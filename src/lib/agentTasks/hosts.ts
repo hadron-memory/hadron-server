@@ -407,7 +407,7 @@ export async function lockAppHostLapse(tx: Prisma.TransactionClient, appId: stri
  * ends: the host-lapse lock SHARED, then the schedule row FOR SHARE (which also
  * holds off a writer that skips the advisory lock, e.g. direct SQL).
  */
-async function lockAppLapseCheckIns(tx: Prisma.TransactionClient, appId: string): Promise<number> {
+export async function lockAppLapseCheckIns(tx: Prisma.TransactionClient, appId: string): Promise<number> {
   await lockAppHostLapse(tx, appId, 'shared');
   const [row] = await tx.$queryRaw<{ checkIns: number | null }[]>`
     SELECT host_lapse_check_ins AS "checkIns" FROM agent_task_stall_schedule WHERE app_id = ${appId} FOR SHARE`;

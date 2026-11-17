@@ -4,6 +4,8 @@ export const typeDefs = `#graphql
     ended
     superseded
     expired
+    "#4292: the host running a SHORT_LIVED worker ended the session on its proof that no agent runs; no handoff was written."
+    agent_absent
     unknown
   }
 
@@ -3878,7 +3880,7 @@ export const typeDefs = `#graphql
   type HostKeyUse {
     id: ID!
     hostId: String!
-    "register, collect, report, availability, read, (#1969) session: a refused session write (updateSession, endSession), or (#1981) issue: a refused issueHostOperation; checkpoint: registerContextResetRecovery with checkpoint input (including replay/refusal)."
+    "register, collect, report, availability, read, (#1969) session: a refused session write (updateSession, endSession), or (#4292) an endAgentlessSession, accepted or refused, or (#1981) issue: a refused issueHostOperation; checkpoint: registerContextResetRecovery with checkpoint input (including replay/refusal)."
     action: String!
     "The operation a report was about."
     operationId: ID
@@ -12018,8 +12020,23 @@ export const typeDefs = `#graphql
     #3309 (hrn:node:hadronmemory.com:specs:cor:agt:050:27 part 11): a worker.reset-context failure may name
     HOST_UNSUPPORTED, optionally followed by ": " and detail, only before its claim (phase requested).
     After the claim this reason is BAD_CONTEXT_RESET_INPUT; its message lists the reasons accepted at that phase.
+    #4292: an end-session operation FAILED with a reason whose leading code is AGENT_ABSENT ends the session when
+    endAgentlessSession's conditions hold, and reads SUCCEEDED, writing no handoff; otherwise it stays FAILED, the session open.
     """
     reportHostOperation(input: ReportHostOperationInput!): HostOperation!
+    """
+    #4292 — a host ends an open session of a SHORT_LIVED worker it runs, after proving that no agent runs in the
+    worker's worktree (reason AGENT_ABSENT); the backstop when the platform's worker.end never came or already failed
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:10, Proposed). A worker.end reported FAILED with a failureReason whose
+    leading code is AGENT_ABSENT runs the same check and, when it holds, ends the session and reads SUCCEEDED.
+    Refusals: HOST_DOES_NOT_RUN_WORKER (this host's registration does not list the worker, or under a server-held setup
+    it is not assigned there, or the session runs on another host: a host-launched session is ended only by its launch
+    host, a hand-started one only by the worker's sole live registration), SESSION_NOT_WORKERS, WORKER_NOT_SHORT_LIVED, WORKER_HAS_OPEN_TASK (the worker is the
+    assignee of a PENDING or STARTED task; extensions.taskId names it). A session that already ended answers
+    ended: false and writes nothing. The end is recorded with endReason agent_absent; it writes no handoff, and
+    handoff in the result is true only when one the worker wrote before it exited names the session.
+    """
+    endAgentlessSession(input: EndAgentlessSessionInput!): AgentlessSessionEnd!
     """
     #1709 — a host marks a worker it registers UNAVAILABLE, only as OUT_OF_TOKENS or HOST_DOWN, or clears a mark it set
     itself (hrn:node:hadronmemory.com:specs:cor:agt:060:08). It never replaces or clears anyone else's mark, a stall
@@ -17626,6 +17643,30 @@ export const typeDefs = `#graphql
     worktree: String
     "FAILED only: why, 1 to 2000 characters."
     failureReason: String
+  }
+
+  "#4292: the closed proofs a host gives for ending a session itself."
+  enum AgentlessEndReason {
+    "No agent process runs in the worker's worktree."
+    AGENT_ABSENT
+  }
+
+  input EndAgentlessSessionInput {
+    appRef: String!
+    "The worker: its id, URN or name within the App."
+    workerRef: String!
+    "The worker's open session to end."
+    sessionId: ID!
+    reason: AgentlessEndReason!
+  }
+
+  "#4292: the outcome of endAgentlessSession."
+  type AgentlessSessionEnd {
+    sessionId: ID!
+    "True when this call ended the session; false when it had already ended."
+    ended: Boolean!
+    "Whether a handoff names this session. False means no handoff was recorded."
+    handoff: Boolean!
   }
 
   input SetHostWorkerAvailabilityInput {
