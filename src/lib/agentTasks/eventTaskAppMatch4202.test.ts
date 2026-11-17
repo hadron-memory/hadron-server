@@ -116,7 +116,7 @@ describe('#4202 episode end (stall.ts, the first-transition read)', () => {
     const task = await makeTask(A, 'A task', { status: 'finished', finishedAt });
     const episodeStart = ago(200);
     await plant({ appId: B.app.id, type: 'task.progress', taskId: task.id, at: ago(50) });
-    const ends = await endedAlarmEpisodeInstants(db, [{ taskId: task.id, type: 'stall.no-progress', episodeStart }], now);
+    const ends = await endedAlarmEpisodeInstants(db, [{ appId: task.appId, taskId: task.id, type: 'stall.no-progress', episodeStart }], now);
     expect([...ends.values()].map((d) => d.getTime())).toEqual([finishedAt.getTime()]);
   });
 
@@ -124,7 +124,7 @@ describe('#4202 episode end (stall.ts, the first-transition read)', () => {
     const task = await makeTask(A, 'A task', { status: 'finished', finishedAt: ago(10) });
     const episodeStart = ago(200);
     await plant({ appId: A.app.id, type: 'task.progress', taskId: task.id, at: ago(50), actorWorkerId: A.worker.id });
-    const ends = await endedAlarmEpisodeInstants(db, [{ taskId: task.id, type: 'stall.no-progress', episodeStart }], now);
+    const ends = await endedAlarmEpisodeInstants(db, [{ appId: task.appId, taskId: task.id, type: 'stall.no-progress', episodeStart }], now);
     expect([...ends.values()].map((d) => d.getTime())).toEqual([ago(50).getTime()]);
   });
 
@@ -134,7 +134,7 @@ describe('#4202 episode end (stall.ts, the first-transition read)', () => {
     const w = await db.worker.findUniqueOrThrow({ where: { id: A.worker.id }, select: { agentId: true } });
     await db.session.create({ data: { id: generateId(), appId: A.app.id, userId: A.user.id, workerId: A.worker.id, agentId: w.agentId, type: 'DEVELOPER', startedAt: ago(150), updatedAt: ago(150) } });
     await plant({ appId: B.app.id, type: 'task.reassigned', taskId: task.id, at: ago(100), payload: { from: { workerId: B.worker.id }, to: { workerId: A.worker.id } } });
-    const ends = await endedAlarmEpisodeInstants(db, [{ taskId: task.id, type: 'stall.no-progress', episodeStart }], now);
+    const ends = await endedAlarmEpisodeInstants(db, [{ appId: task.appId, taskId: task.id, type: 'stall.no-progress', episodeStart }], now);
     expect([...ends.values()].map((d) => d.getTime())).toEqual([ago(150).getTime()]);
   });
 

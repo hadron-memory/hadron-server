@@ -805,7 +805,7 @@ const TERMINAL_STATUSES: ReadonlySet<string> = new Set(['finished', 'cancelled',
  */
 export async function endedAlarmEpisodes(
   db: Db,
-  alarms: { taskId: string | null; type: string; episodeStart: Date | null; appId?: string }[],
+  alarms: { taskId: string | null; type: string; episodeStart: Date | null; appId: string }[],
   now: Date,
 ): Promise<Set<string>> {
   return new Set((await endedAlarmEpisodeInstants(db, alarms, now)).keys());
@@ -845,11 +845,11 @@ const RAISE_BOUNDED_ALARM_TYPES: ReadonlySet<string> = new Set([STALL_EVENT_TYPE
  */
 export async function endedAlarmEpisodeInstants(
   db: Db,
-  alarms: { taskId: string | null; type: string; episodeStart: Date | null; raisedAt?: Date | null; appId?: string }[],
+  alarms: { taskId: string | null; type: string; episodeStart: Date | null; raisedAt?: Date | null; appId: string }[],
   now: Date,
 ): Promise<Map<string, Date>> {
   const out = new Map<string, Date>();
-  const subject = alarms.filter((a): a is { taskId: string; type: string; episodeStart: Date; raisedAt?: Date | null; appId?: string } =>
+  const subject = alarms.filter((a): a is { taskId: string; type: string; episodeStart: Date; raisedAt?: Date | null; appId: string } =>
     !!a.taskId && !!a.episodeStart && STALL_ALARM_TYPES.has(a.type));
   /**
    * #4298, #4300: the instant an ending move must come AFTER (exclusive). For an alarm of a rule an opening move can end
@@ -883,7 +883,7 @@ export async function endedAlarmEpisodeInstants(
     const row = rowOf.get(a.taskId);
     if (row === undefined) return false; // unknown: not found among live, installed Apps' tasks
     // #4202: an alarm of one App naming a task of another is judged from nothing of that task (cor:agt:050:01, :19).
-    if (a.appId !== undefined && a.appId !== row.appId) return false;
+    if (a.appId !== row.appId) return false;
     const i = inputsOf.get(a.taskId);
     return TERMINAL_STATUSES.has(row.status) || !!(i && !running.has(alarmEpisodeKey(a.taskId, a.type, a.episodeStart)));
   });
@@ -1029,7 +1029,7 @@ export async function endedAlarmEpisodeInstants(
  */
 export async function alarmEpisodeEnds(
   db: Db,
-  alarms: { id: string; taskId: string | null; type: string; episodeStart: Date | null; /** #4298: the alarm event's `created_at`. */ raisedAt: Date | null; appId?: string }[],
+  alarms: { id: string; taskId: string | null; type: string; episodeStart: Date | null; /** #4298: the alarm event's `created_at`. */ raisedAt: Date | null; appId: string }[],
   now: Date,
 ): Promise<Map<string, Date>> {
   const out = new Map<string, Date>();
@@ -1111,7 +1111,7 @@ const ESCALATION_RECORD_BATCH = 200;
  */
 export async function freezeEndedEscalation(
   db: Db,
-  alarm: { id: string; taskId: string | null; type: string; episodeStart: Date | null; raisedAt: Date | null; appId?: string },
+  alarm: { id: string; taskId: string | null; type: string; episodeStart: Date | null; raisedAt: Date | null; appId: string },
   now: Date,
 ): Promise<void> {
   const ends = await alarmEpisodeEnds(db, [alarm], now);
