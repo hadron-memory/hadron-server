@@ -13,8 +13,8 @@
  * - otherwise the node rules (`deriveSignatureState`): PENDING / CANCELLED by the first passkey's window, and EARLIER
  *   (not current) instead of CURRENT when the record's version or terms hash no longer matches the row.
  *
- * No grant state label (pending, active, expired, ...) is derived here: the lifecycle cases cor:acl:140:03 leaves open
- * stay unnamed (gate selection 3). `Grant.allows` is the live allow/deny.
+ * No grant lifecycle state is derived here (this is the signature's state): the grant's own state is src/lib/grants/state.ts
+ * (#4173) and `Grant.allows` is the live allow/deny.
  */
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { GrantTermsError, grantTermsFromRow, grantTermsHash } from '../grants/terms.js';

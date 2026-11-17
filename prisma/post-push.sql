@@ -914,6 +914,13 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 -- 20261114120000_app_secret_versions. After worker-reference-invariants.sql: it puts the #1162 fence on its three tables.
 \ir secret-versions-invariants.sql
 
+-- #2719 slice 2: the usage-activity rollup's triggers (the migration carries the same block) and its state row, which
+-- on a push-managed database starts like a deploy: maintained from the next boundary, history by the backfill job.
+\ir usage-activity-rollup-invariants.sql
+INSERT INTO usage_activity_rollup_state (id, applies_from, complete)
+VALUES (1, hadron_usage_cell((now() AT TIME ZONE 'UTC')::timestamp) + interval '15 minutes', false)
+ON CONFLICT (id) DO NOTHING;
+
 -- #2479: per-trigger run budget limits.
 \ir trigger-run-budget-invariants.sql
 
