@@ -54,7 +54,8 @@ async function source(klass: Klass, where: 'user' | 'org', userId = owner.id) {
 
 async function snapshot(id: string) {
   const m = await db.memory.findUniqueOrThrow({ where: { id } });
-  return { class: m.class, visibility: m.visibility, userId: m.userId, name: m.name, acceptsUploads: m.acceptsUploads };
+  // Ownership and tenant fields too: a refusal that touched who owns the source would otherwise pass "nothing changes".
+  return { class: m.class, visibility: m.visibility, userId: m.userId, name: m.name, acceptsUploads: m.acceptsUploads, organizationId: m.organizationId, ownerUserId: m.ownerUserId, appId: m.appId, isInstallMemory: m.isInstallMemory };
 }
 
 /** An Agent with no system memory yet (the updateAgent first-attach shape). */
@@ -185,6 +186,9 @@ describe('controls and concealment', () => {
     const brainless = await brainlessAgent('org', 'S2');
     const upd = await refusal(M.updateAgent({}, { ref: brainless.id, systemMemoryId: src.id }, userCtx(stranger.id)));
     expect(upd.extensions?.code).toBe('MEMORY_NOT_FOUND');
+    // updateAgent's message must not carry the class either: compare its wire bytes with a missing id's (Dara P3).
+    const updGone = await refusal(M.updateAgent({}, { ref: brainless.id, systemMemoryId: missing }, userCtx(stranger.id)));
+    expect(wire(upd)).toBe(wire(updGone));
   });
 
   it('a plain knowledge memory (not private or personal) is still promotable', async () => {
