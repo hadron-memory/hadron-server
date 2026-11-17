@@ -43,7 +43,13 @@ const boundedInstall = async (appId: string, agentId: string, label: string) => 
       await tx.appAgent.create({ data: { appId, agentId } });
     }, { timeout: 30_000 });
   } catch (e) {
-    throw new Error(`cross-install ${label} did not land within lock_timeout ${CROSS_LOCK_TIMEOUT}: ${(e as Error)?.message ?? e}`);
+    // Timeout wording only for Postgres's own lock-timeout cancel (SQLSTATE 55P03); anything else is named neutrally.
+    // The original error is kept as the cause either way (#4354 BLIND delta2 F2).
+    const message = String((e as Error)?.message ?? e);
+    const lockTimeout = /\b55P03\b|lock timeout/i.test(message);
+    throw new Error(lockTimeout
+      ? `cross-install ${label} did not land within lock_timeout ${CROSS_LOCK_TIMEOUT}: ${message}`
+      : `cross-install ${label} failed: ${message}`, { cause: e });
   }
 };
 let edgePos = 100;
@@ -159,8 +165,15 @@ describe('#4318 crossed removeAgentImport fences', () => {
       held();
       await hold;
     }, { timeout: 30_000 });
+    // The holder's rejection is observed at once, and lock readiness races the holder ending, so a setup failure
+    // (no connection, the FOR UPDATE failing) surfaces here and cleanup still runs (#4354 BLIND delta2 F1).
+    const holderEnded = holder.then(
+      () => { throw new Error('the lock holder ended before it held the App lock'); },
+      (e: unknown) => { throw new Error(`the lock holder failed before it held the App lock: ${String((e as Error)?.message ?? e)}`, { cause: e }); },
+    );
+    holderEnded.catch(() => {});
     try {
-      await isHeld;
+      await Promise.race([isHeld, holderEnded]);
       const started = Date.now();
       // Postgres's own lock-timeout cancel (not Prisma's 30 s transaction timeout), well inside that timeout.
       await expect(boundedInstall(w.app2Id, p1.id, 'P1 into App B'))
@@ -168,7 +181,7 @@ describe('#4318 crossed removeAgentImport fences', () => {
       expect(Date.now() - started).toBeLessThan(20_000);
     } finally {
       releaseHold();
-      await holder;
+      await holder.catch(() => {}); // a holder failure has already surfaced through the race
     }
   }, 60_000);
 
