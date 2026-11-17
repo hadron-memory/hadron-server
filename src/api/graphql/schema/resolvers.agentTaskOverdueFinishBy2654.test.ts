@@ -56,19 +56,24 @@ it('arm (a) unchanged; ended, backlog, no-time and future tasks are not listed; 
   const rest = titles(await list({ overdue: false }));
   expect(rest).toEqual(['backlog', 'cancelled', 'finished', 'future', 'none', 'started-future-finish', 'started-start-by-only']);
 });
-it('strictly earlier: a finish-by exactly at the server clock is not overdue', async () => {
+it('strictly earlier: a finish-by or a start-by exactly at the server clock is not overdue', async () => {
   const fixed = await db.$transaction(async (tx) => {
     const [{ now: n }] = await tx.$queryRaw<{ now: Date }[]>`SELECT date_trunc('milliseconds', CURRENT_TIMESTAMP) AS now`;
     await tx.agentTask.create({ data: { appId, ownerUserId: userId, title: 'edge', finishBy: n } as any });
+    // Arm (a) has its own boundary: a pending, not-started task whose start-by equals the clock is in `false`, never in neither.
+    await tx.agentTask.create({ data: { appId, ownerUserId: userId, title: 'edge-start', startBy: n } as any });
     const c = { ...ctx(), db: tx };
     const q = (overdue: boolean) => (resolvers.Query as any).agentTasks(null, { appRef: appId, overdue }, c);
     return [titles(await q(true)), titles(await q(false))];
   });
-  expect(fixed).toEqual([[], ['edge']]);
+  expect(fixed).toEqual([[], ['edge', 'edge-start']]);
   // The field reads the same rule: equal to the clock is not overdue, a millisecond earlier is.
   const row = { status: 'started', startBy: null, finishBy: now, startedAt: now, finishedAt: null, cancelledAt: null } as any;
   expect(isTaskOverdue(row, now)).toBe(false);
   expect(isTaskOverdue({ ...row, finishBy: at(-1) }, now)).toBe(true);
+  const pending = { status: 'pending', startBy: now, finishBy: null, startedAt: null, finishedAt: null, cancelledAt: null } as any;
+  expect(isTaskOverdue(pending, now)).toBe(false);
+  expect(isTaskOverdue({ ...pending, startBy: at(-1) }, now)).toBe(true);
 });
 it('listing records no event and no alarm', async () => {
   await task('quiet', started({ finishBy: at(PAST) }));
