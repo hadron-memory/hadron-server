@@ -185,6 +185,38 @@ enum AgentType {
   CHATBOT
 }
 
+/// #4224 (S3 of #4229) — how long a worker of this Agent runs. LONG_LIVED (default, today's behaviour): its
+/// process should always run. SHORT_LIVED: it should run only while the worker is the assignee of a pending or
+/// started task, one waiting on its child tasks included (G7). Read by the desired-state query
+/// (src/lib/desiredState) and, #4223, by a task's finish or cancellation: the worker's session ends with its last
+/// open task (src/lib/hostOperations/sessionEnd.ts).
+enum AgentLifecycle {
+  LONG_LIVED
+  SHORT_LIVED
+}
+
+/// #4291 (S14 of #4229; decision record run-settings-are-not-worker-identity, settled A) — the generic effort scale of a
+/// run. LOW..MAX are requests the launcher maps to the family's own values (hadron-cli#2199); UNSET is the family's
+/// default. NOT_APPLICABLE is REPORT-ONLY: a session whose family has no effort control records it, and so may the
+/// worker's last-used record; a task never carries it, and a start that falls back to it sends UNSET.
+enum EffortLevel {
+  LOW
+  MEDIUM
+  HIGH
+  XHIGH
+  MAX
+  UNSET
+  NOT_APPLICABLE
+}
+
+/// #4224 (S3 of #4229) — the App's sweep switch. OFF (default): the host sweep acts on no worker and every desired-state
+/// row says SWEEP_OFF. OBSERVE: the sweep compares and reports. APPLY: it also repairs.
+enum SweepMode {
+  OFF
+  OBSERVE
+  APPLY
+}
+
 enum LogLevel {
   DEBUG
   INFO
@@ -1764,6 +1796,8 @@ enum SessionEndReason {
   ended
   superseded
   expired
+  /// #4292: the host that runs a SHORT_LIVED worker ended the session on its proof that no agent runs (cor:agt:050:10, Proposed).
+  agent_absent
 }
 
 model Session {
@@ -1833,6 +1867,9 @@ model Session {
   /// column: no historical backfill. Not `updated_at`, which unrelated writes
   /// move. Describes a self-report, not verified detection.
   modelReportedAt   DateTime?         @map("model_reported_at")
+  /// #4291 — the effort this session runs at, as the launcher applied it and the session reported it (start, resume or
+  /// updateSession). Null until reported; NOT_APPLICABLE for a family with no effort control. A report, never a control.
+  effort            EffortLevel?
   /// #1709 (cor:agt:070:08; Holger via Vera #10773) — a host-launched session:
   /// the host that started it, the `worker.start` operation, the task it was
   /// launched for (none for a manager's start without one), and who issued the
@@ -2045,6 +2082,13 @@ model Agent {
   /// no other started task, the platform asks the worker's host to reset its context: a shed, never a session end.
   /// Off by default; written by whoever manages the Agent, like `usesTasks`.
   resetContextAfterTask Boolean         @default(false) @map("reset_context_after_task")
+  /// #4224 (S3 of #4229) — every worker cast from this Agent shares it. Default LONG_LIVED, so no existing Agent
+  /// changes behaviour; written by whoever manages the Agent, like `usesTasks`.
+  lifecycle             AgentLifecycle  @default(LONG_LIVED)
+  /// #4225 (S4b of #4229, cor:agt:050:27 part 12, Proposed; G4) — the context size, in tokens, above which a worker of this
+  /// LONG_LIVED Agent that its host reports idle is reset (`worker.reset-context`), at most once an hour. Null (the default)
+  /// is no cap. Written by whoever manages the Agent, like `usesTasks`. `chk_agents_context_cap` keeps it at 1 or more.
+  contextCap            Int?            @map("context_cap")
   organizationId        String?         @map("organization_id")
   /// User owner of a user-owned Agent (rooted on the bare `<handle>` — #697 v2,
   /// no `@` sigil). The org/owner XOR is ENFORCED — `chk_agent_owner_xor` in
@@ -3407,6 +3451,8 @@ model App {
   teamPausedAt                      DateTime?            @map("team_paused_at")
   /// #2138 §3.6 — when the last team pause ENDED; restarts every worker's check clock (the status is not OVERDUE the moment a pause lifts). NULL = never paused.
   teamResumedAt                     DateTime?            @map("team_resumed_at")
+  /// #4224 (S3 of #4229) — the sweep switch (see SweepMode). OFF by default: one write restores today's behaviour.
+  sweepMode                         SweepMode            @default(OFF) @map("sweep_mode")
   /// The fastest ticker a worker may subscribe ITSELF to: [floor, 86400].
   tickerSelfSubscribeCadenceSeconds Int                  @default(600) @map("ticker_self_subscribe_cadence_seconds")
   /// How many live tickers the App may have: [1, 100].
@@ -3508,6 +3554,9 @@ model App {
   cadenceEpisodes         CoordinatorCadenceEpisode[]
   cadenceClocks           CoordinatorCadenceClock[]
   postLimitEpisodes       PostLimitEpisode[]
+  startFailingEpisodes    StartFailingEpisode[]
+  hostSweepRuns           HostSweepRun[]
+  hostSweepEpisodes       HostSweepEpisode[]
   automationAdoptionEvents AutomationAdoptionEvent[]
   /// #2484 — this App's prefix-scoped write grants for its userless runs, and their append-only history.
   memoryWriteGrants       AppMemoryWriteGrant[]
@@ -3526,6 +3575,11 @@ model App {
   /// #1707 — hosts that registered which workers they can launch (cor:agt:070:01).
   hostRegistrations       HostRegistration[]
   hostOperations          HostOperation[]
+  /// #4222 (cor:agt:070:01, change Proposed) — who states which workers a host runs: `host` (the default: the host
+  /// states it at registration, as before) or `server` (the platform's assignments; a registration is checked against
+  /// them). Set by whoever manages the App. Shape: prisma/host-assignment-invariants.sql.
+  hostSetupSource         String                 @default("host") @map("host_setup_source")
+  hostWorkerAssignments   HostWorkerAssignment[]
   /// #2162 — the context resets of this App's workers.
   contextResets           ContextReset[]
   /// #2022 (S6, cor:agt:090) — the App's stop signals, live and ended.
@@ -3964,6 +4018,7 @@ model Worker {
   cadenceEpisodes    CoordinatorCadenceEpisode[]
   cadenceClock       CoordinatorCadenceClock?
   postLimitEpisodes PostLimitEpisode[]
+  startFailingEpisodes StartFailingEpisode[]
   appId             String    @map("app_id")
   agentId           String    @map("agent_id")
   /// The worker's name ("Iris") — the identity every surface renders.
@@ -4056,11 +4111,32 @@ model Worker {
   /// availability, matcher, stall rule or alarm. No screen text is ever stored; `chk_workers_terminal_shape` (in
   /// prisma/host-operation-invariants.sql) allows exactly the keys above, so a write that bypasses the resolver still
   /// cannot store more. Read behind `maySeeWorkerInternals` (cor:dmo:050:11).
+  /// #4225 S4a — the object also carries `contextTokens` and `contextMeasuredAt` (the worker's context size as its
+  /// host measured it; both null when the host cannot measure, never 0; absent on a row stored before #4225).
+  /// #4247 — and, for a refused or failed relaunch only, `repair` (RELAUNCH_REFUSED | RELAUNCH_FAILED), `repairReason` and
+  /// `repairAttempt`: all three or none (the other repair outcomes are not stored).
   terminal Json? @map("terminal")
   /// #4041 (V82) — the last host repair notice the PLATFORM posted for this worker, set in the post's own append
-  /// transaction: `alert` (a no-snapshot / cap-reached alert, once per worker until a report without a repair outcome or with
-  /// a relaunch) or `relaunched:<checkedAt>` (so a replayed relaunch report posts nothing twice). Never read by a client.
+  /// transaction: a space-separated set of alert tokens (`alert` for a no-snapshot / cap-reached alert, `<outcome>:<reason>` for a refused or
+  /// failed relaunch), each once per episode until a report without a repair outcome or with a relaunch, or `relaunched:<checkedAt>` (so a replayed relaunch report posts nothing twice). Never read by a client.
   repairNoticeKey String? @map("repair_notice_key")
+  /// #4224 (S3 of #4229) — the leave-alone marker: the host sweep observes and reports this worker but never starts,
+  /// stops or repairs it. Set and cleared by whoever manages the App (`setWorkerLeaveAlone`), each change one
+  /// `worker.leave-alone-changed` team event. The reason, the user who last set it and when are set together with
+  /// the marker and cleared with it (chk_workers_leave_alone_shape, prisma/desired-state-invariants.sql).
+  leaveAlone       Boolean   @default(false) @map("leave_alone")
+  leaveAloneReason String?   @map("leave_alone_reason")
+  /// The user who set the marker (the manager, or the holder a worker acted on the instruction of). A bare id, no FK:
+  /// a record of who acted, like `retiredBy`.
+  leaveAloneBy     String?   @map("leave_alone_by")
+  leaveAloneAt     DateTime? @map("leave_alone_at")
+  /// #4291 (decisions 2 and 8) — the worker's record of its run settings: the family, model and effort its session last
+  /// reported, one value each and no history. A REPORT, not a control: written only from a session's bind or report
+  /// (src/lib/agentTasks/runSettings.ts `recordRunSettings`), never cleared by a null, kept when the worker unbinds. A
+  /// start reads it after the task's own setting (cor:agt:070:08); an unbound worker is matched on it (cor:agt:060:04).
+  lastUsedFamily   String?      @map("last_used_family")
+  lastUsedModel    String?      @map("last_used_model")
+  lastUsedEffort   EffortLevel? @map("last_used_effort")
 
   app                  App                       @relation(fields: [appId], references: [id], onDelete: Cascade)
   /// SetNull: a worker row is never hard-deleted in normal operation, but an
@@ -4092,6 +4168,7 @@ model Worker {
   appGrants            AppGrant[]
   launchableVia        HostRegistrationWorker[]
   hostOperations       HostOperation[]
+  hostAssignments      HostWorkerAssignment[]
   /// #2162 — this worker's context resets (cor:agt:050:27).
   contextResets        ContextReset[]
   /// #2022 — worker- and team-scope stop signals naming this worker as target.
@@ -4100,6 +4177,8 @@ model Worker {
   /// The URN atom's uniqueness. Unfiltered on retirement, like
   /// `workers_app_name_uniq`: a retired worker's URN must keep resolving.
   @@unique([appId, slug], map: "workers_app_slug_uniq")
+  /// #4222: the target of host_worker_assignments' (worker_id, app_id) key; unique trivially (id is the key).
+  @@unique([id, appId], map: "workers_host_assignment_owner_uniq")
   @@index([appId])
   @@index([agentId])
   /// #1050 — "what does this person hold", across Apps.
@@ -6183,6 +6262,18 @@ model AgentTask {
   /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). False unless the assigner asks (R182, #2249): the
   /// default only reaches a raw insert, since every create path writes the resolved value.
   closeSessionWhenDone Boolean   @default(false) @map("close_session_when_done")
+  /// #4291 (decision 5, settled B) — the task's own run settings, each optional: a family, an exact model OR a generic
+  /// tier (high, mid, low), and an effort (never NOT_APPLICABLE). What a start for this task launches, before the
+  /// worker's record; not a matching requirement. Validated at creation (src/lib/agentTasks/runSettings.ts).
+  runFamily            String?      @map("run_family")
+  runModel             String?      @map("run_model")
+  runTier              String?      @map("run_tier")
+  runEffort            EffortLevel? @map("run_effort")
+  /// #4291 — the settings the run actually used: the assignee's newest open session's, read when the task was started.
+  /// Null until started, for a person, or when that session reported none. Shown beside the task's own settings.
+  appliedFamily        String?      @map("applied_family")
+  appliedModel         String?      @map("applied_model")
+  appliedEffort        EffortLevel? @map("applied_effort")
   /// The latest assignment, by hand or by the matcher, in the #1610 actor shape.
   assignedAt           DateTime? @map("assigned_at")
   assignedBy           String?   @map("assigned_by")
@@ -6323,6 +6414,8 @@ model AgentTeamEvent {
   darkEpisode DarkWorkerEpisode?
   cadenceEpisode CoordinatorCadenceEpisode?
   postLimitEpisode PostLimitEpisode?
+  startFailingEpisode StartFailingEpisode?
+  hostSweepEpisode HostSweepEpisode?
   /// #3934 (V77): the recorded end of this alarm's escalation, written once by the evaluator pass or the acknowledgement.
   escalationEnd AlarmEscalationEnd?
 
@@ -6437,6 +6530,26 @@ model CoordinatorCadenceClock {
   @@map("coordinator_cadence_clocks")
 }
 
+/// #4231 (S8 of #4229) — a worker whose platform starts keep failing: three failed platform `worker.start`s in an hour
+/// stop the desired-state start for it, and ONE `alarm.start-failing` goes to its reporting line per episode. An
+/// episode closes an hour after it opened, so a worker still failing then is alarmed again. At most one open per
+/// worker (a partial unique index, prisma/desired-start-invariants.sql).
+model StartFailingEpisode {
+  id       String    @id @default(cuid())
+  appId    String    @map("app_id")
+  workerId String    @map("worker_id")
+  eventId  String    @unique @map("event_id")
+  openedAt DateTime  @map("opened_at")
+  endedAt  DateTime? @map("ended_at")
+
+  app    App            @relation(fields: [appId], references: [id], onDelete: Cascade)
+  worker Worker         @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  event  AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([appId, endedAt])
+  @@map("start_failing_episodes")
+}
+
 /// #2014 — one post-limit episode: the first refusal of a worker's team-chat post by the rate limit in an hour. It only
 /// de-duplicates the alarm raised with it (agent_team_events, type `alarm.post-limit`); the alarm itself stays open until
 /// acknowledged. At most one OPEN row per worker (partial unique index in prisma/post-limit-invariants.sql); an open
@@ -6455,6 +6568,57 @@ model PostLimitEpisode {
 
   @@index([appId, endedAt])
   @@map("post_limit_episodes")
+}
+
+/// #4233 (S10 of #4229) — one run of a host's one-minute sweep, as the host reported it: when it ran, in which mode, how
+/// many workers it planned to change and what became of them, and up to 50 per-worker lines (`lines`: worker token,
+/// outcome, reason code; never free text). Written once by the host key (`recordHostSweepRun`), never changed except
+/// that `postedAt` is claimed by the run's one summary post. `runKey` is the host's own token for the run: a replayed
+/// report is the same row. Shape: prisma/host-sweep-invariants.sql.
+model HostSweepRun {
+  id         String    @id
+  appId      String    @map("app_id")
+  hostId     String    @map("host_id")
+  runKey     String    @map("run_key")
+  startedAt  DateTime  @map("started_at")
+  endedAt    DateTime  @map("ended_at")
+  mode       SweepMode
+  planned    Int
+  applied    Int
+  skipped    Int
+  failed     Int
+  lines      Json      @default("[]")
+  recordedAt DateTime  @default(now()) @map("recorded_at")
+  /// When the run's summary post was written; NULL for a run that needed none, or whose post has not run yet.
+  postedAt   DateTime? @map("posted_at")
+  /// When the retry pass last tried this run's post and did not land it (no chat, the host gap, a failed append). The retry queue
+  /// orders untried runs first, so a run that cannot post goes to the back and never holds the scan (#4255 Clark F4).
+  summaryTriedAt DateTime? @map("summary_tried_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@unique([appId, hostId, runKey], map: "host_sweep_runs_run_uniq")
+  @@index([appId, hostId, recordedAt(sort: Desc)], map: "host_sweep_runs_host_recent_idx")
+  @@map("host_sweep_runs")
+}
+
+/// #4233 — one stale-sweep episode: a host of an App whose sweep mode is OBSERVE or APPLY whose last run is older than five
+/// minutes. It de-duplicates the task-less alarm raised with it (agent_team_events, type `alarm.stale-sweep`, subject worker
+/// NULL). At most one OPEN row per (App, host) (partial unique index in prisma/host-sweep-invariants.sql); the episode ends
+/// when the host records its next run, or when the App's sweep mode goes OFF.
+model HostSweepEpisode {
+  id       String    @id @default(cuid())
+  appId    String    @map("app_id")
+  hostId   String    @map("host_id")
+  eventId  String    @unique @map("event_id")
+  openedAt DateTime  @map("opened_at")
+  endedAt  DateTime? @map("ended_at")
+
+  app   App            @relation(fields: [appId], references: [id], onDelete: Cascade)
+  event AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([appId, endedAt])
+  @@map("host_sweep_episodes")
 }
 
 /// #1706 — one worker's availability for work (cor:agt:060:02). At most one
@@ -6631,6 +6795,41 @@ model HostRegistrationWorker {
   @@map("host_registration_workers")
 }
 
+/// #4222 (S1a of #4229; cor:agt:070:01, change Proposed) — one worker the platform says a host of a team App runs:
+/// the working directory it runs in there (a name token the host resolves: an Orca worktree name, or a plain
+/// directory name for a worker without Git), and its launcher profile (#4230, S1b: family, model, effort, accountProfile,
+/// each a token). Never a path, a command or a credential (cor:agt:070:03). Set and removed by
+/// whoever manages the App. In effect only while the worker is not retired, and used by registration and by starts
+/// only while the App's `hostSetupSource` is `server`. Shape: prisma/host-assignment-invariants.sql.
+model HostWorkerAssignment {
+  id              String   @id
+  appId           String   @map("app_id")
+  hostId          String   @map("host_id")
+  workerId        String   @map("worker_id")
+  workdir         String
+  family          String
+  model           String?
+  /// #4230 (S1b, decision G1): the launcher profile is typed fields, never a command. family above, model, and these two.
+  effort          String?
+  /// The host-local account the launcher runs under (a token the host maps to its launcher; never a path or credential).
+  accountProfile  String?  @map("account_profile")
+  /// The person who made the assignment (a plain id, like a host operation's issuer: it outlives the account).
+  createdByUserId String   @map("created_by_user_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @default(now()) @map("updated_at")
+
+  app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  /// The worker AND its App (#4241 blind review, Diego P2): an assignment names only a worker of its own App, and a worker
+  /// that has assignments keeps its App (onUpdate NoAction). Foreign-key checks see committed rows at every isolation
+  /// level, so this holds when an insert and a move race.
+  worker Worker @relation(fields: [workerId, appId], references: [id, appId], onDelete: Cascade, onUpdate: NoAction, map: "host_worker_assignments_worker_app_fkey")
+
+  @@unique([appId, workerId, hostId], map: "host_worker_assignments_app_worker_host_uniq")
+  @@index([appId, hostId])
+  @@index([workerId])
+  @@map("host_worker_assignments")
+}
+
 /// #1709 (Task Management T6) — one typed operation the platform issued to one
 /// host of a team App (cor:agt:070:02). `type` is one of the closed set of
 /// cor:agt:070:03 and `args` its typed arguments, validated at issue
@@ -6670,6 +6869,10 @@ model HostOperation {
   /// account merge changes the holder (Holger via Vera #10775).
   holdUserId       String?   @map("hold_user_id")
   holdAt           DateTime? @map("hold_at")
+  /// #4231 (S8 of #4229) — why the platform issued it, when that is not a task: `DESIRED_RUNNING` for the start of a
+  /// long-lived worker that should run and has no session (cor:agt:070:05 S7, Proposed). Null for every other
+  /// operation. Shape: prisma/desired-start-invariants.sql.
+  issuedReason     String?   @map("issued_reason")
 
   app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
@@ -6754,7 +6957,11 @@ model ContextReset {
   workerId             String    @map("worker_id")
   /// The worker's session open when the task ended: the fence the claim re-checks.
   sessionId            String    @map("session_id")
-  taskId               String    @unique @map("task_id")
+  /// Null for a `context-cap` reset (#4225): it belongs to no task. `chk_context_resets_cause` ties the two together.
+  taskId               String?   @unique @map("task_id")
+  /// #4225: what asked for the reset: `task-end` (a task's finish or cancel, cor:agt:050:27 part 2) or `context-cap` (the
+  /// Agent's cap, part 12). Never changes (`trg_context_resets_cause_immutable`).
+  cause                String    @default("task-end")
   /// The host the reset was issued to; null when no capable live host registered the worker (HOST_UNSUPPORTED).
   hostId               String?   @map("host_id")
   hostOperationId      String?   @unique @map("host_operation_id")
@@ -6799,7 +7006,8 @@ model ContextReset {
 model TaskSessionEndRequest {
   id                  String    @id
   appId               String    @map("app_id")
-  taskId              String    @unique @map("task_id")
+  /// #4223: not unique. A task asks each time it ends under a worker or is reassigned away from a short-lived one.
+  taskId              String    @map("task_id")
   workerId            String    @map("worker_id")
   sessionId           String    @map("session_id")
   /// The `task.session-end-requested` event this request wrote.
@@ -6817,6 +7025,7 @@ model TaskSessionEndRequest {
 
   @@index([resolvedAt, dueAt])
   @@index([workerId])
+  @@index([taskId])
   @@map("task_session_end_requests")
 }
 
@@ -6832,7 +7041,8 @@ model HostKeyUse {
   /// `register` | `collect` | `report` | `availability` | `read` (#1881: the
   /// App's host registrations or host-operations listing, read with the key;
   /// #2931: its host's tickers, `count` the rows returned) |
-  /// `session` (#1969: a refused session write; always carries a refusedCode).
+  /// `session` (#1969: a refused session write, always with a refusedCode; #4292: also
+  /// endAgentlessSession, accepted with refusedCode null and `count` 1 when it ended the session, else 0).
   action      String
   operationId String?  @map("operation_id")
   count       Int?
@@ -7844,6 +8054,10 @@ model Action {
   /// A closed key the server maps to a gate function; never SQL or code.
   issuerRule      String   @map("issuer_rule")
   summaryTemplate String   @map("summary_template")
+  /// #4163: a limit on uses that applies to every grant of this action (NULL: none). A grant's own max_uses can only narrow it.
+  maxUses         Int?     @map("max_uses")
+  /// #4163: a limit on lifetime from activation, in seconds, for every grant of this action (NULL: none). A grant's own expiry can only narrow it.
+  lifetimeSeconds Int?     @map("lifetime_seconds")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 

@@ -848,8 +848,18 @@ async function validateClientAndRedirectUri(
   };
 }
 
-/** v1 caps on the variable-size /authorize params. */
-const STATE_MAX_LENGTH = 512;
+/**
+ * v1 caps on the variable-size /authorize params.
+ *
+ * #3764: `state` is the client's opaque value and RFC 6749 §4.1.2 requires it returned unchanged, so a long one is
+ * ACCEPTED and echoed byte for byte, never dropped. The bound is only a request-size limit: 4096 characters, eight
+ * times the old 512 and far above any state a real client sends (a CSRF nonce or a signed blob), small enough that the
+ * value still rides the consent form, the sign-in `return_to` and the redirect without nearing a header limit (for a
+ * typical base64url state; a state made only of reserved characters percent-encodes to about 3x). Above
+ * it the request is refused with `invalid_request`, NO code, and the error redirect echoes the supplied state exactly
+ * (§4.1.2.1). The corpus fixes no number (cor:aut:030:01 states the round-trip guarantee only).
+ */
+export const STATE_MAX_LENGTH = 4096;
 /**
  * PKCE S256 challenges are base64url-encoded SHA-256 outputs:
  * exactly 43 chars without padding. RFC 7636 §4.2 mandates a
@@ -952,13 +962,14 @@ function buildHandleAuthorizeGet(
       return;
     }
 
-    // Pre-redirect: capture state for echo. If state is malformed
-    // (not a string, or oversized) we drop it rather than try to
-    // echo garbage back.
-    const state =
-      typeof q.state === 'string' && q.state.length > 0 && q.state.length <= STATE_MAX_LENGTH
-        ? q.state
-        : '';
+    // Pre-redirect: capture state for echo (#3764). A supplied state is returned unchanged; one over the bound
+    // is refused below with the supplied value echoed, never dropped with a code still issued. A non-string
+    // (repeated parameter) or empty one counts as absent, as before.
+    const state = typeof q.state === 'string' ? q.state : '';
+    if (state.length > STATE_MAX_LENGTH) {
+      redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
+      return;
+    }
 
     // The CLI can select which first-party identity provider performs the
     // browser sign-in. Omission remains GitHub for compatibility with older
@@ -1132,10 +1143,14 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  const state =
-    typeof body.state === 'string' && body.state.length > 0 && body.state.length <= STATE_MAX_LENGTH
-      ? body.state
-      : '';
+  // #3764: a supplied state is never dropped on this leg either. The same bound as the authorize GET applies BEFORE
+  // any echo (the deny branch below echoes without a proof check), so a forged form cannot push an unbounded value
+  // into a Location header. An in-bound state that differs from the GET's fails the grant proof below.
+  const state = typeof body.state === 'string' ? body.state : '';
+  if (state.length > STATE_MAX_LENGTH) {
+    redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
+    return;
+  }
 
   // 4. Fail-closed decision check. ONLY literal 'approve' mints.
   if (body.decision !== 'approve') {

@@ -69,7 +69,8 @@ describe('cor:agt:070:01 — a host registers which workers it can launch, and a
   it('a refresh replaces the worker list and writes no event; identity is (App, host)', async () => {
     const first = await registerHost(db, ORCA1(), at('10:00'));
     const again = await registerHost(db, { ...ORCA1(), label: 'renamed', workers: [{ workerId: anne.id, family: 'claude', worktrees: ['repo/anne'] }] }, at('10:01'));
-    expect(again).toEqual({ registrationId: first.registrationId, registered: false });
+    // #4222: under the default hostSetupSource (HOST) nothing is ever left out.
+    expect(again).toEqual({ registrationId: first.registrationId, registered: false, notAssigned: [] });
     expect(Object.fromEntries(await loadLaunchableFamilies(db, { appId: app.id }, at('10:02')))).toEqual({ [anne.id]: ['claude'] });
     expect(await hostEvents()).toHaveLength(1);
     expect(await db.hostRegistration.count()).toBe(1);
