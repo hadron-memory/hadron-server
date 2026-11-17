@@ -12,6 +12,7 @@ import { Client } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { maintenanceUrl } from '../../src/test/dbWorkers.js';
 import { EXIT, main } from './serve-role-smoke.js';
+import { cleanupOwnedSmokeFixture } from './smokeTeardown.js';
 
 const GRANTS_SQL = fileURLToPath(new URL('../../prisma/runtime-role.sql', import.meta.url));
 const suffix = randomBytes(4).toString('hex');
@@ -20,8 +21,9 @@ const SERVE = `smk_serve_${suffix}`;
 const DB = `smk_db_${suffix}`;
 const PASSWORD = randomBytes(12).toString('hex');
 
-// The grants file refuses a superuser runner, so the owner is a real non-superuser role that owns a database
-// built from scratch (db push + post-push.sql), the way the CI lane builds its own.
+// The grants file refuses a serve role that is the role running it, is a superuser, or is a member of the owner
+// (or the reverse), and it must be run as the owner, not `postgres`. So the owner here is a real non-superuser
+// role that owns a database built from scratch (db push + post-push.sql), the way the CI lane builds its own.
 function urlFor(user: string, db: string): string {
   const u = new URL(maintenanceUrl());
   if (user !== u.username) {
@@ -70,12 +72,53 @@ beforeAll(async () => {
   grant();
 }, 180_000);
 
+// #2683: 30s is a margin over the observed 9.4s healthy hosted DROP, not a
+// measured upper bound or a diagnosis of the hosted timeout cause. Keep step
+// timing; a recurrence at 30s needs cause investigation, not another increase.
+// Only this invocation's generated DB and two roles are named or removed.
 afterAll(async () => {
-  await admin(async (c) => {
-    await c.query(`DROP DATABASE IF EXISTS ${DB} WITH (FORCE)`);
-    for (const r of [OWNER, SERVE]) await c.query(`DROP ROLE IF EXISTS ${r}`);
+  const c = new Client({ connectionString: urlFor(new URL(maintenanceUrl()).username, 'postgres') });
+  // #3877: if the owned DROP is still pending after 10s, log what the backends wait on, from a second connection.
+  await cleanupOwnedSmokeFixture(c, { database: DB, roles: [OWNER, SERVE] }, console.error, {
+    slowAfterMs: 10_000,
+    snapshot: () => dropSnapshot(c.processID),
   });
-});
+}, 30_000);
+
+// Each read is independent: one failing (say pg_stat_checkpointer on an older server) never hides the others.
+async function dropSnapshot(dropperPid: number | null | undefined) {
+  const probe = new Client({
+    connectionString: urlFor(new URL(maintenanceUrl()).username, 'postgres'),
+    connectionTimeoutMillis: 5_000,
+    query_timeout: 5_000,
+  });
+  await probe.connect();
+  try {
+    const read = async (sql: string, params: unknown[] = []) => {
+      try {
+        return (await probe.query(sql, params)).rows;
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : 'unknown' };
+      }
+    };
+    return {
+      dropperPid: dropperPid ?? null,
+      activity: await read(
+        `SELECT pid, datname, state, backend_type, wait_event_type, wait_event,
+                round(extract(epoch FROM now() - query_start)::numeric, 1) AS query_age_s, left(query, 80) AS query
+           FROM pg_stat_activity
+          WHERE pid = $1 OR datname = $2 OR backend_type IN ('checkpointer', 'background writer')
+             OR query ~* '^\\s*(create|drop) database'
+          ORDER BY pid LIMIT 50`,
+        [dropperPid ?? 0, DB],
+      ),
+      ungrantedLocks: await read(`SELECT pid, locktype, mode, database, relation::regclass::text AS relation FROM pg_locks WHERE NOT granted LIMIT 50`),
+      checkpointer: await read(`SELECT * FROM pg_stat_checkpointer`),
+    };
+  } finally {
+    await probe.end();
+  }
+}
 
 describe('serve-role-smoke (#2413 S3)', { timeout: 120_000 }, () => {
   it('passes on a correctly granted serve role and leaves no fixture behind', async () => {

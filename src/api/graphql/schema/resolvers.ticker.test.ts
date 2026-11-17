@@ -150,6 +150,11 @@ describe('tickers — create, read, URN, slug', () => {
 
   it('refuses an App key (a bare key is no participant)', async () => {
     await expectCode(createTicker(ctx(undefined, { appId: app.id } as Partial<Context>)), 'APP_NOT_FOUND');
+    // #2931: the line above has no appKeyId, so it is "no user", not a key. A real key, holding host:operate (which
+    // now READS its host's tickers), still creates none.
+    const key = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `h-${generateId()}`, keyPreview: 'abcd' }, select: { id: true } });
+    await M.grantAppKeyScope({}, { id: key.id, scope: 'host:operate', hostId: 'orca1' }, ctx(admin.id));
+    await expectCode(createTicker({ db, appId: app.id, appKeyId: key.id, roles: [] }), 'APP_NOT_FOUND');
   });
 
   it('a duplicate live name is refused ignoring case; the name is reusable after delete, the slug is not', async () => {
@@ -932,5 +937,34 @@ describe('#2068 (R49/R54) — a ticker has reasons: a closed, never-empty list',
     // The list and the single read show the same reasons to a participant.
     const listed = (await Q.tickers({}, { appRef: app.id }, ctx(member.id))).find((x: any) => x.id === t.id);
     expect(await F.Ticker.reasons(listed)).toEqual(['READ_TEAM_CHANNEL']);
+  });
+});
+
+// #2756 — a name is typed into a worker's terminal by the wake nudge, so it must not carry
+// control characters or line breaks. Pins run through every write door the name reaches.
+describe('tickers — name refuses control characters (#2756)', () => {
+  const BAD: Array<[string, string]> = [
+    ['LF', 'a\nb'], ['CR', 'a\rb'], ['TAB', 'a\tb'], ['ESC', 'a\u001b[2Jb'], ['NUL', 'a\u0000b'],
+    ['DEL', 'a\u007fb'], ['C1 NEL', 'a\u0085b'], ['C1 CSI', 'a\u009bb'], ['U+2028', 'a\u2028b'], ['U+2029', 'a\u2029b'],
+  ];
+
+  for (const [label, name] of BAD) {
+    it(`createTicker refuses ${label} with BAD_USER_INPUT and stores nothing`, async () => {
+      await expectCode(createTicker(ctx(member.id), { name }), 'BAD_USER_INPUT');
+      expect(await db.ticker.count({ where: { appId: app.id } })).toBe(0);
+    });
+
+    it(`updateTicker refuses ${label} and leaves name and slug unchanged`, async () => {
+      const t = await createTicker(ctx(member.id));
+      await expectCode(M.updateTicker({}, { ref: t.id, input: { name, cadenceSeconds: 900 } }, ctx(member.id)), 'BAD_USER_INPUT');
+      const row = await db.ticker.findUniqueOrThrow({ where: { id: t.id } });
+      expect(row).toMatchObject({ name: 'Engineering', slug: 'engineering', cadenceSeconds: 600 });
+    });
+  }
+
+  it('still accepts ordinary Unicode (accents, CJK, emoji, inner spaces)', async () => {
+    for (const name of ['Équipe café', '工程团队', 'Ops 🚀 team']) {
+      await expect(createTicker(ctx(member.id), { name })).resolves.toMatchObject({ name });
+    }
   });
 });

@@ -1,3 +1,4 @@
+import { listAppInstallations } from './appInstallations.js';
 /**
  * Spec 049 Phase 5 — the install-created register row (D-2026-09-13-007 D2,
  * plan §3.5 / §7.3).
@@ -42,20 +43,20 @@ export async function ensureInstallRegisterRows(
 ): Promise<number> {
   const app = await db.app.findFirst({ where: { id: appId, deletedAt: null }, select: { defaultChannelId: true } });
   if (!app?.defaultChannelId) return 0;
-  const installs = await db.appAgent.findMany({
-    where: { appId, ...(opts.agentId ? { agentId: opts.agentId } : {}) },
-    select: { agentId: true, agent: { select: { deletedAt: true, registerDefaults: true } } },
-  });
+  const installs = await listAppInstallations(db, appId, opts.agentId);
   let inserted = 0;
   for (const install of installs) {
     if (!install.agent || install.agent.deletedAt) continue;
     const { mentionOnly } = agentRegisterDefaults(install.agent.registerDefaults);
+    // #3196: created_at is written explicitly as UTC. The column is a naive
+    // timestamp holding UTC, and its DEFAULT CURRENT_TIMESTAMP would land as the
+    // session's wall time, hours off under a non-UTC session.
     inserted += await db.$executeRaw`
       INSERT INTO register_entries
-        (id, app_id, channel_id, attendee_agent_id, role, mention_only, description, install_default, created_by)
+        (id, app_id, channel_id, attendee_agent_id, role, mention_only, description, install_default, created_by, created_at)
       VALUES
         (${generateId()}, ${appId}, ${app.defaultChannelId}, ${install.agentId}, 'BOTH'::"RegisterRole",
-         ${mentionOnly}, ${INSTALL_DEFAULT_DESCRIPTION}, true, ${opts.createdBy ?? null})
+         ${mentionOnly}, ${INSTALL_DEFAULT_DESCRIPTION}, true, ${opts.createdBy ?? null}, (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3))
       ON CONFLICT (app_id, channel_id, attendee_agent_id)
         WHERE app_id IS NOT NULL AND attendee_agent_id IS NOT NULL AND deleted_at IS NULL
         DO NOTHING`;

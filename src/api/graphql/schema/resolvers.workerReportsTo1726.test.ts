@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { reportsToChain, writeReportsTo } from '../../../lib/workerReportsTo.js';
@@ -82,6 +83,7 @@ beforeEach(async () => {
   liam = await worker(app.id, 'Liam');
   zed = await worker(otherApp.id, 'Zed');
   old = await worker(app.id, 'Old', { retiredAt: new Date() });
+  await serveEveryAgent(db); // #2712: binds need a served prompt
 });
 
 describe('the value: same App, not itself, not retired, no cycle', () => {

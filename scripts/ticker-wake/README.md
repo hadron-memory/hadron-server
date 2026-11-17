@@ -23,7 +23,7 @@ tsx scripts/ticker-wake/ticker-wake.ts loop [--interval <seconds>=120] [--budget
 
 Config: the router's `~/.config/hadron-orca-attention-router/config.json`
 (app, `hadronCli`, `orcaCli`, `stateDir`, and an optional roster). State lives
-in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`, `needs-person.json`).
+in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`, `needs-person.json`, `holds.log`).
 
 **Receivers (#2138, Hugo #26221).** The roster is not hand-kept. A hand-kept
 file missed 17 subscribed workers, whose wakes stayed due while every pass
@@ -56,6 +56,22 @@ subscriber read stops the pass, as a failed `dueWakes` read does.
 
 ## Contract
 
+- **The server's tick line (#2754, cor:agt:080:23, :26).** `dueWakes` selects
+  `tickText` on each wake. When it is a non-empty string the script can type as
+  one line (1 to 4,000 characters, no control character, tab, line break, U+2028
+  or U+2029), the typed text starts with it, byte for byte, then one space, then
+  the rest (the displaced "Fresh tick request" prefix, the nudge, the open-task
+  line). It is the server's whole line, even when it re-names a task an earlier
+  send named, and the script never trims, parses or re-renders it. A null or
+  absent `tickText` adds nothing. One the script can't type as a line is
+  dropped: today's nudge goes out and the pass logs the worker's name and
+  `tick line not typeable`, never the text. The line changes nothing else:
+  which wakes are delivered, coverage keys, receipts, the ack and its proof,
+  the gates and their order. **Deploy order:** the server with
+  `DueWake.tickText` and `WakeReason.action` (#2733) must be live before this
+  script runs anywhere, since a server without them rejects the whole read and
+  the pass stops; updating the checkout on orca1 is a separate host grant, and
+  `once --dry` comes first.
 - **Nudge (#2138 §5.2).** One line that names the exact commands, checked
   against the released CLI v0.26.0: run `hadron team chat read --mentions-me
   --limit 1` (it prints `cursor #C; channel head #H`), then `hadron team chat
@@ -70,7 +86,13 @@ subscriber read stops the pass, as a failed `dueWakes` read does.
   asks for the coordinator's base tick instead: "run your base tick
   (coordinator-system:tasks:on-base-tick): first the tagged check: …; then the
   sweep of your owned tasks, alarms and ready heads", so the nudge never tells
-  a coordinator to skip its sweep (#2138, Marco #26709). Why two reads: a read without `--since` returns only the newest
+  a coordinator to skip its sweep (#2138, Marco #26709), unless that
+  `coordinator-tick` reason's own `action.state` is `MAPPED` and the server's
+  tick line is typed with it (#2754): then that line already names the task and the nudge carries the ordinary
+  tagged check. Under UNMAPPED, UNRESOLVED, WITHHELD or no action (an App-key
+  credential usually sees WITHHELD) the base-tick sentence stays, so a
+  coordinator is never told less than before; another ticker's state never
+  counts. Why two reads: a read without `--since` returns only the newest
   page (George, #2156 P2), so marking through its head could bury older
   tagged messages; `--since C --all` walks every page forward from the read
   mark and fails as a whole if a page fails. Each read samples its head before
@@ -342,3 +364,13 @@ existing receipt remediation remain separate; rollout requires Hugo's actual gra
 ## Open-task line (#2613)
 
 Every wake this script types ends with ` You have N open task(s) (as read when this was sent); run `hadron team task mine`.` when the delivered worker holds assigned PENDING or STARTED tasks in the wake App (the same set as `hadron team task mine`). The count comes from the existing `agentTasks` read under this script's credential, shared in `scripts/lib/openTaskLine.ts`. Zero adds nothing; a refused, malformed or over-budget read also adds nothing and never says "none", and logs ONE diagnostic per delivery attempt naming only the worker and a closed reason (`refused`, `malformed`, `timeout` or `page_cap`), never anything the read returned (#2630). The count is the read as of send: it is read before the final gates and is never revalidated after them. Existing wake text is unchanged ahead of the added line. Merging deploys nothing. Fresh/recovery briefs and the future in-poller delivery (hadron-cli#907) are out of scope; that delivery needs the same line.
+
+## Hold reasons (`holds.log`, #2746)
+
+A worker's hold reason otherwise goes only to stdout, which on a host that runs the loop as a system-journal user is
+unreadable to the operator. Each non-dry pass therefore appends one line per worker whose wake was held, left alone or
+not confirmed: `<iso time> <worker name> <worker id> <code>`. The code is one of a closed list (`HOLD_CODES` in
+`ticker-wake.ts`, e.g. `no-receiver-on-host`, `unreconciled-earlier-send`, `send-unconfirmed`, `pass-budget-spent`);
+nothing else is written, so no wake text, tick line, proof, request detail or server message reaches the file. A name or
+id outside its plain shape is written as `-`. A delivered wake writes nothing. The file keeps the newest 200 lines, is
+replaced atomically with mode 0644, and a failure to write it is logged and never fails the pass. `--dry` writes nothing.

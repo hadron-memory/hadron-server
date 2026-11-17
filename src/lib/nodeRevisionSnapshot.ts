@@ -480,6 +480,17 @@ export async function revisionsExemptFromPruning(
   const out = new Set<number>(signed.map((s) => s.revision));
   for (const c of carriers) if (c.revNo != null) out.add(c.revNo);
   for (const sv of servedOpen) out.add(Number(sv.rev));
+  // #2751: absence, not a bounded qualification scan, can prove there is
+  // nothing approved to retain. Check ALL hashed carriers for this node:
+  // the memory-scoped exemption list above misses legacy NULL-memory rows.
+  // Foreign/invalid carriers conservatively keep the existing full scan;
+  // only revisionApprovalOf decides whether their evidence qualifies.
+  // Use the caller's same locked write transaction for the live hash read.
+  const [anyCarrier, live] = await Promise.all([
+    db.nodeRevision.findFirst({ where: { nodeId, approvalHash: { not: null } }, select: { id: true } }),
+    db.node.findUnique({ where: { id: nodeId }, select: { approvalHash: true } }),
+  ]);
+  if (!anyCarrier && live?.approvalHash == null) return out;
   // The serving helper's default scan cap is an answer budget, not permission
   // to prune an older qualifying revision. Examine the entire retained set
   // plus the live candidate here; keep exactly the helper's current/historical

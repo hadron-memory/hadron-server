@@ -20,14 +20,15 @@ describe('served-prompt-invariants.sql (#2047)', () => {
     const migration = readFileSync(new URL('../../../prisma/migrations/20261028130000_served_prompt_chat_without_app/migration.sql', import.meta.url), 'utf8');
     expect(migration.endsWith(source)).toBe(true);
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir served-prompt-app-invariants.sql');
-    expect(readFileSync(new URL('../../test/globalSetup.ts', import.meta.url), 'utf8')).toContain('served-prompt-app-invariants.sql');
+    // #434: post-push.sql (above) is the test template's only path; the vitest global setup no longer re-applies it.
+    expect(readFileSync(new URL('../../test/globalSetup.ts', import.meta.url), 'utf8')).not.toContain('served-prompt-app-invariants.sql');
   });
 
-  it('post-push.sql and the test template setup both include the invariants file', () => {
+  it('post-push.sql includes the invariants file, and the test template gets it from there alone (#434)', () => {
     const post = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
     expect(post).toContain('\\ir served-prompt-invariants.sql');
     const setup = readFileSync(new URL('../../test/globalSetup.ts', import.meta.url), 'utf8');
-    expect(setup).toContain('served-prompt-invariants.sql');
+    expect(setup).not.toContain('served-prompt-invariants.sql');
   });
 
   describe('the table', () => {

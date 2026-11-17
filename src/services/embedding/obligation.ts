@@ -21,7 +21,7 @@ export async function resetEmbeddingObligations(
       embedding_error = CASE WHEN ${indexed} AND ${embeddingEligibleSql()}
         AND (SELECT is_encrypted FROM memories WHERE id = nodes.memory_id)
         THEN ${FRESH_PLAINTEXT_REQUIRED} ELSE NULL END,
-      embedding_attempts = 0
+      embedding_attempts = 0, embedding_truncated_chunks = NULL
     WHERE id = ANY(${ids}::text[])
   `;
 }

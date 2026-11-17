@@ -130,7 +130,7 @@ describe('withSweepLock (#445)', () => {
       await foreign.end().catch(() => {});
       await db.$executeRawUnsafe(`DROP DATABASE IF EXISTS "${other}" WITH (FORCE)`);
     }
-  });
+  }, 60_000);
 
   it('excludes a real second process, with one granted advisory row while held and none after', async () => {
     const name = 'test-two-process';

@@ -6,7 +6,7 @@
  * keeps today's behavior. The discriminator is exact string equality, so each
  * near-miss is pinned to the unchanged 302.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
 import { createServer } from '../../server.js';
@@ -18,6 +18,11 @@ import { generateId } from '../../lib/id.js';
 
 // Only the identity-provider boundary is synthetic. Login state, callback,
 // JWT cookie and the authorize/consent handlers run locally for real (#2625).
+// The mock is deliberately a FULL replacement, not an importOriginal partial
+// (#2632): auth/github.ts has four runtime exports and every one is stubbed
+// here, so a partial would add no isolation. It would only let a future
+// network-calling export reach the real GitHub silently, where today it fails
+// loudly as a missing export.
 const githubFixture = vi.hoisted(() => ({
   exchangeCode: vi.fn(async () => 'synthetic-provider-token'),
   fetchUser: vi.fn(async () => ({id: 2625001, login: 'prompt-callback', name: 'Synthetic callback', avatar_url: ''})),
@@ -27,7 +32,32 @@ vi.mock('../../auth/github.js', () => ({
   ...githubFixture,
   buildAuthUrl: (state: string) => `/synthetic/github?state=${encodeURIComponent(state)}`,
 }));
+// Decodes exactly the five forms the production escaper emits (escapeHtml in
+// auth/oauth.ts), once, with &amp; last so an escaped entity is not decoded twice.
 const htmlValue = (value: string) => value.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+interface Tag { attrs: Record<string, string>; inner: string }
+// Attribute-order-independent element lookup. Values are decoded once here, so
+// callers never re-decode.
+function tagsOf(html: string, tag: 'a' | 'input'): Tag[] {
+  const re = tag === 'a' ? /<a\b([^>]*)>([\s\S]*?)<\/a>/g : /<input\b([^>]*)>/g;
+  return [...html.matchAll(re)].map(m => ({
+    attrs: Object.fromEntries([...m[1].matchAll(/([a-zA-Z_:][\w:.-]*)="([^"]*)"/g)].map(a => [a[1], htmlValue(a[2])])),
+    inner: m[2] ?? '',
+  }));
+}
+// A missing element is a fixture/markup problem, so it fails with its own
+// message instead of surfacing later as a misleading callback failure.
+function requireValue<T>(value: T | null | undefined, what: string): T {
+  if (value === null || value === undefined || value === '') throw new Error(`fixture: expected ${what}, found none`);
+  return value;
+}
+function anchorHref(html: string, pick: (a: Tag) => boolean, what: string): string {
+  return requireValue(tagsOf(html, 'a').find(pick)?.attrs.href, `${what} with an href`);
+}
+const signInHref = (html: string) => anchorHref(html, a => a.attrs.class === 'button', '<a class="button"> sign-in link');
+const emailInsteadHref = (html: string) => anchorHref(html, a => a.inner.trim() === 'Use email instead', '"Use email instead" link');
+const hiddenInputs = (html: string) =>
+  Object.fromEntries(tagsOf(html, 'input').filter(i => i.attrs.type === 'hidden' && i.attrs.name).map(i => [i.attrs.name, i.attrs.value ?? '']));
 const paramsOf = (params: URLSearchParams) => [...params.entries()].sort(([a], [b]) => a.localeCompare(b));
 function expectLocalAuthorizeLink(href: string, original: string) {
   expect(isServerLocalPath(href)).toBe(true);
@@ -91,10 +121,7 @@ describe('sign-in prompt (no cookie, login_provider omitted, resource === origin
     expect(res.headers.get('content-type')).toMatch(/text\/html/);
     const html = await res.text();
     expect(html).toContain('Claude Desktop');
-    const href = html.match(/<a [^>]*class="button"[^>]*href="([^"]+)"/)?.[1]
-      ?? html.match(/<a [^>]*href="([^"]+)"[^>]*class="button"/)?.[1];
-    expect(href, 'prompt must carry a sign-in link').toBeDefined();
-    const target = new URL(href!.replace(/&amp;/g, '&'), 'http://placeholder.invalid');
+    const target = new URL(signInHref(html), 'http://placeholder.invalid');
     expect(target.origin).toBe('http://placeholder.invalid');
     expect(target.pathname).toBe('/auth/github');
     expect(target.searchParams.get('return_to')).toBe(`/oauth/authorize?${q}`);
@@ -106,9 +133,7 @@ describe('sign-in prompt (no cookie, login_provider omitted, resource === origin
   it('offers "Use email instead": a local link to the same query with login_provider=email that reaches the email page', async () => {
     const q = query();
     const html = await (await get(q)).text();
-    const href = html.match(/<a href="([^"]+)">Use email instead<\/a>/)?.[1];
-    expect(href).toBeDefined();
-    const emailHref = href!.replace(/&amp;/g, '&');
+    const emailHref = emailInsteadHref(html);
     expectLocalAuthorizeLink(emailHref, q);
     const page = await fetch(`${baseUrl}${emailHref}`, { redirect: 'manual' });
     expect(page.status).toBe(200);
@@ -116,47 +141,123 @@ describe('sign-in prompt (no cookie, login_provider omitted, resource === origin
   });
 });
 
+// Walks prompt -> /auth/github -> synthetic provider and returns the minted callback state.
+async function startPromptLogin(q: string) {
+  const prompt = await get(q);
+  expect(prompt.status).toBe(200);
+  const html = await prompt.text();
+  // Omission is already GitHub: label and actual start route must agree.
+  expect(html).toContain('Continue with GitHub');
+  const signIn = new URL(signInHref(html), baseUrl);
+  expect(signIn.origin).toBe(baseUrl);
+  expect(signIn.pathname).toBe('/auth/github');
+  const expectedReturn = `/oauth/authorize?${q}`;
+  expect(signIn.searchParams.get('return_to')).toBe(expectedReturn);
+  const start = await fetch(signIn, {redirect: 'manual'});
+  expect(start.status).toBe(302);
+  const syntheticProvider = new URL(requireValue(start.headers.get('location'), 'a Location header on the sign-in start'), baseUrl);
+  expect(syntheticProvider.origin).toBe(baseUrl);
+  expect(syntheticProvider.pathname).toBe('/synthetic/github');
+  return {expectedReturn, state: requireValue(syntheticProvider.searchParams.get('state'), 'a provider state')};
+}
+const callbackWith = (state: string) =>
+  fetch(`${baseUrl}/auth/github/callback?${new URLSearchParams({code: 'synthetic-code', state})}`, {redirect: 'manual'});
+const sessionCookie = (res: Response) => res.headers.getSetCookie().find(c => c.startsWith('hadron_token='))?.split(';')[0];
+
 describe('#2625 local synthetic provider callback returns to consent', () => {
   it.each([undefined, 'account mcp'])('preserves all authorize parameters through GitHub callback (scope=%s)', async scope => {
     await db.user.create({data: {id: generateId(), handle: 'prompt-callback', githubUsername: 'prompt-callback', githubId: 2625001, roles: ['CONTRIBUTOR']}});
     const q = query({scope, state: 'opaque &state=other?return_to=//evil.example/#fragment'});
-    const prompt = await get(q);
-    expect(prompt.status).toBe(200);
-    const html = await prompt.text();
-    const href = htmlValue(html.match(/<a [^>]*class="button"[^>]*href="([^"]+)"/)![1]);
-    const signIn = new URL(href, baseUrl);
-    // Omission is already GitHub: label and actual start route must agree.
-    expect(html).toContain('Continue with GitHub');
-    expect(signIn.origin).toBe(baseUrl);
-    expect(signIn.pathname).toBe('/auth/github');
-    const expectedReturn = `/oauth/authorize?${q}`;
-    expect(signIn.searchParams.get('return_to')).toBe(expectedReturn);
-    const start = await fetch(signIn, {redirect: 'manual'});
-    expect(start.status).toBe(302);
-    const syntheticProvider = new URL(start.headers.get('location')!, baseUrl);
-    expect(syntheticProvider.origin).toBe(baseUrl);
-    expect(syntheticProvider.pathname).toBe('/synthetic/github');
-    const callbackState = syntheticProvider.searchParams.get('state');
-    expect(callbackState).toBeTruthy();
-    const callback = await fetch(`${baseUrl}/auth/github/callback?${new URLSearchParams({code: 'synthetic-code', state: callbackState!})}`, {redirect: 'manual'});
+    const {expectedReturn, state: callbackState} = await startPromptLogin(q);
+    const callback = await callbackWith(callbackState);
     expect(callback.status).toBe(302);
     expect(callback.headers.get('location')).toBe(expectedReturn);
     expect(githubFixture.exchangeCode).toHaveBeenCalledExactlyOnceWith('synthetic-code');
     expect(githubFixture.fetchUser).toHaveBeenCalledExactlyOnceWith('synthetic-provider-token');
-    const cookie = callback.headers.getSetCookie().find(c => c.startsWith('hadron_token='))?.split(';')[0];
-    expect(cookie).toBeTruthy();
-    const consent = await fetch(new URL(callback.headers.get('location')!, baseUrl), {redirect: 'manual', headers: {cookie: cookie!}});
+    const cookie = requireValue(sessionCookie(callback), 'a hadron_token cookie on the callback');
+    const consent = await fetch(new URL(requireValue(callback.headers.get('location'), 'a callback Location'), baseUrl), {redirect: 'manual', headers: {cookie}});
     expect(consent.status).toBe(200);
     const consentHtml = await consent.text();
     expect(consentHtml).toContain('Authorize Claude Desktop');
     expect(consentHtml).toContain('value="approve"');
     expect(consentHtml).not.toContain('Sign in to Hadron');
-    const hidden = Object.fromEntries([...consentHtml.matchAll(/<input type="hidden" name="([^"]+)"\s+value="([^"]*)"/g)].map(m => [m[1], htmlValue(m[2])]));
+    const hidden = hiddenInputs(consentHtml);
     const original = new URLSearchParams(q);
     for (const key of ['client_id', 'redirect_uri', 'state', 'code_challenge', 'code_challenge_method', 'resource']) expect(hidden[key], key).toBe(original.get(key));
-    expect(hidden.scope.split(' ').sort()).toEqual((scope ?? 'mcp').split(' ').sort());
+    expect(requireValue(hidden.scope, 'a scope input').split(' ').sort()).toEqual((scope ?? 'mcp').split(' ').sort());
     expect(hidden._csrf).toBeTruthy();
     expect(hidden.grant_proof).toBeTruthy();
+  });
+
+  // Negative controls at the provider-callback boundary. Existing coverage
+  // (durable-login-state.test.ts) pins the unknown-state 400 page and state
+  // single-use at the claim level, and 025-auth-github-return-to.test.ts pins
+  // the start route; neither follows a prompt-minted login through the
+  // callback to the "no session, no provider call" outcome, and nothing
+  // asserts the GITHUB_ORG membership refusal at all.
+  describe('refused callbacks never authenticate', () => {
+    afterEach(() => { vi.unstubAllEnvs(); });
+
+    it('an unknown/tampered state: 400, no provider call, no session, the real login survives', async () => {
+      const {state} = await startPromptLogin(query());
+      const tampered = `${state.slice(0, -1)}${state.endsWith('0') ? '1' : '0'}`;
+      const res = await callbackWith(tampered);
+      expect(res.status).toBe(400);
+      expect(res.headers.get('location')).toBeNull();
+      expect(sessionCookie(res)).toBeUndefined();
+      expect(githubFixture.exchangeCode).not.toHaveBeenCalled();
+      expect(githubFixture.fetchUser).not.toHaveBeenCalled();
+      expect(await db.user.count()).toBe(0);
+      // A wrong guess burns nothing: the genuine state is still claimable.
+      expect(await db.pendingLoginState.findUnique({where: {state}})).not.toBeNull();
+    });
+
+    it('a replayed state is refused after its one successful use', async () => {
+      const {state} = await startPromptLogin(query());
+      expect((await callbackWith(state)).status).toBe(302);
+      githubFixture.exchangeCode.mockClear();
+      const replay = await callbackWith(state);
+      expect(replay.status).toBe(400);
+      expect(sessionCookie(replay)).toBeUndefined();
+      expect(githubFixture.exchangeCode).not.toHaveBeenCalled();
+    });
+
+    it('GITHUB_ORG set and membership refused: 403, no session, no user provisioned, state consumed', async () => {
+      vi.stubEnv('GITHUB_ORG', 'acme-required');
+      githubFixture.checkOrgMembership.mockResolvedValueOnce(false);
+      const {state} = await startPromptLogin(query());
+      const res = await callbackWith(state);
+      expect(res.status).toBe(403);
+      expect(res.headers.get('location')).toBeNull();
+      expect(sessionCookie(res)).toBeUndefined();
+      expect(githubFixture.checkOrgMembership).toHaveBeenCalledExactlyOnceWith('synthetic-provider-token', 'acme-required');
+      expect(await db.user.count()).toBe(0);
+      expect(await db.pendingLoginState.findUnique({where: {state}})).toBeNull();
+    });
+
+    it('GITHUB_ORG set and membership confirmed: the callback still sets a session and redirects to the authorize URL', async () => {
+      vi.stubEnv('GITHUB_ORG', 'acme-required');
+      const q = query();
+      const {expectedReturn, state} = await startPromptLogin(q);
+      const res = await callbackWith(state);
+      expect(res.status).toBe(302);
+      expect(res.headers.get('location')).toBe(expectedReturn);
+      expect(sessionCookie(res)).toBeTruthy();
+      expect(githubFixture.checkOrgMembership).toHaveBeenCalledExactlyOnceWith('synthetic-provider-token', 'acme-required');
+    });
+  });
+});
+
+describe('fixture HTML helpers fail with their own message', () => {
+  it('accept any attribute order and decode the production escapes once', () => {
+    const html = `<a href="/auth/github?a=1&amp;b=&amp;amp;" class="button">x</a><input value="v&quot;1&amp;quot;" name="n" type="hidden">`;
+    expect(signInHref(html)).toBe('/auth/github?a=1&b=&amp;');
+    // &amp;quot; is an escaped ampersand followed by 'quot;': decoding &amp; first would turn it into a quote.
+    expect(hiddenInputs(html)).toEqual({n: 'v"1&quot;'});
+  });
+  it('a missing element is a fixture error, not a callback failure', () => {
+    expect(() => signInHref('<p>no link</p>')).toThrow(/fixture: expected <a class="button"> sign-in link with an href/);
+    expect(() => emailInsteadHref('<a class="button" href="/x">go</a>')).toThrow(/fixture: expected "Use email instead" link/);
   });
 });
 
@@ -165,10 +266,10 @@ describe('hostile request targets never yield a non-local link', () => {
   it('encoded hostile state/query values round-trip exactly inside a local link', async () => {
     const q = query({ state: '//evil.example/&login_provider=email&return_to=https://evil.example' });
     const html = await (await get(q)).text();
-    const href = html.match(/<a [^>]*class="button"[^>]*href="([^"]+)"/)![1].replace(/&amp;/g, '&');
+    const href = signInHref(html);
     expect(href.startsWith('/auth/github?return_to=')).toBe(true);
     expect(new URL(href, 'http://x.invalid').searchParams.get('return_to')).toBe(`/oauth/authorize?${q}`);
-    const email = html.match(/<a href="([^"]+)">Use email instead/)![1].replace(/&amp;/g, '&');
+    const email = emailInsteadHref(html);
     expectLocalAuthorizeLink(email, q);
     expect(new URL(email, baseUrl).searchParams.get('state')).toBe(new URLSearchParams(q).get('state'));
   });
@@ -184,11 +285,11 @@ describe('hostile request targets never yield a non-local link', () => {
     });
     expect(raw.split('\r\n')[0]).toMatch(/ 200 /);
     const body = raw.slice(raw.indexOf('\r\n\r\n') + 4);
-    const hrefs = [...body.matchAll(/href="([^"]+)"/g)].map((m) => m[1].replace(/&amp;/g, '&'));
+    const hrefs = tagsOf(body, 'a').map((a) => requireValue(a.attrs.href, '<a> with an href'));
     expect(hrefs.length).toBeGreaterThanOrEqual(2);
     for (const href of hrefs) expect(href.startsWith('/'), href).toBe(true);
-    const signIn = hrefs.find((h) => h.startsWith('/auth/github'))!;
-    expect(isServerLocalPath(new URL(signIn, 'http://x.invalid').searchParams.get('return_to')!)).toBe(false);
+    const signIn = requireValue(hrefs.find((h) => h.startsWith('/auth/github')), 'a /auth/github link');
+    expect(isServerLocalPath(requireValue(new URL(signIn, 'http://x.invalid').searchParams.get('return_to'), 'a return_to value'))).toBe(false);
   });
 });
 

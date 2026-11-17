@@ -1,0 +1,32 @@
+/** Primary-only memory reads retain the oldest physical install contract. */
+import { beforeEach, expect, it, vi } from 'vitest';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb, createDbAgentOrgGrant, createDbAgentImport } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
+import { getAppMemoryAccess } from '../../../mcp/access-control.js';
+import { resolvers, type Context } from './resolvers.js';
+vi.mock('../../../integrations/github/writeNodeToGit.js',()=>({writeNodeToGit:vi.fn().mockResolvedValue(undefined)}));
+beforeEach(async()=>{await cleanDb(db);});
+it('licensed derived definitions join all-Agent folds but do not replace a live or dead physical primary',async()=>{
+  const org=await db.organization.create({data:{name:'Primary',urn:`primary-${generateId().toLowerCase()}.example`}});
+  const user=await db.user.create({data:{handle:`primary-${generateId()}`,roles:['READER']}});
+  await db.orgMember.create({data:{organizationId:org.id,userId:user.id,role:'ADMIN'}});
+  const ctx={db,userId:user.id,roles:['READER']} as Context;
+  const make=(name:string)=>(resolvers.Mutation as any).createAgent({}, {orgId:org.id,name,personaRole:name},ctx);
+  const first=await make('First'),derived=await make('Derived'),second=await make('Second');
+  const app=await db.app.create({data:{name:'Primary',urn:`primary-${generateId().toLowerCase()}.example:app`,organizationId:org.id}});
+  await db.appAgent.create({data:{appId:app.id,agentId:first.id,createdAt:new Date('2026-01-01')}});
+  await createDbAgentOrgGrant(db,org.id,derived.id);
+  await createDbAgentImport(db,first.id,derived.id);
+  const firstRow=await db.agent.findUniqueOrThrow({where:{id:first.id}});
+  const derivedRow=await db.agent.findUniqueOrThrow({where:{id:derived.id}});
+  const secondRow=await db.agent.findUniqueOrThrow({where:{id:second.id}});
+  const read=(allAgents=false)=>getAppMemoryAccess(db,app.id,{allAgents,includeTeamSpace:false,credentialOnly:true});
+  expect((await read()).has(firstRow.systemMemoryId!)).toBe(true);
+  expect((await read()).has(derivedRow.systemMemoryId!)).toBe(false);
+  expect((await read(true)).has(derivedRow.systemMemoryId!)).toBe(true);
+  await db.appAgent.create({data:{appId:app.id,agentId:second.id,createdAt:new Date('2026-01-02')}});
+  await db.agent.update({where:{id:first.id},data:{deletedAt:new Date()}});
+  expect((await read()).has(secondRow.systemMemoryId!)).toBe(false);
+  expect((await read(true)).has(secondRow.systemMemoryId!)).toBe(true);
+});

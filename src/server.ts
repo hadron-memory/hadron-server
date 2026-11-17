@@ -1,3 +1,6 @@
+import { isSessionSupersededError, respondSessionSuperseded } from './lib/sessionSuperseded.js';
+import { assertRateReadiness, checkRateConfiguration, cleanupRateBuckets } from './lib/rateLimit/index.js';
+import { assertEventKeysLocal } from './lib/agentTasks/eventKeyRebase.js';
 import { deliveryPendingPlugin } from './api/graphql/deliveryPendingPlugin.js';
 import { verifiedLoginEvidence } from './auth/loginEvidence.js';
 import crypto from 'crypto';
@@ -5,6 +8,7 @@ import { mountTeamSpecSchemaRoutes } from './api/teamSpecSchema.js';
 import { readTeamRecordKeys } from './lib/teamSpec/record.js';
 import * as Sentry from '@sentry/node';
 import { ApolloServer, type ApolloServerPlugin, type BaseContext } from '@apollo/server';
+import { memoryPressurePlugin } from './api/graphql/memoryPressurePlugin.js';
 import { expressMiddleware } from '@apollo/server/express4';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
@@ -12,7 +16,6 @@ import rateLimit from 'express-rate-limit';
 import express, { type Express } from 'express';
 import { decodeJwt } from 'jose';
 import { db } from './integrations/db/client.js';
-import { serializeJson } from './integrations/db/provider.js';
 import {
   buildAuthUrl,
   exchangeCode,
@@ -36,6 +39,7 @@ import {
   parseAppleUserField,
   resolveAppleUser,
 } from './auth/index.js';
+import { requireSignupBotCheck } from './auth/turnstile.js';
 import { issueLoginCode, redeemLoginCode } from './auth/authHandoff.js';
 import { startUserDeletionNoticeLoop } from './jobs/sendUserDeletionNotices.js';
 import { startPasskeyRegistrationNoticeLoop } from './jobs/sendPasskeyRegistrationNotices.js';
@@ -51,23 +55,28 @@ import { mintProviderNonce, nonceExpectation, recordNonceRefusal } from './auth/
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
+import { mountSigningCeremonyRoutes } from './api/signingCeremonyRoutes.js';
+import { mountGrantSigningCeremonyRoutes } from './api/grantSigningCeremonyRoutes.js';
 import { beginPasskeySignIn, mountPasskeySignInRoutes } from './api/passkeySignInRoutes.js';
 import { signingSurfacePolicy } from './lib/signing/surface.js';
 import { completeCeremonyLeg, mountFreshSignInRoutes } from './api/freshSignInRoutes.js';
-import { googleReauthenticatedSince } from './auth/google.js';
+import { googleReauthenticatedSince, isGoogleConfigured } from './auth/google.js';
 import {
   oauthSurfaceRefusal,
   oauthSurfaceRefusalMessage,
   hasCurrentPlatformAdminRole,
-  resolveAuthContext,
+  resolveCredentialContextWithStatus,
+  bindPresentedSession,
+  portalHumanUserId,
 } from './middleware/auth.js';
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
+import { startRateBucketCleanupLoop } from './lib/rateLimit/maintenance.js';
 import { assertProductionSigningSecret } from './auth/signingSecret.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
 import { mountOAuthRoutes } from './auth/oauth.js';
 import { impersonationReadOnlyPlugin } from './api/graphql/impersonationReadOnlyPlugin.js';
 import { taskWarningsPlugin } from './api/graphql/taskWarningsPlugin.js';
-import { requireOrgRole, requireSessionWriteAccess } from './api/graphql/schema/resolvers.helpers.js';
+import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
 import type { Context } from './api/graphql/schema/resolvers.js';
 import { querySourceCap, readGraphqlAdmissionConfig } from './api/graphql/admission.js';
 import { complexityAdmissionPlugin } from './api/graphql/admissionComplexity.js';
@@ -85,25 +94,30 @@ import { assignRequestId, bindRequestId, REQUEST_ID_HEADER } from './lib/request
 import { internalFaultErrorHandler, respondInternalFault } from './lib/internalFault.js';
 import { handleMcpRequest, handleMcpDelete, startMcpTransportSweepLoop } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
+import { startPasskeyCeremonySweepLoop } from './jobs/sweepPasskeyCeremonies.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
+import { startGitMirrorObligationSweepLoop } from './jobs/sweepGitMirrorObligations.js';
 import { startOauthClientGcLoop } from './jobs/gcOauthClients.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
 import { startAssetBytesSweepLoop } from './jobs/sweepAssetBytes.js';
 import { startSessionKeySweepLoop } from './lib/sessionKeyCache.js';
+import { startAppKeyCacheSweepLoop } from './lib/secrets/appKeys.js';
 import { startSessionReaperLoop } from './jobs/reapSessions.js';
 import { startPendingEdgePromotionSweepLoop } from './jobs/promotePendingEdges.js';
-import { startEmbeddingWorkerLoop, startEmbeddingBusListener, stopEmbeddingWorker, assertEmbeddingObligationsReconciled } from './jobs/embedNodes.js';
-import { stopEmbeddingPublisher } from './services/embedding/enqueue.js';
+import { startEmbeddingWorkerLoop, startEmbeddingBusListener, stopEmbeddingWorkerOutcome, assertEmbeddingObligationsReconciled } from './jobs/embedNodes.js';
+import { stopEmbeddingPublisherOutcome } from './services/embedding/enqueue.js';
+import { settleStep, type EmbeddingStopOutcomes } from './lib/shutdownSteps.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
 import { GraphQLError, buildSchema, printSchema } from 'graphql';
 import {
+  encryptMemoryTargetRef,
   stageRequestMemoryKeys,
   MemoryUnlockError,
   REQUEST_KEYS_HEADER,
 } from './lib/memoryUnlock.js';
-import { requestKeyStorage } from './lib/requestKeys.js';
+import { requestFirstEncryptionStorage, requestKeyStorage } from './lib/requestKeys.js';
 import { OPERATION_KEY_HEADER, requestOperationKeyStorage, stageRequestOperationKey } from './lib/requestOperationKey.js';
 import { emptyActor, requestActorStorage } from './lib/requestActor.js';
 import { isEmbeddingConfigured } from './lib/embedding/index.js';
@@ -114,7 +128,7 @@ import { startSchedulerLoop } from './jobs/scheduler.js';
 import { startTaskStallEvaluatorLoop } from './jobs/taskStallEvaluator.js';
 import { startTaskMatcherLoop } from './jobs/taskMatcher.js';
 import { mountWebhookRoutes } from './api/webhooks.js';
-import { mountHealthRoutes } from './api/health.js';
+import { mountHealthRoutes, type ReadinessSource } from './api/health.js';
 import { mountCapabilitiesRoute } from './api/capabilities.js';
 import { mountPublicAssetRoutes } from './api/assetPublic.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
@@ -133,7 +147,7 @@ import {
   isGoogleDriveConnectConfigured,
 } from './integrations/googleDrive/auth.js';
 import { mountMailboxConnectRoutes } from './integrations/mailboxConnect.js';
-import { preserveHeartbeatIfLapsed } from './lib/sessionActivity.js';
+import { recordSessionOutcome } from './lib/sessionOutcome.js';
 import { INDEXED_MEMORY_WHERE } from './lib/embedding/indexing.js';
 
 /**
@@ -185,7 +199,13 @@ const sentryApolloPlugin: ApolloServerPlugin<BaseContext> = {
   },
 };
 
-export async function createServer(): Promise<Express> {
+/**
+ * Build the Express app. `readiness` (#2998) is what `/ready` reads: the
+ * entry point passes the tracker for this process's first startup and its
+ * shutdown signal. Omitted (tests that never start up), `/ready` answers
+ * `starting`.
+ */
+export async function createServer({ readiness }: { readiness?: ReadinessSource } = {}): Promise<Express> {
   // #421: before anything else, so a weak signing secret never serves.
   assertProductionSigningSecret();
   // AM Q13: absent leaves team record operations unavailable; an invalid
@@ -219,6 +239,17 @@ export async function createServer(): Promise<Express> {
   } else {
     app.set('trust proxy', true);
   }
+
+  // #4111: a database logically restored without the event-key rebase holds agent_team_events keys this cluster never
+  // issued, and the changed-since read would hide those rows. Refuse before any route, loop or listener exists AND
+  // before the first database write of the bootstrap (gate-owner P9 ruling on #4116, comment 6848664427): it runs after
+  // the non-writing trust-proxy validation above and BEFORE assertRateReadiness, which seeds missing rate metadata.
+  // The check only reads. Restores go through scripts/ops/restore-with-rebase, whose output passes.
+  await assertEventKeysLocal(db);
+
+  // Preserve trust-proxy boot validation before the first DB-writing readiness check (rate metadata seeding).
+  // Both prerequisites still complete before this app can listen.
+  await assertRateReadiness(db);
 
   // #557: a production deploy with no webhook secret refuses deliveries (the
   // route answers 503), so say so at BOOT rather than letting the operator
@@ -565,7 +596,7 @@ export async function createServer(): Promise<Express> {
     // Fail loud and early when the deployment doesn't carry the Google OAuth
     // client — a 302 built with an undefined client_id would send the user to
     // a Google error page instead.
-    if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+    if (!isGoogleConfigured()) {
       res.status(503).json({ error: 'Google login is not configured on this server' });
       return;
     }
@@ -905,6 +936,9 @@ export async function createServer(): Promise<Express> {
     // ordering is the fix rather than a style choice.
     validateEmailSendRequest,
     emailSendPerIpRateLimit,
+    // #2257: bot check after the no-send validation and before the recipient
+    // limiter, so a refused request neither burns a token nor a victim's budget.
+    requireSignupBotCheck,
     emailRecipientRateLimit,
     async (req, res) => {
       const { redirect } = req.body as { redirect?: string };
@@ -1086,6 +1120,10 @@ export async function createServer(): Promise<Express> {
   // NODE_ENV + localhost Host; otherwise indistinguishable from a 404).
   mountDevLoginRoutes(app, db);
   mountPasskeyCeremonyRoutes(app);
+  // #1632 S2b-2 (cor:dmo:130:08): the signing ceremony page; mounted only when the signing switch is on (#1895).
+  mountSigningCeremonyRoutes(app);
+  // #3649 slice C: the grant signing ceremony, on the same switch.
+  mountGrantSigningCeremonyRoutes(app);
   mountPasskeySignInRoutes(app);
   mountFreshSignInRoutes(app, { emailSendPerIpRateLimit, emailRecipientRateLimit });
 
@@ -1188,11 +1226,15 @@ export async function createServer(): Promise<Express> {
     maxTokens: admission.maxTokens, maxSelections: admission.maxSelections,
   }));
   const apollo = new ApolloServer({
+    // #3021: shutdown belongs to src/index.ts. Apollo's default handler runs stop() and then re-raises the
+    // signal (ApolloServer.js signalHandler), which killed the process in ~0.3 s before the stopping drain
+    // window could run (Otto's rehearsal, real image under `doppler run`).
+    stopOnTerminationSignals: false,
     // #2087: concealed errors must not depend on the deployment's NODE_ENV.
     includeStacktraceInErrorResponses: false,
     typeDefs,
     resolvers: deploymentResolvers,
-    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin, deliveryPendingPlugin, complexityAdmissionPlugin(admission)],
+    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin, deliveryPendingPlugin, complexityAdmissionPlugin(admission), memoryPressurePlugin()],
     // #918 — typed client errors carry their stable `extensions.code`.
     // The mapping list lives beside the Sentry predicate that reads it.
     formatError: formatGraphQLError,
@@ -1230,7 +1272,7 @@ export async function createServer(): Promise<Express> {
     // (e.g. resolveAuthContext hitting a DB failure) would hang the request —
     // forward it to the error middleware instead.
     try {
-      const auth = await resolveAuthContext(req, db);
+      const { auth } = await resolveCredentialContextWithStatus(req, db);
       if (!auth.userId && !auth.appId) {
         res.status(401).json({ error: 'Authentication required to read the GraphQL schema.' });
         return;
@@ -1241,6 +1283,7 @@ export async function createServer(): Promise<Express> {
         res.status(403).json({ error: oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface.'), code: 'FORBIDDEN', ...surfaceRefusal });
         return;
       }
+      await bindPresentedSession(req, db, auth);
       res.type('text/plain; charset=utf-8').send(graphqlSdl());
     } catch (err) {
       next(err);
@@ -1257,13 +1300,14 @@ export async function createServer(): Promise<Express> {
     // context — aborted responses included (PR-514 review, Codex P1 ×2).
     bindRequestId,
     (_req, _res, next) => requestKeyStorage.run(new Map(), next),
+    (_req, _res, next) => requestFirstEncryptionStorage.run(new Map(), next),
     (_req, _res, next) => requestOperationKeyStorage.run({}, next),
     // #1610: the Worker / Agent behind this request's writes, filled by
     // resolveAuthContext from the validated session binding.
     (_req, _res, next) => requestActorStorage.run(emptyActor(), next),
     expressMiddleware(apollo, {
       context: async ({ req }) => {
-        const auth = await resolveAuthContext(req, db);
+        const { auth, credentialStatus } = await resolveCredentialContextWithStatus(req, db);
         const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
         if (surfaceRefusal) {
           // #1303: `code` and prose unchanged; `reason` & co. are additive.
@@ -1273,6 +1317,15 @@ export async function createServer(): Promise<Express> {
           throw new GraphQLError(oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface.'), {
             extensions: { code: 'FORBIDDEN', ...surfaceRefusal, http: { status: 403 } },
           });
+        }
+        try {
+          await bindPresentedSession(req, db, auth);
+        } catch (error) {
+          // #3818: a pre-work refusal is not an ambiguous gateway/internal 5xx to clients.
+          if (isSessionSupersededError(error)) throw new GraphQLError(error.message, {
+            extensions: { ...error.extensions, http: { status: 409 } },
+          });
+          throw error;
         }
         stageRequestOperationKey(req.headers[OPERATION_KEY_HEADER], auth);
         // Stage caller-held unlock keys from the request header. Every
@@ -1284,13 +1337,18 @@ export async function createServer(): Promise<Express> {
           db,
           req.headers[REQUEST_KEYS_HEADER],
           (auth as { userId?: string | null }).userId,
+          {
+            impersonated: !!(auth as { impersonation?: unknown }).impersonation,
+            encryptMemoryTarget: () => encryptMemoryTargetRef(req.body),
+          },
         ).catch((err) => {
           if (err instanceof MemoryUnlockError) {
             throw new GraphQLError(err.message, { extensions: { code: err.code } });
           }
           throw err;
         });
-        return { db, ...auth };
+        const portalHuman = portalHumanUserId(auth);
+        return { db, ...auth, credentialStatus, ...(portalHuman ? { portalHumanUserId: portalHuman } : {}) };
       },
     }),
   );
@@ -1351,74 +1409,48 @@ export async function createServer(): Promise<Express> {
   app.post('/sessions/:id/outcome', async (req, res) => {
     const { id } = req.params;
     const { outcome, outcomeRef, outcomeMeta } = req.body ?? {};
-    if (typeof outcome !== 'number' || outcome < 0 || outcome > 1) {
-      res
-        .status(400)
-        .json({ error: 'outcome must be a number between 0 and 1' });
-      return;
-    }
     try {
-      // Inside the try: `resolveAuthContext` does DB lookups, and in Express 4
-      // a rejection above the try is an unhandled rejection rather than a
-      // response (the #555 class).
-      const auth = await resolveAuthContext(req, db);
-      const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
-      if (surfaceRefusal) {
-        // #1303: the prose is unchanged; `code` + `reason` make it matchable.
-        res.status(403).json({ error: oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface.'), code: 'FORBIDDEN', ...surfaceRefusal });
-        return;
-      }
-
-      // #1647 (cor:dmo:070:05): the outcome of a session is a WRITE to it, so the target goes through the one shared
-      // session-write gate (`requireSessionWriteAccess`): the attributed user, or a pure App key for its own App's
-      // eligible user-less, non-host-launched session, or a platform admin on a session that is not bound to another
-      // user's personal/private memory (strict owner wins, cor:acl:010:02). Contributor status, a hybrid active-App
-      // selection or any App key no longer admits. The principal must still hold SOME credential: an anonymous request
-      // is a 401, not a 403.
-      if (!auth.userId && !auth.appId) {
-        res.status(401).json({ error: 'A credential is required' });
-        return;
-      }
-      const target = await db.session.findUnique({
-        where: { id },
-        select: { appId: true, userId: true, launchOperationId: true, memoryId: true, deletedAt: true },
+      // #2896: the validation, the surface refusal, the credential check and the write gate are ONE function shared
+      // with the GraphQL `recordSessionOutcome`; this route only maps each answer onto its status and body.
+      // `resolveAuthContext` does DB lookups, and in Express 4 a rejection above the try is an unhandled rejection
+      // rather than a response (the #555 class), so the whole call stays inside it.
+      const result = await recordSessionOutcome(db, async () => {
+        const { auth } = await resolveCredentialContextWithStatus(req, db);
+        // Keep the shared operation's credential/surface refusals ahead of execution metadata disclosure.
+        if (!oauthSurfaceRefusal(auth, 'account') && (auth.userId || auth.appId)) await bindPresentedSession(req, db, auth);
+        return { db, ...auth } as Context;
+      }, {
+        sessionId: id,
+        outcome,
+        outcomeRef,
+        outcomeMeta,
       });
-      if (!target || target.deletedAt) {
-        res.status(404).json({ error: 'Session not found' });
-        return;
+      switch (result.kind) {
+        case 'out_of_range':
+          res.status(400).json({ error: 'outcome must be a number between 0 and 1' });
+          return;
+        case 'oauth_surface':
+          // #1303: the prose is unchanged; `code` + `reason` make it matchable.
+          res.status(403).json({ error: oauthSurfaceRefusalMessage(result.refusal, 'This OAuth credential is limited to the MCP surface.'), code: 'FORBIDDEN', ...result.refusal });
+          return;
+        case 'no_credential':
+          res.status(401).json({ error: 'A credential is required' });
+          return;
+        case 'not_found':
+          res.status(404).json({ error: 'Session not found' });
+          return;
+        case 'forbidden':
+          // A refusal returns before any write: no outcome, metadata or liveness moves.
+          res.status(403).json({ error: 'Forbidden', code: 'FORBIDDEN' });
+          return;
+        case 'ok':
+          res.json({ ok: true });
+          return;
       }
-      try {
-        await requireSessionWriteAccess({ db, ...auth } as Context, target);
-      } catch (refusal) {
-        if ((refusal as { extensions?: { code?: string } })?.extensions?.code !== 'FORBIDDEN') throw refusal;
-        // A refusal returns before any write: no outcome, metadata or liveness moves.
-        res.status(403).json({ error: 'Forbidden', code: 'FORBIDDEN' });
-        return;
-      }
-
-      await db.session.update({
-        where: { id },
-        data: {
-          // #1543 — an outcome report is not anyone driving the session.
-          ...(await preserveHeartbeatIfLapsed(db as never, id)),
-          outcome,
-          outcomeRef,
-          outcomeMeta: serializeJson(outcomeMeta) as typeof outcomeMeta,
-        },
-      });
-      res.json({ ok: true });
     } catch (err) {
-      // Distinguish "no such session" from "something else went wrong".
-      // This catch used to answer 404 for EVERY failure, which was survivable
-      // while the only statement inside it was the update — but the auth
-      // lookups now live in here too, and reporting a connection-pool blip as
-      // "Session not found" would send the caller chasing a session id that is
-      // perfectly fine. P2025 is Prisma's record-not-found.
-      const code = (err as { code?: string } | null)?.code;
-      if (code === 'P2025') {
-        res.status(404).json({ error: 'Session not found' });
-        return;
-      }
+      // A database fault is a 500, never "Session not found": reporting a connection-pool blip as a missing session
+      // would send the caller chasing a session id that is perfectly fine.
+      if (respondSessionSuperseded(res, err)) return;
       Sentry.captureException(err);
       respondInternalFault(res, 'sessions/outcome', err);
     }
@@ -1477,13 +1509,15 @@ export async function createServer(): Promise<Express> {
     // raises an unhandled rejection. That is the #555 class of defect, fixed
     // this week, reintroduced by putting an await above the try.
     try {
-      const auth = await resolveAuthContext(req, db);
+      const { auth } = await resolveCredentialContextWithStatus(req, db);
       const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
       if (surfaceRefusal) {
         // #1303: the prose is unchanged; `code` + `reason` make it matchable.
         res.status(403).json({ error: oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface.'), code: 'FORBIDDEN', ...surfaceRefusal });
         return;
       }
+
+      await bindPresentedSession(req, db, auth);
 
       // Roles come from the CURRENT user row, not from a token or transport
       // snapshot (@copilot, PR #1250; #1251). Re-reading costs one indexed
@@ -1521,6 +1555,7 @@ export async function createServer(): Promise<Express> {
       }
       res.json({ ok: true });
     } catch (err) {
+      if (respondSessionSuperseded(res, err)) return;
       Sentry.captureException(err);
       respondInternalFault(res, 'reload', err);
     }
@@ -1870,8 +1905,13 @@ export async function createServer(): Promise<Express> {
   mountPublicAssetRoutes(app, db);
 
   // #1906: /health runs SELECT 1 through this pool, so a wedged pool reads
-  // unhealthy. See src/api/health.ts.
-  mountHealthRoutes(app, db);
+  // unhealthy. #2998: /ready adds the first startup and the shutdown signal
+  // on top of the same probe. #1793: only readiness also checks the live rate
+  // keyring/manifest; /health remains DB liveness, without configuration detail.
+  mountHealthRoutes(app, db, { readiness, checkConfiguration: () => checkRateConfiguration(db) });
+
+  // #430: interval-only retries of recorded Git failures; helper skips tests and the disable flag.
+  startGitMirrorObligationSweepLoop(db);
 
   // Background job: purge expired anonymous memories hourly.
   // Skipped in test environments to avoid leaking timers.
@@ -1882,9 +1922,21 @@ export async function createServer(): Promise<Express> {
   // #1770 — retention for account-merge consent requests: a retired request
   // is deleted 30 days after the later of its expiry and consumption
   // (cor:api:010:02), in bounded batches. Live proofs and sealed receipts stay.
+  // #1793: bounded inactive-counter retention, identical with/without the optional bus.
+  if (process.env.NODE_ENV !== 'test') {
+    startRateBucketCleanupLoop(()=>cleanupRateBuckets(db),error=>{
+      const raw=error && typeof error==='object' ? (error as {code?:unknown}).code : undefined;
+      const code=typeof raw==='string' && /^(P\d{4}|[0-9A-Z]{5})$/.test(raw) ? raw : 'UNKNOWN';
+      console.error('rate-limit cleanup failed',{code});
+    });
+  }
+
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_MERGE_CONSENT_SWEEP !== 'true') {
     startMergeConsentSweepLoop(db);
   }
+
+  // #3122: transient passkey/signing ceremonies; independent of feature flags so old rows still retire.
+  startPasskeyCeremonySweepLoop(db);
 
   // #155 — collect unused DCR OAuth clients 7 days past their expiry (soft delete). Dry run, logging
   // the count it would collect, until OAUTH_CLIENT_GC_ENABLED=true (R220).
@@ -1989,6 +2041,12 @@ export async function createServer(): Promise<Express> {
     startSessionKeySweepLoop();
   }
 
+  // #3996 — the App secret key cache's sweep, on its OWN timer for the same reason: it is never behind
+  // DISABLE_SECRET_SWEEP (or any sibling flag), so unwrapped App keys cannot outlive SECRET_APP_KEY_CACHE_TTL_MS.
+  if (process.env.NODE_ENV !== 'test') {
+    startAppKeyCacheSweepLoop();
+  }
+
   // 033 — embedding worker sweep (retries / restarts / backfill). Skipped in
   // tests (which drive embedNode/drainEmbeddingQueue directly). Warns if any
   // memory is vector-indexed but no embedding endpoint is configured.
@@ -2073,8 +2131,9 @@ export async function createServer(): Promise<Express> {
   // #1789: a fault that reaches Express shows the caller the generic envelope, not Express's default stack page.
   app.use(internalFaultErrorHandler);
 
-  app.locals.stopEmbeddingWorker = () => Promise.all([
-    stopEmbeddingWorker(db), stopEmbeddingPublisher(),
-  ]).then(results => results.every(Boolean));
+  // #3845: per-part outcomes (not one folded boolean), so the stop in src/index.ts can name a failing step.
+  app.locals.stopEmbeddingWorker = (): Promise<EmbeddingStopOutcomes> => Promise.all([
+    settleStep(stopEmbeddingWorkerOutcome(db)), settleStep(stopEmbeddingPublisherOutcome()),
+  ]).then(([worker, publisher]) => ({ worker, publisher }));
   return app;
 }

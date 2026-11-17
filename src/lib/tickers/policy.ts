@@ -8,8 +8,10 @@
 // "The worker itself" is a session bound to that worker with a person behind
 // it. "The holder" is a PERSON acting as themselves (no worker session), so a
 // holder who drives another worker's session does not inherit holder rights
-// through it. "Whoever manages the App" counts a person acting as themselves
-// only (`actorManagesApp`); a worker never inherits its driver's management.
+// through it. "Whoever manages the App" (`actorManagesApp`) is a person acting
+// as themselves, or (#3323, cor:dmo:050:12) their held worker on an instruction
+// at a door that passes one; the ticker and settings doors pass none until
+// #3321 (S4b), so here a worker still never inherits its holder's management.
 
 export type PolicyActor =
   | { kind: 'worker'; workerId: string; userId: string | null }

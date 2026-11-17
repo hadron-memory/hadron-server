@@ -91,6 +91,9 @@ export async function wakeStampsFor(
   const authority = held ? held.authority : await lockStampAuthority(ctx, tx, app);
   if (!authority) return {};
   const { live } = authority;
+  // The manager stamp says the manager posted this themselves, so it stays person-only (cor:dmo:050:12, R9 on #3322):
+  // an instructed worker's post is attributed to the worker, and its broadcast goes through the grant below
+  // (cor:agt:080:24, cor:agt:080:14), never through its holder's right.
   const manager = !authorWorkerId && (await managesApp(live, authority.app));
   let granted = false;
   if (broadcast && !manager && authorWorkerId && live.userId && !live.impersonation && (await mayStillDriveWorkerApp(live, authority.app.id))) {

@@ -9,6 +9,7 @@
  * the edit shared one revision, after which the refreshed fingerprint hid the
  * missed transition for good.
  */
+import { attestedAuthoring } from '../../../lib/authoringAttestation.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
@@ -49,7 +50,7 @@ describe('#1339/#1454 — drift is reconciled before the guard and the edit', ()
   it('a stale guarded edit refuses once, persists drift, and succeeds after a fresh read', async () => {
     const node = await driftedNode('drift:guarded');
     const edit = (guardRevSeq: number) => writeNodeCore(
-      { memoryId, loc: node.loc, content: 'blind overwrite' }, ctx(), 'update', { guardRevSeq },
+      { memoryId, loc: node.loc, content: 'blind overwrite' }, ctx(), 'update', { authoring: attestedAuthoring(null), guardRevSeq },
     );
     const conflict = (e: unknown) => e instanceof GraphQLError && e.extensions.code === 'NODE_WRITE_CONFLICT';
 
@@ -83,7 +84,7 @@ describe('#1339/#1454 — drift is reconciled before the guard and the edit', ()
     const freshRevision = await resolvers.Node.revision(parent as never, {}, ctx());
     expect(freshRevision).toBe(2);
     const updated = await writeNodeCore(
-      { memoryId, loc: node.loc, content: 'edit after read' }, ctx(), 'update', { guardRevSeq: freshRevision },
+      { memoryId, loc: node.loc, content: 'edit after read' }, ctx(), 'update', { authoring: attestedAuthoring(null), guardRevSeq: freshRevision },
     );
     expect(updated.revSeq).toBe(3);
     const history = await db.nodeRevision.findMany({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
@@ -94,7 +95,7 @@ describe('#1339/#1454 — drift is reconciled before the guard and the edit', ()
 
   it('an unguarded edit over drift yields TWO revisions: the reconcile, then the edit', async () => {
     const node = await driftedNode('drift:plain');
-    const updated = await writeNodeCore({ memoryId, loc: node.loc, content: 'the edit' }, ctx(), 'update');
+    const updated = await writeNodeCore({ memoryId, loc: node.loc, content: 'the edit' }, ctx(), 'update', { authoring: attestedAuthoring(null) });
     expect(updated.revSeq).toBe(3);
     const history = await db.nodeRevision.findMany({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
     expect(history.map((r) => r.revNo)).toEqual([1, 2]);
@@ -107,7 +108,7 @@ describe('#1339/#1454 — drift is reconciled before the guard and the edit', ()
 
   it('control: a guarded write at the current revision with no drift still succeeds', async () => {
     const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:none', name: 'n', content: 'x' } });
-    const updated = await writeNodeCore({ memoryId, loc: node.loc, content: 'y' }, ctx(), 'update', { guardRevSeq: 1 });
+    const updated = await writeNodeCore({ memoryId, loc: node.loc, content: 'y' }, ctx(), 'update', { authoring: attestedAuthoring(null), guardRevSeq: 1 });
     expect(updated.revSeq).toBe(2);
   });
 
@@ -116,7 +117,7 @@ describe('#1339/#1454 — drift is reconciled before the guard and the edit', ()
   it('a guard equal to the post-reconcile revision is still refused, and only the drift commits', async () => {
     const node = await driftedNode('drift:aba');
     await expect(
-      writeNodeCore({ memoryId, loc: node.loc, content: 'guessed overwrite' }, ctx(), 'update', { guardRevSeq: 2 }),
+      writeNodeCore({ memoryId, loc: node.loc, content: 'guessed overwrite' }, ctx(), 'update', { authoring: attestedAuthoring(null), guardRevSeq: 2 }),
     ).rejects.toSatisfy((e: unknown) => e instanceof GraphQLError && e.extensions.code === 'NODE_WRITE_CONFLICT');
     const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
     expect(after).toMatchObject({ content: 'changed by a raw writer', revSeq: 2 });
@@ -126,7 +127,7 @@ describe('#1339/#1454 — drift is reconciled before the guard and the edit', ()
 
     // The same token is now a legitimate read of the reconciled state.
     const updated = await writeNodeCore(
-      { memoryId, loc: node.loc, content: 'edit after reconcile' }, ctx(), 'update', { guardRevSeq: 2 },
+      { memoryId, loc: node.loc, content: 'edit after reconcile' }, ctx(), 'update', { authoring: attestedAuthoring(null), guardRevSeq: 2 },
     );
     expect(updated).toMatchObject({ content: 'edit after reconcile', revSeq: 3 });
   });
@@ -134,7 +135,7 @@ describe('#1339/#1454 — drift is reconciled before the guard and the edit', ()
   it('a legacy null fingerprint is backfilled without refusing a current guard', async () => {
     const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:legacy', name: 'l', content: 'x' } });
     await db.node.update({ where: { id: node.id }, data: { revisionContentHash: null } });
-    const updated = await writeNodeCore({ memoryId, loc: node.loc, content: 'y' }, ctx(), 'update', { guardRevSeq: 1 });
+    const updated = await writeNodeCore({ memoryId, loc: node.loc, content: 'y' }, ctx(), 'update', { authoring: attestedAuthoring(null), guardRevSeq: 1 });
     expect(updated).toMatchObject({ content: 'y', revSeq: 2 });
     expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(1);
   });
@@ -154,7 +155,7 @@ describe('#1339 review — drift is reconciled first on upsert, controller creat
 
   it('writeNodeCore upsert over an existing drifted row', async () => {
     const node = await driftedNode('drift:upsert');
-    await writeNodeCore({ memoryId, loc: node.loc, name: node.name, content: 'upserted' }, ctx(), 'upsert');
+    await writeNodeCore({ memoryId, loc: node.loc, name: node.name, content: 'upserted' }, ctx(), 'upsert', { authoring: attestedAuthoring(null) });
     await reconcileThenOwn(node.id);
   });
 
@@ -166,7 +167,7 @@ describe('#1339 review — drift is reconciled first on upsert, controller creat
 
   it('restoreNodeRevision over a drifted row', async () => {
     const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:restore', name: 'r', content: 'v1' } });
-    await writeNodeCore({ memoryId, loc: node.loc, content: 'v2' }, ctx(), 'update'); // r1 = v1, live 2
+    await writeNodeCore({ memoryId, loc: node.loc, content: 'v2' }, ctx(), 'update', { authoring: attestedAuthoring(null) }); // r1 = v1, live 2
     const r1 = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: node.id, revNo: 1 } });
     await db.node.update({ where: { id: node.id }, data: { content: 'changed by a raw writer' } });
     await resolvers.Mutation.restoreNodeRevision({}, { revisionId: r1.id } as never, ctx());
@@ -292,18 +293,31 @@ describe('#1339 review round 5', () => {
 });
 
 describe('#1339 review round 6', () => {
-  it('Node.revision never hands a stale parent the number of a newer edge-only write (@codex P1)', async () => {
+  it('edge-only writes keep the revision; stale parents still cannot acquire a later tracked revision (#3497)', async () => {
     const anchor = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:anchor', name: 'a' } });
     const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:edgy', name: 'n', content: 'x' } });
     const parent = await db.node.findUniqueOrThrow({ where: { id: node.id } }); // revision 1, no edges
     await writeNodeCore(
       { memoryId, loc: node.loc, edges: [{ targetId: anchor.id, name: 'links-to' }] } as never,
       ctx(),
-      'update',
+      'update', { authoring: attestedAuthoring(null) },
     );
-    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq).toBe(2);
-    // The parent's fields still match (edges are not tracked fields), but its
-    // edges are stale: its own number is the only self-consistent answer.
+    // Rulings0149+0198 supersede the old edge-consumes-revision premise:
+    // edges apply but are deliberately outside the node's revision state.
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq).toBe(1);
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
+    expect(await db.edge.findMany({
+      where: { sourceId: node.id, deletedAt: null },
+      select: { targetId: true, name: true },
+    })).toEqual([{ targetId: anchor.id, name: 'links-to' }]);
+    expect(await resolvers.Node.revision(parent as never, {}, ctx())).toBe(1);
+    // Retain the original stale-parent safety check for an actual tracked edit.
+    await writeNodeCore(
+      { memoryId, loc: node.loc, content: 'new tracked state' },
+      ctx(), 'update', { authoring: attestedAuthoring(null) },
+    );
+    const current = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(await resolvers.Node.revision(current as never, {}, ctx())).toBe(2);
     expect(await resolvers.Node.revision(parent as never, {}, ctx())).toBe(1);
   });
 });
@@ -311,14 +325,14 @@ describe('#1339 review round 6', () => {
 describe('#1339 review round 7', () => {
   it('a no-op write with a STALE guard is refused and consumes nothing (@copilot)', async () => {
     const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:stale-guard', name: 'n', content: 'v1' } });
-    await writeNodeCore({ memoryId, loc: node.loc, content: 'v2' }, ctx(), 'update'); // live revision 2
-    const attempt = writeNodeCore({ memoryId, loc: node.loc, content: 'v2' }, ctx(), 'update', { guardRevSeq: 1 });
+    await writeNodeCore({ memoryId, loc: node.loc, content: 'v2' }, ctx(), 'update', { authoring: attestedAuthoring(null) }); // live revision 2
+    const attempt = writeNodeCore({ memoryId, loc: node.loc, content: 'v2' }, ctx(), 'update', { authoring: attestedAuthoring(null), guardRevSeq: 1 });
     await expect(attempt).rejects.toSatisfy(
       (e: unknown) => e instanceof GraphQLError && e.extensions.code === 'NODE_WRITE_CONFLICT',
     );
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq).toBe(2);
     // Control: the same no-op at the CURRENT revision still succeeds, unchanged.
-    const ok = await writeNodeCore({ memoryId, loc: node.loc, content: 'v2' }, ctx(), 'update', { guardRevSeq: 2 });
+    const ok = await writeNodeCore({ memoryId, loc: node.loc, content: 'v2' }, ctx(), 'update', { authoring: attestedAuthoring(null), guardRevSeq: 2 });
     expect(ok.revSeq).toBe(2);
   });
 });

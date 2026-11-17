@@ -100,11 +100,10 @@ describe('#2557 subscription parent paths', () => {
         const hiddenMemory = principal === 'orgReader' || principal === 'outsider';
         expect(hidden.errors?.[0]?.extensions?.code).toBe(hiddenMemory
           ? 'NOT_FOUND'
-          : operation === 'createMemorySubscription' ? 'INTERNAL_SERVER_ERROR' : 'FORBIDDEN');
+          : operation === 'createMemorySubscription' ? 'SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY' : 'FORBIDDEN');
         if (!hiddenMemory && operation === 'createMemorySubscription') {
-          // The existing PUBLIC-only check throws this plain Error. Pin its
-          // reason as well as its generic wire code, so an unrelated database
-          // fault cannot satisfy the refusal control.
+          // #2572: the PUBLIC-only check now carries its own typed code. Pin
+          // the reason as well, so an unrelated fault cannot satisfy it.
           expect(hidden.errors?.[0]?.message).toBe('Only public memories can be subscribed to by other organizations');
         }
         if (principal === 'orgReader' || principal === 'outsider') {

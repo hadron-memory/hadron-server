@@ -176,6 +176,65 @@ describe('successful-field history', () => {
     } finally { spy.mockRestore(); }
   });
 
+  it.each([999, 1000, 1001])('#2636 cooperative deadline after first append: %ims, real committed prefix and no retry', async elapsed => {
+    const real = db.$transaction.bind(db);
+    const c = ctx();
+    // Apollo copies the context object; retain the same history queue for the retry probe.
+    c.taskWarningHistory = [];
+    const initial = Date.now();
+    let clock = initial;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const attempted: string[] = [];
+    const realFlush = warnings.flushTaskWarningHistory;
+    let flushedContext: Context | undefined;
+    let receivedQueue: Context['taskWarningHistory'];
+    let receivedRecords: warnings.TaskWarningHistory[] = [];
+    const observeFlush = vi.spyOn(warnings, 'flushTaskWarningHistory').mockImplementation(async (actual, errored) => {
+      flushedContext = actual;
+      receivedQueue = actual.taskWarningHistory;
+      receivedRecords = [...(receivedQueue ?? [])];
+      return realFlush(actual, errored);
+    });
+    // Keep the real transaction, writer and SQL timeouts. Advance ONLY the
+    // cooperative clock after the first event INSERT has actually succeeded.
+    const transaction = vi.spyOn(db, '$transaction').mockImplementation(((fn: any, options: any) => real(async (tx: any) => {
+      const delegate = tx.agentTeamEvent;
+      const createEvent = async (args: any) => {
+        if (args.data.type !== 'task.warning') return delegate.create(args);
+        attempted.push(args.data.taskId);
+        const result = await delegate.create(args);
+        if (attempted.length === 1) clock = initial + elapsed;
+        return result;
+      };
+      const eventModel = new Proxy({}, { get: (_, key) => key === 'create' ? createEvent : delegate[key] });
+      return fn(new Proxy({}, { get: (_, key) => key === 'agentTeamEvent' ? eventModel : tx[key] }));
+    }, options)) as any);
+    try {
+      const response = await graphql(`mutation { ${field('first')} ${field('second')} }`, c);
+      expect(response.errors).toBeUndefined();
+      const ids = [(response.data as any).first.id, (response.data as any).second.id];
+      expect(response.extensions?.warnings).toEqual(['first', 'second'].map(path => ({
+        path, code: 'task.create.no-source', text: warnings.TASK_WARNING_TEXT['task.create.no-source'],
+      })));
+      expect(observeFlush).toHaveBeenCalledTimes(1);
+      expect(receivedQueue).toBe(c.taskWarningHistory);
+      expect(receivedRecords.map(record => record.taskId)).toEqual(ids);
+      const expected = elapsed < 1000 ? ids : ids.slice(0, 1);
+      expect(attempted).toEqual(expected);
+      // Query outside the completed history transaction: this proves COMMIT,
+      // rather than only observing a mocked append or an eventual rollback.
+      expect((await history()).map(row => row.taskId)).toEqual(expected);
+      expect(await db.agentTask.count({ where: { id: { in: ids }, title: 'Synthetic task', status: 'backlog' } })).toBe(2);
+      expect(c.taskWarningHistory).toEqual([]);
+      const originalResponse = structuredClone(response);
+      observeFlush.mockRestore();
+      await realFlush(flushedContext!);
+      expect(attempted).toEqual(expected);
+      expect((await history()).map(row => row.taskId)).toEqual(expected);
+      expect(response).toEqual(originalResponse);
+    } finally { observeFlush.mockRestore(); transaction.mockRestore(); now.mockRestore(); }
+  });
+
   it('the post-commit statement timeout cuts a stalled history write without rolling back the task', async () => {
     const real = db.$transaction.bind(db);
     let reached = false;

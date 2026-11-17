@@ -44,13 +44,19 @@ async function entry(name: string, viewer = mia.id, roles?: Roles) {
   return r.workers.find((e: { name: string }) => e.name === name);
 }
 
+// Distinct per user, by construction: random github ids collided across the fixtures, and
+// later across the bulk holders of the constant-query-count test (#3216). Shared by both.
+let n = 0;
+let seq = 0;
+const nextGithubId = () => 700_000_000 + n * 1_000 + ++seq;
+
 beforeEach(async () => {
   await cleanDb(db);
-  const n = Math.floor(Math.random() * 1_000_000);
-  let seq = 0; // distinct per user: random github ids collided across the six fixtures
+  n = Math.floor(Math.random() * 1_000_000);
+  seq = 0;
   org = await db.organization.create({ data: { name: 'Held', urn: `held-${n}.example` } });
   const user = (tag: string, extra: Record<string, unknown> = {}) =>
-    db.user.create({ data: { githubId: 700_000_000 + n * 10 + ++seq, githubUsername: `h-${tag}-${n}`, roles: ['READER'], ...extra } });
+    db.user.create({ data: { githubId: nextGithubId(), githubUsername: `h-${tag}-${n}`, roles: ['READER'], ...extra } });
   orgAdmin = await user('admin');
   mia = await user('mia');
   coMember = await user('co');
@@ -207,8 +213,8 @@ describe('#2223 constant query count', () => {
     const counts: Array<[number, number]> = [];
     for (const [workers, holders] of [[1, 1], [100, 20]]) {
       await db.worker.deleteMany({ where: { appId: app.id } });
-      const users = await Promise.all(Array.from({ length: holders }, (_, i) =>
-        db.user.create({ data: { githubId: 900_000 + Math.floor(Math.random() * 90_000) + i, githubUsername: `bulk-${generateId().slice(-8)}`, handle: `bulk-${generateId().slice(-8)}`, roles: ['READER'] } })));
+      const users = await Promise.all(Array.from({ length: holders }, () =>
+        db.user.create({ data: { githubId: nextGithubId(), githubUsername: `bulk-${generateId().slice(-8)}`, handle: `bulk-${generateId().slice(-8)}`, roles: ['READER'] } })));
       await db.orgMember.createMany({ data: users.map((u) => ({ organizationId: org.id, userId: u.id, role: 'READER' })), skipDuplicates: true });
       await db.worker.createMany({ data: Array.from({ length: workers }, (_, i) => ({ ...WORKER_SIGNATURE_DEFAULTS,
         id: generateId(), appId: app.id, agentId, name: `B${i}`, slug: `b-${i}`, role: 'engineer',

@@ -111,7 +111,7 @@ describe('#2044 install memory — lazy creation', () => {
     expect(updated.content).toBe('second');
     await expect(M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', content: 'nope' } }, ctxOf(f.member.id))).rejects.toThrow(/Forbidden/);
     await expect(M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', content: 'nope' } }, ctxOf(f.stranger.id)))
-      .rejects.toMatchObject({ extensions: { code: 'INSTALL_MEMORY_NOT_FOUND' } });
+      .rejects.toMatchObject({ code: 'APP_NOT_FOUND' });
   });
 });
 
@@ -277,7 +277,7 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
     try {
       const result = await server.executeOperation(
         { query: `mutation($i:UpdateNodeInput!){updateNode(input:$i){id memoryId loc name revision description abstract tags content data
-          memory{id} outgoingEdges{id} incomingEdges{id} asset{id} signingRequests{id} commentSummary{comments openThreads}
+          memory{id} outgoingEdges{id} incomingEdges{id} asset{id} signingRequests{id} commentSummary{comments openThreads oldestOpenThreadAt}
           approvalStatus{state approval{revision}} mintStatus{minted mintedByInfo} authorship{__typename} createdByWorker{id} updatedByAgent{id} updatedByUser{handle}
           contentValidation{state} signatureStatus{state signatures{id}}}}`, variables: { i: { install: f.install, loc: 'prompts:lane', description: 'only-this' } } },
         { contextValue: ctx },
@@ -295,7 +295,7 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
         outgoingEdges: [], incomingEdges: [], asset: null, signingRequests: [], authorship: null, createdByWorker: null, updatedByAgent: null,
         // Ruth's #2064 merge condition: #2189's updatedByUser re-reads the last editor by node id, so it is concealed too.
         updatedByUser: null });
-      expect(out.commentSummary).toEqual({ comments: 0, openThreads: 0 });
+      expect(out.commentSummary).toEqual({ comments: 0, openThreads: 0, oldestOpenThreadAt: null });
       expect(out.approvalStatus).toEqual({ state: 'NOT_APPLICABLE', approval: null });
       // And it really was applied.
       expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).description).toBe('only-this');
@@ -313,6 +313,19 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
     expect(await N.updatedByUser({ id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id))).toMatchObject({ handle: 'concealed-editor' });
     // A concealed parent carries id and memoryId but must not let the resolver re-read the live row.
     expect(await N.updatedByUser({ [INSTALL_CONCEALED]: true, id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id))).toBeNull();
+  });
+
+  it('#1151 (Rico §10): Node.createdByUser reads nothing on a concealed install-write parent (it would re-read createdBy by node id)', async () => {
+    const f = await fixture();
+    const node = await f.create(f.admin);
+    const creator = await db.user.create({ data: { id: generateId(), handle: 'concealed-creator', roles: ['READER'] } });
+    await db.node.update({ where: { id: node.id }, data: { createdBy: creator.id } });
+    const { INSTALL_CONCEALED } = await import('./installMemory.js');
+    const N = resolvers.Node as any;
+    // Control: an ordinary parent of the same node names the creator.
+    expect(await N.createdByUser({ id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id))).toMatchObject({ handle: 'concealed-creator' });
+    // A concealed parent keeps id and memoryId but not createdBy: the resolver must not re-read the live row.
+    expect(await N.createdByUser({ [INSTALL_CONCEALED]: true, id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id))).toBeNull();
   });
 
   it('withInstallConcealment never reaches the original resolver for a concealed parent, and passes others through', async () => {
@@ -735,23 +748,23 @@ describe('#2044 install memory — lock order and the pooled-only writers (Diego
     expect(await deleting).toBe('deleted');
   });
 
-  it('writers that cannot recheck inside their own fenced transaction fail closed on an install memory (restore, move, delete node)', async () => {
+  it('#2734 restore, move and delete now recheck in their own fenced transactions', async () => {
     const f = await fixture();
     const node = await f.create(f.admin, 'prompts:lane');
     await M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', content: 'v2' } }, ctxOf(f.admin.id));
     const [row] = await f.installRows();
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
     const before = await db.node.findUniqueOrThrow({ where: { id: node.id } });
-    await expect(M.restoreNodeRevision({}, { revisionId: rev.id }, ctxOf(f.admin.id))).rejects.toThrow();
-    await expect(M.deleteNode({}, { nodeRef: node.id }, ctxOf(f.admin.id))).rejects.toThrow();
-    // The title promised "move" and the body never called it (Andi, Xan, Clark): relocate within the install memory.
-    await expect(M.moveNode({}, { sourceRef: node.id, targetUrn: emitNodeUrnV2(row!.urn, 'prompts:moved') }, ctxOf(f.admin.id)))
-      .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    await expect(M.restoreNodeRevision({}, { revisionId: rev.id }, ctxOf(f.admin.id))).resolves.toBeTruthy();
+    await expect(M.moveNode({}, { sourceRef: node.id, targetUrn: emitNodeUrnV2(row!.urn, 'prompts:moved') }, ctxOf(f.admin.id))).resolves.toMatchObject({ loc: 'prompts:moved' });
+    // The original supported door still writes after the move.
+    await expect(M.updateNode({}, { input: { install: f.install, loc: 'prompts:moved', content: 'v3' } }, ctxOf(f.admin.id))).resolves.toBeTruthy();
+    await expect(M.deleteNode({}, { nodeRef: node.id }, ctxOf(f.admin.id))).resolves.toBe(true);
     const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
-    expect({ content: after.content, deletedAt: after.deletedAt, revSeq: after.revSeq, loc: after.loc, memoryId: after.memoryId })
-      .toEqual({ content: before.content, deletedAt: before.deletedAt, revSeq: before.revSeq, loc: before.loc, memoryId: before.memoryId });
-    expect(row).toBeTruthy();
-    // The supported doors still write.
-    await expect(M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', content: 'v3' } }, ctxOf(f.admin.id))).resolves.toBeTruthy();
+    expect(after.memoryId).toBe(before.memoryId);
+    expect(after.loc).toBe('prompts:moved');
+    expect(after.content).toBe('v3');
+    expect(after.deletedAt).not.toBeNull();
+    expect(after.revSeq).toBeGreaterThan(before.revSeq);
   });
 });

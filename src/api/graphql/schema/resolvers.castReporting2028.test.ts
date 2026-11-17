@@ -1,9 +1,9 @@
 /** S12: explicit reporting choice, legacy omission, and permanent-mint atomicity. */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
-import { setS7AvailableForTest } from '../../../lib/tickers/s7Availability.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -18,11 +18,13 @@ beforeEach(async () => {
   user = await db.user.create({ data: { githubId: 2028001, githubUsername: 's12-owner' } });
   const org = await db.organization.create({ data: { name: 'S12', urn: `s12-${generateId()}.com` } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'S12 agent' }, ctx());
+  agent = await M.createAgent({}, { orgId: org.id, name: 'S12 agent', personaRole: 'test-worker' }, ctx());
   app = await db.app.create({ data: { organizationId: org.id, name: 'S12 app', urn: `s12-${generateId()}:team` } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+  await serveEveryAgent(db); // #2712: binds need a served prompt
 });
-afterEach(() => { vi.unstubAllEnvs(); setS7AvailableForTest(false); });
+
+afterEach(() => { vi.unstubAllEnvs(); });
 
 describe('S12 cast choice', () => {
   it('records explicit no-team and returns the same placement in preview', async () => {
@@ -40,7 +42,7 @@ describe('S12 cast choice', () => {
     const worker = await M.castWorker({}, args(), ctx());
     const row = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
     expect(await W.teamPlacement(row, {}, ctx())).toBe('UNSET');
-    expect(await db.agentTeamEvent.count({ where: { subjectWorkerId: row.id } })).toBe(0);
+    expect(await db.agentTeamEvent.count({ where: { subjectWorkerId: row.id, type: 'worker.reports-to' } })).toBe(0);
   });
   for (const required of [false, true]) {
     for (const choice of [{ noTeam: null }, { noTeam: false }, { reportsTo: null }, { reportsTo: ' ' }]) {
@@ -80,7 +82,6 @@ describe('S12 cast choice', () => {
 import { ApolloServer } from '@apollo/server';
 import { typeDefs } from './typeDefs.js';
 import { formatGraphQLError } from '../formatError.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 import { writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
 import { readFileSync } from 'node:fs';
@@ -108,28 +109,25 @@ for (const required of [false, true]) {
         [{ reports: 'secret-foreign-name', none: false }, 'CONFLICT', 'Supply reportsTo or noTeam, never both.'],
         [{ reports: null, none: true }, 'CONFLICT', 'Supply reportsTo or noTeam, never both.'],
       ];
-      const mcp = createTestableMcpServer({ userId: user.id, roles: ['READER'], appId: app.id, clientId: `user:${user.id}` });
       for (const [input, suffix, message] of cases) {
         for (const op of ['castWorker', 'castWorkerPreview'] as const) {
           expect((await wire(op, input)).errors?.[0]).toMatchObject({ message, extensions: { code: `WORKER_TEAM_CHOICE_${suffix}` } });
         }
-        const choice = { ...('reports' in input ? { reportsTo: input.reports } : {}), ...('none' in input ? { noTeam: input.none } : {}) };
-        expect(await mcp.callToolText('hadron_cast_worker', { app: app.id, agent: agent.id, name: 'Wire', ...choice }))
-          .toBe(`Error: [WORKER_TEAM_CHOICE_${suffix}] ${message}`);
       }
       const literal = await wire('castWorker', {}, 'reportsTo:null');
       expect(literal.errors?.[0].extensions?.code).toBe('WORKER_TEAM_CHOICE_INVALID');
       expect(await db.worker.count()).toBe(0);
       expect(await db.agentTeamEvent.count()).toBe(0);
     });
-    it('preserves actual old GraphQL/MCP request omission', async () => {
+    it('preserves actual old GraphQL request omission', async () => {
       vi.stubEnv('CAST_REPORTING_CHOICE_REQUIRED', String(required));
       const result = await wire('castWorkerPreview', {});
       if (required) expect(result.errors?.[0].extensions?.code).toBe('WORKER_TEAM_CHOICE_REQUIRED');
       else expect(result.data?.castWorkerPreview).toMatchObject({ teamPlacement: 'UNSET' });
-      const mcp = createTestableMcpServer({ userId: user.id, roles: ['READER'], appId: app.id, clientId: `user:${user.id}` });
-      const text = await mcp.callToolText('hadron_cast_worker', { agent: agent.id, name: 'Old MCP' });
-      expect(text).toContain(required ? '[WORKER_TEAM_CHOICE_REQUIRED]' : 'Team placement: UNSET');
+      // #3082: the hadron_cast_worker MCP leg is gone; the castWorker mutation carries the same omission.
+      const cast = await wire('castWorker', {});
+      if (required) expect(cast.errors?.[0].extensions?.code).toBe('WORKER_TEAM_CHOICE_REQUIRED');
+      else expect(cast.data?.castWorker).toMatchObject({ teamPlacement: 'UNSET' });
       expect(await db.worker.count()).toBe(required ? 0 : 1);
     });
   });
@@ -141,7 +139,7 @@ describe('S12 lifecycle and invariant', () => {
     const worker = await M.castWorker({}, args(), ctx());
     await db.$transaction(tx => writeReportsTo(tx, { workerId: worker.id, appId: app.id, to: null, actor: eventActor(user.id), setBy: 'app-manager' }));
     await db.$transaction(tx => writeReportsTo(tx, { workerId: worker.id, appId: app.id, to: null, actor: eventActor(user.id), setBy: 'app-manager' }));
-    expect(await db.agentTeamEvent.count({ where: { subjectWorkerId: worker.id } })).toBe(1);
+    expect(await db.agentTeamEvent.count({ where: { subjectWorkerId: worker.id, type: 'worker.reports-to' } })).toBe(1);
     await M.setWorkerReportsTo({}, { workerRef: worker.id, reportsTo: head.id }, ctx());
     let row = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
     expect((row as any).explicitNoTeam).toBe(false);
@@ -172,16 +170,6 @@ describe('S12 lifecycle and invariant', () => {
 });
 
 describe('S12 DARK boundary and atomic S8 join', () => {
-  it('fails closed for head casts if future standby becomes available', async () => {
-    const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
-    vi.stubEnv('CAST_REPORTING_CHOICE_REQUIRED', 'true');
-    setS7AvailableForTest(true);
-    for (const operation of [M.castWorker, Q.castWorkerPreview]) {
-      await expect(operation({}, args({ reportsTo: head.id }), ctx())).rejects.toMatchObject({ extensions: { code: 'WORKER_REPORTING_CAST_UNAVAILABLE' } });
-    }
-    expect(await db.worker.count()).toBe(1);
-    expect(await db.agentTeamEvent.count()).toBe(0);
-  });
   it('conceals foreign/missing/malformed head identities after the manager gate', async () => {
     const other = await db.app.create({ data: { ownerUserId: user.id, name: 'Other', urn: `s12-${generateId()}:other` } });
     const foreign = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: other.id, agentId: agent.id, name: 'Foreign', slug: 'foreign' } });
@@ -252,7 +240,7 @@ describe('S12 deciding transaction fences', () => {
       const pid = await observed.backendFor(casting);
       await waitForAdvisoryWaiter(db, { pid, key: { form: 'int-pair', first: 'authorization:org', second: owner.organizationId! } }, 2500);
     } finally { release(); await revoker; }
-    expect(await result).toBe('FORBIDDEN');
+    expect(await result).toBe('APP_NOT_FOUND');
     expect(await db.worker.count()).toBe(0);
     expect(await db.agentTeamEvent.count()).toBe(0);
   });
@@ -278,14 +266,14 @@ describe('S12 deciding transaction fences', () => {
     } finally { release(); }
     await casting; await revoking;
     expect(await db.worker.count()).toBe(1);
-    expect(await db.agentTeamEvent.count()).toBe(1);
+    expect(await db.agentTeamEvent.count({ where: { type: 'worker.reports-to' } })).toBe(1);
   });
   it('dual casts serialize before the App row upgrade and only one name is minted', async () => {
     const result = await Promise.allSettled([M.castWorker({}, args({ noTeam: true }), ctx()), M.castWorker({}, args({ noTeam: true }), ctx())]);
     expect(result.filter(r => r.status === 'fulfilled')).toHaveLength(1);
     expect(result.find(r => r.status === 'rejected')).toMatchObject({ reason: { extensions: { code: 'WORKER_NAME_TAKEN' } } });
     expect(await db.worker.count()).toBe(1);
-    expect(await db.agentTeamEvent.count()).toBe(1);
+    expect(await db.agentTeamEvent.count({ where: { type: 'worker.reports-to' } })).toBe(1);
   });
   it('shared reporting graph is never upgraded after the new Worker exists', async () => {
     // Hold exclusive graph; the cast must wait before inserting the worker.
@@ -318,7 +306,7 @@ it('migration preserves legacy pointers and null UNSET without backfilled events
     const rows = await tx.worker.findMany({ where: { id: { in: [head.id, child.id] } } });
     expect(rows.find(w => w.id === head.id)).toMatchObject({ reportsToWorkerId: null, explicitNoTeam: false });
     expect(rows.find(w => w.id === child.id)).toMatchObject({ reportsToWorkerId: head.id, explicitNoTeam: false });
-    expect(await tx.agentTeamEvent.count()).toBe(0);
+    expect(await tx.agentTeamEvent.count({ where: { type: 'worker.reports-to' } })).toBe(0);
   });
 });
 
@@ -358,7 +346,7 @@ it('a marker-only clear cannot bypass the existing setter authorization', async 
   const member = await db.user.create({ data: { githubId: 2028004, githubUsername: 's12-reader' } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
   await expect(M.setWorkerReportsTo({}, { workerRef: worker.id, reportsTo: null }, { ...ctx(), userId: member.id })).rejects.toMatchObject({ extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN' } });
-  expect(await db.agentTeamEvent.count()).toBe(0);
+  expect(await db.agentTeamEvent.count({ where: { type: 'worker.reports-to' } })).toBe(0);
   expect((await db.worker.findUniqueOrThrow({ where: { id: worker.id } }) as any).explicitNoTeam).toBe(false);
 });
 
@@ -373,7 +361,7 @@ describe('S12 head casts while standby is inert (Ada36559)', () => {
       const made = await M.castWorker({}, args({ reportsTo: head.id }), ctx());
       expect(made).toMatchObject({ reportsToWorkerId: head.id, explicitNoTeam: false });
       expect(await W.teamPlacement(made, {}, ctx())).toBe('REPORTS_TO');
-      expect(await db.agentTeamEvent.findMany({ where: { subjectWorkerId: made.id } })).toMatchObject([
+      expect(await db.agentTeamEvent.findMany({ where: { subjectWorkerId: made.id, type: 'worker.reports-to' } })).toMatchObject([
         { type: 'worker.reports-to', payload: { from: null, to: head.id, setBy: 'cast' } },
       ]);
     });
@@ -393,7 +381,7 @@ describe('S12 head casts while standby is inert (Ada36559)', () => {
       await expect(operation({}, args({ reportsTo: head.id }), ctx())).rejects.toMatchObject({ extensions: { code: 'WORKER_REPORTS_TO_RETIRED' } });
     }
     expect(await db.worker.count()).toBe(1);
-    expect(await db.agentTeamEvent.count()).toBe(0);
+    expect(await db.agentTeamEvent.count({ where: { type: 'worker.reports-to' } })).toBe(0);
   });
 });
 
@@ -411,14 +399,10 @@ it('a head cast enters existing S6 team stop coverage atomically', async () => {
   expect(await db.agentTeamEvent.count({ where: { subjectWorkerId: made.id, type: 'worker.reports-to' } })).toBe(1);
 });
 
-it('returns selected head identity through GraphQL and delegated MCP receipts', async () => {
+it('returns selected head identity through GraphQL', async () => {
   const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
   expect((await wire('castWorkerPreview', { reports: head.id })).data?.castWorkerPreview).toMatchObject({ teamPlacement: 'REPORTS_TO', reportsToWorkerId: head.id });
   expect((await wire('castWorker', { reports: head.id })).data?.castWorker).toMatchObject({ teamPlacement: 'REPORTS_TO', reportsToWorkerId: head.id });
-  const mcp = createTestableMcpServer({ userId: user.id, roles: ['READER'], appId: app.id, clientId: `user:${user.id}` });
-  const receipt = await mcp.callToolText('hadron_cast_worker', { agent: agent.id, name: 'McpReport', reportsTo: head.id });
-  expect(receipt).toContain('Team placement: REPORTS_TO');
-  expect(receipt).toContain(`Reports to worker: ${head.id}`);
 });
 
 it('a late template failure rolls back reporting and S6 coverage/notices together', async () => {
@@ -464,7 +448,7 @@ it('retirement winning the shared App anchor refuses the later head cast without
   } finally { release(); await retiring; }
   expect(await result).toBe('WORKER_REPORTS_TO_RETIRED');
   expect(await db.worker.count()).toBe(1);
-  expect(await db.agentTeamEvent.count()).toBe(0);
+  expect(await db.agentTeamEvent.count({ where: { type: 'worker.reports-to' } })).toBe(0);
 });
 
 it('cast winning the App anchor commits first; later head retirement preserves the historical line', async () => {
@@ -562,7 +546,7 @@ it('self-leave winning its row lock is rechecked after the cast waits, with no m
       await new Promise(r => setTimeout(r, 10));
     }
   } finally { release(); await leaving; await outcome; }
-  expect(await outcome).toBe('FORBIDDEN');
+  expect(await outcome).toBe('APP_NOT_FOUND');
   expect(await db.worker.count()).toBe(0);
   expect(await db.agentTeamEvent.count()).toBe(0);
 });
@@ -610,13 +594,13 @@ it('an omitted or null reporting choice at bind preserves legacy UNSET without a
   }
 });
 
-it('the delegated MCP list distinguishes stored NO_TEAM from legacy UNSET', async () => {
-  await M.castWorker({}, args({ name: 'Explicit', noTeam: true }), ctx());
-  await M.castWorker({}, args({ name: 'Legacy' }), ctx());
-  const mcp = createTestableMcpServer({ userId: user.id, roles: ['READER'], appId: app.id, clientId: `user:${user.id}` });
-  const text = await mcp.callToolText('hadron_list_workers', {});
-  expect(text.split('\n').find(line => line.includes('Explicit'))).toContain('team placement NO_TEAM');
-  expect(text.split('\n').find(line => line.includes('Legacy'))).toContain('team placement UNSET');
+it('the worker read distinguishes stored NO_TEAM from legacy UNSET', async () => {
+  // #3082: moved from the hadron_list_workers MCP text to the Worker.teamPlacement field it rendered.
+  const explicit = await M.castWorker({}, args({ name: 'Explicit', noTeam: true }), ctx());
+  const legacy = await M.castWorker({}, args({ name: 'Legacy' }), ctx());
+  const row = (id: string) => db.worker.findUniqueOrThrow({ where: { id } });
+  expect(await W.teamPlacement(await row(explicit.id), {}, ctx())).toBe('NO_TEAM');
+  expect(await W.teamPlacement(await row(legacy.id), {}, ctx())).toBe('UNSET');
 });
 
 import { lockStopFence } from '../../../lib/stopSignals/state.js';

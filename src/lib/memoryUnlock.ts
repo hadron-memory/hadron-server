@@ -20,6 +20,7 @@
  */
 
 import { scrypt as scryptCb, randomBytes, type ScryptOptions } from 'crypto';
+import { Kind, getOperationAST, parse, type DocumentNode } from 'graphql';
 
 // promisify() picks the options-less overload; wrap by hand.
 function scrypt(
@@ -42,8 +43,11 @@ import {
   isCiphertext,
   type EncryptionKey,
 } from './crypto.js';
-import { setRequestKey } from './requestKeys.js';
+import { hasRequestFirstEncryption, setRequestFirstEncryption, setRequestKey } from './requestKeys.js';
 import { resolveMemoryRef } from './entityRef/memoryRef.js';
+import { AmbiguousLegacyUrnError } from './entityRef/errors.js';
+import { MemoryNotFoundError } from './asset/gate.js';
+import { UrnNotQualifiedError, UrnParseError } from './urn.js';
 
 const KEY_CHECK_PLAINTEXT = 'hadron-key-check:v1';
 
@@ -66,6 +70,30 @@ export class MemoryUnlockError extends Error {
     super(message);
     this.name = 'MemoryUnlockError';
   }
+}
+
+/**
+ * #3450: the four errors `resolveMemoryRef` throws for a caller's ref, and nothing else. Both catches in
+ * `stageRequestMemoryKeys` consume exactly these and give their own answer. Each is a client error with the ref in its
+ * payload, so one left out would reach the caller typed: an ambiguous alias would be an oracle on memories the caller
+ * doesn't own (cor:sec:040:04, property 1). Anything else is a fault and leaves for the redacted boundary.
+ */
+function isUnresolvableRef(err: unknown): boolean {
+  return err instanceof MemoryNotFoundError || err instanceof AmbiguousLegacyUrnError ||
+    err instanceof UrnNotQualifiedError || err instanceof UrnParseError;
+}
+
+const TEXT_POSTGRES_CANNOT_HOLD = /[\0\p{Cs}]/u;
+
+/**
+ * #3450: a header ref resolved for {@link isUnresolvableRef}. Postgres text can't hold a NUL or a lone surrogate, so such
+ * a ref can't name a memory, yet it passes the URN checks and the driver would refuse it as a fault. It is a malformed
+ * ref, and it answers as one. Local to the header path: `resolveMemoryRef` is shared, and its other callers are not in
+ * question here.
+ */
+async function resolveHeaderRef(db: PrismaClient, ref: string): Promise<{ id: string }> {
+  if (TEXT_POSTGRES_CANNOT_HOLD.test(ref)) throw new MemoryNotFoundError(ref);
+  return resolveMemoryRef(db, ref);
 }
 
 /** Fresh random KDF salt (base64, 16 bytes). */
@@ -192,6 +220,90 @@ export interface RequestKeyEntry {
 export const REQUEST_KEYS_HEADER = 'x-hadron-memory-keys';
 
 /**
+ * #1796: the memory ref of the one `encryptMemory` this GraphQL request runs, or null.
+ *
+ * The header is staged in Apollo's context, before the operation is parsed, so this reads the body
+ * itself. It is called only for an owner's entry on a plaintext memory, so no other request pays for
+ * the parse. It is deliberately narrow: a mutation whose ONLY root selection is an undirected
+ * `encryptMemory`. Anything else (another root field, a fragment, a directive, a query, a batch, a
+ * body that doesn't parse) is null, and the entry gets the header's ordinary NOT_ENCRYPTED.
+ */
+export function encryptMemoryTargetRef(body: unknown): string | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const { query, operationName, variables } = body as Record<string, unknown>;
+  if (typeof query !== 'string') return null;
+  let document: DocumentNode;
+  try {
+    document = parse(query, { noLocation: true });
+  } catch {
+    return null;
+  }
+  const operation = getOperationAST(document, typeof operationName === 'string' ? operationName : undefined);
+  if (operation?.operation !== 'mutation') return null;
+  const [field, ...rest] = operation.selectionSet.selections;
+  if (rest.length > 0 || field?.kind !== Kind.FIELD || field.name.value !== 'encryptMemory' || field.directives?.length) {
+    return null;
+  }
+  const value = field.arguments?.find((argument) => argument.name.value === 'memoryId')?.value;
+  if (value?.kind === Kind.STRING) return value.value;
+  if (value?.kind !== Kind.VARIABLE) return null;
+  const name = value.name.value;
+  if (variables && typeof variables === 'object' && Object.hasOwn(variables, name)) {
+    const supplied = (variables as Record<string, unknown>)[name];
+    return typeof supplied === 'string' ? supplied : null;
+  }
+  // Omitted: the operation's own default is what the resolver will receive.
+  const fallback = operation.variableDefinitions?.find((definition) => definition.variable.name.value === name)?.defaultValue;
+  return fallback?.kind === Kind.STRING ? fallback.value : null;
+}
+
+/** The request facts staging needs beyond the header, for #1796's first-encryption entry. */
+export interface StageRequestKeysOptions {
+  /** The session is an impersonation: `userId` is then the TARGET, who owns nothing here. */
+  impersonated?: boolean;
+  /** Lazily, the ref `encryptMemory` runs on in this request. See {@link encryptMemoryTargetRef}. */
+  encryptMemoryTarget?: () => string | null;
+}
+
+/**
+ * #3450: refuses an entry whose passphrase would reach scrypt without being a string. Only the header's JSON can carry
+ * one; the other callers of {@link resolveSuppliedKey} take a typed string. scrypt's TypeError repeats a number or boolean
+ * verbatim, and a fault goes to the log whole, so the header stops it first and gives the answer this input has always
+ * had. Every refusal `resolveSuppliedKey` makes before deriving keeps its BAD_UNLOCK_INPUT: those it makes on the input
+ * and the row fall out here, and stored KDF parameters it can't use refuse in `parseKdfParams`, as they do there.
+ */
+function refuseNonStringPassphrase(
+  entry: RequestKeyEntry,
+  memory: { kdfSalt: string | null; kdfParams: unknown; keyVerifier: string | null },
+): void {
+  const passphrase: unknown = entry.passphrase;
+  if (!passphrase || typeof passphrase === 'string' || entry.dataKey || !memory.keyVerifier || !memory.kdfSalt) return;
+  parseKdfParams(memory.kdfParams);
+  throw new MemoryUnlockError('Memory not found.', 'NOT_FOUND');
+}
+
+/**
+ * Validate a first-encryption entry: exactly one of dataKey or passphrase, as the argument demands,
+ * and a well-formed key. Nothing is derived here. The operation's own gates run first (spec: only the
+ * strict owner), and the derivation is deliberately expensive.
+ */
+function firstEncryptionEntry(entry: RequestKeyEntry): { dataKey: string } | { passphrase: string } {
+  const { dataKey, passphrase } = entry;
+  const exactlyOne = new MemoryUnlockError('Provide exactly one of dataKey or passphrase.', 'BAD_UNLOCK_INPUT');
+  if ((dataKey !== undefined && typeof dataKey !== 'string') || (passphrase !== undefined && typeof passphrase !== 'string')) {
+    throw exactlyOne;
+  }
+  if (!!dataKey === !!passphrase) throw exactlyOne;
+  if (passphrase) return { passphrase };
+  try {
+    parseDataKey(dataKey as string);
+  } catch (e) {
+    throw new MemoryUnlockError(String((e as Error).message), 'BAD_UNLOCK_INPUT');
+  }
+  return { dataKey: dataKey as string };
+}
+
+/**
  * Stage per-request unlock keys from the raw header value into the CURRENT
  * request's AsyncLocalStorage store (src/lib/requestKeys.ts) — never the
  * global cache, so concurrent requests can't observe them and an aborted
@@ -210,6 +322,7 @@ export async function stageRequestMemoryKeys(
   db: PrismaClient,
   headerValue: string | string[] | undefined,
   userId: string | null | undefined,
+  options: StageRequestKeysOptions = {},
 ): Promise<void> {
   if (!headerValue) return;
   // Unlock requires an authenticated USER (PR-514 review, Copilot): without
@@ -247,6 +360,18 @@ export async function stageRequestMemoryKeys(
       'BAD_UNLOCK_INPUT',
     );
   }
+  // Lazy and remembered: only an owner's entry that could be a first encryption pays for the parse.
+  let encryptMemoryTargetId: string | null | undefined;
+  const targetedByEncryptMemory = async (memoryId: string): Promise<boolean> => {
+    if (encryptMemoryTargetId === undefined) {
+      const ref = options.encryptMemoryTarget?.() ?? null;
+      encryptMemoryTargetId = ref === null ? null : (await resolveHeaderRef(db, ref).catch((err: unknown) => {
+        if (isUnresolvableRef(err)) return null;
+        throw err;
+      }))?.id ?? null;
+    }
+    return encryptMemoryTargetId === memoryId;
+  };
   for (const entry of entries) {
     if (!entry || typeof entry.memory !== 'string') {
       throw new MemoryUnlockError('Each header entry needs a memory ref.', 'BAD_UNLOCK_INPUT');
@@ -265,7 +390,7 @@ export async function stageRequestMemoryKeys(
       keyVerifier: string | null;
     } | null = null;
     try {
-      const { id: memoryId } = await resolveMemoryRef(db, entry.memory);
+      const { id: memoryId } = await resolveHeaderRef(db, entry.memory);
       memory = await db.memory.findUnique({
         where: { id: memoryId },
         select: {
@@ -277,10 +402,25 @@ export async function stageRequestMemoryKeys(
           keyVerifier: true,
         },
       });
-      if (memory && memory.userId === userId) {
+      // #1796: an impersonation's target owns nothing, on any operation: it is a support view that
+      // reads no personal or private memory, so the header has no use here. Falling through gives
+      // the missing-memory answer before the encryption state, or a verdict on a guessed key, can
+      // show (cor:sec:040:04). This reads no operation, so no shape of a request can get around it.
+      if (memory && memory.userId === userId && !options.impersonated) {
         if (!memory.isEncrypted) {
-          throw new MemoryUnlockError('Memory is not encrypted.', 'NOT_ENCRYPTED');
+          // #1796 (ruling 0145): a first encryption's secret establishes the verifier, so there is
+          // nothing to verify it against. It waits for encryptMemory, whose gates still decide, and
+          // only on that operation for this memory: every other request answers as it always has.
+          if (!await targetedByEncryptMemory(memoryId)) {
+            throw new MemoryUnlockError('Memory is not encrypted.', 'NOT_ENCRYPTED');
+          }
+          if (hasRequestFirstEncryption(memoryId)) {
+            throw new MemoryUnlockError('Provide exactly one of dataKey or passphrase.', 'BAD_UNLOCK_INPUT');
+          }
+          setRequestFirstEncryption(memoryId, firstEncryptionEntry(entry));
+          continue;
         }
+        refuseNonStringPassphrase(entry, memory);
         // Verified before staging; partial staging on a later failure is
         // harmless — the store is request-local and dies with the request.
         setRequestKey(
@@ -290,7 +430,7 @@ export async function stageRequestMemoryKeys(
         continue;
       }
     } catch (err) {
-      if (err instanceof MemoryUnlockError) throw err;
+      if (err instanceof MemoryUnlockError || !isUnresolvableRef(err)) throw err;
       // Unresolvable ref falls through to the uniform NOT_FOUND below.
     }
     throw new MemoryUnlockError('Memory not found.', 'NOT_FOUND');

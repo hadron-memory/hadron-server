@@ -1,3 +1,4 @@
+import { effectiveRunBudgets, type TriggerRunBudgets } from './runBudgets.js';
 /**
  * #2441 (cor:agt:010:01): the plain-language projection an adopter reviews
  * before approving. Every sentence is generated here from the previewed pin,
@@ -16,6 +17,7 @@ export interface AutomationSummary {
 }
 export interface TriggerFacts {
   kind: 'SCHEDULE' | 'WEBHOOK' | 'MANUAL';
+  budgets?: TriggerRunBudgets;
   schedule?: { cron: string | null; timezone: string; runAt: Date | null; enabled: boolean };
 }
 
@@ -23,8 +25,11 @@ const NOT_STATED = 'not stated';
 const asRecord = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {});
 const dataOf = (state: Record<string, unknown>) => asRecord(state.data);
 const toolsOf = (state: Record<string, unknown>): string[] => {
-  const tools = dataOf(state).tools;
-  return Array.isArray(tools) ? [...new Set(tools.filter((t): t is string => typeof t === 'string'))].sort() : [];
+  const data = dataOf(state);
+  const tools = Array.isArray(data.tools) ? data.tools.filter((t): t is string => typeof t === 'string') : [];
+  // #670: the approver sees a script node's declared tool too.
+  const scripted = asRecord(asRecord(data.script).call).tool;
+  return [...new Set(typeof scripted === 'string' ? [...tools, scripted] : tools)].sort();
 };
 const nameOf = (state: Record<string, unknown>, fallback: string) => typeof state.name === 'string' && state.name ? state.name : fallback;
 
@@ -73,7 +78,7 @@ export function summarizeAutomation(pin: AutomationPreview, facts: TriggerFacts)
     writes: flows.flatMap(f => f.writes),
     tools: [...new Set(flows.flatMap(f => f.tools))].sort(),
     schedule: scheduleSentence(facts),
-    limits: ['Set by the platform when a run starts (tokens, actions and time). This approval does not enforce a maximum.'],
+    limits: [`Per-run budgets: ${effectiveRunBudgets(facts.budgets).budgetTokens} tokens and ${effectiveRunBudgets(facts.budgets).budgetActions} actions under the current platform defaults. Later platform reductions can lower these amounts. Time and daily quotas remain platform-controlled. Trigger settings can change without a new approval; this approval itself does not enforce a maximum.`],
     cannotDo: [
       'Never reads a private memory.',
       pin.userId ? 'Never goes beyond what the run-as user, and the App, can reach.' : 'Never goes beyond what the App can reach, and never reads anyone\'s personal memory.',

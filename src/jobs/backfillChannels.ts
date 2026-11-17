@@ -1,3 +1,5 @@
+import { legacyMessageCount } from '../lib/chatRootCounters.js';
+import { listAppInstallations } from '../lib/appInstallations.js';
 /**
  * Spec 049 Phase 4 — the one-shot Channel backfill (plan §8.7, closes the
  * data half of #1047).
@@ -66,11 +68,12 @@ export interface BackfillReport {
 /** The allocator's high-water mark for one root, computed the way it computes it. */
 async function highWater(
   db: PrismaClient | Prisma.TransactionClient,
-  root: { memoryId: string; loc: string; data: unknown },
+  root: { id: string; memoryId: string; loc: string; data: unknown },
 ): Promise<{ lastSeq: number; encrypted: boolean }> {
   const data = root.data && typeof root.data === 'object' && !Array.isArray(root.data) ? (root.data as Record<string, unknown>) : {};
   const encrypted = '__enc' in data;
-  const counter = !encrypted && typeof data.messageCount === 'number' ? data.messageCount : 0;
+  const row = await db.chatRootCounter.findUnique({where:{chatRootNodeId:root.id},select:{messageCount:true}});
+  const counter = row?.messageCount ?? (!encrypted ? legacyMessageCount(data) : 0);
   const top = await maxMessageSeqAtLiteralLocPrefix(db, root.memoryId, `${root.loc}:messages:`);
   return { lastSeq: Math.max(counter, top), encrypted };
 }
@@ -91,10 +94,7 @@ async function pickTeamSpace(
   try {
     agentId = (await locateTeamAgent(ctx, appId, null)).id;
   } catch {
-    const installed = await db.appAgent.findMany({
-      where: { appId },
-      select: { agent: { select: { id: true, deletedAt: true } } },
-    });
+    const installed = (await listAppInstallations(db,appId));
     const live = installed.map((r) => r.agent).filter((a) => a && !a.deletedAt);
     if (live.length === 1) agentId = live[0].id;
   }
@@ -276,7 +276,7 @@ export async function backfillChannels(db: PrismaClient, opts: { apply: boolean 
     if (opts.apply) {
       report.registerRowsCreated += await ensureInstallRegisterRows(db, app.id, { createdBy: app.createdBy ?? null });
     } else {
-      const installs = await db.appAgent.count({ where: { appId: app.id, agent: { deletedAt: null } } });
+      const installs = (await listAppInstallations(db,app.id)).length;
       const rows = await db.registerEntry.count({ where: { appId: app.id, installDefault: true, deletedAt: null } });
       report.registerRowsCreated += Math.max(0, installs - rows);
     }

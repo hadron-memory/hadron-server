@@ -16,6 +16,7 @@ import { appRunMutations } from './resolvers.appRun.js';
 import { mintAppRun, executeAppRun, type RunExecutionDeps } from '../../../jobs/appRuns.js';
 import { makeProdRunDeps } from '../../../jobs/appRunDeps.js';
 import { storedAutomationPin } from '../../../lib/automation/pins.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
@@ -35,18 +36,22 @@ async function fixture() {
   const entry = await db.node.create({ data: { memoryId: memory.id, loc: 'entry', name: 'Weekly report', isRunnable: true, content: 'approved', data: { tools: ['web_search'], output: { writeTo: 'hrn:node:adopt.test:flow:out', mode: 'append' } } } });
   const next = await db.node.create({ data: { memoryId: memory.id, loc: 'next', name: 'Summarise', isRunnable: true, content: 'approved next', data: { tools: ['hadron_get_node'] } } });
   await db.edge.create({ data: { memoryId: memory.id, sourceId: entry.id, targetId: next.id, name: 'next', loc: 'entry:next:next' } });
+  // #2712: a run needs an installed Agent with a served boot prompt (R74).
+  const agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: 'adopt.test:runner', name: 'runner' } });
+  await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+  await serveAgentBootPrompt(db, agent.id, 'Test boot prompt.');
   const ctx = { db, userId: user.id, roles: [] as never[] };
   const entryNodeUrn = 'hrn:node:adopt.test:flow:entry';
-  const schedule = await appRunMutations.createAgentSchedule({}, { input: { appRef: app.id, name: 'Weekly', cron: '0 6 * * 1', entryNodeUrn, runAsSelf: true } }, ctx as never);
-  const webhook = await appRunMutations.createAgentWebhook({}, { input: { appRef: app.id, name: 'inbound', entryNodeUrn, runAsSelf: true } }, ctx as never);
-  const manual = await mintAppRun(db, { appId: app.id, organizationId: org.id, userId: user.id, triggerKind: 'MANUAL', entryNodeUrn });
+  const schedule = await appRunMutations.createAgentSchedule({}, { input: { appRef: app.id, name: 'Weekly', cron: '0 6 * * 1', entryNodeUrn, runAsSelf: true, agentRef: agent.id } }, ctx as never);
+  const webhook = await appRunMutations.createAgentWebhook({}, { input: { appRef: app.id, name: 'inbound', entryNodeUrn, runAsSelf: true, agentRef: agent.id } }, ctx as never);
+  const manual = await mintAppRun(db, { appId: app.id, organizationId: org.id, agentId: agent.id, userId: user.id, triggerKind: 'MANUAL', entryNodeUrn });
   const llm = vi.fn(async () => ({ text: 'ok', tokensIn: 1, tokensOut: 1, provider: 'test', model: 'test' }));
   const deps: RunExecutionDeps = { ...makeProdRunDeps(db), resolveConfig: vi.fn(async () => ({ config: {} }) as never), llm, writeOutput: vi.fn(async () => null) };
   const ref = { SCHEDULE: schedule.id, WEBHOOK: webhook.webhook.id, MANUAL: manual.id } as Record<Kind, string>;
   const other = await db.user.create({ data: { handle: 'adopt-other' } });
   await db.orgMember.create({ data: { userId: other.id, organizationId: org.id, role: 'CONTRIBUTOR' } });
   const otherCtx = { db, userId: other.id, roles: [] as never[] };
-  return { user, org, app, memory, entry, next, ctx, otherCtx, schedule, webhook, manual, ref, deps, llm, entryNodeUrn };
+  return { user, org, app, agent, memory, entry, next, ctx, otherCtx, schedule, webhook, manual, ref, deps, llm, entryNodeUrn };
 }
 type F = Awaited<ReturnType<typeof fixture>>;
 const events = (appId: string) => db.automationAdoptionEvent.findMany({ where: { appId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
@@ -286,7 +291,7 @@ describe('approve and decline', () => {
   });
   it.each(['SCHEDULE', 'WEBHOOK'] as const)('declining an adopted %s revokes it: the next run fails AUTOMATION_UNADOPTED and an existing run snapshot is untouched', async kind => {
     const f = await fixture();
-    const mk = () => mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: kind, triggerId: f.ref[kind], entryNodeUrn: f.entryNodeUrn });
+    const mk = () => mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: kind, triggerId: f.ref[kind], entryNodeUrn: f.entryNodeUrn });
     const before = await mk();
     expect(await decline(f, kind)).toBe(true);
     expect((await db.appRun.findUniqueOrThrow({ where: { id: before.id } })).automationPin).toEqual(before.automationPin);
@@ -302,7 +307,7 @@ describe('approve and decline', () => {
     expect(await decline(f, 'MANUAL')).toBe(true);
     expect(await db.manualAutomationPin.count({ where: { runId: f.manual.id } })).toBe(0);
     expect((await db.appRun.findUniqueOrThrow({ where: { id: f.manual.id } })).automationPin).toEqual(before.automationPin);
-    const poll = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: 'INTEGRATION', parentRunId: f.manual.id, entryNodeUrn: f.entryNodeUrn });
+    const poll = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: 'INTEGRATION', parentRunId: f.manual.id, entryNodeUrn: f.entryNodeUrn });
     expect(await executeAppRun(db, poll.id, f.deps)).toBe('failed');
     expect((await db.appRun.findUniqueOrThrow({ where: { id: poll.id } })).failure).toMatchObject({ code: 'AUTOMATION_UNADOPTED' });
     // The declined origin is still reachable by its run id, as UNADOPTED, and can be approved again.
@@ -312,7 +317,7 @@ describe('approve and decline', () => {
   });
   it('mutations act on the exact origin run, never a substitute', async () => {
     const f = await fixture();
-    const newer = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.entryNodeUrn });
+    const newer = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.entryNodeUrn });
     await decline(f, 'MANUAL');
     expect(await db.manualAutomationPin.count({ where: { runId: newer.id } })).toBe(1);
     await expect(M.declineAutomation({}, { triggerKind: 'MANUAL', triggerRef: generateId() }, f.ctx)).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
@@ -435,5 +440,31 @@ describe('user-owned Apps (CHECKED contract: covered, nullable organization, str
     const page = await Q.automationApprovals({}, { appRef: f.app.id }, f.ctx);
     expect(page.rows.map((r: any) => r.triggerRef)).not.toContain(f.ref.SCHEDULE);
     spy.mockRestore();
+  });
+
+  it('#2883: a legacy row whose entry is gone still shows its live read grants (the stale-entry answer is not a null readGrants)', async () => {
+    const f = await fixture();
+    const legacy = await db.agentSchedule.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, name: 'Legacy', cron: '* * * * *', entryNodeUrn: 'hrn:node:adopt.test:flow:gone' } });
+    const target = await db.memory.create({ data: { name: 'KnowStale', urn: 'adopt.test:knowstale', class: 'knowledge', organizationId: f.org.id } });
+    await db.appAutomationReadGrant.create({ data: { appId: f.app.id, triggerKind: 'SCHEDULE', triggerId: legacy.id, memoryId: target.id, prefix: 'tasks', grantedBy: f.user.id } });
+    const d = await Q.automationApproval({}, { triggerKind: 'SCHEDULE', triggerRef: legacy.id }, f.ctx);
+    expect(d.state).toBe('UNADOPTED');
+    expect(d.hash).toBe('');
+    expect(d.readGrants.map((g: any) => [g.memoryUrn, g.prefix])).toEqual([['hrn:mem:adopt.test:knowstale', 'tasks']]);
+  });
+
+  it('#2883 (0081 A): the approval shows the trigger\'s LIVE read grants (memory and prefix), never a revoked one; a manual run shows none', async () => {
+    const f = await fixture();
+    const target = await db.memory.create({ data: { name: 'Know', urn: 'adopt.test:know', class: 'knowledge', organizationId: f.org.id } });
+    const foreignOrg = await db.organization.create({ data: { name: 'Foreign', urn: 'foreign.test' } });
+    const hidden = await db.memory.create({ data: { name: 'Hid', urn: 'foreign.test:hid', class: 'knowledge', organizationId: foreignOrg.id } as never });
+    const base = { appId: f.app.id, triggerKind: 'SCHEDULE', triggerId: f.ref.SCHEDULE, grantedBy: f.user.id };
+    await db.appAutomationReadGrant.create({ data: { ...base, memoryId: target.id, prefix: 'tasks' } });
+    await db.appAutomationReadGrant.create({ data: { ...base, memoryId: target.id, prefix: 'old', revokedAt: new Date(), revokedBy: f.user.id } });
+    await db.appAutomationReadGrant.create({ data: { ...base, memoryId: hidden.id, prefix: null } });
+    const d = await detail(f, 'SCHEDULE');
+    expect(d.readGrants.map((g: any) => [g.memoryUrn, g.prefix])).toEqual([['hrn:mem:adopt.test:know', 'tasks'], [null, null]]);
+    expect((await detail(f, 'WEBHOOK')).readGrants).toEqual([]);
+    expect((await detail(f, 'MANUAL')).readGrants).toEqual([]);
   });
 });

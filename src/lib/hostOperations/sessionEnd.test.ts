@@ -64,7 +64,7 @@ async function startedTask(close = true) {
 }
 const finish = (taskId: string) =>
   asWorker(kit, () => M.finishAgentTask({}, { taskId, result: { outcome: 'succeeded' } }, ctx(holder.id)));
-const requestOf = (taskId: string) => db.taskSessionEndRequest.findUnique({ where: { taskId } });
+const requestOf = (taskId: string) => db.taskSessionEndRequest.findFirst({ where: { taskId } });
 
 beforeEach(async () => {
   await cleanDb(db);

@@ -10,6 +10,7 @@ vi.mock('../lib/bus/index.js', () => ({
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 import {
   dispatchWebFetchEvent,
   mountWebFetchEventRoutes,
@@ -69,6 +70,7 @@ async function seedBinding(): Promise<{ orgId: string; appId: string; sourceRunI
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}::event-app`, name: 'Event App' },
   });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+  await serveAgentBootPrompt(db, agent.id, 'Test boot prompt.'); // #2712: the poll run is served (R74)
   const entryNodeUrn = `${memory.urn}::${entryLoc}`;
   const sourceRun = await db.appRun.create({
     data: {

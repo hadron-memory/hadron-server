@@ -47,6 +47,8 @@ function mockDb() {
     // before any DB call; canReadMemory still reads the memory row to learn
     // its class, so stub a non-personal memory (ADMIN bypass → read allowed).
     memory: {
+      // #2734: this fixture represents ordinary knowledge memory, not an install.
+      findFirst: vi.fn().mockResolvedValue(null),
       findMany: vi.fn().mockResolvedValue([{
         id: 'mem-1', class: 'knowledge', userId: null, userMemoryOfAgentId: null,
         appId: 'app-1', ownerUserId: null,
@@ -84,7 +86,7 @@ function mockDb() {
       })),
       // Codex #554: update/delete now re-read the edge's memoryId to gate on
       // requireMemoryWriteAccess (the ADMIN+appId ctx short-circuits the check).
-      findUnique: vi.fn().mockResolvedValue({ memoryId: 'mem-1' }),
+      findUnique: vi.fn().mockResolvedValue({ memoryId: 'mem-1', source: { memoryId: 'mem-1' } }),
     },
     $executeRaw: vi.fn().mockResolvedValue(1),
     $queryRaw: vi.fn().mockResolvedValue([{ id: 'mem-1' }]),

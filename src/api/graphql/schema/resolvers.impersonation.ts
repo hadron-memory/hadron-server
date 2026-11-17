@@ -29,6 +29,7 @@ import {
   resolveOrgRefArg,
   resolveUserRefArg,
 } from './resolvers.helpers.js';
+import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
@@ -115,8 +116,9 @@ export const impersonationMutations = {
     // No nesting: an impersonated context cannot start another session.
     // (The read-only plugin already blocks this mutation wholesale; this is
     // the clearer error for direct-resolver callers/tests.)
-    if (ctx.impersonation) throw forbidden();
-    if (!ctx.userId) throw forbidden();
+    // Person-only (cor:acl:100): no user, an impersonation, a run principal, a worker-bound session and a refused
+    // session binding are all refused, before anything is looked up.
+    await requirePersonAsThemselves(ctx, forbidden);
 
     const orgId = await resolveOrgRefArg(ctx.db, { ref: orgRef });
     const targetId = await resolveUserRefArg(ctx.db, { ref: userRef });
@@ -169,7 +171,7 @@ export const impersonationMutations = {
       ctx,
       [{ kind: 'org', id: orgId }, { kind: 'user', id: targetId }],
       async (txCtx) => {
-        if (txCtx.impersonation || !txCtx.userId) throw forbidden();
+        await requirePersonAsThemselves(txCtx, forbidden);
         const currentActor = await txCtx.db.orgMember.findFirst({
           where: { organizationId: orgId, userId: txCtx.userId, ...LIVE_ORG_MEMBERSHIP },
           select: { role: true },

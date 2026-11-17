@@ -205,7 +205,7 @@ describe('#952 — installAgentIntoApp attaches an existing Agent to an existing
   it('a plain AppMember cannot — installing is a read grant on the Agent\'s design', async () => {
     // #952 proposed admitting non-'reader' AppMembers here. Not done: an
     // installed Agent's system memory becomes READ_ONLY in every App-context
-    // access map and the payload carries its (ungated) systemPrompt, so this
+    // access map and the payload carries its (ungated) definition, so this
     // would hand a non-org member exactly the org Agent definition that
     // Query.agent refuses them.
     await expect(

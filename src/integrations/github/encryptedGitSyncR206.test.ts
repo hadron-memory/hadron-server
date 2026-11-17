@@ -72,7 +72,7 @@ beforeEach(async () => {
   otherId = other.id;
   localPath = join(paths.root, org.urn, 'r206');
   mkdirSync(join(localPath, '.git'), { recursive: true });
-  writeNodeFile(localPath, { ...node, ...fields, outgoingEdges: [] } as never);
+  writeNodeFile(localPath, { ...node, ...fields, outgoingEdges: [] } as never, undefined, false);
   originalFile = readFileSync(join(localPath, 'node.md'));
   warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
   registerNodeWrittenLocalHandler('r206-test', event => handleNodeWrittenForGit(db, event));
@@ -242,7 +242,7 @@ describe('R206 positive controls: unencrypted memories still mirror', () => {
   it('runs a path-only checkout for an unencrypted memory', async () => {
     const outcome = await withMirrorCheckout({ memoryId, commitSubject: 'path cleanup', logPrefix: '[fixture]' }, ({ localPath: p }) => {
       mkdirSync(join(p, 'touched'), { recursive: true });
-      writeNodeFile(p, { id: nodeId, loc: 'node', name: 'Node', tags: [], content: 'x', outgoingEdges: [] } as never);
+      writeNodeFile(p, { id: nodeId, loc: 'node', name: 'Node', tags: [], content: 'x', outgoingEdges: [] } as never, undefined, false);
     });
     expect(['mirrored', 'no-changes']).toContain(outcome);
   });

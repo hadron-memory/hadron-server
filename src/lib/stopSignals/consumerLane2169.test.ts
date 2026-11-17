@@ -17,6 +17,7 @@ import { generateId } from '../id.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../middleware/auth.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { coveringSignals } from './state.js';
+import { pendingStopNotices } from './delivery.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -314,5 +315,62 @@ describe('fix head 3 — §10 delta pins (Ralion, test-only)', () => {
     const e = await refusal(set(ctx(max.id), { level: 'PAUSE_DISPATCH', scope: 'TEAM', worker: 'Ada' }));
     expect(e?.extensions).toMatchObject({ code: 'STOP_SIGNAL_UNAVAILABLE', workers: 1, lanes: ['unhosted'] });
     expect(await signals()).toBe(0);
+  });
+});
+
+// #2433 / cor:agt:090:04: declaration freshness belongs to the lane, not a
+// snapshot of its workers. The accepted wait ends at the next declaring poll;
+// it is not a promise of delivery within the declaration's freshness window.
+describe('#2433 — a worker joins after its lane declared', () => {
+  it.each(['host', 'unhosted'] as const)('%s lane accepts the set, keeps the notice pending, then offers it on the next declaring poll', async lane => {
+    const consumer = lane === 'host' ? keyCtx(orca2Key) : ctx(max.id);
+    const first = await dueWakes(consumer, { accepts: ['STOP'], first: 200 });
+    expect(first.pageInfo.hasNextPage).toBe(false);
+    expect(first.wakes).toEqual([]);
+    const declaration = await declarations();
+    expect(declaration).toHaveLength(1);
+    expect(declaration[0]!.lane).toBe(lane === 'host' ? (await orca2Reg()).id : 'unhosted');
+
+    let joined: { id: string };
+    if (lane === 'host') {
+      // Liam was not in the registration the first call read (only Kit was).
+      const registration = await orca2Reg();
+      expect(await db.hostRegistrationWorker.count({ where: { registrationId: registration.id, workerId: liam.id } })).toBe(0);
+      joined = liam;
+      await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 2', pollIntervalSeconds: 600,
+        workers: [{ worker: kit.id, family: 'claude' }, { worker: joined.id, family: 'claude' }] } }, consumer);
+      expect((await orca2Reg()).id).toBe(registration.id);
+    } else {
+      // This worker did not exist during the unhosted lane's first poll.
+      joined = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId,
+        name: 'Newcomer', slug: 'newcomer', role: 'engineer', heldByUserId: mia.id, heldAt: new Date() }, select: { id: true } });
+    }
+    // Joining does not manufacture another declaring poll.
+    expect(await declarations()).toEqual(declaration);
+    const signal = await set(ctx(max.id), { level: 'PAUSE', scope: 'WORKER', worker: joined.id });
+    expect(signal).toMatchObject({ live: true });
+    expect(await covered()).toContain(joined.id);
+    const notice = (await pendingStopNotices(db, app.id, [joined.id])).get(joined.id);
+    expect(notice).toMatchObject({ workerId: joined.id, signalId: signal.id, level: 'pause', notice: 'stop' });
+    expect(await db.workerDeliveryTaskEvent.count({ where: { workerId: joined.id, eventId: notice!.eventId } })).toBe(0);
+
+    // A non-accepting call cannot offer the waiting notice or refresh the lane.
+    expect(stopKinds(await dueWakes(consumer, { first: 200 }))).toEqual([]);
+    expect(await declarations()).toEqual(declaration);
+    expect((await pendingStopNotices(db, app.id, [joined.id])).get(joined.id)?.eventId).toBe(notice!.eventId);
+
+    const next = await dueWakes(consumer, { accepts: ['STOP'], first: 200 });
+    expect(next.pageInfo.hasNextPage).toBe(false);
+    const refreshed = await declarations();
+    expect(refreshed).toHaveLength(1);
+    expect(refreshed[0]!.lane).toBe(declaration[0]!.lane);
+    expect(refreshed[0]!.declaredAt.getTime()).toBeGreaterThan(declaration[0]!.declaredAt.getTime());
+    const offered = next.wakes.filter((w: any) => w.worker.id === joined.id);
+    expect(offered).toHaveLength(1);
+    expect(offered[0].reasons).toEqual([expect.objectContaining({ kind: 'STOP', stop: expect.objectContaining({
+      eventId: notice!.eventId, signalId: signal.id, level: 'PAUSE', notice: 'STOP',
+    }) })]);
+    // Offered is not acknowledged or typed by a host: it remains undelivered.
+    expect((await pendingStopNotices(db, app.id, [joined.id])).get(joined.id)?.eventId).toBe(notice!.eventId);
   });
 });

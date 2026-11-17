@@ -1,6 +1,6 @@
 {
-  "description": "hadron-server #2391 / hadron-cli #945 shared Markdown body-framing fixture (cor:int:020:01, F1). A node file is `---\\n<frontmatter>\\n---\\n` followed by `body`; a conforming reader returns `loaded` as the node content (null = no content). Writers frame stored content as `\\n<content>\\n` (empty for null). The reader normalizes CRLF to LF over the whole file, then removes ONE leading `\\n` and ONE trailing `\\n` if present, nothing else; a result that is empty or only ASCII whitespace (space, \\t, \\n, \\r, \\v, \\f) is null. kind: `roundtrip` = writing `stored` produces `body` and reading it gives `stored` back; `lossy` = writing `stored` produces `body`, and the ruled read differs from `stored`; `parse` = a hand-written file, read only. Copies in other repos must match case for case.",
-  "version": "markdown-body-framing-v1",
+  "description": "hadron-server #2391 / hadron-cli #945 shared Markdown body-framing fixture (cor:int:020:01, F1). A node file is `---\\n<frontmatter>\\n---\\n` followed by `body`; a conforming reader returns `loaded` as the node content (null = no content). Writers frame stored content as `\\n<content>\\n` (empty for null). The reader normalizes CRLF to LF over the whole file, then removes ONE leading `\\n` and ONE trailing `\\n` if present, nothing else; a result that is empty or only ASCII whitespace (space, \\t, \\n, \\r, \\v, \\f) is null. kind: `roundtrip` = writing `stored` produces `body` and reading it gives `stored` back; `lossy` = writing `stored` produces `body`, and the ruled read differs from `stored`; `parse` = a hand-written file, read only. A case may carry `store: \"refused\"`: the codecs agree on its framing, but a database write of that content is refused (Postgres `text` cannot hold NUL); readers of the fixture other than the server ignore the field. v2 only adds the `nul-in-body` case to v1; no framing rule changed. Copies in other repos must match case for case.",
+  "version": "markdown-body-framing-v2",
   "frontmatter": "---\nname: fixture\n---\n",
   "cases": [
     { "name": "plain", "kind": "roundtrip", "stored": "X", "body": "\nX\n", "loaded": "X" },
@@ -23,6 +23,7 @@
     { "name": "ascii-whitespace-mix-reads-null", "kind": "lossy", "stored": " \t\n\u000b\u000c ", "body": "\n \t\n\u000b\u000c \n", "loaded": null },
     { "name": "crlf-in-content-normalizes", "kind": "lossy", "stored": "A\r\nB\r\n", "body": "\nA\r\nB\r\n\n", "loaded": "A\nB\n" },
     { "name": "trailing-cr-joins-the-frame-newline", "kind": "lossy", "stored": "A\r", "body": "\nA\r\n", "loaded": "A" },
+    { "name": "nul-in-body", "kind": "roundtrip", "stored": "A\u0000B", "body": "\nA\u0000B\n", "loaded": "A\u0000B", "store": "refused" },
     { "name": "hand-no-blank-line", "kind": "parse", "body": "Body\n", "loaded": "Body" },
     { "name": "hand-no-final-newline", "kind": "parse", "body": "\nBody", "loaded": "Body" },
     { "name": "hand-no-framing", "kind": "parse", "body": "Body", "loaded": "Body" },

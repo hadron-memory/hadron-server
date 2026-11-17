@@ -85,6 +85,7 @@
 
 import { execFile as execFileCb } from 'child_process';
 import { promisify } from 'util';
+import { mirrorFailureMetadata, type MirrorFailureMetadata } from './mirrorFailureMetadata.js';
 
 const execFile = promisify(execFileCb);
 
@@ -104,20 +105,30 @@ export const GIT_TRANSPORT_GUARD: readonly string[] = Object.freeze([
 export interface ExecGitOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  /** #2569: opt-in local-command deadline in milliseconds; network callers leave this unset. */
+  timeout?: number;
 }
 
 /**
  * Never expose an execFile rejection: Node includes the full argv in its
  * message/cmd, and git may repeat the authenticated remote in stderr. The
  * installation token is in that argv for clone and remote set-url. Keep no
- * cause or child-process fields on this error, including in log inspection.
+ * raw cause, command or output on this error. Only bounded allowlisted diagnostic fields survive.
  */
 export class GitCommandError extends Error {
   readonly code = 'GIT_COMMAND_FAILED';
 
-  constructor() {
+  readonly exitCode?: number;
+  readonly providerCode?: MirrorFailureMetadata['providerCode'];
+  readonly signal?: MirrorFailureMetadata['signal'];
+
+  constructor(error?: unknown) {
     super('Git command failed. Check the repository and branch, then retry.');
     this.name = 'GitCommandError';
+    const metadata = mirrorFailureMetadata(error, 'git', 'GIT_COMMAND_FAILED');
+    this.exitCode = metadata.exitCode;
+    this.providerCode = metadata.providerCode;
+    this.signal = metadata.signal;
   }
 }
 
@@ -134,8 +145,12 @@ export async function execGit(
   options: ExecGitOptions = {},
 ): Promise<{ stdout: string; stderr: string }> {
   try {
-    return await execFile('git', [...GIT_TRANSPORT_GUARD, ...args], options);
-  } catch {
-    throw new GitCommandError();
+    // #2569: a bounded child must not ignore the timeout's default SIGTERM and
+    // outlive the checkout lock. execFile's callback settles after child close;
+    // await it (including reap), never race a timer against a live process.
+    const bounded = options.timeout === undefined ? options : { ...options, killSignal: 'SIGKILL' as const };
+    return await execFile('git', [...GIT_TRANSPORT_GUARD, ...args], bounded);
+  } catch (error) {
+    throw new GitCommandError(error);
   }
 }

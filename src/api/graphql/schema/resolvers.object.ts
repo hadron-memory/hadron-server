@@ -55,7 +55,7 @@ async function readMemorySchema(ctx: Context, memoryRef: string): Promise<Memory
   try {
     const { id } = await resolveMemoryRef(ctx.db, memoryRef);
     const accessible = await getAccessibleMemoryIds(ctx);
-    if (accessible !== null && !accessible.includes(id)) return null; // no disclosure
+    if (!accessible.includes(id)) return null; // no disclosure
     const row = await ctx.db.memory.findUnique({ where: { id }, select: { schema: true } });
     return (row?.schema as unknown as MemorySchema | null) ?? null;
   } catch {

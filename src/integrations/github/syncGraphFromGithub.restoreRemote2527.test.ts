@@ -1,7 +1,12 @@
-/** #2527: real file-only git, synthetic credentials, every read-checkout exit. */
+/**
+ * #2527: real file-only git, synthetic credentials, every read-checkout exit.
+ * #2571: the restore settles asynchronously and is sampled when it SETTLES, so
+ * an unawaited restore (completing after lock release) fails; a second holder
+ * of the real checkout lock must see the restored origin.
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { db } from '../db/client.js';
@@ -11,12 +16,20 @@ const SOURCE = 'https://github.com/acme/repo.git';
 const TOKEN = 'ghs_SYNTHETIC_INSTALLATION_TOKEN_2527';
 const TOKEN_URL = SOURCE.replace('https://github.com/', `https://x-access-token:${TOKEN}@github.com/`);
 const GENERIC = 'Git command failed. Check the repository and branch, then retry.';
-type Fault = 'fetch' | 'checkout' | 'merge' | 'clone' | 'load' | null;
+type Fault = 'fetch' | 'checkout' | 'merge' | 'clone' | 'clone-early' | 'load' | null;
 const env = vi.hoisted(() => ({
+  restoreTimeouts: [] as Array<number | undefined>,
   root: '', bare: '', local: '', seed: '', fault: null as Fault,
   tokenInstalled: false, originAtFault: null as string | null,
   failRestore: false, restores: 0, insideLock: false, restoreInsideLock: false,
+  restoreSettledInsideLock: false, settled: false,
   readOrigin: (() => '') as () => string,
+  // #2571: queued during the restore; resolves the restore's deferral when it
+  // acquires the checkout lock, so it can only win the race if the lock is free.
+  queueNextHolder: null as null | (() => Promise<string>),
+  nextHolder: null as null | Promise<string>,
+  /** #3228: runs once as the graph loads, after every read-side git call and before restoreReadRemote starts. */
+  plantLock: null as null | (() => void),
 }));
 
 vi.mock('../../config.js', async original => ({
@@ -40,6 +53,7 @@ vi.mock('../localFs/loadGraphFromFs.js', async original => {
   const real = await original<typeof import('../localFs/loadGraphFromFs.js')>();
   return { ...real, loadGraphFromFs: async (...args: Parameters<typeof real.loadGraphFromFs>) => {
     await Promise.resolve();
+    { const plant = env.plantLock; env.plantLock = null; plant?.(); }
     if (env.fault === 'load') {
       env.originAtFault = env.readOrigin();
       throw new Error('synthetic-load-fault-2527');
@@ -49,14 +63,23 @@ vi.mock('../localFs/loadGraphFromFs.js', async original => {
 });
 vi.mock('./execGit.js', async original => {
   const real = await original<typeof import('./execGit.js')>();
-  return { ...real, execGit: vi.fn(async (args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) => {
-    const restore = args[0] === 'remote' && args[1] === 'set-url' && args[3] === SOURCE;
+  const invoke = async (args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv }, restore: boolean) => {
     if (restore) {
       env.restores++;
+      env.restoreTimeouts.push((options as { timeout?: number }).timeout);
       env.restoreInsideLock = env.insideLock;
+      // #2571: yield to timers before the restore settles. An unawaited restore
+      // lets the lock release first; a queued next holder then runs before it.
+      await new Promise<void>(resolve => {
+        const timer = setTimeout(resolve, env.queueNextHolder ? 500 : 20);
+        if (env.queueNextHolder) {
+          env.nextHolder = env.queueNextHolder().finally(() => { clearTimeout(timer); resolve(); });
+        }
+      });
       if (env.failRestore) throw Object.assign(new Error(`raw ${TOKEN_URL}`), { code: 'RESTORE_SENTINEL' });
     }
     if (args.some(arg => arg.includes(TOKEN))) env.tokenInstalled = true;
+    if (env.fault === 'clone-early' && args[0] === 'clone') throw new real.GitCommandError();
     const run = (argv: string[]) => execFileSync('git', [
       '-c', 'protocol.allow=never', '-c', 'protocol.file.allow=always',
       '-c', `url.${env.bare}.insteadOf=${SOURCE}`,
@@ -84,6 +107,17 @@ vi.mock('./execGit.js', async original => {
     } catch {
       // Match production execGit's sanitized error, never its raw argv/stderr.
       throw new real.GitCommandError();
+    }
+  };
+  return { ...real, execGit: vi.fn(async (args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) => {
+    const restore = args[0] === 'remote' && args[1] === 'set-url' && args[3] === SOURCE;
+    if (!restore) return invoke(args, options, false);
+    try {
+      return await invoke(args, options, true);
+    } finally {
+      // Sampled when the restore SETTLES, success or failure (#2571).
+      env.settled = true;
+      env.restoreSettledInsideLock = env.insideLock;
     }
   }) };
 });
@@ -128,14 +162,20 @@ beforeEach(async () => {
   env.root = mkdtempSync(join(tmpdir(), 'hadron-2527-'));
   env.bare = mkdtempSync(join(tmpdir(), 'hadron-2527-bare-'));
   env.seed = mkdtempSync(join(tmpdir(), 'hadron-2527-seed-'));
-  Object.assign(env, { local: '', fault: null, tokenInstalled: false, originAtFault: null, failRestore: false, restores: 0, insideLock: false, restoreInsideLock: false });
+  Object.assign(env, {
+    restoreTimeouts: [], local: '', fault: null, tokenInstalled: false, originAtFault: null, failRestore: false, restores: 0,
+    insideLock: false, restoreInsideLock: false, restoreSettledInsideLock: false, settled: false,
+    queueNextHolder: null, nextHolder: null, plantLock: null,
+  });
   logged = [];
   for (const level of ['error', 'warn', 'log'] as const) vi.spyOn(console, level).mockImplementation((...args) => { logged.push(args.map(String).join(' ')); });
   await cleanDb(db);
 });
-afterEach(() => {
+afterEach(async () => {
+  await env.nextHolder?.catch(() => undefined);
   vi.restoreAllMocks(); vi.unstubAllEnvs();
   for (const dir of [env.root, env.bare, env.seed]) rmSync(dir, { recursive: true, force: true });
+  for (const timeout of env.restoreTimeouts) expect(timeout, 'restore-only fixed deadline').toBe(10_000);
 });
 
 function assertNoCredentialSurface(result: unknown) {
@@ -150,6 +190,8 @@ function assertRestored() {
   expect(readFileSync(join(env.local, '.git', 'config'), 'utf8')).not.toContain(TOKEN);
   expect(env.restores).toBe(1);
   expect(env.restoreInsideLock).toBe(true);
+  expect(env.settled).toBe(true);
+  expect(env.restoreSettledInsideLock).toBe(true);
 }
 
 describe('#2527 read sync restores origin under the checkout lock', () => {
@@ -172,15 +214,79 @@ describe('#2527 read sync restores origin under the checkout lock', () => {
       assertRestored(); assertNoCredentialSurface(result);
     });
   }
-  it.each([null, 'load'] as const)('restore failure preserves primary outcome (%s)', async fault => {
-    await setup('existing', fault);
-    env.failRestore = true;
+  for (const [checkout, fault] of [['existing', null], ['existing', 'load'], ['fresh', null]] as const) {
+    it(`${checkout} restore failure preserves primary outcome (${fault})`, async () => {
+      await setup(checkout, fault);
+      env.failRestore = true;
+      const result = await syncGraphFromGithub(graph);
+      expect(result.error).toBe(fault ? 'synthetic-load-fault-2527' : undefined);
+      expect(env.readOrigin()).toBe(TOKEN_URL);
+      expect(env.restores).toBe(1);
+      expect(env.restoreInsideLock).toBe(true);
+      expect(env.restoreSettledInsideLock).toBe(true);
+      expect(logged.join(' ')).toMatch(/may still hold an installation token until the next successful restore/);
+      // #2569: only allowlisted diagnostic fields reach the log; arbitrary code/path text never does.
+      expect(logged.join(' ')).not.toContain('RESTORE_SENTINEL');
+      expect(logged.join(' ')).not.toContain(env.local);
+      assertNoCredentialSurface(result);
+    });
+  }
+});
+
+describe('#2571 restore boundaries', () => {
+  it('the next holder of the real checkout lock sees the restored origin', async () => {
+    await setup('existing');
+    const real = await vi.importActual<typeof import('./mirrorCheckoutLock.js')>('./mirrorCheckoutLock.js');
+    env.queueNextHolder = () => real.withMirrorCheckoutLock(graph.id, async () => env.readOrigin());
     const result = await syncGraphFromGithub(graph);
-    expect(result.error).toBe(fault ? 'synthetic-load-fault-2527' : undefined);
-    expect(env.readOrigin()).toBe(TOKEN_URL);
-    expect(env.restores).toBe(1);
-    expect(env.restoreInsideLock).toBe(true);
-    expect(logged.join(' ')).toMatch(/may still hold an installation token until the next successful restore/);
+    expect(result.error).toBeUndefined();
+    expect(env.nextHolder).not.toBeNull();
+    expect(await env.nextHolder).toBe(SOURCE);
+    assertRestored(); assertNoCredentialSurface(result);
+  });
+  it('a clone that fails before creating .git skips the restore', async () => {
+    await setup('fresh', 'clone-early');
+    const result = await syncGraphFromGithub(graph);
+    expect(result.error).toBe(GENERIC);
+    expect(env.tokenInstalled).toBe(true);
+    expect(existsSync(join(env.local, '.git'))).toBe(false);
+    expect(env.restores).toBe(0);
+    expect(logged.join(' ')).not.toMatch(/Failed to restore the origin URL/);
     assertNoCredentialSurface(result);
   });
+});
+
+describe('#3228 a config.lock blocking the read restore is preserved', () => {
+  for (const checkout of ['existing', 'fresh'] as const) {
+    it.each([0, 20_000])(`${checkout}: a config.lock aged %dms survives byte for byte; the sync result stands`, async ageMs => {
+      await setup(checkout);
+      const lockPath = join(env.local, '.git', 'config.lock');
+      let originWhenPlanted: string | null = null;
+      env.plantLock = () => {
+        originWhenPlanted = env.readOrigin();
+        writeFileSync(lockPath, 'synthetic-owner-3228');
+        const stamp = new Date(Date.now() - ageMs);
+        utimesSync(lockPath, stamp, stamp);
+      };
+
+      const result = await syncGraphFromGithub(graph);
+
+      // The lock was planted after the git read and before the restore, with the token installed.
+      expect(originWhenPlanted).toBe(TOKEN_URL);
+      // The primary outcome is the sync, not the restore failure.
+      expect(result.error).toBeUndefined();
+      expect(await db.node.count({ where: { memoryId: graph.id, loc: 'topic' } })).toBe(1);
+      // One restore, refused by the real lock: the lock is untouched and origin still carries the token.
+      expect(env.restores).toBe(1);
+      expect(existsSync(lockPath)).toBe(true);
+      expect(readFileSync(lockPath, 'utf8')).toBe('synthetic-owner-3228');
+      expect(env.readOrigin()).toBe(TOKEN_URL);
+      const restoreLogs = vi.mocked(console.error).mock.calls
+        .filter(([message]) => String(message).includes('Failed to restore the origin URL'));
+      expect(restoreLogs).toHaveLength(1);
+      expect(restoreLogs[0][1]).toMatchObject({ phase: 'restore', class: 'REMOTE_RESTORE' });
+      expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain(env.local);
+      assertNoCredentialSurface(result);
+    });
+  }
 });

@@ -61,7 +61,6 @@ async function makeAgent(orgId: string, orgUrn: string, slug: string, visibility
       name: slug,
       systemMemoryId: systemMemory.id,
       visibility: visibility as any,
-      systemPrompt: 'the secret identity paragraph',
     },
   });
   return { id: agent.id, systemMemoryId: systemMemory.id };
@@ -224,9 +223,8 @@ describe('#945 — the memory leg must be tied to this App or this session\'s ag
     });
     expect(await sessionScopedMemoryIds(db, app.id, session.id)).toEqual([ownAgent.systemMemoryId]);
     await db.agentMemoryItem.update({ where: { id: link.id }, data: { role: 'read' } });
-    expect(new Set(await sessionScopedMemoryIds(db, app.id, session.id))).toEqual(
-      new Set([memory.id, ownAgent.systemMemoryId]),
-    );
+    // #1376: a valid item does not admit it either; an item is never a grant to a userless key.
+    expect(await sessionScopedMemoryIds(db, app.id, session.id)).toEqual([ownAgent.systemMemoryId]);
   });
 
   it('does not turn an Agent link into an App-key grant on user-owned knowledge', async () => {
@@ -248,7 +246,7 @@ describe('#945 — the memory leg must be tied to this App or this session\'s ag
       { agentId: ownAgent.id, memoryId: owned.id, role: 'read' },
       { agentId: ownAgent.id, memoryId: shared.id, role: 'read' },
     ] });
-    for (const [memoryId, allowed] of [[owned.id, false], [shared.id, true]] as const) {
+    for (const [memoryId, allowed] of [[owned.id, false], [shared.id, false]] as const) {
       const session = await db.session.create({
         data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId },
       });
@@ -388,7 +386,8 @@ describe('#945 review — lifecycle, not just structure', () => {
       },
     });
     const reachable = () => getAccessibleMemoryIds(appKeyCtx(app.id, session.id));
-    expect(await reachable()).toContain(knowledge.id);
+    // #1376: the item no longer admits the memory to a userless key; the license still gates the system memory.
+    expect(await reachable()).not.toContain(knowledge.id);
     expect(await reachable()).toContain(foreignAgent.systemMemoryId);
 
     await db.agentOrgGrant.update({

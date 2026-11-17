@@ -103,6 +103,23 @@ export function assertNotInstallMemory(memory: { installOfAgentId?: string | nul
   }
 }
 
+/**
+ * A memory an Agent holds for one person (`userMemoryOfAgentId`) or for an App
+ * (`sharedMemoryOfAgentId`) is that audience's data, not a definition. Promoting
+ * it would hand its content to everyone who reads the new Agent's definition and
+ * break the holding it was. Refused at every promotion door, even for the
+ * holding's own owner; callers run it only after the target is known readable,
+ * so the refusal never tells a non-reader that the id exists.
+ */
+export function assertNotAgentHolding(memory: { userMemoryOfAgentId?: string | null; sharedMemoryOfAgentId?: string | null }): void {
+  if (memory.userMemoryOfAgentId || memory.sharedMemoryOfAgentId) {
+    throw new GraphQLError(
+      "A memory an Agent holds for a person or an App cannot become an Agent's system memory.",
+      { extensions: { code: 'BAD_USER_INPUT' } },
+    );
+  }
+}
+
 /** One agent whose system memory is owned by somebody else. */
 export interface SystemMemoryOwnerMismatch {
   agentId: string;

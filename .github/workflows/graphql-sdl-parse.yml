@@ -57,6 +57,9 @@ on:
       # have inherited the same hole.
       - 'scripts/check-*.mjs'
       - 'scripts/check-*.test.ts'
+      # #3221: the cross-parent manifest is data the check reads; a PR that
+      # edits only it must still run the check, so a glob, not a name.
+      - 'scripts/cross-parent-*'
       - 'scripts/sdl-hash-descriptions-allowed.txt'
       - 'scripts/sdl-spec-citations-baseline.txt'
       - '.github/workflows/graphql-sdl-parse.yml'
@@ -68,6 +71,7 @@ on:
       - 'src/**.ts'
       - 'scripts/check-*.mjs'
       - 'scripts/check-*.test.ts'
+      - 'scripts/cross-parent-*'
       - 'scripts/sdl-hash-descriptions-allowed.txt'
       - 'scripts/sdl-spec-citations-baseline.txt'
       - '.github/workflows/graphql-sdl-parse.yml'
@@ -104,6 +108,9 @@ jobs:
 
       - name: Check the SDL literal, then parse the SDL
         run: pnpm tsx scripts/check-graphql-sdl.mjs
+
+      - name: Every cross-parent object field is classified (#3221)
+        run: pnpm tsx scripts/check-cross-parent-manifest.mjs
 
       - name: SDL descriptions agree with the code they enumerate (#1103)
         run: pnpm check:sdl-enums

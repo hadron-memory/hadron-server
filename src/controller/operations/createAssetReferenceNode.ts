@@ -33,6 +33,7 @@ import type { PrismaClient } from '../../generated/prisma/index.js';
 import { canReadMemory, canWriteToMemory } from '../../mcp/access-control.js';
 import { resolveMemoryRef } from '../../lib/entityRef/memoryRef.js';
 import { writeNodeCore } from '../../api/graphql/schema/resolvers.mutation.node.js';
+import { attestedAuthoring } from '../../lib/authoringAttestation.js';
 import { splitNodeUrn } from '../../lib/urn.js';
 import { splitWholeNodeUrn } from '../../lib/splitNodeUrnTolerant.js';
 import { emitAssetUrnV2 } from '../../lib/urnEmit.js';
@@ -168,6 +169,7 @@ export async function createAssetReferenceNode(
     } as never,
     ctx,
     'create',
+    { authoring: attestedAuthoring(ctx) },
   );
 
   logAssetEvent({

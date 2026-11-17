@@ -68,7 +68,7 @@ export async function ensureAppMember(
   userId: string,
   role: string,
   ctx: { actorId?: string | null } = {},
-): Promise<void> {
+): Promise<{ priorRole: string | null }> {
   await db.app.findUniqueOrThrow({
     where: { id: appId },
     select: { id: true },
@@ -89,7 +89,7 @@ export async function ensureAppMember(
   // Updating an existing member's role: skip the maxMembers check (no new
   // seat is being consumed). Creating a new member: count + compare.
   const maxMembers = policy.maxMembers;
-  const admit = async (tx: Prisma.TransactionClient): Promise<void> => {
+  const admit = async (tx: Prisma.TransactionClient): Promise<{ priorRole: string | null }> => {
     // #1573: maxMembers is count-then-act. Every door that adds a member
     // (joinApp, the GraphQL ensureAppMember) reaches this point, so one
     // exclusive per-App capacity lock held through the count and the insert
@@ -128,12 +128,13 @@ export async function ensureAppMember(
         updatedBy: ctx.actorId ?? null,
       },
     });
+    // #2766: the role the member held before this call, for the door that records the act.
+    return { priorRole: existing?.role ?? null };
   };
   // A transaction-scoped lock needs a transaction: run in the caller's, or
   // open one.
   if ('$transaction' in db && typeof db.$transaction === 'function') {
-    await (db as PrismaClient).$transaction((tx) => admit(tx));
-  } else {
-    await admit(db as Prisma.TransactionClient);
+    return (db as PrismaClient).$transaction((tx) => admit(tx));
   }
+  return admit(db as Prisma.TransactionClient);
 }

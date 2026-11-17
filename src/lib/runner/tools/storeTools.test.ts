@@ -38,6 +38,7 @@ const MEM_URN = `${ORG_URN}:filestore`;
 let orgId: string;
 let appId: string;
 let memoryId: string;
+let writerId: string;
 
 async function mintRun(userId?: string): Promise<AppRun> {
   return db.appRun.create({
@@ -68,6 +69,10 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: orgId, name: 'store-app', urn: `${ORG_URN}::store-app` },
   });
   appId = app.id;
+  const writer = await db.user.create({ data: { handle: `store-writer-${generateId().toLowerCase()}` } });
+  writerId = writer.id;
+  await db.orgMember.create({ data: { organizationId: orgId, userId: writerId, role: 'CONTRIBUTOR' } });
+  await db.appMember.create({ data: { appId, userId: writerId, role: 'member' } });
   const memory = await db.memory.create({
     data: {
       id: generateId(), organizationId: orgId, name: 'filestore',
@@ -75,8 +80,8 @@ beforeEach(async () => {
     },
   });
   memoryId = memory.id;
-  // A headless App run may write an explicitly granted knowledge memory;
-  // the App key alone cannot write its team space (cor:acl:010:01).
+  // #3278: an item never grants a userless run write authority. These storage
+  // success probes run on behalf of an admitted writer; userless refusals stay below.
   const agent = await db.agent.create({
     data: { id: generateId(), organizationId: orgId, name: 'store-agent', urn: `${ORG_URN}:store-agent` },
   });
@@ -95,7 +100,7 @@ describe('hadron_store_file', () => {
   });
 
   it('stores the bytes, creates the Asset row AND the reference node, returns metadata not content', async () => {
-    const run = await mintRun();
+    const run = await mintRun(writerId);
     const urn = `${ORG_URN}::filestore::files:q3-report`;
     const content = '# Q3 report\n\nRevenue up.';
 
@@ -118,11 +123,11 @@ describe('hadron_store_file', () => {
     expect(putArgs.contentType).toBe('text/markdown');
     expect(putArgs.body.toString('utf8')).toBe(content);
 
-    // Asset row: attached (not staged), CLEAN (server-authored), no user.
+    // Asset row: attached (not staged), CLEAN (server-authored), attributed to the user.
     const asset = await db.asset.findUniqueOrThrow({ where: { id: out.asset.id as string } });
     expect(asset.memoryId).toBe(memoryId);
     expect(asset.scanStatus).toBe('CLEAN');
-    expect(asset.uploadedBy).toBeNull();
+    expect(asset.uploadedBy).toBe(writerId);
     expect(asset.description).toBe('Quarterly summary');
 
     // Reference node: nodeType reference, asset metadata in data, run id.
@@ -140,6 +145,8 @@ describe('hadron_store_file', () => {
     const user = await db.user.create({
       data: { githubId: 4242, githubUsername: 'store-user', roles: ['READER'] },
     });
+    await db.orgMember.create({ data: { organizationId: orgId, userId: user.id, role: 'CONTRIBUTOR' } });
+    await db.appMember.create({ data: { appId, userId: user.id, role: 'member' } });
     const run = await mintRun(user.id);
     const out = (await hadronStoreFile.execute(toolCtx(run), {
       urn: `${ORG_URN}::filestore::files:note`, filename: 'note.txt', content: 'hi',
@@ -198,7 +205,7 @@ describe('hadron_store_file', () => {
 
   it('enforces the memory acceptsUploads storage policy before touching storage', async () => {
     await db.memory.update({ where: { id: memoryId }, data: { acceptsUploads: false } });
-    const run = await mintRun();
+    const run = await mintRun(writerId);
     await expect(
       hadronStoreFile.execute(toolCtx(run), {
         urn: `${ORG_URN}::filestore::files:x`, filename: 'x.txt', content: 'x',
@@ -225,7 +232,7 @@ describe('hadron_store_file', () => {
   });
 
   it('compensates on loc conflict: no asset row survives, the stored object is deleted', async () => {
-    const run = await mintRun();
+    const run = await mintRun(writerId);
     const urn = `${ORG_URN}::filestore::files:taken`;
     await db.node.create({
       data: { id: generateId(), memoryId, loc: 'files:taken', name: 'occupied', tags: [] },

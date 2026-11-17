@@ -18,6 +18,8 @@
  * unreadable combination. Keep that property when editing.
  */
 
+import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js';
+
 import type { Response } from 'express';
 
 export const LOGIN_ERROR_TEMPLATE = `<!doctype html>
@@ -53,16 +55,21 @@ export const LOGIN_ERROR_TEMPLATE = `<!doctype html>
       display: flex; justify-content: center;
     }
     main {
-      max-width: 480px; width: 100%;
+      /* Keep the original 480px content + padding/border desktop width,
+         while containing the padding on narrow screens. Layout belongs here. */
+      box-sizing: border-box;
+      max-width: calc(480px + 4rem + 2px); width: 100%;
       background: var(--card-bg); color: var(--text);
       border: 1px solid var(--card-border); border-radius: 8px;
       padding: 1.5rem 2rem;
     }
     h1 { font-size: 1.25rem; margin: 0 0 1rem; }
   </style>
+${HADRON_HEADER_STYLE}
 </head>
 <body>
   <main>
+    ${HADRON_HEADER}
     <h1>Sign-in didn&#39;t complete</h1>
     <p>Your sign-in session expired or was interrupted. Please return to the app and try again.</p>
   </main>

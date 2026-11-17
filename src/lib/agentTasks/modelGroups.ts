@@ -1,0 +1,128 @@
+/**
+ * #2831 S1 (cor:agt:060:12) — model groups: an opaque name over a list of model patterns, declared by the team
+ * Agent and overridable by the App, resolved LIVE at read time (V16, never copied at install, never read from a
+ * published revision). The platform gives a group's name and members no meaning; a group is a matching input,
+ * never an authorization input.
+ *
+ * The walk: for each name, the App's group if it has one, else the Team Agent's. An App-only group has no Agent
+ * counterpart. An App override with an empty list stays an override (it matches no one). There is no merge.
+ */
+
+import type { Prisma } from '../../generated/prisma/index.js';
+
+/** Where an effective group comes from (cor:agt:060:12): the Agent's, an App's replacement of it, or the App's own. */
+export type ModelGroupOrigin = 'AGENT' | 'APP_OVERRIDE' | 'APP';
+
+export type EffectiveModelGroup = { name: string; patterns: string[]; origin: ModelGroupOrigin };
+
+export const MODEL_GROUP_NAME_MAX = 64;
+export const MODEL_GROUP_PATTERNS_MAX = 100;
+export const MODEL_GROUP_PATTERN_MAX = 128;
+/** Most groups one owner (an Agent, or an App) declares. */
+export const MODEL_GROUPS_PER_OWNER_MAX = 50;
+
+const NAME_RE = /^[a-z0-9][a-z0-9._-]*$/;
+const PATTERN_RE = /^[a-z0-9._:/@*?-]+$/;
+
+/** The canonical (lowercase) group name, or null when it is not a token of letters, digits, ".", "_" or "-". */
+export function normalizeModelGroupName(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const name = raw.trim().toLowerCase();
+  return name.length >= 1 && name.length <= MODEL_GROUP_NAME_MAX && NAME_RE.test(name) ? name : null;
+}
+
+/**
+ * The canonical pattern list (lowercase, de-duplicated, first-seen order), or a message saying what is wrong.
+ * `*` matches any run of characters and `?` one; nothing else is special. An empty list is allowed: an override
+ * with no patterns matches no one.
+ */
+export function normalizeModelPatterns(raw: unknown): { patterns: string[] } | { error: string } {
+  if (!Array.isArray(raw)) return { error: 'patterns is a list of model patterns.' };
+  if (raw.length > MODEL_GROUP_PATTERNS_MAX) {
+    return { error: `A group holds at most ${MODEL_GROUP_PATTERNS_MAX} patterns.` };
+  }
+  const out: string[] = [];
+  for (const p of raw) {
+    const v = typeof p === 'string' ? p.trim().toLowerCase() : '';
+    if (v.length < 1 || v.length > MODEL_GROUP_PATTERN_MAX || !PATTERN_RE.test(v)) {
+      return {
+        error:
+          `A pattern is 1 to ${MODEL_GROUP_PATTERN_MAX} characters of letters, digits and . _ : / @ -, ` +
+          'where * stands for any run of characters and ? for one, e.g. claude-opus-*.',
+      };
+    }
+    if (!out.includes(v)) out.push(v);
+  }
+  return { patterns: out };
+}
+
+/**
+ * The effective groups of an App: the Team Agent's groups with the App's overrides applied by name, plus the
+ * App-only groups, ordered by name. `teamAgentId` is the Team Agent, or null when the App has none (then only the
+ * App's own groups exist). Live: it reads the rows as they are now.
+ */
+export async function effectiveModelGroups(
+  db: Pick<Prisma.TransactionClient, 'modelGroup'>,
+  appId: string,
+  teamAgentId: string | null,
+): Promise<EffectiveModelGroup[]> {
+  const [agentRows, appRows] = await Promise.all([
+    teamAgentId ? db.modelGroup.findMany({ where: { agentId: teamAgentId } }) : Promise.resolve([]),
+    db.modelGroup.findMany({ where: { appId } }),
+  ]);
+  const byName = new Map<string, EffectiveModelGroup>();
+  for (const r of agentRows) byName.set(r.name, { name: r.name, patterns: r.patterns, origin: 'AGENT' });
+  for (const r of appRows) {
+    byName.set(r.name, { name: r.name, patterns: r.patterns, origin: byName.has(r.name) ? 'APP_OVERRIDE' : 'APP' });
+  }
+  return [...byName.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+/**
+ * Full-string model glob matching; only `*` and `?` are special. No regex backtracking: an iterative two-pointer match
+ * that remembers only the LAST star (O(pattern x model)), and judges a pattern star BEFORE literal equality so a model
+ * that itself contains `*` or `?` is matched as literal text. ONE primitive for both the S3 readers
+ * (`matchingModelGroupNames`) and the S2 matcher filters (`modelMatchesPattern`), so the groups a worker shows are the
+ * groups the matcher judges it by.
+ */
+function matchesModel(pattern: string, model: string): boolean {
+  let p = 0, m = 0, star = -1, retry = 0;
+  while (m < model.length) {
+    if (pattern[p] === '*') { star = p++; retry = m; }
+    else if (pattern[p] === '?' || pattern[p] === model[m]) { p++; m++; }
+    else if (star >= 0) { p = star + 1; m = ++retry; }
+    else return false;
+  }
+  while (pattern[p] === '*') p++;
+  return p === pattern.length;
+}
+
+/** The glob primitive of the S2 filters: trimmed and case-insensitive, exactly as `matchingModelGroupNames` reads it. */
+export function modelMatchesPattern(pattern: string, model: string): boolean {
+  return matchesModel(pattern.trim().toLowerCase(), model.trim().toLowerCase());
+}
+
+/** Is `model` in the named group? No model (or a blank one), or a name no group carries, is in nothing. */
+export function modelInGroup(groups: EffectiveModelGroup[], name: string, model: string | null): boolean {
+  if (!model?.trim()) return false;
+  const g = groups.find((x) => x.name === name);
+  return !!g && g.patterns.some((p) => modelMatchesPattern(p, model));
+}
+
+/** The group requirements of a task, judged on one worker's model: In admits on any one, NotIn refuses on any one. */
+export function modelGroupsAllowed(
+  req: { modelGroupIn?: string[]; modelGroupNotIn?: string[] },
+  model: string | null,
+  groups: EffectiveModelGroup[],
+): boolean {
+  if (req.modelGroupIn && !req.modelGroupIn.some((n) => modelInGroup(groups, n, model))) return false;
+  if (req.modelGroupNotIn && req.modelGroupNotIn.some((n) => modelInGroup(groups, n, model))) return false;
+  return true;
+}
+
+/** Current membership (hrn:node:hadronmemory.com:specs:cor:agt:060:12), never authorization or family/tier inference. */
+export function matchingModelGroupNames(groups: EffectiveModelGroup[], model: string | null | undefined): string[] {
+  const normalized = model?.trim().toLowerCase();
+  if (!normalized) return [];
+  return groups.filter(g => g.patterns.some(p => matchesModel(p.trim().toLowerCase(), normalized))).map(g => g.name).sort();
+}

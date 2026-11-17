@@ -19,7 +19,7 @@ beforeEach(async () => {
   const admin = await db.user.create({ data: { id: generateId(), githubId: 242900, githubUsername: 'edited-admin' } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   ctx = { db, userId: admin.id, roles: ['READER'] };
-  agentId = (await M.createAgent({}, { orgId: org.id, name: 'Coordinator role' }, ctx)).id;
+  agentId = (await M.createAgent({}, { orgId: org.id, name: 'Coordinator role', personaRole: 'test-worker' }, ctx)).id;
   appId = (await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Edited team', urn: `${org.urn}:team` } })).id;
   await db.appAgent.create({ data: { appId, agentId } });
   await M.createAgentTickerTemplate({}, { agentRef: agentId, input: { name: 'Base tick', cadenceSeconds: 600 } }, ctx);

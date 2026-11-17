@@ -2,8 +2,9 @@
  * #1326 — the system-owned attribution stored with a Node content state.
  *
  * This module only CARRIES an already recorded stamp. Task attestation is
- * verified in #1328, and trusted human attribution is minted in #1336; a
- * generic NodeInput or JSON bag has no path to these columns.
+ * verified in #1328 and trusted human attribution is minted in #1336, both in
+ * `judgeAuthoring` (`authoringAttestation.ts`); a generic NodeInput or JSON bag
+ * has no path to these columns.
  */
 import type { NodeAuthorshipKind } from '../generated/prisma/index.js';
 
@@ -26,7 +27,7 @@ export function carryNodeAuthorship(source: NodeAuthorshipStamp): NodeAuthorship
   };
 }
 
-/** An authored edit has no verified replacement attribution until #1328/#1336. */
+/** An authored edit that no attested or trusted-human write stamped has no verified attribution. */
 export function clearNodeAuthorship(): NodeAuthorshipStamp {
   return {
     authorshipKind: null,

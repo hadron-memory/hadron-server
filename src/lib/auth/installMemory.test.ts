@@ -166,9 +166,9 @@ describe('#2044 install memory — after the App is soft-deleted (ruling A, R45)
     }
   });
 
-  it('whoever manages the App deletes it by hand; everyone else gets the same not-found', async () => {
-    for (const [who, ok] of [['admin', true], ['appOwner', true], ['member', false], ['contributor', false],
-      ['stranger', false], ['revokedAdmin', false], ['foreignAdmin', false], ['otherMember', false]] as const) {
+  it.each([['admin', true], ['appOwner', true], ['member', false], ['contributor', false],
+    ['stranger', false], ['revokedAdmin', false], ['foreignAdmin', false], ['otherMember', false]] as const)(
+    'whoever manages the App deletes it by hand; everyone else gets the same not-found (%s)', async (who, ok) => {
       const f = await deleted();
       const run = () => (resolvers.Mutation as any).deleteMemory({}, { id: f.install.id }, gql(f[who].id));
       if (ok) {
@@ -179,10 +179,8 @@ describe('#2044 install memory — after the App is soft-deleted (ruling A, R45)
         await expect(run(), who).rejects.toThrow(/MEMORY_NOT_FOUND/);
         expect((await db.memory.findUniqueOrThrow({ where: { id: f.install.id } })).deletedAt, who).toBeNull();
       }
-      await cleanDb(db);
-      orgId = (await db.organization.create({ data: { id: generateId(), name: 'im-org', urn: 'im-org' } })).id;
-    }
-  });
+    },
+  );
 
   it('a live-App manager deletes it too, and an Agent system memory is still undeletable by hand', async () => {
     const f = await fixture();

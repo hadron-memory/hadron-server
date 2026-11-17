@@ -26,6 +26,7 @@ import { __matcherTesting } from '../agentTasks/matcher.js';
 import { loadPendingReasons } from '../tickers/checkPending.js';
 import { launchForAssignment } from '../hostOperations/launch.js';
 import { declareAllStopLanes } from '../../test/stopLanes.js';
+import { serveEveryAgent } from '../../test/servedBootPrompt.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -75,6 +76,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: max.id, role: 'ADMIN' } });
   const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(max.id));
   agentId = agent.id;
+  await serveEveryAgent(db); // #2712: binds are served
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true } });
   otherApp = await db.app.create({ data: { organizationId: org.id, name: 'Other', urn: `${org.urn}:other` }, select: { id: true } });
   await db.appMember.create({ data: { appId: app.id, userId: mia.id, role: 'member' } });
@@ -248,7 +250,7 @@ describe('cor:agt:090:03 — every level stops assignment', () => {
     const e = await refusal(M.reassignAgentTask({}, { taskId: assigned.id, assignee: { worker: 'Liam' } }, ctx(max.id)));
     const handle = (await db.user.findUniqueOrThrow({ where: { id: max.id }, select: { handle: true } })).handle;
     const setter = handle ? `@${handle}` : `user ${max.id}`;
-    expect(e.message).toBe(`Can't assign to Liam: a PAUSE_DISPATCH stop signal (TEAM, set by ${setter}, until ${until.toISOString()}) covers them. Assign someone else, or whoever manages the App lifts it (hadron_stop_signal_lift id=${s.id}).`);
+    expect(e.message).toBe(`Can't assign to Liam: a PAUSE_DISPATCH stop signal (TEAM, set by ${setter}, until ${until.toISOString()}) covers them. Assign someone else, or whoever manages the App lifts it (\`hadron team stop lift\`, signal id ${s.id}).`);
     expect(e.extensions).toMatchObject({
       code: 'TASK_STOPPED', workerId: liam.id, workerUrn: expect.stringMatching(/^hrn:worker:.*:liam$/), moreBlockers: false,
       blockers: [{ id: s.id, level: 'PAUSE_DISPATCH', scope: 'TEAM', setByUserId: max.id, setByHandle: handle, setByHostKey: false, until: until.toISOString() }],

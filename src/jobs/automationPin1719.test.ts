@@ -11,6 +11,7 @@ import { materializeHaRunTools } from '../lib/runner/tools/haTools.js';
 import { ToolExecutionError } from '../lib/llm/index.js';
 import { storedAutomationPin } from '../lib/automation/pins.js';
 import { makeProdRunDeps } from './appRunDeps.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 vi.mock('../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 beforeEach(async () => { await cleanDb(db); });
@@ -26,13 +27,17 @@ async function fixture() {
   const dependency = await db.node.create({ data: { memoryId: memory.id, loc: 'doc', name: 'Dependency', content: 'approved doc' } });
   const edge = await db.edge.create({ data: { memoryId: memory.id, sourceId: entry.id, targetId: next.id, name: 'next', loc: 'entry:next:next' } });
   await db.edge.create({ data: { memoryId: memory.id, sourceId: next.id, targetId: dependency.id, name: 'documents', loc: 'next:documents:doc' } });
+  // #2712: a run needs an installed Agent with a served boot prompt (R74).
+  const agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: 'pin.test:runner', name: 'runner' } });
+  await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+  await serveAgentBootPrompt(db, agent.id, 'Test boot prompt.');
   const ctx = { db, userId: user.id, roles: [] };
-  const schedule = await appRunMutations.createAgentSchedule({}, { input: { appRef: app.id, name: 'Pinned', cron: '* * * * *', entryNodeUrn: 'hrn:node:pin.test:flow:entry', runAsSelf: true } }, ctx);
-  const run = () => mintAppRun(db, { appId: app.id, organizationId: org.id, userId: user.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn });
+  const schedule = await appRunMutations.createAgentSchedule({}, { input: { appRef: app.id, name: 'Pinned', cron: '* * * * *', entryNodeUrn: 'hrn:node:pin.test:flow:entry', runAsSelf: true, agentRef: agent.id } }, ctx);
+  const run = () => mintAppRun(db, { appId: app.id, organizationId: org.id, userId: user.id, agentId: agent.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn });
   const llm = vi.fn(async () => ({ text: 'ok', tokensIn: 1, tokensOut: 1, provider: 'test', model: 'test' }));
   const writeOutput = vi.fn(async () => null);
   const deps: RunExecutionDeps = { ...makeProdRunDeps(db), resolveConfig: vi.fn(async () => ({ config: {} }) as never), llm, writeOutput };
-  return { user, org, app, memory, entry, next, dependency, edge, ctx, schedule, run, deps, llm, writeOutput };
+  return { user, org, app, agent, memory, entry, next, dependency, edge, ctx, schedule, run, deps, llm, writeOutput };
 }
 describe('R5b setup consent', () => {
   it.each(['entry', 'next'] as const)('fails before executing after %s content is altered', async key => {
@@ -53,8 +58,8 @@ describe('R5b setup consent', () => {
   });
   it('fails loudly for a legacy unpinned trigger, never adopting it at mint', async () => {
     const f = await fixture();
-    const legacy = await db.agentSchedule.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, name: 'Legacy', cron: '* * * * *', entryNodeUrn: f.schedule.entryNodeUrn } });
-    const run = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: 'SCHEDULE', triggerId: legacy.id, entryNodeUrn: legacy.entryNodeUrn });
+    const legacy = await db.agentSchedule.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, agentId: f.agent.id, userId: f.user.id, name: 'Legacy', cron: '* * * * *', entryNodeUrn: f.schedule.entryNodeUrn } });
+    const run = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: 'SCHEDULE', triggerId: legacy.id, entryNodeUrn: legacy.entryNodeUrn });
     expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
     expect(f.llm).not.toHaveBeenCalled();
     expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure).toMatchObject({ code: 'AUTOMATION_UNADOPTED', message: expect.stringMatching(/re-adopt/) });
@@ -81,7 +86,7 @@ it('re-adoption applies to future runs and poll events, never changing an alread
   expect(await executeAppRun(db, origin.id, f.deps)).toBe('failed');
   const next = await f.run();
   expect(await executeAppRun(db, next.id, f.deps)).toBe('completed');
-  const poll = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: 'INTEGRATION', parentRunId: origin.id, entryNodeUrn: f.schedule.entryNodeUrn });
+  const poll = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: 'INTEGRATION', parentRunId: origin.id, entryNodeUrn: f.schedule.entryNodeUrn });
   expect(poll.automationPin).toEqual(storedAutomationPin(pin));
   expect(await executeAppRun(db, poll.id, f.deps)).toBe('completed');
 });
@@ -89,7 +94,7 @@ it('a child outside the setup graph is refused, while a pinned child is admitted
   const f = await fixture(); const parent = await f.run();
   const outside = await db.node.create({ data: { memoryId: f.memory.id, loc: 'outside', name: 'Outside', isRunnable: true, content: 'unapproved child' } });
   for (const [loc, outcome] of [['outside', 'failed'], ['next', 'completed']] as const) {
-    const child = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: 'SPAWN', parentRunId: parent.id, entryNodeUrn: `hrn:node:pin.test:flow:${loc}` });
+    const child = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: 'SPAWN', parentRunId: parent.id, entryNodeUrn: `hrn:node:pin.test:flow:${loc}` });
     f.llm.mockClear();
     expect(await executeAppRun(db, child.id, f.deps)).toBe(outcome);
     if (outcome === 'failed') {
@@ -114,11 +119,11 @@ it('only the run-as user may re-adopt, and a stale preview never grants consent'
 it.each(['WEBHOOK', 'MANUAL'] as const)('generic re-adoption also binds %s triggers; event input cannot replace the pin', async triggerKind => {
   const f = await fixture();
   const row = triggerKind === 'WEBHOOK'
-    ? await db.agentWebhook.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, name: 'Hook', secret: generateId(), entryNodeUrn: f.schedule.entryNodeUrn } })
-    : await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind, entryNodeUrn: f.schedule.entryNodeUrn });
+    ? await db.agentWebhook.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, agentId: f.agent.id, userId: f.user.id, name: 'Hook', secret: generateId(), entryNodeUrn: f.schedule.entryNodeUrn } })
+    : await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind, entryNodeUrn: f.schedule.entryNodeUrn });
   const adopted = await adopt(f, triggerKind, row.id);
   await db.node.update({ where: { id: f.entry.id }, data: { content: 'swapped flow' } });
-  const run = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id,
+  const run = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id,
     triggerKind: triggerKind === 'MANUAL' ? 'INTEGRATION' : triggerKind, triggerId: row.id,
     parentRunId: triggerKind === 'MANUAL' ? row.id : undefined, entryNodeUrn: f.schedule.entryNodeUrn,
     eventData: { automationPin: adopted, grants: ['everything'] } });
@@ -206,7 +211,7 @@ it('setup and re-adoption persist no authored bytes on triggers, manual consent 
   const preview = await automationPinQueries.previewAutomation({}, { triggerKind: 'SCHEDULE', triggerRef: f.schedule.id }, f.ctx);
   await adopt(f);
   expect(JSON.stringify(preview)).toContain('approved next');
-  const manual = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.schedule.entryNodeUrn });
+  const manual = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.schedule.entryNodeUrn });
   const run = await f.run();
   const schedule = await db.agentSchedule.findUniqueOrThrow({ where: { id: f.schedule.id } });
   const consent = await db.manualAutomationPin.findUniqueOrThrow({ where: { runId: manual.id } });
@@ -249,7 +254,7 @@ it.each(['entry', 'runAsSelf'] as const)('an authorized owner %s edit re-capture
   // re-capture) instead of the literal URN.
   expect((row.automationPin as any).entryId).toBe(row.entryNodeId);
   expect((row.automationPin as any).userId).toBe(row.userId);
-  const run = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: row.userId ?? undefined, triggerKind: 'SCHEDULE', triggerId: row.id, entryNodeUrn: row.entryNodeUrn });
+  const run = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: row.userId ?? undefined, triggerKind: 'SCHEDULE', triggerId: row.id, entryNodeUrn: row.entryNodeUrn });
   expect(await executeAppRun(db, run.id, f.deps)).toBe('completed');
 });
 
@@ -422,9 +427,9 @@ it('a declared named AI config is pinned at setup and payload overrides cannot s
   const f = await fixture();
   await db.aiServiceConfig.create({ data: { appId: f.app.id, name: 'default', provider: 'openai', model: 'default' } });
   const custom = await db.aiServiceConfig.create({ data: { appId: f.app.id, name: 'custom', provider: 'openai', model: 'custom' } });
-  const schedule = await appRunMutations.createAgentSchedule({}, { input: { appRef: f.app.id, name: 'named', cron: '* * * * *', entryNodeUrn: f.schedule.entryNodeUrn, aiConfigName: 'custom', runAsSelf: true } }, f.ctx);
+  const schedule = await appRunMutations.createAgentSchedule({}, { input: { appRef: f.app.id, name: 'named', cron: '* * * * *', entryNodeUrn: f.schedule.entryNodeUrn, aiConfigName: 'custom', runAsSelf: true, agentRef: f.agent.id } }, f.ctx);
   expect((schedule.automationPin as any).resources.ai.id).toBe(custom.id);
-  const input = { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: 'SCHEDULE' as const, triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn };
+  const input = { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: 'SCHEDULE' as const, triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn };
   expect(await executeAppRun(db, (await mintAppRun(db, { ...input, eventData: { __aiConfigName: 'custom' } })).id, f.deps)).toBe('completed');
   const swapped = await mintAppRun(db, { ...input, eventData: { __aiConfigName: 'default' } });
   expect(await executeAppRun(db, swapped.id, f.deps)).toBe('failed');
@@ -510,6 +515,7 @@ it.each(['aiConfigName', 'agentRef'] as const)('the owner %s selector edit re-ca
   const f = await fixture();
   const agent = await db.agent.create({ data: { name: 'Selected', urn: 'pin.test:selected', organizationId: f.org.id } });
   await db.appAgent.create({ data: { appId: f.app.id, agentId: agent.id } });
+  await serveAgentBootPrompt(db, agent.id, 'Selected boot prompt.');
   const config = await db.aiServiceConfig.create({ data: { name: field === 'aiConfigName' ? 'custom' : 'default', provider: 'openai', model: 'new-model', ...(field === 'aiConfigName' ? { appId: f.app.id } : { agentId: agent.id }) } });
   const row = await appRunMutations.updateAgentSchedule({}, { id: f.schedule.id, input: field === 'aiConfigName' ? { aiConfigName: 'custom' } : { agentRef: agent.id } }, f.ctx);
   expect((row.automationPin as any).resources.ai?.id).toBe(config.id);
@@ -554,7 +560,7 @@ it('a definition partial does not grant a spawned child permission to execute it
   expect(pin.flows).not.toContain(partial.id);
   expect(pin.resources.tools).not.toContain('mcp__unused__tool');
   const parent = await f.run();
-  const child = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: 'SPAWN', parentRunId: parent.id, entryNodeUrn: 'hrn:node:pin.test:flow:snippet' });
+  const child = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: 'SPAWN', parentRunId: parent.id, entryNodeUrn: 'hrn:node:pin.test:flow:snippet' });
   expect(await executeAppRun(db, child.id, f.deps)).toBe('failed');
   expect(f.llm).not.toHaveBeenCalled();
   expect((await db.appRun.findUniqueOrThrow({ where: { id: child.id } })).failure).toMatchObject({ code: 'AUTOMATION_CHANGED' });

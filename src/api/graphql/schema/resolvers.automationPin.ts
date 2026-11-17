@@ -7,8 +7,7 @@ import { approvalDepth, headlineOf, summarizeAutomation, type TriggerFacts } fro
 import { runAuthContext, isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
-import { boundWorkerId } from '../../../lib/bootPrompt.js';
-import { currentActorAmbiguity } from '../../../lib/requestActor.js';
+import { workerBoundActor } from '../../../lib/grants/triggerGrant.js';
 import { AppNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
@@ -16,6 +15,8 @@ import { Prisma } from '../../../generated/prisma/index.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { requireOwnerOrOrgRole, type Context } from './resolvers.helpers.js';
+
+import { projectAutomationReadGrant } from './automationReadGrantProjection.js';
 
 export type AutomationTriggerKind = 'SCHEDULE' | 'WEBHOOK' | 'MANUAL';
 export interface AutomationTriggerRef { triggerKind: AutomationTriggerKind; triggerRef: string }
@@ -45,10 +46,10 @@ const badInput = (message: string) => new GraphQLError(message, { extensions: { 
  */
 export async function requireAdopterContext(ctx: Context): Promise<string> {
   if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) throw denied();
-  // An ambiguous MCP actor (several live worker bindings, none named) and a refused session binding are worker
-  // shapes too: the same refusals as the boot-prompt pointer gate (assertMayWriteBootPromptPointer).
-  if (boundWorkerId() || currentActorAmbiguity() !== null || ctx.sessionBindingRefused) throw workerRefused();
-  if (ctx.sessionId && await ctx.db.session.findFirst({ where: { id: ctx.sessionId, workerId: { not: null } }, select: { id: true } })) throw workerRefused();
+  // An ambiguous MCP actor (several live worker bindings, none named), a refused session binding and a session row that
+  // names a worker are worker shapes too: the same refusals as the boot-prompt pointer gate (assertMayWriteBootPromptPointer).
+  // #3483: ONE worker test, shared with the schedule and webhook grant door (src/lib/grants/triggerGrant.ts).
+  if (await workerBoundActor(ctx)) throw workerRefused();
   return ctx.userId;
 }
 
@@ -119,9 +120,14 @@ async function storedConsent(db: Context['db'], kind: AutomationTriggerKind, id:
 }
 type Facts = { facts: TriggerFacts; name: string | null };
 function factsOf(kind: AutomationTriggerKind, row: Record<string, unknown>): Facts {
-  if (kind === 'SCHEDULE') return { name: String(row.name), facts: { kind, schedule: { cron: (row.cron as string | null) ?? null, timezone: String(row.timezone ?? 'UTC'), runAt: (row.runAt as Date | null) ?? null, enabled: row.enabled !== false } } };
-  if (kind === 'WEBHOOK') return { name: String(row.name), facts: { kind } };
-  return { name: null, facts: { kind } };
+  // #2479: a live balance can be zero (exhausted), not a configured limit.
+  // Legacy manual runs without initial snapshots retain the default setup view; never use their live counters.
+  const budgets = kind === 'MANUAL'
+    ? { budgetTokens: row.budgetTokensInitial as number | null, budgetActions: row.budgetActionsInitial as number | null }
+    : { budgetTokens: row.budgetTokens as number | null, budgetActions: row.budgetActions as number | null };
+  if (kind === 'SCHEDULE') return { name: String(row.name), facts: { kind, budgets, schedule: { cron: (row.cron as string | null) ?? null, timezone: String(row.timezone ?? 'UTC'), runAt: (row.runAt as Date | null) ?? null, enabled: row.enabled !== false } } };
+  if (kind === 'WEBHOOK') return { name: String(row.name), facts: { kind, budgets } };
+  return { name: null, facts: { kind, budgets } };
 }
 
 const MAX_PAGE = 50;
@@ -144,12 +150,13 @@ async function entryUnavailable(ctx: Context, entryNodeUrn: string): Promise<boo
   return !anchor || !await canReadMemory(ctx.db, ctx, anchor.memoryId);
 }
 /** #2503: no graph resolves, so there is no hash to approve, no flows and no depth; the stale URN is the only detail. */
-const staleEntryApproval = (entryNodeUrn: string) => ({
+const staleEntryApproval = (entryNodeUrn: string, readGrants: Awaited<ReturnType<typeof liveReadGrants>>) => ({
   state: 'UNADOPTED' as AdoptionState,
   hash: '',
   summary: { name: entryNodeUrn, flows: [], reads: [], writes: [], tools: [], schedule: null, cannotDo: [],
     limits: [`The entry node ${entryNodeUrn} this automation was set up with no longer resolves (renamed, moved, deleted or unreadable). Set the trigger to the entry node's current URN, then review and approve again.`] },
   depth: {},
+  readGrants,
 });
 
 export const automationPinQueries = {
@@ -230,7 +237,7 @@ export const automationPinQueries = {
       // #2503: a legacy row (no stamped id, nothing to resolve by) whose stored URN is dead is UNADOPTED, with that
       // URN, which the row already stores, as the detail. Missing and unreadable are one answer (cor:api:140:03).
       // Only the ENTRY decides it: an error from deeper in the graph is not "the entry is gone" and rethrows.
-      if ((e instanceof NodeNotFoundError || e instanceof AutomationPinError) && !row.entryNodeId && !byStoredId && await entryUnavailable(ctx, row.entryNodeUrn)) return staleEntryApproval(row.entryNodeUrn);
+      if ((e instanceof NodeNotFoundError || e instanceof AutomationPinError) && !row.entryNodeId && !byStoredId && await entryUnavailable(ctx, row.entryNodeUrn)) return staleEntryApproval(row.entryNodeUrn, await liveReadGrants(ctx, input.triggerKind, row));
       throw e;
     }
     let state: AdoptionState = stored.state;
@@ -245,9 +252,29 @@ export const automationPinQueries = {
         catch (e) { if (e instanceof NodeNotFoundError || e instanceof AutomationPinError) state = 'CHANGED'; else throw e; }
       }
     }
-    return { state, hash: pin.hash, summary: summarizeAutomation(pin, factsOf(input.triggerKind, row as never).facts), depth: approvalDepth(pin) };
+    return { state, hash: pin.hash, summary: summarizeAutomation(pin, factsOf(input.triggerKind, row as never).facts), depth: approvalDepth(pin), readGrants: await liveReadGrants(ctx, input.triggerKind, row) };
   },
 };
+
+/**
+ * #2883 (ruling 0081 A): the live read grants this trigger holds, shown to the adopter, who is approving what the
+ * automation may read. Revoked rows are not shown (they read nothing). The target's URN is named only when the adopter
+ * can read that memory; otherwise it is null, as on every other grant projection. A MANUAL run holds none.
+ */
+async function liveReadGrants(ctx: Context, kind: AutomationTriggerRef['triggerKind'], row: { id: string; appId: string }) {
+  if (kind !== 'SCHEDULE' && kind !== 'WEBHOOK') return [];
+  const rows = await ctx.db.appAutomationReadGrant.findMany({
+    where: { appId: row.appId, triggerKind: kind, triggerId: row.id, revokedAt: null },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  });
+  const out = [];
+  for (const g of rows) {
+    const memory = await canReadMemory(ctx.db, ctx as never, g.memoryId)
+      ? await ctx.db.memory.findFirst({ where: { id: g.memoryId, deletedAt: null }, select: { urn: true } }) : null;
+    out.push(projectAutomationReadGrant(g, memory));
+  }
+  return out;
+}
 
 type Row = Awaited<ReturnType<typeof load>>;
 /**

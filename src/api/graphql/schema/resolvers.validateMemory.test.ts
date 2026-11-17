@@ -15,7 +15,7 @@ import { cleanDb, createDbNode } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import { resolvers, type Context } from './resolvers.js';
-import { validateMemoryNodes } from '../../../lib/memoryValidation.js';
+import { validateMemoryNodes, formatValidationProse } from '../../../lib/memoryValidation.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -350,6 +350,24 @@ describe('validateMemory — findings are capped at the SOURCE (#859 review)', (
     const report = await validateMemoryNodes(db, mem.id, 3);
     expect(report.findings.length).toBe(3);
     expect(report.totalFindings).toBe(12);
+  });
+
+  it('#3010: mixed problems and informational findings past the cap stay bounded and the prose says so', async () => {
+    for (let i = 0; i < 4; i++) await createDbNode(db, { loc: `mp-${i}`, memoryId: mem.id, name: `P${i}` });
+    for (let i = 0; i < 3; i++) {
+      const n = await createDbNode(db, { loc: `mi-${i}`, memoryId: mem.id, name: `I${i}`, content: 'x' });
+      await db.node.update({ where: { id: n.id }, data: { embeddingTruncatedChunks: 2 } });
+    }
+    const report = await validateMemoryNodes(db, mem.id, 3);
+    // Retained results stay at the cap, problems first; the totals stay true.
+    expect(report.findings.length).toBe(3);
+    expect(report.findings.every((f) => f.kind !== 'INDEX_TRUNCATED')).toBe(true);
+    expect(report.totalFindings).toBe(4);
+    expect(report.totalInformational).toBe(3);
+    const lines = report.findings.map((f) => `[${f.kind}] ${f.nodeLoc}`);
+    const prose = formatValidationProse(report, lines, []);
+    expect(prose).toContain('Found 4 issue(s) in 7 nodes (showing the first 3):');
+    expect(prose).toContain('Informational findings (3): none shown');
   });
 
   it('BROKEN_REF ignores a soft-deleted EDGE row', async () => {

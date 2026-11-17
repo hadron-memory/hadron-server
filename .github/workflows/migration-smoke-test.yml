@@ -147,8 +147,10 @@ jobs:
 
   # #2413 S3 (plan section 3.6): the same production path (`migrate deploy`), but the database is owned by a
   # NON-SUPERUSER migrator and served by a NON-OWNER role, so a migration that adds a table or object the serve
-  # role cannot use fails here, before production. The grants file refuses a superuser runner, so `postgres` is
-  # used only to create roles and databases; everything else runs as the migrator.
+  # role cannot use fails here, before production. The grants file refuses a serve role that is the role running
+  # it, is a superuser, or is a member of the owner (or the reverse). It must be run as the owner, never as
+  # `postgres` (its default privileges attach to the runner), so `postgres` is used only to create roles and
+  # databases; everything else runs as the migrator.
   serve-role-smoke:
     runs-on: ubuntu-latest
     env:
@@ -208,6 +210,12 @@ jobs:
 
       - name: Apply PR's new migrations via prisma migrate deploy (as the migrator)
         run: pnpm prisma migrate deploy
+
+      # The entrypoint's step after migrate (scripts/docker-start.sh): default ACLs grant DML on every new table, so the
+      # serve role's write on `actions` (a table only the deploy-time upsert may write, #3668) is revoked here, exactly as
+      # it is for _prisma_migrations. Skipping it leaves the verifier correctly reporting a forbidden privilege.
+      - name: Revoke what the default ACLs granted on the new tables (as the migrator, the entrypoint's order)
+        run: pnpm -s tsx scripts/db/revoke-runtime-migrations.ts
 
       - name: Verify the serve role after the migrations
         run: pnpm -s tsx scripts/db/verify-runtime-role.ts

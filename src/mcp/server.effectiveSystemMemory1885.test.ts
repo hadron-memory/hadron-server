@@ -236,3 +236,98 @@ describe('the Signatures line: inherited sanitization and the #1902 switch, comb
     expect(loaded()).toEqual([]);
   });
 });
+
+it('#2774 renders inherited edge endpoint metadata without loading their bodies', async () => {
+  const release = await db.node.findFirstOrThrow({ where: { memoryId: engineer.mem, loc: 'processes:release' } });
+  const ship = await db.node.findFirstOrThrow({ where: { memoryId: engineer.mem, loc: 'tasks:ship' } });
+  const override = await db.node.findFirstOrThrow({ where: { memoryId: backend.mem, loc: 'tasks:open-pr' } });
+  const endpointIds = new Set([ship.id, override.id]);
+  await db.node.update({ where: { id: release.id }, data: { abstract: 'Inherited summary' } });
+  await db.node.updateMany({ where: { id: { in: [...endpointIds] } }, data: { content: 'UNSELECTED'.repeat(16_384) } });
+  await db.edge.create({ data: { memoryId: engineer.mem, sourceId: ship.id, targetId: release.id, name: 'before', loc: 'ship-before-release' } });
+  const single = await call('hadron_get_node', { urn: childUrn('processes:release'), contentScope: 'abstract', raw: true });
+  let bytes = 0;
+  const edges = db.edge.findMany.bind(db.edge);
+  const edgeSpy = vi.spyOn(db.edge, 'findMany').mockImplementation((async (args: any) => {
+    const rows = await edges(args);
+    for (const row of rows as any[]) for (const endpoint of [row.source, row.target]) bytes += Buffer.byteLength(endpoint?.content ?? '');
+    return rows;
+  }) as typeof db.edge.findMany);
+  const unique = db.node.findUnique.bind(db.node);
+  const nodeSpy = vi.spyOn(db.node, 'findUnique').mockImplementation((async (args: any) => {
+    const row = await unique(args);
+    if (row && endpointIds.has(row.id)) bytes += Buffer.byteLength(row.content ?? '');
+    return row;
+  }) as typeof db.node.findUnique);
+  try {
+    const batch = await call('hadron_get_nodes', { refs: [childUrn('processes:release')], contentScope: 'abstract', raw: true });
+    expect(batch).toContain(single);
+    expect(batch).toContain(childUrn('tasks:open-pr'));
+    expect(batch).toContain(baseUrn('tasks:ship'));
+    expect(batch).toContain('Source: abstract-stale');
+    expect(bytes).toBe(0);
+  } finally { edgeSpy.mockRestore(); nodeSpy.mockRestore(); }
+});
+
+/** Stage a real write after metadata/prefetch, before the one-node render snapshot. */
+function beforeRenderSnapshot(change: () => Promise<unknown>) {
+  const original = db.$transaction.bind(db);
+  let snapshots = 0;
+  let changed = false;
+  let bodyBytes = 0;
+  const spy = vi.spyOn(db, '$transaction').mockImplementation(((fn: any, options: any) => {
+    if (typeof fn !== 'function') return (original as any)(fn, options);
+    const invoke = () => (original as any)(async (tx: any) => {
+      const findFirst = tx.node.findFirst.bind(tx.node);
+      const read = vi.spyOn(tx.node, 'findFirst').mockImplementation(async (args: any) => {
+        const row = await findFirst(args);
+        if (changed && args?.include?.outgoingEdges && !args?.omit?.content) bodyBytes += Buffer.byteLength(row?.content ?? '');
+        return row;
+      });
+      try { return await fn(tx); } finally { read.mockRestore(); }
+    }, options);
+    if (options?.isolationLevel !== 'RepeatableRead' || ++snapshots !== 2) return invoke();
+    return change().then(() => { changed = true; return invoke(); });
+  }) as typeof db.$transaction);
+  return { spy, changed: () => changed, bodyBytes: () => bodyBytes };
+}
+
+it.each(['refs', 'prefix'] as const)('#2774 withholds inherited bodies when inheritance ends between passes (%s)', async (form) => {
+  const race = beforeRenderSnapshot(() => db.agent.update({ where: { id: backend.id }, data: { extendsAgentId: null } }));
+  try {
+    const output = await call('hadron_get_nodes', {
+      ...(form === 'refs' ? { refs: [childUrn('processes:release')] }
+        : { memoryUrn: `hrn:mem:${backend.memUrn}`, locPrefix: 'processes:release' }),
+      contentScope: 'all', raw: true,
+    });
+    expect(race.changed(), output).toBe(true);
+    expect(output).toContain('1 unavailable');
+    expect(output).not.toContain('EngRelease body');
+  } finally { race.spy.mockRestore(); }
+});
+
+it('#2774 withholds an old loc renamed between metadata and render', async () => {
+  const own = await db.node.findFirstOrThrow({ where: { memoryId: backend.mem, loc: 'notes:own' } });
+  const race = beforeRenderSnapshot(() => db.node.update({ where: { id: own.id }, data: { loc: 'notes:renamed' } }));
+  try {
+    const output = await call('hadron_get_nodes', { refs: [childUrn('notes:own')], contentScope: 'all', raw: true });
+    expect(race.changed(), output).toBe(true);
+    expect(output).toContain('1 unavailable');
+    expect(output).toContain(childUrn('notes:own'));
+    expect(output).not.toContain('BackOwn body');
+    expect(output).not.toContain('notes:renamed');
+  } finally { race.spy.mockRestore(); }
+});
+
+it('#2774 reauthorizes before reading a body after access is revoked between passes', async () => {
+  const race = beforeRenderSnapshot(() => db.appMember.deleteMany({ where: { userId: reader } }));
+  try {
+    const output = await call('hadron_get_nodes', { refs: [childUrn('notes:own')], contentScope: 'all', raw: true });
+    expect(race.changed(), output).toBe(true);
+    expect(output).toContain('1 unavailable');
+    expect(output).not.toContain('BackOwn body');
+    // The outer recheck also refuses the wire output. This observation pins
+    // the inner gate independently: no full projection is read after revoke.
+    expect(race.bodyBytes()).toBe(0);
+  } finally { race.spy.mockRestore(); }
+});

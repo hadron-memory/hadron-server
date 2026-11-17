@@ -1,3 +1,4 @@
+import { listAppInstallations } from './appInstallations.js';
 /**
  * #723 — reconcile pre-#723 `shared` app-class memories onto the column key.
  *
@@ -113,10 +114,7 @@ export async function adoptSharedMemories(
     const slug = sharedUrnAgentSlug(row.urn) ?? sharedUrnAgentSlug(row.legacyUrn);
     if (!slug) continue; // e.g. a flat `<root>:shared` — not a string-keyed row.
 
-    const installed = await db.appAgent.findMany({
-      where: { appId: row.appId! },
-      select: { agent: { select: { id: true, urn: true, legacyUrn: true, name: true } } },
-    });
+    const installed = (await listAppInstallations(db,row.appId!));
     const matches = installed
       .map((r) => r.agent)
       .filter((a): a is NonNullable<typeof a> => !!a)

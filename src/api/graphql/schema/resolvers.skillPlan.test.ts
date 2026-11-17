@@ -16,6 +16,7 @@ import { generateId } from '../../../lib/id.js';
 import { splitNodeUrn } from '../../../lib/urn.js';
 import { revisionStateHashRefreshMarker } from '../../../lib/nodeRevisionSnapshot.js';
 import { hash } from '../../../lib/skilldoc/hash.js';
+import { MAX_RESOLVE_DEPTH } from '../../../lib/includes/spliceIncludes.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -307,6 +308,27 @@ describe('includes in an exported body (#2041, cor:dmo:150:03 R9)', () => {
   });
 });
 
+describe('an include tag is not a literal-text placeholder (#2943, hadron-cli#1166)', () => {
+  const template = (entry: { findings: Array<{ rule: string }> }) => entry.findings.filter(f => f.rule === 'skill-content-has-template');
+
+  it('a body whose only braces are include tags gets no template finding; a {{var}} beside them still does', async () => {
+    await mkNode('policies:conduct', { content: 'Be kind.', isRunnable: false });
+    await mkNode('tasks:only-include', { properties: declaration({ name: 'skill-only-include' }), content: '# Body\n\n{{> policies:conduct}}' });
+    await mkNode('tasks:with-var', { properties: declaration({ name: 'skill-with-var' }), content: '{{> policies:conduct}}\n\nHi {{name}}' });
+    for (const intent of ['LINT', 'EXPORT']) {
+      const got = await plan({ intent, files: [] });
+      const entries = got.entries as any[];
+      expect(entries, intent).toHaveLength(2);
+      const only = entries.find((e) => JSON.stringify(e).includes('only-include'));
+      const withVar = entries.find((e) => JSON.stringify(e).includes('with-var'));
+      expect(template(only), intent).toEqual([]);
+      expect(template(withVar).map((f: any) => f.message), intent).toEqual([
+        'content contains a {{…}} placeholder — export is verbatim, so it ships as literal text; keep it only if the skill is meant to carry a template',
+      ]);
+    }
+  });
+});
+
 describe('a broken include warns in skill lint (#2048 S11d, cor:dmo:150:03 R9)', () => {
   const rule = (entry: { findings: Array<{ rule: string; severity: string; message: string }> }) => entry.findings.filter(f => f.rule === 'skill-include-broken');
 
@@ -366,6 +388,39 @@ describe('a broken include warns in skill lint (#2048 S11d, cor:dmo:150:03 R9)',
     await mkNode('tasks:mixed', { properties: declaration(), content: '{{> policies:leaf}} and {{> missing-loc}}' });
     const got = await plan({ intent: 'LINT' });
     const found = rule(got.entries[0]);
+    expect(found).toHaveLength(1);
+    expect(found[0].message).toContain('1 include ');
+  });
+
+  // #2757 (Ruth's #2680 P3 1): every site that fails an include counts it. Each case is one failure, so reverting a
+  // site to the bare notice leaves the rendered body as it was and drops the finding, which only these pins see.
+  // The notice and finding name no target (cor:dmo:150:05), so each failure class answers like a missing loc.
+  const brokenOne = async (content: string) => {
+    await mkNode('tasks:probe', { properties: declaration(), content });
+    return rule((await plan({ intent: 'LINT' })).entries[0]);
+  };
+
+  it('an unresolvable URN identity counts, with the same finding as a missing loc', async () => {
+    const byUrn = await brokenOne('{{> hrn:node:nowhere.example:nomemory:nonode}}');
+    expect(byUrn).toHaveLength(1);
+    expect(byUrn[0].message).toContain('1 include ');
+    await db.node.deleteMany({ where: { memoryId: mem.id } });
+    const byLoc = await brokenOne('{{> missing-loc}}');
+    expect(byUrn).toEqual(byLoc);
+  });
+
+  it('the depth cap counts: a chain past MAX_RESOLVE_DEPTH breaks once, at the cap', async () => {
+    for (let i = 0; i <= MAX_RESOLVE_DEPTH + 1; i++) {
+      await mkNode(`policies:d${i}`, { content: i > MAX_RESOLVE_DEPTH ? 'end' : `{{> policies:d${i + 1}}}`, isRunnable: false });
+    }
+    const found = await brokenOne('{{> policies:d0}}');
+    expect(found).toHaveLength(1);
+    expect(found[0].message).toContain('1 include ');
+  });
+
+  it('a target with no qualifying revision counts: approved, and none is approved', async () => {
+    await mkNode('policies:unapproved', { content: 'Never approved.', isRunnable: false });
+    const found = await brokenOne('{{> policies:unapproved approved}}');
     expect(found).toHaveLength(1);
     expect(found[0].message).toContain('1 include ');
   });

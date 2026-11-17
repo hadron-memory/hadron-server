@@ -9,6 +9,7 @@ import { cleanDb } from '../test/helpers.js';
 import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../test/softPasskey.js';
 import { generateId } from '../lib/id.js';
 import * as pendingModule from '../auth/pendingEmailSignIn.js';
+import { sweepPasskeyCeremonies } from '../jobs/sweepPasskeyCeremonies.js';
 import * as evidenceModule from '../auth/loginEvidence.js';
 
 // Pass-through spies: every call runs the real function unless a test overrides ONE call.
@@ -202,6 +203,23 @@ describe('portal continuation, switch on', () => {
     await db.$executeRaw`UPDATE passkey_credentials SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) WHERE id = ${passkeyId}`;
     expect((await post('/complete', cookie, answer(o))).status).toBe(403);
     expect(await db.signIn.count()).toBe(0);
+  });
+
+  it('#3122: a swept ceremony refuses exactly like expiry, keeps the pending flow, and permits new options', async () => {
+    const { cookie } = await begin();
+    const o = await options(cookie!);
+    await db.$executeRaw`UPDATE passkey_ceremonies SET expires_at = (clock_timestamp() AT TIME ZONE 'UTC') - interval '31 days' WHERE id = ${o.ceremonyId}`;
+    const expired = await post('/complete', cookie, answer(o));
+    expect(expired.status).toBe(403);
+    const expected = await expired.json();
+    expect(await sweepPasskeyCeremonies(db)).toBe(1);
+    const swept = await post('/complete', cookie, answer(o));
+    expect(swept.status).toBe(403); expect(await swept.json()).toEqual(expected);
+    expect(await db.signIn.count()).toBe(0); expect(await db.authHandoffCode.count()).toBe(0);
+    expect((await db.pendingEmailSignIn.findFirstOrThrow()).completedAt).toBeNull();
+    const next = await options(cookie!);
+    expect(next.ceremonyId).not.toBe(o.ceremonyId);
+    expect((await post('/complete', cookie, answer(next))).status).toBe(200);
   });
 
   it('a new options call retires the earlier challenge, and an expired flow is dead', async () => {
