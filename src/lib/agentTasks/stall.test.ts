@@ -1,4 +1,4 @@
-import { settledTeamEventQueries } from '../../test/teamEventHorizon.js';
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../test/teamEventHorizon.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1706 (Task Management T2) — the stall evaluator, the alarm chain and its
@@ -27,6 +27,7 @@ import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
 import { evaluateStalls, isSerializationFailure, raiseStallAlarm, stallCandidates, STALL_WINDOW_DEFAULTS, wakeDueOwners } from './stall.js';
 import { mergeUsers } from '../../test/mergeConsent.js';
 import { loadAvailableForWork } from './availability.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),

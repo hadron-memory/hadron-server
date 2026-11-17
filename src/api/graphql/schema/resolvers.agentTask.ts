@@ -3420,7 +3420,45 @@ export const agentTaskQueries = {
     }),
 };
 
-type TeamEventsArgs = { appRef: string; since?: unknown; after?: string | null; before?: string | null; newestFirst?: boolean | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; alarmsInEffect?: boolean | null; taskId?: string | null; limit?: number | null };
+/** #4316 item 4: exported so the parity pin (resolvers.teamEventCursor4098.test.ts) can tie its filter cases to these keys. */
+export type TeamEventsArgs = { appRef: string; since?: unknown; after?: string | null; before?: string | null; newestFirst?: boolean | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; alarmsInEffect?: boolean | null; taskId?: string | null; limit?: number | null };
+
+/** #4316: how long a held-back horizon stays quiet before `team_events.horizon_lag` says something. */
+const HORIZON_LAG_MIN_AGE_MS = 30_000;
+/** #4316: at most one `team_events.horizon_lag` line per App per this window, per process. */
+const HORIZON_LAG_LOG_INTERVAL_MS = 60_000;
+/** #4316 (keyed by App id): when `team_events.horizon_lag` was last emitted for that App in this process. */
+const horizonLagLastLoggedAt = new Map<string, number>();
+/**
+ * #4316: one operator line when a forward read came back short while committed events of the App are held back
+ * at or above the snapshot horizon (cor:agt:050:11 records the horizon as built; a log line changes no
+ * contract). The check is ONE indexed read (`app_id, tx_id`), made only for a short forward read; only rows
+ * visible to the check's own snapshot count, so events of still-open transactions are not "held back" yet.
+ * `created_at` is a UTC-labeled naive column, so the DB clock is read as UTC too — a session TimeZone would
+ * skew the age by its offset. Best-effort by design: a failed or slow check must never change, delay or fail
+ * the page it explains.
+ */
+async function logStalledHorizon(c: Context, appId: string): Promise<void> {
+  const now = Date.now();
+  const last = horizonLagLastLoggedAt.get(appId);
+  if (last != null && now - last < HORIZON_LAG_LOG_INTERVAL_MS) return;
+  try {
+    const [row] = await c.db.$queryRaw<{ heldBack: number; oldestAgeMs: number | null }[]>`
+      SELECT count(*)::int AS "heldBack",
+             CASE WHEN min(created_at) IS NULL THEN NULL
+                  ELSE round(extract(epoch FROM ((clock_timestamp() AT TIME ZONE 'UTC') - min(created_at))) * 1000)::int END AS "oldestAgeMs"
+      FROM agent_team_events
+      WHERE app_id = ${appId} AND tx_id >= pg_snapshot_xmin(pg_current_snapshot())`;
+    if (!row?.oldestAgeMs || row.oldestAgeMs < HORIZON_LAG_MIN_AGE_MS) return;
+    horizonLagLastLoggedAt.set(appId, now);
+    console.log(JSON.stringify({
+      event: 'team_events.horizon_lag', appId, heldBack: row.heldBack, oldestAgeMs: row.oldestAgeMs,
+      at: new Date().toISOString(),
+    }));
+  } catch {
+    // Observability only: the served page is byte-identical whatever happens here.
+  }
+}
 
 async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsArgs, take: number) {
   const since = args.since == null ? null : parseStartBy(args.since);
@@ -3429,6 +3467,8 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
   const newestFirst = args.newestFirst === true;
   if (newestFirst && args.after) throw badInput('after continues the oldest-first read; with newestFirst pass before.');
   if (!newestFirst && args.before) throw badInput('before continues the newestFirst read; pass newestFirst: true with it.');
+  /** #4316: the validated `after` cursor's serving key, read once up front and passed into the forward statement. */
+  let afterKey: { id: string; txId: string; createdAt: string } | null = null;
   let beforeWhere: Prisma.AgentTeamEventWhereInput = {};
   if (args.before) {
     // Scoped to this App, like after: another App's event id is just an unknown cursor.
@@ -3439,10 +3479,18 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
     beforeWhere = { OR: [{ createdAt: { lt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { lt: cursor.id } }] };
   }
   if (args.after) {
-    const cursor = isId(args.after)
-      ? await c.db.agentTeamEvent.findFirst({ where: { id: args.after, appId: app.id }, select: { id: true } })
-      : null;
+    // #4316 (cor:api:120:05): the cursor's key is read HERE, once, and passed into the forward statement, so a
+    // cursor row deleted between the two statements still continues from its key instead of silently emptying
+    // the page. The key round-trips as TEXT: a JS Date truncates to milliseconds and would re-serve rows of the
+    // cursor's own transaction whose created_at carries microseconds. Scoped to this App: another App's event
+    // id, or anything else, is just an unknown cursor (the refusal is unchanged).
+    const [cursor] = isId(args.after)
+      ? await c.db.$queryRaw<{ id: string; txId: string; createdAt: string }[]>`
+          SELECT id, tx_id::text AS "txId", created_at::text AS "createdAt"
+          FROM agent_team_events WHERE id = ${args.after} AND app_id = ${app.id} LIMIT 1`
+      : [];
     if (!cursor) throw badInput('after is not an event of this App. Pass the id of the last event you read.');
+    afterKey = cursor;
   }
   const taskId = args.taskId ? (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId : null;
   const where: Prisma.AgentTeamEventWhereInput = {
@@ -3477,7 +3525,7 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
     FROM agent_team_events e
     WHERE e.app_id = ${app.id}
       AND e.tx_id < pg_snapshot_xmin(pg_current_snapshot())
-      ${args.after ? Prisma.sql`AND (e.tx_id,e.created_at,e.id) > (SELECT tx_id,created_at,id FROM agent_team_events WHERE id=${args.after} AND app_id=${app.id})` : Prisma.empty}
+      ${afterKey ? Prisma.sql`AND (e.tx_id,e.created_at,e.id) > (${afterKey.txId}::xid8, ${afterKey.createdAt}::timestamp, ${afterKey.id})` : Prisma.empty}
       ${since ? Prisma.sql`AND e.created_at > ${since.toISOString()}::timestamp` : Prisma.empty}
       ${args.types?.length ? Prisma.sql`AND e.type IN (${Prisma.join(args.types)})` : Prisma.empty}
       ${args.codePrefix != null ? Prisma.sql`AND starts_with(e.type,${args.codePrefix})` : Prisma.empty}
@@ -3486,6 +3534,9 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
       ${taskId ? Prisma.sql`AND e.task_id=${taskId}` : Prisma.empty}
     ORDER BY e.tx_id,e.created_at,e.id
     LIMIT ${take}`;
+  // #4316: a short forward read is the only read that can mean "the horizon is holding events of this App
+  // back"; one best-effort check, never a change to what is served.
+  if (!newestFirst && events.length < take) await logStalledHorizon(c, app.id);
   // #4135: use the stored AgentTask.handle (cor:agt:050:01, Proposed), once per page.
   // Event task ids are retained after deletion; an absent row must never invent a handle.
   const taskIds = [...new Set(events.flatMap(e => e.taskId ? [e.taskId] : []))];

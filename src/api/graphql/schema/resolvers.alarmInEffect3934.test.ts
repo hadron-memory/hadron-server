@@ -1,4 +1,4 @@
-import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 /**
  * #3934 (cor:agt:050:20, V77 "an alarm in effect") — `AgentTeamEvent.escalationEndedAt` and the `agentTeamEvents`
  * `alarmsInEffect` filter.
@@ -23,6 +23,7 @@ import { appendTaskEvent, ASSIGNEE_CLEARED_EVENT_TYPES } from '../../../lib/agen
 import { runAsActor } from '../../../lib/requestActor.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 const M = resolvers.Mutation as any;
 const DAY = '2026-10-09';

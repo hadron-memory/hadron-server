@@ -5,7 +5,9 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { settleTeamEventHorizon } from '../../../test/teamEventHorizon.js';
+import { type TeamEventsArgs } from './resolvers.agentTask.js';
+import { settleTeamEventHorizon, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 let appId:string,userId:string;
 const T=Date.UTC(2026,10,1);
@@ -93,7 +95,13 @@ describe('#4098 every filter selects the same events on the forward (SQL) and th
   await db.alarmEscalationEnd.create({data:{eventId:ended.id,endedAt:new Date(T+8000)}});
   await settle();
   const all=[plain,onTask,underscore,other,open,acked,ended].map(e=>e.id).sort();
-  const cases:Array<[Record<string,unknown>,string[]]>=[
+  // #4316 item 4: the cases are tied to TeamEventsArgs at the type level. FilterArg is every filter key of
+  // the args (appRef is identity, after/before/newestFirst are read direction, limit is page size — none
+  // filters events). The `satisfies` fails typecheck for a case naming a key the args do not have, and
+  // `parityCoversEveryFilter` below fails typecheck, naming the uncovered key, when a filter is added to
+  // TeamEventsArgs without a case here exercising it.
+  type FilterArg=keyof Omit<TeamEventsArgs,'appRef'|'after'|'before'|'newestFirst'|'limit'>;
+  const cases=[
    [{},all],
    [{since:new Date(T+2000).toISOString()},[other,open,acked,ended].map(e=>e.id)],
    [{since:new Date(T+2000)},[other,open,acked,ended].map(e=>e.id)],
@@ -108,7 +116,11 @@ describe('#4098 every filter selects the same events on the forward (SQL) and th
    [{taskId},[onTask,open].map(e=>e.id)],
    [{taskId,alarmsInEffect:true},[open.id]],
    [{since:new Date(T+4000).toISOString(),alarmsOnly:true,codePrefix:'stall.'},[acked,ended].map(e=>e.id)],
-  ];
+  ] as const satisfies ReadonlyArray<readonly [Partial<Record<FilterArg,unknown>>,readonly string[]]>;
+  type CaseFilterKeys<T>=T extends object?keyof T:never; // distributes; a bare keyof would intersect the union of case filters
+  type MissingParityCases=Exclude<FilterArg,CaseFilterKeys<(typeof cases)[number][0]>>;
+  const parityCoversEveryFilter:MissingParityCases extends never?true:MissingParityCases=true;
+  void parityCoversEveryFilter; // unused at runtime; its type is the whole assertion
   for(const [filter,expected] of cases){
    const got=await both(filter);
    expect(got.forward,`forward ${JSON.stringify(filter)}`).toEqual([...expected].sort());
