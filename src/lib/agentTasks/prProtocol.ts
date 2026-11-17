@@ -6,5 +6,11 @@ export type PrProtocolEvent =
   | { type: 'review.scheduled'; slots: string[] }
   | { type: 'pr.frozen'; head: string; pullRequest: string }
   | { type: 'review.seat.assigned'; slot: string; head: string; supersedes: string | null }
-  | { type: 'review.verdict'; slot: string; head: string; verdict: ReviewVerdict; node: string | null; receipt: string | null }
+  /**
+   * #4235 S12a (hrn:node:hadronmemory.com:specs:cor:agt:130:02): `reviewerFamily`, `reviewerModel` and `modelReportedAt`
+   * (ISO) are a snapshot of the reviewing worker's session at record time. A self-report, null where nothing is
+   * recorded, and never a readiness input (cor:agt:130:03).
+   */
+  | { type: 'review.verdict'; slot: string; head: string; verdict: ReviewVerdict; node: string | null; receipt: string | null;
+      reviewerFamily: string | null; reviewerModel: string | null; modelReportedAt: string | null }
   | { type: 'pr.ready'; head: string };

@@ -64,7 +64,7 @@ async function waitUntilBlocked(): Promise<void> {
   throw new Error('the call never blocked on a lock');
 }
 const code = (r: any): string | undefined => r.errors?.[0]?.extensions?.code;
-const GRANT = 'id appId holderKind holderId issuerUserId requestedByUserId requestedByWorkerId revokedAt revokedByUserId holderDepartedAt allows activatedAt';
+const GRANT = 'id appId holderKind holderId issuerUserId requestedByUserId requestedByWorkerId revokedAt revokedByUserId holderDepartedAt allows activatedAt state';
 const CREATE = `mutation($i:CreateGrantInput!){createGrant(input:$i){${GRANT}}}`;
 const REVOKE = `mutation($r:ID!,$ins:ActInstructionInput){revokeGrant(ref:$r,instruction:$ins){${GRANT}}}`;
 const WITHDRAW = `mutation($r:ID!){withdrawGrant(ref:$r){${GRANT}}}`;
@@ -74,7 +74,7 @@ const mgrInput = (over: Record<string, unknown> = {}) => ({
   appRef: w.appId, action: 'schedule.create', values: entry(), holderKind: 'WORKER', holderRef: otherWorkerId, reason: 'nightly digest', ...over,
 });
 const grantRows = async () => db.$queryRawUnsafe<any[]>('SELECT * FROM grants ORDER BY created_at');
-const events = async (grantId: string) => db.$queryRawUnsafe<any[]>("SELECT * FROM grant_events WHERE grant_id = $1 AND action = 'REVOKE'", grantId);
+const events = async (grantId: string) => db.$queryRawUnsafe<any[]>("SELECT * FROM grant_events WHERE grant_id = $1 AND action IN ('REVOKE', 'WITHDRAW')", grantId);
 
 /** A pending worker-held grant requested by `by`; an ACTIVE one issued by `issuer` (the unguarded insert is the test-only way to a live row). */
 async function pending(over: Record<string, any> = {}): Promise<string> {
@@ -231,7 +231,7 @@ describe('acceptance 2/3/9: revoke', () => {
     const id = await active();
     const r = await post(managerKey, null, REVOKE, { r: id });
     expect(r.errors).toBeUndefined();
-    expect(r.data.revokeGrant).toMatchObject({ id, allows: false, revokedByUserId: managerId });
+    expect(r.data.revokeGrant).toMatchObject({ id, allows: false, revokedByUserId: managerId, state: 'REVOKED' }); // #4173
     expect(r.data.revokeGrant.revokedAt).not.toBeNull();
     const ev = await events(id);
     expect(ev).toHaveLength(1);
@@ -357,7 +357,7 @@ describe('acceptance 6-9 (V57): requester withdrawal of a PENDING grant', () => 
     const id = await pending({ requested_by_user_id: managerId });
     const r = await post(managerKey, null, WITHDRAW, { r: id });
     expect(r.errors).toBeUndefined();
-    expect(r.data.withdrawGrant).toMatchObject({ id, allows: false, revokedByUserId: managerId });
+    expect(r.data.withdrawGrant).toMatchObject({ id, allows: false, revokedByUserId: managerId, state: 'WITHDRAWN' }); // #4173
     expect(r.data.withdrawGrant.revokedAt).not.toBeNull();
     expect(await events(id)).toHaveLength(1);
   });
@@ -632,12 +632,16 @@ describe('Riana, Beckett, Dorian (91002379): the second fix batch', () => {
     expect(r.data.withdrawGrant.signatureStatus.signatures).toEqual([]);
   });
 
-  it('Beckett: a non-manager revoke on an uninstalled App answers GRANT_NOT_MANAGER, as a missing grant does', async () => {
+  it('Beckett: a non-manager revoke on an uninstalled App answers GRANT_NOT_MANAGER, as a missing grant does; #4167: the manager now revokes', async () => {
     const id = await active();
     await db.app.update({ where: { id: w.appId }, data: { uninstalledAt: new Date() } });
     expect(code(await post(memberKey, null, REVOKE, { r: id }))).toBe('GRANT_NOT_MANAGER');
-    expect(code(await post(managerKey, null, REVOKE, { r: id }))).toBe('GRANT_NOT_MANAGER');
-    expect((await grantRows())[0].revoked_at).toBeNull();
+    // #4167 (cor:acl:140:05, Holger 2026-11-14): whoever manages the App revokes also while it is uninstalled — the
+    // pre-#4167 refusal was the manager arm too, so this assertion now states the widened rule.
+    const r = await post(managerKey, null, REVOKE, { r: id });
+    expect(r.errors).toBeUndefined();
+    expect((await grantRows())[0].revoked_by).toBe(managerId);
+    expect(await events(id)).toHaveLength(1);
   });
 
   it('Beckett: a manager naming an agent that does not exist gets the holder refusal, not GRANT_NOT_MANAGER', async () => {

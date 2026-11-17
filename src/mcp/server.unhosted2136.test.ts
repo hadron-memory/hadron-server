@@ -251,7 +251,8 @@ describe('R64 legacy wake scope', () => {
     let changed = false;
     const spy = vi.spyOn(db, '$transaction').mockImplementation((async (...args: any[]) => {
       transactions++;
-      if (transactions === 2) {
+      // #4273: the liveness read opens its own (JIT-off) transaction first, so the second of the endpoint's own is the third.
+      if (transactions === 3) {
         spy.mockRestore();
         expect(await db.appWakeReservation.count({ where: { workerId: unhosted } })).toBe(1);
         await hostWorker(unhosted); changed = true;

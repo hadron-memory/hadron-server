@@ -1,5 +1,6 @@
 import { currentAgentOrgMember } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { requireOrgRole, isAppParticipant } from '../../../lib/auth/appParticipantRead.js';
+import { endGrantsOfAgentsNoLongerInstalled, importedPairsOfParent } from '../../../lib/grants/agentInstallDeparture.js';
 import { lockAppInstallation, readInstallBootPrompt, lockAppAgentCustomization, resolveAppInstallation } from '../../../lib/appInstallations.js';
 import type { AuthoredWith, TaskReadGate } from '../../../lib/authoringAttestation.js';
 import { cachedManagerOrgRole } from '../../../lib/auth/managerOrgRoles.js';
@@ -3110,7 +3111,10 @@ export const ORG_INCLUDE = {
     },
     orderBy: { name: 'asc' as const },
   },
-  subscriptions: { where: { deletedAt: null }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
+  // #2566: a memory soft-delete does not tombstone its subscriptions, and the platform-admin
+  // read shortcut leaves the memory tombstone to callers, so exclude deleted memories here
+  // (the lazy Organization.subscriptions path reuses this where).
+  subscriptions: { where: { deletedAt: null, memory: { deletedAt: null } }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
   // No exchangeConnections here: Organization.exchangeConnections resolves
   // through listOrgExchangeConnections, never from an eager row (hadron-internal#18).
 };
@@ -3599,7 +3603,7 @@ export async function uninstallAgentFromAppCore(
       await requireOwnerOrOrgRole(txCtx, current, 'CONTRIBUTOR');
     },
     async (tx) => {
-      await tx.appAgent.deleteMany({ where: { appId: resolvedAppId, agentId: resolvedAgentId } });
+      const removedRow = await tx.appAgent.deleteMany({ where: { appId: resolvedAppId, agentId: resolvedAgentId } });
       // #3435: the delete is row-keyed. An Agent that is STILL installed by derivation (a direct import of an installed
       // Agent, #2168) has not left the App, so the App's own register rows naming it stay.
       // Hold the raw witnesses, then judge whether the App still has a usable
@@ -3607,9 +3611,17 @@ export async function uninstallAgentFromAppCore(
       await lockAppInstallation(tx, resolvedAppId, resolvedAgentId);
       if (!(await resolveAppInstallation(tx, resolvedAppId, resolvedAgentId)))
         await removeRegisterRowsForUninstall(tx, resolvedAppId, resolvedAgentId, ctx.userId ?? null);
+      // #4172 (Holger ruling A, epic #1975): an agent left with no effective installation in this App has left it, so its grants
+      // here end (first end stands; other Apps untouched). Judged on every call, so a retry also ends a stranded row. The agent
+      // this one imports may have lost its only (derived) witness too: one level, derivation never recurses (D1).
+      const importedHere = removedRow.count > 0 ? await importedPairsOfParent(tx, resolvedAgentId, [resolvedAppId]) : [];
+      await endGrantsOfAgentsNoLongerInstalled(
+        tx, [{ appId: resolvedAppId, agentId: resolvedAgentId }, ...importedHere], ctx.userId ?? null);
     },
     { lockMode: 'exclusive', afterLock: async (tx) => {
-      await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
+      // NO KEY UPDATE, not SHARE (#4210 F1): two uninstalls of different agents in one App delete their own app_agents rows and then
+      // scan each other's FOR SHARE; the fence makes the second wait before it deletes anything.
+      await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR NO KEY UPDATE`;
     } },
   );
   return { appId: resolvedAppId, agentId: resolvedAgentId };
@@ -4216,6 +4228,8 @@ export interface SessionInput {
   // #1707 / cor:agt:060:04: the model family this session runs as. Omitted:
   // derived from llmModel, then tool (src/lib/agentTasks/family.ts).
   family?: string | null;
+  // #4291: the effort this session runs at, as the launcher applied it (src/lib/agentTasks/runSettings.ts).
+  effort?: string | null;
   // #928 / cor:api:140: the role-Agent driving this session (PK or URN).
   agentRef?: string;
   // #943 / cor:api:140: the App this session is a unit of work for (PK or URN),
@@ -4241,6 +4255,8 @@ export interface SessionInput {
   force?: boolean;
   // #1709: a host-launched agent's single-use launch grant (cor:agt:070:08).
   launchGrant?: string | null;
+  // #4306: false, with a launchGrant, says the start did not apply its run settings: the bind inherits none of them.
+  startSettingsApplied?: boolean | null;
   // The session's stated intent (Session.plan) — MCP's hadron_start_session
   // description lands here since it delegates to startSession (#940 parity).
   plan?: string;

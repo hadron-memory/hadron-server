@@ -3,8 +3,9 @@
  * worker session touch its OWN boot prompt.
  *
  *  - `bootprompt.source.edit`: change the TEXT of one existing source node, in place, once. Held by the worker, naming ONE node,
- *    good for an hour from activation (the platform's hour, not the grant's `expires_at`, which may only shorten it), signed by a
- *    person who could make the edit themselves. Spending it writes one `USE` event in the edit's own transaction, under the grant
+ *    good for an hour from activation (the ACTION's lifetime limit, not the grant's `expires_at`, which may only shorten it), and for
+ *    one use (the action's count, and the grant's own `max_uses = 1`), signed by a person who could make the edit themselves.
+ *    Spending it counts the use (`use_count + 1`) and writes one `USE` event in the edit's own transaction, under the grant
  *    row's lock, so a refused or rolled-back write spends nothing and two racing edits cannot both spend one grant.
  *  - `bootprompt.compile.approve`: compile and approve the compiled prompts it names, any number of times within the hour (no use
  *    count). It never signs, and a compile under it never creates a compiled node, sets a pointer or provisions an AgentOrgGrant.
@@ -27,7 +28,7 @@ import {
   COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, boundWorkerId, bootPromptWorkerSessionError,
   inCompileScope, isBootPromptRole,
 } from '../bootPrompt.js';
-import { GRANT_DB_NOW, grantLiveSql, readGrantForUpdate } from './live.js';
+import { GRANT_DB_NOW, chargeGrantUse, grantLiveSql, readGrantForUpdate } from './live.js';
 
 export const BOOT_PROMPT_EDIT_ACTION = 'bootprompt.source.edit';
 export const BOOT_PROMPT_BATCH_ACTION = 'bootprompt.compile.approve';
@@ -119,8 +120,9 @@ async function signerStillEligible(q: Q, issuerUserId: string | null, own: OwnNo
 interface Candidate { id: string; issuer: string | null }
 
 /**
- * The live grants of `action` held by `workerId` in `appId` that name `nodeId` and are inside their hour. `single`: the value must be
- * exactly one node id (an edit grant names ONE source; a list or wildcard names none), and a grant with a USE event is spent.
+ * The live grants of `action` held by `workerId` in `appId` that name `nodeId` and are inside their hour (the hour is the ACTION's lifetime limit, which {@link grantLiveSql} reads, #4163). `single`: the value must be
+ * exactly one node id (an edit grant names ONE source; a list or wildcard names none). A grant is spent by its count (#4163); a USE event
+ * with no count behind it (a grant stored before the count was spent) still reads spent here.
  */
 async function candidates(q: Q, workerId: string, appId: string, action: string, nodeId: string, single: boolean, onlyId?: string): Promise<Candidate[]> {
   const param = single ? 'sourceNode' : 'compiledNode';
@@ -134,7 +136,6 @@ async function candidates(q: Q, workerId: string, appId: string, action: string,
        AND ${names}
        AND ${grantLiveSql('g')}
        AND g.activated_at <= ${GRANT_DB_NOW}
-       AND g.activated_at + interval '1 hour' > ${GRANT_DB_NOW}
        AND ${single ? P.sql`(g.max_uses IS NULL OR g.max_uses = 1) AND NOT EXISTS (SELECT 1 FROM grant_events e WHERE e.grant_id = g.id AND e.action = 'USE')` : P.sql`TRUE`}
      ORDER BY g.activated_at, g.id`);
   return rows.map((r) => ({ id: r.id, issuer: r.issuer_user_id }));
@@ -162,6 +163,10 @@ export async function spendEditGrant(tx: Q, workerId: string, node: BootPromptNo
     if (!(await readGrantForUpdate(tx, c.id))) continue;
     const [again] = await candidates(tx, workerId, own.appId, BOOT_PROMPT_EDIT_ACTION, node.id, true, c.id);
     if (!again || !(await signerStillEligible(tx, again.issuer, own))) continue;
+    // #4163 (cor:acl:140:03): the use is COUNTED, through the shared guarded `use_count + 1`, so the grant reads spent everywhere. A grant
+    // stored without a count (max_uses NULL) is still spent by its USE event alone. A miss after the row was just judged live is the
+    // clock edge between the two reads: refuse, so the write rolls back (the guard's rejection aborts the transaction anyway).
+    if (!(await chargeGrantUse(tx, again.id, own.appId))) throw bootPromptWorkerSessionError('update');
     await tx.grantEvent.create({ data: { grantId: again.id, appId: own.appId, action: 'USE', workerId } });
     return true;
   }

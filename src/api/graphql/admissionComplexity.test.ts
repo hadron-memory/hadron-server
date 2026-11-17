@@ -86,6 +86,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.heldWorkers",
   "Query.homeAssistantInstances",
   "Query.hostOperations",
+  "Query.hostSweepRuns",
   "Query.impersonationSessions",
   "Query.marketplaceAgents",
   "Query.marketplaceMemories",

@@ -49,6 +49,7 @@ import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } fro
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { assertInviteLimits, inviteExpiresAt, inviteMaxActivations } from '../../../lib/invitationLimits.js';
+import { endHeldGrants } from '../../../lib/grants/departure.js';
 
 /** #2871: expected org-member refusals are typed so the boundary does not mask them. */
 const orgMemberRefusal = (code: 'CONFLICT' | 'NOT_FOUND', message: string) =>
@@ -900,6 +901,10 @@ export const orgMutations = {
         await revokeOrgInvitationsByIssuer(
           tx, resolvedOrgId, resolvedUserId, ctx.userId ?? ctx.clientId ?? null,
         );
+        // #4171 (Holger ruling A, epic #1975): leaving the organization ends the person's grants in this organization's Apps, in
+        // this transaction, AFTER the membership soft delete (the SQL guard admits the stamp only on proof the person is no longer
+        // a live member). Not in the already-removed early return above; a rejoin revives nothing.
+        await endHeldGrants(tx, 'user', resolvedUserId, { organizationId: resolvedOrgId });
         },
         {
           lockMode: 'exclusive',

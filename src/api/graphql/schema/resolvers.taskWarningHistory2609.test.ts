@@ -1,3 +1,4 @@
+import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
 /** #2609 — warning history records successful fields, independently of response advice, and stays passive. */
 import { ApolloServer } from '@apollo/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,7 +18,7 @@ import { appendTaskEvent } from '../../../lib/agentTasks/events.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 const M = resolvers.Mutation as any;
-const Q = resolvers.Query as any;
+const Q = settledTeamEventQueries(resolvers.Query, db) as any;
 let app: { id: string };
 let user: { id: string };
 let outsider: { id: string };
@@ -27,7 +28,7 @@ const ctx = (): Context => ({ db, userId: user.id, roles: ['READER'] });
 const create = (c = ctx(), input = {}) => M.createAgentTask({}, { input: { appRef: app.id, title: 'Synthetic task', status: 'BACKLOG', ...input } }, c);
 const history = () => db.agentTeamEvent.findMany({ where: { appId: app.id, type: 'task.warning' }, orderBy: { createdAt: 'asc' } });
 const flush = (c: Context, errored = new Set<string>()) => (warnings as any).flushTaskWarningHistory(c, errored);
-const server = new ApolloServer<Context>({ typeDefs, resolvers, plugins: [taskWarningsPlugin] });
+const server = new ApolloServer<Context>({ typeDefs, resolvers: { ...resolvers, Query: settledTeamEventQueries(resolvers.Query, db) }, plugins: [taskWarningsPlugin] });
 async function graphql(query: string, c = ctx()) {
   const r = await server.executeOperation({ query }, { contextValue: c });
   if (r.body.kind !== 'single') throw new Error('single response required');

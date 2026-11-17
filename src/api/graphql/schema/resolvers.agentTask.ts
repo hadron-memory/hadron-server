@@ -85,10 +85,13 @@ import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
 // APP_NOT_FOUND (#1713 review, Rook P3-1; the resolvePilotApp posture).
 
 import { normalizeFamily } from '../../../lib/agentTasks/family.js';
+import {
+  checkRunSettingsAgainst, restampAppliedRunSettings, RunSettingsError, stampAppliedRunSettings, taskRunSettingsOf, validateTaskRunSettings, type TaskRunSettings,
+} from '../../../lib/agentTasks/runSettings.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
 import { tickBatch } from './tickBatch.js';
-import { type Context, isAppParticipant, clampListTake, withoutRequestCaches, pageArgs, pageEnvelope } from './resolvers.helpers.js';
+import { type Context, isAppParticipant, clampListTake, LIST_PAGE_MAX, withoutRequestCaches, pageArgs, pageEnvelope } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
@@ -195,9 +198,29 @@ export function notAssignee(actor: TaskActor, message: string, ext: Record<strin
 }
 const notFound = (taskId: string): GraphQLError =>
   taskError('TASK_NOT_FOUND', 'Task not found.', { taskId });
+/** The refusal for a task that does not exist or that the caller may not read, for a door outside `mutateTask`. */
+export const taskNotFound = notFound;
 /** #2664: the longest `text` filter, after trimming. */
 const TASK_TEXT_FILTER_MAX = 200;
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
+/**
+ * #4291 (cor:agt:050:01, Proposed): a task's run settings refused by their shape or against the task's own requirements.
+ * One code, with the closed `reason` (src/lib/agentTasks/runSettings.ts RUN_SETTINGS_REFUSALS); the refusal depends only
+ * on the caller's own input, and nothing is written.
+ */
+function runSettingsChecked<T>(check: () => T): T {
+  try {
+    return check();
+  } catch (e) {
+    if (e instanceof RunSettingsError) throw taskError('TASK_RUN_SETTINGS_INVALID', e.message, { reason: e.reason });
+    throw e;
+  }
+}
+/** The start's last step, in its transaction: stamp the settings the run uses (#4291) and return the row as it now is. */
+async function startedWithAppliedSettings(tx: Prisma.TransactionClient, taskId: string): Promise<TaskRow> {
+  await stampAppliedRunSettings(tx, taskId);
+  return tx.agentTask.findUniqueOrThrow({ where: { id: taskId } });
+}
 const forbidden = (message = 'You are not a participant of this App.'): GraphQLError =>
   taskError('FORBIDDEN', message);
 
@@ -294,8 +317,13 @@ export async function resolveTaskActor(ctx: Context, app: TaskApp): Promise<Task
   return { kind: 'user', userId: ctx.userId };
 }
 
-/** The write-side preconditions every task mutation shares, after the actor resolved. */
-export function requireWritable(ctx: Context, app: TaskApp): void {
+/**
+ * The write-side preconditions every task mutation shares, after the actor resolved. `allowUninstalled` (#4167,
+ * hrn:node:hadronmemory.com:specs:cor:acl:140:05, Holger 2026-11-14) is ONLY the revoke door: whoever manages the
+ * App may end its grants also while the App is uninstalled (not deleted), so that door names the exception —
+ * impersonation and a refused binding still refuse, and every other caller keeps the uninstalled refusal.
+ */
+export function requireWritable(ctx: Context, app: TaskApp, options: { allowUninstalled?: boolean } = {}): void {
   if (ctx.impersonation) throw forbidden('Impersonation sessions are read-only.');
   if (ctx.sessionBindingRefused) {
     throw taskError(
@@ -304,7 +332,7 @@ export function requireWritable(ctx: Context, app: TaskApp): void {
         'Nothing was written. Bind a live session, or send no session to act as yourself.',
     );
   }
-  if (app.uninstalledAt) throw taskError('APP_UNINSTALLED', 'This App is uninstalled; its tasks are read-only.');
+  if (app.uninstalledAt && !options.allowUninstalled) throw taskError('APP_UNINSTALLED', 'This App is uninstalled; its tasks are read-only.');
 }
 
 export async function loadApp(ctx: Context, appId: string): Promise<TaskApp | null> {
@@ -380,8 +408,11 @@ async function inKeyReadTx<T>(
   onGone: () => T,
   body: (txCtx: Context, app: TaskApp) => Promise<T>,
   timeoutMs?: number,
+  /** #4224: one repeatable-read snapshot for the whole read (see `withReadableApp`'s `coherent`). */
+  coherent = false,
 ): Promise<T> {
-  return inAnchoredAppTx(ctx, appId, onGone, async (txCtx, app) => ((await keyMayReadApp(txCtx, app)) ? body(txCtx, app) : onGone()), false, timeoutMs);
+  const run = () => inAnchoredAppTx(ctx, appId, onGone, async (txCtx, app) => ((await keyMayReadApp(txCtx, app)) ? body(txCtx, app) : onGone()), coherent, timeoutMs);
+  return coherent ? retryOnSerializationFailure(run) : run();
 }
 
 /** One transaction holding the App's authority anchors SHARED, with the App re-read after the lock (see `inKeyReadTx`). */
@@ -407,6 +438,13 @@ async function inAnchoredAppTx<T>(
       if (head.organizationId) await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${head.organizationId} FOR SHARE`;
       if (head.ownerUserId) await tx.$queryRaw`SELECT id FROM users WHERE id = ${head.ownerUserId} FOR SHARE`;
       await tx.$queryRaw`SELECT id FROM apps WHERE id = ${head.id} FOR SHARE`;
+      // #4224: a key's own rows too, so a key or scope revoked while we waited is a 40001 (and a fresh gate), never
+      // a stale admission from the snapshot. A newly granted scope is an insert the snapshot misses: that only refuses.
+      const key = appKeyCaller(ctx);
+      if (key) {
+        await tx.$queryRaw`SELECT id FROM app_keys WHERE id = ${key.appKeyId} FOR SHARE`;
+        await tx.$queryRaw`SELECT id FROM app_key_scopes WHERE app_key_id = ${key.appKeyId} ORDER BY id FOR SHARE`;
+      }
     }
     const txCtx = withoutRequestCaches(ctx, tx);
     const app = await loadApp(txCtx, appId);
@@ -486,6 +524,13 @@ export async function withReadableApp<T>(
   ctx: Context, appRef: string, body: (c: Context, app: TaskApp) => Promise<T>, allowRun = false,
   /** #3884 — the key arm's transaction cap in ms, for a read whose bounded work can outlast Prisma's 5 s default. Unset keeps the default. */
   keyTxTimeoutMs?: number,
+  /**
+   * #4224 — run `body` on ONE repeatable-read snapshot, for a read that composes several facts into one answer (a
+   * verdict no single instant justified is worse than a stale one). A participant's body runs in its own
+   * repeatable-read transaction; a key's runs in the anchored coherent transaction the run read uses, with the key's
+   * own rows locked too. Either retries a serialization failure with a fresh gate. Not for the run arm.
+   */
+  opts: { coherent?: boolean } = {},
 ): Promise<T> {
   if (isRunPrincipal(ctx) && !ctx.userId && allowRun) {
     let id: string;
@@ -496,7 +541,11 @@ export async function withReadableApp<T>(
   const key = appKeyCaller(ctx);
   if (!key) {
     const { app } = await resolveParticipatedApp(ctx, appRef);
-    return body(ctx, app);
+    if (!opts.coherent) return body(ctx, app);
+    return retryOnSerializationFailure(() => ctx.db.$transaction(
+      (tx) => body(withoutRequestCaches(ctx, tx), app),
+      { timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+    ));
   }
   let appId: string;
   try {
@@ -506,7 +555,7 @@ export async function withReadableApp<T>(
     throw e;
   }
   if (appId !== key.appId) throw appNotFound(appRef);
-  return inKeyReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body, keyTxTimeoutMs);
+  return inKeyReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body, keyTxTimeoutMs, opts.coherent === true);
 }
 
 /**
@@ -1143,6 +1192,12 @@ export async function inTaskWriteTx<T>(
     lockWorkerIds?: readonly (string | null | undefined)[];
     /** #3243: fill and lock the whole live candidate pool at the existing graph-before-worker point. */
     lockWorkerPool?: Set<string>;
+    /**
+     * #4167: the App anchor and the in-transaction re-check admit an UNINSTALLED (not deleted) App — only
+     * `revokeGrant`, whose manager arm the ruling widens. A deleted App still refuses everywhere, and every
+     * other task write keeps the liveness check.
+     */
+    allowUninstalledApp?: boolean;
   } = {},
 ): Promise<T> {
   const anchors: AuthorityAnchor[] = [
@@ -1168,7 +1223,9 @@ export async function inTaskWriteTx<T>(
           const again = await resolveTaskActor(txCtx, fresh);
           if (!again || !sameActor(again, actor)) throw new TaskGateRefused();
         }
-        requireWritable(txCtx, fresh);
+        // No deleted clause here by design: the anchor liveness check above carries the deleted exclusion for
+        // every writer, opted-in or not; this re-check only relaxes the UNINSTALLED refusal, never that one.
+        requireWritable(txCtx, fresh, { allowUninstalled: options.allowUninstalledApp });
       },
       (tx, txCtx) => {
         // #3323: an admission belongs to the attempt that judged it; a retried attempt judges again.
@@ -1177,6 +1234,7 @@ export async function inTaskWriteTx<T>(
       },
       {
         lockMode: options.lockMode,
+        allowUninstalledApp: options.allowUninstalledApp,
         afterLock: async (tx) => {
           await lockStopFence(tx, app.id, options.stopFence ?? 'shared');
           await lockTaskGraph(tx, app.id, options.taskGraph ?? 'shared');
@@ -1316,6 +1374,8 @@ type CreateInput = {
   owner?: PartyInput;
   assignee?: PartyInput;
   requirements?: RequirementsInput | null;
+  /** #4291 (cor:agt:050:01): the task's own run settings; validated by `validateTaskRunSettings`. */
+  runSettings?: unknown;
   startBy?: unknown;
   /** #2648 (cor:agt:050:14): the finish-by deadline; exempts the task from every stall window. */
   finishBy?: unknown;
@@ -1341,6 +1401,8 @@ async function insertTask(
     externalId?: string | null;
     tags: string[]; references?: TaskReference[]; startBy: Date | null; finishBy?: Date | null; closeSessionWhenDone: boolean; priority?: number;
     requirements: Prisma.InputJsonObject | null; owner: TaskParty; assignee: TaskParty | null;
+    /** #4291: already validated against `requirements` by the caller; set only here, at creation. */
+    runSettings?: TaskRunSettings | null;
     /** #2420: already normalized and schema-checked by the caller, which also decided the creator may set it. */
     properties?: Prisma.InputJsonObject | null;
     created: Record<string, unknown>; assigned: Record<string, unknown>; evActor: EventActor;
@@ -1410,6 +1472,8 @@ async function insertTask(
       parentTaskId: parentId,
       clonedFromId: a.clonedFromId ?? null,
       requirements: a.requirements ?? Prisma.DbNull,
+      runFamily: a.runSettings?.family ?? null, runModel: a.runSettings?.model ?? null,
+      runTier: a.runSettings?.tier ?? null, runEffort: a.runSettings?.effort ?? null,
       matchPending: a.matchPending ?? false,
       properties: a.properties ?? Prisma.DbNull,
       ...partyColumns('owner', a.owner),
@@ -1420,7 +1484,7 @@ async function insertTask(
     select: { id: true },
   }).catch((e: unknown) => {
     if (a.externalId != null && isUniqueViolationOn(e, EXTERNAL_ID_TARGETS)) {
-      throw taskError('TASK_EXTERNAL_ID_TAKEN', 'This App already has a task for that external id.');
+      throw taskError('TASK_EXTERNAL_ID_TAKEN', 'This App already has an active task for that external id.');
     }
     throw e;
   });
@@ -1541,9 +1605,9 @@ export async function createStartedClaim(
         startBy: null, closeSessionWhenDone: false, requirements: null, owner, assignee: owner, status: 'pending',
         created: createdStamp(txCtx), assigned: assignedStamp(txCtx, now), evActor: eventActor(txCtx.userId),
       });
-      const started = await tx.agentTask.update({ where: { id: made.id }, data: { status: 'started', startedAt: new Date(), ...updatedStamp(txCtx) } });
+      await tx.agentTask.update({ where: { id: made.id }, data: { status: 'started', startedAt: new Date(), ...updatedStamp(txCtx) } });
       await appendTaskEvent(tx, { appId: fresh.id, taskId: made.id, actor: eventActor(txCtx.userId), event: { type: 'task.started' } });
-      return started;
+      return startedWithAppliedSettings(tx, made.id);
     }, { lockWorkerIds: [lockedWorker] });
   } catch (e) {
     if (e instanceof GraphQLError && e.extensions?.code === 'TASK_EXTERNAL_ID_TAKEN') return null;
@@ -1624,12 +1688,12 @@ export async function createStartedClaimFor(
         evActor, evFor,
       });
       // The start the assignee would make, made here on their behalf (V41, the claims exception to cor:agt:050:08).
-      const started = await tx.agentTask.update({
+      await tx.agentTask.update({
         where: { id: made.id },
         data: { status: 'started', startedAt: new Date(), updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null },
       });
       await appendTaskEvent(tx, { appId: fresh.id, taskId: made.id, actor: evActor, forParty: evFor, event: { type: 'task.started' } });
-      return started;
+      return startedWithAppliedSettings(tx, made.id);
     }, { lockWorkerIds: [lockedAssignee] });
   } catch (e) {
     if (e instanceof GraphQLError && e.extensions?.code === 'TASK_EXTERNAL_ID_TAKEN') return null;
@@ -1858,6 +1922,8 @@ async function resolveCreateParties(tx: Prisma.TransactionClient, txCtx: Context
   } else {
     requirements = await normalizeRequirements(txCtx, app, input.requirements);
   }
+  // #4291: the run settings, judged against the requirements as they will be stored. A clone copies none.
+  const runSettings = runSettingsChecked(() => validateTaskRunSettings(input.runSettings, requirements as Record<string, never> | null));
   let owner: TaskParty = actorParty(actor);
   if (input.owner) {
     // #1757 (cor:agt:050:01, Holger team chat #8183): a root task's
@@ -1904,7 +1970,7 @@ async function resolveCreateParties(tx: Prisma.TransactionClient, txCtx: Context
       await checkAgainstTeamSchema(tx, txCtx, app.id, properties);
     }
   }
-  return { requirements, owner, assignee, properties };
+  return { requirements, runSettings, owner, assignee, properties };
 }
 
 /**
@@ -1935,7 +2001,7 @@ async function applyTaskCreate(
     const src = await tx.agentTask.findUnique({ where: { id: p.clone.sourceId }, select: { appId: true } });
     if (!src || src.appId !== app.id) throw notFound(p.clone.sourceId);
   }
-  const { requirements, owner, assignee, properties } = await resolveCreateParties(tx, txCtx, app, p);
+  const { requirements, runSettings, owner, assignee, properties } = await resolveCreateParties(tx, txCtx, app, p);
   if (assignee?.workerId && assignee.workerId !== p.lockedAssignee) {
     throw taskError('TASK_CONFLICT', 'The assignee named changed while this write waited; try again.');
   }
@@ -1948,7 +2014,7 @@ async function applyTaskCreate(
   const made = await insertTask(tx, {
     app, parentId: parentTaskId, project: input.project === true, title: p.title, description: p.description, source: p.source,
     externalId: p.externalId, tags: p.tags, references: p.references, startBy: p.startBy, finishBy: p.finishBy,
-    closeSessionWhenDone: p.closeSessionWhenDone, requirements, properties, owner, assignee, status: p.status, priority: keepPriority ? p.priority : undefined, clonedFromId: p.clone?.sourceId ?? null,
+    closeSessionWhenDone: p.closeSessionWhenDone, requirements, runSettings, properties, owner, assignee, status: p.status, priority: keepPriority ? p.priority : undefined, clonedFromId: p.clone?.sourceId ?? null,
     created: createdStamp(txCtx), assigned: assignedStamp(txCtx, new Date()), evActor: eventActor(txCtx.userId), matchPending: input.match === true,
   });
   const row = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });
@@ -1980,12 +2046,12 @@ async function startOwnClaim(
   if (p.externalId === null || p.status !== 'pending' || !assignee || !sameParty(assignee, actorParty(p.actor))) return null;
   const fresh = await tx.agentTask.findUniqueOrThrow({ where: { id: taskId } });
   if (fresh.blocked || fresh.status !== 'pending') return null;
-  const started = await tx.agentTask.update({
+  await tx.agentTask.update({
     where: { id: taskId },
     data: { status: 'started', startedAt: new Date(), ...updatedStamp(txCtx) },
   });
   await appendTaskEvent(tx, { appId: app.id, taskId, actor: eventActor(txCtx.userId), event: { type: 'task.started' } });
-  return started;
+  return startedWithAppliedSettings(tx, taskId);
 }
 
 /**
@@ -2012,8 +2078,8 @@ async function afterTaskCreate(
   const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
   // #1709 (cor:agt:070:08): `startItsAssignee` is true when the create NAMED its assignee, or a distinct-batch match chose a
   // worker with no open session (`needsHostStart`). #3815 (ruling 0265 V16-V19): any other matcher-chosen assignee is started
-  // by the matcher's own rule (a host start only for a worker with no open session), so this live-only launch check must not
-  // run for it. `matchTaskNow` runs after the create transaction commits, so `created` below already carries its assignee.
+  // by the matcher's own rule (a host start only for a worker with no open session). #4237: `launchAssignee` applies that same
+  // no-open-session rule (V16) to a named, hand or reassigned start, so a quiet open session is reached, never started over. `matchTaskNow` runs after the create transaction commits, so `created` below already carries its assignee.
   if (startItsAssignee) await launchAssignee(ctx.db, created, family);
   await emitTaskWarnings(ctx, info, created.appId, { codes: warn, taskId: created.id });
   return created;
@@ -2105,7 +2171,11 @@ export const agentTaskMutations = {
           case 'title': value = normalizeTitle(input.title as string); break;
           case 'description': value = optionalText(input.description as string | null, TASK_DESCRIPTION_MAX, 'description'); break;
           case 'tags': value = normalizeTags(input.tags as string[] | null); break;
-          case 'requirements': value = await normalizeRequirements(txCtx, app, input.requirements as RequirementsInput | null); break;
+          case 'requirements':
+            value = await normalizeRequirements(txCtx, app, input.requirements as RequirementsInput | null);
+            // #4291: the task's stored run settings must still satisfy the requirements it would now hold.
+            runSettingsChecked(() => checkRunSettingsAgainst(taskRunSettingsOf(task), value as Record<string, never> | null));
+            break;
           case 'startBy': value = input.startBy === '' ? null : parseStartBy(input.startBy); break;
           case 'finishBy': value = input.finishBy === '' ? null : parseFinishBy(input.finishBy); break;
           case 'closeSessionWhenDone':
@@ -2471,7 +2541,8 @@ export const agentTaskMutations = {
       });
       await recordInstructedManagerAct(tx, app.id, actor, 'task.assign', { taskId: task.id });
     }, { workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] }, instruction);
-    // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no live session through its host.
+    // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no open session through its host
+    // (V16, Proposed in the rule; built by #4237).
     await launchAssignee(ctx.db, assigned);
     await emitTaskWarnings(ctx, info, assigned.appId, { codes: warn, taskId: assigned.id });
     return assigned;
@@ -2592,6 +2663,12 @@ export const agentTaskMutations = {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
         event: { type: 'task.reassigned', from, to: party, closeSessionWhenDone: close },
       });
+      // #4301: a started task shows the run it is on now, so the previous assignee's applied settings do not stay.
+      if (task.status === 'started') await restampAppliedRunSettings(tx, task.id);
+      // #4223 (cor:agt:050:10, Proposed; Peter, team chat #108497): a short-lived worker whose last open task moves
+      // away is asked to end its session, as on a finish or a cancel. `task` is the row before the move, so its
+      // assignee is the worker that lost it; that worker's per-worker lock is held (`assignee: true`).
+      await requestSessionEnd(tx, { appId: app.id, task, actor: eventActor(ctx.userId), now: new Date(), cause: 'reassigned' });
       await recordInstructedManagerAct(tx, app.id, actor, 'task.reassign', { taskId: task.id });
     }, { assignee: true, workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] }, instruction);
     await launchAssignee(ctx.db, reassigned);
@@ -2630,6 +2707,8 @@ export const agentTaskMutations = {
         data: { status: 'started', startedAt: new Date(), ...updatedStamp(ctx) },
       });
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.started' } });
+      // #4291: the settings this run uses, read from the assignee's open session now, shown beside the task's own.
+      await stampAppliedRunSettings(tx, task.id);
     }, { assignee: true });
     await emitTaskWarnings(ctx, info, started.appId, { codes: warn });
     return started;
@@ -2853,6 +2932,8 @@ export const agentTaskMutations = {
         },
         data: {
           status: 'pending', startedAt: null, assigneeWorkerId: null, assigneeUserId: null,
+          // #4291: the settings of the run that handed it back are not the next run's.
+          appliedFamily: null, appliedModel: null, appliedEffort: null,
           ...(requirements ? { requirements } : {}),
           handBackReasonCode: code, handBackReasonText: text, handedBackAt: now,
           ...updatedStamp(ctx),
@@ -2865,6 +2946,12 @@ export const agentTaskMutations = {
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'task.handed-back', code } });
       // #1707: it enters the queue again, and this event is the unassignable rule's queue-entry stamp (cor:agt:050:17).
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'assignment.queued' } });
+      // #4265 (hrn:node:hadronmemory.com:specs:cor:agt:050:10 r20, Proposed; Peter, team chat #109434): a short-lived
+      // worker that hands back its last open task is asked to end its session, as on a finish, a cancel or a
+      // reassignment away. `task` is the row before the hand-back, so its assignee is the worker handing it back,
+      // whose per-worker lock is held (`assignee: true`). The cause keeps `closeSessionWhenDone` out of it: the task
+      // did not end, so a long-lived or leave-alone worker is never asked here.
+      await requestSessionEnd(tx, { appId: app.id, task, actor: evActor, now, cause: 'handed-back' });
     }, { assignee: true });
     // #1707 (cor:agt:060:06): another free worker may take it right away; the returning worker is excluded.
     await matchAfterChange(ctx.db, handedBack.appId);
@@ -2917,8 +3004,8 @@ async function assigneeAdvice(
 
 /**
  * #1709 (cor:agt:070:08; Holger via Vera #10773 (6): assignment by hand launches too, not only matching). After the
- * assignment committed: if its assignee is a worker, ask the platform to start it through its host. Never fails the
- * assignment; a worker it cannot start leaves the task waiting.
+ * assignment committed: if its assignee is a worker, ask the platform to start it through its host; only a worker with no
+ * open session is started (V16, #4237), one with an open session has the task by its notice. Never fails the assignment; a worker it cannot start leaves the task waiting.
  */
 async function launchAssignee(db: Context['db'], t: TaskRow, family?: string): Promise<void> {
   if (!t.assigneeWorkerId || !['pending', 'started'].includes(t.status)) return;
@@ -2948,6 +3035,67 @@ const EXTERNAL_ID_CHANGE_KINDS = {
   'task.finished': 'FINISHED',
   [EXTERNAL_ID_RELEASED]: 'RELEASED',
 } as const satisfies Partial<Record<TaskEventPayload['type'], string>>;
+
+/**
+ * #2654 (ruling 0269, cor:agt:050:14 "Overdue, the list filter"): a task is overdue when EITHER arm holds, judged on
+ * the server's clock (`now`, the database clock at millisecond precision), and never for an ended or backlog task:
+ *  (a) pending, not started, start-by strictly earlier than `now`; or
+ *  (b) pending or started, finish-by strictly earlier than `now`, not finished or cancelled.
+ * Blocking is ignored (R3, Proposed). Listing raises nothing. `overdueWhere` (the filter) and `isTaskOverdue` (the
+ * `AgentTask.overdue` field) are two renderings of this one rule; the differential pin keeps them equal.
+ */
+export function overdueWhere(now: Date): Prisma.AgentTaskWhereInput {
+  const open = { finishedAt: null, cancelledAt: null } as const;
+  return {
+    OR: [
+      { status: 'pending', startBy: { lt: now }, startedAt: null, ...open },
+      { status: { in: ['pending', 'started'] }, finishBy: { lt: now }, ...open },
+    ],
+  };
+}
+
+/**
+ * The complement of {@link overdueWhere}, written out. SQL NOT over a nullable start-by or finish-by would also discard
+ * the tasks with no deadline (NOT NULL is NULL), so each arm's negation guards its nullable column explicitly.
+ */
+export function notOverdueWhere(now: Date): Prisma.AgentTaskWhereInput {
+  return {
+    OR: [
+      { finishedAt: { not: null } },
+      { cancelledAt: { not: null } },
+      {
+        AND: [
+          { OR: [{ status: { not: 'pending' } }, { startedAt: { not: null } }, { startBy: null }, { startBy: { gte: now } }] },
+          { OR: [{ status: { notIn: ['pending', 'started'] } }, { finishBy: null }, { finishBy: { gte: now } }] },
+        ],
+      },
+    ],
+  };
+}
+
+export function isTaskOverdue(
+  t: Pick<TaskRow, 'status' | 'startBy' | 'finishBy' | 'startedAt' | 'finishedAt' | 'cancelledAt'>,
+  now: Date,
+): boolean {
+  if (t.finishedAt || t.cancelledAt) return false;
+  const a = t.status === 'pending' && !t.startedAt && t.startBy != null && t.startBy < now;
+  const b = (t.status === 'pending' || t.status === 'started') && t.finishBy != null && t.finishBy < now;
+  return a || b;
+}
+
+/**
+ * The database clock at the DateTime precision the API exposes, read once per request (the GraphQL context object is
+ * per request) and shared by the `overdue` filter and the `overdue` field.
+ */
+const requestNow = new WeakMap<object, Promise<Date>>();
+async function dbNowFor(c: { db: { $queryRaw: (...a: any[]) => Promise<any> } }): Promise<Date> {
+  let p = requestNow.get(c);
+  if (!p) {
+    p = (c.db.$queryRaw`SELECT date_trunc('milliseconds', CURRENT_TIMESTAMP) AS now` as Promise<{ now: Date }[]>).then((r) => r[0].now);
+    requestNow.set(c, p);
+  }
+  return p;
+}
 
 type ListArgs = {
   matchFailed?: boolean | null;
@@ -3088,13 +3236,13 @@ export const agentTaskQueries = {
       if (range.gte || range.lte) filters.push({ [field]: range });
     }
     if (args.overdue != null) {
-      // Match the millisecond precision exposed by DateTime, using the database clock.
-      const [{ now }] = await c.db.$queryRaw<{ now: Date }[]>`SELECT date_trunc('milliseconds', CURRENT_TIMESTAMP) AS now`;
-      const late: Prisma.AgentTaskWhereInput = {
-        status: 'pending', startBy: { lt: now }, startedAt: null, finishedAt: null, cancelledAt: null,
-      };
-      // SQL NOT over a nullable startBy alone would also discard tasks with no deadline.
-      filters.push(args.overdue ? late : { OR: [{ startBy: null }, { NOT: late }] });
+      // One database-clock snapshot per request, shared with the `overdue` field, so a deadline crossing mid-request
+      // cannot make the filter and the field disagree.
+      const now = await dbNowFor(c);
+      const late = overdueWhere(now);
+      // SQL NOT over nullable startBy / finishBy alone would also discard tasks with no deadline: the negation is
+      // written out so a task with neither time is never overdue and always falls in `false`.
+      filters.push(args.overdue ? late : notOverdueWhere(now));
     }
     const statuses = args.status?.map((s) => STATUS_FROM_GQL[s] ?? s);
     const where: Prisma.AgentTaskWhereInput = {
@@ -3118,9 +3266,10 @@ export const agentTaskQueries = {
       omit: { resultFindings: true },
       where: { AND: [where, noZero, rootsWhere, ownerWhere, assigneeWhere, creatorWhere, ...filters] },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      // #4084: one task per id at most, so a batch read with no limit answers every id it names (the cap is the list
-      // cap), instead of cutting at the list default.
-      take: args.limit == null && args.externalIds?.length ? args.externalIds.length : clampListTake(args.limit),
+      // #4084, #4217: a batch read with no limit answers every task holding each id it names, up to the list cap, instead of
+      // cutting at the list default. An id may have a history (finished and cancelled tasks no longer hold it, cor:agt:120:02,
+      // 2026-11-14), so the page is NOT as long as the list: sizing it to the id count would drop tasks.
+      take: args.limit == null && args.externalIds?.length ? LIST_PAGE_MAX : clampListTake(args.limit),
       skip: Math.max(0, args.offset ?? 0),
     });
     }, true),
@@ -3152,12 +3301,10 @@ export const agentTaskQueries = {
     }, true),
 
   /**
-   * An App's team event stream (cor:agt:050:11, :21), in (createdAt, id)
-   * order. Continue a page with `after`: the id of the last event read. The
-   * cursor is the PAIR, so rows sharing a timestamp — the task.created and
-   * task.assigned one transaction writes, or a capped page cutting a larger
-   * equal-time group — are never skipped (#1713 review, Diego P2-B). `since`
-   * stays a coarse time filter, not a continuation.
+   * An App's team event stream (cor:agt:050:11, :21). #4098: oldest-first pages use the sealed
+   * (tx_id,created_at,id) order from #4089; after remains an event id. A poll may lag behind an older
+   * open transaction, but cannot skip its late commit or a later transaction's backdated stamp.
+   * since stays a coarse time filter, not a continuation. newestFirst/before keep their history order.
    */
   agentTeamEvents: async (_: unknown, args: TeamEventsArgs, ctx: Context) =>
     withReadableApp(ctx, args.appRef, (c, app) => readTeamEvents(c, app, args, clampListTake(args.limit))),
@@ -3282,31 +3429,22 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
   const newestFirst = args.newestFirst === true;
   if (newestFirst && args.after) throw badInput('after continues the oldest-first read; with newestFirst pass before.');
   if (!newestFirst && args.before) throw badInput('before continues the newestFirst read; pass newestFirst: true with it.');
-  let afterWhere: Prisma.AgentTeamEventWhereInput = {};
+  let beforeWhere: Prisma.AgentTeamEventWhereInput = {};
   if (args.before) {
     // Scoped to this App, like after: another App's event id is just an unknown cursor.
     const cursor = isId(args.before)
       ? await c.db.agentTeamEvent.findFirst({ where: { id: args.before, appId: app.id }, select: { id: true, createdAt: true } })
       : null;
     if (!cursor) throw badInput('before is not an event of this App. Pass the id of the last (oldest) event you read.');
-    afterWhere = { OR: [{ createdAt: { lt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { lt: cursor.id } }] };
+    beforeWhere = { OR: [{ createdAt: { lt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { lt: cursor.id } }] };
   }
   if (args.after) {
-    // Scoped to this App: another App's event id is just an unknown cursor.
     const cursor = isId(args.after)
-      ? await c.db.agentTeamEvent.findFirst({
-          where: { id: args.after, appId: app.id },
-          select: { id: true, createdAt: true },
-        })
+      ? await c.db.agentTeamEvent.findFirst({ where: { id: args.after, appId: app.id }, select: { id: true } })
       : null;
     if (!cursor) throw badInput('after is not an event of this App. Pass the id of the last event you read.');
-    afterWhere = {
-      OR: [
-        { createdAt: { gt: cursor.createdAt } },
-        { createdAt: cursor.createdAt, id: { gt: cursor.id } },
-      ],
-    };
   }
+  const taskId = args.taskId ? (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId : null;
   const where: Prisma.AgentTeamEventWhereInput = {
     appId: app.id,
     ...(since ? { createdAt: { gt: since } } : {}),
@@ -3314,20 +3452,40 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
     // #3934: alarms in effect are alarms, and an acknowledged alarm is out of effect by definition (cor:agt:050:20).
     ...(args.alarmsOnly || args.alarmsInEffect ? { severity: 'alarm' } : {}),
     ...(args.alarmsInEffect ? { acknowledgedAt: null } : {}),
-    ...(args.taskId ? { taskId: (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId } : {}),
+    ...(taskId ? { taskId } : {}),
   };
-  // newestFirst is the exact mirror of the default (createdAt, id) order, so a page boundary inside equal timestamps never repeats or skips.
-  const orderBy: Prisma.AgentTeamEventOrderByWithRelationInput[] = newestFirst ? [{ createdAt: 'desc' }, { id: 'desc' }] : [{ createdAt: 'asc' }, { id: 'asc' }];
-  // #3934 (V77; gate disposition on hadron-server#3939): in effect = unacknowledged and no recorded end. Both are columns
-  // of rows already written, so this is an ordinary filtered page: the read works nothing out and its cost follows
-  // `limit`, not the App's alarm history. The end is written once, by the evaluator pass or the acknowledgement.
+  // #3934: an alarm is in effect only while unacknowledged and without a stored escalation end.
   const inEffect: Prisma.AgentTeamEventWhereInput = args.alarmsInEffect ? { escalationEnd: { is: null } } : {};
-  const events = await c.db.agentTeamEvent.findMany({
-    where: { AND: [where, afterWhere, inEffect] },
-    // newestFirst is the exact mirror of the default (createdAt, id) order, so a page boundary inside equal timestamps never repeats or skips.
-    orderBy: newestFirst ? [{ createdAt: 'desc' }, { id: 'desc' }] : [{ createdAt: 'asc' }, { id: 'asc' }],
+  // #4098: every oldest-first page, including the first, advances in the same commit-safe key as #4089.
+  // tx_id below snapshot xmin is sealed: no transaction can later add a row behind a served cursor. A later
+  // transaction with a backdated caller stamp still sorts later by tx_id. Within a sealed transaction, every
+  // event is already visible, so (created_at,id) safely breaks ties. Historic tx_id=0 rows retain their old order.
+  // The forward statement applies every filter and projects the row in ONE snapshot, including the mutable alarm
+  // acknowledgements and ends. The cursor check and the task-ref lookup above are separate, earlier statements.
+  type EventRow = Prisma.AgentTeamEventGetPayload<Record<string, never>>;
+  const events = newestFirst ? await c.db.agentTeamEvent.findMany({
+    where: { AND: [where, beforeWhere, inEffect] },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take,
-  });
+  }) : await c.db.$queryRaw<EventRow[]>`
+    SELECT e.id, e.app_id AS "appId", e.type, e.task_id AS "taskId",
+      e.actor_user_id AS "actorUserId", e.actor_worker_id AS "actorWorkerId", e.actor_agent_id AS "actorAgentId",
+      e.actor_run_id AS "actorRunId", e.actor_app_key_id AS "actorAppKeyId",
+      e.subject_worker_id AS "subjectWorkerId", e.subject_user_id AS "subjectUserId", e.severity, e.chain,
+      e.acknowledged_by_user_id AS "acknowledgedByUserId", e.acknowledged_by_worker_id AS "acknowledgedByWorkerId",
+      e.acknowledged_at AS "acknowledgedAt", e.payload, e.created_at AS "createdAt", e.episode_start AS "episodeStart"
+    FROM agent_team_events e
+    WHERE e.app_id = ${app.id}
+      AND e.tx_id < pg_snapshot_xmin(pg_current_snapshot())
+      ${args.after ? Prisma.sql`AND (e.tx_id,e.created_at,e.id) > (SELECT tx_id,created_at,id FROM agent_team_events WHERE id=${args.after} AND app_id=${app.id})` : Prisma.empty}
+      ${since ? Prisma.sql`AND e.created_at > ${since.toISOString()}::timestamp` : Prisma.empty}
+      ${args.types?.length ? Prisma.sql`AND e.type IN (${Prisma.join(args.types)})` : Prisma.empty}
+      ${args.codePrefix != null ? Prisma.sql`AND starts_with(e.type,${args.codePrefix})` : Prisma.empty}
+      ${args.alarmsOnly || args.alarmsInEffect ? Prisma.sql`AND e.severity='alarm'` : Prisma.empty}
+      ${args.alarmsInEffect ? Prisma.sql`AND e.acknowledged_at IS NULL AND NOT EXISTS (SELECT 1 FROM alarm_escalation_ends z WHERE z.event_id=e.id)` : Prisma.empty}
+      ${taskId ? Prisma.sql`AND e.task_id=${taskId}` : Prisma.empty}
+    ORDER BY e.tx_id,e.created_at,e.id
+    LIMIT ${take}`;
   // #4135: use the stored AgentTask.handle (cor:agt:050:01, Proposed), once per page.
   // Event task ids are retained after deletion; an absent row must never invent a handle.
   const taskIds = [...new Set(events.flatMap(e => e.taskId ? [e.taskId] : []))];
@@ -3607,6 +3765,8 @@ export const agentTaskFieldResolvers = {
       const base = getPortalBaseUrl();
       return base ? `${base}/app/apps/${encodeURIComponent(t.appId)}/tasks/${encodeURIComponent(t.id)}` : null;
     },
+    /** #2654: true exactly when the `overdue` filter would list this task now (same rule, same server clock). */
+    overdue: async (t: TaskRow, _a: unknown, c: any) => isTaskOverdue(t, await dbNowFor(c)),
     /** #3816 (V22): present only on the create answer that ran the match; a later read has none. */
     matchSkipped: (t: TaskRow & { matchSkipped?: unknown }) => t.matchSkipped ?? null,
     matchFailure: (t: TaskRow) => t.matchFailedAt && t.matchFailedReason ? { reason: t.matchFailedReason, failedAt: t.matchFailedAt } : null,
@@ -3677,11 +3837,33 @@ export const agentTaskFieldResolvers = {
         modelGroupNotIn: (r.modelGroupNotIn as string[]) ?? null,
       };
     },
+    /** #4291 (cor:agt:050:01): the task's own run settings; null when it names none. */
+    runSettings: (t: TaskRow) => taskRunSettingsOf(t),
+    /**
+     * #4291: the settings the run actually used, stamped from the assignee's open session when the task started; null
+     * before that (and for a task no worker session started). Beside `runSettings`, so an override a running worker did
+     * not apply is visible.
+     */
+    appliedRunSettings: (t: TaskRow) =>
+      t.startedAt && (t.appliedFamily || t.appliedModel || t.appliedEffort)
+        ? { family: t.appliedFamily, model: t.appliedModel, effort: t.appliedEffort }
+        : null,
     /** #2649 (cor:agt:050:01 References): the stored strings, in order; nothing about any target is read. */
     references: (t: TaskRow) => storedTaskReferences(t.references).map(r => ({ kind: REFERENCE_KIND_TO_GQL[r.kind], target: r.target, label: r.label ?? null })),
     /** #1709 (cor:agt:050:10) — the request this task's end made; the task was already read, so its readers read it. */
     sessionEndRequest: async (t: TaskRow, _: unknown, ctx: Context) => {
-      const r = await ctx.db.taskSessionEndRequest.findUnique({ where: { taskId: t.id } });
+      // #4223: a task may carry several requests, one for each time it ended under a worker or was reassigned away
+      // from one. Only its CURRENT worker assignee's is shown, the latest: a request made of a former assignee names
+      // that worker's session, and whoever reads the task now must never take it for its own (#4253 blind review,
+      // Cedric P2-1). The former assignee is woken for it instead (taskWakes.ts, END_SESSION). And a reader that IS
+      // a worker reads only a request addressed to itself (Peter, team chat #108945): a person, a run or an App key
+      // reads the assignee's, with the worker it asks in `workerId`.
+      if (!t.assigneeWorkerId) return null;
+      const reader = currentActor().workerId;
+      if (reader && reader !== t.assigneeWorkerId) return null;
+      const r = await ctx.db.taskSessionEndRequest.findFirst({
+        where: { taskId: t.id, workerId: t.assigneeWorkerId }, orderBy: [{ requestedAt: 'desc' }, { id: 'desc' }],
+      });
       return r ? { ...r, resolution: r.resolution ? r.resolution.toUpperCase().replace(/-/g, '_') : null } : null;
     },
     /** cor:agt:050:03 — pending with no assignee. Derived, never stored. */

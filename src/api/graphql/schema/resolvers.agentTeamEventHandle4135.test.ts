@@ -1,3 +1,4 @@
+import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
 /** #4135 — stored task handles on the existing event audience, with a bounded page read. */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { buildSchema, defaultFieldResolver, graphql } from 'graphql';
@@ -14,7 +15,7 @@ let outsider: { id: string };
 const ctx = (): Context => ({ db, userId: member.id, roles: ['READER'] });
 const run = (source: string, contextValue = ctx()) => graphql({ schema, source, contextValue,
   fieldResolver: (parent, args, context, info) => {
-    const fields = resolvers[info.parentType.name as keyof typeof resolvers] as Record<string, Function> | undefined;
+    const fields = (info.parentType.name === 'Query' ? settledTeamEventQueries(resolvers.Query, db) : resolvers[info.parentType.name as keyof typeof resolvers]) as Record<string, Function> | undefined;
     const resolver = fields?.[info.fieldName];
     return typeof resolver === 'function' ? resolver(parent, args, context, info) : defaultFieldResolver(parent, args, context, info);
   },

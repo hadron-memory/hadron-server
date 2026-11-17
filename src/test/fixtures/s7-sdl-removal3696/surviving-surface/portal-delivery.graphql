@@ -1,0 +1,16 @@
+# TEST-AUTHORED remaining-surface regression. NOT released/deployed client evidence for C1/R1(b).
+query AppDeliverySettings($appRef: String!) {
+  appDeliverySettings(appRef: $appRef) {
+    batchWindowSeconds
+    busyDelaySeconds
+    stuckWindowSeconds
+  }
+}
+
+mutation SetAppDeliverySettings($appRef: String!, $input: AppDeliverySettingsInput!) {
+  setAppDeliverySettings(appRef: $appRef, input: $input) {
+    batchWindowSeconds
+    busyDelaySeconds
+    stuckWindowSeconds
+  }
+}
