@@ -743,6 +743,13 @@ export async function evaluateStalls(db: PrismaClient, now = new Date(), anchor:
  * #4273 — the keys (`alarmEpisodeKey`) of these candidates' episodes whose alarm event already exists. Asks for exactly the
  * candidates' own (task, type, episode start) tuples, served by that unique key, so a task with a long alarm history
  * (every earlier episode) costs one row per candidate, never one per past episode (Diego P2 on 34689907).
+ *
+ * #4285 (Arianna New-3): the join predicate IS the unique key `agent_team_events_episode_uniq` (task_id, type,
+ * episode_start) (schema.prisma `@@unique([taskId, type, episodeStart])`), the same key `appendAlarmEvent` (events.ts) inserts
+ * under `ON CONFLICT (task_id, type, episode_start) DO NOTHING`. A row this read finds is therefore exactly a row that
+ * insert would refuse, so skipping it changes no outcome. Change the three together. No resolution state lives outside
+ * the key: an acknowledged or escalation-ended alarm keeps its row and so still takes the key (pinned in
+ * stallPassCost4273.test.ts, the "what the skip replaces" block).
  */
 async function loadRaisedEpisodeKeys(db: Db, candidates: StallCandidate[]): Promise<Set<string>> {
   const out = new Set<string>();
