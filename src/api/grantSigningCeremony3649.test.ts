@@ -193,6 +193,12 @@ describe('C10: behind the signing switch; the grant-signing capability token', (
     expect(js.length).toBeGreaterThan(100);
     expect(js).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
   });
+
+  it('#4164 (Victor\'s build note): the page\'s reason for a withheld sentence is true for an unwritable summary too, not only an unreadable node', async () => {
+    const js = await (await fetch(`${base}/grant-signing/ceremony.js`)).text();
+    expect(js).toContain('its text cannot be written from its values');
+    expect(js).not.toContain('You cannot read everything this grant refers to');
+  });
 });
 
 describe('C9 + C5: the proof shows the server-built terms only to someone who may issue the grant', () => {

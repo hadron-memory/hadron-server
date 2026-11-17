@@ -104,7 +104,7 @@ function render(out){
  view.replaceChildren();start.hidden=true;view.hidden=false;setTitle('Review and sign a grant');
  const v=out.view;
  const what=el('section');what.appendChild(el('h2','What this grant allows'));
- what.appendChild(el('p',v.summary===null?'You cannot read everything this grant refers to, so it is not shown and you cannot sign it.':v.summary));
+ what.appendChild(el('p',v.summary===null?'This grant is not shown and you cannot sign it: either you cannot read everything it refers to, or its text cannot be written from its values.':v.summary));
  const dl=el('dl');
  row(dl,'Held by',(v.holder.name||'(unnamed)')+' ('+v.holder.kind+')');
  row(dl,'App',v.app.urn);
