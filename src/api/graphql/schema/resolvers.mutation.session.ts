@@ -2607,6 +2607,9 @@ export const sessionMutations = {
               // #4313: a compile wrote a compiled prompt at this address after the compiled rows were read above.
               // The row is locked now, and it is the compile's: leave it as it is.
               if (current.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
+                // Known as a compiled address from here on: an edge TO it is still restored (the id is in the
+                // map), and a snapshot edge FROM this address is the ordinary node's, not the compiled prompt's.
+                compiled.add(loc);
                 locToId.set(loc, current.id);
                 continue;
               }
