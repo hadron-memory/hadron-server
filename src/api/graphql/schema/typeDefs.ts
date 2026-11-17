@@ -9265,7 +9265,7 @@ export const typeDefs = `#graphql
       unresolvedFindings: Boolean
       "Case-insensitive substring of the title or description, 1 to 200 characters after trimming (else BAD_USER_INPUT). Percent, underscore and backslash match literally. ANDed with every other filter."
       text: String
-      "True: start-by passed on the database clock, not started, not ended, not backlog. False: all other tasks. Not an alarm."
+      "True: overdue on the server clock (the database clock). Two arms: a pending task, not started, whose start-by has passed; or a pending or started task whose finish-by has passed and which has not ended. An ended (finished or cancelled) task and a backlog task are never overdue, and neither is a task with neither time. Blocking is ignored. False: all other tasks. Not an alarm: listing raises nothing."
       overdue: Boolean
       "Inclusive creation-time lower bound."
       createdAfter: DateTime
@@ -17005,6 +17005,8 @@ export const typeDefs = `#graphql
     priority: Int!
     "Whether at least one blocker remains open. Never a status; manual assignment is preserved."
     blocked: Boolean!
+    "#2654: true exactly when the overdue filter of the task list would list this task at the moment of the read (same rule, judged on the server clock). A client shows this field and computes no overdue predicate of its own."
+    overdue: Boolean!
     "Same-App tasks this task waits for, including ended blockers."
     blockedBy(limit: Int = 20, offset: Int = 0): AgentTaskDependencyPage!
     "Same-App tasks that name this task as a blocker."
