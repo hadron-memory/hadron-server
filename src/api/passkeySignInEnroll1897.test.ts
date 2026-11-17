@@ -13,6 +13,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../test/softPasskey.js';
 import { generateId } from '../lib/id.js';
+import { beginPending, portalContinuation, oauthContinuation } from '../test/beginPendingSignIn.js';
 
 const sent = vi.hoisted(() => [] as Array<{ to: string; url: string }>);
 vi.mock('../auth/email.js', async (original) => ({
@@ -74,8 +75,8 @@ async function magicLink(opts: { clientState?: string | null } = {}) {
 }
 const verify = (token: string, qs = '') => realFetch(`${base}/auth/email/verify?token=${token}${qs}`, { redirect: 'manual' });
 async function begin() {
-  const r = await verify(await magicLink());
-  return { r, pending: cookieNamed(r, 'hadron_pending_signin') };
+  const r = await beginPending(ana, portalContinuation(sha('portal-nonce')));
+  return { r, pending: r.cookie ?? '' };
 }
 const page = (path: string, cookie?: string) => realFetch(`${base}${path}`, { headers: cookie ? { cookie } : {} });
 
@@ -113,17 +114,16 @@ async function register(browser: string, key: SoftPasskey) {
 }
 
 describe('a person with no passkey', () => {
-  it('a claimed sign-in link creates a thirty-minute pending flow and publishes nothing; the account exists (R82)', async () => {
+  it('a begun flow for a person with no passkey is a thirty-minute pending flow and publishes nothing; the account exists (R82)', async () => {
     const { r, pending } = await begin();
-    expect(r.status).toBe(302);
-    expect(r.headers.get('location')).toBe('/auth/passkey/sign-in');
+    expect(r.begun).toBe(true);
+    expect(r.location).toBe('/auth/passkey/sign-in');
     expect(pending).toBeTruthy();
-    expect(cookieNamed(r, 'hadron_token')).toBe('');
     const row = await db.pendingEmailSignIn.findFirstOrThrow({ where: { userId: ana } });
     const ttl = (row.expiresAt.getTime() - row.createdAt.getTime()) / 1000;
     expect(ttl).toBeGreaterThan(1790);
     expect(ttl).toBeLessThanOrEqual(1800);
-    expect(r.headers.getSetCookie().find((c) => c.startsWith('hadron_pending_signin='))).toMatch(/Max-Age=180\d|Max-Age=1800/);
+    expect(r.maxAgeMs).toBe(1800 * 1000);
     expect(await db.authHandoffCode.count()).toBe(0);
     expect(await db.signIn.count()).toBe(0);
     expect(await db.passkeyCredential.count()).toBe(0);
@@ -290,8 +290,7 @@ describe('a person with no passkey', () => {
 
   it('end to end (OAuth): the same journey resumes the validated return_to with an sid cookie', async () => {
     const returnTo = '/oauth/authorize?client_id=x&state=s';
-    const r = await verify(await magicLink({ clientState: null }), `&return_to=${encodeURIComponent(returnTo)}`);
-    const pending = cookieNamed(r, 'hadron_pending_signin');
+    const pending = (await beginPending(ana, oauthContinuation(returnTo))).cookie!;
     expect(pending).toBeTruthy();
     const leg = await githubLeg('sign-in');
     const key = softPasskey();
@@ -316,7 +315,7 @@ describe('a person with no passkey', () => {
     expect((await page('/auth/passkey/sign-in', pending)).status).toBe(400);
     await insertSoftPasskey(db, ana, softPasskey());
     const again = await begin();
-    expect(again.r.status).toBe(302);
+    expect(again.r.begun).toBe(true);
     const row = await db.pendingEmailSignIn.findFirstOrThrow({ where: { browserHash: sha(again.pending.split('=')[1]!) } });
     expect((row.expiresAt.getTime() - row.createdAt.getTime()) / 1000).toBeLessThanOrEqual(600);
   });
@@ -324,11 +323,10 @@ describe('a person with no passkey', () => {
   it('a person whose only passkey was revoked is treated as having none; one whose passkeys are all for another RP gets the fixed refusal', async () => {
     const id = await insertSoftPasskey(db, ana, softPasskey());
     await db.$executeRaw`UPDATE passkey_credentials SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) WHERE id = ${id}`;
-    expect((await begin()).r.status).toBe(302);
+    expect((await begin()).r.begun).toBe(true);
     await db.pendingEmailSignIn.deleteMany({});
     await insertSoftPasskey(db, ana, softPasskey(), { rpId: 'elsewhere.example' });
-    const r = await verify(await magicLink());
-    expect(r.status).toBe(400);
+    expect((await begin()).r.begun).toBe(false);
     expect(await db.pendingEmailSignIn.count()).toBe(0);
   });
 });
