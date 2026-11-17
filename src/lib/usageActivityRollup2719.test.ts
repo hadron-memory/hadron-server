@@ -404,13 +404,13 @@ describe('#2719 deployment shape', () => {
     const { readFileSync } = await import('node:fs');
     const read = (rel: string) => readFileSync(new URL(`../../${rel}`, import.meta.url), 'utf8');
     const invariants = read('prisma/usage-activity-rollup-invariants.sql');
-    expect(read('prisma/migrations/20261114190000_usage_activity_rollup/migration.sql')).toContain(invariants);
+    expect(read('prisma/migrations/20261117300000_usage_activity_rollup/migration.sql')).toContain(invariants);
     expect(read('prisma/post-push.sql')).toContain('\\ir usage-activity-rollup-invariants.sql');
   });
 
   it('the migration creates the state row without scanning usage_events', async () => {
     const { readFileSync } = await import('node:fs');
-    const sql = readFileSync(new URL('../../prisma/migrations/20261114190000_usage_activity_rollup/migration.sql', import.meta.url), 'utf8');
+    const sql = readFileSync(new URL('../../prisma/migrations/20261117300000_usage_activity_rollup/migration.sql', import.meta.url), 'utf8');
     const outsideFunctions = sql.replace(/CREATE OR REPLACE FUNCTION[\s\S]*?\$\$;\n/g, '');
     expect(outsideFunctions).not.toMatch(/FROM usage_events|UPDATE usage_events|INSERT INTO usage_activity_cells/);
   });
