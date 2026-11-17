@@ -1,5 +1,5 @@
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (20261117200000_grant_org_leave_agent_uninstall) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (20261117210000_grant_withdrawn_state) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because
@@ -40,7 +40,8 @@ ALTER TABLE grants ADD CONSTRAINT chk_grants_shape CHECK (
   version >= 1 AND
   (starts_at IS NULL OR expires_at IS NULL OR starts_at < expires_at) AND
   (revoked_at IS NULL) = (revoked_by IS NULL) AND
-  (revoked_by IS NULL OR revoked_by <> '')
+  (revoked_by IS NULL OR revoked_by <> '') AND
+  (withdrawn_at IS NULL OR (withdrawn_at = revoked_at AND activated_at IS NULL))
 );
 -- True when `old_id` was merged into `new_id` (a recorded merge), the only proof a person link may move on.
 CREATE OR REPLACE FUNCTION hadron_grant_link_merged(old_id text, new_id text) RETURNS boolean
@@ -81,7 +82,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
   -- Columns that may differ between OLD and NEW; each is judged by its own rule below.
   movable text[] := ARRAY['updated_at', 'use_count', 'user_id', 'issuer_user_id', 'requested_by_user_id', 'verified_by', 'revoked_at', 'revoked_by',
-                          'holder_departed_at', 'activated_at', 'verification_kind', 'signature_id'];
+                          'holder_departed_at', 'activated_at', 'verification_kind', 'signature_id', 'withdrawn_at'];
   db_now timestamp(3) := (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3);
 BEGIN
   IF TG_OP = 'DELETE' THEN
@@ -93,7 +94,7 @@ BEGIN
   IF TG_OP = 'INSERT' THEN
     IF NEW.activated_at IS NOT NULL OR NEW.verification_kind IS NOT NULL OR NEW.verified_by IS NOT NULL
        OR NEW.signature_id IS NOT NULL OR NEW.revoked_by IS NOT NULL -- (revoked_at alone is refused by the pair CHECK)
-       OR NEW.use_count <> 0 OR NEW.version <> 1 OR NEW.holder_departed_at IS NOT NULL THEN
+       OR NEW.use_count <> 0 OR NEW.version <> 1 OR NEW.holder_departed_at IS NOT NULL OR NEW.withdrawn_at IS NOT NULL THEN
       RAISE EXCEPTION 'grants must arrive pending' USING ERRCODE = '23514';
     END IF;
     -- The holder must exist and not have gone. FOR SHARE: a departure that updates the holder row waits for this row (and a
@@ -170,6 +171,13 @@ BEGIN
     IF NOT hadron_grant_link_merged(OLD.revoked_by, NEW.revoked_by) THEN
       RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
     END IF;
+  END IF;
+  -- #4173: the withdrawal marker is set once, in the very statement that stamps the revoke (equal to it), on a row never activated.
+  -- Never cleared, moved, or added to a row already revoked.
+  IF NEW.withdrawn_at IS DISTINCT FROM OLD.withdrawn_at
+     AND (OLD.withdrawn_at IS NOT NULL OR NEW.withdrawn_at IS NULL OR OLD.revoked_at IS NOT NULL OR OLD.activated_at IS NOT NULL
+          OR NEW.revoked_at IS NULL OR NEW.withdrawn_at <> NEW.revoked_at) THEN
+    RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
   END IF;
   -- The departure of the holder: stamped once (NULL to a time), only on a grant not already ended, never cleared or moved.
   -- A row the holder left cannot be re-pointed (the person link below also refuses it).
@@ -269,7 +277,7 @@ FOR EACH ROW EXECUTE FUNCTION hadron_grant_holder_gone('grantee_app_id');
 -- actors alone; worker and session ids are fenced at write time by the #1162 migration).
 ALTER TABLE grant_events DROP CONSTRAINT IF EXISTS chk_grant_events_shape;
 ALTER TABLE grant_events ADD CONSTRAINT chk_grant_events_shape CHECK (
-  action IN ('CREATE', 'ACTIVATE', 'REVOKE', 'USE') AND grant_id <> '' AND (actor_user_id IS NULL OR actor_user_id <> '')
+  action IN ('CREATE', 'ACTIVATE', 'REVOKE', 'WITHDRAW', 'USE') AND grant_id <> '' AND (actor_user_id IS NULL OR actor_user_id <> '')
 );
 CREATE OR REPLACE FUNCTION hadron_append_only_grant_event() RETURNS trigger
 LANGUAGE plpgsql AS $$

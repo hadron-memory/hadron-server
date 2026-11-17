@@ -7933,6 +7933,9 @@ model Grant {
   signatureId           String?   @unique @map("signature_id")
   revokedAt             DateTime? @map("revoked_at")
   revokedBy             String?   @map("revoked_by")
+  /// #4173 (cor:acl:140:03): the withdrawal marker, a FACT like `revokedAt` and never a state column. Equal to `revokedAt`, set once with
+  /// the revoke stamp, on a never-activated row only. Rows withdrawn before #4173 have none and read as revoked.
+  withdrawnAt           DateTime? @map("withdrawn_at")
   /// #3690 (S2a-h, cor:acl:140:03): when the HOLDER went (a person erased, a worker retired or deleted, an agent or an App
   /// deleted). A FACT, like `revokedAt`, never a state label: the live check reads it, and nothing names the ended state.
   /// Stamped once, and only on a grant not already ended (prisma/grant-invariants.sql); the holder id above stays.
