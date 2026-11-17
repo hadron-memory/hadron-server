@@ -1,3 +1,4 @@
+import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../workerSignature.js';
 /**
  * hadron_task_create — a headless run creates root agent tasks in its own App
@@ -287,7 +288,7 @@ describe('follow-ups to #1756 (#1832, #1833)', () => {
   it('#1833: a run-created event names its run on the event read; the SDL declares the field', async () => {
     const run = await mintRun({ userId: person.id });
     await hadronTaskCreate.execute(toolCtx(run), { title: 'x' });
-    const Q = resolvers.Query as any;
+    const Q = settledTeamEventQueries(resolvers.Query, db) as any;
     const events = await Q.agentTeamEvents({}, { appRef: appId }, { db, userId: person.id, roles: ['READER'] });
     expect(events.length).toBeGreaterThan(0);
     expect(events.map((e: any) => e.actorRunId)).toEqual(events.map(() => run.id));

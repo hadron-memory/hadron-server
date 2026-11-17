@@ -1,3 +1,4 @@
+import { settledTeamEventQueries, settleTeamEventHorizon } from '../../../test/teamEventHorizon.js';
 /**
  * #4153 — App-boundary and batching pins on `AgentTeamEvent.taskHandle`, the surface #4146 added.
  * Tests only: production is already correct at the reviewed head; the red for each pin is the mutant
@@ -16,6 +17,7 @@ import { typeDefs } from './typeDefs.js';
 import { deploymentSchema } from './deploymentSchema.js';
 
 const schema = buildSchema(typeDefs);
+const settledQueries = settledTeamEventQueries(resolvers.Query, db);
 let app: { id: string };
 let other: { id: string };
 let member: { id: string };
@@ -23,7 +25,7 @@ let stranger: { id: string };
 const ctx = (): Context => ({ db, userId: member.id, roles: ['READER'] });
 const run = (source: string, contextValue = ctx()) => graphql({ schema, source, contextValue,
   fieldResolver: (parent, args, context, info) => {
-    const fields = resolvers[info.parentType.name as keyof typeof resolvers] as Record<string, Function> | undefined;
+    const fields = (info.parentType.name === 'Query' ? settledQueries : resolvers[info.parentType.name as keyof typeof resolvers]) as Record<string, Function> | undefined;
     const resolver = fields?.[info.fieldName];
     return typeof resolver === 'function' ? resolver(parent, args, context, info) : defaultFieldResolver(parent, args, context, info);
   },
@@ -120,6 +122,7 @@ describe('AgentTeamEvent.taskHandle boundary and batching (#4153)', () => {
         if (r.body.kind !== 'single') throw new Error('single result expected');
         return r.body.singleResult;
       };
+      await settleTeamEventHorizon(db);
       const page = await op(pageQuery());
       expect(page.errors).toBeUndefined();
       expect((page.data?.agentTeamEventsPage as any).events[0].taskHandle).toBe(t.handle);
