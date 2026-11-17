@@ -39,5 +39,9 @@ export async function endHeldGrants(tx: Prisma.TransactionClient, kind: GrantHol
     WHERE ${column} = ${holderId} AND holder_departed_at IS NULL AND revoked_at IS NULL
       AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
       AND NOT (activated_at IS NOT NULL AND ((expires_at IS NOT NULL AND expires_at <= ${GRANT_DB_NOW})
-        OR (max_uses IS NOT NULL AND use_count >= max_uses)))`);
+        OR (max_uses IS NOT NULL AND use_count >= max_uses)
+        -- #4163: the action's own limits end a grant too (cor:acl:140:03), so a used or timed-out boot-prompt grant keeps its first end.
+        OR EXISTS (SELECT 1 FROM actions x WHERE x.name = grants.action
+          AND ((x.max_uses IS NOT NULL AND grants.use_count >= x.max_uses)
+            OR (x.lifetime_seconds IS NOT NULL AND grants.activated_at + make_interval(secs => x.lifetime_seconds) <= ${GRANT_DB_NOW})))))`);
 }

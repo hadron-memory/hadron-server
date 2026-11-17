@@ -226,7 +226,7 @@ describe('9: a soft-deleted scope App allows nothing', () => {
     expect((await read(id))!.live).toBe(true);
     await db.app.update({ where: { id: w.appId }, data: { deletedAt: new Date() } });
     expect((await read(id))!.live).toBe(false);
-    const fields = { activatedAt: new Date(0), revokedAt: null, startsAt: null, expiresAt: null, maxUses: null, useCount: 0, holderDepartedAt: null };
+    const fields = { activatedAt: new Date(0), revokedAt: null, startsAt: null, expiresAt: null, maxUses: null, useCount: 0, holderDepartedAt: null, actionMaxUses: null, actionLifetimeSeconds: null };
     expect(isGrantLive({ ...fields, appDeletedAt: null }, new Date())).toBe(true);
     expect(isGrantLive({ ...fields, appDeletedAt: new Date() }, new Date())).toBe(false);
     expect(isGrantLive({ ...fields, appDeletedAt: null, holderDepartedAt: new Date() }, new Date())).toBe(false);

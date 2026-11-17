@@ -134,7 +134,7 @@ describe('a bound worker creates a PENDING grant for itself or its role agent', 
     expect(row).toMatchObject({ activated_at: null, verification_kind: null, verified_by: null, signature_id: null, use_count: 0, version: 1, holder_departed_at: null });
     expect(isGrantLive({
       activatedAt: row.activated_at, revokedAt: row.revoked_at, holderDepartedAt: row.holder_departed_at, appDeletedAt: null,
-      startsAt: row.starts_at, expiresAt: row.expires_at, maxUses: row.max_uses, useCount: row.use_count,
+      startsAt: row.starts_at, expiresAt: row.expires_at, maxUses: row.max_uses, useCount: row.use_count, actionMaxUses: null, actionLifetimeSeconds: null,
     }, new Date())).toBe(false);
     const read = await post(rawKey, sessionId, 'query($r:ID!){grant(ref:$r){id allows}}', { r: g.id });
     expect(read.data.grant).toEqual({ id: g.id, allows: false });
