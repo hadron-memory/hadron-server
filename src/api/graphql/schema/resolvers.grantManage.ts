@@ -135,7 +135,7 @@ export const grantManageMutations = {
           if (row.issuerUserId === null || row.issuerUserId !== txCtx.userId || !(await issuerStillMember(txCtx, fresh, txCtx.userId!))) throw notManager();
         };
         const { changed } = await endGrant(tx, ref, ender, {
-          authorize,
+          kind: 'revoke', authorize,
           beforeStamp: async (t) => { if (admission.kind === 'instructed-worker' && !(await sessionOpen(t, txCtx.sessionId))) throw notManager(); },
         });
         if (changed) await appendCredentialInstructionEvent(tx, { appId: fresh.id, admission, act: 'grant.revoke' });
@@ -188,7 +188,7 @@ export const grantManageMutations = {
             if (!mine) throw new GrantManageRefusal('GRANT_NOT_REQUESTER');
           };
           await endGrant(tx, ref, ender, {
-            authorize, pendingOnly: true,
+            kind: 'withdraw', authorize, pendingOnly: true,
             beforeStamp: async (t) => { if (reader && !(await sessionOpen(t, txCtx.sessionId))) throw notFound(); },
           });
           // A manager sees the audit facts; a requester who does not manage reads the plain record.
