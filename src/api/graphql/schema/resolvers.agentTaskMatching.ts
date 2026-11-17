@@ -30,6 +30,11 @@ export async function withRosterAppRead<T>(ctx: Context, appRef: string, project
     if (isRunPrincipal(ctx) && !ctx.userId) return withReadableApp(ctx, appRef, project, true);
     // Admission, status and assignment projections share one read snapshot, including MCP callers.
     return ctx.db.$transaction(async (tx) => {
+      // #4271: no JIT for this read. The roster's aggregates are priced in millions (the planner cannot see that a
+      // closed session's usage-event probe is skipped), so Postgres JIT-compiled each one: about 0.4 s of CPU per
+      // statement for a few ms of work, which a burst of rosters on a small box turned into the 20 s budget. SET
+      // LOCAL lasts only as long as this transaction and changes no answer.
+      await tx.$executeRawUnsafe('SET LOCAL jit = off');
       const readCtx = withoutRequestCaches(ctx, tx);
       const { app } = await resolveParticipatedApp(readCtx, appRef);
       return project(readCtx, app);

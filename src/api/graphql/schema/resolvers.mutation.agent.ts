@@ -136,6 +136,10 @@ export interface CreateAgentCoreInput {
   usesTasks?: boolean | null;
   /** #2162 (cor:agt:050:27): reset a worker's context when its task ends. Default false; null means the default. */
   resetContextAfterTask?: boolean | null;
+  /** #4224 (S3 of #4229): how long this Agent's workers run. Default LONG_LIVED; null means the default. */
+  lifecycle?: 'LONG_LIVED' | 'SHORT_LIVED' | null;
+  /** #4225 (S4b of #4229): the context cap in tokens; omitted or null is no cap. */
+  contextCap?: number | null;
   /** #2171 (R211): omitted/null = the default, owner and member. */
   memberRoles?: string[] | null;
 }
@@ -187,6 +191,7 @@ type PromotionTarget = {
  * 3. it is not a `group` memory, even for its owner or a writer: its audience
  *    is its MemoryMember rows (cor:acl:010:01), which a system memory drops,
  *    so the promotion would lock the owner out and widen the audience;
+ * 3b. it is not a `private` or `personal` memory (#4216, cor:dmo:050:01);
  * 4. it is not an App's install memory ({@link assertNotInstallMemory});
  * 5. it is not a memory an Agent holds for a person or an App
  *    ({@link assertNotAgentHolding}), even when its owner asks.
@@ -204,6 +209,18 @@ async function assertPromotableSystemMemory(ctx: Context, target: PromotionTarge
     throw new GraphQLError("A group memory cannot become an Agent's system memory: its members would lose it.", {
       extensions: { code: 'BAD_USER_INPUT' },
     });
+  }
+  // #4216 (ruled option A, cor:dmo:050:01): a private or personal memory is
+  // strict-owner by class (cor:dmo:060:01) and carries `user_id`; a system
+  // memory is readable through every App that installs the Agent and must not.
+  // Promotion would set visibility NULL under a set `user_id` and break
+  // chk_personal_visibility_user (INTERNAL), so it is refused, whoever owns the
+  // Agent. After the readable check, so a non-reader learns nothing of its class.
+  if (target.class === 'private' || target.class === 'personal') {
+    throw new GraphQLError(
+      `A ${target.class} memory cannot become an Agent's system memory: it belongs to one person.`,
+      { extensions: { code: 'BAD_USER_INPUT' } },
+    );
   }
   assertNotInstallMemory(target);
   assertNotAgentHolding(target);
@@ -471,6 +488,8 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
         personaRole: personaRoleNorm,
         ...(input.usesTasks != null ? { usesTasks: input.usesTasks } : {}),
         ...(input.resetContextAfterTask != null ? { resetContextAfterTask: input.resetContextAfterTask } : {}),
+        ...(input.lifecycle != null ? { lifecycle: input.lifecycle } : {}),
+        ...(input.contextCap != null ? { contextCap: parseContextCap(input.contextCap) } : {}),
         createdBy: ctx.userId ?? ctx.clientId ?? null,
       },
       include: AGENT_INCLUDE,
@@ -600,10 +619,18 @@ async function requireKnownImportedAgent(
   }
 }
 
+/** #4225 (S4b): a context cap is a whole number of tokens from 1 (the column is a 32-bit integer), or null for none. */
+function parseContextCap(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 1 || v > 2_147_483_647) {
+    throw new GraphQLError('contextCap is a whole number of tokens from 1 to 2147483647, or null for no cap.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  return v;
+}
+
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemMemoryId, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask, memberRoles }: { orgId?: string | null; name: string; description?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; memberRoles?: string[] | null },
+      { orgId, name, description, systemMemoryId, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask, lifecycle, contextCap, memberRoles }: { orgId?: string | null; name: string; description?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; lifecycle?: 'LONG_LIVED' | 'SHORT_LIVED' | null; contextCap?: number | null; memberRoles?: string[] | null },
       ctx: Context,
     ) => {
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
@@ -662,13 +689,15 @@ export const agentMutations = {
         personaRole,
         usesTasks,
         resetContextAfterTask,
+        lifecycle,
+        contextCap,
         memberRoles,
       });
     },
 
     updateAgent: async (
       _: unknown,
-      { ref, name, urn, description, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, registerDefaults, memberRoles }: { ref: string; name?: string; urn?: string; description?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; registerDefaults?: { mentionOnly?: boolean | null } | null; memberRoles?: string[] | null },
+      { ref, name, urn, description, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, lifecycle, contextCap, registerDefaults, memberRoles }: { ref: string; name?: string; urn?: string; description?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; lifecycle?: 'LONG_LIVED' | 'SHORT_LIVED' | null; contextCap?: number | null; registerDefaults?: { mentionOnly?: boolean | null } | null; memberRoles?: string[] | null },
       ctx: Context,
     ) => {
       // #929 review: normalize persona dressing (blank-after-trim clears).
@@ -1056,6 +1085,12 @@ export const agentMutations = {
           // #2162 (cor:agt:050:27, R116): the same gate and lock as usesTasks; null and omitted change nothing. Turning
           // it off cancels nothing in flight: a reset's claim re-reads it (SETTING_OFF).
           ...(resetContextAfterTask != null ? { resetContextAfterTask } : {}),
+          // #4224 (S3 of #4229): the same gate and lock as usesTasks; null and omitted change nothing. It moves no
+          // session or process by itself: the desired-state query reads it at each call.
+          ...(lifecycle != null ? { lifecycle } : {}),
+          // #4225 (S4b of #4229): the same gate and lock as usesTasks. Omitted leaves it; an explicit null clears it (no
+          // cap). Lowering or removing it cancels nothing in flight: a reset's claim re-reads it (SETTING_OFF).
+          ...(contextCap === null ? { contextCap: null } : contextCap !== undefined ? { contextCap: parseContextCap(contextCap) } : {}),
           // Spec 049 Phase 5: the install-row defaults — a scalar declaration,
           // stored as given; null clears to the platform defaults.
           ...(mergedPolicy !== undefined ? { installationPolicy: mergedPolicy } : {}),

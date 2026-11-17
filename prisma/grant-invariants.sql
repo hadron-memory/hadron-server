@@ -1,5 +1,5 @@
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (20261114140000_grant_org_leave_agent_uninstall) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (20261117200000_grant_org_leave_agent_uninstall) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because
@@ -127,6 +127,10 @@ BEGIN
        OR (OLD.starts_at IS NOT NULL AND OLD.starts_at > db_now)
        OR (OLD.expires_at IS NOT NULL AND OLD.expires_at <= db_now)
        OR (OLD.max_uses IS NOT NULL AND OLD.use_count >= OLD.max_uses)
+       -- #4163: the action's own limits (cor:acl:140:02, ruling of 2026-11-14): its count of uses and its lifetime from activation.
+       OR EXISTS (SELECT 1 FROM actions x WHERE x.name = OLD.action
+                   AND ((x.max_uses IS NOT NULL AND OLD.use_count >= x.max_uses)
+                     OR (x.lifetime_seconds IS NOT NULL AND OLD.activated_at + make_interval(secs => x.lifetime_seconds) <= db_now)))
        OR EXISTS (SELECT 1 FROM apps p WHERE p.id = OLD.app_id AND p.deleted_at IS NOT NULL)
        OR (to_jsonb(NEW) - ARRAY['updated_at', 'use_count']) <> (to_jsonb(OLD) - ARRAY['updated_at', 'use_count']) THEN
       RAISE EXCEPTION 'grants are append-only: a use adds one to a live grant and moves nothing else' USING ERRCODE = '23514';
@@ -238,7 +242,11 @@ BEGIN
       WHERE %I = $1 AND holder_departed_at IS NULL AND revoked_at IS NULL
         AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
         AND NOT (activated_at IS NOT NULL AND ((expires_at IS NOT NULL AND expires_at <= (clock_timestamp() AT TIME ZONE ''UTC''))
-          OR (max_uses IS NOT NULL AND use_count >= max_uses)))', TG_ARGV[0]) USING OLD.id;
+          OR (max_uses IS NOT NULL AND use_count >= max_uses)
+          OR EXISTS (SELECT 1 FROM actions x WHERE x.name = grants.action
+               AND ((x.max_uses IS NOT NULL AND grants.use_count >= x.max_uses)
+                 OR (x.lifetime_seconds IS NOT NULL
+                     AND grants.activated_at + make_interval(secs => x.lifetime_seconds) <= (clock_timestamp() AT TIME ZONE ''UTC''))))))', TG_ARGV[0]) USING OLD.id;
   RETURN NULL;
 END $$;
 DROP TRIGGER IF EXISTS users_grant_holder_gone ON users;
@@ -293,5 +301,6 @@ FOR EACH ROW EXECUTE FUNCTION hadron_append_only_grant_event();
 ALTER TABLE actions DROP CONSTRAINT IF EXISTS chk_actions_shape;
 ALTER TABLE actions ADD CONSTRAINT chk_actions_shape CHECK (
   name <> '' AND source <> '' AND issuer_rule <> '' AND summary_template <> '' AND
-  enforcement IN ('SERVER', 'CREDENTIAL', 'HARNESS_INSTRUCTION', 'RECORDED_ONLY')
+  enforcement IN ('SERVER', 'CREDENTIAL', 'HARNESS_INSTRUCTION', 'RECORDED_ONLY') AND
+  (max_uses IS NULL OR max_uses > 0) AND (lifetime_seconds IS NULL OR lifetime_seconds > 0)
 );
