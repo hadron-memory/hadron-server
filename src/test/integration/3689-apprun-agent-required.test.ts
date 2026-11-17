@@ -30,7 +30,7 @@ import { generateWebhookSecret, mintWebhookPlatformToken, mountWebhookRoutes } f
 
 const read = (path: string) => readFileSync(new URL(`../../../prisma/${path}`, import.meta.url), 'utf8');
 const BLOCK_FILE = 'app-run-agent-pre-push.sql';
-const MIGRATION_FILE = 'migrations/20261111020000_app_run_agent_required/migration.sql';
+const MIGRATION_FILE = 'migrations/20261117500000_app_run_agent_required/migration.sql';
 const blockOf = (sql: string) => sql.match(/^DO \$\$[\s\S]*?^END \$\$;/m)?.[0];
 
 /** Run SQL on a dedicated connection (the per-worker DB), so a statement's SQLSTATE is visible as `code`. */

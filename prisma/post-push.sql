@@ -940,6 +940,6 @@ CREATE INDEX IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"
 
 -- #3689 (#3910 F1): app_runs.agent_id is NOT NULL in the database but optional in schema.prisma, so a build serving the
 -- old nullable column after an HDPRF-refused migration (#3770) can still read the retained agentless runs. `db push`
--- therefore leaves it nullable; this restores the guarantee the 20261111020000_app_run_agent_required migration states.
+-- therefore leaves it nullable; this restores the guarantee the 20261117500000_app_run_agent_required migration states.
 -- app-run-agent-pre-push.sql has already filled or deleted every agentless run before the push.
 ALTER TABLE app_runs ALTER COLUMN agent_id SET NOT NULL;

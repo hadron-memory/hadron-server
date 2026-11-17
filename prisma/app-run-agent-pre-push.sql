@@ -6,7 +6,7 @@
 -- "Installed" here is a ROW install (app_agents) whose Agent is live (deleted_at IS NULL); installs derived through
 -- agent_imports are not counted (gate R5: under-counting only errs toward the ruled delete branch).
 --
--- The DO block below is DUPLICATED VERBATIM in prisma/migrations/20261111020000_app_run_agent_required/migration.sql
+-- The DO block below is DUPLICATED VERBATIM in prisma/migrations/20261117500000_app_run_agent_required/migration.sql
 -- (pinned by src/test/integration/3689-apprun-agent-required.test.ts). Change one, change the other. It guards on the
 -- column still being nullable, so it is a no-op on a fresh database, on a migrated one, and on a second run. A child
 -- table that refuses the delete stops the transition with SQLSTATE HDPRF (CLAUDE.md, #3770) instead of guessing.
