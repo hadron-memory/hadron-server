@@ -454,6 +454,35 @@ describe('#434 slice B: the delta5 folds — a partially captured EXECUTE is una
   });
 });
 
+describe('#4381: the plain-loop guard reads the match\'s own string; implicit literal continuation (E1, E3)', () => {
+  const refusals = (sql: string, payloads?: string) =>
+    classify({ sql, ...(payloads === undefined ? {} : { payloads }) }).filter((c) => 'unrecognized' in c);
+
+  it('a consumed plain EXECUTE before the glued one still refuses (E1)', () => {
+    // The plain loop rewrites `remainder` after every extraction, but the
+    // matchAll snapshot keeps the original indices: from the second match on,
+    // the glued check sliced the MUTATED string at the ORIGINAL index, missed
+    // the ||, and consumed the glued EXECUTE — the block classified clean.
+    // Silent on main (0 refusals, probed); the guard must read m.input.
+    expect(refusals('DO $do$ … $do$;', "BEGIN EXECUTE 'SELECT 1;'; EXECUTE 'SELECT 2; ' || 'CREATE STATISTICS e1_st ON a, b FROM t'; END")).toHaveLength(1);
+  });
+
+  it('an implicit literal continuation across a newline refuses (E3)', () => {
+    // Postgres concatenates adjacent literals: the same partial capture with
+    // no || at all. The forward guard must treat a following quote (anywhere
+    // whitespace can sit, including a newline) as glued, in both spellings.
+    expect(refusals('DO $do$ … $do$;', "BEGIN EXECUTE 'SELECT 1; '\n'CREATE STATISTICS e3_st ON a, b FROM t'; END")).toHaveLength(1);
+    expect(refusals('DO $do$ … $do$;', "EXECUTE $x$SELECT 1;$x$\n'CREATE STATISTICS e3b_st ON a, b FROM t'")).toHaveLength(1);
+  });
+
+  it('a statement-separator follower is not a continuation (E3 boundary)', () => {
+    // `;` after the literal ends the statement — the next quote starts a new
+    // one (a plain EXECUTE the loop must still consume and classify, not a
+    // glued tail). Guards against the forward test over-matching.
+    expect(refusals('DO $do$ … $do$;', "BEGIN EXECUTE 'SELECT 1;'; EXECUTE 'SELECT 2'; END")).toHaveLength(0);
+  });
+});
+
 describe('#434 slice B: completeness, both directions, against the real closure', () => {
   it('the closure parses with zero unrecognized statements', () => {
     const inv = postPushInventory(ENTRY);
