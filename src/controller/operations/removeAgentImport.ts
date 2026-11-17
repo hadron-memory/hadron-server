@@ -15,6 +15,12 @@
 import type { Prisma } from '../../generated/prisma/index.js';
 import { endGrantsOfAgentsNoLongerInstalled, fenceAppsForWitnessDelete, liveAppsWhereInstalled } from '../../lib/grants/agentInstallDeparture.js';
 
+/**
+ * #4318 test seam: runs between the first fence and the re-read (no-op in production). A concurrency pin parks two removals
+ * here to land installs between their reads and form the crossed-fence cycle; nothing else may set it.
+ */
+export const removeAgentImportHooks: { betweenFenceReads?: (parentAgentId: string) => Promise<void> } = {};
+
 export async function removeAgentImport(
   tx: Prisma.TransactionClient,
   parentAgentId: string,
@@ -24,6 +30,9 @@ export async function removeAgentImport(
   // Fence every App the edge could witness an install in BEFORE the delete (two parents' removals would otherwise deadlock on
   // each other's post-delete witness scans, #4210 F1), then re-read: an App the parent was installed in meanwhile is fenced too.
   const fenced = new Set(await fenceAppsForWitnessDelete(tx, await liveAppsWhereInstalled(tx, parentAgentId)));
+  await removeAgentImportHooks.betweenFenceReads?.(parentAgentId);
+  // #4318: this second batch is sorted, but not together with the first, so two removals whose parents were installed into
+  // each other's Apps between their reads can 40P01 here; the resolver retries the whole transaction (retryOnDeadlock).
   const apps = await liveAppsWhereInstalled(tx, parentAgentId);
   await fenceAppsForWitnessDelete(tx, apps.filter((a) => !fenced.has(a)));
   // Idempotent: a missing row is a no-op (deleteMany never throws on it); any other error surfaces.
