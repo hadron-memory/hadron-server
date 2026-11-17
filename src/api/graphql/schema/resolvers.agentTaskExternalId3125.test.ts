@@ -103,12 +103,10 @@ describe('externalId round-trip (#3125 S2)', () => {
   });
 });
 
-describe('externalId is unique per App, whatever the first task state (#3125 S2)', () => {
+describe('externalId is held by one ACTIVE task per App (#3125 S2; #4217: finished and cancelled holders are pinned in resolvers.agentTaskExternalIdActive4217.test.ts)', () => {
   const states: Array<[string, Record<string, unknown>]> = [
     ['pending', {}],
     ['started', { status: 'started', startedAt: new Date(), assigneeUserId: 'OWNER', assignedAt: new Date() }],
-    ['finished', { status: 'finished', startedAt: new Date(), finishedAt: new Date(), resultOutcome: 'done', assigneeUserId: 'OWNER', assignedAt: new Date() }],
-    ['cancelled', { status: 'cancelled', cancelledAt: new Date() }],
     ['backlog', { status: 'backlog' }],
   ];
   for (const [state, data] of states) {

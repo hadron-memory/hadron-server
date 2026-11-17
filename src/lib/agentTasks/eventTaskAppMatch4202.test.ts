@@ -11,7 +11,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
-import { endedAlarmEpisodeInstants, effectiveWindows, loadStallInputs, stallCandidates, wakeDueOwners } from './stall.js';
+import { endedAlarmEpisodeInstants, effectiveWindows, loadStallInputs, STALL_EVENT_TYPE, stallCandidates, wakeDueOwners } from './stall.js';
 import { pendingTaskWakes } from './taskWakes.js';
 import { loadTeamRoster } from './roster.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
@@ -107,6 +107,46 @@ describe('#4202 progress (stall.ts loadStallInputs, the no-progress rule)', () =
     const input = (await loadStallInputs(db, { id: task.id }, now))[0];
     expect(input.startByEditedAt ?? null).toBeNull();
     expect(input.finishByEditedAt ?? null).toBeNull();
+  });
+});
+
+describe('#4315 item 8: a foreign assignment.queued event and foreign finish-by alarm history are read for nothing', () => {
+  const queuedTask = (side: Side) => makeTask(side, 'queued task', { status: 'pending', assigneeWorkerId: null, ownerWorkerId: null, ownerUserId: side.user.id, assignedAt: null, startedAt: null });
+
+  it('a foreign assignment.queued naming the task does not become its queuedAt (the unassignable episode starts at the task\'s own creation)', async () => {
+    const task = await queuedTask(A);
+    await plant({ appId: B.app.id, type: 'assignment.queued', taskId: task.id, at: ago(60) });
+    const input = (await loadStallInputs(db, { id: task.id }, now))[0];
+    expect(input.queuedAt ?? null).toBeNull();
+    const unassignable = stallCandidates(input, effectiveWindows(null), now).find((c) => c.rule === 'unassignable');
+    expect(unassignable?.episodeStart.getTime()).toBe(task.createdAt.getTime());
+  });
+
+  it('control: a same-App assignment.queued IS the queuedAt, and the unassignable episode starts there', async () => {
+    const task = await queuedTask(A);
+    await plant({ appId: A.app.id, type: 'assignment.queued', taskId: task.id, at: ago(60) });
+    const input = (await loadStallInputs(db, { id: task.id }, now))[0];
+    expect(input.queuedAt?.getTime()).toBe(ago(60).getTime());
+    const unassignable = stallCandidates(input, effectiveWindows(null), now).find((c) => c.rule === 'unassignable');
+    expect(unassignable?.episodeStart.getTime()).toBe(ago(60).getTime());
+  });
+
+  it('a foreign finish-by alarm in the history does not become the finish-by episode start', async () => {
+    const finishBy = ago(30);
+    const task = await makeTask(A, 'A task', { finishBy });
+    await plant({ appId: B.app.id, type: STALL_EVENT_TYPE['finish-by'], taskId: task.id, at: ago(20), severity: 'alarm', episodeStart: ago(20), chain: [] });
+    const input = (await loadStallInputs(db, { id: task.id }, now))[0];
+    expect(input.finishByAlarmStart ?? null).toBeNull();
+    const finishByCandidate = stallCandidates(input, effectiveWindows(null), now).find((c) => c.rule === 'finish-by');
+    expect(finishByCandidate?.episodeStart.getTime()).toBe(finishBy.getTime());
+  });
+
+  it('control: a same-App finish-by alarm in the history IS the episode start', async () => {
+    const finishBy = ago(30);
+    const task = await makeTask(A, 'A task', { finishBy });
+    await plant({ appId: A.app.id, type: STALL_EVENT_TYPE['finish-by'], taskId: task.id, at: ago(20), severity: 'alarm', episodeStart: ago(20), chain: [] });
+    const input = (await loadStallInputs(db, { id: task.id }, now))[0];
+    expect(input.finishByAlarmStart?.getTime()).toBe(ago(20).getTime());
   });
 });
 
@@ -290,27 +330,39 @@ describe('#4202 the roster and the external-id change feed', () => {
   });
 
   const X = 'https://example.test/issues/4202';
-  const feed = async () => {
+  // #4315 item 7: the wait for the transaction-visibility condition reports whether it was reached. It used to give up silently after
+  // 200 x 50 ms (longer than the 5000 ms test timeout), so a negative pin could pass without examining the planted event, or time
+  // out with nothing to say why. The bound is now inside the tests' own timeout and a miss throws.
+  const FEED_TIMEOUT_MS = 30_000;
+  const feed = async (wait: { attempts: number; intervalMs: number } = { attempts: 400, intervalMs: 50 }, snapshotDone: (x: string) => Promise<boolean> = async (x) => {
+    const [{ done }] = await db.$queryRaw<{ done: boolean }[]>`SELECT pg_snapshot_xmin(pg_current_snapshot()) > ${x}::xid8 AS done`;
+    return done;
+  }) => {
     // xmin is cluster-wide: wait until every transaction that began before this call has ended (as the #4084 tests do).
     const [{ x }] = await db.$queryRaw<{ x: string }[]>`SELECT pg_current_xact_id()::text AS x`;
-    for (let i = 0; i < 200; i++) {
-      const [{ done }] = await db.$queryRaw<{ done: boolean }[]>`SELECT pg_snapshot_xmin(pg_current_snapshot()) > ${x}::xid8 AS done`;
-      if (done) break;
-      await new Promise((r) => setTimeout(r, 50));
+    let reached = false;
+    for (let i = 0; i < wait.attempts && !reached; i++) {
+      reached = await snapshotDone(x);
+      if (!reached) await new Promise((r) => setTimeout(r, wait.intervalMs));
     }
+    if (!reached) throw new Error(`the change feed's visibility condition was never reached (xmin did not pass ${x} within ${wait.attempts} x ${wait.intervalMs} ms): a transaction elsewhere on the cluster is still open, so this pin cannot examine the planted event`);
     const ctx = { db, userId: A.user.id, roles: ['READER'] } as Context;
     return (resolvers as any).Query.agentTaskExternalIdChanges(null, { appRef: A.app.id }, ctx);
   };
+
+  it('#4315 item 7: when the visibility condition is never reached the helper throws its descriptive error, never a silent pass', async () => {
+    await expect(feed({ attempts: 3, intervalMs: 1 }, async () => false)).rejects.toThrow(/visibility condition was never reached.*xmin did not pass/);
+  });
 
   it('a change in App A naming a task of App B never carries B\'s external id into A\'s feed', async () => {
     const taskB = await makeTask(B, 'B task', { externalId: X });
     await plant({ appId: A.app.id, type: 'task.assigned', taskId: taskB.id, at: ago(1), payload: { type: 'task.assigned' } });
     expect(JSON.stringify(await feed(), (_k, v) => (typeof v === 'bigint' ? v.toString() : v))).not.toContain(X);
-  });
+  }, FEED_TIMEOUT_MS);
 
   it('control: a change of a task of App A carries its external id', async () => {
     const taskA = await makeTask(A, 'A task', { externalId: X });
     await plant({ appId: A.app.id, type: 'task.assigned', taskId: taskA.id, at: ago(1), payload: { type: 'task.assigned' } });
     expect(JSON.stringify(await feed(), (_k, v) => (typeof v === 'bigint' ? v.toString() : v))).toContain(X);
-  });
+  }, FEED_TIMEOUT_MS);
 });
