@@ -147,6 +147,14 @@ describe('#4244 A: a restore leaves compiled boot prompts as they are', () => {
     const after = await db.edge.findMany({ where: { sourceId: made.id } });
     expect(after.map((e) => ({ id: e.id, deletedAt: e.deletedAt, updatedAt: e.updatedAt }))).toEqual([{ id: edge.id, deletedAt: null, updatedAt: edge.updatedAt }]);
   });
+  it('an edge TO a compiled prompt, from a node the snapshot restores, is restored', async () => {
+    const made = await compile();
+    const from = await node('prompts');
+    const edge = await db.edge.create({ data: { id: generateId(), memoryId: systemMemory.id, loc: `prompts->${COMPILED}`, sourceId: from.id, targetId: made.id } as any });
+    const rev = await save();
+    await restore(rev.revisionLoc);
+    expect(await db.edge.findUniqueOrThrow({ where: { id: edge.id } })).toMatchObject({ deletedAt: null, sourceId: from.id, targetId: made.id });
+  });
 });
 
 describe('#4244 A: a snapshot records each node\'s role', () => {
