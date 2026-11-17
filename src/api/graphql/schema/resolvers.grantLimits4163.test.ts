@@ -211,7 +211,7 @@ describe('item 3: a grant ended by use or by the hour keeps its first end when t
 
 describe('upgrade: a grant used before the count existed (LOCAL P2, Baloo)', () => {
   const backfill = () => {
-    const sql = readFileSync(new URL('../../../../prisma/migrations/20261114200000_action_limits/migration.sql', import.meta.url), 'utf8');
+    const sql = readFileSync(new URL('../../../../prisma/migrations/20261117100000_action_limits/migration.sql', import.meta.url), 'utf8');
     return sql.slice(sql.indexOf('-- BEGIN #4163 backfill'), sql.indexOf('-- END #4163 backfill'));
   };
   it('the migration counts the earlier use: it reads spent, and retiring the worker leaves its first end', async () => {
