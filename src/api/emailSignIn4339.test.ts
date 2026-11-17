@@ -1,6 +1,6 @@
 /**
  * #4339 (Slice 1 of hadron-server-private#37): sign-in never depends on a passkey and never prompts for one
- * (Holger's decision, 2026-11-17). With the passkey switches ON, a valid magic link signs the person in exactly as
+ * (decision of 2026-11-17, recorded on the private tracker). With the passkey switches ON, a valid magic link signs the person in exactly as
  * with them off, whatever passkeys they hold; a passkey is asked for only by an act that needs one (signing).
  * Real HTTP and real Postgres. Pins marked RED fail on main (the verify route redirected to the passkey page);
  * pins marked GREEN pass on main by design and guard what must not move.
