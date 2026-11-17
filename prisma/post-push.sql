@@ -785,6 +785,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- src/lib/hostOperations/launch.test.ts).
 \ir host-launch-invariants.sql
 
+
 -- #1631: shared passkey registry invariant guards.
 \ir passkey-invariants.sql
 
@@ -829,6 +830,20 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 CREATE INDEX IF NOT EXISTS usage_events_session_activity_idx
   ON usage_events (session_id, created_at) WHERE counts_as_activity;
 
+-- #4271: the stall rules' person-activity read (loadStallInputs' userCalls, cor:agt:050:12) by actor and App. Partial,
+-- so Prisma's schema language can't model it. Same definition as migration
+-- 20261115280000_agent_team_events_person_activity_idx, which builds it CONCURRENTLY for production.
+CREATE INDEX IF NOT EXISTS agent_team_events_person_activity_idx
+  ON agent_team_events (actor_user_id, app_id, created_at) WHERE actor_worker_id IS NULL AND task_id IS NOT NULL;
+
+-- #4273: the worker-liveness read (workerActivitySql) keeps a worker's open sessions and the ended ones that end at or after
+-- its latest start; these two partial indexes serve those ranges. Same definitions as migrations
+-- 20261115290000_sessions_worker_ended_idx and 20261115291000_sessions_worker_started_idx (built CONCURRENTLY there).
+CREATE INDEX IF NOT EXISTS sessions_worker_ended_idx
+  ON sessions (worker_id, ended_at DESC, id DESC) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS sessions_worker_started_idx
+  ON sessions (worker_id, started_at DESC) WHERE deleted_at IS NULL;
+
 -- #1647: the admin-erasure audit is append-only and its reason is trimmed, 1-500 code points
 -- (Prisma can model neither; the migration carries the same statements).
 ALTER TABLE user_deletion_audits DROP CONSTRAINT IF EXISTS chk_user_deletion_reason;
@@ -862,8 +877,15 @@ CREATE TRIGGER agent_clone_audits_immutable
 -- #1162: newly introduced typed Worker/session references fence hard deletion.
 \ir worker-reference-invariants.sql
 
+-- #4222: host worker assignments and the App's setup-source switch. One source, shared verbatim with migration
+-- 20261115140000_host_worker_assignments (pinned by src/api/graphql/schema/resolvers.hostAssignment4222.test.ts). After
+-- worker-reference-invariants.sql, whose fence function its trigger uses.
+\ir host-assignment-invariants.sql
+
 -- S12 explicit reporting choice (legacy UNSET retained).
 \ir worker-team-choice-invariants.sql
+-- #4224: the leave-alone marker's shape (same rule as migration 20261115160000_desired_state).
+\ir desired-state-invariants.sql
 -- #423: outgoing-edge lookup/delete must not scan every tenant’s edges.
 CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 -- #2047: the served-prompt record — one owner, owner-consistent identity, immutable, deleted only with its owner. After
@@ -882,6 +904,11 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 
 -- #2014: the team-chat post limit's episodes and their worker fence.
 \ir post-limit-invariants.sql
+-- #4231: the platform start's reason and the start-failing episodes (after the #1162 fence file and post-limit).
+\ir desired-start-invariants.sql
+
+-- #4233: the sweep run record and the stale-sweep episodes.
+\ir host-sweep-invariants.sql
 
 -- #3997 (S2 of #3991): App-owned secrets, versions, events, tombstones. One source, shared verbatim with migration
 -- 20261114120000_app_secret_versions. After worker-reference-invariants.sql: it puts the #1162 fence on its three tables.
