@@ -196,21 +196,17 @@ describe('#4298 — a not-started episode ends at the start, not at the assignme
     expect(byId.get(alarm.id)).toBe(at('10:00', GAP_MS).toISOString()); // not repaired
   });
 
-  // Scope (the gate on #4298: the not-started rule only), RESTATED by #4300 (never deleted): its pin "another rule is
-  // unchanged: a couldn't-be-assigned episode still ends at the first assignment after its start" held this rule to
-  // counting from the episode's start, and #4300 changes exactly that (its couldn't-be-assigned pin was red on main). A
-  // couldn't-be-assigned episode now ends at the first assignment at or after its raise, as a not-started one does.
-  it('restated by #4300: a couldn\'t-be-assigned episode ends at the first assignment at or after its raise, not one recorded before it', async () => {
+  // Scope (the gate on #4298: the not-started rule only). Every other rule still counts from its episode's start. Not
+  // red on main: it holds the change to the one rule.
+  it('another rule is unchanged: a couldn\'t-be-assigned episode still ends at the first assignment after its start', async () => {
     const t = await db.agentTask.create({ data: { appId: app.id, title: 'Q', createdAt: at('10:00'), ownerWorkerId: ada.id }, select: { id: true } });
     await tick('10:35');
     const alarm = await db.agentTeamEvent.findFirstOrThrow({ where: { taskId: t.id, type: 'assignment.unassignable' } });
-    // An assignment recorded before the pass that raised the alarm (a late pass): no longer the end.
-    await event(t.id, { type: 'task.assigned', assignee: party(rook), closeSessionWhenDone: false }, at('10:32'));
-    // A reassignment stamped at the very instant of the raise: the end (the raise bound is inclusive).
-    await db.agentTask.update({ where: { id: t.id }, data: { assigneeWorkerId: anne.id, assignedAt: at('10:35') } });
-    await event(t.id, { type: 'task.reassigned', from: party(rook), to: party(anne), closeSessionWhenDone: false }, at('10:35'));
+    // An assignment recorded before the pass that raised the alarm (a late pass): still the end, as on main.
+    await db.agentTask.update({ where: { id: t.id }, data: { assigneeWorkerId: anne.id, assignedAt: at('10:32') } });
+    await event(t.id, { type: 'task.assigned', assignee: party(anne), closeSessionWhenDone: false }, at('10:32'));
     await record('10:36');
-    expect(await events()).toMatchObject([{ id: alarm.id, escalationEndedAt: iso('10:35') }]);
+    expect(await events()).toMatchObject([{ id: alarm.id, escalationEndedAt: iso('10:32') }]);
   });
 
   // The real ASSIGNMENT write path only: it is the one whose two timestamps (row stamp, then event) make the defect. The
