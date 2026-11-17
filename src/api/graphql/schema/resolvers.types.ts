@@ -93,7 +93,6 @@ import {
   isOrgMemberOrAdmin,
   requireAppRead,
   appChildrenWithheld,
-  isUserOwnedAppOwnerMember,
   APP_OWNER_MEMBER_ROLE,
   userOwnedAppOwnerMemberWhere,
   safeCanonicalUrn,
@@ -424,20 +423,6 @@ async function loadReadableNestedApp(ctx: Context, appId: string) {
 async function appProjectionWithheld(ctx: Context, appId: string): Promise<boolean> {
   const app = await loadApp(ctx, appId);
   return !!app && appChildrenWithheld(ctx, app);
-}
-
-/**
- * #3765 (ruling 0260, cor:dmo:050:12): is this App's ROSTER (members, memberCount, appAgents, agents, and the same install fact as
- * agentId / agent / installedAgentUrn) withheld from the caller? Everything {@link appProjectionWithheld} withholds, except from a
- * current owner-role member of the user-owned App: "the same rights as the App's owner, except a user-owned App's AI
- * configuration". The member is decided by {@link isUserOwnedAppOwnerMember} in its own statement (a live, non-impersonated user with
- * a CURRENT owner-role row on a live user-owned App), never from a cached or token-carried role. The AI configuration fields keep
- * {@link appProjectionWithheld}, so this arm cannot loosen them.
- */
-async function appRosterWithheld(ctx: Context, appId: string): Promise<boolean> {
-  const app = await loadApp(ctx, appId);
-  if (!app || !appChildrenWithheld(ctx, app)) return false;
-  return !(await isUserOwnedAppOwnerMember(ctx, app));
 }
 
 async function filterReadableAppRows<T extends {
@@ -1989,7 +1974,7 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
-      if (await appRosterWithheld(ctx, a.id)) return null;
+      if (await appProjectionWithheld(ctx, a.id)) return null;
       // #2640: the URN names the primary Agent, so it answers as that Agent's own read does.
       const agentUrn = (await readablePrimaryAgent(ctx, a))?.urn;
       if (!agentUrn) return null;
@@ -2024,7 +2009,7 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ): Promise<string | null> => {
-      if (await appRosterWithheld(ctx, a.id)) return null;
+      if (await appProjectionWithheld(ctx, a.id)) return null;
       return (await readablePrimaryAgent(ctx, a))?.id ?? null;
     },
     agent: async (
@@ -2032,7 +2017,7 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
-      if (await appRosterWithheld(ctx, a.id)) return null;
+      if (await appProjectionWithheld(ctx, a.id)) return null;
       const eager = readPrimaryAgentRecordFromEager(a) as (NestedAgentRow & Record<string, unknown>) | null | undefined;
       if (eager !== undefined) return readableNestedAgent(ctx, eager);
       const agent = await getPrimaryAgent(ctx.db, a.id, { include: AGENT_INCLUDE });
@@ -2043,7 +2028,7 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
-      if (await appRosterWithheld(ctx, a.id)) return null;
+      if (await appProjectionWithheld(ctx, a.id)) return null;
       const installs = await listAppInstallations(ctx.db,a.id);
       const agents = await ctx.db.agent.findMany({where:{id:{in:installs.map(r=>r.agentId)}},include:AGENT_INCLUDE});
       const byId = new Map(agents.map(agent=>[agent.id,agent]));
@@ -2056,7 +2041,7 @@ export const typeResolvers = {
         .filter((ag): ag is NonNullable<typeof ag> => ag !== null);
     },
     members: async (a: { id: string }, _: unknown, ctx: Context) => {
-      if (await appRosterWithheld(ctx, a.id)) return null;
+      if (await appProjectionWithheld(ctx, a.id)) return null;
       if (!(await loadReadableNestedApp(ctx, a.id))) return [];
       return ctx.db.appMember.findMany({
         where: { appId: a.id },
@@ -2064,7 +2049,7 @@ export const typeResolvers = {
       });
     },
     memberCount: async (a: { id: string }, _: unknown, ctx: Context) => {
-      if (await appRosterWithheld(ctx, a.id)) return null;
+      if (await appProjectionWithheld(ctx, a.id)) return null;
       if (!(await loadReadableNestedApp(ctx, a.id))) return 0;
       return ctx.db.appMember.count({ where: { appId: a.id } });
     },
@@ -2143,7 +2128,7 @@ export const typeResolvers = {
     // parent App onto each row so `AppAgent.app` resolves without an
     // N+1 DB lookup per row.
     appAgents: async (a: { id: string; appAgents?: unknown } & Record<string, unknown>, _: unknown, ctx: Context) => {
-      if (await appRosterWithheld(ctx, a.id)) return null;
+      if (await appProjectionWithheld(ctx, a.id)) return null;
       const installs = await listAppInstallations(ctx.db,a.id);
       const eager = readAllAgentRecordsFromEager(a) ?? [];
       const agents = new Map(eager.map(agent=>[(agent as {id:string}).id,agent] as const));

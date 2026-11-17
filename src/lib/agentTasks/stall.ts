@@ -298,6 +298,8 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
   const queuedBy = new Map(own(queued).map((q) => [q.taskId, q._max.createdAt]));
   const editedBy = new Map(own(startByEdits).map(e => [e.taskId, e._max.createdAt]));
   const finishByEditedBy = new Map(own(finishByEdits).map(e => [e.taskId, e._max.createdAt]));
+  // #4315 item 6: the finish-by alarm history is App-filtered ONCE for the whole pass, not again for every task with a finish-by time.
+  const ownFinishByAlarms = own(finishByAlarms);
   const childrenBy = new Map<string, typeof children>();
   for (const c of children) {
     const list = childrenBy.get(c.parentTaskId as string) ?? [];
@@ -329,7 +331,7 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
       queuedAt: queuedBy.get(task.id) ?? null,
       startByEditedAt: editedBy.get(task.id) ?? null,
       finishByEditedAt: finishByEditedBy.get(task.id) ?? null,
-      finishByAlarmStart: task.finishBy ? currentFinishByAlarmStart(task.id, task.finishBy, own(finishByAlarms)) : null,
+      finishByAlarmStart: task.finishBy ? currentFinishByAlarmStart(task.id, task.finishBy, ownFinishByAlarms) : null,
       stopIntervals,
       stopHolds: stopHoldsBy.get(task.id) ?? [],
     };
