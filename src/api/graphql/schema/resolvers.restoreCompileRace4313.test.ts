@@ -131,9 +131,11 @@ const readsCompiledRows = (where: any) => where?.nodeType === 'compiled-boot-pro
  * `at.nth` matching call of `at.model.at.op` in that transaction has run and before its result is returned.
  * `restoreRevision` opens two transactions: the auto-save's slot allocation, then the restore. `fired` says whether
  * the hook ran, and `seen` is what the hooked statement returned, so a pin can assert it hooked the read it meant.
+ * `locked` holds every row the restore's transaction read back by id (`node.findUniqueOrThrow`): the write loop's
+ * read of a row it has just locked, so a pin can assert WHICH row that check judged.
  */
 function ctxInterleaving(at: HookPoint, during: () => Promise<unknown>) {
-  const state = { fired: false, transactions: 0, seen: undefined as unknown };
+  const state = { fired: false, transactions: 0, seen: undefined as unknown, locked: [] as Array<{ id: string; loc: string; nodeType: string }> };
   const base = adminCtx();
   const proxyDb = new Proxy(base.db, {
     get(target, prop, receiver) {
@@ -144,9 +146,16 @@ function ctxInterleaving(at: HookPoint, during: () => Promise<unknown>) {
         let calls = 0;
         return (target as any).$transaction((tx: any) => {
           if (!isRestore) return (fn as any)(tx);
-          const modelProxy = new Proxy(tx[at.model], {
+          const proxyOf = (model: 'node' | 'edge') => new Proxy(tx[model], {
             get(mt, mp, mr) {
-              if (mp !== at.op) return Reflect.get(mt, mp, mr);
+              if (model === 'node' && mp === 'findUniqueOrThrow') {
+                return async (...args: unknown[]) => {
+                  const row = await mt.findUniqueOrThrow(...args);
+                  state.locked.push({ id: row.id, loc: row.loc, nodeType: row.nodeType });
+                  return row;
+                };
+              }
+              if (model !== at.model || mp !== at.op) return Reflect.get(mt, mp, mr);
               return async (...args: unknown[]) => {
                 const result = await mt[at.op](...args);
                 if (at.where && !at.where((args[0] as any)?.where)) return result;
@@ -155,7 +164,8 @@ function ctxInterleaving(at: HookPoint, during: () => Promise<unknown>) {
               };
             },
           });
-          return (fn as any)(new Proxy(tx, { get: (t, p, r) => (p === at.model ? modelProxy : Reflect.get(t, p, r)) }));
+          const proxies = { node: proxyOf('node'), edge: proxyOf('edge') };
+          return (fn as any)(new Proxy(tx, { get: (t, p, r) => (p === 'node' || p === 'edge' ? proxies[p] : Reflect.get(t, p, r)) }));
         }, opts);
       };
     },
@@ -198,6 +208,9 @@ describe('#4313: a compile that commits while a restore runs is left as it is', 
     const conversations = await node('conversations');
     await db.edge.create({ data: { id: generateId(), memoryId: systemMemory.id, loc: `${COMPILED}->conversations`, sourceId: squatter.id, targetId: conversations.id } as any });
     const rev = await save();
+    // The snapshot really holds that edge: without it nothing below would show that its replay is suppressed.
+    const savedEdges = ((await node(rev.revisionLoc)).data as any).snapshot.edges as Array<{ sourceLoc: string; targetLoc: string }>;
+    expect(savedEdges).toContainEqual(expect.objectContaining({ sourceLoc: COMPILED, targetLoc: 'conversations' }));
     await db.edge.deleteMany({ where: { sourceId: squatter.id } });
     await db.node.delete({ where: { id: squatter.id } });
     let made: { id: string } | undefined;
@@ -205,6 +218,9 @@ describe('#4313: a compile that commits while a restore runs is left as it is', 
     await M.restoreRevision({}, { agentId: agent.id, revisionLoc: rev.revisionLoc }, ctx);
     expect(state.fired).toBe(true);
     expect((state.seen as Array<{ loc: string }>).map((r) => r.loc)).not.toContain(COMPILED); // the hooked read did not hold it
+    // …and the write loop then read the compile's row back under its lock and judged THAT row: the locked lookup
+    // returned the compiled prompt at this address, which is the check that skipped the write.
+    expect(state.locked).toContainEqual({ id: made!.id, loc: COMPILED, nodeType: 'compiled-boot-prompt' });
     expect(await node(COMPILED)).toMatchObject({ id: made!.id, deletedAt: null, nodeType: 'compiled-boot-prompt', role: 'boot-prompt', content: 'compiled while restoring' });
     // The snapshot's edge from the ordinary node is not replayed onto the compiled prompt: it keeps its own edge only.
     const edges = await db.edge.findMany({ where: { sourceId: made!.id }, select: { loc: true, deletedAt: true } });
