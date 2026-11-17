@@ -363,7 +363,9 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     // Every probe goes through here, so the in-flight count covers the background loop and the checkpoint alike. Admission is
     // recorded the moment connect() resolves, whatever happens to the close; a refusal keeps its SQLSTATE and text (a limit or
     // transport failure must not pass for an ACL refusal, and the code does not depend on the server's locale).
-    type Probe = { connected: boolean; admittedAt: number | null; code: string | null; error: string | null };
+    type Probe =
+      | { connected: true; admittedAt: number; code: null; error: null }
+      | { connected: false; admittedAt: null; code: string | null; error: string };
     // A client that was admitted and then failed to close may still hold a slot, which would make the slot accounting below
     // wrong; count those and fail the test on any, instead of swallowing them.
     let closeFailures = 0;
@@ -375,7 +377,7 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
         try {
           await c.connect();
         } catch (e) {
-          await c.end().catch(() => undefined); // release whatever a refused or timed-out connect left open
+          await c.end().catch(() => { closeFailures++; }); // release whatever a refused or timed-out connect left open; the original outcome is kept, a failed cleanup is counted
           return { connected: false, admittedAt: null, code: (e as { code?: string } | null)?.code ?? null, error: String((e as Error | null)?.message ?? e) };
         }
         const admittedAt = performance.now(); // the instant of admission, taken before the close can delay it
@@ -392,7 +394,7 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
       for (let i = 0; !stop; i++) {
         const role = roles[i % roles.length]!;
         const result = await probe(role);
-        if (result.connected) events.push({ at: result.admittedAt!, what: role });
+        if (result.connected) events.push({ at: result.admittedAt, what: role });
         await new Promise((r) => setTimeout(r, 5));
       }
     })().then(
@@ -431,7 +433,7 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     expect(events.some((e) => e.what === F.ROLES.other)).toBe(false);
     // #4322: the limit is 4: the pipeline's session and pg_restore's leave two spare slots, so at most two probes may be in flight.
     expect(maxInFlight).toBeLessThanOrEqual(2);
-    expect(closeFailures).toBe(0); // no admitted probe left a connection behind to eat a slot
+    expect(closeFailures).toBe(0); // no probe, admitted or refused, left a connection behind to eat a slot
     // ...and each role, the serve role included, was refused for lack of CONNECT at the working-phase checkpoint, before the restore went on.
     expect(checkpointCompleteAtS3).toBe(true);
     for (const role of roles) {
