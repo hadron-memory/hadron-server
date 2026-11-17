@@ -274,7 +274,11 @@ export async function loadNoSessionReasons(db: Db, workerIds: string[], now: Dat
       by: ['workerId'],
       where: { workerId: { in: workerIds }, endedAt: null, deletedAt: null, autoExpiredAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
     }),
-    db.session.groupBy({ by: ['workerId'], where: { workerId: { in: workerIds }, deletedAt: null } }),
+    // #4273: "has any undeleted session", one index probe per worker, not a read of every session the worker ever had
+    // (a groupBy over them grew with the App's whole session history, on every stall tick and every roster).
+    db.$queryRaw<{ workerId: string }[]>`
+      SELECT w AS "workerId" FROM unnest(${workerIds}::text[]) AS w
+      WHERE EXISTS (SELECT 1 FROM sessions s WHERE s.worker_id = w AND s.deleted_at IS NULL)`,
   ]);
   const idle = new Set(open.map((r) => r.workerId));
   const seen = new Set(any.map((r) => r.workerId));

@@ -1,3 +1,4 @@
+import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
 /**
  * #3933 — agentTeamEvents can be read from the NEWEST end (the portal's alarm view walked forward and could not reach alarms
  * past 2000 events). Vera's FIT conditions: (a) no direction => today's rows and order, byte-identical; (b) the same gate and the
@@ -15,7 +16,7 @@ import { resolvers, type Context } from './resolvers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 
-const Q = resolvers.Query as any;
+const Q = settledTeamEventQueries(resolvers.Query, db) as any;
 const T0 = Date.UTC(2026, 10, 1);
 
 async function code(p: Promise<unknown>): Promise<string | undefined> {

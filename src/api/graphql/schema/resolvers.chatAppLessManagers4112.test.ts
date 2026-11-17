@@ -4,7 +4,8 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { resolvers, type Context } from './resolvers.js';
-import { chatHomeAgentIfLicensed, refuseUnreachableChatHomeAgent } from '../../../lib/chatHomeAgent.js';
+import { chatHomeAgentIfReachable, refuseUnreachableChatHomeAgent } from '../../../lib/chatHomeAgent.js';
+import { observeClient } from '../../../test/chatReadObserver.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -68,36 +69,12 @@ async function demoted(): Promise<Home> {
   return home;
 }
 
-/** Transparent observer follows the resolver's client through interactive transactions and retains real query results.
- * Its limit (#4120): it records only an explicit protected-ID detector, a Node/NodeRevision/Edge find/count/aggregate/groupBy
- * call whose arguments mention a protected id, or a raw query that does. It does NOT audit every relation-filter read or
- * every delegate projection (a read that reaches protected rows through another model's `include`/`select`/relation
- * filter is not seen). An empty `reads` therefore pins "none of those explicit reads", never "no protected read at all". */
+/** Transparent observer (src/test/chatReadObserver.ts, #4105): follows the resolver's client through interactive transactions and
+ * retains real query results. See that file for what it does and does not see (#4120). */
 async function observe<T>(userId: string, run: (ctx: Context) => Promise<T>, protectedMemoryId = systemId) {
   const protectedIds = [protectedMemoryId, ...(await db.node.findMany({ where: { memoryId: protectedMemoryId }, select: { id: true } })).map(n => n.id)];
   const reads: string[] = [];
-  const read = /^(find|count|aggregate|groupBy)/;
-  const track = (model: string, method: string, args: unknown[]) => {
-    const encoded = JSON.stringify(args, (_key, value) => typeof value === 'bigint' ? String(value) : value);
-    if (protectedIds.some(id => encoded?.includes(id))) reads.push(`${model}.${method}`);
-  };
-  const wrap = (client: any): any => new Proxy(client, {
-    get(target, key) {
-      if (key === '$transaction') return (first: any, ...rest: any[]) =>
-        target.$transaction(typeof first === 'function' ? (tx: any) => first(wrap(tx)) : first, ...rest);
-      const value = Reflect.get(target, key, target);
-      if (key === 'node' || key === 'nodeRevision' || key === 'edge') return new Proxy(value, {
-        get(delegate, method) {
-          const fn = Reflect.get(delegate, method, delegate);
-          if (typeof fn !== 'function') return fn;
-          return (...args: unknown[]) => { if (read.test(String(method))) track(String(key), String(method), args); return fn.apply(delegate, args); };
-        },
-      });
-      if (key === '$queryRaw' || key === '$queryRawUnsafe') return (...args: unknown[]) => { track('$raw', String(key), args); return value.apply(target, args); };
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  });
-  const value = await run(context(userId, wrap(db)));
+  const value = await run(context(userId, observeClient(db, protectedIds, reads)));
   return { value, reads };
 }
 const send = (ctx: Context, home: Home) => M.sendChatMessage({}, { chatId: home.chatId, userMessage: 'continue' }, ctx);
@@ -172,12 +149,12 @@ describe('#4120 admission pins', () => {
     // The equivalent Agent WITH a matching live system memory: the same platform ADMIN manages it, so it is admitted.
     const withDefinition = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
     expect(withDefinition.systemMemoryId).toBe(systemId);
-    expect((await chatHomeAgentIfLicensed(db, home, withDefinition, ctx))?.id).toBe(agentId);
+    expect((await chatHomeAgentIfReachable(db, home, withDefinition, ctx))?.id).toBe(agentId);
     await expect(refuseUnreachableChatHomeAgent(db, home, withDefinition, ctx)).resolves.toBeUndefined();
     // A live Agent whose systemMemoryId is null has no definition to admit anyone to.
     const bare = await db.agent.create({ data: { name: 'No definition', urn: 'managers4120.bare', organizationId: agentOrgId, systemMemoryId: null } });
     expect(bare.deletedAt).toBeNull();
-    expect(await chatHomeAgentIfLicensed(db, home, bare, ctx), 'no throw, no definition for this turn').toBeNull();
+    expect(await chatHomeAgentIfReachable(db, home, bare, ctx), 'no throw, no definition for this turn').toBeNull();
     const refusal = await errorOf(() => refuseUnreachableChatHomeAgent(db, home, bare, ctx));
     expect(refusal, 'the concealed unknown-Agent refusal').toMatchObject({ code: 'AGENT_NOT_FOUND' });
     await expect(refuseUnreachableChatHomeAgent(db, home, bare, ctx)).rejects.toBeInstanceOf(AgentNotFoundError);
@@ -219,7 +196,7 @@ describe('#4120 admission pins', () => {
       expect(agentRow.organizationId).toBeNull();
       const ownerHome = await ownedHome(ownerId);
       expect((await db.memory.findUniqueOrThrow({ where: { id: ownerHome.memoryId } })).appId).toBeNull();
-      expect((await chatHomeAgentIfLicensed(db, { appId: null }, agentRow, context(ownerId)))?.id).toBe(userAgentId);
+      expect((await chatHomeAgentIfReachable(db, { appId: null }, agentRow, context(ownerId)))?.id).toBe(userAgentId);
       const beforeSend = await messages(ownerHome);
       const sent = await observe(ownerId, ctx => send(ctx, ownerHome), userSystemId);
       expect(sent.reads.length).toBeGreaterThan(0);
@@ -229,7 +206,7 @@ describe('#4120 admission pins', () => {
       expect(answered.reads.length).toBeGreaterThan(0);
 
       const strangerHome = await ownedHome(strangerId);
-      expect(await chatHomeAgentIfLicensed(db, { appId: null }, agentRow, context(strangerId))).toBeNull();
+      expect(await chatHomeAgentIfReachable(db, { appId: null }, agentRow, context(strangerId))).toBeNull();
       const before = await messages(strangerHome);
       const refused = await observe(strangerId, ctx => errorOf(() => send(ctx, strangerHome)), userSystemId);
       expect(refused.value).toMatchObject({ code: 'AGENT_NOT_FOUND' });

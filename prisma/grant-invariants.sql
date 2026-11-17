@@ -1,5 +1,5 @@
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (20261110010300_grant_requester_erasure) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (20261117200000_grant_org_leave_agent_uninstall) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because
@@ -13,6 +13,9 @@
 --     grant at its current version, by that signer, whose signing request has completed. The signer becomes the issuer
 --     (issuer_user_id := verified_by). Only a grant not revoked, not left by its holder and not past its expiry activates, and
 --     nothing else moves in the same update. After that the three activation columns never move again;
+--   * it is USED (#3483, cor:acl:140:03 single-use and repeating grants): use_count goes up by exactly one, and only while the
+--     row is live on the database clock (activated, not revoked, holder not gone, App not deleted, started, not expired, below
+--     its max_uses), with nothing else moving but updated_at. The caller holds the row FOR UPDATE and writes the USE event;
 --   * it ends ONCE, by revoked_at stamped together with revoked_by, or by its HOLDER going: holder_departed_at is stamped
 --     (NULL to a time, never back) by the AFTER DELETE triggers below on every hard delete of a holder row, and by the
 --     deleting code on the soft deletes (an erased person, a retired worker, a deleted agent or App). The first end stands:
@@ -45,11 +48,39 @@ LANGUAGE sql STABLE AS $$
   SELECT old_id IS NOT NULL AND new_id IS NOT NULL
     AND EXISTS (SELECT 1 FROM user_merges m WHERE m.source_user_id = old_id AND m.target_user_id = new_id)
 $$;
+-- #4172: the SQL twin of resolveAppInstallation (src/lib/appInstallations.ts) as the grant guard needs it: does this agent still have an
+-- EFFECTIVE installation in this App? TRUE when EITHER a physical app_agents row exists and the agent is live, OR the agent is
+-- installed by DERIVATION (#2168): the App belongs to a live organization and is itself live and not uninstalled, a LIVE parent
+-- agent is installed in it by row, an agent_imports edge parent -> agent exists, the imported agent is live, the agent's own
+-- organization (if any) is live, and the organization's licence to the agent is usable (an activated, unrevoked, unexpired
+-- agent_org_grants row, or with no row at all, the agent's own organization is the App's: orgAgentLicenseUsable). It reads the
+-- database clock for the licence expiry. Drift from the code is pinned by a differential test (resolveAppInstallation vs this).
+CREATE OR REPLACE FUNCTION hadron_agent_installed_in_app(p_app_id text, p_agent_id text) RETURNS boolean
+LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (SELECT 1 FROM app_agents aa JOIN agents g ON g.id = aa.agent_id
+                  WHERE aa.app_id = p_app_id AND aa.agent_id = p_agent_id AND g.deleted_at IS NULL)
+      OR EXISTS (
+        SELECT 1
+          FROM apps ap
+          JOIN organizations o ON o.id = ap.organization_id AND o.deleted_at IS NULL
+          JOIN agents ia ON ia.id = p_agent_id AND ia.deleted_at IS NULL
+          JOIN agent_imports ai ON ai.imported_agent_id = ia.id
+          JOIN app_agents pa ON pa.app_id = ap.id AND pa.agent_id = ai.parent_agent_id
+          JOIN agents pg ON pg.id = pa.agent_id AND pg.deleted_at IS NULL
+         WHERE ap.id = p_app_id AND ap.deleted_at IS NULL AND ap.uninstalled_at IS NULL
+           AND (ia.organization_id IS NULL OR EXISTS (SELECT 1 FROM organizations ao WHERE ao.id = ia.organization_id AND ao.deleted_at IS NULL))
+           AND CASE WHEN EXISTS (SELECT 1 FROM agent_org_grants l WHERE l.org_id = ap.organization_id AND l.agent_id = ia.id)
+                    THEN EXISTS (SELECT 1 FROM agent_org_grants l WHERE l.org_id = ap.organization_id AND l.agent_id = ia.id
+                                  AND l.activated_at IS NOT NULL AND l.revoked_at IS NULL
+                                  AND (l.expires_at IS NULL OR l.expires_at > (clock_timestamp() AT TIME ZONE 'UTC')))
+                    ELSE ia.organization_id = ap.organization_id END)
+$$;
+
 CREATE OR REPLACE FUNCTION hadron_guard_grant() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
   -- Columns that may differ between OLD and NEW; each is judged by its own rule below.
-  movable text[] := ARRAY['updated_at', 'user_id', 'issuer_user_id', 'requested_by_user_id', 'verified_by', 'revoked_at', 'revoked_by',
+  movable text[] := ARRAY['updated_at', 'use_count', 'user_id', 'issuer_user_id', 'requested_by_user_id', 'verified_by', 'revoked_at', 'revoked_by',
                           'holder_departed_at', 'activated_at', 'verification_kind', 'signature_id'];
   db_now timestamp(3) := (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3);
 BEGIN
@@ -87,6 +118,24 @@ BEGIN
   -- UPDATE: nothing but the movable columns may differ.
   IF (to_jsonb(NEW) - movable) <> (to_jsonb(OLD) - movable) THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
+  END IF;
+  -- A use (#3483): +1 on a row live at this instant, and nothing else in the same update. The caller holds the row FOR UPDATE,
+  -- so the revocation, departure, expiry and count read here are the row's newest.
+  IF NEW.use_count IS DISTINCT FROM OLD.use_count THEN
+    IF NEW.use_count IS DISTINCT FROM OLD.use_count + 1
+       OR OLD.activated_at IS NULL OR OLD.revoked_at IS NOT NULL OR OLD.holder_departed_at IS NOT NULL
+       OR (OLD.starts_at IS NOT NULL AND OLD.starts_at > db_now)
+       OR (OLD.expires_at IS NOT NULL AND OLD.expires_at <= db_now)
+       OR (OLD.max_uses IS NOT NULL AND OLD.use_count >= OLD.max_uses)
+       -- #4163: the action's own limits (cor:acl:140:02, ruling of 2026-11-14): its count of uses and its lifetime from activation.
+       OR EXISTS (SELECT 1 FROM actions x WHERE x.name = OLD.action
+                   AND ((x.max_uses IS NOT NULL AND OLD.use_count >= x.max_uses)
+                     OR (x.lifetime_seconds IS NOT NULL AND OLD.activated_at + make_interval(secs => x.lifetime_seconds) <= db_now)))
+       OR EXISTS (SELECT 1 FROM apps p WHERE p.id = OLD.app_id AND p.deleted_at IS NOT NULL)
+       OR (to_jsonb(NEW) - ARRAY['updated_at', 'use_count']) <> (to_jsonb(OLD) - ARRAY['updated_at', 'use_count']) THEN
+      RAISE EXCEPTION 'grants are append-only: a use adds one to a live grant and moves nothing else' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
   END IF;
   -- The one activation (#3649 slice C): a pending grant, by its own completed signature, and nothing else in the same update.
   -- The signer becomes the issuer; the time is the database's. The caller holds the grant row (FOR UPDATE) when it writes this,
@@ -132,8 +181,16 @@ BEGIN
   -- retired). A bare stamp on a live holder would end a grant by hand; the issuer link below has the same proof. (A hard delete
   -- stamps from the AFTER DELETE trigger, when the row is already gone.)
   IF NEW.holder_departed_at IS DISTINCT FROM OLD.holder_departed_at AND (
-       EXISTS (SELECT 1 FROM users u WHERE u.id = OLD.user_id AND u.deleted_at IS NULL)
-    OR EXISTS (SELECT 1 FROM agents a WHERE a.id = OLD.agent_id AND a.deleted_at IS NULL)
+       -- #4171: a live person's grant may be stamped only on proof the person left the organization that owns the grant's App: the App
+       -- belongs to an organization and the person has no live membership there (a membership live only in ANOTHER organization does
+       -- not block; a user-owned App has no org leave, so a live person's stamp there stays refused).
+       EXISTS (SELECT 1 FROM users u WHERE u.id = OLD.user_id AND u.deleted_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM apps ga WHERE ga.id = OLD.app_id AND ga.organization_id IS NOT NULL
+                               AND NOT EXISTS (SELECT 1 FROM org_members m WHERE m.user_id = OLD.user_id
+                                               AND m.organization_id = ga.organization_id AND m.deleted_at IS NULL)))
+       -- #4172: a live agent's grant may be stamped only once the agent has no effective installation in the grant's App.
+    OR EXISTS (SELECT 1 FROM agents a WHERE a.id = OLD.agent_id AND a.deleted_at IS NULL
+               AND hadron_agent_installed_in_app(OLD.app_id, OLD.agent_id))
     OR EXISTS (SELECT 1 FROM workers k WHERE k.id = OLD.worker_id AND k.retired_at IS NULL)
     OR EXISTS (SELECT 1 FROM apps p WHERE p.id = OLD.grantee_app_id AND p.deleted_at IS NULL)) THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
@@ -185,7 +242,11 @@ BEGIN
       WHERE %I = $1 AND holder_departed_at IS NULL AND revoked_at IS NULL
         AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
         AND NOT (activated_at IS NOT NULL AND ((expires_at IS NOT NULL AND expires_at <= (clock_timestamp() AT TIME ZONE ''UTC''))
-          OR (max_uses IS NOT NULL AND use_count >= max_uses)))', TG_ARGV[0]) USING OLD.id;
+          OR (max_uses IS NOT NULL AND use_count >= max_uses)
+          OR EXISTS (SELECT 1 FROM actions x WHERE x.name = grants.action
+               AND ((x.max_uses IS NOT NULL AND grants.use_count >= x.max_uses)
+                 OR (x.lifetime_seconds IS NOT NULL
+                     AND grants.activated_at + make_interval(secs => x.lifetime_seconds) <= (clock_timestamp() AT TIME ZONE ''UTC''))))))', TG_ARGV[0]) USING OLD.id;
   RETURN NULL;
 END $$;
 DROP TRIGGER IF EXISTS users_grant_holder_gone ON users;
@@ -240,5 +301,6 @@ FOR EACH ROW EXECUTE FUNCTION hadron_append_only_grant_event();
 ALTER TABLE actions DROP CONSTRAINT IF EXISTS chk_actions_shape;
 ALTER TABLE actions ADD CONSTRAINT chk_actions_shape CHECK (
   name <> '' AND source <> '' AND issuer_rule <> '' AND summary_template <> '' AND
-  enforcement IN ('SERVER', 'CREDENTIAL', 'HARNESS_INSTRUCTION', 'RECORDED_ONLY')
+  enforcement IN ('SERVER', 'CREDENTIAL', 'HARNESS_INSTRUCTION', 'RECORDED_ONLY') AND
+  (max_uses IS NULL OR max_uses > 0) AND (lifetime_seconds IS NULL OR lifetime_seconds > 0)
 );
