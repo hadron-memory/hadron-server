@@ -355,8 +355,10 @@ describe('#434 slice B: the delta3 folds — DDL in strings must not vanish (Bro
   it('a column constraint BEFORE the generation expression refuses too (B4)', () => {
     // Postgres accepts column constraints in any order; the lazy capture
     // absorbed the CHECK and the row named the column, losing the constraint.
+    // The positive case asserts ZERO refusals, not one row — a length check
+    // alone passes even if the plain shape wrongly refuses (delta4 C2).
     expect(refusals("ALTER TABLE fixture_books ADD COLUMN c text CHECK (c <> '') GENERATED ALWAYS AS (lower(id)) STORED")).toHaveLength(1);
-    expect(classify({ sql: 'ALTER TABLE fixture_books ADD COLUMN c text GENERATED ALWAYS AS (lower(id)) STORED' })).toHaveLength(1);
+    expect(refusals('ALTER TABLE fixture_books ADD COLUMN c text GENERATED ALWAYS AS (lower(id)) STORED')).toHaveLength(0);
   });
 
   it('block comments in DO payloads are stripped — no token-joining hole, no prose hit (B5)', () => {
@@ -367,10 +369,12 @@ describe('#434 slice B: the delta3 folds — DDL in strings must not vanish (Bro
   it('a double-quoted identifier containing an apostrophe is not a string opener (B6)', () => {
     // Without identifier tracking, the apostrophe in "o'brien" opened a
     // phantom string that could keep a later comment alive (phantom row) or
-    // blank real DDL out of the code-only remainder.
+    // blank real DDL out of the code-only remainder. The refuse-side probe
+    // uses CREATE STATISTICS — DDL only the code-only rule catches, so the
+    // bigram cannot mask a stripPayloadStrings mutant (delta4 C3).
     const payloads = 'BEGIN PERFORM notice("o\'brien");\n-- EXECUTE \'CREATE INDEX b6_idx ON fixture_books (id)\'\nEND';
     expect(classify({ sql: 'DO $do$ … $do$;', payloads })).toEqual([]);
-    expect(refusals('DO $do$ … $do$;', "BEGIN PERFORM notice(\"o'brien\"); CREATE INDEX b6b_idx ON fixture_books (id); END")).toHaveLength(1);
+    expect(refusals('DO $do$ … $do$;', "BEGIN PERFORM notice(\"o'brien\"); CREATE STATISTICS b6_st ON a, b FROM fixture_books; END")).toHaveLength(1);
   });
 
   it('comments inside a dollar-quoted EXECUTE reach classify stripped (B7)', () => {
@@ -379,6 +383,46 @@ describe('#434 slice B: the delta3 folds — DDL in strings must not vanish (Bro
     const out = classify({ sql: 'DO $do$ … $do$;', payloads: 'EXECUTE $x$-- why\nCREATE INDEX b7_idx ON fixture_books (id)$x$' });
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({ kind: 'index', name: 'b7_idx' });
+  });
+});
+
+describe('#434 slice B: the delta4 folds — a leftover EXECUTE is unanalyzable (Brooks C1–C5)', () => {
+  const refusals = (sql: string, payloads?: string) =>
+    classify({ sql, ...(payloads === undefined ? {} : { payloads }) }).filter((c) => 'unrecognized' in c);
+
+  it('DDL the bigram noun list never named still refuses inside uncaptured EXECUTE shapes (C1)', () => {
+    // The two refusal layers disagreed on scope: CREATE STATISTICS (or
+    // EVENT TRIGGER, PUBLICATION, …) in code-only text was caught by the
+    // broad rule, but the same DDL inside a format() string was invisible —
+    // the bigram reads strings but only knows its nouns. Any EXECUTE left
+    // after both extraction loops is a shape the extractor cannot capture:
+    // refuse it outright.
+    expect(refusals('DO $do$ … $do$;', "BEGIN EXECUTE format('CREATE STATISTICS c1_st ON a, b FROM t'); END")).toHaveLength(1);
+    expect(refusals('DO $do$ … $do$;', "BEGIN EXECUTE format('CREATE %s ON t (c)', 'INDEX'); END")).toHaveLength(1);
+    expect(refusals('DO $do$ … $do$;', "BEGIN EXECUTE format('CREATE/**/INDEX c1c_idx ON t (c)'); END")).toHaveLength(1);
+  });
+
+  it('a concatenated EXECUTE literal is loud via the extracted fragment (C1 note)', () => {
+    // The extractor consumes `EXECUTE 'CREATE '`; the bare fragment
+    // classifies to a refusal — loud, never silent — and the leftover
+    // concatenation carries no DDL of its own.
+    expect(refusals('DO $do$ … $do$;', "BEGIN EXECUTE 'CREATE ' || 'INDEX c1d_idx ON t (c)'; END")).toHaveLength(1);
+  });
+
+  it('RAISE prose with an article stays clean; verb+noun prose is the accepted loud hit (C5)', () => {
+    expect(classify({ sql: 'DO $do$ … $do$;', payloads: "BEGIN RAISE NOTICE 'refusing to create the index twice'; END" })).toEqual([]);
+    expect(refusals('DO $do$ … $do$;', "BEGIN RAISE NOTICE 'will create index on %'; END")).toHaveLength(1);
+  });
+
+  it('a plain-string EXECUTE with its own comments strips them, like the dollar path (C4)', () => {
+    // The outer stripper sees a plain-string payload as string CONTENT, so
+    // the payload's own comments survived into classify — a comment-led
+    // CREATE INDEX was a loud refusal instead of an inventory row, and a
+    // /*c*/-led DO escaped the nested-DO guard.
+    const out = classify({ sql: 'DO $do$ … $do$;', payloads: "BEGIN EXECUTE '-- why\nCREATE INDEX c4_idx ON fixture_books (id)'; END" });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ kind: 'index', name: 'c4_idx' });
+    expect(refusals('DO $do$ … $do$;', "BEGIN EXECUTE '/*c*/ DO $$ BEGIN PERFORM 1; END $$'; END")).toHaveLength(1);
   });
 });
 

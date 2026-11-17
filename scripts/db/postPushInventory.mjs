@@ -66,7 +66,11 @@ const REMAINDER_DDL = /\b(CREATE|ALTER|DROP)\s+\w/i;
  * `v := 'CREATE …'; EXECUTE v`, `EXECUTE E'CREATE …'` — pass as []. The
  * bigram still sees that text because it reads strings; and it ignores
  * prose ("refusing to create the unique index") by requiring the verb's
- * noun (with the usual modifiers) to follow.
+ * noun (with the usual modifiers) to follow. Prose whose verb IS directly
+ * followed by its noun — `RAISE NOTICE 'will create index on %'` — still
+ * hits: that is the accepted LOUD direction of this disjunct (delta4 C5),
+ * because a false refusal costs one taught head while a missed DDL string
+ * costs an inventory hole.
  */
 const DO_BLOCK_DDL = /\b(CREATE|ALTER|DROP)\s+((OR\s+REPLACE|TEMP|TEMPORARY|UNLOGGED|MATERIALIZED|UNIQUE|CONCURRENTLY|GLOBAL|LOCAL|RECURSIVE|IF\s+NOT\s+EXISTS)\s+)*(TABLE|INDEX|CONSTRAINT|EXTENSION|FUNCTION|PROCEDURE|TRIGGER|SEQUENCE|SCHEMA|TYPE|DOMAIN|RULE|AGGREGATE|VIEW|POLICY|COLUMN)\b/i;
 
@@ -722,11 +726,26 @@ export function classify(stmt) {
       remainder = remainder.replace(m[0], ' ');
     }
     for (const m of remainder.matchAll(/\bEXECUTE\s*'((?:[^']|'')*)'/gi)) {
-      if (/(^|;)\s*DO\b/i.test(m[1])) out.push({ unrecognized: sql });
-      else out.push(...classify({ sql: m[1].replace(/''/g, "'") }));
+      // Same shape as the dollar path (delta3 B7): the outer stripper sees a
+      // plain-string payload as string CONTENT, so the payload's own comments
+      // survive into the DO test and classify — strip them after unescaping
+      // (delta4 C4).
+      const inner = stripPayloadComments(m[1].replace(/''/g, "'"));
+      if (/(^|;)\s*DO\b/i.test(inner)) out.push({ unrecognized: sql });
+      else out.push(...classify({ sql: inner }));
       remainder = remainder.replace(m[0], ' ');
     }
-    if (REMAINDER_DDL.test(stripPayloadStrings(remainder)) || DO_BLOCK_DDL.test(remainder)) out.push({ unrecognized: sql });
+    // Any EXECUTE still standing in the remainder after both extraction
+    // loops is a shape the extractor cannot capture — format(…), a variable,
+    // E'…', a comment glued into the verb: its DDL is unanalyzable here.
+    // Refuse it outright rather than let the bigram's noun list decide which
+    // uncaptured shapes count (delta4 C1: CREATE STATISTICS / EVENT TRIGGER /
+    // PUBLICATION in a format string were silent; this subsumes the noun
+    // list's job for EXECUTE shapes, leaving the bigram to cover assignments
+    // whose DDL runs elsewhere). One disjunctive refusal — a statement
+    // refuses once, however many rules trip.
+    const codeOnly = stripPayloadStrings(remainder);
+    if (/\bEXECUTE\b/i.test(codeOnly) || REMAINDER_DDL.test(codeOnly) || DO_BLOCK_DDL.test(remainder)) out.push({ unrecognized: sql });
     return out;
   }
   if (/^DROP (INDEX|TRIGGER|FUNCTION|VIEW|TABLE|CONSTRAINT|POLICY|SCHEMA|EXTENSION|TYPE|SEQUENCE)\b/i.test(head)) return [];
