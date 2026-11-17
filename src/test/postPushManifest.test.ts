@@ -538,6 +538,14 @@ describe('#4382 folds: comment separators, dollar-path E1, position and duplicat
     expect(refusals(W, "BEGIN EXECUTE 'SELECT 1' USING 'y'; END")).toHaveLength(0);
     expect(refusals(W, "BEGIN PERFORM 1; EXECUTE format('SELECT %s', 1); END")).toHaveLength(1);
   });
+
+  it('a || glued BEFORE the literal refuses — the backward half of isGlued (LOCAL P3)', () => {
+    // The guard's contract is both sides (delta5 D1); this half had no pin.
+    // The shape is contrived as SQL — a concatenation cannot really precede
+    // the EXECUTE verb in plpgsql — but the analyzer's contract is textual,
+    // and dropping the backward half of isGlued must turn this pin red.
+    expect(refusals(W, "BEGIN v := 'SELECT 1; ' || EXECUTE 'SELECT 2'; END")).toHaveLength(1);
+  });
 });
 
 describe('#434 slice B: completeness, both directions, against the real closure', () => {
