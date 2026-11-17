@@ -179,22 +179,33 @@ describe('#863: the reads a compile makes stay inside the run node\'s own memory
 });
 
 describe('#863: usage is recorded as before', () => {
-  const events = (type: string) => db.usageEvent.count({ where: { type, memoryId: memId } });
-  const settle = () => new Promise((r) => setTimeout(r, 150)); // the recorder writes after the response
+  const count = (where: Record<string, unknown>) => db.usageEvent.count({ where: { memoryId: memId, ...where } });
+  // The usage recorder is fire-and-forget (it writes after the response), so poll for the writes to land instead of
+  // reading after a fixed wait: the idiom of server.batchRead.test.ts, at most 50 x 20 ms.
+  const landed = async (done: () => Promise<boolean>) => {
+    for (let i = 0; i < 50 && !(await done()); i++) await new Promise((r) => setTimeout(r, 20));
+  };
 
   it('one action-run per call, and a read for the run node and each inlined target only', async () => {
     await viaAction('tasks:step-one', { subject: 'x' });
-    await settle();
-    expect(await events('action-run')).toBe(1);
+    await landed(async () => (await count({ type: 'action-run' })) >= 1 && (await count({ type: 'read' })) >= 2);
+    expect(await count({ type: 'action-run' })).toBe(1);
     const reads = await db.usageEvent.findMany({ where: { type: 'read', memoryId: memId }, select: { nodeLoc: true } });
     expect(reads.map((r) => r.nodeLoc).sort()).toEqual(['docs:ref', 'tasks:step-one']); // not the next step: it was not returned
   });
 
   it('a refused render records neither', async () => {
     setResolutionLimits({ limits: { maxBytes: 8 } });
-    await viaAction('tasks:step-one', { subject: 'x' });
-    await settle();
-    expect(await events('action-run')).toBe(0);
-    expect(await events('read')).toBe(0);
+    expect(await viaAction('tasks:step-one', { subject: 'x' })).toContain('CONTENT_RESOLUTION_LIMIT_EXCEEDED');
+    // Absence cannot be polled for. A later call that IS served is the marker: once its events have landed, the
+    // recorder has had its turn for the refused call before it, and none of that call's events may be there.
+    setResolutionLimits(null);
+    const marker = await mkNode('tasks:marker', 'Marker', 'A plain body.', { isRunnable: true });
+    await viaAction('tasks:marker');
+    await landed(async () => (await count({ type: 'action-run', nodeId: marker.id })) >= 1 && (await count({ type: 'read', nodeId: marker.id })) >= 1);
+    expect(await count({ type: 'action-run', nodeId: marker.id })).toBe(1); // the marker did land
+    expect(await count({ type: 'action-run', nodeId: stepId })).toBe(0);
+    expect(await count({ type: 'read', nodeId: stepId })).toBe(0);
+    expect(await count({ type: 'read', nodeLoc: 'docs:ref' })).toBe(0);
   });
 });
