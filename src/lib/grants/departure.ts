@@ -12,7 +12,7 @@
  * with no effective installation in an App ({@link endAgentGrantsAtApps}). Rejoining or reinstalling revives nothing: the stamp
  * is never cleared (the database guard refuses it), so a new grant must be issued and signed.
  *
- * The stamp `holder_departed_at` is a FACT, like `revoked_at`; no state label is chosen for the ended grant (`:03` Open). It is
+ * The stamp `holder_departed_at` is a FACT, like `revoked_at`; the ended grant reads HOLDER_GONE (state.ts, #4173). It is
  * set once and only on a grant not already ended (the first end stands), and `isGrantLive` / `grantLiveSql` read it.
  * LOCK ORDER: the grant row lock is the LAST lock a departing transaction takes. Each caller runs this after its own locks
  * (the holder row among them), and anything that locks a grant row and then a holder row can deadlock against it.

@@ -244,12 +244,15 @@ describe('the projection', () => {
   };
   const leaf = (t: any): { kind: string; name: string } => (t.ofType ? leaf(t.ofType) : t);
 
-  it('Grant has ids and scalars only: no state label and no nested object but its own signature projection', async () => {
+  it('Grant has ids and scalars only (#4173: state is a nonnull enum) and no nested object but its own signature projection', async () => {
     const grant = await type('Grant');
     expect(grant).not.toBeNull();
     const names = grant!.fields.map((f) => f.name);
     expect(names).toContain('allows');
-    expect(names).not.toContain('state');
+    // #4173: the lifecycle state is a nonnull enum on the grant, the same on every surface.
+    const state = grant!.fields.find((f) => f.name === 'state');
+    expect(state && leaf(state.type)).toMatchObject({ kind: 'ENUM', name: 'GrantState' });
+    expect(state!.type.kind).toBe('NON_NULL');
     // #3649 slice D: the ONE object field is signatureStatus, the grant's own signature records as a sanitized projection
     // (#552): ids, scalars, enums and the signer as handle and URN only. No other entity's object is reachable from a Grant.
     const objects = grant!.fields.filter((f) => !['SCALAR', 'ENUM'].includes(leaf(f.type).kind));
