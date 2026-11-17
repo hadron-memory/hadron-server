@@ -2,7 +2,7 @@
 -- Only widens the closed error_class set, so every existing row still satisfies it (no preflight needed).
 
 -- #430: the Git-mirror obligation's shape. One source, shared verbatim with migration
--- 20261117500000_git_mirror_push_rejected (#3234 added PUSH_REJECTED; pinned by src/integrations/github/mirrorObligations430.test.ts) and applied by
+-- 20261117800000_git_mirror_push_rejected (#3234 added PUSH_REJECTED; pinned by src/integrations/github/mirrorObligations430.test.ts) and applied by
 -- post-push.sql and the test globalSetup.
 --
 -- `error_class` is a CLOSED set of fixed words, never exception text: a raw Git error can carry an installation-token URL
