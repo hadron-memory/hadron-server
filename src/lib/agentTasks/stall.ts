@@ -1131,6 +1131,8 @@ export async function wakeDueOwners(db: PrismaClient, now = new Date()): Promise
         AND w.ended_at IS NULL
         AND w.due_at <= ${toNaiveUtc(now)}::timestamp
         AND e.acknowledged_at IS NULL
+        -- #4202: an alarm of one App naming a task of another wakes nobody and is never stamped (cor:agt:050:01, :19).
+        AND NOT EXISTS (SELECT 1 FROM agent_tasks ft WHERE ft.id = e.task_id AND ft.app_id <> e.app_id)
       ORDER BY w.due_at, w.event_id, w.chain_index
       LIMIT 500
       FOR NO KEY UPDATE OF w SKIP LOCKED

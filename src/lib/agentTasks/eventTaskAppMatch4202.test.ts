@@ -11,7 +11,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
-import { endedAlarmEpisodeInstants, effectiveWindows, loadStallInputs, stallCandidates } from './stall.js';
+import { endedAlarmEpisodeInstants, effectiveWindows, loadStallInputs, stallCandidates, wakeDueOwners } from './stall.js';
 import { pendingTaskWakes } from './taskWakes.js';
 import { loadTeamRoster } from './roster.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
@@ -220,6 +220,54 @@ describe('#4202 task wakes (taskWakes.ts)', () => {
     const wakes = await pendingTaskWakes(db, [A.worker.id], now);
     expect(JSON.stringify([...wakes.values()])).not.toContain('B secret title');
     expect(taskIds(wakes, A.worker.id)).toEqual([]);
+  });
+});
+
+describe('#4202 the due-wake pass and the acknowledgement freeze (BLIND F1 and LOCAL P3-1 on #4212 at 82201be6)', () => {
+  const noProgressStart = async (task: { id: string }) =>
+    (stallCandidates((await loadStallInputs(db, { id: task.id }, now))[0], effectiveWindows(null), now).find((c) => c.rule === 'no-progress'))!.episodeStart;
+  /** Two UNWOKEN rows of `alarm`, both due. The column is a naive timestamp, so the bind is naive-UTC text. */
+  const dueRows = async (alarm: string) => {
+    const due = ago(2).toISOString().replace('Z', '');
+    await db.$executeRaw`INSERT INTO agent_team_alarm_schedule (event_id, chain_index, due_at) VALUES (${alarm}, 0, ${due}::timestamp), (${alarm}, 1, ${due}::timestamp)`;
+  };
+  const rowsOf = (alarm: string) => db.agentTeamAlarmSchedule.findMany({ where: { eventId: alarm }, select: { wokenAt: true, endedAt: true }, orderBy: { chainIndex: 'asc' } });
+
+  it('an alarm of App A naming a running task of App B: wakeDueOwners stamps none of its due rows', async () => {
+    const taskB = await makeTask(B, 'B task');
+    const alarm = await plant({
+      appId: A.app.id, type: 'stall.no-progress', taskId: taskB.id, at: ago(5), severity: 'alarm', episodeStart: await noProgressStart(taskB),
+      chain: [{ workerId: A.worker.id }, { workerId: A.worker.id }],
+    });
+    await dueRows(alarm);
+    expect(await wakeDueOwners(db, now)).toBe(0);
+    expect(await rowsOf(alarm)).toEqual([{ wokenAt: null, endedAt: null }, { wokenAt: null, endedAt: null }]);
+  });
+
+  it('control: the same alarm naming a running task of its own App is woken', async () => {
+    const taskA = await makeTask(A, 'A task');
+    const alarm = await plant({
+      appId: A.app.id, type: 'stall.no-progress', taskId: taskA.id, at: ago(5), severity: 'alarm', episodeStart: await noProgressStart(taskA),
+      chain: [{ workerId: A.worker.id }, { workerId: A.worker.id }],
+    });
+    await dueRows(alarm);
+    expect(await wakeDueOwners(db, now)).toBe(2);
+    expect((await rowsOf(alarm)).map((r) => r.wokenAt !== null)).toEqual([true, true]);
+  });
+
+  it('acknowledging an alarm of App A naming a FINISHED task of App B records no episode end from that task', async () => {
+    const taskB = await makeTask(B, 'B task', { status: 'finished', finishedAt: ago(10) });
+    const alarm = await plant({ appId: A.app.id, type: 'stall.no-progress', taskId: taskB.id, at: ago(100), severity: 'alarm', episodeStart: ago(200), chain: [{ userId: A.user.id }] });
+    await (resolvers.Mutation as any).acknowledgeAlarm({}, { eventId: alarm }, { db, userId: A.user.id, roles: ['READER'] } as Context);
+    expect((await db.agentTeamEvent.findUniqueOrThrow({ where: { id: alarm } })).acknowledgedAt).not.toBeNull();
+    expect(await db.alarmEscalationEnd.count({ where: { eventId: alarm } })).toBe(0);
+  });
+
+  it('control: acknowledging the same alarm naming a finished task of its own App records the end', async () => {
+    const taskA = await makeTask(A, 'A task', { status: 'finished', finishedAt: ago(10) });
+    const alarm = await plant({ appId: A.app.id, type: 'stall.no-progress', taskId: taskA.id, at: ago(100), severity: 'alarm', episodeStart: ago(200), chain: [{ userId: A.user.id }] });
+    await (resolvers.Mutation as any).acknowledgeAlarm({}, { eventId: alarm }, { db, userId: A.user.id, roles: ['READER'] } as Context);
+    expect(await db.alarmEscalationEnd.count({ where: { eventId: alarm } })).toBe(1);
   });
 });
 
