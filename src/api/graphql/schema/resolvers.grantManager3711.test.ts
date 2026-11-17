@@ -64,7 +64,7 @@ async function waitUntilBlocked(): Promise<void> {
   throw new Error('the call never blocked on a lock');
 }
 const code = (r: any): string | undefined => r.errors?.[0]?.extensions?.code;
-const GRANT = 'id appId holderKind holderId issuerUserId requestedByUserId requestedByWorkerId revokedAt revokedByUserId holderDepartedAt allows activatedAt';
+const GRANT = 'id appId holderKind holderId issuerUserId requestedByUserId requestedByWorkerId revokedAt revokedByUserId holderDepartedAt allows activatedAt state';
 const CREATE = `mutation($i:CreateGrantInput!){createGrant(input:$i){${GRANT}}}`;
 const REVOKE = `mutation($r:ID!,$ins:ActInstructionInput){revokeGrant(ref:$r,instruction:$ins){${GRANT}}}`;
 const WITHDRAW = `mutation($r:ID!){withdrawGrant(ref:$r){${GRANT}}}`;
@@ -74,7 +74,7 @@ const mgrInput = (over: Record<string, unknown> = {}) => ({
   appRef: w.appId, action: 'schedule.create', values: entry(), holderKind: 'WORKER', holderRef: otherWorkerId, reason: 'nightly digest', ...over,
 });
 const grantRows = async () => db.$queryRawUnsafe<any[]>('SELECT * FROM grants ORDER BY created_at');
-const events = async (grantId: string) => db.$queryRawUnsafe<any[]>("SELECT * FROM grant_events WHERE grant_id = $1 AND action = 'REVOKE'", grantId);
+const events = async (grantId: string) => db.$queryRawUnsafe<any[]>("SELECT * FROM grant_events WHERE grant_id = $1 AND action IN ('REVOKE', 'WITHDRAW')", grantId);
 
 /** A pending worker-held grant requested by `by`; an ACTIVE one issued by `issuer` (the unguarded insert is the test-only way to a live row). */
 async function pending(over: Record<string, any> = {}): Promise<string> {
@@ -231,7 +231,7 @@ describe('acceptance 2/3/9: revoke', () => {
     const id = await active();
     const r = await post(managerKey, null, REVOKE, { r: id });
     expect(r.errors).toBeUndefined();
-    expect(r.data.revokeGrant).toMatchObject({ id, allows: false, revokedByUserId: managerId });
+    expect(r.data.revokeGrant).toMatchObject({ id, allows: false, revokedByUserId: managerId, state: 'REVOKED' }); // #4173
     expect(r.data.revokeGrant.revokedAt).not.toBeNull();
     const ev = await events(id);
     expect(ev).toHaveLength(1);
@@ -357,7 +357,7 @@ describe('acceptance 6-9 (V57): requester withdrawal of a PENDING grant', () => 
     const id = await pending({ requested_by_user_id: managerId });
     const r = await post(managerKey, null, WITHDRAW, { r: id });
     expect(r.errors).toBeUndefined();
-    expect(r.data.withdrawGrant).toMatchObject({ id, allows: false, revokedByUserId: managerId });
+    expect(r.data.withdrawGrant).toMatchObject({ id, allows: false, revokedByUserId: managerId, state: 'WITHDRAWN' }); // #4173
     expect(r.data.withdrawGrant.revokedAt).not.toBeNull();
     expect(await events(id)).toHaveLength(1);
   });

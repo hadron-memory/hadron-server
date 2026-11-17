@@ -10,8 +10,7 @@
  * spent (`max_uses` is NULL or `use_count < max_uses`), and inside its ACTION's limits (#4163, cor:acl:140:02, :03): the action's
  * own count of uses and its lifetime from activation, which apply to every grant of it. A grant's own `max_uses` and `expires_at`
  * can only narrow them, since each is a further condition.
- * The state is worked out here and never stored. The `cor:acl:140:03` open questions (a grant signed before its start,
- * a pending grant past its expiry) are NOT given a name here: both simply allow nothing.
+ * The state is worked out here and never stored. The lifecycle state NAME is state.ts (#4173); `allows` is exactly state ACTIVE and started.
  */
 import { Prisma } from '../../generated/prisma/index.js';
 

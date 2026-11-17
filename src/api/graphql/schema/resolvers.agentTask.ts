@@ -3036,6 +3036,67 @@ const EXTERNAL_ID_CHANGE_KINDS = {
   [EXTERNAL_ID_RELEASED]: 'RELEASED',
 } as const satisfies Partial<Record<TaskEventPayload['type'], string>>;
 
+/**
+ * #2654 (ruling 0269, cor:agt:050:14 "Overdue, the list filter"): a task is overdue when EITHER arm holds, judged on
+ * the server's clock (`now`, the database clock at millisecond precision), and never for an ended or backlog task:
+ *  (a) pending, not started, start-by strictly earlier than `now`; or
+ *  (b) pending or started, finish-by strictly earlier than `now`, not finished or cancelled.
+ * Blocking is ignored (R3, Proposed). Listing raises nothing. `overdueWhere` (the filter) and `isTaskOverdue` (the
+ * `AgentTask.overdue` field) are two renderings of this one rule; the differential pin keeps them equal.
+ */
+export function overdueWhere(now: Date): Prisma.AgentTaskWhereInput {
+  const open = { finishedAt: null, cancelledAt: null } as const;
+  return {
+    OR: [
+      { status: 'pending', startBy: { lt: now }, startedAt: null, ...open },
+      { status: { in: ['pending', 'started'] }, finishBy: { lt: now }, ...open },
+    ],
+  };
+}
+
+/**
+ * The complement of {@link overdueWhere}, written out. SQL NOT over a nullable start-by or finish-by would also discard
+ * the tasks with no deadline (NOT NULL is NULL), so each arm's negation guards its nullable column explicitly.
+ */
+export function notOverdueWhere(now: Date): Prisma.AgentTaskWhereInput {
+  return {
+    OR: [
+      { finishedAt: { not: null } },
+      { cancelledAt: { not: null } },
+      {
+        AND: [
+          { OR: [{ status: { not: 'pending' } }, { startedAt: { not: null } }, { startBy: null }, { startBy: { gte: now } }] },
+          { OR: [{ status: { notIn: ['pending', 'started'] } }, { finishBy: null }, { finishBy: { gte: now } }] },
+        ],
+      },
+    ],
+  };
+}
+
+export function isTaskOverdue(
+  t: Pick<TaskRow, 'status' | 'startBy' | 'finishBy' | 'startedAt' | 'finishedAt' | 'cancelledAt'>,
+  now: Date,
+): boolean {
+  if (t.finishedAt || t.cancelledAt) return false;
+  const a = t.status === 'pending' && !t.startedAt && t.startBy != null && t.startBy < now;
+  const b = (t.status === 'pending' || t.status === 'started') && t.finishBy != null && t.finishBy < now;
+  return a || b;
+}
+
+/**
+ * The database clock at the DateTime precision the API exposes, read once per request (the GraphQL context object is
+ * per request) and shared by the `overdue` filter and the `overdue` field.
+ */
+const requestNow = new WeakMap<object, Promise<Date>>();
+async function dbNowFor(c: { db: { $queryRaw: (...a: any[]) => Promise<any> } }): Promise<Date> {
+  let p = requestNow.get(c);
+  if (!p) {
+    p = (c.db.$queryRaw`SELECT date_trunc('milliseconds', CURRENT_TIMESTAMP) AS now` as Promise<{ now: Date }[]>).then((r) => r[0].now);
+    requestNow.set(c, p);
+  }
+  return p;
+}
+
 type ListArgs = {
   matchFailed?: boolean | null;
   appRef: string;
@@ -3175,13 +3236,13 @@ export const agentTaskQueries = {
       if (range.gte || range.lte) filters.push({ [field]: range });
     }
     if (args.overdue != null) {
-      // Match the millisecond precision exposed by DateTime, using the database clock.
-      const [{ now }] = await c.db.$queryRaw<{ now: Date }[]>`SELECT date_trunc('milliseconds', CURRENT_TIMESTAMP) AS now`;
-      const late: Prisma.AgentTaskWhereInput = {
-        status: 'pending', startBy: { lt: now }, startedAt: null, finishedAt: null, cancelledAt: null,
-      };
-      // SQL NOT over a nullable startBy alone would also discard tasks with no deadline.
-      filters.push(args.overdue ? late : { OR: [{ startBy: null }, { NOT: late }] });
+      // One database-clock snapshot per request, shared with the `overdue` field, so a deadline crossing mid-request
+      // cannot make the filter and the field disagree.
+      const now = await dbNowFor(c);
+      const late = overdueWhere(now);
+      // SQL NOT over nullable startBy / finishBy alone would also discard tasks with no deadline: the negation is
+      // written out so a task with neither time is never overdue and always falls in `false`.
+      filters.push(args.overdue ? late : notOverdueWhere(now));
     }
     const statuses = args.status?.map((s) => STATUS_FROM_GQL[s] ?? s);
     const where: Prisma.AgentTaskWhereInput = {
@@ -3703,6 +3764,8 @@ export const agentTaskFieldResolvers = {
       const base = getPortalBaseUrl();
       return base ? `${base}/app/apps/${encodeURIComponent(t.appId)}/tasks/${encodeURIComponent(t.id)}` : null;
     },
+    /** #2654: true exactly when the `overdue` filter would list this task now (same rule, same server clock). */
+    overdue: async (t: TaskRow, _a: unknown, c: any) => isTaskOverdue(t, await dbNowFor(c)),
     /** #3816 (V22): present only on the create answer that ran the match; a later read has none. */
     matchSkipped: (t: TaskRow & { matchSkipped?: unknown }) => t.matchSkipped ?? null,
     matchFailure: (t: TaskRow) => t.matchFailedAt && t.matchFailedReason ? { reason: t.matchFailedReason, failedAt: t.matchFailedAt } : null,

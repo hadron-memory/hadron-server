@@ -1,5 +1,5 @@
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (20261114200000_action_limits) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (20261117210000_grant_withdrawn_state) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because
@@ -40,7 +40,8 @@ ALTER TABLE grants ADD CONSTRAINT chk_grants_shape CHECK (
   version >= 1 AND
   (starts_at IS NULL OR expires_at IS NULL OR starts_at < expires_at) AND
   (revoked_at IS NULL) = (revoked_by IS NULL) AND
-  (revoked_by IS NULL OR revoked_by <> '')
+  (revoked_by IS NULL OR revoked_by <> '') AND
+  (withdrawn_at IS NULL OR (withdrawn_at = revoked_at AND activated_at IS NULL))
 );
 -- True when `old_id` was merged into `new_id` (a recorded merge), the only proof a person link may move on.
 CREATE OR REPLACE FUNCTION hadron_grant_link_merged(old_id text, new_id text) RETURNS boolean
@@ -48,12 +49,40 @@ LANGUAGE sql STABLE AS $$
   SELECT old_id IS NOT NULL AND new_id IS NOT NULL
     AND EXISTS (SELECT 1 FROM user_merges m WHERE m.source_user_id = old_id AND m.target_user_id = new_id)
 $$;
+-- #4172: the SQL twin of resolveAppInstallation (src/lib/appInstallations.ts) as the grant guard needs it: does this agent still have an
+-- EFFECTIVE installation in this App? TRUE when EITHER a physical app_agents row exists and the agent is live, OR the agent is
+-- installed by DERIVATION (#2168): the App belongs to a live organization and is itself live and not uninstalled, a LIVE parent
+-- agent is installed in it by row, an agent_imports edge parent -> agent exists, the imported agent is live, the agent's own
+-- organization (if any) is live, and the organization's licence to the agent is usable (an activated, unrevoked, unexpired
+-- agent_org_grants row, or with no row at all, the agent's own organization is the App's: orgAgentLicenseUsable). It reads the
+-- database clock for the licence expiry. Drift from the code is pinned by a differential test (resolveAppInstallation vs this).
+CREATE OR REPLACE FUNCTION hadron_agent_installed_in_app(p_app_id text, p_agent_id text) RETURNS boolean
+LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (SELECT 1 FROM app_agents aa JOIN agents g ON g.id = aa.agent_id
+                  WHERE aa.app_id = p_app_id AND aa.agent_id = p_agent_id AND g.deleted_at IS NULL)
+      OR EXISTS (
+        SELECT 1
+          FROM apps ap
+          JOIN organizations o ON o.id = ap.organization_id AND o.deleted_at IS NULL
+          JOIN agents ia ON ia.id = p_agent_id AND ia.deleted_at IS NULL
+          JOIN agent_imports ai ON ai.imported_agent_id = ia.id
+          JOIN app_agents pa ON pa.app_id = ap.id AND pa.agent_id = ai.parent_agent_id
+          JOIN agents pg ON pg.id = pa.agent_id AND pg.deleted_at IS NULL
+         WHERE ap.id = p_app_id AND ap.deleted_at IS NULL AND ap.uninstalled_at IS NULL
+           AND (ia.organization_id IS NULL OR EXISTS (SELECT 1 FROM organizations ao WHERE ao.id = ia.organization_id AND ao.deleted_at IS NULL))
+           AND CASE WHEN EXISTS (SELECT 1 FROM agent_org_grants l WHERE l.org_id = ap.organization_id AND l.agent_id = ia.id)
+                    THEN EXISTS (SELECT 1 FROM agent_org_grants l WHERE l.org_id = ap.organization_id AND l.agent_id = ia.id
+                                  AND l.activated_at IS NOT NULL AND l.revoked_at IS NULL
+                                  AND (l.expires_at IS NULL OR l.expires_at > (clock_timestamp() AT TIME ZONE 'UTC')))
+                    ELSE ia.organization_id = ap.organization_id END)
+$$;
+
 CREATE OR REPLACE FUNCTION hadron_guard_grant() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
   -- Columns that may differ between OLD and NEW; each is judged by its own rule below.
   movable text[] := ARRAY['updated_at', 'use_count', 'user_id', 'issuer_user_id', 'requested_by_user_id', 'verified_by', 'revoked_at', 'revoked_by',
-                          'holder_departed_at', 'activated_at', 'verification_kind', 'signature_id'];
+                          'holder_departed_at', 'activated_at', 'verification_kind', 'signature_id', 'withdrawn_at'];
   db_now timestamp(3) := (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3);
 BEGIN
   IF TG_OP = 'DELETE' THEN
@@ -65,7 +94,7 @@ BEGIN
   IF TG_OP = 'INSERT' THEN
     IF NEW.activated_at IS NOT NULL OR NEW.verification_kind IS NOT NULL OR NEW.verified_by IS NOT NULL
        OR NEW.signature_id IS NOT NULL OR NEW.revoked_by IS NOT NULL -- (revoked_at alone is refused by the pair CHECK)
-       OR NEW.use_count <> 0 OR NEW.version <> 1 OR NEW.holder_departed_at IS NOT NULL THEN
+       OR NEW.use_count <> 0 OR NEW.version <> 1 OR NEW.holder_departed_at IS NOT NULL OR NEW.withdrawn_at IS NOT NULL THEN
       RAISE EXCEPTION 'grants must arrive pending' USING ERRCODE = '23514';
     END IF;
     -- The holder must exist and not have gone. FOR SHARE: a departure that updates the holder row waits for this row (and a
@@ -143,6 +172,13 @@ BEGIN
       RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
     END IF;
   END IF;
+  -- #4173: the withdrawal marker is set once, in the very statement that stamps the revoke (equal to it), on a row never activated.
+  -- Never cleared, moved, or added to a row already revoked.
+  IF NEW.withdrawn_at IS DISTINCT FROM OLD.withdrawn_at
+     AND (OLD.withdrawn_at IS NOT NULL OR NEW.withdrawn_at IS NULL OR OLD.revoked_at IS NOT NULL OR OLD.activated_at IS NOT NULL
+          OR NEW.revoked_at IS NULL OR NEW.withdrawn_at <> NEW.revoked_at) THEN
+    RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
+  END IF;
   -- The departure of the holder: stamped once (NULL to a time), only on a grant not already ended, never cleared or moved.
   -- A row the holder left cannot be re-pointed (the person link below also refuses it).
   IF NEW.holder_departed_at IS DISTINCT FROM OLD.holder_departed_at
@@ -153,8 +189,16 @@ BEGIN
   -- retired). A bare stamp on a live holder would end a grant by hand; the issuer link below has the same proof. (A hard delete
   -- stamps from the AFTER DELETE trigger, when the row is already gone.)
   IF NEW.holder_departed_at IS DISTINCT FROM OLD.holder_departed_at AND (
-       EXISTS (SELECT 1 FROM users u WHERE u.id = OLD.user_id AND u.deleted_at IS NULL)
-    OR EXISTS (SELECT 1 FROM agents a WHERE a.id = OLD.agent_id AND a.deleted_at IS NULL)
+       -- #4171: a live person's grant may be stamped only on proof the person left the organization that owns the grant's App: the App
+       -- belongs to an organization and the person has no live membership there (a membership live only in ANOTHER organization does
+       -- not block; a user-owned App has no org leave, so a live person's stamp there stays refused).
+       EXISTS (SELECT 1 FROM users u WHERE u.id = OLD.user_id AND u.deleted_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM apps ga WHERE ga.id = OLD.app_id AND ga.organization_id IS NOT NULL
+                               AND NOT EXISTS (SELECT 1 FROM org_members m WHERE m.user_id = OLD.user_id
+                                               AND m.organization_id = ga.organization_id AND m.deleted_at IS NULL)))
+       -- #4172: a live agent's grant may be stamped only once the agent has no effective installation in the grant's App.
+    OR EXISTS (SELECT 1 FROM agents a WHERE a.id = OLD.agent_id AND a.deleted_at IS NULL
+               AND hadron_agent_installed_in_app(OLD.app_id, OLD.agent_id))
     OR EXISTS (SELECT 1 FROM workers k WHERE k.id = OLD.worker_id AND k.retired_at IS NULL)
     OR EXISTS (SELECT 1 FROM apps p WHERE p.id = OLD.grantee_app_id AND p.deleted_at IS NULL)) THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
@@ -233,7 +277,7 @@ FOR EACH ROW EXECUTE FUNCTION hadron_grant_holder_gone('grantee_app_id');
 -- actors alone; worker and session ids are fenced at write time by the #1162 migration).
 ALTER TABLE grant_events DROP CONSTRAINT IF EXISTS chk_grant_events_shape;
 ALTER TABLE grant_events ADD CONSTRAINT chk_grant_events_shape CHECK (
-  action IN ('CREATE', 'ACTIVATE', 'REVOKE', 'USE') AND grant_id <> '' AND (actor_user_id IS NULL OR actor_user_id <> '')
+  action IN ('CREATE', 'ACTIVATE', 'REVOKE', 'WITHDRAW', 'USE') AND grant_id <> '' AND (actor_user_id IS NULL OR actor_user_id <> '')
 );
 CREATE OR REPLACE FUNCTION hadron_append_only_grant_event() RETURNS trigger
 LANGUAGE plpgsql AS $$
