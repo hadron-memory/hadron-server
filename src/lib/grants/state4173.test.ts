@@ -149,6 +149,30 @@ const end = (id: string, pendingOnly = false) => db.$transaction((tx) => endGran
 const PAST = raw(`${DB_NOW} - interval '1 hour'`);
 const FUTURE = raw(`${DB_NOW} + interval '1 hour'`);
 
+describe('endGrant: a grant that expires between the judgment and the stamp is not ended (Dara F1, R1)', () => {
+  const crossExpiry = (id: string, kind: 'withdraw' | 'revoke') => db.$transaction((tx) => endGrant(tx, id, ender(), {
+    authorize: () => undefined, kind, ...(kind === 'withdraw' ? { pendingOnly: true } : {}),
+    // The state read has already passed (still live); this pause carries the clock across the expiry before the stamp.
+    beforeStamp: async (t) => { await t.$queryRawUnsafe('SELECT pg_sleep(2.2)::text'); },
+  }));
+  const EXPIRES_SOON = raw(`${DB_NOW} + interval '1500 milliseconds'`);
+  for (const [kind, activated] of [['withdraw', false], ['revoke', false], ['revoke', true]] as const) {
+    it(`${kind} of a ${activated ? 'active' : 'pending'} grant whose expiry passes after the state read: changed false, no stamp, no event, no updated_at move, state EXPIRED`, async () => {
+      const id = activated
+        ? await insertGrantUnguarded(w, { activated_at: PAST, expires_at: EXPIRES_SOON })
+        : await insertGrant(w, { expires_at: EXPIRES_SOON });
+      const before = await stored(id);
+      expect(before.state).toBe(activated ? 'ACTIVE' : 'PENDING');
+      expect(await crossExpiry(id, kind)).toEqual({ changed: false });
+      const after = await stored(id);
+      expect(after.revoked_at).toBeNull(); expect(after.withdrawn_at).toBeNull();
+      expect(after.updated_at.getTime()).toBe(before.updated_at.getTime());
+      expect(after.state).toBe('EXPIRED');
+      expect(await events(id)).toEqual([]);
+    }, 30_000);
+  }
+});
+
 describe('endGrant: a withdrawal is its own fact and event; the first end stands (D8)', () => {
   it('A12/A26 withdraw of a live pending grant: stamps, withdrawn_at = revoked_at, exactly one WITHDRAW event, state WITHDRAWN', async () => {
     const id = await insertGrant(w, { expires_at: FUTURE });

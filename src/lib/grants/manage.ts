@@ -87,14 +87,20 @@ export async function endGrant(tx: Prisma.TransactionClient, id: string, ender: 
   const [{ state }] = await tx.$queryRaw<Array<{ state: string }>>(Prisma.sql`SELECT ${grantStateSql('g')} AS state FROM grants g WHERE g.id = ${id}`);
   if (state === 'EXPIRED' || state === 'SPENT') return { changed: false };
   await opts.beforeStamp?.(tx);
+  // The first end stands, judged ONCE MORE in the stamping statement itself, on the same database instant the stamp takes (Dara F1 on
+  // 8b8935dde: expiry can pass between the SELECT above and a slow `beforeStamp`, and a grant that expired first must not be ended).
+  // Zero rows: no stamp, no event, no `updated_at` move.
   const ended = opts.kind === 'withdraw'
-    ? await tx.$executeRaw`
+    ? await tx.$executeRaw(Prisma.sql`
     UPDATE grants SET revoked_at = t.at, withdrawn_at = t.at, revoked_by = ${ender.userId}, updated_at = t.at
     FROM (SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS at) t
-    WHERE id = ${id} AND revoked_at IS NULL AND holder_departed_at IS NULL`
-    : await tx.$executeRaw`
-    UPDATE grants SET revoked_at = (clock_timestamp() AT TIME ZONE 'UTC'), revoked_by = ${ender.userId}, updated_at = (clock_timestamp() AT TIME ZONE 'UTC')
-    WHERE id = ${id} AND revoked_at IS NULL AND holder_departed_at IS NULL`;
+    WHERE id = ${id} AND revoked_at IS NULL AND holder_departed_at IS NULL
+      AND ${grantStateSql('grants', Prisma.sql`t.at`)} NOT IN ('EXPIRED', 'SPENT')`)
+    : await tx.$executeRaw(Prisma.sql`
+    UPDATE grants SET revoked_at = t.at, revoked_by = ${ender.userId}, updated_at = t.at
+    FROM (SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS at) t
+    WHERE id = ${id} AND revoked_at IS NULL AND holder_departed_at IS NULL
+      AND ${grantStateSql('grants', Prisma.sql`t.at`)} NOT IN ('EXPIRED', 'SPENT')`);
   if (ended !== 1) return { changed: false };
   await tx.grantEvent.create({ data: { grantId: id, appId: row.appId, action: opts.kind === 'withdraw' ? 'WITHDRAW' : 'REVOKE', actorUserId: ender.userId, workerId: ender.workerId, sessionId: ender.sessionId } });
   return { changed: true };
