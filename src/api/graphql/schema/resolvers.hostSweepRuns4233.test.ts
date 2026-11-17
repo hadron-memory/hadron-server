@@ -335,7 +335,7 @@ describe('the stale-sweep alarm', () => {
     await record({ runId: 'fresh' });
     const { alarmEpisodeEnds } = await import('../../../lib/agentTasks/stall.js');
     const a = (await alarms()).find((e) => (e.payload as any).hostId === 'orca1')!;
-    const ends = await alarmEpisodeEnds(db, [{ id: a.id, taskId: null, type: a.type, episodeStart: null, raisedAt: a.createdAt }], new Date());
+    const ends = await alarmEpisodeEnds(db, [{ id: a.id, appId: a.appId, taskId: null, type: a.type, episodeStart: null, raisedAt: a.createdAt }], new Date());
     expect(ends.get(a.id)).toBeInstanceOf(Date);
   });
 });

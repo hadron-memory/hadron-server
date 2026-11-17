@@ -54,10 +54,14 @@ async function taskEvents(tx: Prisma.TransactionClient, ids: string[]): Promise<
   if (!ids.length) return [];
   // Collapse history in PostgreSQL, not Prisma's client-side distinct: repeated verdicts/freezes must
   // not hydrate the complete append-only stream. At most one row per task and protocol type escapes.
-  const rows = await tx.$queryRaw<Event[]>`SELECT DISTINCT ON (task_id, type)
-    id, task_id AS "taskId", type, payload, actor_worker_id AS "actorWorkerId", actor_user_id AS "actorUserId", created_at AS "createdAt"
-    FROM agent_team_events WHERE task_id IN (${Prisma.join(ids)}) AND type IN (${Prisma.join([...PR_EVENT_TYPES])})
-    ORDER BY task_id, type, created_at DESC, id DESC`;
+  // #4202 (cor:agt:050:01, :21): `agent_team_events.task_id` has no foreign key, so an event of another App can name
+  // one of these tasks. Only an event of the task's OWN App is one of its protocol facts (the join).
+  const rows = await tx.$queryRaw<Event[]>`SELECT DISTINCT ON (e.task_id, e.type)
+    e.id, e.task_id AS "taskId", e.type, e.payload, e.actor_worker_id AS "actorWorkerId", e.actor_user_id AS "actorUserId", e.created_at AS "createdAt"
+    FROM agent_team_events e
+    JOIN agent_tasks t ON t.id = e.task_id AND t.app_id = e.app_id
+    WHERE e.task_id IN (${Prisma.join(ids)}) AND e.type IN (${Prisma.join([...PR_EVENT_TYPES])})
+    ORDER BY e.task_id, e.type, e.created_at DESC, e.id DESC`;
   return rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || b.id.localeCompare(a.id));
 }
 function frozen(events: Event[], taskId: string, head: string, code = 'PR_HEAD_NOT_FROZEN'): string {
@@ -70,8 +74,11 @@ function scheduled(events: Event[], taskId: string): string[] {
   if (!Array.isArray(slots) || !slots.length || !slots.every(validSlot)) throw taskError('REVIEW_SCHEDULE_MISSING', 'The build task has no review schedule.');
   return slots as string[];
 }
-async function negativeAtHead(tx: Prisma.TransactionClient, taskId: string, head: string): Promise<boolean> {
-  const prior = await tx.agentTeamEvent.findFirst({ where: { taskId, type: 'review.verdict', payload: { path: ['head'], equals: head } }, orderBy: [...newest] });
+/** #4202: the task's latest verdict at `head`, among the events of the task's OWN App (`appId`); another App's row naming the task is not its verdict. */
+const verdictAtHead = (tx: Prisma.TransactionClient, appId: string, taskId: string, head: string) =>
+  tx.agentTeamEvent.findFirst({ where: { appId, taskId, type: 'review.verdict', payload: { path: ['head'], equals: head } }, orderBy: [...newest] });
+async function negativeAtHead(tx: Prisma.TransactionClient, appId: string, taskId: string, head: string): Promise<boolean> {
+  const prior = await verdictAtHead(tx, appId, taskId, head);
   return ['CHANGES_REQUESTED', 'FAIL', 'REFUSED'].includes(String(data(prior ?? undefined).verdict));
 }
 function sameEventActor(event: Pick<Event, 'actorWorkerId' | 'actorUserId'>, actor: { workerId: string | null; userId: string | null }): boolean {
@@ -254,7 +261,7 @@ export const prProtocolMutations = {
         const oldSlots = latest(prior, 'review.scheduled', row.id) ? scheduled(prior, row.id) : [];
         for (const slot of oldSlots.filter(slot => !values.includes(slot))) {
           const current = currentAssignment(history, slot);
-          if (current?.taskId && await negativeAtHead(tx, current.taskId, head)) {
+          if (current?.taskId && await negativeAtHead(tx, row.appId, current.taskId, head)) {
             throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'A schedule cannot drop a slot with a negative verdict at the frozen head.');
           }
         }
@@ -286,12 +293,12 @@ export const prProtocolMutations = {
       if (!storedTaskReferences(row.references).some((r) => r.kind === 'pull_request')) {
         throw taskError('PR_REFERENCE_MISSING', 'A defect links to a build task with a pull_request reference.');
       }
-      if (head !== null && !await tx.agentTeamEvent.count({ where: { taskId: row.id, type: 'pr.frozen', payload: { path: ['head'], equals: head } } })) {
+      if (head !== null && !await tx.agentTeamEvent.count({ where: { appId: app.id, taskId: row.id, type: 'pr.frozen', payload: { path: ['head'], equals: head } } })) {
         throw taskError('DEFECT_HEAD_NOT_FROZEN', 'introducedAtHead must be a head frozen on this pull request. Nothing was written.');
       }
       // Under the task's row lock (mutateTask), so two links of one pair cannot both write.
       const linked = (where: Prisma.AgentTeamEventWhereInput) => tx.agentTeamEvent.findFirst({
-        where: { taskId: row.id, type: 'review.defect-linked', payload: { path: ['defect'], equals: defect }, ...where },
+        where: { appId: app.id, taskId: row.id, type: 'review.defect-linked', payload: { path: ['defect'], equals: defect }, ...where },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true, taskId: true, payload: true, createdAt: true },
       });
       const existing = await linked({});
@@ -327,12 +334,12 @@ export const prProtocolMutations = {
       const history = await taskEvents(tx, siblings.map(s => s.id));
       const previous = data(latest(history, 'review.seat.assigned', row.id));
       // Xanthos #75789: moving the negative seat is the same replacement, not a way around it.
-      if (previous.head === head && previous.slot !== slot && await negativeAtHead(tx, row.id, head)) {
+      if (previous.head === head && previous.slot !== slot && await negativeAtHead(tx, app.id, row.id, head)) {
         throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'A negative seat cannot move slots at the same frozen head.');
       }
       const current = currentAssignment(history, slot);
       // An implicit replacement (no supersedes pointer) must obey the identical negative-seat gate.
-      if (current?.taskId && current.taskId !== row.id && data(current).head === head && await negativeAtHead(tx, current.taskId, head)) {
+      if (current?.taskId && current.taskId !== row.id && data(current).head === head && await negativeAtHead(tx, app.id, current.taskId, head)) {
         throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'A negative current seat cannot be replaced at the same frozen head.');
       }
       if (typeof previous.slot === 'string') throw taskError('REVIEW_SEAT_ALREADY_ASSIGNED', 'Each seat task is assigned once; use a new seat task.');
@@ -346,7 +353,7 @@ export const prProtocolMutations = {
         supersedes = await resolveTaskRef(c, args.supersedes, app.id);
         const sibling = supersedes ? await tx.agentTask.findFirst({ where: { id: supersedes, appId: app.id, parentTaskId: row.parentTaskId } }) : null;
         if (!sibling || sibling.id === row.id || data(latest(history, 'review.seat.assigned', sibling.id)).slot !== slot || current?.taskId !== sibling.id) throw taskError('REVIEW_SEAT_SUPERSEDE_INVALID', 'supersedes must name the current sibling seat for this slot.');
-        if (await negativeAtHead(tx, sibling.id, head)) throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'A negative verdict cannot be superseded at the same frozen head.');
+        if (await negativeAtHead(tx, app.id, sibling.id, head)) throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'A negative verdict cannot be superseded at the same frozen head.');
       }
       await record(tx, c, row, { type: 'review.seat.assigned', slot, head, supersedes }, { 'review.slot': slot, 'review.head': head, 'review.supersedes': supersedes });
     }, { taskGraph: 'exclusive' });
@@ -361,7 +368,7 @@ export const prProtocolMutations = {
       if (typeof assigned.slot !== 'string') throw taskError('REVIEW_SEAT_UNASSIGNED', 'The task has no assigned review seat.');
       const head = headValue(args.head);
       if (head !== assigned.head) throw taskError('REVIEW_HEAD_MISMATCH', 'The verdict head differs from the assigned head.');
-      const prior = await tx.agentTeamEvent.findFirst({ where: { taskId: row.id, type: 'review.verdict', payload: { path: ['head'], equals: head } }, orderBy: [...newest] });
+      const prior = await verdictAtHead(tx, row.appId, row.id, head);
       if (prior && ['CHANGES_REQUESTED', 'FAIL', 'REFUSED'].includes(String(data(prior).verdict))
         && !sameEventActor(prior, { workerId: currentActor().workerId, userId: c.userId ?? null })) {
         throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'Only the actor who recorded a negative verdict may re-rate it at the same head.');

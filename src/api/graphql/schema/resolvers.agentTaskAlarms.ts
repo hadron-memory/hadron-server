@@ -248,7 +248,7 @@ export const agentTaskAlarmMutations = {
       // #3934 (V77): an episode that had already ended but was not yet recorded is recorded now, before the acknowledgement
       // is written, so the end the field reports is the episode's, not the acknowledgement's.
       const { freezeEndedEscalation } = await import('../../../lib/agentTasks/stall.js');
-      await freezeEndedEscalation(tx, { id, taskId: row.taskId, type: row.type, episodeStart: row.episodeStart, raisedAt: row.createdAt }, new Date());
+      await freezeEndedEscalation(tx, { id, appId: row.appId, taskId: row.taskId, type: row.type, episodeStart: row.episodeStart, raisedAt: row.createdAt }, new Date());
       // The server's clock, never a client value (Rook P3-2).
       await tx.agentTeamEvent.update({
         where: { id },
