@@ -73,7 +73,10 @@ SELECT 'plain' /* mid-statement ; comment */ WHERE false;
 SELECT E'escaped \' quote ; semicolon' WHERE false;
 /* nested /* block ; comment */ — Postgres nests, so this is still ONE comment */
 CREATE INDEX fixture_nested_comment_idx ON fixture_books (id);
-CREATE /* separator */ INDEX fixture_comment_sep_idx ON fixture_books (id);
+-- The comment sits BETWEEN two tokens with NO surrounding spaces (delta2 A2):
+-- dropping it instead of replacing it with a separator would join the tokens
+-- (`INDEXfixture_comment_sep_idx`) and refuse — this is the mutant this row kills.
+CREATE INDEX/*c*/fixture_comment_sep_idx ON fixture_books (id);
 DROP TRIGGER IF EXISTS old_trig ON fixture_books;
 DROP INDEX IF EXISTS old_idx;
 

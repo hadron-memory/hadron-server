@@ -46,15 +46,17 @@ export const OBJECT_KINDS = [
 const NON_OBJECT_HEADS = /^(INSERT|UPDATE|DELETE|SELECT|SET|RESET|GRANT|REVOKE|COMMENT|ANALYZE|VACUUM|LOCK|TRUNCATE|NOTIFY|LISTEN|CALL|VALUES|WITH)\b/i;
 
 /**
- * DDL that may not hide inside a DO block's payload: it creates, changes or
- * removes objects the inventory must see. Matched as verb+object BIGRAM (with
- * the usual optional modifiers) so prose in RAISE messages — "refusing to
- * create the unique index" — does not false-positive; the payload's line
- * comments are stripped for the same reason. Dollar-quoted DDL payloads
- * (`EXECUTE $ddl$CREATE UNIQUE INDEX …$ddl$`) and plain dynamic SQL
- * (`EXECUTE 'CREATE TABLE …'`) both match.
+ * DDL-shaped text that may not REMAIN in a DO block's payload after the
+ * EXECUTE'd statements were extracted: any verb+word (`CREATE EVENT TRIGGER`,
+ * `ALTER COLLATION`, …) refuses the block. The allow-by-default bigram list
+ * this replaces silently admitted object kinds it had never been taught
+ * (Brooks delta2 A4): top level defaults to deny, so a DO body must too. The
+ * remainder is comment- AND string-stripped first (stripPayloadComments +
+ * stripPayloadStrings), so prose in RAISE messages — "refusing to create the
+ * unique index" — cannot false-positive; the EXECUTE'd DDL itself was already
+ * extracted and classified.
  */
-const DO_BLOCK_DDL = /\b(CREATE|ALTER|DROP)\s+((OR\s+REPLACE|TEMP|TEMPORARY|UNLOGGED|MATERIALIZED|UNIQUE|CONCURRENTLY|GLOBAL|LOCAL|RECURSIVE|IF\s+NOT\s+EXISTS)\s+)*(TABLE|INDEX|CONSTRAINT|EXTENSION|FUNCTION|PROCEDURE|TRIGGER|SEQUENCE|SCHEMA|TYPE|DOMAIN|RULE|AGGREGATE|VIEW|POLICY|COLUMN)\b/i;
+const REMAINDER_DDL = /\b(CREATE|ALTER|DROP)\s+\w/i;
 
 /**
  * ALTER TABLE actions that are recognized as non-object maintenance, anchored
@@ -70,8 +72,8 @@ const BENIGN_ALTER_ACTIONS = /^(DROP|ALTER|VALIDATE\s+CONSTRAINT|CLUSTER|SET|RES
 /** An inline clause that makes a plain ADD COLUMN create objects beyond the column (a constraint, an identity sequence). */
 const ADD_COLUMN_OBJECT_CLAUSE = /\b(CONSTRAINT|CHECK|REFERENCES|UNIQUE|PRIMARY\s+KEY|EXCLUDE|GENERATED|IDENTITY)\b/i;
 
-/** psql meta-commands the parser FOLLOWS (relative to the current file, except `\i` which psql resolves against the working directory). */
-const FOLLOWED_METAS = /^\\(?<cmd>ir|include_relative|i)\s+(?:"(?<dq>[^"]+)"|'(?<sq>[^']+)'|(?<bare>\S+))\s*$/;
+/** psql meta-commands the parser FOLLOWS (relative to the current file, except `\i` which psql resolves against the working directory). A bare path may not start with a quote: `\ir "unterminated` is an odd shape to REFUSE, not a file literally named `"unterminated` (delta2 A1). */
+const FOLLOWED_METAS = /^\\(?<cmd>ir|include_relative|i)\s+(?:"(?<dq>[^"]+)"|'(?<sq>[^']+)'|(?<bare>[^"'\s]\S*))\s*$/;
 /** psql meta-commands recognized as benign session/output state and silently skipped. */
 const ALLOWED_METAS = /^\\(set|unset|echo|qecho|warn)\b/;
 
@@ -384,20 +386,45 @@ function scan(entryFile) {
 /**
  * Strip `-- comments` from a DO payload WITHOUT touching string literals: a
  * bare global replace would cut at a `--` inside a quoted message and shift
- * the quote pairing the plain-`EXECUTE '…'` extraction depends on.
+ * the quote pairing the plain-`EXECUTE '…'` extraction depends on. String
+ * literals are lexed whole — `''` escapes, `E'…'` backslash escapes, and
+ * dollar-quoted spans (`RAISE NOTICE $m$can't$m$`) included — so an
+ * apostrophe inside a dollar-quoted message cannot leave the lexer thinking a
+ * string is open and keep a LATER comment (delta2 A4: that is how a
+ * commented-out `-- EXECUTE 'CREATE INDEX …'` came back as a phantom row).
  */
 function stripPayloadComments(body) {
   let out = '';
   let inS = false;
+  let eS = false; // that string opened with E'…' (backslash escapes)
   for (let i = 0; i < body.length; i++) {
     const ch = body[i];
     if (inS) {
       out += ch;
+      if (eS && ch === '\\') { out += body[i + 1] ?? ''; i++; continue; } // \' keeps the string open
       if (ch === "'" && body[i + 1] === "'") { out += "'"; i++; }
       else if (ch === "'") inS = false;
       continue;
     }
-    if (ch === "'") { inS = true; out += ch; continue; }
+    if (ch === "'") {
+      const prev = i > 0 ? body[i - 1] : '';
+      const prev2 = i > 1 ? body[i - 2] : '';
+      eS = (prev === 'e' || prev === 'E') && !/[A-Za-z0-9_$"]/.test(prev2);
+      inS = true;
+      out += ch;
+      continue;
+    }
+    const dollar = ch === '$' ? body.slice(i).match(/^(\$[A-Za-z_]*\$)/) : null;
+    if (dollar && isPayloadDollarOpener(body, i)) {
+      // A dollar-quoted span inside the payload: copy it through verbatim,
+      // apostrophes and all, so nothing inside it is mistaken for a comment
+      // or a quote.
+      const close = body.indexOf(dollar[1], i + dollar[1].length);
+      const end = close === -1 ? body.length : close + dollar[1].length;
+      out += body.slice(i, end);
+      i = end - 1;
+      continue;
+    }
     if (ch === '-' && body[i + 1] === '-') {
       while (i < body.length && body[i] !== '\n') i++;
       i--; // the loop's i++ lands ON the newline, preserving it
@@ -407,6 +434,91 @@ function stripPayloadComments(body) {
     out += ch;
   }
   return out;
+}
+
+/** A `$tag$` at `i` opens a dollar-quote only when it does not continue an identifier/number (mirrors scan's isDollarOpener). */
+function isPayloadDollarOpener(text, i) {
+  const prev = i > 0 ? text[i - 1] : '';
+  return !/[A-Za-z0-9_$]/.test(prev);
+}
+
+/**
+ * Blank out string literals and dollar-quoted spans (each becomes one space),
+ * leaving identifiers and code. Applied to a DO payload's REMAINDER — after
+ * EXECUTE'd statements were extracted and comments stripped — before the
+ * REMAINDER_DDL test, so DDL-shaped PROSE inside a string ("refusing to
+ * create the unique index") cannot false-positive while real DDL text left in
+ * the body still refuses (delta2 A4).
+ */
+function stripPayloadStrings(text) {
+  let out = '';
+  let inS = false;
+  let eS = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inS) {
+      if (eS && ch === '\\') i++; // \' keeps the string open
+      else if (ch === "'" && text[i + 1] === "'") i++;
+      else if (ch === "'") { inS = false; out += ' '; }
+      continue;
+    }
+    if (ch === "'") {
+      const prev = i > 0 ? text[i - 1] : '';
+      const prev2 = i > 1 ? text[i - 2] : '';
+      eS = (prev === 'e' || prev === 'E') && !/[A-Za-z0-9_$"]/.test(prev2);
+      inS = true;
+      continue;
+    }
+    const dollar = ch === '$' ? text.slice(i).match(/^(\$[A-Za-z_]*\$)/) : null;
+    if (dollar && isPayloadDollarOpener(text, i)) {
+      const close = text.indexOf(dollar[1], i + dollar[1].length);
+      const end = close === -1 ? text.length : close + dollar[1].length;
+      out += ' ';
+      i = end - 1;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * Index just past the `)` that balances the `(` at `openAt`, respecting
+ * single-quoted (incl. E'…') and double-quoted spans; -1 when unbalanced.
+ */
+function balancedClose(text, openAt) {
+  let depth = 0;
+  let inS = false;
+  let eS = false;
+  let inD = false;
+  for (let i = openAt; i < text.length; i++) {
+    const ch = text[i];
+    if (inS) {
+      if (eS && ch === '\\') i++;
+      else if (ch === "'" && text[i + 1] === "'") i++;
+      else if (ch === "'") inS = false;
+      continue;
+    }
+    if (inD) {
+      if (ch === '"' && text[i + 1] === '"') i++;
+      else if (ch === '"') inD = false;
+      continue;
+    }
+    if (ch === "'") {
+      const prev = i > 0 ? text[i - 1] : '';
+      const prev2 = i > 1 ? text[i - 2] : '';
+      eS = (prev === 'e' || prev === 'E') && !/[A-Za-z0-9_$"]/.test(prev2);
+      inS = true;
+      continue;
+    }
+    if (ch === '"') { inD = true; continue; }
+    if (ch === '(') depth++;
+    if (ch === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
 }
 
 /** Cut a trailing `-- comment` off a psql meta-command line (outside quoted arguments). */
@@ -487,7 +599,17 @@ export function classify(stmt) {
         out.push({ kind, name: normalizeName(unquote(am[1] ?? am[2])) });
         continue;
       }
-      if ((am = action.match(new RegExp(`^ADD COLUMN (?:IF NOT EXISTS )?${IDENT}.*?GENERATED ALWAYS AS \\(`, 'is')))) {
+      if ((am = action.match(new RegExp(`^ADD COLUMN (?:IF NOT EXISTS )?${IDENT}.*?GENERATED ALWAYS AS\\s*\\(`, 'is')))) {
+        // An inline clause AFTER the generation expression (STORED CHECK …,
+        // REFERENCES …) creates objects this row does not name: refuse rather
+        // than inventory the column and lose them (delta2 A6).
+        const openAt = am.index + am[0].length - 1;
+        const closeAt = balancedClose(action, openAt);
+        const tail = closeAt === -1 ? '' : action.slice(closeAt + 1);
+        if (closeAt === -1 || /\b(CONSTRAINT|CHECK|REFERENCES|UNIQUE|PRIMARY\s+KEY|EXCLUDE|IDENTITY)\b/i.test(tail)) {
+          out.push({ unrecognized: sql });
+          continue;
+        }
         out.push({ kind: 'generated-column', name: `${table}.${unquote(am[1] ?? am[2])}` });
         continue;
       }
@@ -499,9 +621,17 @@ export function classify(stmt) {
       // objects the inventory must see; Prisma does not introspect CHECK
       // constraints, so an inline one is invisible to both fences. Refuse.
       if (/^ADD COLUMN IF NOT EXISTS\b/i.test(action) && !ADD_COLUMN_OBJECT_CLAUSE.test(action)) continue;
-      // `ALTER COLUMN … ADD GENERATED … AS IDENTITY` attaches an identity
-      // SEQUENCE to an existing column — a new durable object.
-      if (/^ALTER\s+COLUMN\b.*\bADD\s+GENERATED\b/i.test(action)) {
+      // `ALTER [COLUMN] … ADD GENERATED … AS IDENTITY` attaches an identity
+      // SEQUENCE to an existing column — a new durable object. Postgres makes
+      // the COLUMN keyword optional (delta2 A5).
+      if (/^ALTER\s+(?:COLUMN\s+)?\S+\s+ADD\s+GENERATED\b/i.test(action)) {
+        out.push({ unrecognized: sql });
+        continue;
+      }
+      // `SET SCHEMA` moves the table to another schema — the same identity
+      // change a RENAME TO makes, and RENAME is already refused on that
+      // ground. It must not pass as benign `SET` (delta2 A5).
+      if (/^SET\s+SCHEMA\b/i.test(action)) {
         out.push({ unrecognized: sql });
         continue;
       }
@@ -519,20 +649,26 @@ export function classify(stmt) {
   // DDL hidden in the format string, a nested DO whose own payload this
   // extraction cannot capture) refuses the whole block.
   if (/^DO\b/i.test(head)) {
+    // A DO whose payload was never captured — a plain-string or E-string body
+    // (`DO 'BEGIN EXECUTE ''CREATE INDEX …''; END'`), which the scanner
+    // carries in the statement text, not in `payloads` — must not vanish as a
+    // recognized non-object: whatever DDL hides in that string is invisible
+    // here. Refuse (delta2 A3).
+    if (!(stmt.payloads ?? '').trim()) return [{ unrecognized: sql }];
     const body = stripPayloadComments(stmt.payloads ?? '');
     const out = [];
     let remainder = body;
     for (const m of body.matchAll(/\bEXECUTE\s+\$([A-Za-z_]*)\$([\s\S]*?)\$\1\$/gi)) {
-      if (/^\s*DO\b/i.test(m[2])) out.push({ unrecognized: sql }); // nested DO: payload-in-payload, unextractable here
+      if (/\bDO\b/i.test(m[2])) out.push({ unrecognized: sql }); // nested DO anywhere in the payload: payload-in-payload, unextractable here
       else out.push(...classify({ sql: m[2] }));
       remainder = remainder.replace(m[0], ' ');
     }
     for (const m of remainder.matchAll(/\bEXECUTE\s*'((?:[^']|'')*)'/gi)) {
-      if (/^\s*DO\b/i.test(m[1])) out.push({ unrecognized: sql });
+      if (/\bDO\b/i.test(m[1])) out.push({ unrecognized: sql });
       else out.push(...classify({ sql: m[1].replace(/''/g, "'") }));
       remainder = remainder.replace(m[0], ' ');
     }
-    if (DO_BLOCK_DDL.test(remainder)) out.push({ unrecognized: sql });
+    if (REMAINDER_DDL.test(stripPayloadStrings(remainder))) out.push({ unrecognized: sql });
     return out;
   }
   if (/^DROP (INDEX|TRIGGER|FUNCTION|VIEW|TABLE|CONSTRAINT|POLICY|SCHEMA|EXTENSION|TYPE|SEQUENCE)\b/i.test(head)) return [];
