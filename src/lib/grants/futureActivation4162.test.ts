@@ -37,6 +37,17 @@ describe('trigger door: a future-dated activation admits nothing', () => {
     expect(await admit()).toBe(now);
     expect(future).not.toBe(now);
   });
+  it('a FUTURE starts_at admits nothing either, and a past one does (Rook P3: grantLiveSql judges it for this door)', async () => {
+    const early = await insertGrantUnguarded(w as unknown as World, {
+      user_id: null, worker_id: w.workerId, action: 'schedule.create', action_values: { entryNode: w.entryNodeId }, verified_by: w.userId, issuer_user_id: w.userId,
+      starts_at: FUTURE, ...active(NOW) } as never);
+    expect(await admit()).toBeNull();
+    const started = await insertGrantUnguarded(w as unknown as World, {
+      user_id: null, worker_id: w.workerId, action: 'schedule.create', action_values: { entryNode: w.entryNodeId }, verified_by: w.userId, issuer_user_id: w.userId,
+      starts_at: raw(`${DB_NOW} - interval '1 minute'`), ...active(NOW) } as never);
+    expect(await admit()).toBe(started);
+    expect(early).not.toBe(started);
+  });
   it('the shared check itself returns nothing for it, for either lock mode', async () => {
     await mk(FUTURE);
     for (const lock of [undefined, 'SHARE', 'UPDATE'] as const) {
@@ -66,6 +77,19 @@ describe('boot-prompt door: a future-dated activation admits nothing', () => {
   const node = () => db.node.create({ data: { id: generateId(), memoryId: installMemoryId, loc: `boot:workers:${workerId}:source`, name: 'Source', content: 'original', role: 'boot-prompt' } });
   const mk = (nodeId: string, activatedAt: unknown) => insertGrantUnguarded({ appId, userId: adminId } as unknown as World, {
     user_id: null, worker_id: workerId, action: 'bootprompt.source.edit', action_values: { sourceNode: nodeId }, verified_by: adminId, issuer_user_id: adminId, ...active(activatedAt) } as never);
+  it('a FUTURE starts_at is refused by both entry points, and spends nothing (Rook P3: grantLiveSql judges it for this door)', async () => {
+    const s = await node(); const facts = { id: s.id, memoryId: installMemoryId, loc: s.loc };
+    const early = await insertGrantUnguarded({ appId, userId: adminId } as unknown as World, {
+      user_id: null, worker_id: workerId, action: 'bootprompt.source.edit', action_values: { sourceNode: s.id }, verified_by: adminId, issuer_user_id: adminId,
+      starts_at: FUTURE, ...active(NOW) } as never);
+    expect(await db.$transaction((tx) => hasUsableEditGrant(tx, workerId, facts))).toBe(false);
+    expect(await db.$transaction((tx) => spendEditGrant(tx, workerId, facts))).toBe(false);
+    expect(await db.grantEvent.count({ where: { grantId: early } })).toBe(0);
+    await db.$executeRawUnsafe(`ALTER TABLE grants DISABLE TRIGGER grants_guard`);
+    await db.$executeRawUnsafe(`UPDATE grants SET starts_at = ${DB_NOW} - interval '1 minute' WHERE id = $1`, early);
+    await db.$executeRawUnsafe(`ALTER TABLE grants ENABLE TRIGGER grants_guard`);
+    expect(await db.$transaction((tx) => hasUsableEditGrant(tx, workerId, facts))).toBe(true);
+  });
   it('hasUsableEditGrant and spendEditGrant refuse it; the clock-now control is usable and spends', async () => {
     const s = await node(); const facts = { id: s.id, memoryId: installMemoryId, loc: s.loc };
     const future = await mk(s.id, FUTURE);
