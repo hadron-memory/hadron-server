@@ -360,28 +360,38 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     let inFlight = 0;
     let maxInFlight = 0;
     const roles = [F.ROLES.serve, F.ROLES.owner, F.ROLES.other];
-    // Every probe goes through here, so the in-flight count covers the background loop and the checkpoint alike.
-    const probe = async (role: string) => {
+    // Every probe goes through here, so the in-flight count covers the background loop and the checkpoint alike. The refusal
+    // text is kept: a limit or transport failure must not pass for an ACL refusal.
+    const probe = async (role: string): Promise<{ connected: boolean; error: string | null }> => {
       inFlight++;
       maxInFlight = Math.max(maxInFlight, inFlight);
+      const c = new Client({ connectionString: B.url(target, role, F.PASSWORD), connectionTimeoutMillis: 2_000 });
       try {
-        return await tryConnect(B.url(target, role, F.PASSWORD));
+        await c.connect();
+        await c.end();
+        return { connected: true, error: null };
+      } catch (e) {
+        return { connected: false, error: (e as Error).message };
       } finally {
         inFlight--;
       }
     };
     // One loop, roles in turn: at most ONE background probe in flight, so the probes can never take the slots pg_restore
     // needs. (Three parallel loops did, and refused pg_restore's own connection: 'too many connections for database'.)
-    const loop = (async () => {
+    // Its failure is captured the moment it happens, so it can neither go unhandled nor mask a restore error.
+    let probeFailure: unknown = null;
+    const probeLoop = (async () => {
       for (let i = 0; !stop; i++) {
         const role = roles[i % roles.length]!;
-        if (await probe(role)) events.push({ at: performance.now(), what: role });
+        if ((await probe(role)).connected) events.push({ at: performance.now(), what: role });
         await new Promise((r) => setTimeout(r, 5));
       }
-    })();
+    })().catch((e) => { probeFailure = e; });
     // Coverage that cannot race the restore: at the 'fenced' checkpoint (ACL fence done, admission on, pg_restore not yet
-    // started) each role is probed once, in turn, and must be refused. A fast restore cannot skip this.
-    const checkpoint: Record<string, boolean> = {};
+    // started) each role is probed once, in turn, and must be refused for lack of CONNECT. The log hook is awaited by the
+    // caller; the S3 event below proves it (the checkpoint is complete before the restore reports S3).
+    const checkpoint: Record<string, { connected: boolean; error: string | null }> = {};
+    let checkpointCompleteAtS3 = false;
     try {
       await restoreWithRebase(
         base({
@@ -389,15 +399,17 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
           log: async (e) => {
             if (e.event === 'releasing') releasingAt = performance.now();
             if (e.stage === 'S2' && e.event === 'fenced') for (const role of roles) checkpoint[role] = await probe(role);
+            if (e.stage === 'S3' && e.event === 'restored') checkpointCompleteAtS3 = Object.keys(checkpoint).length === roles.length;
           },
         }),
       );
       await new Promise((r) => setTimeout(r, 300));
     } finally {
-      // Stop and join the loop even when the restore throws, so no probe outlives the test.
+      // Stop and join the loop even when the restore throws; the restore's own error still propagates.
       stop = true;
-      await loop;
+      await probeLoop;
     }
+    if (probeFailure) throw probeFailure;
     // 'releasing' is logged immediately before the release statement is sent: no connect may succeed before it.
     expect(releasingAt).toBeLessThan(Infinity);
     const early = events.filter((e) => e.at < releasingAt);
@@ -406,8 +418,12 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     expect(events.some((e) => e.what === F.ROLES.other)).toBe(false);
     // #4322: the limit is 4: the pipeline's session and pg_restore's leave two spare slots, so at most two probes may be in flight.
     expect(maxInFlight).toBeLessThanOrEqual(2);
-    // ...and each role, the serve role included, was refused at the working-phase checkpoint, or the pin proves nothing.
-    expect(checkpoint).toEqual({ [F.ROLES.serve]: false, [F.ROLES.owner]: false, [F.ROLES.other]: false });
+    // ...and each role, the serve role included, was refused for lack of CONNECT at the working-phase checkpoint, before the restore went on.
+    expect(checkpointCompleteAtS3).toBe(true);
+    for (const role of roles) {
+      expect(checkpoint[role]?.connected).toBe(false);
+      expect(checkpoint[role]?.error).toMatch(/permission denied for database/);
+    }
   });
 
   it('P3: a foreign (superuser) session at the hard fence aborts; it is never killed, so the plain drop fails and leaves it', async () => {
