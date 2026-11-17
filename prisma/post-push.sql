@@ -830,6 +830,20 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 CREATE INDEX IF NOT EXISTS usage_events_session_activity_idx
   ON usage_events (session_id, created_at) WHERE counts_as_activity;
 
+-- #4271: the stall rules' person-activity read (loadStallInputs' userCalls, cor:agt:050:12) by actor and App. Partial,
+-- so Prisma's schema language can't model it. Same definition as migration
+-- 20261115280000_agent_team_events_person_activity_idx, which builds it CONCURRENTLY for production.
+CREATE INDEX IF NOT EXISTS agent_team_events_person_activity_idx
+  ON agent_team_events (actor_user_id, app_id, created_at) WHERE actor_worker_id IS NULL AND task_id IS NOT NULL;
+
+-- #4273: the worker-liveness read (workerActivitySql) keeps a worker's open sessions and the ended ones that end at or after
+-- its latest start; these two partial indexes serve those ranges. Same definitions as migrations
+-- 20261115290000_sessions_worker_ended_idx and 20261115291000_sessions_worker_started_idx (built CONCURRENTLY there).
+CREATE INDEX IF NOT EXISTS sessions_worker_ended_idx
+  ON sessions (worker_id, ended_at DESC, id DESC) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS sessions_worker_started_idx
+  ON sessions (worker_id, started_at DESC) WHERE deleted_at IS NULL;
+
 -- #1647: the admin-erasure audit is append-only and its reason is trimmed, 1-500 code points
 -- (Prisma can model neither; the migration carries the same statements).
 ALTER TABLE user_deletion_audits DROP CONSTRAINT IF EXISTS chk_user_deletion_reason;
@@ -899,6 +913,13 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 -- #3997 (S2 of #3991): App-owned secrets, versions, events, tombstones. One source, shared verbatim with migration
 -- 20261114120000_app_secret_versions. After worker-reference-invariants.sql: it puts the #1162 fence on its three tables.
 \ir secret-versions-invariants.sql
+
+-- #2719 slice 2: the usage-activity rollup's triggers (the migration carries the same block) and its state row, which
+-- on a push-managed database starts like a deploy: maintained from the next boundary, history by the backfill job.
+\ir usage-activity-rollup-invariants.sql
+INSERT INTO usage_activity_rollup_state (id, applies_from, complete)
+VALUES (1, hadron_usage_cell((now() AT TIME ZONE 'UTC')::timestamp) + interval '15 minutes', false)
+ON CONFLICT (id) DO NOTHING;
 
 -- #2479: per-trigger run budget limits.
 \ir trigger-run-budget-invariants.sql

@@ -104,7 +104,9 @@ const undelivered = (worker: string, event: string, chainIndex: string) => Prism
 /**
  * The task wakes each of `workerIds` is due, oldest first. Who may READ them
  * is the caller's to decide (cor:agt:050:21, :080:23): this only says what is
- * pending. Workers of another App never match (`w.app_id = t.app_id`).
+ * pending. Workers of another App never match (`w.app_id = t.app_id`). #4202: nor does an event of another App
+ * naming the task (`e.app_id = t.app_id`; `agent_team_events.task_id` has no foreign key): it wakes nobody, carries no
+ * task metadata and suppresses no wake (cor:agt:050:01, :19, :21).
  */
 export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): Promise<Map<string, PendingTaskWake[]>> {
   const out = new Map<string, PendingTaskWake[]>();
@@ -120,7 +122,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
       WITH latest AS (
         SELECT DISTINCT ON (e.task_id) e.id, e.task_id, e.type, e.subject_worker_id, e.created_at, e.payload
         FROM agent_team_events e
-        JOIN agent_tasks t ON t.id = e.task_id
+        JOIN agent_tasks t ON t.id = e.task_id AND t.app_id = e.app_id
         WHERE t.assignee_worker_id IN (${ids}) AND t.status IN ${OPEN} AND e.type IN (${assignedTypes})
         ORDER BY e.task_id, e.created_at DESC, e.id DESC
       )
@@ -131,7 +133,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
       WHERE l.subject_worker_id = t.assignee_worker_id
         AND ${liveApp('t')}
         AND NOT EXISTS (SELECT 1 FROM agent_team_events x
-                        WHERE x.task_id = t.id AND x.actor_worker_id = l.subject_worker_id AND x.created_at >= l.created_at AND x.type NOT LIKE 'app.%' AND x.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])}))
+                        WHERE x.task_id = t.id AND x.app_id = t.app_id AND x.actor_worker_id = l.subject_worker_id AND x.created_at >= l.created_at AND x.type NOT LIKE 'app.%' AND x.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])}))
         AND ${undelivered('l.subject_worker_id', 'l.id', '0')}`),
     // A child's end (finished or cancelled), for each of two subjects: the child's owner (cor:agt:050:16 r2) and the
     // parent's CURRENT assignee (#4234, Holger's G7 ruling: a running implementer waiting on its review, QA and merge
@@ -141,7 +143,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
     db.$queryRaw<Row[]>(Prisma.sql`
       SELECT s.wid AS "workerId", c.id AS "taskId", e.id AS "eventId", e.type, c.title, c.handle, e.created_at AS at
       FROM agent_team_events e
-      JOIN agent_tasks c ON c.id = e.task_id
+      JOIN agent_tasks c ON c.id = e.task_id AND c.app_id = e.app_id
       JOIN agent_tasks p ON p.id = c.parent_task_id
       CROSS JOIN LATERAL (SELECT c.owner_worker_id AS wid UNION SELECT p.assignee_worker_id) s
       JOIN workers w ON w.id = s.wid AND w.app_id = c.app_id
@@ -149,14 +151,14 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
         AND e.actor_worker_id IS DISTINCT FROM s.wid
         AND ${liveApp('c')}
         AND NOT EXISTS (SELECT 1 FROM agent_team_events x
-                        WHERE x.task_id = p.id AND x.actor_worker_id = s.wid AND x.created_at >= e.created_at AND x.type NOT LIKE 'app.%' AND x.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])}))
+                        WHERE x.task_id = p.id AND x.app_id = p.app_id AND x.actor_worker_id = s.wid AND x.created_at >= e.created_at AND x.type NOT LIKE 'app.%' AND x.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])}))
         AND ${undelivered('s.wid', 'e.id', '0')}`),
     // An unacknowledged alarm's highest woken chain position, when that position names one of these workers.
     db.$queryRaw<(Row & { chainIndex: number; episodeStart: Date | null })[]>(Prisma.sql`
       SELECT (e.chain -> s.idx ->> 'workerId') AS "workerId", t.id AS "taskId", e.id AS "eventId", e.type, t.title, t.handle,
              e.created_at AS at, s.idx AS "chainIndex", e.episode_start AS "episodeStart"
       FROM agent_team_events e
-      JOIN agent_tasks t ON t.id = e.task_id
+      JOIN agent_tasks t ON t.id = e.task_id AND t.app_id = e.app_id
       JOIN LATERAL (SELECT max(chain_index) AS idx FROM agent_team_alarm_schedule
                     WHERE event_id = e.id AND woken_at IS NOT NULL) s ON s.idx IS NOT NULL
       JOIN workers w ON w.id = (e.chain -> s.idx ->> 'workerId') AND w.app_id = e.app_id

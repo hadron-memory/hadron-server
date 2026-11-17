@@ -44,6 +44,7 @@ import {
 } from '../../../controller/operations/publishAgentImport.js';
 import { assertMaySubscribeOrgToPublicAgent } from '../../../controller/operations/subscribeOrgToPublicAgent.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
+import { endGrantsOfAgentsNoLongerInstalled, liveAppsWhereInstalled } from '../../../lib/grants/agentInstallDeparture.js';
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { writeAgentBase } from '../../../lib/agentBase.js';
@@ -190,6 +191,7 @@ type PromotionTarget = {
  * 3. it is not a `group` memory, even for its owner or a writer: its audience
  *    is its MemoryMember rows (cor:acl:010:01), which a system memory drops,
  *    so the promotion would lock the owner out and widen the audience;
+ * 3b. it is not a `private` or `personal` memory (#4216, cor:dmo:050:01);
  * 4. it is not an App's install memory ({@link assertNotInstallMemory});
  * 5. it is not a memory an Agent holds for a person or an App
  *    ({@link assertNotAgentHolding}), even when its owner asks.
@@ -207,6 +209,18 @@ async function assertPromotableSystemMemory(ctx: Context, target: PromotionTarge
     throw new GraphQLError("A group memory cannot become an Agent's system memory: its members would lose it.", {
       extensions: { code: 'BAD_USER_INPUT' },
     });
+  }
+  // #4216 (ruled option A, cor:dmo:050:01): a private or personal memory is
+  // strict-owner by class (cor:dmo:060:01) and carries `user_id`; a system
+  // memory is readable through every App that installs the Agent and must not.
+  // Promotion would set visibility NULL under a set `user_id` and break
+  // chk_personal_visibility_user (INTERNAL), so it is refused, whoever owns the
+  // Agent. After the readable check, so a non-reader learns nothing of its class.
+  if (target.class === 'private' || target.class === 'personal') {
+    throw new GraphQLError(
+      `A ${target.class} memory cannot become an Agent's system memory: it belongs to one person.`,
+      { extensions: { code: 'BAD_USER_INPUT' } },
+    );
   }
   assertNotInstallMemory(target);
   assertNotAgentHolding(target);
@@ -1192,6 +1206,8 @@ export const agentMutations = {
           });
         }
         const deletedAt = new Date();
+        // #4172 D4 is vacuous on main: assertNoLiveAgentReferences (above) refuses deleting an agent installed in a live App, so a
+        // deleted parent never witnesses a derived install there; pinned in resolvers.agentUninstallDeparture4172.test.ts.
         await tx.agent.update({ where: { id }, data: { deletedAt } });
         // #3690 / ruling 0259: any agent delete, soft delete included, is a departure. No FK action fires on a soft delete, so the grants
         // the agent HOLDS end here, after the `agents FOR UPDATE` lock (afterLock below): the grant row lock is the last one.
@@ -1465,6 +1481,15 @@ export const agentMutations = {
               updatedBy: ctx.userId ?? ctx.clientId ?? null,
             },
           });
+          // #4172 (D3): the licence stopped being usable, so an install of this agent in the org's Apps that existed ONLY by derivation
+          // through an importing parent is gone. Candidates: the org's live Apps where a parent that imports it is installed.
+          const parents = await tx.agentImport.findMany({ where: { importedAgentId: resolvedAgentId }, select: { parentAgentId: true } });
+          const candidateApps = new Set<string>();
+          for (const { parentAgentId } of parents) {
+            for (const appId of await liveAppsWhereInstalled(tx, parentAgentId, resolvedOrgId)) candidateApps.add(appId);
+          }
+          await endGrantsOfAgentsNoLongerInstalled(
+            tx, [...candidateApps].map((appId) => ({ appId, agentId: resolvedAgentId })), ctx.userId ?? null);
           return tx.agentOrgGrant.findUnique({
             where: { orgId_agentId: { orgId: resolvedOrgId, agentId: resolvedAgentId } },
           });
@@ -1558,7 +1583,24 @@ export const agentMutations = {
       if (!edge) {
         await requireReadableAgent(ctx, await ctx.db.agent.findUnique({ where: { id: resolvedImportedId } }), importedAgentRef);
       }
-      await removeAgentImport(ctx.db, resolvedParentId, resolvedImportedId);
+      // #4172: one authorized transaction, so the edge delete and the grants it ends commit or roll back together.
+      await withAuthorizedTx(
+        ctx,
+        [
+          { kind: 'agent', id: resolvedParentId },
+          ...(parent.organizationId ? [{ kind: 'org' as const, id: parent.organizationId }] : []),
+          ...(parent.ownerUserId ? [{ kind: 'user' as const, id: parent.ownerUserId }] : []),
+        ],
+        async (txCtx) => {
+          const current = await txCtx.db.agent.findUniqueOrThrow({ where: { id: resolvedParentId } });
+          if (current.organizationId !== parent.organizationId || current.ownerUserId !== parent.ownerUserId) {
+            throw new Error('Agent ownership changed; retry the operation');
+          }
+          await requireAgentAccess(txCtx, current, 'ADMIN');
+        },
+        (tx) => removeAgentImport(tx, resolvedParentId, resolvedImportedId, ctx.userId ?? null),
+        { lockMode: 'exclusive' },
+      );
       return true;
     },
 

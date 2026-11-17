@@ -1,3 +1,4 @@
+import { settledTeamEventQueries } from '../../test/teamEventHorizon.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1706 (Task Management T2) — the stall evaluator, the alarm chain and its
@@ -32,7 +33,7 @@ vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
 }));
 
 const M = resolvers.Mutation as any;
-const Q = resolvers.Query as any;
+const Q = settledTeamEventQueries(resolvers.Query, db) as any;
 
 const DAY = '2026-10-09';
 /** `at('10:15')` — a moment on the scenario day, UTC; seconds and ms allowed (`'10:14:59.999'`). */

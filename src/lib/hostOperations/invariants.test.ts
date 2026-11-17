@@ -47,7 +47,18 @@ beforeEach(async () => {
 
 describe('the invariants file', () => {
   it('the migration carries a byte-identical copy, and post-push includes it after the file whose token function it uses', () => {
-    const source = readFileSync(new URL('../../../prisma/host-operation-invariants.sql', import.meta.url), 'utf8');
+    const current4291 = readFileSync(new URL('../../../prisma/host-operation-invariants.sql', import.meta.url), 'utf8');
+    // #4291 (S14) widened worker.start once more (an optional `tier`: high, mid or low). 20261116210000_run_settings
+    // carries host_operation_args_ok as it is now; every older copy is compared with the file as it was before, so the
+    // S14 lines are taken out first and the comparisons below are unchanged.
+    const S14_KEYS = "    -- #4291 (S14): a start whose task names a generic tier carries the tier instead of a model.\n";
+    const S14_CHECK = "    ELSIF op_type = 'worker.start' AND k = 'tier' THEN\n      IF (v #>> '{}') NOT IN ('high', 'mid', 'low') THEN RETURN false; END IF;\n";
+    expect(current4291.includes(S14_KEYS) && current4291.includes(S14_CHECK) && current4291.includes("'lifecycle', 'tier']")).toBe(true);
+    const source = current4291.replace(S14_KEYS, '').replace("'lifecycle', 'tier']", "'lifecycle']").replace(S14_CHECK, '');
+    const argsFnOf = (t: string) => t.slice(t.indexOf('CREATE OR REPLACE FUNCTION host_operation_args_ok'), t.indexOf('$$;', t.indexOf('CREATE OR REPLACE FUNCTION host_operation_args_ok')) + 3);
+    const runSettings = readFileSync(new URL('../../../prisma/migrations/20261116210000_run_settings/migration.sql', import.meta.url), 'utf8');
+    expect(runSettings).toContain(argsFnOf(current4291));
+    expect(argsFnOf(current4291)).not.toBe(argsFnOf(source));
     const migration = readFileSync(new URL('../../../prisma/migrations/20261029200000_worker_terminal/migration.sql', import.meta.url), 'utf8');
     // The new migration widens only the CHECK; all other canonical DDL still matches the old migration.
     // #4225: the terminal-shape CHECK is the file's last block and was widened by 20261115120000_worker_terminal_context, so

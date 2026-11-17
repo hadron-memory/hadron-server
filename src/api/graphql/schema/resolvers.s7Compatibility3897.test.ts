@@ -1,4 +1,4 @@
-/** #3897: structural cleanup oracle and actual GraphQL compatibility, not a behavior-changing guard. */
+/** #3897: structural cleanup oracle. The executed get/clear compatibility selections were retired with the fields (#3696). */
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
@@ -35,32 +35,4 @@ it('structurally removes the shadowed isolation keys from wakeSettingsOut', () =
   if (!returned || !ts.isObjectLiteralExpression(returned)) throw new Error('wakeSettingsOut must return an object');
   const keys = returned.properties.map(property => property.name?.getText(source));
   expect(keys).toEqual(['workerId', 'mentions', 'pausedUntil']);
-});
-
-it.each([false, true])('executes get and clear selections without changing settings or events (stored row: %s)', async stored => {
-  const until = new Date('2099-01-01T00:00:00.000Z');
-  if (stored) await db.workerWakeSettings.create({ data: { workerId: targetId, mentions: 'OFF', pausedUntil: until } });
-  const snapshot = async () => ({
-    settings: await db.workerWakeSettings.findUnique({ where: { workerId: targetId } }),
-    events: await db.agentTeamEvent.findMany({ where: { appId }, orderBy: { id: 'asc' } }),
-  });
-  const before = await snapshot();
-  for (const [operation, field] of [['query', 'workerWakeSettings'], ['mutation', 'clearWorkerIsolation']]) {
-    const result = await server.executeOperation({
-      query: `${operation}($ref: String!) { ${field}(workerRef: $ref) {
-        worker { id } mentions pausedUntil effectiveCadenceSeconds
-        isolated isolatedUntil isolatedAt isolatedByHandle canManageIsolation
-      } }`,
-      variables: { ref: targetId },
-    }, { contextValue: { db, userId: holderId, roles: ['READER'] } });
-    expect(result.body.kind).toBe('single');
-    if (result.body.kind !== 'single') throw new Error('Expected a single GraphQL result');
-    expect(result.body.singleResult.errors).toBeUndefined();
-    expect(result.body.singleResult.data?.[field]).toEqual({
-      worker: { id: targetId }, mentions: stored ? 'OFF' : 'IMMEDIATE', pausedUntil: stored ? until.toISOString() : null,
-      effectiveCadenceSeconds: null, isolated: false, isolatedUntil: null, isolatedAt: null,
-      isolatedByHandle: null, canManageIsolation: false,
-    });
-    expect(await snapshot()).toEqual(before);
-  }
 });

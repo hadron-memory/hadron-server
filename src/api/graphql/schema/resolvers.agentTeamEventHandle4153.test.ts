@@ -1,3 +1,4 @@
+import { settledTeamEventQueries, settleTeamEventHorizon } from '../../../test/teamEventHorizon.js';
 /**
  * #4153 — App-boundary and batching pins on `AgentTeamEvent.taskHandle`, the surface #4146 added.
  * Tests only: production is already correct at the reviewed head; the red for each pin is the mutant
@@ -16,6 +17,7 @@ import { typeDefs } from './typeDefs.js';
 import { deploymentSchema } from './deploymentSchema.js';
 
 const schema = buildSchema(typeDefs);
+const settledQueries = settledTeamEventQueries(resolvers.Query, db);
 let app: { id: string };
 let other: { id: string };
 let member: { id: string };
@@ -23,7 +25,7 @@ let stranger: { id: string };
 const ctx = (): Context => ({ db, userId: member.id, roles: ['READER'] });
 const run = (source: string, contextValue = ctx()) => graphql({ schema, source, contextValue,
   fieldResolver: (parent, args, context, info) => {
-    const fields = resolvers[info.parentType.name as keyof typeof resolvers] as Record<string, Function> | undefined;
+    const fields = (info.parentType.name === 'Query' ? settledQueries : resolvers[info.parentType.name as keyof typeof resolvers]) as Record<string, Function> | undefined;
     const resolver = fields?.[info.fieldName];
     return typeof resolver === 'function' ? resolver(parent, args, context, info) : defaultFieldResolver(parent, args, context, info);
   },
@@ -65,6 +67,25 @@ describe('AgentTeamEvent.taskHandle boundary and batching (#4153)', () => {
     expect(rows.find((row: any) => row.taskId === foreign.id).taskHandle).toBe(null);
   });
 
+  it('answers a foreign-App taskId exactly as an unknown id and a null taskId (#4199)', async () => {
+    const foreign = await task(other, stranger.id);
+    const unknownId = generateId(); // matches no task row in any App
+    const rowFor = async (taskId: string | null) => {
+      const created = await event(taskId);
+      const response = await run(pageQuery());
+      expect(response.errors).toBeUndefined();
+      return (response.data?.agentTeamEventsPage as any).events.find((row: any) => row.id === created.id);
+    };
+    const foreignRow = await rowFor(foreign.id);
+    const unknownRow = await rowFor(unknownId);
+    const nullRow = await rowFor(null);
+    expect(unknownRow.taskHandle).toBe(null);
+    expect(nullRow.taskHandle).toBe(null);
+    expect(nullRow.taskId).toBe(null);
+    // Same answer, field for field, apart from the id each row carries.
+    expect({ ...foreignRow, id: 0, taskId: 0 }).toEqual({ ...unknownRow, id: 0, taskId: 0 });
+  });
+
   it('answers a foreign-App taskId null through the acknowledgeAlarm single-event fallback', async () => {
     const foreign = await task(other, stranger.id);
     const raised = await alarm(foreign.id);
@@ -99,7 +120,10 @@ describe('AgentTeamEvent.taskHandle boundary and batching (#4153)', () => {
     expect(response.errors).toBeUndefined();
     const rows = response.data?.agentTeamEvents as any[];
     expect(rows).toHaveLength(50);
-    expect(rows.map((row: any) => row.taskHandle).sort()).toEqual(tasks.map(t => t.handle).sort());
+    // Pair each row's own taskId with its own handle: two sorted lists would let a cross-wise swap pass (#4199).
+    const handleByTask = new Map(tasks.map(t => [t.id, t.handle]));
+    expect(new Set(rows.map((row: any) => row.taskId)).size).toBe(50);
+    for (const row of rows) expect(row.taskHandle).toBe(handleByTask.get(row.taskId));
     expect(new Set(rows.map((row: any) => row.taskHandle)).size).toBe(50);
     expect(many).toHaveBeenCalledTimes(1); expect(unique).not.toHaveBeenCalled(); expect(first).not.toHaveBeenCalled();
   });
@@ -120,6 +144,7 @@ describe('AgentTeamEvent.taskHandle boundary and batching (#4153)', () => {
         if (r.body.kind !== 'single') throw new Error('single result expected');
         return r.body.singleResult;
       };
+      await settleTeamEventHorizon(db);
       const page = await op(pageQuery());
       expect(page.errors).toBeUndefined();
       expect((page.data?.agentTeamEventsPage as any).events[0].taskHandle).toBe(t.handle);

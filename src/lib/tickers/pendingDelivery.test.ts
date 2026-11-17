@@ -170,14 +170,24 @@ describe('complete metadata-only pending enumeration', () => {
   });
   it('continues beyond the internal worker page even when its first 200 workers have no watched channels', async () => {
     const workers = [workerId];
-    for (let i=0;i<204;i++) workers.push((await addWorker(1000+i, `Worker${i}`)).id);
+    // The internal worker page is a fixed 200 (not injectable), so the fixture needs 204 workers. Insert
+    // them in three batches, not 612 statements: setup is not what is being proved.
+    const added = Array.from({ length: 204 }, (_, i) => ({ n: 1000 + i, name: `Worker${i}` }));
+    await db.worker.createMany({ data: added.map(({ n, name }) => ({ ...WORKER_SIGNATURE_DEFAULTS, id: id(n), appId: app.id, agentId: id(4), name, slug: name.toLowerCase(), heldByUserId: id(3), heldAt: posted })) });
+    await db.hostRegistrationWorker.createMany({ data: added.map(({ n }) => ({ registrationId, workerId: id(n), family: 'codex' })) });
+    await db.registerEntry.createMany({ data: added.map(({ n }) => ({ appId: app.id, channelId, attendeeWorkerId: id(n), role: 'BOTH' as const })) });
+    for (const { n } of added) workers.push(id(n));
     await messages(1, { mentions: ['all'], broadcastWakes: true });
     expect((await enumerate()).items).toHaveLength(205);
     await db.registerEntry.updateMany({ where: { attendeeWorkerId: { in: workers.slice(0,200) } }, data: { role: 'POST' } });
     const page = await enumerate();
     expect(page.items.map((m: any) => m.workerId)).toEqual(workers.slice(200));
     expect(page.complete).toBe(true);
-  });
+    // Budget (#4325, #2727): the two walks over 205 workers cost about 1.2 s of the ~1.9 s measured on an idle
+    // runner and ~4-5.6 s with 96 busy loops on 32 cores; CI hit 5953 ms and 6120 ms against vitest's 5 s
+    // default. The walk is the thing under test and cannot shrink (its page size is fixed in production),
+    // so the budget is sized to it: ~15x the idle cost, still far below a hang.
+  }, 30_000);
   it('a cursor position cannot substitute another worker into a forced self selection', async () => {
     const other = await addWorker(23, 'Other'); await messages(3, { mentions: ['all'], broadcastWakes: true });
     const page = await enumerate({ hostId: null, workerIds: [workerId], first: 1 });

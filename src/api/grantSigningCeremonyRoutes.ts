@@ -104,7 +104,7 @@ function render(out){
  view.replaceChildren();start.hidden=true;view.hidden=false;setTitle('Review and sign a grant');
  const v=out.view;
  const what=el('section');what.appendChild(el('h2','What this grant allows'));
- what.appendChild(el('p',v.summary===null?'You cannot read everything this grant refers to, so it is not shown and you cannot sign it.':v.summary));
+ what.appendChild(el('p',v.summary===null?'This grant is not shown and you cannot sign it: either you cannot read everything it refers to, or its text cannot be written from its values.':v.summary));
  const dl=el('dl');
  row(dl,'Held by',(v.holder.name||'(unnamed)')+' ('+v.holder.kind+')');
  row(dl,'App',v.app.urn);
@@ -114,9 +114,10 @@ function render(out){
  what.appendChild(dl);view.appendChild(what);
  const why=el('section');why.appendChild(el('h2','The requester\\'s reason'));
  why.appendChild(el('p','In their own words. Hadron did not write or check this text.'));
- why.appendChild(el('blockquote',v.requesterReason));view.appendChild(why);
+ why.appendChild(el('blockquote',v.requesterReason));
+ why.appendChild(el('p','Written by '+(v.reasonAuthor.name||'a deleted user')+(v.reasonAuthor.via?' via '+v.reasonAuthor.via:'')+', who asked for this grant.'));view.appendChild(why);
  const meta=el('section');meta.appendChild(el('h2','This request'));
- meta.appendChild(el('p','Requested by '+v.requester.name+(v.requester.via?' via '+v.requester.via:'')+'.'));
+ meta.appendChild(el('p','Signature requested by '+v.requester.name+(v.requester.via?' via '+v.requester.via:'')+'.'));
  meta.appendChild(el('p','Expires '+stamp(new Date(v.requestExpiresAt))+'.'));
  meta.appendChild(el('p','Signing makes this grant active, and makes you its issuer.'));
  view.appendChild(meta);

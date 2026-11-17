@@ -195,6 +195,20 @@ enum AgentLifecycle {
   SHORT_LIVED
 }
 
+/// #4291 (S14 of #4229; decision record run-settings-are-not-worker-identity, settled A) — the generic effort scale of a
+/// run. LOW..MAX are requests the launcher maps to the family's own values (hadron-cli#2199); UNSET is the family's
+/// default. NOT_APPLICABLE is REPORT-ONLY: a session whose family has no effort control records it, and so may the
+/// worker's last-used record; a task never carries it, and a start that falls back to it sends UNSET.
+enum EffortLevel {
+  LOW
+  MEDIUM
+  HIGH
+  XHIGH
+  MAX
+  UNSET
+  NOT_APPLICABLE
+}
+
 /// #4224 (S3 of #4229) — the App's sweep switch. OFF (default): the host sweep acts on no worker and every desired-state
 /// row says SWEEP_OFF. OBSERVE: the sweep compares and reports. APPLY: it also repairs.
 enum SweepMode {
@@ -1782,6 +1796,8 @@ enum SessionEndReason {
   ended
   superseded
   expired
+  /// #4292: the host that runs a SHORT_LIVED worker ended the session on its proof that no agent runs (cor:agt:050:10, Proposed).
+  agent_absent
 }
 
 model Session {
@@ -1851,6 +1867,9 @@ model Session {
   /// column: no historical backfill. Not `updated_at`, which unrelated writes
   /// move. Describes a self-report, not verified detection.
   modelReportedAt   DateTime?         @map("model_reported_at")
+  /// #4291 — the effort this session runs at, as the launcher applied it and the session reported it (start, resume or
+  /// updateSession). Null until reported; NOT_APPLICABLE for a family with no effort control. A report, never a control.
+  effort            EffortLevel?
   /// #1709 (cor:agt:070:08; Holger via Vera #10773) — a host-launched session:
   /// the host that started it, the `worker.start` operation, the task it was
   /// launched for (none for a manager's start without one), and who issued the
@@ -2037,6 +2056,34 @@ model UsageEvent {
   // counts_as_activity. Prisma can't model a partial index, so it lives in
   // prisma/post-push.sql and migration 20261014040000.
   @@map("usage_events")
+}
+
+/// #2719 slice 2: the usage-activity rollup. One row per (scope, 15-minute UTC cell) holding the live `read` and
+/// `write` event counts of that cell, maintained by statement-level triggers on `usage_events`
+/// (prisma/usage-activity-rollup-invariants.sql), never written by application code. `scopeKind` is `user` (events
+/// attributed to the user) or `memory` (events attributed to the event's own `memoryId`); no FK on purpose, the rollup
+/// follows the events and an event outlives its memory (#796).
+model UsageActivityCell {
+  scopeKind String   @map("scope_kind")
+  scopeId   String   @map("scope_id")
+  cell      DateTime
+  reads     BigInt   @default(0)
+  writes    BigInt   @default(0)
+
+  @@id([scopeKind, scopeId, cell])
+  @@map("usage_activity_cells")
+}
+
+/// #2719 slice 2: the rollup's single state row (`id = 1`). The triggers maintain every cell at or after `appliesFrom`;
+/// cells before it enter by the backfill job, which sets `complete`. Until then the reader answers earlier cells from
+/// `usage_events`, so deploying before the backfill is correct, only not faster. `appliesFrom` stays a real timestamp
+/// (Prisma cannot read -infinity); `complete` carries the "all history" meaning.
+model UsageActivityRollupState {
+  id          Int      @id @default(1)
+  appliesFrom DateTime @map("applies_from")
+  complete    Boolean  @default(false)
+
+  @@map("usage_activity_rollup_state")
 }
 
 /// **The Agent definition** — what a Builder creates and what the
@@ -4111,6 +4158,13 @@ model Worker {
   /// a record of who acted, like `retiredBy`.
   leaveAloneBy     String?   @map("leave_alone_by")
   leaveAloneAt     DateTime? @map("leave_alone_at")
+  /// #4291 (decisions 2 and 8) — the worker's record of its run settings: the family, model and effort its session last
+  /// reported, one value each and no history. A REPORT, not a control: written only from a session's bind or report
+  /// (src/lib/agentTasks/runSettings.ts `recordRunSettings`), never cleared by a null, kept when the worker unbinds. A
+  /// start reads it after the task's own setting (cor:agt:070:08); an unbound worker is matched on it (cor:agt:060:04).
+  lastUsedFamily   String?      @map("last_used_family")
+  lastUsedModel    String?      @map("last_used_model")
+  lastUsedEffort   EffortLevel? @map("last_used_effort")
 
   app                  App                       @relation(fields: [appId], references: [id], onDelete: Cascade)
   /// SetNull: a worker row is never hard-deleted in normal operation, but an
@@ -6170,8 +6224,9 @@ model AgentTask {
   description          String?
   /// Opaque origin reference (an issue URL, a node URN). Not interpreted.
   source               String?
-  /// #3125 S2 (V29, V46; cor:agt:120:02): the claim on an outside item, set once at create. Unique within an App,
-  /// whatever the task's state, through the partial unique index agent_tasks_app_external_id_uniq (raw SQL in
+  /// #3125 S2 (V29, V46; cor:agt:120:02), amended by #4217: the claim on an outside item, set once at create. Held by at
+  /// most ONE ACTIVE task (backlog, pending, started) within an App; a finished or cancelled task keeps its id without
+  /// blocking a new claim. Through the partial unique index agent_tasks_app_external_id_uniq (raw SQL in
   /// agent-task-external-id-invariants.sql: Prisma cannot model a partial unique). Compared exactly as written.
   externalId           String?   @map("external_id")
   /// Null for a root task. Always in the same App (cor:agt:050:01).
@@ -6236,6 +6291,18 @@ model AgentTask {
   /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). False unless the assigner asks (R182, #2249): the
   /// default only reaches a raw insert, since every create path writes the resolved value.
   closeSessionWhenDone Boolean   @default(false) @map("close_session_when_done")
+  /// #4291 (decision 5, settled B) — the task's own run settings, each optional: a family, an exact model OR a generic
+  /// tier (high, mid, low), and an effort (never NOT_APPLICABLE). What a start for this task launches, before the
+  /// worker's record; not a matching requirement. Validated at creation (src/lib/agentTasks/runSettings.ts).
+  runFamily            String?      @map("run_family")
+  runModel             String?      @map("run_model")
+  runTier              String?      @map("run_tier")
+  runEffort            EffortLevel? @map("run_effort")
+  /// #4291 — the settings the run actually used: the assignee's newest open session's, read when the task was started.
+  /// Null until started, for a person, or when that session reported none. Shown beside the task's own settings.
+  appliedFamily        String?      @map("applied_family")
+  appliedModel         String?      @map("applied_model")
+  appliedEffort        EffortLevel? @map("applied_effort")
   /// The latest assignment, by hand or by the matcher, in the #1610 actor shape.
   assignedAt           DateTime? @map("assigned_at")
   assignedBy           String?   @map("assigned_by")
@@ -7003,7 +7070,8 @@ model HostKeyUse {
   /// `register` | `collect` | `report` | `availability` | `read` (#1881: the
   /// App's host registrations or host-operations listing, read with the key;
   /// #2931: its host's tickers, `count` the rows returned) |
-  /// `session` (#1969: a refused session write; always carries a refusedCode).
+  /// `session` (#1969: a refused session write, always with a refusedCode; #4292: also
+  /// endAgentlessSession, accepted with refusedCode null and `count` 1 when it ended the session, else 0).
   action      String
   operationId String?  @map("operation_id")
   count       Int?
@@ -7886,6 +7954,9 @@ model Grant {
   signatureId           String?   @unique @map("signature_id")
   revokedAt             DateTime? @map("revoked_at")
   revokedBy             String?   @map("revoked_by")
+  /// #4173 (cor:acl:140:03): the withdrawal marker, a FACT like `revokedAt` and never a state column. Equal to `revokedAt`, set once with
+  /// the revoke stamp, on a never-activated row only. Rows withdrawn before #4173 have none and read as revoked.
+  withdrawnAt           DateTime? @map("withdrawn_at")
   /// #3690 (S2a-h, cor:acl:140:03): when the HOLDER went (a person erased, a worker retired or deleted, an agent or an App
   /// deleted). A FACT, like `revokedAt`, never a state label: the live check reads it, and nothing names the ended state.
   /// Stamped once, and only on a grant not already ended (prisma/grant-invariants.sql); the holder id above stays.
@@ -8015,6 +8086,10 @@ model Action {
   /// A closed key the server maps to a gate function; never SQL or code.
   issuerRule      String   @map("issuer_rule")
   summaryTemplate String   @map("summary_template")
+  /// #4163: a limit on uses that applies to every grant of this action (NULL: none). A grant's own max_uses can only narrow it.
+  maxUses         Int?     @map("max_uses")
+  /// #4163: a limit on lifetime from activation, in seconds, for every grant of this action (NULL: none). A grant's own expiry can only narrow it.
+  lifetimeSeconds Int?     @map("lifetime_seconds")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 

@@ -484,7 +484,10 @@ export const GOVERNED_MCP_DOOR_FIELDS: readonly string[] = [
 /**
  * Whether a generic MCP node write could be replayed through `kind`'s door
  * (`op`): every field it sets is one that door carries, and it clears neither
- * `content` nor `abstract` (the doors take strings only).
+ * `content`, `abstract` nor `data` (the doors take strings for the first two
+ * and an OBJECT for data — none of the three is nullable, so a null cannot
+ * replay; #3729, which became reachable when #3721 made the generic update
+ * schema's `data` nullable).
  *
  * The kind SIGNALS are door-specific (@copilot + @codex, PR #1305): only the
  * task update door carries `isRunnable`, only the review update door carries
@@ -528,7 +531,10 @@ export function mcpDoorCanReplay(
       continue;
     }
     if (!GOVERNED_MCP_DOOR_FIELDS.includes(key)) return false;
-    if ((key === 'content' || key === 'abstract') && value === null) return false;
+    // #3729 — a null cannot replay: content/abstract take strings on the
+    // doors, and `data` takes an object (governedDoorArgs.data is optional,
+    // never nullable), so a bag-clearing `data: null` has no door either.
+    if ((key === 'content' || key === 'abstract' || key === 'data') && value === null) return false;
   }
   // The create doors require a non-blank name (callGovernedDoor), which the
   // generic create tool does not (@codex, PR #1305).

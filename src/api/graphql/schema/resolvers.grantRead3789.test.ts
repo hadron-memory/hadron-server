@@ -204,7 +204,7 @@ describe('allows', () => {
       // Fixed JS instants cannot judge a DB-clock row; the stored facts decide the same way at the DB's own instant.
       const [{ now }] = await db.$queryRaw<Array<{ now: Date }>>`SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS now`;
       // The App is live in this fixture, so appDeletedAt (a column of apps, not grants) is null.
-      expect(isGrantLive({ ...row, appDeletedAt: null }, now), `isGrantLive ${name}`).toBe(allows);
+      expect(isGrantLive({ ...row, appDeletedAt: null, actionMaxUses: null, actionLifetimeSeconds: null }, now), `isGrantLive ${name}`).toBe(allows);
     }
   });
 
@@ -218,6 +218,24 @@ describe('allows', () => {
   });
 });
 
+describe('allows reads the ACTION\'s limits (#4163)', () => {
+  const setLimits = (max: string, life: string) => db.$executeRawUnsafe(`UPDATE actions SET max_uses = ${max}, lifetime_seconds = ${life} WHERE name LIKE 'test.s1a.%'`);
+  it('grant(ref) and grants() read an hour-old or once-used grant as allows false though the row states no limit', async () => {
+    await setLimits('1', '3600');
+    try {
+      const old = await live({ activated_at: raw(`${DB_NOW} - interval '2 hours'`) });
+      const used = await live({ use_count: 1 });
+      const fresh = await live({ activated_at: raw(`${DB_NOW} - interval '10 minutes'`) });
+      expect((await asWorker(ONE, { r: old })).data.grant.allows).toBe(false);
+      expect((await asWorker(ONE, { r: used })).data.grant.allows).toBe(false);
+      expect((await asWorker(ONE, { r: fresh })).data.grant.allows).toBe(true);
+      const list = await asWorker(LIST);
+      const by = new Map((list.data.grants.items as Array<{ id: string; allows: boolean }>).map((i) => [i.id, i.allows]));
+      expect([by.get(old), by.get(used), by.get(fresh)]).toEqual([false, false, true]);
+    } finally { await setLimits('NULL', 'NULL'); }
+  });
+});
+
 describe('the projection', () => {
   const type = async (name: string) => {
     const a = await direct.executeOperation({ query: 'query($n:String!){__type(name:$n){fields{name type{kind name ofType{kind name ofType{kind name ofType{kind name}}}}}}}', variables: { n: name } }, { contextValue: { db, roles: [] } as Context });
@@ -226,12 +244,15 @@ describe('the projection', () => {
   };
   const leaf = (t: any): { kind: string; name: string } => (t.ofType ? leaf(t.ofType) : t);
 
-  it('Grant has ids and scalars only: no state label and no nested object but its own signature projection', async () => {
+  it('Grant has ids and scalars only (#4173: state is a nonnull enum) and no nested object but its own signature projection', async () => {
     const grant = await type('Grant');
     expect(grant).not.toBeNull();
     const names = grant!.fields.map((f) => f.name);
     expect(names).toContain('allows');
-    expect(names).not.toContain('state');
+    // #4173: the lifecycle state is a nonnull enum on the grant, the same on every surface.
+    const state = grant!.fields.find((f) => f.name === 'state');
+    expect(state && leaf(state.type)).toMatchObject({ kind: 'ENUM', name: 'GrantState' });
+    expect(state!.type.kind).toBe('NON_NULL');
     // #3649 slice D: the ONE object field is signatureStatus, the grant's own signature records as a sanitized projection
     // (#552): ids, scalars, enums and the signer as handle and URN only. No other entity's object is reachable from a Grant.
     const objects = grant!.fields.filter((f) => !['SCALAR', 'ENUM'].includes(leaf(f.type).kind));
