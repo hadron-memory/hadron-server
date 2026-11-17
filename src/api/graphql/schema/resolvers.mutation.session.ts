@@ -2521,19 +2521,15 @@ export const sessionMutations = {
           // row locks, and only the locked rows are tombstoned.
           // #4244 (cor:agt:040:12): compiling is the only way a compiled boot prompt is written, so a restore leaves
           // each one as it is. It is not tombstoned here (a retired compiled node would refuse every bind,
-          // cor:agt:040:10), not written below, and a snapshot's copy of one is ignored. `compiled` holds every loc a
-          // compiled row sits at, retired ones included, plus the locs the snapshot holds one at.
-          const compiledRows = await tx.node.findMany({
-            where: { memoryId: sysMemId, nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
-            select: { id: true, loc: true },
-          });
-          const compiledIds = compiledRows.map((n) => n.id);
-          const compiled = new Set([
-            ...compiledRows.map((n) => n.loc),
-            ...snapshot.nodes.filter((n) => n.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE).map((n) => n.loc as string),
-          ]);
+          // cor:agt:040:10), not written below, and a snapshot's copy of one is ignored.
+          //
+          // #4313: every statement of this step leaves compiled rows out BY TYPE, in its own WHERE. It used to leave
+          // them out by the ids of an earlier read, so a compile that committed between that read and this one (the
+          // transaction is READ COMMITTED and shares no lock with a compile) was tombstoned, or had its edges
+          // retired. No statement here depends on what an earlier one saw of compiled rows.
+          const notCompiled = { nodeType: { not: COMPILED_BOOT_PROMPT_NODE_TYPE } };
           const live = await tx.node.findMany({
-            where: { memoryId: sysMemId, deletedAt: null, id: { notIn: compiledIds }, NOT: { loc: { startsWith: 'revisions' } } },
+            where: { memoryId: sysMemId, deletedAt: null, ...notCompiled, NOT: { loc: { startsWith: 'revisions' } } },
             select: { id: true, loc: true },
           });
           const snapshotTags = new Map(snapshot.nodes.map((n) => [n.loc as string, (n.tags as string[]) ?? []]));
@@ -2546,19 +2542,27 @@ export const sessionMutations = {
             'restore a snapshot of',
           );
           await tx.node.updateMany({
-            where: { id: { in: live.map((n) => n.id) }, deletedAt: null },
+            where: { id: { in: live.map((n) => n.id) }, deletedAt: null, ...notCompiled },
             data: { deletedAt: new Date() },
           });
 
-          // Delete all edges in the system memory
-          const currentNodeIds = (await tx.node.findMany({
-            where: { memoryId: sysMemId, id: { notIn: compiledIds } }, // #4244: a compiled prompt keeps its edges
-            select: { id: true },
-          })).map((n) => n.id);
+          // Delete all edges in the system memory, except those FROM a compiled prompt (#4244), decided in the
+          // statement: the source is not a compiled row now (#4313).
           await tx.edge.updateMany({
-            where: { sourceId: { in: currentNodeIds }, deletedAt: null, governedKind: null },
+            where: { source: { memoryId: sysMemId, ...notCompiled }, deletedAt: null, governedKind: null },
             data: { deletedAt: new Date() },
           });
+
+          // The compiled rows as they are NOW, after the tombstone step: `compiled` holds every loc one sits at,
+          // retired ones included, plus the locs the snapshot holds one at. None of them is written below.
+          const compiledRows = await tx.node.findMany({
+            where: { memoryId: sysMemId, nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+            select: { id: true, loc: true },
+          });
+          const compiled = new Set([
+            ...compiledRows.map((n) => n.loc),
+            ...snapshot.nodes.filter((n) => n.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE).map((n) => n.loc as string),
+          ]);
 
           // Restore nodes from snapshot (upsert to handle soft-deleted rows
           // that still hold the unique (loc, memoryId) constraint).
@@ -2599,6 +2603,12 @@ export const sessionMutations = {
               // soft-delete above, so liveness is not part of this check.
               if (current.loc !== loc || current.memoryId !== sysMemId) {
                 throw new Error(`restoreRevision: "${loc}" moved during the restore; retry.`);
+              }
+              // #4313: a compile wrote a compiled prompt at this address after the compiled rows were read above.
+              // The row is locked now, and it is the compile's: leave it as it is.
+              if (current.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
+                locToId.set(loc, current.id);
+                continue;
               }
               const changes = diffNodeChanges(current, nodeData);
               // Agent snapshots predate #1326 and contain no attribution.
