@@ -11,13 +11,21 @@
 // slip past the inventory silently; it must be taught here and given a
 // manifest row.
 //
-// Object identity is (kind, name). A duplicate (kind, name) is an error:
-// `CREATE OR REPLACE FUNCTION` with the same name replaces, so a corpus that
-// creates the same object twice is either a copy-paste bug or an overload the
-// parser must be taught to distinguish (name + arg types).
+// Object identity is (kind, name). An idempotent re-declare (CREATE … IF NOT
+// EXISTS / CREATE OR REPLACE) of the same (kind, name) dedupes into one row
+// with every site listed. A FUNCTION name seen with two different normalized
+// argument lists is a true overload: two distinct objects under one name,
+// which the inventory cannot tell apart by name — that throws and must be
+// taught explicitly. Names are normalized by dropping a `public.` schema
+// prefix (the default search_path): `fn` and `public.fn` are one object.
+//
+// One statement can create MORE than one object (`ALTER TABLE t ADD
+// CONSTRAINT a CHECK (…), ADD CONSTRAINT b UNIQUE (…)`), so `classify`
+// returns a LIST of classifications; an empty list is a recognized
+// non-object (guards, session state, data surgery).
 
 import { readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, isAbsolute } from 'node:path';
 
 /** Kinds the parser knows how to classify. Every other CREATE-shaped statement is unrecognized. */
 export const OBJECT_KINDS = [
@@ -34,8 +42,27 @@ export const OBJECT_KINDS = [
   'sequence',
 ];
 
-/** Statement shapes that are recognized as NON-objects (guards, session state, data surgery). */
-const NON_OBJECT_HEADS = /^(INSERT|UPDATE|DELETE|SELECT|SET|RESET|GRANT|REVOKE|COMMENT|ANALYZE|VACUUM|DO|LOCK|TRUNCATE|NOTIFY|LISTEN|CALL|VALUES|WITH)\b/i;
+/** Statement shapes that are recognized as NON-objects (guards, session state, data surgery). DO is handled on its own: its payload is scanned for DDL. */
+const NON_OBJECT_HEADS = /^(INSERT|UPDATE|DELETE|SELECT|SET|RESET|GRANT|REVOKE|COMMENT|ANALYZE|VACUUM|LOCK|TRUNCATE|NOTIFY|LISTEN|CALL|VALUES|WITH)\b/i;
+
+/**
+ * DDL that may not hide inside a DO block's payload: it creates, changes or
+ * removes objects the inventory must see. Matched as verb+object BIGRAM (with
+ * the usual optional modifiers) so prose in RAISE messages — "refusing to
+ * create the unique index" — does not false-positive; the payload's line
+ * comments are stripped for the same reason. Dollar-quoted DDL payloads
+ * (`EXECUTE $ddl$CREATE UNIQUE INDEX …$ddl$`) and plain dynamic SQL
+ * (`EXECUTE 'CREATE TABLE …'`) both match.
+ */
+const DO_BLOCK_DDL = /\b(CREATE|ALTER|DROP)\s+((OR\s+REPLACE|TEMP|TEMPORARY|UNIQUE|CONCURRENTLY|IF\s+NOT\s+EXISTS)\s+)*(TABLE|INDEX|CONSTRAINT|EXTENSION|FUNCTION|TRIGGER|SEQUENCE|SCHEMA|TYPE|VIEW|POLICY|COLUMN)\b/i;
+
+/** ALTER TABLE actions that are recognized as non-object maintenance, anchored at the action (never the whole statement — `ALTER` is the statement's own head keyword). */
+const BENIGN_ALTER_ACTIONS = /^(DROP|ALTER|VALIDATE\s+CONSTRAINT|CLUSTER|SET|RESET|ENABLE|DISABLE|OWNER|RENAME|ATTACH|DETACH|FORCE|REPLICA)\b/i;
+
+/** psql meta-commands the parser FOLLOWS (relative to the current file, except `\i` which psql resolves against the working directory). */
+const FOLLOWED_METAS = /^\\(?<cmd>ir|include_relative|i)\s+(?:"(?<dq>[^"]+)"|'(?<sq>[^']+)'|(?<bare>\S+))\s*$/;
+/** psql meta-commands recognized as benign session/output state and silently skipped. */
+const ALLOWED_METAS = /^\\(set|unset|echo|qecho|warn)\b/;
 
 const IDENT = String.raw`(?:("[^"]+")|([A-Za-z_][\w$]*))`;
 const QUALID = String.raw`(?:${IDENT}\s*\.\s*)?${IDENT}`; // schema-qualified, e.g. public.fn / public.tbl
@@ -44,35 +71,152 @@ function unquote(id) {
   return id.startsWith('"') ? id.slice(1, -1).replace(/""/g, '"') : id;
 }
 
+/** `public.x` and `x` are the same object (default search_path); other schemas stay qualified. */
+function normalizeName(name) {
+  return name.replace(/^public\./i, '');
+}
+
 function firstIdent(rest) {
   const m = rest.match(new RegExp(`^\\s*${IDENT}`));
   return m ? unquote(m[1] ?? m[2]) : null;
 }
 
 /** Name of a QUALID match: groups are (schemaQ, schemaP, nameQ, nameP); schema kept when written. */
-function qualidName(m) {
-  return qualidNameFrom(m, 0);
-}
 function qualidNameFrom(m, offset) {
   const schema = m[offset + 1] ?? m[offset + 2];
   const name = unquote(m[offset + 3] ?? m[offset + 4]);
   return schema ? `${unquote(schema)}.${name}` : name;
 }
 
-/** Normalize a function argument list for overload identity (whitespace-collapsed, lowercased). */
+/** Split `text` on commas at paren depth 0, respecting single/double-quoted strings. */
+function splitTopLevel(text) {
+  const parts = [];
+  let cur = '';
+  let depth = 0;
+  let inS = false;
+  let inD = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inS) {
+      cur += ch;
+      if (ch === "'" && text[i + 1] === "'") { cur += "'"; i++; }
+      else if (ch === "'") inS = false;
+      continue;
+    }
+    if (inD) {
+      cur += ch;
+      if (ch === '"' && text[i + 1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') inD = false;
+      continue;
+    }
+    if (ch === "'") { inS = true; cur += ch; continue; }
+    if (ch === '"') { inD = true; cur += ch; continue; }
+    if (ch === '(') { depth++; cur += ch; continue; }
+    if (ch === ')') { depth--; cur += ch; continue; }
+    if (ch === ',' && depth === 0) { parts.push(cur.trim()); cur = ''; continue; }
+    cur += ch;
+  }
+  if (cur.trim()) parts.push(cur.trim());
+  return parts;
+}
+
+/**
+ * Type-openers usable in a function parameter after an optional parameter
+ * name. Used only to DECIDE whether a parameter's first token is a name
+ * (`a text`) or the type itself (`character varying`); anything unrecognized
+ * keeps the whole parameter text, which can only make identities MORE
+ * distinct (loud), never merge two different signatures.
+ */
+const TYPE_STARTERS = new Set([
+  'int', 'integer', 'int2', 'int4', 'int8', 'smallint', 'bigint', 'numeric', 'decimal',
+  'real', 'float', 'float4', 'float8', 'double', 'text', 'varchar', 'char', 'character',
+  'boolean', 'bool', 'date', 'time', 'timestamp', 'timestamptz', 'timetz', 'interval',
+  'json', 'jsonb', 'uuid', 'bytea', 'inet', 'cidr', 'macaddr', 'xml', 'money',
+  'regclass', 'regproc', 'regprocedure', 'regtype', 'trigger', 'anyelement', 'anyarray',
+  'anynonarray', 'record', 'void', 'name', 'oid', 'bit', 'varbit', 'tsvector', 'tsquery',
+  'pg_lsn', 'point', 'line', 'lseg', 'box', 'path', 'polygon', 'circle', 'setof', 'table',
+]);
+
+/** Strip a leading parameter NAME (`a text` → `text`), never a type word (`character varying` stays). */
+function stripParamName(param) {
+  const m = param.match(/^([A-Za-z_][\w$]*)\s+(.+)$/);
+  if (!m) return param;
+  const rest = m[2].replace(/\s*\[\s*\]/g, '[]').trim();
+  const firstWord = rest.match(/^(?:"([^"]+)"|setof\s+([A-Za-z_][\w$]*)|([A-Za-z_][\w$]*))/i);
+  if (!firstWord) return param;
+  const probe = (firstWord[1] ?? firstWord[2] ?? firstWord[3] ?? '').toLowerCase();
+  const looksLikeType = firstWord[1] !== undefined || TYPE_STARTERS.has(probe) || TYPE_STARTERS.has(probe.replace(/\[\]$/, ''));
+  return looksLikeType ? rest : param;
+}
+
+/**
+ * Normalize a function argument list for overload identity: each parameter is
+ * cut at `DEFAULT …`, stripped of IN/OUT/INOUT mode words and of a leading
+ * parameter name, whitespace-collapsed and lowercased — so `fn(a text)` and
+ * `fn(text)` are one signature while `fn(text, integer)` and `fn(numeric, integer)`
+ * stay two. Whitespace around STRUCTURAL punctuation (parens, commas) is
+ * canonicalized away, so `numeric(10,2)` and `numeric(10, 2)` are one type:
+ * two spellings of one signature must never read as a false overload.
+ */
 function normalizeArgs(raw) {
-  return raw.replace(/\s+/g, ' ').trim().toLowerCase();
+  return splitTopLevel(raw)
+    .map((param) =>
+      param
+        .split(/\s+DEFAULT\s+/i)[0]
+        .replace(/^(IN|OUT|INOUT)\s+/i, '')
+        .replace(/\s*\[\s*\]/g, '[]'),
+    )
+    .map(stripParamName)
+    .join(', ')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*\(\s*/g, '(')
+    .replace(/\s*\)\s*/g, ')')
+    .replace(/\s*,\s*/g, ', ')
+    .trim()
+    .toLowerCase();
+}
+
+/** Capture a function's argument list with BALANCED parens (`numeric(10,2)` keeps its inner comma-paren content). */
+function functionArgs(head) {
+  const open = head.indexOf('(');
+  if (open === -1) return null;
+  let depth = 0;
+  let inS = false;
+  let inD = false;
+  for (let i = open; i < head.length; i++) {
+    const ch = head[i];
+    if (inS) {
+      if (ch === "'" && head[i + 1] === "'") i++;
+      else if (ch === "'") inS = false;
+      continue;
+    }
+    if (inD) {
+      if (ch === '"' && head[i + 1] === '"') i++;
+      else if (ch === '"') inD = false;
+      continue;
+    }
+    if (ch === "'") { inS = true; continue; }
+    if (ch === '"') { inD = true; continue; }
+    if (ch === '(') depth++;
+    if (ch === ')') {
+      depth--;
+      if (depth === 0) return head.slice(open + 1, i);
+    }
+  }
+  return null; // unbalanced — let the caller's unanchored fallback or refusal handle it
 }
 
 /**
  * Parse one file's text into statements, following `\ir` includes recursively.
- * Dollar-quoted bodies ($$…$$ / $tag$…$tag$) are skipped as payloads, line
- * comments are stripped outside strings, and multi-line statements are
- * accumulated until a top-level `;`.
+ * Dollar-quoted bodies ($$…$$ / $tag$…$tag$) are kept OUT of the statement
+ * text but captured as `payloads` (a DO block's payload is scanned for DDL);
+ * `/* … *​/` block comments are skipped, line comments are stripped outside
+ * strings, double-quoted identifiers and E'…' escape strings are lexed
+ * whole, and multi-line statements are accumulated until a top-level `;`.
  */
 function scan(entryFile) {
   const files = new Set();
-  const statements = []; // {sql, file, line}
+  const statements = []; // {sql, payloads, file, line}
 
   function scanFile(file) {
     if (files.has(file)) return;
@@ -81,7 +225,11 @@ function scan(entryFile) {
 
     let inDollar = null; // closing tag while inside a dollar-quoted body
     let inString = false; // inside a single-quoted literal ('' escapes)
+    let eString = false; // that literal was E'…' prefixed (backslash escapes)
+    let inDQuote = false; // inside a double-quoted identifier ("" escapes)
+    let inBlockComment = false;
     let stmt = ''; // current statement text
+    let payload = ''; // dollar-quoted body text of the current statement
     let stmtLine = 0;
     let line = 1;
 
@@ -90,20 +238,42 @@ function scan(entryFile) {
       if (ch === '\n') line++;
 
       if (inDollar) {
+        payload += ch;
         if (text.startsWith(inDollar, i)) { i += inDollar.length - 1; inDollar = null; }
-        continue; // body payload is not part of any statement
+        continue; // body payload is not part of any statement's SQL text
       }
       if (inString) {
         stmt += ch;
+        if (eString && ch === '\\') { stmt += text[i + 1] ?? ''; i++; continue; } // \' escape
         if (ch === "'" && text[i + 1] === "'") { stmt += "'"; i++; continue; } // '' escape
-        if (ch === "'") inString = false;
+        if (ch === "'") { inString = false; eString = false; }
         continue;
       }
+      if (inDQuote) {
+        stmt += ch;
+        if (ch === '"' && text[i + 1] === '"') { stmt += '"'; i++; continue; } // "" escape
+        if (ch === '"') inDQuote = false;
+        continue;
+      }
+      if (inBlockComment) {
+        if (ch === '*' && text[i + 1] === '/') { i++; inBlockComment = false; }
+        continue; // block comments never reach a statement (a `;` inside cannot split it)
+      }
 
-      if (ch === "'") { inString = true; stmt += ch; continue; }
+      if (ch === "'") {
+        // E'…' escape-string literals take backslash escapes; a preceding E
+        // counts only when it is a standalone opener, not an identifier's tail.
+        const prev = i > 0 ? text[i - 1] : '';
+        const prev2 = i > 1 ? text[i - 2] : '';
+        eString = (prev === 'e' || prev === 'E') && !/[A-Za-z0-9_$"]/.test(prev2);
+        inString = true;
+        stmt += ch;
+        continue;
+      }
+      if (ch === '"') { inDQuote = true; stmt += ch; continue; }
       if (ch === '$') {
         const m = text.slice(i).match(/^(\$[A-Za-z_]*\$)/);
-        if (m && isDollarOpener(text, i, m[1], stmt)) {
+        if (m && isDollarOpener(text, i)) {
           // Enter the dollar-quoted body: keep the opener in the statement.
           stmt += m[1];
           i += m[1].length - 1;
@@ -114,21 +284,39 @@ function scan(entryFile) {
         continue;
       }
       if (ch === '\\' && !stmt.trim()) {
-        // psql backslash command at line level (e.g. \ir "file.sql"): read to EOL.
+        // psql backslash command at line level: read to EOL and dispatch.
         let j = i;
         while (j < text.length && text[j] !== '\n') j++;
-        const cmd = text.slice(i, j).trim();
-        const irMatch = cmd.match(/^\\ir\s+(?:"([^"]+)"|(\S+))\s*$/);
-        if (irMatch) scanFile(join(dirname(file), irMatch[1] ?? irMatch[2]));
+        const raw = text.slice(i, j);
+        const cmd = stripMetaComment(raw).trim();
+        const follow = cmd.match(FOLLOWED_METAS);
+        if (follow) {
+          const rel = follow.groups.dq ?? follow.groups.sq ?? follow.groups.bare;
+          const base = follow.groups.cmd === 'i' ? process.cwd() : dirname(file);
+          scanFile(isAbsolute(rel) ? rel : join(base, rel));
+        } else if (ALLOWED_METAS.test(cmd)) {
+          // benign session/output state: recognized, skipped
+        } else {
+          // An unfollowed, un-allowlisted meta-command (\i variants with odd
+          // argument shapes, \copy, \connect, …) must not vanish: surface it
+          // as a statement so classify() reports it unrecognized.
+          stmt = cmd;
+          stmtLine = stmtLine || line;
+          push();
+        }
         i = j - 1; // resume at the newline (the loop's i++ lands on it, bumping `line`)
         continue;
       }
       if (ch === '-' && text[i + 1] === '-') {
-        // line comment: skip to end of line
+        // line comment: skip to just before the newline so the loop's own
+        // i++ lands ON it and `line` still counts it (inherited bug: the
+        // terminating newline was skipped past and every later line lagged).
         while (i < text.length && text[i] !== '\n') i++;
+        if (text[i] === '\n') i--;
         continue;
       }
-      if (ch === ';' ) {
+      if (ch === '/' && text[i + 1] === '*') { inBlockComment = true; i++; continue; }
+      if (ch === ';') {
         push();
         continue;
       }
@@ -140,8 +328,9 @@ function scan(entryFile) {
 
     function push() {
       const sql = stmt.trim().replace(/\s+/g, ' ');
-      if (sql) statements.push({ sql, file, line: stmtLine });
+      if (sql) statements.push({ sql, payloads: payload.trim(), file, line: stmtLine });
       stmt = '';
+      payload = '';
       stmtLine = 0;
     }
 
@@ -149,7 +338,7 @@ function scan(entryFile) {
     // an identifier/number (e.g. `a$b$1` is not a quote). At statement level in
     // this corpus every `$` that follows whitespace, `(` or AS is an opener;
     // heuristic: the char before it is not alnum/underscore/dollar.
-    function isDollarOpener(_text, i, tag, sofar) {
+    function isDollarOpener(_text, i) {
       const prev = i > 0 ? _text[i - 1] : '';
       if (/[A-Za-z0-9_$]/.test(prev)) return false;
       return true;
@@ -157,67 +346,128 @@ function scan(entryFile) {
   }
 
   scanFile(entryFile);
-  scanFile(entryFile);
   return statements;
 }
 
-/** Classify one statement into `{ kind, name } | null (recognized non-object) | { unrecognized: sql }`. */
+/** Cut a trailing `-- comment` off a psql meta-command line (outside quoted arguments). */
+function stripMetaComment(raw) {
+  let inS = false;
+  let inD = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inS) { if (ch === "'") inS = false; continue; }
+    if (inD) { if (ch === '"') inD = false; continue; }
+    if (ch === "'") { inS = true; continue; }
+    if (ch === '"') { inD = true; continue; }
+    if (ch === '-' && raw[i + 1] === '-') return raw.slice(0, i);
+  }
+  return raw;
+}
+
+/**
+ * Classify one already-scanned statement into ZERO OR MORE results: each is a
+ * named object (`{kind, name, …}`), an `unrecognized` marker (the
+ * completeness test turns any of these red), or — for the list as a whole —
+ * empty for a recognized non-object (guard drops, DML, session state). One
+ * ALTER TABLE can carry several object-creating actions.
+ */
 export function classify(stmt) {
   const sql = stmt.sql.replace(/\s+/g, ' ').trim();
   const head = sql; // full statement: ON/OF clauses can sit past any fixed window
 
   let m;
   if ((m = head.match(new RegExp(`^CREATE EXTENSION (?:IF NOT EXISTS )?${IDENT}`, 'i')))) {
-    return { kind: 'extension', name: unquote(m[1] ?? m[2]) };
+    return [{ kind: 'extension', name: unquote(m[1] ?? m[2]) }];
   }
   if ((m = head.match(new RegExp(`^CREATE UNIQUE INDEX (?:CONCURRENTLY )?(?:IF NOT EXISTS )?${IDENT}`, 'i')))) {
-    return { kind: 'unique-index', name: unquote(m[1] ?? m[2]) };
+    return [{ kind: 'unique-index', name: normalizeName(unquote(m[1] ?? m[2])) }];
   }
   if ((m = head.match(new RegExp(`^CREATE INDEX (?:CONCURRENTLY )?(?:IF NOT EXISTS )?${IDENT}`, 'i')))) {
-    return { kind: 'index', name: unquote(m[1] ?? m[2]) };
+    return [{ kind: 'index', name: normalizeName(unquote(m[1] ?? m[2])) }];
   }
-  if ((m = head.match(new RegExp(`^CREATE (?:OR REPLACE )?FUNCTION ${QUALID}\\s*\\(([^)]*)\\)`, 'i')))) {
-    return { kind: 'function', name: qualidName(m), args: normalizeArgs(m[5]) };
+  if ((m = head.match(new RegExp(`^CREATE (?:OR REPLACE )?FUNCTION ${QUALID}\\s*\\(`, 'i')))) {
+    const args = functionArgs(head);
+    if (args === null) return [{ unrecognized: sql }]; // unbalanced parens — refuse, never guess a signature
+    return [{ kind: 'function', name: normalizeName(qualidNameFrom(m, 0)), args: normalizeArgs(args) }];
   }
   if ((m = head.match(new RegExp(`^CREATE (?:OR REPLACE )?FUNCTION ${QUALID}`, 'i')))) {
-    return { kind: 'function', name: qualidName(m), args: '' };
+    return [{ kind: 'function', name: normalizeName(qualidNameFrom(m, 0)), args: '' }];
   }
   if ((m = head.match(new RegExp(`^CREATE (?:CONSTRAINT )?TRIGGER (?:IF NOT EXISTS )?${IDENT}`, 'i')))) {
     const on = head.match(new RegExp(`\\bON\\s+${QUALID}`, 'i'));
-    const table = on ? qualidNameFrom(on, 0) : null;
+    const table = on ? normalizeName(qualidNameFrom(on, 0)) : null;
     const name = unquote(m[1] ?? m[2]);
-    if (!table) return { unrecognized: sql };
-    return { kind: 'trigger', name: `${table}.${name}`, table, trigger: name };
+    if (!table) return [{ unrecognized: sql }];
+    return [{ kind: 'trigger', name: `${table}.${name}`, table, trigger: name }];
   }
   if ((m = head.match(new RegExp(`^CREATE SEQUENCE (?:IF NOT EXISTS )?${IDENT}`, 'i')))) {
-    return { kind: 'sequence', name: unquote(m[1] ?? m[2]) };
+    return [{ kind: 'sequence', name: normalizeName(unquote(m[1] ?? m[2])) }];
   }
-  if ((m = head.match(new RegExp(`^CREATE (?:TEMP|TEMPORARY) TABLE`, 'i')))) {
-    return null; // session-scoped: not a durable object
+  if ((m = head.match(/^CREATE (?:TEMP|TEMPORARY) TABLE/i))) {
+    return []; // session-scoped: not a durable object
   }
   if ((m = head.match(new RegExp(`^CREATE TABLE (?:IF NOT EXISTS )?${IDENT}`, 'i')))) {
-    return { kind: 'table', name: unquote(m[1] ?? m[2]) };
+    return [{ kind: 'table', name: normalizeName(unquote(m[1] ?? m[2])) }];
   }
-  // ALTER TABLE … ADD CONSTRAINT name CHECK/FOREIGN KEY/UNIQUE
-  if ((m = head.match(new RegExp(`^ALTER TABLE (?:ONLY )?(?:IF EXISTS )?${IDENT}\\s+ADD CONSTRAINT (?:IF NOT EXISTS )?${IDENT}\\s+(CHECK|FOREIGN KEY|UNIQUE|EXCLUDE|PRIMARY KEY)`, 'i')))) {
-    const what = m[5].toUpperCase();
-    const kind = what === 'CHECK' ? 'check-constraint'
-      : what === 'FOREIGN KEY' ? 'foreign-key-constraint'
-        : what === 'UNIQUE' ? 'unique-constraint' : null;
-    if (!kind) return { unrecognized: sql };
-    return { kind, name: unquote(m[3] ?? m[4]) };
+  // ALTER TABLE: split the action list and classify EACH action. The table
+  // may be schema-qualified (QUALID); the benign-action test is anchored at
+  // the ACTION text, never the whole statement — `ALTER` is the statement's
+  // own head keyword and would vacuously match.
+  if ((m = head.match(new RegExp(`^ALTER TABLE (?:ONLY )?(?:IF EXISTS )?${QUALID}\\s+(?<actions>.+)$`, 'is')))) {
+    const table = normalizeName(qualidNameFrom(m, 0));
+    const out = [];
+    for (const action of splitTopLevel(m.groups.actions)) {
+      let am;
+      if ((am = action.match(new RegExp(`^ADD CONSTRAINT (?:IF NOT EXISTS )?${IDENT}\\s+(?<what>CHECK|FOREIGN KEY|UNIQUE|EXCLUDE|PRIMARY KEY)\\b`, 'i')))) {
+        const what = am.groups.what.toUpperCase();
+        const kind = what === 'CHECK' ? 'check-constraint'
+          : what === 'FOREIGN KEY' ? 'foreign-key-constraint'
+            : what === 'UNIQUE' ? 'unique-constraint' : null;
+        if (!kind) { out.push({ unrecognized: sql }); continue; } // EXCLUDE / PRIMARY KEY: teach me here
+        out.push({ kind, name: normalizeName(unquote(am[1] ?? am[2])) });
+        continue;
+      }
+      if ((am = action.match(new RegExp(`^ADD COLUMN (?:IF NOT EXISTS )?${IDENT}.*?GENERATED ALWAYS AS`, 'is')))) {
+        out.push({ kind: 'generated-column', name: `${table}.${unquote(am[1] ?? am[2])}` });
+        continue;
+      }
+      // A GUARDED plain ADD COLUMN is schema-owned skew repair (the corpus
+      // idiom: every such column is @map'd in schema.prisma; raw-SQL-only
+      // columns surface as drift lines in the smoke lane's filter, not as
+      // inventory objects). Unguarded stays refused below: it cannot re-run.
+      if (/^ADD COLUMN IF NOT EXISTS\b/i.test(action) && !/GENERATED ALWAYS AS/i.test(action)) continue;
+      if (BENIGN_ALTER_ACTIONS.test(action)) continue;
+      out.push({ unrecognized: sql }); // unknown action: structural change the parser cannot name
+    }
+    return out;
   }
-  // ALTER TABLE … ADD COLUMN name … GENERATED ALWAYS AS (…) STORED
-  if ((m = head.match(new RegExp(`^ALTER TABLE (?:ONLY )?(?:IF EXISTS )?${IDENT}\\s+ADD COLUMN (?:IF NOT EXISTS )?${IDENT}[^;]*?GENERATED ALWAYS AS`, 'i')))) {
-    return { kind: 'generated-column', name: `${unquote(m[1] ?? m[2])}.${unquote(m[3] ?? m[4])}` };
+  // A DO block runs at apply time, so DDL inside its payload creates real
+  // objects the inventory must see. The corpus idiom gates an idempotent
+  // ensure-exists on a catalog check and EXECUTEs the DDL — usually from a
+  // dollar-quoted ($ddl$…$ddl$), sometimes a plain string. Those are
+  // extracted and classified like any other statement. DDL that cannot be
+  // extracted (bare DDL statements in the body, EXECUTE format(...) with the
+  // DDL hidden in the format string) refuses the whole block.
+  if (/^DO\b/i.test(head)) {
+    const body = (stmt.payloads ?? '').replace(/--[^\n]*/g, '');
+    const out = [];
+    let remainder = body;
+    for (const m of body.matchAll(/\bEXECUTE\s+\$([A-Za-z_]*)\$([\s\S]*?)\$\1\$/gi)) {
+      out.push(...classify({ sql: m[2] }));
+      remainder = remainder.replace(m[0], ' ');
+    }
+    for (const m of remainder.matchAll(/\bEXECUTE\s*'((?:[^']|'')*)'/gi)) {
+      out.push(...classify({ sql: m[1].replace(/''/g, "'") }));
+      remainder = remainder.replace(m[0], ' ');
+    }
+    if (DO_BLOCK_DDL.test(remainder)) out.push({ unrecognized: sql });
+    return out;
   }
-  // Guard drops and other recognized non-object statements.
-  if (/^ALTER TABLE\b/i.test(head) && /\b(DROP|ALTER|VALIDATE CONSTRAINT|CLUSTER|SET|RESET|ENABLE|DISABLE|OWNER|RENAME|ATTACH|DETACH)\b/i.test(head)) return null;
-  if (/^DROP (INDEX|TRIGGER|FUNCTION|VIEW|TABLE|CONSTRAINT|POLICY|SCHEMA|EXTENSION|TYPE|SEQUENCE)\b/i.test(head)) return null;
-  if (NON_OBJECT_HEADS.test(head)) return null;
-  if (/^\\(ir|include)\b/.test(head)) return null;
-  if (/^(BEGIN|COMMIT|ROLLBACK|START TRANSACTION|END)\b/i.test(head)) return null;
-  return { unrecognized: sql };
+  if (/^DROP (INDEX|TRIGGER|FUNCTION|VIEW|TABLE|CONSTRAINT|POLICY|SCHEMA|EXTENSION|TYPE|SEQUENCE)\b/i.test(head)) return [];
+  if (NON_OBJECT_HEADS.test(head)) return [];
+  if (/^\\(ir|include_relative|i|set|unset|echo|qecho|warn)\b/.test(head)) return [];
+  if (/^(BEGIN|COMMIT|ROLLBACK|START TRANSACTION|END)\b/i.test(head)) return [];
+  return [{ unrecognized: sql }];
 }
 
 /**
@@ -238,32 +488,33 @@ export function postPushInventory(entryFile) {
   const functionArgs = new Map(); // name -> Set of normalized arg lists
   const unrecognized = [];
   for (const stmt of statements) {
-    const c = classify(stmt);
-    if (!c) continue;
-    if (c.unrecognized) {
-      unrecognized.push({ sql: c.unrecognized, file: stmt.file, line: stmt.line });
-      continue;
-    }
-    const identity = `${c.kind}:${c.name}`;
-    if (c.kind === 'function') {
-      const seen = functionArgs.get(c.name) ?? new Set();
-      if (seen.size > 0 && !seen.has(c.args)) {
-        throw new Error(
-          `post-push closure declares function ${c.name} with two argument lists (${[...seen].join(' | ')} and ${c.args})` +
-            ` at ${stmt.file}:${stmt.line} — a true overload; the inventory must be taught to name it`,
-        );
+    for (const c of classify(stmt)) {
+      if (!c) continue;
+      if (c.unrecognized) {
+        unrecognized.push({ sql: c.unrecognized, file: stmt.file, line: stmt.line });
+        continue;
       }
-      seen.add(c.args);
-      functionArgs.set(c.name, seen);
+      const identity = `${c.kind}:${c.name}`;
+      if (c.kind === 'function') {
+        const seen = functionArgs.get(c.name) ?? new Set();
+        if (seen.size > 0 && !seen.has(c.args)) {
+          throw new Error(
+            `post-push closure declares function ${c.name} with two argument lists (${[...seen].join(' | ')} and ${c.args})` +
+              ` at ${stmt.file}:${stmt.line} — a true overload; the inventory must be taught to name it`,
+          );
+        }
+        seen.add(c.args);
+        functionArgs.set(c.name, seen);
+      }
+      const existing = byIdentity.get(identity);
+      if (existing) {
+        existing.sites.push({ file: stmt.file, line: stmt.line });
+        continue;
+      }
+      const row = { kind: c.kind, name: c.name, file: stmt.file, line: stmt.line, sites: [{ file: stmt.file, line: stmt.line }] };
+      byIdentity.set(identity, row);
+      objects.push(row);
     }
-    const existing = byIdentity.get(identity);
-    if (existing) {
-      existing.sites.push({ file: stmt.file, line: stmt.line });
-      continue;
-    }
-    const row = { kind: c.kind, name: c.name, file: stmt.file, line: stmt.line, sites: [{ file: stmt.file, line: stmt.line }] };
-    byIdentity.set(identity, row);
-    objects.push(row);
   }
   return { objects, unrecognized, statementCount: statements.length };
 }

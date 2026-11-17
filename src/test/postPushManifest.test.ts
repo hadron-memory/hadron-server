@@ -1,7 +1,7 @@
 /**
  * #434 slice B — the post-push manifest contract.
  *
- * Three fences, one per failure mode the slice exists to close:
+ * Four fences, one per failure mode the slice exists to close:
  *
  * 1. The parser pin (fixture): every object kind the inventory claims to
  *    extract IS extracted, and decoys (dollar-quoted payloads, comment text,
@@ -34,7 +34,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 // eslint-disable-next-line import/no-relative-packages -- scripts/ is outside src/ by design; plain node ESM
-import { postPushInventory } from '../../scripts/db/postPushInventory.mjs';
+import { postPushInventory, classify } from '../../scripts/db/postPushInventory.mjs';
 // eslint-disable-next-line import/no-relative-packages
 import { loadManifest, whitelistedLines, ManifestError } from '../../scripts/db/postPushManifest.mjs';
 
@@ -43,6 +43,9 @@ const MANIFEST_PATH = join(repoRoot, 'prisma/post-push-manifest.json');
 const ENTRY = join(repoRoot, 'prisma/post-push.sql');
 const WORKFLOW = join(repoRoot, '.github/workflows/migration-smoke-test.yml');
 const FIXTURE = join(repoRoot, 'src/test/testdata/post-push-fixture/main.sql');
+const I_ENTRY = join(repoRoot, 'src/test/testdata/post-push-fixture/i-entry.sql');
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const identity = (o: { kind: string; name: string }) => `${o.kind}:${o.name}`;
 
@@ -62,12 +65,15 @@ describe('#434 slice B: the manifest exists and validates', () => {
     const bad = (mutate: (m: any) => void) => {
       const m = JSON.parse(JSON.stringify(base));
       mutate(m);
-      const tmp = join(repoRoot, 'src/test/testdata/post-push-manifest.invalid.json');
-      writeFileSync(tmp, JSON.stringify(m));
+      // mkdtemp, never a fixed path inside the repo: parallel workers must not
+      // collide and a crashed run must leave nothing behind.
+      const dir = mkdtempSync(join(tmpdir(), 'post-push-manifest-invalid-'));
       try {
+        const tmp = join(dir, 'manifest.json');
+        writeFileSync(tmp, JSON.stringify(m));
         expect(() => loadManifest(tmp)).toThrow(ManifestError);
       } finally {
-        rmSync(tmp);
+        rmSync(dir, { recursive: true, force: true });
       }
     };
     bad((m) => { m['unknown-key'] = true; });
@@ -85,17 +91,24 @@ describe('#434 slice B: the parser pin (mutant control)', () => {
     const got = inv.objects.map(identity).sort();
     expect(got).toEqual([
       'check-constraint:fixture_chk',
+      'check-constraint:fixture_do_chk', // DO block, plain-string EXECUTE ('' unescaped)
+      'check-constraint:fixture_multi_a', // multi-action ALTER: first object …
+      'check-constraint:fixture_qualified_chk', // schema-qualified ALTER TABLE public.x
+      'check-constraint:fixture_readd_chk', // idempotent DROP IF EXISTS + ADD in one statement
       'extension:vector',
       'foreign-key-constraint:fixture_fk',
-      'function:public.fixture_fn',
+      'function:fixture_fn', // public. prefix normalized away (default search_path)
       'generated-column:fixture_books.lower_id',
+      'index:fixture_include_rel_idx', // via \include_relative with a trailing comment
       'index:fixture_included_idx', // via \ir include.sql — includes are followed
       'index:fixture_plain_idx',
       'sequence:fixture_seq',
       'table:fixture_books',
       'trigger:fixture_books.fixture_ctrig', // CREATE CONSTRAINT TRIGGER, identity is table.name
       'trigger:fixture_books.fixture_trig',
+      'unique-constraint:fixture_multi_b', // … and the second object of that same statement
       'unique-constraint:fixture_uq',
+      'unique-index:fixture_do_idx', // DO block, dollar-quoted EXECUTE (the chat-seq idiom)
       'unique-index:fixture_uniq_idx',
     ]);
     // The decoys must not appear under any identity.
@@ -103,10 +116,79 @@ describe('#434 slice B: the parser pin (mutant control)', () => {
     expect(flat).not.toContain('decoy');
   });
 
+  it('\\i resolves against the working directory and is followed (psql semantics)', () => {
+    // Unlike \ir/\include_relative (resolved against the including file), \i
+    // is cwd-relative — the fixture's path is repo-root-relative because that
+    // is where vitest runs. Pinned so the two resolution rules cannot merge.
+    const inv = postPushInventory(I_ENTRY);
+    expect(inv.unrecognized).toEqual([]);
+    expect(inv.objects.map(identity)).toEqual(['index:fixture_i_included_idx']);
+  });
+});
+
+describe('#434 slice B: the parser refuses what it cannot name (classify probes)', () => {
+  // Direct classify() calls pin the REFUSALS: shapes that must surface as
+  // unrecognized, never silently vanish. (The old vacuous ALTER fallback —
+  // the BLIND review's P2-1 — made exactly that class of shape a silent
+  // non-object.)
+  const refusals = (sql: string, payloads?: string) =>
+    classify({ sql, ...(payloads === undefined ? {} : { payloads }) }).filter((c) => 'unrecognized' in c);
+
   it('a trigger without an ON table is unrecognized, not silently dropped', () => {
-    const inv = postPushInventory(FIXTURE);
-    // (Guard for the fixture itself; the classify-level check is pinned by construction.)
-    expect(inv.objects.every((o) => o.kind !== 'trigger' || o.name.includes('.'))).toBe(true);
+    expect(refusals('CREATE TRIGGER orphan_trig AFTER INSERT EXECUTE FUNCTION fixture_fn()')).toHaveLength(1);
+  });
+
+  it('an unguarded plain ADD COLUMN is unrecognized (it cannot re-run)', () => {
+    expect(refusals('ALTER TABLE fixture_books ADD COLUMN plain_col text')).toHaveLength(1);
+  });
+
+  it('an ALTER action the parser cannot name is unrecognized', () => {
+    // EXCLUDE constraints: teach the parser here before whitelisting one.
+    expect(refusals('ALTER TABLE fixture_books ADD CONSTRAINT fixture_ex EXCLUDE USING gist (id WITH =)')).toHaveLength(1);
+    expect(refusals('ALTER TABLE fixture_books INHERIT parent_tbl')).toHaveLength(1);
+  });
+
+  it('bare DDL inside a DO body (not EXECUTE-extracted) refuses the whole block', () => {
+    const body = "BEGIN ALTER TABLE fixture_books ADD CONSTRAINT bare_chk CHECK (id <> ''); END";
+    expect(refusals('DO $do$ BEGIN … END $do$;', body)).toHaveLength(1);
+  });
+
+  it('an unfollowed, un-allowlisted psql meta-command surfaces as unrecognized', () => {
+    expect(refusals('\\copy fixture_books TO stdout')).toHaveLength(1);
+  });
+
+  it('function signatures normalize: balanced arg lists whole, param names and DEFAULTs stripped', () => {
+    // (Brooks P3-4) `numeric(10,2)` must survive intact — the old
+    // `\(([^)]*)\` capture truncated at the first `)` — and a parameter NAME
+    // must not turn `fn(a text)` into a different signature from `fn(text)`.
+    const f = (sql: string) => {
+      const out = classify({ sql });
+      expect(out, sql).toHaveLength(1);
+      const entry = out[0];
+      if (!('args' in entry) || entry.kind !== 'function') throw new Error('not a function classification');
+      return entry.args;
+    };
+    expect(f('CREATE FUNCTION sig_fn(p_a numeric(10,2), p_b text DEFAULT \'x\') RETURNS void LANGUAGE sql AS $$ SELECT 1 $$')).toBe('numeric(10, 2), text');
+    // The same signature with a space inside the parens: ONE identity, never
+    // a false overload (structural whitespace is canonicalized away).
+    expect(f('CREATE FUNCTION sig_fn(numeric(10, 2), text) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$')).toBe('numeric(10, 2), text');
+    expect(f('CREATE OR REPLACE FUNCTION public.sig_fn(IN a integer) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$')).toBe('integer');
+  });
+
+  it('a true overload (same name, two arg lists) throws instead of merging', () => {
+    // The inventory cannot tell two same-named functions apart by name: it
+    // must refuse loudly, never silently merge them into one row.
+    const dir = mkdtempSync(join(tmpdir(), 'post-push-overload-'));
+    try {
+      const sql = join(dir, 'overload.sql');
+      writeFileSync(sql, [
+        "CREATE FUNCTION ol_fn(a text) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;",
+        "CREATE FUNCTION ol_fn(a numeric) RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;",
+      ].join('\n'));
+      expect(() => postPushInventory(sql)).toThrow(/two argument lists/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -162,7 +244,9 @@ describe('#434 slice B: diff-whitelist rows are anchored to the SQL corpus', () 
     const sql = corpus();
     for (const row of loadManifest(MANIFEST_PATH).diffWhitelist) {
       const bare = row.name.includes('.') ? row.name.split('.').pop()! : row.name;
-      expect(sql, `${row.name}: appears in prisma/*.sql or migrations`).toContain(bare);
+      // Word-boundary match: a bare substring check is trivially true for
+      // short names (`tsv` sits inside to_tsvector, `handle` inside handles).
+      expect(sql, `${row.name}: appears in prisma/*.sql or migrations`).toMatch(new RegExp(`\\b${escapeRe(bare)}\\b`));
     }
   });
 
@@ -178,19 +262,32 @@ describe('#434 slice B: the workflow is wired to the manifest', () => {
     expect(wf).toContain('node scripts/db/migrateDiffFilter.mjs prisma/post-push-manifest.json');
   });
 
-  it('the manifest path triggers the lane (both pull_request and push paths)', () => {
+  it('the manifest path AND the filter\'s own code trigger the lane (both pull_request and push paths)', () => {
+    // Order-independent block extraction: match the key at ITS indent, then
+    // its body as the following lines indented DEEPER (a `push:` at the same
+    // depth ends the block) — rather than slicing between first occurrences,
+    // which a `push:` inside a comment or a reordered file would shrink.
     const wf = readFileSync(WORKFLOW, 'utf8');
-    const prBlock = wf.slice(wf.indexOf('pull_request:'), wf.indexOf('push:'));
-    const pushBlock = wf.slice(wf.indexOf('push:'), wf.indexOf('jobs:'));
-    expect(prBlock).toContain('prisma/post-push-manifest.json');
-    expect(pushBlock).toContain('prisma/post-push-manifest.json');
+    const block = (key: string) => wf.match(new RegExp(`^([ \\t]*)${key}:[^\\n]*(?:\\n\\1[ \\t]+.*)*`, 'm'))?.[0] ?? '';
+    for (const key of ['pull_request', 'push']) {
+      const b = block(key);
+      expect(b, `${key}: block exists`).toMatch(/\S/);
+      expect(b, `${key}: manifest edits trigger the lane`).toContain('prisma/post-push-manifest.json');
+      // The lane runs the filter and its manifest module: their own regressions
+      // must re-run it (the BLIND review's P2-4, already true at the reviewed
+      // head — pinned here so a paths-list trim cannot quietly lose it).
+      expect(b, `${key}: filter-code edits trigger the lane`).toContain('scripts/db/**');
+    }
   });
 
-  it('no whitelisted object name survives as a hand-written grep in the workflow', () => {
+  it('no whitelisted object name survives as hand-written SQL in the workflow', () => {
     const wf = readFileSync(WORKFLOW, 'utf8');
     for (const row of loadManifest(MANIFEST_PATH).diffWhitelist) {
       const bare = row.name.includes('.') ? row.name.split('.').pop()! : row.name;
-      expect(wf, `${bare} must live only in the manifest, not the workflow`).not.toContain(bare);
+      // The QUOTED form is how a name would appear in hand-written SQL or a
+      // grep pattern. Bare prose (`handle`, `tsv`) must NOT trip this fence —
+      // that brittleness was the BLIND review's P3.
+      expect(wf, `"${bare}" must live only in the manifest, not the workflow`).not.toContain(`"${bare}"`);
     }
   });
 });
@@ -216,7 +313,11 @@ describe('#434 slice B: the drift filter executes its contract (spawn)', () => {
     // Exact stdout: only the superstring (its \r preserved as passthrough) and
     // the unrelated line survive; both whitelisted forms are dropped.
     expect(res.stdout.split('\n')).toEqual([`${superstring}\r`, 'UNRELATED DRIFT;', '']);
-    expect(res.stderr).toContain('dropped 2 whitelisted line(s)');
+    // The run reports WHICH whitelist rows it consumed: matched telemetry,
+    // not a gate (unmatched rows are normal in any single diff — a row that
+    // can never match again surfaces as kept-line drift above). 1 DISTINCT
+    // row: the same line dropped twice still consumes one whitelist row.
+    expect(res.stderr).toMatch(/dropped 2 whitelisted line\(s\) per \S+ \(1\/\d+ whitelist rows matched, \d+ unmatched this run\)/);
   });
 
   it('an all-whitelisted input exits 0 with empty stdout (empty diff is success)', () => {

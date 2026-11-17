@@ -8,6 +8,7 @@
 // the failure mode this whole slice exists to remove.
 
 import { readFileSync } from 'node:fs';
+import { OBJECT_KINDS } from './postPushInventory.mjs';
 
 /** Kinds a diff-whitelist row may carry (the DRIFT REASON vocabulary). */
 export const DIFF_WHITELIST_KINDS = [
@@ -20,20 +21,12 @@ export const DIFF_WHITELIST_KINDS = [
   'unique-index',
 ];
 
-/** Kinds a post-push-owned row may carry (must mirror OBJECT_KINDS in postPushInventory.mjs). */
-export const POST_PUSH_OWNED_KINDS = [
-  'extension',
-  'index',
-  'unique-index',
-  'check-constraint',
-  'foreign-key-constraint',
-  'unique-constraint',
-  'generated-column',
-  'function',
-  'trigger',
-  'table',
-  'sequence',
-];
+/**
+ * Kinds a post-push-owned row may carry — the parser's own vocabulary, one
+ * source of truth (a hand-maintained copy could drift from the parser's; the
+ * parser's is the one the completeness test actually enforces).
+ */
+export const POST_PUSH_OWNED_KINDS = OBJECT_KINDS;
 
 export class ManifestError extends Error {}
 

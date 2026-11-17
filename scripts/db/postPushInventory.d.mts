@@ -34,17 +34,21 @@ export type ClassifiedObject =
   | { kind: Exclude<ObjectKind, 'function' | 'trigger'>; name: string };
 
 /**
- * One statement's classification: a named object, an `unrecognized` marker
- * (the completeness test turns any of these red), or `null` for a recognized
- * non-object (guard drops, DML, session state).
+ * One classification: a named object, or an `unrecognized` marker (the
+ * completeness test turns any of these red).
  */
-export type ClassifiedStatement = ClassifiedObject | { unrecognized: string };
+export type ClassifiedEntry = ClassifiedObject | { unrecognized: string };
 
 /**
- * Classify one already-scanned statement. Only `sql` is read; `file`/`line`
- * are accepted so scan results can be passed straight through.
+ * Classify one already-scanned statement into ZERO OR MORE entries. An empty
+ * list is a recognized non-object (guard drops, DML, session state); one
+ * statement can create several objects (an ALTER TABLE with multiple
+ * object-creating actions). `payloads` carries the statement's dollar-quoted
+ * body text, scanned only for DO blocks (EXECUTE'd DDL inside them creates
+ * real objects); `file`/`line` are accepted so scan results can be passed
+ * straight through.
  */
-export function classify(stmt: { sql: string }): ClassifiedStatement | null;
+export function classify(stmt: { sql: string; payloads?: string }): readonly ClassifiedEntry[];
 
 /** One durable object the closure creates. Identity is `kind:name`. */
 export interface InventoryRow {

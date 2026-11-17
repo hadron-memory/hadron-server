@@ -41,11 +41,20 @@ process.stdin.on('data', (chunk) => { input += chunk; });
 process.stdin.on('end', () => {
   const out = [];
   let dropped = 0;
+  const matched = new Set(); // distinct whitelist rows this run consumed
   for (const line of input.split('\n')) {
     const candidate = line.endsWith('\r') ? line.slice(0, -1) : line;
-    if (lines.has(candidate)) { dropped++; continue; }
+    if (lines.has(candidate)) { dropped++; matched.add(candidate); continue; }
     out.push(line);
   }
   process.stdout.write(out.join('\n'));
-  console.error(`migrate-diff filter: dropped ${dropped} whitelisted line(s) per ${manifestPath}`);
+  // Unmatched rows are normal in any single run (the whitelist covers every
+  // object that CAN drift, a given diff contains only the ones that DID). A
+  // row that can never match again surfaces as drift above — the changed
+  // line stops matching and is kept in stdout — so this count is telemetry,
+  // not a gate.
+  console.error(
+    `migrate-diff filter: dropped ${dropped} whitelisted line(s) per ${manifestPath} ` +
+      `(${matched.size}/${lines.size} whitelist rows matched, ${lines.size - matched.size} unmatched this run)`,
+  );
 });

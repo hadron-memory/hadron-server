@@ -1,5 +1,5 @@
 {
-  "note": "Known-acceptable drift and raw-SQL object inventory for the migration smoke lane (#434). diff-whitelist: the exact `prisma migrate diff` lines the CI drift check may drop — each row names the object, its kind, and WHY the drift is acceptable; the filter (scripts/db/migrateDiffFilter.mjs) matches lines exactly, so any definition change re-surfaces as drift. post-push-owned: every durable object the prisma/post-push.sql closure creates — regenerate with scripts/db/gen-post-push-manifest.mjs; the completeness test (src/test/postPushManifest.test.ts) fails if either half drifts.",
+  "note": "Known-acceptable drift and raw-SQL object inventory for the migration smoke lane (#434). diff-whitelist: the exact `prisma migrate diff` lines the CI drift check may drop — each row names the object, its kind, and WHY the drift is acceptable; the filter (scripts/db/migrateDiffFilter.mjs) matches lines exactly, so any definition change re-surfaces as drift. This half is hand-maintained: a row whose line prisma no longer emits at all is pruned by hand on regen, and the smoke lane's own exact matching is what surfaces a changed line. post-push-owned: every durable object the prisma/post-push.sql closure creates — regenerate with scripts/db/gen-post-push-manifest.mjs; the completeness test (src/test/postPushManifest.test.ts) pins THIS half against the closure in both directions (a missing or stale row is red), and gen --check compares full rows (name, kind, file, why).",
   "diff-whitelist": [
     {
       "name": "memories_user_id_idx",
@@ -955,631 +955,631 @@
       "name": "node_signatures_stamp_key_id_fkey",
       "kind": "foreign-key-constraint",
       "file": "signing-invariants.sql",
-      "why": "Foreign key against a polymorphic owner; Prisma cannot model it against the schema as written."
+      "why": "Foreign key created and owned by the raw-SQL corpus, not modeled in schema.prisma as written."
     },
     {
       "name": "served_prompts_chat_fkey",
       "kind": "foreign-key-constraint",
       "file": "served-prompt-invariants.sql",
-      "why": "Foreign key against a polymorphic owner; Prisma cannot model it against the schema as written."
+      "why": "Foreign key created and owned by the raw-SQL corpus, not modeled in schema.prisma as written."
     },
     {
       "name": "served_prompts_run_owner_fkey",
       "kind": "foreign-key-constraint",
       "file": "served-prompt-invariants.sql",
-      "why": "Foreign key against a polymorphic owner; Prisma cannot model it against the schema as written."
+      "why": "Foreign key created and owned by the raw-SQL corpus, not modeled in schema.prisma as written."
     },
     {
       "name": "served_prompts_session_owner_fkey",
       "kind": "foreign-key-constraint",
       "file": "served-prompt-invariants.sql",
-      "why": "Foreign key against a polymorphic owner; Prisma cannot model it against the schema as written."
+      "why": "Foreign key created and owned by the raw-SQL corpus, not modeled in schema.prisma as written."
     },
     {
       "name": "agent_base_guard",
       "kind": "function",
       "file": "agent-base-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "agent_tasks_assign_number",
       "kind": "function",
       "file": "agent-task-number-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "agent_tasks_number_immutable",
       "kind": "function",
       "file": "agent-task-number-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "app_grant_grantee_same_app",
       "kind": "function",
       "file": "ticker-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "context_reset_cause_immutable",
       "kind": "function",
       "file": "context-reset-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "context_reset_forward_only",
       "kind": "function",
       "file": "context-reset-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "context_reset_same_app",
       "kind": "function",
       "file": "context-reset-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "guard_agent_task_findings",
       "kind": "function",
       "file": "agent-task-findings-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_agent_clone_audit_immutable",
       "kind": "function",
       "file": "post-push.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_agent_installed_in_app",
       "kind": "function",
       "file": "grant-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_alarm_escalation_end_write_once",
       "kind": "function",
       "file": "alarm-escalation-end-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_append_only_agent_team_event",
       "kind": "function",
       "file": "agent-task-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_append_only_app_automation_read_grant_event",
       "kind": "function",
       "file": "app-automation-read-grant-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_append_only_app_automation_team_snapshot_grant_event",
       "kind": "function",
       "file": "app-automation-team-snapshot-grant-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_append_only_app_memory_write_grant_event",
       "kind": "function",
       "file": "app-memory-write-grant-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_append_only_automation_adoption_event",
       "kind": "function",
       "file": "automation-adoption-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_append_only_grant_event",
       "kind": "function",
       "file": "grant-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_append_only_user_api_key_deletion",
       "kind": "function",
       "file": "user-api-key-deletion-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_apps_secrets_gone",
       "kind": "function",
       "file": "secret-versions-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_bind_grant_event",
       "kind": "function",
       "file": "grant-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_boot_prompt_entered",
       "kind": "function",
       "file": "boot-prompt-approval-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_boot_prompt_placed",
       "kind": "function",
       "file": "boot-prompt-approval-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_check_comment_node",
       "kind": "function",
       "file": "comment-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_comment_meta_immutable",
       "kind": "function",
       "file": "comment-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_comment_node_changed",
       "kind": "function",
       "file": "comment-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_compiled_prompt_revision_immutable",
       "kind": "function",
       "file": "compiled-prompt-revision-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_edges_governed_immutable",
       "kind": "function",
       "file": "comment-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_end_boot_prompt_approvals_in",
       "kind": "function",
       "file": "boot-prompt-approval-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_end_boot_prompt_approvals_on_agent_attach",
       "kind": "function",
       "file": "boot-prompt-approval-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_end_boot_prompt_approvals_on_install",
       "kind": "function",
       "file": "boot-prompt-approval-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_end_boot_prompt_node_approval",
       "kind": "function",
       "file": "boot-prompt-approval-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_end_boot_prompt_revision_approvals",
       "kind": "function",
       "file": "boot-prompt-approval-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_end_open_grant_signing_requests",
       "kind": "function",
       "file": "grant-signing-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_end_open_signing_requests",
       "kind": "function",
       "file": "signing-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_grant_holder_gone",
       "kind": "function",
       "file": "grant-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_grant_link_merged",
       "kind": "function",
       "file": "grant-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_grant_signing_stale",
       "kind": "function",
       "file": "grant-signing-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_guard_app_automation_read_grant",
       "kind": "function",
       "file": "app-automation-read-grant-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_guard_app_automation_team_snapshot_grant",
       "kind": "function",
       "file": "app-automation-team-snapshot-grant-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_guard_app_memory_write_grant",
       "kind": "function",
       "file": "app-memory-write-grant-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_guard_fresh_sign_in",
       "kind": "function",
       "file": "fresh-sign-in-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_guard_grant",
       "kind": "function",
       "file": "grant-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_guard_grant_signature",
       "kind": "function",
       "file": "grant-signing-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_guard_grant_signing_request",
       "kind": "function",
       "file": "grant-signing-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_guard_node_signature",
       "kind": "function",
       "file": "signing-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_guard_passkey_cancel_token",
       "kind": "function",
       "file": "passkey-registration-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_guard_passkey_ceremony_binding",
       "kind": "function",
       "file": "passkey-registration-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_guard_passkey_credential",
       "kind": "function",
       "file": "passkey-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_guard_passkey_registration_notice",
       "kind": "function",
       "file": "passkey-registration-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_guard_pending_email_sign_in",
       "kind": "function",
       "file": "pending-email-sign-in-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_guard_sign_in",
       "kind": "function",
       "file": "signin-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_guard_sign_in_delete",
       "kind": "function",
       "file": "signin-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_guard_sign_in_root",
       "kind": "function",
       "file": "signin-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_guard_signing_request",
       "kind": "function",
       "file": "signing-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_immutable_automation_version",
       "kind": "function",
       "file": "automation-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_initialize_node_revision_content_hash",
       "kind": "function",
       "file": "post-push.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_is_boot_prompt_role",
       "kind": "function",
       "file": "boot-prompt-approval-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_memory_encrypted_signing",
       "kind": "function",
       "file": "signing-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_node_content_change",
       "kind": "function",
       "file": "signing-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_node_content_validation_report_immutable",
       "kind": "function",
       "file": "content-validation-report-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_node_revision_state_hash",
       "kind": "function",
       "file": "post-push.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_nodes_tsv",
       "kind": "function",
       "file": "post-push.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_passkey_clock_offset",
+      "kind": "function",
+      "file": "passkey-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_passkey_now",
+      "kind": "function",
+      "file": "passkey-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_passkey_wall_now",
+      "kind": "function",
+      "file": "passkey-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_refresh_task_blocked",
       "kind": "function",
       "file": "task-blocker-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_safe_numeric",
       "kind": "function",
       "file": "post-push.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_safe_timestamptz",
       "kind": "function",
       "file": "post-push.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_secret_event_guard",
       "kind": "function",
       "file": "secret-versions-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_secret_tombstone_guard",
       "kind": "function",
       "file": "secret-versions-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_secret_version_owner",
       "kind": "function",
       "file": "secret-versions-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_served_prompt_guard",
       "kind": "function",
       "file": "served-prompt-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_served_prompt_no_truncate",
       "kind": "function",
       "file": "served-prompt-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_signing_now",
       "kind": "function",
       "file": "signing-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_task_blocker_app_fixed",
       "kind": "function",
       "file": "task-blocker-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_task_blocker_guard",
       "kind": "function",
       "file": "task-blocker-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_task_blocker_refresh",
       "kind": "function",
       "file": "task-blocker-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_task_end_releases",
       "kind": "function",
       "file": "task-blocker-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_usage_cell",
       "kind": "function",
       "file": "usage-activity-rollup-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_usage_rollup_after_delete",
       "kind": "function",
       "file": "usage-activity-rollup-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_usage_rollup_after_insert",
       "kind": "function",
       "file": "usage-activity-rollup-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_usage_rollup_after_truncate",
       "kind": "function",
       "file": "usage-activity-rollup-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_usage_rollup_after_update",
       "kind": "function",
       "file": "usage-activity-rollup-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_usage_rollup_drop_zero",
       "kind": "function",
       "file": "usage-activity-rollup-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_usage_rollup_floor",
       "kind": "function",
       "file": "usage-activity-rollup-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "hadron_user_deletion_audit_immutable",
       "kind": "function",
       "file": "post-push.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "host_key_use_append_only",
       "kind": "function",
       "file": "host-operation-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "host_launcher_model_ok",
       "kind": "function",
       "file": "host-operation-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "host_operation_args_ok",
       "kind": "function",
       "file": "host-operation-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "host_operation_forward_only",
       "kind": "function",
       "file": "host-operation-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "host_operation_hold_fixed",
       "kind": "function",
       "file": "host-launch-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "host_operation_same_app",
       "kind": "function",
       "file": "host-operation-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "host_operation_token_array_ok",
       "kind": "function",
       "file": "agent-task-matching-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "host_operation_token_ok",
       "kind": "function",
       "file": "agent-task-matching-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "host_registration_worker_same_app",
       "kind": "function",
       "file": "agent-task-matching-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "maintain_agent_task_dispositions",
       "kind": "function",
       "file": "agent-task-dispositions-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
-    },
-    {
-      "name": "public.hadron_passkey_clock_offset",
-      "kind": "function",
-      "file": "passkey-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
-    },
-    {
-      "name": "public.hadron_passkey_now",
-      "kind": "function",
-      "file": "passkey-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
-    },
-    {
-      "name": "public.hadron_passkey_wall_now",
-      "kind": "function",
-      "file": "passkey-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "team_stop_signal_end_once",
       "kind": "function",
       "file": "stop-signal-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "team_stop_signal_target_same_app",
       "kind": "function",
       "file": "stop-signal-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "ticker_subscription_worker_same_app",
       "kind": "function",
       "file": "ticker-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "worker_reference_fence_1162",
       "kind": "function",
       "file": "worker-reference-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "worker_reference_targets_1162",
       "kind": "function",
       "file": "worker-reference-invariants.sql",
-      "why": "Trigger support function (or invariant helper) defined in raw SQL; lives outside the Prisma schema entirely."
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
       "name": "nodes.tsv",
@@ -1591,199 +1591,199 @@
       "name": "agent_team_alarm_schedule_open_due_idx",
       "kind": "index",
       "file": "agent-task-stall-invariants.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "agent_team_events_person_activity_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "agent_team_events_pr_frozen_head_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "agent_team_events_unacked_alarms_idx",
       "kind": "index",
       "file": "alarm-escalation-end-invariants.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "agents_organization_id_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "coordinator_cadence_episodes_app_id_ended_at_idx",
       "kind": "index",
       "file": "coordinator-cadence-invariants.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "dark_worker_episodes_app_id_ended_at_idx",
       "kind": "index",
       "file": "dark-alarm-invariants.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "edges_source_id_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "host_operations_failed_platform_start_idx",
       "kind": "index",
       "file": "desired-start-invariants.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "host_sweep_episodes_app_id_ended_at_idx",
       "kind": "index",
       "file": "host-sweep-invariants.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "host_sweep_runs_host_recent_idx",
       "kind": "index",
       "file": "host-sweep-invariants.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "host_sweep_runs_unposted_idx",
       "kind": "index",
       "file": "host-sweep-invariants.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "node_embeddings_embedding_hnsw",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "nodes_chat_worker_created_idx",
       "kind": "index",
       "file": "post-limit-invariants.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "nodes_data_gin",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "nodes_embedding_failed_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "nodes_embedding_pending_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "nodes_memory_id_loc_c_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "nodes_memory_parent_loc_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "nodes_memory_segment_key_eligible_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "nodes_memory_segment_key_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "nodes_msg_channel_seq_loc_c_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "nodes_properties_gin",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "nodes_tsv_gin",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "post_limit_episodes_app_id_ended_at_idx",
       "kind": "index",
       "file": "post-limit-invariants.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "sessions_agent_id_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "sessions_memory_id_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "sessions_worker_ended_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "sessions_worker_started_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "start_failing_episodes_app_id_ended_at_idx",
       "kind": "index",
       "file": "desired-start-invariants.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "team_stop_signals_live_idx",
       "kind": "index",
       "file": "stop-signal-invariants.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "usage_events_node_id_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "usage_events_session_activity_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape)."
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "git_mirror_attempt_seq",
@@ -2653,313 +2653,319 @@
       "name": "agent_task_counters_project_uniq",
       "kind": "unique-index",
       "file": "agent-task-number-backfill.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "agent_task_stop_holds_open_uniq",
       "kind": "unique-index",
       "file": "stop-signal-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "agent_tasks_app_external_id_uniq",
       "kind": "unique-index",
       "file": "agent-task-external-id-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "agent_tasks_app_id_handle_key",
       "kind": "unique-index",
       "file": "agent-task-number-backfill.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "agent_ticker_templates_name_live_uniq",
       "kind": "unique-index",
       "file": "agent-ticker-template-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "ai_service_configs_agent_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "ai_service_configs_app_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "ai_service_configs_org_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "ai_service_configs_server_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "app_automation_read_grants_live_uq",
       "kind": "unique-index",
       "file": "app-automation-read-grant-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "app_automation_team_snapshot_grants_live_uq",
       "kind": "unique-index",
       "file": "app-automation-team-snapshot-grant-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "app_grants_live_uniq",
       "kind": "unique-index",
       "file": "ticker-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "app_key_scopes_live_uniq",
       "kind": "unique-index",
       "file": "app-key-scope-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "app_memory_write_grants_live_uq",
       "kind": "unique-index",
       "file": "app-memory-write-grant-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "app_runs_served_prompt_owner_uniq",
       "kind": "unique-index",
       "file": "served-prompt-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "channel_read_states_agent_app_channel_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "channel_read_states_worker_channel_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "comment_meta_one_open_thread",
       "kind": "unique-index",
       "file": "comment-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "coordinator_cadence_episodes_one_open_uniq",
       "kind": "unique-index",
       "file": "coordinator-cadence-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "dark_worker_episodes_one_open_uniq",
       "kind": "unique-index",
       "file": "dark-alarm-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "host_sweep_episodes_one_open_uniq",
       "kind": "unique-index",
       "file": "host-sweep-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "host_sweep_runs_run_uniq",
       "kind": "unique-index",
       "file": "host-sweep-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "launch_grants_live_per_operation",
       "kind": "unique-index",
       "file": "host-launch-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "memories_install_memory_live_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "memory_config_templates_app_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "memory_config_templates_org_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "memory_config_templates_server_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "memory_config_templates_user_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "node_embeddings_abstract_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "nodes_chat_message_seq_unique_idx",
+      "kind": "unique-index",
+      "file": "chat-seq-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "post_limit_episodes_one_open_uniq",
       "kind": "unique-index",
       "file": "post-limit-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "register_entries_app_channel_agent_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "register_entries_app_channel_all_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "register_entries_app_channel_worker_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "register_entries_org_channel_agent_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "register_entries_org_channel_all_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "register_entries_org_channel_worker_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "scopes_agent_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "scopes_app_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "scopes_org_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "secret_app_keys_one_active_idx",
       "kind": "unique-index",
       "file": "secret-app-keys-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "served_prompts_chat_ordinal_uniq",
       "kind": "unique-index",
       "file": "served-prompt-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "served_prompts_run_uniq",
       "kind": "unique-index",
       "file": "served-prompt-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "served_prompts_session_uniq",
       "kind": "unique-index",
       "file": "served-prompt-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "sessions_served_prompt_owner_uniq",
       "kind": "unique-index",
       "file": "served-prompt-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "slack_connections_org_team_active_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "start_failing_episodes_one_open_uniq",
       "kind": "unique-index",
       "file": "desired-start-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "team_stop_coverage_open_uniq",
       "kind": "unique-index",
       "file": "stop-signal-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "ticker_subscriptions_live_uniq",
       "kind": "unique-index",
       "file": "ticker-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "tickers_app_name_live_uniq",
       "kind": "unique-index",
       "file": "ticker-invariants.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "tickers_generated_live_uniq",
       "kind": "unique-index",
       "file": "ticker-generated-live-unique.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "users_handle_lower_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
       "name": "workers_app_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index defined in raw SQL; Prisma schema language cannot express this shape (partial or expression-unique)."
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     }
   ]
 }
