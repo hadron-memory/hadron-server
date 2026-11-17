@@ -242,9 +242,49 @@ describe('#3689 the data transition (migration + pre-push)', () => {
     expect((await db.appRun.findMany({ where: { appId: { in: [two.id, one.id] } } })).map(r => r.id).sort()).toEqual([ids.retained, ids.control].sort());
   });
 
+  it('a failure after the cleanup rolls the cleanup back: the file is one transaction as the migration runner sends it', async () => {
+    // BLIND F1 (Coco, 924be003): the file has no BEGIN of its own. `prisma migrate deploy` sends a migration file as ONE
+    // multi-statement query, which PostgreSQL runs as a single implicit transaction, so a statement that fails AFTER the
+    // DO block (here CREATE INDEX, behind SET NOT NULL) must bring back the runs the block deleted, their children and the
+    // NULLs it filled. This runs the real file the same way (one query, no BEGIN). A COMMIT, or anything else that ends
+    // the implicit transaction, added to the file would make this fail.
+    const single = await app('atomic-single', [{ live: true }]);
+    const two = await app('atomic-two', [{ live: true }, { live: true }]);
+    await withPg(async (c) => {
+      await c.query(RELAX);
+      const fillable = await insertRun(c, single.id, null);
+      const doomed = await insertRun(c, two.id, null);
+      await c.query(`INSERT INTO manual_automation_pins (run_id, pin) VALUES ($1, '{}'::jsonb)`, [doomed]);
+      // The migration's index name is taken, so its CREATE INDEX fails after the block has filled and deleted.
+      await c.query('CREATE INDEX app_runs_agent_id_idx ON app_runs (created_at)');
+      try {
+        const err = await sqlError(c, read(MIGRATION_FILE));
+        expect(err?.code).toBe('42P07');
+        const rows = await c.query('SELECT id, agent_id FROM app_runs WHERE id = ANY($1) ORDER BY id', [[fillable, doomed]]);
+        expect(rows.rows).toEqual([{ id: fillable, agent_id: null }, { id: doomed, agent_id: null }].sort((a, b) => (a.id < b.id ? -1 : 1)));
+        expect((await c.query('SELECT count(*)::int AS n FROM manual_automation_pins WHERE run_id = $1', [doomed])).rows).toEqual([{ n: 1 }]);
+        const nullable = await c.query(`SELECT is_nullable FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'app_runs' AND column_name = 'agent_id'`);
+        expect(nullable.rows).toEqual([{ is_nullable: 'YES' }]);
+      } finally {
+        await c.query('DROP INDEX IF EXISTS app_runs_agent_id_idx');
+      }
+    });
+  });
+
   afterEach(async () => {
     // A failed assertion above can leave the schema relaxed; put the PR's shape back for the next file in this worker.
-    await withPg(c => c.query(`DELETE FROM app_runs WHERE agent_id IS NULL OR NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = app_runs.agent_id)`).then(() => c.query(RESTORE))).catch(() => undefined);
+    // BLIND F3 (Coco, 924be003): a restore that fails is not swallowed, and the restored shape is checked, so no later
+    // test runs against a relaxed table without this file saying so.
+    await withPg(async (c) => {
+      await c.query(`DELETE FROM app_runs WHERE agent_id IS NULL OR NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = app_runs.agent_id)`);
+      await c.query(RESTORE);
+      const shape = await c.query(`
+        SELECT (SELECT is_nullable FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'app_runs' AND column_name = 'agent_id') AS nullable,
+               (SELECT confdeltype::text FROM pg_constraint WHERE conname = 'app_runs_agent_id_fkey' AND conrelid = 'app_runs'::regclass) AS fk,
+               (SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'app_runs_agent_id_idx') AS idx`);
+      expect(shape.rows[0]).toMatchObject({ nullable: 'NO', fk: 'c' });
+      expect(shape.rows[0].idx).toMatch(/\(agent_id\)$/);
+    });
   });
 });
 
