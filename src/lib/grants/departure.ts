@@ -26,6 +26,17 @@ export type GrantHolderKind = 'user' | 'agent' | 'worker' | 'app';
 const HOLDER_COLUMN: Record<GrantHolderKind, string> = { user: 'user_id', agent: 'agent_id', worker: 'worker_id', app: 'grantee_app_id' };
 
 /**
+ * The first end stands (ruling 0259): an ACTIVATED grant past its own expiry or at its own count, or past its action's limits
+ * (#4163, cor:acl:140:03: a used or timed-out boot-prompt grant), has already ended and is never stamped departed. Read with the
+ * database clock, after the row locks. ONE fragment for every departure door, so the doors cannot drift.
+ */
+const ALREADY_ENDED = Prisma.sql`(activated_at IS NOT NULL AND ((expires_at IS NOT NULL AND expires_at <= ${GRANT_DB_NOW})
+        OR (max_uses IS NOT NULL AND use_count >= max_uses)
+        OR EXISTS (SELECT 1 FROM actions x WHERE x.name = grants.action
+          AND ((x.max_uses IS NOT NULL AND grants.use_count >= x.max_uses)
+            OR (x.lifetime_seconds IS NOT NULL AND grants.activated_at + make_interval(secs => x.lifetime_seconds) <= ${GRANT_DB_NOW})))))`;
+
+/**
  * End every grant `holderId` holds that has not already ended, in the caller's transaction. Returns how many it ended.
  * A grant already revoked, departed, EXPIRED or SPENT (an activated grant past its expiry or at its count) keeps its first end; a grant whose own App is gone is skipped (its row is
  * deleted with the App). Never throws for "no grants".
@@ -53,8 +64,7 @@ export async function endHeldGrants(
     UPDATE grants SET holder_departed_at = ${GRANT_DB_NOW}, updated_at = ${GRANT_DB_NOW}
     WHERE ${column} = ${holderId} AND holder_departed_at IS NULL AND revoked_at IS NULL
       AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id) ${inScope}
-      AND NOT (activated_at IS NOT NULL AND ((expires_at IS NOT NULL AND expires_at <= ${GRANT_DB_NOW})
-        OR (max_uses IS NOT NULL AND use_count >= max_uses)))`);
+      AND NOT ${ALREADY_ENDED}`);
 }
 
 /**
@@ -80,10 +90,5 @@ export async function endAgentGrantsAtApps(
     UPDATE grants SET holder_departed_at = ${GRANT_DB_NOW}, updated_at = ${GRANT_DB_NOW}
     WHERE ${inPairs} AND holder_departed_at IS NULL AND revoked_at IS NULL
       AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
-      AND NOT (activated_at IS NOT NULL AND ((expires_at IS NOT NULL AND expires_at <= ${GRANT_DB_NOW})
-        OR (max_uses IS NOT NULL AND use_count >= max_uses)
-        -- #4163: the action's own limits end a grant too (cor:acl:140:03), so a used or timed-out boot-prompt grant keeps its first end.
-        OR EXISTS (SELECT 1 FROM actions x WHERE x.name = grants.action
-          AND ((x.max_uses IS NOT NULL AND grants.use_count >= x.max_uses)
-            OR (x.lifetime_seconds IS NOT NULL AND grants.activated_at + make_interval(secs => x.lifetime_seconds) <= ${GRANT_DB_NOW})))))`);
+      AND NOT ${ALREADY_ENDED}`);
 }
