@@ -407,7 +407,7 @@ describe('protocol event feed compatibility', () => {
       const answer=(child.body as any).singleResult;expect(answer.errors).toBeUndefined();
       expect(answer.data.agentTeamEvents).toEqual(expect.arrayContaining([
         {type:'review.seat.assigned',payload:{slot:'local',head:H,supersedes:null}},
-        {type:'review.verdict',payload:{slot:'local',head:H,verdict:'APPROVE',node:'hrn:node:example.test:reviews:one',receipt:'https://example.test/receipt'}},
+        {type:'review.verdict',payload:{slot:'local',head:H,verdict:'APPROVE',node:'hrn:node:example.test:reviews:one',receipt:'https://example.test/receipt',reviewerFamily:null,reviewerModel:null,modelReportedAt:null}}, // #4235: a person's verdict carries null for all three
       ]));
     } finally { await api.stop(); }
   });

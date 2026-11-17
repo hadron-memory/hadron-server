@@ -1693,6 +1693,13 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
       // attribution, not activity. Both derivations must still read it lapsed.
       Ida: { startedAt: t(-5000), updatedAt: t(-4000), endedAt: null, autoExpiredAt: null,
              eventAt: t(-1), eventCounts: false },
+      // #4271 (#4272 QA P2): the row classes of the liveness guard, which skips usage events only for a session its
+      // own stamps close. Ended with no updated_at and an event inside: the event counts.
+      Nell: { startedAt: t(-900), updatedAt: null, endedAt: t(-600), autoExpiredAt: null, eventAt: t(-700) },
+      // Ended and closed by its own stamps, with an event after the end: capped at the end.
+      Ola: { startedAt: t(-900), updatedAt: t(-600), endedAt: t(-600), autoExpiredAt: null, eventAt: t(-500) },
+      // Ended with updated_at before the end and an event between: the event counts.
+      Pim: { startedAt: t(-900), updatedAt: t(-850), endedAt: t(-600), autoExpiredAt: null, eventAt: t(-700) },
     };
 
     const workers: Record<string, { id: string; appId: string }> = {};
