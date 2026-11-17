@@ -175,29 +175,47 @@ describe('#4301: a started task shows the settings of the run it is on now', () 
   // #4309 (2): both take the destination worker's per-worker lock first. A gate transaction holds that lock while the
   // first operation starts and is seen waiting on it, then the second starts and is seen waiting too, then the gate
   // releases: contention is real every round and the lock queue fixes the order, so each order runs three times.
-  const waitingOnAdvisoryLocks = async () =>
-    Number((await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`)[0]!.n);
-  const waitUntilWaiting = async (n: number) => {
-    for (let k = 0; k < 400 && (await waitingOnAdvisoryLocks()) < n; k++) await new Promise((r) => setTimeout(r, 25));
-    expect(await waitingOnAdvisoryLocks()).toBeGreaterThanOrEqual(n);
+  /** Waiters on exactly this worker's lock key (workerLock.ts: classid hashtext('agent-task-matcher:worker'), objid hashtext(id)). */
+  const waitingOnWorkerLock = async (w: { id: string }) =>
+    Number((await db.$queryRaw<Array<{ n: bigint }>>`
+      SELECT count(*) AS n FROM pg_locks
+      WHERE locktype = 'advisory' AND NOT granted
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND classid::bigint = (hashtext('agent-task-matcher:worker')::bigint & 4294967295)
+        AND objid::bigint = (hashtext(${w.id})::bigint & 4294967295)`)[0]!.n);
+  const waitUntilWaiting = async (w: { id: string }, n: number) => {
+    for (let k = 0; k < 400 && (await waitingOnWorkerLock(w)) < n; k++) await new Promise((r) => setTimeout(r, 25));
+    expect(await waitingOnWorkerLock(w)).toBe(n);
   };
   async function raceBehindWorkerLock(w: { id: string }, first: () => Promise<unknown>, second: () => Promise<unknown>) {
     let release!: () => void;
     let held!: () => void;
-    const heldP = new Promise<void>((r) => { held = r; });
+    let heldFailed!: (e: unknown) => void;
+    const heldP = new Promise<void>((res, rej) => { held = res; heldFailed = rej; });
     const gate = db.$transaction(async (tx) => {
       await lockWorkersForAssignment(tx as never, [w.id]);
       held();
       await new Promise<void>((r) => { release = r; });
     }, { timeout: 30_000, maxWait: 30_000 });
-    await heldP;
-    const one = first();
-    await waitUntilWaiting(1);
-    const two = second();
-    await waitUntilWaiting(2);
-    release();
-    await gate;
-    await Promise.all([one, two]);
+    gate.catch((e) => heldFailed(e)); // a gate that fails before holding the lock reaches the readiness wait
+    const started: Array<Promise<unknown>> = [gate];
+    // Each racer's rejection is observed at once, so none is left unhandled while the polling runs.
+    const run = (f: () => Promise<unknown>) => { const pr = f(); pr.catch(() => undefined); started.push(pr); };
+    let failure: unknown;
+    try {
+      await heldP;
+      run(first);
+      await waitUntilWaiting(w, 1);
+      run(second);
+      await waitUntilWaiting(w, 2);
+    } catch (e) {
+      failure = e;
+    } finally {
+      release?.(); // always let the gate go, then drain everything that started
+      const settled = await Promise.allSettled(started);
+      if (failure === undefined) for (const r of settled) if (r.status === 'rejected') failure = r.reason;
+    }
+    if (failure !== undefined) throw failure;
   }
 
   it.each([['bind', 'reassignment'], ['reassignment', 'bind']])(
