@@ -23,7 +23,7 @@ import { pathUnderGraphsRoot } from '../localFs/pathUnderGraphsRoot.js';
 import { db as defaultDb } from '../db/client.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
-import { prepareWriteBranch, unpublishedCommitCount } from './gitBranch.js';
+import { prepareWriteBranch, unpublishedCommitCount, quarantineUnpublishedCommits } from './gitBranch.js';
 import { hasIncompleteMirrorMutation } from './mirrorFileMutation.js';
 import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
 import { execGit } from './execGit.js';
@@ -191,6 +191,8 @@ export async function withMirrorCheckout(
       let attemptedBranch: string | undefined;
       let fixedBranch = false;
       let allBranches = true;
+      /** #3234: commits the remote refused that this attempt moved to the local quarantine namespace. */
+      let quarantined = 0;
       const fail = (errorClass: MirrorErrorClass): 'failed' => {
         settlement = { result: 'failed', errorClass };
         return 'failed';
@@ -381,21 +383,44 @@ export async function withMirrorCheckout(
           // `-u` sets upstream tracking so the branch isn't left tracking-less —
           // the original root cause of the "branch already exists" failure.
           // Explicit refspec — see pushMemoryToGit for why a bare name is parsed
-          // rather than used (@codex, PR #1247).
+          // rather than used (@codex, PR #1247). It also means a quarantine ref is never pushed (#3234).
           await execGit(
             ['push', '-u', 'origin', `refs/heads/${branch}:refs/heads/${branch}`],
             { cwd: localPath },
           );
           console.log(`${logPrefix} Pushed ${commitSubject} → ${memory.urn}`);
+        } catch (pushErr) {
+          // #3234: while the remote URL is still usable. Exit 1 is git's "refused by the remote" (a hook, push protection);
+          // a transport failure is 128 and keeps the #2308 behaviour (the commit stays for the retry).
+          if (isRemoteRefusal(pushErr)) {
+            quarantined = await quarantineUnpublishedCommits(localPath, branch, memory.readBranch ?? undefined);
+            if (quarantined > 0) {
+              logQuarantine(logPrefix, memory.id, branch, quarantined);
+              // Nothing in `branch` is rejected-but-unpublished any more, so a batch can now be split honestly: each row
+              // alone, on a branch the rejected commit is not an ancestor of (#3234).
+              if (opts.retry && attemptSeq !== null && obligations.length > 1) {
+                const split = await isolateRetryRows({
+                  db, memoryId: resolvedMemoryId, memory: { id: memory.id, urn: memory.urn, readBranch: memory.readBranch,
+                    orgName: memory.organization.name, orgUrn: memory.organization.urn },
+                  localPath, branch, commitSubject, logPrefix, obligations, mutate, verify: opts.verify,
+                  attemptSeq, maxAttempts: opts.retry.maxAttempts, targetBranch: attemptedBranch,
+                });
+                obligations = split.cleared;
+                if (!split.cleared.length) settlement = null;
+                return split.cleared.length ? 'mirrored' : 'failed';
+              }
+            }
+          }
+          throw pushErr;
         } finally {
           await restoreRemote(localPath, memory.source);
         }
         if (opts.verify && !await opts.verify({ localPath, branch, memoryUrn: memory.urn, memoryId: memory.id, obligations })) return fail('TREE_WRITE');
         return 'mirrored';
       } catch (err) {
-        console.error(`${logPrefix} Commit/push failed for ${commitSubject}`, mirrorFailureMetadata(err, 'push', 'PUSH_FAILED'));
+        console.error(`${logPrefix} Commit/push failed for ${commitSubject}`, mirrorFailureMetadata(err, 'push', quarantined > 0 ? 'PUSH_REJECTED' : 'PUSH_FAILED'));
         await restoreRemote(localPath, memory.source);
-        return fail('PUSH_FAILED');
+        return fail(quarantined > 0 ? 'PUSH_REJECTED' : 'PUSH_FAILED');
       }
       })();
       if (attemptSeq !== null && settlement !== null) await settleMirrorObligations(db, resolvedMemoryId, obligations, settlement, attemptSeq, opts.retry?.maxAttempts, {
@@ -469,4 +494,84 @@ export function branchFitsTemplate(template: string, branch: string): boolean {
   if (at < 0) return branch === template;
   const prefix = template.slice(0, at), suffix = template.slice(at + '{client}'.length);
   return branch.length > prefix.length + suffix.length && branch.startsWith(prefix) && branch.endsWith(suffix);
+}
+
+/** #3234: git exits 1 when the remote refuses a ref (a hook, push protection) and 128 for a transport failure. */
+function isRemoteRefusal(err: unknown): boolean {
+  try { return typeof err === 'object' && err !== null && Object.getOwnPropertyDescriptor(err, 'exitCode')?.value === 1; }
+  catch { return false; }
+}
+
+/**
+ * #3234: the one fixed-class line announcing a blocked branch. Ids and a count only: a refused push is typically push
+ * protection, so neither file names nor content may reach it. Recovery: the quarantine runbook in docs/ops.
+ */
+function logQuarantine(logPrefix: string, memoryId: string, branch: string, commits: number): void {
+  console.error(`${logPrefix} git-mirror.quarantine memory=${memoryId} branch=${branch} commits=${commits} recovery=runbook`);
+}
+
+/**
+ * #3234: after a refused batch was quarantined, publish the rows one at a time. Each starts from the published tip, so a
+ * refusal names exactly that row, and a row the remote accepts is cleared without charging it for its sibling's refusal.
+ * A row the remote refuses is quarantined in turn and charged PUSH_REJECTED; a transport failure stops the split and
+ * charges the unattempted rest PUSH_FAILED (the commit stays for the retry, as in #2308). Failures are settled here on the
+ * attempt's own fence; the cleared rows are returned for the caller's ordinary settle.
+ */
+async function isolateRetryRows(a: {
+  db: PrismaClient; memoryId: string;
+  memory: { id: string; urn: string; readBranch: string | null; orgName: string; orgUrn: string };
+  localPath: string; branch: string; commitSubject: string; logPrefix: string;
+  obligations: readonly MirrorObligationRef[];
+  mutate: (repo: MirrorRepo) => void | boolean | MirrorMutationResult | Promise<void | boolean | MirrorMutationResult>;
+  verify?: (repo: MirrorRepo) => boolean | Promise<boolean>;
+  attemptSeq: bigint; maxAttempts: number; targetBranch?: string;
+}): Promise<{ cleared: MirrorObligationRef[] }> {
+  const cleared: MirrorObligationRef[] = [];
+  const refused: MirrorObligationRef[] = [];
+  const failed: MirrorObligationRef[] = [];
+  const tree: MirrorObligationRef[] = [];
+  const repoFor = (refs: readonly MirrorObligationRef[]): MirrorRepo => ({
+    localPath: a.localPath, branch: a.branch, memoryUrn: a.memory.urn, memoryId: a.memory.id, obligations: refs,
+  });
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: a.memory.orgName, GIT_AUTHOR_EMAIL: `hadron@${a.memory.orgUrn}`,
+    GIT_COMMITTER_NAME: a.memory.orgName, GIT_COMMITTER_EMAIL: `hadron@${a.memory.orgUrn}`,
+  };
+  let stopped = false;
+  for (const ref of a.obligations) {
+    if (stopped) { failed.push(ref); continue; }
+    try {
+      const result = await a.mutate(repoFor([ref]));
+      if (hasIncompleteMirrorMutation(a.localPath)) { tree.push(ref); stopped = true; continue; }
+      if (typeof result === 'object' && result !== null) {
+        const key = JSON.stringify([ref.nodeId, ref.removeLoc ?? '', ref.branch ?? '']);
+        const rowFailed = ref.kind === 'WRITE' ? result.failedWrites.includes(ref.nodeId)
+          : (result.failedRemoves ?? []).some(r => JSON.stringify([r.nodeId, r.removeLoc ?? '', r.branch ?? '']) === key);
+        if (rowFailed) { tree.push(ref); continue; }
+      } else if (result === false) { cleared.push(ref); continue; }
+      await execGit(['add', '-A'], { cwd: a.localPath });
+      const { stdout } = await execGit(['status', '--porcelain'], { cwd: a.localPath });
+      if (stdout.trim()) {
+        await execGit(['commit', '-m', `${a.commitSubject}\n\n[hadron-server]`], { cwd: a.localPath, env: gitEnv });
+        await execGit(['push', '-u', 'origin', `refs/heads/${a.branch}:refs/heads/${a.branch}`], { cwd: a.localPath });
+      }
+      if (a.verify && !await a.verify(repoFor([ref]))) { tree.push(ref); continue; }
+      cleared.push(ref);
+    } catch (err) {
+      if (isRemoteRefusal(err)) {
+        const n = await quarantineUnpublishedCommits(a.localPath, a.branch, a.memory.readBranch ?? undefined);
+        if (n > 0) { logQuarantine(a.logPrefix, a.memory.id, a.branch, n); refused.push(ref); continue; }
+      }
+      console.error(`${a.logPrefix} Row-isolated push failed`, mirrorFailureMetadata(err, 'push', 'PUSH_FAILED'));
+      failed.push(ref); stopped = true; // the commit stays on the branch; later rows would only carry it
+    }
+  }
+  const route = { targetBranch: a.targetBranch };
+  const charge = (refs: MirrorObligationRef[], errorClass: MirrorErrorClass) => refs.length
+    ? settleMirrorObligations(a.db, a.memoryId, refs, { result: 'failed', errorClass }, a.attemptSeq, a.maxAttempts, route) : Promise.resolve();
+  await charge(refused, 'PUSH_REJECTED');
+  await charge(tree, 'TREE_WRITE');
+  await charge(failed, 'PUSH_FAILED');
+  return { cleared };
 }
