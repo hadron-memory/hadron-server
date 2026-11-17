@@ -96,6 +96,16 @@ describe('item 1: the edit door counts the use', () => {
     expect(await view(g)).toMatchObject({ allows: false, useCount: 1 });
     await expect(edit(s.id)).rejects.toBeInstanceOf(GraphQLError);
   });
+  it('a grant stored with a USE event but no count (use_count 0) is refused by the door on the event alone (candidates back-compat clause, LOCAL P3 Arianna)', async () => {
+    const s = await source();
+    const g = await grant({ sourceNode: s.id }, { max_uses: null, use_count: 0 });
+    await db.grantEvent.create({ data: { grantId: g, appId, action: 'USE', workerId } });
+    // by the count it is live (0 < the action's 1): only the USE event says it was spent
+    expect(await view(g)).toMatchObject({ allows: true, useCount: 0 });
+    await expect(edit(s.id)).rejects.toBeInstanceOf(GraphQLError);
+    expect((await row(g)).useCount).toBe(0);
+    expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).content).toBe('original');
+  });
   it('a refused edit spends nothing: the count and the events stay at zero', async () => {
     const s = await source();
     const g = await grant({ sourceNode: s.id }, { activated_at: raw(`${DB_NOW} - interval '61 minutes'`) });
