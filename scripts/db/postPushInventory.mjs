@@ -718,10 +718,15 @@ export function classify(stmt) {
       // own comments would reach classify raw and break its ^-anchored heads
       // — strip them here first (delta3 B7).
       const inner = stripPayloadComments(m[2]);
+      // A PARTIALLY captured EXECUTE — concatenation glued to either side —
+      // is unanalyzable: the tail can carry DDL only the code-only rule
+      // knows, and the loop's replace would hide the verb from it (delta5 D1).
+      const glued =
+        /^\s*\|\|/.test(body.slice(m.index + m[0].length)) || /\|\|\s*$/.test(body.slice(0, m.index));
       // A STATEMENT-LEADING nested DO (payload-in-payload, unextractable
       // here) refuses the block wherever in the string it sits;
       // `ON CONFLICT DO NOTHING` is not one (delta3 B3).
-      if (/(^|;)\s*DO\b/i.test(inner)) out.push({ unrecognized: sql });
+      if (glued || /(^|;)\s*DO\b/i.test(inner)) out.push({ unrecognized: sql });
       else out.push(...classify({ sql: inner }));
       remainder = remainder.replace(m[0], ' ');
     }
@@ -729,9 +734,11 @@ export function classify(stmt) {
       // Same shape as the dollar path (delta3 B7): the outer stripper sees a
       // plain-string payload as string CONTENT, so the payload's own comments
       // survive into the DO test and classify — strip them after unescaping
-      // (delta4 C4).
+      // (delta4 C4). Same concatenation guard as the dollar path (delta5 D1).
       const inner = stripPayloadComments(m[1].replace(/''/g, "'"));
-      if (/(^|;)\s*DO\b/i.test(inner)) out.push({ unrecognized: sql });
+      const glued =
+        /^\s*\|\|/.test(remainder.slice(m.index + m[0].length)) || /\|\|\s*$/.test(remainder.slice(0, m.index));
+      if (glued || /(^|;)\s*DO\b/i.test(inner)) out.push({ unrecognized: sql });
       else out.push(...classify({ sql: inner }));
       remainder = remainder.replace(m[0], ' ');
     }
@@ -742,10 +749,13 @@ export function classify(stmt) {
     // uncaptured shapes count (delta4 C1: CREATE STATISTICS / EVENT TRIGGER /
     // PUBLICATION in a format string were silent; this subsumes the noun
     // list's job for EXECUTE shapes, leaving the bigram to cover assignments
-    // whose DDL runs elsewhere). One disjunctive refusal — a statement
-    // refuses once, however many rules trip.
+    // whose DDL runs elsewhere). The PRIVILEGE spelling is not dynamic SQL:
+    // `GRANT/REVOKE EXECUTE ON FUNCTION …` never carries DDL, and the
+    // dynamic form is never followed by ON (delta5 D3). This final check
+    // refuses at most once — the extraction loops above may each have pushed
+    // their own refusals independently of it (delta5 D4).
     const codeOnly = stripPayloadStrings(remainder);
-    if (/\bEXECUTE\b/i.test(codeOnly) || REMAINDER_DDL.test(codeOnly) || DO_BLOCK_DDL.test(remainder)) out.push({ unrecognized: sql });
+    if (/\bEXECUTE\b(?!\s+ON\b)/i.test(codeOnly) || REMAINDER_DDL.test(codeOnly) || DO_BLOCK_DDL.test(remainder)) out.push({ unrecognized: sql });
     return out;
   }
   if (/^DROP (INDEX|TRIGGER|FUNCTION|VIEW|TABLE|CONSTRAINT|POLICY|SCHEMA|EXTENSION|TYPE|SEQUENCE)\b/i.test(head)) return [];

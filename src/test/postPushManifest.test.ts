@@ -355,10 +355,11 @@ describe('#434 slice B: the delta3 folds — DDL in strings must not vanish (Bro
   it('a column constraint BEFORE the generation expression refuses too (B4)', () => {
     // Postgres accepts column constraints in any order; the lazy capture
     // absorbed the CHECK and the row named the column, losing the constraint.
-    // The positive case asserts ZERO refusals, not one row — a length check
-    // alone passes even if the plain shape wrongly refuses (delta4 C2).
+    // The positive case pins BOTH directions in one assertion (delta5 D2):
+    // exactly one row, and it IS the generated column — a regression to []
+    // (row lost) or to a refusal (over-refusal) both fail it.
     expect(refusals("ALTER TABLE fixture_books ADD COLUMN c text CHECK (c <> '') GENERATED ALWAYS AS (lower(id)) STORED")).toHaveLength(1);
-    expect(refusals('ALTER TABLE fixture_books ADD COLUMN c text GENERATED ALWAYS AS (lower(id)) STORED')).toHaveLength(0);
+    expect(classify({ sql: 'ALTER TABLE fixture_books ADD COLUMN c text GENERATED ALWAYS AS (lower(id)) STORED' })).toMatchObject([{ kind: 'generated-column', name: 'fixture_books.c' }]);
   });
 
   it('block comments in DO payloads are stripped — no token-joining hole, no prose hit (B5)', () => {
@@ -423,6 +424,33 @@ describe('#434 slice B: the delta4 folds — a leftover EXECUTE is unanalyzable 
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({ kind: 'index', name: 'c4_idx' });
     expect(refusals('DO $do$ … $do$;', "BEGIN EXECUTE '/*c*/ DO $$ BEGIN PERFORM 1; END $$'; END")).toHaveLength(1);
+  });
+});
+
+describe('#434 slice B: the delta5 folds — a partially captured EXECUTE is unanalyzable (Brooks D1–D4)', () => {
+  const refusals = (sql: string, payloads?: string) =>
+    classify({ sql, ...(payloads === undefined ? {} : { payloads }) }).filter((c) => 'unrecognized' in c);
+
+  it('an EXECUTE literal glued to || refuses — the tail escapes every other layer (D1)', () => {
+    // The plain loop consumed `EXECUTE 'SELECT 1; '`, classified the fragment
+    // clean, and the replace hid the verb: the concatenated DDL was then
+    // blanked from the code-only text and the bigram does not know
+    // STATISTICS. Silent, in both the plain and dollar spellings.
+    expect(refusals('DO $do$ … $do$;', "BEGIN EXECUTE 'SELECT 1; ' || 'CREATE STATISTICS d1_st ON a, b FROM t'; END")).toHaveLength(1);
+    expect(refusals('DO $do$ … $do$;', "EXECUTE $x$SELECT 1;$x$ || 'CREATE STATISTICS d1b_st ON a, b FROM t'")).toHaveLength(1);
+  });
+
+  it('a bare fragment classifies to a refusal, never a malformed row (D1 note)', () => {
+    // `EXECUTE 'CREATE INDEX ' || n` hands classify a head with no name:
+    // it must fall through to unrecognized (loud), not emit a broken row.
+    expect(refusals('DO $do$ … $do$;', "BEGIN EXECUTE 'CREATE INDEX ' || n; END")).toHaveLength(1);
+  });
+
+  it('GRANT EXECUTE ON in a DO body is a privilege, not dynamic SQL (D3)', () => {
+    // The conditional grant is a common migration idiom; the privilege
+    // spelling is always `EXECUTE ON` and never carries DDL, so it must
+    // keep passing as a recognized non-object.
+    expect(classify({ sql: 'DO $do$ … $do$;', payloads: 'BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $$reader$$) THEN GRANT EXECUTE ON FUNCTION fixture_fn TO reader; END IF; END' })).toEqual([]);
   });
 });
 
