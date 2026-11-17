@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 import { Prisma } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
-import { DB_NOW, dropTestActions, insertGrantUnguarded, raw } from './grantFixtures3668.js';
+import { DB_NOW, dropTestActions, insertGrant, insertGrantUnguarded, raw } from './grantFixtures3668.js';
 import { seedTriggerWorld, triggerGrant, useCount, useEvents, type TriggerWorld } from './triggerGrantFixtures3483.js';
 import { PLATFORM_ACTIONS, upsertPlatformActions, type ActionDefinition } from './actions.js';
 import { coverSql, coverableAction, findCoveringGrants, spendGrant, valueCovers, type CoverableAction } from './cover.js';
@@ -209,6 +209,31 @@ describe('the count rule is a per-action parameter (gate delta 2) and the migrat
     const g = await grantOf(BATCH, 'compiledNode', [w.entryNodeId], { max_uses: 1 });
     await db.$transaction((tx) => spendGrant(tx, g, { appId: w.appId, workerId: w.workerId, sessionId: null }, () => new Error('miss')));
     expect(await ids(coverableAction(BATCH), 'compiledNode', w.entryNodeId)).toEqual([]);
+  });
+});
+
+describe('the old boot door\'s activated_at <= now filter is redundant: no activated grant can be future-dated (BLIND P1, Gabriel)', () => {
+  it('the database refuses a row inserted ACTIVE, and an activation move that is not a completed signature, so no activation time is ever caller-chosen', async () => {
+    await expect(insertGrant(w, { user_id: null, worker_id: w.workerId, action: EDIT, action_values: { sourceNode: w.entryNodeId } as never, max_uses: 1,
+      activated_at: raw(`${DB_NOW} + interval '1 day'`), verification_kind: 'passkey', verified_by: w.userId, issuer_user_id: w.userId })).rejects.toThrow();
+    const pending = await triggerGrant(w, { action: SCHEDULE, activate: false });
+    await expect(db.$executeRawUnsafe(`UPDATE grants SET activated_at = ${DB_NOW} + interval '1 day', verification_kind = 'passkey', verified_by = $2 WHERE id = $1`, pending, w.userId)).rejects.toThrow();
+    const row = await db.$queryRawUnsafe<Array<{ activated_at: Date | null }>>(`SELECT activated_at FROM grants WHERE id = $1`, pending);
+    expect(row[0]!.activated_at).toBeNull();
+  });
+  it('every grant that covers has activated_at at or before the database clock (a covered grant is never "early")', async () => {
+    await grantOf(SCHEDULE, 'entryNode', w.entryNodeId);
+    const rows = await db.$queryRawUnsafe<Array<{ ok: boolean }>>(`SELECT (activated_at <= ${DB_NOW}) AS ok FROM grants WHERE action = $1`, SCHEDULE);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((x) => x.ok)).toBe(true);
+  });
+});
+
+describe('listParameters must name reference parameters (BLIND P2-3, Gabriel)', () => {
+  it('an action whose list flag names a parameter of a non-reference type is refused at the definition', async () => {
+    await expect(upsertPlatformActions(db, [{ ...synthetic('test.s1a.badlist', 'free-text'), listParameters: ['target'] }])).rejects.toThrow(/not a reference type/);
+    await expect(upsertPlatformActions(db, [{ ...synthetic('test.s1a.badlist2', 'node-ref'), listParameters: ['nope'] }])).rejects.toThrow(/unknown parameter/);
+    await expect(upsertPlatformActions(db, [{ ...synthetic('test.s1a.goodlist', 'secret-ref'), listParameters: ['target'] }])).resolves.toBeDefined();
   });
 });
 

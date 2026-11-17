@@ -22,6 +22,9 @@ export interface ActionParameter { name: string; type: string; refusesWildcard: 
  *  - `WORKER_OR_ROLE_AGENT`: the worker, or its role agent's grant, which reaches the agent's live workers (cor:acl:140:06, Decided);
  *  - `NO_WORKER`: a person-held grant, which reaches no agent or worker, even one the person drives (cor:acl:140:06 R5, Decided).
  */
+/** #4162: the parameter types whose value is a reference to something with an id; only these can name a subject, take a list or be covered. */
+export const REFERENCE_PARAMETER_TYPES: ReadonlySet<string> = new Set(['node-ref', 'secret-ref']);
+
 export type GrantReach = 'WORKER' | 'WORKER_OR_ROLE_AGENT' | 'NO_WORKER';
 
 export interface ActionDefinition {
@@ -101,7 +104,10 @@ function validate(list: readonly ActionDefinition[]): void {
     if (!a.issuerRule || !a.summaryTemplate) throw new Error(`action ${a.name}: issuerRule and summaryTemplate are required`);
     if (a.reach !== undefined && !(['WORKER', 'WORKER_OR_ROLE_AGENT', 'NO_WORKER'] as readonly string[]).includes(a.reach)) throw new Error(`action ${a.name}: unknown reach`);
     for (const n of a.listParameters ?? []) {
-      if (!a.parameters.some((p) => p.name === n)) throw new Error(`action ${a.name}: listParameters names unknown parameter ${n}`);
+      const p = a.parameters.find((x) => x.name === n);
+      if (!p) throw new Error(`action ${a.name}: listParameters names unknown parameter ${n}`);
+      // A list on a parameter that is no reference names nothing: the shared check would refuse every act of the action, silently.
+      if (!REFERENCE_PARAMETER_TYPES.has(p.type)) throw new Error(`action ${a.name}: listParameters names ${n}, whose type ${p.type} is not a reference type`);
     }
     for (const [label, v] of [['maxUses', a.maxUses], ['lifetimeSeconds', a.lifetimeSeconds]] as const) {
       if (v !== undefined && (!Number.isSafeInteger(v) || v <= 0 || v > 2147483647)) throw new Error(`action ${a.name}: ${label} must be a positive integer`);

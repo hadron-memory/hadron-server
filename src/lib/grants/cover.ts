@@ -28,7 +28,7 @@
  */
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
-import { PLATFORM_ACTIONS, type ActionParameter, type GrantReach } from './actions.js';
+import { PLATFORM_ACTIONS, REFERENCE_PARAMETER_TYPES, type ActionParameter, type GrantReach } from './actions.js';
 import { chargeGrantUse, grantLiveSql } from './live.js';
 import { workersReachedByGrant } from './reach.js';
 
@@ -51,7 +51,7 @@ export function coverableAction(name: string): CoverableAction {
 }
 
 /** The parameter types whose value is a reference to something with an id; any other type covers nothing. */
-const REFERENCE_TYPES: ReadonlySet<string> = new Set(['node-ref', 'secret-ref']);
+const REFERENCE_TYPES: ReadonlySet<string> = REFERENCE_PARAMETER_TYPES;
 const WILDCARD = '*';
 
 /** Whether a grant's stored value for `param` covers an act that names `id` there. */
@@ -105,8 +105,6 @@ export interface CoverArgs {
   lock?: 'SHARE' | 'UPDATE';
   /** `CAPPED_FIRST`: a capped grant before an uncapped one, then the oldest created (the trigger door); `ACTIVATED`: oldest activation first (the boot-prompt door). */
   order: 'CAPPED_FIRST' | 'ACTIVATED';
-  /** Judge only this grant (the caller already chose it). */
-  onlyId?: string;
 }
 
 export interface CoveringGrant { id: string; maxUses: number | null; issuerUserId: string | null }
@@ -121,11 +119,10 @@ export async function findCoveringGrants(db: Db, a: CoverArgs): Promise<Covering
   const holder = reach === 'WORKER_OR_ROLE_AGENT' && a.roleAgentId
     ? Prisma.sql`(g.worker_id = ${a.workerId} OR g.agent_id = ${a.roleAgentId})`
     : Prisma.sql`g.worker_id = ${a.workerId}`;
-  const only = a.onlyId === undefined ? Prisma.empty : Prisma.sql` AND g.id = ${a.onlyId}`;
   const lock = a.lock === 'UPDATE' ? Prisma.sql` FOR UPDATE` : a.lock === 'SHARE' ? Prisma.sql` FOR SHARE` : Prisma.empty;
   const locked = await db.$queryRaw<Array<{ id: string }>>(Prisma.sql`
     SELECT g.id FROM grants g
-    WHERE g.app_id = ${a.appId} AND g.action = ${a.action.name} AND ${holder} AND ${coverSql(a.action, 'g', a.values)}${only}
+    WHERE g.app_id = ${a.appId} AND g.action = ${a.action.name} AND ${holder} AND ${coverSql(a.action, 'g', a.values)}
     ORDER BY g.id${lock}`);
   if (locked.length === 0) return [];
   const order = a.order === 'CAPPED_FIRST' ? Prisma.sql`(g.max_uses IS NULL), g.created_at, g.id` : Prisma.sql`g.activated_at, g.id`;
