@@ -14,6 +14,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { DB_NOW, dropTestActions, insertGrantUnguarded, raw, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
 import { resolveAppInstallation } from '../../../lib/appInstallations.js';
+import { chargeGrantUse, readGrantForUpdate } from '../../../lib/grants/live.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -322,5 +323,92 @@ describe('expiry while the door waits on the grant row', () => {
     try { await waitForLockWaiters(db as any); await new Promise((r) => setTimeout(r, 2600)); } finally { release(); }
     await blocker; await p;
     expect((await row(id)).departed).toBe(false);
+  }, 30_000);
+});
+
+// #4210 (gate on #4172: "real overlapping-App, issue/use/reinstall interleaves", unclaimed at e8c200e7). Each holds the uninstall
+// INSIDE its transaction (a blocker holds an existing grant row, so the door waits at its last lock phase, after its anchors,
+// installation locks and witness delete) while the other move runs, and judges the end state, not the order.
+describe('#4210 interleaves: a move racing an uninstall that is in flight', () => {
+  /** Start the uninstall and hold it at its grant lock phase. Returns the door's promise and the release. */
+  async function uninstallHeldAtGrantLocks(blockerGrantId: string) {
+    let release!: () => void; let locked!: () => void;
+    const lockedP = new Promise<void>((r) => { locked = r; }); const releaseP = new Promise<void>((r) => { release = r; });
+    const blocker = db.$transaction(async (tx) => { await tx.$queryRaw`SELECT id FROM grants WHERE id = ${blockerGrantId} FOR UPDATE`; locked(); await releaseP; }, { timeout: 20_000 });
+    await lockedP;
+    const door = uninstall(w.appId, w.agentId);
+    await waitForLockWaiters(db as any);
+    return { door, done: async () => { release(); await blocker; return door; } };
+  }
+  const agentGrantsHere = () => db.$queryRaw<Array<{ id: string; departed: boolean }>>(Prisma.sql`
+    SELECT id, holder_departed_at IS NOT NULL AS departed FROM grants WHERE app_id = ${w.appId} AND agent_id = ${w.agentId} ORDER BY id`);
+
+  it('ISSUE: a manager\'s new grant for the agent is refused, or ended, when the uninstall commits first; never left live', async () => {
+    await install(w.appId, w.agentId);
+    const g0 = await held(w.agentId, w.appId);
+    const { done } = await uninstallHeldAtGrantLocks(g0);
+    const issue = M.createGrant({}, { input: { appRef: w.appId, action: 'test.s1a.act', values: {}, holderKind: 'AGENT', holderRef: w.agentId, reason: 'race' } }, ctx())
+      .then(() => 'issued', (e: { extensions?: { code?: string } }) => e.extensions?.code ?? String(e));
+    await waitForLockWaiters(db as any, 2); // the issue waits behind the door (the App lock), not beside it
+    await done();
+    const outcome = await issue;
+    expect(outcome).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    expect((await agentGrantsHere()).every((g) => g.departed)).toBe(true);
+  }, 30_000);
+
+  it('USE: a use that holds the grant row first counts, and the uninstall then ends the grant (no lost use, no live grant)', async () => {
+    await install(w.appId, w.agentId);
+    const g = await held(w.agentId, w.appId, { max_uses: 3 });
+    let release!: () => void; let locked!: () => void;
+    const lockedP = new Promise<void>((r) => { locked = r; }); const releaseP = new Promise<void>((r) => { release = r; });
+    const use = db.$transaction(async (tx) => {
+      const live = await readGrantForUpdate(tx, g); locked(); await releaseP;
+      return live?.live ? chargeGrantUse(tx, g, w.appId) : false;
+    }, { timeout: 20_000 });
+    await lockedP;
+    const door = uninstall(w.appId, w.agentId);
+    try { await waitForLockWaiters(db as any); } finally { release(); }
+    expect(await use).toBe(true);
+    await door;
+    const [r] = await db.$queryRaw<Array<{ use_count: number; departed: boolean }>>(Prisma.sql`
+      SELECT use_count, holder_departed_at IS NOT NULL AS departed FROM grants WHERE id = ${g}`);
+    expect(r).toEqual({ use_count: 1, departed: true });
+  }, 30_000);
+
+  it('USE after the uninstall: a use waiting behind the in-flight uninstall is refused once it commits', async () => {
+    await install(w.appId, w.agentId);
+    const g = await held(w.agentId, w.appId, { max_uses: 3 });
+    const { done } = await uninstallHeldAtGrantLocks(g);
+    const use = db.$transaction(async (tx) => { const live = await readGrantForUpdate(tx, g); return live?.live ? chargeGrantUse(tx, g, w.appId) : false; }, { timeout: 20_000 });
+    await waitForLockWaiters(db as any, 2);
+    await done();
+    expect(await use).toBe(false);
+    expect(await row(g)).toMatchObject({ departed: true });
+  }, 30_000);
+
+  it('REINSTALL: a reinstall racing the in-flight uninstall revives nothing: the old grant ends either way', async () => {
+    await install(w.appId, w.agentId);
+    const g = await held(w.agentId, w.appId);
+    const { done } = await uninstallHeldAtGrantLocks(g);
+    const again = M.installAgentIntoApp({}, { appRef: w.appId, agentRef: w.agentId }, ctx()).then(() => 'installed', (e: Error) => e.message);
+    // Whichever way the reinstall lands (before the door commits, or after it), the old grant ends and stays ended.
+    await new Promise((r) => setTimeout(r, 200));
+    await done();
+    await again;
+    expect(await row(g)).toMatchObject({ departed: true }); // reinstall revives nothing
+  }, 30_000);
+
+  it('OVERLAPPING Apps: the agent is uninstalled from two Apps at once; each ends only its own App\'s grants', async () => {
+    await install(w.appId, w.agentId);
+    await install(w.app2Id, w.agentId);
+    const a = await held(w.agentId, w.appId);
+    const b = await held(w.agentId, w.app2Id);
+    const keep = await held(w.agentId, w.app2Id, { app_id: w.app2Id });
+    await Promise.all([uninstall(w.appId, w.agentId), uninstall(w.app2Id, w.agentId)]);
+    expect([(await row(a)).departed, (await row(b)).departed, (await row(keep)).departed]).toEqual([true, true, true]);
+    await install(w.app2Id, w.agentId);
+    const fresh = await held(w.agentId, w.app2Id);
+    await uninstall(w.appId, w.agentId).catch(() => undefined); // already gone from App 1: no departure in App 2
+    expect((await row(fresh)).departed).toBe(false);
   }, 30_000);
 });

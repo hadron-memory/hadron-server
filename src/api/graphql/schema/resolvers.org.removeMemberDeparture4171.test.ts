@@ -14,6 +14,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { DB_NOW, dropTestActions, insertGrant, insertGrantUnguarded, raw, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
 import { endHeldGrants } from '../../../lib/grants/departure.js';
+import { chargeGrantUse, readGrantForUpdate } from '../../../lib/grants/live.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -190,5 +191,60 @@ describe('expiry while the door waits on the grant row', () => {
     try { await waitForLockWaiters(db as any); await new Promise((r) => setTimeout(r, 2600)); } finally { release(); }
     await blocker; await p;
     expect((await row(id)).departed).toBe(false);
+  }, 30_000);
+});
+
+// #4210 (gate on #4171: "transaction/lock order against grant issue/use and rejoin", unclaimed at e8c200e7). Person-held issue is
+// unreachable from the current creator (gate selections), so the interleaves are a USE and a REJOIN racing a leave that is in flight.
+describe('#4210 interleaves: a move racing an org leave that is in flight', () => {
+  /** Start the leave and hold it at its grant lock phase (a blocker holds `blockerId`). */
+  async function leaveHeldAtGrantLocks(blockerId: string) {
+    let release!: () => void; let locked!: () => void;
+    const lockedP = new Promise<void>((r) => { locked = r; }); const releaseP = new Promise<void>((r) => { release = r; });
+    const blocker = db.$transaction(async (tx) => { await tx.$queryRaw`SELECT id FROM grants WHERE id = ${blockerId} FOR UPDATE`; locked(); await releaseP; }, { timeout: 20_000 });
+    await lockedP;
+    const door = remove();
+    await waitForLockWaiters(db as any);
+    return { done: async () => { release(); await blocker; return door; } };
+  }
+
+  it('USE first: a use holding the grant row counts, and the leave then ends the grant', async () => {
+    const g = await active({ user_id: w.user2Id, app_id: w.appId, max_uses: 3 });
+    let release!: () => void; let locked!: () => void;
+    const lockedP = new Promise<void>((r) => { locked = r; }); const releaseP = new Promise<void>((r) => { release = r; });
+    const use = db.$transaction(async (tx) => {
+      const live = await readGrantForUpdate(tx, g); locked(); await releaseP;
+      return live?.live ? chargeGrantUse(tx, g, w.appId) : false;
+    }, { timeout: 20_000 });
+    await lockedP;
+    const door = remove();
+    try { await waitForLockWaiters(db as any); } finally { release(); }
+    expect(await use).toBe(true);
+    await door;
+    const [r] = await db.$queryRaw<Array<{ use_count: number; departed: boolean }>>(Prisma.sql`
+      SELECT use_count, holder_departed_at IS NOT NULL AS departed FROM grants WHERE id = ${g}`);
+    expect(r).toEqual({ use_count: 1, departed: true });
+  }, 30_000);
+
+  it('USE after: a use waiting behind the in-flight leave is refused once it commits', async () => {
+    const g = await active({ user_id: w.user2Id, app_id: w.appId, max_uses: 3 });
+    const { done } = await leaveHeldAtGrantLocks(g);
+    const use = db.$transaction(async (tx) => { const live = await readGrantForUpdate(tx, g); return live?.live ? chargeGrantUse(tx, g, w.appId) : false; }, { timeout: 20_000 });
+    await waitForLockWaiters(db as any, 2);
+    await done();
+    expect(await use).toBe(false);
+    expect(await row(g)).toMatchObject({ departed: true });
+  }, 30_000);
+
+  it('REJOIN: a rejoin racing the in-flight leave revives nothing: the grant ends either way', async () => {
+    const g = await active({ user_id: w.user2Id, app_id: w.appId });
+    const { done } = await leaveHeldAtGrantLocks(g);
+    // The real rejoin door, while the leave is in flight: it lands before or after the leave commits, never in between.
+    const rejoin = M.addOrgMember({}, { orgId: w.orgId, userId: w.user2Id, role: 'CONTRIBUTOR' }, ctx(admin.id))
+      .then(() => 'rejoined', (e: Error) => e.message);
+    await new Promise((r) => setTimeout(r, 200));
+    await done();
+    await rejoin;
+    expect(await row(g)).toMatchObject({ departed: true });
   }, 30_000);
 });
