@@ -17,6 +17,26 @@
  * replacement session the worker binds later is never ended by an old task's
  * fallback, and a session that ended in the meantime (with a handoff or
  * deliberately without one) resolves the request as `ended`.
+ *
+ * #4223 (S2 of #4229) — A SHORT-LIVED WORKER (cor:agt:050:10's short-lived paragraph, Proposed; Holger's G7 ruling,
+ * hrn:node:hadronmemory.com:hadron-dev-team-shared:coordination:team-on-orca-decisions, log 2026-11-15 15:10). For a
+ * worker whose Agent's lifecycle is SHORT_LIVED, `closeSessionWhenDone` is not read. While any other task assigned to
+ * it is pending or started, one waiting on its child tasks included, nothing is asked: it stays up with its context
+ * (no parking). When the LAST such task finishes or is cancelled, it is asked exactly as above, and the same grace and
+ * the same `worker.end` follow. A worker marked leave-alone (`Worker.leaveAlone`, #4224) keeps the ordinary rule, so
+ * a marked worker is never ended by its Agent's lifecycle. LONG_LIVED, the default, is unchanged.
+ *
+ * REASSIGNED AWAY (Peter, team chat #108497; one Proposed sentence in 050:10): a short-lived worker whose last open
+ * task is reassigned to someone else is asked the same way, by the reassignment's transaction, with the FORMER
+ * assignee as the request's worker. So one task may carry several requests over its life: one each time it leaves a
+ * short-lived worker or ends under a worker (nothing limits it to one per worker: moved away and back, a worker has
+ * two). `AgentTask.sessionEndRequest` shows only the task's current assignee's latest; the former assignee has no
+ * task to read its request on, so it is always woken for it (taskWakes.ts, END_SESSION).
+ *
+ * #4265 — HANDED BACK (cor:agt:050:10 r20, Proposed; Peter, team chat #109434): a short-lived worker that hands back
+ * its last open task (cor:agt:050:29) is asked the same way, by the hand-back's transaction. The task goes back to
+ * the queue with no assignee, so the request is never read on the task: the worker is woken for it, although it made
+ * the hand-back itself, and a later assignee of the re-queued task never reads it.
  */
 
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
@@ -25,6 +45,7 @@ import { toNaiveUtc } from '../sessionActivity.js';
 import type { EventActor } from '../agentTasks/events.js';
 import { HOST_LAPSE_CHECK_INS_DEFAULT, lockAppHostLapse } from '../agentTasks/hosts.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
+import { OPEN_SESSION_PLACEMENT_JOIN } from '../sessionPlacement.js';
 
 /** cor:agt:050:10 — the default grace, in minutes, when the App has not set one. */
 export const SESSION_END_GRACE_DEFAULT_MINUTES = 10;
@@ -32,6 +53,9 @@ export const SESSION_END_GRACE_MIN_MINUTES = 1;
 export const SESSION_END_GRACE_MAX_MINUTES = 1440;
 
 export const SESSION_END_REQUESTED_EVENT = 'task.session-end-requested';
+
+/** How a task left its worker assignee WITHOUT ending (#4223 reassigned away, #4265 handed back). */
+export type SessionEndCause = 'reassigned' | 'handed-back';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -42,24 +66,59 @@ export async function sessionEndGraceMinutes(db: Db, appId: string): Promise<num
 }
 
 /**
- * In the finish's or cancellation's transaction (the task row locked): if the
- * task closes its session when done and its assignee is a worker with an open
- * session, ask it to end that session. Returns the request, or null when
- * nothing is asked (`closeSessionWhenDone` false, a person assignee, no
- * assignee, or no open session: "the session has already ended", 050:10's
- * Proposed edge case, so the worker is simply free).
+ * #4223: is the worker's Agent SHORT_LIVED, and is the worker marked leave-alone? The Agent is the one its open
+ * session was bound under (#2458; the live worker row's when it has none), held FOR SHARE like the context reset
+ * holds `resetContextAfterTask`, so a lifecycle change either committed first or waits for this task write.
+ */
+export async function workerLifecycle(
+  tx: Prisma.TransactionClient, workerId: string,
+): Promise<{ shortLived: boolean; leaveAlone: boolean }> {
+  const [row] = await tx.$queryRaw<{ lifecycle: string; leaveAlone: boolean }[]>`
+    SELECT a.lifecycle::text AS lifecycle, w.leave_alone AS "leaveAlone" FROM workers w
+    ${OPEN_SESSION_PLACEMENT_JOIN}
+    JOIN agents a ON a.id = COALESCE(os.agent_id, w.agent_id) WHERE w.id = ${workerId} FOR SHARE OF a`;
+  return { shortLived: row?.lifecycle === 'SHORT_LIVED', leaveAlone: row?.leaveAlone ?? false };
+}
+
+/**
+ * In the finish's, cancellation's, reassignment's or hand-back's transaction (the task row locked, and the assignee's per-worker assignment lock
+ * held, which every assignment, start, finish and cancel takes: src/lib/agentTasks/workerLock.ts): ask the task's
+ * worker assignee to end its open session, if the rule says so. Returns the request, or null when nothing is asked.
+ *
+ * The rule: for a short-lived worker (#4223, see the file header), this was the LAST pending or started task
+ * assigned to it; for every other worker, the task's `closeSessionWhenDone` is yes. Never asked of a person
+ * assignee, with no assignee, or with no open session ("the session has already ended", 050:10's Proposed edge
+ * case, so the worker is simply free). The count of other open tasks is read under the per-worker lock, so of two
+ * tasks of one worker ending at once the second sees the first ended, and exactly one of them asks.
  */
 export async function requestSessionEnd(
   tx: Prisma.TransactionClient,
   args: {
     appId: string;
+    /** The task as it was BEFORE this write: `assigneeWorkerId` is the worker that finished it, had it cancelled, or lost it. */
     task: { id: string; closeSessionWhenDone: boolean; assigneeWorkerId: string | null };
     actor: EventActor;
     now: Date;
+    /**
+     * The task did not end. `reassigned`: it moved to another assignee (the caller holds the former assignee's
+     * per-worker lock too). `handed-back` (#4265): its assignee returned it to the queue. Only the lifecycle asks
+     * then; `closeSessionWhenDone` is about the task's end.
+     */
+    cause?: SessionEndCause;
   },
 ): Promise<{ id: string; sessionId: string; dueAt: Date } | null> {
   const { task, now } = args;
-  if (!task.closeSessionWhenDone || !task.assigneeWorkerId) return null;
+  if (!task.assigneeWorkerId) return null;
+  const { shortLived, leaveAlone } = await workerLifecycle(tx, task.assigneeWorkerId);
+  const byLifecycle = shortLived && !leaveAlone;
+  if (byLifecycle) {
+    const otherOpen = await tx.agentTask.count({
+      where: { assigneeWorkerId: task.assigneeWorkerId, status: { in: ['pending', 'started'] }, id: { not: task.id } },
+    });
+    if (otherOpen > 0) return null;
+  } else if (args.cause || !task.closeSessionWhenDone) {
+    return null;
+  }
   const [session] = await tx.$queryRaw<{ id: string }[]>`
     SELECT id FROM sessions
     WHERE worker_id = ${task.assigneeWorkerId} AND ended_at IS NULL AND deleted_at IS NULL
@@ -80,7 +139,9 @@ export async function requestSessionEnd(
       actorAgentId: args.actor.agentId,
       actorRunId: args.actor.runId ?? null,
       subjectWorkerId: task.assigneeWorkerId,
-      payload: { sessionId: session.id, dueAt: dueAt.toISOString(), graceMinutes: grace },
+      // #4223: `lifecycle` is present exactly when the Agent's lifecycle, not the task's closeSessionWhenDone, asked;
+      // `cause` exactly when the task did not end but was reassigned away or (#4265) handed back.
+      payload: { sessionId: session.id, dueAt: dueAt.toISOString(), graceMinutes: grace, ...(byLifecycle ? { lifecycle: 'SHORT_LIVED' } : {}), ...(args.cause ? { cause: args.cause } : {}) },
       createdAt: now,
     },
   });

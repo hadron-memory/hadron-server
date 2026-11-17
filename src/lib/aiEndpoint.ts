@@ -57,6 +57,20 @@ export const AI_PROVIDER_ENDPOINTS: Record<AiProvider, readonly AiProviderEndpoi
       note: 'Pay-as-you-go on a Zhipu BigModel account.',
     },
   ],
+  kimi: [
+    {
+      url: 'https://api.moonshot.ai/v1',
+      label: 'Moonshot (international)',
+      isDefault: true,
+      note: 'Pay-as-you-go on an international Moonshot account.',
+    },
+    {
+      url: 'https://api.moonshot.cn/v1',
+      label: 'Moonshot (China)',
+      isDefault: false,
+      note: 'Pay-as-you-go on a China Moonshot account.',
+    },
+  ],
   bedrock: [],
   // No suggestions and no default: the host IS the configuration.
   'openai-compatible': [],
@@ -127,6 +141,7 @@ export type AiApiStyle = (typeof AI_API_STYLES)[number];
 const DEFAULT_API_STYLE: Partial<Record<string, AiApiStyle>> = {
   openai: 'RESPONSES',
   glm: 'CHAT_COMPLETIONS',
+  kimi: 'CHAT_COMPLETIONS',
   // What almost every compatible host serves; RESPONSES is one apiStyle away.
   'openai-compatible': 'CHAT_COMPLETIONS',
 };

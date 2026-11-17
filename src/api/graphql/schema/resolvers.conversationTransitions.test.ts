@@ -519,7 +519,10 @@ describe('Edge evaluation in processChatResponse', () => {
         sourceId: nodeIds['conversations:main:check'],
         targetId: nodeIds['conversations:profile'],
         name: 'Fill profile if missing',
-        // Use a Boolean-valued condition: bare missing returns an array, currently coerced with Boolean by the evaluator.
+        // Use a Boolean-valued condition so this test does not rest on `missing`'s array-valued result: that array's
+        // final coercion was its own bug, fixed by #4059 (merge c2ec377713, closing #4056) — historical context, not
+        // an outstanding evaluator bug — and pinned separately in evaluator.test.ts, selectNextEdge.test.ts and the
+        // #4056 V85 test below (#4102).
         condition: { '!': { var: 'memory.business_type' } },
         data: {
           timing: 'on_complete',
