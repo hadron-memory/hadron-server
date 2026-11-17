@@ -86,7 +86,7 @@ import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
 
 import { normalizeFamily } from '../../../lib/agentTasks/family.js';
 import {
-  checkRunSettingsAgainst, RunSettingsError, stampAppliedRunSettings, taskRunSettingsOf, validateTaskRunSettings, type TaskRunSettings,
+  checkRunSettingsAgainst, restampAppliedRunSettings, RunSettingsError, stampAppliedRunSettings, taskRunSettingsOf, validateTaskRunSettings, type TaskRunSettings,
 } from '../../../lib/agentTasks/runSettings.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
@@ -2663,6 +2663,8 @@ export const agentTaskMutations = {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
         event: { type: 'task.reassigned', from, to: party, closeSessionWhenDone: close },
       });
+      // #4301: a started task shows the run it is on now, so the previous assignee's applied settings do not stay.
+      if (task.status === 'started') await restampAppliedRunSettings(tx, task.id);
       // #4223 (cor:agt:050:10, Proposed; Peter, team chat #108497): a short-lived worker whose last open task moves
       // away is asked to end its session, as on a finish or a cancel. `task` is the row before the move, so its
       // assignee is the worker that lost it; that worker's per-worker lock is held (`assignee: true`).

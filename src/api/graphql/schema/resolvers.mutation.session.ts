@@ -117,7 +117,7 @@ import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
-import { effortFromToken, isEffortLevel, recordRunSettings, type EffortLevel } from '../../../lib/agentTasks/runSettings.js';
+import { effortFromToken, fillEmptyAppliedRunSettings, isEffortLevel, recordRunSettings, type EffortLevel } from '../../../lib/agentTasks/runSettings.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
@@ -1594,7 +1594,11 @@ export const sessionMutations = {
         // whole bind rolls back.
         if (launch && !(await consumeGrant(tx, launch.grant.id, created.id, new Date()))) throw launchGrantInvalid();
         // #4291: the bind is the first report; the worker's record follows it (the worker row is held FOR UPDATE above).
-        if (workerId) await recordRunSettings(tx, created.id);
+        if (workerId) {
+          await recordRunSettings(tx, created.id);
+          // #4301: a started task reassigned to this worker while it had no session now shows this run.
+          await fillEmptyAppliedRunSettings(tx, created.id);
+        }
         // #1726: set who the worker reports to, in one step with the bind (a
         // spawn brief). Only onto a worker that reports to nobody, or to the
         // same worker (nothing to do): naming a different one would move a
