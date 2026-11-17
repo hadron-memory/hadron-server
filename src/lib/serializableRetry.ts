@@ -65,3 +65,36 @@ export async function retryOnSerializationFailure<T>(
     }
   }
 }
+
+/**
+ * #4318: true when `e` is Postgres's deadlock abort (SQLSTATE 40P01) as Prisma reports it from a raw statement (P2010 with
+ * `meta.code === '40P01'`, the form a locking `$queryRaw` raises), or from a model operation / the transaction (P2034,
+ * Prisma's "write conflict or a deadlock", whose message names the deadlock). Deliberately SEPARATE from
+ * {@link isSerializationFailure}: widening that predicate would change the behaviour of every existing caller.
+ */
+export function isDeadlock(e: unknown): boolean {
+  if (!(e instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  if (e.code === 'P2010') return (e.meta as { code?: unknown } | undefined)?.code === '40P01';
+  return e.code === 'P2034' && /deadlock/i.test(e.message);
+}
+
+/** #4318: how many times a deadlocked transaction is re-run (four attempts in all) before the 40P01 surfaces as today. */
+export const DEADLOCK_RETRIES = 3;
+
+/**
+ * Runs `run`, which must open ONE transaction and have no effect outside the database, and re-runs it when Postgres aborts
+ * it as a deadlock. A 40P01 aborts the WHOLE transaction, so the retry must wrap the transaction itself (never a step
+ * inside it): each attempt is fresh, takes its locks again and re-reads under them, and nothing from the aborted attempt
+ * survives. The same full-jitter wait as {@link retryOnSerializationFailure}, so two transactions that deadlocked each
+ * other do not retry in lockstep. After {@link DEADLOCK_RETRIES} retries the error is rethrown unchanged.
+ */
+export async function retryOnDeadlock<T>(run: () => Promise<T>, retries: number = DEADLOCK_RETRIES): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await run();
+    } catch (e) {
+      if (!isDeadlock(e) || attempt > retries) throw e;
+      await waitForSerializationRetry(attempt);
+    }
+  }
+}
