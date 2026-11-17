@@ -360,18 +360,23 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     let inFlight = 0;
     let maxInFlight = 0;
     const roles = [F.ROLES.serve, F.ROLES.owner, F.ROLES.other];
-    // Every probe goes through here, so the in-flight count covers the background loop and the checkpoint alike. The refusal
-    // text is kept: a limit or transport failure must not pass for an ACL refusal.
-    const probe = async (role: string): Promise<{ connected: boolean; error: string | null }> => {
+    // Every probe goes through here, so the in-flight count covers the background loop and the checkpoint alike. Admission is
+    // recorded the moment connect() resolves, whatever happens to the close; a refusal keeps its SQLSTATE and text (a limit or
+    // transport failure must not pass for an ACL refusal, and the code does not depend on the server's locale).
+    type Probe = { connected: boolean; code: string | null; error: string | null };
+    const probe = async (role: string): Promise<Probe> => {
       inFlight++;
       maxInFlight = Math.max(maxInFlight, inFlight);
       const c = new Client({ connectionString: B.url(target, role, F.PASSWORD), connectionTimeoutMillis: 2_000 });
       try {
-        await c.connect();
-        await c.end();
-        return { connected: true, error: null };
-      } catch (e) {
-        return { connected: false, error: (e as Error).message };
+        try {
+          await c.connect();
+        } catch (e) {
+          await c.end().catch(() => undefined); // release whatever a refused or timed-out connect left open
+          return { connected: false, code: (e as { code?: string } | null)?.code ?? null, error: String((e as Error | null)?.message ?? e) };
+        }
+        await c.end().catch(() => undefined); // a failed close must not hide that the connect was admitted
+        return { connected: true, code: null, error: null };
       } finally {
         inFlight--;
       }
@@ -379,18 +384,20 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     // One loop, roles in turn: at most ONE background probe in flight, so the probes can never take the slots pg_restore
     // needs. (Three parallel loops did, and refused pg_restore's own connection: 'too many connections for database'.)
     // Its failure is captured the moment it happens, so it can neither go unhandled nor mask a restore error.
-    let probeFailure: unknown = null;
     const probeLoop = (async () => {
       for (let i = 0; !stop; i++) {
         const role = roles[i % roles.length]!;
         if ((await probe(role)).connected) events.push({ at: performance.now(), what: role });
         await new Promise((r) => setTimeout(r, 5));
       }
-    })().catch((e) => { probeFailure = e; });
+    })().then(
+      () => ({ failed: false as const }),
+      (reason: unknown) => ({ failed: true as const, reason }), // tagged, so even a falsy rejection is rethrown
+    );
     // Coverage that cannot race the restore: at the 'fenced' checkpoint (ACL fence done, admission on, pg_restore not yet
     // started) each role is probed once, in turn, and must be refused for lack of CONNECT. The log hook is awaited by the
     // caller; the S3 event below proves it (the checkpoint is complete before the restore reports S3).
-    const checkpoint: Record<string, { connected: boolean; error: string | null }> = {};
+    const checkpoint: Record<string, Probe> = {};
     let checkpointCompleteAtS3 = false;
     try {
       await restoreWithRebase(
@@ -407,9 +414,10 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     } finally {
       // Stop and join the loop even when the restore throws; the restore's own error still propagates.
       stop = true;
-      await probeLoop;
+      await probeLoop; // never rejects: its outcome is tagged
     }
-    if (probeFailure) throw probeFailure;
+    const loopOutcome = await probeLoop;
+    if (loopOutcome.failed) throw loopOutcome.reason;
     // 'releasing' is logged immediately before the release statement is sent: no connect may succeed before it.
     expect(releasingAt).toBeLessThan(Infinity);
     const early = events.filter((e) => e.at < releasingAt);
@@ -422,6 +430,7 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     expect(checkpointCompleteAtS3).toBe(true);
     for (const role of roles) {
       expect(checkpoint[role]?.connected).toBe(false);
+      expect(checkpoint[role]?.code).toBe('42501'); // insufficient_privilege: the ACL fence, not the limit (53300) or the network
       expect(checkpoint[role]?.error).toMatch(/permission denied for database/);
     }
   });
