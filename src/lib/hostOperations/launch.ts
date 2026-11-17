@@ -32,7 +32,7 @@
  */
 
 import { normalizeFamily } from '../agentTasks/family.js';
-import { loadWorkerRunRecord, resolveStartSettings, runFamilyOf, taskRunSettingsOf, type StartSettings } from '../agentTasks/runSettings.js';
+import { loadWorkerRunRecord, resolveStartSettings, runFamilyOf, taskRunSettingsOf, type StartSettings, type TaskRunSettings } from '../agentTasks/runSettings.js';
 import { afterWaits, anchorNow, coveringSignals, lockStopFence } from '../stopSignals/state.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
@@ -107,7 +107,8 @@ function profileArgs(p: LauncherProfile | null | undefined): Record<string, stri
 
 /**
  * #4291 (cor:agt:070:08, Proposed) — the settings a platform start of `workerId` on `reg` carries: the task's own
- * setting first, then the worker's record, and for an empty record the host's own statement (`reg.family` and, under
+ * setting first (for a SHORT_LIVED worker only, #4302: `launchTaskSettings`), then the worker's record, and for an
+ * empty record the host's own statement (`reg.family` and, under
  * `server`, the assignment's launcher profile). Read on the start's transaction, under its worker row lock, so a
  * session that reports while this start is decided is ordered with it. Pure resolution: `resolveStartSettings`.
  */
@@ -115,10 +116,26 @@ export async function startSettingsFor(
   tx: Prisma.TransactionClient, workerId: string, taskId: string | null, reg: { family: string; profile: LauncherProfile | null },
 ): Promise<StartSettings> {
   const record = await loadWorkerRunRecord(tx, workerId);
-  const task = taskId
-    ? taskRunSettingsOf(await tx.agentTask.findUnique({ where: { id: taskId }, select: { runFamily: true, runModel: true, runTier: true, runEffort: true } }))
-    : null;
+  const task = taskId ? await launchTaskSettings(tx, workerId, taskId) : null;
   return resolveStartSettings(task, record, { family: reg.family, model: reg.profile?.model ?? null, effort: reg.profile?.effort ?? null });
+}
+
+/**
+ * #4302 — the task's own run settings a platform start of `workerId` applies: the task's, for a SHORT_LIVED worker
+ * only. A LONG_LIVED worker starts as its record says, whatever the task names (decision 10 of the run-settings
+ * record: a change to a long-lived worker applies at its next relaunch, and a human triggers it). This is the SAME
+ * lifecycle rule the matcher judges a task's settings by (`launchSets`, `stillFreeAs`), so a start never runs as a
+ * family, tier or model the match did not judge. The override is then simply not applied: the task's read shows it
+ * beside the settings the run used, and it does not become the worker's last used.
+ *
+ * The lifecycle is the Agent's as it is when the start is issued, read in the start's transaction as the start's own
+ * `lifecycle` argument is (insertWorkerStart).
+ */
+export async function launchTaskSettings(tx: Prisma.TransactionClient, workerId: string, taskId: string): Promise<TaskRunSettings | null> {
+  const [row] = await tx.$queryRaw<{ lifecycle: string }[]>`
+    SELECT ag.lifecycle::text AS lifecycle FROM workers w JOIN agents ag ON ag.id = w.agent_id WHERE w.id = ${workerId}`;
+  if (row?.lifecycle !== 'SHORT_LIVED') return null;
+  return taskRunSettingsOf(await tx.agentTask.findUnique({ where: { id: taskId }, select: { runFamily: true, runModel: true, runTier: true, runEffort: true } }));
 }
 
 /**
@@ -302,7 +319,8 @@ export async function launchForAssignment(
       // While neither settles it (an empty record), the host's own statement is the family, exactly as before: the
       // matcher's family, when it named one, still picks the host, so a start never runs as another family than matched.
       const regs = (await liveRegistrationsFor(tx, a.appId, a.workerId, now)).filter((r) => r.worktrees.length > 0);
-      const taskRun = taskRunSettingsOf(await tx.agentTask.findUnique({ where: { id: a.taskId }, select: { runFamily: true, runModel: true, runTier: true, runEffort: true } }));
+      // #4302: the task's settings count only for a SHORT_LIVED worker, here as in the args (launchTaskSettings).
+      const taskRun = await launchTaskSettings(tx, a.workerId, a.taskId);
       const settled = runFamilyOf(taskRun) ?? (await loadWorkerRunRecord(tx, a.workerId)).family;
       const reg = settled
         ? regs.find((r) => r.family === settled) ?? regs[0]
