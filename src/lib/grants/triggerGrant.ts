@@ -22,9 +22,7 @@ import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { boundWorkerId } from '../bootPrompt.js';
 import { currentActorAmbiguity } from '../requestActor.js';
-import { generateId } from '../id.js';
-import { GRANT_DB_NOW, chargeGrantUse, grantLiveSql } from './live.js';
-import { workersReachedByGrant } from './reach.js';
+import { coverableAction, findCoveringGrants, spendGrant } from './cover.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -87,19 +85,6 @@ export async function workerBoundActor(ctx: Pick<Context, 'db' | 'sessionId' | '
   };
 }
 
-interface Candidate { id: string; max_uses: number | null; live: boolean }
-
-/** The candidate rows for one act: this action, this App, this entry node (a single value or a list holding it), held by the worker or its agent. */
-function candidatesSql(appId: string, action: TriggerGrantAction, entryNodeId: string, workerId: string, agentId: string, lock: boolean): Prisma.Sql {
-  const filter = Prisma.sql`g.app_id = ${appId} AND g.action = ${action}
-    AND (g.action_values -> 'entryNode' = to_jsonb(${entryNodeId}::text)
-      OR (jsonb_typeof(g.action_values -> 'entryNode') = 'array' AND g.action_values -> 'entryNode' ? ${entryNodeId}))
-    AND (g.worker_id = ${workerId} OR g.agent_id = ${agentId})`;
-  return lock
-    ? Prisma.sql`SELECT g.id FROM grants g WHERE ${filter} ORDER BY g.id FOR UPDATE`
-    : Prisma.sql`SELECT g.id FROM grants g WHERE ${filter}`;
-}
-
 /**
  * The grant this act would use, or null. With `lock`, the worker row is taken FOR SHARE first (a `retireWorker` that committed
  * is seen; one that comes next waits), then the candidates FOR UPDATE in id order as the LAST lock, and only then are they
@@ -117,15 +102,14 @@ export async function findAdmittingGrant(
     : await db.$queryRaw<Array<{ agent_id: string; app_id: string; retired_at: Date | null }>>`SELECT agent_id, app_id, retired_at FROM workers WHERE id = ${actor.workerId}`;
   const worker = workers[0];
   if (!worker || worker.app_id !== appId || worker.retired_at !== null) return null;
-  const locked = await db.$queryRaw<Array<{ id: string }>>(candidatesSql(appId, action, entryNodeId, actor.workerId, worker.agent_id, lock));
-  if (locked.length === 0) return null;
-  const judged = await db.$queryRaw<Candidate[]>(Prisma.sql`
-    SELECT g.id, g.max_uses, ${grantLiveSql('g')} AS live FROM grants g
-    WHERE g.id IN (${Prisma.join(locked.map((r) => r.id))})
-    ORDER BY (g.max_uses IS NULL), g.created_at, g.id`);
-  for (const g of judged) {
-    if (!g.live || !sessionMayUseGrant(g.max_uses, actor.hostLaunched)) continue;
-    if ((await workersReachedByGrant(db, g.id)).includes(actor.workerId)) return g.id;
+  // #4162: which grants cover this act is the shared check's question (cover.ts), with this door's parameters: reach is the worker or
+  // its role agent (cor:acl:140:06), the entry node may be a single id or a list, a capped grant first, then the oldest.
+  const found = await findCoveringGrants(db, {
+    appId, action: coverableAction(action), workerId: actor.workerId, roleAgentId: worker.agent_id,
+    values: { entryNode: entryNodeId }, order: 'CAPPED_FIRST', lock: lock ? 'UPDATE' : undefined,
+  });
+  for (const g of found) {
+    if (sessionMayUseGrant(g.maxUses, actor.hostLaunched)) return g.id;
   }
   return null;
 }
@@ -140,12 +124,9 @@ export async function spendTriggerGrant(
   grantId: string,
   record: { appId: string; workerId: string; sessionId: string | null },
 ): Promise<void> {
-  // The predicate and the guard read the clock separately (and the guard rounds it to timestamp(3)), so a grant can pass the
-  // predicate and have expired when the guard judges it. That is a miss like any other: the ONE refusal.
-  if (!(await chargeGrantUse(tx, grantId, record.appId))) throw triggerGrantRequired();
-  await tx.grantEvent.create({
-    data: { id: generateId(), grantId, appId: record.appId, action: 'USE', workerId: record.workerId, sessionId: record.sessionId },
-  });
+  // The shared spend (cover.ts): the predicate and the guard read the clock separately (the guard rounds it to timestamp(3)), so a grant
+  // can pass the predicate and have expired when the guard judges it. That is a miss like any other: the ONE refusal.
+  await spendGrant(tx, grantId, record, triggerGrantRequired);
 }
 
 /**
