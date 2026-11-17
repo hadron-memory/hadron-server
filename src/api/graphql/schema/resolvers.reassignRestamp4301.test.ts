@@ -14,6 +14,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 import { matchQueuedTasks } from '../../../lib/agentTasks/matcher.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
@@ -158,6 +159,7 @@ describe('#4301: a started task shows the settings of the run it is on now', () 
     ['family', { appliedFamily: 'claude' }, { family: 'claude', model: null, effort: null }],
     ['model', { appliedModel: 'claude-sonnet-5-5' }, { family: null, model: 'claude-sonnet-5-5', effort: null }],
     ['effort', { appliedEffort: 'LOW' }, { family: null, model: null, effort: 'LOW' }],
+    ['family and effort', { appliedFamily: 'claude', appliedEffort: 'LOW' }, { family: 'claude', model: null, effort: 'LOW' }],
     ['family and model', { appliedFamily: 'claude', appliedModel: 'claude-sonnet-5-5' }, { family: 'claude', model: 'claude-sonnet-5-5', effort: null }],
     ['model and effort', { appliedModel: 'claude-sonnet-5-5', appliedEffort: 'LOW' }, { family: null, model: 'claude-sonnet-5-5', effort: 'LOW' }],
   ])('a partial stamp (%s set) is kept as it was by a later bind of the assignee', async (_name, partial, expected) => {
@@ -170,23 +172,51 @@ describe('#4301: a started task shows the settings of the run it is on now', () 
     expect(await stored(t.id)).toEqual(expected);
   });
 
-  // #4309 (2): both take the destination worker's per-worker lock first, so run at once they serialize, and either
-  // order ends with the destination's session values.
-  it('a bind of W and a reassignment of a started task to W, run together and repeated: no deadlock, W\'s values', async () => {
-    const s = await bindAs(kit, CLAUDE);
-    for (let i = 0; i < 6; i++) {
-      const t = await assignTo(kit);
-      await runAsActor({ workerId: kit.id, agentId: longAgent }, () => M.startAgentTask({}, { taskId: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
-      expect((await row(t.id)).status).toBe('started');
-      const open = await db.session.findMany({ where: { workerId: sam.id, endedAt: null } });
-      for (const o of open) await M.endSession({}, { id: o.id }, ctx(bo.id));
-      const racers = [() => bindAs(sam, CODEX), () => reassign(t.id, { worker: sam.id })];
-      if (i % 2) racers.reverse();
-      await Promise.all(racers.map((f) => f()));
-      expect(await assigneeOf(t.id)).toBe(sam.id);
-      expect(await applied(t.id)).toEqual(CODEX);
-    }
-  }, 60_000);
+  // #4309 (2): both take the destination worker's per-worker lock first. A gate transaction holds that lock while the
+  // first operation starts and is seen waiting on it, then the second starts and is seen waiting too, then the gate
+  // releases: contention is real every round and the lock queue fixes the order, so each order runs three times.
+  const waitingOnAdvisoryLocks = async () =>
+    Number((await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`)[0]!.n);
+  const waitUntilWaiting = async (n: number) => {
+    for (let k = 0; k < 400 && (await waitingOnAdvisoryLocks()) < n; k++) await new Promise((r) => setTimeout(r, 25));
+    expect(await waitingOnAdvisoryLocks()).toBeGreaterThanOrEqual(n);
+  };
+  async function raceBehindWorkerLock(w: { id: string }, first: () => Promise<unknown>, second: () => Promise<unknown>) {
+    let release!: () => void;
+    let held!: () => void;
+    const heldP = new Promise<void>((r) => { held = r; });
+    const gate = db.$transaction(async (tx) => {
+      await lockWorkersForAssignment(tx as never, [w.id]);
+      held();
+      await new Promise<void>((r) => { release = r; });
+    }, { timeout: 30_000, maxWait: 30_000 });
+    await heldP;
+    const one = first();
+    await waitUntilWaiting(1);
+    const two = second();
+    await waitUntilWaiting(2);
+    release();
+    await gate;
+    await Promise.all([one, two]);
+  }
+
+  it.each([['bind', 'reassignment'], ['reassignment', 'bind']])(
+    'a concurrent %s then %s on one destination worker, queued on its lock: no deadlock, the task ends stamped with the destination session\'s settings',
+    async (firstOp) => {
+      const s = await bindAs(kit, CLAUDE);
+      for (let i = 0; i < 3; i++) {
+        const t = await assignTo(kit);
+        await runAsActor({ workerId: kit.id, agentId: longAgent }, () => M.startAgentTask({}, { taskId: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
+        expect((await row(t.id)).status).toBe('started');
+        const open = await db.session.findMany({ where: { workerId: sam.id, endedAt: null } });
+        for (const o of open) await M.endSession({}, { id: o.id }, ctx(bo.id));
+        const doBind = () => bindAs(sam, CODEX);
+        const doReassign = () => reassign(t.id, { worker: sam.id });
+        await (firstOp === 'bind' ? raceBehindWorkerLock(sam, doBind, doReassign) : raceBehindWorkerLock(sam, doReassign, doBind));
+        expect(await assigneeOf(t.id)).toBe(sam.id);
+        expect(await applied(t.id)).toEqual(CODEX);
+      }
+    }, 60_000);
 
   it('a bind fills only its own worker\'s STARTED tasks: not a pending one, another assignee\'s, or an ended one', async () => {
     const { t } = await startedByKit();
