@@ -1582,7 +1582,9 @@ export const typeDefs = `#graphql
     "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:06) — the node's signatures and their derived states, current signers first. Batch-loaded on list and search reads. An encrypted node reads NOT_APPLICABLE and lists none."
     signatureStatus: NodeSignatureStatus!
     "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — the node's signing requests, newest first, including ended ones (#10019). state filters on the effective state (an open request past its deadline is EXPIRED). first: 1–100, default 20."
-    signingRequests(state: SigningRequestState, first: Int = 20): [SigningRequest!]!
+    signingRequests(state: SigningRequestState, first: Int = 20): [SigningRequest!]! @deprecated(reason: "Use signingRequestsPage for hasMore and nextCursor.")
+    "The node's signing requests with the same reader gate; effective-state filtering precedes paging. Newest first (createdAt, id descending). Default 20, clamp 1–100; after is an authenticated filter-scoped keyset (createdAt, id), valid after deletion of the boundary row. offset is an alternative, never combined with after. total counts the full current filtered set. hrn:node:hadronmemory.com:specs:cor:api:120:04; hrn:node:hadronmemory.com:specs:cor:api:120:05."
+    signingRequestsPage(state: SigningRequestState, first: Int = 20, after: String, offset: Int): SigningRequestsPage!
     "#1610 — the Worker that created this node, when it was written in a worker session. The user is createdBy. Null for a write with no worker behind it, and for nodes written before #1610."
     createdByWorker: ActorRef
     "#1610 — the Agent behind this node's creation: a worker's role agent, an agent session, or a headless App run. Null when no agent was behind it."
@@ -3286,9 +3288,8 @@ export const typeDefs = `#graphql
     installed; \`appAgents\` lists every install, an entry whose \`agent\` is null
     being an installed Agent withheld from this caller.
 
-    null can also mean WITHHELD from this caller (#2089): an impersonated caller, or a
-    caller who reaches the App only by another route. A current owner-role member of a
-    user-owned App reads them as the owning user does (ruling 0260, #3765).
+    A caller who reaches a user-owned App only as an owner-role member gets null on
+    both for a different reason: WITHHELD (#2089). Render it as unknown.
     """
     agentId: ID
     agent: Agent
@@ -3312,9 +3313,9 @@ export const typeDefs = `#graphql
     installedAgentUrn: String
     trainingMode: Boolean!
     surfaces: [String!]!
-    "The App's members. null means WITHHELD from this caller (#2089): an impersonated caller, or one who reaches a user-owned App only by an outer-object route. Never read null as an empty roster. The App's owning user, a current owner-role member of a user-owned App (ruling 0260, #3765), and callers of an org-owned App get the real list (a real empty list included)."
+    "The App's members. null means WITHHELD from this caller (#2089): a user-owned App's owner-role member reaches the App record but not its roster. Never read null as an empty roster. The App's owning user, and callers of an org-owned App, get the real list (a real empty list included)."
     members: [AppMember!]
-    "Member count. null means WITHHELD from this caller (#2089), never zero; the real count (a real 0 included) for callers who may see the roster, a current owner-role member of a user-owned App among them (ruling 0260, #3765)."
+    "Member count. null means WITHHELD from this caller (#2089), never zero; the real count (a real 0 included) for callers who may see the roster."
     memberCount: Int
     """
     The App's SHARED app-class memory (#965) — the team space the shared/team
@@ -3341,7 +3342,7 @@ export const typeDefs = `#graphql
     aiProvider: String
     "null can mean WITHHELD from this caller (#2089), not only that it is not configured."
     aiModel: String
-    "Whether an AI API key is configured for this App. null means WITHHELD from this caller (#2089): only the owning user of a user-owned App holds its AI configuration, an owner-role member of it included (the one carve-out hrn:node:hadronmemory.com:specs:cor:dmo:050:12 states; ruling 0260). Never read null as false; a real false means no key."
+    "Whether an AI API key is configured for this App. null means WITHHELD from this caller (#2089): only the owning user of a user-owned App holds its AI configuration. Never read null as false; a real false means no key."
     hasAiApiKey: Boolean
     expiresAt: DateTime
     # App-original fields
@@ -3368,10 +3369,9 @@ export const typeDefs = `#graphql
     write an AppAgent row. One App credential
     routes to all of them via the URN supplied in the request.
 
-    null means WITHHELD from this caller (#2089): an impersonated caller, or one who
-    reaches a user-owned App only by an outer-object route. A current owner-role member
-    of a user-owned App reads the roster as the owning user does (ruling 0260, #3765).
-    Never read null as no installed Agents.
+    null means WITHHELD from this caller (#2089): a user-owned App's
+    owner-role member does not see its installation roster. Never read null as
+    no installed Agents.
     """
     appAgents: [AppAgent!]
     """
@@ -3384,8 +3384,7 @@ export const typeDefs = `#graphql
     \`appAgents\`: served installation creation time, then Agent id. When any
     installed Agent is withheld, every entry shares the App date, so order is by id.
 
-    null means WITHHELD from this caller (#2089), never no Agents. A current owner-role member
-    of a user-owned App reads the list as the owning user does (ruling 0260, #3765).
+    null means WITHHELD from this caller (#2089), never no Agents.
     """
     agents: [Agent!]
     "Key inventory, only for whoever manages the App as themselves, never through a worker session, instructed or not: a nested field carries no instruction, so an instructed worker lists through appKeys / appKeysPage (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6)."
@@ -4227,7 +4226,7 @@ export const typeDefs = `#graphql
     publicAgentsPage(limit: Int, offset: Int): PublicResourceRefsPage!
   }
 
-  "A page of sanitized public resource refs that says whether more rows follow (#3873, hrn:node:hadronmemory.com:specs:cor:api:120:04). The marketplace catalogue keeps PublicResourceRefPage."
+  "A page of sanitized public resource refs that says whether more rows follow (#3873, hrn:node:hadronmemory.com:specs:cor:api:120:04). The marketplace catalogue keeps MarketplaceResourcePage."
   type PublicResourceRefsPage {
     items: [PublicResourceRef!]!
     total: Int!
@@ -4243,7 +4242,7 @@ export const typeDefs = `#graphql
   }
 
   "A paginated page of sanitized public resource refs (marketplace catalogue)."
-  type PublicResourceRefPage {
+  type MarketplaceResourcePage {
     items: [PublicResourceRef!]!
     total: Int!
   }
@@ -5469,7 +5468,7 @@ export const typeDefs = `#graphql
     title: String!
     conversationName: String
     stageName: String
-    "Names of conversations this chat has completed, in first-completion order; empty for encrypted rows. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
+    "Names of conversations this chat has completed, in first-completion order; an empty list for encrypted rows means the state is unreadable, not proof that none completed. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
     completedConversations: [String!]!
     messageCount: Int!
     createdAt: DateTime!
@@ -6342,6 +6341,22 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  "One page of org-bound watches in jobId order. Default 20, clamp 1–100. Authenticated jobId keyset cursors survive deletion of the boundary row. Offset is a separate option. total counts current org-bound watches. hrn:node:hadronmemory.com:specs:cor:api:120:04."
+  type WebPollsPage {
+    items: [WebPoll!]!
+    total: Int!
+    hasMore: Boolean!
+    nextCursor: String
+  }
+
+  "One page of a node's signing requests, including ended requests. hrn:node:hadronmemory.com:specs:cor:api:120:04."
+  type SigningRequestsPage {
+    items: [SigningRequest!]!
+    total: Int!
+    hasMore: Boolean!
+    nextCursor: String
+  }
+
   """
   A page-monitor watch (#1562): the hadrontool-webfetch job behind a run's
   web_poll_start, as the org's admins see it outside a run. \`url\` is the
@@ -6350,7 +6365,7 @@ export const typeDefs = `#graphql
   """
   type WebPoll {
     jobId: ID!
-    "The sidecar's job state, such as active or cancelled."
+    "An open string supplied by hadrontool-webfetch. Values seen include active and cancelled; these examples are not exhaustive, and clients must tolerate other states."
     status: String!
     url: String!
     appId: ID!
@@ -8173,9 +8188,10 @@ export const typeDefs = `#graphql
     """
     #4306 — with launchGrant only: whether the host applied the run settings (family, model, effort) its start named
     (hrn:node:hadronmemory.com:specs:cor:agt:070:08). false: the start's settings were NOT applied (an exec-path worker
-    runs its own fixed command), so this bind inherits none of them; the session, the worker's last-used record and the
-    task's applied settings hold only the family, model and effort this bind itself reports (a family derived from its
-    own llmModel or tool included). true, null or omitted: a bind that reports none runs as its start said, as before,
+    runs its own fixed command), so this bind inherits none of them from its start: the session holds only the family,
+    model and effort this bind itself reports (a family derived from its own llmModel or tool included), and the
+    worker's last-used record and the task's applied settings follow the session, so a record the worker already had
+    stays as it was (a null never clears it). true, null or omitted: a bind that reports none runs as its start said, as before,
     so a client that never sends this is unaffected. false without a launchGrant is refused BAD_USER_INPUT before
     anything is written, because there is no start to qualify.
     """
@@ -10101,9 +10117,9 @@ export const typeDefs = `#graphql
     - marketplaceMemories: listed + public-readable memories.
     Drill into an org's public footprint via publicOrganization(ref:).
     """
-    marketplaceOrganizations(limit: Int, offset: Int): PublicResourceRefPage!
-    marketplaceAgents(limit: Int, offset: Int): PublicResourceRefPage!
-    marketplaceMemories(limit: Int, offset: Int): PublicResourceRefPage!
+    marketplaceOrganizations(limit: Int, offset: Int): MarketplaceResourcePage!
+    marketplaceAgents(limit: Int, offset: Int): MarketplaceResourcePage!
+    marketplaceMemories(limit: Int, offset: Int): MarketplaceResourcePage!
 
     """
     Invitation lookup (public to the slug holder). Returns only invite-page
@@ -10239,10 +10255,12 @@ export const typeDefs = `#graphql
     """
     The organization's active page-monitor watches (#1562): what web_poll_list
     returns inside a run, for org ADMIN/OWNER outside one. Refused with
-    POLICY_DENIED when the org, user or App policy omits tool.web_poll. Jobs
-    with no routing binding in this org are not listed.
+    POLICY_DENIED when the org, caller user or App-in-context policy omits tool.web_poll (no App layer when the context has no App). Jobs
+    with no routing binding in this org are not listed. One page only: default 20, clamp 1–100, use webPollsPage for hasMore and nextCursor.
     """
-    webPolls(orgRef: ID!): [WebPoll!]!
+    webPolls(orgRef: ID!, first: Int = 20): [WebPoll!]! @deprecated(reason: "One bounded page only; use webPollsPage for hasMore and nextCursor.")
+    "The same org ADMIN/OWNER and tool.web_poll policy gates as webPolls, before fetching jobs; App policy is read only for the App in the caller context. Jobs without a routing binding in this org are omitted. Default 20, clamp 1–100; authenticated jobId keyset cursor scoped to org. offset is an alternative, never combined with after. total counts all currently admitted watches. hrn:node:hadronmemory.com:specs:cor:api:120:04; hrn:node:hadronmemory.com:specs:cor:api:120:05."
+    webPollsPage(orgRef: ID!, first: Int = 20, after: String, offset: Int): WebPollsPage!
 
     """
     Live tools/list passthrough for one registered server (org member) —
@@ -11965,6 +11983,10 @@ export const typeDefs = `#graphql
     behind the call, for OTHER workers only. Idempotent for a live subscription. A grant use is announced
     to the team chat, best-effort: announcement says POSTED or FAILED, and the subscription stands either way.
     #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
+    #4234: a worker of a SHORT_LIVED Agent is refused TICKER_ON_SHORT_LIVED, after authorization and before anything is
+    written (it runs only while it holds a task, so a ticker could not wake it). The refusal comes before the idempotent
+    answer: re-subscribing such a worker that already has a live subscription is refused too, not answered changed false.
+    Unsubscribing it stays allowed.
     """
     subscribeWorker(tickerRef: String!, workerRef: String!, instruction: ActInstructionInput): SubscribeResult!
 
@@ -12885,7 +12907,7 @@ export const typeDefs = `#graphql
     raw relative content links that now miss or resolve to another node.
     """
     moveNode(sourceRef: ID!, targetUrn: String, targetMemoryRef: ID): Node!
-    "Plan with the real move's gates and raised refusals, without locks, reconciliation, writes or mirror effects. Nodes in loc order; limit clamps to 1–1000 (default 100), with total and truncation disclosed. No edges. A point-in-time answer, not a reservation. hrn:node:hadronmemory.com:specs:cor:api:190:03."
+    "Plan with the real move's gates and raised refusals, without locks, reconciliation, writes or mirror effects. Nodes in loc order; limit clamps to 1–1000 (default 100), with total and truncation disclosed. No edges. A point-in-time answer, not a reservation. This plan-only call is on the mutation root by rulings 0210/0211, so impersonation sessions are refused even though planning writes nothing. hrn:node:hadronmemory.com:specs:cor:api:190:03."
     planNodeMove(sourceRef: ID!, targetUrn: String, targetMemoryRef: ID, limit: Int = 100): NodeMovePlan!
 
 
@@ -17909,9 +17931,10 @@ export const typeDefs = `#graphql
   }
 
   """
-  #1707 — a worker's derived state on the team roster (plan
-  design:agent-tasks §7.4). Plan-derived, not a spec. A worker can be in
-  several at once; it is shown in the first that holds, in this order.
+  #1707 — a worker's derived state on the team roster, as defined by
+  hrn:node:hadronmemory.com:specs:cor:agt:050:22 (Definition: A worker's roster state;
+  the states are Proposed). A worker can be in several at once; it is shown in the
+  first that holds, in this order. NO_FAMILY is served but not yet defined in the spec.
   """
   enum TeamRosterState {
     "Woken on an unacknowledged alarm (hrn:node:hadronmemory.com:specs:cor:agt:050:19), or a child task it owns finished or was cancelled after it last acted (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."

@@ -4,7 +4,14 @@
  *
  * The triggers maintain EVERY cell from the moment the migration runs, so the backfill only has to make the cells
  * before the state row's `applies_from` agree with usage_events once, then flip `complete` (which lets the reader use
- * them). Each chunk is a whole number of cells and is OVERWRITTEN (delete the span, insert the recount), never added
+ * them).
+ *
+ * CORRECTION (#4320) of the migration's preamble, which says "the triggers maintain cells from the next 15-minute
+ * boundary on" (prisma/migrations/20261117300000_usage_activity_rollup/migration.sql, written before d20dc14e): the
+ * triggers maintain every cell from the moment they exist, and the boundary only tells the READER where to trust the
+ * cells. An applied migration is never edited, so this header is where a reader of the rollup lands on that.
+ *
+ * Each chunk is a whole number of cells and is OVERWRITTEN (delete the span, insert the recount), never added
  * to, so a rerun, a resumed run or a crash between chunks cannot double count. A chunk runs in one transaction that
  * first takes SHARE ROW EXCLUSIVE on usage_events (writers wait for it; reads do not), so the recount is a consistent
  * snapshot, nothing else touches the span while it is rewritten, and two backfills running together take their chunks

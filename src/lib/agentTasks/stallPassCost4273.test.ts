@@ -5,7 +5,14 @@
  * every pass, to find the unique key (task, type, episode start) taken. On the #4271 seed that was 842 re-evaluations a
  * minute (35-41 s). A candidate is now skipped only where an alarm event with its own key exists; a candidate whose
  * episode is new (a reassignment, a restart, another rule) is still decided in its own transaction. The alarms raised
- * are the ones raised before (cor:agt:050:12-:20); only the work for the already-raised ones is gone.
+ * are the ones raised before (hrn:node:hadronmemory.com:specs:cor:agt:050:12 through :20: what counts as activity on a task,
+ * the stall alarms, and who is woken until an acknowledgement stops the escalation); only the work for the already-raised
+ * ones is gone.
+ *
+ * #4285 (Arianna's BLIND P3, naming): despite the name, this file holds every #4273 cost pin, not only the pass's: the
+ * settled-pass skip, the liveness read's transaction-local JIT setting, the per-raise statement budget, the rows a pass
+ * and a whole tick read against history, and the pruned session read's equivalence. Each describe names its own pin. The
+ * file keeps its name so the links from #4273, #4274 and #4285 and their reviews still resolve.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -14,7 +21,8 @@ import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { PrismaClient } from '../../generated/prisma/index.js';
-import { evaluateStalls, loadStallInputs, raiseStallAlarm, stallCandidates, STALL_WINDOW_DEFAULTS } from './stall.js';
+import { Client as PgClient } from 'pg';
+import { evaluateStalls, loadStallInputs, raiseStallAlarm, stallCandidates, STALL_EVENT_TYPE, STALL_WINDOW_DEFAULTS } from './stall.js';
 import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -195,6 +203,9 @@ describe('#4273 — acceptance 4(c): the rows a settled pass reads do not follow
     await evaluateStalls(db, new Date());
     await seedHistory(1, 50);
     const small = await settledPassReads();
+    // #4285 item 3: the counters saw the open work this pass reads, so the bounds below cannot hold vacuously at 0.
+    expect(small.tasks, 'tasks rows read for the open set').toBeGreaterThan(0);
+    expect(small.events, 'alarm-key rows read for the open set').toBeGreaterThan(0);
     await seedHistory(51, 1_450); // 1,500 finished tasks in all
     const large = await settledPassReads();
     // Never more than the small history read (the counters of a tiny table move with the plan chosen, so not equality), and
@@ -211,6 +222,7 @@ describe('#4273 — acceptance 4(c): the rows a settled pass reads do not follow
     const t = await pending('10:00');
     await evaluateStalls(db, new Date()); // the current episode's alarm is raised
     const small = await settledPassReads();
+    expect(small.events, 'the raised alarm\'s own key row was read (a 0 would make this pin vacuous)').toBeGreaterThan(0);
     await db.$executeRaw`INSERT INTO agent_team_events (id, app_id, type, task_id, subject_worker_id, severity, chain, payload, created_at, episode_start)
       SELECT md5('old' || g), ${appId}, 'stall.not-started', ${t.id}, ${anne}, 'alarm', '[]'::jsonb, '{}'::jsonb, now() - interval '40 days', now() - interval '40 days' - (g || ' minutes')::interval
       FROM generate_series(1, 1500) g`;
@@ -221,44 +233,72 @@ describe('#4273 — acceptance 4(c): the rows a settled pass reads do not follow
 });
 
 describe('#4273 — acceptance 4(c) on the WHOLE tick: session rows read do not follow ended-session history', () => {
+  /**
+   * #4285 item 3: the rows of `sessions` ONE settled tick reads, measured so nothing else can land in the figure.
+   *
+   * `pg_stat_user_tables` counts every backend on this database, and a backend publishes its counters late: an idle one on
+   * a timer (up to ~10 s after its last statement), an exiting one as it exits. The earlier version polled for "two equal
+   * reads 600 ms apart", which a late flush outlasts, so a pool connection's earlier history read could land in the window
+   * (main run 43859882551: 1484, run 43964497842: 1256), and a measurement's own late flush could land in the NEXT window,
+   * leaving its own short (so a minimum of several was not safe either: noise does not only add).
+   *
+   * Now the window holds exactly one tick's reads:
+   *  1. the shared pool (`db`) is disconnected first, so its backends exit and publish what they read; nothing in the tick
+   *     may reconnect it (asserted at the end: a reconnect would be an unmeasured reader);
+   *  2. the tick runs on its own client, tagged by application_name, and is disconnected after, so its backends exit too;
+   *  3. a raw pg poller, which reads only pg_stat views (never `sessions`), waits until those backends are gone and the
+   *     counter has stopped moving, before and after.
+   */
   async function measureTickOnce(): Promise<number> {
+    const tag = `stall-measure-${generateId().slice(-8)}`;
     const url = new URL(process.env.DATABASE_URL!);
     url.searchParams.set('options', '-c enable_indexonlyscan=off -c enable_seqscan=off'); // every row an index path visits is a counted fetch; a test table is too small for the planner to prefer an index
-    const read = async () => {
-      const [r] = await db.$queryRaw<{ n: bigint }[]>`SELECT COALESCE(seq_tup_read, 0) + COALESCE(idx_tup_fetch, 0) AS n FROM pg_stat_user_tables WHERE relname = 'sessions'`;
-      return Number(r?.n ?? 0);
-    };
-    // Backend counters reach the shared view when a backend flushes them (on idle, or on exit), so wait until the figure
-    // stops moving (two equal reads 600 ms apart) instead of trusting one fixed sleep: a loaded machine flushes late.
-    const counted = async () => {
-      let last = await read();
-      for (let i = 0; i < 40; i++) {
-        await new Promise((r) => setTimeout(r, 600));
-        const now = await read();
-        if (now === last) return now;
-        last = now;
+    url.searchParams.set('application_name', tag);
+    const pollerUrl = new URL(process.env.DATABASE_URL!);
+    pollerUrl.search = '';
+    const poller = new PgClient({ connectionString: pollerUrl.toString(), application_name: 'stall-measure-poller' });
+    await poller.connect();
+    try {
+      const others = async () => (await poller.query<{ who: string }>(
+        `SELECT COALESCE(NULLIF(application_name, ''), 'pid ' || pid) AS who FROM pg_stat_activity
+          WHERE datname = current_database() AND backend_type = 'client backend' AND pid <> pg_backend_pid()`,
+      )).rows.map((r) => r.who);
+      const rows = async () => Number((await poller.query<{ n: string }>(
+        `SELECT COALESCE(seq_tup_read, 0) + COALESCE(idx_tup_fetch, 0) AS n FROM pg_stat_user_tables WHERE relname = 'sessions'`,
+      )).rows[0]?.n ?? 0);
+      // Wait until no other client backend is on this database (so every earlier reader has exited and published), then
+      // until the counter holds still. Exit publishes at once, so this settles in well under a second when unloaded.
+      const settled = async () => {
+        for (let i = 0; i < 100 && (await others()).length > 0; i++) await new Promise((r) => setTimeout(r, 100));
+        const left = await others();
+        if (left.length > 0) throw new Error(`another backend is still on the test database: ${left.join(', ')}`);
+        let last = await rows();
+        for (let i = 0; i < 40; i++) {
+          await new Promise((r) => setTimeout(r, 250));
+          const now = await rows();
+          if (now === last) return now;
+          last = now;
+        }
+        throw new Error('the sessions read counter never settled');
+      };
+      await db.$disconnect();
+      const before = await settled();
+      const client = new PrismaClient({ datasourceUrl: url.toString() });
+      try {
+        await client.$connect();
+        await taskStallTick(client as any, new Date());
+      } finally {
+        await client.$disconnect();
       }
-      return last;
-    };
-    const client = new PrismaClient({ datasourceUrl: url.toString() });
-    await client.$connect();
-    const before = await counted();
-    await taskStallTick(client as any, new Date());
-    await client.$disconnect(); // a backend's counters are flushed when it exits
-    return (await counted()) - before;
+      const after = await settled(); // also fails if the tick reconnected the shared pool: an unmeasured reader
+      return after - before;
+    } finally {
+      await poller.end();
+    }
   }
 
-  /**
-   * #4285: the smallest of three measurements of the same settled tick. The table counters are per table, so ANY other
-   * statement on this database inside the window (a late counter flush from the pool, autovacuum, a fire-and-forget run left
-   * by an earlier step) is added to the figure; noise only ever adds. A settled tick is idempotent, so its true cost is the
-   * minimum, and a real regression (the whole history read) is in every measurement, so it still fails. Main run 43859882551
-   * read 1484 once on a loaded shard while the same pin passed on every other run.
-   */
   async function tickSessionRows(): Promise<number> {
-    const runs: number[] = [];
-    for (let i = 0; i < 3; i++) runs.push(await measureTickOnce());
-    return Math.min(...runs);
+    return measureTickOnce();
   }
 
   async function endedSessions(from: number, count: number) {
@@ -275,10 +315,39 @@ describe('#4273 — acceptance 4(c) on the WHOLE tick: session rows read do not 
     await endedSessions(1, 10);
     await taskStallTick(db, new Date()); // settle: the first pass raises and records
     const small = await tickSessionRows();
+    expect(small, 'the counter saw the open sessions the tick reads (a 0 would make this pin vacuous)').toBeGreaterThan(0);
     await endedSessions(11, 390);
     const large = await tickSessionRows();
     expect(large).toBeLessThanOrEqual(small + 20);
     expect(large).toBeLessThan(200); // 400 ended sessions x 3 workers = 1,200 rows of history per liveness read before
+  }, 120_000);
+
+  it('#4285: a whole-history read the shared pool made just before the window is not counted as the tick\'s', async () => {
+    for (let i = 0; i < 4; i++) await pending('10:00', i % 2 ? anne : liam);
+    for (const w of [anne, liam]) await db.session.create({ data: { id: generateId(), appId, workerId: w, startedAt: new Date(Date.now() - 3_600_000), updatedAt: new Date() } });
+    await endedSessions(1, 400);
+    await taskStallTick(db, new Date()); // settle
+    const quiet = await tickSessionRows();
+    // A pool connection reads every session row (1,200 of history) and goes idle: its counters publish late, on a timer.
+    await db.$executeRawUnsafe('SET enable_seqscan = on');
+    const [{ n }] = await db.$queryRaw<{ n: bigint }[]>`SELECT count(*) AS n FROM sessions WHERE ended_at IS NOT NULL`;
+    expect(Number(n)).toBe(1_200);
+    const noisy = await tickSessionRows();
+    expect(noisy).toBeLessThanOrEqual(quiet + 20);
+    expect(noisy).toBeLessThan(200);
+  }, 120_000);
+
+  it('#4285: a reader still connected when the window opens makes the measurement refuse, never count its rows silently', async () => {
+    for (let i = 0; i < 4; i++) await pending('10:00', i % 2 ? anne : liam);
+    await endedSessions(1, 400);
+    const lingering = new PgClient({ connectionString: process.env.DATABASE_URL!, application_name: 'lingering-reader' });
+    await lingering.connect();
+    try {
+      await lingering.query('SELECT count(*) FROM sessions'); // its counters publish only on its idle timer or its exit
+      await expect(tickSessionRows()).rejects.toThrow(/another backend is still on the test database: lingering-reader/);
+    } finally {
+      await lingering.end();
+    }
   }, 120_000);
 });
 
@@ -349,7 +418,11 @@ describe('#4273 — what the skip replaces: a raise for an already-taken key ref
       const now = at('10:15');
       const c = await candidateFor(t.id, now);
       expect(await raiseStallAlarm(db, c, now)).not.toBeNull(); // raised once
-      const [alarm] = await db.agentTeamEvent.findMany({ where: { taskId: t.id } });
+      // #4285 (Arianna New-1): THIS rule's alarm by type, not the task's first event: any other event on the task would
+      // otherwise take the acknowledge/escalation-end below, and those variants would silently test the live state.
+      const alarms = await db.agentTeamEvent.findMany({ where: { taskId: t.id, type: STALL_EVENT_TYPE[c.rule] } });
+      expect(alarms, 'exactly one alarm of this rule was raised').toHaveLength(1);
+      const [alarm] = alarms;
       if (state === 'acknowledged') await db.agentTeamEvent.update({ where: { id: alarm!.id }, data: { acknowledgedAt: at('10:20'), acknowledgedByWorkerId: ada } });
       if (state === 'escalation ended') await db.alarmEscalationEnd.create({ data: { eventId: alarm!.id, endedAt: at('10:30') } });
       const before = await writes();

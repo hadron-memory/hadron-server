@@ -22,13 +22,12 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../generated/prisma/index.js';
-import { Prisma as P } from '../../generated/prisma/index.js';
 import { managesAgent, managesApp } from '../auth/appManagement.js';
 import {
   COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, boundWorkerId, bootPromptWorkerSessionError,
   inCompileScope, isBootPromptRole,
 } from '../bootPrompt.js';
-import { GRANT_DB_NOW, chargeGrantUse, grantLiveSql, readGrantForUpdate } from './live.js';
+import { coverableAction, findCoveringGrants, spendGrant } from './cover.js';
 
 export const BOOT_PROMPT_EDIT_ACTION = 'bootprompt.source.edit';
 export const BOOT_PROMPT_BATCH_ACTION = 'bootprompt.compile.approve';
@@ -120,54 +119,44 @@ async function signerStillEligible(q: Q, issuerUserId: string | null, own: OwnNo
 interface Candidate { id: string; issuer: string | null }
 
 /**
- * The live grants of `action` held by `workerId` in `appId` that name `nodeId` and are inside their hour (the hour is the ACTION's lifetime limit, which {@link grantLiveSql} reads, #4163). `single`: the value must be
- * exactly one node id (an edit grant names ONE source; a list or wildcard names none). A grant is spent by its count (#4163); a USE event
- * with no count behind it (a grant stored before the count was spent) still reads spent here.
+ * The live grants of `action` held by the worker that cover `nodeId` (#4162: the shared check, cover.ts, with this door's parameters from
+ * the action's own declaration: held by the WORKER itself, never its role agent, cor:agt:040:11 V50; the edit parameter names ONE node
+ * and refuses a list, the batch parameter takes a list; the edit action is single use, the batch action has no count). The hour is the
+ * ACTION's lifetime limit, which the shared live definition reads (#4163). A grant is spent by its count (#4163); a USE event with no
+ * count behind it (a grant stored before the count was spent) still reads spent, in the shared check. `lock`: the candidate rows are held
+ * to the end of the transaction (`UPDATE` to spend, `SHARE` to hold against a revocation) and then judged on the database clock.
  */
-async function candidates(q: Q, workerId: string, appId: string, action: string, nodeId: string, single: boolean, onlyId?: string): Promise<Candidate[]> {
-  const param = single ? 'sourceNode' : 'compiledNode';
-  const names = single
-    ? P.sql`(jsonb_typeof(g.action_values->${param}) = 'string' AND g.action_values->>${param} = ${nodeId})`
-    : P.sql`(g.action_values->${param} @> to_jsonb(${nodeId}::text))`;
-  const rows = await q.$queryRaw<Array<{ id: string; issuer_user_id: string | null }>>(P.sql`
-    SELECT g.id, g.issuer_user_id FROM grants g
-     WHERE g.worker_id = ${workerId} AND g.app_id = ${appId} AND g.action = ${action}
-       AND ${onlyId === undefined ? P.sql`TRUE` : P.sql`g.id = ${onlyId}`}
-       AND ${names}
-       AND ${grantLiveSql('g')}
-       AND g.activated_at <= ${GRANT_DB_NOW}
-       AND ${single ? P.sql`(g.max_uses IS NULL OR g.max_uses = 1) AND NOT EXISTS (SELECT 1 FROM grant_events e WHERE e.grant_id = g.id AND e.action = 'USE')` : P.sql`TRUE`}
-     ORDER BY g.activated_at, g.id`);
-  return rows.map((r) => ({ id: r.id, issuer: r.issuer_user_id }));
+async function candidates(q: Q, workerId: string, appId: string, action: string, nodeId: string, lock?: 'SHARE' | 'UPDATE'): Promise<Candidate[]> {
+  const param = action === BOOT_PROMPT_EDIT_ACTION ? 'sourceNode' : 'compiledNode';
+  const found = await findCoveringGrants(q, { appId, action: coverableAction(action), workerId, values: { [param]: nodeId }, order: 'ACTIVATED', lock });
+  return found.map((g) => ({ id: g.id, issuer: g.issuerUserId }));
 }
 
 /** Whether a usable edit grant exists for this worker and node: a read, with no lock and no spend (the fast refusal). */
 export async function hasUsableEditGrant(q: Q, workerId: string, node: BootPromptNodeFacts): Promise<boolean> {
   const own = await ownBootPromptNode(q, workerId, node, 'source');
   if (!own) return false;
-  for (const c of await candidates(q, workerId, own.appId, BOOT_PROMPT_EDIT_ACTION, node.id, true)) {
+  for (const c of await candidates(q, workerId, own.appId, BOOT_PROMPT_EDIT_ACTION, node.id)) {
     if (await signerStillEligible(q, c.issuer, own)) return true;
   }
   return false;
 }
 
 /**
- * Spend one edit grant for `node`, in the caller's transaction. Each candidate row is locked FOR UPDATE in its own statement, THEN
- * judged again on the database clock (a grant that expired, was revoked or was spent while this waited reads dead), and only then
+ * Spend one edit grant for `node`, in the caller's transaction. The candidate rows are locked FOR UPDATE (one statement, in id order), THEN
+ * judged on the database clock (a grant that expired, was revoked or was spent while this waited reads dead), and only then
  * is the `USE` event written. This is the LAST lock the edit takes (the node row is already held). False when none is usable.
  */
 export async function spendEditGrant(tx: Q, workerId: string, node: BootPromptNodeFacts): Promise<boolean> {
   const own = await ownBootPromptNode(tx, workerId, node, 'source');
   if (!own) return false;
-  for (const c of await candidates(tx, workerId, own.appId, BOOT_PROMPT_EDIT_ACTION, node.id, true)) {
-    if (!(await readGrantForUpdate(tx, c.id))) continue;
-    const [again] = await candidates(tx, workerId, own.appId, BOOT_PROMPT_EDIT_ACTION, node.id, true, c.id);
-    if (!again || !(await signerStillEligible(tx, again.issuer, own))) continue;
-    // #4163 (cor:acl:140:03): the use is COUNTED, through the shared guarded `use_count + 1`, so the grant reads spent everywhere. A grant
-    // stored without a count (max_uses NULL) is still spent by its USE event alone. A miss after the row was just judged live is the
-    // clock edge between the two reads: refuse, so the write rolls back (the guard's rejection aborts the transaction anyway).
-    if (!(await chargeGrantUse(tx, again.id, own.appId))) throw bootPromptWorkerSessionError('update');
-    await tx.grantEvent.create({ data: { grantId: again.id, appId: own.appId, action: 'USE', workerId } });
+  // The candidate rows are locked FOR UPDATE in one statement and THEN judged on the database clock (cover.ts), so a grant that expired,
+  // was revoked or was spent while this waited reads dead. This is the LAST lock the edit takes (the node row is already held).
+  for (const c of await candidates(tx, workerId, own.appId, BOOT_PROMPT_EDIT_ACTION, node.id, 'UPDATE')) {
+    if (!(await signerStillEligible(tx, c.issuer, own))) continue;
+    // #4163 (cor:acl:140:03): the use is COUNTED, through the shared spend, so the grant reads spent everywhere. A miss after the row was just
+    // judged live is the clock edge between the two reads: refuse, so the write rolls back (the guard's rejection aborts the transaction anyway).
+    await spendGrant(tx, c.id, { appId: own.appId, workerId, sessionId: null }, () => bootPromptWorkerSessionError('update'));
     return true;
   }
   return false;
@@ -175,7 +164,7 @@ export async function spendEditGrant(tx: Q, workerId: string, node: BootPromptNo
 
 /**
  * The id of a live batch grant the worker holds that names this compiled node, or null. The grant has no use count, so nothing is
- * spent. With `lock` each candidate row is held FOR SHARE in its own statement and then JUDGED AGAIN on the database clock: a grant
+ * spent. With `lock` the candidate rows are held FOR SHARE (one statement, in id order) and then JUDGED on the database clock: a grant
  * that was revoked or expired while this waited behind another transaction's lock reads dead (the query that selects can be
  * evaluated before the lock is granted). A revocation then either committed first or waits for the act. Take it LAST among the
  * act's locks.
@@ -183,15 +172,8 @@ export async function spendEditGrant(tx: Q, workerId: string, node: BootPromptNo
 export async function findBatchGrant(q: Q, workerId: string, node: BootPromptNodeFacts, lock = false): Promise<string | null> {
   const own = await batchTargetScope(q, workerId, node);
   if (!own) return null;
-  for (const c of await candidates(q, workerId, own.appId, BOOT_PROMPT_BATCH_ACTION, node.id, false)) {
-    let live = c;
-    if (lock) {
-      await q.$queryRaw`SELECT g.id FROM grants g WHERE g.id = ${c.id} FOR SHARE`;
-      const [again] = await candidates(q, workerId, own.appId, BOOT_PROMPT_BATCH_ACTION, node.id, false, c.id);
-      if (!again) continue;
-      live = again;
-    }
-    if (await signerStillEligible(q, live.issuer, own)) return c.id;
+  for (const c of await candidates(q, workerId, own.appId, BOOT_PROMPT_BATCH_ACTION, node.id, lock ? 'SHARE' : undefined)) {
+    if (await signerStillEligible(q, c.issuer, own)) return c.id;
   }
   return null;
 }

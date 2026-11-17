@@ -72,6 +72,21 @@ describe('usageActivity gate, answered from the rollup', () => {
     expect(reads(await Q.usageActivity(null, { memoryRefs: [memA.id] }, asMember()))).toBe(6);
   });
 
+  it('pins the serving path: a marked cell surfaces in the answer, not the raw rows', async () => {
+    // #4320 item 6 (BLIND Cedric, 2bf4490d): every other test here would also pass if the reader fell back to the raw
+    // rows for every window. A planted count far above the raw rows shows in the resolver's answer only when the
+    // rollup served it. The cell holds one shared timestamp 3h back, whole-interior to the default window
+    // (from = now-7d, to = now), so the reader must take it from the cells.
+    const t = hourAgo();
+    await db.usageEvent.createMany({ data: [
+      { id: generateId(), type: 'read', userId: member.id, memoryId: memA.id, createdAt: t },
+      { id: generateId(), type: 'read', userId: member.id, memoryId: memA.id, createdAt: t },
+    ] });
+    const cell = new Date(Math.floor(t.getTime() / 900_000) * 900_000);
+    await db.$executeRaw`UPDATE usage_activity_cells SET reads = reads + 1000 WHERE scope_kind = 'user' AND scope_id = ${member.id} AND cell = ${cell.toISOString().replace('Z', '')}::timestamp`;
+    expect(reads(await Q.usageActivity(null, {}, asMember()))).toBe(2 + 1000);
+  });
+
   it('a user-less App key gets the empty own-activity answer', async () => {
     await seed(3, { userId: member.id });
     expect(await Q.usageActivity(null, {}, asKey())).toEqual([]);
