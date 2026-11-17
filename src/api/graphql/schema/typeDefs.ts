@@ -1940,6 +1940,12 @@ export const typeDefs = `#graphql
     input only, never an authorization input: it is self-declared.
     """
     family: String
+    """
+    #4291 — the effort this session runs at (hrn:node:hadronmemory.com:specs:cor:agt:060:04), as the launcher applied it and the session
+    reported it at start, on a resume or through updateSession. Null until reported; NOT_APPLICABLE for a family with no
+    effort control. A report, never a control: nothing makes a running session adopt a value.
+    """
+    effort: EffortLevel
     "#1709 — a host-launched session (hrn:node:hadronmemory.com:specs:cor:agt:070:08): the host that started it. Null for a session started by hand."
     launchHostId: String
     "#1709 — the worker.start operation that launched it."
@@ -2071,6 +2077,8 @@ export const typeDefs = `#graphql
     llmModel: String
     "Recorded on a session the redemption starts, and refreshed on an open session it resumes (#2086). Wins over the family a model implies; an invalid token is refused before any claim is spent."
     family: String
+    "#4291: recorded on a session the redemption starts, and refreshed on an open session it resumes. Omitted or null never clears."
+    effort: EffortLevel
     "Recorded on a session the redemption starts only."
     transcriptPath: String
     """
@@ -5871,6 +5879,15 @@ export const typeDefs = `#graphql
     """
     tier: String
     """
+    #4291 (hrn:node:hadronmemory.com:specs:cor:agt:060:04) — the worker's record of the family, model and effort its
+    session last reported: one value each, no history. It follows the session on every bind and report (whoever made
+    the change), is never cleared by a null, and is kept when the worker unbinds, when family and model above are null:
+    an unbound worker is matched on it, and a start launches it with these unless the task names its own. A report,
+    not a control: no edit makes a running session adopt a value. Null on the same read gate as hasLiveSession.
+    Self-declared: advisory, never authorization.
+    """
+    lastUsed: WorkerRunSettings
+    """
     hadron-cli#487 — when this worker was last DRIVEN, over every session it has
     ever had. Null for a worker nobody has ever bound, and that null is the
     point: a casting nobody picked up renders identically to one worked
@@ -8039,6 +8056,13 @@ export const typeDefs = `#graphql
     never an authorization input.
     """
     family: String
+    """
+    #4291 (hrn:node:hadronmemory.com:specs:cor:agt:060:04): the effort this session runs at, as the launcher applied it; NOT_APPLICABLE for a
+    family with no effort control (never a refusal). Omitted on a host-started bind: the start's own effort is recorded
+    when it names one of the scale, as its family and model are when the bind reports none. A worker-bound session's
+    family, model and effort are also written to the worker's last-used record (Worker.lastUsed).
+    """
+    effort: EffortLevel
     """
     #928 / cor:api:140: the role-Agent driving this session, as a PK or URN.
     Resolves to Session.agentId. The caller must be able to READ the agent
@@ -13055,8 +13079,11 @@ export const typeDefs = `#graphql
     Updates on an ended session stay allowed (late PR-merge attribution).
     #1931 — llmModel refreshes the model-family derivation; an explicit family wins.
     Null or omitted family metadata preserves the existing family. Unclassified models do not clear it.
+    #4291 — effort reports the effort the session now runs at; null or omitted leaves it as last recorded. A report
+    (model, family or effort) on a worker's OPEN session is also written to that worker's last-used record
+    (Worker.lastUsed, hrn:node:hadronmemory.com:specs:cor:agt:060:04); a report on an ended session moves no record.
     """
-    updateSession(id: ID!, prNumber: Int, branch: String, llmModel: String, family: String): Session!
+    updateSession(id: ID!, prNumber: Int, branch: String, llmModel: String, family: String, effort: EffortLevel): Session!
 
     """
     #2896 — report a session's outcome: outcome is a number from 0 to 1, outcomeRef an opaque reference of the
@@ -15956,6 +15983,50 @@ export const typeDefs = `#graphql
     modelGroupNotIn: [String!]
   }
 
+  """
+  #4291 (hrn:node:hadronmemory.com:specs:cor:agt:050:01; decision record run-settings-are-not-worker-identity) — a task's own run
+  settings: what a start for it launches. Anything left out falls back to the worker's last used (Worker.lastUsed), so
+  a missing value is never a refusal. They are run settings, not requirements: a worker that is already running takes
+  the task under its session's settings (AgentTask.appliedRunSettings shows them), and a task that must run on a
+  family says so with requirements.familyIn. For a short-lived worker with no open session the launch applies them, so
+  the matcher judges familyIn, familyNotIn and minTier against them (hrn:node:hadronmemory.com:specs:cor:agt:060:06).
+
+  Refused TASK_RUN_SETTINGS_INVALID, with extensions.reason: BAD_VALUE (a field that is not its token),
+  EFFORT_NOT_A_REQUEST (NOT_APPLICABLE), MODEL_AND_TIER (both named), MODEL_OUTSIDE_FAMILY (an exact model of another
+  family than the one named), FAMILY_EXCLUDED (the family, named or implied by the model, is outside
+  requirements.familyIn or inside familyNotIn), TIER_BELOW_MINIMUM (the tier, or the exact model's tier, is below
+  requirements.minTier).
+  """
+  input AgentTaskRunSettingsInput {
+    "A model family token, e.g. claude, codex or glm."
+    family: String
+    "An exact model name (letters, digits, '.', '_' or '-'; at most 128 characters). Give this or tier, not both."
+    model: String
+    "A generic tier instead of a model: high, mid or low. The host's launcher maps it to the family's model."
+    tier: String
+    "A generic effort; the launcher maps it to the family's own value. NOT_APPLICABLE is a report, not a request, and is refused."
+    effort: EffortLevel
+  }
+
+  "#4291 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): a task's own run settings as stored. Each field is null when the task names none."
+  type AgentTaskRunSettings {
+    family: String
+    model: String
+    "high, mid or low; null when the task names an exact model or neither."
+    tier: String
+    effort: EffortLevel
+  }
+
+  """
+  #4291 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): the settings a task's run actually used: its worker assignee's newest open
+  session's family, model and effort, read when the task was started. Each is null when that session had not reported it.
+  """
+  type AgentTaskAppliedRunSettings {
+    family: String
+    model: String
+    effort: EffortLevel
+  }
+
   "#2662: severity is shape only, never matcher, authorization or alarm input (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
   enum AgentTaskFindingSeverity { P1 P2 P3 note }
   "#2662: immutable finding set at finish; text never enters the event stream."
@@ -16582,6 +16653,14 @@ export const typeDefs = `#graphql
     isolated: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
   }
 
+  """
+  #4291 (hrn:node:hadronmemory.com:specs:cor:agt:060:04) — the generic effort scale of a run. LOW to MAX are levels the launcher maps to the
+  family's own values; UNSET is the family's default. NOT_APPLICABLE is report-only: a session whose family has no effort
+  control reports it, and a worker's last-used record may hold it; a task never carries it. Self-declared, like the family
+  and model: a reporting input, never authorization.
+  """
+  enum EffortLevel { LOW MEDIUM HIGH XHIGH MAX UNSET NOT_APPLICABLE }
+
   "#4224 (S3 of #4229): how long an Agent's workers run."
   enum AgentLifecycle {
     "The worker's process should always run (the default, and the behaviour before this field existed)."
@@ -16902,6 +16981,15 @@ export const typeDefs = `#graphql
     matchSkipped: [AgentTaskSkippedCandidate!]
     "Null unless an opt-in single-shot match failed. No assignment-unassignable alarm is raised for it."
     matchFailure: AgentTaskMatchFailure
+    "#4291 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): the task's own run settings (what a start for it launches); null when it names none."
+    runSettings: AgentTaskRunSettings
+    """
+    #4291 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): the settings the run actually used, from the assignee's open session when the
+    task was started. Null until then, for a task a person runs, and when that session had reported none. Read it beside
+    runSettings: a worker that was already running keeps its session's settings, so the two can differ. A hand-back
+    clears it; a reassignment of a started task does not restamp it.
+    """
+    appliedRunSettings: AgentTaskAppliedRunSettings
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:01) — priority1 is highest; range1..5, default1. Matching only, never authority."
     priority: Int!
     "Whether at least one blocker remains open. Never a status; manual assignment is preserved."
@@ -18034,6 +18122,18 @@ export const typeDefs = `#graphql
 
     "Coarse tier from the server model mapping: high, mid or low. Null when unbound, unreported or unmapped; advisory, never authorization."
     tier: String
+    """
+    #4291 (hrn:node:hadronmemory.com:specs:cor:agt:060:04): the effort the worker last ran at, from its record (lastUsed.effort): a level, UNSET
+    for the family's default, or NOT_APPLICABLE for a family with no effort control. Null when no session ever reported one.
+    """
+    effort: EffortLevel
+    """
+    #4291 (hrn:node:hadronmemory.com:specs:cor:agt:060:04): the worker's record of the family, model and effort its session last reported,
+    one value each and no history. It follows the session on every bind and report, is never cleared by a null, and is
+    kept when the worker unbinds: an unbound worker is matched and started on it (family and model above stay the
+    binding's, null when unbound). A report, not a control. Self-declared: advisory, never authorization.
+    """
+    lastUsed: WorkerRunSettings!
     "Families a live host registration can launch it as (hrn:node:hadronmemory.com:specs:cor:agt:070:01)."
     launchableFamilies: [String!]!
     "Free for work (hrn:node:hadronmemory.com:specs:cor:agt:060:05)."
@@ -18106,6 +18206,13 @@ export const typeDefs = `#graphql
     Null both when withheld and when unset, so a masked name cannot be told from an unnamed user.
     """
     name: String
+  }
+
+  "#4291 (hrn:node:hadronmemory.com:specs:cor:agt:060:04): a worker's last-used run settings. Each is null until a session of the worker reported it."
+  type WorkerRunSettings {
+    family: String
+    model: String
+    effort: EffortLevel
   }
 
   "#1707 — the team roster of one App."
@@ -18440,6 +18547,12 @@ export const typeDefs = `#graphql
     "Omit to leave the task queued."
     assignee: AgentTaskPartyInput
     requirements: AgentTaskRequirementsInput
+    """
+    #4291 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): the task's own run settings, each optional. What a start for this task
+    launches, before the worker's last used; never a matching requirement. Checked here, at creation, and refused
+    TASK_RUN_SETTINGS_INVALID with a reason. Set only here: no edit takes them, and a clone copies none.
+    """
+    runSettings: AgentTaskRunSettingsInput
     """
     #2420 (hrn:node:hadronmemory.com:specs:cor:agt:050:28): the task's own properties, a JSON object with the same limits
     and refusal codes as on update. Only set when the creator is one of the task's writers (its owner, someone above the

@@ -37,6 +37,7 @@ import { tierOf, type ModelTier } from './family.js';
 import type { AvailabilityRecord, WorkerAvailabilityView } from './availability.js';
 import { loadWorkerWorkStates, type WorkerWorkState } from './matcher.js';
 import { alarmEpisodeKey, endedAlarmEpisodes, loadStallInputs, unreactedChildren } from './stall.js';
+import type { EffortLevel, WorkerRunRecord } from './runSettings.js';
 import { withSharedWorkerActivity } from '../../api/graphql/schema/resolvers.worker.js';
 
 export const ROSTER_STATES = [
@@ -64,6 +65,13 @@ export type RosterEntry = {
   model: string | null;
   modelReportedAt: Date | null;
   tier: ModelTier | null;
+  /**
+   * #4291 (cor:agt:060:04, Proposed): the worker's record of what its session last reported, kept when it unbinds. An
+   * unbound worker is matched and started on it. `effort` is the record's effort (the session's applied effort follows
+   * into it on every report), null when none was ever reported.
+   */
+  lastUsed: WorkerRunRecord;
+  effort: EffortLevel | null;
   launchableFamilies: string[];
   /** The families it is free for work as now; empty when not free. */
   freeFamilies: string[];
@@ -220,6 +228,8 @@ async function readTeamRoster(db: Db, appId: string, now: Date): Promise<RosterE
         model: w.bindingModel,
         modelReportedAt: w.modelReportedAt,
         tier: tierOf(w.bindingModel),
+        lastUsed: w.lastUsed,
+        effort: w.lastUsed.effort,
         launchableFamilies: w.launchableFamilies,
         freeFamilies: w.freeFamilies,
         free: w.free,

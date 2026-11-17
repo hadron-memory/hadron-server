@@ -32,6 +32,7 @@
  */
 
 import { normalizeFamily } from '../agentTasks/family.js';
+import { loadWorkerRunRecord, resolveStartSettings, runFamilyOf, taskRunSettingsOf, type StartSettings } from '../agentTasks/runSettings.js';
 import { afterWaits, anchorNow, coveringSignals, lockStopFence } from '../stopSignals/state.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
@@ -102,6 +103,22 @@ function profileArgs(p: LauncherProfile | null | undefined): Record<string, stri
   if (p?.effort) out.effort = p.effort;
   if (p?.accountProfile) out.accountProfile = p.accountProfile;
   return out;
+}
+
+/**
+ * #4291 (cor:agt:070:08, Proposed) — the settings a platform start of `workerId` on `reg` carries: the task's own
+ * setting first, then the worker's record, and for an empty record the host's own statement (`reg.family` and, under
+ * `server`, the assignment's launcher profile). Read on the start's transaction, under its worker row lock, so a
+ * session that reports while this start is decided is ordered with it. Pure resolution: `resolveStartSettings`.
+ */
+export async function startSettingsFor(
+  tx: Prisma.TransactionClient, workerId: string, taskId: string | null, reg: { family: string; profile: LauncherProfile | null },
+): Promise<StartSettings> {
+  const record = await loadWorkerRunRecord(tx, workerId);
+  const task = taskId
+    ? taskRunSettingsOf(await tx.agentTask.findUnique({ where: { id: taskId }, select: { runFamily: true, runModel: true, runTier: true, runEffort: true } }))
+    : null;
+  return resolveStartSettings(task, record, { family: reg.family, model: reg.profile?.model ?? null, effort: reg.profile?.effort ?? null });
 }
 
 /**
@@ -188,6 +205,12 @@ export async function insertWorkerStart(
      * second read that a lifecycle change could race (Peter #108323).
      */
     profile?: LauncherProfile | null;
+    /**
+     * #4291: the resolved run settings of a PLATFORM start ({@link startSettingsFor}). They replace `family` and the
+     * profile's model and effort; the profile still gives the account. A manager's own start passes none and carries
+     * exactly what it named (cor:agt:070:05).
+     */
+    settings?: StartSettings;
     issuer:
       | { issuedBy: 'platform' }
       | { issuedBy: 'user'; issuedByUserId: string; issuedByAgentId: string | null }
@@ -211,7 +234,13 @@ export async function insertWorkerStart(
       appId: a.appId,
       hostId: a.hostId,
       type: 'worker.start',
-      args: { workerId: a.workerId, worktree: a.worktree, family: a.family, ...profileArgs(a.profile), ...lifecycle, ...(a.taskId ? { taskId: a.taskId } : {}) },
+      args: {
+        workerId: a.workerId, worktree: a.worktree,
+        ...(a.settings
+          ? { ...a.settings, ...(a.profile?.accountProfile ? { accountProfile: a.profile.accountProfile } : {}) }
+          : { family: a.family, ...profileArgs(a.profile) }),
+        ...lifecycle, ...(a.taskId ? { taskId: a.taskId } : {}),
+      },
       workerId: a.workerId,
       ...a.issuer,
       holdUserId: a.hold.userId,
@@ -268,11 +297,21 @@ export async function launchForAssignment(
         throw e;
       }
       await fenceHostDecision(tx, a.appId);
-      const reg = (await liveRegistrationsFor(tx, a.appId, a.workerId, now)).find((r) => r.worktrees.length > 0 && (!a.family || r.family === normalizeFamily(a.family)));
+      // #4291: once the task or the worker's record settles the family, the start runs as that, whatever family the
+      // host registered: no host is ruled out, and one that states the same family goes first (else the first by id).
+      // While neither settles it (an empty record), the host's own statement is the family, exactly as before: the
+      // matcher's family, when it named one, still picks the host, so a start never runs as another family than matched.
+      const regs = (await liveRegistrationsFor(tx, a.appId, a.workerId, now)).filter((r) => r.worktrees.length > 0);
+      const taskRun = taskRunSettingsOf(await tx.agentTask.findUnique({ where: { id: a.taskId }, select: { runFamily: true, runModel: true, runTier: true, runEffort: true } }));
+      const settled = runFamilyOf(taskRun) ?? (await loadWorkerRunRecord(tx, a.workerId)).family;
+      const reg = settled
+        ? regs.find((r) => r.family === settled) ?? regs[0]
+        : regs.find((r) => !a.family || r.family === normalizeFamily(a.family));
       if (!reg) return null;
       return insertWorkerStart(tx, {
         appId: a.appId, hostId: reg.hostId, workerId: a.workerId, worktree: reg.worktrees[0]!, family: reg.family,
-        profile: reg.profile, taskId: a.taskId, issuer: { issuedBy: 'platform' }, hold,
+        profile: reg.profile, settings: await startSettingsFor(tx, a.workerId, a.taskId, reg),
+        taskId: a.taskId, issuer: { issuedBy: 'platform' }, hold,
       });
     });
   } catch (err) {
