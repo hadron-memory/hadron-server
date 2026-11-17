@@ -7,10 +7,14 @@
  */
 import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
-import { mutateTask, mayDirectTask, isAssignee, notAssignee, refuseEnded, withReadableTask, resolveTaskRef, taskError, type TaskRow, type TaskActor, type TaskApp } from './resolvers.agentTask.js';
+import { mutateTask, mayDirectTask, isAssignee, notAssignee, refuseEnded, withReadableTask, resolveTaskRef, taskError, taskNotFound, actorManagesApp, recordInstructedManagerAct, type TaskRow, type TaskActor, type TaskApp } from './resolvers.agentTask.js';
+import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
+import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { workerHasRole } from '../../../lib/agentTasks/workerRole.js';
 import { appendTaskEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import { PR_EVENT_TYPES, REVIEW_VERDICTS, type ReviewVerdict, type PrProtocolEvent } from '../../../lib/agentTasks/prProtocol.js';
-import { storedTaskReferences } from '../../../lib/agentTasks/references.js';
+import { normalizeTaskReferences, storedTaskReferences, TaskReferenceError } from '../../../lib/agentTasks/references.js';
 import { checkAgainstTeamSchema, normalizeTaskProperties, propertiesFingerprint } from '../../../lib/agentTasks/properties.js';
 import { lockTaskGraph } from '../../../lib/agentTasks/blockers.js';
 import { currentActor } from '../../../lib/requestActor.js';
@@ -116,6 +120,24 @@ function assignee(actor: TaskActor, task: TaskRow) {
   if (!isAssignee(actor, task)) throw notAssignee(actor, 'Only the task\'s assignee performs this command.');
 }
 
+/**
+ * #4235 S12a (cor:agt:130:02): which model reviewed, copied from the session the reviewing WORKER records through. The
+ * request's own bound session when it is an open session of that worker, else the worker's binding (its newest open
+ * session, the matcher's ordering). The values are the session's self-report (`family`, `llmModel`,
+ * `modelReportedAt`), never an argument of the verdict call, and null wherever nothing is recorded: a person (no
+ * worker session), no open session, or a null column. Never derived, never 'unknown'. Readiness does not read them.
+ */
+async function reviewerModelSnapshot(tx: Prisma.TransactionClient, actor: TaskActor, sessionId: string | undefined) {
+  const none = { reviewerFamily: null, reviewerModel: null, modelReportedAt: null };
+  if (actor.kind !== 'worker') return none;
+  const where = { workerId: actor.workerId, endedAt: null, deletedAt: null };
+  const select = { family: true, llmModel: true, modelReportedAt: true } as const;
+  const session = (sessionId ? await tx.session.findFirst({ where: { ...where, id: sessionId }, select }) : null)
+    ?? await tx.session.findFirst({ where, orderBy: [{ startedAt: 'desc' }, { id: 'desc' }], select });
+  if (!session) return none;
+  return { reviewerFamily: session.family || null, reviewerModel: session.llmModel || null, modelReportedAt: session.modelReportedAt?.toISOString() ?? null };
+}
+
 /** Mirrors obey the ordinary size/schema constraints, but are never consulted as protocol facts. */
 async function record(tx: Prisma.TransactionClient, c: Context, task: TaskRow, event: PrProtocolEvent, mirror: Record<string, Prisma.InputJsonValue | null>) {
   const properties = normalizeTaskProperties({ ...(task.properties as Record<string, unknown> | null ?? {}), ...mirror });
@@ -197,6 +219,27 @@ export const prProtocolQueries = {
   },
 };
 
+/** #4280 (Proposed cor:agt:130:05, Peter's ruling on the issue): the worker roles that may link a defect, by the CURRENT Worker.role. */
+export const DEFECT_LINK_ROLES = ['qa-engineer', 'coordinator'] as const;
+const defectLinkForbidden = () => taskError('DEFECT_LINK_FORBIDDEN',
+  'Only a QA engineer or coordinator worker, or whoever manages the App, may link a defect to a pull request. Nothing was written.');
+
+type DefectLinkEvent = Pick<Event, 'id' | 'taskId' | 'payload' | 'createdAt'>;
+const defectLink = (e: DefectLinkEvent, created: boolean) => {
+  const p = data(e as Event);
+  return { taskId: e.taskId, defect: p.defect, introducedAtHead: p.introducedAtHead ?? null, eventId: e.id, linkedAt: e.createdAt, created };
+};
+
+/** #4280: the issue URL, with exactly the rules a task reference of kind `issue` passes; stored as given. */
+function defectValue(raw: unknown): string {
+  try {
+    return normalizeTaskReferences([{ kind: 'issue', target: raw }])[0]!.target;
+  } catch (e) {
+    if (e instanceof TaskReferenceError) throw badInput(e.message.replace(/^Reference 1/, 'defectRef'));
+    throw e;
+  }
+}
+
 export const prProtocolMutations = {
   setReviewSchedule: async (_: unknown, { taskRef, slots }: { taskRef: string; slots: string[] }, ctx: Context) => {
     const task = await mutateTask(ctx, taskRef, async (tx, row, actor, app, c) => {
@@ -219,6 +262,45 @@ export const prProtocolMutations = {
       await record(tx, c, row, { type: 'review.scheduled', slots: values }, { 'review.schedule': values });
     }, { taskGraph: 'exclusive' });
     return { task, action: await action(ctx, task.appId, 'review.scheduled') };
+  },
+  /**
+   * #4280 (S12b of #4229; Proposed cor:agt:130:05): record that a defect found after the PR merged traces back to it.
+   * One `review.defect-linked` event on the PR's build task, and nothing else: no property, verdict, seat, readiness or
+   * row field changes. One link per (defect, task): a second call returns the first link (`created: false`).
+   */
+  linkDefectToPullRequest: async (_: unknown, args: { defectRef: string; prTaskRef: string; introducedAtHead?: string | null; instruction?: ActInstruction | null }, ctx: Context) => {
+    const defect = defectValue(args.defectRef);
+    const head = args.introducedAtHead == null ? null : headValue(args.introducedAtHead);
+    // The App's key and a run never link (rule 1), even a run a manager started: one that may read the task is refused
+    // DEFECT_LINK_FORBIDDEN, one that may not is answered as for a task that does not exist (cor:agt:050:21).
+    if (isRunPrincipal(ctx) || appKeyCaller(ctx)) {
+      const readable = await withReadableTask(ctx, args.prTaskRef, async () => true, true);
+      throw readable ? defectLinkForbidden() : taskNotFound(args.prTaskRef);
+    }
+    let out: ReturnType<typeof defectLink> | undefined;
+    // mutateTask answers a caller who may not read the App's tasks as for a task that does not exist.
+    await mutateTask(ctx, args.prTaskRef, async (tx, row, actor, app, c) => {
+      const allowed = (actor.kind === 'worker' && await workerHasRole(tx, actor.workerId, app.id, DEFECT_LINK_ROLES))
+        || await actorManagesApp(c, app, actor, actor.instructed);
+      if (!allowed) throw defectLinkForbidden();
+      if (!storedTaskReferences(row.references).some((r) => r.kind === 'pull_request')) {
+        throw taskError('PR_REFERENCE_MISSING', 'A defect links to a build task with a pull_request reference.');
+      }
+      if (head !== null && !await tx.agentTeamEvent.count({ where: { taskId: row.id, type: 'pr.frozen', payload: { path: ['head'], equals: head } } })) {
+        throw taskError('DEFECT_HEAD_NOT_FROZEN', 'introducedAtHead must be a head frozen on this pull request. Nothing was written.');
+      }
+      // Under the task's row lock (mutateTask), so two links of one pair cannot both write.
+      const linked = (where: Prisma.AgentTeamEventWhereInput) => tx.agentTeamEvent.findFirst({
+        where: { taskId: row.id, type: 'review.defect-linked', payload: { path: ['defect'], equals: defect }, ...where },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true, taskId: true, payload: true, createdAt: true },
+      });
+      const existing = await linked({});
+      if (existing) { out = defectLink(existing, false); return; }
+      await appendTaskEvent(tx, { appId: app.id, taskId: row.id, actor: eventActor(c.userId), event: { type: 'review.defect-linked', defect, introducedAtHead: head } });
+      out = defectLink((await linked({}))!, true);
+      await recordInstructedManagerAct(tx, app.id, actor, 'review.defect-link', { taskId: row.id });
+    }, {}, args.instruction ?? null);
+    return out!;
   },
   freezePullRequestHead: async (_: unknown, { taskRef, head: raw }: { taskRef: string; head: string }, ctx: Context) => {
     const task = await mutateTask(ctx, taskRef, async (tx, row, actor, _app, c) => {
@@ -286,7 +368,8 @@ export const prProtocolMutations = {
       }
       if (!(REVIEW_VERDICTS as readonly string[]).includes(args.verdict)) throw badInput('Unknown review verdict.');
       const node = optionalMetadata(args.node, 'node'), receipt = optionalMetadata(args.receipt, 'receipt');
-      await record(tx, c, row, { type: 'review.verdict', slot: assigned.slot, head, verdict: args.verdict, node, receipt }, { 'review.verdict': args.verdict, 'review.node': node, 'review.receipt': receipt });
+      const reviewer = await reviewerModelSnapshot(tx, actor, c.sessionId);
+      await record(tx, c, row, { type: 'review.verdict', slot: assigned.slot, head, verdict: args.verdict, node, receipt, ...reviewer }, { 'review.verdict': args.verdict, 'review.node': node, 'review.receipt': receipt });
     }, { taskGraph: 'exclusive' });
     return { task, action: await action(ctx, task.appId, 'review.verdict') };
   },
