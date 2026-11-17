@@ -14,6 +14,9 @@
  *    grant's own cap may not exceed it, and a grant stored with as many USE events as the count is spent although its `use_count` says
  *    zero (a grant used before the count existed, #4163's migration guard, ruling 0259). With no action count, neither applies.
  *
+ * An activation time still in the future admits nothing (`activated_at <= now`, the old boot-prompt door's filter, kept for both doors): the
+ * database stamps the database clock at activation so no shipped path makes such a row, but the authorization check does not lean on that.
+ *
  * WHAT IS NOT HERE. The hour (an action's lifetime from activation) and the count's `use_count` arithmetic belong to the shared live
  * definition (`grantLiveSql`, `chargeGrantUse` in live.ts, #4163): this module calls them and states neither (a grep pin).
  *
@@ -29,7 +32,7 @@
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
 import { PLATFORM_ACTIONS, REFERENCE_PARAMETER_TYPES, type ActionParameter, type GrantReach } from './actions.js';
-import { chargeGrantUse, grantLiveSql } from './live.js';
+import { GRANT_DB_NOW, chargeGrantUse, grantLiveSql } from './live.js';
 import { workersReachedByGrant } from './reach.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -128,7 +131,7 @@ export async function findCoveringGrants(db: Db, a: CoverArgs): Promise<Covering
   const order = a.order === 'CAPPED_FIRST' ? Prisma.sql`(g.max_uses IS NULL), g.created_at, g.id` : Prisma.sql`g.activated_at, g.id`;
   const judged = await db.$queryRaw<Array<{ id: string; max_uses: number | null; issuer_user_id: string | null }>>(Prisma.sql`
     SELECT g.id, g.max_uses, g.issuer_user_id FROM grants g
-    WHERE g.id IN (${Prisma.join(locked.map((r) => r.id))}) AND ${grantLiveSql('g')} AND ${countRuleSql(a.action, 'g')}
+    WHERE g.id IN (${Prisma.join(locked.map((r) => r.id))}) AND ${grantLiveSql('g')} AND g.activated_at <= ${GRANT_DB_NOW} AND ${countRuleSql(a.action, 'g')}
     ORDER BY ${order}`);
   const out: CoveringGrant[] = [];
   for (const g of judged) {
