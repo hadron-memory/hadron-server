@@ -360,9 +360,13 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     let inFlight = 0;
     let maxInFlight = 0;
     const attempts: { at: number; role: string }[] = [];
-    const hammer = (role: string) =>
+    // One loop, roles in turn: at most ONE probe in flight, so the probes can never take the slots pg_restore needs.
+    // (Three parallel loops did, and refused pg_restore's own connection: 'too many connections for database'.)
+    const roles = [F.ROLES.serve, F.ROLES.owner, F.ROLES.other];
+    const loops = [
       (async () => {
-        while (!stop) {
+        for (let i = 0; !stop; i++) {
+          const role = roles[i % roles.length]!;
           inFlight++;
           maxInFlight = Math.max(maxInFlight, inFlight);
           const connected = await tryConnect(B.url(target, role, F.PASSWORD));
@@ -371,8 +375,8 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
           if (connected) events.push({ at: performance.now(), what: role });
           await new Promise((r) => setTimeout(r, 5));
         }
-      })();
-    const loops = [F.ROLES.serve, F.ROLES.owner, F.ROLES.other].map(hammer);
+      })(),
+    ];
     await restoreWithRebase(
       base({
         target,
