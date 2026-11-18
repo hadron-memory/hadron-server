@@ -141,6 +141,15 @@ describe('#2417 — what does not come along', () => {
     expect(await refusal(assembleBootPrompt(db, await input('{{> parts:boot}}', acme())))).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
   });
 
+  it('a retired base part answers RETIRED to an installer, as it does to the owner', async () => {
+    await createDbAgentOrgGrant(db, acmeId, backend.id);
+    await db.node.updateMany({ where: { memoryId: engineer.mem, loc: 'parts:rules' }, data: { deletedAt: new Date() } });
+    expect(await refusal(assembleBootPrompt(db, await input('{{> parts:rules}}', acme())))).toBe('BOOT_PROMPT_INCLUDE_RETIRED');
+    await createDbAgentOrgGrant(db, vendorId, backend.id);
+    expect(await refusal(assembleBootPrompt(db, await input('{{> parts:rules}}', { kind: 'org', orgId: vendorId }, backend, null))))
+      .toBe('BOOT_PROMPT_INCLUDE_RETIRED');
+  });
+
   it('an Agent outside the chain, and its own base, still need their own licences', async () => {
     await createDbAgentOrgGrant(db, acmeId, backend.id);
     const other = await makeAgent(vendorId, 'other', engineer.id);
