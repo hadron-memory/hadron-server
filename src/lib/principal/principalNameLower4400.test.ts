@@ -90,6 +90,10 @@ describe('#4400 the migration refuses on data instead of guessing', () => {
     expect(state).toContain('HDPRF');
     expect(state).toContain('1 row(s) are not lower case');
     expect(await db.principal.count({ where: { name: 'Legacy.Example' } })).toBe(0);
+    // The rollback also brought the constraint back: a later test file must not run without it.
+    const [{ n }] = await db.$queryRaw<{ n: bigint }[]>`
+      SELECT count(*) AS n FROM pg_constraint WHERE conname = 'chk_principals_name_lower'`;
+    expect(Number(n)).toBe(1);
   });
 
   it('adds the same CHECK the test database gets from post-push.sql', () => {
