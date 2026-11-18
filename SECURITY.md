@@ -3,7 +3,7 @@
 ## Reporting a Vulnerability
 
 Please report security vulnerabilities **privately** through GitHub's
-[private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-reviewing/privately-reporting-a-security-vulnerability):
+[private vulnerability reporting](https://github.com/hadron-memory/hadron-server/security/advisories/new):
 use **Security → Report a vulnerability** on this repository. Do not open a
 public issue, discussion, or pull request for a vulnerability report.
 
