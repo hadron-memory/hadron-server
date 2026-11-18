@@ -52,10 +52,12 @@ describe('#3998 issueSecretReadClient', () => {
     expect(await db.grant.count()).toBe(0);
   });
 
-  it('an auto-delete mark needs a window or a budget, and then stores the delete mark', async () => {
+  it('an auto-delete mark needs a window or a budget, and is then refused until S6 consumes it (#4001)', async () => {
     expect(await code(issue(ownerId, { autoDelete: true }))).toBe('SECRET_AUTO_DELETE_NEEDS_LIMIT');
-    const r: any = await issue(ownerId, { autoDelete: true, maxReads: 1 });
-    expect((await db.grant.findUniqueOrThrow({ where: { id: r.grantId } })).values).toEqual({ secret: secretId, 'auto-delete': 'delete' });
+    // Signed but not consumed: refused with a typed code, nothing written. S6 removes this guard (and this expectation).
+    expect(await code(issue(ownerId, { autoDelete: true, maxReads: 1 }))).toBe('SECRET_AUTO_DELETE_NOT_AVAILABLE');
+    expect(await db.grant.count()).toBe(0);
+    expect(await db.secretReadClient.count()).toBe(0);
   });
 
   it('a person holder is only the issuer themself', async () => {
@@ -77,5 +79,24 @@ describe('#3998 issueSecretReadClient', () => {
   it('refuses a missing secret exactly as it refuses someone who may not issue', async () => {
     const missing = await code(resolvers.Mutation.issueSecretReadClient({}, { input: { secretRef: generateId(), holderKind: 'USER', autoDelete: false, reason: 'r' } }, ctxOf(ownerId)));
     expect(missing).toBe(await code(issue(outsiderId)));
+  });
+
+  it('input refusals do not tell an outsider whether a secret exists (existence oracle)', async () => {
+    const as = (userId: string, ref: string, over: Record<string, unknown>) => code(resolvers.Mutation.issueSecretReadClient({}, {
+      input: { secretRef: ref, holderKind: 'USER', autoDelete: false, reason: 'r', ...over },
+    }, ctxOf(userId)));
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['agent holder', { holderKind: 'AGENT', holderRef: generateId() }],
+      ['app holder', { holderKind: 'APP' }],
+      ['auto-delete without a limit', { autoDelete: true }],
+      ['auto-delete with a limit', { autoDelete: true, maxReads: 1 }],
+      ['bad time', { expiresAt: 'not-a-date' }],
+      ['plain', {}],
+    ];
+    for (const [label, over] of cases) {
+      const existing = await as(outsiderId, secretId, over);
+      const missing = await as(outsiderId, generateId(), over);
+      expect(existing, label).toBe(missing);
+    }
   });
 });

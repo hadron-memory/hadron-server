@@ -518,10 +518,8 @@ function asTime(v: Date | string | null | undefined): Date | null {
  */
 async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) {
   await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
-  const found = await findSecretByRef(ctx, input.secretRef);
-  if (!found || found.ownerType !== 'app') throw authorizationDenied();
-  const app = await loadLiveApp(ctx, found.ownerId);
-  if (!app) throw authorizationDenied();
+  // The refusals that depend only on the INPUT come first, before the secret is looked up: judged after it, a stranger could tell an
+  // existing secret from a missing one by which refusal came back (existence oracle, Rook's partial §10 at f610b2e5).
   // #4434: an agent holder (or an App) is not built here, and a read client nothing can read must never exist: refuse before any write.
   if (input.holderKind === 'AGENT' || input.holderKind === 'APP') {
     throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A read client is held by a person or a worker.');
@@ -532,6 +530,15 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
   if (input.autoDelete && !expiresAt && maxUses === null) {
     throw readClientRefusal('SECRET_AUTO_DELETE_NEEDS_LIMIT', 'An auto-delete mark needs a window or a read budget.');
   }
+  // The "delete" mark is signed but nothing consumes it until S6 (#4001): a person must not sign a retention term the server does not
+  // keep. S6's first act is to remove this guard; the "keep" wording stays.
+  if (input.autoDelete) {
+    throw readClientRefusal('SECRET_AUTO_DELETE_NOT_AVAILABLE', 'Auto-delete on a read client is not available yet.');
+  }
+  const found = await findSecretByRef(ctx, input.secretRef);
+  if (!found || found.ownerType !== 'app') throw authorizationDenied();
+  const app = await loadLiveApp(ctx, found.ownerId);
+  if (!app) throw authorizationDenied();
   try {
     return await withAuthorizedTx(
       ctx,

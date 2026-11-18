@@ -6420,7 +6420,7 @@ export const typeDefs = `#graphql
     "WORKER: a live worker of the App (holderRef is its id). USER: the issuer themself (holderRef omitted)."
     holderKind: GrantHolderKind!
     holderRef: ID
-    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget."
+    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refused (SECRET_AUTO_DELETE_NOT_AVAILABLE) until the deletion is built (#4001)."
     autoDelete: Boolean! = false
     startsAt: DateTime
     expiresAt: DateTime
