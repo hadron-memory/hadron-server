@@ -6,7 +6,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
-import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
@@ -104,5 +103,19 @@ describe('#3775 B — a person-assigned task raises no stall alarm', () => {
     expect(await alarms()).toEqual([]); // the window counts from the reassignment, not from the old person assignment
     await tick('12:20');
     expect((await alarms()).map((a) => a.type)).toEqual(['stall.not-started']);
+  });
+
+  it('reassigning from a worker to the person while an alarm is open ends its episode (recorded once) and raises nothing new (BLIND P2)', async () => {
+    const t = await toAnne('10:00');
+    await tick('10:20');
+    const [raised] = await alarms();
+    expect(raised).toMatchObject({ type: 'stall.not-started', taskId: t.id });
+    expect(await db.alarmEscalationEnd.count({ where: { eventId: raised.id } })).toBe(0); // still running
+    await db.agentTask.update({ where: { id: t.id }, data: { assigneeWorkerId: null, assigneeUserId: miaId, assignedAt: at('10:30') } });
+    await tick('10:31');
+    expect(await db.alarmEscalationEnd.count({ where: { eventId: raised.id } })).toBe(1); // the person now holds it: no episode to keep running
+    await tick('13:00');
+    expect((await alarms()).map((a) => a.id)).toEqual([raised.id]); // nothing new, and the old alarm is neither deleted nor re-raised
+    expect(await db.alarmEscalationEnd.count({ where: { eventId: raised.id } })).toBe(1);
   });
 });
