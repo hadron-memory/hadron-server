@@ -20,6 +20,7 @@ import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
 import { isGrantLive } from '../../../lib/grants/live.js';
 import { dropTestActions, seedReadableNodes, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../../test/startServerFixture.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -28,11 +29,11 @@ let http: Server;
 let base: string;
 beforeAll(async () => {
   vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
-  http = httpServer(await createServer());
+  http = httpServer(await createServerOnCleanDb());
   await new Promise<void>((r) => http.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
 });
-afterAll(async () => { await new Promise<void>((r) => http.close(() => r())); await cleanDb(db); await dropTestActions(); vi.unstubAllEnvs(); });
+afterAll(async () => { await closeServerIfStarted(http); await cleanDb(db); await dropTestActions(); vi.unstubAllEnvs(); });
 
 let w: World;
 /** #4067: node ids the requester can read (a node-typed value must name one). */

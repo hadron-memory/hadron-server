@@ -8,13 +8,13 @@ import { EventEmitter } from 'node:events';
 import { createServer as createHttpServer, request as httpRequest, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
-import { createServer } from '../server.js';
 import { signJwt } from '../auth/jwt.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 import { generateId } from '../lib/id.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../middleware/auth.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../test/startServerFixture.js';
 import {
   handleMcpRequest,
   reserveMcpSession,
@@ -50,14 +50,14 @@ let port: number;
 let baseUrl: string;
 
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   port = (server.address() as AddressInfo).port;
   baseUrl = `http://127.0.0.1:${port}`;
 });
 afterAll(async () => {
   server.closeAllConnections?.();
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await closeServerIfStarted(server);
 });
 beforeEach(async () => {
   await cleanDb(db);

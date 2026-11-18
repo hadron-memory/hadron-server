@@ -1,4 +1,4 @@
-import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #2607 (action register phase 3) — warnings on task cancel and alarm acknowledgement.
@@ -19,6 +19,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { taskWarningsPlugin } from '../taskWarningsPlugin.js';
 import { TASK_WARNING_TEXT } from './resolvers.taskWarnings.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));

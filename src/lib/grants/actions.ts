@@ -15,6 +15,18 @@ export type ActionEnforcement = (typeof ACTION_ENFORCEMENT)[number];
 
 export interface ActionParameter { name: string; type: string; refusesWildcard: boolean }
 
+/**
+ * #4162 (cor:acl:140:10, :06): WHO may hold a grant of an action for it to cover a WORKER's act. Ruled per action, so it is a
+ * declaration of the action and never a universal of the shared check (src/lib/grants/cover.ts):
+ *  - `WORKER`: the worker itself only (both boot-prompt grants, cor:agt:040:11 V50: a grant held by its role agent authorizes nothing at use);
+ *  - `WORKER_OR_ROLE_AGENT`: the worker, or its role agent's grant, which reaches the agent's live workers (cor:acl:140:06, Decided);
+ *  - `NO_WORKER`: a person-held grant, which reaches no agent or worker, even one the person drives (cor:acl:140:06 R5, Decided).
+ */
+/** #4162: the parameter types whose value is a reference to something with an id; only these can name a subject, take a list or be covered. */
+export const REFERENCE_PARAMETER_TYPES: ReadonlySet<string> = new Set(['node-ref', 'secret-ref']);
+
+export type GrantReach = 'WORKER' | 'WORKER_OR_ROLE_AGENT' | 'NO_WORKER';
+
 export interface ActionDefinition {
   /** The dotted code, unique. */
   name: string;
@@ -27,6 +39,14 @@ export interface ActionDefinition {
   issuerRule: string;
   /** The plain-language template the platform fills from the action and a grant's values only. */
   summaryTemplate: string;
+  /** #4162: who may hold a grant of this action for it to cover a worker's act (see {@link GrantReach}). Absent means `WORKER`, the narrowest. Code-only: never stored or served. */
+  reach?: GrantReach;
+  /**
+   * #4162 (cor:acl:140:10 line 4: "the action's own declaration"): the names of the parameters whose value may be a LIST of ids, a
+   * grant covering an act on any member. Every other parameter takes one id only (a list names nothing). Code-only like `reach`, so
+   * the stored and served parameter shape (name, type, refusesWildcard) is unchanged.
+   */
+  listParameters?: readonly string[];
   /** #4163 (cor:acl:140:02): a limit on uses that applies to every grant of this action. A grant's own count can only narrow it. */
   maxUses?: number;
   /** #4163: a limit on lifetime from activation, in seconds, that applies to every grant of this action. A grant's own expiry can only narrow it. */
@@ -47,10 +67,12 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
   {
     name: 'schedule.create', source: 'PLATFORM', parameters: [ENTRY_NODE], tool: null, enforcement: 'SERVER',
     issuerRule: 'APP_SCHEDULE_ADMIN', summaryTemplate: 'Create a schedule in {app} that starts at the entry node {entryNode}',
+    reach: 'WORKER_OR_ROLE_AGENT', listParameters: ['entryNode'],
   },
   {
     name: 'webhook.create', source: 'PLATFORM', parameters: [ENTRY_NODE], tool: null, enforcement: 'SERVER',
     issuerRule: 'APP_WEBHOOK_ADMIN', summaryTemplate: 'Create a webhook in {app} that starts at the entry node {entryNode}',
+    reach: 'WORKER_OR_ROLE_AGENT', listParameters: ['entryNode'],
   },
   // #3823 (ruling 0267, cor:agt:040:11 r8): the two boot-prompt grants. The edit names ONE source node (a single value, enforced
   // where it is spent); the batch names the compiled prompts it covers. The signer must manage the App, and what more the signer must
@@ -59,11 +81,13 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
     name: 'bootprompt.source.edit', source: 'PLATFORM', parameters: [{ name: 'sourceNode', type: 'node-ref', refusesWildcard: true }], tool: null,
     enforcement: 'SERVER', issuerRule: 'APP_MANAGER', summaryTemplate: 'Change the text of the boot prompt source {sourceNode} in {app}, once, within an hour',
     maxUses: 1, lifetimeSeconds: BOOT_PROMPT_GRANT_LIFETIME_SECONDS,
+    reach: 'WORKER',
   },
   {
     name: 'bootprompt.compile.approve', source: 'PLATFORM', parameters: [{ name: 'compiledNode', type: 'node-ref', refusesWildcard: true }], tool: null,
     enforcement: 'SERVER', issuerRule: 'APP_MANAGER', summaryTemplate: 'Compile and approve the boot prompts {compiledNode} in {app}, any number of times within an hour',
     lifetimeSeconds: BOOT_PROMPT_GRANT_LIFETIME_SECONDS,
+    reach: 'WORKER', listParameters: ['compiledNode'],
   },
 ];
 
@@ -78,6 +102,13 @@ function validate(list: readonly ActionDefinition[]): void {
     if (!(ACTION_ENFORCEMENT as readonly string[]).includes(a.enforcement)) throw new Error(`action ${a.name}: unknown enforcement level`);
     if (a.source !== 'PLATFORM') throw new Error(`action ${a.name}: source must be PLATFORM`);
     if (!a.issuerRule || !a.summaryTemplate) throw new Error(`action ${a.name}: issuerRule and summaryTemplate are required`);
+    if (a.reach !== undefined && !(['WORKER', 'WORKER_OR_ROLE_AGENT', 'NO_WORKER'] as readonly string[]).includes(a.reach)) throw new Error(`action ${a.name}: unknown reach`);
+    for (const n of a.listParameters ?? []) {
+      const p = a.parameters.find((x) => x.name === n);
+      if (!p) throw new Error(`action ${a.name}: listParameters names unknown parameter ${n}`);
+      // A list on a parameter that is no reference names nothing: the shared check would refuse every act of the action, silently.
+      if (!REFERENCE_PARAMETER_TYPES.has(p.type)) throw new Error(`action ${a.name}: listParameters names ${n}, whose type ${p.type} is not a reference type`);
+    }
     for (const [label, v] of [['maxUses', a.maxUses], ['lifetimeSeconds', a.lifetimeSeconds]] as const) {
       if (v !== undefined && (!Number.isSafeInteger(v) || v <= 0 || v > 2147483647)) throw new Error(`action ${a.name}: ${label} must be a positive integer`);
     }

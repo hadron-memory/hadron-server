@@ -1,4 +1,4 @@
-import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 /**
  * #3933 — agentTeamEvents can be read from the NEWEST end (the portal's alarm view walked forward and could not reach alarms
  * past 2000 events). Vera's FIT conditions: (a) no direction => today's rows and order, byte-identical; (b) the same gate and the
@@ -12,6 +12,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));

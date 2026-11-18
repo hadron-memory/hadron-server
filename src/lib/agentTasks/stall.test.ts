@@ -1,4 +1,4 @@
-import { settledTeamEventQueries } from '../../test/teamEventHorizon.js';
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../test/teamEventHorizon.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1706 (Task Management T2) — the stall evaluator, the alarm chain and its
@@ -24,9 +24,11 @@ import { generateId } from '../id.js';
 import { runAsActor } from '../requestActor.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
-import { evaluateStalls, isSerializationFailure, raiseStallAlarm, stallCandidates, STALL_WINDOW_DEFAULTS, wakeDueOwners } from './stall.js';
+import { evaluateStalls, isSerializationFailure, raiseStallAlarm, stallCandidates, STALL_EVENT_TYPE, STALL_RULES, STALL_WINDOW_DEFAULTS, wakeDueOwners } from './stall.js';
+import { ALARM_EVENT_TYPES } from './events.js';
 import { mergeUsers } from '../../test/mergeConsent.js';
 import { loadAvailableForWork } from './availability.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -1149,5 +1151,20 @@ describe('#1754 — backlog and the stall rules (cor:agt:050:02, :17)', () => {
     expect(await alarms('assignment.unassignable')).toHaveLength(1);
     expect((await wakes(a.id))[1]).toMatchObject({ wokenAt: null, endedAt: at('09:10') });
     expect((await wakes(a.id))[2]).toMatchObject({ wokenAt: null, endedAt: at('09:10') });
+  });
+});
+
+describe('#4285 item 2: every stall rule has its own alarm type (the raised-keys read joins on it)', () => {
+  // loadRaisedEpisodeKeys passes STALL_EVENT_TYPE[rule] for each candidate into an unnest(...) join on (task, type, episode
+  // start). An unmapped rule would send undefined (a key that matches nothing: the raise is never skipped, or the type is
+  // NULL); two rules sharing a type would let one rule's alarm hide the other's (Arianna, #4274 New-1/old 5).
+  it('maps each rule to a defined, distinct alarm type the event layer knows', () => {
+    const types = STALL_RULES.map((rule) => STALL_EVENT_TYPE[rule]);
+    for (const [i, t] of types.entries()) {
+      expect(t, `rule ${STALL_RULES[i]} has an alarm type`).toBeTypeOf('string');
+      expect(ALARM_EVENT_TYPES as readonly string[], `rule ${STALL_RULES[i]}'s type is a known alarm type`).toContain(t);
+    }
+    expect(new Set(types).size, 'no two rules share an alarm type').toBe(STALL_RULES.length);
+    expect(Object.keys(STALL_EVENT_TYPE).sort(), 'the map has no rule the evaluator does not know').toEqual([...STALL_RULES].sort());
   });
 });

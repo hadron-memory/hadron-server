@@ -10,7 +10,6 @@ import { randomBytes } from 'node:crypto';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createServer } from '../../../server.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -19,6 +18,7 @@ import { USER_API_KEY_PREFIX, hashUserApiKey } from '../../../middleware/auth.js
 import { grantManageMutations } from './resolvers.grantManage.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
 import { DB_NOW, dropTestActions, insertGrant, insertGrantUnguarded, raw, seedReadableNodes, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
+import { createServerOnCleanDb } from '../../../test/startServerFixture.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -27,7 +27,7 @@ let http: Server;
 let base: string;
 beforeAll(async () => {
   vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
-  http = httpServer(await createServer());
+  http = httpServer(await createServerOnCleanDb());
   await new Promise<void>((r) => http.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
 });
@@ -35,9 +35,11 @@ beforeAll(async () => {
 // `() => r()` the close callback actually resolves the promise — the earlier `() => r` form returned the
 // resolver instead of calling it, so every run silently waited out the full 2 s (misread as a runner flake).
 afterAll(async () => {
-  http.closeIdleConnections?.();
-  http.closeAllConnections?.();
-  await Promise.race([new Promise<void>((r) => http.close(() => r())), new Promise<void>((r) => setTimeout(r, 2000))]);
+  if (http) { // beforeAll may have failed before the server was assigned
+    http.closeIdleConnections?.();
+    http.closeAllConnections?.();
+    await Promise.race([new Promise<void>((r) => http.close(() => r())), new Promise<void>((r) => setTimeout(r, 2000))]);
+  }
   await cleanDb(db);
   await dropTestActions();
   vi.unstubAllEnvs();

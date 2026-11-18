@@ -144,12 +144,26 @@ it('executes surviving wake get/pause/clearPause and delivery get/set; client pr
   const until=new Date(Date.now()+60_000).toISOString();
   expect((await execute('SetWorkerWakeSettings','cli-wake',{workerRef:targetId,input:{pausedUntil:until}},ctx(holderId))).setWorkerWakeSettings.pausedUntil).toBe(until);
   expect((await execute('SetWorkerWakeSettings','cli-wake',{workerRef:targetId,input:{clearPause:true}},ctx(holderId))).setWorkerWakeSettings.pausedUntil).toBeNull();
-  for(const[name,file,variables,key]of[
-   ['TeamDeliverySettings','cli-delivery',{appRef:appId},'appDeliverySettings'],
-   ['TeamDeliverySettingsSet','cli-delivery',{appRef:appId,input:{busyDelaySeconds:500}},'setAppDeliverySettings'],
-   ['AppDeliverySettings','portal-delivery',{appRef:appId},'appDeliverySettings'],
-   ['SetAppDeliverySettings','portal-delivery',{appRef:appId,input:{busyDelaySeconds:500}},'setAppDeliverySettings'],
-  ] as const)expect((await execute(name,file,variables,ctx(adminId)))[key]).not.toHaveProperty('standbyEnabled');
+  // #4323 F2: assert the surviving VALUES returned and persisted after each operation (the fixtures never select
+  // standbyEnabled, so a bare not.toHaveProperty would pass whatever the resolver did).
+  const cliKeys=['darkAlarmWindowSeconds','batchWindowSeconds','busyDelaySeconds','stuckWindowSeconds','checkPeriodSeconds','failedChecksToOverdue'].sort();
+  const portalKeys=['batchWindowSeconds','busyDelaySeconds','stuckWindowSeconds'].sort();
+  const stored=async()=>(await db.app.findUniqueOrThrow({where:{id:appId}})).deliveryBusyDelaySeconds;
+  let busy=(await db.app.findUniqueOrThrow({where:{id:appId}})).deliveryBusyDelaySeconds;
+  for(const[name,file,variables,key,keys,sets]of[
+   ['TeamDeliverySettings','cli-delivery',{appRef:appId},'appDeliverySettings',cliKeys,null],
+   ['TeamDeliverySettingsSet','cli-delivery',{appRef:appId,input:{busyDelaySeconds:500}},'setAppDeliverySettings',cliKeys,500],
+   ['AppDeliverySettings','portal-delivery',{appRef:appId},'appDeliverySettings',portalKeys,null],
+   ['SetAppDeliverySettings','portal-delivery',{appRef:appId,input:{busyDelaySeconds:501}},'setAppDeliverySettings',portalKeys,501],
+  ] as const){
+   const out=(await execute(name,file,variables,ctx(adminId)))[key];
+   if(sets!==null)busy=sets;
+   expect(Object.keys(out).sort(),name).toEqual([...keys]);
+   expect(out.busyDelaySeconds,name).toBe(busy);
+   expect(out.batchWindowSeconds,name).toEqual(expect.any(Number));
+   expect(out.stuckWindowSeconds,name).toEqual(expect.any(Number));
+   expect(await stored(),name).toBe(busy);
+  }
  }finally{await server.stop();}
 });
 

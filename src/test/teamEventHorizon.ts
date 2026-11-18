@@ -2,8 +2,15 @@
 import { vi } from 'vitest';
 import type { PrismaClient } from '../generated/prisma/index.js';
 
-// xmin is cluster-wide: another worker's transaction can briefly delay an otherwise committed fixture.
-vi.setConfig({ testTimeout: 30_000 });
+/**
+ * #4316 item 3: a file whose tests wait on the horizon sets its own 30 s timeout by calling this, replacing the
+ * import side effect this module used to have (a top-level `vi.setConfig` on every importer). xmin is
+ * cluster-wide: another transaction can briefly delay an otherwise committed fixture, so waiting can legitimately
+ * outgrow the default 5 s.
+ */
+export function useTeamEventHorizonTimeout(): void {
+  vi.setConfig({ testTimeout: 30_000 });
+}
 export async function settleTeamEventHorizon(db: Pick<PrismaClient, '$queryRaw'>): Promise<void> {
   const [{ x }] = await db.$queryRaw<Array<{ x: string }>>`SELECT pg_current_xact_id()::text AS x`;
   for (let attempt = 0; attempt < 200; attempt++) {

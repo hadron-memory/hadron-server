@@ -1,4 +1,4 @@
-import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../workerSignature.js';
 /**
  * hadron_task_create — a headless run creates root agent tasks in its own App
@@ -21,6 +21,7 @@ import { lockAuthorityAnchors } from '../../auth/authorityAnchors.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
 import type { RunToolContext } from './types.js';
 import { testRunAgentId } from '../../../test/runAgent.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 let orgId: string;
 let appId: string;

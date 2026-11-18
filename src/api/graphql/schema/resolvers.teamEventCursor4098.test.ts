@@ -5,7 +5,9 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { settleTeamEventHorizon } from '../../../test/teamEventHorizon.js';
+import { type TeamEventsArgs } from './resolvers.agentTask.js';
+import { settleTeamEventHorizon, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 let appId:string,userId:string;
 const T=Date.UTC(2026,10,1);
@@ -43,6 +45,26 @@ describe('#4098 committed-event completeness',()=>{
   const anchor=await event(T);await settle();expect(await read(surface,anchor.id)).toEqual([]);
   const later=await event(T-3600000);await settle();
   expect((await read(surface,anchor.id)).map(r=>r.id)).toEqual([later.id]);
+ },30000);
+ it.each(surfaces)('%s: a same-transaction sibling behind the cursor at finer stored precision is not re-served (#4372 fold)',async(surface)=>{
+  // #4372 fold (Baylor P2: the key round-trip unpinned): the cursor key carries created_at as TEXT, and the
+  // column's full storable precision is milliseconds — so the discriminator is two same-transaction siblings
+  // at different milliseconds within one second, the behind one carrying the HIGHER id. Any precision loss in
+  // the key (a seconds-precision text, a Date intermediate that collapses the second) falls to the id
+  // tiebreak and re-serves the behind row. Microseconds would discriminate a Date intermediate exactly, but
+  // created_at is timestamp(3): they do not survive storage (Celine's #4372 QA note), so this millisecond
+  // pin is the strongest the schema admits today.
+  const a=generateId(),b=generateId();
+  const curId=a<b?a:b,behindId=a<b?b:a; // same tx, earlier millisecond, HIGHER id than the cursor
+  const pg=new Client({connectionString:process.env.DATABASE_URL});await pg.connect();let open=false;
+  try{
+   await pg.query('BEGIN');open=true;
+   await pg.query(`INSERT INTO agent_team_events(id,app_id,type,created_at) VALUES($1,$2,'task.created',$3::timestamp),($4,$2,'task.created',$5::timestamp)`,
+    [behindId,appId,'2026-11-01T00:00:01.123',curId,'2026-11-01T00:00:01.999']);
+   await pg.query('COMMIT');open=false;
+  }finally{if(open)await pg.query('ROLLBACK');await pg.end();}
+  const after=await event(T+4000);await settle();
+  expect((await read(surface,curId,10)).map(r=>r.id)).toEqual([after.id]);
  },30000);
 });
 
@@ -93,7 +115,13 @@ describe('#4098 every filter selects the same events on the forward (SQL) and th
   await db.alarmEscalationEnd.create({data:{eventId:ended.id,endedAt:new Date(T+8000)}});
   await settle();
   const all=[plain,onTask,underscore,other,open,acked,ended].map(e=>e.id).sort();
-  const cases:Array<[Record<string,unknown>,string[]]>=[
+  // #4316 item 4: the cases are tied to TeamEventsArgs at the type level. FilterArg is every filter key of
+  // the args (appRef is identity, after/before/newestFirst are read direction, limit is page size — none
+  // filters events). The `satisfies` fails typecheck for a case naming a key the args do not have, and
+  // `parityCoversEveryFilter` below fails typecheck, naming the uncovered key, when a filter is added to
+  // TeamEventsArgs without a case here exercising it.
+  type FilterArg=keyof Omit<TeamEventsArgs,'appRef'|'after'|'before'|'newestFirst'|'limit'>;
+  const cases=[
    [{},all],
    [{since:new Date(T+2000).toISOString()},[other,open,acked,ended].map(e=>e.id)],
    [{since:new Date(T+2000)},[other,open,acked,ended].map(e=>e.id)],
@@ -108,7 +136,11 @@ describe('#4098 every filter selects the same events on the forward (SQL) and th
    [{taskId},[onTask,open].map(e=>e.id)],
    [{taskId,alarmsInEffect:true},[open.id]],
    [{since:new Date(T+4000).toISOString(),alarmsOnly:true,codePrefix:'stall.'},[acked,ended].map(e=>e.id)],
-  ];
+  ] as const satisfies ReadonlyArray<readonly [Partial<Record<FilterArg,unknown>>,readonly string[]]>;
+  type CaseFilterKeys<T>=T extends object?keyof T:never; // distributes; a bare keyof would intersect the union of case filters
+  type MissingParityCases=Exclude<FilterArg,CaseFilterKeys<(typeof cases)[number][0]>>;
+  const parityCoversEveryFilter:MissingParityCases extends never?true:MissingParityCases=true;
+  void parityCoversEveryFilter; // unused at runtime; its type is the whole assertion
   for(const [filter,expected] of cases){
    const got=await both(filter);
    expect(got.forward,`forward ${JSON.stringify(filter)}`).toEqual([...expected].sort());

@@ -93,8 +93,10 @@ describe('#4276: withSharedWorkerActivity shares one fold only inside its bounda
     await inTx(async (tx) => {
       await expect(withSharedWorkerActivity(tx, app.id, now, async () => { throw new Error('read failed'); })).rejects.toThrow('read failed');
       // #4273: the abandoned share's own fold now starts after its JIT-off setting statement, so let it land first; the pin
-      // is on the NEXT read's fold, not on when the discarded one is dispatched.
-      await new Promise((r) => setTimeout(r, 100));
+      // is on the NEXT read's fold, not on when the discarded one is dispatched. #4285 (Arianna New-5): wait for that one
+      // fold to be counted (inTx zeroed the count), not a fixed 100 ms a slow runner can outlast.
+      for (let i = 0; i < 200 && folds < 1; i++) await new Promise((r) => setTimeout(r, 10));
+      expect(folds, 'the abandoned share dispatched its one fold').toBe(1);
       const before = folds;
       await read(tx, [kit]);
       expect(folds - before, 'a rejected read left its share on the transaction').toBe(1);
