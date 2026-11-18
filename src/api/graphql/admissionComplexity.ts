@@ -56,6 +56,7 @@ import {
 import { getComplexity, simpleEstimator, type ComplexityEstimator } from 'graphql-query-complexity';
 import type { GraphqlAdmissionConfig } from './admission.js';
 import { pageTake } from './pageBounds.js';
+import { listPageTake } from '../../lib/listPage.js';
 import { SPEC_DOCUMENT_MAX_NODES, SPEC_DOCUMENT_CALL_COST } from '../../lib/specDocument/limits.js';
 
 export const QUERY_TOO_COMPLEX = 'QUERY_TOO_COMPLEX';
@@ -112,6 +113,18 @@ export const PAGE_ARGS_FIELDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Fields whose resolver sizes its page with `listPageArgs` / `validateListPageInput` (default 20, cap 100, over the cap served as
+ * the cap), costed at `listPageTake`: the list's OWN cap, shared with the resolver, not `pageTake`'s 200 (#4390, cor:api:120:04 S2).
+ * The `Node.signingRequestsPage` / `Node.signingRequests` key covers the installed-memory and inherited-node twins (same type and field).
+ */
+export const LIST_PAGE_FIELDS: ReadonlySet<string> = new Set([
+  'Query.webPollsPage',
+  'Query.webPolls',
+  'Node.signingRequestsPage',
+  'Node.signingRequests',
+]);
+
+/**
  * Lists with no page argument whose length is bounded by a refusal instead: costed at that bound, not at
  * `GRAPHQL_LIST_FACTOR`. #1302: `specDocument` refuses a document over its cap, so `entries` never exceeds it.
  */
@@ -150,6 +163,7 @@ function pageSizeOf(
   const v = args[declared];
   // A field whose resolver sizes its page with `pageArgs` is charged for the rows it actually reads (at least 1: count-only
   // is not free), not for a stated size the resolver would clamp (#2212 A2, cor:api:120:04 S2).
+  if (LIST_PAGE_FIELDS.has(fieldKey)) return listPageTake(typeof v === 'number' && Number.isSafeInteger(v) ? v : null);
   if (PAGE_ARGS_FIELDS.has(fieldKey)) return Math.max(1, pageTake(typeof v === 'number' && Number.isSafeInteger(v) ? v : null));
   if (typeof v === 'number' && Number.isSafeInteger(v)) return Math.max(1, Math.abs(v));
   return OMITTED_PAGE_SIZE[fieldKey] ?? DEFAULT_OMITTED_PAGE_SIZE;
