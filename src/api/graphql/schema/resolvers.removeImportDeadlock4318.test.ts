@@ -68,8 +68,9 @@ function crossInstallError(e: unknown, label: string): Error {
  * - the holder failing BEFORE it holds the lock rejects at once (lock readiness races the holder ending), and cleanup runs;
  * - the holder failing AFTER it held the lock (during `body`, or while ending) rejects, naming that, when `body` passed;
  * - when `body` failed, `body`'s own error stands, whatever the holder did.
- * `seams` are test-only (#4383): `beforeHold` runs inside the holder before it takes the lock, `afterHold` after the lock
- * is released, so either holder failure can be forced.
+ * `seams` are test-only (#4383): `beforeHold` runs inside the holder before it takes the lock, `afterHold` after `hold`
+ * resolves — still inside the holder transaction, before it commits, so the `FOR UPDATE` row lock is held — letting
+ * either holder failure be forced.
  */
 type HolderSeams = { beforeHold?: () => Promise<void>; afterHold?: () => Promise<void> };
 async function withHeldAppLock(appId: string, body: () => Promise<void>, seams: HolderSeams = {}): Promise<void> {
@@ -84,22 +85,29 @@ async function withHeldAppLock(appId: string, body: () => Promise<void>, seams: 
     await hold;
     await seams.afterHold?.();
   }, { timeout: 30_000 });
+  // Defensive-only (#4394): this fulfill arm runs at every successful holder teardown (its rejection is swallowed —
+  // by the `catch` below, and again by the finally's `holder.then(() => undefined, …)`) but can never WIN the readiness
+  // race: `held()` resolves unconditionally right after the `FOR UPDATE`, before `await hold`, so the holder can only
+  // end after signaling readiness. Kept so a future harness edit that breaks that ordering (the body running with no
+  // lock held) fails loudly in the race instead of passing silently.
   const holderEnded = holder.then(
     () => { throw new Error('the lock holder ended before it held the App lock'); },
     (e: unknown) => { throw new Error(`the lock holder failed before it held the App lock: ${String((e as Error)?.message ?? e)}`, { cause: e }); },
   );
   holderEnded.catch(() => {});
-  let bodyFailed = false;
+  // Set by either failure that surfaces before cleanup — the readiness race rejecting (a holder setup failure) or the
+  // body throwing — so cleanup never overwrites the error that already stands.
+  let failedBeforeCleanup = false;
   try {
     await Promise.race([isHeld, holderEnded]);
     await body();
   } catch (e) {
-    bodyFailed = true;
+    failedBeforeCleanup = true;
     throw e;
   } finally {
     releaseHold();
     const holderError = await holder.then(() => undefined, (e: unknown) => e ?? new Error('holder rejected'));
-    if (holderError !== undefined && !bodyFailed) {
+    if (holderError !== undefined && !failedBeforeCleanup) {
       throw new Error(`the lock holder failed after it held the App lock: ${String((holderError as Error)?.message ?? holderError)}`, { cause: holderError });
     }
   }
@@ -247,6 +255,19 @@ describe('#4318 crossed removeAgentImport fences', () => {
       expect(ran).toBe(false);
     }, 60_000);
 
+    /**
+     * Fixture provenance (#4394): this factory reproduces Prisma's debug text for a failed model operation — a
+     * `PrismaClientUnknownRequestError` whose message embeds `ConnectorError(ConnectorError { … QueryError(PostgresError
+     * { … }) })` — because that embedded text is the only place Prisma reports a model operation's Postgres error (no
+     * code or meta; see `crossInstallError`). The deadline case below is verbatim from a real lock-timeout probe run
+     * during #4354's BLIND review, and the live bounded-wait test above still asserts that diagnostic end-to-end, so a
+     * Prisma upgrade that changes the format turns THAT test red. The NOWAIT case is fixture-only: nothing live issues
+     * NOWAIT — the harness's bounded wait is `lock_timeout`, and the runtime fences lock with plain waits (`FOR NO KEY
+     * UPDATE` and `FOR UPDATE`, `src/lib/governedRemoval.ts`; no runtime code spells NOWAIT — only the 20261025030000
+     * migration and some test-side probes ever did) — so its spelling is hand-written from Postgres's 55P03 wording,
+     * and the classifier is deliberately insensitive to it (it matches the deadline text; every other 55P03 is named
+     * neutrally).
+     */
     const unknownError = (pg: string) => new Prisma.PrismaClientUnknownRequestError(
       `\nInvalid \`prisma.appAgent.create()\` invocation:\n\nError occurred during query execution:\nConnectorError(ConnectorError { user_facing_error: None, kind: QueryError(PostgresError { ${pg}, severity: "ERROR", detail: None, column: None, hint: None }), transient: false })`,
       { clientVersion: 'test' });
@@ -258,7 +279,7 @@ describe('#4318 crossed removeAgentImport fences', () => {
       expect((named as Error & { cause?: unknown }).cause).toBe(e);
     });
 
-    it('a NOWAIT 55P03 ("could not obtain lock") is named neutrally, keeping the same cause', () => {
+    it('a NOWAIT 55P03 ("could not obtain lock") is named neutrally, keeping the same cause (fixture-only input — see provenance above)', () => {
       const e = unknownError('code: "55P03", message: "could not obtain lock on row in relation \\"apps\\""');
       const named = crossInstallError(e, 'X');
       expect(named.message).toMatch(/^cross-install X failed: /);
