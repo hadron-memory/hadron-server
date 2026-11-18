@@ -85,9 +85,11 @@ async function withHeldAppLock(appId: string, body: () => Promise<void>, seams: 
     await hold;
     await seams.afterHold?.();
   }, { timeout: 30_000 });
-  // Defensive-only (#4394): this fulfill branch cannot fire — `held()` resolves unconditionally right after the
-  // `FOR UPDATE`, before `await hold`, so the holder can only end after signaling readiness. Kept so a future harness
-  // edit that breaks that ordering (the body running with no lock held) fails loudly here instead of passing silently.
+  // Defensive-only (#4394): this fulfill arm runs at every successful holder teardown (its rejection is swallowed —
+  // by the `catch` below, and again by the finally's `holder.then(() => undefined, …)`) but can never WIN the readiness
+  // race: `held()` resolves unconditionally right after the `FOR UPDATE`, before `await hold`, so the holder can only
+  // end after signaling readiness. Kept so a future harness edit that breaks that ordering (the body running with no
+  // lock held) fails loudly in the race instead of passing silently.
   const holderEnded = holder.then(
     () => { throw new Error('the lock holder ended before it held the App lock'); },
     (e: unknown) => { throw new Error(`the lock holder failed before it held the App lock: ${String((e as Error)?.message ?? e)}`, { cause: e }); },
@@ -260,10 +262,11 @@ describe('#4318 crossed removeAgentImport fences', () => {
      * code or meta; see `crossInstallError`). The deadline case below is verbatim from a real lock-timeout probe run
      * during #4354's BLIND review, and the live bounded-wait test above still asserts that diagnostic end-to-end, so a
      * Prisma upgrade that changes the format turns THAT test red. The NOWAIT case is fixture-only: nothing live issues
-     * NOWAIT — the harness's bounded wait is `lock_timeout`, and the runtime fences lock `FOR NO KEY UPDATE` as plain
-     * waits (`src/lib/governedRemoval.ts`; only the 20261025030000 migration ever used NOWAIT) — so its spelling is
-     * hand-written from Postgres's 55P03 wording, and the classifier is deliberately insensitive to it (it matches the
-     * deadline text; every other 55P03 is named neutrally).
+     * NOWAIT — the harness's bounded wait is `lock_timeout`, and the runtime fences lock with plain waits (`FOR NO KEY
+     * UPDATE` and `FOR UPDATE`, `src/lib/governedRemoval.ts`; no runtime code spells NOWAIT — only the 20261025030000
+     * migration and some test-side probes ever did) — so its spelling is hand-written from Postgres's 55P03 wording,
+     * and the classifier is deliberately insensitive to it (it matches the deadline text; every other 55P03 is named
+     * neutrally).
      */
     const unknownError = (pg: string) => new Prisma.PrismaClientUnknownRequestError(
       `\nInvalid \`prisma.appAgent.create()\` invocation:\n\nError occurred during query execution:\nConnectorError(ConnectorError { user_facing_error: None, kind: QueryError(PostgresError { ${pg}, severity: "ERROR", detail: None, column: None, hint: None }), transient: false })`,
