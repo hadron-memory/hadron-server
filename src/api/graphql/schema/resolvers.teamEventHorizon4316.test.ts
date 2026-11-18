@@ -15,6 +15,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { teamEventHorizonSettled } from './resolvers.agentTask.js';
 import { settleTeamEventHorizon, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 
 useTeamEventHorizonTimeout(); // this file's two-connection pins wait on the horizon
@@ -52,7 +53,14 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
       await pg.query('SELECT pg_current_xact_id()'); // assigns this connection's xid, holding xmin
       const held = await event(Date.now() - 60_000); // committed, 60 s old, at or above the held horizon
       expect(lagLines(log)).toEqual([]); // nothing logged yet: no read has happened
+      // #4372 fold (the vacuous-assertion P2s): the newest-first read comes FIRST — before any forward read
+      // of this App — and its silence is asserted after the probe has settled, so the once-per-minute limit
+      // cannot be the reason nothing appears. Dropping the !newestFirst guard makes this red on its own.
+      await resolvers.Query.agentTeamEvents({}, { appRef: appId, limit: 10, newestFirst: true }, context());
+      await teamEventHorizonSettled();
+      expect(lagLines(log)).toEqual([]); // a newest-first read is not a forward read: no line
       const rows = await resolvers.Query.agentTeamEvents({}, { appRef: appId, limit: 10 }, context());
+      await teamEventHorizonSettled(); // the probe is fire-and-forget: settle before reading the spy
       // The log changes nothing: the page is exactly the below-horizon row, byte-identical in shape.
       expect(rows).toEqual([{ ...await db.agentTeamEvent.findUniqueOrThrow({ where: { id: served.id } }), taskHandle: null }]);
       const lines = lagLines(log);
@@ -63,18 +71,23 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
       // The line carries the App id, the count and the age — never any event content.
       expect(Object.keys(lines[0]).sort()).toEqual(['appId', 'at', 'event', 'heldBack', 'oldestAgeMs']);
       void held;
-      // A second read of the same App within the minute logs nothing (once per App per minute per process).
+      // A second read of the same App within the minute neither checks nor logs anything (once per App per
+      // minute per process — the stamp is on the check, so the second poll does not even run the query).
       expect(await resolvers.Query.agentTeamEvents({}, { appRef: appId, limit: 10 }, context())).toEqual(rows);
-      expect(lagLines(log)).toHaveLength(1);
-      // A newest-first read is not a forward read: no line even on a different App's first read path.
-      await resolvers.Query.agentTeamEvents({}, { appRef: appId, limit: 10, newestFirst: true }, context());
+      await teamEventHorizonSettled();
       expect(lagLines(log)).toHaveLength(1);
       await pg.query('ROLLBACK');
       open = false;
       await settle();
-      // Nothing held back any more: a short read logs nothing further.
-      await resolvers.Query.agentTeamEvents({}, { appRef: appId, limit: 10 }, context());
-      expect(lagLines(log)).toHaveLength(1);
+      // #4372 fold: the after-the-hold silence is asserted on a FRESH App (never checked, never logged), so
+      // the rate limit is not the reason nothing appears — a check that ignored the horizon filter would
+      // still see this App's old below-horizon event and log.
+      const afterApp = (await db.app.create({ data: { ownerUserId: userId, name: 'After', urn: `${generateId().toLowerCase()}:a4316` } })).id;
+      await db.agentTeamEvent.create({ data: { appId: afterApp, type: 'task.created', createdAt: new Date(T) } });
+      await settle();
+      await resolvers.Query.agentTeamEvents({}, { appRef: afterApp, limit: 10 }, context());
+      await teamEventHorizonSettled();
+      expect(lagLines(log)).toHaveLength(1); // nothing held back any more: a short read logs nothing
     } finally {
       if (open) await pg.query('ROLLBACK');
       await pg.end();
@@ -93,6 +106,7 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
       await pg.query('SELECT pg_current_xact_id()');
       await event(Date.now() - 60_000);
       const page = await resolvers.Query.agentTeamEventsPage({}, { appRef: appId, limit: 10 }, context());
+      await teamEventHorizonSettled();
       expect(page.hasMore).toBe(false);
       expect(page.events).toHaveLength(1);
       expect(lagLines(log)).toHaveLength(1);
@@ -101,6 +115,67 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
       if (open) await pg.query('ROLLBACK');
       await pg.end();
     }
+  });
+
+  it('a held-back event younger than the 30 s floor stays silent (#4372 fold: the age gate is pinned)', async () => {
+    await event(T);
+    await settle();
+    const pg = new Client({ connectionString: process.env.DATABASE_URL });
+    await pg.connect();
+    let open = false;
+    try {
+      await pg.query('BEGIN');
+      open = true;
+      await pg.query('SELECT pg_current_xact_id()');
+      await event(Date.now() - 5_000); // committed and held back, but younger than HORIZON_LAG_MIN_AGE_MS
+      const rows = await resolvers.Query.agentTeamEvents({}, { appRef: appId, limit: 10 }, context());
+      await teamEventHorizonSettled();
+      expect(rows).toHaveLength(1); // the below-horizon row only; the young held row is not served
+      expect(lagLines(log)).toEqual([]); // young lag is not yet worth a line — dropping the floor makes this red
+    } finally {
+      if (open) await pg.query('ROLLBACK');
+      await pg.end();
+    }
+  });
+
+  it('a caught-up App runs the check once per window, not on every poll (#4372 fold: the stamp is on the check)', async () => {
+    await event(T); // nothing held back: the App is healthy, so no line — but the probe still runs once
+    await settle();
+    let checks = 0;
+    const hooked = Object.create(db) as typeof db;
+    const realQueryRaw = db.$queryRaw.bind(db) as unknown as (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown>;
+    (hooked as unknown as { $queryRaw: typeof db.$queryRaw }).$queryRaw = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+      // The horizon check is the only statement naming "heldBack"; the forward read and the cursor lookup differ.
+      const out = realQueryRaw(strings, ...values);
+      if (strings.join('').includes('"heldBack"')) checks += 1;
+      return out;
+    }) as typeof db.$queryRaw;
+    for (let i = 0; i < 3; i++) await resolvers.Query.agentTeamEvents({}, { appRef: appId, limit: 10 }, context({ db: hooked }));
+    await teamEventHorizonSettled();
+    expect(checks).toBe(1); // the first poll checks; the next two are inside the window and check nothing
+    expect(lagLines(log)).toEqual([]); // and a healthy App never logs
+  });
+
+  it('a slow check never delays the page it explains (#4372 fold: the probe is not awaited)', async () => {
+    await event(T);
+    await settle();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const hooked = Object.create(db) as typeof db;
+    const realQueryRaw = db.$queryRaw.bind(db) as unknown as (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown>;
+    (hooked as unknown as { $queryRaw: typeof db.$queryRaw }).$queryRaw = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+      const out = realQueryRaw(strings, ...values);
+      // Only the horizon check is gated; the page's own statements pass straight through.
+      return strings.join('').includes('"heldBack"') ? gate.then(() => out) : out;
+    }) as typeof db.$queryRaw;
+    const page = resolvers.Query.agentTeamEvents({}, { appRef: appId, limit: 10 }, context({ db: hooked }));
+    // The gate stays closed while the page is awaited: the page must settle without the probe ever
+    // finishing. Awaiting the probe (the pre-fold shape) leaves this await unresolved behind the gate and
+    // the test times out red here — no wall-clock bound, so host load cannot produce a false red or green.
+    const rows = await page;
+    expect(rows).toHaveLength(1);
+    release();
+    await teamEventHorizonSettled();
   });
 });
 

@@ -46,6 +46,26 @@ describe('#4098 committed-event completeness',()=>{
   const later=await event(T-3600000);await settle();
   expect((await read(surface,anchor.id)).map(r=>r.id)).toEqual([later.id]);
  },30000);
+ it.each(surfaces)('%s: a same-transaction sibling behind the cursor at finer stored precision is not re-served (#4372 fold)',async(surface)=>{
+  // #4372 fold (Baylor P2: the key round-trip unpinned): the cursor key carries created_at as TEXT, and the
+  // column's full storable precision is milliseconds — so the discriminator is two same-transaction siblings
+  // at different milliseconds within one second, the behind one carrying the HIGHER id. Any precision loss in
+  // the key (a seconds-precision text, a Date intermediate that collapses the second) falls to the id
+  // tiebreak and re-serves the behind row. Microseconds would discriminate a Date intermediate exactly, but
+  // created_at is timestamp(3): they do not survive storage (Celine's #4372 QA note), so this millisecond
+  // pin is the strongest the schema admits today.
+  const a=generateId(),b=generateId();
+  const curId=a<b?a:b,behindId=a<b?b:a; // same tx, earlier millisecond, HIGHER id than the cursor
+  const pg=new Client({connectionString:process.env.DATABASE_URL});await pg.connect();let open=false;
+  try{
+   await pg.query('BEGIN');open=true;
+   await pg.query(`INSERT INTO agent_team_events(id,app_id,type,created_at) VALUES($1,$2,'task.created',$3::timestamp),($4,$2,'task.created',$5::timestamp)`,
+    [behindId,appId,'2026-11-01T00:00:01.123',curId,'2026-11-01T00:00:01.999']);
+   await pg.query('COMMIT');open=false;
+  }finally{if(open)await pg.query('ROLLBACK');await pg.end();}
+  const after=await event(T+4000);await settle();
+  expect((await read(surface,curId,10)).map(r=>r.id)).toEqual([after.id]);
+ },30000);
 });
 
 describe('#4098 row and filter parity',()=>{

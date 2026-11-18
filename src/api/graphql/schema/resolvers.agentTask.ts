@@ -3425,10 +3425,15 @@ export type TeamEventsArgs = { appRef: string; since?: unknown; after?: string |
 
 /** #4316: how long a held-back horizon stays quiet before `team_events.horizon_lag` says something. */
 const HORIZON_LAG_MIN_AGE_MS = 30_000;
-/** #4316: at most one `team_events.horizon_lag` line per App per this window, per process. */
+/** #4316: at most one horizon check (and so at most one line) per App per this window, per process. */
 const HORIZON_LAG_LOG_INTERVAL_MS = 60_000;
-/** #4316 (keyed by App id): when `team_events.horizon_lag` was last emitted for that App in this process. */
-const horizonLagLastLoggedAt = new Map<string, number>();
+/**
+ * #4316 (keyed by App id): when the horizon was last CHECKED for that App in this process. Stamped when the
+ * check runs, not when a line is emitted (#4372 fold): a healthy App runs the probe query at most once per
+ * window instead of on every caught-up poll, and the line cadence — at most one per window — is unchanged,
+ * because a line can only come from a check.
+ */
+const horizonLagLastCheckedAt = new Map<string, number>();
 /**
  * #4316: one operator line when a forward read came back short while committed events of the App are held back
  * at or above the snapshot horizon (cor:agt:050:11 records the horizon as built; a log line changes no
@@ -3436,12 +3441,13 @@ const horizonLagLastLoggedAt = new Map<string, number>();
  * visible to the check's own snapshot count, so events of still-open transactions are not "held back" yet.
  * `created_at` is a UTC-labeled naive column, so the DB clock is read as UTC too — a session TimeZone would
  * skew the age by its offset. Best-effort by design: a failed or slow check must never change, delay or fail
- * the page it explains.
+ * the page it explains — the caller does not await it (#4372 fold).
  */
 async function logStalledHorizon(c: Context, appId: string): Promise<void> {
   const now = Date.now();
-  const last = horizonLagLastLoggedAt.get(appId);
+  const last = horizonLagLastCheckedAt.get(appId);
   if (last != null && now - last < HORIZON_LAG_LOG_INTERVAL_MS) return;
+  horizonLagLastCheckedAt.set(appId, now);
   try {
     const [row] = await c.db.$queryRaw<{ heldBack: number; oldestAgeMs: number | null }[]>`
       SELECT count(*)::int AS "heldBack",
@@ -3450,7 +3456,6 @@ async function logStalledHorizon(c: Context, appId: string): Promise<void> {
       FROM agent_team_events
       WHERE app_id = ${appId} AND tx_id >= pg_snapshot_xmin(pg_current_snapshot())`;
     if (!row?.oldestAgeMs || row.oldestAgeMs < HORIZON_LAG_MIN_AGE_MS) return;
-    horizonLagLastLoggedAt.set(appId, now);
     console.log(JSON.stringify({
       event: 'team_events.horizon_lag', appId, heldBack: row.heldBack, oldestAgeMs: row.oldestAgeMs,
       at: new Date().toISOString(),
@@ -3458,6 +3463,18 @@ async function logStalledHorizon(c: Context, appId: string): Promise<void> {
   } catch {
     // Observability only: the served page is byte-identical whatever happens here.
   }
+}
+
+/**
+ * #4372 fold: the probes the fire-and-forget call sites below have started and not yet finished. The page is
+ * served without awaiting its probe, so a test that asserts on (the absence of) a `team_events.horizon_lag`
+ * line needs a positive signal the probe has RUN; awaiting this settles every in-flight probe. Production
+ * never awaits it — the probes complete on their own and a rejection is impossible (every await sits inside
+ * the try above).
+ */
+const horizonProbes = new Set<Promise<void>>();
+export async function teamEventHorizonSettled(): Promise<void> {
+  while (horizonProbes.size) await Promise.all([...horizonProbes]);
 }
 
 async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsArgs, take: number) {
@@ -3535,8 +3552,13 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
     ORDER BY e.tx_id,e.created_at,e.id
     LIMIT ${take}`;
   // #4316: a short forward read is the only read that can mean "the horizon is holding events of this App
-  // back"; one best-effort check, never a change to what is served.
-  if (!newestFirst && events.length < take) await logStalledHorizon(c, app.id);
+  // back"; one best-effort check, never a change to what is served. #4372 fold: not awaited — a slow probe
+  // must not delay the page it explains (the function's own contract); tests observe it via
+  // teamEventHorizonSettled().
+  if (!newestFirst && events.length < take) {
+    const probe = logStalledHorizon(c, app.id).finally(() => { horizonProbes.delete(probe); });
+    horizonProbes.add(probe);
+  }
   // #4135: use the stored AgentTask.handle (cor:agt:050:01, Proposed), once per page.
   // Event task ids are retained after deletion; an absent row must never invent a handle.
   const taskIds = [...new Set(events.flatMap(e => e.taskId ? [e.taskId] : []))];
