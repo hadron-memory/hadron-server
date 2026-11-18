@@ -17,7 +17,7 @@ const invalid = () => new GraphQLError('Invalid page cursor or size.', { extensi
  */
 export const LIST_PAGE_DEFAULT = 20;
 export const LIST_PAGE_CAP = 100;
-/** How many rows a stated `first` reads: the same clamp `validateListPageInput` applies (an unusable value is refused there, before any read). */
+/** How many rows a stated `first` reads, for a value `validateListPageInput` admits (a non-integer or unsafe one is refused there before any read; admission passes only safe integers here). */
 export function listPageTake(first: number | null | undefined): number {
   return Math.min(LIST_PAGE_CAP, Math.max(1, first ?? LIST_PAGE_DEFAULT));
 }
