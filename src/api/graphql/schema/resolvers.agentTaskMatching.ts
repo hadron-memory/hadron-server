@@ -39,11 +39,17 @@ export async function withRosterAppRead<T>(ctx: Context, appRef: string, project
         await tx.$executeRawUnsafe('SET LOCAL jit = off');
         // #4476: the budget must bite ON the statement, not after it. #4455's transaction timeout
         // only lands once the running statement returns — prod's roster statements ran 20–175 s
-        // (p50 66 s, Hugo's alpha journal, #118308) inside the 5 s budget, holding a pooled
-        // connection long after every client had given up. statement_timeout from the same
-        // constant makes Postgres itself cancel the running statement at the budget (SQLSTATE
-        // 57014), which the catch below classifies as the same typed retryable refusal.
-        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${TEAM_READ_TX_TIMEOUT_MS}`);
+        // (p50 66 s, the prod journal at #118308) inside the 5 s budget, holding a pooled
+        // connection long after every client had given up. Two server-side bounds from the same
+        // constant (PG17+, the platform image): statement_timeout cancels any ONE statement that
+        // outruns the budget, and transaction_timeout cancels the whole read — statement included —
+        // at the budget from the transaction's start, closing the window where a statement that
+        // STARTS near the expiry would otherwise run a full budget of its own (worst case 2×; BLIND
+        // review P2-1 on #4482). Both cancels raise SQLSTATE 57014, which the catch below
+        // classifies as the same typed retryable refusal. Both are transaction-local (set_config
+        // with is_local), so neither reaches the pooled session.
+        await tx.$queryRaw`SELECT set_config('statement_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS)}, true) AS statement_timeout,
+                           set_config('transaction_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS)}, true) AS transaction_timeout`;
         const readCtx = withoutRequestCaches(ctx, tx);
         const { app } = await resolveParticipatedApp(readCtx, appRef);
         return project(readCtx, app);
