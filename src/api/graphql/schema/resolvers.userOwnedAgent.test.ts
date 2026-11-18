@@ -465,7 +465,7 @@ it('lets an org-less user create, view and use a personal agent through GraphQL'
   }
   ${portalAgentFields1694}`)).createAgent;
   expect(created).toMatchObject({ organizationId: null, hasAiApiKey: false, memoryItems: [],
-    memoryProvisioning: { appMemory: 'shared' }, installationPolicy: { maxMembers: 'unlimited', memberRoles: ['owner'] },
+    memoryProvisioning: { appMemory: 'shared' }, installationPolicy: { maxMembers: 'unlimited', memberRoles: ['owner', 'member'] },
     imports: [], appCount: 0, orgGrants: [] });
   const viewed = (await execute(`query($ref: ID!) {
     agent(ref: $ref) { ...AgentFields orgGrants { organization { id } } }
