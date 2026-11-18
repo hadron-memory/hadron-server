@@ -21,20 +21,34 @@ on:
   push:
     branches: [main]
 
-# Cancel in-progress runs when a new commit lands on the same ref. Saves
-# runner minutes on iterative pushes and gets feedback faster.
 concurrency:
-  group: test-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # These regressions use node:test and are deliberately excluded from Vitest.
+  # Their fixtures stub stack commands; no Docker, database or install is needed.
+  node-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run disposable-stack Node regressions
+        run: node --test scripts/e2e/*.test.mjs
+
   test-shard:
     runs-on: ubuntu-latest
     # GH default job timeout is 6 hours — a hung vitest worker or
     # deadlocked postgres connection would consume it before failing.
-    # A shard runs a quarter of the suite; 20 minutes is generous cover
-    # for CI cold starts (install + prisma generate + db setup).
-    timeout-minutes: 20
+    # A shard runs a quarter of the suite. #2776: 20 minutes cancelled slow
+    # but healthy runs (15-23 min per shard on the private mirror's hosted
+    # runners), so the cap was 40; hadron-internal#40's suite ran past it
+    # on the hosted runners, so it is 60: room for a slow run, still a
+    # hard stop for a real hang long before the 6-hour default.
+    timeout-minutes: 60
     strategy:
       # Don't cancel the other shards when one fails — surface every shard's
       # results so a failure isn't masked by a sibling shard's early exit.
@@ -78,6 +92,37 @@ jobs:
 
       - run: pnpm prisma generate
 
+      # #3877: this service cluster is throwaway, so it runs without durability. On PG16, every DROP DATABASE (the
+      # suite's per-worker clones, the serve-role smoke's owned database) waits on an immediate checkpoint of the WHOLE
+      # cluster, and with fsync on that checkpoint writes and syncs every dirty buffer the shard's parallel test
+      # databases produced: 13-22 s for the smoke's 30 s afterAll on green runs, more under load. A crash loses only
+      # this job's data, which nothing keeps.
+      # #4377: off, the drop's checkpoint writes and syncs in about 0.1 s, yet still took 2-7 s: after the writes it
+      # unlinks every relation file a TRUNCATE has left since the previous checkpoint, and cleanDb truncates before
+      # each test (about 290k files per shard by the smoke's drop, at the default 5 min checkpoint_timeout). A 30 s
+      # timeout (the minimum) lets each timed checkpoint unlink its own share, so no drop inherits the whole backlog.
+      # Only THIS cluster: the restore-private-cluster, migration-smoke and seed jobs exercise real durability paths
+      # and stay stock. Every setting here reloads without a restart (a service container takes no -c flags).
+      - name: Run the throwaway test cluster without durability (#3877)
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q \
+            -c "ALTER SYSTEM SET fsync = off" \
+            -c "ALTER SYSTEM SET full_page_writes = off" \
+            -c "ALTER SYSTEM SET synchronous_commit = off" \
+            -c "ALTER SYSTEM SET checkpoint_timeout = '30s'" \
+            -c "ALTER SYSTEM SET track_io_timing = on" \
+            -c "SELECT pg_reload_conf()"
+          # #4377: the serve-role smoke's checkpoint reading uses pg_buffercache (dirty buffers by database), and
+          # pg_stat_io's write time needs track_io_timing. Both are for that diagnostic only, on this cluster only.
+          psql "${DATABASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -q -c "CREATE EXTENSION IF NOT EXISTS pg_buffercache"
+          # pg_reload_conf() only signals the server: a fresh session sees the new values once the reload lands.
+          for _ in $(seq 1 10); do
+            got=$(psql "$DATABASE_URL" -Atc "SELECT current_setting('fsync') || current_setting('full_page_writes') || current_setting('synchronous_commit') || current_setting('checkpoint_timeout')")
+            [ "$got" = "offoffoff30s" ] && exit 0
+            sleep 1
+          done
+          echo "test-cluster settings did not apply: $got"; exit 1
+
       # No schema step (#1922): the vitest globalSetup builds the test template
       # itself, from an empty database, for this checkout's schema fingerprint
       # (src/test/schemaTemplate.ts). Pushing to `hadron_test` here would build
@@ -89,17 +134,51 @@ jobs:
         # slices and runs slice i here; a non-zero exit fails the job. NOTE: the
         # flag is passed WITHOUT a `--` separator — `pnpm test -- --shard=…`
         # drops the arg in pnpm 11 and silently runs the whole suite.
-        run: pnpm test --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+        # #4278: hosted runners have vanished mid-shard ("lost communication with the server", about 50 min in), leaving
+        # no result and no log of why. The theory under test is memory exhaustion: three forks, each with its own
+        # Postgres clone, plus the service cluster on one VM. So:
+        # - a sampler prints memory, disk and the largest processes into THIS step's log every 60 s. It goes to stdout,
+        #   because an upload step never runs once the VM is gone. It stops when the step ends; its sleep writes
+        #   nowhere, so nothing holds the log open after the suite exits.
+        # - a 45 min step timeout (healthy shards take 15-26 min) makes a hang fail as this named step, log kept,
+        #   inside the job's 60.
+        # - the fork count pinned at 3, vitest's default on these 4-vCPU runners (CPUs - 1), so a changed runner size
+        #   can't silently change it. A trial of 2 (Hugo's rule: pin 3 if any shard's median grew more than 30%) grew
+        #   shard 4's median by 39%, while healthy shards peaked at 3.7 GB used of 16 GB at 2 forks.
+        timeout-minutes: 45
+        env:
+          HADRON_TEST_MAX_WORKERS: '3'
+        run: |
+          echo "[sampler] nproc=$(nproc)"
+          (
+            set +e
+            trap 'kill "$nap" 2>/dev/null; exit 0' TERM
+            while :; do
+              echo "[sampler] $(date -u +%FT%TZ)"; free -m; df -h /; ps -eo rss,comm --sort=-rss | head -5
+              sleep 60 >/dev/null 2>&1 & nap=$!; wait "$nap"
+            done
+          ) &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
+          pnpm test --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+
+      # #4377 (measurement): the cluster's own checkpoint log (PG16 logs checkpoints by default). Each
+      # "checkpoint complete" line splits write, sync and total time, so time spent outside the buffer writes shows.
+      - name: Checkpoint log of the test cluster (#4377)
+        if: always()
+        run: docker logs ${{ job.services.postgres.id }} 2>&1 | grep -E 'checkpoint (starting|complete)' | tail -n 40 || true
 
   # Aggregation gate: a single stable check named `test` that passes iff every
-  # shard passed. Keep THIS as the required status check on `main` (matrix jobs
-  # report as `test-shard (1..4)` and don't need to be individually required).
+  # shard and the Node regressions passed. Keep THIS as the required status check
+  # on `main` (individual jobs don't need to be separately required).
   test:
-    needs: [test-shard]
+    needs: [test-shard, node-regressions]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Require all shards to pass
+      - name: Require all test jobs to pass
         run: |
           echo "test-shard aggregate result: ${{ needs.test-shard.result }}"
           test "${{ needs.test-shard.result }}" = "success"
+          echo "node-regressions result: ${{ needs.node-regressions.result }}"
+          test "${{ needs.node-regressions.result }}" = "success"

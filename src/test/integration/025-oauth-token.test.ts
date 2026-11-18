@@ -20,10 +20,10 @@ import type { Request } from 'express';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 import {
   resolveAuthContext,
   USER_API_KEY_PREFIX,
@@ -41,7 +41,7 @@ const TEST_CLIENT_ID = `dcr_${'a'.repeat(32)}`;
 let testUser: { id: string };
 
 beforeAll(async () => {
-  const app = await createServer();
+  const app = await createServerOnCleanDb();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
@@ -49,9 +49,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await new Promise<void>((resolve, reject) => {
-    server.close((err) => (err ? reject(err) : resolve()));
-  });
+  await closeServerIfStarted(server);
 });
 
 beforeEach(async () => {
@@ -502,6 +500,51 @@ describe('POST /oauth/token — expiry', () => {
     expect(await db.userApiKey.count()).toBe(0);
     // Expired codes aren't revoked — they were already irretrievable.
     await assertCodeNotRedeemed(authCodeId);
+  });
+});
+
+// ── #155: client lifetime ────────────────────────────────────────────
+
+describe('POST /oauth/token — soft-deleted client (#155)', () => {
+  it('refuses with the unknown-code answer, mints nothing, and leaves the code burned', async () => {
+    const { rawCode, verifier, authCodeId } = await seedAuthCode();
+    await db.oAuthClient.update({
+      where: { clientId: TEST_CLIENT_ID },
+      data: { deletedAt: new Date(), deletedBy: 'system:gc' },
+    });
+    const res = await postToken(defaultFields(rawCode, verifier));
+    expect(res.status).toBe(400);
+    // The same answer as a lost race (R: Xabat's CHECKED Q2), so /token is no
+    // oracle for client state.
+    expect(await res.json()).toEqual({ error: 'invalid_grant', error_description: 'code is unknown' });
+    expect(await db.userApiKey.count()).toBe(0);
+    await assertCodeRedeemed(authCodeId);
+  });
+});
+
+describe('POST /oauth/token — redemption extends the client (#155)', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  it('moves an expiring client to 30 days from the redemption', async () => {
+    await db.oAuthClient.update({
+      where: { clientId: TEST_CLIENT_ID },
+      data: { expiresAt: new Date(Date.now() + 2 * DAY) },
+    });
+    const { rawCode, verifier } = await seedAuthCode();
+    const before = Date.now();
+    const res = await postToken(defaultFields(rawCode, verifier));
+    expect(res.status).toBe(200);
+    const row = await db.oAuthClient.findUniqueOrThrow({ where: { clientId: TEST_CLIENT_ID } });
+    expect(row.expiresAt!.getTime()).toBeGreaterThanOrEqual(before + 30 * DAY - 5_000);
+    expect(row.expiresAt!.getTime()).toBeLessThanOrEqual(Date.now() + 30 * DAY + 5_000);
+  });
+
+  it('leaves a client that never expires (NULL) at NULL', async () => {
+    const { rawCode, verifier } = await seedAuthCode();
+    const res = await postToken(defaultFields(rawCode, verifier));
+    expect(res.status).toBe(200);
+    const row = await db.oAuthClient.findUniqueOrThrow({ where: { clientId: TEST_CLIENT_ID } });
+    expect(row.expiresAt).toBeNull();
   });
 });
 

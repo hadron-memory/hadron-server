@@ -186,3 +186,32 @@ CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "team_stop_
 DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "compiled_prompt_revisions";
 CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "compiled_prompt_revisions"
   FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.target_worker_id');
+-- #2162: a context reset's worker and session join the closed #1162 fence inventory.
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "context_resets";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "context_resets"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id', 's:$.session_id');
+-- #2024 (S8): a generated ticker's worker joins the closed #1162 fence inventory (generated_for_worker_id, no FK).
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "tickers";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "tickers"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.owner_worker_id', 'w:$.generated_for_worker_id', 'w:$.created_by_worker_id', 'w:$.updated_by_worker_id', 'w:$.deleted_by_worker_id');
+-- #1332: a content-validation report's WORKER reporter joins the closed #1162 fence inventory (reporter_worker_id, no FK).
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "node_content_validation_reports";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "node_content_validation_reports"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.reporter_worker_id');
+-- #3668 (S1a): the grant tables' worker and session columns join the closed #1162 fence inventory. The holder worker_id is
+-- fenced as well as the FK-free requested_by_* ids and the event ids. A byte-identical copy of this block ends prisma/worker-reference-invariants.sql.
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "grants";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "grants"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id', 'w:$.requested_by_worker_id', 's:$.requested_by_session_id');
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "grant_events";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "grant_events"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id', 's:$.session_id');
+-- #3649 slice B: the grant signing request's FK-free requester worker and session ids join the closed #1162 fence inventory.
+-- A byte-identical copy of this block ends prisma/worker-reference-invariants.sql.
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "grant_signing_requests";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "grant_signing_requests"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.requester_worker_id', 's:$.requester_session_id');
+-- #3818: the typed successor reference joins the existing closed #1162 inventory.
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "sessions";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "sessions"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id', 's:$.parent_session_id', 's:$.prev_session_id', 's:$.superseded_by_session_id');

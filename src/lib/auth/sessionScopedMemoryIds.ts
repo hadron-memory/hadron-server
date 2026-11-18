@@ -1,10 +1,12 @@
+import { personalOrgAgentTextAllowed } from './personalOrgAgentInstall.js';
 /**
  * The App-key-with-active-session memory scope — the hard isolation boundary
  * for multi-user agents, as ONE predicate with two callers.
  *
- * When an App key operates inside a session, it is confined to that session's
- * memory plus the bound agent's system memory: even if an LLM asks for another
- * memory by id, the filter denies it. Two surfaces implement that confinement —
+ * This helper returns the session's own reach: its memory plus the bound agent's
+ * system memory. The read gates additionally admit explicitly named PUBLIC knowledge
+ * read-only (0114 B); that exception never enters this discovery set or permits a write.
+ * Two surfaces historically implemented the session confinement —
  * the GraphQL gate (`getAccessibleMemoryIds` in `resolvers.helpers.ts`) and the
  * MCP node-search scope (`src/mcp/server.ts`) — and until #945 each carried its
  * own copy of the rule, the second one annotated "mirrors the resolver's
@@ -44,9 +46,8 @@
  * intersection with a set that was never meant to cover them.
  */
 
-import { LINK_CAP_MEMORY_SELECT, agentLinkTenant, cappedLinkLevel } from './agentMemoryLinkCap.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { isAgentInstalledAndLicensed, isGrantedAgentMemoryRole } from '../appAgent.js';
+import { isAgentInstalledAndLicensed } from '../appAgent.js';
 import { isActiveAgentSubscription } from '../agentSubscription.js';
 
 /**
@@ -67,7 +68,7 @@ export async function sessionScopedMemoryIds(
   const app = await db.app.findUnique({
     where: { id: appId },
     select: {
-      deletedAt: true, uninstalledAt: true,
+      organizationId:true, ownerUserId:true, deletedAt: true, uninstalledAt: true,
       organization: { select: { deletedAt: true } },
     },
   });
@@ -98,7 +99,8 @@ export async function sessionScopedMemoryIds(
   const hasLicensedInstall = async (): Promise<boolean> => {
     if (session.agentId === null) return false;
     if (licensedInstall === undefined) {
-      licensedInstall = await isAgentInstalledAndLicensed(db, appId, session.agentId);
+      licensedInstall = await isAgentInstalledAndLicensed(db, appId, session.agentId) &&
+        await personalOrgAgentTextAllowed(db,app,session.agentId,session.userId);
     }
     return licensedInstall;
   };
@@ -136,18 +138,9 @@ export async function sessionScopedMemoryIds(
     const tiedToApp = mem.appId === appId;
     const isAgentsOwnMemory =
       !foreignAppScoped && session.agentId !== null && mem.userMemoryOfAgentId === session.agentId;
-    const agentLink = !foreignAppScoped && !tiedToApp && !isAgentsOwnMemory && session.agentId !== null
-      ? await db.agentMemoryItem.findFirst({
-          where: { agentId: session.agentId, memoryId: mem.id, deletedAt: null },
-          select: { role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
-        })
-      : null;
-    // #1349: the link admits the memory only as far as the Agent's tenant
-    // reaches it on its own (cor:dmo:050:09) — a limit, never a grant.
-    const isAgentLinked = agentLink !== null && isGrantedAgentMemoryRole(agentLink.role) &&
-      cappedLinkLevel({ ...(await agentLinkTenant(db, session.agentId!)), appId }, agentLink.memory, agentLink.role) !== null &&
-      (await hasLicensedInstall());
-    if ((tiedToApp || isAgentsOwnMemory || isAgentLinked) && (await identityMemoryLicensed(db, session, mem))) {
+    // #1376: every caller is a userless key, for which an AgentMemoryItem is never a grant
+    // (cor:dmo:050:09), so an item-linked memory is not admitted here.
+    if ((tiedToApp || isAgentsOwnMemory) && (await identityMemoryLicensed(db, session, mem))) {
       ids.push(mem.id);
     }
   }

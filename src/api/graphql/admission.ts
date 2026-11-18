@@ -8,46 +8,78 @@
  *
  * L1 counts the `query` string only. Variables stay under the 25 MB `/graphql`
  * JSON cap, so a small query carrying large content still works. Depth and cost
- * of the SELECTED operation (L4) are deliberately not here.
+ * of the SELECTED operation (L4) live in `admissionComplexity.ts`; this module
+ * holds their configuration too.
  *
  * Limits are fleet-wide deployment configuration. An unset variable takes the
  * default; a set one must be a positive integer, and anything else refuses boot
- * (no zero or "off" value: an operator raises a number instead).
+ * (no zero or "off" value: an operator raises a number instead). The L4 mode is
+ * `observe` or `enforce` and nothing else.
  */
 import type { NextFunction, Request, Response } from 'express';
 import { GraphQLError } from 'graphql';
 import { formatGraphQLError } from './formatError.js';
 
+/** L4: `enforce` refuses an over-limit operation; `observe` measures, logs and admits it. Never an off switch. */
+export type ComplexityMode = 'observe' | 'enforce';
+
 export interface GraphqlAdmissionConfig {
   maxQueryBytes: number;
   maxTokens: number;
   maxSelections: number;
+  /** L4: field nesting of the selected operation. */
+  maxDepth: number;
+  /** L4: estimated cost of the selected operation (see `admissionComplexity.ts`). */
+  maxCost: number;
+  /** L4: the assumed length of a list whose size the request does not state. */
+  listFactor: number;
+  /** L4: code default `enforce`, so a deployment that never sets it is protected. */
+  complexityMode: ComplexityMode;
 }
 
 export const GRAPHQL_ADMISSION_DEFAULTS: GraphqlAdmissionConfig = {
   maxQueryBytes: 32 * 1024,
   maxTokens: 4000,
   maxSelections: 1000,
+  maxDepth: 12,
+  // #2372: Holger-approved calibration; portal NodeFind(limit: 500) costs 166251.
+  maxCost: 200_000,
+  listFactor: 10,
+  complexityMode: 'enforce',
 };
+
+type NumericLimit = Exclude<keyof GraphqlAdmissionConfig, 'complexityMode'>;
 
 const ENV_NAMES = {
   maxQueryBytes: 'GRAPHQL_MAX_QUERY_BYTES',
   maxTokens: 'GRAPHQL_MAX_TOKENS',
   maxSelections: 'GRAPHQL_MAX_SELECTIONS',
-} as const satisfies Record<keyof GraphqlAdmissionConfig, string>;
+  maxDepth: 'GRAPHQL_MAX_DEPTH',
+  maxCost: 'GRAPHQL_MAX_COST',
+  listFactor: 'GRAPHQL_LIST_FACTOR',
+} as const satisfies Record<NumericLimit, string>;
+
+const MODE_ENV = 'GRAPHQL_COMPLEXITY_MODE';
 
 export const QUERY_TOO_LARGE = 'QUERY_TOO_LARGE';
 
-/** Read the three limits; a malformed value throws (never echoing the value). */
+/** Read the limits and the L4 mode; a malformed value throws (never echoing the value). */
 export function readGraphqlAdmissionConfig(env: NodeJS.ProcessEnv = process.env): GraphqlAdmissionConfig {
   const out = { ...GRAPHQL_ADMISSION_DEFAULTS };
-  for (const key of Object.keys(ENV_NAMES) as Array<keyof GraphqlAdmissionConfig>) {
+  for (const key of Object.keys(ENV_NAMES) as NumericLimit[]) {
     const raw = env[ENV_NAMES[key]];
     if (raw === undefined) continue;
     if (!/^[1-9][0-9]{0,14}$/.test(raw)) {
       throw new Error(`${ENV_NAMES[key]} must be a positive integer; refusing to boot.`);
     }
     out[key] = Number(raw);
+  }
+  const mode = env[MODE_ENV];
+  if (mode !== undefined) {
+    if (mode !== 'observe' && mode !== 'enforce') {
+      throw new Error(`${MODE_ENV} must be exactly "observe" or "enforce"; refusing to boot.`);
+    }
+    out.complexityMode = mode;
   }
   return out;
 }

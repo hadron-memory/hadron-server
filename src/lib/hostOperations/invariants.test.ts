@@ -47,9 +47,71 @@ beforeEach(async () => {
 
 describe('the invariants file', () => {
   it('the migration carries a byte-identical copy, and post-push includes it after the file whose token function it uses', () => {
-    const source = readFileSync(new URL('../../../prisma/host-operation-invariants.sql', import.meta.url), 'utf8');
-    const migration = readFileSync(new URL('../../../prisma/migrations/20261020030100_host_key_use_stop_action/migration.sql', import.meta.url), 'utf8');
-    expect(migration.endsWith(`\n${source}`)).toBe(true);
+    const current4291 = readFileSync(new URL('../../../prisma/host-operation-invariants.sql', import.meta.url), 'utf8');
+    // #4291 (S14) widened worker.start once more (an optional `tier`: high, mid or low). 20261116210000_run_settings
+    // carries host_operation_args_ok as it is now; every older copy is compared with the file as it was before, so the
+    // S14 lines are taken out first and the comparisons below are unchanged.
+    const S14_KEYS = "    -- #4291 (S14): a start whose task names a generic tier carries the tier instead of a model.\n";
+    const S14_CHECK = "    ELSIF op_type = 'worker.start' AND k = 'tier' THEN\n      IF (v #>> '{}') NOT IN ('high', 'mid', 'low') THEN RETURN false; END IF;\n";
+    expect(current4291.includes(S14_KEYS) && current4291.includes(S14_CHECK) && current4291.includes("'lifecycle', 'tier']")).toBe(true);
+    const source = current4291.replace(S14_KEYS, '').replace("'lifecycle', 'tier']", "'lifecycle']").replace(S14_CHECK, '');
+    const argsFnOf = (t: string) => t.slice(t.indexOf('CREATE OR REPLACE FUNCTION host_operation_args_ok'), t.indexOf('$$;', t.indexOf('CREATE OR REPLACE FUNCTION host_operation_args_ok')) + 3);
+    const runSettings = readFileSync(new URL('../../../prisma/migrations/20261116210000_run_settings/migration.sql', import.meta.url), 'utf8');
+    expect(runSettings).toContain(argsFnOf(current4291));
+    expect(argsFnOf(current4291)).not.toBe(argsFnOf(source));
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261029200000_worker_terminal/migration.sql', import.meta.url), 'utf8');
+    // The new migration widens only the CHECK; all other canonical DDL still matches the old migration.
+    // #4225: the terminal-shape CHECK is the file's last block and was widened by 20261115120000_worker_terminal_context, so
+    // the old migration is compared with everything before that block, and the block with the new migration.
+    const block = "-- #2771 (proposed cor:agt:070:09) — a worker's stored terminal report";
+    const head = source.slice(0, source.indexOf(block));
+    expect(source.indexOf(block)).toBeGreaterThan(0);
+    // #4225: the reset operation's args were widened in this file (taskId optional, a closed cause), and carried by
+    // 20261115270000_context_cap, which also carries #4230/#4251's start keys; the original migration holds the function as it was.
+    const withTheCapWideningUndone = (t: string) => t
+      .replace("    -- #4225: the task is named only when there is one (a context-cap reset has none), and the cause is a closed set.\n", '')
+      .replace("required := ARRAY['workerId', 'sessionId', 'resetId']; optional := ARRAY['taskId', 'cause'];", "required := ARRAY['workerId', 'sessionId', 'taskId', 'resetId'];")
+      .replace("    ELSIF k = 'cause' THEN\n      IF NOT (v #>> '{}') IN ('task-end', 'context-cap') THEN RETURN false; END IF;\n", '');
+    // #4230 (S1b) widened worker.start's optional keys in host_operation_args_ok; its migration carries the function as
+    // it is now, so the old copy is compared with the function as it was (the S1b lines taken out).
+    const S1B_KEYS = "    -- #4230 (S1b, decision G1): a start may carry its assignment's typed launcher profile and its Agent's lifecycle,\n    -- never a command.\n";
+    const S1B_CHECK = "\n    ELSIF op_type = 'worker.start' AND k IN ('effort', 'accountProfile') THEN\n      IF NOT (v #>> '{}') ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' THEN RETURN false; END IF;" +
+      "\n    -- The model: the one launcher-model grammar the assignment store uses too (host_launcher_model_ok, above)." +
+      "\n    ELSIF op_type = 'worker.start' AND k = 'model' THEN\n      IF NOT host_launcher_model_ok(v #>> '{}') THEN RETURN false; END IF;" +
+      "\n    ELSIF op_type = 'worker.start' AND k = 'lifecycle' THEN\n      IF (v #>> '{}') NOT IN ('LONG_LIVED', 'SHORT_LIVED') THEN RETURN false; END IF;";
+    expect(head.includes(S1B_KEYS) && head.includes(S1B_CHECK)).toBe(true);
+    // #4251: the one launcher-model grammar is its own block, before host_operation_args_ok.
+    const S1B_MODEL_FN = head.slice(head.indexOf('-- #4230 (S1b; #4251 blind P2, Peter #108855)'), head.indexOf('-- cor:agt:070:03 — the closed set of typed operations'));
+    expect(S1B_MODEL_FN).toContain('CREATE OR REPLACE FUNCTION host_launcher_model_ok');
+    const pre4230 = head.replace(S1B_MODEL_FN, '').replace(S1B_KEYS, '').replace(", 'model', 'effort', 'accountProfile', 'lifecycle']", ']').replace(S1B_CHECK, '');
+    expect(migration.endsWith(`\n${withTheCapWideningUndone(pre4230 + migration.slice(migration.indexOf(block))).replaceAll(", 'checkpoint', 'sweep'", '').replaceAll(", 'checkpoint'", '')}`)).toBe(true);
+    const fnStart = source.indexOf('-- #4230 (S1b; #4251 blind P2, Peter #108855)');
+    const fn = source.slice(fnStart, source.indexOf('$$;\n', source.indexOf('-- cor:agt:070:03 — the closed set of typed operations')) + 4);
+    const s1b = readFileSync(new URL('../../../prisma/migrations/20261115230000_host_launcher_profiles/migration.sql', import.meta.url), 'utf8');
+    // #4251's migration carries the function before the cap widening (this slice's migration carries it after).
+    expect(s1b).toContain(`\n${withTheCapWideningUndone(fn)}`);
+    const capFn = source.slice(source.indexOf('CREATE OR REPLACE FUNCTION host_operation_args_ok'), source.indexOf('$$;', source.indexOf('CREATE OR REPLACE FUNCTION host_operation_args_ok')) + 3);
+    const cap = readFileSync(new URL('../../../prisma/migrations/20261115270000_context_cap/migration.sql', import.meta.url), 'utf8');
+    // The cap migration carries the function as main has it (the #4230 start keys and #4251's model grammar) with the cause.
+    expect(cap).toContain(capFn);
+    expect(capFn).toContain("host_launcher_model_ok(v #>> '{}')");
+    expect(capFn).toContain("optional := ARRAY['taskId', 'cause']");
+    // #4247: the CHECK was widened again by 20261115170000_worker_terminal_relaunch_repair. #4259 widened it once more, by
+    // 20261115260000_relaunch_failure_codes, which carries the current block; the #4247 copy is the block without the
+    // #4259 lines (its comment line and the two new failure reasons).
+    const current = source.slice(source.indexOf(block));
+    const L4259 = "-- #4259 — the failure set gains SETUP_FAILED and VERIFY_FAILED.\n";
+    expect(current.includes(L4259) && current.includes(", 'SETUP_FAILED', 'VERIFY_FAILED'")).toBe(true);
+    const relaunch = readFileSync(new URL('../../../prisma/migrations/20261115170000_worker_terminal_relaunch_repair/migration.sql', import.meta.url), 'utf8');
+    expect(relaunch.endsWith(`\n${current.replace(L4259, '').replace(", 'SETUP_FAILED', 'VERIFY_FAILED'", '')}`)).toBe(true);
+    const codes = readFileSync(new URL('../../../prisma/migrations/20261115260000_relaunch_failure_codes/migration.sql', import.meta.url), 'utf8');
+    expect(codes.endsWith(`\n${current}`)).toBe(true);
+    const checkpoint = readFileSync(new URL('../../../prisma/migrations/20261103014500_host_checkpoint_use_action/migration.sql', import.meta.url),'utf8');
+    const check = source.slice(source.indexOf('ALTER TABLE host_key_uses DROP CONSTRAINT'),source.indexOf('CREATE OR REPLACE FUNCTION host_key_use_append_only')).trim();
+    // #4233: the checkpoint migration's copy predates 'sweep'; the sweep migration carries the current CHECK.
+    expect(checkpoint.trim().endsWith(check.replaceAll(", 'checkpoint', 'sweep'", ", 'checkpoint'"))).toBe(true);
+    const sweep = readFileSync(new URL('../../../prisma/migrations/20261115190000_host_sweep_runs/migration.sql', import.meta.url), 'utf8');
+    expect(sweep.trim().endsWith(check)).toBe(true);
     const post = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
     const at = post.indexOf('\\ir host-operation-invariants.sql');
     expect(at).toBeGreaterThan(post.indexOf('\\ir agent-task-matching-invariants.sql'));
@@ -58,7 +120,7 @@ describe('the invariants file', () => {
 });
 
 describe('cor:agt:070:03 — the closed set, with exactly its typed arguments', () => {
-  it('each of the five types with its own arguments is accepted', async () => {
+  it('each of the six types with its own arguments is accepted', async () => {
     await expect(op()).resolves.toBeTruthy();
     // #1883: a start records the hold that authorized it (prisma/host-launch-invariants.sql).
     await expect(op({ type: 'worker.start', args: { workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude', taskId: 't1' }, holdUserId: user.id })).resolves.toBeTruthy();
@@ -66,7 +128,11 @@ describe('cor:agt:070:03 — the closed set, with exactly its typed arguments', 
     await expect(op({ type: 'worker.deliver', args: { workerId: kit.id, sessionId: 's1', eventId: 'e1' } })).resolves.toBeTruthy();
     await expect(op({ type: 'worker.end', args: { workerId: kit.id, sessionId: 's1' } })).resolves.toBeTruthy();
     await expect(op({ type: 'worktree.remove', args: { workerId: kit.id, worktree: 'hadron-server/kit' } })).resolves.toBeTruthy();
-    expect(HOST_OPERATION_TYPES).toHaveLength(5);
+    // #2162 (cor:agt:050:27): the reset, with exactly its ids.
+    await expect(op({ type: 'worker.reset-context', args: { workerId: kit.id, sessionId: 's1', taskId: 't1', resetId: 'r1' } })).resolves.toBeTruthy();
+    await expectCheck(op({ type: 'worker.reset-context', args: { workerId: kit.id, sessionId: 's1', taskId: 't1' } }));
+    await expectCheck(op({ type: 'worker.reset-context', args: { workerId: kit.id, sessionId: 's1', taskId: 't1', resetId: 'r1', command: 'kill' } }));
+    expect(HOST_OPERATION_TYPES).toHaveLength(6);
   });
 
   it('a shell type, an extra or missing argument, a non-string, a bad token or another worker\'s id is refused', async () => {

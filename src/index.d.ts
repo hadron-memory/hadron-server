@@ -3,6 +3,8 @@ export interface Node {
   memoryId: string;
   loc: string;
   isLink: boolean;
+  nodeType: string;
+  data: import('./generated/prisma/index.js').Prisma.JsonValue;
   name: string;
   alias: string | null;
   description: string | null;

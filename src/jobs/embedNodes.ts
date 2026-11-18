@@ -1,3 +1,4 @@
+import { isRawChatNode } from '../services/embedding/rawChat.js';
 import { randomUUID } from 'node:crypto';
 /**
  * 033-rag-vector-retrieval — embedding worker (interim Postgres-backed queue).
@@ -33,6 +34,7 @@ import {
 } from '../services/embedding/vectors.js';
 import { chunkNode } from '../lib/chunking.js';
 import { recordLlmUsage } from '../lib/metering/index.js';
+import type { StepOutcome } from '../lib/shutdownSteps.js';
 
 export interface EmbedPlaintext {
   content?: string | null;
@@ -63,6 +65,9 @@ export interface EmbedRetryOpts {
   /** Backoff ceiling in ms (default 6h). */
   retryMaxMs?: number;
 }
+
+// cor:rag:010:01 — tunable passage count, independent of per-memory chunk size.
+export const MAX_NODE_PASSAGE_CHUNKS = 256;
 
 const DEFAULT_RETRY_BASE_MS = 60_000;
 const DEFAULT_RETRY_MAX_MS = 6 * 60 * 60 * 1000;
@@ -100,6 +105,7 @@ export async function embedNode(
       // #1608 — a comment's stub state (a deleted-with-replies stub is never indexed).
       commentMeta: { select: { retractedAt: true } },
       embeddingAttempts: true,
+      embeddingTruncatedChunks: true,
       memory: {
         select: {
           id: true,
@@ -121,8 +127,16 @@ export async function embedNode(
   const memory = node.memory;
   const capturedPendingAt = node.embeddingPendingAt;
   const capturedWorkToken = node.embeddingWorkToken;
-  if (!capturedWorkToken || !capturedPendingAt || capturedPendingAt.getTime() > Date.now()
+  if (!capturedWorkToken || !capturedPendingAt
     || (retryOpts.workToken !== undefined && retryOpts.workToken !== capturedWorkToken)) return 'skipped';
+  // Excluded turns never reach plaintext selection or an embedding provider.
+  // Clear only this obligation; existing vectors require the separately reviewed
+  // purge plan and are deliberately left untouched by this build (#1282).
+  if (isRawChatNode(node)) {
+    await clearMarkers(db, nodeId, capturedWorkToken);
+    return 'skipped';
+  }
+  if (capturedPendingAt.getTime() > Date.now()) return 'skipped';
   // R132: a keyless worker cannot recover this plaintext. Preserve the explicit pending
   // diagnostic and obligation; only a fresh authorized plaintext prompt can serve it.
   if (memory.isEncrypted && plaintext === undefined) return 'skipped';
@@ -154,6 +168,10 @@ export async function embedNode(
   let usedClient: EmbeddingClient | null = null;
 
   try {
+    // Ordinary summary-only work has no capped passages to remove. Avoid an extra
+    // transaction on every summary embed; policy changes already purge their vectors.
+    if (!wantChunks && node.embeddingTruncatedChunks != null
+      && !(await deleteNodeChunkVectors(db, nodeId, capturedWorkToken))) return 'skipped';
     if (wantAbstract) {
       const abstractText = isComment
         ? (plaintext?.content !== undefined ? plaintext.content : node.content)
@@ -232,11 +250,13 @@ export async function embedNode(
       if (contentText == null || contentText.trim() === '') {
         if (!(await deleteNodeChunkVectors(db, nodeId, capturedWorkToken))) return 'skipped';
       } else {
-        const chunks = chunkNode(contentText, {
+        const allChunks = chunkNode(contentText, {
           chunkTokens: memory.chunkTokens ?? undefined,
           chunkOverlap: memory.chunkOverlap ?? undefined,
           forceFixedSize: memory.forceFixedSize,
         });
+        const chunks = allChunks.slice(0, MAX_NODE_PASSAGE_CHUNKS);
+        const omittedChunks = allChunks.length - chunks.length;
         if (chunks.length === 0) {
           if (!(await deleteNodeChunkVectors(db, nodeId, capturedWorkToken))) return 'skipped';
         } else {
@@ -276,6 +296,7 @@ export async function embedNode(
               embedding: vectors[i],
             })),
             capturedWorkToken,
+            omittedChunks || null,
           );
           if (!wroteChunks) return 'skipped';
         }
@@ -595,6 +616,14 @@ export function startEmbeddingWorkerLoop(
 }
 
 export async function stopEmbeddingWorker(db: PrismaClient, graceMs = 5_000): Promise<boolean> {
+  return (await stopEmbeddingWorkerOutcome(db, graceMs)) === 'ok';
+}
+
+/**
+ * #3845: the same stop, saying which part failed: `ok`, `jobs_unsettled` (in-flight jobs did not settle),
+ * `bus_stop_rejected` (the broker listener's stop rejected) or `grace_timeout` (neither finished inside the grace).
+ */
+export async function stopEmbeddingWorkerOutcome(db: PrismaClient, graceMs = 5_000): Promise<StepOutcome> {
   const timer = workerTimers.get(db);
   if (timer) clearTimeout(timer);
   workerTimers.delete(db);
@@ -606,8 +635,8 @@ export async function stopEmbeddingWorker(db: PrismaClient, graceMs = 5_000): Pr
   try {
     return await Promise.race([
       Promise.all([settled, stopBus ? stopBus().then(() => true, () => false) : true])
-        .then(([jobs, bus]) => jobs && bus),
-      new Promise<boolean>((resolve) => { deadline = setTimeout(() => resolve(false), Math.max(0, graceMs)); }),
+        .then(([jobs, bus]): StepOutcome => (!jobs ? 'jobs_unsettled' : !bus ? 'bus_stop_rejected' : 'ok')),
+      new Promise<StepOutcome>((resolve) => { deadline = setTimeout(() => resolve('grace_timeout'), Math.max(0, graceMs)); }),
     ]);
   } finally { if (deadline) clearTimeout(deadline); }
 }

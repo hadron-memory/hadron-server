@@ -405,7 +405,6 @@ describe('findNodes — orgId scope (#463); with filter.isRunnable = the tasks-i
   });
 
   it('an App-key caller may scope to its own App org, but not another org', async () => {
-    await mkNode(graph.id, { loc: 'app.task', name: 'App Task', isRunnable: true });
     // App in orgA + a session scoped to orgA's `graph` memory → App-key access.
     // #945: the session carries an installed agent that is LINKED to `graph`
     // (an AgentMemoryItem — the schema's "active write-memory for this session"
@@ -422,18 +421,38 @@ describe('findNodes — orgId scope (#463); with filter.isRunnable = the tasks-i
       },
     });
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    // #1376: an item never admits a userless key's session, so the session memory is the App's own (tied to it).
+    const appGraph = await db.memory.create({
+      data: { id: generateId(), organizationId: orgA.id, appId: app.id, urn: 'fn-org:fn-app-graph', name: 'fn app graph', class: 'knowledge', visibility: 'PUBLIC' },
+    });
+    await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: appGraph.id, role: 'read' } }); // PUBLIC: what a bare key keeps
+    await mkNode(appGraph.id, { loc: 'app.task', name: 'App Task' });
     const session = await db.session.create({
-      data: { id: generateId(), appId: app.id, agentId: agent.id, memoryId: graph.id },
+      data: { id: generateId(), appId: app.id, agentId: agent.id, memoryId: appGraph.id },
     });
     const appCtx = ctx({ appId: app.id, sessionId: session.id });
 
+    // (#1987: the runnable listing excludes App-scoped memory, so this org gate is proven on the plain scope.)
     // Own org (orgA) → authorized; the session's memory is in orgA → its node shows.
-    const own = await findNodes({ orgId: orgA.id, filter: { isRunnable: true } }, appCtx);
+    const own = await findNodes({ orgId: orgA.id }, appCtx);
     expect(own.hits.map((h: any) => h.node.loc)).toEqual(['app.task']);
 
     // A different org → gate rejects (empty), no disclosure.
     const other = await createDbOrgAndGraph(db, { orgName: 'fn-other', graphName: 'other/graph' });
-    const cross = await findNodes({ orgId: other.org.id, filter: { isRunnable: true } }, appCtx);
+    const cross = await findNodes({ orgId: other.org.id }, appCtx);
     expect(cross).toMatchObject({ hits: [], total: 0 });
   });
+});
+
+it('#2421 shared hybrid keyword extraction preserves independent degraded envelopes across calls', async () => {
+  await db.memory.update({where:{id:graph.id},data:{vectorIndexEnabled:false}});
+  await mkNode(graph.id, {loc:'extraction.banana',name:'banana shake'});
+  for (const [query, degraded] of [
+    ['banana zucchini', 'no_vector_index,and_relaxed_to_or'],
+    ['(banana OR', 'no_vector_index,literal_fallback'],
+    ['banana', 'no_vector_index'],
+  ]) {
+    const result = await findNodes({query,mode:'hybrid',filter:{memoryIds:[graph.id]}});
+    expect(result.degraded).toBe(degraded);
+  }
 });

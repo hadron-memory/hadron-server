@@ -136,7 +136,7 @@ describe('nodeRevisionsPage', () => {
   it('the old nodeRevisions is unchanged (still returns the readable snapshots up to its limit)', async () => {
     await db.nodeRevision.createMany({ data: Array.from({ length: 60 }, (_, i) => rev(memA.id, i, T(i))) });
     const old = await Q.nodeRevisions({}, { nodeRef: node.id }, asUser(member.id));
-    expect(old).toHaveLength(50);
+    expect(old).toHaveLength(20);
   });
 
   it('count and rows are database-side: the page query carries take/skip', async () => {
@@ -223,10 +223,12 @@ describe('sessionsPage', () => {
 // ── usageEventsPage ────────────────────────────────────────────────────────
 
 describe('usageEventsPage', () => {
+  // #2817 (cor:acl:090:01): a read naming no resource is the caller's own activity, so seeded events
+  // are the member's unless a test says otherwise.
   const seedEvents = async (memoryId: string, n: number, over: Record<string, unknown> = {}) => {
     const createdAt = new Date('2026-03-01T00:00:00Z');
     await db.usageEvent.createMany({
-      data: Array.from({ length: n }, () => ({ id: generateId(), type: 'read', nodeLoc: 'shared', memoryId, createdAt, ...over })),
+      data: Array.from({ length: n }, () => ({ id: generateId(), type: 'read', nodeLoc: 'shared', memoryId, userId: member.id, createdAt, ...over })),
     });
   };
 
@@ -246,14 +248,16 @@ describe('usageEventsPage', () => {
     expect([...seen].sort()).toEqual(ids(old).sort());
   });
 
-  it('total counts only events in readable memories; another memory never moves it', async () => {
+  it('total counts only the scope read: another principal\'s events in another memory never move it', async () => {
     await seedEvents(memA.id, 5);
     const c = asUser(member.id);
     const before = await Q.usageEventsPage({}, { limit: 50 }, c);
-    await seedEvents(memB.id, 8);
+    await seedEvents(memB.id, 8, { userId: outsider.id });
     const after = await Q.usageEventsPage({}, { limit: 50 }, c);
     expect(after.total).toBe(5);
     expect(ids(after.items)).toEqual(ids(before.items));
+    // the resource scope of a readable memory counts that memory only
+    expect((await Q.usageEventsPage({}, { memoryId: memA.id, limit: 50 }, c)).total).toBe(5);
     // asking for the unreadable memory answers exactly as the old field does
     const oldErr = await Q.usageEvents({}, { memoryId: memB.id }, c).catch((e: any) => e);
     const newErr = await Q.usageEventsPage({}, { memoryId: memB.id }, c).catch((e: any) => e);

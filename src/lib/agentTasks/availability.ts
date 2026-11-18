@@ -42,6 +42,10 @@ export type AvailabilityRecord = {
   reason: string | null;
   until: Date | null;
   setAt: Date;
+  /** #3865: the full stored row carries who set it; the predicate does not read it. */
+  setBy?: string;
+  /** #2162: a `resetting` mark's stop instant; activity after it ends the mark. Absent reads as null. */
+  clearsOnActivityAfter?: Date | null;
 } | null;
 
 /**
@@ -55,6 +59,11 @@ export function recordInEffect(record: AvailabilityRecord, now: Date, lastActivi
   if (record.until && record.until.getTime() <= now.getTime()) return false;
   // cor:agt:060:07 (Proposed): the worker's next activity ends a stall mark.
   if (record.reason === 'stalled' && lastActivityAt && lastActivityAt.getTime() > record.setAt.getTime()) return false;
+  // #2162 (cor:agt:050:27): the relaunched agent's first activity ends a `resetting` mark. Only activity AFTER the host
+  // reported the old agent stopped counts, never after the mark was set: the old agent's own last calls, between the
+  // claim and the stop, must not lift it.
+  if (record.reason === 'resetting' && record.clearsOnActivityAfter && lastActivityAt
+      && lastActivityAt.getTime() > record.clearsOnActivityAfter.getTime()) return false;
   return true;
 }
 
@@ -132,6 +141,21 @@ export async function loadAvailabilityByFamily(
 }
 
 /**
+ * #4291 — whether the App's own record for each of `families` (cor:agt:060:03) leaves it available now: the family
+ * half of {@link loadAvailabilityByFamily}, for a family no worker runs as yet (a task's run setting names it, and the
+ * launch would apply it). The same rows and `recordInEffect`, either persisted spelling.
+ */
+export async function loadFamilyAvailability(
+  db: PrismaClient | Prisma.TransactionClient, appId: string, families: readonly string[], now = new Date(),
+): Promise<Map<string, boolean>> {
+  const wanted = [...new Set(families.map(normalizeFamily).filter((f): f is string => f !== null))];
+  if (wanted.length === 0) return new Map();
+  const rows = await db.modelFamilyAvailability.findMany({ where: { appId, family: { in: wanted.flatMap(familySpellings) } } });
+  const unavailable = new Set(rows.filter((r) => recordInEffect(r, now)).map((r) => normalizeFamily(r.family)));
+  return new Map(wanted.map((f) => [f, !unavailable.has(f)]));
+}
+
+/**
  * cor:agt:060:07 — a not-started or no-progress alarm marks its worker
  * assignee unavailable, reason `stalled`. Runs in the alarm's transaction.
  *
@@ -164,7 +188,7 @@ export async function markStalled(
       where: { workerId: args.workerId },
       data: {
         state: 'unavailable', reason: 'stalled', until: null, setAt: args.now, setBy: 'stall-rule',
-        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null,
+        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null, clearsOnActivityAfter: null, contextResetId: null,
       },
     });
     changed = !stalled;
@@ -296,7 +320,7 @@ async function recordLapse(db: PrismaClient, r: LapsedRecord, now: Date): Promis
       where: { workerId: r.workerId, state: 'unavailable', until: r.until, setAt: r.setAt },
       data: {
         state: 'available', reason: null, until: null, setAt: r.until, setBy: 'lapse',
-        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null,
+        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null, clearsOnActivityAfter: null, contextResetId: null,
       },
     });
     if (n.count === 0) return false;

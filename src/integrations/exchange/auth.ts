@@ -10,6 +10,7 @@
  * Hadron owns ONE multi-tenant Azure AD app. Users sign in with their
  * Microsoft account — no Azure Portal visit needed.
  */
+import { getProjectBaseUrl } from '../../lib/baseUrl.js';
 
 const AUTHORITY = 'https://login.microsoftonline.com/common/oauth2/v2.0';
 
@@ -35,7 +36,7 @@ function getClientId(): string {
  * token exchange must pass the SAME value the authorize URL carried.
  */
 export function getMicrosoftRedirectUri(): string {
-  const base = process.env.BASE_URL || 'http://localhost:4000';
+  const base = getProjectBaseUrl();
   return `${base}/auth/microsoft/callback`;
 }
 

@@ -18,6 +18,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
+import { markBatchReadNodes } from './resolvers.nodeBatchEdges.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -214,4 +215,27 @@ describe('the edge query preloads an endpoint, then a write, then the selection'
     const got = await incoming();
     expect(servedIds(got)).not.toContain(ids.draft);
   });
+});
+
+
+it.each(['role', 'loc', 'memory'] as const)('bounded metadata rejects an effective endpoint changed before hydration: %s', async (change) => {
+  const parent = await releaseThroughLead();
+  markBatchReadNodes([parent]);
+  hooks.beforeHydrate = { id: ids.backOpenPr!, run: async () => {
+    await db.node.update({ where: { id: ids.backOpenPr }, data: change === 'role'
+      ? { role: 'boot-prompt' } : change === 'loc' ? { loc: 'tasks:moved' } : { memoryId: elsewhere } });
+  } };
+  const edges = await N.outgoingEdges(parent, {}, racyCtx());
+  expect(edges.map((e: any) => e.name)).toEqual(['stage 2']);
+});
+
+it('a bounded lazy endpoint rechecks inheritance after metadata admission', async () => {
+  const parent = await releaseThroughLead();
+  markBatchReadNodes([parent]);
+  const context = racyCtx();
+  const edges = await N.outgoingEdges(parent, {}, context);
+  const first = edges.find((e: any) => e.name === 'stage 1');
+  expect(first).toBeDefined();
+  await turnOverrideIntoBootPrompt();
+  expect(await E.target(first, {}, context)).toBeNull();
 });

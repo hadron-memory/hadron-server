@@ -1,3 +1,4 @@
+import { resolveAppInstallation, lockAppInstallation, lockAppAgentCustomization } from './appInstallations.js';
 /**
  * #2045 (S8, cor:agt:040:07) — the three boot-prompt POINTERS: `Agent`,
  * `AppAgent` (the install) and `Worker`, each naming a compiled boot-prompt
@@ -16,11 +17,11 @@
  *
  * Approval is NOT checked here: a valid unapproved pointer is accepted, and
  * whether it may be SERVED is S10's serve-time check (cor:agt:040:10). Nothing
- * in this module serves, and nothing here reads `Agent.systemPrompt` or
- * `Worker.promptOverride` (those retire at S10's activation).
+ * in this module serves.
  */
 import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
+import { lockWorkersForAssignment } from './agentTasks/workerLock.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, isBootPromptRole } from './bootPrompt.js';
 import { currentActor, currentActorAmbiguity } from './requestActor.js';
 import { managesAgent, managesApp, type AppManagerCaller } from './auth/appManagement.js';
@@ -81,6 +82,7 @@ const APP_OWNER_SELECT = { id: true, organizationId: true, ownerUserId: true } a
 export async function loadBootPromptPointerOwner(
   tx: Db,
   target: BootPromptPointerTarget,
+  opts?: { lockForWrite?: boolean },
 ): Promise<BootPromptPointerOwner | null> {
   const db = tx as PrismaClient;
   const liveApp = { deletedAt: null, uninstalledAt: null };
@@ -92,12 +94,32 @@ export async function loadBootPromptPointerOwner(
     return agent ? { field: 'AGENT', agent } : null;
   }
   if (target.field === 'APP_AGENT') {
-    const row = await db.appAgent.findFirst({
-      where: { appId: target.appId, agentId: target.agentId, app: liveApp },
-      select: { agentId: true, app: { select: APP_OWNER_SELECT } },
-    });
-    return row ? { field: 'APP_AGENT', app: row.app, agentId: row.agentId } : null;
+    if (opts?.lockForWrite) await lockAppAgentCustomization(tx as Prisma.TransactionClient,target.appId,target.agentId);
+    const install = opts?.lockForWrite
+      ? await lockAppInstallation(tx as Prisma.TransactionClient,target.appId,target.agentId)
+      : await resolveAppInstallation(db,target.appId,target.agentId);
+    const app = install ? await db.app.findFirst({where:{id:target.appId,...liveApp},select:APP_OWNER_SELECT}) : null;
+    return app ? {field:'APP_AGENT',app,agentId:target.agentId} : null;
   }
+  // #2458: changeWorkerAgent may now land while this worker has an open session, so the placement check below must judge
+  // the agent the worker casts when this write commits. Same order as the change: assignment lock, the Agent row FOR
+  // SHARE, then the Worker row FOR UPDATE; the agent is re-read once the assignment lock (which the change holds) is ours.
+  // Only a caller that is about to WRITE the pointer, inside its transaction, asks for the locks (`lockForWrite`): on the
+  // pooled client an advisory transaction lock would be released at once and promise nothing, and a read has no business
+  // contending with the change.
+  if (opts?.lockForWrite !== true) {
+    const read = await db.worker.findFirst({
+      where: { id: target.workerId, app: liveApp },
+      select: { id: true, agentId: true, app: { select: APP_OWNER_SELECT } },
+    });
+    return read ? { field: 'WORKER', app: read.app, worker: { id: read.id, agentId: read.agentId } } : null;
+  }
+  if (!(await db.worker.findFirst({ where: { id: target.workerId, app: liveApp }, select: { id: true } }))) return null;
+  await lockWorkersForAssignment(tx as Prisma.TransactionClient, [target.workerId]);
+  const current = await db.worker.findUnique({ where: { id: target.workerId }, select: { agentId: true } });
+  if (!current) return null;
+  await tx.$queryRaw`SELECT id FROM agents WHERE id = ${current.agentId} FOR SHARE`;
+  await tx.$queryRaw`SELECT id FROM workers WHERE id = ${target.workerId} FOR UPDATE`;
   const worker = await db.worker.findFirst({
     where: { id: target.workerId, app: liveApp },
     select: { id: true, agentId: true, app: { select: APP_OWNER_SELECT } },
@@ -278,12 +300,23 @@ export async function setBootPromptPointer(
   canReadMemory: (memoryId: string) => Promise<boolean>,
 ): Promise<ResolvedBootPromptPointer | null> {
   await assertMayWriteBootPromptPointer(ctx, owner);
+  if (owner.field === 'APP_AGENT') await lockAppAgentCustomization(tx,owner.app.id,owner.agentId);
   const target = nodeRef === null ? null : await validateBootPromptPointer(tx, owner, nodeRef, canReadMemory);
   const data = { bootPromptNodeId: target?.id ?? null, bootPromptUrn: target?.urn ?? null };
   if (owner.field === 'AGENT') {
     await tx.agent.update({ where: { id: owner.agent.id }, data });
   } else if (owner.field === 'APP_AGENT') {
-    await tx.appAgent.update({ where: { appId_agentId: { appId: owner.app.id, agentId: owner.agentId } }, data });
+    const install = await lockAppInstallation(tx,owner.app.id,owner.agentId);
+    if (!install) throw new Error('Installation changed while setting its boot prompt');
+    if (install.installationKind === 'ROW') {
+      await tx.appAgent.update({where:{appId_agentId:{appId:owner.app.id,agentId:owner.agentId}},data});
+      await tx.appAgentCustomization.updateMany({where:{appId:owner.app.id,agentId:owner.agentId},data});
+    } else {
+      await tx.appAgentCustomization.upsert({
+        where:{appId_agentId:{appId:owner.app.id,agentId:owner.agentId}},
+        create:{appId:owner.app.id,agentId:owner.agentId,...data},update:data,
+      });
+    }
   } else {
     await tx.worker.update({ where: { id: owner.worker.id }, data });
   }

@@ -30,7 +30,8 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../lib/workerSignature.js';
 import { describe, it, expect } from 'vitest';
 import { Prisma } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
-import { workerActivitySql } from '../../api/graphql/schema/resolvers.worker.js';
+import { workerActivitySql, setWorkerActivityPlanSettings } from '../../api/graphql/schema/resolvers.worker.js';
+import { everyRowProbe, rolledBack as rolledBackIn, type RolledBackOptions } from '../sessionActivityProbe.js';
 
 const INDEX = 'usage_events_session_activity_idx';
 const WALK = 'usage_events_created_at_idx';
@@ -38,42 +39,19 @@ const APP = 'app-1903';
 const NOW = new Date('2026-10-14T12:00:00Z');
 
 type Tx = Prisma.TransactionClient;
+/** The pins that seed rows with no parents (seedSkew and the fixtures after it). */
+const SEEDS: RolledBackOptions = { seedWithoutParents: true };
 
-/** Runs `fn` in a transaction that always rolls back, so seeds, ANALYZE and dropped indexes never escape. */
-async function rolledBack<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
-  let out: { value: T } | undefined;
-  try {
-    await db.$transaction(
-      async (tx) => {
-        await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off');
-        await tx.$executeRawUnsafe('SET LOCAL enable_bitmapscan = off');
-        out = { value: await fn(tx) };
-        throw new RolledBack();
-      },
-      { timeout: 60_000 },
-    );
-  } catch (e) {
-    if (!(e instanceof RolledBack)) throw e;
-  }
-  if (!out) throw new Error('unreachable');
-  return out.value;
-}
-
-class RolledBack extends Error {}
+const rolledBack = <T>(fn: (tx: Tx) => Promise<T>, o: RolledBackOptions = {}) => rolledBackIn(db, fn, o);
 
 const roster = (): Prisma.Sql => workerActivitySql(Prisma.sql`w.app_id = ${APP}`, NOW);
 
 /**
- * The pre-#1952 probe shape (a bare `max(e.created_at)`), derived from the
- * live SQL so the parity pin compares the shipped query against exactly one
- * difference.
+ * The pre-#1952 probe shape (a bare `max(e.created_at)`), derived from the live SQL so the parity pin compares the
+ * shipped query against exactly one difference: the aggregate in place of #4397's ordered one-row probe.
  */
 function incidentShape(sql: Prisma.Sql): Prisma.Sql {
-  const D = "max(e.created_at + interval '0')";
-  const hits = sql.strings.filter((s) => s.includes(D)).length;
-  if (hits !== 1) throw new Error(`expected the probe shape exactly once, found ${hits}`);
-  const strings = sql.strings.map((s) => s.replace(D, 'max(e.created_at)'));
-  return Prisma.sql(Object.assign(strings, { raw: strings }) as TemplateStringsArray, ...sql.values);
+  return everyRowProbe(sql, 'max(e.created_at)');
 }
 
 async function explain(tx: Tx, sql: Prisma.Sql): Promise<string> {
@@ -83,17 +61,41 @@ async function explain(tx: Tx, sql: Prisma.Sql): Promise<string> {
 
 /**
  * The #1952 skew: 20,000 activity rows in ONE session, then a real ANALYZE.
- * session_replication_role=replica skips the FKs (and triggers), so the rows
+ * The foreign keys are dropped inside the rolled-back transaction, so the rows
  * need no session, worker or App behind them.
  */
 async function seedSkew(tx: Tx): Promise<void> {
-  await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
   await tx.$executeRawUnsafe(`
     INSERT INTO usage_events (id, type, session_id, counts_as_activity, created_at)
     SELECT 'ue-skew-' || g, 'tool_call', 'sess-heavy', true,
            timestamp '2026-09-01 00:00:00' + g * interval '1 second'
     FROM generate_series(1, 20000) g`);
   await tx.$executeRawUnsafe('ANALYZE usage_events');
+}
+
+/**
+ * #2577: the flake's condition, made deterministic. The incident shape's two index paths, the created_at walk and
+ * the session-activity index, are a near tie on a clone's statistics; a hosted clone can break it either way. Rows
+ * with counts_as_activity=false sit only in usage_events_created_at_idx (the activity index is partial), so
+ * bulking them up makes the walk the costlier path and the planner takes the activity index for the bare max too.
+ */
+async function steerPlannerToActivityIndex(tx: Tx): Promise<void> {
+  await tx.$executeRawUnsafe(`
+    INSERT INTO usage_events (id, type, session_id, counts_as_activity, created_at)
+    SELECT 'ue-bulk-' || g, 'tool_call', 'sess-bulk-' || (g % 500), false,
+           timestamp '2026-08-01 00:00:00' + g * interval '1 second'
+    FROM generate_series(1, 20000) g`);
+  await tx.$executeRawUnsafe('ANALYZE usage_events');
+}
+
+/**
+ * #2577: the incident's condition by construction rather than by the planner's mood. Without the two session-keyed
+ * indexes (the state production was in before #1903) the bare max(created_at) has exactly one index path left, the
+ * created_at walk, whatever the statistics say. The shipped shape has no path to it either way.
+ */
+async function removeSessionKeyedIndexes(tx: Tx): Promise<void> {
+  await tx.$executeRawUnsafe(`DROP INDEX ${INDEX}`);
+  await tx.$executeRawUnsafe('DROP INDEX usage_events_session_id_idx');
 }
 
 /** A plan-assertion message that carries the plan, so a future failure is diagnosable from the log. */
@@ -119,16 +121,18 @@ describe('#1903 / #1952 roster liveness probe', () => {
     const plan = await rolledBack(async (tx) => {
       await seedSkew(tx);
       return explain(tx, roster());
-    });
+    }, SEEDS);
     expect(plan, withPlan(plan)).not.toContain(WALK);
   });
 
-  it('the skew pin is not vacuous: the bare max(created_at) walks the created_at index under that skew', async () => {
-    const plan = await rolledBack(async (tx) => {
+  it('the skew pin is not vacuous: where the session-keyed indexes are gone, the bare max(created_at) walks the created_at index and the probe does not', async () => {
+    const plans = await rolledBack(async (tx) => {
       await seedSkew(tx);
-      return explain(tx, incidentShape(roster()));
-    });
-    expect(plan, withPlan(plan)).toContain(WALK);
+      await removeSessionKeyedIndexes(tx);
+      return { incident: await explain(tx, incidentShape(roster())), shipped: await explain(tx, roster()) };
+    }, SEEDS);
+    expect(plans.incident, withPlan(plans.incident)).toContain(WALK);
+    expect(plans.shipped, withPlan(plans.shipped)).not.toContain(WALK);
   });
 
   it('the index pin is not vacuous: without the index the probe plans elsewhere', async () => {
@@ -140,9 +144,11 @@ describe('#1903 / #1952 roster liveness probe', () => {
     expect(plan, withPlan(plan)).toMatch(/usage_events_\w+_idx/);
   });
 
-  it('moves only the plan: the answer is identical to the bare max(created_at) under both plans', async () => {
+  for (const steered of [false, true]) {
+  it(`moves only the plan: the answer is identical to the bare max(created_at) under both plans${steered ? ' (planner steered to the activity index, #2577)' : ''}`, async () => {
     const result = await rolledBack(async (tx) => {
       await seedSkew(tx);
+      if (steered) await steerPlannerToActivityIndex(tx);
       // The heavy session and a spread of liveness cases, all in scope. Times
       // are naive UTC, as the columns are.
       await tx.$executeRaw(Prisma.sql`
@@ -177,15 +183,24 @@ describe('#1903 / #1952 roster liveness probe', () => {
       const incident = incidentShape(shipped);
       const read = (sql: Prisma.Sql) =>
         tx.$queryRaw<Record<string, unknown>[]>(Prisma.sql`SELECT * FROM (${sql}) r ORDER BY r."workerId"`);
+      const shippedPlan = await explain(tx, shipped);
+      const shippedRows = await read(shipped);
+      // Steered, the incident shape must have left the walk BEFORE the drop: this is what proves the steer took
+      // (the red pin shows it deterministic). Without it, deleting the steer leaves every assertion green.
+      const steeredPlan = steered ? await explain(tx, incident) : null;
+      // The incident shape is read where it MUST walk created_at (#2577), not where the planner happens to.
+      await removeSessionKeyedIndexes(tx);
       return {
-        shippedPlan: await explain(tx, shipped),
+        steeredPlan,
+        shippedPlan,
         incidentPlan: await explain(tx, incident),
-        shipped: await read(shipped),
+        shipped: shippedRows,
         incident: await read(incident),
       };
-    });
+    }, SEEDS);
 
-    // Two genuinely different plans were compared...
+    if (steered) expect(result.steeredPlan, withPlan(result.steeredPlan!)).not.toContain(WALK);
+    // Two genuinely different plans were compared (by construction for the incident's, #2577)...
     expect(result.incidentPlan, withPlan(result.incidentPlan)).toContain(WALK);
     expect(result.shippedPlan, withPlan(result.shippedPlan)).not.toContain(WALK);
     // ...over a fixture that exercises the probe, not an empty roster...
@@ -196,4 +211,5 @@ describe('#1903 / #1952 roster liveness probe', () => {
     // ...and the answer is the same, row for row and field for field.
     expect(JSON.stringify(result.shipped)).toBe(JSON.stringify(result.incident));
   });
+  }
 });

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { Config, Runner } from '../orca-attention-router/router.js';
 import { buildSchema, parse, validate } from 'graphql';
 import { typeDefs } from '../../src/api/graphql/schema/typeDefs.js';
-import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE, SUBSCRIBERS, SUBSCRIBERS_PAGE, CURRENT_SESSION, ALARM_EVENT, DELIVERY_POOL, SUBMIT_PROBE_S, runCommandAsync } from './ticker-wake.js';
+import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE, SUBSCRIBERS, SUBSCRIBERS_PAGE, CURRENT_SESSION, ALARM_EVENT, DELIVERY_POOL, SUBMIT_PROBE_S, runCommandAsync, holdOf } from './ticker-wake.js';
 import type { RunResult } from '../orca-attention-router/router.js';
 
 const RULE = '─'.repeat(112);
@@ -67,6 +67,7 @@ interface Fake {
   subscribersError: string | null;
   /** Terminals listed besides term_a. */
   extraTerminals: any[];
+  terminalReply?: () => unknown;
   /** #2161: each worker's sessions as the server lists them, newest first. */
   sessions: Record<string, Array<{ id: string; workerId: string; appId: string; endedAt: string | null }>>;
   sessionsError: string | null;
@@ -76,6 +77,14 @@ interface Fake {
   /** When set, the alarm read answers this GraphQL error. */
   alarmError: string | null;
   alarmQueries: string[];
+  /** #2613: agentTasks rows by worker id (the open-task read), the reads seen, and a failure switch. */
+  openTasks: Record<string, unknown[]>;
+  openTaskReads: string[][];
+  openTasksError: boolean;
+  /** #2613: the order of the open-task read, screen reads and sends. */
+  order: string[];
+  /** #2613: runs when the open-task read is served (a test clock advances here). */
+  onCount: (() => void) | null;
 }
 
 let dir: string;
@@ -89,7 +98,7 @@ function fake(): Fake {
     incarnation: 'inc-1', retries: [], retryReply: null, run: undefined as any,
     lastCheckedAt: null, tasks: {}, evidenceQueries: [], checkError: null, enters: [], enterReply: null,
     tickers: [], subscribersError: null, extraTerminals: [], sessions: {}, sessionsError: null, sessionQueries: [],
-    alarms: {}, alarmError: null, alarmQueries: [],
+    alarms: {}, alarmError: null, alarmQueries: [], openTasks: {}, openTaskReads: [], openTasksError: false, order: [], onCount: null,
   };
   const subPage = (t: { pages: Array<Array<{ id: string; name: string }>> }, i: number) => ({
     items: (t.pages[i] ?? []).map((w) => ({ worker: w })), hasNextPage: i + 1 < t.pages.length, endCursor: i + 1 < t.pages.length ? `p${i + 1}` : null,
@@ -134,6 +143,14 @@ function fake(): Fake {
         const from = after === undefined ? 0 : all.findIndex((e) => e.id === after) + 1;
         return out({ data: { agentTeamEvents: all.slice(from, from + 200) } });
       }
+      if (q.includes('agentTasks(')) {
+        f.order.push('count');
+        f.onCount?.();
+        f.openTaskReads.push([fArg(argv, 'a') as string, fArg(argv, 'w') as string, fArg(argv, 'o') as string]);
+        if (f.openTasksError) return out({ errors: [{ message: 'tasks down', extensions: { code: 'INTERNAL_SERVER_ERROR' } }] });
+        const o = Number(fArg(argv, 'o'));
+        return out({ data: { agentTasks: (f.openTasks[fArg(argv, 'w') as string] ?? []).slice(o, o + 200) } });
+      }
       if (q.includes('agentTask(')) {
         const t = fArg(argv, 't') as string;
         f.evidenceQueries.push(`task ${t}`);
@@ -148,9 +165,11 @@ function fake(): Fake {
     }
     if (argv[0] === 'orca' && argv[1] === 'terminal') {
       if (argv[2] === 'list') {
-        return out({ ok: true, result: { terminals: [{ handle: 'term_a', incarnationId: f.incarnation, worktreePath: dir, connected: true, writable: true, agentIdentity: 'claude' }, ...f.extraTerminals] } });
+        if (f.terminalReply) return out(f.terminalReply());
+        return out({ ok: true, result: { hostScope: { hostIds: ['local'], omittedHostIds: [] }, terminals: [{ handle: 'term_a', incarnationId: f.incarnation, worktreePath: dir, connected: true, writable: true, agentIdentity: 'claude' }, ...f.extraTerminals] } });
       }
       if (argv[2] === 'wait') return out({ ok: f.idle, result: { wait: { satisfied: f.idle } }, error: f.idle ? undefined : { code: 'timeout' } });
+      if (argv[2] === 'read') f.order.push('read');
       if (argv[2] === 'read') return out({ ok: true, result: { terminal: f.screen } });
       if (argv[2] === 'send' && !argv.includes('--text')) {
         f.enters.push(argv[argv.indexOf('--terminal') + 1]);
@@ -161,6 +180,7 @@ function fake(): Fake {
         return { code: 0, stdout: f.retryReply ? f.retryReply() : JSON.stringify(ACCEPTED_ONLY), stderr: '' };
       }
       if (argv[2] === 'send') {
+        f.order.push('send');
         f.sent.push(argv[argv.indexOf('--text') + 1]);
         if (f.sendReply) return { code: 0, stdout: f.sendReply(), stderr: '' };
         return out(CONFIRMED);
@@ -173,8 +193,10 @@ function fake(): Fake {
 
 // Server-owned timing (R63): by default past the floor, busy deadline still ahead.
 const iso = (ms: number): string => new Date(ms).toISOString();
-const wake = (id: string, name: string, reasons: any[], p = proof(['T:1']), channels: any[] = [], timing?: { anchorAt: string; deliverAfter: string; busyDeadline: string }) => ({
+const wake = (id: string, name: string, reasons: any[], p = proof(['T:1']), channels: any[] = [], timing?: { anchorAt: string; deliverAfter: string; busyDeadline: string }, tickText?: string | null) => ({
   worker: { id, name }, reasons, channels, proof: p,
+  // #2754: absent (not null) when the caller passes nothing, like a reply recorded before the server wrote a tick line.
+  ...(tickText === undefined ? {} : { tickText }),
   ...(timing ?? { anchorAt: iso(Date.now() - 600_000), deliverAfter: iso(Date.now() - 300_000), busyDeadline: iso(Date.now() + 3_600_000) }),
 });
 const cfg = (): Config => ({
@@ -838,7 +860,7 @@ describe('typed-once, coverage and ambiguity', () => {
     expect(f.acked).toHaveLength(1);
   });
 
-  it('reissuing an unresolved request keeps the receiver and composer guard: no retry while a draft is pending or the receiver changed', async () => {
+  it('reissuing an unresolved request keeps the receiver and composer guard: no retry while a draft is pending or the receiver identity is unknown', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
     await go();
@@ -847,7 +869,7 @@ describe('typed-once, coverage and ambiguity', () => {
     expect(f.retries).toEqual([]);
     expect(log()).toContain('not reissued');
     f.screen = { source: 'screen', tail: CLAUDE_IDLE };
-    f.incarnation = 'inc-2';
+    f.incarnation = ''; // unknown is not proof that the old incarnation is gone
     await go();
     expect(f.retries).toEqual([]);
     expect(log()).toContain('another receiver');
@@ -1058,6 +1080,11 @@ describe('GraphQL contract with the server SDL (#2102 / R63)', () => {
     expect(validate(schema, parse(QUERY)).map((e) => e.message)).toEqual([]);
     for (const f of ['anchorAt', 'deliverAfter', 'busyDeadline']) expect(QUERY).toContain(f);
   });
+  it('#2754: the dueWakes query selects the server tick line and each reason\'s action state, and validates', async () => {
+    expect(validate(schema, parse(QUERY)).map((e) => e.message)).toEqual([]);
+    expect(QUERY).toContain('tickText');
+    expect(QUERY).toMatch(/action\s*\{\s*state\s*\}/);
+  });
   it('the acknowledgeWakes mutation validates', async () => {
     expect(validate(schema, parse(ACK)).map((e) => e.message)).toEqual([]);
   });
@@ -1118,6 +1145,21 @@ describe('diagnostics never carry a proof, typed text or a server message (P2-2)
     expect(everything).not.toContain(PROOF_SENTINEL);
     expect(everything).not.toContain(TEXT_SENTINEL);
   };
+
+  it('#2754: a tick line holding a sentinel reaches the typed text and never the log or the receipt', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], undefined, `tick coordinator-tick: run hrn:node:hadronmemory.com:x:${TEXT_SENTINEL}`)];
+    await go();
+    expect(f.sent[0]).toContain(TEXT_SENTINEL);
+    clean();
+  });
+
+  it('#2754: an untypeable tick line holding a sentinel is dropped, and the sentinel never reaches the log, the receipt or the terminal', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], undefined, `tick coordinator-tick: ${TEXT_SENTINEL}\u0007`)];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).not.toContain(TEXT_SENTINEL);
+    clean();
+  });
 
   it('a failed ack logs its server error CODE but not the server message', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
@@ -1478,11 +1520,11 @@ describe('#2138: an ambiguous receipt is resolved on evidence, never on a timeou
     expect(receipt().state).toBe('ambiguous');
   });
 
-  it('(b) another receiver is not resolved, and no evidence is read', async () => {
+  it('(b) an unknown receiver is not resolved, and no evidence is read', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
     await ambiguous();
     f.lastCheckedAt = iso(T0 + 60_000);
-    f.incarnation = 'inc-2';
+    f.incarnation = '';
     await go(at(T0 + 120_000));
     expect(f.acked).toEqual([]);
     expect(f.evidenceQueries).toEqual([]);
@@ -1744,6 +1786,31 @@ describe('#2138: a stranded draft is detected and listed for a person, never sub
     noInput();
     expect(log()).toMatch(/stranded draft, 60s \(not recorded: \w+\); .*needs a person/);
     expect(receipt().strandedAt).toBeUndefined();
+  });
+
+  describe('#2746 the hold file names a mature stranded draft', () => {
+    const holdsPath = () => join(dir, 'ticker-wake', 'holds.log');
+    const lastHold = () => readFileSync(holdsPath(), 'utf8').split('\n').filter(Boolean).at(-1) ?? '';
+
+    it('before 60 s, at first detection, on a later pass and when not recorded, the file says stranded-draft', async () => {
+      await stranded();
+      await go(at(T0 + 30_000));
+      expect(lastHold()).toMatch(/ Ada w-ada stranded-draft$/);
+      await go(at(T0 + 61_000)); // first detection: `stranded draft, 61s; ... needs a person`
+      expect(log()).toContain('stranded draft, 61s');
+      expect(lastHold()).toMatch(/ Ada w-ada stranded-draft$/);
+      await go(at(T0 + 180_000)); // later pass: `(first seen ...)`
+      expect(log()).toContain('first seen');
+      expect(lastHold()).toMatch(/ Ada w-ada stranded-draft$/);
+    });
+
+    it('a draft whose strandedAt cannot be recorded is still stranded-draft in the file', async () => {
+      await stranded();
+      mkdirSync(`${receiptsFile()}.${process.pid}.tmp`);
+      try { await go(at(T0 + 60_000)); } finally { rmSync(`${receiptsFile()}.${process.pid}.tmp`, { recursive: true, force: true }); }
+      expect(log()).toMatch(/not recorded/);
+      expect(lastHold()).toMatch(/ Ada w-ada stranded-draft$/);
+    });
   });
 
   it('dry run is a no-op', async () => {
@@ -2337,6 +2404,16 @@ describe('#2138 — fresh ticks after two unreconciled cadences', () => {
     await go(at(T0 + 1_200_001));
     expect(f.sent).toHaveLength(2); // restart/re-offer is not another fresh request
   });
+  it('#2746: a hold logged earlier in a delivery is cleared when the same delivery then succeeds', async () => {
+    await stuck();
+    const holdsPath = join(dir, 'ticker-wake', 'holds.log');
+    expect(readFileSync(holdsPath, 'utf8').trim().split('\n')).toHaveLength(1); // pass one: send accepted but unconfirmed
+    f.sendReply = () => JSON.stringify(CONFIRMED);
+    await go(at(T0 + 1_200_000));
+    expect(f.acked).toHaveLength(1);
+    expect(log()).toContain('earlier request still unreconciled'); // a hold line was logged before the fresh request succeeded
+    expect(readFileSync(holdsPath, 'utf8').trim().split('\n')).toHaveLength(1); // pass two delivered: no new hold line
+  });
   it('a confirmed replacement acks only its newer proof; the old entry survives the ack', async () => {
     await stuck();
     f.sendReply = () => JSON.stringify(CONFIRMED);
@@ -2427,15 +2504,17 @@ describe('#2138 — fresh ticks after two unreconciled cadences', () => {
     expect(current().coverage).toEqual(['T:1']);
     expect(log()).toContain('old request could not be retained');
   });
-  for (const guard of ['draft', 'incarnation', 'busy', 'before cadence', 'same tick', 'not accepted', 'missing incarnation', 'server check failed'] as const) {
+  for (const guard of ['draft', 'incomplete inventory', 'busy', 'before cadence', 'same tick', 'missing incarnation', 'server check failed'] as const) {
     it(`holds a replacement with ${guard}`, async () => {
       await stuck();
       if (guard === 'draft') f.screen = {...f.screen, draft: 'human typing'};
-      if (guard === 'incarnation') f.incarnation = 'inc-2';
+      if (guard === 'incomplete inventory') {
+        f.incarnation = 'inc-2';
+        f.terminalReply = () => ({ ok: true, result: { hasNextPage: true, terminals: [{ handle: 'term_a', incarnationId: f.incarnation, worktreePath: dir, agentIdentity: 'claude' }] } });
+      }
       if (guard === 'missing incarnation') f.incarnation = '';
       if (guard === 'busy') { f.idle = false; f.screen = {source:'screen', tail:['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)']}; }
       if (guard === 'same tick') f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], T0 + 1_200_000), [], timing)];
-      if (guard === 'not accepted') { const r = current(); r.detail = 'unrecognized send receipt'; writeFileSync(receiptsFile(), JSON.stringify({'w-ada': r})); f.retryReply = () => JSON.stringify({ok:false,error:{code:'transport'},requestId:'r1'}); }
       if (guard === 'server check failed') f.checkError = 'unavailable';
       await go(at(T0 + (guard === 'before cadence' ? 1_199_999 : 1_200_000)));
       expect(f.sent).toHaveLength(1);
@@ -2443,4 +2522,686 @@ describe('#2138 — fresh ticks after two unreconciled cadences', () => {
       expect(current().state).toBe('ambiguous');
     });
   }
+});
+
+
+describe('#2275 dead-receiver replacement', () => {
+  const old = () => ({ state: 'ambiguous', coverage: ['T:1'], receiver: 'term_old#inc-old',
+    at: Date.now() - 60_000, detail: 'accepted, turn start not confirmed (input_accepted)',
+    text: 'old notification', handle: 'term_old', requestId: 'old-request', checkedBefore: null });
+  const stored = () => JSON.parse(readFileSync(receiptsFile(), 'utf8'));
+  const inventory = () => ({ ok: true, result: { hostScope: { hostIds: ['local'], omittedHostIds: [] }, terminals: [{ handle: 'term_a', incarnationId: f.incarnation,
+    worktreePath: dir, connected: true, writable: true, agentIdentity: 'claude' }, ...f.extraTerminals] } });
+  function seed(prior = old()) {
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': prior, unrelated: {
+      state: 'sent', coverage: ['U:9'], receiver: 'term_other#inc-other', at: 1 } }));
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
+    return prior;
+  }
+  it('replaces an absent accepted-but-unconfirmed receiver without acknowledging old delivery or unrelated state', async () => {
+    const prior = seed();
+    await go();
+    expect(f.sent).toHaveLength(1); expect(f.retries).toEqual([]); expect(f.acked).toEqual([]);
+    expect(stored()['w-ada']).toMatchObject({ state: 'ambiguous', receiver: 'term_a#inc-1', handle: 'term_a' });
+    expect(stored().unrelated).toMatchObject({ receiver: 'term_other#inc-other' });
+    const archive = Object.values(JSON.parse(readFileSync(join(dir, 'ticker-wake', 'needs-person.json'), 'utf8')));
+    expect(archive).toEqual([expect.objectContaining({ ...prior, workerId: 'w-ada' })]);
+  });
+  it('keeps a still-present prior incarnation held even when it cannot currently accept input', async () => {
+    const prior = seed();
+    f.extraTerminals = [{ handle: 'term_old', incarnationId: 'inc-old', worktreePath: dir, connected: false, writable: false }];
+    await go();
+    expect(f.sent).toEqual([]); expect(f.acked).toEqual([]); expect(stored()['w-ada']).toEqual(prior);
+  });
+  it('recognizes a reused handle only with a known different incarnation', async () => {
+    seed({ ...old(), handle: 'term_a', receiver: 'term_a#inc-old' });
+    await go();
+    expect(f.sent).toHaveLength(1); expect(f.acked).toEqual([]);
+    expect(stored()['w-ada'].receiver).toBe('term_a#inc-1');
+  });
+  for (const kind of ['failed', 'partial', 'unknown-old', 'unknown-current', 'unknown-row'] as const) {
+    it(`holds replacement on ${kind} inventory/identity`, async () => {
+      const prior = seed();
+      if (kind === 'failed') f.terminalReply = () => ({ ok: false, error: { code: 'terminal_list_failed' } });
+      if (kind === 'partial') f.terminalReply = () => ({ ...inventory(), result: { ...inventory().result, hasNextPage: true } });
+      if (kind === 'unknown-old') { prior.receiver = 'term_old#'; writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': prior })); }
+      if (kind === 'unknown-current') f.incarnation = '';
+      if (kind === 'unknown-row') f.extraTerminals = [{ incarnationId: 'inc-old', worktreePath: dir }];
+      try { await go(); } catch { /* an unreadable inventory may stop the whole pass */ }
+      expect(f.sent).toEqual([]); expect(f.retries).toEqual([]); expect(f.acked).toEqual([]);
+      expect(stored()['w-ada']).toEqual(prior);
+    });
+  }
+  for (const guard of ['draft', 'busy', 'future-floor', 'dry'] as const) {
+    it(`keeps replacement behind the normal ${guard} send gate`, async () => {
+      const prior = seed();
+      if (guard === 'draft') f.screen.draft = 'human work';
+      if (guard === 'busy') { f.idle = false; f.screen = { source: 'screen', tail: ['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'] }; }
+      if (guard === 'future-floor') f.wakes[0].deliverAfter = iso(Date.now() + 60_000);
+      await go({ dry: guard === 'dry' });
+      expect(f.sent).toEqual([]); expect(f.acked).toEqual([]); expect(stored()['w-ada']).toEqual(prior);
+    });
+  }
+  const incompleteScopes = [
+    ['missing scope', undefined], ['null scope', null],
+    ['empty covered hosts', { hostIds: [], omittedHostIds: [] }],
+    ['unknown covered hosts', { hostIds: ['future:host'], omittedHostIds: [] }],
+    ['omitted SSH host', { hostIds: ['local'], omittedHostIds: ['ssh:devbox'] }],
+    ['omitted local host', { hostIds: ['ssh:devbox'], omittedHostIds: ['local'] }],
+    ['omitted unknown host', { hostIds: ['local'], omittedHostIds: ['future:host'] }],
+    ['missing omitted list', { hostIds: ['local'] }],
+    ['invalid encoded host', { hostIds: ['ssh:%ZZ'], omittedHostIds: [] }],
+    ['invalid runtime omission', { hostIds: ['local'], omittedHostIds: ['runtime:'] }],
+    ['pipe in runtime omission', { hostIds: ['local'], omittedHostIds: ['runtime:a|b'] }],
+  ] as const;
+  for (const [label, scope] of incompleteScopes) {
+    it(`holds without Orca census completeness: ${label}`, async () => {
+      const prior = seed();
+      f.terminalReply = () => ({ ...inventory(), result: { ...inventory().result, hostScope: scope } });
+      await go();
+      expect(f.sent).toEqual([]); expect(f.retries).toEqual([]); expect(f.acked).toEqual([]);
+      expect(stored()['w-ada']).toEqual(prior);
+      expect(existsSync(join(dir, 'ticker-wake', 'needs-person.json'))).toBe(false);
+    });
+  }
+  it('accepts a legible covered host with runtime-only omissions, including unknown future covered host kinds', async () => {
+    seed();
+    f.terminalReply = () => ({ ...inventory(), result: { ...inventory().result,
+      hostScope: { hostIds: ['future:host', 'ssh:dev%20box'], omittedHostIds: ['runtime:peer%20box'] } } });
+    await go();
+    expect(f.sent).toHaveLength(1); expect(f.acked).toEqual([]);
+  });
+  it('rechecks host-scope coverage before archiving or replacement intent', async () => {
+    const prior = seed(); let calls = 0;
+    f.terminalReply = () => ({ ...inventory(), result: { ...inventory().result,
+      hostScope: { hostIds: ['local'], omittedHostIds: ++calls > 1 ? ['ssh:lost'] : [] } } });
+    await go();
+    expect(f.sent).toEqual([]); expect(f.acked).toEqual([]); expect(stored()['w-ada']).toEqual(prior);
+  });
+  it('duplicate terminal handles cannot prove the old receiver gone', async () => {
+    const prior = seed();
+    f.extraTerminals = [{ handle: 'term_a', incarnationId: 'different', worktreePath: dir }];
+    await go();
+    expect(f.sent).toEqual([]); expect(f.acked).toEqual([]); expect(stored()['w-ada']).toEqual(prior);
+  });
+  it('archives before replacement intent: archive failure leaves the old receipt and unrelated entries intact', async () => {
+    const prior = seed(); mkdirSync(join(dir, 'ticker-wake', `needs-person.json.${process.pid}.tmp`));
+    await go();
+    expect(f.sent).toEqual([]); expect(f.acked).toEqual([]); expect(stored()['w-ada']).toEqual(prior);
+    expect(stored().unrelated).toMatchObject({ receiver: 'term_other#inc-other' });
+  });
+  it('retains new intent and the old archive if a confirmed replacement crashes before receipt persistence', async () => {
+    const prior = seed();
+    f.sendReply = () => { mkdirSync(`${receiptsFile()}.${process.pid}.tmp`); return JSON.stringify(CONFIRMED); };
+    await go();
+    expect(f.sent).toHaveLength(1); expect(f.acked).toEqual([]);
+    expect(stored()['w-ada']).toMatchObject({ state: 'ambiguous', receiver: 'term_a#inc-1', detail: 'send intent recorded before submission; outcome unknown' });
+    expect(Object.values(JSON.parse(readFileSync(join(dir, 'ticker-wake', 'needs-person.json'), 'utf8')))).toEqual([
+      expect.objectContaining({ ...prior, workerId: 'w-ada' }),
+    ]);
+    rmSync(`${receiptsFile()}.${process.pid}.tmp`, { recursive: true });
+    f.sendReply = null; await go();
+    expect(f.sent).toHaveLength(1); expect(f.acked).toEqual([]);
+    expect(stored().unrelated).toMatchObject({ receiver: 'term_other#inc-other' });
+  });
+  for (const change of ['old receiver returns', 'current replaced', 'inventory fails', 'draft appears'] as const) {
+    it(`revalidates before durable retirement when ${change}`, async () => {
+      const prior = seed(); let count = 0;
+      f.terminalReply = () => {
+        if (++count === 2) {
+          if (change === 'old receiver returns') f.extraTerminals = [{ handle: 'term_old', incarnationId: 'inc-old', worktreePath: dir }];
+          if (change === 'current replaced') f.incarnation = 'inc-2';
+          if (change === 'draft appears') f.screen.draft = 'human typing';
+          if (change === 'inventory fails') return { ok: false, error: { code: 'terminal_list_failed' } };
+        }
+        return inventory();
+      };
+      try { await go(); } catch { /* failed inventory aborts rather than writes */ }
+      expect(f.sent).toEqual([]); expect(f.acked).toEqual([]); expect(stored()['w-ada']).toEqual(prior);
+    });
+  }
+  it('does not retire the old receipt when replacement intent cannot be saved', async () => {
+    const prior = seed(); mkdirSync(`${receiptsFile()}.${process.pid}.tmp`);
+    await go();
+    expect(f.sent).toEqual([]); expect(f.acked).toEqual([]); expect(stored()['w-ada']).toEqual(prior);
+    expect(stored().unrelated).toMatchObject({ receiver: 'term_other#inc-other' });
+  });
+});
+
+// #2275 slice A: a failed request identity is still uncertain, not proof of non-delivery.
+describe('#2275 same-receiver never-accepted recovery', () => {
+  const T0 = Date.UTC(2026, 9, 24, 0);
+  const at = (ms: number) => ({ now: () => ms });
+  const timing = { anchorAt: iso(T0 - 600_000), deliverAfter: iso(T0 - 300_000), busyDeadline: iso(T0 + 3_600_000) };
+  const stored = () => JSON.parse(readFileSync(receiptsFile(), 'utf8'));
+  const archived = () => Object.values(JSON.parse(readFileSync(join(dir, 'ticker-wake', 'needs-person.json'), 'utf8'))) as any[];
+  const failed = { ok: false, error: { code: 'transport' }, requestId: 'failed-request' };
+  function seed(joined = false) {
+    const prior = { state: 'ambiguous', coverage: ['T:1', 'task:old-event:0'], receiver: 'term_a#inc-1', at: T0,
+      detail: 'failed with a request identity' + (joined ? '; same-id retry: failed with a request identity' : ''),
+      text: 'original prompt must not be replayed as fresh', handle: 'term_a', requestId: 'failed-request', checkedBefore: null };
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': prior, unrelated: { state: 'sent', coverage: ['U:9'], receiver: 'other#inc', at: 1 } }));
+    f.wakes = [wake('w-ada', 'Ada', [TICK, task('old-task', 'ASSIGNED', 'old-event')], proof(['T:3'], T0 + 1_200_000, [taskEntry('old-task', 'old-event')]), [], timing)];
+    f.retryReply = () => JSON.stringify(failed);
+    f.sendReply = () => JSON.stringify({ ...ACCEPTED_ONLY, result: { send: { accepted: true, prompt: { requestId: 'new-request', stages: ['input_accepted'] } } } });
+    return prior;
+  }
+  for (const joined of [false, true]) {
+    it(`replaces old failure${joined ? ' with joined retry detail' : ''} with newer tick only, keeping old coverage and unrelated receipts`, async () => {
+      const prior = seed(joined);
+      await go(at(T0 + 1_200_000));
+      expect(f.sent).toHaveLength(1);
+      expect(f.sent[0]).toContain('Fresh tick request at');
+      expect(f.sent[0]).not.toContain('original prompt');
+      expect(f.sent[0]).not.toContain('old-task');
+      expect(f.retries).toEqual(['failed-request']); // only the existing own-id reconciliation
+      expect(stored()['w-ada']).toMatchObject({ requestId: 'new-request', coverage: ['T:3'] });
+      expect(stored().unrelated).toMatchObject({ receiver: 'other#inc' });
+      expect(archived()).toEqual([expect.objectContaining({ ...prior, workerId: 'w-ada' })]);
+      expect(log()).toContain('Orca never reported the input accepted');
+      expect(log()).toMatch(/needs a person.*not a retype/);
+      expect(f.acked).toEqual([]);
+      expect(f.enters).toEqual([]);
+      await go(at(T0 + 1_200_001));
+      expect(f.sent).toHaveLength(1); // restart/re-offer cannot repeat archived coverage
+      expect(f.acked).toEqual([]);
+    });
+  }
+  for (const guard of ['young', 'different live receiver', 'draft', 'busy', 'missing incarnation', 'same tick', 'dry'] as const) {
+    it(`still holds failed identity with ${guard}`, async () => {
+      const prior = seed();
+      if (guard === 'different live receiver') {
+        prior.handle = 'term_old'; prior.receiver = 'term_old#inc-old';
+        writeFileSync(receiptsFile(), JSON.stringify({ ...stored(), 'w-ada': prior }));
+        f.extraTerminals = [{ handle: 'term_old', incarnationId: 'inc-old', worktreePath: dir }];
+      }
+      if (guard === 'draft') f.screen.draft = 'human typing';
+      if (guard === 'busy') { f.idle = false; f.screen = { source: 'screen', tail: ['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'] }; }
+      if (guard === 'missing incarnation') f.incarnation = '';
+      if (guard === 'same tick') f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], T0 + 1_200_000), [], timing)];
+      await go({ ...at(T0 + (guard === 'young' ? 1_199_999 : 1_200_000)), dry: guard === 'dry' });
+      expect(f.sent).toEqual([]);
+      expect(f.acked).toEqual([]);
+      expect(stored()['w-ada']).toEqual(prior);
+    });
+  }
+  for (const fault of ['archive', 'intent', 'after send'] as const) {
+    it(`keeps durable old ambiguity and unrelated receipts on ${fault} persistence failure`, async () => {
+      const prior = seed();
+      const blocked = fault === 'archive' ? join(dir, 'ticker-wake', `needs-person.json.${process.pid}.tmp`) : `${receiptsFile()}.${process.pid}.tmp`;
+      if (fault === 'after send') f.sendReply = () => { mkdirSync(blocked); return JSON.stringify(CONFIRMED); };
+      else mkdirSync(blocked);
+      await go(at(T0 + 1_200_000));
+      expect(f.sent).toHaveLength(fault === 'after send' ? 1 : 0);
+      expect(f.acked).toEqual([]);
+      expect(stored().unrelated).toMatchObject({ receiver: 'other#inc' });
+      if (fault === 'after send') {
+        expect(stored()['w-ada']).toMatchObject({ state: 'ambiguous', detail: 'send intent recorded before submission; outcome unknown' });
+        expect(archived()).toEqual([expect.objectContaining(prior)]);
+        rmSync(blocked, { recursive: true });
+        await go(at(T0 + 1_200_001));
+        expect(f.sent).toHaveLength(1);
+        expect(f.acked).toEqual([]);
+      } else {
+        expect(stored()['w-ada']).toEqual(prior);
+        expect(log()).toContain(fault === 'archive' ? 'old request could not be retained' : 'send intent could not be recorded');
+      }
+    });
+  }
+});
+
+describe('#2613 — the open-task line on every ticker-wake form', () => {
+  const open = (worker: string, n: number, status = 'STARTED') =>
+    Array.from({ length: n }, (_, i) => ({ id: `o${i}`, status, assignee: { kind: 'WORKER', id: worker } }));
+  const LINE = (n: number) => ` You have ${n} open task${n === 1 ? '' : 's'} (as read when this was sent); run \`hadron team task mine\`.`;
+
+  it('appends the line after the existing bytes on the team-tick, assignment, alarm and finished-child forms', () => {
+    expect(nudgeText(['team-tick'], [], LINE(2))).toBe(nudgeText(['team-tick'], []) + LINE(2));
+    expect(nudgeText([], ['t1'], LINE(2))).toBe(nudgeText([], ['t1']) + LINE(2));
+    const forms: Array<Array<{ id: string; event: 'ALARM' | 'CHILD_FINISHED'; eventId?: string; rule?: string }>> = [
+      [{ id: 't9', event: 'ALARM', eventId: 'e9', rule: 'STALL_NOT_STARTED' }], [{ id: 'c1', event: 'CHILD_FINISHED' }],
+    ];
+    for (const tasks of forms) expect(nudgeText(['team-tick'], tasks as any, LINE(2))).toBe(nudgeText(['team-tick'], tasks as any) + LINE(2));
+    expect(nudgeText(['coordinator-tick'], [], LINE(1))).toBe(nudgeText(['coordinator-tick'], []) + LINE(1));
+  });
+
+  it('delivers a tick wake carrying the line, read for THIS worker in the wake App', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 4);
+    f.openTasks['w-other'] = open('w-other', 9); // another worker's tasks are never read for Ada
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], [], LINE(4)));
+    expect(f.openTaskReads).toEqual([['hrn:app:test:team', 'w-ada', '0']]);
+  });
+
+  it('delivers an assignment wake carrying the line', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [task('t7')], proof([], 'b', [taskEntry('t7')]))];
+    f.openTasks['w-ada'] = open('w-ada', 1, 'PENDING');
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toBe(nudgeText([], ['t7'], LINE(1)));
+  });
+
+  it('zero open tasks leaves the wake byte-identical to today', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    await go();
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], []));
+  });
+
+  it('a refused count read still delivers the wake, with no count claim and no "none"', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasksError = true;
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], []));
+    expect(f.sent[0]).not.toMatch(/open task|You have \d/);
+  });
+
+  it('a refused count read logs ONE closed-reason line with the worker name and nothing the read returned (#2630)', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasksError = true;
+    await go();
+    const diag = lines.filter((l) => l.includes('open-task count unknown'));
+    expect(diag).toHaveLength(1);
+    expect(diag[0]).toMatch(/Ada: open-task count unknown \(refused\); the wake goes without the line$/);
+    expect(lines.join('\n')).not.toMatch(/tasks down|INTERNAL_SERVER_ERROR/);
+    expect(f.sent).toHaveLength(1); // fail-open
+  });
+
+  it('a count or a zero logs no diagnostic (#2630)', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 2);
+    await go();
+    expect(lines.filter((l) => l.includes('open-task count unknown'))).toEqual([]);
+  });
+
+  it('an empty result (the read answered, zero rows): no diagnostic, no open-task clause, the plain wake still delivers (#2641)', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = [];
+    await go();
+    expect(f.openTaskReads).toEqual([['hrn:app:test:team', 'w-ada', '0']]); // the read ran and answered empty
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], []));
+    expect(f.sent[0]).not.toMatch(/open task|You have \d/);
+    expect(lines.filter((l) => l.includes('open-task count unknown'))).toEqual([]);
+  });
+
+  it('a row that is not open or not this worker makes the count unknown; the wake is plain', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = [...open('w-ada', 2), { id: 'x', status: 'CANCELLED', assignee: { kind: 'WORKER', id: 'w-ada' } }];
+    await go();
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], []));
+  });
+
+  it('pages: 201 open tasks read as 201', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 201);
+    await go();
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], [], LINE(201)));
+    expect(f.openTaskReads.map((r) => r[2])).toEqual(['0', '200']);
+  });
+
+  it('a dry run reads nothing and sends nothing', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 2);
+    await go({ dry: true });
+    expect(f.sent).toEqual([]);
+    expect(f.openTaskReads).toEqual([]);
+  });
+
+  it('reads the count BEFORE the final screen proofs, never between the last gate and the send (LOCAL P2-1)', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 2);
+    await go();
+    expect(f.sent).toHaveLength(1);
+    const count = f.order.indexOf('count');
+    expect(count).toBeGreaterThan(-1);
+    expect(f.order.lastIndexOf('read')).toBeGreaterThan(count);
+    expect(f.order.indexOf('send')).toBeGreaterThan(f.order.lastIndexOf('read'));
+    expect(f.order.slice(count + 1, f.order.indexOf('send')).includes('count')).toBe(false);
+  });
+
+  it("the count shares the pass deadline: a read that ends past the pass end adds no line, and the wake is still sent plain", async () => {
+    const base = Date.now();
+    let t = 0;
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 2);
+    f.onCount = () => { t += 3_000; }; // the read itself takes 3 s; the pass has 2 s left
+    await pass(cfg(), f.run, { now: () => base + t, budgetMs: 2_000 }, (l) => lines.push(l));
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], []));
+  });
+
+  it('inside the pass deadline the same read still counts', async () => {
+    const base = Date.now();
+    let t = 0;
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 2);
+    f.onCount = () => { t += 100; };
+    await pass(cfg(), f.run, { now: () => base + t, budgetMs: 2_000 }, (l) => lines.push(l));
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], [], LINE(2)));
+  });
+});
+
+describe('#2754 — the server tick line', () => {
+  const stored = () => JSON.parse(readFileSync(receiptsFile(), 'utf8'));
+  const OPEN = (n: number) => ` You have ${n} open task${n === 1 ? '' : 's'} (as read when this was sent); run \`hadron team task mine\`.`;
+  const FORMS = [
+    'tick team-tick: run hrn:node:hadronmemory.com:x-system:tasks:on-team-tick',
+    'tick eden-queue-tick: same task as above',
+    'tick team-tick: no task is mapped for tick.team',
+    'tick team-tick: no task found at x-system:tasks:on-team-tick for tick.team',
+    'tick team-tick: resolve your task for tick.team yourself',
+  ];
+  const TEAM = { kind: 'TICK', ticker: { id: 'V', name: 'team-tick' } };
+  const mapped = (t: any, state: string) => ({ ...t, action: { state } });
+
+  it('2. a due TICK wake sends the server line first, then one space, then today\'s nudge', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, FORMS[0])];
+    await go();
+    expect(f.sent).toEqual([`${FORMS[0]} ${nudgeText(['team-tick'], [])}`]);
+  });
+
+  for (const form of FORMS) {
+    it(`3. types the line byte for byte: ${form.slice(0, 40)}`, async () => {
+      f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, form)];
+      await go();
+      expect(f.sent[0].startsWith(form + ' Hadron ticker wake (team-tick)')).toBe(true);
+      expect(f.sent[0]).not.toContain('\n');
+    });
+  }
+
+  it('3. does not trim, re-case or re-space the line (double spaces and edge spaces survive)', async () => {
+    const odd = ' tick team-tick:  run  hrn:node:hadronmemory.com:x:y ';
+    f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, odd)];
+    await go();
+    expect(f.sent[0]).toBe(`${odd} ${nudgeText(['team-tick'], [])}`);
+  });
+
+  it('4. a null tick line, and a reply with no tickText field at all, send today\'s text', async () => {
+    for (const tickText of [null, undefined]) {
+      f.sent.length = 0; f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1'], String(tickText)), [], undefined, tickText)];
+      rmSync(join(dir, 'ticker-wake'), { recursive: true, force: true });
+      await go();
+      expect(f.sent).toEqual([nudgeText(['team-tick'], [])]);
+    }
+  });
+
+  it('5. a TICK + ASSIGNED wake starts with the line, then the assignment text; a TASK-only wake is unchanged', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TEAM, task('t7')], proof(['V:1'], 'a', [taskEntry('t7')]), [], undefined, FORMS[0])];
+    await go();
+    expect(f.sent).toEqual([`${FORMS[0]} ${nudgeText(['team-tick'], ['t7'])}`]);
+    f.sent.length = 0; rmSync(join(dir, 'ticker-wake'), { recursive: true, force: true });
+    f.wakes = [wake('w-ada', 'Ada', [task('t8')], proof([], 'b', [taskEntry('t8')]), [], undefined, null)];
+    await go();
+    expect(f.sent).toEqual([nudgeText([], ['t8'])]);
+  });
+
+  it('6. a displaced request is the line, then the fresh-request prefix, then the nudge', async () => {
+    const T0 = Date.UTC(2026, 9, 24, 0);
+    const prior = { state: 'ambiguous', coverage: ['V:1'], receiver: 'term_a#inc-1', at: T0, detail: 'failed with a request identity',
+      text: 'original', handle: 'term_a', requestId: 'failed-request', checkedBefore: null };
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': prior }));
+    const timing = { anchorAt: iso(T0 - 600_000), deliverAfter: iso(T0 - 300_000), busyDeadline: iso(T0 + 3_600_000) };
+    f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:3'], T0 + 1_200_000), [], timing, FORMS[0])];
+    f.retryReply = () => JSON.stringify({ ok: false, error: { code: 'transport' }, requestId: 'failed-request' });
+    f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
+    await go({ now: () => T0 + 1_200_000 });
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0].startsWith(`${FORMS[0]} Fresh tick request at `)).toBe(true);
+  });
+
+  const BAD: Array<[string, string]> = [
+    ['a C0 control character', 'tick team-tick: run x\u0007y'],
+    ['a C1 control character', 'tick team-tick: run x\u0085y'],
+    ['a tab', 'tick team-tick:\trun x'],
+    ['a line break', 'tick team-tick: run x\ntick u: y'],
+    ['a carriage return', 'tick team-tick: run x\ry'],
+    ['U+2028', 'tick team-tick: run x\u2028y'],
+    ['U+2029', 'tick team-tick: run x\u2029y'],
+    ['an empty string', ''],
+    ['a non-string', 42 as any],
+    ['over the length cap', 'tick team-tick: ' + 'x'.repeat(5000)],
+  ];
+  for (const [why, bad] of BAD) {
+    it(`7. a tick line holding ${why} is dropped: today's text goes out, one closed-reason log line, no text in the log or receipt`, async () => {
+      f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, bad)];
+      await go();
+      expect(f.sent).toEqual([nudgeText(['team-tick'], [])]);
+      if (bad === '' || typeof bad !== 'string') return;
+      expect(log().split('\n').filter((l) => l.includes('tick line not typeable'))).toHaveLength(1);
+      expect(log()).toMatch(/Ada: .*tick line not typeable/);
+      expect(log()).not.toContain('x\u0007y');
+      expect(log()).not.toContain('tick team-tick');
+      expect(readFileSync(receiptsFile(), 'utf8')).not.toContain('tick team-tick: ');
+    });
+  }
+
+  it('8. a coordinator-tick whose action is MAPPED no longer gets the hard-coded base-tick sentence, and still gets the tagged check', async () => {
+    const line = 'tick coordinator-tick: run hrn:node:hadronmemory.com:coordinator-system:tasks:on-base-tick';
+    f.wakes = [wake('w-ada', 'Ada', [mapped(TICK, 'MAPPED')], proof(['T:1']), [], undefined, line)];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    const rest = f.sent[0].replace(line + ' ', '');
+    expect(rest).not.toContain('coordinator-system:tasks:on-base-tick');
+    expect(rest).not.toContain('run your base tick');
+    expect(rest).toBe(nudgeText(['coordinator-tick'], [], '', new Set(['coordinator-tick'])));
+    expect(rest).toContain('hadron team chat read --mentions-me --limit 1');
+  });
+
+  for (const action of [null, undefined, { state: 'UNMAPPED' }, { state: 'UNRESOLVED' }, { state: 'WITHHELD' }]) {
+    it(`9. a coordinator-tick with action ${JSON.stringify(action)} keeps today's base-tick sentence`, async () => {
+      f.wakes = [wake('w-ada', 'Ada', [{ ...TICK, ...(action === undefined ? {} : { action }) }], proof(['T:1']), [], undefined, 'tick coordinator-tick: resolve your task for tick.coordinator yourself')];
+      await go();
+      expect(f.sent[0]).toContain('run your base tick (coordinator-system:tasks:on-base-tick)');
+    });
+  }
+
+  const BEL = String.fromCharCode(7); // a real control character, built explicitly so no diff view can show it as text
+  for (const [why, tickText] of [['null', null], ['absent', undefined], ['untypeable', `tick coordinator-tick: run x${BEL}y`]] as const) {
+    it(`8b. a MAPPED coordinator-tick whose tick line is ${why} keeps the base-tick sentence (the task is named nowhere else)`, async () => {
+      f.wakes = [wake('w-ada', 'Ada', [mapped(TICK, 'MAPPED')], proof(['T:1']), [], undefined, tickText)];
+      await go();
+      expect(f.sent).toHaveLength(1);
+      expect(f.sent[0]).toContain('run your base tick (coordinator-system:tasks:on-base-tick)');
+    });
+  }
+
+  it('9. only the coordinator-tick\'s own state counts: WITHHELD coordinator-tick with a MAPPED team-tick keeps the base-tick sentence', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [mapped(TICK, 'WITHHELD'), mapped(TEAM, 'MAPPED')], proof(['T:1', 'V:1']), [], undefined, FORMS[0])];
+    await go();
+    expect(f.sent[0]).toContain('run your base tick (coordinator-system:tasks:on-base-tick)');
+  });
+
+  it('10. coverage keys and the ack proof are identical with and without tickText and action', async () => {
+    const p = proof(['T:1', 'V:1'], 'same');
+    f.sendReply = () => JSON.stringify(ACCEPTED_ONLY); // accepted but unconfirmed: the receipt (and its coverage) stays on disk
+    f.wakes = [wake('w-ada', 'Ada', [TICK, TEAM], p)];
+    await go();
+    const plain = { coverage: stored()['w-ada'].coverage, acked: [...f.acked] };
+    f.sent.length = 0; f.acked.length = 0; rmSync(join(dir, 'ticker-wake'), { recursive: true, force: true });
+    f.wakes = [wake('w-ada', 'Ada', [mapped(TICK, 'MAPPED'), mapped(TEAM, 'WITHHELD')], p, [], undefined, FORMS[0])];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect({ coverage: stored()['w-ada'].coverage, acked: [...f.acked] }).toEqual(plain);
+  });
+
+  it('11. a covered tick T and a new tick U: the header names only U, and the typed line is the server\'s whole line', async () => {
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'sent', coverage: ['T:1'], receiver: 'term_a#inc-1', at: Date.now() - 60_000, text: 'earlier', handle: 'term_a' } }));
+    const whole = `${FORMS[0]} · ${FORMS[1]}`;
+    f.wakes = [wake('w-ada', 'Ada', [TICK, TICK2], proof(['T:1', 'U:1'], 'c'), [], undefined, whole)];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0].startsWith(whole + ' Hadron ticker wake (eden-queue-tick)')).toBe(true);
+  });
+
+  it('puts the tick line before the open-task line\'s host text: line, nudge, then the open-task count', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, FORMS[0])];
+    f.openTasks['w-ada'] = Array.from({ length: 2 }, (_, i) => ({ id: `o${i}`, status: 'STARTED', assignee: { kind: 'WORKER', id: 'w-ada' } }));
+    await go();
+    expect(f.sent).toEqual([`${FORMS[0]} ${nudgeText(['team-tick'], [], OPEN(2))}`]);
+  });
+
+  it('a dry pass never types the line', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, FORMS[0])];
+    await go({ dry: true });
+    expect(f.sent).toEqual([]);
+  });
+});
+
+describe('#2746: a readable per-pass hold reason', () => {
+  const holdsFile = () => join(dir, 'ticker-wake', 'holds.log');
+  const holds = () => (existsSync(holdsFile()) ? readFileSync(holdsFile(), 'utf8').split('\n').filter(Boolean) : []);
+  const TEXT_SENTINEL = 'PRIVATE-TICK-TEXT-SENTINEL-2746a1';
+  const PROOF_SENTINEL = 'OPAQUE-PROOF-SENTINEL-2746b2';
+
+  it('a held wake writes one line naming the worker and a closed reason', async () => {
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    await go();
+    expect(f.sent).toEqual([]);
+    const lines = holds();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^\S+ Zed w-other no-receiver-on-host$/);
+  });
+
+  it('each hold site maps to its own closed code', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], 'opaque')];
+    await go();
+    expect(holds()[0]).toMatch(/ Ada w-ada proof-coverage-unreadable$/);
+    rmSync(holdsFile());
+    f.wakes = [wake('w-ada', 'Ada', [TICK, task('t1', 'END_SESSION')], proof(['T:1']))];
+    await go();
+    expect(holds()[0]).toMatch(/ Ada w-ada carries-other-reasons$/);
+  });
+
+  it.each([
+    ['left alone (also carries END_SESSION; the proof would record them delivered unseen)', 'carries-other-reasons'],
+    ['held (no receiver on this host)', 'no-receiver-on-host'],
+    ["held (the proof's tick coverage cannot be read)", 'proof-coverage-unreadable'],
+    ['held (the wake carries no server timing)', 'no-server-timing'],
+    ['held (another send to this terminal is in flight)', 'terminal-send-in-flight'],
+    ['an earlier send is unreconciled for another receiver', 'unreconciled-other-receiver'],
+    ['an earlier send is unreconciled', 'unreconciled-earlier-send'],
+    ['earlier request still unreconciled (x); no delivery evidence yet (y); needs a person', 'unreconciled-earlier-send'],
+    ['our nudge is in the composer', 'stranded-draft'],
+    ['held (the uncovered tick work cannot be identified)', 'uncovered-work-unidentified'],
+    ['held (the alarm cannot be read)', 'alarm-unreadable'],
+    ["held (the alarm's rule is not established)", 'alarm-rule-unestablished'],
+    ['held (the alarm was acknowledged)', 'alarm-acknowledged'],
+    ["held (the worker's check status cannot be read)", 'check-status-unreadable'],
+    ['held (the terminal incarnation changed)', 'terminal-changed'],
+    ['held (the old request could not be retained)', 'state-write-failed'],
+    ['nudged x but the receipt could not be written', 'state-write-failed'],
+    ['send not confirmed', 'send-unconfirmed'],
+    ['could not type; will retry', 'send-failed-will-retry'],
+    ['nudged x; ack FAILED', 'ack-failed'],
+    ['nudged x; acked', 'ok'],
+    ['tick line not typeable', 'info'],
+    ['held (something new)', 'other'],
+    ['a line nobody mapped', 'other'],
+  ])('#2746 every log wording maps to its closed code: %s', (body, code) => {
+    expect(holdOf(body)).toBe(code);
+  });
+
+  it('a delivered wake writes no hold line', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    await go();
+    expect(f.acked).toHaveLength(1);
+    expect(holds()).toEqual([]);
+  });
+
+  it('an earlier unreconciled send is reported as such, the incident of #2746', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    f.sendReply = () => JSON.stringify({ ok: true, result: { send: { accepted: false } } });
+    await go();
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'y'))];
+    await go();
+    expect(holds().some((l) => / Ada w-ada (unreconciled-earlier-send|send-unconfirmed)$/.test(l))).toBe(true);
+  });
+
+  it('the file never carries tick text, a proof, or a server message', async () => {
+    f.wakes = [wake('w-other', `Zed`, [TICK], `${PROOF_SENTINEL}.sig`, [], undefined, `tick coordinator-tick: ${TEXT_SENTINEL}`)];
+    await go();
+    f.wakes = [wake('w-ada', 'Ada', [TICK], `${PROOF_SENTINEL}`, [], undefined, `tick coordinator-tick: ${TEXT_SENTINEL}`)];
+    await go();
+    const text = holds().join('\n');
+    expect(text).not.toBe('');
+    expect(text).not.toContain(TEXT_SENTINEL);
+    expect(text).not.toContain(PROOF_SENTINEL);
+  });
+
+  it('a worker name or id outside the plain shape is not written as sent', async () => {
+    f.wakes = [wake('w-x y\nFORGED', 'Bad Name\nFORGED 2026 w-ada ok', [TICK])];
+    await go();
+    const lines = holds();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain('FORGED');
+    expect(lines[0].split(' ')).toHaveLength(4);
+  });
+
+  it('the file is capped: it keeps only the newest lines', async () => {
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    for (let i = 0; i < 230; i++) await go();
+    const lines = holds();
+    expect(lines.length).toBe(200);
+  });
+
+  it('the file is world-readable, so the orca user can read it', async () => {
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    await go();
+    const { statSync } = await import('node:fs');
+    expect(statSync(holdsFile()).mode & 0o444).toBe(0o444);
+  });
+
+  it('--dry writes no hold file', async () => {
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    await go({ dry: true });
+    expect(existsSync(holdsFile())).toBe(false);
+  });
+
+  it('a failed ack is reported as ack-failed', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    f.ackReply = () => ({ errors: [{ message: 'x', extensions: { code: 'WAKE_PROOF_STALE' } }] });
+    await go();
+    expect(holds()).toHaveLength(1);
+    expect(holds()[0]).toMatch(/ Ada w-ada ack-failed$/);
+  });
+
+  it('a wake left past the pass budget is reported as pass-budget-spent', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    await pass(cfg(), f.run, { budgetMs: 0 }, (l) => lines.push(l));
+    expect(f.sent).toEqual([]);
+    expect(holds()[0]).toMatch(/ Ada w-ada pass-budget-spent$/);
+  });
+
+  it('--dry writes nothing even when the state directory exists', async () => {
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    await go({ dry: true });
+    expect(existsSync(holdsFile())).toBe(false);
+  });
+
+  it('the file is world-readable even under a restrictive umask', async () => {
+    const { statSync } = await import('node:fs');
+    const old = process.umask(0o077);
+    try {
+      f.wakes = [wake('w-other', 'Zed', [TICK])];
+      await go();
+    } finally { process.umask(old); }
+    expect(statSync(holdsFile()).mode & 0o777).toBe(0o644);
+  });
+
+  it('an unwritable hold file is logged and never fails the pass', async () => {
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    mkdirSync(holdsFile());
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    await go();
+    expect(log()).toContain('hold reasons not written');
+  });
 });

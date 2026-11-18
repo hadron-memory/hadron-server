@@ -21,6 +21,7 @@ import type { Server } from 'node:http';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 
 vi.mock('../lib/bus/index.js', () => ({
   getBusClient: vi.fn(async () => null),
@@ -64,12 +65,17 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: orgId, name: 'wh-app', urn: 'wh-org::wh-app' },
   });
   appId = app.id;
+  // #2712: a webhook launch needs an installed Agent with a served boot prompt (R74).
+  const agent = await db.agent.create({ data: { id: generateId(), organizationId: orgId, urn: 'wh-org:runner', name: 'runner' } });
+  await db.appAgent.create({ data: { appId, agentId: agent.id } });
+  await serveAgentBootPrompt(db, agent.id, 'Test boot prompt.');
   secret = generateWebhookSecret();
   const webhook = await db.agentWebhook.create({
     data: {
       id: generateId(),
       organizationId: orgId,
       appId,
+      agentId: agent.id,
       name: 'notify',
       secret,
       entryNodeUrn: 'wh-org::whmem::tasks:notify',

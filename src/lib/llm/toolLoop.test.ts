@@ -159,6 +159,10 @@ describe('generateWithTools', () => {
   it('passes the step cap through stopWhen (D-TL-4)', async () => {
     sdkRunsTools();
     await generateWithTools(resolved, req, [echoTool], { toolCtx: stubCtx(), stepCap: 3 });
-    expect(mockedGenerate.mock.calls[0][0].stopWhen).toEqual({ kind: 'stepCountIs', n: 3 });
+    // The step cap plus a predicate that stops the loop once a tool terminal is set (#2412).
+    const stopWhen = mockedGenerate.mock.calls[0][0].stopWhen as unknown[];
+    expect(stopWhen).toHaveLength(2);
+    expect(stopWhen[0]).toEqual({ kind: 'stepCountIs', n: 3 });
+    expect(typeof stopWhen[1]).toBe('function');
   });
 });

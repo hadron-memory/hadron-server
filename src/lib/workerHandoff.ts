@@ -12,7 +12,7 @@
  * - **Storage** (Holger, 2026-08-18): ordered child nodes in the worker's own
  *   working memory (`Worker.memoryId`), append-only, newest last. Chosen over
  *   `Session.summary` (one mutable string, no ordering, no read path) and
- *   `promptOverride` (single field, no history, and it conflates what a worker
+ *   the per-worker prompt override (since removed, #2712: single field, no history, and it conflates what a worker
  *   has BECOME with where a worker GOT TO). What ordered nodes give that
  *   neither does: a sequence a human can walk in the portal with no new surface
  *   built, individual addressability so a handoff can be cited, revision

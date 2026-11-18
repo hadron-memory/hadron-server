@@ -105,7 +105,7 @@ export const driveSearch: RunToolDef = {
     const searching = Boolean(query || nameContains || mimeType || modifiedAfter);
     const input: Record<string, unknown> = {
       folderId: optionalString(args.folderId),
-      top: Math.min(optionalInt(args.top) ?? 25, 100),
+      top: Math.min(optionalInt(args.top) ?? 20, 100),
       pageToken: optionalString(args.pageToken),
     };
     if (searching) Object.assign(input, { query, nameContains, mimeType, modifiedAfter });

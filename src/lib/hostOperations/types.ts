@@ -3,7 +3,7 @@
  * typed arguments (cor:agt:070:03; the per-type arguments are #1709's T6
  * table, Proposed until folded into the spec).
  *
- * A host carries out only these five types, never a free-form command. Every
+ * A host carries out only these six types, never a free-form command. Every
  * argument is an id or a name token: a token starts with a letter or digit (so
  * it is never an option), uses only letters, digits and `. _ / @ + -`, and has
  * no `..`, `//` or trailing `/` (so it is never a path escape). A host resolves
@@ -14,12 +14,23 @@
 
 import { normalizeFamily } from '../agentTasks/family.js';
 
-/** The closed set (cor:agt:070:03). */
-export const HOST_OPERATION_TYPES = ['worktree.create', 'worker.start', 'worker.deliver', 'worker.end', 'worktree.remove'] as const;
+/** The closed set (cor:agt:070:03). #2162 adds `worker.reset-context` (cor:agt:050:27), issued only by the platform. */
+export const HOST_OPERATION_TYPES = [
+  'worktree.create', 'worker.start', 'worker.deliver', 'worker.end', 'worktree.remove', 'worker.reset-context',
+] as const;
 export type HostOperationType = (typeof HOST_OPERATION_TYPES)[number];
 
 export const isHostOperationType = (v: unknown): v is HostOperationType =>
   typeof v === 'string' && (HOST_OPERATION_TYPES as readonly string[]).includes(v);
+
+/**
+ * #2162 (cor:agt:070:01, Proposed) — the operation types a host must DECLARE in its registration before it is ever
+ * issued one. A host that never declared it never receives it; the closed set above stays the guard against any other.
+ */
+export const HOST_CAPABILITIES = ['worker.reset-context'] as const;
+export type HostCapability = (typeof HOST_CAPABILITIES)[number];
+export const isHostCapability = (v: unknown): v is HostCapability =>
+  typeof v === 'string' && (HOST_CAPABILITIES as readonly string[]).includes(v);
 
 /** cor:agt:070:02 — `collected` is #1709's addition (Proposed). */
 export const HOST_OPERATION_STATUSES = ['issued', 'collected', 'succeeded', 'failed'] as const;
@@ -27,6 +38,8 @@ export type HostOperationStatus = (typeof HOST_OPERATION_STATUSES)[number];
 
 /** A name argument. Same shape as `host_operation_token_ok` in prisma/agent-task-matching-invariants.sql. */
 export const HOST_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,255}$/;
+/** A host's id within its App (cor:agt:070:04): the one its key's host:operate scope names. */
+export const HOST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 /** An id argument (a worker, session, event or task id). */
 export const HOST_ID_ARG_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 /** At most this many worktrees per worker in one registration. */
@@ -47,6 +60,8 @@ const ARGS: Record<HostOperationType, { required: Record<string, ArgKind>; optio
   'worker.deliver': { required: { workerId: 'id', sessionId: 'id', eventId: 'id' } },
   'worker.end': { required: { workerId: 'id', sessionId: 'id' } },
   'worktree.remove': { required: { workerId: 'id', worktree: 'token' } },
+  // #4225: a context-cap reset has no task.
+  'worker.reset-context': { required: { workerId: 'id', sessionId: 'id', resetId: 'id' }, optional: { taskId: 'id', cause: 'token' } },
 };
 
 const FAMILY = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -92,6 +107,10 @@ export function validateHostOperation(type: unknown, args: unknown): { type: Hos
       const what = kind === 'id' ? 'an id' : kind === 'family' ? 'a lowercase model family token'
         : 'a name token (letters, digits and . _ / @ + -, starting with a letter or digit, no "..", "//" or trailing "/")';
       throw new HostOperationArgsError('BAD_HOST_OPERATION_ARGS', `${type}'s "${k}" must be ${what}.`);
+    }
+    // #4225: the reset's cause is a closed set, as in the database CHECK, not any token.
+    if (type === 'worker.reset-context' && k === 'cause' && v !== 'task-end' && v !== 'context-cap') {
+      throw new HostOperationArgsError('BAD_HOST_OPERATION_ARGS', `${type}'s "cause" is task-end or context-cap.`);
     }
     out[k] = kind === 'family' ? normalizeFamily(v as string)! : v as string;
   }

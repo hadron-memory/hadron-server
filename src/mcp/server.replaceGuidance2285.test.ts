@@ -3,6 +3,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
+import { ensureChannelWithRoot } from '../lib/channels.js';
 import type { AuthContext } from '../middleware/auth.js';
 vi.mock('../integrations/github/writeNodeToGit.js',()=>({writeNodeToGit:vi.fn().mockResolvedValue(undefined)}));
 let memoryId:string, userId:string;
@@ -40,4 +41,25 @@ it('does not describe an empty prefix selection as a governed skip #2285',async(
  const text=await server().callToolText('hadron_replace_text',{memoryUrns:['hrn:mem:guidance2285:memory'],prefix:'absent',oldText:'cat',newText:'dog',fields:['content']});
  expect(text).toContain('0 selected; 0 scanned; 0 skipped/protected');
  expect(text).not.toContain('hadron_update_task');expect(text).not.toContain('Selected nodes were skipped');
+});
+for(const dryRun of [true,false]){
+ it(`mixed scanned + governed selection names the door but not the zero-scanned note, dryRun=${dryRun} #2285`,async()=>{
+  const ordinary=await db.node.create({data:{id:generateId(),memoryId,loc:'ordinary',name:'ordinary',content:'cat here'}});
+  const task=await db.node.create({data:{id:generateId(),memoryId,loc:'task',name:'task',content:'cat stays',isRunnable:true,role:'role-task'}});
+  const text=await server().callToolText('hadron_replace_text',{nodeUrns:[ordinary.id,task.id],oldText:'cat',newText:'dog',fields:['content'],dryRun});
+  expect(text).toContain('Coverage: 2 selected; 1 scanned; 1 skipped/protected (1 governed, 0 protected address).');
+  expect(text).toContain('hadron_update_task');
+  expect(text).not.toContain('Selected nodes were skipped');
+  expect((await db.node.findUniqueOrThrow({where:{id:task.id}})).content).toBe('cat stays');
+ });
+}
+it('a protected-address-only skip does not name the governed door #2285',async()=>{
+ const {rootId}=await ensureChannelWithRoot(db,{memoryId,loc:'protected',name:'protected',createdBy:userId});
+ await db.node.update({where:{id:rootId},data:{content:'cat stays'}});
+ const text=await server().callToolText('hadron_replace_text',{nodeUrns:[rootId],oldText:'cat',newText:'dog',fields:['content']});
+ expect(text).toContain('Coverage: 1 selected; 0 scanned; 1 skipped/protected (0 governed, 1 protected address).');
+ expect(text).toContain('Selected nodes were skipped before text scanning');
+ expect(text).not.toContain('Governed nodes require');
+ expect(text).not.toContain('hadron_update_task');
+ expect((await db.node.findUniqueOrThrow({where:{id:rootId}})).content).toBe('cat stays');
 });

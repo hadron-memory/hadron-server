@@ -37,7 +37,7 @@
 import { COMMENT_NODE_TYPE, commentGovernedError } from './comments/index.js';
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../generated/prisma/index.js';
-import { lockMemoryForChannelChange } from './channels.js';
+import { lockMemoriesForChannelChange } from './channels.js';
 import {
   LocProtectedError,
   protectedLocsIn,
@@ -196,7 +196,7 @@ export async function assertMemoryBulkMutable(
  * moves anything is worth one query), and THIS runs inside each writing
  * transaction, over the rows that transaction is about to write:
  *
- *   - it takes `lockMemoryForChannelChange` on every memory involved, which is
+ *   - it takes `lockMemoriesForChannelChange` on every memory involved, which is
  *     the key `ensureChannelWithRoot` holds while it creates a Channel — so a
  *     concurrent Channel create either commits before this check sees it, or
  *     waits behind this batch;
@@ -205,9 +205,9 @@ export async function assertMemoryBulkMutable(
  *   - it checks the batch's OWN rows, read inside the same transaction, so a
  *     row promoted to a governed kind between classification and write is seen.
  *
- * The memory locks are taken in sorted order for the same reason
- * `compareLockKeys` sorts on memory first (#1187): two merges with swapped
- * endpoints must not invert against each other.
+ * The complete memory set is resolved to PostgreSQL signed hash keys and
+ * acquired in that order (#1213), so collisions cannot invert acquisitions
+ * between two merges with different endpoint sets.
  *
  * What this does NOT claim: a merge that has already relocated pages one to
  * eight does not un-relocate them when page nine refuses. Bulk paging makes
@@ -243,9 +243,7 @@ export async function assertBatchMutable(
     governed?: 'refuse' | 'carry';
   } = {},
 ): Promise<GovernedSnapshot | undefined> {
-  for (const memoryId of [...new Set(memoryIds)].sort()) {
-    await lockMemoryForChannelChange(tx as Prisma.TransactionClient, memoryId);
-  }
+  await lockMemoriesForChannelChange(tx as Prisma.TransactionClient, memoryIds);
   const locs = rows.map((r) => r.loc);
   for (const memoryId of new Set(memoryIds)) {
     await assertNoProtectedReach(tx, memoryId, locs, op);

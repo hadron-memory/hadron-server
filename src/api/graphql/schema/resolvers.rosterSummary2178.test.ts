@@ -6,13 +6,11 @@ import { ApolloServer } from '@apollo/server';
 import { typeDefs } from './typeDefs.js';
 import { loadRosterTaskSummaries } from '../../../lib/agentTasks/rosterSummary.js';
 import * as taskReadPolicy from './resolvers.agentTask.js';
-import { setS6NoticesAvailableForTest } from '../../../lib/stopSignals/delivery.js';
+import { declareAllStopLanes } from '../../../test/stopLanes.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import type { AuthContext } from '../../../middleware/auth.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 import { renderRosterEntry } from '../../../mcp/agentTaskTools.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -96,11 +94,9 @@ describe('#2178 safe roster enrichment — red first', () => {
     const expired = ago(1);
     await db.workerWakeSettings.update({ where: { workerId: w.Kit.id }, data: { pausedUntil: expired } });
     expect((await entry('Kit')).checkStatus.pendingReason).toBeNull();
-    setS6NoticesAvailableForTest(true);
-    try {
-      await M.setTeamStopSignal({}, { input: { appRef: app.id, level: 'PAUSE', scope: 'WORKER', worker: w.Kit.id } }, ctx(admin.id));
-      expect(await entry('Kit')).toMatchObject({ pausedUntil: expired, checkStatus: { status: 'PENDING', pendingReason: 'STOPPED' } });
-    } finally { setS6NoticesAvailableForTest(false); }
+    await declareAllStopLanes(db, app.id);
+    await M.setTeamStopSignal({}, { input: { appRef: app.id, level: 'PAUSE', scope: 'WORKER', worker: w.Kit.id } }, ctx(admin.id));
+    expect(await entry('Kit')).toMatchObject({ pausedUntil: expired, checkStatus: { status: 'PENDING', pendingReason: 'STOPPED' } });
   });
 
   it('selects STARTED ahead of PENDING, oldest assigned first, even without a session', async () => {
@@ -128,10 +124,9 @@ describe('#2178 safe roster enrichment — red first', () => {
     expect((await entry('Rook')).currentTask.id).toBe(moved.id);
   });
 
-  it('prints the same authorized selected title on the actual MCP roster tool', async () => {
+  it('prints the same authorized selected title through the roster renderer (hadron_team_roster is off over MCP, #3082)', async () => {
     await task({title:'selected title 2178',status:'started',assigneeWorkerId:w.Kit.id,assignedAt:ago(1)});
-    const srv=createTestableMcpServer({userId:mia.id,roles:['READER'],clientId:`user:${mia.id}`} as AuthContext);
-    expect(await srv.callToolText('hadron_team_roster',{appRef:app.id})).toContain('selected title 2178');
+    expect(renderRosterEntry(await entry('Kit'), new Date())).toContain('selected title 2178');
   });
 
   it('renders stored pause tense against the roster snapshot, including equality, rather than the host clock', async () => {
@@ -144,12 +139,11 @@ describe('#2178 safe roster enrichment — red first', () => {
     expect(renderRosterEntry({ ...r, pausedUntil: future }, asOf)).toContain(`own pause until ${future.toISOString()}`);
   });
 
-  it('labels the selected task as an assignment and expired pause as ended on actual MCP', async () => {
+  it('labels the selected task as an assignment and expired pause as ended in the roster renderer', async () => {
     await task({ title: 'pending display only', status: 'pending', assigneeWorkerId: w.Kit.id });
     const expired = ago(10);
     await db.workerWakeSettings.create({ data: { workerId: w.Kit.id, pausedUntil: expired } });
-    const srv = createTestableMcpServer({ userId: mia.id, roles: ['READER'], clientId: `user:${mia.id}` } as AuthContext);
-    const text = await srv.callToolText('hadron_team_roster', { appRef: app.id });
+    const text = renderRosterEntry(await entry('Kit'), new Date());
     expect(text).toContain('top assignment');
     expect(text).toContain(`own pause ended ${expired.toISOString()}`);
     expect(text).not.toContain('current task');
@@ -266,8 +260,7 @@ describe('#2178 safe roster enrichment — red first', () => {
       let pauses = 0;
       const traced = db.$extends({ query: { $allOperations: async ({ args, query, operation, model }) => {
         if (operation === '$queryRaw' && JSON.stringify(args).includes('SELECT DISTINCT ON (assignee_worker_id)')) summaries++;
-        if (model === 'WorkerWakeSettings' && operation === 'findMany' &&
-          JSON.stringify(args).includes('"select":{"workerId":true,"pausedUntil":true}')) pauses++;
+        if (model === 'WorkerWakeSettings' && operation === 'findMany') pauses++;
         return query(args);
       } } });
       const result = await Q.teamRoster({}, { appRef: app.id }, { ...ctx(mia.id), db: traced });
@@ -275,7 +268,9 @@ describe('#2178 safe roster enrichment — red first', () => {
       expect(result.workers.every((e: any) => e.currentTask === null && e.pausedUntil === null)).toBe(true);
       counts.push([summaries, pauses]);
     }
-    // One existing check-status pause read plus the one new enrichment read.
-    expect(counts).toEqual([[1, 2], [1, 2]]);
+    // Counts, not the select shape, are what must not grow with the roster (#2755 widened the check-status select).
+    expect(counts[1]).toEqual(counts[0]);
+    expect(counts[0][0]).toBe(1);
+    expect(counts[0][1]).toBeGreaterThan(0);
   });
 });

@@ -13,6 +13,7 @@
  * gmail.send are restricted scopes, and sharing a client would drag login
  * into restricted-scope verification (#581/#583). Never merge the two.
  */
+import { getProjectBaseUrl } from '../../lib/baseUrl.js';
 
 const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 
@@ -42,7 +43,7 @@ function getClientId(): string {
  * token exchange must pass the SAME value the authorize URL carried.
  */
 export function getGmailRedirectUri(): string {
-  const base = process.env.BASE_URL || 'http://localhost:4000';
+  const base = getProjectBaseUrl();
   return `${base}/auth/gmail/callback`;
 }
 

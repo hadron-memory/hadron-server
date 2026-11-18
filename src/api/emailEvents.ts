@@ -22,6 +22,7 @@ import type { Express, Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { safeEqual } from '../lib/constantTime.js';
 import type { ToolEmailMessage } from '../lib/emailClient.js';
+import { respondInternalFault } from '../lib/internalFault.js';
 
 /**
  * Normalized event payload the tools send. The message is the SAME
@@ -100,8 +101,7 @@ export function mountEmailEventRoutes(app: Express): void {
       await dispatchEmailEvent(req.body);
       res.status(202).json({ ok: true });
     } catch (err) {
-      console.error('[email-events] dispatch failed:', err);
-      res.status(500).json({ error: 'dispatch failed' });
+      respondInternalFault(res, 'email-events', err);
     }
   });
 }

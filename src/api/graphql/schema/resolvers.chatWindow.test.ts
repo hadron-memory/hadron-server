@@ -23,6 +23,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { typeDefs } from './typeDefs.js';
+import { serveAgentBootPrompt, serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -264,11 +265,11 @@ describe('chatHistory returns the most recent window (#1111)', () => {
     ]);
   });
 
-  it('applies the same tail window to the default limit of 100', async () => {
+  it('applies the same tail window to the default limit of 20', async () => {
     await seedTranscript(130);
     const rows = await read(undefined);
-    expect(rows).toHaveLength(100);
-    expect(rows[0].seq).toBe(31);
+    expect(rows).toHaveLength(20);
+    expect(rows[0].seq).toBe(111);
     expect(rows[rows.length - 1].seq).toBe(130);
   });
 });
@@ -351,6 +352,8 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
         },
       });
     }
+    // #2712: chats are served the Agent's boot prompt; an Agent without one is refused.
+    await serveEveryAgent(db);
   });
 
   /**
@@ -378,10 +381,8 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
   }
 
   it('binds the Agent identity in both chat prompt paths and preserves the stage prompt', async () => {
-    await db.agent.update({
-      where: { id: agent.id },
-      data: { systemPrompt: 'You are {{name}}, a {{role}}.', personaRole: 'researcher' },
-    });
+    await db.agent.update({ where: { id: agent.id }, data: { personaRole: 'researcher' } });
+    await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}, a {{worker.role}}.');
 
     const start = await resolvers.Mutation.startChat({}, { agentId: agent.id }, adminCtx());
     expect(start.systemMessage).toBe('You are research-agent, a researcher.\n\nScope the research.');
@@ -391,8 +392,8 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
     );
     expect(turn.systemMessage).toBe(start.systemMessage);
 
-    // Existing systemPrompt text without tokens remains byte-for-byte.
-    await db.agent.update({ where: { id: agent.id }, data: { systemPrompt: 'Existing prompt.' } });
+    // A newly served prompt without tokens reaches the next turn byte-for-byte.
+    await serveAgentBootPrompt(db, agent.id, 'Existing prompt.');
     const next = await resolvers.Mutation.sendChatMessage(
       {}, { chatId: start.chatId, userMessage: 'second turn' }, adminCtx(),
     );
@@ -415,6 +416,19 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
     const numbers = userTurns.map((c) => Number(c.slice('turn-'.length)));
     expect(numbers).toEqual([...numbers].sort((a, b) => a - b));
   }, DRIVE_60_TIMEOUT_MS);
+
+  it('#3496: a real chatbot turn leaves the counter keys outside record-root data', async () => {
+    const start = await resolvers.Mutation.startChat({}, { agentId: agent.id }, adminCtx());
+    const root = await chatNodeByLocOrThrow(db, start.chatId);
+    expect(root.nodeType).toBe('record');
+    expect(root.data).not.toHaveProperty('messageCount');
+    expect(await db.chatRootCounter.findUnique({where:{chatRootNodeId:root.id}})).toMatchObject({messageCount:0});
+    await resolvers.Mutation.sendChatMessage({}, {chatId:start.chatId,userMessage:'counter turn'}, adminCtx());
+    const after = await db.node.findUniqueOrThrow({where:{id:root.id}});
+    expect(after.data).not.toHaveProperty('messageCount');
+    expect(after.data).not.toHaveProperty('lastMessageAt');
+    expect((await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:root.id}})).messageCount).toBeGreaterThan(0);
+  });
 
   it('CONTROL: under the window the current turn is present too', async () => {
     const contents = await driveTurns(12);

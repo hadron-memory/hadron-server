@@ -44,6 +44,7 @@ import {
   scopeMemoryIds,
   type ScopeOwnerType,
 } from '../../../lib/scopes.js';
+import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
 export interface ScopeFilterInput {
   ownerType?: ScopeOwnerType | null;
@@ -84,8 +85,8 @@ async function readableScope(ctx: Context, ref: string): Promise<Scope | null> {
  * `createdBy: ctx.userId` below would otherwise stamp the TARGET as author.
  */
 function requireWriter(ctx: Context): string {
-  if (ctx.impersonation) throw new Error('Forbidden');
-  if (!ctx.userId) throw new Error('Unauthenticated');
+  if (ctx.impersonation) throw forbiddenError();
+  if (!ctx.userId) throw unauthenticatedError();
   return ctx.userId;
 }
 
@@ -312,7 +313,7 @@ export const scopeFieldResolvers = {
         orderBy: { position: 'asc' },
       });
       const accessible = await getAccessibleMemoryIds(ctx);
-      const { kept } = narrowToAccessible(rows.map((r) => r.memoryId), accessible === null ? 'unrestricted' : new Set(accessible));
+      const { kept } = narrowToAccessible(rows.map((r) => r.memoryId), new Set(accessible));
       const keptSet = new Set(kept);
       const memories = await ctx.db.memory.findMany({ where: { id: { in: kept } } });
       const byId = new Map(memories.map((m) => [m.id, m]));

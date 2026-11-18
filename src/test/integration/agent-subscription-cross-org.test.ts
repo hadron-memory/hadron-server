@@ -131,6 +131,9 @@ describe('User Story 3 — cross-org chain (SC-003)', () => {
     const f = await buildFourOrgFixture();
     const ctx: AuthContext = { appId: f.app.id, userId: f.alice.id, organizationId: f.orgA.id };
 
+    // #3305: the Agent's tenant subscription alone cannot admit Alice.
+    expect(await canReadMemory(db, ctx, f.knowledgeMemory.id)).toBe(false);
+    await db.memorySubscription.create({ data: { organizationId: f.personalAlice.id, memoryId: f.knowledgeMemory.id, role: 'READER' } });
     expect(await canReadMemory(db, ctx, f.knowledgeMemory.id)).toBe(true);
     expect(await canWriteToMemory(db, ctx, f.personalMemory.id)).toBe(true);
   });

@@ -37,9 +37,9 @@
 // miss a create that committed while we waited for the lock.
 //
 // The locks are pg_advisory_xact_lock: they release automatically when the
-// holding transaction ends, take no row locks, and — acquired root→leaf in a
-// consistent order — cannot deadlock with each other or with a single-key
-// delete (the delete never waits while holding, so it can't close a cycle).
+// holding transaction ends and take no row locks. Multi-key sets are acquired
+// in signed resolved-key order (#1214), including when distinct inputs collide.
+// Callers must declare their complete set before taking any of its locks.
 //
 // NOT covered: moveNode, which can relocate an existing node INTO a subtree
 // being deleted without passing through these create paths. Coordinating move
@@ -57,30 +57,10 @@ export interface LockKey {
 }
 
 /**
- * THE global acquisition order (#1187). Every multi-key caller sorts with this
- * and nothing else.
- *
- * `memoryId` first — `mergeNodes` can cross memories, so the cross-memory rule
- * is load-bearing rather than theoretical. Then **length, then lexical**: a
- * parent's loc is a prefix of its child's and therefore shorter, so length-first
- * IS root→leaf, which is the order `lockAncestorsForCreateMany` has always used
- * and the one the ancestor walks produce naturally. The lexical tiebreak makes
- * the order total and stable.
- *
- * **This orders the INPUTS, which is NOT by itself the lock order** — see
- * {@link acquireLockSet}, which orders by the actual advisory key. An earlier
- * version of this comment claimed input order was sufficient because colliding
- * inputs "simply share" a key. That is wrong, and @copilot supplied the
- * counterexample: for inputs X and Y that collide under `hashtext` to one key
- * H, and a third key Z with `X < Z < Y`, a caller holding {X, Z} takes H then
- * Z while a caller holding {Y, Z} takes Z then H. A cycle, from two callers
- * that both sorted. Re-entrancy does not help — these are different
- * transactions.
- *
- * So this comparator is the stable, total order over the loc SPACE — it is what
- * makes ancestor walks root→leaf and what the ordering tests assert — and it is
- * what `acquireLockSet` acquires in today. Ordering by the RESOLVED advisory
- * key, which is what would make the protocol collision-proof, is #1214.
+ * Stable input-space order: memory, then loc length and lexical order (#1187).
+ * Ancestor enumeration remains root→leaf, but this is NOT an advisory-lock
+ * acquisition order: hashtext collisions can invert it (#1214).
+ * {@link acquireLockSet} orders the actual signed PostgreSQL key pairs.
  */
 export function compareLockKeys(a: LockKey, b: LockKey): number {
   if (a.memoryId !== b.memoryId) return a.memoryId < b.memoryId ? -1 : 1;
@@ -129,23 +109,24 @@ export async function acquireLockSet(tx: Prisma.TransactionClient, keys: LockKey
     seen.add(id);
     unique.push(k);
   }
-  unique.sort(compareLockKeys);
-  // AWAITED, one statement per key — the order is then a guarantee rather than
-  // a planner choice (@copilot round 3: an `ORDER BY` at the same query level
-  // as `pg_advisory_xact_lock` does not constrain when the function is
-  // evaluated, so batching the set made the acquisition order a plan detail).
-  //
-  // KNOWN LIMIT, stated because the earlier version of this comment claimed
-  // otherwise: this orders the INPUT strings, and `hashtext` is not injective,
-  // so the guarantee holds only while no two distinct locs in play collide onto
-  // one advisory key. @copilot's counterexample — inputs X and Y colliding to
-  // key H with a third key Z where `X < Z < Y`, so {X,Z} takes H then Z while
-  // {Y,Z} takes Z then H — is real. Closing it means ordering by the RESOLVED
-  // key, which is one extra round trip and a different acquisition order from
-  // the root→leaf one this repo's helpers and tests are written around.
-  // Deliberately NOT done at the end of this change: #1214.
-  for (const k of unique) {
+  if (unique.length === 0) return;
+  if (unique.length === 1) {
+    // Preserve the single-key path: no resolution round trip is needed.
+    const k = unique[0];
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${k.memoryId}), hashtext(${k.loc}))`;
+    return;
+  }
+  // #1214: resolve the COMPLETE set in one round trip. Input-space ordering
+  // cannot prevent a collision X=Y from inverting against an intervening Z.
+  const resolved = await tx.$queryRaw<Array<{ h1: number; h2: number }>>`
+    SELECT hashtext(k."memoryId") AS h1, hashtext(k.loc) AS h2
+    FROM jsonb_to_recordset(${JSON.stringify(unique)}::jsonb) AS k("memoryId" text, loc text)`;
+  const actual = new Map(resolved.map((k) => [`${k.h1},${k.h2}`, k]));
+  const ordered = [...actual.values()].sort((a, b) => a.h1 - b.h1 || a.h2 - b.h2);
+  // One AWAITED statement per distinct pair. An ORDER BY beside the lock
+  // function does not constrain its evaluation order, nor does Promise.all.
+  for (const k of ordered) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${k.h1}::int, ${k.h2}::int)`;
   }
 }
 
@@ -154,9 +135,8 @@ export async function acquireLockSet(tx: Prisma.TransactionClient, keys: LockKey
  * ':'-delimited path, so `a:b:c` has ancestors `['a', 'a:b']`. A root-level loc
  * (no ':') has none. The node's own loc is never included.
  *
- * Root→leaf order is load-bearing: acquiring the advisory locks in this
- * consistent global order is what keeps concurrent creates on overlapping paths
- * deadlock-free.
+ * This is enumeration order only. Advisory acquisition uses the resolved-key
+ * order in acquireLockSet, preserving ancestor coverage without hash inversions.
  */
 export function ancestorLocs(loc: string): string[] {
   const segments = loc.split(':');
@@ -171,8 +151,7 @@ export function ancestorLocs(loc: string): string[] {
  * Acquire transaction-scoped advisory locks on every strict ancestor of a node
  * being created, so a concurrent ancestor-delete's descendant count cannot miss
  * the new row and orphan it (#664). A root-level loc acquires nothing (no
- * ancestor to coordinate against). Locks are taken root→leaf for a consistent
- * global order (deadlock-free).
+ * ancestor to coordinate against). Locks use the shared resolved-key order.
  *
  * MUST run inside a READ COMMITTED interactive transaction that also performs
  * the create; the lock is held only for that transaction's lifetime.
@@ -229,7 +208,7 @@ export async function lockAncestorsForCreate(
 /**
  * Batch form of {@link lockAncestorsForCreate} for a BULK insert of many nodes
  * (e.g. a git-graph sync; `replaceSubtree` was one until #454 retired it). Dedupes the ancestor set across all
- * `locs` and acquires each lock exactly once in a single sorted (root→leaf)
+ * `locs` and acquires each distinct actual key once in a sorted resolved-key
  * pass — the same consistent global order the single-loc helper uses, so a bulk
  * insert can't deadlock against a concurrent create/delete or another bulk
  * insert. Locs with no ancestor (root-level) contribute nothing.
@@ -246,9 +225,7 @@ export async function lockAncestorsForCreateMany(
   for (const loc of locs) {
     for (const ancestor of ancestorLocs(loc)) ancestors.add(ancestor);
   }
-  // The ordering moved to `acquireLockSet` / `compareLockKeys` (#1187) — this
-  // helper's length-first rule was the only one in the family and is now the
-  // one every caller uses.
+  // acquireLockSet owns the resolved-key acquisition order (#1214).
   await acquireLockSet(tx, [...ancestors].map((ancestor) => ({ memoryId, loc: ancestor })));
   await guard(tx, memoryId, locs, opts?.op ?? 'create under', opts);
 }
@@ -258,7 +235,7 @@ export async function lockAncestorsForCreateMany(
  * itself plus its strict ancestors — before the child's own loc is known.
  *
  * Identical key set to `lockAncestorsForCreate(tx, memoryId, `${parentLoc}:x`)`
- * for any `x`, and taken in the same root→leaf order, so it neither deadlocks
+ * for any `x`, and taken in the same resolved-key order, so it neither deadlocks
  * with nor slips past the other helpers here. #919 needs it because a chat
  * message's name embeds a sequence number that can only be allocated once the
  * lock is held: the loc doesn't exist yet at lock time.
@@ -283,9 +260,9 @@ export async function lockPathForCreateUnder(
  * — the same key `lockNodeForDelete` and an ancestor-create use, so all three
  * serialize against each other on that loc.
  *
- * Take it AFTER `lockAncestorsForCreate` (root→leaf order is what keeps the
- * whole family deadlock-free), and inside the same READ COMMITTED transaction
- * as the write itself.
+ * A writer needing this key and ancestor keys declares the COMPLETE set via
+ * acquireLockSet first (#1187/#1214), then re-acquires here for the gate.
+ * Run inside the same READ COMMITTED transaction as the write itself.
  *
  * Why a writer needs it (#976 / PR #977 review, both bots): an upsert that
  * decides "create or overwrite?" from a read taken BEFORE the transaction can

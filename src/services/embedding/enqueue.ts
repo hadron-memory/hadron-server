@@ -1,3 +1,4 @@
+import { embeddingEligibleSql } from './rawChat.js';
 /**
  * 033-rag-vector-retrieval — write-path embedding enqueue + prompt-drain.
  *
@@ -16,6 +17,7 @@ import { isEmbeddingConfigured } from '../../lib/embedding/index.js';
 import { randomUUID } from 'node:crypto';
 import { embeddingDispatcher, embedNode, EMBED_WAKE_SUBJECT, type EmbedPlaintext } from '../../jobs/embedNodes.js';
 import { getBusClient } from '../../lib/bus/index.js';
+import type { StepOutcome } from '../../lib/shutdownSteps.js';
 import { SYSTEM_MEMORY_CLASS } from '../../lib/embedding/indexing.js';
 
 /**
@@ -49,14 +51,19 @@ export function publishEmbedWake(_payload: { nodeId?: string }): Promise<void> {
 
 /** Close synchronously, retain at most the already admitted publish, and wait boundedly. */
 export async function stopEmbeddingPublisher(graceMs = 5_000): Promise<boolean> {
+  return (await stopEmbeddingPublisherOutcome(graceMs)) === 'ok';
+}
+
+/** #3845: the same stop, saying how it failed: `ok` or `grace_timeout` (an admitted publish outlived the grace). */
+export async function stopEmbeddingPublisherOutcome(graceMs = 5_000): Promise<StepOutcome> {
   publishClosed = true;
   publishDirty = false;
-  if (!publishing) return true;
+  if (!publishing) return 'ok';
   let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      publishing.then(() => true),
-      new Promise<boolean>(resolve => { deadline = setTimeout(() => resolve(false), graceMs); }),
+      publishing.then((): StepOutcome => 'ok'),
+      new Promise<StepOutcome>(resolve => { deadline = setTimeout(() => resolve('grace_timeout'), graceMs); }),
     ]);
   } finally { if (deadline) clearTimeout(deadline); }
 }
@@ -120,7 +127,7 @@ export async function backfillMemoryEmbeddings(
       embedding_error = CASE WHEN (SELECT is_encrypted FROM memories WHERE id = ${memoryId})
         THEN 'Embedding pending: fresh authorized plaintext is required.' ELSE NULL END,
       embedding_attempts = 0
-    WHERE memory_id = ${memoryId} AND deleted_at IS NULL
+    WHERE memory_id = ${memoryId} AND deleted_at IS NULL AND ${embeddingEligibleSql()}
       AND EXISTS (SELECT 1 FROM memories WHERE id = ${memoryId} AND (vector_index_enabled = true OR class = 'system') AND deleted_at IS NULL)
   `;
   // Drain ping (empty payload): the bus listener drains the whole queue now
@@ -155,7 +162,7 @@ export async function stampMemoryEmbeddingsBatch(
   const after = opts.afterNodeId ?? '';
   const rows = await db.$queryRaw<{ id: string; eligible: boolean }[]>`
     SELECT n.id,
-      (n.abstract IS NOT NULL AND n.abstract !~ ${BLANK_ABSTRACT_REGEX}
+      (n.abstract IS NOT NULL AND n.abstract !~ ${BLANK_ABSTRACT_REGEX} AND ${embeddingEligibleSql('n')}
         AND n.embedding_pending_at IS NULL AND n.embedding_failed_at IS NULL
         AND NOT EXISTS (SELECT 1 FROM node_embeddings e WHERE e.node_id = n.id AND e.kind = 'abstract')) AS eligible
     FROM nodes n
@@ -175,7 +182,7 @@ export async function stampMemoryEmbeddingsBatch(
           THEN 'Embedding pending: fresh authorized plaintext is required.' ELSE NULL END,
         embedding_attempts = 0
       WHERE n.id = ANY(${eligibleIds}::text[]) AND n.memory_id = ${memoryId}
-        AND n.deleted_at IS NULL AND n.embedding_pending_at IS NULL AND n.embedding_failed_at IS NULL
+        AND n.deleted_at IS NULL AND ${embeddingEligibleSql('n')} AND n.embedding_pending_at IS NULL AND n.embedding_failed_at IS NULL
         AND EXISTS (SELECT 1 FROM memories m WHERE m.id = n.memory_id
           AND m.deleted_at IS NULL AND m.class = ${SYSTEM_MEMORY_CLASS}::"MemoryClass")
     `;
@@ -211,7 +218,7 @@ export async function restampFailedEmbeddings(
       embedding_error = CASE WHEN (SELECT is_encrypted FROM memories WHERE id = ${memoryId})
         THEN 'Embedding pending: fresh authorized plaintext is required.' ELSE NULL END,
       embedding_attempts = 0
-    WHERE memory_id = ${memoryId} AND deleted_at IS NULL AND embedding_failed_at IS NOT NULL
+    WHERE memory_id = ${memoryId} AND deleted_at IS NULL AND ${embeddingEligibleSql()} AND embedding_failed_at IS NOT NULL
       AND EXISTS (SELECT 1 FROM memories WHERE id = ${memoryId} AND (vector_index_enabled = true OR class = 'system') AND deleted_at IS NULL)
   `;
 }

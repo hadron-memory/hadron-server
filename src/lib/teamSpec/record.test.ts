@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createHmac } from 'node:crypto';
 import { canonicalizeTeamJson } from './canonicalize.js';
 import { readTeamRecordKeys, sealTeamRecord, teamRecordStateText, teamValueToken, verifyTeamRecord, TEAM_RECORD_CODEC } from './record.js';
-import { createServer } from '../../server.js';
+import { createServerOnCleanDb } from '../../test/startServerFixture.js';
 
 const k1 = '1'.repeat(64), k2 = '2'.repeat(64);
 const ring = () => readTeamRecordKeys(JSON.stringify({ current: 'k1', keys: { k1 } }))!;
@@ -28,7 +28,7 @@ describe('team-record codec foundation', () => {
   it('refuses server boot on a malformed configured keyring', async () => {
     vi.stubEnv('TEAM_RECORD_KEYRING', 'private-bad-value');
     try {
-      await expect(createServer()).rejects.toThrow('TEAM_RECORD_KEYRING must name a current key');
+      await expect(createServerOnCleanDb()).rejects.toThrow('TEAM_RECORD_KEYRING must name a current key');
     } finally { vi.unstubAllEnvs(); }
   });
   it('uses domain-separated, App/address-bound value tokens', () => {

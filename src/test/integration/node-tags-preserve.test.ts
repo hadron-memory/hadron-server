@@ -24,6 +24,7 @@
  * against the real `hadron_test` DB (pinned by vitest.config.ts).
  */
 
+import { attestedAuthoring } from '../../lib/authoringAttestation.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
@@ -81,7 +82,7 @@ async function upsertNode(input: Record<string, unknown>) {
   return writeNodeCore(
     { memoryId: fx.memory.id, ...input } as never,
     fx.ctx,
-    'upsert',
+    'upsert', { authoring: attestedAuthoring(null) },
   );
 }
 

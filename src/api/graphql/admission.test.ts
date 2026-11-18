@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { parse } from 'graphql';
-import { createServer } from '../../server.js';
+import { createServerOnCleanDb } from '../../test/startServerFixture.js';
 import { resolvers } from './schema/resolvers.js';
 import {
   GRAPHQL_ADMISSION_DEFAULTS,
@@ -37,7 +37,7 @@ async function bootReal(env: Record<string, string> = {}): Promise<string> {
   const saved: Record<string, string | undefined> = {};
   for (const k of Object.keys(env)) { saved[k] = process.env[k]; process.env[k] = env[k]; }
   try {
-    return await listen(await createServer());
+    return await listen(await createServerOnCleanDb());
   } finally {
     for (const k of Object.keys(env)) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
   }
@@ -134,7 +134,7 @@ describe('L1 query source bytes (POST, real stack)', () => {
       variables: { i: { memoryId: 'x', loc: 'a', name: 'a', content: 'c'.repeat(5 * 1024 * 1024) } },
     });
     expect(res.status).toBe(200);
-    expect((await res.json()).errors[0].message).toContain('createNode reached');
+    expect((await res.json()).errors[0].message).toBe('Internal server error.'); // #1789: the spy's plain Error is a fault; reaching the resolver is asserted by the spy call below
     expect(createNodeSpy).toHaveBeenCalledTimes(1);
     createNodeSpy.mockClear(); // its recorded call holds the 5 MB variable
   });
@@ -281,13 +281,16 @@ describe('configuration', () => {
   it('createServer itself refuses boot, and the refusal does not echo the value', async () => {
     process.env.GRAPHQL_MAX_TOKENS = 'SENTINEL_BAD';
     try {
-      const err: Error | null = await createServer().then(() => null, (e: unknown) => e as Error);
+      const err: Error | null = await createServerOnCleanDb().then(() => null, (e: unknown) => e as Error);
       expect(err?.message).toMatch(/GRAPHQL_MAX_TOKENS must be a positive integer/);
       expect(err?.message).not.toContain('SENTINEL_BAD');
     } finally { delete process.env.GRAPHQL_MAX_TOKENS; }
   });
 
   it('unset variables take the ruled defaults', () => {
-    expect(readGraphqlAdmissionConfig({})).toEqual({ maxQueryBytes: 32768, maxTokens: 4000, maxSelections: 1000 });
+    expect(readGraphqlAdmissionConfig({})).toEqual({
+      maxQueryBytes: 32768, maxTokens: 4000, maxSelections: 1000,
+      maxDepth: 12, maxCost: 200_000, listFactor: 10, complexityMode: 'enforce',
+    });
   });
 });

@@ -1,3 +1,4 @@
+import { lockTaskGraph } from './blockers.js';
 import { anchorNow } from '../stopSignals/state.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
@@ -23,7 +24,7 @@ import { generateId } from '../id.js';
 import { runAsActor } from '../requestActor.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { taskMatcherTick } from '../../jobs/taskMatcher.js';
-import { __matcherTesting, compareRank, eligibleFamily, loadWorkerWorkStates, matchable, matchQueuedTasks, parseRequirements } from './matcher.js';
+import { __matcherTesting, compareRank, eligibleFamily, loadWorkerWorkStates, matchable, matchQueuedTasks, matchTaskNow, needsHostStart, parseRequirements } from './matcher.js';
 import { registerHost } from './hosts.js';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 
@@ -231,7 +232,7 @@ describe('cor:agt:060:06 — a queued task goes to the matching worker free for 
     await lastAssigned(baloo, '09:00');
     await lastAssigned(liam, '10:00');
     const t = await queued('11:00', NOT_CLAUDE_REVIEWER);
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, matched: 1 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, recovered: 0, matched: 1, desiredStarts: 0 });
     expect(await assigneeOf(t.id)).toBe(baloo.id);
     const task = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
     expect(task).toMatchObject({ status: 'pending', assignedAt: at('11:01'), assignedBy: null, assignedByWorkerId: null });
@@ -345,7 +346,7 @@ describe('cor:agt:060:06 — a queued task goes to the matching worker free for 
       })),
     });
     const last = await queued('10:00', { role: 'reviewer' });
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, matched: 1 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, recovered: 0, matched: 1, desiredStarts: 0 });
     expect(await assigneeOf(last.id)).toBe(baloo.id);
   });
 });
@@ -362,12 +363,14 @@ describe('the family follows the BINDING, not activity (#1723 review, Diego P2-2
     expect(await familyOf(baloo)).toBe('codex');
     const [state] = (await loadWorkerWorkStates(db, app.id, new Date())).filter((w) => w.id === baloo.id);
     expect(state).toMatchObject({ bound: true, live: false, bindingFamily: 'codex', launchableFamilies: ['glm'], families: ['codex'], freeFamilies: ['codex'] });
-    // A quiet BOUND worker is not matchable, whatever a host could launch it as: a glm-only task stays queued, and so does a codex one.
+    // #3815: a quiet BOUND worker is matchable, but only as its binding's family, whatever a host could launch it as:
+    // a glm-only task stays queued, a codex one is assigned, and no host start is issued over the open session.
     const glmOnly = await queued('09:00', { familyIn: ['glm'] });
     const codexOk = await queued('09:01', { familyIn: ['codex'] });
     await matchQueuedTasks(db, new Date(), { appId: app.id });
     expect(await assigneeOf(glmOnly.id)).toBeNull();
-    expect(await assigneeOf(codexOk.id)).toBeNull();
+    expect(await assigneeOf(codexOk.id)).toBe(baloo.id);
+    expect(await db.hostOperation.count()).toBe(0);
   });
 
   it('an actual end clears it; only then does a host family apply', async () => {
@@ -385,14 +388,12 @@ describe('the family follows the BINDING, not activity (#1723 review, Diego P2-2
     expect(await familyOf(baloo)).toBe('glm');
   });
 
-  it('a quiet binding that is driven again is matched as its family', async () => {
+  it('#3815: a quiet binding is matched as its family', async () => {
     const s = await bind(baloo, 'codex', new Date(Date.now() - 25 * 3_600_000));
     const t = await queued('09:00', { role: 'reviewer' });
     await matchQueuedTasks(db, new Date(), { appId: app.id });
-    expect(await assigneeOf(t.id)).toBeNull();
-    await db.session.update({ where: { id: s.id }, data: { updatedAt: new Date() } });
-    await matchQueuedTasks(db, new Date(), { appId: app.id });
     expect(await assigneeOf(t.id)).toBe(baloo.id);
+    expect(s.id).toBeTruthy();
   });
 });
 
@@ -488,9 +489,55 @@ describe('cor:agt:060:05 — free for work: each disqualifier on its own', () =>
     })).toBe(false);
   });
 
-  it('a lapsed session (idle past its window) is not live, so not matched', async () => {
+  it('#3815: a quiet session (idle past its window, still open) is matched; silence is not abandonment', async () => {
     expect(await matchesBaloo(() => bind(baloo, 'codex', at('10:00')).then(() => undefined), new Date(at('10:00').getTime() + 25 * 3_600_000)))
-      .toBe(false);
+      .toBe(true);
+  });
+
+  it('#3815: a session past its hard expiry (not yet reaped) is not matched', async () => {
+    expect(await matchesBaloo(async () => {
+      const s = await bind(baloo, 'codex', at('10:00'));
+      await db.session.update({ where: { id: s.id }, data: { expiresAt: at('10:30') } });
+    }, new Date(at('10:00').getTime() + 25 * 3_600_000))).toBe(false);
+  });
+
+  it('#3815: a quiet worker is the only candidate: not NOBODY_FREE on match-now', async () => {
+    await bind(baloo, 'codex', at('10:00'));
+    const later = new Date(at('10:00').getTime() + 25 * 3_600_000);
+    const t = await queued('11:00', { role: 'reviewer' }, { matchPending: true });
+    expect(await matchTaskNow(db, t.id, later)).toBeNull();
+    const row = await db.agentTask.findUniqueOrThrow({ where: { id: t.id }, select: { assigneeWorkerId: true, matchFailedReason: true } });
+    expect(row).toEqual({ assigneeWorkerId: baloo.id, matchFailedReason: null });
+  });
+
+  it('#3815: the sweep also assigns the only quiet candidate', async () => {
+    await bind(baloo, 'codex', at('10:00'));
+    const t = await queued('11:00', { role: 'reviewer' });
+    const later = new Date(at('10:00').getTime() + 25 * 3_600_000);
+    expect(await matchQueuedTasks(db, later, { appId: app.id })).toEqual([{ taskId: t.id, workerId: baloo.id, family: 'codex' }]);
+  });
+
+  it('#3815: a stalled, retired or task-holding worker stays excluded when quiet too', async () => {
+    const later = new Date(at('10:00').getTime() + 25 * 3_600_000);
+    expect(await matchesBaloo(async () => {
+      await bind(baloo, 'codex', at('10:00'));
+      await db.workerAvailability.create({ data: { workerId: baloo.id, state: 'unavailable', reason: 'stalled', setAt: at('10:30'), setBy: 'stall-rule' } });
+    }, later)).toBe(false);
+  });
+
+  it('#3815 V16: no worker.start is issued for a matched worker whose session is open, quiet or live', async () => {
+    await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family: 'codex', worktrees: ['repo/baloo'] }] }, at('10:00'));
+    await bind(baloo, 'codex', at('10:00'));
+    const t = await queued('11:00', { role: 'reviewer' });
+    await matchQueuedTasks(db, new Date(at('10:00').getTime() + 25 * 3_600_000), { appId: app.id });
+    expect(await assigneeOf(t.id)).toBe(baloo.id);
+    expect(await db.hostOperation.count()).toBe(0);
+  });
+
+  it('#3815 V16: needsHostStart is true only for an unbound, not-live worker', () => {
+    expect(needsHostStart({ bound: false, live: false })).toBe(true);
+    expect(needsHostStart({ bound: true, live: false })).toBe(false);
+    expect(needsHostStart({ bound: true, live: true })).toBe(false);
   });
 
   it('the newest open session is the binding: its family wins, even when it reported none', async () => {
@@ -722,7 +769,7 @@ describe('#1754 — a backlog task is never matched (cor:agt:050:02)', () => {
       data: { appId: app.id, title: 'Parked', ownerUserId: mia.id, status: 'backlog', createdAt: at('11:00') },
       select: { id: true },
     });
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, matched: 0 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, recovered: 0, matched: 0, desiredStarts: 0 });
     expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }))
       .toMatchObject({ status: 'backlog', assigneeWorkerId: null, assigneeUserId: null });
     expect(await db.agentTeamEvent.findMany({ where: { taskId: t.id } })).toEqual([]);
@@ -731,7 +778,7 @@ describe('#1754 — a backlog task is never matched (cor:agt:050:02)', () => {
   it('a task parked FROM THE QUEUE (a real queue stint behind it) is not matched (#1790 Xylon P2-2)', async () => {
     await bind(baloo, 'codex', at('11:00'));
     const t = await queuedAt('10:00', { status: 'backlog' }); // queued at 10:00, parked since
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, matched: 0 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, recovered: 0, matched: 0, desiredStarts: 0 });
     expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }))
       .toMatchObject({ status: 'backlog', assigneeWorkerId: null, assigneeUserId: null });
   });
@@ -745,7 +792,7 @@ describe('#1754 — a backlog task is never matched (cor:agt:050:02)', () => {
     });
     await db.agentTask.update({ where: { id: older.id }, data: { status: 'pending' } });
     const younger = await queuedAt('11:00'); // queued continuously
-    expect(await taskMatcherTick(db, at('11:31'))).toEqual({ lost: 0, lapsed: 0, expired: 0, matched: 1 });
+    expect(await taskMatcherTick(db, at('11:31'))).toEqual({ lost: 0, lapsed: 0, expired: 0, recovered: 0, matched: 1, desiredStarts: 0 });
     expect(await assigneeOf(older.id)).toBe(baloo.id);
     expect(await assigneeOf(younger.id)).toBeNull();
   });
@@ -755,18 +802,21 @@ describe('#1961 the roster SDL states the shipped matching rule', () => {
   const field = (name: string) => new RegExp(`"([^"]*)"\\n\\s*${name}: `).exec(/type TeamRosterEntry \{[^}]*\}/.exec(typeDefs)![0])?.[1] ?? '';
   const state = (name: string) => new RegExp(`"([^"]*)"\\n\\s*${name}\\n`).exec(/enum TeamRosterState \{[^}]*\}/.exec(typeDefs)![0])?.[1] ?? '';
 
-  it('matchable: a bound worker only while live, an unbound one always (free for work then needs a launchable family)', () => {
+  it('matchable: a bound worker with an open session, live or quiet; an unbound one always (free for work then needs a launchable family)', () => {
     expect(matchable({ bound: true, live: true })).toBe(true);
-    expect(matchable({ bound: true, live: false })).toBe(false);
+    expect(matchable({ bound: true, live: false, openSession: true })).toBe(true);
+    expect(matchable({ bound: true, live: false, openSession: false })).toBe(false);
     expect(matchable({ bound: false, live: false })).toBe(true);
+    expect(matchable({ bound: true, live: false, openSession: true, endingSession: true })).toBe(false);
     expect(matchable({ bound: false, live: false, endingSession: true })).toBe(false);
   });
 
   it('liveSession and AVAILABLE describe that rule, with no pre-T6 restriction left', () => {
-    expect(field('liveSession')).toContain('The matcher assigns to a BOUND worker only while it has one');
+    expect(field('liveSession')).toContain('Matching does not need one');
     expect(field('liveSession')).toContain('an unbound worker is matched when a live host can launch it');
     expect(state('AVAILABLE')).toContain('an unbound worker a live host can launch, which the matcher assigns to');
-    expect(state('AVAILABLE')).toContain('which the matcher leaves alone until its session is live again');
+    expect(state('AVAILABLE')).toContain('which the matcher also assigns to');
+    expect(state('AVAILABLE')).not.toContain('leaves alone');
     for (const text of [field('liveSession'), state('AVAILABLE')]) expect(text).not.toMatch(/host-operations slice|until T6/);
   });
 });
@@ -863,4 +913,64 @@ describe('#2191 deciding checks after real lock waits', () => {
       expect(await assigneeOf(task.id)).toBeNull();
     });
   }
+});
+
+// #2644: priority is a queue ordering input, never matching eligibility.
+describe('#2644 blocker and priority queue', () => {
+  it('the deciding update refuses a task blocked after discovery', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    const task = await queued('10:00');
+    const outcome = await __matcherTesting.tryAssign(db, { ...task, appId: app.id, requirements: null, closeSessionWhenDone: false }, baloo.id, 'codex', at('11:01'), {
+      // A separate connection changes the deciding row after the stale discovery.
+      // Adding a link here would wait on the graph lock held by this assignment.
+      afterWorkerCheck: async () => { await db.agentTask.update({ where: { id: task.id }, data: { blocked: true } }); },
+    });
+    expect(outcome).toBe('task-gone');
+    expect(await assigneeOf(task.id)).toBeNull();
+    expect(await db.agentTeamEvent.count({ where: { taskId: task.id, type: 'assignment.matched' } })).toBe(0);
+  });
+  it('assignment waits for an exclusive blocker writer and rechecks its committed link', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    const blocker = await queued('09:00', null, { status: 'backlog' });
+    const task = await queued('10:00');
+    const h = hold(async (tx) => {
+      await lockTaskGraph(tx, app.id);
+      await tx.agentTaskBlocker.create({ data: { taskId: task.id, blockerTaskId: blocker.id } });
+    });
+    const pid = await h.held;
+    let reachedWorkerCheck = false;
+    const pending = __matcherTesting.tryAssign(db, { ...task, appId: app.id, requirements: null, closeSessionWhenDone: false }, baloo.id, 'codex', at('11:01'), {
+      afterWorkerCheck: async () => { reachedWorkerCheck = true; },
+    });
+    try {
+      await blockedBy(pid);
+      // A row-lock wait is insufficient: the graph lock must fence the worker check too.
+      expect(reachedWorkerCheck).toBe(false);
+    } finally { h.release(); await h.done; await pending; }
+    expect(await pending).toBe('task-gone');
+    expect(await assigneeOf(task.id)).toBeNull();
+    expect(await db.agentTeamEvent.count({ where: { taskId: task.id, type: 'assignment.matched' } })).toBe(0);
+  });
+  it('skips an open blocker, chooses lowest priority then FIFO, and retains later pages', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    const blocker = await queued('09:00', null, { status: 'backlog' });
+    const blocked = await queued('09:01', null, { priority: 1 });
+    await db.agentTaskBlocker.create({ data: { taskId: blocked.id, blockerTaskId: blocker.id } });
+    const low = await queued('09:02', null, { priority: 5 });
+    const high = await queued('09:03', null, { priority: 2 });
+    const tie = await queued('09:04', null, { priority: 2 });
+    expect(await matchQueuedTasks(db, at('11:01'), { appId: app.id })).toMatchObject([{ taskId: high.id }]);
+    expect(await assigneeOf(blocked.id)).toBeNull();
+    expect(await assigneeOf(low.id)).toBeNull();
+    expect(await assigneeOf(tie.id)).toBeNull();
+  });
+  it('passes more than one page of mixed priorities and ties that nobody can take', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    await db.agentTask.createMany({ data: Array.from({ length: 501 }, (_, i) => ({
+      id: generateId(), appId: app.id, title: 'Synthetic ineligible', ownerUserId: mia.id,
+      priority: i < 250 ? 1 : 2, createdAt: at('10:00'), requirements: { role: 'unmatched-role' },
+    })) });
+    const target = await queued('09:00', { role: 'reviewer' }, { priority: 3 });
+    expect(await matchQueuedTasks(db, at('11:01'), { appId: app.id })).toMatchObject([{ taskId: target.id, workerId: baloo.id }]);
+  });
 });

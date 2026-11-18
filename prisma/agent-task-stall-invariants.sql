@@ -32,12 +32,18 @@ ALTER TABLE worker_availability DROP CONSTRAINT IF EXISTS chk_worker_availabilit
 ALTER TABLE worker_availability ADD CONSTRAINT chk_worker_availability_shape CHECK (
   CASE state
     WHEN 'available' THEN reason IS NULL AND until IS NULL
-    WHEN 'unavailable' THEN reason IS NOT NULL AND reason IN ('stalled', 'out-of-tokens', 'host-down', 'other')
+    WHEN 'unavailable' THEN reason IS NOT NULL AND reason IN ('stalled', 'out-of-tokens', 'host-down', 'other', 'resetting')
     ELSE false
   END AND
-  set_by IN ('worker', 'holder', 'app-manager', 'reports-to', 'stall-rule', 'host', 'lapse') AND
+  set_by IN ('worker', 'holder', 'app-manager', 'reports-to', 'stall-rule', 'host', 'lapse', 'context-reset') AND
   ((set_by = 'host') = (set_by_host_id IS NOT NULL)) AND
-  (set_by <> 'host' OR state = 'available' OR reason IN ('out-of-tokens', 'host-down'))
+  (set_by <> 'host' OR state = 'available' OR reason IN ('out-of-tokens', 'host-down')) AND
+  -- #2162 (cor:agt:050:27): only the platform's reset writes `resetting`, an unavailable mark it sets is always that,
+  -- and only that mark ends on activity after the old agent stopped. The reset may also write the mark's release.
+  ((reason IS NOT DISTINCT FROM 'resetting') = (set_by = 'context-reset' AND state = 'unavailable')) AND
+  (clears_on_activity_after IS NULL OR reason = 'resetting') AND
+  -- The mark names the reset that claimed it, and only the mark does (#2255 review: a reset touches only its own).
+  ((context_reset_id IS NOT NULL) = (reason IS NOT DISTINCT FROM 'resetting'))
 );
 
 -- cor:agt:060:03 — the same state / reason shape per App and model family; a

@@ -1,3 +1,4 @@
+import { getProjectBaseUrl } from '../lib/baseUrl.js';
 import crypto from 'crypto';
 import { Resend } from 'resend';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
@@ -26,28 +27,47 @@ export function isEmailSenderConfigured(): boolean {
 }
 
 /**
+ * #3047 (same class as #3012 item 1): send one message and require the provider's acknowledgement. A THROWN SDK error's
+ * message is free text that can name the recipient (a network error does), and these errors reach the fault log, Sentry
+ * and the deletion-notice job's console.error, so only the thrown error's name is kept. A refusal the SDK RESOLVES goes
+ * through {@link assertProviderAck}, already name-only. The one place the three non-magic-link senders send.
+ */
+async function sendAcked(message: Parameters<Resend['emails']['send']>[0]): Promise<void> {
+  // Outside the try: a missing key is a configuration fault that keeps its own message, not a send failure.
+  const client = getResend();
+  let result: Awaited<ReturnType<Resend['emails']['send']>>;
+  try {
+    result = await client.emails.send(message);
+  } catch (err) {
+    throw new Error(`mail provider send failed: ${err instanceof Error ? err.name : 'unknown'}`);
+  }
+  assertProviderAck(result);
+}
+
+/**
  * #1647: tell a user an administrator erased their account. The text deliberately carries NO reason: the reason is an
  * audit record, not something the notice discloses. Throws when the provider refuses, so the caller can count a try.
  */
 export async function sendAccountDeletionNotice(to: string): Promise<void> {
   const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
-  const result = await getResend().emails.send({
+  await sendAcked({
     from: fromAddress,
     to,
     subject: 'Your Hadron account was deleted',
     html: '<p>A Hadron administrator deleted your account, and your data was erased.</p>' +
       '<p>If you believe this was a mistake, contact Hadron support.</p>',
   });
-  assertProviderAck(result);
 }
 
 /**
  * The Resend SDK RESOLVES a failure (HTTP 422, network) as `{ data: null, error }` instead of throwing, so a bare
  * `await send()` reads a refused message as delivered. Only a result carrying data is an acknowledgement.
  */
-export function assertProviderAck(result: { data?: unknown; error?: { message?: string } | null } | null | undefined): void {
+export function assertProviderAck(result: { data?: unknown; error?: { message?: string; name?: string } | null } | null | undefined): void {
   if (!result || result.error || !result.data) {
-    throw new Error(`mail provider did not acknowledge: ${result?.error?.message ?? 'no data'}`);
+    // #3012: the provider's free-text message can echo the recipient, and this error reaches the fault log and
+    // Sentry, so only the provider's machine name is carried.
+    throw new Error(`mail provider did not acknowledge: ${result?.error?.name ?? 'unknown'}`);
   }
 }
 
@@ -340,30 +360,62 @@ export async function sendMagicLink(
     },
   });
 
-  // `||` (not `??`) so empty-string BASE_URL / PORT — e.g. shell `BASE_URL= node ...`
-  // or `vi.stubEnv('PORT', '')` — fall back instead of producing `http://localhost:`.
-  // Symmetric with src/mcp/server.ts:getDeploymentInfo and src/auth/github.ts.
-  // Centralization across the four `BASE_URL` consumers is a known follow-up
-  // (see src/auth/oauth.ts docstring + CLAUDE.md BASE_URL row).
-  const baseUrl =
-    process.env.BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
+  const baseUrl = getProjectBaseUrl();
   let verifyUrl = `${baseUrl}/auth/email/verify?token=${token}`;
   if (redirect) verifyUrl += `&redirect=${encodeURIComponent(redirect)}`;
   if (returnTo) verifyUrl += `&return_to=${encodeURIComponent(returnTo)}`;
 
   const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
 
-  await getResend().emails.send({
-    from: fromAddress,
-    to: email,
-    subject: 'Sign in to Hadron',
-    html: `
+  // #2988: the SDK resolves a refused send as `{ data: null, error }`; an unchecked await reported it as sent.
+  // Throwing lets both callers answer a fault, and the token that can no longer be delivered is removed.
+  const startedAt = Date.now();
+  let result: Awaited<ReturnType<Resend['emails']['send']>> | undefined;
+  try {
+    result = await getResend().emails.send({
+      from: fromAddress,
+      to: email,
+      subject: 'Sign in to Hadron',
+      html: `
       <p>Click the link below to sign in to Hadron:</p>
       <p><a href="${verifyUrl}">Sign in to Hadron</a></p>
       <p>This link expires in ${TOKEN_EXPIRY_MINUTES} minutes.</p>
       <p>If you didn't request this, you can safely ignore this email.</p>
     `,
-  });
+    });
+    assertProviderAck(result);
+    logMagicLinkSend('acked', startedAt, { providerId: result.data?.id });
+  } catch (err) {
+    // The provider's free-text message can echo the recipient, so only a machine name is kept: the provider's own
+    // for a refusal, the thrown error's for a send that threw.
+    const providerError = result ? result.error?.name : err instanceof Error ? err.name : undefined;
+    logMagicLinkSend(result ? 'refused' : 'error', startedAt, { providerError });
+    try {
+      await db.emailVerificationToken.deleteMany({ where: { token } });
+    } catch {
+      // #3012: a failed cleanup must not replace the send failure; the token expires on its own.
+    }
+    if (result) throw err; // assertProviderAck's message is already name-only
+    // A thrown SDK error's message is free text too (a network error can name the recipient).
+    throw new Error(`mail provider send failed: ${providerError ?? 'unknown'}`);
+  }
+}
+
+/**
+ * #2988: one line per sign-in send, so a "no email arrived" report is answerable from the log alone: the provider's
+ * message id (look it up in Resend's Emails log), how long the provider call took, and whether it was acknowledged.
+ * Never the address, the token or the link, and never the provider's free-text message.
+ */
+function logMagicLinkSend(
+  outcome: 'acked' | 'refused' | 'error',
+  startedAt: number,
+  extra: { providerId?: string; providerError?: string },
+): void {
+  // eslint-disable-next-line no-console
+  console.warn(
+    '[auth] auth.magic_link.send',
+    JSON.stringify({ event: 'auth.magic_link.send', outcome, durationMs: Date.now() - startedAt, ...extra }),
+  );
 }
 
 /**
@@ -372,7 +424,7 @@ export async function sendMagicLink(
  */
 export async function sendCeremonySignInLink(to: string, verifyUrl: string): Promise<void> {
   const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
-  const result = await getResend().emails.send({
+  await sendAcked({
     from: fromAddress,
     to,
     subject: 'Confirm it is you, to manage your Hadron passkeys',
@@ -383,7 +435,6 @@ export async function sendCeremonySignInLink(to: string, verifyUrl: string): Pro
       <p>If you didn't request this, you can safely ignore this email.</p>
     `,
   });
-  assertProviderAck(result);
 }
 
 /** What a passkey registration notice says (cor:aut:040:02). */
@@ -425,7 +476,7 @@ export function passkeyNoticeEmail(n: PasskeyNoticeContent): { subject: string; 
 export async function sendPasskeyRegisteredNotice(to: string, n: PasskeyNoticeContent): Promise<void> {
   const { subject, html } = passkeyNoticeEmail(n);
   const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
-  assertProviderAck(await getResend().emails.send({ from: fromAddress, to, subject, html }));
+  await sendAcked({ from: fromAddress, to, subject, html });
 }
 
 export async function verifyMagicLink(

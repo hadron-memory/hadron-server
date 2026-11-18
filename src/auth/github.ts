@@ -1,3 +1,4 @@
+import { getProjectBaseUrl } from '../lib/baseUrl.js';
 export interface GitHubUser {
   id: number;         // GitHub numeric ID
   login: string;
@@ -60,12 +61,6 @@ export async function checkOrgMembership(
 }
 
 function getCallbackUrl(): string {
-  // `||` (not `??`) so empty-string BASE_URL / PORT — e.g. shell `BASE_URL= node ...`
-  // or `vi.stubEnv('PORT', '')` — fall back instead of producing `http://localhost:`.
-  // Symmetric with src/mcp/server.ts:getDeploymentInfo and src/auth/email.ts.
-  // Centralization across the four `BASE_URL` consumers is a known follow-up
-  // (see src/auth/oauth.ts docstring + CLAUDE.md BASE_URL row).
-  const base =
-    process.env.BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
+  const base = getProjectBaseUrl();
   return `${base}/auth/github/callback`;
 }

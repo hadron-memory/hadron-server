@@ -260,7 +260,11 @@ describe('#1721 rulings Q2/Q3 — one deleteComment, no hide or retract, an accu
   it('hideComment and retractComment are gone from the API, and the hidden columns from the schema', async () => {
     const { typeDefs } = await import('./typeDefs.js');
     const sdl = String(typeDefs);
-    for (const gone of ['hideComment(', 'retractComment(', 'hiddenAt:', 'retracted: Boolean']) expect(sdl).not.toContain(gone);
+    for (const gone of ['hideComment(', 'retractComment(', 'retracted: Boolean']) expect(sdl).not.toContain(gone);
+    // `hiddenAt` is legitimately back on UserApiKey (#2298), so only the Comment type must not carry it.
+    const start = sdl.indexOf('type Comment {');
+    expect(start).toBeGreaterThan(-1);
+    expect(sdl.slice(start, sdl.indexOf('\n  }', start))).not.toContain('hiddenAt');
     expect(sdl).toContain('deleteComment(commentRef: ID!, expectedRevision: Int!): Comment!');
     expect(M.hideComment).toBeUndefined();
     expect(M.retractComment).toBeUndefined();

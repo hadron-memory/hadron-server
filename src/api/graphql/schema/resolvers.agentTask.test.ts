@@ -1,3 +1,4 @@
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #1705 — agent tasks (Task Management T1): authorization matrix, lifecycle,
@@ -22,6 +23,7 @@ import { isAppParticipant } from './resolvers.helpers.js';
 import { mergeUsers } from '../../../test/mergeConsent.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { ownerChain } from '../../../lib/agentTasks/stall.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -31,7 +33,7 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({
 }));
 
 const M = resolvers.Mutation as any;
-const Q = resolvers.Query as any;
+const Q = settledTeamEventQueries(resolvers.Query, db) as any;
 const F = resolvers as any;
 
 function ctx(userId?: string, extra: Partial<Context> = {}): Context {
@@ -174,7 +176,7 @@ describe('createAgentTask — root tasks: any App participant (cor:agt:050:06)',
     await expectCode(asWorker(anne, () => create(ctx(undefined, { appId: app.id }), {})), 'APP_NOT_FOUND');
     const t = await create(ctx(member.id), {});
     expect(await asWorker(anne, () => Q.agentTask({}, { id: t.id }, ctx(undefined, { appId: app.id })))).toBeNull();
-    expect(await db.agentTask.count()).toBe(1);
+    expect(await db.agentTask.count({ where: { handle: { not: 'AT0' } } })).toBe(1);
   });
 
   it("a worker of another App is refused — even when its driver participates here", async () => {
@@ -666,6 +668,26 @@ describe('start / progress / finish — the assignee only (cor:agt:050:08)', () 
     await expectCode(asWorker(rook, () => M.recordAgentTaskProgress({}, { taskId: t.id }, ctx(member.id))), 'TASK_NOT_ASSIGNEE');
   });
 
+  it('#3863: the refusal names which actor the server saw, and still refuses before any write', async () => {
+    const t = await anneTask({ start: true });
+    const before = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
+    const seen = async (p: Promise<unknown>) => {
+      try { await p; } catch (e) { return { code: (e as GraphQLError).extensions?.code, actor: (e as GraphQLError).extensions?.actor, message: (e as GraphQLError).message }; }
+      return null;
+    };
+    // No worker session on the request: it acted as the person.
+    const person = await seen(M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(member.id)));
+    expect(person).toMatchObject({ code: 'TASK_NOT_ASSIGNEE', actor: 'person' });
+    expect(person!.message).toContain('carried no worker session');
+    // A different worker's session: same code, told apart.
+    const other = await seen(asWorker(rook, () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(member.id))));
+    expect(other).toMatchObject({ code: 'TASK_NOT_ASSIGNEE', actor: 'worker' });
+    expect(other!.message).not.toContain('no worker session');
+    // Neither names the assignee, and the task is unchanged.
+    expect(JSON.stringify([person, other])).not.toContain(anne.id);
+    expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).toEqual(before);
+  });
+
   it('a queued task can be started by nobody (050:08 edge case)', async () => {
     const t = await create(ctx(member.id), {});
     await expectCode(M.startAgentTask({}, { taskId: t.id }, ctx(member.id)), 'TASK_NOT_ASSIGNEE');
@@ -782,6 +804,54 @@ describe('reads — the App\'s participants, workers included (cor:agt:050:21)',
     expect(await ids({ rootsOnly: true })).toEqual([a.id, b.id].sort());
     expect(await ids({ queued: true })).toEqual([a.id, child.id].sort());
     expect(await ids({ parentTaskId: b.id })).toEqual([child.id]);
+  });
+
+  describe('creator filter (#2370): matches what `createdBy` projects', () => {
+    const ids = async (args: Record<string, unknown>, c: Context = ctx(member.id)) =>
+      (await Q.agentTasks({}, { appRef: app.id, ...args }, c)).map((t: any) => t.id).sort();
+    /** `inPerson` is created by `member` directly; `byAnne` by Anne's session (stamps BOTH createdBy = holder and createdByWorkerId). */
+    async function twoCreators() {
+      const inPerson = await create(ctx(member.id), { title: 'in person' });
+      const byAnne = await asWorker(anne, () => create(ctx(member.id), { title: 'by anne' }));
+      return { inPerson, byAnne };
+    }
+
+    it('P1: a worker creator returns what that worker created, not what its holder created in person', async () => {
+      const { byAnne } = await twoCreators();
+      expect(await ids({ creator: { worker: anne.id } })).toEqual([byAnne.id]);
+      expect(await ids({ creator: { worker: 'Anne' } })).toEqual([byAnne.id]);
+    });
+
+    it('P2: a person creator returns their in-person tasks and excludes their workers\' tasks', async () => {
+      const { inPerson } = await twoCreators();
+      expect(await ids({ creator: { user: member.id } })).toEqual([inPerson.id]);
+      expect(await ids({ creator: { user: `@${member.handle}` } })).toEqual([inPerson.id]);
+    });
+
+    it('P3: combines with the other filters by AND', async () => {
+      await twoCreators();
+      const byAnne = await asWorker(anne, () => create(ctx(member.id), { title: 'for liam', assignee: { worker: 'Liam' } }));
+      expect(await ids({ creator: { worker: anne.id }, assignee: { worker: liam.id }, status: ['PENDING'] })).toEqual([byAnne.id]);
+      expect(await ids({ creator: { worker: anne.id }, assignee: { worker: rook.id } })).toEqual([]);
+      expect(await ids({ creator: { worker: anne.id }, status: ['STARTED'] })).toEqual([]);
+    });
+
+    it('P4: a ref naming nobody in this App matches nothing, with no error', async () => {
+      await twoCreators();
+      expect(await ids({ creator: { worker: zed.id } })).toEqual([]);
+      expect(await ids({ creator: { worker: 'Nobody' } })).toEqual([]);
+      expect(await ids({ creator: { user: outsider.id } })).toEqual([]);
+      // Parity with owner/assignee: a retired worker is not a party to resolve.
+      expect(await ids({ creator: { worker: retired.id } })).toEqual([]);
+      await expectCode(Q.agentTasks({}, { appRef: app.id, creator: { worker: 'Anne', user: member.id } }, ctx(member.id)), 'BAD_USER_INPUT');
+    });
+
+    it('P5: a non-participant gets APP_NOT_FOUND, exactly as without the filter (R202, no oracle)', async () => {
+      await twoCreators();
+      await expectCode(Q.agentTasks({}, { appRef: app.id, creator: { worker: anne.id } }, ctx(outsider.id)), 'APP_NOT_FOUND');
+      await expectCode(Q.agentTasks({}, { appRef: app.id, creator: { user: member.id } }, ctx(outsider.id)), 'APP_NOT_FOUND');
+      await expectCode(Q.agentTasks({}, { appRef: app.id, creator: { worker: 'Nobody' } }, ctx(outsider.id)), 'APP_NOT_FOUND');
+    });
   });
 
   it('derived: queued (050:03) and waitingOnChildren (050:04), never stored', async () => {

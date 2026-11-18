@@ -1,0 +1,12 @@
+-- #451: an agent delete nulls sessions.agent_id (ON DELETE SET NULL): the only
+-- index carrying agent_id has it third, so the lookup walks that whole index.
+--
+-- CONCURRENTLY cannot run inside a transaction block, and `prisma migrate
+-- deploy` sends a file as one simple query: one statement runs outside a
+-- transaction, several run as one implicit transaction (SQLSTATE 25001). Keep
+-- this file a single statement.
+--
+-- A failed CONCURRENTLY build leaves an INVALID index under this name, which
+-- IF NOT EXISTS would then skip. If it is ever INVALID, drop it and re-run
+-- this statement by hand.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "sessions_agent_id_idx" ON "sessions"("agent_id");

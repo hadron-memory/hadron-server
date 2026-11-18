@@ -15,6 +15,7 @@
  * Google SENSITIVE scopes (lighter verification than Gmail's restricted
  * ones, no CASA), which is exactly why they get their own client.
  */
+import { getProjectBaseUrl } from '../../lib/baseUrl.js';
 
 const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 
@@ -46,7 +47,7 @@ function getClientId(): string {
  * token exchange must pass the SAME value the authorize URL carried.
  */
 export function getGoogleCalRedirectUri(): string {
-  const base = process.env.BASE_URL || 'http://localhost:4000';
+  const base = getProjectBaseUrl();
   return `${base}/auth/google-cal/callback`;
 }
 

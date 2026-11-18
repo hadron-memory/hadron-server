@@ -30,7 +30,7 @@ export const PAGED_ATTENTION_CAPABILITY = 'team-attention-paged';
 /** Per-request budgets (contract defaults; the caps are hard ceilings). */
 export const PAGE_SCAN_ROW_BUDGET_DEFAULT = 50;
 export const PAGE_SCAN_ROW_BUDGET_MAX = 100;
-export const PAGE_RESULT_PAIRS_DEFAULT = 50;
+export const PAGE_RESULT_PAIRS_DEFAULT = 20;
 export const PAGE_RESULT_PAIRS_MAX = 100;
 
 export const MAX_PAGE_TOKEN_CHARS = 65_536;

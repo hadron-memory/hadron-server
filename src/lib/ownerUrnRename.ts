@@ -105,10 +105,14 @@ export async function renameOwnerNamespacedUrns(
   // spec-021 migration window, while every resolver queries the single-colon
   // form — so an un-normalized key would be stored somewhere nothing ever looks.
   // Bulk SQL cannot call the TypeScript normalizer, hence the inline mirror.
+  // #3196: created_at is written explicitly as UTC. The column is a naive
+  // timestamp holding UTC, and its DEFAULT CURRENT_TIMESTAMP would land as the
+  // session's wall time, hours off under a non-UTC session.
   await tx.$executeRaw`
-    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn)
+    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn, created_at)
     SELECT gen_random_uuid()::text, replace(m.urn, '::', ':'), 'MEMORY'::"UrnAliasEntityType", m.id,
-           'RENAME'::"UrnAliasReason", replace(${newPrefix} || substr(m.urn, strpos(m.urn, ':')), '::', ':')
+           'RENAME'::"UrnAliasReason", replace(${newPrefix} || substr(m.urn, strpos(m.urn, ':')), '::', ':'),
+           (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3)
     FROM memories m
     WHERE m.owner_user_id = ${userId} AND strpos(m.urn, ':') > 0
       AND NOT starts_with(m.urn, ${newColon})
@@ -116,9 +120,10 @@ export async function renameOwnerNamespacedUrns(
       DO UPDATE SET replaced_by_urn = EXCLUDED.replaced_by_urn
   `;
   await tx.$executeRaw`
-    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn)
+    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn, created_at)
     SELECT gen_random_uuid()::text, replace(a.urn, '::', ':'), 'AGENT'::"UrnAliasEntityType", a.id,
-           'RENAME'::"UrnAliasReason", replace(${newPrefix} || substr(a.urn, strpos(a.urn, ':')), '::', ':')
+           'RENAME'::"UrnAliasReason", replace(${newPrefix} || substr(a.urn, strpos(a.urn, ':')), '::', ':'),
+           (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3)
     FROM agents a
     WHERE a.owner_user_id = ${userId} AND strpos(a.urn, ':') > 0
       AND NOT starts_with(a.urn, ${newColon})
@@ -126,9 +131,10 @@ export async function renameOwnerNamespacedUrns(
       DO UPDATE SET replaced_by_urn = EXCLUDED.replaced_by_urn
   `;
   await tx.$executeRaw`
-    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn)
+    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn, created_at)
     SELECT gen_random_uuid()::text, replace(ap.urn, '::', ':'), 'APP'::"UrnAliasEntityType", ap.id,
-           'RENAME'::"UrnAliasReason", replace(${newPrefix} || substr(ap.urn, strpos(ap.urn, ':')), '::', ':')
+           'RENAME'::"UrnAliasReason", replace(${newPrefix} || substr(ap.urn, strpos(ap.urn, ':')), '::', ':'),
+           (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3)
     FROM apps ap
     WHERE ap.owner_user_id = ${userId} AND strpos(ap.urn, ':') > 0
       AND NOT starts_with(ap.urn, ${newColon})

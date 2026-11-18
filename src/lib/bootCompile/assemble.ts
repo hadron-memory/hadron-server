@@ -11,7 +11,9 @@
  * It shares the readers' semantics instead of copying them:
  *   - tags are parsed by S1's `locateIncludeTags` (R77 code literals, R78 v2 URNs);
  *   - a revision is chosen by S2's `selectIncludeRevision` (rev pin, approved,
- *     signed ignored until signing ships, no settings = latest);
+ *     signed enforced while the deployment signing policy is on, no settings = latest);
+ *     a tag's settings are read through `effectiveIncludeSettings`, so `signed` while signing is not checked
+ *     changes neither the qualification (approved, signed), the existence pre-check nor the refusal class (#4033);
  *   - the depth cap is S2's `MAX_RESOLVE_DEPTH` (R75: level 1..10, 11 refused).
  * Where a reader shows the broken-include notice, the compile refuses.
  *
@@ -31,6 +33,7 @@
  * so a refusal never discloses a memory the caller cannot see.
  */
 
+import { includeUrnTarget } from '../includes/includeUrnTarget.js';
 import { splitNodeUrn } from '@hadron-memory/urn-lib-js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import type { PrismaClient } from '../../generated/prisma/index.js';
@@ -38,9 +41,11 @@ import { agentBaseChain } from '../agentBase.js';
 import { isBootPromptRole } from '../bootPrompt.js';
 import { IncludeSyntaxError, locateIncludeTags, type IncludeTag } from '../includes/parseIncludeTags.js';
 import {
+  effectiveIncludeSettings,
   IncludeReadMemo,
   MAX_RESOLVE_DEPTH,
   selectIncludeRevision,
+  type IncludeDb,
   type IncludeTarget,
 } from '../includes/spliceIncludes.js';
 import { sha256Hex, type CompiledOccurrence, type CompiledTarget } from './provenance.js';
@@ -102,7 +107,7 @@ export interface AssemblePlan {
   grants: AssembledGrant[];
 }
 
-type Db = Pick<PrismaClient, 'node' | 'memory' | 'nodeRevision' | 'agent' | 'agentOrgGrant' | 'agentSubscription' | '$queryRaw'>;
+type Db = IncludeDb & Pick<PrismaClient, 'agentOrgGrant' | 'agentSubscription'>;
 
 type MemoryKind =
   | { kind: 'encrypted' }
@@ -165,8 +170,40 @@ export async function assembleBootPrompt(
     return hit;
   };
 
+  /**
+   * #2417 (cor:dmo:050:14, Holger 2026-10-27): whose grant a memory of the TARGET's chain needs when
+   * a bare-loc include reaches it through that chain. Installing a child brings its bases along, so
+   * a recipient that does not own the target needs only the target: a base's memory is then read
+   * under the target's own grant, and no grant to the base is asked for or provisioned. The target's
+   * owner is the one who extends, and still needs the grant extending needs to each base, as before.
+   * Only the chain walk passes `viaTargetChain`; a full node URN names its memory directly and always
+   * needs that Agent's own grant, so nothing of a base outside what the target inherits comes along.
+   */
+  const targetOwnedByRecipient = (() => {
+    let hit: Promise<boolean> | null = null;
+    return (): Promise<boolean> => (hit ??= (async () => {
+      const target = await db.agent.findUnique({
+        where: { id: input.target.agentId },
+        select: { organizationId: true, ownerUserId: true },
+      });
+      if (!target) return true;
+      return input.recipient.kind === 'org'
+        ? target.organizationId === input.recipient.orgId
+        : target.ownerUserId === input.recipient.userId;
+    })());
+  })();
+  async function grantHolderFor(agentId: string, viaTargetChain: boolean): Promise<string> {
+    // The chain walk visits only the target's own memory and its bases', so any other Agent here is a base.
+    if (!viaTargetChain || agentId === input.target.agentId) return agentId;
+    return (await targetOwnedByRecipient()) ? agentId : input.target.agentId;
+  }
+
   /** Is this memory an allowed source? Records the Agent whose grant it needs. */
-  async function admitSource(memoryId: string, position: { line: number; column: number } | null): Promise<void> {
+  async function admitSource(
+    memoryId: string,
+    position: { line: number; column: number } | null,
+    viaTargetChain = false,
+  ): Promise<void> {
     const kind = await kindOf(memoryId);
     if (kind.kind === 'encrypted') throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_UNAVAILABLE', position);
     if (kind.kind === 'install' && memoryId === input.installMemoryId) return;
@@ -174,10 +211,11 @@ export async function assembleBootPrompt(
       // Qualify the dependency BEFORE anything of it is inspected: node status, revisions and the
       // text all come after this, so a refusal can never describe content the recipient has no
       // entitlement to read (cor:agt:040:08, read under the grant alone).
-      let plan = grantPlans.get(kind.agentId);
+      const holder = await grantHolderFor(kind.agentId, viaTargetChain);
+      let plan = grantPlans.get(holder);
       if (!plan) {
-        plan = planGrant(db, kind.agentId, input.recipient, position);
-        grantPlans.set(kind.agentId, plan);
+        plan = planGrant(db, holder, input.recipient, position);
+        grantPlans.set(holder, plan);
       }
       await plan;
       return;
@@ -194,12 +232,13 @@ export async function assembleBootPrompt(
    * other is evaluated on the side and left out of the plan, so the scan never provisions a grant
    * or refuses a compile for a memory the output did not read.
    */
-  async function admittedQuietly(memoryId: string): Promise<boolean> {
+  async function admittedQuietly(memoryId: string, viaTargetChain = false): Promise<boolean> {
     const kind = await kindOf(memoryId);
     if (kind.kind === 'install') return memoryId === input.installMemoryId;
     if (kind.kind !== 'agent') return false;
     try {
-      await (grantPlans.get(kind.agentId) ?? planGrant(db, kind.agentId, input.recipient, null));
+      const holder = await grantHolderFor(kind.agentId, viaTargetChain);
+      await (grantPlans.get(holder) ?? planGrant(db, holder, input.recipient, null));
       return true;
     } catch (e) {
       if (e instanceof BootCompileRefusal) return false;
@@ -208,17 +247,17 @@ export async function assembleBootPrompt(
   }
 
   /** The bare-loc lookup chain for a tag written in `includerMemoryId` (R8). */
-  async function lookupChain(includerMemoryId: string): Promise<{ memories: string[]; installFirst: boolean }> {
+  async function lookupChain(includerMemoryId: string): Promise<{ memories: string[]; installFirst: boolean; viaTargetChain: boolean }> {
     const targetChain = await agentChain(input.target.agentId);
     const inTargetScope = includerMemoryId === input.installMemoryId || targetChain.includes(includerMemoryId);
     if (inTargetScope) {
       return input.installMemoryId
-        ? { memories: [input.installMemoryId, ...targetChain], installFirst: true }
-        : { memories: targetChain, installFirst: false };
+        ? { memories: [input.installMemoryId, ...targetChain], installFirst: true, viaTargetChain: true }
+        : { memories: targetChain, installFirst: false, viaTargetChain: true };
     }
     const kind = await kindOf(includerMemoryId);
-    if (kind.kind === 'agent') return { memories: await agentChain(kind.agentId), installFirst: false };
-    return { memories: [includerMemoryId], installFirst: false };
+    if (kind.kind === 'agent') return { memories: await agentChain(kind.agentId), installFirst: false, viaTargetChain: false };
+    return { memories: [includerMemoryId], installFirst: false, viaTargetChain: false };
   }
 
   type Found = { node: { id: string; memoryId: string; content: string | null; revSeq: number; role: string | null }; replacesNodeId?: string };
@@ -229,7 +268,7 @@ export async function assembleBootPrompt(
    * tombstone or a node in a memory the recipient may not read can never shape the answer.
    */
   async function findByLoc(includerMemoryId: string, loc: string, position: { line: number; column: number }): Promise<Found> {
-    const { memories, installFirst } = await lookupChain(includerMemoryId);
+    const { memories, installFirst, viaTargetChain } = await lookupChain(includerMemoryId);
     let found: Found | null = null;
     let sawTombstone = false;
     for (const [i, memoryId] of memories.entries()) {
@@ -237,9 +276,9 @@ export async function assembleBootPrompt(
       // and planned. After the hit the output is decided; the scan only looks for the node the install
       // node replaces, and it may not widen what the compile reads, plans or refuses on (Cooper).
       if (found) {
-        if (!(await admittedQuietly(memoryId))) continue;
+        if (!(await admittedQuietly(memoryId, viaTargetChain))) continue;
       } else {
-        await admitSource(memoryId, position);
+        await admitSource(memoryId, position, viaTargetChain);
       }
       const rows = await db.node.findMany({
         where: { memoryId, loc },
@@ -271,11 +310,14 @@ export async function assembleBootPrompt(
   async function findByUrn(urn: string, position: { line: number; column: number }): Promise<Found> {
     let parts: { memoryUrn: string; loc: string };
     try { parts = splitNodeUrn(urn); } catch { throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_MALFORMED', position); }
-    const memory = await db.memory.findUnique({ where: { urn: parts.memoryUrn }, select: { id: true } });
+    const resolved = await includeUrnTarget(db, urn);
+    // Preserve the compile's existing retired-node refusal on the direct path;
+    // aliases themselves resolve live identities only, never deleted claimants.
+    const memory = resolved ? { id: resolved.memoryId } : await db.memory.findUnique({ where: { urn: parts.memoryUrn }, select: { id: true } });
     if (!memory) throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_UNAVAILABLE', position);
     await admitSource(memory.id, position);
     const row = await db.node.findFirst({
-      where: { memoryId: memory.id, loc: parts.loc },
+      where: resolved ? { id: resolved.id, memoryId: resolved.memoryId, deletedAt: null, memory: { deletedAt: null } } : { memoryId: memory.id, loc: parts.loc, deletedAt: { not: null } },
       orderBy: { deletedAt: { sort: 'asc', nulls: 'first' } },
       select: { id: true, memoryId: true, content: true, revSeq: true, role: true, deletedAt: true },
     });
@@ -321,29 +363,31 @@ export async function assembleBootPrompt(
       const level = depth + 1;
       if (level > MAX_RESOLVE_DEPTH) throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_TOO_DEEP', position);
       const found = tag.kind === 'urn' ? await findByUrn(tag.target, position) : await findByLoc(memoryId, tag.target, position);
-      if (tag.kind === 'loc') await admitSource(found.node.memoryId, position);
+      if (tag.kind === 'loc') await admitSource(found.node.memoryId, position, (await lookupChain(memoryId)).viaTargetChain);
       if (trail.has(found.node.id)) throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_CYCLE', position);
       const target: IncludeTarget = {
         id: found.node.id, memoryId: found.node.memoryId, content: found.node.content, revSeq: found.node.revSeq,
         memory: { id: found.node.memoryId, isEncrypted: false },
       };
+      // While signing is not checked `signed` is ignored: judge the tag as if it were not there (#4033).
+      const settings = effectiveIncludeSettings(tag.settings);
       // R79: a pin to a revision the target does not have refuses like a missing include.
       if (tag.settings.rev !== undefined && tag.settings.rev > found.node.revSeq) {
         throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_UNAVAILABLE', position);
       }
       // R79: a pin to a revision that is not stored (never kept, or pruned) is a missing include, with
-      // `approved` too. Existence is decided on the pin alone, apart from qualification, so an existing
-      // revision that merely fails `approved` stays REVISION_UNAVAILABLE.
-      if (tag.settings.rev !== undefined && tag.settings.approved
-        && !(await selectIncludeRevision(db, memo, target, { ...tag.settings, approved: false, signed: false }))) {
+      // `approved` or an enforced `signed` too. Existence is decided on the pin alone, apart from qualification, so an
+      // existing revision that merely fails `approved` or `signed` stays REVISION_UNAVAILABLE.
+      if (settings.rev !== undefined && (settings.approved || settings.signed)
+        && !(await selectIncludeRevision(db, memo, target, { ...settings, approved: false, signed: false }))) {
         throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_UNAVAILABLE', position);
       }
-      const selected = await selectIncludeRevision(db, memo, target, tag.settings);
+      const selected = await selectIncludeRevision(db, memo, target, settings);
       if (!selected) {
-        // An existing revision that does not qualify (approved) is REVISION_UNAVAILABLE; a pin that
+        // An existing revision that does not qualify (approved, or signed while it is checked) is REVISION_UNAVAILABLE; a pin that
         // names no stored revision (never kept, or pruned) is a missing include (R79).
         throw new BootCompileRefusal(
-          tag.settings.approved ? 'BOOT_PROMPT_INCLUDE_REVISION_UNAVAILABLE' : 'BOOT_PROMPT_INCLUDE_UNAVAILABLE', position,
+          settings.approved || settings.signed ? 'BOOT_PROMPT_INCLUDE_REVISION_UNAVAILABLE' : 'BOOT_PROMPT_INCLUDE_UNAVAILABLE', position,
         );
       }
       const order = occurrences.length;
@@ -369,6 +413,12 @@ export async function assembleBootPrompt(
   });
   if (!root) throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
   await admitSource(root.memoryId, null);
+  // The Agent being compiled for needs its own entitlement even when the source sits wholly in the install
+  // memory (admitted directly above) and traverses none of the Agent's content (cor:agt:040:12, missing grant).
+  if (!grantPlans.has(input.target.agentId)) {
+    grantPlans.set(input.target.agentId, planGrant(db, input.target.agentId, input.recipient, null));
+  }
+  await grantPlans.get(input.target.agentId);
   const rootText = root.content ?? '';
   occurrences.push({
     order: 0, depth: 0, parent: null, kind: 'source', nodeId: root.id, revNo: root.revSeq,

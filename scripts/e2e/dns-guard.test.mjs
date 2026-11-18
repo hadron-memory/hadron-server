@@ -74,3 +74,52 @@ exit 99
   assert.match(r.stderr, /seeding 1\.1\.1\.1/);
   assert.ok(existsSync(seeded), 'the seed write never ran');
 });
+
+// #1963: the seed must work on the REAL file shape. A fresh instance's
+// /etc/resolv.conf is a symlink into /run/systemd/resolve/, which can still be
+// absent when the guard seeds; appending through it fails ("Directory
+// nonexistent") and the resolver stays dead. The fake `incus exec ... sh -c`
+// below runs the guard's actual seed script against a fixture filesystem, so
+// the test cannot pass by stubbing the write away.
+function runRealSeed(t, { linkTarget, readonlyDir = false }) {
+  const root = mkdtempSync(join(tmpdir(), 'hadron-dns-guard-real-'));
+  t.after(() => { spawnSync('chmod', ['-R', 'u+rwx', root]); rmSync(root, { recursive: true, force: true }); });
+  const etc = join(root, 'etc'); mkdirSync(etc);
+  const resolv = join(etc, 'resolv.conf');
+  if (linkTarget) spawnSync('ln', ['-s', linkTarget, resolv]);
+  else writeFileSync(resolv, 'nameserver 10.0.0.1\n');
+  if (readonlyDir) spawnSync('chmod', ['555', etc]);
+  const bin = join(root, 'bin'); mkdirSync(bin);
+  writeFileSync(join(bin, 'incus'), `#!/bin/sh
+shift 3
+case "$1" in
+  getent) grep -qx 'nameserver 1.1.1.1' "${resolv}" 2>/dev/null && exit 0; exit 2 ;;
+  sh) shift; shift; exec sh -c "$(printf '%s' "$1" | sed "s#/etc/resolv.conf#${resolv}#g")" ;;
+esac
+exit 99
+`, { mode: 0o700 });
+  const r = spawnSync('bash', ['-c', `set -euo pipefail; . "${guard}"; e2e_dns_guard fixture`], {
+    encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, E2E_DNS_POLL_SECONDS: '0', E2E_DNS_SEED_AFTER: '2', E2E_DNS_WAIT_PROBES: '6' },
+  });
+  return { r, resolv };
+}
+
+test('DNS guard seeds through a dangling resolv.conf symlink by replacing it (#1963)', t => {
+  const { r, resolv } = runRealSeed(t, { linkTarget: join(tmpdir(), 'hadron-no-such-dir', 'stub-resolv.conf') });
+  assert.equal(r.status, 0, `guard exited ${r.status}: ${r.stderr}`);
+  assert.match(readFileSync(resolv, 'utf8'), /^nameserver 1\.1\.1\.1$/m);
+});
+
+test('DNS guard seeds a plain resolv.conf without duplicating the nameserver (#1963)', t => {
+  const { r, resolv } = runRealSeed(t, {});
+  assert.equal(r.status, 0, r.stderr);
+  const lines = readFileSync(resolv, 'utf8').split('\n').filter(l => l === 'nameserver 1.1.1.1');
+  assert.equal(lines.length, 1);
+});
+
+test('DNS guard names the write failure when the resolver file cannot be written (#1963)', t => {
+  const { r } = runRealSeed(t, { linkTarget: join(tmpdir(), 'hadron-no-such-dir', 'stub-resolv.conf'), readonlyDir: true });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /could not write the fallback resolver/);
+  assert.match(r.stderr, /DNS not answering/);
+});

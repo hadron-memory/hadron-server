@@ -88,13 +88,9 @@ export async function listAssets(ctx: Context, input: ListAssetsInput): Promise<
 
   // The shared read gate — the caller's accessible memory set.
   //
-  // Its declared type includes `null` ("no filter"), which is how
-  // memoryAccessFilter reads it, but NO branch returns null today: even
-  // the platform-admin path builds an explicit id list, precisely so the
-  // 034 owner-only carve-out for another user's personal/private memory
-  // survives. The null handling below is therefore defensive against the
-  // declared contract, not a live path — if that ever changes, this must
-  // keep meaning "unrestricted" and not silently invert.
+  // Always a materialised id list (#3921): even the platform-admin path
+  // builds an explicit list, precisely so the 034 owner-only carve-out for
+  // another user's personal/private memory survives.
   const accessible = await getAccessibleMemoryIds(ctx);
 
   // Org narrowing has to be expressed as a memory-id set too, because the
@@ -102,13 +98,13 @@ export async function listAssets(ctx: Context, input: ListAssetsInput): Promise<
   // actually requested — without one, the accessible set already IS the
   // caller's reach and must not be narrowed to org-owned memories (that
   // would drop user-owned and shared ones).
-  let allowed: string[] | null = accessible;
+  let allowed: string[] = accessible;
   if (scope.scopedOrgId) {
     const orgMemories = await db.memory.findMany({
       where: {
         organizationId: scope.scopedOrgId,
         deletedAt: null,
-        ...(accessible === null ? {} : { id: { in: accessible } }),
+        id: { in: accessible },
       },
       select: { id: true },
     });
@@ -147,16 +143,15 @@ export async function listAssets(ctx: Context, input: ListAssetsInput): Promise<
         if (err instanceof MemoryNotFoundError) continue;
         throw err;
       }
-      if (allowed === null || allowed.includes(id)) resolved.add(id);
+      if (allowed.includes(id)) resolved.add(id);
     }
     if (resolved.size === 0) return EMPTY;
     allowed = [...resolved];
   }
 
   const where: Record<string, unknown> = {
-    // Scope on the COLUMN. `allowed === null` (unrestricted admin) still
-    // requires a non-null memoryId so staged assets stay out.
-    ...(allowed === null ? { memoryId: { not: null } } : { memoryId: { in: allowed } }),
+    // Scope on the COLUMN, so staged assets (no memory) stay out.
+    memoryId: { in: allowed },
     ...(f.includeDeleted ? {} : { deletedAt: null }),
     ...(f.mine ? { uploadedBy: ctx.userId } : {}),
     ...(f.mimeType ? { mimeType: f.mimeType } : {}),

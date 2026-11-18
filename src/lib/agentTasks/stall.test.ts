@@ -1,3 +1,4 @@
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../test/teamEventHorizon.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1706 (Task Management T2) — the stall evaluator, the alarm chain and its
@@ -23,16 +24,18 @@ import { generateId } from '../id.js';
 import { runAsActor } from '../requestActor.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
-import { evaluateStalls, isSerializationFailure, raiseStallAlarm, stallCandidates, STALL_WINDOW_DEFAULTS, wakeDueOwners } from './stall.js';
+import { evaluateStalls, isSerializationFailure, raiseStallAlarm, stallCandidates, STALL_EVENT_TYPE, STALL_RULES, STALL_WINDOW_DEFAULTS, wakeDueOwners } from './stall.js';
+import { ALARM_EVENT_TYPES } from './events.js';
 import { mergeUsers } from '../../test/mergeConsent.js';
 import { loadAvailableForWork } from './availability.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
 }));
 
 const M = resolvers.Mutation as any;
-const Q = resolvers.Query as any;
+const Q = settledTeamEventQueries(resolvers.Query, db) as any;
 
 const DAY = '2026-10-09';
 /** `at('10:15')` — a moment on the scenario day, UTC; seconds and ms allowed (`'10:14:59.999'`). */
@@ -126,7 +129,8 @@ async function note(taskId: string, t: string, by: { id: string } = anne) {
 const tick = (t: string) => taskStallTick(db, at(t));
 const alarms = (type?: string) =>
   db.agentTeamEvent.findMany({
-    where: { severity: 'alarm', ...(type ? { type } : {}) },
+    // The four stall rules' alarms: #2755's task-less dark-worker alarm is pinned in darkWorker2755.test.ts.
+    where: { severity: 'alarm', type: type ?? { not: 'alarm.dark-worker' } },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
 const wakes = (eventId: string) => db.agentTeamAlarmSchedule.findMany({ where: { eventId }, orderBy: { chainIndex: 'asc' } });
@@ -191,10 +195,12 @@ describe('cor:agt:050:14 — a task not started in time raises an alarm', () => 
     expect(await alarms()).toEqual([]);
   });
 
-  it('a person assignee is alarmed too, and is never marked unavailable', async () => {
+  // #3775 B (R5): this was "a person assignee is alarmed too"; a person-assigned task now raises no stall alarm at all
+  // (personAssigned3775.test.ts pins every rule), and a person is still never marked unavailable.
+  it('a person assignee raises no alarm and is never marked unavailable', async () => {
     await task({ ownerWorkerId: ada.id, assigneeUserId: mia.id, assignedAt: at('10:00'), createdAt: at('10:00') });
     await tick('10:15');
-    expect((await alarms()).map((a) => [a.type, a.subjectWorkerId])).toEqual([['stall.not-started', null]]);
+    expect(await alarms()).toEqual([]);
     expect(await db.workerAvailability.count()).toBe(0);
   });
 });
@@ -383,7 +389,7 @@ describe('cor:agt:050:16 r2 — an owner who doesn\'t react to a finished child 
   describe('#1848 — a person owner\'s own task calls end the window (cor:agt:050:12)', () => {
     /** Mia owns Rook's child under Ada's parent; the child finishes at 10:00. */
     async function personOwned() {
-      const parent = await task({ ownerWorkerId: ada.id, assigneeUserId: mia.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:10') });
+      const parent = await task({ ownerWorkerId: ada.id, assigneeWorkerId: liam.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:10') }); // #3775 B: a person-assigned parent raises nothing; the child OWNER stays Mia
       await task({
         parentTaskId: parent.id, ownerUserId: mia.id, assigneeWorkerId: rook.id, assignedAt: at('09:20'),
         status: 'finished', startedAt: at('09:30'), finishedAt: at('10:00'), resultOutcome: 'succeeded',
@@ -399,7 +405,7 @@ describe('cor:agt:050:16 r2 — an owner who doesn\'t react to a finished child 
       const parent = await personOwned();
       await db.agentTask.update({ where: { id: parent.id }, data: { assignedAt: at('10:05') } });
       await tick('10:20');
-      expect(await alarms('stall.owner-unreactive')).toEqual([expect.objectContaining({ taskId: parent.id, subjectWorkerId: null })]);
+      expect(await alarms('stall.owner-unreactive')).toEqual([expect.objectContaining({ taskId: parent.id, subjectWorkerId: liam.id })]); // #3775 B: the parent's assignee is a worker now; the person owner of the CHILD is never marked (count below)
       expect(await db.workerAvailability.count()).toBe(0);
     });
 
@@ -536,7 +542,7 @@ describe('cor:agt:050:13 — exactly one alarm per stall episode', () => {
   it('a re-run of the same pass is a no-op', async () => {
     await assignedToAnne('10:00');
     expect((await tick('10:15')).raised).toBe(1);
-    expect(await tick('10:15')).toEqual({ raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0 });
+    expect(await tick('10:15')).toEqual({ raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0, darkRaised: 0, cadenceRaised: 0, staleSweepRaised: 0, sweepSummariesPosted: 0 });
     expect(await alarms()).toHaveLength(1);
   });
 
@@ -852,7 +858,7 @@ describe('cor:agt:060:07 — a stall makes the assignee unavailable until it act
 
     it('a person who owns the parent is alarmed and never marked', async () => {
       const parent = await task({
-        ownerWorkerId: ada.id, assigneeUserId: mia.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:10'),
+        ownerWorkerId: ada.id, assigneeWorkerId: liam.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:10'), // #3775 B: worker-assigned parent
       });
       await task({
         parentTaskId: parent.id, ownerUserId: mia.id, assigneeWorkerId: rook.id, assignedAt: at('09:20'),
@@ -1142,9 +1148,25 @@ describe('#1754 — backlog and the stall rules (cor:agt:050:02, :17)', () => {
     expect(await wakes(a.id)).toHaveLength(3); // ada (child owner), liam (root owner), then the App manager (#1761)
     await db.agentTask.update({ where: { id: child.id }, data: { status: 'backlog' } });
     // Row 1 fell due at 09:01; the 09:10 pass closes it (nobody is woken) and raises nothing new.
-    expect(await tick('09:10')).toEqual({ raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0 });
+    // #2755: the fixture's worker is silent (OVERDUE), which is the dark-worker alarm's business, not this stall rule's.
+    expect(await tick('09:10')).toEqual({ raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0, darkRaised: expect.any(Number), cadenceRaised: expect.any(Number), staleSweepRaised: expect.any(Number), sweepSummariesPosted: expect.any(Number) });
     expect(await alarms('assignment.unassignable')).toHaveLength(1);
     expect((await wakes(a.id))[1]).toMatchObject({ wokenAt: null, endedAt: at('09:10') });
     expect((await wakes(a.id))[2]).toMatchObject({ wokenAt: null, endedAt: at('09:10') });
+  });
+});
+
+describe('#4285 item 2: every stall rule has its own alarm type (the raised-keys read joins on it)', () => {
+  // loadRaisedEpisodeKeys passes STALL_EVENT_TYPE[rule] for each candidate into an unnest(...) join on (task, type, episode
+  // start). An unmapped rule would send undefined (a key that matches nothing: the raise is never skipped, or the type is
+  // NULL); two rules sharing a type would let one rule's alarm hide the other's (Arianna, #4274 New-1/old 5).
+  it('maps each rule to a defined, distinct alarm type the event layer knows', () => {
+    const types = STALL_RULES.map((rule) => STALL_EVENT_TYPE[rule]);
+    for (const [i, t] of types.entries()) {
+      expect(t, `rule ${STALL_RULES[i]} has an alarm type`).toBeTypeOf('string');
+      expect(ALARM_EVENT_TYPES as readonly string[], `rule ${STALL_RULES[i]}'s type is a known alarm type`).toContain(t);
+    }
+    expect(new Set(types).size, 'no two rules share an alarm type').toBe(STALL_RULES.length);
+    expect(Object.keys(STALL_EVENT_TYPE).sort(), 'the map has no rule the evaluator does not know').toEqual([...STALL_RULES].sort());
   });
 });

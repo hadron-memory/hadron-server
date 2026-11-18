@@ -1,6 +1,8 @@
-import Mustache from 'mustache';
 import { parseIncludeTags } from './includes/parseIncludeTags.js';
 import { spliceIncludes, type SpliceOptions } from './includes/spliceIncludes.js';
+import { LiteralGuardCollision, makeLiteralGuard, restoreLiteralTags } from './includes/literalGuard.js';
+import { ResolutionBudget, isContentResolutionLimitError } from './includes/resolutionBudget.js';
+import { renderBudgeted } from './includes/budgetedWriter.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { decryptNodeFields } from './nodeCrypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
@@ -43,6 +45,10 @@ export function templatePartialLocs(content: string): string[] {
  * read, on top of the explicitly memory-wide ones (`memoryDataView.ts`). Omit
  * it when there is no attributable person: such a compile reads memory-wide
  * values only. Single-human memories ignore it.
+ *
+ * hadron-internal#40: the whole compile (splice, data and reference lookups, render) runs under
+ * one `ResolutionBudget` — `includes.budget`, or a fresh default one, so no caller compiles
+ * unbounded. Over a limit it throws `ContentResolutionLimitError`; it never returns partial text.
  */
 export async function compileTemplate(
   rawContent: string,
@@ -55,7 +61,8 @@ export async function compileTemplate(
   includes: SpliceOptions & { includer?: { id?: string } } = {},
 ): Promise<string> {
   if (!rawContent.includes('{{')) return rawContent;
-  let content = rawContent;
+  const content = rawContent;
+  const budget = includes.budget ?? new ResolutionBudget();
 
   // Check if the memory is encrypted. If so, we need to decrypt any nodes we
   // load during compilation. No key in the cache → we can't compile, so we
@@ -79,71 +86,113 @@ export async function compileTemplate(
   // Includes first, as plain text: each tag becomes the target's stored text
   // (nested, the reader's own access, a notice where it can't resolve), so the
   // variables below render across the whole of it, as a Mustache partial did.
-  content = await spliceIncludes(db, accessFilter, content, { id: includes.includer?.id, memoryId }, includes);
+  // A tag written as code is literal (cor:dmo:150:02, #2135): its opener is
+  // swapped for a per-render guard here, so Mustache cannot drop it as a
+  // partial, and swapped back on every way out. A guard that meets source text
+  // containing it is discarded and drawn again.
+  const renderSpliced = async (content: string, guard: string): Promise<string> => {
+    // 1. Build the view: node's own data
+    const view: Record<string, unknown> = {};
 
-  // 1. Build the view: node's own data
-  const view: Record<string, unknown> = {};
+    // #910: the default data bag and {{data.…}} references both use the
+    // per-person view in a multi-human host.
+    const dataNodeView = async (stored: Record<string, unknown>) =>
+      memory && isMultiHumanChatHost(memory)
+        ? multiHumanDataView(stored, await declaredMemoryWideFields(db, memory), personId)
+        : stored;
 
-  // #910: the default data bag and {{data.…}} references both use the
-  // per-person view in a multi-human host.
-  const dataNodeView = async (stored: Record<string, unknown>) =>
-    memory && isMultiHumanChatHost(memory)
-      ? multiHumanDataView(stored, await declaredMemoryWideFields(db, memory), personId)
-      : stored;
-
-  // #1835: retain both the includer's memory and the caller's read filter.
-  // Spreading the filter here could overwrite the literal memoryId.
-  // 2. Load memory's default data node (loc: "data")
-  const defaultDataNode = await db.node.findFirst({
-    where: { loc: 'data', memoryId, deletedAt: null, AND: [accessFilter] },
-    select: { data: true, content: true, memoryId: true },
-  });
-  if (defaultDataNode) {
-    if (memEncInfo?.isEncrypted) decryptNodeFields(defaultDataNode, memEncInfo);
-    if (defaultDataNode.data && typeof defaultDataNode.data === 'object') {
-      Object.assign(view, await dataNodeView(defaultDataNode.data as Record<string, unknown>));
-    }
-  }
-
-  // Node's own data overrides defaults. If nodeData is the wrapped
-  // ciphertext shape, the caller is responsible for having decrypted it
-  // before passing — the read-path resolvers already do that.
-  if (nodeData && typeof nodeData === 'object' && !('__enc' in nodeData)) {
-    Object.assign(view, nodeData as Record<string, unknown>);
-  }
-
-  // 3. Find cross-node references ({{node-name.field}})
-  // Mustache uses dot paths — we need to pre-populate referenced nodes
-  const refPattern = /\{\{[#^/]?([a-zA-Z0-9_-]+)\./g;
-  const refs = new Set<string>();
-  let match;
-  while ((match = refPattern.exec(content)) !== null) {
-    const ref = match[1];
-    // Skip if already in view (local or default data)
-    if (!(ref in view)) {
-      refs.add(ref);
-    }
-  }
-
-  for (const ref of refs) {
-    const refNode = await db.node.findFirst({
-      where: { loc: ref, memoryId, deletedAt: null, AND: [accessFilter] },
+    // #1835: retain both the includer's memory and the caller's read filter.
+    // Spreading the filter here could overwrite the literal memoryId.
+    // 2. Load memory's default data node (loc: "data")
+    budget.chargeLookup();
+    const defaultDataNode = await db.node.findFirst({
+      where: { loc: 'data', memoryId, deletedAt: null, AND: [accessFilter] },
       select: { data: true, content: true, memoryId: true },
     });
-    if (refNode) {
-      if (memEncInfo?.isEncrypted) decryptNodeFields(refNode, memEncInfo);
-      if (refNode.data && typeof refNode.data === 'object') {
-        view[ref] = ref === 'data'
-          ? await dataNodeView(refNode.data as Record<string, unknown>)
-          : refNode.data;
+    if (defaultDataNode) {
+      if (memEncInfo?.isEncrypted) decryptNodeFields(defaultDataNode, memEncInfo);
+      chargeLoadedRow(budget, defaultDataNode);
+      if (defaultDataNode.data && typeof defaultDataNode.data === 'object') {
+        Object.assign(view, await dataNodeView(defaultDataNode.data as Record<string, unknown>));
       }
     }
-  }
 
-  try {
-    return Mustache.render(content, view);
-  } catch {
-    // If compilation fails, return the raw content
-    return content;
+    // Node's own data overrides defaults. If nodeData is the wrapped
+    // ciphertext shape, the caller is responsible for having decrypted it
+    // before passing — the read-path resolvers already do that.
+    if (nodeData && typeof nodeData === 'object' && !('__enc' in nodeData)) {
+      Object.assign(view, nodeData as Record<string, unknown>);
+    }
+
+    // 3. Find cross-node references ({{node-name.field}})
+    // Mustache uses dot paths — we need to pre-populate referenced nodes
+    const refPattern = /\{\{[#^/]?([a-zA-Z0-9_-]+)\./g;
+    const refs = new Set<string>();
+    let match;
+    while ((match = refPattern.exec(content)) !== null) {
+      const ref = match[1];
+      // Skip if already in view (local or default data)
+      if (!(ref in view)) {
+        refs.add(ref);
+      }
+    }
+
+    for (const ref of refs) {
+      // Charged before the query, found or not (no oracle on which locs exist).
+      budget.chargeLookup();
+      const refNode = await db.node.findFirst({
+        where: { loc: ref, memoryId, deletedAt: null, AND: [accessFilter] },
+        select: { data: true, content: true, memoryId: true },
+      });
+      if (refNode) {
+        if (memEncInfo?.isEncrypted) decryptNodeFields(refNode, memEncInfo);
+        chargeLoadedRow(budget, refNode);
+        if (refNode.data && typeof refNode.data === 'object') {
+          view[ref] = ref === 'data'
+            ? await dataNodeView(refNode.data as Record<string, unknown>)
+            : refNode.data;
+        }
+      }
+    }
+
+    // The guard is restored out of the rendered text, so data holding it would be rewritten too.
+    if (viewHolds(view, guard)) throw new LiteralGuardCollision();
+    try {
+      // A writer per render: charged as it writes, and no parse retained afterwards (#40).
+      return renderBudgeted(content, view, budget);
+    } catch (e) {
+      // A limit refuses the read; it must never fall through to the spliced text below.
+      if (isContentResolutionLimitError(e)) throw e;
+      // If compilation fails, return the raw content
+      return content;
+    }
+  };
+
+  for (let attempt = 0; ; attempt++) {
+    const guard = makeLiteralGuard();
+    try {
+      const spliced = await spliceIncludes(
+        // A guard collision (vanishingly rare: the guard is random per render) retries under the
+        // same budget, so a retry can only refuse sooner, never resolve more.
+        db, accessFilter, content, { id: includes.includer?.id, memoryId }, { ...includes, literalGuard: guard, budget },
+      );
+      return restoreLiteralTags(await renderSpliced(spliced, guard), guard);
+    } catch (e) {
+      if (!(e instanceof LiteralGuardCollision) || attempt >= 4) throw e;
+    }
   }
+}
+
+/** Charge an authorized data or reference row's loaded text (its content and its data, as UTF-8). */
+function chargeLoadedRow(budget: ResolutionBudget, row: { content?: unknown; data?: unknown }): void {
+  if (typeof row.content === 'string') budget.chargeLoaded(row.content);
+  if (row.data != null && typeof row.data === 'object') budget.chargeLoaded(JSON.stringify(row.data));
+}
+
+/** Whether any string in `view` (keys included) holds `guard`. A walk, not JSON: JSON escapes the control characters a guard is made of. */
+function viewHolds(value: unknown, guard: string, seen = new Set<object>()): boolean {
+  if (typeof value === 'string') return value.includes(guard);
+  if (value === null || typeof value !== 'object' || seen.has(value)) return false;
+  seen.add(value);
+  return Object.entries(value).some(([k, v]) => k.includes(guard) || viewHolds(v, guard, seen));
 }

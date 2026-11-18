@@ -22,10 +22,12 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
+import { waitForLockWaiters } from '../lockWait.js';
 import { generateId } from '../../lib/id.js';
+import { Client } from 'pg';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 
 let server: Server;
 let baseUrl: string;
@@ -37,7 +39,7 @@ const TEST_CLIENT_ID = `dcr_${'a'.repeat(32)}`;
 let testUser: { id: string };
 
 beforeAll(async () => {
-  const app = await createServer();
+  const app = await createServerOnCleanDb();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
@@ -45,9 +47,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await new Promise<void>((resolve, reject) => {
-    server.close((err) => (err ? reject(err) : resolve()));
-  });
+  await closeServerIfStarted(server);
 });
 
 beforeEach(async () => {
@@ -174,5 +174,35 @@ describe('POST /oauth/token — concurrent redemption (SC-005 / R-9)', () => {
     expect(statuses).toEqual([200, 400, 400, 400, 400]);
     const keys = await db.userApiKey.findMany({ where: { userId: testUser.id } });
     expect(keys).toHaveLength(1);
+  });
+});
+
+describe('POST /oauth/token — client collected mid-redemption (#155)', () => {
+  it('a soft delete that holds the client row while two redeemers run lets neither mint a key', async () => {
+    const seed = await seedRedemptionCandidate();
+    // A second connection plays the GC: it holds the client row, the
+    // redeemers queue behind it, and it commits the soft delete only then.
+    const gc = new Client({ connectionString: process.env.DATABASE_URL });
+    await gc.connect();
+    try {
+      await gc.query('BEGIN');
+      await gc.query('SELECT client_id FROM oauth_clients WHERE client_id = $1 FOR UPDATE', [TEST_CLIENT_ID]);
+      const pending = Promise.all([redeem(seed), redeem(seed)]);
+      // Both redeemers are queued behind the held client row (n = 2), not assumed from a delay.
+      await waitForLockWaiters(db, 2);
+      // Nothing may have been minted while the client row is held.
+      expect(await db.userApiKey.count()).toBe(0);
+      await gc.query(
+        "UPDATE oauth_clients SET deleted_at = now(), deleted_by = 'system:gc' WHERE client_id = $1",
+        [TEST_CLIENT_ID],
+      );
+      await gc.query('COMMIT');
+      const responses = await pending;
+      expect(responses.map((r) => r.status)).toEqual([400, 400]);
+      for (const r of responses) expect(((await r.json()) as { error: string }).error).toBe('invalid_grant');
+      expect(await db.userApiKey.count()).toBe(0);
+    } finally {
+      await gc.end();
+    }
   });
 });

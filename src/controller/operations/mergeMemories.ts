@@ -1,3 +1,4 @@
+import { ENGINE_KEYS } from '../../lib/chatRootEngineState.js';
 import { resetEmbeddingObligations, stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { memoryIsVectorIndexed } from '../../lib/embedding/indexing.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptMergeCollisions, assertNoBootPromptRows, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
@@ -13,7 +14,7 @@ import {
   assertNoMintedSpecRemoval,
   preflightNoMintedCorpusRemoval,
 } from '../../lib/mintedSpecPermanence.js';
-import { lockMemoryForChannelChange } from '../../lib/channels.js';
+import { lockMemoriesForChannelChange, lockMemoryForChannelChange } from '../../lib/channels.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import { clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import {
@@ -676,9 +677,7 @@ async function runMerge(
       // the fold rows. Take the complete Channel-memory set first: holding the
       // Node/Memory rows while waiting for a Channel key would invert against
       // final source disposition, which takes that key before its Memory rows.
-      for (const id of [...new Set([sourceMemoryId, targetMemoryId])].sort()) {
-        await lockMemoryForChannelChange(tx, id);
-      }
+      await lockMemoriesForChannelChange(tx, [sourceMemoryId, targetMemoryId]);
 
       // Read the target schema INSIDE the tx so the fold validates against the
       // schema current at fold time (a tightening committed between batches is
@@ -766,10 +765,20 @@ async function runMerge(
       for (const src of srcRows) {
         const tgt = tgtById.get(survivor.get(src.id)!);
         if (!tgt) continue; // counterpart vanished (concurrent delete) — skip
+        // #3501: a collision keeps the target's operational identity, including
+        // its pre-fold legacy seed or absence. Source DATA may fill content gaps,
+        // but must never become a later lazy engine seed on the surviving root.
+        let sourceData = src.data;
+        if (tgt.nodeType === 'record' && /^chats:[^:]+$/.test(tgt.loc)
+          && sourceData && typeof sourceData === 'object' && !Array.isArray(sourceData)) {
+          const contentData = { ...sourceData };
+          for (const key of ENGINE_KEYS) delete contentData[key];
+          sourceData = contentData;
+        }
         let merged;
         try {
           merged = mergeNodeFields(
-            { content: src.content, abstract: src.abstract, description: src.description, tags: src.tags, data: src.data, properties: src.properties },
+            { content: src.content, abstract: src.abstract, description: src.description, tags: src.tags, data: sourceData, properties: src.properties },
             { content: tgt.content, abstract: tgt.abstract, description: tgt.description, tags: tgt.tags, data: tgt.data, properties: tgt.properties },
             fields,
           );

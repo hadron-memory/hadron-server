@@ -294,6 +294,34 @@ func headerCases() []kase {
 // findingsByHost from Go's LintFor over EVERY row of skilldoc.Hosts — never
 // skilldoc.Lint, the Claude-only wrapper, under which a codexSkill
 // declaration is not evaluated at all (PR #1343 review).
+// templateCases are the inputs of `lintTemplate` (hadron-server#2943 /
+// hadron-cli#1166): an include tag `{{> part}}` is resolved on export, so the
+// "ships as literal text" warning is for an ordinary placeholder only.
+func templateCases() []kase {
+	node := func(content string) map[string]any {
+		decl := map[string]any{"name": "tpl", "description": "Does a thing. Use when you need it.", "enable": true}
+		return map[string]any{
+			"urn": "hrn:node:acme.com:mem:tasks:tpl", "loc": "tasks:tpl", "memoryUrn": "hrn:mem:acme.com:mem",
+			"isRunnable": true, "content": content,
+			"properties": map[string]any{"exports": map[string]any{"claudeSkill": decl, "codexSkill": decl}},
+		}
+	}
+	return []kase{
+		{"name": "an include tag alone gets no finding", "node": node("# T\n\n{{> base:parts:intro}}\n")},
+		{"name": "two include tags get no finding", "node": node("{{> a:b}} then {{>c}}")},
+		{"name": "a placeholder alone still warns", "node": node("Hello {{name}}")},
+		{"name": "an include tag beside a placeholder still warns", "node": node("{{> a:b}} and {{name}}"),
+			"why": "the placeholder still ships as literal text"},
+		{"name": "a space before > is not an include tag, so it warns", "node": node("{{ > a:b}}"),
+			"why": "the export resolver's opener is exactly {{>"},
+		{"name": "an empty pair still warns", "node": node("x {{}} y")},
+		{"name": "no braces, no finding", "node": node("plain body")},
+		{"name": "braces inside an include target still warn", "node": node("{{>{{x}}"),
+			"why": "the rule is a pattern search, not the include parser: the inner {{x}} is a placeholder match (out of scope: reimplementing the parser, #2943)"},
+		{"name": "an include tag with inner padding gets no finding", "node": node("{{>  part  }}")},
+	}
+}
+
 func lintPerHost(doc map[string]json.RawMessage, section string, cases []kase) []kase {
 	var out []kase
 	b, _ := json.Marshal(upsert(decodeOrEmpty(doc, section), cases...))
@@ -515,6 +543,13 @@ func main() {
 	// c9fa75a) or later for the rule to exist.
 	doc["lintMarkup"], _ = json.Marshal(lintPerHost(doc, "lintMarkup", markupCases()))
 	doc["lintMarkupSourceCommit"], _ = json.Marshal(commit)
+
+	// ── lintTemplate ────────────────────────────────────────────────────────
+	// hadron-server#2943 / hadron-cli#1166: include tags get no
+	// skill-content-has-template finding. Its own section and stamp, like
+	// lintMarkup; needs the hadron-cli#1166 change or later.
+	doc["lintTemplate"], _ = json.Marshal(lintPerHost(doc, "lintTemplate", templateCases()))
+	doc["lintTemplateSourceCommit"], _ = json.Marshal(commit)
 
 	// ── parseHeader ─────────────────────────────────────────────────────────
 	// #1323: Go's ParseFile over the headerCases edits. Its own section and

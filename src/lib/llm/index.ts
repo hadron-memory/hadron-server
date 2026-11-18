@@ -23,6 +23,7 @@ import {
   type LanguageModel,
 } from 'ai';
 import { AuthorFailError, type RunToolDef, type RunToolContext } from '../runner/tools/types.js';
+import { admitAndExecuteTool, type ToolCallRecord } from '../runner/toolAdmission.js';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
@@ -126,6 +127,10 @@ function modelFor(resolved: ResolvedAiConfig): LanguageModel {
     case 'glm':
       // Default CHAT_COMPLETIONS: Zhipu and Z.ai serve only /chat/completions.
       return openAiCompatible(createOpenAI({ apiKey: key, baseURL: defaultEndpoint('glm')!, ...conn }));
+    case 'kimi':
+      // #4170: Moonshot serves Chat Completions; own key only (kimi is not an
+      // ambient-credential provider), the catalogue default host when no endpoint is set.
+      return openAiCompatible(createOpenAI({ apiKey: key, baseURL: defaultEndpoint('kimi')!, ...conn }));
     case 'openai-compatible':
       // #1373: a caller-named host speaking an OpenAI wire protocol. Its
       // endpoint is required at write time; a row that somehow lacks one must
@@ -263,7 +268,7 @@ const EXTRACTION_NATIVE_TIMEOUT_MS = (() => {
 })();
 
 /** Providers whose native structured-output path is not trusted yet. */
-const JSON_PROMPT_ONLY_PROVIDERS = new Set(['bedrock', 'glm', 'openai-compatible']);
+const JSON_PROMPT_ONLY_PROVIDERS = new Set(['bedrock', 'glm', 'kimi', 'openai-compatible']);
 
 export async function generateExtraction(
   resolved: ResolvedAiConfig,
@@ -377,14 +382,34 @@ const DEFAULT_TOOL_STEP_CAP = (() => {
   return Number.isFinite(raw) && raw > 0 ? raw : 8; // D-TL-4
 })();
 
-export interface ToolCallRecord {
-  name: string;
-  ok: boolean;
-  ms: number;
-}
+export type { ToolCallRecord } from '../runner/toolAdmission.js';
 
 export interface LlmToolLoopResult extends LlmResult {
   toolCalls: ToolCallRecord[];
+}
+
+/**
+ * #862 — the usage the provider already billed for the steps a tool-loop call
+ * COMPLETED before it was rejected (cor:agt:010:02: every action decrements the
+ * run's budget on that call). Carried on the thrown error, never invented:
+ *
+ *   - absent means unknown: no step completed, or none reported usage;
+ *   - present with zeros means a step really measured zero;
+ *   - the step that failed is never included, and is never represented as zero.
+ *
+ * A step is measured when the SDK gave a defined input or output count; an
+ * undefined side of a measured step counts as 0 on that side.
+ */
+export interface PartialUsage {
+  tokensIn: number;
+  tokensOut: number;
+  /** Completed steps that reported usage; >= 1 whenever the property exists. */
+  measuredSteps: number;
+}
+
+/** The measured usage of a rejected tool-loop call, or undefined when unknown. */
+export function partialUsageOf(err: unknown): PartialUsage | undefined {
+  return (err as { partialUsage?: PartialUsage } | null)?.partialUsage;
 }
 
 /** Unverified provider for the tool loop (D-TL-8) — typed, not string-matched
@@ -401,26 +426,7 @@ export class NoToolSupportError extends LlmInvocationError {
   }
 }
 
-/** The D-TL-3 gate said no: policy, cancellation, or exhausted action budget. */
-export class ToolDeniedError extends Error {
-  constructor(readonly tool: string) {
-    super(`Tool "${tool}" denied (policy, cancellation, or action budget).`);
-    this.name = 'ToolDeniedError';
-  }
-}
-
-/** A handler threw: terminal TOOL_FAILED, never retried (D-TL-6 — tool side
- *  effects are not known-idempotent, so redelivery is unsafe). */
-export class ToolExecutionError extends Error {
-  constructor(
-    readonly tool: string,
-    message: string,
-    options?: ErrorOptions,
-  ) {
-    super(`Tool "${tool}" failed: ${message}`, options);
-    this.name = 'ToolExecutionError';
-  }
-}
+export { ToolDeniedError, ToolExecutionError } from '../runner/toolAdmission.js';
 
 export interface ToolLoopOpts {
   /** Max LLM steps for this hop (D-TL-4). Default RUN_MAX_TOOL_STEPS_PER_HOP (8). */
@@ -465,6 +471,22 @@ export async function generateWithTools(
   const toolCalls: ToolCallRecord[] = [];
   // Our terminal errors, captured before the SDK can wrap them.
   let fatal: Error | null = null;
+  const terminal = (): Error | null => fatal;
+  // #862: usage of the steps the SDK reports complete, for a rejected call.
+  const measured: Array<{ tokensIn: number; tokensOut: number }> = [];
+  const withMeasuredUsage = <E extends Error>(err: E): E => {
+    // The usage belongs to THIS invocation: an error instance thrown again by a
+    // later call (a reused provider error) must not carry the last call's steps.
+    if (measured.length === 0) delete (err as E & { partialUsage?: PartialUsage }).partialUsage;
+    if (measured.length > 0) {
+      (err as E & { partialUsage?: PartialUsage }).partialUsage = {
+        tokensIn: measured.reduce((n, step) => n + step.tokensIn, 0),
+        tokensOut: measured.reduce((n, step) => n + step.tokensOut, 0),
+        measuredSteps: measured.length,
+      };
+    }
+    return err;
+  };
 
   const sdkTools = Object.fromEntries(
     toolDefs.map((def) => [
@@ -473,27 +495,27 @@ export async function generateWithTools(
         description: def.description,
         inputSchema: jsonSchema<Record<string, unknown>>(def.inputSchema as never),
         execute: async (args: Record<string, unknown>) => {
-          const started = Date.now();
           try {
-            if (opts.onToolCall && !(await opts.onToolCall(def.policyAction ?? `tool.${def.name}`, def.cost))) {
-              throw new ToolDeniedError(def.name);
-            }
-            const result = await def.execute(opts.toolCtx, args ?? {});
-            toolCalls.push({ name: def.name, ok: true, ms: Date.now() - started });
-            return result;
+            // #670: admission + execute is ONE function shared with the script node (cor:agt:010:04).
+            // #2418: ai@7 starts every call of a step together, so a sibling can be admitted (and charged)
+            // while a terminal runs. Past admission, an already-set terminal means this call's side effect
+            // must not run: `beforeExecute` throws the first terminal (nothing replaces it).
+            return await admitAndExecuteTool(def, args, {
+              onToolCall: opts.onToolCall,
+              toolCtx: opts.toolCtx,
+              beforeExecute: () => {
+                const ended = terminal();
+                if (ended) throw ended;
+              },
+              record: (r) => toolCalls.push(r),
+            });
           } catch (err) {
-            toolCalls.push({ name: def.name, ok: false, ms: Date.now() - started });
-            // instanceof, not name-matching: a non-Error rejection with a
-            // spoofed `name` must not ride the passthrough (PR-540 Copilot).
-            fatal =
-              err instanceof AuthorFailError || err instanceof ToolDeniedError
-                ? err
-                : new ToolExecutionError(
-                    def.name,
-                    String((err as Error)?.message ?? err),
-                    { cause: err },
-                  );
-            throw fatal; // abort the SDK loop
+            // The FIRST terminal wins: with parallel calls in one step a later sibling's failure must not
+            // replace the error that ended the run. admitAndExecuteTool already classified `err`.
+            if (fatal === null) fatal = err as Error;
+            // ai@7 turns a throwing execute into a `tool-error` part and keeps looping, so a throw alone no
+            // longer aborts (#2412): `stopWhen` ends the loop after this step, and the resolved path rethrows.
+            throw fatal;
           }
         },
       }),
@@ -507,9 +529,21 @@ export async function generateWithTools(
       ...(req.system ? { system: req.system } : {}),
       prompt: req.prompt,
       tools: sdkTools,
-      stopWhen: stepCountIs(opts.stepCap ?? DEFAULT_TOOL_STEP_CAP),
+      stopWhen: [stepCountIs(opts.stepCap ?? DEFAULT_TOOL_STEP_CAP), () => terminal() !== null],
+      onStepEnd: (step) => {
+        const { inputTokens, outputTokens } = step.usage ?? {};
+        if (inputTokens !== undefined || outputTokens !== undefined) {
+          measured.push({ tokensIn: inputTokens ?? 0, tokensOut: outputTokens ?? 0 });
+        }
+      },
       ...settings,
     });
+    // Backstop (#2412): the SDK resolved after a tool terminal. Our error
+    // wins, un-wrapped, so the kernel maps it (AUTHOR_FAIL / ACTIVATION_DENIED /
+    // TOOL_FAILED) instead of recording a success. Thrown inside this try, so
+    // the catch below attaches the steps it completed (#862).
+    const ended = terminal();
+    if (ended) throw ended;
     const usage = out.totalUsage ?? out.usage; // summed across steps (spike-pinned)
     return {
       text: out.text,
@@ -522,19 +556,94 @@ export async function generateWithTools(
       toolCalls,
     };
   } catch (err) {
-    if (fatal) throw fatal; // our terminal errors win over SDK wrapping
-    if (err instanceof LlmInvocationError) throw err;
+    const ended = terminal();
+    if (ended) throw withMeasuredUsage(ended); // our terminal errors win over SDK wrapping
+    if (err instanceof LlmInvocationError) throw withMeasuredUsage(err);
     // Transient (⇒ bus-redelivery retry) ONLY while no SIDE-EFFECTING tool
     // has executed (D-TL-6, refined per PR-540 Gemini): cost-0 tools are
     // retry-safe — reads are pure, and hadron_log writes only to the
     // in-memory hop element, which a transient reset never persisted.
     const costOf = new Map(toolDefs.map((t) => [t.name, t.cost]));
     const sideEffectRan = toolCalls.some((c) => c.ok && (costOf.get(c.name) ?? 1) > 0);
-    throw new LlmInvocationError(
+    throw withMeasuredUsage(new LlmInvocationError(
       `LLM tool loop failed (${provider}/${model}): ${String((err as Error)?.message ?? err)}`,
       provider,
       isTransient(err) && !sideEffectRan,
       { cause: err },
+    ));
+  }
+}
+
+/** Whether a provider (and config) can be offered tools at all: the tool loop's own gate. */
+export function providerSupportsTools(config: { provider: string; params?: unknown }): boolean {
+  const optedIn =
+    config.provider === 'openai-compatible' &&
+    (config.params as { toolCalling?: unknown } | null | undefined)?.toolCalling === true;
+  return TOOL_LOOP_PROVIDERS.has(config.provider) || optedIn;
+}
+
+export interface ChatProbeCall {
+  name: string;
+  /** The arguments as the SDK parsed them; undefined when the call's input was not valid JSON for its schema. */
+  input: unknown;
+  /** The SDK could not match the call to a declared tool or its input to the schema. */
+  invalid: boolean;
+}
+
+export interface ChatProbeResult {
+  text: string;
+  calls: ChatProbeCall[];
+  tokensIn: number;
+  tokensOut: number;
+}
+
+/**
+ * #4005 — ONE tool-offering call, no execution and no loop: the chat probe
+ * offers the chat turn's respond tool with the chat turn's tool-choice
+ * decision and reports what the model called. Same model construction,
+ * endpoint guard and call settings as every other call; zero retries and a
+ * hard deadline, like the run probe.
+ */
+export async function generateChatProbe(
+  resolved: ResolvedAiConfig,
+  req: LlmRequest,
+  tools: ReadonlyArray<{ name: string; description: string; parameters: unknown }>,
+  toolChoice: 'auto' | { type: 'tool'; toolName: string },
+): Promise<ChatProbeResult> {
+  const { provider, model } = resolved.config;
+  const { settings } = callSettingsFor(resolved.config, req.maxTokens);
+  const sdkTools = Object.fromEntries(
+    tools.map((def) => [
+      def.name,
+      aiTool({ description: def.description, inputSchema: jsonSchema<Record<string, unknown>>(def.parameters as never) }),
+    ]),
+  );
+  try {
+    const out = await aiGenerateText({
+      model: modelFor(resolved),
+      ...(req.system ? { system: req.system } : {}),
+      prompt: req.prompt,
+      tools: sdkTools,
+      toolChoice,
+      ...settings,
+      ...(req.timeoutMs != null ? { abortSignal: AbortSignal.timeout(req.timeoutMs), maxRetries: 0 } : {}),
+    });
+    return {
+      text: out.text,
+      calls: out.toolCalls.map((c) => ({
+        name: c.toolName,
+        input: (c as { input?: unknown }).input,
+        invalid: (c as { invalid?: boolean }).invalid === true,
+      })),
+      tokensIn: out.usage?.inputTokens ?? 0,
+      tokensOut: out.usage?.outputTokens ?? 0,
+    };
+  } catch (err) {
+    if (err instanceof LlmInvocationError) throw err;
+    throw new LlmInvocationError(
+      `LLM call failed (${provider}/${model}): ${String((err as Error)?.message ?? err)}`,
+      provider,
+      isTransient(err),
     );
   }
 }
