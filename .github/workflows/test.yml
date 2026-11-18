@@ -142,11 +142,12 @@ jobs:
         #   nowhere, so nothing holds the log open after the suite exits.
         # - a 45 min step timeout (healthy shards take 15-26 min) makes a hang fail as this named step, log kept,
         #   inside the job's 60.
-        # - a trial cap of 2 forks (Hugo, #4278): vitest's default on these 4-vCPU runners is already 3 (CPUs - 1), so
-        #   2 is the real reduction. If a shard's median wall time grows by more than 30%, pin 3 instead.
+        # - the fork count pinned at 3, vitest's default on these 4-vCPU runners (CPUs - 1), so a changed runner size
+        #   can't silently change it. A trial of 2 (Hugo's rule: pin 3 if any shard's median grew more than 30%) grew
+        #   shard 4's median by 39%, while healthy shards peaked at 3.7 GB used of 16 GB at 2 forks.
         timeout-minutes: 45
         env:
-          HADRON_TEST_MAX_WORKERS: '2'
+          HADRON_TEST_MAX_WORKERS: '3'
         run: |
           echo "[sampler] nproc=$(nproc)"
           (
