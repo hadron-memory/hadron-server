@@ -17952,7 +17952,7 @@ export const typeDefs = `#graphql
   #1707 — a worker's derived state on the team roster, as defined by
   hrn:node:hadronmemory.com:specs:cor:agt:050:22 (Definition: A worker's roster state;
   the states are Proposed). A worker can be in several at once; it is shown in the
-  first that holds, in this order. NO_FAMILY is served but not yet defined in the spec.
+  first that holds, in this order.
   """
   enum TeamRosterState {
     "Woken on an unacknowledged alarm (hrn:node:hadronmemory.com:specs:cor:agt:050:19), or a child task it owns finished or was cancelled after it last acted (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
