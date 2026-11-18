@@ -49,14 +49,16 @@ describe('#3998 revealSecret', () => {
   });
 
   it('a failed audit write on a refused read keeps the uniform refusal and is logged, not swallowed (Dara P2)', async () => {
-    const create = vi.spyOn(db.secretEvent, 'create').mockRejectedValueOnce(new Error('audit down'));
+    const create = vi.spyOn(db.secretEvent, 'create').mockRejectedValueOnce(Object.assign(new Error('audit down SENTINEL-hunter2'), { code: 'P2002', meta: { target: 'SENTINEL-hunter2' } }));
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
       expect(await code(reveal(otherWorkerId))).toBe('SECRET_READ_CLIENT_NOT_FOUND');
       expect(create).toHaveBeenCalledTimes(1);
       const call = log.mock.calls.find((c) => c[0] === '[revealSecret] audit write failed');
       expect(call).toBeDefined();
-      expect(JSON.stringify(call, (_k, v) => (v instanceof Error ? v.message : v))).not.toContain('hunter2');
+      // Only the allowlisted code is logged: neither the message nor the metadata of the thrown error reaches the log (Dara P2, head 3).
+      expect(call?.[1]).toMatchObject({ errorCode: 'P2002' });
+      expect(JSON.stringify(call, (_k, v) => (v instanceof Error ? { m: v.message, ...v } : v))).not.toContain('SENTINEL');
     } finally { create.mockRestore(); log.mockRestore(); }
   });
 
