@@ -77,13 +77,74 @@ beforeAll(async () => {
 // timing; a recurrence at 30s needs cause investigation, not another increase.
 // Only this invocation's generated DB and two roles are named or removed.
 afterAll(async () => {
+  // #4377: the cluster's checkpoint counters and dirty-buffer origin either side of the owned DROP, to say what the
+  // drop's immediate checkpoint writes. Each reading is capped and swallowed, so it can't fail or stall the hook.
+  const before = await checkpointReading();
   const c = new Client({ connectionString: urlFor(new URL(maintenanceUrl()).username, 'postgres') });
   // #3877: if the owned DROP is still pending after 10s, log what the backends wait on, from a second connection.
-  await cleanupOwnedSmokeFixture(c, { database: DB, roles: [OWNER, SERVE] }, console.error, {
-    slowAfterMs: 10_000,
-    snapshot: () => dropSnapshot(c.processID),
-  });
+  try {
+    await cleanupOwnedSmokeFixture(c, { database: DB, roles: [OWNER, SERVE] }, console.error, {
+      slowAfterMs: 10_000,
+      snapshot: () => dropSnapshot(c.processID),
+    });
+  } finally {
+    console.error(JSON.stringify({ event: 'serve-role-smoke.cleanup.checkpoint', database: DB, before, after: await checkpointReading() }));
+  }
 }, 30_000);
+
+/** Reads on one probe connection, each independent: a failing read (an absent view or extension) is recorded, not thrown. */
+async function probeReads(reads: Record<string, [string, unknown[]?]>, timeoutMs = 5_000): Promise<Record<string, unknown>> {
+  const probe = new Client({
+    connectionString: urlFor(new URL(maintenanceUrl()).username, 'postgres'),
+    connectionTimeoutMillis: timeoutMs,
+    query_timeout: timeoutMs,
+  });
+  await probe.connect();
+  try {
+    const out: Record<string, unknown> = {};
+    for (const [name, [sql, params = []]] of Object.entries(reads)) {
+      try {
+        out[name] = (await probe.query(sql, params)).rows;
+      } catch (error) {
+        out[name] = { error: error instanceof Error ? error.message : 'unknown' };
+      }
+    }
+    return out;
+  } finally {
+    await probe.end();
+  }
+}
+
+/** PG16 keeps the checkpoint counters in pg_stat_bgwriter (CI); PG17 moved them to pg_stat_checkpointer. */
+const CHECKPOINT_COUNTERS = `SELECT * FROM pg_stat_bgwriter`;
+
+/**
+ * #4377: one reading of what an immediate checkpoint would have to write. Dirty buffers are grouped by database and
+ * split by relfilenode below 16384 (system catalogs as a fresh clone copies them) or above (user relations, which
+ * tests write and TRUNCATE renumbers), so clone copies and test writes show apart. pg_buffercache and track_io_timing
+ * are set up only on CI's throwaway test cluster (test.yml); elsewhere those reads record their error. Capped at 2s.
+ */
+async function checkpointReading(): Promise<unknown> {
+  const started = performance.now();
+  const reading = probeReads({
+    counters: [CHECKPOINT_COUNTERS],
+    checkpointerCounters: [`SELECT * FROM pg_stat_checkpointer`],
+    checkpointerIo: [`SELECT writes, write_time, fsyncs, fsync_time FROM pg_stat_io
+                       WHERE backend_type = 'checkpointer' AND object = 'relation' AND context = 'normal'`],
+    checkpointer: [`SELECT wait_event FROM pg_stat_activity WHERE backend_type = 'checkpointer'`],
+    buffers: [`SELECT count(*) FILTER (WHERE isdirty) AS dirty, count(relfilenode) AS used, count(*) AS total FROM pg_buffercache`],
+    dirtyByDatabase: [`SELECT coalesce(d.datname, b.reldatabase::text) AS db,
+                              count(*) FILTER (WHERE b.relfilenode < 16384) AS catalog,
+                              count(*) FILTER (WHERE b.relfilenode >= 16384) AS user_rel
+                         FROM pg_buffercache b LEFT JOIN pg_database d ON d.oid = b.reldatabase
+                        WHERE b.isdirty GROUP BY 1 ORDER BY count(*) DESC LIMIT 20`],
+    databases: [`SELECT count(*) AS total, count(*) FILTER (WHERE datname LIKE 'hadron_test_r%') AS clones FROM pg_database`],
+    settings: [`SELECT name, setting FROM pg_settings WHERE name IN ('shared_buffers', 'track_io_timing', 'fsync', 'checkpoint_timeout', 'max_wal_size')`],
+  }, 2_000);
+  const cap = new Promise<{ error: string }>((resolve) => setTimeout(() => resolve({ error: 'reading capped at 2000ms' }), 2_000).unref());
+  const result = await Promise.race([reading.catch((e: unknown) => ({ error: e instanceof Error ? e.message : 'unknown' })), cap]);
+  return { readMs: Math.round(performance.now() - started), ...result };
+}
 
 // Each read is independent: one failing (say pg_stat_checkpointer on an older server) never hides the others.
 async function dropSnapshot(dropperPid: number | null | undefined) {
@@ -113,7 +174,8 @@ async function dropSnapshot(dropperPid: number | null | undefined) {
         [dropperPid ?? 0, DB],
       ),
       ungrantedLocks: await read(`SELECT pid, locktype, mode, database, relation::regclass::text AS relation FROM pg_locks WHERE NOT granted LIMIT 50`),
-      checkpointer: await read(`SELECT * FROM pg_stat_checkpointer`),
+      // pg_stat_checkpointer is PG17; CI's PG16 keeps the same counters in pg_stat_bgwriter (#4377).
+      checkpointer: await read(`SELECT * FROM pg_stat_checkpointer`).then((r) => ('error' in r ? read(CHECKPOINT_COUNTERS) : r)),
     };
   } finally {
     await probe.end();
