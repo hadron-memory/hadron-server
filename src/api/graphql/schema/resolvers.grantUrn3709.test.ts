@@ -131,10 +131,21 @@ describe('#3709 — grant(ref:) accepts the computed URN under the id read gate'
   it('a grant held by another worker, and a caller with no reader, answer as missing', async () => {
     const otherWorkerGrant = await heldGrant({ worker_id: null, user_id: w.user2Id });
     const r1 = await asWorker(ONE, { r: otherWorkerGrant.urn });
+    // Null AND error-free: a typed not-found on the wire would be an existence
+    // oracle (cor:api:140:02 — the same answer as a missing id, never an error).
+    expect(r1.errors, JSON.stringify(r1.errors)).toBeUndefined();
     expect(r1.data.grant).toBeNull();
 
     const r2 = await post(rawKey, null, ONE, { r: otherWorkerGrant.urn });
+    expect(r2.errors, JSON.stringify(r2.errors)).toBeUndefined();
     expect(r2.data.grant).toBeNull();
+
+    // A well-formed URN whose leaf names nothing: null, never a typed not-found
+    // on the wire — the catch around resolveGrantRef must conceal the miss
+    // exactly as the row scope conceals an out-of-scope row (cor:api:140:02).
+    const r3 = await asWorker(ONE, { r: composeGrantUrnV2(orgUrn, APP_SLUG, generateId()) });
+    expect(r3.errors, JSON.stringify(r3.errors)).toBeUndefined();
+    expect(r3.data.grant).toBeNull();
   });
 
   it('a malformed or wrong-type URN is the typed input refusal URN_NOT_QUALIFIED (acceptance 3)', async () => {
@@ -171,6 +182,7 @@ describe('#3709 — grant(ref:) accepts the computed URN under the id read gate'
     const g = await heldGrant();
     await db.app.update({ where: { id: w.appId }, data: { deletedAt: new Date() } });
     const r = await asWorker(ONE, { r: g.urn });
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
     expect(r.data.grant).toBeNull();
   });
 });
