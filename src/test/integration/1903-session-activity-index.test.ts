@@ -31,6 +31,7 @@ import { describe, it, expect } from 'vitest';
 import { Prisma } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
 import { workerActivitySql, setWorkerActivityPlanSettings } from '../../api/graphql/schema/resolvers.worker.js';
+import { everyRowProbe, skipSeedForeignKeys } from '../sessionActivityProbe.js';
 
 const INDEX = 'usage_events_session_activity_idx';
 const WALK = 'usage_events_created_at_idx';
@@ -69,18 +70,7 @@ const roster = (): Prisma.Sql => workerActivitySql(Prisma.sql`w.app_id = ${APP}`
  * shipped query against exactly one difference: the aggregate in place of #4397's ordered one-row probe.
  */
 function incidentShape(sql: Prisma.Sql): Prisma.Sql {
-  const swaps: [string, string][] = [
-    ['SELECT e.created_at AS max_created', 'SELECT max(e.created_at) AS max_created'],
-    ['e.session_id >= s.id AND e.session_id <= s.id', 'e.session_id = s.id'],
-    ['ORDER BY e.session_id DESC, e.created_at DESC\n      LIMIT 1', ''],
-  ];
-  let strings = sql.strings.slice();
-  for (const [from, to] of swaps) {
-    const hits = strings.filter((s) => s.includes(from)).length;
-    if (hits !== 1) throw new Error(`expected the probe fragment exactly once, found ${hits}: ${from}`);
-    strings = strings.map((s) => s.replace(from, to));
-  }
-  return Prisma.sql(Object.assign(strings, { raw: strings }) as TemplateStringsArray, ...sql.values);
+  return everyRowProbe(sql, 'max(e.created_at)');
 }
 
 async function explain(tx: Tx, sql: Prisma.Sql): Promise<string> {
@@ -90,11 +80,11 @@ async function explain(tx: Tx, sql: Prisma.Sql): Promise<string> {
 
 /**
  * The #1952 skew: 20,000 activity rows in ONE session, then a real ANALYZE.
- * session_replication_role=replica skips the FKs (and triggers), so the rows
+ * The foreign keys are dropped inside the rolled-back transaction, so the rows
  * need no session, worker or App behind them.
  */
 async function seedSkew(tx: Tx): Promise<void> {
-  await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+  await skipSeedForeignKeys(tx);
   await tx.$executeRawUnsafe(`
     INSERT INTO usage_events (id, type, session_id, counts_as_activity, created_at)
     SELECT 'ue-skew-' || g, 'tool_call', 'sess-heavy', true,
