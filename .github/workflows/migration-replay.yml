@@ -17,6 +17,7 @@ on:
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'scripts/db/migration-replay*'
+      - 'scripts/db/growth-approval.sh'
       - 'src/test/catalogSnapshot.ts'
       - 'src/test/schemaTemplate.ts'
       - '.github/workflows/migration-replay.yml'
@@ -28,6 +29,7 @@ on:
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'scripts/db/migration-replay*'
+      - 'scripts/db/growth-approval.sh'
       - 'src/test/catalogSnapshot.ts'
       - 'src/test/schemaTemplate.ts'
       - '.github/workflows/migration-replay.yml'
@@ -86,14 +88,14 @@ jobs:
           if [ "$EVENT" = pull_request ]; then
             git fetch --no-tags --depth=1 origin "$BASE_REF" # a fetch failure fails the step (#4392 BLIND F2)
             src=FETCH_HEAD
-            allow=$(jq -r '[.pull_request.labels[].name] | index("baseline-growth-approved") != null' "$GITHUB_EVENT_PATH") \
+            # #4395 item 2: both label filters live in scripts/db/growth-approval.sh, which the tests run too.
+            allow=$(bash scripts/db/growth-approval.sh pr < "$GITHUB_EVENT_PATH") \
               || { echo "::warning::could not read this PR's labels from the event; growth is not approved"; allow=false; }
           else
             src=HEAD^
             # Only the PR whose merge commit IS this push (#4392 BLIND F1): an associated PR that merely contains the
             # commit (a stacked or batched PR) never lends its label. Merge commits are this repo's only merge method.
-            allow=$(gh api "repos/$REPO/commits/$SHA/pulls" \
-                --jq "[.[] | select(.merge_commit_sha == \"$SHA\") | .labels[].name] | index(\"baseline-growth-approved\") != null") \
+            allow=$(set -o pipefail; gh api "repos/$REPO/commits/$SHA/pulls" | bash scripts/db/growth-approval.sh push "$SHA") \
               || { echo "::warning::could not read the merged PR's labels; growth is not approved"; allow=false; }
           fi
           # A base without the baseline (the bootstrapping change) is not judged; a base commit git cannot read fails
@@ -115,6 +117,17 @@ jobs:
           MIGRATION_REPLAY_BASE_BASELINE: ${{ steps.base.outputs.path }}
           MIGRATION_REPLAY_ALLOW_GROWTH: ${{ steps.base.outputs.allow }}
         run: pnpm tsx scripts/db/migration-replay.ts
+      # #4395: the script's process-level tests (the early-closed stdout run needs a CREATEDB role, so the main suite skips
+      # it) and the label-filter tests, run where that role exists.
+      - name: Replay script tests (early-closed stdout cleanup, growth-approval filters)
+        env:
+          MIGRATION_REPLAY_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hadron_test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hadron_test # prisma.config reads it to generate
+        # The suite's setup files load the Prisma client, which this job otherwise never generates.
+        run: |
+          pnpm prisma generate
+          pnpm vitest run scripts/db/migration-replay.test.ts
       # #4338 BLIND F4: the red controls run here, every time, so the check's teeth are regression-covered. Each seeds one
       # throwaway change in this disposable checkout, expects its exact exit status naming the entry, and reverts it.
       # #4378 item 3: the controls name today's schema objects and baseline lines. Each is guarded, so a rename or a

@@ -105,6 +105,14 @@ export const AGENT_TASK_READ_TOOLS = [
   'hadron_stall_schedule_get',
 ] as const;
 
+/** The `hadron_team_roster` description (#4413: exported so its text pin imports it rather than scraping the source). */
+export const HADRON_TEAM_ROSTER_DESCRIPTION =
+  'Read a team App\'s roster: each worker that is not retired, with one derived state ' +
+  '(YOUR_MOVE, UNAVAILABLE, WAITING, WORKING, ASSIGNED_NOT_STARTED, AVAILABLE, NO_FAMILY, NOT_LAUNCHABLE) and the ' +
+  'facts behind it: model family, free for work, availability, its tasks and alarms. The states are defined by ' +
+  'hrn:node:hadronmemory.com:specs:cor:agt:050:22 (Proposed). ' +
+  'Readers: the App\'s participants.';
+
 function textResult(text: string, isError = false) {
   return { ...(isError ? { isError: true as const } : {}), content: [{ type: 'text' as const, text }] };
 }
@@ -609,11 +617,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
 
   off(
     'hadron_team_roster',
-    'Read a team App\'s roster: each worker that is not retired, with one derived state ' +
-      '(YOUR_MOVE, UNAVAILABLE, WAITING, WORKING, ASSIGNED_NOT_STARTED, AVAILABLE, NO_FAMILY, NOT_LAUNCHABLE) and the ' +
-      'facts behind it: model family, free for work, availability, its tasks and alarms. The states are defined by ' +
-      'hrn:node:hadronmemory.com:specs:cor:agt:050:22 (Proposed). ' +
-      'Readers: the App\'s participants.',
+    HADRON_TEAM_ROSTER_DESCRIPTION,
     SHAPE_HADRON_TEAM_ROSTER,
     async ({ session, appRef }) =>
       read(session, async (ctx) => {
