@@ -43,18 +43,67 @@ const boundedInstall = async (appId: string, agentId: string, label: string) => 
       await tx.appAgent.create({ data: { appId, agentId } });
     }, { timeout: 30_000 });
   } catch (e) {
-    // Timeout wording only for Postgres's own lock-timeout cancel; anything else is named neutrally, and the original
-    // error is kept as the cause either way (#4354 BLIND delta2 F2). Prisma reports a model operation's Postgres error
-    // only inside an UnknownRequestError's message (no code or meta), so the check requires that exact diagnostic: SQLSTATE
-    // 55P03 WITH "canceling statement due to lock timeout" (55P03 alone also covers NOWAIT), (#4354 BLIND delta3 F2).
-    const message = String((e as Error)?.message ?? e);
-    const lockTimeout = e instanceof Prisma.PrismaClientUnknownRequestError
-      && /PostgresError \{ code: "55P03", message: "canceling statement due to lock timeout"/.test(message);
-    throw new Error(lockTimeout
-      ? `cross-install ${label} did not land within lock_timeout ${CROSS_LOCK_TIMEOUT}: ${message}`
-      : `cross-install ${label} failed: ${message}`, { cause: e });
+    throw crossInstallError(e, label);
   }
 };
+/**
+ * The cross-install's failure, named. Timeout wording only for Postgres's own lock-timeout cancel; anything else is named
+ * neutrally, and the original error object is kept as `cause` either way (#4354 BLIND delta2 F2). Prisma reports a model
+ * operation's Postgres error only inside an UnknownRequestError's message (no code or meta), so the check requires that
+ * exact diagnostic: SQLSTATE 55P03 WITH "canceling statement due to lock timeout"; 55P03 alone also covers NOWAIT's
+ * "could not obtain lock" (#4354 BLIND delta3 F2). Pure, so its ambiguous inputs are pinned directly (#4383).
+ */
+function crossInstallError(e: unknown, label: string): Error {
+  const message = String((e as Error)?.message ?? e);
+  const lockTimeout = e instanceof Prisma.PrismaClientUnknownRequestError
+    && /PostgresError \{ code: "55P03", message: "canceling statement due to lock timeout"/.test(message);
+  return new Error(lockTimeout
+    ? `cross-install ${label} did not land within lock_timeout ${CROSS_LOCK_TIMEOUT}: ${message}`
+    : `cross-install ${label} failed: ${message}`, { cause: e });
+}
+
+/**
+ * Hold FOR UPDATE on an App (which conflicts with an insert's FOR KEY SHARE, standing in for a lock a parked removal could
+ * hold) while `body` runs, then release it. Settles as `body` does, except (#4354 BLIND delta2 F1, delta3 F1):
+ * - the holder failing BEFORE it holds the lock rejects at once (lock readiness races the holder ending), and cleanup runs;
+ * - the holder failing AFTER it held the lock (during `body`, or while ending) rejects, naming that, when `body` passed;
+ * - when `body` failed, `body`'s own error stands, whatever the holder did.
+ * `seams` are test-only (#4383): `beforeHold` runs inside the holder before it takes the lock, `afterHold` after the lock
+ * is released, so either holder failure can be forced.
+ */
+type HolderSeams = { beforeHold?: () => Promise<void>; afterHold?: () => Promise<void> };
+async function withHeldAppLock(appId: string, body: () => Promise<void>, seams: HolderSeams = {}): Promise<void> {
+  let releaseHold!: () => void;
+  const hold = new Promise<void>((r) => { releaseHold = r; });
+  let held!: () => void;
+  const isHeld = new Promise<void>((r) => { held = r; });
+  const holder = db.$transaction(async (tx) => {
+    await seams.beforeHold?.();
+    await tx.$queryRaw(Prisma.sql`SELECT id FROM apps WHERE id = ${appId} FOR UPDATE`);
+    held();
+    await hold;
+    await seams.afterHold?.();
+  }, { timeout: 30_000 });
+  const holderEnded = holder.then(
+    () => { throw new Error('the lock holder ended before it held the App lock'); },
+    (e: unknown) => { throw new Error(`the lock holder failed before it held the App lock: ${String((e as Error)?.message ?? e)}`, { cause: e }); },
+  );
+  holderEnded.catch(() => {});
+  let bodyFailed = false;
+  try {
+    await Promise.race([isHeld, holderEnded]);
+    await body();
+  } catch (e) {
+    bodyFailed = true;
+    throw e;
+  } finally {
+    releaseHold();
+    const holderError = await holder.then(() => undefined, (e: unknown) => e ?? new Error('holder rejected'));
+    if (holderError !== undefined && !bodyFailed) {
+      throw new Error(`the lock holder failed after it held the App lock: ${String((holderError as Error)?.message ?? holderError)}`, { cause: holderError });
+    }
+  }
+}
 let edgePos = 100;
 async function importEdge(parentAgentId: string, importedAgentId: string) {
   await db.agentOrgGrant.upsert({
@@ -158,43 +207,13 @@ describe('#4318 crossed removeAgentImport fences', () => {
 
   it('a cross-install blocked by a held App lock fails within its bound, naming the install (#4354 BLIND delta F1)', async () => {
     const { p1 } = await crossedWorld();
-    // FOR UPDATE on the App conflicts with the insert's FOR KEY SHARE, standing in for a lock a parked removal could hold.
-    let releaseHold!: () => void;
-    const hold = new Promise<void>((r) => { releaseHold = r; });
-    let held!: () => void;
-    const isHeld = new Promise<void>((r) => { held = r; });
-    const holder = db.$transaction(async (tx) => {
-      await tx.$queryRaw(Prisma.sql`SELECT id FROM apps WHERE id = ${w.app2Id} FOR UPDATE`);
-      held();
-      await hold;
-    }, { timeout: 30_000 });
-    // The holder's rejection is observed at once, and lock readiness races the holder ending, so a setup failure
-    // (no connection, the FOR UPDATE failing) surfaces here and cleanup still runs (#4354 BLIND delta2 F1).
-    const holderEnded = holder.then(
-      () => { throw new Error('the lock holder ended before it held the App lock'); },
-      (e: unknown) => { throw new Error(`the lock holder failed before it held the App lock: ${String((e as Error)?.message ?? e)}`, { cause: e }); },
-    );
-    holderEnded.catch(() => {});
-    let bodyFailed = false;
-    try {
-      await Promise.race([isHeld, holderEnded]);
+    await withHeldAppLock(w.app2Id, async () => {
       const started = Date.now();
       // Postgres's own lock-timeout cancel (not Prisma's 30 s transaction timeout), well inside that timeout.
       await expect(boundedInstall(w.app2Id, p1.id, 'P1 into App B'))
         .rejects.toThrow(/^cross-install P1 into App B did not land within lock_timeout 5s: .*lock timeout/s);
       expect(Date.now() - started).toBeLessThan(20_000);
-    } catch (e) {
-      bodyFailed = true;
-      throw e;
-    } finally {
-      releaseHold();
-      // A holder failure AFTER it held the lock (during the install check, or while ending) still fails the pin; when the
-      // body already failed, its own error stands (#4354 BLIND delta3 F1).
-      const holderError = await holder.then(() => undefined, (e: unknown) => e ?? new Error('holder rejected'));
-      if (holderError !== undefined && !bodyFailed) {
-        throw new Error(`the lock holder failed after it held the App lock: ${String((holderError as Error)?.message ?? holderError)}`, { cause: holderError });
-      }
-    }
+    });
   }, 60_000);
 
   it('a cross-install that fails for another reason is named neutrally and keeps its cause (#4354 BLIND delta3 F2)', async () => {
@@ -204,6 +223,65 @@ describe('#4318 crossed removeAgentImport fences', () => {
     expect(err?.message).not.toMatch(/lock_timeout/);
     expect((err as Error & { cause?: unknown })?.cause).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
   }, 60_000);
+
+  describe('#4383 the held-lock harness and the classifier, on their failure paths', () => {
+    const rejection = (p: Promise<unknown>) => p.then(() => undefined, (e: unknown) => e as Error);
+
+    it('a holder failure after it held the lock fails the harness when the body passed', async () => {
+      const err = await rejection(withHeldAppLock(w.appId, async () => {}, { afterHold: async () => { throw new Error('forced holder failure'); } }));
+      expect(err?.message).toBe('the lock holder failed after it held the App lock: forced holder failure');
+      expect((err as Error & { cause?: Error })?.cause?.message).toBe('forced holder failure');
+    }, 60_000);
+
+    it('a body failure stands when the holder also fails: cleanup never overwrites it', async () => {
+      const bodyError = new Error('the body failed first');
+      const err = await rejection(withHeldAppLock(w.appId, async () => { throw bodyError; }, { afterHold: async () => { throw new Error('forced holder failure'); } }));
+      expect(err).toBe(bodyError);
+    }, 60_000);
+
+    it('a holder that fails before it holds the lock rejects at once, without running the body', async () => {
+      let ran = false;
+      const err = await rejection(withHeldAppLock(w.appId, async () => { ran = true; },
+        { beforeHold: async () => { throw new Error('forced setup failure'); } }));
+      expect(err?.message).toBe('the lock holder failed before it held the App lock: forced setup failure');
+      expect(ran).toBe(false);
+    }, 60_000);
+
+    const unknownError = (pg: string) => new Prisma.PrismaClientUnknownRequestError(
+      `\nInvalid \`prisma.appAgent.create()\` invocation:\n\nError occurred during query execution:\nConnectorError(ConnectorError { user_facing_error: None, kind: QueryError(PostgresError { ${pg}, severity: "ERROR", detail: None, column: None, hint: None }), transient: false })`,
+      { clientVersion: 'test' });
+
+    it('the classifier gives deadline wording only for the exact lock-timeout diagnostic, keeping the same cause', () => {
+      const e = unknownError('code: "55P03", message: "canceling statement due to lock timeout"');
+      const named = crossInstallError(e, 'X');
+      expect(named.message).toMatch(/^cross-install X did not land within lock_timeout 5s: /);
+      expect((named as Error & { cause?: unknown }).cause).toBe(e);
+    });
+
+    it('a NOWAIT 55P03 ("could not obtain lock") is named neutrally, keeping the same cause', () => {
+      const e = unknownError('code: "55P03", message: "could not obtain lock on row in relation \\"apps\\""');
+      const named = crossInstallError(e, 'X');
+      expect(named.message).toMatch(/^cross-install X failed: /);
+      expect(named.message).not.toMatch(/did not land within/);
+      expect((named as Error & { cause?: unknown }).cause).toBe(e);
+    });
+
+    it('an unrelated unknown-request error that mentions "lock timeout" is named neutrally, keeping the same cause', () => {
+      const e = new Prisma.PrismaClientUnknownRequestError('upstream proxy: lock timeout while dialing the database', { clientVersion: 'test' });
+      const named = crossInstallError(e, 'X');
+      expect(named.message).toBe('cross-install X failed: upstream proxy: lock timeout while dialing the database');
+      expect((named as Error & { cause?: unknown }).cause).toBe(e);
+    });
+
+    it('a known Prisma error (a duplicate install) is named neutrally, keeping the same cause object', async () => {
+      const { p1 } = await crossedWorld(); // P1 is already installed in App A
+      const raw = await rejection(db.appAgent.create({ data: { appId: w.appId, agentId: p1.id } }));
+      expect(raw).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      const named = crossInstallError(raw, 'P1 into App A');
+      expect(named.message).toMatch(/^cross-install P1 into App A failed: /);
+      expect((named as Error & { cause?: unknown }).cause).toBe(raw);
+    }, 60_000);
+  });
 
   it('control: a single removal through the same seam (no crossing) succeeds and ends the grant its edge witnessed', async () => {
     const { p1, gA, gB } = await crossedWorld();
