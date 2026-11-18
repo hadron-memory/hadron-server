@@ -1,4 +1,4 @@
-import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 /** #4135 — stored task handles on the existing event audience, with a bounded page read. */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { buildSchema, defaultFieldResolver, graphql } from 'graphql';
@@ -7,6 +7,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 const schema = buildSchema(typeDefs);
 let app: { id: string };
