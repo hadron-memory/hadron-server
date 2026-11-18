@@ -1,3 +1,4 @@
+import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import { db } from '../../../integrations/db/client.js';
@@ -28,7 +29,7 @@ async function parties(prefix = 'p') {
 
 /** Begin, then approve as both accounts with a fresh login: an executable proof. */
 async function approvedProof(p: Awaited<ReturnType<typeof parties>>) {
-  const { proof } = await beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id);
+  const { proof } = await beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id, transportRateIdentity({ userId: p.admin.id }));
   const c = await db.userMergeConsent.findUniqueOrThrow({ where: { proofHash: hash(proof) } });
   const ctx = (userId: string): Context => ({ db, userId, roles: ['READER'], login: { at: c.createdAt.getTime(), method: 'email' } });
   await approveUserMergeConsent(ctx(p.source.id), proof, p.source.id, p.target.id);
@@ -41,16 +42,16 @@ describe('#1770 live-proof cap (10 per requester)', () => {
 
   it('refuses the 11th begin with MERGE_CONSENT_LIMIT_REACHED and writes nothing', async () => {
     const p = await parties();
-    for (let i = 0; i < 10; i++) await beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id);
+    for (let i = 0; i < 10; i++) await beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id, transportRateIdentity({ userId: p.admin.id }));
     const before = await db.userMergeConsent.findMany({ orderBy: { id: 'asc' } });
-    await expect(beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id))
+    await expect(beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id, transportRateIdentity({ userId: p.admin.id })))
       .rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_LIMIT_REACHED' } });
     expect(await db.userMergeConsent.findMany({ orderBy: { id: 'asc' } })).toEqual(before);
   });
 
   it('the resolver surfaces the same typed refusal', async () => {
     const p = await parties();
-    for (let i = 0; i < 10; i++) await beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id);
+    for (let i = 0; i < 10; i++) await beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id, transportRateIdentity({ userId: p.admin.id }));
     await expect(orgMutations.beginMergeUsersConsent({}, { source: p.source.id, target: p.target.id },
       { db, userId: p.admin.id, roles: ['ADMIN'] })).rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_LIMIT_REACHED' } });
     expect(await db.userMergeConsent.count()).toBe(10);
@@ -59,20 +60,20 @@ describe('#1770 live-proof cap (10 per requester)', () => {
   it('a second requester has independent capacity', async () => {
     const p = await parties();
     const other = await db.user.create({ data: { handle: 'other-admin', roles: ['ADMIN'] } });
-    for (let i = 0; i < 10; i++) await beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id);
-    await expect(beginUserMergeConsent(db, p.source.id, p.target.id, other.id)).resolves.toMatchObject({ proof: expect.any(String) });
+    for (let i = 0; i < 10; i++) await beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id, transportRateIdentity({ userId: p.admin.id }));
+    await expect(beginUserMergeConsent(db, p.source.id, p.target.id, other.id, transportRateIdentity({ userId: other.id }))).resolves.toMatchObject({ proof: expect.any(String) });
   });
 
   it('expired and consumed proofs stop counting without waiting for the sweep', async () => {
     const p = await parties();
-    for (let i = 0; i < 10; i++) await beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id);
+    for (let i = 0; i < 10; i++) await beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id, transportRateIdentity({ userId: p.admin.id }));
     const [a, b] = await db.userMergeConsent.findMany({ orderBy: { id: 'asc' }, take: 2 });
     await db.userMergeConsent.update({ where: { id: a.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
-    await expect(beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id)).resolves.toBeTruthy();
-    await expect(beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id))
+    await expect(beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id, transportRateIdentity({ userId: p.admin.id }))).resolves.toBeTruthy();
+    await expect(beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id, transportRateIdentity({ userId: p.admin.id })))
       .rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_LIMIT_REACHED' } });
     await db.userMergeConsent.update({ where: { id: b.id }, data: { consumedAt: new Date() } });
-    await expect(beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id)).resolves.toBeTruthy();
+    await expect(beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id, transportRateIdentity({ userId: p.admin.id }))).resolves.toBeTruthy();
     expect(await liveCount(p.admin.id)).toBe(10);
   });
 
@@ -80,8 +81,8 @@ describe('#1770 live-proof cap (10 per requester)', () => {
     for (let round = 0; round < 3; round++) {
       await cleanDb(db);
       const p = await parties(`r${round}`);
-      for (let i = 0; i < 9; i++) await beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id);
-      const results = await Promise.allSettled([0, 1, 2].map(() => beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id)));
+      for (let i = 0; i < 9; i++) await beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id, transportRateIdentity({ userId: p.admin.id }));
+      const results = await Promise.allSettled([0, 1, 2].map(() => beginUserMergeConsent(db, p.source.id, p.target.id, p.admin.id, transportRateIdentity({ userId: p.admin.id }))));
       expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1);
       for (const r of results.filter(r => r.status === 'rejected'))
         expect((r as PromiseRejectedResult).reason).toMatchObject({ extensions: { code: 'MERGE_CONSENT_LIMIT_REACHED' } });

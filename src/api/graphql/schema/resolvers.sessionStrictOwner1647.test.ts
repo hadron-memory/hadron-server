@@ -11,8 +11,8 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { signJwt } from '../../../auth/jwt.js';
-import { createServer } from '../../../server.js';
 import { resolvers, type Context } from './resolvers.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../../test/startServerFixture.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -43,13 +43,13 @@ async function mkMemory(cls: 'personal' | 'private' | 'knowledge', userId: strin
 }
 
 beforeAll(async () => {
-  const app = await createServer();
+  const app = await createServerOnCleanDb();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 afterAll(async () => {
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await closeServerIfStarted(server);
 });
 
 beforeEach(async () => {

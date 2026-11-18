@@ -1,4 +1,5 @@
 /** #1460: reviving a node must not publish vectors from its prior incarnation. */
+import { attestedAuthoring } from '../../lib/authoringAttestation.js';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
@@ -60,7 +61,7 @@ async function expectOldVectorsGone() {
 describe('revival clears prior vectors without an embedding endpoint', () => {
   it('GraphQL create mode', async () => {
     const ctx: Context = { db, roles: ['ADMIN'], userId: adminId, clientId: `user:${adminId}` };
-    const revived = await writeNodeCore({ memoryId: memory.id, loc: 'reused', name: 'New', content: 'replacement only' }, ctx, 'create');
+    const revived = await writeNodeCore({ memoryId: memory.id, loc: 'reused', name: 'New', content: 'replacement only' }, ctx, 'create', { authoring: attestedAuthoring(null) });
     expect(revived.id).toBe(nodeId);
     await expectOldVectorsGone();
   });
@@ -77,7 +78,7 @@ describe('revival clears prior vectors without an embedding endpoint', () => {
   it('does not queue embedding when GraphQL revives in an unindexed memory', async () => {
     await db.memory.update({ where: { id: memory.id }, data: { vectorIndexEnabled: false } });
     const ctx: Context = { db, roles: ['ADMIN'], userId: adminId, clientId: `user:${adminId}` };
-    await writeNodeCore({ memoryId: memory.id, loc: 'reused', name: 'New', content: 'replacement only' }, ctx, 'create');
+    await writeNodeCore({ memoryId: memory.id, loc: 'reused', name: 'New', content: 'replacement only' }, ctx, 'create', { authoring: attestedAuthoring(null) });
     expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).embeddingPendingAt).toBeNull();
     await expectOldVectorsGone();
   });
@@ -98,7 +99,7 @@ describe('revival clears prior vectors without an embedding endpoint', () => {
     const effects: Array<() => void> = [];
     await db.$transaction((tx) => writeNodeCore(
       { memoryId: memory.id, loc: 'reused', name: 'New', content: 'replacement only' },
-      ctx, 'create', { transaction: { tx, pooledDb: db, afterCommit: (effect) => effects.push(effect) } },
+      ctx, 'create', { authoring: attestedAuthoring(null), transaction: { tx, pooledDb: db, afterCommit: (effect) => effects.push(effect) } },
     ));
     const staleWrite = await upsertAbstractVector(db, {
       nodeId, memoryId: memory.id, provider: 'old-worker', model: 'old', dim: 768, embedding: query,
@@ -160,7 +161,7 @@ describe('revival clears prior vectors without an embedding endpoint', () => {
   it('a refused create over a live node leaves its vectors intact', async () => {
     await db.node.update({ where: { id: nodeId }, data: { deletedAt: null, deletedBy: null } });
     const ctx: Context = { db, roles: ['ADMIN'], userId: adminId, clientId: `user:${adminId}` };
-    await expect(writeNodeCore({ memoryId: memory.id, loc: 'reused', name: 'New' }, ctx, 'create'))
+    await expect(writeNodeCore({ memoryId: memory.id, loc: 'reused', name: 'New' }, ctx, 'create', { authoring: attestedAuthoring(null) }))
       .rejects.toMatchObject({ extensions: { code: 'NodeLocConflictError' } });
     expect(await db.nodeEmbedding.count({ where: { nodeId } })).toBe(2);
   });

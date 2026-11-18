@@ -97,7 +97,7 @@ describe('getAccessibleMemoryIds — user-owned memory', () => {
   it('excludes it for a different user', async () => {
     const mem = await createUserOwnedKnowledge(ownerId);
     const ids = await getAccessibleMemoryIds(ctx({ userId: otherId, roles: ['READER'] }));
-    expect(ids ?? []).not.toContain(mem.id);
+    expect(ids).not.toContain(mem.id);
   });
 
   it('excludes another user’s user-owned memory even from a platform ADMIN', async () => {
@@ -106,13 +106,13 @@ describe('getAccessibleMemoryIds — user-owned memory', () => {
     // The ADMIN "see all" branch returns an explicit id list; it must NOT
     // contain another user's user-owned memory.
     expect(ids).not.toBeNull();
-    expect(ids ?? []).not.toContain(mem.id);
+    expect(ids).not.toContain(mem.id);
   });
 
   it('DOES include a platform ADMIN’s OWN user-owned memory', async () => {
     const mem = await createUserOwnedKnowledge(otherId); // otherId is the ADMIN below
     const ids = await getAccessibleMemoryIds(ctx({ userId: otherId, roles: ['ADMIN'] }));
-    expect(ids ?? []).toContain(mem.id);
+    expect(ids).toContain(mem.id);
   });
 });
 

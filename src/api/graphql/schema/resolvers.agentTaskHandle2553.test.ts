@@ -1,3 +1,4 @@
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 /**
  * #2553 (epic #1704, T12, rev 6): every AgentTask has a hierarchical, immutable handle `AT<n>(.<n>)*`: a project is
  * numbered per App (AT3), a task within its parent (AT3.405, AT3.405.16). `AT0` is the reserved project "No project",
@@ -17,12 +18,13 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 
 const M = resolvers.Mutation as any;
-const Q = resolvers.Query as any;
+const Q = settledTeamEventQueries(resolvers.Query, db) as any;
 const T = (resolvers as any).AgentTask as Record<string, (t: any, a: unknown, c: Context) => unknown>;
 
 async function refusal(p: Promise<unknown>): Promise<GraphQLError> {
@@ -149,8 +151,9 @@ describe('numbering', () => {
     const update = typeDefs.match(/input \w*(?:Update|Edit|Move|Reparent)\w*AgentTask\w* \{[^}]*\}/g) ?? [];
     for (const block of update) expect(block).not.toMatch(/parentTaskId/);
     const ops = Object.keys(M).filter((n) => /agenttask/i.test(n));
-    // Match the operation verb: removeAgentTaskBlocker unlinks a dependency, never reparents a task.
-    expect(ops.filter((n) => /^(move|reparent|update|edit)/i.test(n))).toEqual([]);
+    // #2645 adds descriptive editing, with parent still absent from its patch. Match the operation verb:
+    // removeAgentTaskBlocker unlinks a dependency, never reparents a task.
+    expect(ops.filter((n) => /^(move|reparent|update|edit)/i.test(n))).toEqual(['updateAgentTask']);
   });
 
   it('an explicit number spends its counter: the next allocation never repeats it; an explicit handle must match its parent', async () => {
@@ -362,9 +365,9 @@ describe('AT0 is the platform\'s own row (rev 6)', () => {
 
 describe('the migration', () => {
   const migrationSql = () => readFileSync(new URL('../../../../prisma/migrations/20261027100000_agent_task_number/migration.sql', import.meta.url), 'utf8');
-  const invariants = () => readFileSync(new URL('../../../../prisma/agent-task-number-invariants.sql', import.meta.url), 'utf8');
+  const invariants = () => readFileSync(new URL('../../../../prisma/agent-task-number-invariants.sql', import.meta.url), 'utf8').split('\n-- #2666:')[0]!;
 
-  it('carries a byte-identical copy of the invariants file', () => {
+  it('carries a byte-identical copy of the original invariants file', () => {
     expect(migrationSql().endsWith(invariants())).toBe(true);
   });
 

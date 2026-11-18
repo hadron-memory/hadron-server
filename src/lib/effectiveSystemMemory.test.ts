@@ -7,7 +7,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
-import { descendantMemoriesInheriting, inheritedNodeIds, systemMemoryChain } from './effectiveSystemMemory.js';
+import { descendantMemoriesInheriting, inheritedNodeIds, resolveInheritedEdges, systemMemoryChain } from './effectiveSystemMemory.js';
 
 let n: number;
 let org: { id: string; urn: string };
@@ -150,5 +150,46 @@ describe('what never comes through', () => {
     await db.agent.update({ where: { id: backend.id }, data: { deletedAt: new Date() } });
     expect(await systemMemoryChain(db, backend.mem)).toEqual([]);
     expect(await descendantMemoriesInheriting(db, { id: live, memoryId: engineer.mem, loc: 'tasks:live', role: null })).toEqual([]);
+  });
+});
+
+// #2801: pin actual row shape, rather than relying on a compile-only promise.
+describe('inherited edge endpoint projection shapes', () => {
+  const projections = [
+    { name: 'bounded identity', identityOnly: true as const, maxResults: 4 },
+    { name: 'bounded metadata', endpointMetadataOnly: true as const, maxResults: 4 },
+    { name: 'unbounded metadata', endpointMetadataOnly: true as const },
+    { name: 'bounded full', maxResults: 4 },
+    { name: 'unbounded full' },
+  ];
+  it.each(projections.flatMap(projection => (['out', 'in'] as const).flatMap(direction =>
+    [false, true].map(outside => ({ ...projection, direction, outside })),
+  )))('$name $direction outside=$outside', async ({ name, direction, outside, ...projection }) => {
+    const base = await agent('base');
+    const child = await agent('child', base);
+    const other = outside ? await agent('outside') : base;
+    const anchor = await node(base, 'anchor');
+    const endpointId = await node(other, 'endpoint');
+    await db.edge.create({ data: {
+      memoryId: base.mem, loc: 'projection-edge',
+      sourceId: direction === 'out' ? anchor : endpointId,
+      targetId: direction === 'out' ? endpointId : anchor,
+    } });
+    const rows = await resolveInheritedEdges(db, {
+      nodeId: anchor, via: child.mem, direction, canReadMemory: async () => true,
+      ...projection,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.endpoint.id).toBe(endpointId);
+    const endpoint = rows[0]!.endpoint;
+    if (name.includes('identity')) {
+      expect(endpoint).not.toHaveProperty('name');
+      expect(endpoint).not.toHaveProperty('content');
+    } else if (name.includes('metadata')) {
+      expect(endpoint).toHaveProperty('name', 'endpoint');
+      expect(endpoint).not.toHaveProperty('content');
+    } else {
+      expect(endpoint).toHaveProperty('content', `${other.urn} endpoint`);
+    }
   });
 });

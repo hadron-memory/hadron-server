@@ -73,6 +73,7 @@ const runStartup = async (): Promise<'ran'> => {
     if (!memory.organization) continue;
     const orgUrn = memory.organization.urn;
     const result = await syncGraphFromGithub(memory);
+    if (result.notAttemptedReason) continue; // No attempt: neither a success nor a failure to report.
     if (result.error) {
       console.error(`  [FAIL] ${orgUrn}/${memory.name}: ${result.error}`);
     } else {

@@ -4,10 +4,14 @@
 // batched. Nothing here restates the arms. What this file adds is the PRINCIPAL
 // rule for a read-time fact (a pure App key, an impersonated session, a headless
 // run and a worker-bound request are not the direct user, so they read false)
-// and request-local batching with fresh role and App reads.
+// and request-local batching with fresh role and App reads. A worker-bound request
+// reads false because this nested field carries no instruction argument, so it is a
+// headless read and no worker carries its holder's right on one (cor:dmo:050:12,
+// Vera's R9 on #3322).
 
-import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
-import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { currentActor } from '../../../lib/requestActor.js';
+import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
+export { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
 import { managesAppBatch } from '../../../lib/auth/appManagement.js';
 import type { Context } from './resolvers.helpers.js';
 
@@ -22,14 +26,9 @@ export interface ViewerManagesCache {
   actor: Promise<{ roles: string[] } | null> | null;
 }
 
-/** Is this request the direct user acting for themself (cor:dmo:050:12)? */
+/** Is this request the direct user acting for themself? A worker-bound read is headless (cor:dmo:050:12). */
 function isDirectUser(ctx: Context): boolean {
-  return !!ctx.userId
-    && !ctx.impersonation
-    && !isRunPrincipal(ctx)
-    && currentActor().workerId === null
-    && currentActorAmbiguity() === null
-    && !ctx.sessionBindingRefused;
+  return !isRefusedPrincipal(ctx) && currentActor().workerId === null;
 }
 
 async function evaluate(ctx: Context, cache: ViewerManagesCache, ids: string[]): Promise<Map<string, boolean>> {

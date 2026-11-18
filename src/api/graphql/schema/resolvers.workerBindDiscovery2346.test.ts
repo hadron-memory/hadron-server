@@ -40,7 +40,7 @@ beforeEach(async () => {
   org = await db.organization.create({ data: { name: 'Org', urn: `org-${suffix}.example` } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'CONTRIBUTOR' } });
   agentId = (await db.agent.create({ data: { organizationId: org.id, name: 'Builder', urn: `${org.urn}:builder`,
-    systemPrompt: 'Work as {{name}}.', personaRole: 'server-engineer', visibility: 'ORGANIZATION' } })).id;
+    personaRole: 'server-engineer', visibility: 'ORGANIZATION' } })).id;
 });
 
 describe('resolveWorkerBindCandidatesByName round trips (#2346)', () => {

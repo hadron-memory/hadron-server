@@ -241,23 +241,21 @@ describe('#1645 session privacy', () => {
   });
 
   it('independently gates the sibling top-level usageEvents query', async () => {
+    // #2817 (cor:acl:090:01): naming no resource is own activity, so the memory-gated form of the
+    // top-level query is a bare loc, which spans every readable memory.
+    const BY_LOC = '{a:usageEvents(loc:"owner-private"){nodeLoc} b:usageEvents(loc:"strict-event"){nodeLoc}}';
+    const locs = (out: any) => [...out.a, ...out.b].map((e: any) => e.nodeLoc);
     for (const ctx of [
       context(member),
       context(admin),
       context(platform, ['ADMIN']),
     ]) {
-      const out = await execute('{usageEvents{nodeLoc}}', ctx);
-      expect(out.usageEvents.map((e: any) => e.nodeLoc)).not.toContain(
-        'owner-private',
-      );
-      expect(out.usageEvents.map((e: any) => e.nodeLoc)).not.toContain(
-        'strict-event',
-      );
+      const out = await execute(BY_LOC, ctx);
+      expect(locs(out)).not.toContain('owner-private');
+      expect(locs(out)).not.toContain('strict-event');
     }
-    const out = await execute('{usageEvents{nodeLoc}}', context(owner));
-    expect(out.usageEvents.map((e: any) => e.nodeLoc)).toContain(
-      'owner-private',
-    );
+    const out = await execute(BY_LOC, context(owner));
+    expect(locs(out)).toContain('owner-private');
   });
   it('denies org/member/admin/App-key/impersonation strict-session reads before paging; preserves unbound sessions', async () => {
     const callers = [

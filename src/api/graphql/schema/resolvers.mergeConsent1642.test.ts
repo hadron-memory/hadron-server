@@ -1,3 +1,4 @@
+import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -28,7 +29,7 @@ async function fixture() {
   const admin = await db.user.create({ data: { handle: 'admin', roles: ['ADMIN'] } });
   const source = await db.user.create({ data: { handle: 'source' } });
   const target = await db.user.create({ data: { handle: 'target' } });
-  const { proof } = await beginUserMergeConsent(db, source.id, target.id, admin.id);
+  const { proof } = await beginUserMergeConsent(db, source.id, target.id, admin.id, transportRateIdentity({ userId: admin.id }));
   const key = { proofHash: createHash('sha256').update(proof).digest('hex') };
   const c = await db.userMergeConsent.findUniqueOrThrow({ where: key });
   const context = (userId: string): Context => ({ db, userId, roles: ['READER'], login: { at: c.createdAt.getTime(), method: 'email' } });

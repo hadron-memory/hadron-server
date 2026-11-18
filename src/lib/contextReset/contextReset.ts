@@ -31,18 +31,21 @@ import { OPEN_SESSION_PLACEMENT_JOIN } from '../sessionPlacement.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { generateId } from '../id.js';
+import { emitNodeUrnV2 } from '../urnEmit.js';
+import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import { appendAvailabilityEvent, PLATFORM_ACTOR, type EventActor } from '../agentTasks/events.js';
 import { loadAvailabilityByFamily, recordInEffect } from '../agentTasks/availability.js';
 import { HOST_LAPSE_CHECK_INS_DEFAULT } from '../agentTasks/hosts.js';
 import { lockWorkersForAssignment } from '../agentTasks/workerLock.js';
+import { hasUnstorableJsonText } from '../agentTasks/references.js';
 import { resolveNodeRef } from '../entityRef/nodeRef.js';
 import { hostReportTimeoutMinutes } from '../hostOperations/settle.js';
 import {
   CANCELLABLE_PHASES,
   CLAIM_LEASE_MS,
   CLAIMED_PHASES,
-  HOST_REPORTED_REASONS,
+  hostReportedReasons,
   isRefusal,
   PROCESS_START_TIME_PATTERN,
   RELAUNCH_FAILED_REASONS,
@@ -57,10 +60,16 @@ import {
 type Db = PrismaClient | Prisma.TransactionClient;
 export type ContextResetRow = Prisma.ContextResetGetPayload<Record<string, never>>;
 
+export const CHECKPOINT_CONTENT_MAX_BYTES = 65_536;
+export const CHECKPOINT_TITLE_MAX_CHARS = 200;
+
 export const CONTEXT_RESET_REQUESTED_EVENT = 'task.context-reset-requested';
 // Task-scoped, like the request: chk_agent_team_events_shape allows no hyphen in an event type's first segment.
 export const CONTEXT_RESET_FAILED_EVENT = 'task.context-reset-failed';
 export const CONTEXT_RESET_DONE_EVENT = 'task.context-reset-done';
+export const CONTEXT_RESET_LATE_STOP_EVENT = 'task.context-reset-late-stop';
+/** #3255: transport bound for the host's reported lateness, in integer milliseconds (at most one day). */
+export const CONTEXT_RESET_LATE_STOP_MAX_MS = 86_400_000;
 
 /** A host step refused for a reason that changes nothing (a wrong id, a stale epoch, a step out of order). */
 export class ContextResetError extends Error {
@@ -70,7 +79,10 @@ export class ContextResetError extends Error {
       | 'STALE_EPOCH'
       | 'CONTEXT_RESET_WRONG_PHASE'
       | 'RECOVERY_REF_INVALID'
+      | 'CHECKPOINT_LOC_TAKEN'
+      | 'CHECKPOINT_MEMORY_ENCRYPTED'
       | 'HOST_OPERATION_NOT_COLLECTED'
+      | 'BAD_USER_INPUT'
       | 'BAD_CONTEXT_RESET_INPUT',
     message: string,
   ) {
@@ -134,7 +146,7 @@ export async function outstandingStopLease(tx: Db, workerId: string, now: Date):
 
 async function appendResetEvent(
   tx: Prisma.TransactionClient,
-  a: { appId: string; taskId: string; workerId: string; type: string; payload: Prisma.InputJsonObject; actor?: EventActor; now: Date },
+  a: { appId: string; taskId: string | null; workerId: string; type: string; payload: Prisma.InputJsonObject; actor?: EventActor; now: Date },
 ): Promise<string> {
   const id = generateId();
   const actor = a.actor ?? PLATFORM_ACTOR;
@@ -179,26 +191,57 @@ export async function requestContextReset(
   const workerId = a.task.assigneeWorkerId;
   if (!workerId || !a.wasStarted || a.sessionEndRequested) return null;
   // R117: the worker itself started it. A start is the assignee's only (cor:agt:050:08), so a started task reassigned
-  // since then carries a `task.started` by someone else.
+  // since then carries a `task.started` by someone else. #4202: only an event of the task's own App is its start
+  // (`agent_team_events.task_id` has no foreign key).
   const started = await tx.agentTeamEvent.findFirst({
-    where: { taskId: a.task.id, type: 'task.started', actorWorkerId: workerId },
+    where: { appId: a.appId, taskId: a.task.id, type: 'task.started', actorWorkerId: workerId },
     select: { id: true },
   });
   if (!started) return null;
   // R115/R116: the Agent's setting, held like the matcher holds usesTasks. The newest open session here is the one chosen
   // just below (same ordering), and claimContextReset reads the agent of that named session, so the two agree. #2458: a worker with an open session is read
   // on the agent that session was bound under, not the live worker row.
-  const [agent] = await tx.$queryRaw<{ on: boolean }[]>`
-    SELECT a.reset_context_after_task AS "on" FROM workers w
+  const [agent] = await tx.$queryRaw<{ on: boolean; lifecycle: string }[]>`
+    SELECT a.reset_context_after_task AS "on", a.lifecycle::text AS lifecycle FROM workers w
     ${OPEN_SESSION_PLACEMENT_JOIN}
     JOIN agents a ON a.id = COALESCE(os.agent_id, w.agent_id) WHERE w.id = ${workerId} FOR SHARE OF a`;
   if (!agent?.on) return null;
+  // #4223 (S2 of #4229; cor:agt:050:27 part 9, decision G4): a short-lived Agent never requests a reset. Its worker's
+  // context ends with its session, when its last task ends (cor:agt:050:10), and a task ending beside another open
+  // one must leave the running worker's context intact (G7).
+  if (agent.lifecycle === 'SHORT_LIVED') return null;
   const otherStarted = await tx.agentTask.count({ where: { assigneeWorkerId: workerId, status: 'started', id: { not: a.task.id } } });
   if (otherStarted > 0) return null;
   // R120: a team pause suppresses it. The App's anchors are held by the task write, and the pause writer takes them
   // exclusively, so this read is the pause in force.
   const app = await tx.app.findUnique({ where: { id: a.appId }, select: { teamPausedAt: true } });
   if (!app || app.teamPausedAt) return null;
+  return issueReset(tx, {
+    appId: a.appId, workerId, taskId: a.task.id, cause: 'task-end', actor: a.actor, now: a.now, unsupportedIsFailure: true, extra: {},
+  });
+}
+
+/**
+ * The shared issue step (cor:agt:050:27 parts 2 and 12): with the worker's per-worker lock held, pick its newest open
+ * session and a live host that registers it with the capability, record the reset and issue ONE `worker.reset-context`
+ * to that host. A task's end names its task and records a failed reset when no host can take it (§6); the context cap
+ * (#4225) names none and, with no capable host, issues nothing (an hourly failed row would be noise, not a signal).
+ */
+export async function issueReset(
+  tx: Prisma.TransactionClient,
+  a: {
+    appId: string;
+    workerId: string;
+    taskId: string | null;
+    cause: 'task-end' | 'context-cap';
+    actor: EventActor;
+    now: Date;
+    /** True: no capable host records a `failed` reset (HOST_UNSUPPORTED). False: it issues nothing and returns null. */
+    unsupportedIsFailure: boolean;
+    extra: Prisma.InputJsonObject;
+  },
+): Promise<{ resetId: string; issued: boolean } | null> {
+  const workerId = a.workerId;
   // The session, chosen under the per-worker lock (a bind takes it too, so no new session can appear meanwhile).
   const [session] = await tx.$queryRaw<{ id: string; host: string | null }[]>`
     SELECT id, host FROM sessions
@@ -218,15 +261,16 @@ export async function requestContextReset(
           >= ${toNaiveUtc(a.now)}::timestamp
     ORDER BY r.host_id`;
   const hostId = hosts.find((h) => h.hostId === session.host)?.hostId ?? hosts[0]?.hostId ?? null;
+  if (!hostId && !a.unsupportedIsFailure) return null;
   await __contextResetTesting.beforeIssueInsert?.(tx);
 
   const resetId = generateId();
   const operationId = hostId ? generateId() : null;
   // Once per finish (§5): a task ends once, and taskId is unique; a duplicate inserts nothing and requests nothing.
   const inserted = await tx.$queryRaw<{ id: string }[]>`
-    INSERT INTO context_resets (id, app_id, worker_id, session_id, task_id, host_id, host_operation_id, phase, reason,
+    INSERT INTO context_resets (id, app_id, worker_id, session_id, task_id, cause, host_id, host_operation_id, phase, reason,
                                 requested_at, ended_at)
-    VALUES (${resetId}, ${a.appId}, ${workerId}, ${session.id}, ${a.task.id}, ${hostId}, ${operationId},
+    VALUES (${resetId}, ${a.appId}, ${workerId}, ${session.id}, ${a.taskId}, ${a.cause}, ${hostId}, ${operationId},
             ${hostId ? 'requested' : 'failed'}, ${hostId ? null : 'HOST_UNSUPPORTED'},
             ${toNaiveUtc(a.now)}::timestamp, ${hostId ? null : toNaiveUtc(a.now)}::timestamp)
     ON CONFLICT (task_id) DO NOTHING
@@ -239,19 +283,19 @@ export async function requestContextReset(
         appId: a.appId,
         hostId,
         type: 'worker.reset-context',
-        args: { workerId, sessionId: session.id, taskId: a.task.id, resetId },
+        args: { workerId, sessionId: session.id, ...(a.taskId ? { taskId: a.taskId } : {}), resetId, ...(a.cause === 'context-cap' ? { cause: a.cause } : {}) },
         workerId,
         issuedBy: 'platform',
       },
     });
   }
   await appendResetEvent(tx, {
-    appId: a.appId, taskId: a.task.id, workerId, type: CONTEXT_RESET_REQUESTED_EVENT, actor: a.actor, now: a.now,
-    payload: { resetId, sessionId: session.id, issued: hostId !== null, operationId, hostId, reason: hostId ? null : 'HOST_UNSUPPORTED' },
+    appId: a.appId, taskId: a.taskId, workerId, type: CONTEXT_RESET_REQUESTED_EVENT, actor: a.actor, now: a.now,
+    payload: { resetId, sessionId: session.id, issued: hostId !== null, operationId, hostId, reason: hostId ? null : 'HOST_UNSUPPORTED', ...(a.cause === 'context-cap' ? { cause: a.cause } : {}), ...a.extra },
   });
   if (!hostId) {
     await appendResetEvent(tx, {
-      appId: a.appId, taskId: a.task.id, workerId, type: CONTEXT_RESET_FAILED_EVENT, now: a.now,
+      appId: a.appId, taskId: a.taskId, workerId, type: CONTEXT_RESET_FAILED_EVENT, now: a.now,
       payload: { resetId, phase: 'failed', reason: 'HOST_UNSUPPORTED' },
     });
   }
@@ -391,25 +435,51 @@ async function endReset(
 // ── The host's steps ──────────────────────────────────────────────────────
 
 /** The host a step is made by: the key's own App and host (cor:agt:070:04), never a request field. */
-export type ResetHost = { appId: string; hostId: string };
+export type ResetHost = { appId: string; hostId: string; appKeyId?: string };
+
+/**
+ * #3273: a host may inspect one reset it collected, ended resets included (cor:agt:070:04).
+ * Same not-found order as lockForHost, without taking the protocol's worker/mark locks or changing a reset.
+ * Deliberately stricter collection proof: settlement may fail an issued operation without collecting it.
+ * The caller holds the host key's App authority anchor while reading. No id is echoed in a refusal.
+ */
+export async function readContextResetForHost(tx: Prisma.TransactionClient, host: ResetHost, resetId: string): Promise<ContextResetRow> {
+  const notFound = () => new ContextResetError('CONTEXT_RESET_NOT_FOUND', 'Context reset not found.');
+  if (typeof resetId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(resetId)) throw notFound();
+  const reset = await tx.contextReset.findUnique({ where: { id: resetId } });
+  if (!reset || reset.appId !== host.appId || reset.hostId !== host.hostId) throw notFound();
+  const operation = reset.hostOperationId
+    ? await tx.hostOperation.findUnique({ where: { id: reset.hostOperationId }, select: { collectedAt: true } })
+    : null;
+  if (!operation) throw notFound();
+  if (!operation.collectedAt) {
+    throw new ContextResetError('HOST_OPERATION_NOT_COLLECTED', 'Collect the reset\'s operation before acting on it.');
+  }
+  return reset;
+}
 
 /**
  * Lock and load a reset for a host step, in the #2162 order: the per-worker lock, the worker's availability row, then
  * the reset row. Another App's or another host's reset reads as not found. The operation must have been collected by
  * this host (cor:agt:070:04): a host acts on what it collected, never on an id it guessed.
  */
-async function lockForHost(tx: Prisma.TransactionClient, host: ResetHost, resetId: string): Promise<ContextResetRow> {
+async function lockForHost(tx: Prisma.TransactionClient, host: ResetHost, resetId: string, options: {collectedTimestamp?:boolean;checkpointMemory?:boolean} = {}): Promise<ContextResetRow> {
   const notFound = () => new ContextResetError('CONTEXT_RESET_NOT_FOUND', 'Context reset not found.');
   if (typeof resetId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(resetId)) throw notFound();
   const head = await tx.contextReset.findUnique({ where: { id: resetId }, select: { workerId: true, appId: true, hostId: true } });
   if (!head || head.appId !== host.appId || head.hostId !== host.hostId) throw notFound();
   await lockWorkersForAssignment(tx, [head.workerId]);
+  // #3276: follow the shared worker-row → availability → reset-row order. These reads decide no refusal.
+  if (options.checkpointMemory) {
+    const [worker] = await tx.$queryRaw<{memoryId:string|null}[]>`SELECT memory_id AS "memoryId" FROM workers WHERE id=${head.workerId} FOR SHARE`;
+    if (worker?.memoryId) await tx.$queryRaw`SELECT id FROM memories WHERE id=${worker.memoryId} FOR SHARE`;
+  }
   await lockMark(tx, head.workerId);
   await tx.$queryRaw`SELECT id FROM context_resets WHERE id = ${resetId} FOR UPDATE`;
   const r = await tx.contextReset.findUniqueOrThrow({ where: { id: resetId } });
-  const op = r.hostOperationId ? await tx.hostOperation.findUnique({ where: { id: r.hostOperationId }, select: { status: true } }) : null;
+  const op = r.hostOperationId ? await tx.hostOperation.findUnique({ where: { id: r.hostOperationId }, select: { status: true, collectedAt: true } }) : null;
   if (!op) throw notFound();
-  if (op.status === 'issued') {
+  if (options.collectedTimestamp ? !op.collectedAt : op.status === 'issued') {
     throw new ContextResetError('HOST_OPERATION_NOT_COLLECTED', 'Collect the reset\'s operation before acting on it.');
   }
   return r;
@@ -465,8 +535,8 @@ export async function claimContextReset(
   requireEpoch(r, epoch);
   const refuse = (reason: ContextResetRefusal | ContextResetFailure) => endReset(tx, r, reason, now).then((e) => step(e, reason));
 
-  const [worker] = await tx.$queryRaw<{ retiredAt: Date | null; on: boolean }[]>`
-    SELECT w.retired_at AS "retiredAt", a.reset_context_after_task AS "on"
+  const [worker] = await tx.$queryRaw<{ retiredAt: Date | null; on: boolean; capped: boolean }[]>`
+    SELECT w.retired_at AS "retiredAt", a.reset_context_after_task AS "on", (a.context_cap IS NOT NULL AND a.lifecycle = 'LONG_LIVED') AS "capped"
     FROM workers w
     LEFT JOIN sessions bs ON bs.id = ${r.sessionId} AND bs.worker_id = w.id AND bs.role IS NOT NULL
     JOIN agents a ON a.id = COALESCE(bs.agent_id, w.agent_id) WHERE w.id = ${r.workerId}`;
@@ -475,9 +545,12 @@ export async function claimContextReset(
   const open = await tx.$queryRaw<{ id: string }[]>`
     SELECT id FROM sessions WHERE worker_id = ${r.workerId} AND ended_at IS NULL AND deleted_at IS NULL`;
   if (open.length !== 1 || open[0]!.id !== r.sessionId) return refuse('SESSION_CHANGED');
-  // (b) no open task, pending or started.
-  const tasks = await tx.agentTask.count({ where: { assigneeWorkerId: r.workerId, status: { in: ['pending', 'started'] } } });
-  if (tasks > 0) return refuse('OTHER_WORK');
+  // (b) no open task, pending or started. Not for the context cap (#4225, G4): a long-lived worker over its cap holds tasks
+  // by design (a coordinator holds many), they stay assigned through a reset, and the relaunched agent reads its list (§3).
+  if (r.cause !== 'context-cap') {
+    const tasks = await tx.agentTask.count({ where: { assigneeWorkerId: r.workerId, status: { in: ['pending', 'started'] } } });
+    if (tasks > 0) return refuse('OTHER_WORK');
+  }
   // (c) no other availability record in effect.
   const view = (await loadAvailabilityByFamily(tx, [{ id: r.workerId, appId: r.appId, families: [] }], now)).get(r.workerId);
   // An ended reset's stop grant still outstanding keeps the worker out too (#2255 review): no writer exposes it before
@@ -485,7 +558,8 @@ export async function claimContextReset(
   if (view?.ownInEffect || (await outstandingStopLease(tx, r.workerId, now))) return refuse('UNAVAILABLE');
   const app = await tx.app.findUnique({ where: { id: r.appId }, select: { teamPausedAt: true } });
   if (!app || app.teamPausedAt) return refuse('PAUSED');
-  if (!worker.on) return refuse('SETTING_OFF');
+  // The switch this reset rests on: the Agent's setting for a task's end, the cap (on a long-lived Agent) for the cap.
+  if (!(r.cause === 'context-cap' ? worker.capped : worker.on)) return refuse('SETTING_OFF');
 
   const claimed = await tx.contextReset.update({
     where: { id: r.id },
@@ -500,11 +574,22 @@ export async function claimContextReset(
  * working memory, for the reset's own session and task. A wrong reference is refused RECOVERY_REF_INVALID and changes
  * nothing; the host may register a right one while the claim lease runs.
  */
+export interface CheckpointWrite {
+  nodeId: string;
+  loc: string;
+  memoryId: string;
+  workToken: string | null;
+  content: string;
+}
+
 export async function registerContextResetRecovery(
   tx: Prisma.TransactionClient, host: ResetHost, resetId: string, epoch: unknown,
-  ref: { checkpointNode: unknown; sessionId: unknown; taskId: unknown }, now: Date,
+  ref: { checkpointNode?: unknown; checkpoint?: {title: string; content: string} | null; sessionId: unknown; taskId?: unknown }, now: Date,
+  checkpointWritten?: (write: CheckpointWrite) => void,
 ): Promise<ContextResetStep> {
-  const r = await lockForHost(tx, host, resetId);
+  const r = await lockForHost(tx, host, resetId, {collectedTimestamp:ref.checkpoint != null,checkpointMemory:ref.checkpoint != null});
+  // The write's lease is judged after all potentially blocking admission locks, never from a pre-wait clock.
+  if (ref.checkpoint != null) now = new Date();
   requireEpoch(r, epoch);
   if (r.phase !== 'claimed') {
     const stored = (r.recoveryRef ?? null) as { checkpointNodeId?: string } | null;
@@ -514,23 +599,65 @@ export async function registerContextResetRecovery(
   if (claimLapsed(r, now)) return endReset(tx, r, 'CLAIM_LAPSED', now).then((e) => step(e, 'CLAIM_LAPSED'));
   const invalid = (why: string) => new ContextResetError('RECOVERY_REF_INVALID', why);
   if (ref.sessionId !== r.sessionId) throw invalid('The recovery reference names another session.');
-  if (ref.taskId !== r.taskId) throw invalid('The recovery reference names another task.');
-  if (typeof ref.checkpointNode !== 'string' || ref.checkpointNode.trim() === '') throw invalid('Name the checkpoint node.');
-  const worker = await tx.worker.findUnique({ where: { id: r.workerId }, select: { memoryId: true } });
+  // A context-cap reset has no task (#4225): the host names none, or an empty one (a client that cannot omit a string).
+  if ((typeof ref.taskId === 'string' && ref.taskId !== '' ? ref.taskId : null) !== r.taskId) throw invalid('The recovery reference names another task.');
+  const writesCheckpoint = ref.checkpoint != null;
+  if (writesCheckpoint === (ref.checkpointNode != null)) throw invalid('Supply exactly one of checkpointNode and checkpoint.');
+  const worker = await tx.worker.findUnique({where:{id:r.workerId},select:{memoryId:true}});
+  if (!worker?.memoryId) throw invalid('The worker has no working memory.');
   let nodeId: string | null = null;
-  try {
-    nodeId = (await resolveNodeRef(tx as unknown as PrismaClient, ref.checkpointNode.trim())).id;
-  } catch {
-    nodeId = null;
-  }
-  const node = nodeId ? await tx.node.findFirst({ where: { id: nodeId, deletedAt: null }, select: { memoryId: true } }) : null;
-  if (!node || !worker?.memoryId || node.memoryId !== worker.memoryId) {
-    throw invalid("The checkpoint is a live node in the worker's own working memory.");
+  let checkpointNodeUrn: string;
+  let write: CheckpointWrite | undefined;
+  if (writesCheckpoint) {
+    // Ruling0090A: deliberately not the generic node writer, nor any grant to that writer.
+    if (!host.appKeyId) throw invalid('A checkpoint is written only by the host key.');
+    if (typeof ref.checkpoint!.title !== 'string' || !ref.checkpoint!.title.trim() || typeof ref.checkpoint!.content !== 'string') {
+      throw invalid(`A checkpoint needs a nonblank title (at most ${CHECKPOINT_TITLE_MAX_CHARS} characters) and string content (at most ${CHECKPOINT_CONTENT_MAX_BYTES} UTF-8 bytes).`);
+    }
+    if ([...ref.checkpoint!.title].length > CHECKPOINT_TITLE_MAX_CHARS) {
+      throw invalid(`A checkpoint title is nonblank and at most ${CHECKPOINT_TITLE_MAX_CHARS} characters.`);
+    }
+    if (Buffer.byteLength(ref.checkpoint!.content,'utf8') > CHECKPOINT_CONTENT_MAX_BYTES) {
+      throw invalid(`Checkpoint content is at most ${CHECKPOINT_CONTENT_MAX_BYTES} UTF-8 bytes.`);
+    }
+    if (hasUnstorableJsonText(ref.checkpoint!.title) || hasUnstorableJsonText(ref.checkpoint!.content)) {
+      throw invalid('Checkpoint text cannot contain NUL or unpaired surrogates.');
+    }
+    const memory = await tx.memory.findUnique({where:{id:worker.memoryId},select:{id:true,urn:true,isEncrypted:true,deletedAt:true}});
+    if (!memory || memory.deletedAt) throw invalid('The working memory is unavailable.');
+    if (memory.isEncrypted) throw new ContextResetError('CHECKPOINT_MEMORY_ENCRYPTED','A host key cannot unlock an encrypted working memory.');
+    const [clock] = await tx.$queryRaw<{stamp:string}[]>`SELECT to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24MISS"Z"') AS stamp`;
+    const loc = `sheds:auto-${clock!.stamp}`;
+    if (await tx.node.findUnique({where:{loc_memoryId:{loc,memoryId:worker.memoryId}},select:{id:true}})) {
+      throw new ContextResetError('CHECKPOINT_LOC_TAKEN','The checkpoint address is already occupied.');
+    }
+    try {
+      nodeId = (await tx.node.create({data:{id:generateId(),memoryId:worker.memoryId,loc,name:ref.checkpoint!.title,
+        content:ref.checkpoint!.content,nodeType:'info',role:null,isRunnable:false,tags:[],createdBy:host.appKeyId,updatedBy:host.appKeyId}})).id;
+    } catch (e) {
+      // A generic writer may insert after the precheck. The unique constraint is the final fence.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        throw new ContextResetError('CHECKPOINT_LOC_TAKEN','The checkpoint address is already occupied.');
+      }
+      throw e;
+    }
+    write = {nodeId:nodeId!,loc,memoryId:worker.memoryId,
+      workToken:await stampEmbeddingObligation(tx,nodeId!,worker.memoryId),content:ref.checkpoint!.content};
+    checkpointNodeUrn = emitNodeUrnV2(memory.urn, loc);
+  } else {
+    if (typeof ref.checkpointNode !== 'string' || ref.checkpointNode.trim() === '') throw invalid('Name the checkpoint node.');
+    try { nodeId = (await resolveNodeRef(tx as unknown as PrismaClient, ref.checkpointNode.trim())).id; } catch { nodeId=null; }
+    const node = nodeId ? await tx.node.findFirst({where:{id:nodeId,deletedAt:null},select:{memoryId:true,loc:true,memory:{select:{urn:true}}}}) : null;
+    if (!node || node.memoryId !== worker.memoryId) throw invalid("The checkpoint is a live node in the worker's own working memory.");
+    checkpointNodeUrn = emitNodeUrnV2(node.memory.urn, node.loc);
   }
   const registered = await tx.contextReset.update({
     where: { id: r.id },
-    data: { phase: 'checkpointed', recoveryRef: { checkpointNodeId: nodeId!, sessionId: r.sessionId, taskId: r.taskId }, recoveryRegisteredAt: now },
+    // #3300 / cor:agt:050:27 part 3: retain the registered address, not a later address of the node or worker memory.
+    data: { phase: 'checkpointed', recoveryRef: { checkpointNodeId: nodeId!, checkpointNodeUrn, sessionId: r.sessionId, taskId: r.taskId }, recoveryRegisteredAt: now },
   });
+  // Capture only; the transport publishes after the enclosing transaction commits.
+  if (write) checkpointWritten?.(write);
   return step(registered);
 }
 
@@ -571,20 +698,68 @@ export async function authorizeContextResetStop(
   return step(granted);
 }
 
+/** #3255: validate the host's bounded millisecond annotation; old clients and on-time reports mean zero. */
+function lateStopMilliseconds(value: unknown): number {
+  if (value == null) return 0;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > CONTEXT_RESET_LATE_STOP_MAX_MS) {
+    throw new ContextResetError('BAD_USER_INPUT', `lateStopMs is an integer from 0 to ${CONTEXT_RESET_LATE_STOP_MAX_MS} milliseconds.`);
+  }
+  return value;
+}
+
+/**
+ * #3255 (cor:agt:050:27 part 10): host-reported telemetry only. The reset row is already locked by lockForHost,
+ * serializing re-reports, and the event is inserted in the report's transaction. A later re-report never replaces
+ * the first lateness. A prior stopped report consumes the grant even without an annotation; zero adds nothing.
+ * No reset, availability, task or alarm state moves.
+ */
+async function recordLateStop(tx: Prisma.TransactionClient, r: ContextResetRow, value: number, now: Date): Promise<void> {
+  if (value === 0 || r.agentStoppedAt) return;
+  const previous = await tx.agentTeamEvent.findFirst({
+    where: { appId: r.appId, taskId: r.taskId, type: CONTEXT_RESET_LATE_STOP_EVENT, payload: { path: ['resetId'], equals: r.id } },
+    select: { id: true },
+  });
+  if (previous) return;
+  await appendResetEvent(tx, {
+    appId: r.appId, taskId: r.taskId, workerId: r.workerId, type: CONTEXT_RESET_LATE_STOP_EVENT, now,
+    payload: { resetId: r.id, workerId: r.workerId, lateStopMs: value },
+  });
+}
+
 /**
  * The host reports the old agent stopped. From here the mark lasts until the relaunched agent's first activity
  * (§4, R6), a `relaunchFailed`, or the operation's report deadline. A mark that already lapsed with the lease is not
- * raised again: the worker may have been given work since, and the recovery prompt reads its task list.
+ * raised again: the worker may have been given work since, and the recovery prompt reads its task list. #3255 adds
+ * an optional lateness annotation without changing this transition or mark behavior.
  */
 export async function reportContextResetAgentStopped(
-  tx: Prisma.TransactionClient, host: ResetHost, resetId: string, epoch: unknown, now: Date,
+  tx: Prisma.TransactionClient, host: ResetHost, resetId: string, epoch: unknown, now: Date, lateStopMs?: unknown,
 ): Promise<ContextResetStep> {
   const r = await lockForHost(tx, host, resetId);
+  const lateness = lateStopMilliseconds(lateStopMs);
+  // #3255 S8 / ruling 0087: a stalled host may signal after cancellation advanced the epoch. It may still annotate
+  // the stop grant it held, but cannot re-open this reset, move the current mark, or act at the cancelled epoch.
+  // A claim advances the epoch once; a failed/refused end advances it once more. A successful end keeps it.
+  if (r.endedAt && lateness > 0) {
+    if (!r.stopGrantedAt || !r.stopLeaseMs) {
+      throw new ContextResetError('CONTEXT_RESET_WRONG_PHASE', 'A late stop is reported only for a granted stop.');
+    }
+    const grantedEpoch = r.phase === 'failed' || r.phase === 'refused' ? r.epoch - 1 : r.epoch;
+    if (!Number.isInteger(epoch) || epoch !== grantedEpoch) {
+      throw new ContextResetError('STALE_EPOCH', 'A late stop names the epoch of the stop grant the host held.');
+    }
+    await recordLateStop(tx, r, lateness, now);
+    return step(r, null, true);
+  }
   requireEpoch(r, epoch);
-  if (r.agentStoppedAt && !r.endedAt) return step(r, null, true);
+  if (r.agentStoppedAt && !r.endedAt) {
+    await recordLateStop(tx, r, lateness, now);
+    return step(r, null, true);
+  }
   if (r.phase !== 'stop-granted') {
     throw new ContextResetError('CONTEXT_RESET_WRONG_PHASE', `This reset is ${r.phase}; the agent is reported stopped after a granted stop.`);
   }
+  await recordLateStop(tx, r, lateness, now);
   const stopped = await tx.contextReset.update({ where: { id: r.id }, data: { phase: 'agent-stopped', agentStoppedAt: now } });
   const mark = await lockMark(tx, r.workerId);
   if (ownsMark(mark, r) && recordInEffect(mark, now)) {
@@ -650,10 +825,11 @@ export async function onContextResetReported(
     return;
   }
   const code = (failureReason ?? '').split(/[\s:]/, 1)[0] ?? '';
-  if (!(HOST_REPORTED_REASONS as readonly string[]).includes(code) && !r.endedAt) {
+  const reasons = hostReportedReasons(r.phase);
+  if (!(reasons as readonly string[]).includes(code) && !r.endedAt) {
     throw new ContextResetError(
       'BAD_CONTEXT_RESET_INPUT',
-      `A reset's failure starts with its reason: one of ${HOST_REPORTED_REASONS.join(', ')}, then ": " and any detail.`,
+      `A reset's failure in phase ${r.phase} starts with its reason: one of ${reasons.join(', ')}, then ": " and any detail.`,
     );
   }
   if (r.endedAt) return;
@@ -748,7 +924,7 @@ async function sweepOne(db: PrismaClient, d: { id: string; workerId: string }, n
     else if (!session || session.endedAt || session.deletedAt) reason = 'SESSION_ENDED';
     else if (op?.status === 'failed' || op?.status === 'succeeded') {
       const code = (op.failureReason ?? '').split(/[\s:]/, 1)[0] ?? '';
-      reason = (HOST_REPORTED_REASONS as readonly string[]).includes(code) ? code as ContextResetReason
+      reason = (hostReportedReasons(r.phase) as readonly string[]).includes(code) ? code as ContextResetReason
         : r.phase === 'stop-granted' || r.phase === 'agent-stopped' ? 'RELAUNCH_UNVERIFIED'
         : !op.collectedAt ? 'HOST_LOST'
         : 'REPORT_TIMEOUT';

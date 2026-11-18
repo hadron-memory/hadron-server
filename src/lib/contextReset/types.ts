@@ -33,11 +33,18 @@ export type ContextResetReason = ContextResetRefusal | ContextResetFailure;
 export const isRefusal = (r: string): r is ContextResetRefusal => (CONTEXT_RESET_REFUSALS as readonly string[]).includes(r);
 export const isFailure = (r: string): r is ContextResetFailure => (CONTEXT_RESET_FAILURES as readonly string[]).includes(r);
 
-/** The reasons a HOST may name when it reports the operation FAILED (cor:agt:070:02), by the phase it stopped in. */
+/** The existing reasons a HOST may name when it reports the operation FAILED (cor:agt:070:02). */
 export const HOST_REPORTED_REASONS: readonly ContextResetReason[] = [
   'DIRTY_TREE', 'UNPUSHED_HEAD', 'BUSY', 'DRAFT_OR_MENU', 'TWO_AGENTS', 'NOT_IDLE', 'PROCESS_CHANGED',
   'CHECKPOINT_FAILED', 'STAGING_FAILED', 'RELAUNCH_UNVERIFIED', 'RELAUNCH_BLOCKED',
 ];
+/** #3309 / cor:agt:050:27 part 11: inability to act is reportable only before the claim. */
+const PRECLAIM_HOST_REPORTED_REASONS: readonly ContextResetReason[] = ['HOST_UNSUPPORTED', ...HOST_REPORTED_REASONS];
+
+/** Shared by the locked report and sweep: no post-claim reset may end as host-reported HOST_UNSUPPORTED. */
+export function hostReportedReasons(phase: string): readonly ContextResetReason[] {
+  return phase === 'requested' ? PRECLAIM_HOST_REPORTED_REASONS : HOST_REPORTED_REASONS;
+}
 /** The reasons `relaunchFailed` takes: a failure after the claim that the host saw. */
 export const RELAUNCH_FAILED_REASONS: readonly ContextResetFailure[] = [
   'CHECKPOINT_FAILED', 'STAGING_FAILED', 'RELAUNCH_UNVERIFIED', 'RELAUNCH_BLOCKED',

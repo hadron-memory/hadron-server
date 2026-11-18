@@ -64,8 +64,15 @@ async function keyedConnection(userId: string) {
   const { userApiKey } = await mintUserApiKey(db, { userId, createdBy: userId, label: 'presented key', issuedVia: 'portal' });
   const auth = { userId, apiKeyId: userApiKey.id, roles: ['READER'], clientId: `user:${userId}` } as AuthContext;
   const mcp = createTestableMcpServer(auth, { sessionId: `k-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-  return { mcp, revoke: () => M.revokeUserApiKey(null, { id: userApiKey.id }, as(userId)) };
+  // #3082: hadron_task_create / hadron_ack_wakes / hadron_set_worker_reports_to are disabled on MCP, so those pins call the
+  // resolver with the same Context the MCP wrapper built (userId + apiKeyId, the presented session as sessionId).
+  const gql = (sessionId?: string): Context => ({ db, userId, apiKeyId: userApiKey.id, roles: ['READER'], ...(sessionId ? { sessionId } : {}) });
+  return { mcp, gql, revoke: () => M.revokeUserApiKey(null, { id: userApiKey.id }, as(userId)) };
 }
+
+const codeOf = async (p: Promise<unknown>) => {
+  try { await p; return 'NO_ERROR'; } catch (e) { return (e as { extensions?: { code?: string } }).extensions?.code ?? String(e); }
+};
 
 describe('#1868: a revoked hdr_user_ key cannot write through the delegating MCP tools', () => {
   it('commentTools: hadron_create_comment is refused and writes no comment', async () => {
@@ -77,46 +84,42 @@ describe('#1868: a revoked hdr_user_ key cannot write through the delegating MCP
     expect(await db.node.count({ where: { nodeType: 'comment' } })).toBe(0);
   });
 
-  it('agentTaskTools: hadron_task_create is refused and creates no task', async () => {
+  it('agentTaskTools: createAgentTask with a revoked key is refused and creates no task (resolver; #3082 moved from MCP)', async () => {
     const plain = await db.session.create({ data: { id: generateId(), userId: member.id }, select: { id: true } });
-    const { mcp, revoke } = await keyedConnection(member.id);
+    const { gql, revoke } = await keyedConnection(member.id);
     await revoke();
-    const t = text(await mcp.callTool('hadron_task_create', { appRef: app.id, title: 'after revocation', session: plain.id }));
     // The agent-task resolvers conceal an authority denial as the App being unknown.
-    expect(code(t)).toBe('APP_NOT_FOUND');
+    expect(await codeOf(M.createAgentTask({}, { input: { appRef: app.id, title: 'after revocation' } }, gql(plain.id)))).toBe('APP_NOT_FOUND');
     expect(await db.agentTask.count()).toBe(0);
   });
 
-  it('tickerTools: hadron_ack_wakes with a genuine proof is refused at the key check', async () => {
+  it('tickerTools: acknowledgeWakes with a genuine proof is refused at the key check (resolver; #3082 moved from MCP)', async () => {
     const plain = await db.session.create({ data: { id: generateId(), userId: member.id }, select: { id: true } });
-    const { mcp, revoke } = await keyedConnection(member.id);
+    const { gql, revoke } = await keyedConnection(member.id);
     await revoke();
-    const t = text(await mcp.callTool('hadron_ack_wakes', { proofs: [proofFor(member.id)], session: plain.id }));
     // acknowledgeWakes maps the transaction's denial to the requester-mismatch refusal.
-    expect(code(t)).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+    expect(await codeOf(M.acknowledgeWakes({}, { proofs: [proofFor(member.id)] }, gql(plain.id)))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
   });
 
-  it('server.ts worker tools: hadron_set_worker_reports_to is refused and changes nothing (Anne #1872 sweep)', async () => {
-    const { mcp, revoke } = await keyedConnection(admin.id);
+  it('worker tools: setWorkerReportsTo with a revoked key is refused and changes nothing (Anne #1872 sweep; resolver, #3082)', async () => {
+    const { gql, revoke } = await keyedConnection(admin.id);
     await revoke();
-    const t = text(await mcp.callTool('hadron_set_worker_reports_to', { workerRef: workerId, reportsTo: rookId, app: app.id }));
-    // The tool renders the transaction's denial as the reports-to refusal text.
-    expect(t).toMatch(/may change who it reports to/);
+    await expect(M.setWorkerReportsTo({}, { workerRef: workerId, reportsTo: rookId }, gql())).rejects.toThrow(/may change who it reports to/);
     expect((await db.worker.findUniqueOrThrow({ where: { id: workerId } })).reportsToWorkerId).toBeNull();
   });
 
-  it('a live key still writes through the same tools (the control)', async () => {
+  it('a live key still writes through the same paths (the control)', async () => {
     const target = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 't:2', name: 'Target', content: 'Body' } });
     const plain = await db.session.create({ data: { id: generateId(), userId: member.id }, select: { id: true } });
-    const { mcp } = await keyedConnection(member.id);
+    const { mcp, gql } = await keyedConnection(member.id);
     expect(code(text(await mcp.callTool('hadron_create_comment', { targetRef: target.id, body: 'live key' })))).toBe('NO_ERROR');
-    expect(code(text(await mcp.callTool('hadron_task_create', { appRef: app.id, title: 'live key', session: plain.id })))).toBe('NO_ERROR');
-    expect(text(await mcp.callTool('hadron_ack_wakes', { proofs: [proofFor(member.id)], session: plain.id }))).toMatch(/^Acknowledged /);
+    expect(await codeOf(M.createAgentTask({}, { input: { appRef: app.id, title: 'live key' } }, gql(plain.id)))).toBe('NO_ERROR');
+    expect((await M.acknowledgeWakes({}, { proofs: [proofFor(member.id)] }, gql(plain.id))).acknowledged).toBeGreaterThanOrEqual(0);
   });
 
   it('a live key sets reports-to (the worker-tool control)', async () => {
-    const { mcp } = await keyedConnection(admin.id);
-    expect(code(text(await mcp.callTool('hadron_set_worker_reports_to', { workerRef: workerId, reportsTo: rookId, app: app.id })))).toBe('NO_ERROR');
+    const { gql } = await keyedConnection(admin.id);
+    expect(await codeOf(M.setWorkerReportsTo({}, { workerRef: workerId, reportsTo: rookId }, gql()))).toBe('NO_ERROR');
     expect((await db.worker.findUniqueOrThrow({ where: { id: workerId } })).reportsToWorkerId).toBe(rookId);
   });
 });

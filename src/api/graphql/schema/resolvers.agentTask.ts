@@ -1,3 +1,13 @@
+import { hasUnstorableJsonText } from '../../../lib/agentTasks/references.js';
+import { appendAppActionEvent } from '../../../lib/agentTasks/events.js';
+import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
+import { requireAppActionCode } from '../../../lib/actionRegister/appCode.js';
+import { resolveActionAnswer } from '../../../lib/actionRegister/answer.js';
+import { runMayReadTeam } from '../../../lib/auth/runTeamRead.js';
+import { retryOnSerializationFailure } from '../../../lib/serializableRetry.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { finishFindings, countFindings, type TaskFinding } from '../../../lib/agentTasks/findings.js';
+import { isDeepStrictEqual } from 'node:util';
 import { lockTaskGraph, taskPriority, addTaskBlocker, removeTaskBlocker } from '../../../lib/agentTasks/blockers.js';
 import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
 // Agent tasks — #1705 (Task Management slice T1, epic #1704).
@@ -58,13 +68,15 @@ import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
 // owner-role AppMembers, org ADMIN/OWNER and platform admins. It replaced the
 // strict reading of #1713 (Rook P1-1), whose self-grant risk #1714 closed:
 // `joinApp` never hands out `owner`.
-// INTERIM (team chat #7508): the App-manager arm counts only for a PERSON
-// acting as themselves; a worker acting through its session does not inherit
-// its driver's management rights. This is attribution hygiene, NOT a privilege
-// boundary (Rook P3-3): the same credential can act as the person by sending
-// no worker session. It keeps a worker's own acts from being recorded as
-// management acts. A worker's own authority over others' tasks is 050:09's
-// `reportsTo` arm (Holger #7804; built with #1726), not its driver's role.
+// #3323 (S4a of #2483, cor:dmo:050:12, replacing the #7508 interim): the
+// App-manager arm admits a PERSON acting as themselves, and their held worker's
+// session ONLY on a clear instruction the door passes on (`actorManagesApp`'s
+// explicit `instructed` input; #3307's check, judged on the holder). Such an act
+// is recorded as one `app.manager-act` event, so a worker's management acts are
+// told apart from its own. With no instruction a worker never inherits its
+// holder's management, and every door not wired for S4a passes none. A worker's
+// own authority over others' tasks is still 050:09's `reportsTo` arm (Holger
+// #7804; built with #1726), asked before the manager arm.
 //
 // CONCEALMENT: a task the caller cannot read — including one in another App,
 // or a parent named across Apps — reads as TASK_NOT_FOUND (mutations) or null
@@ -73,18 +85,26 @@ import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
 // APP_NOT_FOUND (#1713 review, Rook P3-1; the resolvePilotApp posture).
 
 import { normalizeFamily } from '../../../lib/agentTasks/family.js';
+import {
+  checkRunSettingsAgainst, restampAppliedRunSettings, RunSettingsError, stampAppliedRunSettings, taskRunSettingsOf, validateTaskRunSettings, type TaskRunSettings,
+} from '../../../lib/agentTasks/runSettings.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
-import { type Context, isAppParticipant, clampListTake, withoutRequestCaches, pageArgs, pageEnvelope } from './resolvers.helpers.js';
+import { tickBatch } from './tickBatch.js';
+import { type Context, isAppParticipant, clampListTake, LIST_PAGE_MAX, withoutRequestCaches, pageArgs, pageEnvelope } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import { getPortalBaseUrl } from '../../../lib/portalUrl.js';
 import { parseTaskHandle, composeTaskHandle, handleDepth, MAX_HANDLE_DEPTH, MAX_HANDLE_LENGTH } from '../../../lib/agentTasks/handle.js';
 import { ensureProjectZero, PROJECT_ZERO_HANDLE, rootTaskWhere } from '../../../lib/agentTasks/projectZero.js';
 import { composeWorkerUrn, resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { resolveWorkerIdByName } from './resolvers.worker.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
+import type { ActAdmission, ActInstruction } from '../../../lib/auth/instructedAct.js';
+import { appendManagerInstructionEvent, type ManagerAct, type ManagerActSubject } from '../../../lib/agentTasks/events.js';
+import { lockCallerSession, readActInstruction, requireInstructedActKeepingRuns } from './resolvers.instruction.js';
 import { lockAppReportsTo } from '../../../lib/workerReportsTo.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { refuseStoppedAssignee } from '../../../lib/stopSignals/enforce.js';
@@ -92,7 +112,9 @@ import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { currentActor } from '../../../lib/requestActor.js';
+import { touchSessionIfLive } from '../../../lib/sessionActivity.js';
 import { appKeyCaller, refuseSessionBound } from '../../../lib/appKeyScopes/scopes.js';
+import { keyHostId } from '../../../lib/hostOperations/hostKey.js';
 import { launchForAssignment } from '../../../lib/hostOperations/launch.js';
 import { requestSessionEnd } from '../../../lib/hostOperations/sessionEnd.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
@@ -102,10 +124,20 @@ import {
   appendTaskEvent,
   eventActor,
   TASK_EVENT_TYPES,
+  TASK_EDIT_FIELDS,
+  TASK_HAND_BACK_CODES,
+  type TaskEditField,
+  type TaskHandBackCode,
   type EventActor,
+  type TaskEventPayload,
   type TaskParty,
 } from '../../../lib/agentTasks/events.js';
-import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
+import { loadAppModelGroups, matchAfterChange, matchTaskNow, matchTaskNowInTx } from '../../../lib/agentTasks/matcher.js';
+import { normalizeModelGroupName } from '../../../lib/agentTasks/modelGroups.js';
+import { checkAgainstTeamSchema, normalizeTaskProperties, propertiesFingerprint, type PropertiesFingerprint } from '../../../lib/agentTasks/properties.js';
+import { checkOutcomeInTeamSet } from '../../../lib/agentTasks/outcomeSet.js';
+import { checkExternalIdText, normalizeExternalId, normalizeTaskReferences, referenceKind, storedTaskReferences, REFERENCE_KIND_TO_GQL, TaskReferenceError, TASK_EXTERNAL_ID_MAX, TASK_REFERENCE_TARGET_MAX, type TaskReference } from '../../../lib/agentTasks/references.js';
+import { isUniqueViolationOn } from '../../../auth/userProvision.js';
 import { emitTaskWarnings, readAssigneeFacts, type TaskWarningCode } from './resolvers.taskWarnings.js';
 import type { GraphQLResolveInfo } from 'graphql';
 
@@ -119,6 +151,8 @@ export const TASK_EVIDENCE_MAX = 2_048;
 export const TASK_TAG_MAX = 64;
 export const TASK_TAGS_MAX = 32;
 export const TASK_REQUIREMENT_LIST_MAX = 32;
+/** #2651 (cor:agt:050:29): the optional hand-back reason text. */
+export const TASK_HAND_BACK_TEXT_MAX = 2_000;
 /**
  * An outcome is a WORD (cor:agt:050:01: `succeeded`, `failed`, or a word the
  * team chooses) — and it is copied into the event stream, which must never
@@ -150,9 +184,43 @@ function normalizeCreateStatus(value: string | null | undefined): 'backlog' | 'p
 export function taskError(code: string, message: string, ext: Record<string, unknown> = {}): GraphQLError {
   return new GraphQLError(message, { extensions: { code, ...ext } });
 }
+/**
+ * #3863: TASK_NOT_ASSIGNEE for one request shape that looks identical from outside — a request that carried no worker
+ * session (it acted as the person) versus one that acted as a worker who is not the assignee. The refusal now says which
+ * the SERVER saw (`extensions.actor`: 'person' | 'worker'), which is the caller's own request and reveals nothing about
+ * the task or its assignee. The code, the gate and the refuse-before-write order are unchanged (cor:agt:050:08).
+ */
+export function notAssignee(actor: TaskActor, message: string, ext: Record<string, unknown> = {}): GraphQLError {
+  const note = actor.kind === 'worker'
+    ? ' This request acted as a worker session.'
+    : ' This request acted as a person: it carried no worker session, and a worker\'s task is acted on only with that worker\'s session.';
+  return taskError('TASK_NOT_ASSIGNEE', message + note, { ...ext, actor: actor.kind === 'worker' ? 'worker' : 'person' });
+}
 const notFound = (taskId: string): GraphQLError =>
   taskError('TASK_NOT_FOUND', 'Task not found.', { taskId });
+/** The refusal for a task that does not exist or that the caller may not read, for a door outside `mutateTask`. */
+export const taskNotFound = notFound;
+/** #2664: the longest `text` filter, after trimming. */
+const TASK_TEXT_FILTER_MAX = 200;
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
+/**
+ * #4291 (cor:agt:050:01, Proposed): a task's run settings refused by their shape or against the task's own requirements.
+ * One code, with the closed `reason` (src/lib/agentTasks/runSettings.ts RUN_SETTINGS_REFUSALS); the refusal depends only
+ * on the caller's own input, and nothing is written.
+ */
+function runSettingsChecked<T>(check: () => T): T {
+  try {
+    return check();
+  } catch (e) {
+    if (e instanceof RunSettingsError) throw taskError('TASK_RUN_SETTINGS_INVALID', e.message, { reason: e.reason });
+    throw e;
+  }
+}
+/** The start's last step, in its transaction: stamp the settings the run uses (#4291) and return the row as it now is. */
+async function startedWithAppliedSettings(tx: Prisma.TransactionClient, taskId: string): Promise<TaskRow> {
+  await stampAppliedRunSettings(tx, taskId);
+  return tx.agentTask.findUniqueOrThrow({ where: { id: taskId } });
+}
 const forbidden = (message = 'You are not a participant of this App.'): GraphQLError =>
   taskError('FORBIDDEN', message);
 
@@ -163,12 +231,40 @@ const APP_SELECT = {
   uninstalledAt: true, deletedAt: true,
 } as const;
 export type TaskApp = Prisma.AppGetPayload<{ select: typeof APP_SELECT }>;
-type TaskRow = Prisma.AgentTaskGetPayload<Record<string, never>>;
+export type TaskRow = Omit<Prisma.AgentTaskGetPayload<Record<string, never>>, 'resultFindings'> & { resultFindings?: Prisma.JsonValue | null };
 
-/** Who is acting on a task: a worker through its session, or a person as themselves. */
+/**
+ * #3323 (S4a of #2483, hrn:node:hadronmemory.com:specs:cor:dmo:050:12): the instruction a wired door was called with,
+ * and what the App-manager arm made of it in the current attempt. `admitted` is set only when #3307's check admitted
+ * the caller's held worker on its holder's right; the door records that act, after every refusal.
+ */
+export type ManagerInstruction = { claim: ActInstruction; admitted: Extract<ActAdmission, { kind: 'instructed-worker' }> | null };
+
+/**
+ * Who is acting on a task: a worker through its session, or a person as themselves. `instructed` is attached only by
+ * a door wired for #3323 ({@link withInstruction}); every other caller resolves an actor without one.
+ */
 export type TaskActor =
-  | { kind: 'worker'; workerId: string; agentId: string | null; userId: string | null }
-  | { kind: 'user'; userId: string };
+  | { kind: 'worker'; workerId: string; agentId: string | null; userId: string | null; instructed?: ManagerInstruction }
+  | { kind: 'user'; userId: string; instructed?: ManagerInstruction };
+
+/** #3323: the actor a wired door acts as, carrying the instruction it was called with (none: the actor unchanged). */
+export function withInstruction<A extends TaskActor>(actor: A, claim: ActInstruction | null | undefined): A {
+  return claim == null ? actor : { ...actor, instructed: { claim, admitted: null } };
+}
+
+/**
+ * #3323: one ids-only `app.manager-act` record for an act the instructed App-manager arm admitted (cor:agt:050:11).
+ * Called by the door in the act's own transaction, after every refusal and only when the act changed something; a
+ * person, and a worker admitted on another arm (owner, reportsTo, assignee, itself, the alarm chain), record nothing.
+ */
+export async function recordInstructedManagerAct(
+  tx: Prisma.TransactionClient, appId: string, actor: TaskActor, act: ManagerAct,
+  subject: ManagerActSubject = {},
+): Promise<void> {
+  const admission = actor.instructed?.admitted;
+  if (admission) await appendManagerInstructionEvent(tx, { appId, admission, act, subject });
+}
 
 /**
  * #1756 (cor:agt:050:06): a headless run of the App creating a root task. Not a `TaskActor`: a run is never an
@@ -176,6 +272,14 @@ export type TaskActor =
  * is allowed, and `inTaskWriteTx` re-gates it under the App's anchors like any other creator.
  */
 export type RunCreator = { kind: 'run'; runId: string };
+
+/**
+ * #3132 (cor:agt:050:23, :120:03): the App's own key claiming an outside item, its ONE task write. Like `RunCreator`
+ * it is not a `TaskActor`, so no read, transition or assignment path ever sees it; only the claim constructs it.
+ * `inTaskWriteTx` re-runs the key read gate (`keyMayReadApp`) under the App's shared anchors, so a revocation or an
+ * App or org deletion either committed first (refused, nothing written) or waits for the claim.
+ */
+export type KeyCreator = { kind: 'appKey'; appKeyId: string };
 
 /** The run is this App's, and still running, judged under the write's locks (a finished run creates nothing). */
 async function requireRunLive(txCtx: Context, app: TaskApp, runId: string): Promise<void> {
@@ -213,8 +317,13 @@ export async function resolveTaskActor(ctx: Context, app: TaskApp): Promise<Task
   return { kind: 'user', userId: ctx.userId };
 }
 
-/** The write-side preconditions every task mutation shares, after the actor resolved. */
-export function requireWritable(ctx: Context, app: TaskApp): void {
+/**
+ * The write-side preconditions every task mutation shares, after the actor resolved. `allowUninstalled` (#4167,
+ * hrn:node:hadronmemory.com:specs:cor:acl:140:05, Holger 2026-11-14) is ONLY the revoke door: whoever manages the
+ * App may end its grants also while the App is uninstalled (not deleted), so that door names the exception —
+ * impersonation and a refused binding still refuse, and every other caller keeps the uninstalled refusal.
+ */
+export function requireWritable(ctx: Context, app: TaskApp, options: { allowUninstalled?: boolean } = {}): void {
   if (ctx.impersonation) throw forbidden('Impersonation sessions are read-only.');
   if (ctx.sessionBindingRefused) {
     throw taskError(
@@ -223,7 +332,7 @@ export function requireWritable(ctx: Context, app: TaskApp): void {
         'Nothing was written. Bind a live session, or send no session to act as yourself.',
     );
   }
-  if (app.uninstalledAt) throw taskError('APP_UNINSTALLED', 'This App is uninstalled; its tasks are read-only.');
+  if (app.uninstalledAt && !options.allowUninstalled) throw taskError('APP_UNINSTALLED', 'This App is uninstalled; its tasks are read-only.');
 }
 
 export async function loadApp(ctx: Context, appId: string): Promise<TaskApp | null> {
@@ -279,6 +388,13 @@ async function keyMayReadApp(ctx: Context, app: TaskApp): Promise<boolean> {
   return true;
 }
 
+export { runMayReadTeam };
+
+/** The callback projection stays under shared authority anchors in one coherent view; later GraphQL fields re-gate separately. */
+export async function inRunTeamReadTx<T>(ctx: Context, appId: string, onGone: () => T, body: (c: Context, app: TaskApp) => Promise<T>): Promise<T> {
+  return retryOnSerializationFailure(() => inAnchoredAppTx(ctx, appId, onGone, async (c, app) => await runMayReadTeam(c, app) ? body(c, app) : onGone(), true));
+}
+
 /**
  * A key's whole read in ONE transaction that holds the App's authority anchors
  * SHARED: whoever revokes the key or deletes the App takes them exclusively, so
@@ -291,6 +407,22 @@ async function inKeyReadTx<T>(
   appId: string,
   onGone: () => T,
   body: (txCtx: Context, app: TaskApp) => Promise<T>,
+  timeoutMs?: number,
+  /** #4224: one repeatable-read snapshot for the whole read (see `withReadableApp`'s `coherent`). */
+  coherent = false,
+): Promise<T> {
+  const run = () => inAnchoredAppTx(ctx, appId, onGone, async (txCtx, app) => ((await keyMayReadApp(txCtx, app)) ? body(txCtx, app) : onGone()), coherent, timeoutMs);
+  return coherent ? retryOnSerializationFailure(run) : run();
+}
+
+/** One transaction holding the App's authority anchors SHARED, with the App re-read after the lock (see `inKeyReadTx`). */
+async function inAnchoredAppTx<T>(
+  ctx: Context,
+  appId: string,
+  onGone: () => T,
+  body: (txCtx: Context, app: TaskApp) => Promise<T>,
+  coherentRunRead = false,
+  timeoutMs?: number,
 ): Promise<T> {
   const head = await loadApp(ctx, appId);
   if (!head) return onGone();
@@ -300,21 +432,120 @@ async function inKeyReadTx<T>(
       ...(head.organizationId ? [{ kind: 'org' as const, id: head.organizationId }] : []),
       ...(head.ownerUserId ? [{ kind: 'user' as const, id: head.ownerUserId }] : []),
     ], 'shared');
+    if (coherentRunRead) {
+      // A repeatable-read snapshot may predate an advisory-lock wait. Locking owner rows first
+      // detects a committed revocation with 40001, then the outer bounded retry re-gates afresh.
+      if (head.organizationId) await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${head.organizationId} FOR SHARE`;
+      if (head.ownerUserId) await tx.$queryRaw`SELECT id FROM users WHERE id = ${head.ownerUserId} FOR SHARE`;
+      await tx.$queryRaw`SELECT id FROM apps WHERE id = ${head.id} FOR SHARE`;
+      // #4224: a key's own rows too, so a key or scope revoked while we waited is a 40001 (and a fresh gate), never
+      // a stale admission from the snapshot. A newly granted scope is an insert the snapshot misses: that only refuses.
+      const key = appKeyCaller(ctx);
+      if (key) {
+        await tx.$queryRaw`SELECT id FROM app_keys WHERE id = ${key.appKeyId} FOR SHARE`;
+        await tx.$queryRaw`SELECT id FROM app_key_scopes WHERE app_key_id = ${key.appKeyId} ORDER BY id FOR SHARE`;
+      }
+    }
     const txCtx = withoutRequestCaches(ctx, tx);
     const app = await loadApp(txCtx, appId);
     // Ownership moved while we waited for the anchors: the locks we hold are the wrong ones, so answer as missing.
     if (!app || app.organizationId !== head.organizationId || app.ownerUserId !== head.ownerUserId) return onGone();
-    if (!(await keyMayReadApp(txCtx, app))) return onGone();
     return body(txCtx, app);
+  }, coherentRunRead
+    ? { timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }
+    : timeoutMs !== undefined ? { timeout: timeoutMs } : undefined);
+}
+
+/**
+ * #2931 (V6, Holger 2026-10-31; cor:agt:070:04, cor:agt:080:18, :22) — the host this caller reads an App's tickers
+ * as: the App's OWN key holding a live `host:operate` scope, or null. Judged on `ctx.db`, which is the read's own
+ * transaction under the App's shared anchors, so a scope or key revoked while the read waited is seen.
+ *
+ * ORDER, so that every caller this does not admit gets exactly today's answer (APP_NOT_FOUND / null):
+ * own App, App and org live, then the scope (`keyHostId`: a live scope on an unrevoked key of an installed App),
+ * and ONLY THEN the session refusal. A session-bound key without the scope still reads "not found"; a host key
+ * learns only that it carries a session. Unlike `keyMayReadApp`, an unscoped own-App key is NOT admitted, and no
+ * worker set is derived for a key without a host: such a key is refused, never given an "unregistered" set.
+ * READ-ONLY by construction: it yields no `TaskActor`, so every write still refuses the key.
+ */
+async function hostKeyTickerReader(ctx: Context, app: TaskApp): Promise<string | null> {
+  const key = appKeyCaller(ctx);
+  if (!key || app.deletedAt || app.id !== key.appId) return null;
+  if (app.organizationId) {
+    const org = await ctx.db.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } });
+    if (!org) return null;
+  }
+  const hostId = await keyHostId(ctx.db, key);
+  if (!hostId) return null;
+  refuseSessionBound(ctx);
+  if (currentActor().workerId) throw taskError('APP_KEY_SESSION_BOUND', 'A host key does not act as a worker. Send no session.');
+  return hostId;
+}
+
+/**
+ * #2931 — a host key's ticker read of App `appId`, in one transaction under the App's shared anchors: `body` runs
+ * with the host the key operates as, re-judged after the lock; `onGone` answers (or throws) for anyone else.
+ */
+export async function inHostKeyTickerReadTx<T>(
+  ctx: Context,
+  appId: string,
+  onGone: () => T,
+  body: (txCtx: Context, app: TaskApp, hostId: string) => Promise<T>,
+): Promise<T> {
+  return inAnchoredAppTx(ctx, appId, onGone, async (txCtx, app) => {
+    const hostId = await hostKeyTickerReader(txCtx, app);
+    return hostId ? body(txCtx, app, hostId) : onGone();
   });
 }
 
-/** Run a read over an App the caller may READ tasks and events of: a participant, or the App's own key. */
-export async function withReadableApp<T>(ctx: Context, appRef: string, body: (c: Context, app: TaskApp) => Promise<T>): Promise<T> {
+/** #2931 — `inHostKeyTickerReadTx` by App ref: another App's ref, or one that resolves to nothing, is APP_NOT_FOUND as today. */
+export async function withHostKeyTickerApp<T>(
+  ctx: Context,
+  appRef: string,
+  body: (txCtx: Context, app: TaskApp, hostId: string) => Promise<T>,
+): Promise<T> {
+  const key = appKeyCaller(ctx);
+  let appId: string;
+  try {
+    ({ id: appId } = await resolveAppRef(ctx.db, appRef));
+  } catch (e) {
+    if (e instanceof AppNotFoundError) throw appNotFound(appRef);
+    throw e;
+  }
+  if (!key || appId !== key.appId) throw appNotFound(appRef);
+  return inHostKeyTickerReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body);
+}
+
+/**
+ * Shared participant/key read. Only roster/task callers opt into the separate USERLESS run arm (#2925).
+ * Xanthos #70403: a user-backed run keeps its existing person arm, actor and non-task management behavior.
+ */
+export async function withReadableApp<T>(
+  ctx: Context, appRef: string, body: (c: Context, app: TaskApp) => Promise<T>, allowRun = false,
+  /** #3884 — the key arm's transaction cap in ms, for a read whose bounded work can outlast Prisma's 5 s default. Unset keeps the default. */
+  keyTxTimeoutMs?: number,
+  /**
+   * #4224 — run `body` on ONE repeatable-read snapshot, for a read that composes several facts into one answer (a
+   * verdict no single instant justified is worse than a stale one). A participant's body runs in its own
+   * repeatable-read transaction; a key's runs in the anchored coherent transaction the run read uses, with the key's
+   * own rows locked too. Either retries a serialization failure with a fresh gate. Not for the run arm.
+   */
+  opts: { coherent?: boolean } = {},
+): Promise<T> {
+  if (isRunPrincipal(ctx) && !ctx.userId && allowRun) {
+    let id: string;
+    try { ({ id } = await resolveAppRef(ctx.db, appRef)); } catch (e) { if (e instanceof AppNotFoundError) throw appNotFound(appRef); throw e; }
+    if (id !== ctx.appId) throw appNotFound(appRef);
+    return inRunTeamReadTx(ctx, id, () => { throw appNotFound(appRef); }, body);
+  }
   const key = appKeyCaller(ctx);
   if (!key) {
     const { app } = await resolveParticipatedApp(ctx, appRef);
-    return body(ctx, app);
+    if (!opts.coherent) return body(ctx, app);
+    return retryOnSerializationFailure(() => ctx.db.$transaction(
+      (tx) => body(withoutRequestCaches(ctx, tx), app),
+      { timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+    ));
   }
   let appId: string;
   try {
@@ -324,7 +555,7 @@ export async function withReadableApp<T>(ctx: Context, appRef: string, body: (c:
     throw e;
   }
   if (appId !== key.appId) throw appNotFound(appRef);
-  return inKeyReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body);
+  return inKeyReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body, keyTxTimeoutMs, opts.coherent === true);
 }
 
 /**
@@ -335,6 +566,7 @@ export async function withReadableApp<T>(ctx: Context, appRef: string, body: (c:
 export async function mayReadAppTasks(ctx: Context, appId: string): Promise<boolean> {
   const app = await loadApp(ctx, appId);
   if (!app || app.deletedAt) return false;
+  if (isRunPrincipal(ctx) && !ctx.userId) return runMayReadTeam(ctx, app);
   if (appKeyCaller(ctx)) return keyMayReadApp(ctx, app);
   return (await resolveTaskActor(ctx, app)) !== null;
 }
@@ -377,6 +609,7 @@ async function participatedAppIds(ctx: Context): Promise<string[]> {
 
 /** The ONE App a BARE handle means for this caller: a key's own App, a worker session's App, else the one App a person belongs to. */
 async function bareHandleApp(ctx: Context, ref: string): Promise<string | null> {
+  if (isRunPrincipal(ctx) && !ctx.userId) return ctx.appId ?? null;
   const key = appKeyCaller(ctx);
   if (key) return key.appId;
   const bound = currentActor();
@@ -440,11 +673,21 @@ async function loadReadableTask(
 }
 
 /** A task the caller may READ, with its App: a participant, or the App's own key (#1755). Null when missing or unreadable. */
-async function withReadableTask<T>(
+export async function withReadableTask<T>(
   ctx: Context,
   taskRef: string,
   body: (c: Context, r: { task: TaskRow; app: TaskApp }) => Promise<T>,
+  allowRun = false,
 ): Promise<T | null> {
+  if (isRunPrincipal(ctx) && !ctx.userId) {
+    if (!allowRun || !ctx.appId) return null;
+    const taskId = await resolveTaskRef(ctx, taskRef, ctx.appId);
+    if (!taskId) return null;
+    return inRunTeamReadTx<T | null>(ctx, ctx.appId, () => null, async (c, app) => {
+      const task = await c.db.agentTask.findFirst({ where: { id: taskId, appId: app.id } });
+      return task ? body(c, { task, app }) : null;
+    });
+  }
   const key = appKeyCaller(ctx);
   if (!key) {
     const readable = await loadReadableTask(ctx, taskRef);
@@ -465,19 +708,64 @@ function actorIs(actor: TaskActor, workerId: string | null, userId: string | nul
   if (actor.kind === 'worker') return workerId !== null && workerId === actor.workerId;
   return workerId === null && userId !== null && userId === actor.userId;
 }
-const isOwner = (actor: TaskActor, t: TaskRow): boolean => actorIs(actor, t.ownerWorkerId, t.ownerUserId);
-const isAssignee = (actor: TaskActor, t: TaskRow): boolean =>
+const isOwner = (actor: TaskActor, t: Pick<TaskRow, 'ownerWorkerId' | 'ownerUserId'>): boolean => actorIs(actor, t.ownerWorkerId, t.ownerUserId);
+export const isAssignee = (actor: TaskActor, t: Pick<TaskRow, 'assigneeWorkerId' | 'assigneeUserId'>): boolean =>
   actorIs(actor, t.assigneeWorkerId, t.assigneeUserId);
 
+/** The App-manager arm's own refusal inside #3307's check; the door answers with its own refusal. */
+class ManagerArmRefused extends Error {}
+
 /**
- * Whoever manages the App — cor:acl:010:01 as Holger ruled it on 2026-10-10
- * (`managesApp`, #1731). INTERIM: a person acting as themselves only — see the
- * file header. Called with the transaction context, so it reads committed
- * state under the write's anchors, with platform roles re-read from the user row.
+ * Whoever manages the App — cor:acl:010:01 as Holger ruled it on 2026-10-10 (`managesApp`, #1731). Called with the
+ * transaction context, so it reads committed state under the write's anchors, with platform roles re-read.
+ *
+ * #3323 (S4a of #2483, hrn:node:hadronmemory.com:specs:cor:dmo:050:12): a worker's session acts with its holder's
+ * manager right ONLY when the door passes the instruction it was called with (`instructed`, an explicit input). With
+ * none, a worker actor is refused exactly as before: every caller not wired for S4a (the grant and key-scope doors,
+ * the stop-signal, ticker, settings, host and wake doors until #3321) passes none, so widening this helper widens no
+ * door no slice has re-read. With one, #3307's shared check decides on the live transaction (the caller's session row
+ * fenced first): the request user holds the worker, the session is hand-started in this App, the claim is valid, and
+ * `managesApp` holds for that holder. An admitted worker is noted in `instructed.admitted` for the door's record.
+ * A person with an instruction is judged by the same check (a present claim is validated), and records nothing.
  */
-export async function actorManagesApp(ctx: Context, app: TaskApp, actor: TaskActor): Promise<boolean> {
-  if (actor.kind !== 'user' || ctx.impersonation) return false;
-  return managesApp(ctx, app);
+export async function actorManagesApp(ctx: Context, app: TaskApp, actor: TaskActor, instructed?: ManagerInstruction): Promise<boolean> {
+  if (ctx.impersonation) return false;
+  if (!instructed) return actor.kind === 'user' && managesApp(ctx, app);
+  return admitOnHolderRight(ctx, app, actor, instructed, () => managesApp(ctx, app));
+}
+
+/**
+ * #3321: the manager arm of a door whose own arms need no instruction (the ticker's owner, the worker itself, a grant).
+ * Those decide first for a worker, so a worker admitted on its own arm spends no instruction and writes no record
+ * (acceptance 5). A person is asked as before: whether they manage decides which authority a door reports.
+ */
+export async function managerArmAfterOwn(ctx: Context, app: TaskApp, actor: TaskActor, ownArm: () => boolean): Promise<boolean> {
+  if (actor.kind === 'worker' && ownArm()) return false;
+  return actorManagesApp(ctx, app, actor, actor.instructed);
+}
+
+/**
+ * #3307's check for one right of the holder: `holderRight` is judged on the holder, never on a worker grant. Sets
+ * `instructed.admitted` only for the same worker the door is acting as.
+ */
+export async function admitOnHolderRight(
+  ctx: Context, app: TaskApp, actor: TaskActor, instructed: ManagerInstruction, holderRight: () => boolean | Promise<boolean>,
+): Promise<boolean> {
+  if (ctx.impersonation) return false;
+  await lockCallerSession(ctx.db as Prisma.TransactionClient, ctx.sessionId);
+  let admission: ActAdmission;
+  try {
+    admission = await requireInstructedActKeepingRuns(
+      ctx, app.id, instructed.claim, async () => holderRight(), readActInstruction, () => new ManagerArmRefused(),
+    );
+  } catch (e) {
+    if (e instanceof ManagerArmRefused) return false;
+    throw e;
+  }
+  if (actor.kind === 'user') return admission.kind === 'person';
+  if (admission.kind !== 'instructed-worker' || admission.workerId !== actor.workerId) return false;
+  instructed.admitted = admission;
+  return true;
 }
 
 /**
@@ -494,7 +782,7 @@ export async function actorManagesApp(ctx: Context, app: TaskApp, actor: TaskAct
  * It stops at the first worker that reports to nobody; a retired worker
  * reports to nobody, so a chain never runs through one.
  */
-async function actorCoordinatesOwner(tx: Prisma.TransactionClient, actor: TaskActor, task: TaskRow): Promise<boolean> {
+async function actorCoordinatesOwner(tx: Prisma.TransactionClient, actor: TaskActor, task: Pick<TaskRow, 'ownerWorkerId'>): Promise<boolean> {
   if (actor.kind !== 'worker' || !task.ownerWorkerId) return false;
   let current = task.ownerWorkerId;
   for (let hops = 0; hops < 1000; hops++) {
@@ -507,9 +795,25 @@ async function actorCoordinatesOwner(tx: Prisma.TransactionClient, actor: TaskAc
   return false;
 }
 
-/** The task's owner, whoever manages the App, or (#1726) a worker the owner reports to. */
-async function mayDirectTask(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: TaskRow): Promise<boolean> {
-  return isOwner(actor, task) || (await actorManagesApp(txCtx, app, actor)) || (await actorCoordinatesOwner(tx, actor, task));
+/**
+ * The task's owner, (#1726) a worker the owner reports to, or whoever manages the App. #3323: the manager arm is asked
+ * last, so a worker the other arms admit needs no instruction and writes no instructed-act record.
+ */
+export async function mayDirectTask(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: Pick<TaskRow, 'ownerWorkerId' | 'ownerUserId'>): Promise<boolean> {
+  return isOwner(actor, task) || (await actorCoordinatesOwner(tx, actor, task)) || (await actorManagesApp(txCtx, app, actor, actor.instructed));
+}
+
+/**
+ * #2420 (cor:agt:050:28): who may write a task's `properties` — the cor:agt:050:09 set (owner, a worker the owner
+ * reports to, whoever manages the App) AND the task's own assignee; nobody else. Asked of a task row or, at creation,
+ * of the facts the new row will carry. #3323: the assignee arm decides first, because the manager arm of
+ * {@link mayDirectTask} would record an instructed act for a write the assignee may make on its own (cor:dmo:050:12).
+ */
+async function mayWriteProperties(
+  tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor,
+  task: Pick<TaskRow, 'ownerWorkerId' | 'ownerUserId' | 'assigneeWorkerId' | 'assigneeUserId'>,
+): Promise<boolean> {
+  return isAssignee(actor, task) || (await mayDirectTask(tx, txCtx, app, actor, task));
 }
 
 function sameActor(a: TaskActor, b: TaskActor): boolean {
@@ -618,6 +922,42 @@ function normalizeTitle(title: string): string {
   return t;
 }
 
+/** #2649 (cor:agt:050:01 References): the stored list, or BAD_USER_INPUT with a fixed message (never the target). */
+function taskReferencesInput(input: unknown): TaskReference[] {
+  try {
+    return normalizeTaskReferences(input);
+  } catch (e) {
+    if (e instanceof TaskReferenceError) throw badInput(e.message);
+    throw e;
+  }
+}
+
+/** #3125 S2 (V46): the stored external id, or BAD_USER_INPUT with fixed text (never the value). */
+function externalIdInput(input: unknown): string | null {
+  try {
+    return normalizeExternalId(input);
+  } catch (e) {
+    if (e instanceof TaskReferenceError) throw badInput(e.message);
+    throw e;
+  }
+}
+
+/**
+ * #3125 S2: a P2002 from the partial unique index agent_tasks_app_external_id_uniq. Prisma names it by its columns
+ * (app_id, external_id), or by the index name; no other unique on agent_tasks contains external_id, so that column
+ * alone identifies it (app_id would also match (app_id, handle)).
+ */
+const EXTERNAL_ID_TARGETS = ['external_id', 'agent_tasks_app_external_id_uniq'] as const;
+
+function refKind(kind: unknown): string {
+  try {
+    return referenceKind(kind);
+  } catch (e) {
+    if (e instanceof TaskReferenceError) throw badInput(e.message);
+    throw e;
+  }
+}
+
 function normalizeTags(tags: readonly string[] | null | undefined): string[] {
   if (!tags) return [];
   const out: string[] = [];
@@ -631,12 +971,28 @@ function normalizeTags(tags: readonly string[] | null | undefined): string[] {
   return out;
 }
 
+const REQUIREMENT_KEYS = new Set(['role', 'roles', 'team', 'familyIn', 'familyNotIn', 'excludeWorkers', 'minTier', 'modelGroupIn', 'modelGroupNotIn']);
+
 type RequirementsInput = {
+  roles?: string[] | null;
+  team?: string | null;
   role?: string | null;
   familyIn?: string[] | null;
   familyNotIn?: string[] | null;
   excludeWorkers?: string[] | null;
+  minTier?: string | null;
+  modelGroupIn?: string[] | null;
+  modelGroupNotIn?: string[] | null;
 };
+
+/** #2831 S2 (cor:agt:060:12): a model group name no effective group of this App carries is refused, naming it. */
+async function refuseUnknownModelGroups(ctx: Context, app: TaskApp, names: string[]): Promise<void> {
+  if (!names.length) return;
+  const known = new Set((await loadAppModelGroups(ctx.db, app.id, { strict: true })).map((g) => g.name));
+  for (const name of names) {
+    if (!known.has(name)) throw taskError('MODEL_GROUP_NOT_FOUND', `No model group named "${name}" is declared for this App.`, { name });
+  }
+}
 
 /** The matcher's requirements (plan §3.1). Stored for T3; validated here. */
 async function normalizeRequirements(
@@ -645,7 +1001,28 @@ async function normalizeRequirements(
   input: RequirementsInput | null | undefined,
 ): Promise<Prisma.InputJsonObject | null> {
   if (!input) return null;
+  // #2252 D1: there is no `maxTier`, and no other key is read here, so an unknown one is refused rather than silently
+  // dropped (GraphQL validation already refuses it; this holds for any caller that reaches the resolver, MCP included).
+  const unknown = Object.keys(input).filter((k) => !REQUIREMENT_KEYS.has(k));
+  if (unknown.length) throw badInput(`requirements has no field ${unknown.map((k) => `"${k}"`).join(', ')}${unknown.includes('maxTier') ? ' (a task names a minimum tier, minTier, never a maximum)' : ''}.`);
   const role = optionalText(input.role, 128, 'requirements.role');
+  let roles: string[] | undefined;
+  if (input.roles != null) {
+    if (!Array.isArray(input.roles) || input.roles.length === 0 || input.roles.length > TASK_REQUIREMENT_LIST_MAX
+      || input.roles.some(r => typeof r !== 'string' || !r.trim() || r.trim().length > 128)) {
+      throw badInput('requirements.roles must contain 1 to 32 nonblank roles, each at most 128 characters.');
+    }
+    if (role) throw badInput('Name requirements.role or requirements.roles, not both.');
+    roles = [...new Set(input.roles.map(r => r.trim().toLowerCase()))];
+  }
+  let teamWorkerId: string | undefined;
+  if (input.team != null) {
+    if (typeof input.team !== 'string' || !input.team.trim()) throw badInput('requirements.team must name a live worker of this App.');
+    const id = await resolveTaskWorkerId(ctx, app.id, input.team);
+    const lead = id ? await ctx.db.worker.findFirst({ where: { id, appId: app.id, retiredAt: null }, select: { id: true } }) : null;
+    if (!lead) throw badInput('requirements.team must name a live worker of this App.');
+    teamWorkerId = lead.id;
+  }
   const list = (xs: string[] | null | undefined, field: string): string[] | null => {
     if (!xs) return null;
     const out = [...new Set(xs.map((x) => (x ?? '').trim()).filter((x) => x !== ''))];
@@ -676,11 +1053,37 @@ async function normalizeRequirements(
       if (!excludeWorkerIds.includes(id)) excludeWorkerIds.push(id);
     }
   }
+  // #2252 D1: exactly low | mid | high (cor:agt:060:06); anything else is refused, never read as "no bound".
+  if (input.minTier != null && input.minTier !== 'low' && input.minTier !== 'mid' && input.minTier !== 'high') {
+    throw badInput('requirements.minTier must be low, mid or high.');
+  }
+  // #2831 S2 (cor:agt:060:12): group names, lowercase; a name no effective group of this App carries is refused,
+  // naming it, so a typo never becomes a filter that silently matches no one (In) or everyone (NotIn).
+  const groupNames = (xs: string[] | null | undefined, field: string): string[] | null => {
+    const values = list(xs, field);
+    if (!values) return null;
+    const names = values.map((v) => {
+      const n = normalizeModelGroupName(v);
+      if (!n) throw badInput(`${field} entries are model group names: letters, digits, ".", "_" or "-", up to 64 characters.`);
+      return n;
+    });
+    return [...new Set(names)];
+  };
+  const modelGroupIn = groupNames(input.modelGroupIn, 'requirements.modelGroupIn');
+  const modelGroupNotIn = groupNames(input.modelGroupNotIn, 'requirements.modelGroupNotIn');
+  if (modelGroupIn || modelGroupNotIn) {
+    await refuseUnknownModelGroups(ctx, app, [...(modelGroupIn ?? []), ...(modelGroupNotIn ?? [])]);
+  }
   const out: Prisma.InputJsonObject = {
     ...(role ? { role } : {}),
+    ...(roles ? { roles } : {}),
+    ...(teamWorkerId ? { teamWorkerId } : {}),
     ...(familyIn ? { familyIn } : {}),
     ...(familyNotIn ? { familyNotIn } : {}),
     ...(excludeWorkerIds ? { excludeWorkerIds } : {}),
+    ...(input.minTier ? { minTier: input.minTier } : {}),
+    ...(modelGroupIn ? { modelGroupIn } : {}),
+    ...(modelGroupNotIn ? { modelGroupNotIn } : {}),
   };
   return Object.keys(out).length ? out : null;
 }
@@ -690,6 +1093,40 @@ function parseStartBy(value: unknown): Date | null {
   const d = value instanceof Date ? value : new Date(String(value));
   if (Number.isNaN(d.getTime())) throw badInput('startBy is not a valid date-time.');
   return d;
+}
+
+function parseFinishBy(value: unknown): Date | null {
+  if (value == null) return null;
+  const d = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(d.getTime())) throw badInput('finishBy is not a valid date-time.');
+  return d;
+}
+
+/**
+ * #2648 (cor:agt:050:14, Refused values): a call that SETS the finish-by time is refused if it is in the past or
+ * earlier than the start-by time; a call that sets only the start-by time is refused if it is later than the
+ * finish-by time, even one that has passed. Equal times are allowed; a call that sets neither, or clears one, is not
+ * checked. Thrown before any write, so a refused call changes nothing.
+ */
+function checkFinishBy(a: { finishBy: Date | null; startBy: Date | null; setsFinishBy: boolean; setsStartBy: boolean; now: Date }): void {
+  if (a.setsFinishBy && a.finishBy) {
+    if (a.finishBy.getTime() < a.now.getTime()) throw badInput('finishBy is in the past; name a time that has not passed yet.');
+    if (a.startBy && a.finishBy.getTime() < a.startBy.getTime()) throw badInput('finishBy is earlier than startBy; a task cannot be due to finish before it is due to start.');
+  } else if (a.setsStartBy && a.startBy && a.finishBy && a.startBy.getTime() > a.finishBy.getTime()) {
+    throw badInput('startBy is later than the task\'s finishBy; a task cannot be due to start after it is due to finish.');
+  }
+}
+
+/**
+ * #2648 (BLIND P2 at 2c7474dc; LOCAL P2-2 at 6feb16dd): a create judges its finish-by time against the database
+ * clock as the LAST statement of its write transaction, after every lock it takes (the authority anchors, the
+ * counter row inside insertTask, and the blocker graph after the insert), as the edit path does. A deadline that
+ * passed while the create waited is refused, and the rollback leaves nothing inserted.
+ */
+async function checkFinishByAtDbClock(tx: Prisma.TransactionClient, finishBy: Date | null, startBy: Date | null): Promise<void> {
+  if (!finishBy) return;
+  const [{ at }] = await tx.$queryRaw<Array<{ at: Date }>>`SELECT clock_timestamp() AS at`;
+  checkFinishBy({ finishBy, startBy, setsFinishBy: true, setsStartBy: startBy !== null, now: at });
 }
 
 // ── Audit stamping (#1610 actor shape) ────────────────────────────────────
@@ -733,7 +1170,7 @@ class TaskGateRefused extends Error {}
 export async function inTaskWriteTx<T>(
   ctx: Context,
   app: TaskApp,
-  actor: TaskActor | RunCreator,
+  actor: TaskActor | RunCreator | KeyCreator,
   refused: () => GraphQLError,
   write: (tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp) => Promise<T>,
   /**
@@ -753,6 +1190,14 @@ export async function inTaskWriteTx<T>(
      * come after the worker row and cycle).
      */
     lockWorkerIds?: readonly (string | null | undefined)[];
+    /** #3243: fill and lock the whole live candidate pool at the existing graph-before-worker point. */
+    lockWorkerPool?: Set<string>;
+    /**
+     * #4167: the App anchor and the in-transaction re-check admit an UNINSTALLED (not deleted) App — only
+     * `revokeGrant`, whose manager arm the ruling widens. A deleted App still refuses everywhere, and every
+     * other task write keeps the liveness check.
+     */
+    allowUninstalledApp?: boolean;
   } = {},
 ): Promise<T> {
   const anchors: AuthorityAnchor[] = [
@@ -771,15 +1216,25 @@ export async function inTaskWriteTx<T>(
         if (!fresh) throw new TaskGateRefused();
         if (actor.kind === 'run') {
           await requireRunLive(txCtx, fresh, actor.runId);
+        } else if (actor.kind === 'appKey') {
+          // The same key, still live, of this App and a live org, sending no session: the read gate, re-run locked.
+          if (appKeyCaller(txCtx)?.appKeyId !== actor.appKeyId || !(await keyMayReadApp(txCtx, fresh))) throw new TaskGateRefused();
         } else {
           const again = await resolveTaskActor(txCtx, fresh);
           if (!again || !sameActor(again, actor)) throw new TaskGateRefused();
         }
-        requireWritable(txCtx, fresh);
+        // No deleted clause here by design: the anchor liveness check above carries the deleted exclusion for
+        // every writer, opted-in or not; this re-check only relaxes the UNINSTALLED refusal, never that one.
+        requireWritable(txCtx, fresh, { allowUninstalled: options.allowUninstalledApp });
       },
-      (tx, txCtx) => write(tx, txCtx, fresh as TaskApp),
+      (tx, txCtx) => {
+        // #3323: an admission belongs to the attempt that judged it; a retried attempt judges again.
+        if ('instructed' in actor && actor.instructed) actor.instructed.admitted = null;
+        return write(tx, txCtx, fresh as TaskApp);
+      },
       {
         lockMode: options.lockMode,
+        allowUninstalledApp: options.allowUninstalledApp,
         afterLock: async (tx) => {
           await lockStopFence(tx, app.id, options.stopFence ?? 'shared');
           await lockTaskGraph(tx, app.id, options.taskGraph ?? 'shared');
@@ -788,7 +1243,12 @@ export async function inTaskWriteTx<T>(
           // of cor:agt:050:09 then reads a graph no writer can change before
           // this commits.
           await lockAppReportsTo(tx, app.id, 'shared');
-          if (options.lockWorkerIds?.length) await lockWorkersForAssignment(tx, options.lockWorkerIds);
+          if (options.lockWorkerPool) {
+            const pool = await tx.worker.findMany({ where: { appId: app.id, retiredAt: null }, select: { id: true } });
+            for (const w of pool) options.lockWorkerPool.add(w.id);
+          }
+          const workers = [...(options.lockWorkerIds ?? []), ...(options.lockWorkerPool ?? [])];
+          if (workers.length) await lockWorkersForAssignment(tx, workers);
           if (ctx.userId) {
             await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${app.id} AND user_id = ${ctx.userId} FOR SHARE`;
           }
@@ -814,7 +1274,7 @@ export async function inTaskWriteTx<T>(
  * TRANSACTION context, so the authorization and state checks inside `act` see
  * exactly the row and the authority they depend on.
  */
-async function mutateTask(
+export async function mutateTask(
   ctx: Context,
   taskRef: string,
   act: (tx: Prisma.TransactionClient, task: TaskRow, actor: TaskActor, app: TaskApp, txCtx: Context, locked: ReadonlySet<string>) => Promise<void>,
@@ -825,6 +1285,8 @@ async function mutateTask(
    * assignee).
    */
   locks: { taskGraph?: 'shared' | 'exclusive'; assignee?: boolean; workers?: (appId: string) => Promise<(string | null)[]> } = {},
+  /** #3323: the instruction a door wired for S4a was called with; the App-manager arm judges it ({@link actorManagesApp}). */
+  instruction?: ActInstruction | null,
 ): Promise<TaskRow> {
   const readable = await loadReadableTask(ctx, taskRef);
   if (!readable) throw notFound(taskRef);
@@ -834,7 +1296,8 @@ async function mutateTask(
   }
   // #2553: the caller's spelling (an id or a handle) is echoed in refusals; every query below runs on the id.
   const taskId = readable.task.id;
-  const { app, actor } = readable;
+  const { app } = readable;
+  const actor = withInstruction(readable.actor, instruction);
   requireWritable(ctx, app);
   for (let attempt = 0; ; attempt += 1) {
     const named = locks.workers ? await locks.workers(app.id) : [];
@@ -856,6 +1319,8 @@ async function mutateTask(
       }
     }
   }
+  // #2694 (cor:agt:020:11 r3): a worker's accepted task write through its own live session is that worker driving it.
+  if (actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, actor.workerId);
   return ctx.db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
 }
 
@@ -882,7 +1347,7 @@ async function partyWorkerForLock(ctx: Context, appId: string, input: PartyInput
   return ref ? resolveTaskWorkerId(ctx, appId, ref) : null;
 }
 
-function refuseEnded(task: TaskRow): void {
+export function refuseEnded(task: TaskRow): void {
   if (ENDED.includes(task.status)) {
     throw taskError('TASK_ENDED', `This task is ${task.status}; an ended task never moves again.`, {
       taskId: task.id, status: task.status,
@@ -892,7 +1357,11 @@ function refuseEnded(task: TaskRow): void {
 
 // ── Mutations ─────────────────────────────────────────────────────────────
 
+/** #2646: the overrides of a clone; every field is optional, and a field left out keeps the source's value. */
+type CloneInput = Partial<Pick<CreateInput, 'title' | 'description' | 'source' | 'tags' | 'references' | 'closeSessionWhenDone' | 'priority' | 'properties' | 'requirements' | 'owner' | 'assignee' | 'status' | 'startBy' | 'finishBy' | 'project' | 'parentTaskId'>>;
+
 type CreateInput = {
+  match?: boolean | null;
   appRef?: string | null;
   parentTaskId?: string | null;
   title: string;
@@ -900,15 +1369,24 @@ type CreateInput = {
   blockedBy?: string[] | null;
   description?: string | null;
   source?: string | null;
+  /** #3125 S2 (V29, V46): the claim on an outside item; set only here. */
+  externalId?: unknown;
   owner?: PartyInput;
   assignee?: PartyInput;
   requirements?: RequirementsInput | null;
+  /** #4291 (cor:agt:050:01): the task's own run settings; validated by `validateTaskRunSettings`. */
+  runSettings?: unknown;
   startBy?: unknown;
+  /** #2648 (cor:agt:050:14): the finish-by deadline; exempts the task from every stall window. */
+  finishBy?: unknown;
   tags?: string[] | null;
   closeSessionWhenDone?: boolean | null;
   status?: string | null;
   /** #2553: make a top-level PROJECT (AT1, AT2, ...) instead of a task under AT0. Not with a parentTaskId. */
   project?: boolean | null;
+  /** #2420 (cor:agt:050:28): the task's own properties; left out, not refused, for a creator who may not write them. */
+  properties?: unknown;  /** #2649 (cor:agt:050:01 References): any creator may set them, as it sets the title. */
+  references?: unknown;
 };
 
 /**
@@ -919,13 +1397,24 @@ async function insertTask(
   tx: Prisma.TransactionClient,
   a: {
     app: TaskApp; parentId: string | null; title: string; description: string | null; source: string | null;
-    tags: string[]; startBy: Date | null; closeSessionWhenDone: boolean; priority?: number;
+    /** #3125 S2: already validated by the caller; set only here, at creation (V29). */
+    externalId?: string | null;
+    tags: string[]; references?: TaskReference[]; startBy: Date | null; finishBy?: Date | null; closeSessionWhenDone: boolean; priority?: number;
     requirements: Prisma.InputJsonObject | null; owner: TaskParty; assignee: TaskParty | null;
+    /** #4291: already validated against `requirements` by the caller; set only here, at creation. */
+    runSettings?: TaskRunSettings | null;
+    /** #2420: already normalized and schema-checked by the caller, which also decided the creator may set it. */
+    properties?: Prisma.InputJsonObject | null;
     created: Record<string, unknown>; assigned: Record<string, unknown>; evActor: EventActor;
+    /** #3132 (rulings:0009): whom a key's or run's create was for, recorded as each event's subject (never its actor). */
+    evFor?: TaskParty | null;
     /** #1754: a backlog task is parked, never queued (cor:agt:050:02). Default pending. */
     status?: 'backlog' | 'pending';
     /** #2553: make a top-level PROJECT (numbered from the App's project counter) instead of a child of AT0. */
     project?: boolean;
+    matchPending?: boolean;
+    /** #2646: the task a clone was made from; set only here, at creation, and named in the one task.created event. */
+    clonedFromId?: string | null;
   },
 ): Promise<{ id: string; queued: boolean }> {
   // #2022 (cor:agt:090:03): a stop signal refuses making a covered worker the assignee, at creation too.
@@ -966,39 +1455,60 @@ async function insertTask(
   if (handle.length > MAX_HANDLE_LENGTH) {
     throw taskError('TASK_TOO_DEEP', `A task handle is at most ${MAX_HANDLE_LENGTH} characters; create this task under a shallower parent.`, { taskId: parentId });
   }
+  // #3125 S2 (V45, cor:agt:120:02): the INSERT is the uniqueness judgement, after every gate above, so only a caller
+  // who may create here can ever learn that its own App already holds the external id. A violation of exactly that
+  // index is TASK_EXTERNAL_ID_TAKEN, naming no task; the transaction rolls back, counter increment included.
   const created = await tx.agentTask.create({
     data: {
       appId: a.app.id,
       taskNumber: counter!.last_number,
       handle,
-      title: a.title, description: a.description, source: a.source, tags: a.tags, startBy: a.startBy,
+      externalId: a.externalId ?? null,
+      title: a.title, description: a.description, source: a.source, tags: a.tags, references: a.references ?? [], startBy: a.startBy,
+      finishBy: a.finishBy ?? null,
       closeSessionWhenDone: a.closeSessionWhenDone,
       priority: a.priority ?? 1,
       status: a.status ?? 'pending',
       parentTaskId: parentId,
+      clonedFromId: a.clonedFromId ?? null,
       requirements: a.requirements ?? Prisma.DbNull,
+      runFamily: a.runSettings?.family ?? null, runModel: a.runSettings?.model ?? null,
+      runTier: a.runSettings?.tier ?? null, runEffort: a.runSettings?.effort ?? null,
+      matchPending: a.matchPending ?? false,
+      properties: a.properties ?? Prisma.DbNull,
       ...partyColumns('owner', a.owner),
       ...partyColumns('assignee', a.assignee),
       ...(a.assignee ? a.assigned : {}),
       ...a.created,
     },
     select: { id: true },
+  }).catch((e: unknown) => {
+    if (a.externalId != null && isUniqueViolationOn(e, EXTERNAL_ID_TARGETS)) {
+      throw taskError('TASK_EXTERNAL_ID_TAKEN', 'This App already has an active task for that external id.');
+    }
+    throw e;
   });
   await appendTaskEvent(tx, {
-    appId: a.app.id, taskId: created.id, actor: a.evActor,
+    appId: a.app.id, taskId: created.id, actor: a.evActor, forParty: a.evFor,
     // The owner rides the event (#1757): a named owner is visible to the
     // event stream — and so to the alarm chain — from creation.
-    event: { type: 'task.created', parentTaskId: a.parentId, owner: a.owner, hasAssignee: a.assignee !== null },
+    event: { type: 'task.created', parentTaskId: a.parentId, owner: a.owner, hasAssignee: a.assignee !== null, clonedFromTaskId: a.clonedFromId ?? null },
   });
+  if (a.properties) {
+    await appendTaskEvent(tx, {
+      appId: a.app.id, taskId: created.id, actor: a.evActor, forParty: a.evFor,
+      event: { type: 'task.properties-changed', from: null, to: propertiesFingerprint(a.properties) },
+    });
+  }
   if (a.assignee) {
     await appendTaskEvent(tx, {
-      appId: a.app.id, taskId: created.id, actor: a.evActor,
+      appId: a.app.id, taskId: created.id, actor: a.evActor, forParty: a.evFor,
       event: { type: 'task.assigned', assignee: a.assignee, closeSessionWhenDone: a.closeSessionWhenDone },
     });
   } else if ((a.status ?? 'pending') === 'pending') {
     // #1707: the task enters the queue (cor:agt:050:03, :11). A backlog task
     // never does — it is parked (#1754, cor:agt:050:02).
-    await appendTaskEvent(tx, { appId: a.app.id, taskId: created.id, actor: a.evActor, event: { type: 'assignment.queued' } });
+    await appendTaskEvent(tx, { appId: a.app.id, taskId: created.id, actor: a.evActor, forParty: a.evFor, event: { type: 'assignment.queued' } });
   }
   return { id: created.id, queued: a.assignee === null && (a.status ?? 'pending') === 'pending' };
 }
@@ -1035,6 +1545,7 @@ export async function createRootTaskForRun(
   const source = optionalText(input.source, TASK_SOURCE_MAX, 'source');
   const tags = normalizeTags(input.tags);
   const startBy = parseStartBy(input.startBy);
+  const finishBy = parseFinishBy(input.finishBy);
   const closeSessionWhenDone = input.closeSessionWhenDone ?? false;
   const now = new Date();
   const evActor: EventActor = { userId: null, workerId: null, agentId: null, runId: run.id };
@@ -1051,15 +1562,181 @@ export async function createRootTaskForRun(
     }
     // #2162 (cor:agt:050:27 §4): never onto a worker that is resetting.
     await refuseResettingAssignee(tx, fresh.id, assignee?.workerId);
-    return insertTask(tx, {
-      app: fresh, parentId: null, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee,
+    const inserted = await insertTask(tx, {
+      app: fresh, parentId: null, title, description, source, tags, startBy, finishBy, closeSessionWhenDone, requirements, owner, assignee,
       created: { createdBy: null, createdByWorkerId: null, createdByAgentId: null, createdByRunId: run.id, updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null },
       assigned: { assignedAt: now, assignedBy: null, assignedByWorkerId: null, assignedByAgentId: null },
       evActor,
     });
+    await checkFinishByAtDbClock(tx, finishBy, startBy);
+    return inserted;
   }, { lockWorkerIds: [lockedAssignee] });
   if (made.queued) await matchAfterChange(principal.db, app.id);
   return principal.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
+}
+
+/**
+ * #3125 S3 (cor:agt:120:03, V42): claim one outside item for the caller, in its OWN write transaction. A root task
+ * through the root create gate (the participant re-judged under the anchors by `inTaskWriteTx`), owned by and assigned
+ * to the caller, with the item's URL as external id, source and an issue reference, created STARTED with its start
+ * time set: the one create that enters as started (cor:agt:050:02), so no not-started alarm can fire (050:14). Events,
+ * in order: task.created, task.assigned (as any create onto an assignee), task.started (V-2, V45).
+ * Returns null when another caller already holds the item (TASK_EXTERNAL_ID_TAKEN from the index): the walk skips it.
+ * Any other refusal is thrown, for the walk to stop on.
+ */
+export async function createStartedClaim(
+  ctx: Context,
+  app: TaskApp,
+  actor: TaskActor,
+  item: { title: string; url: string },
+): Promise<TaskRow | null> {
+  const externalId = externalIdInput(item.url);
+  const references = taskReferencesInput([{ kind: 'issue', target: item.url }]);
+  const owner = actorParty(actor);
+  const lockedWorker = actor.kind === 'worker' ? actor.workerId : null;
+  const now = new Date();
+  try {
+    // The row the answer carries is read inside the claim's transaction: nothing can fail between the commit and the
+    // answer, so a committed claim is never left out of it (Jane, #3150 delta P2).
+    return await inTaskWriteTx(ctx, app, actor, () => appNotFound(app.id), async (tx, txCtx, fresh) => {
+      await refuseResettingAssignee(tx, fresh.id, owner.workerId);
+      const made = await insertTask(tx, {
+        app: fresh, parentId: null, title: item.title, description: null, source: externalId, externalId, tags: [], references,
+        startBy: null, closeSessionWhenDone: false, requirements: null, owner, assignee: owner, status: 'pending',
+        created: createdStamp(txCtx), assigned: assignedStamp(txCtx, now), evActor: eventActor(txCtx.userId),
+      });
+      await tx.agentTask.update({ where: { id: made.id }, data: { status: 'started', startedAt: new Date(), ...updatedStamp(txCtx) } });
+      await appendTaskEvent(tx, { appId: fresh.id, taskId: made.id, actor: eventActor(txCtx.userId), event: { type: 'task.started' } });
+      return startedWithAppliedSettings(tx, made.id);
+    }, { lockWorkerIds: [lockedWorker] });
+  } catch (e) {
+    if (e instanceof GraphQLError && e.extensions?.code === 'TASK_EXTERNAL_ID_TAKEN') return null;
+    throw e;
+  }
+}
+
+/** #3132: a key's or run's claim names its parties; each is resolved to a party of the App (`resolveClaimParties`). */
+export type ClaimPartiesInput = { owner?: PartyInput; assignee?: PartyInput };
+export type ClaimParties = { owner: TaskParty; assignee: TaskParty };
+
+/**
+ * #3132 (cor:agt:120:03, V45 point 12; cor:agt:050:01): the owner and assignee of a claim by an App key or a run, judged
+ * on `c` (the caller's gate transaction, and again inside each claim's write). The assignee must be named
+ * (TASK_ASSIGNEE_REQUIRED); the owner is the one named, else the person a run acts for (`actsForUserId`; a key acts for
+ * nobody, so it must name one), else TASK_OWNER_REQUIRED. Each must be a worker or participant of the App, refused
+ * exactly as `createAgentTask` refuses one (TASK_OWNER_INVALID / TASK_ASSIGNEE_INVALID).
+ */
+export async function resolveClaimParties(
+  c: Context,
+  app: TaskApp,
+  input: ClaimPartiesInput,
+  actsForUserId: string | null,
+): Promise<ClaimParties> {
+  if (!input.assignee) {
+    throw taskError('TASK_ASSIGNEE_REQUIRED', 'A claim by an App key or a run names its assignee: a worker of the App or a person who participates in it. The claimed task is started on their behalf.');
+  }
+  let owner: TaskParty;
+  if (input.owner) owner = await resolveParty(c, app, input.owner, 'TASK_OWNER_INVALID');
+  else if (actsForUserId) owner = await resolveParty(c, app, { user: actsForUserId }, 'TASK_OWNER_INVALID');
+  else throw taskError('TASK_OWNER_REQUIRED', 'A claim by an App key, or by a run that acts for no person, names the task\'s owner: a worker of the App or a person who participates in it.');
+  const assignee = await resolveParty(c, app, input.assignee, 'TASK_ASSIGNEE_INVALID');
+  return { owner, assignee };
+}
+
+const partyRef = (p: TaskParty): NonNullable<PartyInput> => (p.workerId ? { worker: p.workerId } : { user: p.userId as string });
+
+/**
+ * #3132 (cor:agt:120:03, :050:08 claims exception, :050:11, :050:23): claim one outside item for an App key or a run, in
+ * its OWN write transaction, owned by and assigned to the parties the caller's gate resolved (re-resolved here under
+ * the locks, so one who left meanwhile is refused). Created STARTED on the assignee's behalf, as `createStartedClaim`
+ * does for a person or worker. The key or run is the creator and every event's actor (`actorAppKeyId` /
+ * `actorRunId`; no person, worker or agent is credited), and the assignee is each event's subject when the actor does
+ * not resolve it (`forParty`: always for a key; for a run unless the assignee is the person it acts for).
+ * Returns null when another caller already holds the item.
+ */
+export async function createStartedClaimFor(
+  ctx: Context,
+  app: TaskApp,
+  creator: KeyCreator | RunCreator,
+  item: { title: string; url: string },
+  parties: ClaimParties,
+): Promise<TaskRow | null> {
+  const externalId = externalIdInput(item.url);
+  const references = taskReferencesInput([{ kind: 'issue', target: item.url }]);
+  const evActor: EventActor = creator.kind === 'appKey'
+    ? { userId: null, workerId: null, agentId: null, appKeyId: creator.appKeyId }
+    : { userId: null, workerId: null, agentId: null, runId: creator.runId };
+  const actsFor = creator.kind === 'run' ? ctx.userId ?? null : null;
+  const evFor = parties.assignee.userId && parties.assignee.userId === actsFor ? null : parties.assignee;
+  const lockedAssignee = parties.assignee.workerId ?? null;
+  const now = new Date();
+  try {
+    return await inTaskWriteTx(ctx, app, creator, () => appNotFound(app.id), async (tx, txCtx, fresh) => {
+      const again = await resolveClaimParties(txCtx, fresh, { owner: partyRef(parties.owner), assignee: partyRef(parties.assignee) }, null);
+      if ((again.assignee.workerId ?? null) !== lockedAssignee) {
+        throw taskError('TASK_CONFLICT', 'The assignee named changed while this write waited; try again.');
+      }
+      await refuseResettingAssignee(tx, fresh.id, again.assignee.workerId);
+      const made = await insertTask(tx, {
+        app: fresh, parentId: null, title: item.title, description: null, source: externalId, externalId, tags: [], references,
+        startBy: null, closeSessionWhenDone: false, requirements: null, owner: again.owner, assignee: again.assignee, status: 'pending',
+        created: {
+          createdBy: null, createdByWorkerId: null, createdByAgentId: null, createdByRunId: creator.kind === 'run' ? creator.runId : null,
+          updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null,
+        },
+        assigned: { assignedAt: now, assignedBy: null, assignedByWorkerId: null, assignedByAgentId: null },
+        evActor, evFor,
+      });
+      // The start the assignee would make, made here on their behalf (V41, the claims exception to cor:agt:050:08).
+      await tx.agentTask.update({
+        where: { id: made.id },
+        data: { status: 'started', startedAt: new Date(), updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null },
+      });
+      await appendTaskEvent(tx, { appId: fresh.id, taskId: made.id, actor: evActor, forParty: evFor, event: { type: 'task.started' } });
+      return startedWithAppliedSettings(tx, made.id);
+    }, { lockWorkerIds: [lockedAssignee] });
+  } catch (e) {
+    if (e instanceof GraphQLError && e.extensions?.code === 'TASK_EXTERNAL_ID_TAKEN') return null;
+    throw e;
+  }
+}
+
+/**
+ * #3132: a headless run's read of its OWN App's tasks (the untracked list's claimed-id read), in one transaction under
+ * the App's shared anchors: the App and its org live and the run still RUNNING, re-judged after the lock. Anything
+ * else answers as a missing App.
+ */
+export async function withRunTaskApp<T>(
+  principal: Context,
+  run: { id: string; appId: string },
+  body: (c: Context, app: TaskApp) => Promise<T>,
+): Promise<T> {
+  const gone = (): never => { throw appNotFound(run.appId); };
+  return inAnchoredAppTx(principal, run.appId, gone, async (txCtx, app) => {
+    if (app.organizationId) {
+      const org = await txCtx.db.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } });
+      if (!org) return gone();
+    }
+    try {
+      await requireRunLive(txCtx, app, run.id);
+    } catch (e) {
+      if (e instanceof TaskGateRefused) return gone();
+      throw e;
+    }
+    return body(txCtx, app);
+  });
+}
+
+/** #3132: a run names no App but its own; any other ref, or one that resolves to nothing, is the missing-App answer. */
+export async function requireRunOwnApp(principal: Context, run: { appId: string }, appRef: string | null | undefined): Promise<void> {
+  if (appRef == null || appRef === '') return;
+  let namedAppId: string | null = null;
+  try {
+    namedAppId = (await resolveAppRef(principal.db, appRef)).id;
+  } catch (e) {
+    if (!(e instanceof AppNotFoundError)) throw e;
+  }
+  if (namedAppId !== run.appId) throw appNotFound(appRef);
 }
 
 /** #2644: priority/blockers use exactly the existing assigner set, never the assignee alone. */
@@ -1095,7 +1772,7 @@ export async function setTaskPriorityInTx(tx: Prisma.TransactionClient, txCtx: C
  * Never upgrade a shared graph lock after taking a task row. Never open a nested
  * transaction from an edit; post-commit matching is the outer caller's job.
  */
-export async function changeTaskBlockerInTx(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: TaskRow, ref: string, operation: 'add' | 'remove') {
+export async function changeTaskBlockerInTx(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: TaskRow, ref: string, operation: 'add' | 'remove'): Promise<boolean> {
   await requireTaskDirection(tx, txCtx, app, actor, task);
   requireBlockerState(task);
   const id = await blockerRef(txCtx, app.id, ref);
@@ -1105,28 +1782,462 @@ export async function changeTaskBlockerInTx(tx: Prisma.TransactionClient, txCtx:
   if ((operation === 'add' && !existed) || (operation === 'remove' && existed)) {
     await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(txCtx.userId),
       event: { type: operation === 'add' ? 'task.blocker-added' : 'task.blocker-removed', blockerTaskId: id } });
+    return true;
+  }
+  return false;
+}
+
+// ── Creating a task: one judgement shared by createAgentTask and createAgentTasks ──
+
+/** #2653 (cor:agt:050:06): the most tasks one createAgentTasks call may create. */
+export const TASK_BATCH_MAX = 25;
+
+/**
+ * A create judged before its transaction: the App and actor it resolved to, its parent, its normalized fields and
+ * the advice decided so far. Built by {@link prepareTaskCreate}; written by {@link applyTaskCreate}.
+ */
+/**
+ * #2646: what a clone only copied. Copied properties or a copied priority the caller may not set are left out, never
+ * refused; copied requirements are checked as a create checks them, so a model group removed since refuses the clone.
+ */
+type CloneCopy = { sourceId: string; priorityCopied: boolean; propertiesCopied: boolean; requirements?: Prisma.JsonValue | null };
+
+type PreparedCreate = {
+  input: CreateInput;
+  /** #2646: set only by cloneAgentTask, after the create is prepared. */
+  clone?: CloneCopy;
+  /** The caller's spelling of the parent (an id or a handle), echoed in refusals; null for a root task. */
+  parentRef: string | null;
+  /** The parent's canonical id once it resolved. */
+  parentTaskId: string | null;
+  app: TaskApp;
+  actor: TaskActor;
+  priority: number;
+  title: string; description: string | null; source: string | null; tags: string[];
+  references: TaskReference[]; externalId: string | null;
+  startBy: Date | null; finishBy: Date | null; closeSessionWhenDone: boolean;
+  status: 'backlog' | 'pending';
+  /** #2198: advice decided inside the write transaction, filed after it commits. */
+  warn: TaskWarningCode[];
+  /** #2162: the worker the named assignee resolved to, unlocked, so the write takes its per-worker lock first. */
+  lockedAssignee: string | null;
+  /** The concealment for a refusal discovered inside the write transaction. */
+  refused: () => GraphQLError;
+};
+
+/**
+ * Everything a create judges before its transaction (cor:agt:050:06 root, :07 child): the App and actor, the
+ * parent's readability, and the fields. `inApp` (#2653) is the App a createAgentTasks call names: a parent in another
+ * App reads as not found, and a root task naming another App is refused as that App is.
+ */
+async function prepareTaskCreate(ctx: Context, input: CreateInput, inApp?: { app: TaskApp; actor: TaskActor }): Promise<PreparedCreate> {
+  if (!input) throw badInput('input is required.');
+  const parentRef = input.parentTaskId?.trim() || null;
+  if (input.project && parentRef) throw badInput('A project is a top-level task: it takes no parentTaskId.');
+  // #2553: the parent's canonical id once it resolves (a handle is an alias); `parentRef` stays the caller's spelling for echoes.
+  let parentTaskId: string | null = null;
+  let app: TaskApp;
+  let actor: TaskActor;
+  if (parentRef) {
+    const readable = await loadReadableTask(ctx, parentRef);
+    if (!readable || (inApp && readable.app.id !== inApp.app.id)) throw notFound(parentRef);
+    ({ app, actor } = readable);
+    parentTaskId = readable.task.id;
+    // #2553: AT0 is the implicit parent of a task with no project, never a parent a caller names: a plain create takes
+    // the ROOT gate and owner rules (this input names no parent), so naming AT0 would reach the child gate instead.
+    if (readable.task.handle === PROJECT_ZERO_HANDLE) throw badInput('AT0 is the reserved "No project" project: omit parentTaskId to make a task with no project.');
+    // A parent in another App reads as not-found: no cross-App oracle (#1705).
+    if (input.appRef) {
+      let namedAppId: string | null = null;
+      try {
+        namedAppId = (await resolveAppRef(ctx.db, input.appRef)).id;
+      } catch (e) {
+        if (!(e instanceof AppNotFoundError)) throw e;
+      }
+      if (namedAppId !== app.id) throw notFound(parentRef);
+    }
+  } else if (inApp) {
+    // #2653: a root task of a call is in the call's App; naming any other is refused as that App is (no oracle: a
+    // missing App, one you do not participate in and another App you do all read alike).
+    if (input.appRef) {
+      let namedAppId: string | null = null;
+      try {
+        namedAppId = (await resolveAppRef(ctx.db, input.appRef)).id;
+      } catch (e) {
+        if (!(e instanceof AppNotFoundError)) throw e;
+      }
+      if (namedAppId !== inApp.app.id) throw appNotFound(input.appRef);
+    }
+    ({ app, actor } = inApp);
+  } else {
+    if (!input.appRef) throw badInput('Name the App for a root task (or a parentTaskId for a child task).');
+    ({ app, actor } = await resolveParticipatedApp(ctx, input.appRef));
+  }
+  requireWritable(ctx, app);
+
+  const priority = taskPriority(input.priority);
+  const title = normalizeTitle(input.title);
+  const description = optionalText(input.description, TASK_DESCRIPTION_MAX, 'description');
+  const source = optionalText(input.source, TASK_SOURCE_MAX, 'source');
+  const tags = normalizeTags(input.tags);
+  // #2649: judged with the other fields, before any transaction, so a refused list writes nothing.
+  const references = taskReferencesInput(input.references);
+  // #3125 S2 (V46): judged with the other fields after the App gate above, so a refused value writes nothing.
+  const externalId = externalIdInput(input.externalId);
+  const startBy = parseStartBy(input.startBy);
+  const finishBy = parseFinishBy(input.finishBy);
+  const closeSessionWhenDone = input.closeSessionWhenDone ?? false;
+  // #1754: backlog or pending — and a backlog task carries no assignee.
+  const status = normalizeCreateStatus(input.status);
+  if (input.match != null && typeof input.match !== 'boolean') throw badInput('match must be a boolean.');
+  if (input.match && (status !== 'pending' || input.assignee)) throw badInput('match requires a pending task with no explicit assignee.');
+  if (status === 'backlog' && input.assignee) {
+    throw badInput('A backlog task has no assignee (cor:agt:050:02). Make it ready, then assign it.');
+  }
+  const refused = parentRef ? () => notFound(parentRef) : input.appRef ? () => appNotFound(input.appRef as string) : () => notFound(input.parentTaskId!.trim());
+  const warn: TaskWarningCode[] = source === null ? ['task.create.no-source'] : [];
+  // #2162: a task created straight onto a worker takes that worker's per-worker lock, before any row.
+  const lockedAssignee = await partyWorkerForLock(ctx, app.id, input.assignee);
+  return {
+    input, parentRef, parentTaskId, app, actor, priority, title, description, source, tags, references, externalId,
+    startBy, finishBy, closeSessionWhenDone, status, warn, lockedAssignee, refused,
+  };
+}
+
+/**
+ * The inputs that name OTHER entities (owner, assignee, excluded workers). Resolved only after the caller is
+ * authorized — for a child task, under the parent's row lock — so a caller who may not create here learns nothing
+ * from which of them would be refused.
+ */
+async function resolveCreateParties(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, p: PreparedCreate) {
+  const { input, actor, parentRef } = p;
+  const { clone } = p;
+  let requirements: Prisma.InputJsonObject | null;
+  if (clone && clone.requirements !== undefined) {
+    // #2646: copied values still pass the create gates (cor:agt:050:02): a model group removed since the source was made
+    // is refused as a plain create refuses it. A removed excluded worker is held by the database reference fence.
+    requirements = (clone.requirements as Prisma.InputJsonObject | null) ?? null;
+    const groups = (k: string) => (Array.isArray(requirements?.[k]) ? (requirements![k] as string[]) : []);
+    await refuseUnknownModelGroups(txCtx, app, [...groups('modelGroupIn'), ...groups('modelGroupNotIn')]);
+  } else {
+    requirements = await normalizeRequirements(txCtx, app, input.requirements);
+  }
+  // #4291: the run settings, judged against the requirements as they will be stored. A clone copies none.
+  const runSettings = runSettingsChecked(() => validateTaskRunSettings(input.runSettings, requirements as Record<string, never> | null));
+  let owner: TaskParty = actorParty(actor);
+  if (input.owner) {
+    // #1757 (cor:agt:050:01, Holger team chat #8183): a root task's
+    // creator — any participant, worker or person — may name its owner,
+    // so long as the named party participates in the App too. A ref that
+    // names nobody, a non-participant or another App's worker is
+    // TASK_OWNER_INVALID — the same refusal either way. A child task's
+    // owner is its parent's assignee, so naming anybody but yourself is
+    // TASK_CHILD_OWNER_MISMATCH, valid ref or not (no oracle).
+    let named: TaskParty | null = null;
+    try {
+      named = await resolveParty(txCtx, app, input.owner, 'TASK_OWNER_INVALID');
+    } catch (e) {
+      if (!parentRef || !(e instanceof GraphQLError && e.extensions?.code === 'TASK_OWNER_INVALID')) throw e;
+    }
+    if (!named || !sameParty(named, owner)) {
+      if (parentRef) {
+        throw taskError('TASK_CHILD_OWNER_MISMATCH', "A child task is owned by the parent's assignee who creates it; it cannot name another owner.");
+      }
+      owner = named as TaskParty;
+    }
+  }
+  const assignee = input.assignee ? await resolveParty(txCtx, app, input.assignee, 'TASK_ASSIGNEE_INVALID') : null;
+  // #2420 (cor:agt:050:28): a creator sets properties only when it is one of their writers for THIS new task (its
+  // owner, someone above the owner, a manager, or the assignee it names); any other creator gets the task made
+  // without them, never a refusal, and the value is not even judged (nothing to learn from its validation).
+  let properties: Prisma.InputJsonObject | null = null;
+  if (input.properties !== undefined && input.properties !== null
+    && await mayWriteProperties(tx, txCtx, app, actor, {
+      ownerWorkerId: owner.workerId ?? null, ownerUserId: owner.userId ?? null,
+      assigneeWorkerId: assignee?.workerId ?? null, assigneeUserId: assignee?.userId ?? null,
+    })) {
+    if (clone?.propertiesCopied) {
+      // #2646: a clone only copies them, so a value the team's schema now refuses is left out, never a refusal.
+      try {
+        properties = normalizeTaskProperties(input.properties);
+        await checkAgainstTeamSchema(tx, txCtx, app.id, properties);
+      } catch (e) {
+        if (!(e instanceof GraphQLError)) throw e;
+        properties = null;
+      }
+    } else {
+      properties = normalizeTaskProperties(input.properties);
+      await checkAgainstTeamSchema(tx, txCtx, app.id, properties);
+    }
+  }
+  return { requirements, runSettings, owner, assignee, properties };
+}
+
+/**
+ * The write of one prepared create inside its transaction: the parent gate on the locked parent, the parties, the
+ * row and its events ({@link insertTask}), the priority authority and blocker links, and the finish-by check, in
+ * that order. `withinCall` (#2653) names the tasks of the same createAgentTasks call that already exist (this one
+ * and those before it in the list), given this task's new id, so they are linked here with its other blockers.
+ * `namesCallBlockers` (#2653) says the task names blockers by position at all: the authority to name them is judged
+ * here, in its own write, even when every position it names is later and its link waits for that task to exist.
+ */
+async function applyTaskCreate(
+  tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, p: PreparedCreate,
+  withinCall: (selfId: string) => string[] = () => [], namesCallBlockers = false, deferMatchBlockerCheck = false,
+): Promise<{ id: string; queued: boolean; row: TaskRow }> {
+  const { input, actor, parentRef, parentTaskId } = p;
+  if (parentRef) {
+    // Lock the parent so its assignee and status can't move under us,
+    // then authorize against the locked row — the one assignee check.
+    const parent = await lockTask(tx, parentTaskId!);
+    if (!parent || parent.appId !== app.id) throw notFound(parentRef);
+    if (!isAssignee(actor, parent)) {
+      throw notAssignee(actor, "Only the parent task's assignee creates its child tasks.", { taskId: parentRef });
+    }
+    refuseEnded(parent);
+  }
+  if (p.clone) {
+    // The source is revalidated under the write: one that is gone refuses like an unknown task, never a foreign-key error.
+    const src = await tx.agentTask.findUnique({ where: { id: p.clone.sourceId }, select: { appId: true } });
+    if (!src || src.appId !== app.id) throw notFound(p.clone.sourceId);
+  }
+  const { requirements, runSettings, owner, assignee, properties } = await resolveCreateParties(tx, txCtx, app, p);
+  if (assignee?.workerId && assignee.workerId !== p.lockedAssignee) {
+    throw taskError('TASK_CONFLICT', 'The assignee named changed while this write waited; try again.');
+  }
+  await refuseResettingAssignee(tx, app.id, assignee?.workerId);
+  await assigneeAdvice(tx, app.id, assignee, null, p.warn);
+  // #2646: a copied priority is kept only for a caller who may set it (as the owner of this clone, or above); for anyone
+  // else it is left unset, never refused. A priority the caller NAMED is judged in applyTaskCreateBlockers, as on a create.
+  const keepPriority = !p.clone?.priorityCopied
+    || (await mayDirectTask(tx, txCtx, app, actor, { ownerWorkerId: owner.workerId ?? null, ownerUserId: owner.userId ?? null }));
+  const made = await insertTask(tx, {
+    app, parentId: parentTaskId, project: input.project === true, title: p.title, description: p.description, source: p.source,
+    externalId: p.externalId, tags: p.tags, references: p.references, startBy: p.startBy, finishBy: p.finishBy,
+    closeSessionWhenDone: p.closeSessionWhenDone, requirements, runSettings, properties, owner, assignee, status: p.status, priority: keepPriority ? p.priority : undefined, clonedFromId: p.clone?.sourceId ?? null,
+    created: createdStamp(txCtx), assigned: assignedStamp(txCtx, new Date()), evActor: eventActor(txCtx.userId), matchPending: input.match === true,
+  });
+  const row = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });
+  await applyTaskCreateBlockers(tx, txCtx, app, p, row, withinCall(row.id), namesCallBlockers);
+  // A match-now create refuses actual open blockers inside the same transaction.
+  if (!deferMatchBlockerCheck && input.match && (await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } })).blocked) {
+    throw badInput('A blocked task cannot be matched now.');
+  }
+  await checkFinishByAtDbClock(tx, p.finishBy, p.startBy);
+  // #4113 (cor:agt:050:02, cor:agt:120): a create that names an externalId AND whose assignee is the caller IS the claim,
+  // and is created started (see startOwnClaim). A batch defers it until its second pass has linked the forward blockers.
+  if (!deferMatchBlockerCheck) {
+    const started = await startOwnClaim(tx, txCtx, app, p, assignee, made.id);
+    if (started) return { ...made, row: started };
+  }
+  return { ...made, row };
+}
+
+/**
+ * #4113 (cor:agt:050:02, cor:agt:120): a create that names an externalId AND whose assignee is the caller IS the claim, and a
+ * claim is created started: one write, so no create-then-start window and no not-started alarm (050:14). A claim for
+ * another assignee stays pending (050:08 governs it), as does one with an open blocker (startAgentTask refuses a
+ * blocked task, so a started one would break its own rule). Judged after ALL the task's blockers link, on the row's own
+ * flag, so a batch calls it after the second pass: a started task takes no later blocker link. Null when not a claim.
+ */
+async function startOwnClaim(
+  tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, p: PreparedCreate, assignee: TaskParty | null, taskId: string,
+): Promise<TaskRow | null> {
+  if (p.externalId === null || p.status !== 'pending' || !assignee || !sameParty(assignee, actorParty(p.actor))) return null;
+  const fresh = await tx.agentTask.findUniqueOrThrow({ where: { id: taskId } });
+  if (fresh.blocked || fresh.status !== 'pending') return null;
+  await tx.agentTask.update({
+    where: { id: taskId },
+    data: { status: 'started', startedAt: new Date(), ...updatedStamp(txCtx) },
+  });
+  await appendTaskEvent(tx, { appId: app.id, taskId, actor: eventActor(txCtx.userId), event: { type: 'task.started' } });
+  return startedWithAppliedSettings(tx, taskId);
+}
+
+/**
+ * #2644: naming priority or blockers at creation needs the assigner authority on the new task; then each blocker is
+ * linked through the one link door, which re-checks that authority per link. `withinCall` (#2653) are tasks of the
+ * same createAgentTasks call, by id.
+ */
+async function applyTaskCreateBlockers(
+  tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, p: PreparedCreate, row: TaskRow, withinCall: readonly string[],
+  namesCallBlockers: boolean,
+): Promise<void> {
+  if ((p.input.priority !== undefined && !p.clone?.priorityCopied) || p.input.blockedBy !== undefined || namesCallBlockers) {
+    await requireTaskDirection(tx, txCtx, app, p.actor, row);
+  }
+  for (const ref of [...new Set([...(p.input.blockedBy ?? []), ...withinCall])]) {
+    await changeTaskBlockerInTx(tx, txCtx, app, p.actor, row, ref, 'add');
   }
 }
 
+/** What a committed create does next: start the assignee it names (#1709) and file its warnings (#2198). */
+async function afterTaskCreate(
+  ctx: Context, info: Pick<GraphQLResolveInfo, 'path'> | undefined, taskId: string, warn: TaskWarningCode[], startItsAssignee: boolean, family?: string,
+) {
+  const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
+  // #1709 (cor:agt:070:08): `startItsAssignee` is true when the create NAMED its assignee, or a distinct-batch match chose a
+  // worker with no open session (`needsHostStart`). #3815 (ruling 0265 V16-V19): any other matcher-chosen assignee is started
+  // by the matcher's own rule (a host start only for a worker with no open session). #4237: `launchAssignee` applies that same
+  // no-open-session rule (V16) to a named, hand or reassigned start, so a quiet open session is reached, never started over. `matchTaskNow` runs after the create transaction commits, so `created` below already carries its assignee.
+  if (startItsAssignee) await launchAssignee(ctx.db, created, family);
+  await emitTaskWarnings(ctx, info, created.appId, { codes: warn, taskId: created.id });
+  return created;
+}
+
+/** #2653: a refusal about one task of a createAgentTasks call names that task's 1-based position in the list. */
+function atPosition(e: unknown, position: number): unknown {
+  if (!(e instanceof GraphQLError)) return e;
+  return new GraphQLError(e.message, { extensions: { ...e.extensions, position } });
+}
+
+/** #2653: one task of a createAgentTasks call. */
+type CreateBatchItem = { task: CreateInput; blockedByPositions?: number[] | null };
+
 export const agentTaskMutations = {
-  setAgentTaskPriority: async (_: unknown, { taskRef: taskId, priority }: { taskRef: string; priority: number }, ctx: Context) => {
+  /** #3449: root-task creator authority, re-judged under the App's anchors before recording. */
+  recordAppAction: async (_: unknown, args: { appRef: string; code: string; taskRef?: string | null; payload?: unknown }, ctx: Context) => {
+    const { app, actor } = await resolveParticipatedApp(ctx, args.appRef);
+    requireWritable(ctx, app);
+    requireAppActionCode(app.urn, args.code);
+    const payload = args.payload === undefined ? {} : args.payload;
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) throw badInput('payload must be a JSON object of at most 4096 bytes.');
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(payload, (key, value) => {
+        // PostgreSQL jsonb cannot represent NUL or an unpaired surrogate in a key/string.
+        if (hasUnstorableJsonText(key) || (typeof value === 'string' && hasUnstorableJsonText(value))) throw new Error('Unstorable JSON text');
+        return value;
+      });
+    } catch { throw badInput('payload must be a JSON object of at most 4096 bytes.'); }
+    if (Buffer.byteLength(serialized, 'utf8') > 4096) throw badInput('payload must be a JSON object of at most 4096 bytes.');
+    const value = JSON.parse(serialized) as Prisma.InputJsonObject;
+    const eventId = await inTaskWriteTx(ctx, app, actor, () => appNotFound(args.appRef), async (tx, txCtx, fresh) => {
+      requireAppActionCode(fresh.urn, args.code);
+      let taskId: string | null = null;
+      if (args.taskRef != null) {
+        const id = await resolveTaskRef(txCtx, args.taskRef, fresh.id);
+        const task = id ? await tx.agentTask.findFirst({ where: { id, appId: fresh.id }, select: { id: true } }) : null;
+        if (!task) throw notFound(args.taskRef);
+        taskId = task.id;
+      }
+      return appendAppActionEvent(tx, {
+        appId: fresh.id, taskId, code: args.code, payload: value,
+        actor: eventActor(txCtx.userId),
+      });
+    });
+    const action = await resolveActionAnswer(ctx, app.id, args.code, currentActor().agentId);
+    return { eventId, action };
+  },
+
+  /** #2645: Proposed cor:agt:050:09 Editing. The assignment gate and transaction are the only write door. */
+  updateAgentTask: async (_: unknown, { taskId, input, instruction }: { taskId: string; input: Record<string, unknown>; instruction?: ActInstruction | null }, ctx: Context) =>
+    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+      // #2420 (cor:agt:050:28) and #3441 (ruling 0233, cor:agt:050:01 / :09): the task's assignee may write its
+      // `properties` and its `references` and nothing else; a patch that names any other field needs the
+      // cor:agt:050:09 set, and is refused whole.
+      const named = input && typeof input === 'object' && !Array.isArray(input) ? Object.keys(input) : [];
+      const assigneeWrites = named.length > 0 && named.every(k => k === 'properties' || k === 'references') && isAssignee(actor, task);
+      if (!assigneeWrites && !(await mayDirectTask(tx, txCtx, app, actor, task))) {
+        throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, edits it; its assignee may write only its properties and references.", { taskId });
+      }
+      refuseEnded(task);
+      if (!input || typeof input !== 'object' || Array.isArray(input) || named.some(k => k !== 'properties' && !(TASK_EDIT_FIELDS as readonly string[]).includes(k))) {
+        throw badInput('Name only editable task fields; source and lifecycle fields are fixed.');
+      }
+      const data: Prisma.AgentTaskUpdateInput = {};
+      const fields: TaskEditField[] = [];
+      // #2420: omitted leaves the value, an object replaces the whole of it, null clears it (and skips the schema).
+      let propertiesChange: { from: PropertiesFingerprint | null; to: PropertiesFingerprint | null } | null = null;
+      if (input.properties !== undefined) {
+        const next = input.properties === null ? null : normalizeTaskProperties(input.properties);
+        if (next !== null) await checkAgainstTeamSchema(tx, txCtx, app.id, next);
+        if (!isDeepStrictEqual(task.properties, next)) {
+          Object.assign(data, { properties: next === null ? Prisma.DbNull : next });
+          propertiesChange = {
+            from: task.properties === null ? null : propertiesFingerprint(task.properties),
+            to: next === null ? null : propertiesFingerprint(next),
+          };
+        }
+      }
+      // #2648 (LOCAL P2-1 at 2c7474dc): a call that NAMES finishBy or startBy sets it (cor:agt:050:14, "a call that
+      // sets the finish-by time"), even when the value equals the stored one; it is judged below, before the no-op.
+      let namedFinishBy: Date | null | undefined;
+      let namedStartBy: Date | null | undefined;
+      for (const field of TASK_EDIT_FIELDS) {
+        if (!Object.hasOwn(input, field)) continue;
+        let value: unknown;
+        switch (field) {
+          case 'title': value = normalizeTitle(input.title as string); break;
+          case 'description': value = optionalText(input.description as string | null, TASK_DESCRIPTION_MAX, 'description'); break;
+          case 'tags': value = normalizeTags(input.tags as string[] | null); break;
+          case 'requirements':
+            value = await normalizeRequirements(txCtx, app, input.requirements as RequirementsInput | null);
+            // #4291: the task's stored run settings must still satisfy the requirements it would now hold.
+            runSettingsChecked(() => checkRunSettingsAgainst(taskRunSettingsOf(task), value as Record<string, never> | null));
+            break;
+          case 'startBy': value = input.startBy === '' ? null : parseStartBy(input.startBy); break;
+          case 'finishBy': value = input.finishBy === '' ? null : parseFinishBy(input.finishBy); break;
+          case 'closeSessionWhenDone':
+            if (input.closeSessionWhenDone != null && typeof input.closeSessionWhenDone !== 'boolean') throw badInput('closeSessionWhenDone must be a boolean.');
+            value = input.closeSessionWhenDone ?? false; break;
+          // #2649 (cor:agt:050:09): a named list replaces the whole list, order kept; null or [] clears it.
+          case 'references': value = taskReferencesInput(input.references); break;
+        }
+        if (field === 'finishBy') namedFinishBy = value as Date | null;
+        if (field === 'startBy') namedStartBy = value as Date | null;
+        if (isDeepStrictEqual(task[field], value)) continue;
+        fields.push(field);
+        Object.assign(data, { [field]: field === 'requirements' && value === null ? Prisma.DbNull : value });
+      }
+      const setsFinishBy = namedFinishBy !== undefined;
+      const setsStartBy = namedStartBy !== undefined;
+      // #2648: judged on the values the task would hold, against the database clock after all authority/task waits,
+      // before the no-op return and the write, so a refused call changes nothing.
+      if (setsFinishBy || setsStartBy) {
+        const [{ at: judgedAt }] = await tx.$queryRaw<Array<{ at: Date }>>`SELECT clock_timestamp() AS at`;
+        checkFinishBy({
+          finishBy: setsFinishBy ? namedFinishBy! : task.finishBy,
+          startBy: setsStartBy ? namedStartBy! : task.startBy,
+          setsFinishBy, setsStartBy, now: judgedAt,
+        });
+      }
+      if (fields.length === 0 && !propertiesChange) return;
+      // The episode identity is a deciding time after all authority/task waits, not transaction-start now().
+      const [{ at }] = await tx.$queryRaw<Array<{ at: Date }>>`SELECT clock_timestamp() AS at`;
+      await tx.agentTask.update({ where: { id: task.id }, data: { ...data, ...updatedStamp(ctx) } });
+      if (fields.length > 0) {
+        await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.edited', fields }, createdAt: at });
+      }
+      if (propertiesChange) {
+        await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.properties-changed', ...propertiesChange }, createdAt: at });
+      }
+      await recordInstructedManagerAct(tx, app.id, actor, 'task.update', { taskId: task.id });
+    }, {}, instruction),
+  setAgentTaskPriority: async (_: unknown, { taskRef: taskId, priority, instruction }: { taskRef: string; priority: number; instruction?: ActInstruction | null }, ctx: Context) => {
     const value = taskPriority(priority);
     const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       await setTaskPriorityInTx(tx, txCtx, app, actor, task, value);
-    });
+      // #3323 (acceptance 6): a no-op writes no instructed-act record. The door's own event stays as it was.
+      if (task.priority !== value) await recordInstructedManagerAct(tx, app.id, actor, 'task.priority', { taskId: task.id });
+    }, {}, instruction);
     await matchAfterChange(ctx.db, task.appId);
     return ctx.db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
   },
-  addAgentTaskBlocker: async (_: unknown, { taskRef: taskId, blockerTaskRef: blockerTaskId }: { taskRef: string; blockerTaskRef: string }, ctx: Context) => {
+  addAgentTaskBlocker: async (_: unknown, { taskRef: taskId, blockerTaskRef: blockerTaskId, instruction }: { taskRef: string; blockerTaskRef: string; instruction?: ActInstruction | null }, ctx: Context) => {
     const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
-      await changeTaskBlockerInTx(tx, txCtx, app, actor, task, blockerTaskId, 'add');
-    }, { taskGraph: 'exclusive' });
+      if (await changeTaskBlockerInTx(tx, txCtx, app, actor, task, blockerTaskId, 'add')) {
+        await recordInstructedManagerAct(tx, app.id, actor, 'task.blocker-add', { taskId: task.id });
+      }
+    }, { taskGraph: 'exclusive' }, instruction);
     return ctx.db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
   },
-  removeAgentTaskBlocker: async (_: unknown, { taskRef: taskId, blockerTaskRef: blockerTaskId }: { taskRef: string; blockerTaskRef: string }, ctx: Context) => {
+  removeAgentTaskBlocker: async (_: unknown, { taskRef: taskId, blockerTaskRef: blockerTaskId, instruction }: { taskRef: string; blockerTaskRef: string; instruction?: ActInstruction | null }, ctx: Context) => {
     const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
-      await changeTaskBlockerInTx(tx, txCtx, app, actor, task, blockerTaskId, 'remove');
-    }, { taskGraph: 'exclusive' });
+      if (await changeTaskBlockerInTx(tx, txCtx, app, actor, task, blockerTaskId, 'remove')) {
+        await recordInstructedManagerAct(tx, app.id, actor, 'task.blocker-remove', { taskId: task.id });
+      }
+    }, { taskGraph: 'exclusive' }, instruction);
     await matchAfterChange(ctx.db, task.appId);
     return ctx.db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
   },
@@ -1139,129 +2250,228 @@ export const agentTaskMutations = {
    * not under an ended parent (TASK_ENDED, 050:07 open question; #1705
    * interim).
    */
-  createAgentTask: async (_: unknown, { input }: { input: CreateInput }, ctx: Context, info?: GraphQLResolveInfo) => {
-    if (!input) throw badInput('input is required.');
-    let parentId = input.parentTaskId?.trim() || null;
-    if (input.project && parentId) throw badInput('A project is a top-level task: it takes no parentTaskId.');
-    // #2553: the parent's canonical id once it resolves (a handle is an alias); `parentId` stays the caller's spelling for echoes.
-    let parentTaskId: string | null = null;
-    let app: TaskApp;
-    let actor: TaskActor;
-    if (parentId) {
-      const readable = await loadReadableTask(ctx, parentId);
-      if (!readable) throw notFound(parentId);
-      ({ app, actor } = readable);
-      parentTaskId = readable.task.id;
-      // #2553: AT0 is the implicit parent of a task with no project, never a parent a caller names: a plain create takes
-      // the ROOT gate and owner rules (this input names no parent), so naming AT0 would reach the child gate instead.
-      if (readable.task.handle === PROJECT_ZERO_HANDLE) throw badInput('AT0 is the reserved "No project" project: omit parentTaskId to make a task with no project.');
-      // A parent in another App reads as not-found: no cross-App oracle (#1705).
-      if (input.appRef) {
-        let namedAppId: string | null = null;
-        try {
-          namedAppId = (await resolveAppRef(ctx.db, input.appRef)).id;
-        } catch (e) {
-          if (!(e instanceof AppNotFoundError)) throw e;
-        }
-        if (namedAppId !== app.id) throw notFound(input.parentTaskId!.trim());
-      }
-    } else {
-      if (!input.appRef) throw badInput('Name the App for a root task (or a parentTaskId for a child task).');
-      ({ app, actor } = await resolveParticipatedApp(ctx, input.appRef));
-    }
-    requireWritable(ctx, app);
-
-    const priority = taskPriority(input.priority);
-    const title = normalizeTitle(input.title);
-    const description = optionalText(input.description, TASK_DESCRIPTION_MAX, 'description');
-    const source = optionalText(input.source, TASK_SOURCE_MAX, 'source');
-    const tags = normalizeTags(input.tags);
-    const startBy = parseStartBy(input.startBy);
-    const closeSessionWhenDone = input.closeSessionWhenDone ?? false;
-    // #1754: backlog or pending — and a backlog task carries no assignee.
-    const status = normalizeCreateStatus(input.status);
-    if (status === 'backlog' && input.assignee) {
-      throw badInput('A backlog task has no assignee (cor:agt:050:02). Make it ready, then assign it.');
-    }
-    const now = new Date();
-    const evActor = eventActor(ctx.userId);
-
-    /**
-     * The inputs that name OTHER entities (owner, assignee, excluded
-     * workers). Resolved only after the caller is authorized — for a child
-     * task, under the parent's row lock — so a caller who may not create here
-     * learns nothing from which of them would be refused.
-     */
-    const resolveParties = async (txCtx: Context, app: TaskApp) => {
-      const requirements = await normalizeRequirements(txCtx, app, input.requirements);
-      let owner: TaskParty = actorParty(actor);
-      if (input.owner) {
-        // #1757 (cor:agt:050:01, Holger team chat #8183): a root task's
-        // creator — any participant, worker or person — may name its owner,
-        // so long as the named party participates in the App too. A ref that
-        // names nobody, a non-participant or another App's worker is
-        // TASK_OWNER_INVALID — the same refusal either way. A child task's
-        // owner is its parent's assignee, so naming anybody but yourself is
-        // TASK_CHILD_OWNER_MISMATCH, valid ref or not (no oracle).
-        let named: TaskParty | null = null;
-        try {
-          named = await resolveParty(txCtx, app, input.owner, 'TASK_OWNER_INVALID');
-        } catch (e) {
-          if (!parentId || !(e instanceof GraphQLError && e.extensions?.code === 'TASK_OWNER_INVALID')) throw e;
-        }
-        if (!named || !sameParty(named, owner)) {
-          if (parentId) {
-            throw taskError('TASK_CHILD_OWNER_MISMATCH', "A child task is owned by the parent's assignee who creates it; it cannot name another owner.");
-          }
-          owner = named as TaskParty;
-        }
-      }
-      const assignee = input.assignee ? await resolveParty(txCtx, app, input.assignee, 'TASK_ASSIGNEE_INVALID') : null;
-      return { requirements, owner, assignee };
-    };
-
-    const refused = parentId ? () => notFound(parentId) : input.appRef ? () => appNotFound(input.appRef as string) : () => notFound(input.parentTaskId!.trim());
-    // #2198: advice decided inside the write transaction, filed after it commits.
-    const warn: TaskWarningCode[] = source === null ? ['task.create.no-source'] : [];
-    // #2162: a task created straight onto a worker takes that worker's per-worker lock, before any row.
-    const lockedAssignee = await partyWorkerForLock(ctx, app.id, input.assignee);
-    const made = await inTaskWriteTx(ctx, app, actor, refused, async (tx, txCtx, app) => {
-      if (parentId) {
-        // Lock the parent so its assignee and status can't move under us,
-        // then authorize against the locked row — the one assignee check.
-        const parent = await lockTask(tx, parentTaskId!);
-        if (!parent || parent.appId !== app.id) throw notFound(parentId);
-        if (!isAssignee(actor, parent)) {
-          throw taskError('TASK_NOT_ASSIGNEE', "Only the parent task's assignee creates its child tasks.", { taskId: parentId });
-        }
-        refuseEnded(parent);
-      }
-      const { requirements, owner, assignee } = await resolveParties(txCtx, app);
-      if (assignee?.workerId && assignee.workerId !== lockedAssignee) {
-        throw taskError('TASK_CONFLICT', 'The assignee named changed while this write waited; try again.');
-      }
-      await refuseResettingAssignee(tx, app.id, assignee?.workerId);
-      await assigneeAdvice(tx, app.id, assignee, null, warn);
-      const made = await insertTask(tx, {
-        app, parentId: parentTaskId, project: input.project === true, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee, status, priority,
-        created: createdStamp(ctx), assigned: assignedStamp(ctx, now), evActor,
-      });
-      const row = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });
-      if (input.priority !== undefined || input.blockedBy !== undefined) {
-        await requireTaskDirection(tx, txCtx, app, actor, row);
-      }
-      for (const ref of [...new Set(input.blockedBy ?? [])]) {
-        await changeTaskBlockerInTx(tx, txCtx, app, actor, row, ref, 'add');
-      }
-      return made;
-    }, { lockWorkerIds: [lockedAssignee], taskGraph: input.blockedBy?.length ? 'exclusive' : 'shared' });
+  createAgentTask: async (_: unknown, { input, instruction }: { input: CreateInput; instruction?: ActInstruction | null }, ctx: Context, info?: GraphQLResolveInfo) => {
+    const p = await prepareTaskCreate(ctx, input);
+    // #3323: the direction arm a create may need (naming its priority, blockers or properties for another owner).
+    p.actor = withInstruction(p.actor, instruction);
+    const made = await inTaskWriteTx(ctx, p.app, p.actor, p.refused, async (tx, txCtx, app) => {
+      const created = await applyTaskCreate(tx, txCtx, app, p);
+      await recordInstructedManagerAct(tx, app.id, p.actor, 'task.create', { taskId: created.id });
+      return created;
+    }, { lockWorkerIds: [p.lockedAssignee], taskGraph: input.blockedBy?.length ? 'exclusive' : 'shared' });
     // #1707 (cor:agt:060:06): a queued task is matched now, after its create
     // committed; the returned task shows the assignee when one was free.
-    if (made.queued) await matchAfterChange(ctx.db, app.id);
-    const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
-    // #1709 (cor:agt:070:08): created straight onto a worker, it may start that worker.
-    await launchAssignee(ctx.db, created);
-    await emitTaskWarnings(ctx, info, created.appId, { codes: warn, taskId: created.id });
+    // #3816 (V22): a failed match's candidates ride this answer only; they are never stored.
+    const skipped = input.match ? await matchTaskNow(ctx.db, made.id, new Date()) : null;
+    if (!input.match && made.queued) await matchAfterChange(ctx.db, p.app.id);
+    const created = await afterTaskCreate(ctx, info, made.id, p.warn, made.row.assigneeWorkerId != null);
+    // #2694 (cor:agt:020:11 r3): creating a task is the one task write outside `mutateTask`; same rule as there.
+    if (p.actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, p.actor.workerId);
+    return skipped ? Object.assign(created, { matchSkipped: skipped }) : created;
+  },
+
+  /**
+   * #2653 (cor:agt:050:06 "Creating several at once", ruling 0011 A): create 1 to {@link TASK_BATCH_MAX} tasks in the
+   * App `appRef`, all or none, in ONE transaction. Each task is judged exactly as createAgentTask judges it alone (the
+   * shared prepare/apply above); the first refusal refuses the call and carries `extensions.position`, the 1-based
+   * position of the task that caused it. Positions are judged item-first, in list order: each task's checks before
+   * the write and then, inside the transaction, its whole write (parties, row, priority authority, its existing
+   * blockers and its blockers earlier in the list, and its authority to name blockers by position at all), so a
+   * refusal at task k is raised only after tasks 1..k-1 were written without one; last come the links to tasks LATER
+   * in the list, in list order. A task names an
+   * existing parent, never another task of the call; `blockedByPositions` names other tasks of the call as its
+   * blockers (a self-block or a cycle is TASK_BLOCKER_CYCLE). Handles follow list order and a refused call spends none. Events are a single
+   * create's, per task; ordinary matching, all launches and warnings run only after the commit (warnings filed per task under
+   * `<responseKey>.<position>`). Not idempotent.
+   *
+   * LOCKS: the call holds the App's task graph EXCLUSIVE (every other task write in the App holds it shared, so the
+   * call's parent and counter rows are taken with no task write of the App interleaved: two calls naming two parents
+   * in opposite orders cannot deadlock), then every named worker's per-worker lock, then the parents in id order,
+   * before the first insert.
+   */
+  createAgentTasks: async (
+    _: unknown,
+    { appRef, tasks, distinctAssignees }: { appRef: string; tasks: CreateBatchItem[]; distinctAssignees?: boolean | null },
+    ctx: Context,
+    info?: GraphQLResolveInfo,
+  ) => {
+    if (!Array.isArray(tasks) || tasks.length === 0) throw badInput('Name at least one task.');
+    if (tasks.length > TASK_BATCH_MAX) {
+      throw taskError('TASK_BATCH_TOO_LARGE', `One call creates at most ${TASK_BATCH_MAX} tasks; this one names ${tasks.length}.`, { max: TASK_BATCH_MAX });
+    }
+    const inApp = await resolveParticipatedApp(ctx, appRef);
+    requireWritable(ctx, inApp.app);
+    const prepared: PreparedCreate[] = [];
+    const withinCall: number[][] = [];
+    // Item-first (LOCAL P2 at 5c64cc3b): the first task whose checks before the write refuse stops the preparing, and
+    // its refusal waits until every task before it has been written, so an earlier task's write refusal comes first.
+    let refusedBeforeWrite: unknown = null;
+    for (const [i, t] of tasks.entries()) {
+      try {
+        if (!t || typeof t !== 'object' || !t.task) throw badInput('Each item names its task.');
+        const positions = [...new Set(t.blockedByPositions ?? [])];
+        for (const n of positions) {
+          if (!Number.isInteger(n) || n < 1 || n > tasks.length) {
+            throw badInput(`blockedByPositions names a task of this call by its position, 1 to ${tasks.length}.`);
+          }
+        }
+        prepared.push(await prepareTaskCreate(ctx, t.task, inApp));
+        withinCall.push(positions);
+      } catch (e) {
+        refusedBeforeWrite = atPosition(e, i + 1);
+        break;
+      }
+    }
+    if (prepared.length === 0) throw refusedBeforeWrite;
+    const distinct = distinctAssignees === true;
+    const workerPool = new Set<string>();
+    const matchedFamilies = new Map<string, string>();
+    /** #3815: the distinct-batch matches whose worker has NO open session, the only ones the post-commit launch starts. */
+    const matchedNeedStart = new Set<string>();
+    const parents = [...new Set(prepared.map(p => p.parentTaskId).filter((id): id is string => id !== null))].sort();
+    const made = await inTaskWriteTx(ctx, inApp.app, inApp.actor, () => appNotFound(appRef), async (tx, txCtx, app) => {
+      for (const id of parents) await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id = ${id} FOR UPDATE`;
+      const out: Array<{ id: string; queued: boolean; row: TaskRow }> = [];
+      // Each task's whole write, in list order, links the tasks of the call that already exist (itself and those
+      // before it); only a link to a LATER task waits for the second pass, once that task exists.
+      for (const [i, p] of prepared.entries()) {
+        try {
+          out.push(await applyTaskCreate(tx, txCtx, app, p,
+            (selfId) => withinCall[i]!.filter(n => n <= i + 1).map(n => (n === i + 1 ? selfId : out[n - 1]!.id)),
+            withinCall[i]!.length > 0, true));
+        } catch (e) {
+          throw atPosition(e, i + 1);
+        }
+      }
+      // Every task before the refused one is written without a refusal: the refused task's comes next, before any
+      // link to a later task (a link to the refused task or past it would name a task that does not exist).
+      if (refusedBeforeWrite) throw refusedBeforeWrite;
+      for (const [i, p] of prepared.entries()) {
+        for (const n of withinCall[i]!.filter(n => n > i + 1)) {
+          try {
+            await changeTaskBlockerInTx(tx, txCtx, app, p.actor, out[i]!.row, out[n - 1]!.id, 'add');
+          } catch (e) {
+            throw atPosition(e, i + 1);
+          }
+        }
+      }
+      // #4113: a caller-own claim starts only now, once every link (backward and forward) has landed.
+      for (const [i, p] of prepared.entries()) {
+        const started = await startOwnClaim(tx, txCtx, app, p, assigneeOf(out[i]!.row), out[i]!.id);
+        if (started) out[i] = { ...out[i]!, row: started };
+      }
+      // Match-now judges the final derived blocker state, including forward-position links.
+      // A refusal rolls back the whole batch before any post-commit attempt or wake can run.
+      for (const [i, p] of prepared.entries()) {
+        if (p.input.match && (await tx.agentTask.findUniqueOrThrow({ where: { id: out[i]!.id } })).blocked) {
+          throw atPosition(badInput('A blocked task cannot be matched now.'), i + 1);
+        }
+      }
+      if (distinct) {
+        // Reserve every named worker, including later list entries, before matching the first task.
+        const excluded = new Set<string>();
+        for (const [i, m] of out.entries()) {
+          if (!m.row.assigneeWorkerId) continue;
+          if (excluded.has(m.row.assigneeWorkerId)) throw atPosition(badInput('Distinct assignees cannot name the same worker twice.'), i + 1);
+          excluded.add(m.row.assigneeWorkerId);
+        }
+        for (const [i, p] of prepared.entries()) {
+          if (!p.input.match) continue;
+          const outcome = await matchTaskNowInTx(tx, out[i]!.id, new Date(), excluded, workerPool);
+          if ('reason' in outcome) throw taskError('TASK_MATCH_FAILED', 'A task of this distinct batch could not be matched.', { position: i + 1, reason: outcome.reason });
+          excluded.add(outcome.workerId);
+          matchedFamilies.set(out[i]!.id, outcome.family);
+          if (outcome.needsHostStart) matchedNeedStart.add(out[i]!.id);
+        }
+      }
+      return out;
+    }, { lockWorkerIds: prepared.map(p => p.lockedAssignee), lockWorkerPool: distinct && prepared.some(p => p.input.match) ? workerPool : undefined, taskGraph: 'exclusive' });
+    // Each requested match gets its single attempt in list order after the complete commit.
+    // Ordinary failures mark only that task; distinct matching already completed atomically above (#3243).
+    const matchErrors: unknown[] = [];
+    for (const [i, m] of made.entries()) {
+      if (distinct || !prepared[i]!.input.match) continue;
+      try {
+        await matchTaskNow(ctx.db, m.id, new Date());
+      } catch (error) {
+        // A committed sibling still owns its one attempt even when an earlier attempt throws.
+        // Do not clear the throwing task's reservation: that could cause an automatic retry.
+        matchErrors.push(error);
+      }
+    }
+    if (matchErrors.length) throw matchErrors[0];
+    if (made.some((m, i) => m.queued && !prepared[i]!.input.match)) await matchAfterChange(ctx.db, inApp.app.id);
+    const key = info?.path?.key;
+    const created = [];
+    for (const [i, m] of made.entries()) {
+      const at = typeof key === 'string' ? { path: { key: `${key}.${i + 1}`, prev: undefined, typename: undefined } } : undefined;
+      created.push(await afterTaskCreate(ctx, at, m.id, prepared[i]!.warn, m.row.assigneeWorkerId != null || matchedNeedStart.has(m.id), matchedFamilies.get(m.id)));
+    }
+    if (inApp.actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, inApp.actor.workerId);
+    return created;
+  },
+
+  /**
+   * #2646 (cor:agt:050:02, What a clone does; Decided, ruling 0010): a clone is a create in the source's App with its
+   * fields filled in from the source, linked to it. Whoever may read the source and create a task there may clone it,
+   * whatever its status. Every create gate applies to the copied values (the parent, the root gate, properties,
+   * priority); the source is never changed. An ended task never reopens: this makes a NEW task.
+   */
+  cloneAgentTask: async (_: unknown, { taskId, input }: { taskId: string; input?: CloneInput | null }, ctx: Context, info?: GraphQLResolveInfo) => {
+    const readable = await loadReadableTask(ctx, taskId);
+    // Unknown, unreadable and cross-App sources answer alike (#1577 posture): no existence oracle over task ids.
+    if (!readable) throw notFound(taskId);
+    const src = readable.task;
+    if (src.handle === PROJECT_ZERO_HANDLE) throw badInput('AT0 is the reserved "No project" project and cannot be cloned.');
+    const ov: CloneInput = input ?? {};
+    const named = <K extends keyof CloneInput>(k: K): boolean => ov[k] !== undefined;
+    // The parent: a parent the call names; else, when the call names none (parentTaskId: null), a root; else the
+    // source's own. A project stays a project, and a task under AT0 or under an ended parent goes under AT0.
+    let parentTaskId: string | null = null;
+    let project = false;
+    if (ov.parentTaskId) {
+      parentTaskId = ov.parentTaskId;
+      project = ov.project === true;
+    } else if (ov.parentTaskId === null) {
+      project = ov.project === true;
+    } else if (!src.parentTaskId) {
+      project = ov.project ?? true;
+    } else if (ov.project === true) {
+      // An explicit project override on a child source makes a top-level project, as on a plain create.
+      project = true;
+    } else {
+      const parent = await ctx.db.agentTask.findUnique({ where: { id: src.parentTaskId }, select: { id: true, handle: true, status: true } });
+      if (parent && parent.handle !== PROJECT_ZERO_HANDLE && !ENDED.includes(parent.status)) parentTaskId = parent.id;
+      project = false;
+    }
+    const stored = storedTaskReferences(src.references).map(r => ({ kind: REFERENCE_KIND_TO_GQL[r.kind], target: r.target, label: r.label ?? null }));
+    const createInput: CreateInput = {
+      appRef: readable.app.id,
+      parentTaskId,
+      project,
+      title: ov.title ?? src.title,
+      description: named('description') ? ov.description : src.description,
+      source: named('source') ? ov.source : src.source,
+      tags: named('tags') ? ov.tags : src.tags,
+      references: named('references') ? ov.references : stored,
+      closeSessionWhenDone: ov.closeSessionWhenDone ?? src.closeSessionWhenDone,
+      priority: ov.priority ?? src.priority,
+      properties: named('properties') ? ov.properties : (src.properties ?? undefined),
+      requirements: named('requirements') ? ov.requirements : undefined,
+      owner: ov.owner, assignee: ov.assignee, status: ov.status, startBy: ov.startBy, finishBy: ov.finishBy,
+    };
+    const p = await prepareTaskCreate(ctx, createInput);
+    p.clone = {
+      sourceId: src.id,
+      priorityCopied: ov.priority == null,
+      propertiesCopied: !named('properties'),
+      requirements: named('requirements') ? undefined : ((src.requirements as Prisma.JsonValue | null) ?? null),
+    };
+    const made = await inTaskWriteTx(ctx, p.app, p.actor, p.refused, (tx, txCtx, app) => applyTaskCreate(tx, txCtx, app, p),
+      { lockWorkerIds: [p.lockedAssignee], taskGraph: 'shared' });
+    if (made.queued) await matchAfterChange(ctx.db, p.app.id);
+    const created = await afterTaskCreate(ctx, info, made.id, p.warn, made.row.assigneeWorkerId != null);
+    if (p.actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, p.actor.workerId);
     return created;
   },
 
@@ -1274,7 +2484,7 @@ export const agentTaskMutations = {
    */
   assignAgentTask: async (
     _: unknown,
-    { taskId, assignee, closeSessionWhenDone }: { taskId: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null },
+    { taskId, assignee, closeSessionWhenDone, instruction }: { taskId: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null; instruction?: ActInstruction | null },
     ctx: Context,
     info?: GraphQLResolveInfo,
   ) => {
@@ -1311,6 +2521,7 @@ export const agentTaskMutations = {
         },
         data: {
           ...partyColumns('assignee', party),
+          matchPending: false, matchFailedAt: null, matchFailedReason: null,
           ...(fromBacklog ? { status: 'pending' as const } : {}),
           closeSessionWhenDone: close, ...assignedStamp(ctx, new Date()), ...updatedStamp(ctx),
         },
@@ -1328,8 +2539,10 @@ export const agentTaskMutations = {
         appId: app.id, taskId: task.id, actor: evActor,
         event: { type: 'task.assigned', assignee: party, closeSessionWhenDone: close },
       });
-    }, { workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] });
-    // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no live session through its host.
+      await recordInstructedManagerAct(tx, app.id, actor, 'task.assign', { taskId: task.id });
+    }, { workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] }, instruction);
+    // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no open session through its host
+    // (V16, Proposed in the rule; built by #4237).
     await launchAssignee(ctx.db, assigned);
     await emitTaskWarnings(ctx, info, assigned.appId, { codes: warn, taskId: assigned.id });
     return assigned;
@@ -1340,7 +2553,7 @@ export const agentTaskMutations = {
    * assignee becomes BACKLOG — unassigned, never matched, never waited on, no
    * alarms. Whoever may assign a task may park it (cor:agt:050:09).
    */
-  parkAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) =>
+  parkAgentTask: async (_: unknown, { taskId, instruction }: { taskId: string; instruction?: ActInstruction | null }, ctx: Context) =>
     mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, parks it in the backlog.", { taskId });
@@ -1366,14 +2579,15 @@ export const agentTaskMutations = {
       await appendTaskEvent(tx, {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.parked' },
       });
-    }),
+      await recordInstructedManagerAct(tx, app.id, actor, 'task.park', { taskId: task.id });
+    }, {}, instruction),
 
   /**
    * Make a backlog task ready to be worked (#1754, cor:agt:050:02): BACKLOG
    * becomes pending and the task enters the queue. Whoever may assign a task
    * may make it ready (cor:agt:050:09).
    */
-  makeAgentTaskReady: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) => {
+  makeAgentTaskReady: async (_: unknown, { taskId, instruction }: { taskId: string; instruction?: ActInstruction | null }, ctx: Context) => {
     const ready = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, makes a backlog task ready.", { taskId });
@@ -1388,7 +2602,7 @@ export const agentTaskMutations = {
       // typed, so the append-only stream never takes a duplicate pair.
       const n = await tx.agentTask.updateMany({
         where: { id: task.id, appId: app.id, status: 'backlog' },
-        data: { status: 'pending', ...updatedStamp(ctx) },
+        data: { status: 'pending', matchPending: false, matchFailedAt: null, matchFailedReason: null, ...updatedStamp(ctx) },
       });
       if (n.count === 0) {
         throw taskError('TASK_INVALID_TRANSITION', 'Only a backlog task is made ready to be worked.', { taskId });
@@ -1399,7 +2613,8 @@ export const agentTaskMutations = {
       // and this event is the stall rule's queue-entry stamp for the new stint
       // (cor:agt:050:17; the unassignable episode starts here, not at creation).
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'assignment.queued' } });
-    });
+      await recordInstructedManagerAct(tx, app.id, actor, 'task.ready', { taskId: task.id });
+    }, {}, instruction);
     // #1707 (cor:agt:060:06): a free worker may take it right away.
     await matchAfterChange(ctx.db, ready.appId);
     return ready;
@@ -1412,7 +2627,7 @@ export const agentTaskMutations = {
    */
   reassignAgentTask: async (
     _: unknown,
-    { taskId, assignee, closeSessionWhenDone }: { taskId: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null },
+    { taskId, assignee, closeSessionWhenDone, instruction }: { taskId: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null; instruction?: ActInstruction | null },
     ctx: Context,
     info?: GraphQLResolveInfo,
   ) => {
@@ -1442,13 +2657,20 @@ export const agentTaskMutations = {
       const close = closeSessionWhenDone ?? task.closeSessionWhenDone;
       await tx.agentTask.update({
         where: { id: task.id },
-        data: { ...partyColumns('assignee', party), closeSessionWhenDone: close, ...assignedStamp(ctx, new Date()), ...updatedStamp(ctx) },
+        data: { ...partyColumns('assignee', party), matchPending: false, matchFailedAt: null, matchFailedReason: null, closeSessionWhenDone: close, ...assignedStamp(ctx, new Date()), ...updatedStamp(ctx) },
       });
       await appendTaskEvent(tx, {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
         event: { type: 'task.reassigned', from, to: party, closeSessionWhenDone: close },
       });
-    }, { assignee: true, workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] });
+      // #4301: a started task shows the run it is on now, so the previous assignee's applied settings do not stay.
+      if (task.status === 'started') await restampAppliedRunSettings(tx, task.id);
+      // #4223 (cor:agt:050:10, Proposed; Peter, team chat #108497): a short-lived worker whose last open task moves
+      // away is asked to end its session, as on a finish or a cancel. `task` is the row before the move, so its
+      // assignee is the worker that lost it; that worker's per-worker lock is held (`assignee: true`).
+      await requestSessionEnd(tx, { appId: app.id, task, actor: eventActor(ctx.userId), now: new Date(), cause: 'reassigned' });
+      await recordInstructedManagerAct(tx, app.id, actor, 'task.reassign', { taskId: task.id });
+    }, { assignee: true, workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] }, instruction);
     await launchAssignee(ctx.db, reassigned);
     await emitTaskWarnings(ctx, info, reassigned.appId, { codes: warn, taskId: reassigned.id });
     return reassigned;
@@ -1458,10 +2680,11 @@ export const agentTaskMutations = {
    * Start a task: the assignee only (cor:agt:050:08). Explicit start only —
    * 050:02's inferred start is an open question (#1705 interim).
    */
-  startAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) =>
-    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+  startAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context, info?: GraphQLResolveInfo) => {
+    const warn: TaskWarningCode[] = [];
+    const started = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
-        throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee starts it.", { taskId });
+        throw notAssignee(actor, "Only the task's assignee starts it.", { taskId });
       }
       refuseEnded(task);
       if (task.status !== 'pending') {
@@ -1470,26 +2693,81 @@ export const agentTaskMutations = {
       if (task.blocked) throw taskError('TASK_BLOCKED', 'This task has an open blocker.', { taskId });
       // #2162: unreachable while the claim requires no open task, and asserted here as a guard, not a path.
       await refuseResettingAssignee(tx, app.id, task.assigneeWorkerId);
+      // #3267: advice, decided from the locked row in this transaction; starting still succeeds. A worker assignee
+      // that already holds another STARTED task in this App, and a parent that has already ended.
+      if (task.assigneeWorkerId && (await tx.agentTask.count({
+        where: { appId: app.id, assigneeWorkerId: task.assigneeWorkerId, status: 'started' }, // this task is pending, so never counted
+      })) > 0) warn.push('task.start.other-started');
+      if (task.parentTaskId) {
+        const parent = await tx.agentTask.findUnique({ where: { id: task.parentTaskId }, select: { status: true } });
+        if (parent && ENDED.includes(parent.status)) warn.push('task.start.parent-ended');
+      }
       await tx.agentTask.update({
         where: { id: task.id },
         data: { status: 'started', startedAt: new Date(), ...updatedStamp(ctx) },
       });
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.started' } });
-    }, { assignee: true }),
+      // #4291: the settings this run uses, read from the assignee's open session now, shown beside the task's own.
+      await stampAppliedRunSettings(tx, task.id);
+    }, { assignee: true });
+    await emitTaskWarnings(ctx, info, started.appId, { codes: warn });
+    return started;
+  },
 
   /** Record progress on a started task: the assignee only (cor:agt:050:08). Carries no text (050:11). */
-  recordAgentTaskProgress: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) =>
-    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+  recordAgentTaskProgress: async (_: unknown, { taskId }: { taskId: string }, ctx: Context, info?: GraphQLResolveInfo) => {
+    const warn: TaskWarningCode[] = [];
+    const recorded = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
-        throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee records progress on it.", { taskId });
+        throw notAssignee(actor, "Only the task's assignee records progress on it.", { taskId });
       }
       refuseEnded(task);
       if (task.status !== 'started') {
         throw taskError('TASK_INVALID_TRANSITION', 'Start the task before recording progress.', { taskId, status: task.status });
       }
+      // #3267: advice from the locked row's children, in this transaction: it has children and none is still
+      // unended (backlog, pending or started), so its own finish is probably due. Recording still succeeds.
+      // ONE statement, so the decision reads one snapshot. A concurrent child create cannot split it anyway: lockTask
+      // holds the parent row FOR UPDATE, and a child INSERT needs FOR KEY SHARE on that row through
+      // agent_tasks_parent_task_id_fkey, which conflicts, so the insert waits for this transaction (#3297). Weakening
+      // lockTask to FOR NO KEY UPDATE would remove that; resolvers.taskProgressChildren3297.test.ts pins it.
+      const [kids] = await tx.$queryRaw<Array<{ total: bigint; unended: bigint }>>`
+        SELECT count(*) AS total, count(*) FILTER (WHERE status NOT IN (${Prisma.join([...ENDED])})) AS unended
+        FROM agent_tasks WHERE parent_task_id = ${task.id}`;
+      if (kids!.total > 0n && kids!.unended === 0n) warn.push('task.progress.children-ended');
       await tx.agentTask.update({ where: { id: task.id }, data: { ...updatedStamp(ctx) } });
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.progress' } });
-    }),
+    });
+    await emitTaskWarnings(ctx, info, recorded.appId, { codes: warn });
+    return recorded;
+  },
+
+  /** #2663 / hrn:node:hadronmemory.com:specs:cor:agt:050:30: assigners dispose a finished finding, never its result. */
+  disposeAgentTaskFinding: async (
+    _: unknown,
+    args: { taskRef: string; findingId: string; disposition: unknown; reference?: unknown; instruction?: ActInstruction | null },
+    ctx: Context,
+  ) => mutateTask(ctx, args.taskRef, async (tx, task, actor, app, txCtx) => {
+    if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
+      throw taskError('TASK_NOT_OWNER', 'Only whoever may assign this task disposes its findings.', { taskId: args.taskRef });
+    }
+    if (task.status !== 'finished') throw taskError('TASK_NOT_FINISHED', 'Only a finished task has findings to dispose.', { taskId: args.taskRef });
+    if (!['fixed', 'accepted', 'deferred', 'rejected'].includes(args.disposition as string)) throw badInput('A disposition is fixed, accepted, deferred or rejected; it cannot be cleared.');
+    const findings = (task.resultFindings ?? []) as TaskFinding[];
+    if (!findings.some(f => f.id === args.findingId)) throw taskError('TASK_FINDING_NOT_FOUND', 'Finding not found.', { taskId: args.taskRef });
+    const reference = args.reference == null ? null : taskReferencesInput([args.reference])[0];
+    const dispositions = task.findingDispositions as unknown as { findingId: string; disposition: string; reference: TaskReference | null }[];
+    const unchanged = dispositions.some(d => d.findingId === args.findingId && d.disposition === args.disposition && isDeepStrictEqual(d.reference, reference));
+    const next = dispositions.filter(d => d.findingId !== args.findingId);
+    next.push({ findingId: args.findingId, disposition: args.disposition as string, reference });
+    next.sort((a, b) => findings.findIndex(f => f.id === a.findingId) - findings.findIndex(f => f.id === b.findingId));
+    // mutateTask holds the task row: two dispositions cannot overwrite each other. The trigger derives the open IDs.
+    await tx.agentTask.update({ where: { id: task.id }, data: { findingDispositions: next, ...updatedStamp(ctx) } });
+    await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
+      event: { type: 'task.finding-disposed', findingId: args.findingId, disposition: args.disposition as 'fixed' | 'accepted' | 'deferred' | 'rejected' } });
+    // #3323 (acceptance 6): the same disposition again is a no-op, and a no-op writes no record.
+    if (!unchanged) await recordInstructedManagerAct(tx, app.id, actor, 'task.finding-dispose', { taskId: task.id });
+  }, {}, args.instruction),
 
   /**
    * Finish a started task with its result: the assignee only (cor:agt:050:08).
@@ -1499,7 +2777,7 @@ export const agentTaskMutations = {
    */
   finishAgentTask: async (
     _: unknown,
-    { taskId, result }: { taskId: string; result: { outcome: string; summary?: string | null; evidence?: string | null } },
+    { taskId, result }: { taskId: string; result: { outcome: string; summary?: string | null; evidence?: string | null; findings?: unknown } },
     ctx: Context,
     info?: GraphQLResolveInfo,
   ) => {
@@ -1509,15 +2787,18 @@ export const agentTaskMutations = {
     }
     const summary = optionalText(result?.summary, TASK_SUMMARY_MAX, 'summary');
     const evidence = optionalText(result?.evidence, TASK_EVIDENCE_MAX, 'evidence');
+    const findings = finishFindings(result?.findings);
     const warn: TaskWarningCode[] = [];
     const finished = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
-        throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee finishes it and sets its result.", { taskId });
+        throw notAssignee(actor, "Only the task's assignee finishes it and sets its result.", { taskId });
       }
       refuseEnded(task);
       if (task.status !== 'started') {
         throw taskError('TASK_INVALID_TRANSITION', 'Start the task before finishing it.', { taskId, status: task.status });
       }
+      // #2652 (cor:agt:050:30): the team's closed outcome set, read now, before any write; no set keeps any one word.
+      await checkOutcomeInTeamSet(tx, txCtx, app.id, outcome, (w) => TASK_OUTCOME_PATTERN.test(w));
       // #2198: finishing with open children still succeeds (as it always has); the response says so.
       if ((await tx.agentTask.count({ where: { parentTaskId: task.id, status: { in: OPEN } } })) > 0) warn.push('task.finish.open-children');
       await tx.agentTask.update({
@@ -1525,11 +2806,12 @@ export const agentTaskMutations = {
         data: {
           status: 'finished', finishedAt: new Date(),
           resultOutcome: outcome, resultSummary: summary, resultEvidence: evidence,
+          ...(findings !== undefined ? { resultFindings: findings } : {}),
           ...updatedStamp(ctx),
         },
       });
       await appendTaskEvent(tx, {
-        appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.finished', outcome },
+        appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.finished', outcome, ...(findings !== undefined ? { findingCounts: countFindings(findings) } : {}) },
       });
       // #1709 (cor:agt:050:10): ask the assignee to end its session when the task says so.
       const ending = await requestSessionEnd(tx, { appId: app.id, task, actor: eventActor(ctx.userId), now: new Date() });
@@ -1548,7 +2830,7 @@ export const agentTaskMutations = {
    * Cancel a pending, started or backlog task: its owner, or whoever manages
    * the App (cor:agt:050:09, Proposed; backlog directly, Holger team chat #8150).
    */
-  cancelAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context, info?: GraphQLResolveInfo) => {
+  cancelAgentTask: async (_: unknown, { taskId, instruction }: { taskId: string; instruction?: ActInstruction | null }, ctx: Context, info?: GraphQLResolveInfo) => {
     const warn: TaskWarningCode[] = [];
     const cancelled = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
@@ -1560,7 +2842,7 @@ export const agentTaskMutations = {
       if (openChildCount > 0) warn.push('task.cancel.open-children');
       await tx.agentTask.update({
         where: { id: task.id },
-        data: { status: 'cancelled', cancelledAt: new Date(), ...updatedStamp(ctx) },
+        data: { status: 'cancelled', cancelledAt: new Date(), matchPending: false, matchFailedAt: null, matchFailedReason: null, ...updatedStamp(ctx) },
       });
       await appendTaskEvent(tx, {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
@@ -1573,13 +2855,132 @@ export const agentTaskMutations = {
         appId: app.id, task, wasStarted: task.status === 'started', sessionEndRequested: ending !== null,
         actor: eventActor(ctx.userId), now: new Date(),
       });
-    }, { assignee: true });
+      await recordInstructedManagerAct(tx, app.id, actor, 'task.cancel', { taskId: task.id });
+    }, { assignee: true }, instruction);
     // #1707: a worker may have freed up (cor:agt:060:06).
     await matchAfterChange(ctx.db, cancelled.appId);
     await emitTaskWarnings(ctx, info, cancelled.appId, { codes: warn, taskId: cancelled.id });
     return cancelled;
   },
+
+  /**
+   * #4084 (hrn:node:hadronmemory.com:specs:cor:agt:120:02; who may release is V87, Proposed): give a task's outside item
+   * back by clearing its external id, so the next create naming it claims it. Whoever may cancel the task may release
+   * it (cor:agt:050:09: the owner, a worker up the owner's reporting chain, whoever manages the App, with #3323's
+   * instruction arm), in ANY status, so the assignee alone may not; and refused exactly as cancel refuses
+   * (TASK_NOT_OWNER, or TASK_NOT_FOUND for a task the caller cannot read). Authority is judged before anything about
+   * the id, then a task holding none refuses TASK_EXTERNAL_ID_NONE; either way nothing is written. Nothing else about
+   * the task changes. One team event, `task.external-id-released`, names the released id, for the team's reconcile
+   * pass (agentTaskExternalIdChanges); it is passive history, never stall activity. The id is never set again on this
+   * task: `externalId` is not in the update input (V29).
+   */
+  releaseAgentTaskExternalId: async (_: unknown, { taskId, instruction }: { taskId: string; instruction?: ActInstruction | null }, ctx: Context) =>
+    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+      if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
+        throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, releases its external id.", { taskId });
+      }
+      const released = task.externalId;
+      if (released == null) {
+        throw taskError('TASK_EXTERNAL_ID_NONE', 'This task holds no external id to release.', { taskId });
+      }
+      await tx.agentTask.update({ where: { id: task.id }, data: { externalId: null, ...updatedStamp(ctx) } });
+      await appendTaskEvent(tx, {
+        appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
+        event: { type: EXTERNAL_ID_RELEASED, externalId: released },
+      });
+      await recordInstructedManagerAct(tx, app.id, actor, 'task.release-external-id', { taskId: task.id });
+    }, {}, instruction),
+
+  /**
+   * #2651 (hrn:node:hadronmemory.com:specs:cor:agt:050:29, Proposed details): hand a STARTED task back, by its
+   * assignee only. The task loses its assignee, goes back to pending and re-enters the queue (cor:agt:050:03), with
+   * a returning WORKER added to `requirements.excludeWorkerIds` so the matcher never gives it back to that worker
+   * (cor:agt:060:06); a person is not added, since the platform assigns only workers. The reason code (closed set)
+   * rides the `task.handed-back` event; the optional text is stored on the task only (cor:agt:050:01, :11). No result
+   * is written, and the task's children are left untouched (cor:agt:050:07). Leaving `started` ends every ORDINARY
+   * stall episode the task had (cor:agt:050:13): no not-started or no-progress rule holds for a queued task, and the
+   * `assignment.queued` appended here starts the unassignable rule's new episode. A finish-by episode is KEPT: the
+   * hand-back keeps `finishBy`, and a task with a finish-by time follows only the finish-by rule (:13, :14), whose
+   * episode runs until the task ends or the time is edited (gate-owner disposition, Xan, PR #3104 comment
+   * 6556326061; the :29 vs :13 reconciliation is Vera's).
+   *
+   * Concurrency: `mutateTask` takes the assignee's per-worker lock and the task row `FOR UPDATE` before this judges
+   * anything, so a concurrent finish (which takes the same locks) runs strictly before or after; the loser reads the
+   * winner's committed state and is refused. The write is still a guarded `updateMany` on the consumed state.
+   */
+  handBackAgentTask: async (
+    _: unknown,
+    { taskRef, reason }: { taskRef: string; reason: { code: string; text?: string | null } },
+    ctx: Context,
+  ) => {
+    const code = handBackCode(reason?.code);
+    const text = optionalText(reason?.text, TASK_HAND_BACK_TEXT_MAX, 'reason.text');
+    const handedBack = await mutateTask(ctx, taskRef, async (tx, task, actor, app) => {
+      if (!isAssignee(actor, task)) {
+        throw notAssignee(actor, "Only the task's assignee hands it back.", { taskId: taskRef });
+      }
+      refuseEnded(task);
+      if (task.status !== 'started') {
+        throw taskError('TASK_INVALID_TRANSITION', 'Only a started task is handed back.', { taskId: taskRef, status: task.status });
+      }
+      const requirements = withExcludedWorker(task.requirements, task.assigneeWorkerId);
+      const now = new Date();
+      const n = await tx.agentTask.updateMany({
+        where: {
+          id: task.id, appId: app.id, status: 'started',
+          assigneeWorkerId: task.assigneeWorkerId, assigneeUserId: task.assigneeUserId,
+        },
+        data: {
+          status: 'pending', startedAt: null, assigneeWorkerId: null, assigneeUserId: null,
+          // #4291: the settings of the run that handed it back are not the next run's.
+          appliedFamily: null, appliedModel: null, appliedEffort: null,
+          ...(requirements ? { requirements } : {}),
+          handBackReasonCode: code, handBackReasonText: text, handedBackAt: now,
+          ...updatedStamp(ctx),
+        },
+      });
+      if (n.count === 0) {
+        throw taskError('TASK_INVALID_TRANSITION', 'Only a started task is handed back.', { taskId: taskRef });
+      }
+      const evActor = eventActor(ctx.userId);
+      await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'task.handed-back', code } });
+      // #1707: it enters the queue again, and this event is the unassignable rule's queue-entry stamp (cor:agt:050:17).
+      await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'assignment.queued' } });
+      // #4265 (hrn:node:hadronmemory.com:specs:cor:agt:050:10 r20, Proposed; Peter, team chat #109434): a short-lived
+      // worker that hands back its last open task is asked to end its session, as on a finish, a cancel or a
+      // reassignment away. `task` is the row before the hand-back, so its assignee is the worker handing it back,
+      // whose per-worker lock is held (`assignee: true`). The cause keeps `closeSessionWhenDone` out of it: the task
+      // did not end, so a long-lived or leave-alone worker is never asked here.
+      await requestSessionEnd(tx, { appId: app.id, task, actor: evActor, now, cause: 'handed-back' });
+    }, { assignee: true });
+    // #1707 (cor:agt:060:06): another free worker may take it right away; the returning worker is excluded.
+    await matchAfterChange(ctx.db, handedBack.appId);
+    return handedBack;
+  },
 };
+
+/**
+ * #2651: the GraphQL enum name (`MISSING_INPUT`) as the stored word (`missing_input`). Anything that is not exactly
+ * one of the closed set's names is refused, so a direct caller cannot slip a stored word or free text past the enum.
+ */
+function handBackCode(value: unknown): TaskHandBackCode {
+  const word = typeof value === 'string' && /^[A-Z_]+$/.test(value) ? value.toLowerCase() : null;
+  if (!word || !(TASK_HAND_BACK_CODES as readonly string[]).includes(word)) {
+    throw badInput(`reason.code must be one of ${TASK_HAND_BACK_CODES.map((c) => c.toUpperCase()).join(', ')}.`);
+  }
+  return word as TaskHandBackCode;
+}
+
+/**
+ * #2651: the task's requirements with `workerId` added to `excludeWorkerIds` once, every other field kept. Null when
+ * there is nothing to add (a person handed it back), so the caller leaves the column as it is.
+ */
+function withExcludedWorker(requirements: Prisma.JsonValue | null, workerId: string | null): Prisma.InputJsonObject | null {
+  if (!workerId) return null;
+  const r = requirements && typeof requirements === 'object' && !Array.isArray(requirements) ? requirements as Prisma.JsonObject : {};
+  const current = Array.isArray(r.excludeWorkerIds) ? (r.excludeWorkerIds as string[]) : [];
+  return { ...r, excludeWorkerIds: current.includes(workerId) ? current : [...current, workerId] } as Prisma.InputJsonObject;
+}
 
 /**
  * #2198: the advice an assignment earns, read in the write transaction: `unavailable`, `busy` and `paused` are pushed
@@ -1603,17 +3004,101 @@ async function assigneeAdvice(
 
 /**
  * #1709 (cor:agt:070:08; Holger via Vera #10773 (6): assignment by hand launches too, not only matching). After the
- * assignment committed: if its assignee is a worker, ask the platform to start it through its host. Never fails the
- * assignment; a worker it cannot start leaves the task waiting.
+ * assignment committed: if its assignee is a worker, ask the platform to start it through its host; only a worker with no
+ * open session is started (V16, #4237), one with an open session has the task by its notice. Never fails the assignment; a worker it cannot start leaves the task waiting.
  */
-async function launchAssignee(db: Context['db'], t: TaskRow): Promise<void> {
+async function launchAssignee(db: Context['db'], t: TaskRow, family?: string): Promise<void> {
   if (!t.assigneeWorkerId || !['pending', 'started'].includes(t.status)) return;
-  await launchForAssignment(db as PrismaClient, { appId: t.appId, taskId: t.id, workerId: t.assigneeWorkerId });
+  await launchForAssignment(db as PrismaClient, { appId: t.appId, taskId: t.id, workerId: t.assigneeWorkerId, ...(family ? { family } : {}) });
 }
 
 // ── Queries ───────────────────────────────────────────────────────────────
 
+/**
+ * #4084: the most external ids one batch read names. With limit omitted the page is as long as the list, so this is
+ * also that page's length: it stays within the admission model's omitted-page charge (DEFAULT_OMITTED_PAGE_SIZE, 100,
+ * admissionComplexity.ts), so the batch can never be under-counted.
+ */
+export const TASK_EXTERNAL_IDS_MAX = 100;
+/** #4084: the release event's type, shared by its writer and the changed-since read. */
+const EXTERNAL_ID_RELEASED = 'task.external-id-released' as const;
+/**
+ * #4084 (cor:agt:120): the team events agentTaskExternalIdChanges reports, and the kind each is. The platform's own
+ * assignment (`assignment.matched`) is an assignment like `task.assigned`.
+ */
+const EXTERNAL_ID_CHANGE_KINDS = {
+  'task.assigned': 'ASSIGNED',
+  'assignment.matched': 'ASSIGNED',
+  'task.reassigned': 'REASSIGNED',
+  'task.handed-back': 'HANDED_BACK',
+  'task.cancelled': 'CANCELLED',
+  'task.finished': 'FINISHED',
+  [EXTERNAL_ID_RELEASED]: 'RELEASED',
+} as const satisfies Partial<Record<TaskEventPayload['type'], string>>;
+
+/**
+ * #2654 (ruling 0269, cor:agt:050:14 "Overdue, the list filter"): a task is overdue when EITHER arm holds, judged on
+ * the server's clock (`now`, the database clock at millisecond precision), and never for an ended or backlog task:
+ *  (a) pending, not started, start-by strictly earlier than `now`; or
+ *  (b) pending or started, finish-by strictly earlier than `now`, not finished or cancelled.
+ * Blocking is ignored (R3, Proposed). Listing raises nothing. `overdueWhere` (the filter) and `isTaskOverdue` (the
+ * `AgentTask.overdue` field) are two renderings of this one rule; the differential pin keeps them equal.
+ */
+export function overdueWhere(now: Date): Prisma.AgentTaskWhereInput {
+  const open = { finishedAt: null, cancelledAt: null } as const;
+  return {
+    OR: [
+      { status: 'pending', startBy: { lt: now }, startedAt: null, ...open },
+      { status: { in: ['pending', 'started'] }, finishBy: { lt: now }, ...open },
+    ],
+  };
+}
+
+/**
+ * The complement of {@link overdueWhere}, written out. SQL NOT over a nullable start-by or finish-by would also discard
+ * the tasks with no deadline (NOT NULL is NULL), so each arm's negation guards its nullable column explicitly.
+ */
+export function notOverdueWhere(now: Date): Prisma.AgentTaskWhereInput {
+  return {
+    OR: [
+      { finishedAt: { not: null } },
+      { cancelledAt: { not: null } },
+      {
+        AND: [
+          { OR: [{ status: { not: 'pending' } }, { startedAt: { not: null } }, { startBy: null }, { startBy: { gte: now } }] },
+          { OR: [{ status: { notIn: ['pending', 'started'] } }, { finishBy: null }, { finishBy: { gte: now } }] },
+        ],
+      },
+    ],
+  };
+}
+
+export function isTaskOverdue(
+  t: Pick<TaskRow, 'status' | 'startBy' | 'finishBy' | 'startedAt' | 'finishedAt' | 'cancelledAt'>,
+  now: Date,
+): boolean {
+  if (t.finishedAt || t.cancelledAt) return false;
+  const a = t.status === 'pending' && !t.startedAt && t.startBy != null && t.startBy < now;
+  const b = (t.status === 'pending' || t.status === 'started') && t.finishBy != null && t.finishBy < now;
+  return a || b;
+}
+
+/**
+ * The database clock at the DateTime precision the API exposes, read once per request (the GraphQL context object is
+ * per request) and shared by the `overdue` filter and the `overdue` field.
+ */
+const requestNow = new WeakMap<object, Promise<Date>>();
+async function dbNowFor(c: { db: { $queryRaw: (...a: any[]) => Promise<any> } }): Promise<Date> {
+  let p = requestNow.get(c);
+  if (!p) {
+    p = (c.db.$queryRaw`SELECT date_trunc('milliseconds', CURRENT_TIMESTAMP) AS now` as Promise<{ now: Date }[]>).then((r) => r[0].now);
+    requestNow.set(c, p);
+  }
+  return p;
+}
+
 type ListArgs = {
+  matchFailed?: boolean | null;
   appRef: string;
   status?: string[] | null;
   owner?: PartyInput;
@@ -1623,7 +3108,14 @@ type ListArgs = {
   tagsAny?: string[] | null;
   tagsAll?: string[] | null;
   source?: string | null;
+  externalId?: string | null;
+  /** #4084: tasks holding any of these external ids (1 to {@link TASK_EXTERNAL_IDS_MAX}). */
+  externalIds?: string[] | null;
+  /** #2649: tasks carrying a reference with exactly this target (and this kind when given); the label is ignored. */
+  reference?: { kind?: string | null; target: string } | null;
+  text?: string | null;
   overdue?: boolean | null;
+  unresolvedFindings?: boolean | null;
   createdAfter?: unknown;
   createdBefore?: unknown;
   startedAfter?: unknown;
@@ -1656,7 +3148,7 @@ async function partyFilter(ctx: Context, app: TaskApp, input: PartyInput, prefix
 export const agentTaskQueries = {
   /** One task, or null when it does not exist or the caller may not read it (cor:agt:050:21). */
   agentTask: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-    return withReadableTask(ctx, id, async (_c, { task }) => task);
+    return withReadableTask(ctx, id, async (_c, { task }) => task, true);
   },
 
   /** An App's tasks, newest first, for its participants and the App's own key (cor:agt:050:21, #1755). */
@@ -1664,6 +3156,7 @@ export const agentTaskQueries = {
     withReadableApp(ctx, args.appRef, async (c, app) => {
     // Narrow only after the existing App read gate. All filters run in SQL before paging.
     const filters: Prisma.AgentTaskWhereInput[] = [];
+    if (args.matchFailed != null) filters.push({ matchFailedAt: args.matchFailed ? { not: null } : null });
     for (const [name, tags] of [['tagsAny', args.tagsAny], ['tagsAll', args.tagsAll]] as const) {
       // #2696: the bounds a task's own tags obey, so the read and write limits cannot drift.
       if (tags && tags.length > TASK_TAGS_MAX) throw badInput(`${name} takes at most ${TASK_TAGS_MAX} tags.`);
@@ -1672,6 +3165,61 @@ export const agentTaskQueries = {
     if (args.tagsAny?.length) filters.push({ tags: { hasSome: args.tagsAny } });
     if (args.tagsAll?.length) filters.push({ tags: { hasEvery: args.tagsAll } });
     if (args.source != null) filters.push({ source: args.source });
+    if (args.externalId != null) {
+      // #3125 S2: after the App read gate above, so it only narrows tasks the caller may already read. Exact match.
+      // Fix head 1: the same character count and surrogate check as the create (checkExternalIdText).
+      if (typeof args.externalId !== 'string') throw badInput(`externalId must be 1 to ${TASK_EXTERNAL_ID_MAX} characters.`);
+      try {
+        checkExternalIdText(args.externalId);
+      } catch (e) {
+        if (e instanceof TaskReferenceError) throw badInput(e.message);
+        throw e;
+      }
+      filters.push({ externalId: args.externalId });
+    }
+    if (args.externalIds != null) {
+      // #4084 (cor:agt:120:02, cor:agt:050:21): the batch form, after the same App read gate, so it only narrows tasks
+      // the caller may already read. Each entry passes the single form's check; one bad entry refuses the whole list,
+      // naming its position and never its text. An empty list is refused rather than read as "no narrowing".
+      const ids = args.externalIds;
+      if (!Array.isArray(ids) || ids.length < 1 || ids.length > TASK_EXTERNAL_IDS_MAX) {
+        throw badInput(`externalIds takes 1 to ${TASK_EXTERNAL_IDS_MAX} ids.`);
+      }
+      ids.forEach((id, i) => {
+        try {
+          if (typeof id !== 'string') throw new TaskReferenceError(`externalId must be 1 to ${TASK_EXTERNAL_ID_MAX} characters.`);
+          checkExternalIdText(id);
+        } catch (e) {
+          if (e instanceof TaskReferenceError) throw badInput(`externalIds[${i}]: ${e.message}`);
+          throw e;
+        }
+      });
+      filters.push({ externalId: { in: ids } });
+    }
+    if (args.reference != null) {
+      // #2649 (cor:agt:050:01): after the App read gate above, so it only narrows tasks the caller may already read.
+      // jsonb containment: an element holding this target (and kind) matches whatever its label; never a prefix.
+      const { target } = args.reference;
+      if (typeof target !== 'string' || target.length < 1 || target.length > TASK_REFERENCE_TARGET_MAX) {
+        throw badInput(`reference.target must be 1 to ${TASK_REFERENCE_TARGET_MAX} characters.`);
+      }
+      const element: Record<string, string> = { target };
+      if (args.reference.kind != null) element.kind = refKind(args.reference.kind);
+      filters.push({ references: { array_contains: [element] } });
+    }
+    if (args.unresolvedFindings === true) filters.push({ status: 'finished', unresolvedFindingIds: { isEmpty: false } });
+    if (args.text != null) {
+      // #2664: a case-insensitive substring over title and description. Trimmed, 1..TASK_TEXT_FILTER_MAX; the refusal
+      // is fixed text (never the pattern) and comes after the App read gate, like the tag bounds above. Prisma's
+      // `contains` does NOT escape LIKE wildcards, so %, _ and \ are escaped here and match literally.
+      const text = args.text.trim();
+      if (text.length < 1 || text.length > TASK_TEXT_FILTER_MAX) throw badInput(`text must be 1 to ${TASK_TEXT_FILTER_MAX} characters after trimming.`);
+      const like = text.replace(/[\\%_]/g, '\\$&');
+      filters.push({ OR: [
+        { title: { contains: like, mode: 'insensitive' } },
+        { description: { contains: like, mode: 'insensitive' } },
+      ] });
+    }
     for (const [prefix, field] of [['created', 'createdAt'], ['started', 'startedAt'], ['finished', 'finishedAt']] as const) {
       const range: { gte?: Date; lte?: Date } = {};
       for (const [suffix, op] of [['After', 'gte'], ['Before', 'lte']] as const) {
@@ -1688,13 +3236,13 @@ export const agentTaskQueries = {
       if (range.gte || range.lte) filters.push({ [field]: range });
     }
     if (args.overdue != null) {
-      // Match the millisecond precision exposed by DateTime, using the database clock.
-      const [{ now }] = await c.db.$queryRaw<{ now: Date }[]>`SELECT date_trunc('milliseconds', CURRENT_TIMESTAMP) AS now`;
-      const late: Prisma.AgentTaskWhereInput = {
-        status: 'pending', startBy: { lt: now }, startedAt: null, finishedAt: null, cancelledAt: null,
-      };
-      // SQL NOT over a nullable startBy alone would also discard tasks with no deadline.
-      filters.push(args.overdue ? late : { OR: [{ startBy: null }, { NOT: late }] });
+      // One database-clock snapshot per request, shared with the `overdue` field, so a deadline crossing mid-request
+      // cannot make the filter and the field disagree.
+      const now = await dbNowFor(c);
+      const late = overdueWhere(now);
+      // SQL NOT over nullable startBy / finishBy alone would also discard tasks with no deadline: the negation is
+      // written out so a task with neither time is never overdue and always falls in `false`.
+      filters.push(args.overdue ? late : notOverdueWhere(now));
     }
     const statuses = args.status?.map((s) => STATUS_FROM_GQL[s] ?? s);
     const where: Prisma.AgentTaskWhereInput = {
@@ -1715,12 +3263,16 @@ export const agentTaskQueries = {
     const assigneeWhere = await partyFilter(c, app, args.assignee, 'assignee');
     const creatorWhere = await partyFilter(c, app, args.creator, 'creator');
     return c.db.agentTask.findMany({
+      omit: { resultFindings: true },
       where: { AND: [where, noZero, rootsWhere, ownerWhere, assigneeWhere, creatorWhere, ...filters] },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      take: clampListTake(args.limit),
+      // #4084, #4217: a batch read with no limit answers every task holding each id it names, up to the list cap, instead of
+      // cutting at the list default. An id may have a history (finished and cancelled tasks no longer hold it, cor:agt:120:02,
+      // 2026-11-14), so the page is NOT as long as the list: sizing it to the id count would drop tasks.
+      take: args.limit == null && args.externalIds?.length ? LIST_PAGE_MAX : clampListTake(args.limit),
       skip: Math.max(0, args.offset ?? 0),
     });
-    }),
+    }, true),
 
   /**
    * A task and every task below it, root first then by creation. Null when the
@@ -1740,120 +3292,747 @@ export const agentTaskQueries = {
       )
       SELECT id, depth FROM tree LIMIT ${TASK_TREE_MAX}`;
     const tasks = await c.db.agentTask.findMany({
+      omit: { resultFindings: true },
       where: { id: { in: rows.map((r) => r.id) }, appId: readable.app.id },
     });
     const depth = new Map(rows.map((r) => [r.id, r.depth]));
     return tasks.sort((a, b) =>
       (depth.get(a.id)! - depth.get(b.id)!) || a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id));
+    }, true),
+
+  /**
+   * An App's team event stream (cor:agt:050:11, :21). #4098: oldest-first pages use the sealed
+   * (tx_id,created_at,id) order from #4089; after remains an event id. A poll may lag behind an older
+   * open transaction, but cannot skip its late commit or a later transaction's backdated stamp.
+   * since stays a coarse time filter, not a continuation. newestFirst/before keep their history order.
+   */
+  agentTeamEvents: async (_: unknown, args: TeamEventsArgs, ctx: Context) =>
+    withReadableApp(ctx, args.appRef, (c, app) => readTeamEvents(c, app, args, clampListTake(args.limit), ctx.db)),
+
+  /**
+   * #3933 (cor:api:120:04, cor:agt:050:11 FIT condition (c)): the same read as agentTeamEvents, the `<field>Page` sibling, so a
+   * page tells the reader whether more remain. One row beyond the page is read to know; `nextCursor` is the id of the last event
+   * served when more remain (pass it as `after`, or with newestFirst as `before`) and null on the last page.
+   *
+   * #3949 (cor:api:120:04, cor:agt:050:11): the page size has a FLOOR of 1. This envelope carries no `total`, so a zero page
+   * could only say "is there anything", and `limit: 0` used to read the lookahead row yet serve none: events [], hasMore true,
+   * nextCursor null, a continuation nobody could follow. `limit` <= 0 now reads one event (clamped, never refused, like
+   * cor:api:090:04); hasMore true always carries a non-null nextCursor. The legacy agentTeamEvents list keeps `limit: 0` = [].
+   */
+  agentTeamEventsPage: async (_: unknown, args: TeamEventsArgs, ctx: Context) =>
+    withReadableApp(ctx, args.appRef, async (c, app) => {
+      const take = Math.max(1, clampListTake(args.limit));
+      const rows = await readTeamEvents(c, app, args, take + 1, ctx.db);
+      const events = rows.slice(0, take);
+      const hasMore = rows.length > take;
+      return { events, hasMore, nextCursor: hasMore ? events[events.length - 1]!.id : null };
     }),
 
   /**
-   * An App's team event stream (cor:agt:050:11, :21), in (createdAt, id)
-   * order. Continue a page with `after`: the id of the last event read. The
-   * cursor is the PAIR, so rows sharing a timestamp — the task.created and
-   * task.assigned one transaction writes, or a capped page cutting a larger
-   * equal-time group — are never skipped (#1713 review, Diego P2-B). `since`
-   * stays a coarse time filter, not a continuation.
+   * #4084 (hrn:node:hadronmemory.com:specs:cor:agt:120, minimal write-back): what changed on the App's tasks that carry
+   * an external id, oldest first, after an opaque cursor, for a team's reconcile pass. A generic question: it knows
+   * nothing about trackers. Read from the team event stream inside the same read gate as agentTeamEvents
+   * (cor:agt:050:21), so a change is exactly an event a reader could already see.
+   *
+   * A release clears the task's external id, so a filter on "tasks holding an id" could never return one (the FIT
+   * finding the gate made binding): every change carries the id its task held WHEN it happened, judged in this read's
+   * own order (#4107), so in the served order no change carrying an id follows that id's RELEASED. An id is set once, at
+   * create, and cleared at most once, by a release whose event names it; so a change before the release carries the
+   * released id, the release carries it too, and a change after the release (the task then holds none) is left out.
+   * The answer is the same whenever it is read: a reader who polled between a cancel and the release saw the cancel,
+   * and so does one who polls after both.
+   *
+   * Commit-safe order (Glen's blind P2 on #4089): `created_at` is stamped when a row is written, not when it commits, so
+   * paging by it lets a reader pass a change whose transaction is still open, and never see it. The order is
+   * `(tx_id, created_at, id)`, where `tx_id` is the writing transaction's id (set by the database), and only changes
+   * whose transaction id is below this read's snapshot xmin are served: every transaction that could still add a row
+   * has an id at or above xmin, so nothing can later appear behind a served cursor. A change is served once its
+   * transaction and every older one have ended (xmin is cluster-wide); it may lag, it is never skipped. Rows from
+   * before the column hold '0' and keep their (created_at, id) order. `tx_id` is never null: nothing writes it, and the
+   * column default fills every insert.
+   *
+   * The id arm of the key (#4097): it decides only between rows of one transaction — distinct transactions get
+   * distinct xid8s, and door-written rows stamp `created_at = now()`, fixed per transaction — and the release door
+   * writes no other change-kind event for the task, so for door-written rows the id never decides released-id
+   * retention; a full tie is reachable only by forced rows (the append-only trigger's INSERT arm leaves `tx_id` to
+   * the writer). Whatever the id tail then does — the generator does not order within a millisecond — the served
+   * order and the classification share the key, so no change carrying an id follows that id's RELEASED in the served
+   * order (#4097 tests, blocks 1).
    */
-  agentTeamEvents: async (
-    _: unknown,
-    args: { appRef: string; since?: unknown; after?: string | null; types?: string[] | null; alarmsOnly?: boolean | null; taskId?: string | null; limit?: number | null },
-    ctx: Context,
-  ) => withReadableApp(ctx, args.appRef, async (c, app) => {
-    const since = args.since == null ? null : parseStartBy(args.since);
-    let afterWhere: Prisma.AgentTeamEventWhereInput = {};
-    if (args.after) {
-      // Scoped to this App: another App's event id is just an unknown cursor.
-      const cursor = isId(args.after)
-        ? await c.db.agentTeamEvent.findFirst({
-            where: { id: args.after, appId: app.id },
-            select: { id: true, createdAt: true },
-          })
-        : null;
-      if (!cursor) throw badInput('after is not an event of this App. Pass the id of the last event you read.');
-      afterWhere = {
-        OR: [
-          { createdAt: { gt: cursor.createdAt } },
-          { createdAt: cursor.createdAt, id: { gt: cursor.id } },
-        ],
-      };
-    }
-    return c.db.agentTeamEvent.findMany({
-      where: {
-        appId: app.id,
-        ...afterWhere,
-        ...(since ? { createdAt: { gt: since } } : {}),
-        ...(args.types?.length ? { type: { in: args.types } } : {}),
-        ...(args.alarmsOnly ? { severity: 'alarm' } : {}),
-        ...(args.taskId ? { taskId: (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId } : {}),
-      },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      take: clampListTake(args.limit),
-    });
-  }),
+  agentTaskExternalIdChanges: async (_: unknown, args: { appRef: string; after?: string | null; limit?: number | null }, ctx: Context) =>
+    withReadableApp(ctx, args.appRef, async (c, app) => {
+      const take = Math.max(1, clampListTake(args.limit));
+      if (args.after != null) {
+        // Scoped to this App: another App's cursor, or anything else, is just an unknown cursor.
+        const known = isId(args.after)
+          ? await c.db.agentTeamEvent.findFirst({ where: { id: args.after, appId: app.id }, select: { id: true } })
+          : null;
+        if (!known) throw badInput('after is not a cursor of this App. Pass the nextCursor (or a change\'s cursor) you read.');
+      }
+      const types = Object.keys(EXTERNAL_ID_CHANGE_KINDS);
+      // `r` is the task's release, if any (at most one: the id is never set again). The id a change carries is the one
+      // the task holds now, else, for a change at or before the release, the released id; after a release, none.
+      // #4107: "before" and "after" are judged on the serving key (tx_id, created_at, id), the order the page is served
+      // and the cursor advances in, never on created_at alone (a writer-stamped time): otherwise a change written after
+      // the release with an older stamp kept the id and was served after RELEASED.
+      // #4097: the id arm of that key decides only between rows of ONE transaction — distinct transactions get
+      // distinct xid8s from the database and door-written rows stamp created_at = now(), fixed per transaction — and
+      // no door writes a change-kind event and the release for one task in one transaction (the release door writes
+      // only the release), so for door-written rows the id never decides; a tie is reachable only by forced rows.
+      // #4097 (N14): both event-to-task joins are App-tight — agent_team_events.task_id carries no FK, so a forced or
+      // legacy row can name another App's task: without the predicate such a row leaked that task's external id (or a
+      // foreign RELEASED payload moved this App's boundary) and hydrated to no task mid-page.
+      const rows = await c.db.$queryRaw<{ id: string; createdAt: Date; type: string; taskId: string; externalId: string }[]>`
+        SELECT x.id, x."createdAt", x.type, x."taskId", x."externalId" FROM (
+          SELECT e.id, e.created_at AS "createdAt", e.type, e.task_id AS "taskId", e.tx_id AS "txId",
+                 COALESCE(t.external_id,
+                   CASE WHEN (e.tx_id, e.created_at, e.id) <= (r.tx_id, r.created_at, r.id) THEN r.payload->>'externalId' END) AS "externalId"
+          FROM agent_team_events e
+          JOIN agent_tasks t ON t.id = e.task_id AND t.app_id = e.app_id
+          LEFT JOIN LATERAL (
+            SELECT rr.id, rr.tx_id, rr.created_at, rr.payload FROM agent_team_events rr
+            WHERE rr.task_id = e.task_id AND rr.app_id = e.app_id AND rr.type = ${EXTERNAL_ID_RELEASED}
+            ORDER BY rr.tx_id, rr.created_at, rr.id LIMIT 1
+          ) r ON true
+          WHERE e.app_id = ${app.id}
+            AND e.type IN (${Prisma.join(types)})
+            AND e.tx_id < pg_snapshot_xmin(pg_current_snapshot())
+            ${args.after != null ? Prisma.sql`AND (e.tx_id, e.created_at, e.id) > (SELECT tx_id, created_at, id FROM agent_team_events WHERE id = ${args.after})` : Prisma.empty}
+        ) x
+        WHERE x."externalId" IS NOT NULL
+        ORDER BY x."txId", x."createdAt", x.id
+        LIMIT ${take + 1}`;
+      const page = rows.slice(0, take);
+      const hasMore = rows.length > take;
+      const tasks = await c.db.agentTask.findMany({
+        omit: { resultFindings: true },
+        where: { id: { in: [...new Set(page.map((r) => r.taskId))] }, appId: app.id },
+      });
+      const byId = new Map(tasks.map((t) => [t.id, t]));
+      const changes = page.map((r) => ({
+        cursor: r.id,
+        at: r.createdAt,
+        kind: EXTERNAL_ID_CHANGE_KINDS[r.type as keyof typeof EXTERNAL_ID_CHANGE_KINDS],
+        externalId: r.externalId as string,
+        task: byId.get(r.taskId)!,
+      }));
+      return { changes, hasMore, nextCursor: hasMore ? rows[take - 1]!.id : null };
+    }),
 };
+
+/** #4316 item 4: exported so the parity pin (resolvers.teamEventCursor4098.test.ts) can tie its filter cases to these keys. */
+export type TeamEventsArgs = { appRef: string; since?: unknown; after?: string | null; before?: string | null; newestFirst?: boolean | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; alarmsInEffect?: boolean | null; taskId?: string | null; limit?: number | null };
+
+/** #4316: how long a held-back horizon stays quiet before `team_events.horizon_lag` says something. */
+const HORIZON_LAG_MIN_AGE_MS = 30_000;
+/** #4316: at most one horizon check (and so at most one line) per App per this window, per process. */
+const HORIZON_LAG_LOG_INTERVAL_MS = 60_000;
+/**
+ * #4316 (keyed by App id): when the horizon was last CHECKED for that App in this process. Stamped when the
+ * check runs, not when a line is emitted (#4372 fold): a healthy App runs the probe query at most once per
+ * window instead of on every caught-up poll, and the line cadence — at most one per window — is unchanged,
+ * because a line can only come from a check.
+ */
+const horizonLagLastCheckedAt = new Map<string, number>();
+/**
+ * #4316: one operator line when a forward read came back short while committed events of the App are held back
+ * at or above the snapshot horizon (cor:agt:050:11 records the horizon as built; a log line changes no
+ * contract). The check is ONE indexed read (`app_id, tx_id`), made only for a short forward read; only rows
+ * visible to the check's own snapshot count, so events of still-open transactions are not "held back" yet.
+ * `created_at` is a UTC-labeled naive column, so the DB clock is read as UTC too — a session TimeZone would
+ * skew the age by its offset. Best-effort by design: a failed or slow check must never change, delay or fail
+ * the page it explains — the caller does not await it (#4372 fold).
+ *
+ * #4372 fold 2 (Peter, #114870): the check takes the ROOT POOLED CLIENT, never the read's own `c.db`. Under
+ * `withReadableApp`'s App-key arm the whole read runs inside `inKeyReadTx`'s transaction and `c.db` there is
+ * the TRANSACTION client; an un-awaited query on it outlives the resolver's return, dies P2028 ("Transaction
+ * already closed") inside the catch below and is swallowed — the probe silently no-ops in exactly the
+ * incident's error class. Pinned in resolvers.teamEventHorizon4316.test.ts: the direct-seam test drives
+ * `readTeamEvents` through a REAL transaction and asserts the check ran on the root client (not a key read —
+ * through the resolver the seam is un-pinnable at runtime: the transaction client is created inside
+ * `withReadableApp`, hooking the shared client infects it, and an un-awaited probe on the transaction client
+ * races the commit, so a key-arm behavioral pin cannot be deterministic). The resolver CALL SITES are
+ * source-pinned in the same file (#4372 fold 3).
+ *
+ * #4372 fold 3: the check itself is bounded and observable. The statement races a timeout, so a wedged or
+ * pool-starved probe releases its bookkeeping instead of holding it forever (Baylor F2), and a fault is no
+ * longer silent: the catch emits its own `team_events.horizon_probe_error` line (Baylor F3 — "ran and found
+ * nothing" stays silent, "errored" is now visible). The once-per-window map is capped (Baylor F5).
+ *
+ * #4408 (the #4372 review follow-ups): the cap EVICTS the least-recently-checked App instead of clearing
+ * every throttle at once; the race timer is cleared on every path, not only success; and the fault line
+ * carries the error's class and code, never its message.
+ */
+/** Exported for the #4408 direct pins (resolvers.teamEventHorizon4316.test.ts): the throttle bookkeeping, the race timer and the fault line, driven on a stand-in root client. */
+export async function logStalledHorizon(db: Context['db'], appId: string): Promise<void> {
+  const now = Date.now();
+  const last = horizonLagLastCheckedAt.get(appId);
+  if (last != null && now - last < HORIZON_LAG_LOG_INTERVAL_MS) return;
+  // Baylor F5: a long-lived server would otherwise accumulate one entry per App forever. #4408 item 1:
+  // past the cap, evict the least-recently-checked App — NOT the whole map. Clear-all reset every App's
+  // settle-throttle at once, so a hot fleet re-probed in a burst the moment any 1_001st App arrived;
+  // eviction loses one window for one App. The scan is O(cap) and runs only when a NEW App arrives at the
+  // cap (a re-check updates a stamp in place); ties evict the earliest-inserted (Map iteration order),
+  // which is deterministic. Caller-visible behaviour is unchanged (FIT, #4408): the throttle only paces
+  // probes, so what a caller is served — which events, and the more-remain answer — is the same.
+  if (horizonLagLastCheckedAt.size >= 1_000) {
+    let oldestApp: string | undefined;
+    let oldestStamp = Infinity;
+    for (const [app, stamp] of horizonLagLastCheckedAt) {
+      if (stamp < oldestStamp) { oldestStamp = stamp; oldestApp = app; }
+    }
+    horizonLagLastCheckedAt.delete(oldestApp!);
+  }
+  horizonLagLastCheckedAt.set(appId, now);
+  const startedAt = now;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const [row] = await Promise.race([
+      db.$queryRaw<{ heldBack: number; oldestAgeMs: number | null }[]>`
+        SELECT count(*)::int AS "heldBack",
+               CASE WHEN min(created_at) IS NULL THEN NULL
+                    ELSE round(extract(epoch FROM ((clock_timestamp() AT TIME ZONE 'UTC') - min(created_at))) * 1000)::int END AS "oldestAgeMs"
+        FROM agent_team_events
+        WHERE app_id = ${appId} AND tx_id >= pg_snapshot_xmin(pg_current_snapshot())`,
+      // Baylor F2: bounded — the probe's promise settles at 5 s even if its statement never returns (the
+      // pool connection heals when the statement eventually does; the bookkeeping does not wait for it).
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          // #4408 item 3: the bound's own fault is identified by its class on the log line below, never
+          // by message text (a plain Error's name says nothing; this one says "the bound fired").
+          const timedOut = new Error('horizon probe timeout');
+          timedOut.name = 'HorizonProbeTimeoutError';
+          reject(timedOut);
+        }, 5_000);
+        (timeout as unknown as { unref?: () => void }).unref?.();
+      }),
+    ]);
+    if (!row?.oldestAgeMs || row.oldestAgeMs < HORIZON_LAG_MIN_AGE_MS) return;
+    console.log(JSON.stringify({
+      event: 'team_events.horizon_lag', appId, heldBack: row.heldBack, oldestAgeMs: row.oldestAgeMs,
+      at: new Date().toISOString(),
+    }));
+  } catch (error) {
+    // Observability only: the served page is byte-identical whatever happens here. F3: visible, not silent.
+    // #4408 item 3 (Bob P3.3): the line carries the error's class and code, never its message — a Prisma
+    // connection error's message names the DB host and port, and internal logs are no reason to repeat
+    // them. The two Prisma carriers spell the code differently: `code` on PrismaClientKnownRequestError
+    // (P2028 …), `errorCode` on PrismaClientInitializationError (P1001, the usual DB-unreachable fault —
+    // Jonas's BLIND P2 on #4433 caught the first cut reading only `code`). Either way a string or the key
+    // is omitted rather than nulled; other errors carry neither. A non-Error throw names its kind; there
+    // is no message to leak and none invented.
+    const fault = typeof error === 'object' && error !== null ? (error as { code?: unknown; errorCode?: unknown }) : undefined;
+    const code = typeof fault?.code === 'string' ? fault.code
+      : typeof fault?.errorCode === 'string' ? fault.errorCode : undefined;
+    console.log(JSON.stringify({
+      event: 'team_events.horizon_probe_error', appId, ms: Date.now() - startedAt,
+      errorName: error instanceof Error ? error.name : typeof error,
+      ...(code ? { errorCode: code } : {}),
+      at: new Date().toISOString(),
+    }));
+  } finally {
+    // #4408 item 2 (Bob P3.2): cleared on EVERY path. The clear used to sit on the success path only, so
+    // a faulted probe left the unref'd 5 s timer armed to fire harmlessly later — harmless, and still one
+    // armed timer per fault. clearTimeout on an already-fired timer is a no-op, so this one clear point
+    // serves the success, fault and bound-fired paths alike.
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * #4372 fold: the probes the fire-and-forget call sites below have started and not yet finished. The page is
+ * served without awaiting its probe, so a test that asserts on (the absence of) a `team_events.horizon_lag`
+ * line needs a positive signal the probe has RUN; awaiting this settles every in-flight probe. Production
+ * never awaits it — the probes complete on their own and a rejection is impossible (every await sits inside
+ * the try above; the fold-3 timeout race rejects into the SAME catch, which only logs).
+ *
+ * #4372 fold 3 (Peter #114929/#115033): BOUNDED. A probe that cannot settle (a wedged statement, pool
+ * exhaustion) FAILS the awaiting test after `timeoutMs` instead of hanging the run — the two host wedges
+ * both hung here, freezing every horizon test on the shared host. The bound mirrors settleTeamEventHorizon's
+ * own 10 s (src/test/teamEventHorizon.ts).
+ */
+const horizonProbes = new Set<Promise<void>>();
+export async function teamEventHorizonSettled(timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (horizonProbes.size) {
+    if (Date.now() >= deadline) {
+      throw new Error(`team events horizon: ${horizonProbes.size} probe(s) unsettled after ${timeoutMs} ms`);
+    }
+    await Promise.race([
+      Promise.all([...horizonProbes]),
+      new Promise<void>((resolve) => {
+        const tick = setTimeout(resolve, 100);
+        (tick as unknown as { unref?: () => void }).unref?.();
+      }),
+    ]);
+  }
+}
+
+/** Exported for the #4372 fold-2 pin: the probe's root-client seam is pinned from inside a REAL transaction (resolvers.teamEventHorizon4316.test.ts). */
+export async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsArgs, take: number, probeDb: Context['db']) {
+  const since = args.since == null ? null : parseStartBy(args.since);
+  // #3933 (cor:agt:050:11 FIT): the newest-end read. `after` continues forward and `before` backward, so each belongs to one
+  // direction; a cursor in the wrong one is refused rather than read as something else.
+  const newestFirst = args.newestFirst === true;
+  if (newestFirst && args.after) throw badInput('after continues the oldest-first read; with newestFirst pass before.');
+  if (!newestFirst && args.before) throw badInput('before continues the newestFirst read; pass newestFirst: true with it.');
+  /** #4316: the validated `after` cursor's serving key, read once up front and passed into the forward statement. */
+  let afterKey: { id: string; txId: string; createdAt: string } | null = null;
+  let beforeWhere: Prisma.AgentTeamEventWhereInput = {};
+  if (args.before) {
+    // Scoped to this App, like after: another App's event id is just an unknown cursor.
+    const cursor = isId(args.before)
+      ? await c.db.agentTeamEvent.findFirst({ where: { id: args.before, appId: app.id }, select: { id: true, createdAt: true } })
+      : null;
+    if (!cursor) throw badInput('before is not an event of this App. Pass the id of the last (oldest) event you read.');
+    beforeWhere = { OR: [{ createdAt: { lt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { lt: cursor.id } }] };
+  }
+  if (args.after) {
+    // #4316 (cor:api:120:05): the cursor's key is read HERE, once, and passed into the forward statement, so a
+    // cursor row deleted between the two statements still continues from its key instead of silently emptying
+    // the page. The key round-trips as TEXT: a JS Date truncates to milliseconds and would re-serve rows of the
+    // cursor's own transaction whose created_at carries microseconds. Scoped to this App: another App's event
+    // id, or anything else, is just an unknown cursor (the refusal is unchanged).
+    const [cursor] = isId(args.after)
+      ? await c.db.$queryRaw<{ id: string; txId: string; createdAt: string }[]>`
+          SELECT id, tx_id::text AS "txId", created_at::text AS "createdAt"
+          FROM agent_team_events WHERE id = ${args.after} AND app_id = ${app.id} LIMIT 1`
+      : [];
+    if (!cursor) throw badInput('after is not an event of this App. Pass the id of the last event you read.');
+    afterKey = cursor;
+  }
+  const taskId = args.taskId ? (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId : null;
+  const where: Prisma.AgentTeamEventWhereInput = {
+    appId: app.id,
+    ...(since ? { createdAt: { gt: since } } : {}),
+    ...((args.types?.length || args.codePrefix != null) ? { type: { ...(args.types?.length ? { in: args.types } : {}), ...(args.codePrefix != null ? { startsWith: escapePrismaLikePattern(args.codePrefix) } : {}) } } : {}),
+    // #3934: alarms in effect are alarms, and an acknowledged alarm is out of effect by definition (cor:agt:050:20).
+    ...(args.alarmsOnly || args.alarmsInEffect ? { severity: 'alarm' } : {}),
+    ...(args.alarmsInEffect ? { acknowledgedAt: null } : {}),
+    ...(taskId ? { taskId } : {}),
+  };
+  // #3934: an alarm is in effect only while unacknowledged and without a stored escalation end.
+  const inEffect: Prisma.AgentTeamEventWhereInput = args.alarmsInEffect ? { escalationEnd: { is: null } } : {};
+  // #4098: every oldest-first page, including the first, advances in the same commit-safe key as #4089.
+  // tx_id below snapshot xmin is sealed: no transaction can later add a row behind a served cursor. A later
+  // transaction with a backdated caller stamp still sorts later by tx_id. Within a sealed transaction, every
+  // event is already visible, so (created_at,id) safely breaks ties. Historic tx_id=0 rows retain their old order.
+  // The forward statement applies every filter and projects the row in ONE snapshot, including the mutable alarm
+  // acknowledgements and ends. The cursor check and the task-ref lookup above are separate, earlier statements.
+  type EventRow = Prisma.AgentTeamEventGetPayload<Record<string, never>>;
+  const events = newestFirst ? await c.db.agentTeamEvent.findMany({
+    where: { AND: [where, beforeWhere, inEffect] },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take,
+  }) : await c.db.$queryRaw<EventRow[]>`
+    SELECT e.id, e.app_id AS "appId", e.type, e.task_id AS "taskId",
+      e.actor_user_id AS "actorUserId", e.actor_worker_id AS "actorWorkerId", e.actor_agent_id AS "actorAgentId",
+      e.actor_run_id AS "actorRunId", e.actor_app_key_id AS "actorAppKeyId",
+      e.subject_worker_id AS "subjectWorkerId", e.subject_user_id AS "subjectUserId", e.severity, e.chain,
+      e.acknowledged_by_user_id AS "acknowledgedByUserId", e.acknowledged_by_worker_id AS "acknowledgedByWorkerId",
+      e.acknowledged_at AS "acknowledgedAt", e.payload, e.created_at AS "createdAt", e.episode_start AS "episodeStart"
+    FROM agent_team_events e
+    WHERE e.app_id = ${app.id}
+      AND e.tx_id < pg_snapshot_xmin(pg_current_snapshot())
+      ${afterKey ? Prisma.sql`AND (e.tx_id,e.created_at,e.id) > (${afterKey.txId}::xid8, ${afterKey.createdAt}::timestamp, ${afterKey.id})` : Prisma.empty}
+      ${since ? Prisma.sql`AND e.created_at > ${since.toISOString()}::timestamp` : Prisma.empty}
+      ${args.types?.length ? Prisma.sql`AND e.type IN (${Prisma.join(args.types)})` : Prisma.empty}
+      ${args.codePrefix != null ? Prisma.sql`AND starts_with(e.type,${args.codePrefix})` : Prisma.empty}
+      ${args.alarmsOnly || args.alarmsInEffect ? Prisma.sql`AND e.severity='alarm'` : Prisma.empty}
+      ${args.alarmsInEffect ? Prisma.sql`AND e.acknowledged_at IS NULL AND NOT EXISTS (SELECT 1 FROM alarm_escalation_ends z WHERE z.event_id=e.id)` : Prisma.empty}
+      ${taskId ? Prisma.sql`AND e.task_id=${taskId}` : Prisma.empty}
+    ORDER BY e.tx_id,e.created_at,e.id
+    LIMIT ${take}`;
+  // #4316: a short forward read is the only read that can mean "the horizon is holding events of this App
+  // back"; one best-effort check, never a change to what is served. #4372 fold: not awaited — a slow probe
+  // must not delay the page it explains (the function's own contract); tests observe it via
+  // teamEventHorizonSettled(). #4372 fold 2: the probe runs on `probeDb` (the request's root pooled client,
+  // passed by the resolver) — never on `c.db`, which is the App-key transaction's client under `withReadableApp`'s
+  // key arm and would close under the un-awaited query (see logStalledHorizon).
+  if (!newestFirst && events.length < take) {
+    // F1 (Baylor's #4372 delta): the .catch makes the chain self-absorbing — the promise parked in
+    // horizonProbes can never reject, whatever the function's own catch body does or stops doing.
+    const probe = logStalledHorizon(probeDb, app.id).catch(() => {}).finally(() => { horizonProbes.delete(probe); });
+    horizonProbes.add(probe);
+  }
+  // #4135: use the stored AgentTask.handle (cor:agt:050:01, Proposed), once per page.
+  // Event task ids are retained after deletion; an absent row must never invent a handle.
+  const taskIds = [...new Set(events.flatMap(e => e.taskId ? [e.taskId] : []))];
+  const tasks = taskIds.length ? await c.db.agentTask.findMany({
+    where: { appId: app.id, id: { in: taskIds } }, select: { id: true, handle: true },
+  }) : [];
+  const handles = new Map(tasks.map(t => [t.id, t.handle]));
+  return events.map(e => ({ ...e, taskHandle: e.taskId ? handles.get(e.taskId) ?? null : null }));
+}
 
 // ── Field resolvers ───────────────────────────────────────────────────────
 
 export type PartyView = { kind: 'WORKER' | 'USER'; id: string; name: string | null; urn: string | null };
 
-/** A sanitized party projection — never the User object (#552: no other tenant's identity fields). */
+const workerPartyOf = tickBatch<string, PartyView | null>(async (ctx, ids) => {
+  const rows = await ctx.db.worker.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, slug: true, app: { select: { urn: true } } } });
+  return new Map(rows.map((w) => [w.id, { kind: 'WORKER' as const, id: w.id, name: w.name, urn: composeWorkerUrn(w.app.urn, w.slug) }]));
+}, null);
+const userPartyOf = tickBatch<string, { id: string; handle: string | null } | null>(async (ctx, ids) => {
+  const rows = await ctx.db.user.findMany({ where: { id: { in: ids } }, select: { id: true, handle: true } });
+  return new Map(rows.map((u) => [u.id, u]));
+}, null);
+/** #3934: the fields of an event row the escalation end is read from. */
+type AlarmEndRow = { id: string; severity: string | null; acknowledgedAt: Date | null };
+/**
+ * #3934 (V77): when this alarm's escalation ended: the earlier of its acknowledgement and its RECORDED end. Nothing is
+ * worked out here (the pass or the acknowledgement wrote the record once), so a read cannot move the value. Batched per
+ * request: one lookup serves a page.
+ */
+const alarmEndOf = tickBatch<AlarmEndRow, Date | null>(async (ctx, rows) => {
+  const recorded = await ctx.db.alarmEscalationEnd.findMany({ where: { eventId: { in: rows.map((r) => r.id) } }, select: { eventId: true, endedAt: true } });
+  const at = new Map(recorded.map((r) => [r.eventId, r.endedAt]));
+  const earlier = (a: Date | null | undefined, b: Date | null | undefined): Date | null =>
+    a && b ? (a.getTime() <= b.getTime() ? a : b) : a ?? b ?? null;
+  return new Map(rows.map((r) => [r, earlier(r.acknowledgedAt, at.get(r.id))]));
+}, null);
+const hasOpenChild = tickBatch<string, boolean>(async (ctx, ids) => {
+  const rows = await ctx.db.agentTask.findMany({ where: { parentTaskId: { in: ids }, status: { in: OPEN } }, select: { parentTaskId: true }, distinct: ['parentTaskId'] });
+  return new Map(rows.map((r) => [r.parentTaskId as string, true]));
+}, false);
+
+/**
+ * #3867: the full rows of the tasks the caller may READ, in the arms of {@link withReadableTask} (a run principal in its
+ * own App, the App's own key inside one read transaction, or a participant, decided once per distinct App). An id that
+ * is missing or unreadable is absent from the map and its caller answers as a missing task does.
+ */
+async function readableTasks(ctx: Context, ids: string[]): Promise<Map<string, TaskRow>> {
+  const out = new Map<string, TaskRow>();
+  const fill = (rows: TaskRow[]) => { for (const r of rows) out.set(r.id, r); };
+  if (isRunPrincipal(ctx) && !ctx.userId) {
+    if (!ctx.appId) return out;
+    const rows = await inRunTeamReadTx<TaskRow[] | null>(ctx, ctx.appId, () => null, (c, app) => c.db.agentTask.findMany({ where: { id: { in: ids }, appId: app.id } }));
+    fill(rows ?? []);
+    return out;
+  }
+  const key = appKeyCaller(ctx);
+  const heads = await ctx.db.agentTask.findMany({ where: { id: { in: ids } }, select: { id: true, appId: true } });
+  if (key) {
+    const own = heads.filter((h) => h.appId === key.appId);
+    if (!own.length) return out;
+    const rows = await inKeyReadTx<TaskRow[] | null>(ctx, key.appId, () => null, (tx, app) =>
+      tx.db.agentTask.findMany({ where: { id: { in: own.map((h) => h.id) }, appId: app.id } }));
+    fill(rows ?? []);
+    return out;
+  }
+  const readableApps = new Set<string>();
+  await Promise.all([...new Set(heads.map((h) => h.appId))].map(async (appId) => {
+    const app = await loadApp(ctx, appId);
+    if (app && (await resolveTaskActor(ctx, app))) readableApps.add(appId);
+  }));
+  const readable = heads.filter((h) => readableApps.has(h.appId)).map((h) => h.id);
+  if (readable.length) fill(await ctx.db.agentTask.findMany({ where: { id: { in: readable } } }));
+  return out;
+}
+const readableTask = tickBatch<string, TaskRow | null>(readableTasks, null);
+
+/** A sanitized party projection — never the User object (#552: no other tenant's identity fields). Batched per request (#3867). */
 export async function partyView(ctx: Context, workerId: string | null, userId: string | null): Promise<PartyView | null> {
   if (workerId) {
-    const w = await ctx.db.worker.findUnique({
-      where: { id: workerId },
-      select: { id: true, name: true, slug: true, app: { select: { urn: true } } },
-    });
-    if (!w) return { kind: 'WORKER', id: workerId, name: null, urn: null };
-    return { kind: 'WORKER', id: w.id, name: w.name, urn: composeWorkerUrn(w.app.urn, w.slug) };
+    const party = await workerPartyOf(ctx, workerId);
+    return party ?? { kind: 'WORKER', id: workerId, name: null, urn: null };
   }
   if (userId) {
-    const u = await ctx.db.user.findUnique({ where: { id: userId }, select: { id: true, handle: true } });
+    const u = await userPartyOf(ctx, userId);
     return { kind: 'USER', id: userId, name: u?.handle ?? null, urn: null };
   }
   return null;
 }
 
-/** #2644: bounded same-App dependency reads use the task's normal participant/key gate. */
-async function taskRelations(ctx: Context, id: string, direction: 'blockedBy' | 'blocks', args: { limit?: number | null; offset?: number | null }) {
+type RelationDirection = 'blockedBy' | 'blocks' | 'clones';
+type RelationPage = { items: TaskRow[]; total: number; hasMore: boolean };
+type RelationRequest = {
+  id: string;
+  direction: RelationDirection;
+  take: number;
+  skip: number;
+  settle: (page: RelationPage) => void;
+  fail: (error: unknown) => void;
+};
+
+/**
+ * #2764: the relation requests one request's field resolvers raised in the current tick. Keyed by the Context OBJECT
+ * (a WeakMap, not a field): a copy made for another caller or transaction (`{ ...ctx, userId }`) never inherits the
+ * original's queue, so a batch holds one caller's requests only. Nothing here outlives its flush: the queue is
+ * removed before the flush starts and no result is kept, so a later read always reaches the database.
+ */
+const relationQueues = new WeakMap<Context, RelationRequest[]>();
+
+/**
+ * #2644 / #2764: bounded same-App dependency reads, batched per request. GraphQL starts every list item's field
+ * resolver in one synchronous pass, so the requests raised in that pass are served together by
+ * {@link flushTaskRelations}: a 200-row list costs a fixed number of queries, not two per row.
+ */
+function taskRelations(ctx: Context, id: string, direction: RelationDirection, args: { limit?: number | null; offset?: number | null }): Promise<RelationPage> {
   const { take, skip } = pageArgs(args);
-  return (await withReadableTask(ctx, id, async (c, r) => {
-    const where: Prisma.AgentTaskWhereInput = { appId: r.task.appId,
-      ...(direction === 'blockedBy' ? { dependentLinks: { some: { taskId: r.task.id } } } : { blockerLinks: { some: { blockerTaskId: r.task.id } } }) };
-    const [items, total] = await Promise.all([
-      c.db.agentTask.findMany({ where, orderBy: { id: 'asc' }, take, skip }), c.db.agentTask.count({ where }),
-    ]);
-    return pageEnvelope(items, total, skip);
-  })) ?? pageEnvelope([], 0, skip);
+  return new Promise((settle, fail) => {
+    let queue = relationQueues.get(ctx);
+    if (!queue) {
+      const fresh: RelationRequest[] = (queue = []);
+      relationQueues.set(ctx, fresh);
+      queueMicrotask(() => {
+        relationQueues.delete(ctx);
+        void flushTaskRelations(ctx, fresh);
+      });
+    }
+    queue.push({ id, direction, take, skip, settle, fail });
+  });
+}
+
+/** A caller with no readable parent gets exactly the page a missing task gets. */
+const emptyRelationPage = (skip: number): RelationPage => pageEnvelope([] as TaskRow[], 0, skip);
+
+async function flushTaskRelations(ctx: Context, requests: RelationRequest[]): Promise<void> {
+  try {
+    const taskIds = [...new Set(requests.map((r) => r.id))];
+    const parents = await readableRelationParents(ctx, taskIds, requests);
+    for (const r of requests) r.settle(parents.get(r) ?? emptyRelationPage(r.skip));
+  } catch (e) {
+    for (const r of requests) r.fail(e);
+  }
+}
+
+/**
+ * The relation page of every REQUESTED parent the caller may read, by the SAME gate the per-task read used: a
+ * participant of the parent's App (decided once per distinct App, since the actor depends on the App alone), or the
+ * App's own key inside ONE transaction holding the App's shared anchors. A parent that is missing or unreadable is
+ * absent from the map, and the caller answers it with the empty page.
+ */
+async function readableRelationParents(ctx: Context, taskIds: string[], requests: RelationRequest[]): Promise<Map<RelationRequest, RelationPage>> {
+  const key = appKeyCaller(ctx);
+  const heads = await ctx.db.agentTask.findMany({ where: { id: { in: taskIds } }, select: { id: true, appId: true } });
+  if (!key) {
+    const readableApps = new Set<string>();
+    await Promise.all(
+      [...new Set(heads.map((h) => h.appId))].map(async (appId) => {
+        const app = await loadApp(ctx, appId);
+        if (app && (await resolveTaskActor(ctx, app))) readableApps.add(appId);
+      }),
+    );
+    return relationPages(ctx.db, heads.filter((h) => readableApps.has(h.appId)), requests);
+  }
+  const own = heads.filter((h) => h.appId === key.appId);
+  if (!own.length) return new Map();
+  const pages = await inKeyReadTx<Map<RelationRequest, RelationPage> | null>(ctx, key.appId, () => null, async (txCtx, app) => {
+    const rows = await txCtx.db.agentTask.findMany({ where: { id: { in: own.map((h) => h.id) }, appId: app.id }, select: { id: true, appId: true } });
+    return relationPages(txCtx.db, rows, requests);
+  });
+  return pages ?? new Map();
+}
+
+/**
+ * Count and page every (parent, direction, take, skip) in a fixed number of statements. The related task is the
+ * parent's blocker (`blockedBy`) or dependent (`blocks`), in the parent's own App, ordered by id; the window numbers
+ * each parent's rows so a page is exactly `offset .. offset+limit` of ITS OWN list.
+ */
+async function relationPages(
+  db: Context['db'],
+  parents: Array<{ id: string; appId: string }>,
+  requests: RelationRequest[],
+): Promise<Map<RelationRequest, RelationPage>> {
+  const known = new Set(parents.map((p) => p.id));
+  const mine = requests.filter((r) => known.has(r.id));
+  const out = new Map<RelationRequest, RelationPage>();
+  if (!mine.length) return out;
+  const totals = new Map<string, number>(); // `${direction}:${parent}` -> total
+  const related = new Map<string, TaskRow>();
+  const relatedIds = new Map<string, string[]>(); // `${direction}:${take}:${skip}:${parent}` -> related ids, in order
+  for (const direction of ['blockedBy', 'blocks', 'clones'] as const) {
+    const ofDirection = mine.filter((r) => r.direction === direction);
+    if (!ofDirection.length) continue;
+    const parentIds = [...new Set(ofDirection.map((r) => r.id))];
+    const counts = direction === 'clones'
+      ? await db.$queryRaw<Array<{ parent: string; n: number }>>`
+          SELECT c.cloned_from_id AS parent, count(*)::int AS n FROM agent_tasks c
+          JOIN agent_tasks p ON p.id = c.cloned_from_id AND p.app_id = c.app_id
+          WHERE c.cloned_from_id IN (${Prisma.join(parentIds)}) GROUP BY c.cloned_from_id`
+      : direction === 'blockedBy'
+      ? await db.$queryRaw<Array<{ parent: string; n: number }>>`
+          SELECT l.task_id AS parent, count(*)::int AS n FROM agent_task_blockers l
+          JOIN agent_tasks p ON p.id = l.task_id JOIN agent_tasks r ON r.id = l.blocker_task_id AND r.app_id = p.app_id
+          WHERE l.task_id IN (${Prisma.join(parentIds)}) GROUP BY l.task_id`
+      : await db.$queryRaw<Array<{ parent: string; n: number }>>`
+          SELECT l.blocker_task_id AS parent, count(*)::int AS n FROM agent_task_blockers l
+          JOIN agent_tasks p ON p.id = l.blocker_task_id JOIN agent_tasks r ON r.id = l.task_id AND r.app_id = p.app_id
+          WHERE l.blocker_task_id IN (${Prisma.join(parentIds)}) GROUP BY l.blocker_task_id`;
+    for (const c of counts) totals.set(`${direction}:${c.parent}`, c.n);
+    // One windowed read per distinct page shape (limit, offset); every parent that asked for it shares the statement.
+    const shapes = new Map<string, { take: number; skip: number; parentIds: string[] }>();
+    for (const r of ofDirection) {
+      if (r.take === 0 || !totals.get(`${direction}:${r.id}`)) continue;
+      const s = shapes.get(`${r.take}:${r.skip}`) ?? { take: r.take, skip: r.skip, parentIds: [] };
+      if (!s.parentIds.includes(r.id)) s.parentIds.push(r.id);
+      shapes.set(`${r.take}:${r.skip}`, s);
+    }
+    for (const s of shapes.values()) {
+      const upper = s.skip + s.take;
+      const rows = direction === 'clones'
+        ? await db.$queryRaw<Array<{ parent: string; related: string }>>`
+            SELECT parent, related FROM (
+              SELECT c.cloned_from_id AS parent, c.id AS related,
+                     row_number() OVER (PARTITION BY c.cloned_from_id ORDER BY c.id) AS rn
+              FROM agent_tasks c
+              JOIN agent_tasks p ON p.id = c.cloned_from_id AND p.app_id = c.app_id
+              WHERE c.cloned_from_id IN (${Prisma.join(s.parentIds)})) w
+            WHERE rn > ${s.skip} AND rn <= ${upper} ORDER BY parent, related`
+        : direction === 'blockedBy'
+        ? await db.$queryRaw<Array<{ parent: string; related: string }>>`
+            SELECT parent, related FROM (
+              SELECT l.task_id AS parent, l.blocker_task_id AS related,
+                     row_number() OVER (PARTITION BY l.task_id ORDER BY l.blocker_task_id) AS rn
+              FROM agent_task_blockers l
+              JOIN agent_tasks p ON p.id = l.task_id JOIN agent_tasks r ON r.id = l.blocker_task_id AND r.app_id = p.app_id
+              WHERE l.task_id IN (${Prisma.join(s.parentIds)})) w
+            WHERE rn > ${s.skip} AND rn <= ${upper} ORDER BY parent, related`
+        : await db.$queryRaw<Array<{ parent: string; related: string }>>`
+            SELECT parent, related FROM (
+              SELECT l.blocker_task_id AS parent, l.task_id AS related,
+                     row_number() OVER (PARTITION BY l.blocker_task_id ORDER BY l.task_id) AS rn
+              FROM agent_task_blockers l
+              JOIN agent_tasks p ON p.id = l.blocker_task_id JOIN agent_tasks r ON r.id = l.task_id AND r.app_id = p.app_id
+              WHERE l.blocker_task_id IN (${Prisma.join(s.parentIds)})) w
+            WHERE rn > ${s.skip} AND rn <= ${upper} ORDER BY parent, related`;
+      for (const row of rows) {
+        const k = `${direction}:${s.take}:${s.skip}:${row.parent}`;
+        const list = relatedIds.get(k) ?? [];
+        list.push(row.related);
+        relatedIds.set(k, list);
+      }
+    }
+  }
+  const wanted = [...new Set([...relatedIds.values()].flat())];
+  if (wanted.length) for (const t of await db.agentTask.findMany({ where: { id: { in: wanted } }, omit: { resultFindings: true } })) related.set(t.id, t);
+  for (const r of mine) {
+    const items = (relatedIds.get(`${r.direction}:${r.take}:${r.skip}:${r.id}`) ?? []).map((id) => related.get(id)).filter((t): t is TaskRow => !!t);
+    out.set(r, pageEnvelope(items, totals.get(`${r.direction}:${r.id}`) ?? 0, r.skip));
+  }
+  return out;
 }
 
 export const agentTaskFieldResolvers = {
+  AgentTaskResult: {
+    /** Result is reachable only through the existing task read gate; no separate finding read surface. */
+    findings: (result: { findings?: unknown }, args: { limit?: number | null; offset?: number | null }) => {
+      const stored = result.findings;
+      const items = (stored ?? []) as TaskFinding[];
+      const { take, skip } = pageArgs(args);
+      return pageEnvelope(items.slice(skip, skip + take), items.length, skip);
+    },
+  },
   AgentTask: {
+    /**
+     * #4084 (cor:agt:120: mark-tracked is given the portal URL as the server prints it): the portal's existing task
+     * page. Not the `/app/u/<urn>` resolver, which has no agent-task kind (the FIT finding). Null when FRONTEND_URL is
+     * unset or malformed, like Node.portalUrl (#881), so no client ever builds the link.
+     */
+    portalUrl: (t: TaskRow) => {
+      const base = getPortalBaseUrl();
+      return base ? `${base}/app/apps/${encodeURIComponent(t.appId)}/tasks/${encodeURIComponent(t.id)}` : null;
+    },
+    /** #2654: true exactly when the `overdue` filter would list this task now (same rule, same server clock). */
+    overdue: async (t: TaskRow, _a: unknown, c: any) => isTaskOverdue(t, await dbNowFor(c)),
+    /** #3816 (V22): present only on the create answer that ran the match; a later read has none. */
+    matchSkipped: (t: TaskRow & { matchSkipped?: unknown }) => t.matchSkipped ?? null,
+    matchFailure: (t: TaskRow) => t.matchFailedAt && t.matchFailedReason ? { reason: t.matchFailedReason, failedAt: t.matchFailedAt } : null,
+    /** #2663: current dispositions, in immutable finding order, separate from the finished result. */
+    findingDispositions: (t: TaskRow, args: { limit?: number | null; offset?: number | null }) => {
+      const rows = t.findingDispositions as unknown as { findingId: string; disposition: string; reference: TaskReference | null }[];
+      // The locked writer stores finding order; broad reads need not load the immutable findings payload.
+      const items = rows.map(d => ({ ...d, reference: d.reference ? { ...d.reference, kind: REFERENCE_KIND_TO_GQL[d.reference.kind] } : null }));
+      const { take, skip } = pageArgs(args);
+      return pageEnvelope(items.slice(skip, skip + take), items.length, skip);
+    },
+    /**
+     * #3325: the one CURRENT stored disposition for `findingId` on THIS task (exact match, no trim or case-fold), or null.
+     * Reached only through the existing task read gate, like the paged field; a real-but-undisposed id, an unknown id and an
+     * id stored only on another task all read as null, so the field is no existence oracle. No event, no reference fetch.
+     */
+    findingDisposition: (t: TaskRow, args: { findingId: string }) => {
+      const rows = t.findingDispositions as unknown as { findingId: string; disposition: string; reference: TaskReference | null }[];
+      const d = rows.find(r => r.findingId === args.findingId);
+      return d ? { ...d, reference: d.reference ? { ...d.reference, kind: REFERENCE_KIND_TO_GQL[d.reference.kind] } : null } : null;
+    },
     blockedBy: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blockedBy', args),
     blocks: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blocks', args),
+    /** #2646 (cor:agt:050:02): the clones made from this task, paged, in this task's own App; each as its own read answers. */
+    clones: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'clones', args),
+    /**
+     * #2646: the task this one was cloned from, as that task's OWN read answers (cor:acl:110:02): the gate is judged
+     * here, not inherited from the clone's, so a source the caller cannot read, a source in another App (the server
+     * never makes one) and a source since removed all read as null, never as an error.
+     */
+    clonedFrom: async (task: TaskRow, _: unknown, ctx: Context) => {
+      if (!task.clonedFromId) return null;
+      return withReadableTask(ctx, task.clonedFromId, async (c, r) => (r.task.appId === task.appId ? r.task : null), true);
+    },
     /** #2553: the per-App handle. Never null in the database; the column is optional only in the client type. */
     handle: (t: TaskRow) => t.handle!,
     taskNumber: (t: TaskRow) => String(t.taskNumber),
     status: (t: TaskRow) => t.status.toUpperCase(),
     owner: (t: TaskRow, _: unknown, ctx: Context) => partyView(ctx, t.ownerWorkerId, t.ownerUserId),
     assignee: (t: TaskRow, _: unknown, ctx: Context) => partyView(ctx, t.assigneeWorkerId, t.assigneeUserId),
-    result: (t: TaskRow) =>
-      t.status === 'finished' && t.resultOutcome
-        ? { outcome: t.resultOutcome, summary: t.resultSummary, evidence: t.resultEvidence }
+    result: (t: TaskRow, _: unknown, ctx: Context) => {
+      const view = (row: TaskRow) => row.status === 'finished' && row.resultOutcome
+        ? { outcome: row.resultOutcome, summary: row.resultSummary, evidence: row.resultEvidence, ...(row.resultFindings != null ? { findings: row.resultFindings } : {}) }
+        : null;
+      if (t.status !== 'finished' || !t.resultOutcome || Object.hasOwn(t, 'resultFindings')) return view(t);
+      // #2662: wide list/tree/relation rows omit the large payload. Only a selected result loads it, under the
+      // SAME task read gate (including the App-key arm), rechecked at this read rather than trusting an old row.
+      // #3867: the recheck of one request's rows is decided together (readableTasks), not once per row.
+      return readableTask(ctx, t.id).then((task) => (task ? view(task) : null));
+    },
+    /** #2651 (cor:agt:050:29, :01): the latest hand-back, readable as the task is; null when never handed back. */
+    handBack: (t: TaskRow) =>
+      t.handBackReasonCode && t.handedBackAt
+        ? { code: t.handBackReasonCode.toUpperCase(), text: t.handBackReasonText, handedBackAt: t.handedBackAt }
         : null,
     requirements: (t: TaskRow) => {
       const r = (t.requirements ?? null) as Record<string, unknown> | null;
       if (!r) return null;
       return {
         role: (r.role as string) ?? null,
+        roles: (r.roles as string[]) ?? null,
+        teamWorkerId: (r.teamWorkerId as string) ?? null,
         familyIn: (r.familyIn as string[]) ?? null,
         familyNotIn: (r.familyNotIn as string[]) ?? null,
         excludeWorkerIds: (r.excludeWorkerIds as string[]) ?? null,
+        minTier: (r.minTier as string) ?? null,
+        modelGroupIn: (r.modelGroupIn as string[]) ?? null,
+        modelGroupNotIn: (r.modelGroupNotIn as string[]) ?? null,
       };
     },
+    /** #4291 (cor:agt:050:01): the task's own run settings; null when it names none. */
+    runSettings: (t: TaskRow) => taskRunSettingsOf(t),
+    /**
+     * #4291: the settings the run actually used, stamped from the assignee's open session when the task started; null
+     * before that (and for a task no worker session started). Beside `runSettings`, so an override a running worker did
+     * not apply is visible.
+     */
+    appliedRunSettings: (t: TaskRow) =>
+      t.startedAt && (t.appliedFamily || t.appliedModel || t.appliedEffort)
+        ? { family: t.appliedFamily, model: t.appliedModel, effort: t.appliedEffort }
+        : null,
+    /** #2649 (cor:agt:050:01 References): the stored strings, in order; nothing about any target is read. */
+    references: (t: TaskRow) => storedTaskReferences(t.references).map(r => ({ kind: REFERENCE_KIND_TO_GQL[r.kind], target: r.target, label: r.label ?? null })),
     /** #1709 (cor:agt:050:10) — the request this task's end made; the task was already read, so its readers read it. */
     sessionEndRequest: async (t: TaskRow, _: unknown, ctx: Context) => {
-      const r = await ctx.db.taskSessionEndRequest.findUnique({ where: { taskId: t.id } });
+      // #4223: a task may carry several requests, one for each time it ended under a worker or was reassigned away
+      // from one. Only its CURRENT worker assignee's is shown, the latest: a request made of a former assignee names
+      // that worker's session, and whoever reads the task now must never take it for its own (#4253 blind review,
+      // Cedric P2-1). The former assignee is woken for it instead (taskWakes.ts, END_SESSION). And a reader that IS
+      // a worker reads only a request addressed to itself (Peter, team chat #108945): a person, a run or an App key
+      // reads the assignee's, with the worker it asks in `workerId`.
+      if (!t.assigneeWorkerId) return null;
+      const reader = currentActor().workerId;
+      if (reader && reader !== t.assigneeWorkerId) return null;
+      const r = await ctx.db.taskSessionEndRequest.findFirst({
+        where: { taskId: t.id, workerId: t.assigneeWorkerId }, orderBy: [{ requestedAt: 'desc' }, { id: 'desc' }],
+      });
       return r ? { ...r, resolution: r.resolution ? r.resolution.toUpperCase().replace(/-/g, '_') : null } : null;
     },
     /** cor:agt:050:03 — pending with no assignee. Derived, never stored. */
@@ -1861,22 +4040,34 @@ export const agentTaskFieldResolvers = {
     /** cor:agt:050:04 — started with at least one open child. Derived, never stored. */
     waitingOnChildren: async (t: TaskRow, _: unknown, ctx: Context) => {
       if (t.status !== 'started') return false;
-      const open = await ctx.db.agentTask.findFirst({
-        where: { parentTaskId: t.id, status: { in: OPEN } },
-        select: { id: true },
-      });
-      return open !== null;
+      return hasOpenChild(ctx, t.id);
     },
     createdBy: (t: TaskRow, _: unknown, ctx: Context) => partyView(ctx, t.createdByWorkerId, t.createdByWorkerId ? null : t.createdBy),
     assignedBy: (t: TaskRow, _: unknown, ctx: Context) =>
       t.assignedAt ? partyView(ctx, t.assignedByWorkerId, t.assignedByWorkerId ? null : t.assignedBy) : null,
   },
   AgentTeamEvent: {
+    // Page reads already hydrate this field in one batch. AcknowledgeAlarm returns a single raw event.
+    taskHandle: async (e: { appId: string; taskId: string | null; taskHandle?: string | null }, _: unknown, ctx: Context) => {
+      if (e.taskHandle !== undefined) return e.taskHandle;
+      if (!e.taskId) return null;
+      return (await ctx.db.agentTask.findFirst({ where: { id: e.taskId, appId: e.appId }, select: { handle: true } }))?.handle ?? null;
+    },
+    // #2755: a dark-worker alarm's evidence is for a reader of the worker's internals; every other payload is as written.
+    payload: async (e: { type: string; appId: string; payload: unknown }, _: unknown, ctx: Context) => {
+      const { eventPayloadFor } = await import('../../../lib/agentTasks/darkWorker.js');
+      return eventPayloadFor(e, ctx);
+    },
     severity: (e: { severity: string | null }) => (e.severity === 'alarm' ? 'ALARM' : null),
+    // #3934 (V77): when this alarm's escalation ended, from the same answer the wake schedule uses; null while in effect and on any
+    // ordinary event. Batched per request, so a page of events costs one evaluation, not one per row.
+    escalationEndedAt: (e: AlarmEndRow, _: unknown, ctx: Context) => (e.severity === 'alarm' ? alarmEndOf(ctx, e) : null),
     actor: (e: { actorWorkerId: string | null; actorUserId: string | null }, _: unknown, ctx: Context) =>
       partyView(ctx, e.actorWorkerId, e.actorWorkerId ? null : e.actorUserId),
     subjectWorker: (e: { subjectWorkerId: string | null }, _: unknown, ctx: Context) =>
       e.subjectWorkerId ? partyView(ctx, e.subjectWorkerId, null) : null,
+    subjectUser: (e: { subjectUserId: string | null }, _: unknown, ctx: Context) =>
+      e.subjectUserId ? partyView(ctx, null, e.subjectUserId) : null,
     acknowledgedBy: (e: { acknowledgedByWorkerId: string | null; acknowledgedByUserId: string | null }, _: unknown, ctx: Context) =>
       partyView(ctx, e.acknowledgedByWorkerId, e.acknowledgedByWorkerId ? null : e.acknowledgedByUserId),
   },

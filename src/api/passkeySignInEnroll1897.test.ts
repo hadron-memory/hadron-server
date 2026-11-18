@@ -13,6 +13,13 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../test/softPasskey.js';
 import { generateId } from '../lib/id.js';
+import { beginPending, portalContinuation, oauthContinuation } from '../test/beginPendingSignIn.js';
+
+const sent = vi.hoisted(() => [] as Array<{ to: string; url: string }>);
+vi.mock('../auth/email.js', async (original) => ({
+  ...(await original<typeof import('../auth/email.js')>()),
+  sendCeremonySignInLink: async (to: string, url: string) => { sent.push({ to, url }); },
+}));
 
 const ORIGIN = 'https://sign.example.test';
 const RP = 'example.test';
@@ -25,9 +32,11 @@ let ana: string;
 
 beforeEach(async () => {
   await cleanDb(db);
+  sent.length = 0;
   vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
   vi.stubEnv('PASSKEY_REGISTRATION_ENABLED', 'true');
   vi.stubEnv('PASSKEY_RP_ID', RP);
+  vi.stubEnv('BASE_URL', 'https://api.example.test');
   vi.stubEnv('SIGNING_CEREMONY_ORIGINS', ORIGIN);
   vi.stubEnv('GITHUB_OAUTH_APP_CLIENT_ID', 'gh-client');
   vi.stubEnv('GITHUB_OAUTH_APP_CLIENT_SECRET', 'gh-secret');
@@ -66,8 +75,8 @@ async function magicLink(opts: { clientState?: string | null } = {}) {
 }
 const verify = (token: string, qs = '') => realFetch(`${base}/auth/email/verify?token=${token}${qs}`, { redirect: 'manual' });
 async function begin() {
-  const r = await verify(await magicLink());
-  return { r, pending: cookieNamed(r, 'hadron_pending_signin') };
+  const r = await beginPending(ana, portalContinuation(sha('portal-nonce')));
+  return { r, pending: r.cookie ?? '' };
 }
 const page = (path: string, cookie?: string) => realFetch(`${base}${path}`, { headers: cookie ? { cookie } : {} });
 
@@ -105,17 +114,16 @@ async function register(browser: string, key: SoftPasskey) {
 }
 
 describe('a person with no passkey', () => {
-  it('a claimed sign-in link creates a thirty-minute pending flow and publishes nothing; the account exists (R82)', async () => {
+  it('a begun flow for a person with no passkey is a thirty-minute pending flow and publishes nothing; the account exists (R82)', async () => {
     const { r, pending } = await begin();
-    expect(r.status).toBe(302);
-    expect(r.headers.get('location')).toBe('/auth/passkey/sign-in');
+    expect(r.begun).toBe(true);
+    expect(r.location).toBe('/auth/passkey/sign-in');
     expect(pending).toBeTruthy();
-    expect(cookieNamed(r, 'hadron_token')).toBe('');
     const row = await db.pendingEmailSignIn.findFirstOrThrow({ where: { userId: ana } });
     const ttl = (row.expiresAt.getTime() - row.createdAt.getTime()) / 1000;
     expect(ttl).toBeGreaterThan(1790);
     expect(ttl).toBeLessThanOrEqual(1800);
-    expect(r.headers.getSetCookie().find((c) => c.startsWith('hadron_pending_signin='))).toMatch(/Max-Age=180\d|Max-Age=1800/);
+    expect(r.maxAgeMs).toBe(1800 * 1000);
     expect(await db.authHandoffCode.count()).toBe(0);
     expect(await db.signIn.count()).toBe(0);
     expect(await db.passkeyCredential.count()).toBe(0);
@@ -203,10 +211,86 @@ describe('a person with no passkey', () => {
     expect(handoff.clientStateHash).toBe(sha('portal-nonce'));
   });
 
+  it('email-only second-link confirmation composes with enrollment and rightful-user sign-in (#2254)', async () => {
+    const { pending } = await begin();
+    const start = await post('/passkeys/sign-in/email', { email: EMAIL, next: 'sign-in' });
+    expect(start.status).toBe(200);
+    const browser = cookieNamed(start, 'hadron_ceremony_browser');
+    const next = cookieNamed(start, 'hadron_ceremony_next');
+    expect(browser).toBeTruthy();
+    expect(next).toBe('hadron_ceremony_next=sign-in');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.to).toBe(EMAIL);
+    const token = new URL(sent[0]!.url).searchParams.get('token')!;
+    const preview = await page(`/passkeys/sign-in/email/verify?token=${encodeURIComponent(token)}`);
+    expect(preview.status).toBe(200);
+    expect((await db.freshSignIn.findFirstOrThrow({ where: { userId: ana } })).confirmedAt).toBeNull();
+    const confirm = await realFetch(`${base}/passkeys/sign-in/confirm`, {
+      method: 'POST', redirect: 'manual',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: ORIGIN, cookie: `${browser}; ${next}` },
+      body: new URLSearchParams({ token }).toString(),
+    });
+    expect(confirm.status).toBe(200);
+    expect(await confirm.text()).toContain('href="/passkeys/register?next=sign-in"');
+    expect((await db.freshSignIn.findFirstOrThrow({ where: { userId: ana } }))).toMatchObject({ method: 'email', confirmedAt: expect.any(Date) });
+    const key = softPasskey();
+    expect((await register(browser, key)).status).toBe(200);
+    const credential = await db.passkeyCredential.findFirstOrThrow({ where: { ownerId: ana } });
+    expect(credential.registrationMethod).toBe('email');
+    expect(await db.signIn.count()).toBe(0);
+    expect(await db.authHandoffCode.count()).toBe(0);
+    const o = await (await post('/auth/passkey/sign-in/options', {}, pending)).json() as { ceremonyId: string; challenge: string; allowCredentials: string[] };
+    expect(o.allowCredentials).toEqual([key.credentialId.toString('base64url')]);
+    const a = key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(o.challenge, 'base64url'), origin: ORIGIN, rpId: RP, counter: 1 });
+    const done = await post('/auth/passkey/sign-in/complete', {
+      ceremonyId: o.ceremonyId, credentialId: key.credentialId.toString('base64url'),
+      authenticatorData: a.authenticatorData.toString('base64url'), clientDataJson: a.clientDataJson.toString('base64url'), signature: a.signature.toString('base64url'),
+    }, pending);
+    expect(done.status).toBe(200);
+    const signIn = await db.signIn.findFirstOrThrow({ where: { userId: ana } });
+    expect(signIn.completedByPasskeyId).toBe(credential.id);
+    expect((await db.authHandoffCode.findFirstOrThrow({ where: { userId: ana } })).signInId).toBe(signIn.id);
+  });
+
+  it('a foreign-user passkey leaves the pending first-passkey flow untouched, then the rightful user completes it (#2254)', async () => {
+    const { pending } = await begin();
+    const rightful = softPasskey();
+    const rightfulId = await insertSoftPasskey(db, ana, rightful, { firstWindow: true });
+    const other = await db.user.create({ data: { handle: 'enrol-bea', email: 'enrol-bea@example.test', roles: ['READER'] } });
+    const foreign = softPasskey();
+    const foreignId = await insertSoftPasskey(db, other.id, foreign, { firstWindow: true });
+    const options = await post('/auth/passkey/sign-in/options', {}, pending);
+    expect(options.status).toBe(200);
+    const o = await options.json() as { ceremonyId: string; challenge: string; allowCredentials: string[] };
+    expect(o.allowCredentials).toEqual([rightful.credentialId.toString('base64url')]);
+    const snapshot = async () => ({
+      pending: await db.pendingEmailSignIn.findFirstOrThrow({ where: { userId: ana } }),
+      ceremony: await db.passkeyCeremony.findUniqueOrThrow({ where: { id: o.ceremonyId } }),
+      foreign: await db.passkeyCredential.findUniqueOrThrow({ where: { id: foreignId } }),
+      rightful: await db.passkeyCredential.findUniqueOrThrow({ where: { id: rightfulId } }),
+      signIns: await db.signIn.count(), handoffs: await db.authHandoffCode.count(),
+    });
+    const complete = async (key: SoftPasskey) => {
+      const a = key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(o.challenge, 'base64url'), origin: ORIGIN, rpId: RP, counter: 1 });
+      return post('/auth/passkey/sign-in/complete', {
+        ceremonyId: o.ceremonyId, credentialId: key.credentialId.toString('base64url'),
+        authenticatorData: a.authenticatorData.toString('base64url'), clientDataJson: a.clientDataJson.toString('base64url'), signature: a.signature.toString('base64url'),
+      }, pending);
+    };
+    const before = await snapshot();
+    expect((await complete(foreign)).status).toBe(403);
+    expect(await snapshot()).toEqual(before);
+    expect((await complete(rightful)).status).toBe(200);
+    const signIn = await db.signIn.findFirstOrThrow({ where: { userId: ana } });
+    expect(signIn.completedByPasskeyId).toBe(rightfulId);
+    expect(await db.signIn.count({ where: { userId: other.id } })).toBe(0);
+    expect(await db.passkeyCredential.findUniqueOrThrow({ where: { id: foreignId } })).toEqual(before.foreign);
+    expect((await db.pendingEmailSignIn.findUniqueOrThrow({ where: { id: before.pending.id } })).completedAt).not.toBeNull();
+  });
+
   it('end to end (OAuth): the same journey resumes the validated return_to with an sid cookie', async () => {
     const returnTo = '/oauth/authorize?client_id=x&state=s';
-    const r = await verify(await magicLink({ clientState: null }), `&return_to=${encodeURIComponent(returnTo)}`);
-    const pending = cookieNamed(r, 'hadron_pending_signin');
+    const pending = (await beginPending(ana, oauthContinuation(returnTo))).cookie!;
     expect(pending).toBeTruthy();
     const leg = await githubLeg('sign-in');
     const key = softPasskey();
@@ -231,7 +315,7 @@ describe('a person with no passkey', () => {
     expect((await page('/auth/passkey/sign-in', pending)).status).toBe(400);
     await insertSoftPasskey(db, ana, softPasskey());
     const again = await begin();
-    expect(again.r.status).toBe(302);
+    expect(again.r.begun).toBe(true);
     const row = await db.pendingEmailSignIn.findFirstOrThrow({ where: { browserHash: sha(again.pending.split('=')[1]!) } });
     expect((row.expiresAt.getTime() - row.createdAt.getTime()) / 1000).toBeLessThanOrEqual(600);
   });
@@ -239,11 +323,10 @@ describe('a person with no passkey', () => {
   it('a person whose only passkey was revoked is treated as having none; one whose passkeys are all for another RP gets the fixed refusal', async () => {
     const id = await insertSoftPasskey(db, ana, softPasskey());
     await db.$executeRaw`UPDATE passkey_credentials SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) WHERE id = ${id}`;
-    expect((await begin()).r.status).toBe(302);
+    expect((await begin()).r.begun).toBe(true);
     await db.pendingEmailSignIn.deleteMany({});
     await insertSoftPasskey(db, ana, softPasskey(), { rpId: 'elsewhere.example' });
-    const r = await verify(await magicLink());
-    expect(r.status).toBe(400);
+    expect((await begin()).r.begun).toBe(false);
     expect(await db.pendingEmailSignIn.count()).toBe(0);
   });
 });

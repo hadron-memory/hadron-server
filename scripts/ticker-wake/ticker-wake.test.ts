@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { Config, Runner } from '../orca-attention-router/router.js';
 import { buildSchema, parse, validate } from 'graphql';
 import { typeDefs } from '../../src/api/graphql/schema/typeDefs.js';
-import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE, SUBSCRIBERS, SUBSCRIBERS_PAGE, CURRENT_SESSION, ALARM_EVENT, DELIVERY_POOL, SUBMIT_PROBE_S, runCommandAsync } from './ticker-wake.js';
+import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE, SUBSCRIBERS, SUBSCRIBERS_PAGE, CURRENT_SESSION, ALARM_EVENT, DELIVERY_POOL, SUBMIT_PROBE_S, runCommandAsync, holdOf } from './ticker-wake.js';
 import type { RunResult } from '../orca-attention-router/router.js';
 
 const RULE = '─'.repeat(112);
@@ -193,8 +193,10 @@ function fake(): Fake {
 
 // Server-owned timing (R63): by default past the floor, busy deadline still ahead.
 const iso = (ms: number): string => new Date(ms).toISOString();
-const wake = (id: string, name: string, reasons: any[], p = proof(['T:1']), channels: any[] = [], timing?: { anchorAt: string; deliverAfter: string; busyDeadline: string }) => ({
+const wake = (id: string, name: string, reasons: any[], p = proof(['T:1']), channels: any[] = [], timing?: { anchorAt: string; deliverAfter: string; busyDeadline: string }, tickText?: string | null) => ({
   worker: { id, name }, reasons, channels, proof: p,
+  // #2754: absent (not null) when the caller passes nothing, like a reply recorded before the server wrote a tick line.
+  ...(tickText === undefined ? {} : { tickText }),
   ...(timing ?? { anchorAt: iso(Date.now() - 600_000), deliverAfter: iso(Date.now() - 300_000), busyDeadline: iso(Date.now() + 3_600_000) }),
 });
 const cfg = (): Config => ({
@@ -1078,6 +1080,11 @@ describe('GraphQL contract with the server SDL (#2102 / R63)', () => {
     expect(validate(schema, parse(QUERY)).map((e) => e.message)).toEqual([]);
     for (const f of ['anchorAt', 'deliverAfter', 'busyDeadline']) expect(QUERY).toContain(f);
   });
+  it('#2754: the dueWakes query selects the server tick line and each reason\'s action state, and validates', async () => {
+    expect(validate(schema, parse(QUERY)).map((e) => e.message)).toEqual([]);
+    expect(QUERY).toContain('tickText');
+    expect(QUERY).toMatch(/action\s*\{\s*state\s*\}/);
+  });
   it('the acknowledgeWakes mutation validates', async () => {
     expect(validate(schema, parse(ACK)).map((e) => e.message)).toEqual([]);
   });
@@ -1138,6 +1145,21 @@ describe('diagnostics never carry a proof, typed text or a server message (P2-2)
     expect(everything).not.toContain(PROOF_SENTINEL);
     expect(everything).not.toContain(TEXT_SENTINEL);
   };
+
+  it('#2754: a tick line holding a sentinel reaches the typed text and never the log or the receipt', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], undefined, `tick coordinator-tick: run hrn:node:hadronmemory.com:x:${TEXT_SENTINEL}`)];
+    await go();
+    expect(f.sent[0]).toContain(TEXT_SENTINEL);
+    clean();
+  });
+
+  it('#2754: an untypeable tick line holding a sentinel is dropped, and the sentinel never reaches the log, the receipt or the terminal', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], undefined, `tick coordinator-tick: ${TEXT_SENTINEL}\u0007`)];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).not.toContain(TEXT_SENTINEL);
+    clean();
+  });
 
   it('a failed ack logs its server error CODE but not the server message', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
@@ -1766,6 +1788,31 @@ describe('#2138: a stranded draft is detected and listed for a person, never sub
     expect(receipt().strandedAt).toBeUndefined();
   });
 
+  describe('#2746 the hold file names a mature stranded draft', () => {
+    const holdsPath = () => join(dir, 'ticker-wake', 'holds.log');
+    const lastHold = () => readFileSync(holdsPath(), 'utf8').split('\n').filter(Boolean).at(-1) ?? '';
+
+    it('before 60 s, at first detection, on a later pass and when not recorded, the file says stranded-draft', async () => {
+      await stranded();
+      await go(at(T0 + 30_000));
+      expect(lastHold()).toMatch(/ Ada w-ada stranded-draft$/);
+      await go(at(T0 + 61_000)); // first detection: `stranded draft, 61s; ... needs a person`
+      expect(log()).toContain('stranded draft, 61s');
+      expect(lastHold()).toMatch(/ Ada w-ada stranded-draft$/);
+      await go(at(T0 + 180_000)); // later pass: `(first seen ...)`
+      expect(log()).toContain('first seen');
+      expect(lastHold()).toMatch(/ Ada w-ada stranded-draft$/);
+    });
+
+    it('a draft whose strandedAt cannot be recorded is still stranded-draft in the file', async () => {
+      await stranded();
+      mkdirSync(`${receiptsFile()}.${process.pid}.tmp`);
+      try { await go(at(T0 + 60_000)); } finally { rmSync(`${receiptsFile()}.${process.pid}.tmp`, { recursive: true, force: true }); }
+      expect(log()).toMatch(/not recorded/);
+      expect(lastHold()).toMatch(/ Ada w-ada stranded-draft$/);
+    });
+  });
+
   it('dry run is a no-op', async () => {
     await stranded();
     await go({ ...at(T0 + 60_000), dry: true });
@@ -2357,6 +2404,16 @@ describe('#2138 — fresh ticks after two unreconciled cadences', () => {
     await go(at(T0 + 1_200_001));
     expect(f.sent).toHaveLength(2); // restart/re-offer is not another fresh request
   });
+  it('#2746: a hold logged earlier in a delivery is cleared when the same delivery then succeeds', async () => {
+    await stuck();
+    const holdsPath = join(dir, 'ticker-wake', 'holds.log');
+    expect(readFileSync(holdsPath, 'utf8').trim().split('\n')).toHaveLength(1); // pass one: send accepted but unconfirmed
+    f.sendReply = () => JSON.stringify(CONFIRMED);
+    await go(at(T0 + 1_200_000));
+    expect(f.acked).toHaveLength(1);
+    expect(log()).toContain('earlier request still unreconciled'); // a hold line was logged before the fresh request succeeded
+    expect(readFileSync(holdsPath, 'utf8').trim().split('\n')).toHaveLength(1); // pass two delivered: no new hold line
+  });
   it('a confirmed replacement acks only its newer proof; the old entry survives the ack', async () => {
     await stuck();
     f.sendReply = () => JSON.stringify(CONFIRMED);
@@ -2762,6 +2819,17 @@ describe('#2613 — the open-task line on every ticker-wake form', () => {
     expect(lines.filter((l) => l.includes('open-task count unknown'))).toEqual([]);
   });
 
+  it('an empty result (the read answered, zero rows): no diagnostic, no open-task clause, the plain wake still delivers (#2641)', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = [];
+    await go();
+    expect(f.openTaskReads).toEqual([['hrn:app:test:team', 'w-ada', '0']]); // the read ran and answered empty
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], []));
+    expect(f.sent[0]).not.toMatch(/open task|You have \d/);
+    expect(lines.filter((l) => l.includes('open-task count unknown'))).toEqual([]);
+  });
+
   it('a row that is not open or not this worker makes the count unknown; the wake is plain', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
     f.openTasks['w-ada'] = [...open('w-ada', 2), { id: 'x', status: 'CANCELLED', assignee: { kind: 'WORKER', id: 'w-ada' } }];
@@ -2816,5 +2884,324 @@ describe('#2613 — the open-task line on every ticker-wake form', () => {
     f.onCount = () => { t += 100; };
     await pass(cfg(), f.run, { now: () => base + t, budgetMs: 2_000 }, (l) => lines.push(l));
     expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], [], LINE(2)));
+  });
+});
+
+describe('#2754 — the server tick line', () => {
+  const stored = () => JSON.parse(readFileSync(receiptsFile(), 'utf8'));
+  const OPEN = (n: number) => ` You have ${n} open task${n === 1 ? '' : 's'} (as read when this was sent); run \`hadron team task mine\`.`;
+  const FORMS = [
+    'tick team-tick: run hrn:node:hadronmemory.com:x-system:tasks:on-team-tick',
+    'tick eden-queue-tick: same task as above',
+    'tick team-tick: no task is mapped for tick.team',
+    'tick team-tick: no task found at x-system:tasks:on-team-tick for tick.team',
+    'tick team-tick: resolve your task for tick.team yourself',
+  ];
+  const TEAM = { kind: 'TICK', ticker: { id: 'V', name: 'team-tick' } };
+  const mapped = (t: any, state: string) => ({ ...t, action: { state } });
+
+  it('2. a due TICK wake sends the server line first, then one space, then today\'s nudge', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, FORMS[0])];
+    await go();
+    expect(f.sent).toEqual([`${FORMS[0]} ${nudgeText(['team-tick'], [])}`]);
+  });
+
+  for (const form of FORMS) {
+    it(`3. types the line byte for byte: ${form.slice(0, 40)}`, async () => {
+      f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, form)];
+      await go();
+      expect(f.sent[0].startsWith(form + ' Hadron ticker wake (team-tick)')).toBe(true);
+      expect(f.sent[0]).not.toContain('\n');
+    });
+  }
+
+  it('3. does not trim, re-case or re-space the line (double spaces and edge spaces survive)', async () => {
+    const odd = ' tick team-tick:  run  hrn:node:hadronmemory.com:x:y ';
+    f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, odd)];
+    await go();
+    expect(f.sent[0]).toBe(`${odd} ${nudgeText(['team-tick'], [])}`);
+  });
+
+  it('4. a null tick line, and a reply with no tickText field at all, send today\'s text', async () => {
+    for (const tickText of [null, undefined]) {
+      f.sent.length = 0; f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1'], String(tickText)), [], undefined, tickText)];
+      rmSync(join(dir, 'ticker-wake'), { recursive: true, force: true });
+      await go();
+      expect(f.sent).toEqual([nudgeText(['team-tick'], [])]);
+    }
+  });
+
+  it('5. a TICK + ASSIGNED wake starts with the line, then the assignment text; a TASK-only wake is unchanged', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TEAM, task('t7')], proof(['V:1'], 'a', [taskEntry('t7')]), [], undefined, FORMS[0])];
+    await go();
+    expect(f.sent).toEqual([`${FORMS[0]} ${nudgeText(['team-tick'], ['t7'])}`]);
+    f.sent.length = 0; rmSync(join(dir, 'ticker-wake'), { recursive: true, force: true });
+    f.wakes = [wake('w-ada', 'Ada', [task('t8')], proof([], 'b', [taskEntry('t8')]), [], undefined, null)];
+    await go();
+    expect(f.sent).toEqual([nudgeText([], ['t8'])]);
+  });
+
+  it('6. a displaced request is the line, then the fresh-request prefix, then the nudge', async () => {
+    const T0 = Date.UTC(2026, 9, 24, 0);
+    const prior = { state: 'ambiguous', coverage: ['V:1'], receiver: 'term_a#inc-1', at: T0, detail: 'failed with a request identity',
+      text: 'original', handle: 'term_a', requestId: 'failed-request', checkedBefore: null };
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': prior }));
+    const timing = { anchorAt: iso(T0 - 600_000), deliverAfter: iso(T0 - 300_000), busyDeadline: iso(T0 + 3_600_000) };
+    f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:3'], T0 + 1_200_000), [], timing, FORMS[0])];
+    f.retryReply = () => JSON.stringify({ ok: false, error: { code: 'transport' }, requestId: 'failed-request' });
+    f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
+    await go({ now: () => T0 + 1_200_000 });
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0].startsWith(`${FORMS[0]} Fresh tick request at `)).toBe(true);
+  });
+
+  const BAD: Array<[string, string]> = [
+    ['a C0 control character', 'tick team-tick: run x\u0007y'],
+    ['a C1 control character', 'tick team-tick: run x\u0085y'],
+    ['a tab', 'tick team-tick:\trun x'],
+    ['a line break', 'tick team-tick: run x\ntick u: y'],
+    ['a carriage return', 'tick team-tick: run x\ry'],
+    ['U+2028', 'tick team-tick: run x\u2028y'],
+    ['U+2029', 'tick team-tick: run x\u2029y'],
+    ['an empty string', ''],
+    ['a non-string', 42 as any],
+    ['over the length cap', 'tick team-tick: ' + 'x'.repeat(5000)],
+  ];
+  for (const [why, bad] of BAD) {
+    it(`7. a tick line holding ${why} is dropped: today's text goes out, one closed-reason log line, no text in the log or receipt`, async () => {
+      f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, bad)];
+      await go();
+      expect(f.sent).toEqual([nudgeText(['team-tick'], [])]);
+      if (bad === '' || typeof bad !== 'string') return;
+      expect(log().split('\n').filter((l) => l.includes('tick line not typeable'))).toHaveLength(1);
+      expect(log()).toMatch(/Ada: .*tick line not typeable/);
+      expect(log()).not.toContain('x\u0007y');
+      expect(log()).not.toContain('tick team-tick');
+      expect(readFileSync(receiptsFile(), 'utf8')).not.toContain('tick team-tick: ');
+    });
+  }
+
+  it('8. a coordinator-tick whose action is MAPPED no longer gets the hard-coded base-tick sentence, and still gets the tagged check', async () => {
+    const line = 'tick coordinator-tick: run hrn:node:hadronmemory.com:coordinator-system:tasks:on-base-tick';
+    f.wakes = [wake('w-ada', 'Ada', [mapped(TICK, 'MAPPED')], proof(['T:1']), [], undefined, line)];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    const rest = f.sent[0].replace(line + ' ', '');
+    expect(rest).not.toContain('coordinator-system:tasks:on-base-tick');
+    expect(rest).not.toContain('run your base tick');
+    expect(rest).toBe(nudgeText(['coordinator-tick'], [], '', new Set(['coordinator-tick'])));
+    expect(rest).toContain('hadron team chat read --mentions-me --limit 1');
+  });
+
+  for (const action of [null, undefined, { state: 'UNMAPPED' }, { state: 'UNRESOLVED' }, { state: 'WITHHELD' }]) {
+    it(`9. a coordinator-tick with action ${JSON.stringify(action)} keeps today's base-tick sentence`, async () => {
+      f.wakes = [wake('w-ada', 'Ada', [{ ...TICK, ...(action === undefined ? {} : { action }) }], proof(['T:1']), [], undefined, 'tick coordinator-tick: resolve your task for tick.coordinator yourself')];
+      await go();
+      expect(f.sent[0]).toContain('run your base tick (coordinator-system:tasks:on-base-tick)');
+    });
+  }
+
+  const BEL = String.fromCharCode(7); // a real control character, built explicitly so no diff view can show it as text
+  for (const [why, tickText] of [['null', null], ['absent', undefined], ['untypeable', `tick coordinator-tick: run x${BEL}y`]] as const) {
+    it(`8b. a MAPPED coordinator-tick whose tick line is ${why} keeps the base-tick sentence (the task is named nowhere else)`, async () => {
+      f.wakes = [wake('w-ada', 'Ada', [mapped(TICK, 'MAPPED')], proof(['T:1']), [], undefined, tickText)];
+      await go();
+      expect(f.sent).toHaveLength(1);
+      expect(f.sent[0]).toContain('run your base tick (coordinator-system:tasks:on-base-tick)');
+    });
+  }
+
+  it('9. only the coordinator-tick\'s own state counts: WITHHELD coordinator-tick with a MAPPED team-tick keeps the base-tick sentence', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [mapped(TICK, 'WITHHELD'), mapped(TEAM, 'MAPPED')], proof(['T:1', 'V:1']), [], undefined, FORMS[0])];
+    await go();
+    expect(f.sent[0]).toContain('run your base tick (coordinator-system:tasks:on-base-tick)');
+  });
+
+  it('10. coverage keys and the ack proof are identical with and without tickText and action', async () => {
+    const p = proof(['T:1', 'V:1'], 'same');
+    f.sendReply = () => JSON.stringify(ACCEPTED_ONLY); // accepted but unconfirmed: the receipt (and its coverage) stays on disk
+    f.wakes = [wake('w-ada', 'Ada', [TICK, TEAM], p)];
+    await go();
+    const plain = { coverage: stored()['w-ada'].coverage, acked: [...f.acked] };
+    f.sent.length = 0; f.acked.length = 0; rmSync(join(dir, 'ticker-wake'), { recursive: true, force: true });
+    f.wakes = [wake('w-ada', 'Ada', [mapped(TICK, 'MAPPED'), mapped(TEAM, 'WITHHELD')], p, [], undefined, FORMS[0])];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect({ coverage: stored()['w-ada'].coverage, acked: [...f.acked] }).toEqual(plain);
+  });
+
+  it('11. a covered tick T and a new tick U: the header names only U, and the typed line is the server\'s whole line', async () => {
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'sent', coverage: ['T:1'], receiver: 'term_a#inc-1', at: Date.now() - 60_000, text: 'earlier', handle: 'term_a' } }));
+    const whole = `${FORMS[0]} · ${FORMS[1]}`;
+    f.wakes = [wake('w-ada', 'Ada', [TICK, TICK2], proof(['T:1', 'U:1'], 'c'), [], undefined, whole)];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0].startsWith(whole + ' Hadron ticker wake (eden-queue-tick)')).toBe(true);
+  });
+
+  it('puts the tick line before the open-task line\'s host text: line, nudge, then the open-task count', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, FORMS[0])];
+    f.openTasks['w-ada'] = Array.from({ length: 2 }, (_, i) => ({ id: `o${i}`, status: 'STARTED', assignee: { kind: 'WORKER', id: 'w-ada' } }));
+    await go();
+    expect(f.sent).toEqual([`${FORMS[0]} ${nudgeText(['team-tick'], [], OPEN(2))}`]);
+  });
+
+  it('a dry pass never types the line', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, FORMS[0])];
+    await go({ dry: true });
+    expect(f.sent).toEqual([]);
+  });
+});
+
+describe('#2746: a readable per-pass hold reason', () => {
+  const holdsFile = () => join(dir, 'ticker-wake', 'holds.log');
+  const holds = () => (existsSync(holdsFile()) ? readFileSync(holdsFile(), 'utf8').split('\n').filter(Boolean) : []);
+  const TEXT_SENTINEL = 'PRIVATE-TICK-TEXT-SENTINEL-2746a1';
+  const PROOF_SENTINEL = 'OPAQUE-PROOF-SENTINEL-2746b2';
+
+  it('a held wake writes one line naming the worker and a closed reason', async () => {
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    await go();
+    expect(f.sent).toEqual([]);
+    const lines = holds();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^\S+ Zed w-other no-receiver-on-host$/);
+  });
+
+  it('each hold site maps to its own closed code', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], 'opaque')];
+    await go();
+    expect(holds()[0]).toMatch(/ Ada w-ada proof-coverage-unreadable$/);
+    rmSync(holdsFile());
+    f.wakes = [wake('w-ada', 'Ada', [TICK, task('t1', 'END_SESSION')], proof(['T:1']))];
+    await go();
+    expect(holds()[0]).toMatch(/ Ada w-ada carries-other-reasons$/);
+  });
+
+  it.each([
+    ['left alone (also carries END_SESSION; the proof would record them delivered unseen)', 'carries-other-reasons'],
+    ['held (no receiver on this host)', 'no-receiver-on-host'],
+    ["held (the proof's tick coverage cannot be read)", 'proof-coverage-unreadable'],
+    ['held (the wake carries no server timing)', 'no-server-timing'],
+    ['held (another send to this terminal is in flight)', 'terminal-send-in-flight'],
+    ['an earlier send is unreconciled for another receiver', 'unreconciled-other-receiver'],
+    ['an earlier send is unreconciled', 'unreconciled-earlier-send'],
+    ['earlier request still unreconciled (x); no delivery evidence yet (y); needs a person', 'unreconciled-earlier-send'],
+    ['our nudge is in the composer', 'stranded-draft'],
+    ['held (the uncovered tick work cannot be identified)', 'uncovered-work-unidentified'],
+    ['held (the alarm cannot be read)', 'alarm-unreadable'],
+    ["held (the alarm's rule is not established)", 'alarm-rule-unestablished'],
+    ['held (the alarm was acknowledged)', 'alarm-acknowledged'],
+    ["held (the worker's check status cannot be read)", 'check-status-unreadable'],
+    ['held (the terminal incarnation changed)', 'terminal-changed'],
+    ['held (the old request could not be retained)', 'state-write-failed'],
+    ['nudged x but the receipt could not be written', 'state-write-failed'],
+    ['send not confirmed', 'send-unconfirmed'],
+    ['could not type; will retry', 'send-failed-will-retry'],
+    ['nudged x; ack FAILED', 'ack-failed'],
+    ['nudged x; acked', 'ok'],
+    ['tick line not typeable', 'info'],
+    ['held (something new)', 'other'],
+    ['a line nobody mapped', 'other'],
+  ])('#2746 every log wording maps to its closed code: %s', (body, code) => {
+    expect(holdOf(body)).toBe(code);
+  });
+
+  it('a delivered wake writes no hold line', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    await go();
+    expect(f.acked).toHaveLength(1);
+    expect(holds()).toEqual([]);
+  });
+
+  it('an earlier unreconciled send is reported as such, the incident of #2746', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    f.sendReply = () => JSON.stringify({ ok: true, result: { send: { accepted: false } } });
+    await go();
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'y'))];
+    await go();
+    expect(holds().some((l) => / Ada w-ada (unreconciled-earlier-send|send-unconfirmed)$/.test(l))).toBe(true);
+  });
+
+  it('the file never carries tick text, a proof, or a server message', async () => {
+    f.wakes = [wake('w-other', `Zed`, [TICK], `${PROOF_SENTINEL}.sig`, [], undefined, `tick coordinator-tick: ${TEXT_SENTINEL}`)];
+    await go();
+    f.wakes = [wake('w-ada', 'Ada', [TICK], `${PROOF_SENTINEL}`, [], undefined, `tick coordinator-tick: ${TEXT_SENTINEL}`)];
+    await go();
+    const text = holds().join('\n');
+    expect(text).not.toBe('');
+    expect(text).not.toContain(TEXT_SENTINEL);
+    expect(text).not.toContain(PROOF_SENTINEL);
+  });
+
+  it('a worker name or id outside the plain shape is not written as sent', async () => {
+    f.wakes = [wake('w-x y\nFORGED', 'Bad Name\nFORGED 2026 w-ada ok', [TICK])];
+    await go();
+    const lines = holds();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain('FORGED');
+    expect(lines[0].split(' ')).toHaveLength(4);
+  });
+
+  it('the file is capped: it keeps only the newest lines', async () => {
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    for (let i = 0; i < 230; i++) await go();
+    const lines = holds();
+    expect(lines.length).toBe(200);
+  });
+
+  it('the file is world-readable, so the orca user can read it', async () => {
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    await go();
+    const { statSync } = await import('node:fs');
+    expect(statSync(holdsFile()).mode & 0o444).toBe(0o444);
+  });
+
+  it('--dry writes no hold file', async () => {
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    await go({ dry: true });
+    expect(existsSync(holdsFile())).toBe(false);
+  });
+
+  it('a failed ack is reported as ack-failed', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    f.ackReply = () => ({ errors: [{ message: 'x', extensions: { code: 'WAKE_PROOF_STALE' } }] });
+    await go();
+    expect(holds()).toHaveLength(1);
+    expect(holds()[0]).toMatch(/ Ada w-ada ack-failed$/);
+  });
+
+  it('a wake left past the pass budget is reported as pass-budget-spent', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    await pass(cfg(), f.run, { budgetMs: 0 }, (l) => lines.push(l));
+    expect(f.sent).toEqual([]);
+    expect(holds()[0]).toMatch(/ Ada w-ada pass-budget-spent$/);
+  });
+
+  it('--dry writes nothing even when the state directory exists', async () => {
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    await go({ dry: true });
+    expect(existsSync(holdsFile())).toBe(false);
+  });
+
+  it('the file is world-readable even under a restrictive umask', async () => {
+    const { statSync } = await import('node:fs');
+    const old = process.umask(0o077);
+    try {
+      f.wakes = [wake('w-other', 'Zed', [TICK])];
+      await go();
+    } finally { process.umask(old); }
+    expect(statSync(holdsFile()).mode & 0o777).toBe(0o644);
+  });
+
+  it('an unwritable hold file is logged and never fails the pass', async () => {
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    mkdirSync(holdsFile());
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    await go();
+    expect(log()).toContain('hold reasons not written');
   });
 });

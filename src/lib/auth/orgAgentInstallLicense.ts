@@ -19,6 +19,17 @@ export type OrgAgentLicense =
   | 'CONCEALED'
   | 'GONE';
 
+/** The shared usable-state rule for cast classification and derived App readers.
+ * Missing same-org grants may be provisioned; a retained inactive one never is. */
+export function orgAgentLicenseUsable(
+  orgId:string,
+  agentOrganizationId:string|null,
+  grant:{activatedAt:Date|null;revokedAt:Date|null;expiresAt:Date|null}|null,
+  now=new Date(),
+):boolean {
+  return grant ? isLifecycleActive(grant,now) : agentOrganizationId===orgId;
+}
+
 /**
  * Classify `orgId`'s licence to `agentId` without throwing. The one place the licence rules live:
  * {@link planOrgAgentInstallGrant} is a wrapper over it, so install, base and clone cannot drift.
@@ -38,10 +49,10 @@ export async function classifyOrgAgentLicense(
     where: { orgId_agentId: { orgId, agentId } },
   });
   if (agent.organizationId === orgId) {
-    if (grant && !isLifecycleActive(grant)) return 'SAME_ORG_INACTIVE';
+    if (!orgAgentLicenseUsable(orgId,agent.organizationId,grant)) return 'SAME_ORG_INACTIVE';
     return grant ? 'LICENSED' : 'SAME_ORG_PROVISIONABLE';
   }
-  if (grant && isLifecycleActive(grant)) return 'LICENSED';
+  if (orgAgentLicenseUsable(orgId,agent.organizationId,grant)) return 'LICENSED';
   if (agent.visibility === 'PUBLIC') return grant ? 'FOREIGN_INACTIVE' : 'SUBSCRIBABLE';
   return 'CONCEALED';
 }

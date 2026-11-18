@@ -26,11 +26,14 @@ import { GraphQLError as GraphQLErrorClass, Kind, type GraphQLError, type GraphQ
 import { publicErrorExtensions } from '../../lib/errorDiagnostics.js';
 import { faultRequestId, INTERNAL_ERROR_CODE, INTERNAL_ERROR_MESSAGE, logInternalFault } from '../../lib/internalFault.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
-import { AmbiguousLegacyUrnError } from '../../lib/entityRef/errors.js';
+import { AmbiguousLegacyUrnError, EncryptedVectorIndexNotAcknowledgedError, InvalidChunkConfigError } from '../../lib/entityRef/errors.js';
 import { EntityNotFoundError } from '../../lib/entityRef/entityNotFound.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
+import { SetAssetEnabledError } from '../../controller/operations/setAgentAssetUploadEnabled.js';
 import { QueryTooComplexError } from './admissionComplexity.js';
+import { TeamReadBusyError } from '../../lib/agentTasks/teamReadBudget.js';
 import { GitCommandError } from '../../integrations/github/execGit.js';
+import { SessionExpiredError } from '../../lib/nodeCrypto.js';
 
 interface ClientErrorMapping {
   matches: (err: unknown) => boolean;
@@ -61,6 +64,21 @@ function mapping<E>(
 }
 
 const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
+  // #4455: the bounded team read (roster/composition/utilization) surfacing its budget expiry typed and RETRYABLE.
+  // The error is already a GraphQLError carrying its code, but mapping it here guarantees the extensions merge at
+  // the Apollo boundary and states the Sentry column. NOT silenced: these are the availability signal — the
+  // P2028 incident (#4380) was found by counting them, so the issue stream keeps them.
+  mapping(
+    (err): err is TeamReadBusyError => err instanceof TeamReadBusyError,
+    (err) => ({ ...err.extensions }),
+    { silenceInSentry: false },
+  ),
+  // #3009: declining the encrypted-vector disclosure is a caller refusal on both consumers of this list.
+  mapping(
+    (err): err is EncryptedVectorIndexNotAcknowledgedError => err instanceof EncryptedVectorIndexNotAcknowledgedError,
+    (err) => ({ code: 'ENCRYPTED_VECTOR_INDEX_NOT_ACKNOWLEDGED', disclosure: err.disclosure, memoryRef: err.memoryRef }),
+    { silenceInSentry: true },
+  ),
   // hadron-internal#3 L4: an over-limit operation is the caller's, not a fault. The refusal already carries its fixed
   // text and `extensions` (code, limit, max, http status), so nothing is added.
   mapping(
@@ -99,6 +117,44 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
     (err) => ({ code: 'AmbiguousLegacyUrnError', offendingValue: err.ref }),
     { silenceInSentry: true },
   ),
+  // #3136 review (local seat F1): AmbiguousUserRefError is deliberately NOT
+  // mapped. No GraphQL path throws it raw — every resolveUserRefOrEmail caller
+  // already answers the same condition typed: resolveRefArg and
+  // resolveGranteeId as BAD_USER_INPUT, workersHeldBy as an empty page
+  // (resolveUserRef, which effectiveAccess/cloneAgent call, never throws it).
+  // A central AMBIGUOUS_USER_REF code would mint a permanent synonym of the
+  // existing BAD_USER_INPUT answer (cor:agt:110:01) and — because
+  // resolveUserRefOrEmail reads the full user table for cross-org shares — an
+  // account-existence oracle no read gate covers (cor:api:140:02/:03). The
+  // per-surface disposition lives on the class doc (entityRef/errors.ts).
+  // #3136: updateMemory's chunk-dial validation threw this raw, so a mis-set
+  // chunkOverlap surfaced as INTERNAL_SERVER_ERROR while calling itself "the
+  // friendly typed error at the API boundary". The code is the message's own
+  // SCREAMING_SNAKE prefix — nothing ever reached the wire under the doc's old
+  // 'InvalidChunkConfigError' spelling, so the convention governs. Sentry: a
+  // caller's invalid dials are theirs (the DB CHECK backstop still exists for
+  // state that slips past the boundary).
+  mapping(
+    (err): err is InvalidChunkConfigError => err instanceof InvalidChunkConfigError,
+    (err) => ({ code: 'INVALID_CHUNK_CONFIG', reason: err.reason }),
+    { silenceInSentry: true },
+  ),
+  // #3136: encrypt/decrypt on an encrypted memory with no active session key
+  // used to be a bare Error('SESSION_EXPIRED: …') that only the surfaces which
+  // hand-wrapped it (comments/teamChat/teamRole/teamAttention/channels) typed;
+  // every other read/write path surfaced INTERNAL_SERVER_ERROR. Throwing the
+  // typed class at the source (nodeCrypto) and mapping it once gives every path
+  // the code those wrapped sites already deliver — message prefix unchanged, so
+  // the internal startsWith('SESSION_EXPIRED') catchers are untouched.
+  // Sentry: silenced — the hand-wrapped sites were already skipped by the
+  // plugin's non-INTERNAL_SERVER_ERROR branch; this is parity, not a new
+  // silence. The condition is caller session state (never unlocked, or the
+  // key-cache idle TTL #1114 released it), not a server fault.
+  mapping(
+    (err): err is SessionExpiredError => err instanceof SessionExpiredError,
+    (err) => ({ code: 'SESSION_EXPIRED', memoryId: err.memoryId }),
+    { silenceInSentry: true },
+  ),
   // #918: every asset refusal in one branch, taking the code off the instance —
   // MALWARE_BLOCKED, SCAN_PENDING, SCAN_BLOCKED, NOT_FOUND, the MIME/size
   // rejections, and anything the class gains later. Mapping the class rather
@@ -116,6 +172,15 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
     (err): err is AssetUploadError => err instanceof AssetUploadError,
     (err) => ({ code: err.code }),
     { silenceInSentry: false },
+  ),
+  // #2979: setAgentAssetUploadEnabled's refusals (PERMISSION_DENIED, NOT_FOUND) are caller errors with a code on the
+  // instance, exactly as AssetUploadError above. The message is the operation's fixed text (no ref, no id), so it is
+  // safe to show, and #1946's same-answer property for an unreadable-vs-absent Agent is kept by the resolver's gate.
+  // Silenced in Sentry: a refused caller is not a server fault.
+  mapping(
+    (err): err is SetAssetEnabledError => err instanceof SetAssetEnabledError,
+    (err) => ({ code: err.code }),
+    { silenceInSentry: true },
   ),
   // #1578/#1789: git failures carry a FIXED message by design (argv and stderr can hold the installation token), so the
   // text is safe and the code is the class's own. Still reported: a failing sync is ours to know about.

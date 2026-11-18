@@ -10,12 +10,13 @@ import * as manualRun from './resolvers.appRun.js';
 import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { setQuotaLimit } from '../../../jobs/appRuns.js';
 import { resolvers, type Context } from './resolvers.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({writeNodeToGit:vi.fn().mockResolvedValue(undefined)}));
-let ctx: Context, memoryId: string, appId: string, taskId: string;
+let ctx: Context, memoryId: string, appId: string, taskId: string, agentId: string;
 beforeEach(async () => {
+  vi.restoreAllMocks();
   vi.clearAllMocks();
-  vi.stubEnv('BOOT_PROMPT_SERVE_ENABLED','false');
   await cleanDb(db);
   const org = await db.organization.create({data:{name:'Import refusal',urn:'import2737.test'}});
   const user = await db.user.create({data:{githubId:273701,githubUsername:'import2737-admin',roles:['ADMIN']}});
@@ -25,14 +26,20 @@ beforeEach(async () => {
   memoryId=memory.id;
   const app=await db.app.create({data:{name:'Import App',urn:'import2737.test:app',organizationId:org.id}});
   appId=app.id;
+  // #2712: serving is always on, so the run needs an installed Agent with a served prompt.
+  agentId=(await db.agent.create({data:{name:'Importer',urn:'import2737.test:importer',organizationId:org.id}})).id;
+  await db.appAgent.create({data:{appId,agentId} as never});
+  await serveAgentBootPrompt(db,agentId,'You import.');
   const task=await db.node.create({data:{id:generateId(),memoryId,loc:'tasks:import',name:'Import',isRunnable:true,nodeType:'task',content:'Process {{importedNodeUrn}}'}});
   taskId=task.id;
 });
 afterEach(() => {vi.restoreAllMocks();vi.unstubAllEnvs();});
+// The installed Agent loses its prompt, so the run is refused BOOT_PROMPT_NOT_SET (cor:agt:040:10).
+const unserve=()=>db.agent.update({where:{id:agentId},data:{bootPromptNodeId:null,bootPromptUrn:null}});
 const input=()=>({memoryId,loc:'clips:refused',content:'# Imported',contentType:'text/markdown',taskRef:taskId,appRef:appId});
 describe('#2737 importNode run refusal',()=>{
   it('BOOT_PROMPT_NOT_SET leaves no imported node or run',async()=>{
-    vi.stubEnv('BOOT_PROMPT_SERVE_ENABLED','true');
+    await unserve();
     await expect(resolvers.Mutation.importNode({}, {input:input()},ctx)).rejects.toMatchObject({extensions:{code:'BOOT_PROMPT_NOT_SET'}});
     expect(await db.node.findUnique({where:{loc_memoryId:{loc:'clips:refused',memoryId}}}),'refused import must not persist its node').toBeNull();
     expect(await db.appRun.count()).toBe(0);
@@ -47,11 +54,14 @@ describe('#2737 importNode run refusal',()=>{
   });
   it('a refused re-import preserves existing content and revision history', async()=>{
     const prior=await db.node.create({data:{memoryId,loc:'clips:refused',name:'Curated',content:'Original'}});
-    const revisions=await db.nodeRevision.findMany({where:{nodeId:prior.id}});
-    vi.stubEnv('BOOT_PROMPT_SERVE_ENABLED','true');
+    // #2745: an empty history cannot prove rollback preserves existing snapshots.
+    await db.nodeRevision.create({data:{nodeId:prior.id,memoryId,loc:prior.loc,name:'Earlier',content:'Historical content',revNo:0,tags:[],changes:['initial import']}});
+    const revisions=await db.nodeRevision.findMany({where:{nodeId:prior.id},orderBy:{id:'asc'}});
+    expect(revisions).toHaveLength(1);
+    await unserve();
     await expect(resolvers.Mutation.importNode({}, {input:input()},ctx)).rejects.toMatchObject({extensions:{code:'BOOT_PROMPT_NOT_SET'}});
     expect(await db.node.findUnique({where:{id:prior.id}})).toMatchObject({content:'Original',name:'Curated',revSeq:prior.revSeq});
-    expect(await db.nodeRevision.findMany({where:{nodeId:prior.id}})).toEqual(revisions);
+    expect(await db.nodeRevision.findMany({where:{nodeId:prior.id},orderBy:{id:'asc'}})).toEqual(revisions);
   });
   it('an unexpected mint error rolls back the imported node', async()=>{
     vi.spyOn(manualRun,'mintManualRun').mockRejectedValueOnce(new Error('injected mint outage'));
@@ -86,7 +96,7 @@ describe('#2737 importNode run refusal',()=>{
   it('refusal publishes neither node nor run wake effects', async()=>{
     const nodeWritten=vi.spyOn(nodeEvents,'publishNodeWritten');
     const runRequested=vi.spyOn(runKernel,'publishRunRequested');
-    vi.stubEnv('BOOT_PROMPT_SERVE_ENABLED','true');
+    await unserve();
     await expect(resolvers.Mutation.importNode({}, {input:input()},ctx)).rejects.toMatchObject({extensions:{code:'BOOT_PROMPT_NOT_SET'}});
     expect(nodeWritten).not.toHaveBeenCalled();
     expect(runRequested).not.toHaveBeenCalled();
@@ -103,7 +113,9 @@ describe('#2737 importNode run refusal',()=>{
     expect(nodeWritten).toHaveBeenCalledTimes(1);
   });
   it('a node write refusal creates no run and preserves quota', async()=>{
-    await expect(resolvers.Mutation.importNode({}, {input:{...input(),name:'',nodeType:'comment'}},ctx)).rejects.toThrow();
+    await expect(resolvers.Mutation.importNode({}, {input:{...input(),name:'',nodeType:'comment'}},ctx)).rejects.toMatchObject({
+      extensions:{code:'ROLE_GOVERNED',kind:'comment',strength:'integrity',door:'createComment',op:'create',refusal:'produces'},
+    });
     expect(await db.appRun.count()).toBe(0);
     expect(await db.quotaCounter.count({where:{scopeId:appId}})).toBe(0);
   });
@@ -119,6 +131,23 @@ describe('#2737 importNode run refusal',()=>{
     vi.spyOn(busClient,'getBusClient').mockResolvedValue({publish} as never);
     await resolvers.Mutation.importNode({}, {input:input()},ctx);
     expect(observed).toEqual([true]);
+  });
+
+  it('#2745: the node-written broker observes the committed node, run and nonempty revision history', async()=>{
+    const prior=await db.node.create({data:{memoryId,loc:'clips:refused',name:'Curated',content:'Original'}});
+    await db.nodeRevision.create({data:{nodeId:prior.id,memoryId,loc:prior.loc,name:'Earlier',content:'Historical content',revNo:0,tags:[],changes:[]}});
+    const observed:Array<{nodeId:string;content:string|null;runCount:number;historyCount:number}>=[];
+    vi.spyOn(busClient,'getBusClient').mockResolvedValue({publish:async(subject:string,event:unknown)=>{
+      if(subject!==nodeEvents.NODE_WRITTEN_SUBJECT) return;
+      const {nodeId}=event as {nodeId:string};
+      const node=await db.node.findUnique({where:{id:nodeId}});
+      observed.push({nodeId,content:node?.content??null,runCount:await db.appRun.count(),historyCount:await db.nodeRevision.count({where:{nodeId}})});
+    }} as never);
+    await resolvers.Mutation.importNode({}, {input:input()},ctx);
+    // Node dispatch is fire-and-forget: drain it without making a fixed sleep the assertion.
+    await vi.waitFor(()=>expect(observed).toHaveLength(1),{timeout:2000,interval:10});
+    expect(observed[0]).toMatchObject({nodeId:prior.id,content:'# Imported',runCount:1});
+    expect(observed[0]!.historyCount).toBeGreaterThan(1);
   });
 
   it('an error after a real mint rolls back its run and consumed quota', async()=>{

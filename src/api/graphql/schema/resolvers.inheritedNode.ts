@@ -28,9 +28,11 @@
  * inherited node without `via` still reads as having none.
  */
 
+import { validateListPageInput } from '../../../lib/listPage.js';
 import { resolveInheritedEdges, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { isMemoryReadableCached } from './resolvers.helpers.js';
 import type { Context } from './resolvers.js';
+import { batchReadEdgeOverflow, loadBatchReadEdges, markBatchInheritedEndpoint } from './resolvers.nodeBatchEdges.js';
 
 type Resolver = (parent: any, args?: any, ctx?: any, info?: any) => unknown;
 
@@ -41,21 +43,33 @@ const empty = () => [];
 async function inheritedEdges(parent: { id: string; inheritedFrom?: InheritedFrom }, ctx: Context, direction: 'out' | 'in') {
   const via = parent.inheritedFrom?.via;
   if (!via) return [];
-  const resolved = await resolveInheritedEdges(ctx.db, {
-    nodeId: parent.id,
-    via,
-    direction,
-    canReadMemory: (memoryId) => isMemoryReadableCached(ctx, memoryId),
-  });
-  // Both endpoints are set, so Edge.source/target never re-load them by FK:
-  // the parent and a resolved endpoint are admitted through the child.
-  return resolved.map(({ edge, endpoint }) => direction === 'out'
-    ? { ...edge, sourceId: parent.id, source: parent, targetId: endpoint.id, target: endpoint }
-    : { ...edge, sourceId: endpoint.id, source: endpoint, targetId: parent.id, target: parent });
+  const load = async (remaining?: number) => {
+    const args = {
+      nodeId: parent.id, via, direction,
+      canReadMemory: (memoryId: string) => isMemoryReadableCached(ctx, memoryId),
+      onLimit: batchReadEdgeOverflow,
+    };
+    const resolved = remaining === undefined
+      ? await resolveInheritedEdges(ctx.db, args)
+      : await resolveInheritedEdges(ctx.db, { ...args, maxResults: remaining, identityOnly: true });
+    return resolved.map(({ edge, endpoint }) => {
+      if (remaining === undefined) return direction === 'out'
+        ? { ...edge, sourceId: parent.id, source: parent, targetId: endpoint.id, target: endpoint }
+        : { ...edge, sourceId: endpoint.id, source: endpoint, targetId: parent.id, target: parent };
+      // Retain admitted identities, not bodies. Edge.source/target lazily
+      // recheck the effective identity if that endpoint object is selected.
+      const result = direction === 'out'
+        ? { ...edge, sourceId: parent.id, source: parent, targetId: endpoint.id }
+        : { ...edge, sourceId: endpoint.id, targetId: parent.id, target: parent };
+      markBatchInheritedEndpoint(result, direction === 'out' ? 'target' : 'source', endpoint, via);
+      return result;
+    });
+  };
+  return loadBatchReadEdges(parent as { id: string; memoryId: string }, direction, load) ?? load();
 }
 
 /** Field → what an inherited node returns, given the field's normal value. */
-const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: any, ctx: any) => unknown> = {
+const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: any, ctx: any, args?: any) => unknown> = {
   // Ordinary inherited reads admit only live nodes; recovery never inherits.
   deletedAt: none,
   memory: none,
@@ -70,10 +84,15 @@ const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: a
   updatedByWorker: none,
   updatedByAgent: none,
   updatedByUser: none,
+  createdByUser: none,
   asComment: none,
   asset: none,
   signingRequests: empty,
-  commentSummary: () => ({ openThreads: 0, resolvedThreads: 0, comments: 0, viewerOpenThreadId: null }),
+  signingRequestsPage: (_value, _parent, _ctx, args) => {
+    validateListPageInput(args ?? {});
+    return { items: [], total: 0, hasMore: false, nextCursor: null };
+  },
+  commentSummary: () => ({ openThreads: 0, resolvedThreads: 0, comments: 0, viewerOpenThreadId: null, oldestOpenThreadAt: null }),
   approvalStatus: async (value) => {
     const s = await value();
     return { state: s.state, approval: null };
@@ -90,6 +109,8 @@ const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: a
     const s = await value();
     return { state: s.state, latestReport: null };
   },
+  // #3659: the rules are the base memory's, and a report is recorded against the base node.
+  validationTasks: none,
 };
 
 /** The fields {@link withInheritedNodeProjection} covers, for the drift pin. */
@@ -102,7 +123,7 @@ export function withInheritedNodeProjection<T extends Record<string, any>>(node:
     const original: Resolver = node[field] ?? ((parent) => parent[field]);
     out[field] = (parent, args, ctx, info) =>
       parent?.inheritedFrom
-        ? project(async () => original(parent, args, ctx, info), parent, ctx)
+        ? project(async () => original(parent, args, ctx, info), parent, ctx, args)
         : original(parent, args, ctx, info);
   }
   return out as T;

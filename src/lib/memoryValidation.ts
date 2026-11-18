@@ -19,12 +19,13 @@ import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAg
 import { normalizeObjectType } from './enforceNodeSchema.js';
 import type { MemorySchema } from './memorySchema.js';
 
-/** The six checks. Mirrors the GraphQL MemoryValidationCheck enum. */
+/** The validation checks. Mirrors the GraphQL MemoryValidationCheck enum. */
 export type ValidationKind =
   | 'BROKEN_REF'
   | 'SPARSE'
   | 'STALE_ABSTRACT'
   | 'EMBED_FAILED'
+  | 'INDEX_TRUNCATED'
   | 'GIT_MIRROR_FAILED'
   | 'SCHEMA';
 
@@ -44,8 +45,12 @@ export interface ValidationReport {
   nodesChecked: number;
   /** Findings, capped at `maxFindings`. */
   findings: ValidationFinding[];
-  /** The TRUE count, even when `findings` was capped. */
+  /** The TRUE problem count, even when `findings` was capped. */
   totalFindings: number;
+  /** Non-informational findings, counted even beyond the retained page. */
+  totalProblems: number;
+  /** Informational declarations; never included in the problem count. */
+  totalInformational: number;
   /**
    * A check that could NOT run. Reported explicitly rather than silently
    * omitted: a clean bill of health that quietly skipped a check is worse than
@@ -112,11 +117,18 @@ export async function validateMemoryNodes(
     // no longer exists.
     include: { outgoingEdges: { where: { deletedAt: null } } },
   });
-  const findings: ValidationFinding[] = [];
+  const problems: ValidationFinding[] = [];
+  const informational: ValidationFinding[] = [];
   let totalFindings = 0;
+  let totalInformational = 0;
   const record = (f: ValidationFinding) => {
-    totalFindings += 1;
-    if (findings.length < maxFindings) findings.push(f);
+    if (f.kind === 'INDEX_TRUNCATED') {
+      totalInformational += 1;
+      if (informational.length < maxFindings) informational.push(f);
+    } else {
+      totalFindings += 1;
+      if (problems.length < maxFindings) problems.push(f);
+    }
   };
 
   // BROKEN_REF, corrected in #819. The pre-#819 check compared every edge
@@ -198,6 +210,10 @@ export async function validateMemoryNodes(
     // permanent encrypted-no-plaintext class. All are operator-useful, because
     // from outside this audit an empty vector index is indistinguishable from
     // "no hits matched".
+    if (node.embeddingTruncatedChunks != null && node.embeddingTruncatedChunks > 0) {
+      record({ kind: 'INDEX_TRUNCATED', nodeId: node.id, nodeLoc: node.loc,
+        detail: `${node.embeddingTruncatedChunks} passage chunks omitted by the per-node indexing cap (informational)` });
+    }
     if (node.embeddingFailedAt) {
       record({
         kind: 'EMBED_FAILED',
@@ -244,12 +260,51 @@ export async function validateMemoryNodes(
         kind: 'GIT_MIRROR_FAILED',
         nodeId: o.nodeId,
         nodeLoc,
-        detail: `${o.kind === 'REMOVE' ? 'Git mirror removal of this path' : 'Git mirror write'} did not land (${o.errorClass}, ${o.attempts} attempt${o.attempts === 1 ? '' : 's'}); the repository may be stale`,
+        detail: `${o.kind === 'REMOVE' ? 'Git mirror removal of this path' : 'Git mirror write'} did not land (${o.errorClass}, ${o.attempts} attempt${o.attempts === 1 ? '' : 's'}); the repository may be stale${o.state === 'EXHAUSTED' ? `; retries stopped after ${o.attempts} attempts` : ''}`,
       });
     }
   }
 
-  return { nodesChecked: nodes.length, findings, totalFindings, skippedChecks };
+  // Keep each bucket bounded during the scan, and give actionable problems
+  // precedence regardless of where informational declarations were encountered.
+  const findings = problems.concat(informational.slice(0, Math.max(0, maxFindings - problems.length)));
+  return { nodesChecked: nodes.length, findings, totalFindings, totalProblems: totalFindings, totalInformational, skippedChecks };
+}
+
+/**
+ * The MCP prose for a whole report (#3010). `issueLines` / `informationalLines` are the RETAINED findings
+ * (capped at `maxFindings` per scan, problems first); the report's totals are the TRUE counts. Whenever a
+ * list is shorter than its total the header says "showing the first K", and an informational section the
+ * problems crowded out says so rather than printing a count over an empty body. `No issues found.` and the
+ * skipped-check disclosure are unchanged.
+ */
+export function formatValidationProse(
+  report: Pick<ValidationReport, 'nodesChecked' | 'totalFindings' | 'totalInformational' | 'skippedChecks'>,
+  issueLines: string[],
+  informationalLines: string[],
+): string {
+  let informationalNote = '';
+  if (report.totalInformational) {
+    const shown = informationalLines.length;
+    if (shown === 0) {
+      informationalNote = `\n\nInformational findings (${report.totalInformational}): none shown, the findings cap was filled by the issues above.`;
+    } else if (shown < report.totalInformational) {
+      informationalNote = `\n\nInformational findings (${report.totalInformational}, showing the first ${shown}):\n${informationalLines.join('\n')}`;
+    } else {
+      informationalNote = `\n\nInformational findings (${report.totalInformational}):\n${informationalLines.join('\n')}`;
+    }
+  }
+  // A skipped check is stated rather than silently omitted — a clean bill
+  // of health that quietly skipped a check is worse than no report.
+  const skippedNote = report.skippedChecks.length
+    ? `\n\nSkipped checks:\n${report.skippedChecks.map((c) => `- ${c.check}: ${c.reason}`).join('\n')}`
+    : '';
+  if (report.totalFindings === 0) {
+    return `Validated ${report.nodesChecked} nodes. No issues found.${informationalNote}${skippedNote}`;
+  }
+  const shownIssues = issueLines.length;
+  const cappedNote = shownIssues < report.totalFindings ? ` (showing the first ${shownIssues})` : '';
+  return `Found ${report.totalFindings} issue(s) in ${report.nodesChecked} nodes${cappedNote}:\n\n${issueLines.join('\n')}${informationalNote}${skippedNote}`;
 }
 
 /** The MCP prose line for one finding — the pre-#819 wording, preserved. */
@@ -259,6 +314,7 @@ export function formatFindingLine(f: ValidationFinding, nodeUrn: string): string
     SPARSE: 'sparse',
     STALE_ABSTRACT: 'stale-abstract',
     EMBED_FAILED: 'embed-failed',
+    INDEX_TRUNCATED: 'index-truncated',
     GIT_MIRROR_FAILED: 'git-mirror-failed',
     SCHEMA: 'schema',
   }[f.kind];

@@ -1,3 +1,4 @@
+import { resolveAppInstallation, type InstallationDb } from './appInstallations.js';
 /**
  * #1885 slice 2 — an Agent's effective system memory (cor:dmo:050:14).
  *
@@ -25,7 +26,7 @@ import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { AGENT_BASE_CHAIN_CAP } from './agentBase.js';
 import { COMMENT_NODE_TYPE } from './comments/index.js';
 
-type Db = Pick<PrismaClient, '$queryRaw'> | Prisma.TransactionClient;
+type Db = (Pick<PrismaClient, '$queryRaw'> & InstallationDb) | Prisma.TransactionClient;
 
 /** The role family a base never passes down (cor:dmo:050:14 ruling 2). */
 export const NOT_INHERITED_ROLE = 'boot-prompt';
@@ -390,6 +391,30 @@ export async function servedEndpointInEffect(
 /** An edge of an inherited node, resolved through its child (#1893). */
 export type ResolvedInheritedEdge<E, N> = { edge: E; endpoint: N & { inheritedFrom?: InheritedFrom } };
 
+/** #2801: selector-derived endpoint types keep metadata/identity readers honest about absent bodies. */
+const endpointIdentity = { id: true, memoryId: true, loc: true, role: true, deletedAt: true } as const satisfies Prisma.NodeSelect;
+const endpointMetadata = { ...endpointIdentity, name: true } as const satisfies Prisma.NodeSelect;
+type EndpointIdentity = Prisma.NodeGetPayload<{ select: typeof endpointIdentity }>;
+type EndpointMetadata = Prisma.NodeGetPayload<{ select: typeof endpointMetadata }>;
+type EndpointFull = Prisma.NodeGetPayload<{}>;
+type EdgeRow = Prisma.EdgeGetPayload<{}>;
+type EndpointRow = EndpointIdentity | EndpointMetadata | EndpointFull;
+type InheritedEdgeDb = Pick<PrismaClient, '$queryRaw' | 'edge' | 'node'>;
+type InheritedEdgeArgs = {
+  nodeId: string;
+  via: string;
+  direction: 'out' | 'in';
+  canReadMemory: (memoryId: string) => Promise<boolean>;
+  /** MCP projections render endpoint identity/name, never endpoint bodies. */
+  endpointMetadataOnly?: boolean;
+  /** Called when admitted results exceed the shared edge budget. */
+  onLimit?: () => never;
+} & (
+  // Only the bounded hydration path selects identity-only endpoint rows;
+  // maxResults bounds retained authorized results and pages raw edge metadata.
+  | { identityOnly: true; maxResults: number }
+  | { identityOnly?: false; maxResults?: number }
+);
 /**
  * #1893 (cor:dmo:050:14; Holger, team chat #10968 item 2) — an inherited
  * node's edges, read through the child it came through, resolved the way
@@ -406,40 +431,69 @@ export type ResolvedInheritedEdge<E, N> = { edge: E; endpoint: N & { inheritedFr
  * Both directions follow the same rule. So no edge ever hands over a base
  * node that is not in effect for the child (S7 stays shut).
  */
-export async function resolveInheritedEdges(
-  db: Pick<PrismaClient, '$queryRaw' | 'edge' | 'node'>,
-  args: {
-    nodeId: string;
-    via: string;
-    direction: 'out' | 'in';
-    canReadMemory: (memoryId: string) => Promise<boolean>;
-  },
-) {
+export function resolveInheritedEdges(db: InheritedEdgeDb, args: InheritedEdgeArgs & { identityOnly: true }): Promise<Array<ResolvedInheritedEdge<EdgeRow, EndpointIdentity>>>;
+export function resolveInheritedEdges(db: InheritedEdgeDb, args: InheritedEdgeArgs & { endpointMetadataOnly: true; identityOnly?: false }): Promise<Array<ResolvedInheritedEdge<EdgeRow, EndpointMetadata>>>;
+export function resolveInheritedEdges(db: InheritedEdgeDb, args: InheritedEdgeArgs & { endpointMetadataOnly?: false; identityOnly?: false }): Promise<Array<ResolvedInheritedEdge<EdgeRow, EndpointFull>>>;
+export function resolveInheritedEdges(db: InheritedEdgeDb, args: InheritedEdgeArgs): Promise<Array<ResolvedInheritedEdge<EdgeRow, EndpointRow>>>;
+export async function resolveInheritedEdges(db: InheritedEdgeDb, args: InheritedEdgeArgs) {
   const chain = await systemMemoryChain(db as Db, args.via);
   const inChain = new Set(chain.map((l) => l.memoryId));
-  const far = args.direction === 'out' ? 'target' : 'source';
-  const edges = await db.edge.findMany({
-    where: args.direction === 'out'
-      ? { sourceId: args.nodeId, deletedAt: null, target: { deletedAt: null } }
-      : { targetId: args.nodeId, deletedAt: null, source: { deletedAt: null } },
-    include: { [far]: true } as { target: true } | { source: true },
-    orderBy: { loc: 'asc' },
-  });
-  type EdgeRow = (typeof edges)[number];
-  type NodeRow = NonNullable<Awaited<ReturnType<typeof db.node.findUnique>>>;
-  const out: Array<ResolvedInheritedEdge<EdgeRow, NodeRow>> = [];
-  for (const edge of edges) {
-    const endpoint = (edge as unknown as Record<string, NodeRow>)[far]!;
-    if (!inChain.has(endpoint.memoryId)) {
-      if (await args.canReadMemory(endpoint.memoryId)) out.push({ edge, endpoint });
-      continue;
+  const bounded = args.maxResults !== undefined;
+  const pageSize = 128;
+  let cursor: string | undefined;
+  const readPage = (): Promise<Array<EdgeRow & { target?: EndpointRow; source?: EndpointRow }>> => {
+    const page = {
+      where: args.direction === 'out'
+        ? { sourceId: args.nodeId, deletedAt: null, target: { deletedAt: null } }
+        : { targetId: args.nodeId, deletedAt: null, source: { deletedAt: null } },
+      orderBy: bounded ? [{ loc: 'asc' as const }, { id: 'asc' as const }] : { loc: 'asc' as const },
+      ...(bounded ? { take: pageSize, ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}) } : {}),
+    };
+    if (bounded) return db.edge.findMany(page);
+    if (args.direction === 'out') return args.endpointMetadataOnly
+      ? db.edge.findMany({ ...page, include: { target: { select: endpointMetadata } } })
+      : db.edge.findMany({ ...page, include: { target: true } });
+    return args.endpointMetadataOnly
+      ? db.edge.findMany({ ...page, include: { source: { select: endpointMetadata } } })
+      : db.edge.findMany({ ...page, include: { source: true } });
+  };
+  let edges = await readPage();
+  const readEndpoint = (id: string) => args.identityOnly
+    ? db.node.findUnique({ where: { id }, select: endpointIdentity })
+    : args.endpointMetadataOnly
+      ? db.node.findUnique({ where: { id }, select: endpointMetadata })
+      : db.node.findUnique({ where: { id } });
+  const out: Array<ResolvedInheritedEdge<EdgeRow, EndpointRow>> = [];
+  const checkLimit = () => {
+    if (args.maxResults === undefined || out.length <= args.maxResults) return;
+    if (args.onLimit) args.onLimit();
+    throw new Error('Inherited edge result limit exceeded.');
+  };
+  do {
+    for (const edge of edges) {
+      const endpoint = bounded
+        ? await db.node.findUnique({ where: { id: args.direction === 'out' ? edge.targetId : edge.sourceId }, select: endpointIdentity })
+        : args.direction === 'out' ? edge.target : edge.source;
+      if (!endpoint || endpoint.deletedAt) continue;
+      if (!inChain.has(endpoint.memoryId)) {
+        if (await args.canReadMemory(endpoint.memoryId)) {
+          const row = bounded ? await readEndpoint(endpoint.id) : endpoint;
+          if (row && row.memoryId === endpoint.memoryId && row.loc === endpoint.loc && !row.deletedAt) out.push({ edge, endpoint: row });
+        }
+        checkLimit();
+        continue;
+      }
+      const effective = await findEffectiveNodeIdByLoc(db as Db, args.via, endpoint.loc);
+      if (!effective) continue;
+      const row = effective.id === endpoint.id && !bounded ? endpoint : await readEndpoint(effective.id);
+      if (!row || !(await servedEndpointInEffect(db as Db, args.via, endpoint.loc, effective, row))) continue;
+      out.push({ edge, endpoint: effective.inheritedFrom ? { ...row, inheritedFrom: effective.inheritedFrom } : row });
+      checkLimit();
     }
-    const effective = await findEffectiveNodeIdByLoc(db as Db, args.via, endpoint.loc);
-    if (!effective) continue;
-    const row = effective.id === endpoint.id ? endpoint : await db.node.findUnique({ where: { id: effective.id } });
-    if (!row || !(await servedEndpointInEffect(db as Db, args.via, endpoint.loc, effective, row))) continue;
-    out.push({ edge, endpoint: effective.inheritedFrom ? { ...row, inheritedFrom: effective.inheritedFrom } : row });
-  }
+    if (!bounded || edges.length < pageSize) break;
+    cursor = edges.at(-1)!.id;
+    edges = await readPage();
+  } while (edges.length);
   return out;
 }
 
@@ -460,19 +514,20 @@ export async function resolveInheritedEdges(
  * A full node URN names exactly that node and never goes through this chain.
  */
 export async function compileChain(
-  db: Db,
+  db: Db & InstallationDb,
   target: { appId: string; agentId: string },
 ): Promise<{ links: ChainLink[]; exemptThrough: number; installMemoryId: string | null }> {
   const agent = await (db as Pick<PrismaClient, '$queryRaw'>).$queryRaw<Array<{ urn: string; system_memory_id: string | null }>>`
     SELECT urn, system_memory_id FROM agents WHERE id = ${target.agentId} AND deleted_at IS NULL`;
   const own = agent[0];
   if (!own) return { links: [], exemptThrough: 0, installMemoryId: null };
-  const install = await (db as Pick<PrismaClient, '$queryRaw'>).$queryRaw<Array<{ id: string }>>`
+  const installed = await resolveAppInstallation(db,target.appId,target.agentId);
+  const install = installed ? await (db as Pick<PrismaClient, '$queryRaw'>).$queryRaw<Array<{ id: string }>>`
     SELECT m.id FROM memories m JOIN apps a ON a.id = m.app_id
     WHERE m.app_id = ${target.appId} AND m.install_of_agent_id = ${target.agentId}
       AND m.class = 'system' AND m.deleted_at IS NULL
       AND a.deleted_at IS NULL AND a.uninstalled_at IS NULL
-      AND EXISTS (SELECT 1 FROM app_agents aa WHERE aa.app_id = a.id AND aa.agent_id = ${target.agentId})`;
+      ` : [];
   const links: ChainLink[] = [];
   if (install[0]) links.push({ agentId: target.agentId, agentUrn: own.urn, memoryId: install[0].id });
   const base = own.system_memory_id ? await systemMemoryChain(db, own.system_memory_id) : [];

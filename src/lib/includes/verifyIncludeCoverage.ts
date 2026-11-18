@@ -1,4 +1,5 @@
 import { includeUrnTarget } from './includeUrnTarget.js';
+import { storedByteFingerprintSql } from './storedByteFingerprint.js';
 import type { Prisma } from '../../generated/prisma/index.js';
 import { INCLUDE_RETENTION_PARSER_VERSION, INCLUDE_RETENTION_SCHEMA_VERSION } from './structuralReferences.js';
 
@@ -36,7 +37,7 @@ export async function verifyIncludeCoverage(tx: Prisma.TransactionClient): Promi
         OR c.source_memory_id <> n.memory_id
         OR c.source_loc <> n.loc
         OR c.source_encrypted <> m.is_encrypted
-        OR c.source_content_fingerprint <> encode(sha256(convert_to(CASE WHEN n.content IS NULL THEN 'null' ELSE 'text:' || n.content END, 'UTF8')), 'hex')
+        OR c.source_content_fingerprint <> ${storedByteFingerprintSql('n.content')}
         OR c.reference_count <> (SELECT count(*) FROM include_references r WHERE r.includer_id = n.id)
         OR (c.state = 'COMPLETE_EMPTY' AND c.reference_count <> 0)
         OR (c.state = 'COMPLETE_TAGS' AND c.reference_count = 0)

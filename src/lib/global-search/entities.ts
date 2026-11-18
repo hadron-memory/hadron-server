@@ -7,7 +7,7 @@
  *   - Organization:    id ∈ orgIds
  *   - Memory / Node:   memoryId ∈ accessibleMemoryIds (admin: owner-only carve-out)
  *   - Agent / App:     organizationId ∈ orgIds  (App also: uninstalledAt = null)
- *   - AiServiceConfig: owner org ∈ orgIds  (org-, app-, or agent-owned)
+ *   - AiServiceConfig: the id read's gate (#3917, aiConfigReadScope): org ADMIN+, a user-owned App/Agent's owner, platform admin for server-owned
  *   - User:            authenticated viewer only (parity with `searchUsers`)
  *
  * Encryption: only Node `content` is ciphertext on encrypted memories
@@ -18,8 +18,9 @@
  * Spec: cor:api:050:02
  */
 
+import { GraphQLError } from 'graphql';
 import { COMMENT_NODE_TYPE } from '../comments/index.js';
-import { searchContains, searchStartsWith } from '../../integrations/db/provider.js';
+import { searchContains } from '../../integrations/db/provider.js';
 import type { PrismaClient, Prisma } from '../../generated/prisma/index.js';
 import {
   bestMatch,
@@ -33,6 +34,9 @@ import { userUrn } from '../userHandle.js';
 import { canSeeUserPersonalFields, type UserVisibilityCtx } from '../auth/userVisibility.js';
 import { foreignIdentityScopedMemoryFilter } from '../auth/memoryOwnership.js';
 import { discoverableOrgWhere } from '../orgDiscoverability.js';
+import { aiConfigReadScope } from '../aiConfigReadScope.js';
+import { aiConfigOwnerKey, loadAiConfigOwners, type AiConfigOwnerRef } from '../aiConfigOwner.js';
+import { composeAiConfigUrn } from '../entityRef/aiConfigRef.js';
 
 type AnyWhere = Record<string, unknown>;
 
@@ -98,38 +102,35 @@ function textPred(column: string, q: string): AnyWhere {
   return searchContains(column, q) as AnyWhere;
 }
 
-function startsPred(column: string, q: string): AnyWhere {
-  return searchStartsWith(column, q) as AnyWhere;
-}
-
 /**
- * The loc portion of a node-URN query — everything after the leading org +
- * memory hierarchy atoms. A full node URN is `root:memory:loc` (v1: `org::memory::loc`), but the Node
- * row stores only `loc`, so matching the whole query against `loc` never hits;
- * we recover the loc here to build a PRECISE loc predicate.
- *
- * Earlier this returned just the LAST colon-atom (e.g. `cor:brd:010:01` → `01`),
- * which was so broad it flooded the candidate cap and crowded the real row out
- * before scoring — a bare-loc search returned nothing (#301). Stripping exactly
- * the org + memory atoms keeps the fallback precise.
- *
- * Separator-agnostic: collapse `::`/`:` runs to single-colon atoms (like
- * match.ts `singleColon`) before stripping, so v1 (`org::memory::loc`),
- * canonical v2 (`org:memory:loc`), and mixed (`org::memory:loc`) forms all yield the
- * loc. The Node row stores its loc single-colon, so rejoining with `:` matches.
- * Returns '' when there is no loc portion (≤ 2 atoms — an org/memory URN, not a
- * node URN).
- *
- * This is a heuristic: it can't know whether the first two atoms are really an
- * org + memory (full node URN) or just the start of a longer loc (a partial-loc
- * search like `brd:010:01`, where it wrongly yields `01`). The suffix is matched
- * with `startsWith`, NOT `contains` (see searchNodes), so a wrong guess like
- * `01` matches ~nothing and can't re-flood the cap — the precise whole-query
- * predicate carries partial-loc searches.
+ * A substring of memory.urn + ':' + loc is either wholly inside one column,
+ * or crosses their separator. Try every separator of the normalized query as
+ * that boundary: the memory must END with the left half and loc START with
+ * the right half. No assumption about how many leading atoms were supplied.
+ * Two-sided boundaries join the direct loc predicates; memory-only and
+ * one-sided matches fill unused slots separately in searchNodes. Memory URNs
+ * may still store the legacy double-colon spelling; loc is single-colon. Final scoring uses the shared
+ * URN emitter.
  */
-function locSuffix(urnTerm: string): string {
-  const atoms = urnTerm.replace(/:+/g, ':').split(':');
-  return atoms.length > 2 ? atoms.slice(2).join(':') : '';
+function nodeUrnPreds(urnTerm: string): { direct: AnyWhere[]; broad: AnyWhere[] } {
+  const term = urnTerm.replace(/:+/g, ':');
+  const direct: AnyWhere[] = [textPred('loc', term)];
+  const broad: AnyWhere[] = [{ memory: { OR: urnPreds('urn', term) } }];
+  for (let i = 0; i < term.length; i++) {
+    if (term[i] !== ':') continue;
+    const memoryTail = term.slice(0, i);
+    const locHead = term.slice(i + 1);
+    for (const variant of urnSearchVariants(memoryTail)) {
+      // One-sided splits are real URN substrings, but can match an entire
+      // memory or every loc prefix. Like #301, they must not flood the cap
+      // before direct matches; keep them in the remaining-slot pool.
+      (memoryTail && locHead ? direct : broad).push({ AND: [
+        { memory: { urn: { endsWith: variant, mode: 'insensitive' } } },
+        { loc: { startsWith: locHead, mode: 'insensitive' } },
+      ] });
+    }
+  }
+  return { direct, broad };
 }
 
 /**
@@ -262,22 +263,11 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   const { fields, q, urnTerm, principal } = ctx;
   const preds: AnyWhere[] = [];
   if (fields.has('pk')) preds.push(pkPred(q));
+  let broadUrnPreds: AnyWhere[] = [];
   if (fields.has('urn')) {
-    // Node URN is computed (memory.urn + loc), so match the stored `loc`:
-    //   1. CONTAINS the whole query — covers bare- and partial-loc searches
-    //      (`cor:brd:010:01`, `brd:010:01`), the common case.
-    //   2. STARTS WITH the loc portion of a full node-URN query —
-    //      covers pasting a complete node URN, whose loc the row stores without
-    //      the org/memory prefix.
-    // The suffix uses startsWith, not contains: locSuffix is a heuristic strip
-    // that mis-fires on partial locs (yielding e.g. `01`), and a broad
-    // `contains '01'` would flood the candidate cap and drop the real row
-    // (#301). An anchored startsWith for a bad guess matches ~nothing, so the
-    // precise predicate (1) still carries the search. Scoring re-anchors on the
-    // full node URN regardless.
-    preds.push(textPred('loc', urnTerm));
-    const suffix = locSuffix(urnTerm);
-    if (suffix && suffix !== urnTerm) preds.push(startsPred('loc', suffix));
+    const urnPredicates = nodeUrnPreds(urnTerm);
+    preds.push(...urnPredicates.direct);
+    broadUrnPreds = urnPredicates.broad;
   }
   if (fields.has('name')) preds.push(textPred('name', q));
   if (fields.has('description')) preds.push(textPred('description', q));
@@ -310,6 +300,10 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   };
   if (fields.has('content')) nodeSelect.content = true;
 
+  // #1586: direct node-field and two-sided boundary matches take candidate slots
+  // before memory-only and one-sided matches. A large memory whose address
+  // contains a word must not crowd out a node named that word. Fill only the remaining slots,
+  // so the total fetched/scored node budget stays ctx.cap (not cap per branch).
   const rows = await ctx.db.node.findMany({
     where: {
       // #1608 (cor:dmo:110:08) — global search is content only; comments are
@@ -319,6 +313,22 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
     select: nodeSelect,
     take: ctx.cap,
   });
+
+  if (broadUrnPreds.length > 0 && rows.length < ctx.cap) {
+    const broadMatches = await ctx.db.node.findMany({
+      where: {
+        AND: [
+          nodeScopeWhere(principal), { deletedAt: null },
+          { nodeType: { not: COMMENT_NODE_TYPE } },
+          { id: { notIn: rows.map(row => row.id) } },
+          { OR: broadUrnPreds },
+        ],
+      } as Prisma.NodeWhereInput,
+      select: nodeSelect,
+      take: ctx.cap - rows.length,
+    });
+    rows.push(...broadMatches);
+  }
 
   const hits: GlobalSearchHit[] = [];
   for (const r of rows) {
@@ -459,42 +469,106 @@ async function searchApps(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   return hits;
 }
 
+/** The most gated configs the URN leg reads per search; a URN is computed, so it is matched here, not in SQL. */
+const AICONF_URN_SCAN_MAX = 2000;
+const AICONF_URN_PREFIX = 'hrn:aiconf:';
+
+/**
+ * #3917: AiServiceConfig search. Every leg (urn, name, pk) sits behind the id
+ * read's gate (`aiConfigReadScope`, the filter form of `requireAiConfigOwnerAdmin`),
+ * applied in the candidate query so an unreadable config neither ranks, counts
+ * toward `total`, nor takes a cap slot (cor:api:050:02/03; cor:urn:010:01 V63).
+ * The URN is computed (cor:urn:010:01 point 3), so the urn leg composes it for
+ * the gated rows and matches that.
+ */
 async function searchAiServiceConfigs(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
-  const { fields, q, principal } = ctx;
+  const { fields, q, urnTerm, principal } = ctx;
+  const wantUrn = fields.has('urn');
   const preds: AnyWhere[] = [];
   if (fields.has('pk')) preds.push(pkPred(q));
   if (fields.has('name')) preds.push(textPred('name', q));
-  if (preds.length === 0) return [];
-  if (principal.orgIds !== null && principal.orgIds.length === 0) return [];
+  if (preds.length === 0 && !wantUrn) return [];
 
-  // Owner-org scope: directly org-owned, or owned by an app/agent in the org.
-  // AiServiceConfig has NO deletedAt (hard-deleted) — no soft-delete filter.
-  const ownerScope: AnyWhere =
-    principal.orgIds !== null
-      ? {
-          OR: [
-            { organizationId: { in: principal.orgIds } },
-            { app: { organizationId: { in: principal.orgIds } } },
-            { agent: { organizationId: { in: principal.orgIds } } },
-          ],
-        }
-      : {};
-
-  const rows = await ctx.db.aiServiceConfig.findMany({
-    where: { AND: [ownerScope, { OR: preds }] } as Prisma.AiServiceConfigWhereInput,
-    select: {
-      id: true,
-      name: true,
-      organizationId: true,
-      app: { select: { organizationId: true } },
-      agent: { select: { organizationId: true } },
-    },
-    take: ctx.cap,
+  const readable = await aiConfigReadScope(ctx.db, {
+    viewerUserId: principal.viewerUserId,
+    isPlatformAdmin: principal.isPlatformAdmin,
+    orgIds: principal.orgIds,
+    orgScopeId: principal.orgScopeId,
+    impersonationOrgId: principal.impersonationOrgId,
   });
+  if (!readable) return [];
+
+  // AiServiceConfig has NO deletedAt (hard-deleted) — no soft-delete filter.
+  const select = {
+    id: true,
+    name: true,
+    organizationId: true,
+    appId: true,
+    agentId: true,
+    hadronServerId: true,
+    app: { select: { organizationId: true } },
+    agent: { select: { organizationId: true } },
+  } satisfies Prisma.AiServiceConfigSelect;
+  type Row = Prisma.AiServiceConfigGetPayload<{ select: typeof select }>;
+
+  const byId = new Map<string, Row>();
+  if (preds.length > 0) {
+    const rows = await ctx.db.aiServiceConfig.findMany({
+      where: { AND: [readable, { OR: preds }] } as Prisma.AiServiceConfigWhereInput,
+      select,
+      take: ctx.cap,
+    });
+    for (const r of rows) byId.set(r.id, r);
+  }
+  if (wantUrn) {
+    const rows = await ctx.db.aiServiceConfig.findMany({
+      where: readable,
+      select,
+      orderBy: { id: 'asc' },
+      take: AICONF_URN_SCAN_MAX + 1,
+    });
+    if (rows.length > AICONF_URN_SCAN_MAX) {
+      rows.length = AICONF_URN_SCAN_MAX;
+      ctx.degraded.push(`aiServiceConfig URN search read the first ${AICONF_URN_SCAN_MAX} readable configs only`);
+    }
+    for (const r of rows) byId.set(r.id, r);
+  }
+  const rows = [...byId.values()];
+
+  const owners = await loadAiConfigOwners(
+    ctx.db,
+    rows.flatMap((r): AiConfigOwnerRef[] =>
+      r.organizationId ? [{ ownerType: 'ORGANIZATION', ownerId: r.organizationId }]
+      : r.appId ? [{ ownerType: 'APP', ownerId: r.appId }]
+      : r.agentId ? [{ ownerType: 'AGENT', ownerId: r.agentId }]
+      : r.hadronServerId ? [{ ownerType: 'HADRON_SERVER', ownerId: r.hadronServerId }]
+      : [],
+    ),
+  );
+  const urnOf = (r: Row): string | null => {
+    const ref: AiConfigOwnerRef | null = r.organizationId ? { ownerType: 'ORGANIZATION', ownerId: r.organizationId }
+      : r.appId ? { ownerType: 'APP', ownerId: r.appId }
+      : r.agentId ? { ownerType: 'AGENT', ownerId: r.agentId }
+      : r.hadronServerId ? { ownerType: 'HADRON_SERVER', ownerId: r.hadronServerId }
+      : null;
+    const info = ref ? owners.get(aiConfigOwnerKey(ref)) : undefined;
+    if (!ref || !info) return null;
+    // The reserved `server` root names THE SERVER ANSWERING: another server's config has no URN here.
+    if (ref.ownerType === 'HADRON_SERVER') return info.current ? composeAiConfigUrn({ kind: 'server' }, r.name) : null;
+    if (info.urn == null) return null;
+    const kind = ref.ownerType === 'ORGANIZATION' ? 'org' : ref.ownerType === 'APP' ? 'app' : 'agent';
+    return composeAiConfigUrn({ kind, urn: info.urn }, r.name);
+  };
 
   const hits: GlobalSearchHit[] = [];
   for (const r of rows) {
+    const urn = urnOf(r);
     const candidates: FieldCandidate[] = [
+      {
+        field: 'urn',
+        value: urn,
+        tier: wantUrn && urn ? Math.max(urnMatchTier(urn.slice(AICONF_URN_PREFIX.length), urnTerm), urnMatchTier(urn, urnTerm)) as 0 | 1 | 2 | 3 : 0,
+      },
       { field: 'name', value: r.name },
       { field: 'pk', value: r.id, tier: r.id === q ? 3 : 0 },
     ];
@@ -503,7 +577,7 @@ async function searchAiServiceConfigs(ctx: AdapterCtx): Promise<GlobalSearchHit[
     hits.push({
       entityType: 'aiServiceConfig',
       id: r.id,
-      urn: null,
+      urn,
       name: r.name,
       description: null,
       matchedField: m.field,
@@ -594,6 +668,123 @@ async function searchUsers(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   return hits;
 }
 
+/** Added to a task's score on an exact handle match: above a tie with an exact title (tier 3 x name weight). */
+const EXACT_HANDLE_BOOST = 0.5;
+
+export const taskSearchLimits = {
+  /** Distinct Apps examined per page. */
+  page: 100,
+  /** Stop once this many Apps are admitted: the per-entity candidate cap bounds what they can contribute. */
+  admittedApps: 200,
+  /** Hard safety bound on Apps examined (denied ones included), so a broad query by a stranger stays bounded. */
+  maxScanned: 10_000,
+};
+
+/** The next page of distinct App ids (ascending, after `after`) holding a task that matches. */
+async function taskAppPage(db: PrismaClient, match: AnyWhere, after: string | null): Promise<{ appId: string }[]> {
+  return db.agentTask.findMany({
+    where: { AND: [match, after ? { appId: { gt: after } } : {}] } as Prisma.AgentTaskWhereInput,
+    distinct: ['appId'],
+    select: { appId: true },
+    orderBy: { appId: 'asc' },
+    take: taskSearchLimits.page,
+  });
+}
+
+/**
+ * #3945 (cor:api:050:02): tasks match on title and handle, both under `name` (case-insensitive substring), an exact
+ * handle ranking first. The per-App read gate runs on every App BEFORE a task becomes a candidate, so an unreadable
+ * task is indistinguishable from a missing one in hits, ranking and `total`. No gate (MCP) or no `name` field ⇒ nothing.
+ */
+async function searchAgentTasks(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
+  const { fields, q, principal } = ctx;
+  const gate = principal.taskReadGate;
+  if (!gate || !fields.has('name')) return [];
+  const match: AnyWhere = {
+    OR: [textPred('title', q), textPred('handle', q)],
+    ...(principal.orgScopeId || principal.taskAppScope
+      ? {
+          app: {
+            AND: [
+              ...(principal.orgScopeId ? [{ organizationId: principal.orgScopeId }] : []),
+              ...(principal.taskAppScope ? [principal.taskAppScope] : []),
+            ],
+          },
+        }
+      : {}),
+  };
+
+  const admitted: string[] = [];
+  let after: string | null = null;
+  let scanned = 0;
+  // Denied Apps never count against the admitted bound: only the hard scan bound stops a walk that keeps finding denied Apps.
+  while (admitted.length < taskSearchLimits.admittedApps && scanned < taskSearchLimits.maxScanned) {
+    const groups = await taskAppPage(ctx.db, match, after);
+    const ok = await Promise.all(
+      groups.map(async (g) => {
+        try {
+          return await gate(g.appId);
+        } catch (e) {
+          // A typed refusal reads as denied (never a signal); a database or programming failure must not read as "not allowed".
+          if (e instanceof GraphQLError) return false;
+          throw e;
+        }
+      }),
+    );
+    groups.forEach((g, i) => ok[i] && admitted.push(g.appId));
+    scanned += groups.length;
+    if (groups.length < taskSearchLimits.page) break;
+    after = groups[groups.length - 1]!.appId;
+  }
+  if (admitted.length === 0) return [];
+
+  const select = { id: true, handle: true, title: true, appId: true, app: { select: { organizationId: true } } } as const;
+  const [exact, rows] = await Promise.all([
+    ctx.db.agentTask.findMany({
+      where: { AND: [{ appId: { in: admitted } }, { handle: { equals: q, mode: 'insensitive' } }] } as Prisma.AgentTaskWhereInput,
+      select,
+      orderBy: { id: 'asc' },
+      take: ctx.cap,
+    }),
+    ctx.db.agentTask.findMany({
+      where: { AND: [{ appId: { in: admitted } }, match] } as Prisma.AgentTaskWhereInput,
+      select,
+      orderBy: { id: 'asc' },
+      take: ctx.cap,
+    }),
+  ]);
+  const seen = new Set<string>();
+  const hits: GlobalSearchHit[] = [];
+  for (const r of [...exact, ...rows]) {
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    const m = bestMatch(
+      [
+        { field: 'name', value: r.title },
+        { field: 'name', value: r.handle },
+      ],
+      q,
+      fields,
+    );
+    if (!m) continue;
+    hits.push({
+      entityType: 'agentTask',
+      id: r.id,
+      urn: null, // until #3878 serves task URNs (#3950)
+      name: r.title,
+      description: null, // pinned for this slice
+      matchedField: m.field,
+      // An exact handle (ignoring case) outranks every other match, an exact title included (cor:api:050:02).
+      score: r.handle !== null && r.handle.toLowerCase() === q.toLowerCase() ? m.score + EXACT_HANDLE_BOOST : m.score,
+      memoryId: null,
+      organizationId: r.app.organizationId,
+      handle: r.handle,
+    });
+    if (hits.length >= ctx.cap) break;
+  }
+  return hits;
+}
+
 export const ADAPTERS: Record<SearchEntityType, (ctx: AdapterCtx) => Promise<GlobalSearchHit[]>> = {
   organization: searchOrganizations,
   memory: searchMemories,
@@ -602,4 +793,5 @@ export const ADAPTERS: Record<SearchEntityType, (ctx: AdapterCtx) => Promise<Glo
   app: searchApps,
   aiServiceConfig: searchAiServiceConfigs,
   user: searchUsers,
+  agentTask: searchAgentTasks,
 };

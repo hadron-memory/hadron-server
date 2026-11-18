@@ -106,6 +106,14 @@ describe('sameOwner', () => {
 
 describe('#949 — createAgent cannot promote a foreign-owned memory', () => {
   it('refuses a memory owned by another org', async () => {
+    // Readable and writable to the caller (a CONTRIBUTOR of org B), so the
+    // refusal is the owner check's, not the promotion target gate's: an
+    // unreadable target answers MEMORY_NOT_FOUND and an unwritable one the
+    // write gate's refusal, before any owner comparison
+    // (resolvers.systemMemoryPromotionGate.test.ts).
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: orgB.id, userId: adminA.id, role: 'CONTRIBUTOR' },
+    });
     const foreign = await db.memory.create({
       data: {
         id: generateId(),
@@ -143,7 +151,9 @@ describe('#949 — createAgent cannot promote a foreign-owned memory', () => {
     });
     await expectCode(
       M.createAgent(null, { name: 'Mine', systemMemoryId: theirs.id }, ctx(userA.id)),
-      'SYSTEM_MEMORY_OWNER_MISMATCH',
+      // Another user's memory is unreadable to the caller, so the promotion
+      // target gate answers first, as for a missing id (no owner disclosed).
+      'MEMORY_NOT_FOUND',
     );
   });
 
@@ -180,7 +190,7 @@ describe('#949 — updateAgent first-attach cannot attach a foreign-owned memory
     });
     await expectCode(
       M.updateAgent(null, { ref: agent.id, systemMemoryId: theirs.id }, ctx(userA.id)),
-      'SYSTEM_MEMORY_OWNER_MISMATCH',
+      'MEMORY_NOT_FOUND', // unreadable: the target gate answers before the owner check
     );
     const untouched = await db.memory.findUniqueOrThrow({ where: { id: theirs.id } });
     expect(untouched.class).toBe('knowledge');

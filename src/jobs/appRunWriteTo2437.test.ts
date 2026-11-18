@@ -31,8 +31,9 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, createDbRunConsentPrincipal } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 
 vi.mock('../lib/bus/index.js', () => ({
   getBusClient: vi.fn(async () => null),
@@ -56,6 +57,7 @@ const UNGATED_URN = `${ORG_URN}:ungated`;
 let orgId: string;
 let appId: string;
 let memoryId: string;
+let agentId: string;
 let ungatedMemoryId: string;
 
 /** Point the entry node's data.output at a destination for one test. */
@@ -71,9 +73,11 @@ async function runOnce(body = 'report body'): Promise<{ runId: string; outcome: 
   const run = await mintAppRun(db, {
     organizationId: orgId,
     appId,
+    agentId,
     triggerKind: 'MANUAL',
     entryNodeUrn: ENTRY,
     eventData: {},
+    consentPrincipal: await createDbRunConsentPrincipal(db, orgId, appId),
   });
   const deps: RunExecutionDeps = {
     ...makeProdRunDeps(db),
@@ -101,12 +105,12 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: orgId, name: 'writeto-app', urn: `${ORG_URN}::writeto-app` },
   });
   appId = app.id;
-  // The granted destination: the run principal's write access rides the
-  // App's installed Agent's memory map (read-write AgentMemoryItem).
+  // #3278: the flow/destination is PUBLIC for reads. Writes require explicit
+  // prefix grants, never the installed Agent's read-write item.
   const memory = await db.memory.create({
     data: {
       id: generateId(), organizationId: orgId, name: 'writemem',
-      urn: MEM_URN, class: 'knowledge', visibility: 'ORGANIZATION',
+      urn: MEM_URN, class: 'knowledge', visibility: 'PUBLIC',
     },
   });
   memoryId = memory.id;
@@ -122,9 +126,17 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: orgId, name: 'writeto-agent', urn: `${ORG_URN}:writeto-agent` },
   });
   await db.appAgent.create({ data: { appId, agentId: agent.id } });
+  agentId = agent.id;
+  await serveAgentBootPrompt(db, agentId, 'Test boot prompt.'); // #2712: a run is served its Agent's prompt
   await db.agentMemoryItem.create({
     data: { agentId: agent.id, memoryId, role: 'read-write' },
   });
+  const grantor = await createDbRunConsentPrincipal(db, orgId, appId);
+  await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: grantor.userId } }, data: { role: 'ADMIN' } });
+  await db.appMemoryWriteGrant.createMany({ data: ['reports', 'flow'].map(prefix => ({
+    appId, memoryId, prefix, grantedBy: grantor.userId,
+    registerNodeUrn: 'hrn:node:example.com:fixture:authority',
+  })) });
   await db.node.create({
     data: {
       id: generateId(), memoryId, loc: 'flow:report', name: 'report',

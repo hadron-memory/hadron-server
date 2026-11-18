@@ -1,0 +1,51 @@
+{
+  "description": "DRAFT (Bob, #1632 S2b-2; not law until Vera reviews and Holger approves). v3 conformance vectors for cor:dmo:130:01: v1's lines under prefix hadron-signature-v3 plus a final 'request <id>' line. requestId is a 128-bit CSPRNG value in unpadded base64url (22 chars, [A-Za-z0-9_-]), written verbatim on one line. Every line including the last ends with LF; no CR. challenge = raw SHA-256 of the payload bytes. Generated independently with Python hashlib from the approval hashes in signaturePayload.fixture.json. v1 payloads are never accepted by a verifier (R80). The request line carries the stored id string verbatim: the server's canonical unpadded base64url of the 16 random bytes, never re-encoded.",
+  "version": "hadron-signature-v3",
+  "challengeAlgorithm": "SHA-256",
+  "cases": [
+    {
+      "name": "spec-retention-request-a",
+      "note": "request id of 22 base64url characters",
+      "nodeId": "01a10408afb6716c80d6944e8845467b",
+      "approvalHash": "82af07de06359450e375ee9f1e3639f5f124d2e2d9ed176001ff108175ce1246",
+      "requestId": "AAAAAAAAAAAAAAAAAAAAAA",
+      "payloadUtf8": "hadron-signature-v3\nnode 01a10408afb6716c80d6944e8845467b\napproval-hash 82af07de06359450e375ee9f1e3639f5f124d2e2d9ed176001ff108175ce1246\nrequest AAAAAAAAAAAAAAAAAAAAAA\n",
+      "canonical": "aGFkcm9uLXNpZ25hdHVyZS12Mwpub2RlIDAxYTEwNDA4YWZiNjcxNmM4MGQ2OTQ0ZTg4NDU0NjdiCmFwcHJvdmFsLWhhc2ggODJhZjA3ZGUwNjM1OTQ1MGUzNzVlZTlmMWUzNjM5ZjVmMTI0ZDJlMmQ5ZWQxNzYwMDFmZjEwODE3NWNlMTI0NgpyZXF1ZXN0IEFBQUFBQUFBQUFBQUFBQUFBQUFBQUEK",
+      "challengeHex": "99d5ba1109f13770d25c0d7f7c77d48ca0e8235432347b7e8bded664a8c0e037",
+      "challengeBase64url": "mdW6EQnxN3DSXA1_fHfUjKDoI1QyNHt-i97WZKjA4Dc"
+    },
+    {
+      "name": "same-node-other-request",
+      "note": "same node and approval hash, different request id => different challenge (no cross-request replay)",
+      "nodeId": "01a10408afb6716c80d6944e8845467b",
+      "approvalHash": "82af07de06359450e375ee9f1e3639f5f124d2e2d9ed176001ff108175ce1246",
+      "requestId": "AAAAAAAAAAAAAAAAAAAAAQ",
+      "payloadUtf8": "hadron-signature-v3\nnode 01a10408afb6716c80d6944e8845467b\napproval-hash 82af07de06359450e375ee9f1e3639f5f124d2e2d9ed176001ff108175ce1246\nrequest AAAAAAAAAAAAAAAAAAAAAQ\n",
+      "canonical": "aGFkcm9uLXNpZ25hdHVyZS12Mwpub2RlIDAxYTEwNDA4YWZiNjcxNmM4MGQ2OTQ0ZTg4NDU0NjdiCmFwcHJvdmFsLWhhc2ggODJhZjA3ZGUwNjM1OTQ1MGUzNzVlZTlmMWUzNjM5ZjVmMTI0ZDJlMmQ5ZWQxNzYwMDFmZjEwODE3NWNlMTI0NgpyZXF1ZXN0IEFBQUFBQUFBQUFBQUFBQUFBQUFBQVEK",
+      "challengeHex": "deaeb4257fc8517df9733158c2c3a491847dc118832abcb0f275f8209161b950",
+      "challengeBase64url": "3q60JX_IUX35czFYwsOkkYR9wRiDKryw8nX4IJFhuVA"
+    },
+    {
+      "name": "id-with-dash-and-underscore",
+      "note": "base64url alphabet characters - and _ appear verbatim",
+      "nodeId": "01a10408afb6716c80d6944e8845467b",
+      "approvalHash": "82af07de06359450e375ee9f1e3639f5f124d2e2d9ed176001ff108175ce1246",
+      "requestId": "a-_Z9bQ0-xYz_w1234abcQ",
+      "payloadUtf8": "hadron-signature-v3\nnode 01a10408afb6716c80d6944e8845467b\napproval-hash 82af07de06359450e375ee9f1e3639f5f124d2e2d9ed176001ff108175ce1246\nrequest a-_Z9bQ0-xYz_w1234abcQ\n",
+      "canonical": "aGFkcm9uLXNpZ25hdHVyZS12Mwpub2RlIDAxYTEwNDA4YWZiNjcxNmM4MGQ2OTQ0ZTg4NDU0NjdiCmFwcHJvdmFsLWhhc2ggODJhZjA3ZGUwNjM1OTQ1MGUzNzVlZTlmMWUzNjM5ZjVmMTI0ZDJlMmQ5ZWQxNzYwMDFmZjEwODE3NWNlMTI0NgpyZXF1ZXN0IGEtX1o5YlEwLXhZel93MTIzNGFiY1EK",
+      "challengeHex": "7e35c3084cd667de5943cd67cf32de167916f0fd5d38304f1da482fc823cd6f3",
+      "challengeBase64url": "fjXDCEzWZ95ZQ81nzzLeFnkW8P1dODBPHaSC_II81vM"
+    },
+    {
+      "name": "same-content-different-node-request",
+      "note": "other node, same request id => different challenge",
+      "nodeId": "01a10408afb6716c80d6944e8845467c",
+      "approvalHash": "82af07de06359450e375ee9f1e3639f5f124d2e2d9ed176001ff108175ce1246",
+      "requestId": "AAAAAAAAAAAAAAAAAAAAAA",
+      "payloadUtf8": "hadron-signature-v3\nnode 01a10408afb6716c80d6944e8845467c\napproval-hash 82af07de06359450e375ee9f1e3639f5f124d2e2d9ed176001ff108175ce1246\nrequest AAAAAAAAAAAAAAAAAAAAAA\n",
+      "canonical": "aGFkcm9uLXNpZ25hdHVyZS12Mwpub2RlIDAxYTEwNDA4YWZiNjcxNmM4MGQ2OTQ0ZTg4NDU0NjdjCmFwcHJvdmFsLWhhc2ggODJhZjA3ZGUwNjM1OTQ1MGUzNzVlZTlmMWUzNjM5ZjVmMTI0ZDJlMmQ5ZWQxNzYwMDFmZjEwODE3NWNlMTI0NgpyZXF1ZXN0IEFBQUFBQUFBQUFBQUFBQUFBQUFBQUEK",
+      "challengeHex": "12ef4299e9889c9c677fffa3d2058ab20d1a7f2ef810d02d84a431e1460c370e",
+      "challengeBase64url": "Eu9CmemInJxnf_-j0gWKsg0afy74ENAthKQx4UYMNw4"
+    }
+  ]
+}

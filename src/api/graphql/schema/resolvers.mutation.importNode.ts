@@ -25,12 +25,15 @@ import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { fetchWebPage } from '../../../lib/webFetch.js';
 import { extractArticle } from '../../../lib/articleExtract.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
+import { attestedAuthoring, type AuthoredWith } from '../../../lib/authoringAttestation.js';
 import { assertManualRunAllowed, mintManualRun } from './resolvers.appRun.js';
 import { publishRunRequested } from '../../../jobs/appRuns.js';
 import { lockInstallAuthorityFirst } from './installMemory.js';
 import { type Context, requireMemoryWriteAccess, withoutRequestCaches } from './resolvers.helpers.js';
 
 export interface ImportNodeInput {
+  /** #1328 — import always attests, from any surface. */
+  authoredWith?: AuthoredWith | null;
   // Target — (memoryId + loc) XOR nodeUrn. The URN may name a
   // not-yet-existing node (import creates it), so it is SPLIT into
   // memory-URN + loc rather than resolved via resolveNodeRef.
@@ -53,6 +56,7 @@ export interface ImportNodeInput {
   taskArgs?: Record<string, unknown> | null;
   /** App to run under — PK or URN. Falls back to the caller's active App (ctx.appId). */
   appRef?: string | null;
+  agentRef?: string | null;
 }
 
 export const importNodeMutations = {
@@ -108,7 +112,16 @@ export const importNodeMutations = {
     // unauthorized caller must not be able to use importNode as an egress /
     // resource-consumption primitive (a full 30s fetch with redirects) just
     // to be denied at the write (PR-486 review, Codex P1).
-    await requireMemoryWriteAccess(ctx, memoryId);
+    //
+    // #3101: opt into the install-memory pre-flight like every other node-write door.
+    // On the pooled client `fencedInstallAudience` answers write:false for an install
+    // memory unless the door rechecks inside its own fenced transaction; this one does,
+    // because both store paths below go through `writeNodeCore`, which re-runs the gate
+    // under the install authority locks (and the composed path takes them first,
+    // `lockInstallAuthorityFirst`). Without the flag an App manager was refused here
+    // (cor:api:130:00 (1): an import admits exactly the direct-write audience;
+    // cor:agt:040:06). A reader who doesn't manage the App is still refused pre-fetch.
+    await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, memoryId);
 
     // ── #528 — validate the post-import task-run preconditions BEFORE the
     // fetch/write, so a bad taskRef / missing App / non-runnable task fails
@@ -116,7 +129,7 @@ export const importNodeMutations = {
     // run itself is minted after the write (it needs the stored node's URN).
     let taskRun: {
       entryNodeUrn: string;
-      app: { id: string; organizationId: string };
+      app: { id: string; organizationId: string; agentId: string | null };
       runAsSelf: boolean;
       importedMemoryUrn: string;
     } | null = null;
@@ -158,7 +171,7 @@ export const importNodeMutations = {
       // never leaves an orphaned imported node. The run is minted after the
       // write (it needs the stored node's URN) via mintManualRun — WITHOUT
       // re-running the gate. mintAppRun's dynamic quota check stays at mint time.
-      const app = await assertManualRunAllowed(ctx, { entryNodeUrn, appRef: runAppRef, runAsSelf });
+      const app = await assertManualRunAllowed(ctx, { entryNodeUrn, appRef: runAppRef, runAsSelf, agentRef: input.agentRef });
       taskRun = { entryNodeUrn, app, runAsSelf, importedMemoryUrn: importedMemory.urn };
     }
 
@@ -230,7 +243,7 @@ export const importNodeMutations = {
       },
       writeCtx,
       name === undefined ? 'update' : 'upsert',
-      { transaction },
+      { transaction, authoring: attestedAuthoring(ctx, input.authoredWith) },
     );
 
     if (!taskRun) {

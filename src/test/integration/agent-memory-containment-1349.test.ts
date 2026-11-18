@@ -15,14 +15,15 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb, createDbAppWithKey, createDbAppAgent } from '../helpers.js';
+import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import { createTestableMcpServer } from '../../mcp/server.js';
-import { getAppMemoryAccess } from '../../mcp/access-control.js';
+import { getAppMemoryAccess, getPrincipalAppMemoryAccess } from '../../mcp/access-control.js';
 import { sharedChatKnowledgeMemoryIds } from '../../api/graphql/schema/chat-scope.js';
 import { sessionScopedMemoryIds } from '../../lib/auth/sessionScopedMemoryIds.js';
 import { resolveAssetTargetMemoryId } from '../../api/graphql/schema/resolvers.helpers.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
+import { serveAgentBootPrompt } from '../servedBootPrompt.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -79,16 +80,23 @@ async function writes(appKey: string, target: string) {
 const lists = async (appKey: string, target: string) =>
   ((await gql(appKey, LIST, { m: mem[target]!.urn })).data?.memoryNodes?.total ?? 0) > 0;
 
-const mcpFor = (appId: string) => createTestableMcpServer({ appId, roles: ['READER'] });
+const mcpFor = (appId: string, userId?: string) => createTestableMcpServer({ appId, userId, roles: ['READER'] });
+
+/** #1376: an App member (a user behind the App), the principal that still reaches memory through the agent's items. */
+async function memberOf(appId: string) {
+  const user = await db.user.create({ data: { id: generateId(), handle: `am-${generateId()}`, githubUsername: `am-${generateId()}` } });
+  await createDbAppMember(db, appId, user.id, 'member');
+  return user.id;
+}
 const nodeUrn = (target: string) => `hrn:node:${mem[target]!.urn.replace(/^hrn:mem:/, '')}:payroll`;
 
-async function mcpReads(appId: string, target: string) {
-  const text = await mcpFor(appId).callToolText('hadron_get_node', { urn: nodeUrn(target) });
+async function mcpReads(appId: string, target: string, userId?: string) {
+  const text = await mcpFor(appId, userId).callToolText('hadron_get_node', { urn: nodeUrn(target) });
   return text.includes(mem[target]!.content);
 }
 
-async function mcpWrites(appId: string, target: string) {
-  const text = await mcpFor(appId).callToolText('hadron_update_node', { urn: nodeUrn(target), content: 'mcp-tampered' });
+async function mcpWrites(appId: string, target: string, userId?: string) {
+  const text = await mcpFor(appId, userId).callToolText('hadron_update_node', { urn: nodeUrn(target), content: 'mcp-tampered' });
   const after = await db.node.findUniqueOrThrow({ where: { id: mem[target]!.nodeId } });
   const wrote = after.content === 'mcp-tampered';
   if (wrote) await db.node.update({ where: { id: after.id }, data: { content: mem[target]!.content } });
@@ -193,24 +201,30 @@ describe('#1349 Slice 1 — a legacy link to another tenant grants nothing it co
 });
 
 describe('#1349 Slice 1 — the link still caps what the App reaches on its own', () => {
-  it('home ORGANIZATION knowledge, read-write: read and write', async () => {
+  it('home ORGANIZATION knowledge: neither an App-only member nor a bare key is admitted (#3305)', async () => {
     const { appId, appKey } = await legacyLink('homeOrg', 'read-write');
-    expect(await reads(appKey, 'homeOrg')).toBe('homeOrg SECRET');
-    expect(await writes(appKey, 'homeOrg')).toBe(true);
-    expect(await mcpWrites(appId, 'homeOrg')).toBe(true);
-  });
-
-  it('home ORGANIZATION knowledge, read: read, and the link still caps the write', async () => {
-    const { appId, appKey } = await legacyLink('homeOrg', 'read');
-    expect(await reads(appKey, 'homeOrg')).toBe('homeOrg SECRET');
+    expect(await reads(appKey, 'homeOrg')).toBeNull();
     expect(await writes(appKey, 'homeOrg')).toBe(false);
-    expect(await mcpWrites(appId, 'homeOrg')).toBe(false);
+    const userId = await memberOf(appId);
+    expect(await mcpReads(appId, 'homeOrg', userId)).toBe(false);
+    expect(await mcpWrites(appId, 'homeOrg', userId)).toBe(false);
   });
 
-  it('home PUBLIC knowledge, read-write: the owning org writes it; PUBLIC changes nothing for it', async () => {
-    const { appKey } = await legacyLink('homePublic', 'read-write');
+  it('home ORGANIZATION knowledge: an independent org reader retains read-only access (#3305)', async () => {
+    const { appId, appKey } = await legacyLink('homeOrg', 'read');
+    expect(await reads(appKey, 'homeOrg')).toBeNull();
+    expect(await writes(appKey, 'homeOrg')).toBe(false);
+    const userId = await memberOf(appId);
+    await db.orgMember.create({ data: { organizationId: homeOrgId, userId, role: 'READER' } });
+    expect(await mcpReads(appId, 'homeOrg', userId)).toBe(true);
+    expect(await mcpWrites(appId, 'homeOrg', userId)).toBe(false);
+  });
+
+  it('home PUBLIC knowledge: PUBLIC admits read-only, never an App-only member write (#3305)', async () => {
+    const { appId, appKey } = await legacyLink('homePublic', 'read-write');
     expect(await reads(appKey, 'homePublic')).toBe('homePublic SECRET');
-    expect(await writes(appKey, 'homePublic')).toBe(true);
+    expect(await writes(appKey, 'homePublic')).toBe(false);
+    expect(await mcpWrites(appId, 'homePublic', await memberOf(appId))).toBe(false);
   });
 
   it('an invalid stored role grants nothing, even on a memory the App could reach', async () => {
@@ -223,9 +237,13 @@ describe('#1349 Slice 1 — the link still caps what the App reaches on its own'
 describe('#1349 Slice 1 — a subscribed memory (Vera\'s control)', () => {
   it('a live CONTRIBUTOR subscription is independent reach: the read-write link reads and writes it', async () => {
     const { appId, appKey } = await legacyLink('foreignSubscribed', 'read-write');
+    // #1376: a bare key gets no item-derived reach, and a subscription is the org's, not the key's; a user behind the App does.
     expect(await reads(appKey, 'foreignSubscribed')).toBe('foreignSubscribed SECRET');
-    expect((await getAppMemoryAccess(db, appId)).get(mem.foreignSubscribed!.id)).toBe('READ_WRITE');
-    expect(await writes(appKey, 'foreignSubscribed')).toBe(true);
+    expect(await writes(appKey, 'foreignSubscribed')).toBe(false);
+    const userId = await memberOf(appId);
+    await db.orgMember.create({ data: { organizationId: homeOrgId, userId, role: 'CONTRIBUTOR' } });
+    expect((await getPrincipalAppMemoryAccess(db, { appId, userId })).get(mem.foreignSubscribed!.id)).toBe('READ_WRITE');
+    expect(await mcpWrites(appId, 'foreignSubscribed', userId)).toBe(true);
   });
 
   it('a read link on a subscribed memory still caps the write', async () => {
@@ -262,6 +280,8 @@ async function giveConversation(agentId: string) {
   ] as const) {
     await db.node.create({ data: { id: generateId(), memoryId: sys.id, loc, name: loc.split(':').pop()!, nodeType: 'system', data: data as never, content } });
   }
+  // #2712: serving is always on, so a chat needs an approved boot prompt.
+  await serveAgentBootPrompt(db, agentId, 'Hi.');
 }
 
 describe('#1349 Slice 1 — the folds that read links directly use the same cap', () => {
@@ -276,7 +296,8 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
   });
 
   it('session scope: a session naming a foreign ORG memory through its agent link admits nothing', async () => {
-    for (const [target, admitted] of [['foreignOrg', false], ['homeOrg', true]] as const) {
+    for (const [target, admitted] of [['foreignOrg', false], ['homeOrg', false]] as const) {
+      // #1376: every caller is a userless key, for which an item never admits (Dara, P2)
       const { appId, agentId } = await legacyLink(target, 'read-write');
       const session = await db.session.create({
         data: { id: generateId(), appId, agentId, memoryId: mem[target]!.id } as never,
@@ -302,6 +323,57 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
     const response = await gql(link.appKey, 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }', { agent: link.agentId });
     expect(response.errors, JSON.stringify(response)).toBeDefined();
     expect(await db.node.count({ where: { memoryId: mem.foreignPersonal!.id } })).toBe(before);
+  });
+
+  it('#1376 legacy startChat: a bare key writes nothing into org knowledge through a read-write item (Riana, P2 1)', async () => {
+    const link = await legacyLink('homeOrg', 'read-write');
+    await giveConversation(link.agentId);
+    const before = await db.node.count({ where: { memoryId: mem.homeOrg!.id } });
+    const response = await gql(link.appKey, 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }', { agent: link.agentId });
+    expect(response.errors, JSON.stringify(response)).toBeDefined();
+    expect(await db.node.count({ where: { memoryId: mem.homeOrg!.id } })).toBe(before);
+  });
+
+  it('#1376 session-bound startChat: a bare key never takes an item-linked org memory from Session.memoryId (Diego, P1)', async () => {
+    const link = await legacyLink('homeOrg', 'read-write');
+    await giveConversation(link.agentId);
+    const session = await db.session.create({ data: { id: generateId(), appId: link.appId, agentId: link.agentId, memoryId: mem.homeOrg!.id } as never });
+    const before = await db.node.count({ where: { memoryId: mem.homeOrg!.id } });
+    const response = await fetch(`${baseUrl}/graphql`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${link.appKey}`, 'x-hadron-session': session.id },
+      body: JSON.stringify({ query: 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }', variables: { agent: link.agentId } }),
+    });
+    expect(((await response.json()) as { errors?: unknown }).errors).toBeDefined();
+    expect(await db.node.count({ where: { memoryId: mem.homeOrg!.id } })).toBe(before);
+  });
+
+  it('#1376 session-bound startChat: the App-provisioned session memory (anon app-class, personal) stays a chat target (Riana, P1 on f96eec28)', async () => {
+    for (const cls of ['app', 'personal'] as const) {
+      const link = await legacyLink('homeOrg', 'read');
+      await giveConversation(link.agentId);
+      const owner = await db.user.create({ data: { id: generateId(), handle: `sc-${generateId()}`, githubUsername: `sc-${generateId()}` } });
+      const own = await db.memory.create({
+        data: {
+          id: generateId(), urn: `home-${suffix}:sess-${cls}-${generateId()}`, name: `sess-${cls}`, ...(cls === 'personal' ? {} : { organizationId: homeOrgId }),
+          class: cls, visibility: null, appId: link.appId, userMemoryOfAgentId: link.agentId,
+          ...(cls === 'personal' ? { userId: owner.id, ownerUserId: owner.id } : {}),
+        } as never,
+      });
+      if (cls === 'personal') await db.agentSubscription.create({ data: { userId: owner.id, agentId: link.agentId, activatedAt: new Date() } });
+      const session = await db.session.create({ data: { id: generateId(), appId: link.appId, agentId: link.agentId, memoryId: own.id, ...(cls === 'personal' ? { userId: owner.id } : {}) } as never });
+      // the gate's input: the session's verified reach holds the provisioned memory (personal: read-only in the access map, still reachable)
+      expect(await sessionScopedMemoryIds(db, link.appId, session.id), cls).toContain(own.id);
+      if (cls === 'personal') continue;
+      const response = await fetch(`${baseUrl}/graphql`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: `Bearer ${link.appKey}`, 'x-hadron-session': session.id },
+        body: JSON.stringify({ query: 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }', variables: { agent: link.agentId } }),
+      });
+      const body = (await response.json()) as { errors?: unknown; data?: { startChat?: { chatId?: string } } };
+      expect(body.errors, `${cls}: ${JSON.stringify(body)}`).toBeUndefined();
+      expect(body.data?.startChat?.chatId).toBeTruthy();
+    }
   });
 
   it("asset upload target: never another user's personal memory through a read-write link", async () => {
@@ -334,12 +406,16 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
   });
 
   it('listings follow the cap: GraphQL memories and MCP hadron_list_memories (Colin)', async () => {
-    for (const [target, want] of [['foreignOrg', false], ['foreignPublic', true], ['homeOrg', true]] as const) {
+    for (const [target, want] of [['foreignOrg', false], ['foreignPublic', true], ['homeOrg', false]] as const) {
       const { appId, appKey } = await legacyLink(target, 'read-write');
       const response = await gql(appKey, 'query { memories { items { id } } }', {});
       expect(response.errors).toBeUndefined();
-      expect(response.data?.memories.items.some((m: { id: string }) => m.id === mem[target]!.id)).toBe(want);
-      expect((await mcpFor(appId).callToolText('hadron_list_memories', {})).includes(mem[target]!.urn)).toBe(want);
+      // #1376: a bare key lists home ORGANIZATION knowledge no longer; an App member's listing follows the cap.
+      const bareWant = target === 'homeOrg' ? false : want;
+      expect(response.data?.memories.items.some((m: { id: string }) => m.id === mem[target]!.id)).toBe(bareWant);
+      expect((await mcpFor(appId).callToolText('hadron_list_memories', {})).includes(mem[target]!.urn)).toBe(bareWant);
+      const userId = await memberOf(appId);
+      expect((await mcpFor(appId, userId).callToolText('hadron_list_memories', {})).includes(mem[target]!.urn)).toBe(want);
     }
   });
 
@@ -367,7 +443,7 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
 });
 
 describe("#1349 Slice 1 — the same-App row grants nothing extra (Vera's control; the exception stays Proposed)", () => {
-  it('an App-scoped memory of App X, linked to an agent: X reads it as before; another App installing the agent does not', async () => {
+  it('an App-scoped memory of App X, linked to an agent: a bare key X no longer reads it (#1376); another App installing the agent does not', async () => {
     const agent = await db.agent.create({
       data: { id: generateId(), organizationId: homeOrgId, name: 'same-app', urn: `ag-same-app-${suffix}` } as never,
     });
@@ -383,7 +459,84 @@ describe("#1349 Slice 1 — the same-App row grants nothing extra (Vera's contro
     });
     const node = await db.node.create({ data: { id: generateId(), memoryId: scoped.id, loc: 'payroll', name: 'p', content: 'X SCOPED' } });
     await db.agentMemoryItem.create({ data: { id: generateId(), agentId: agent.id, memoryId: scoped.id, role: 'read' } });
-    expect((await gql(x.rawKey, READ, { r: node.id })).data?.node?.content).toBe('X SCOPED');
+    // #1376: a bare key no longer reads its own App-scoped memory through an item (Riana, P2 2)
+    expect((await gql(x.rawKey, READ, { r: node.id })).data?.node ?? null).toBeNull();
     expect((await gql(y.rawKey, READ, { r: node.id })).data?.node ?? null).toBeNull();
+  });
+});
+
+const START_CHAT = 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }';
+
+describe('#2895 — optional pins from the #2885 review (refs #1376)', () => {
+  /** A session-bound bare App key calling startChat, the shape #2885 gates on the session's verified reach. */
+  async function startChatInSession(link: { appKey: string; agentId: string }, sessionId: string) {
+    const response = await fetch(`${baseUrl}/graphql`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${link.appKey}`, 'x-hadron-session': sessionId },
+      body: JSON.stringify({ query: START_CHAT, variables: { agent: link.agentId } }),
+    });
+    return (await response.json()) as { errors?: Array<{ message: string }>; data?: { startChat?: { chatId?: string } } };
+  }
+
+  it('item 1: a user-attributed session with a personal memory actually starts a chat in it (Baloo, Atilla)', async () => {
+    const link = await legacyLink('homeOrg', 'read-write');
+    await giveConversation(link.agentId);
+    const userId = await memberOf(link.appId);
+    const personal = await db.memory.create({
+      data: {
+        id: generateId(), urn: `home-${suffix}:sess-personal-${generateId()}`, name: 'sess-personal', class: 'personal', visibility: null,
+        appId: link.appId, userMemoryOfAgentId: link.agentId, userId, ownerUserId: userId,
+      } as never,
+    });
+    await db.agentSubscription.create({ data: { userId, agentId: link.agentId, activatedAt: new Date() } });
+    const session = await db.session.create({ data: { id: generateId(), appId: link.appId, agentId: link.agentId, memoryId: personal.id, userId } as never });
+    expect(await sessionScopedMemoryIds(db, link.appId, session.id)).toContain(personal.id);
+    const before = await db.node.count({ where: { memoryId: personal.id } });
+    const body = await startChatInSession(link, session.id);
+    expect(body.errors, JSON.stringify(body)).toBeUndefined();
+    const chatId = body.data?.startChat?.chatId;
+    expect(chatId).toBeTruthy();
+    // the chat was written INTO the personal memory, and nowhere else
+    expect(await db.node.count({ where: { memoryId: personal.id } })).toBeGreaterThan(before);
+    expect(await db.node.findFirst({ where: { loc: chatId!, memoryId: personal.id } })).not.toBeNull();
+    expect(await db.node.count({ where: { memoryId: mem.homeOrg!.id, loc: { startsWith: 'chats' } } })).toBe(0);
+  });
+
+  it('item 2: a malformed stored role on a PUBLIC memory gives the userless key its PUBLIC read and nothing more', async () => {
+    const { appId, appKey } = await legacyLink('homePublic', 'admin');
+    expect(await reads(appKey, 'homePublic')).toBe('homePublic SECRET');
+    expect(await writes(appKey, 'homePublic')).toBe(false);
+    expect(await mcpReads(appId, 'homePublic')).toBe(true);
+    expect(await mcpWrites(appId, 'homePublic')).toBe(false);
+    // the bare principal's App-derived reach holds it read-only, never the malformed role's level
+    expect((await getPrincipalAppMemoryAccess(db, { appId })).get(mem.homePublic!.id)).toBe('READ_ONLY');
+  });
+
+  it("items 3 and 4: an Agent's system memory in Session.memoryId is refused as a startChat target, like any unreadable target (Riana §10, Diego)", async () => {
+    const link = await legacyLink('homeOrg', 'read-write');
+    await giveConversation(link.agentId);
+    const agent = await db.agent.findUniqueOrThrow({ where: { id: link.agentId }, select: { systemMemoryId: true } });
+    const systemId = agent.systemMemoryId!;
+    // raw-DB fixture: no API path writes a system memory into Session.memoryId
+    const session = await db.session.create({ data: { id: generateId(), appId: link.appId, agentId: link.agentId, memoryId: systemId } as never });
+    // reads are NOT narrowed: the session's verified reach still holds the system memory
+    expect(await sessionScopedMemoryIds(db, link.appId, session.id)).toContain(systemId);
+    const before = await db.node.count({ where: { memoryId: systemId } });
+    const refused = await startChatInSession(link, session.id);
+    expect(refused.data?.startChat ?? null, JSON.stringify(refused)).toBeNull();
+    expect(await db.node.count({ where: { memoryId: systemId } })).toBe(before);
+    // byte-identical to the refusal for an item-linked org memory named in Session.memoryId (Diego's P1 case)
+    const other = await db.session.create({ data: { id: generateId(), appId: link.appId, agentId: link.agentId, memoryId: mem.homeOrg!.id } as never });
+    const unreadable = await startChatInSession(link, other.id);
+    expect(unreadable.errors?.length, JSON.stringify(unreadable)).toBe(1);
+    // the envelope carries a per-request id, so compare everything else
+    const shape = (b: { errors?: Array<{ message: string; extensions?: Record<string, unknown> }> }) =>
+      b.errors?.map(({ message, extensions }) => ({ message, ...extensions, requestId: undefined }));
+    expect(shape(refused)).toEqual(shape(unreadable));
+    // and at the resolver, where HTTP masks the text, both are the same "No target memory" refusal
+    const direct = (sessionId: string) => resolvers.Mutation.startChat({}, { agentId: link.agentId }, { db, appId: link.appId, sessionId, roles: ['READER'] } as never)
+      .then(() => null, (e: Error) => e.message);
+    expect(await direct(session.id)).toMatch(/No target memory available/);
+    expect(await direct(session.id)).toBe(await direct(other.id));
   });
 });

@@ -53,7 +53,7 @@ afterEach(async () => {
   `);
   await pgClient.query(`ALTER TABLE memories ALTER COLUMN class SET NOT NULL`);
   // Restore each constraint to its CURRENT definition (must stay in sync with
-  // prisma/post-push.sql + src/test/globalSetup.ts) — re-adding a stale
+  // prisma/post-push.sql, the test template's only DDL source since #434) — re-adding a stale
   // definition clobbers the constraint for every test file that runs after
   // this one. 034-memory-class-access re-keyed ownership onto class and
   // relaxed the app_id / agent requirements.

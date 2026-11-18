@@ -8,7 +8,9 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../test/softPasskey.js';
 import { generateId } from '../lib/id.js';
+import { beginPending, portalContinuation, oauthContinuation } from '../test/beginPendingSignIn.js';
 import * as pendingModule from '../auth/pendingEmailSignIn.js';
+import { sweepPasskeyCeremonies } from '../jobs/sweepPasskeyCeremonies.js';
 import * as evidenceModule from '../auth/loginEvidence.js';
 
 // Pass-through spies: every call runs the real function unless a test overrides ONE call.
@@ -64,11 +66,10 @@ const verify = (token: string, qs = '') => fetch(`${base}/auth/email/verify?toke
 const cookieOf = (r: Response, name: string) => (r.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]!).find((c) => c.startsWith(`${name}=`));
 const pendingCount = () => db.pendingEmailSignIn.count();
 
-/** Begin a portal flow and return the pending cookie. */
-async function begin(over: { clientState?: string | null; qs?: string } = {}) {
-  const r = await verify(await magicLink({ clientState: over.clientState }), over.qs ?? '');
-  const cookie = cookieOf(r, 'hadron_pending_signin');
-  return { r, cookie };
+/** Begin a portal flow and return the pending cookie (#4339: the flow is started directly; /auth/email/verify no longer starts one). */
+async function begin(over: { clientState?: string | null } = {}) {
+  const begun = await beginPending(userId, portalContinuation(over.clientState === null ? null : sha(over.clientState ?? 'portal-nonce')));
+  return { r: begun, cookie: begun.cookie };
 }
 const post = (path: string, cookie: string | undefined, body?: unknown, origin: string | null = ORIGIN) => fetch(`${base}/auth/passkey/sign-in${path}`, {
   method: 'POST', headers: { 'content-type': 'application/json', ...(origin ? { origin } : {}), ...(cookie ? { cookie } : {}) }, body: JSON.stringify(body ?? {}),
@@ -106,16 +107,15 @@ describe('switch off or signing-only', () => {
 describe('portal continuation, switch on', () => {
   beforeEach(async () => { await boot(ON); });
 
-  it('a claimed link publishes nothing: no handoff code, no JWT cookie, only a pending row and its cookie', async () => {
+  it('a begun flow publishes nothing: no handoff code, no JWT cookie, only a pending row and its cookie (the machinery; email verify no longer begins one, #4339)', async () => {
     const { r, cookie } = await begin();
-    expect(r.status).toBe(302);
-    expect(r.headers.get('location')).toBe('/auth/passkey/sign-in');
+    expect(r.begun).toBe(true);
+    expect(r.location).toBe('/auth/passkey/sign-in');
     expect(cookie).toBeTruthy();
-    expect(cookieOf(r, 'hadron_token')).toBeUndefined();
     expect(await db.authHandoffCode.count()).toBe(0);
     expect(await db.signIn.count()).toBe(0);
     expect(await pendingCount()).toBe(1);
-    expect(r.headers.get('location')).not.toMatch(/token|code|@/);
+    expect(r.location).not.toMatch(/token|code|@/);
   });
 
   it('the page renders only for the cookie holder, with the security headers, and never completes anything', async () => {
@@ -204,6 +204,23 @@ describe('portal continuation, switch on', () => {
     expect(await db.signIn.count()).toBe(0);
   });
 
+  it('#3122: a swept ceremony refuses exactly like expiry, keeps the pending flow, and permits new options', async () => {
+    const { cookie } = await begin();
+    const o = await options(cookie!);
+    await db.$executeRaw`UPDATE passkey_ceremonies SET expires_at = (clock_timestamp() AT TIME ZONE 'UTC') - interval '31 days' WHERE id = ${o.ceremonyId}`;
+    const expired = await post('/complete', cookie, answer(o));
+    expect(expired.status).toBe(403);
+    const expected = await expired.json();
+    expect(await sweepPasskeyCeremonies(db)).toBe(1);
+    const swept = await post('/complete', cookie, answer(o));
+    expect(swept.status).toBe(403); expect(await swept.json()).toEqual(expected);
+    expect(await db.signIn.count()).toBe(0); expect(await db.authHandoffCode.count()).toBe(0);
+    expect((await db.pendingEmailSignIn.findFirstOrThrow()).completedAt).toBeNull();
+    const next = await options(cookie!);
+    expect(next.ceremonyId).not.toBe(o.ceremonyId);
+    expect((await post('/complete', cookie, answer(next))).status).toBe(200);
+  });
+
   it('a new options call retires the earlier challenge, and an expired flow is dead', async () => {
     const { cookie } = await begin();
     const first = await options(cookie!);
@@ -268,26 +285,24 @@ describe('portal continuation, switch on', () => {
     expect((await post('/options', cookie)).status).toBe(403);
   });
 
-  it('a passkey enrolled for another RP ID does not count: the fixed refusal, no pending row', async () => {
+  it('a passkey enrolled for another RP ID does not count: the flow is refused, no pending row', async () => {
     const elsewhere = await db.user.create({ data: { email: 'rp@example.test', handle: 'rp-user', roles: ['READER'] } });
     await insertSoftPasskey(db, elsewhere.id, softPasskey(), { rpId: 'elsewhere.example' });
-    const r = await verify(await magicLink({ email: 'rp@example.test' }));
-    expect(r.status).toBe(400);
-    expect(await r.json()).toEqual({ error: 'Invalid or expired token' });
+    const r = await beginPending(elsewhere.id, portalContinuation(sha('portal-nonce')));
+    expect(r.begun).toBe(false);
     expect(await pendingCount()).toBe(0);
     expect(await db.authHandoffCode.count()).toBe(0);
   });
 
-  it('a user with no passkey is NOT signed in: the flow leads to enrolment (B2) and publishes nothing; the factor is never skipped', async () => {
-    await db.user.create({ data: { email: 'nopass@example.test', handle: 'nopass', roles: ['READER'] } });
-    const r = await verify(await magicLink({ email: 'nopass@example.test' }));
-    expect(r.status).toBe(302);
-    expect(r.headers.get('location')).toBe('/auth/passkey/sign-in');
+  it('a user with no passkey is NOT signed in by this flow: it leads to enrolment (B2) and publishes nothing; the factor is never skipped', async () => {
+    const nopass = await db.user.create({ data: { email: 'nopass@example.test', handle: 'nopass', roles: ['READER'] } });
+    const r = await beginPending(nopass.id, portalContinuation(sha('portal-nonce')));
+    expect(r.begun).toBe(true);
+    expect(r.location).toBe('/auth/passkey/sign-in');
     expect(await pendingCount()).toBe(1);
     expect(await db.authHandoffCode.count()).toBe(0);
-    expect(cookieOf(r, 'hadron_token')).toBeUndefined();
     // Nothing to assert with yet: the routes refuse until a passkey exists (enrolment itself: passkeySignInEnroll1897.test.ts).
-    expect((await post('/options', cookieOf(r, 'hadron_pending_signin'))).status).toBe(403);
+    expect((await post('/options', r.cookie)).status).toBe(403);
     expect(await db.signIn.count()).toBe(0);
   });
 
@@ -310,11 +325,9 @@ describe('OAuth continuation, switch on', () => {
 
   it('resumes the validated return_to with a revocable sid cookie, and only after the passkey', async () => {
     const returnTo = '/oauth/authorize?client_id=x&state=s';
-    const r = await verify(await magicLink({ clientState: null }), `&return_to=${encodeURIComponent(returnTo)}`);
-    expect(r.status).toBe(302);
-    expect(r.headers.get('location')).toBe('/auth/passkey/sign-in');
-    expect(cookieOf(r, 'hadron_token')).toBeUndefined();
-    const cookie = cookieOf(r, 'hadron_pending_signin')!;
+    const begun = await beginPending(userId, oauthContinuation(returnTo));
+    expect(begun.location).toBe('/auth/passkey/sign-in');
+    const cookie = begun.cookie!;
     const o = await options(cookie);
     const done = await post('/complete', cookie, answer(o));
     expect(done.status).toBe(200);
@@ -324,13 +337,5 @@ describe('OAuth continuation, switch on', () => {
     const claims = JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString());
     expect(claims).toMatchObject({ sid: signIn.id, sub: userId });
     expect(await db.authHandoffCode.count()).toBe(0);
-  });
-
-  it('a tampered return_to is refused before the link is spent, and an unbound link without return_to still fails closed', async () => {
-    const t = await magicLink({ clientState: null });
-    expect((await verify(t, '&return_to=https://evil.example')).status).toBe(400);
-    expect(await pendingCount()).toBe(0);
-    expect((await verify(t)).status).toBe(400);
-    expect(await pendingCount()).toBe(0);
   });
 });

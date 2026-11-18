@@ -620,11 +620,11 @@ describe('Rook §10 on #1690 — the chat-by-loc operations never reach the deci
     for (const [chatId, userId] of attempts) {
       const c = as(userId, { roles: userId === platformAdmin.id ? ['ADMIN'] : ['READER'] });
       expect({ chatId, userId, op: 'send', r: await codeOf(M.sendChatMessage(null, { chatId, userMessage: 'hi' }, c)) })
-        .toEqual({ chatId, userId, op: 'send', r: `Chat "${chatId}" not found` });
+        .toEqual({ chatId, userId, op: 'send', r: 'CHAT_NOT_FOUND' });
       expect({ chatId, userId, op: 'title', r: await codeOf(M.updateChatTitle(null, { chatId, title: 'x' }, c)) })
-        .toMatchObject({ chatId, userId, op: 'title', r: expect.stringMatching(/not found/) });
+        .toMatchObject({ chatId, userId, op: 'title', r: 'CHAT_NOT_FOUND' });
       expect({ chatId, userId, op: 'delete', r: await codeOf(M.deleteChat(null, { chatId }, c)) })
-        .toEqual({ chatId, userId, op: 'delete', r: `Chat "${chatId}" not found` });
+        .toEqual({ chatId, userId, op: 'delete', r: 'CHAT_NOT_FOUND' });
     }
     expect(await snapshot(d.row.id, log.row.id, 'chats')).toEqual(before);
   });

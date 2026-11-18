@@ -7,26 +7,28 @@
  * An OPEN thread is a live top-level comment in state OPEN that is neither
  * a deleted-with-replies stub: the same predicate as the one-open-thread index.
  */
-import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
+import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
+
+import { OPEN_ROOT_SQL } from './openThreads.js';
 
 type Db = Pick<PrismaClient, '$queryRaw'> | Prisma.TransactionClient;
 
-export type CommentCounts = { openThreads: number; resolvedThreads: number; comments: number };
+export type CommentCounts = { openThreads: number; resolvedThreads: number; comments: number; oldestOpenThreadAt: Date | null };
 
 /** Per-target counts for the given node ids; targets with no comments are absent. */
 export async function openThreadCounts(db: Db, targetIds: string[]): Promise<Map<string, CommentCounts>> {
   if (targetIds.length === 0) return new Map();
-  const rows = await db.$queryRaw<Array<{ target_node_id: string; open: bigint; resolved: bigint; comments: bigint }>>`
+  const rows = await db.$queryRaw<Array<{ target_node_id: string; open: bigint; resolved: bigint; comments: bigint; oldest: Date | null }>>`
     SELECT cm.target_node_id,
-      count(*) FILTER (WHERE cm.thread_root_id IS NULL AND cm.thread_state = 'OPEN'
-                       AND cm.retracted_at IS NULL) AS open,
+      count(*) FILTER (WHERE ${Prisma.raw(OPEN_ROOT_SQL)}) AS open,
+      min(cn.created_at) FILTER (WHERE ${Prisma.raw(OPEN_ROOT_SQL)}) AS oldest,
       count(*) FILTER (WHERE cm.thread_root_id IS NULL AND cm.thread_state = 'RESOLVED') AS resolved,
       count(*) AS comments
-    FROM comment_meta cm JOIN nodes n ON n.id = cm.node_id
-    WHERE cm.target_node_id = ANY(${targetIds}) AND n.deleted_at IS NULL
+    FROM comment_meta cm JOIN nodes cn ON cn.id = cm.node_id
+    WHERE cm.target_node_id = ANY(${targetIds}) AND cn.deleted_at IS NULL
     GROUP BY cm.target_node_id`;
   return new Map(rows.map((r) => [r.target_node_id, {
-    openThreads: Number(r.open), resolvedThreads: Number(r.resolved), comments: Number(r.comments),
+    openThreads: Number(r.open), resolvedThreads: Number(r.resolved), comments: Number(r.comments), oldestOpenThreadAt: r.oldest,
   }]));
 }
 
@@ -35,10 +37,9 @@ export async function viewerOpenThreads(db: Db, targetIds: string[], authorKey: 
   if (targetIds.length === 0) return new Map();
   const rows = await db.$queryRaw<Array<{ target_node_id: string; node_id: string }>>`
     SELECT cm.target_node_id, cm.node_id
-    FROM comment_meta cm JOIN nodes n ON n.id = cm.node_id
+    FROM comment_meta cm JOIN nodes cn ON cn.id = cm.node_id
     WHERE cm.target_node_id = ANY(${targetIds}) AND cm.author_key = ${authorKey}
-      AND cm.thread_root_id IS NULL AND cm.thread_state = 'OPEN'
-      AND cm.retracted_at IS NULL AND n.deleted_at IS NULL`;
+      AND ${Prisma.raw(OPEN_ROOT_SQL)}`;
   return new Map(rows.map((r) => [r.target_node_id, r.node_id]));
 }
 

@@ -1,0 +1,53 @@
+# Exact operation/fragment selections from hadron-cli v0.39.0; extracted with GraphQL AST.
+fragment WorkerWakeSettingsFields on WorkerWakeSettings {
+  worker {
+    id
+    name
+    urn
+  }
+  mentions
+  pausedUntil
+  subscriptions {
+    id
+    ticker {
+      id
+      urn
+      name
+      cadenceSeconds
+      enabled
+    }
+    viaGrant
+    createdAt
+  }
+  effectiveCadenceSeconds
+  dormant
+  isolated
+  isolatedAt
+  isolatedByHandle
+  isolatedUntil
+  canManageIsolation
+}
+
+query WorkerWakeSettings($workerRef: String!) {
+  workerWakeSettings(workerRef: $workerRef) {
+    ...WorkerWakeSettingsFields
+  }
+}
+
+mutation SetWorkerWakeSettings($workerRef: String!, $input: WorkerWakeSettingsInput!) {
+  setWorkerWakeSettings(workerRef: $workerRef, input: $input) {
+    ...WorkerWakeSettingsFields
+  }
+}
+
+mutation IsolateWorker($workerRef: String!, $until: DateTime) {
+  isolateWorker(workerRef: $workerRef, until: $until) {
+    ...WorkerWakeSettingsFields
+  }
+}
+
+mutation ClearWorkerIsolation($workerRef: String!) {
+  clearWorkerIsolation(workerRef: $workerRef) {
+    ...WorkerWakeSettingsFields
+  }
+}

@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { lockAgentTemplates } from '../../../lib/tickers/agentTickerTemplates.js';
@@ -36,7 +35,7 @@ beforeEach(async () => {
   const reader = await db.user.create({ data: { id: generateId(), githubId: 202402, githubUsername: 'tmpl-member' } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: reader.id, role: 'CONTRIBUTOR' } });
   managerOnly = asUser(reader.id);
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Coordinator role' }, ctx);
+  const agent = await M.createAgent({}, { orgId: org.id, name: 'Coordinator role', personaRole: 'test-worker' }, ctx);
   agentId = agent.id;
   const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Tmpl team', urn: `${org.urn}:team` } });
   appId = app.id;
@@ -217,7 +216,7 @@ describe('#2024 cast instantiation', () => {
 
   it('a generated name that is already a live ticker refuses the whole cast', async () => {
     await declare('Base tick');
-    await db.ticker.create({ data: { appId, name: 'base tick · iris', slug: 'taken', cadenceSeconds: 600, ownerUserId: ctx.userId } });
+    await db.ticker.create({ data: { tickCode: 'tick.fixture', appId, name: 'base tick · iris', slug: 'taken', cadenceSeconds: 600, ownerUserId: ctx.userId } });
     expect(await refusal(cast('Iris'))).toBe('TICKER_NAME_TAKEN');
     expect(await db.worker.count({ where: { appId } })).toBe(0);
   });
@@ -237,13 +236,13 @@ describe('#2024 cast instantiation', () => {
     const t = await declare('Base tick');
     const iris = await cast('Iris');
     await expect(db.ticker.create({
-      data: { appId, name: 'dup', slug: 'dup', cadenceSeconds: 600, ownerWorkerId: iris.id, sourceTemplateId: t.id, sourceTemplateRevision: 1, generatedForWorkerId: iris.id },
+      data: { tickCode: 'tick.fixture', appId, name: 'dup', slug: 'dup', cadenceSeconds: 600, ownerWorkerId: iris.id, sourceTemplateId: t.id, sourceTemplateRevision: 1, generatedForWorkerId: iris.id },
     })).rejects.toThrow();
   });
 
   it('provenance is all-or-nothing and owned by the worker it was made for (CHECK)', async () => {
     await expect(db.ticker.create({
-      data: { appId, name: 'half', slug: 'half', cadenceSeconds: 600, ownerUserId: ctx.userId, sourceTemplateId: 'x' },
+      data: { tickCode: 'tick.fixture', appId, name: 'half', slug: 'half', cadenceSeconds: 600, ownerUserId: ctx.userId, sourceTemplateId: 'x' },
     })).rejects.toThrow();
   });
 
@@ -275,8 +274,8 @@ describe('#2024 retirement and repair', () => {
     await declare('Base tick');
     const iris = await cast('Iris');
     const henry = await cast('Henry');
-    const runtime = await db.ticker.create({ data: { appId, name: 'Iris runtime', slug: 'iris-runtime', cadenceSeconds: 600, ownerWorkerId: iris.id } });
-    const appTicker = await db.ticker.create({ data: { appId, name: 'App wide', slug: 'app-wide', cadenceSeconds: 600, ownerUserId: ctx.userId } });
+    const runtime = await db.ticker.create({ data: { tickCode: 'tick.fixture', appId, name: 'Iris runtime', slug: 'iris-runtime', cadenceSeconds: 600, ownerWorkerId: iris.id } });
+    const appTicker = await db.ticker.create({ data: { tickCode: 'tick.fixture', appId, name: 'App wide', slug: 'app-wide', cadenceSeconds: 600, ownerUserId: ctx.userId } });
     const henrysGenerated = await db.ticker.findFirstOrThrow({ where: { generatedForWorkerId: henry.id } });
     // Henry subscribes to Iris's generated ticker, to show those subscriptions end too.
     const irisGenerated = await db.ticker.findFirstOrThrow({ where: { generatedForWorkerId: iris.id } });
@@ -352,34 +351,9 @@ describe('#2024 repair carve-out stays narrow', () => {
   });
 });
 
-describe('#2024 MCP parity', () => {
-  const server = () => createTestableMcpServer({ userId: ctx.userId, roles: ['READER'] });
-  it('create, list, update (stale refused) and delete go through the same resolvers', async () => {
-    const created = await server().callToolText('hadron_agent_ticker_template_create', {
-      agentRef: agentId, name: 'Heartbeat', cadenceSeconds: 3600, reasons: ['every-tick'],
-    });
-    expect(created).toMatch(/^Created\./);
-    const row = await db.agentTickerTemplate.findFirstOrThrow({ where: { agentId } });
-    expect(row).toMatchObject({ reasons: ['every-tick'], cadenceSeconds: 3600, revision: 1 });
-    const listed = await server().callToolText('hadron_agent_ticker_template_list', { agentRef: agentId });
-    expect(listed).toContain(row.id);
-    expect(listed).toContain('revision 1');
-    expect(listed).toContain('reasons every-tick');
-    expect(await server().callToolText('hadron_agent_ticker_template_update', { id: row.id, expectedRevision: 1, cadenceSeconds: 1800 })).toMatch(/^Updated\./);
-    const stale = await server().callToolText('hadron_agent_ticker_template_update', { id: row.id, expectedRevision: 1, cadenceSeconds: 900 });
-    expect(stale).toMatch(/ticker_template_revision_mismatch/);
-    expect((await db.agentTickerTemplate.findUniqueOrThrow({ where: { id: row.id } })).cadenceSeconds).toBe(1800);
-    expect(await server().callToolText('hadron_agent_ticker_template_delete', { id: row.id, expectedRevision: 2 })).toBe('Deleted.');
-  });
-
-  it('an unauthorized MCP caller is refused the same way', async () => {
-    const text = await createTestableMcpServer({ userId: managerOnly.userId, roles: ['READER'] }).callToolText('hadron_agent_ticker_template_create', {
-      agentRef: agentId, name: 'Nope', cadenceSeconds: 600,
-    });
-    expect(text).toMatch(/\[(forbidden|agent_not_found)\]/);
-    expect(await db.agentTickerTemplate.count()).toBe(0);
-  });
-});
+// #3082: the 'MCP parity' describe (hadron_agent_ticker_template_create/list/update/delete) is removed with the disabled
+// tools. The same rules stay pinned above through the resolvers: create/list/update (revision mismatch)/delete
+// (this file, lines ~48-86) and the unauthorized caller refusals (FORBIDDEN / TICKER_TEMPLATE_NOT_FOUND, ~140-153).
 
 describe('#2024 concurrency', () => {
   const settle = (...ps: Array<Promise<unknown>>) => Promise.allSettled(ps);
@@ -593,5 +567,24 @@ describe('#2024 lock protocol (two-connection barriers)', () => {
     h.release(); await h.holder;
     expect(await writing).toBe('FORBIDDEN');
     expect(await db.agentTickerTemplate.count({ where: { agentId } })).toBe(0);
+  });
+});
+
+describe('#2756 template names refuse control characters', () => {
+  const BAD = ['a\nb', 'a\rb', 'a\tb', 'a\u001b[2Jb', 'a\u0000b', 'a\u007fb', 'a\u0085b', 'a\u2028b', 'a\u2029b'];
+
+  it('create refuses each class with BAD_USER_INPUT and stores nothing; Unicode still passes', async () => {
+    for (const name of BAD) expect(await refusal(declare(name))).toBe('BAD_USER_INPUT');
+    expect(await db.agentTickerTemplate.count({ where: { agentId } })).toBe(0);
+    await expect(declare('Équipe 工程 🚀')).resolves.toMatchObject({ name: 'Équipe 工程 🚀' });
+  });
+
+  it('update refuses each class and leaves the template unchanged', async () => {
+    const t = await declare('Heartbeat');
+    for (const name of BAD) {
+      expect(await refusal(M.updateAgentTickerTemplate({}, { id: t.id, expectedRevision: 1, input: { name, cadenceSeconds: 3600 } }, ctx))).toBe('BAD_USER_INPUT');
+    }
+    const row = await db.agentTickerTemplate.findUniqueOrThrow({ where: { id: t.id } });
+    expect(row).toMatchObject({ name: 'Heartbeat', revision: 1, cadenceSeconds: 600 });
   });
 });

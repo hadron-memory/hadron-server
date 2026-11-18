@@ -18,11 +18,12 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import { createServer as createHttpServer, type Server } from 'node:http';
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
+import { confirmConnect } from '../connectInterstitial.js';
 import { issueExchangeStartNonce } from '../../auth/authHandoff.js';
 import { signJwt } from '../../auth/index.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 
 let server: Server;
 let baseUrl: string;
@@ -30,16 +31,14 @@ let userId: string;
 let orgId: string;
 
 beforeAll(async () => {
-  const app = await createServer();
+  const app = await createServerOnCleanDb();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 
 afterAll(async () => {
-  await new Promise<void>((resolve, reject) =>
-    server.close((err) => (err ? reject(err) : resolve())),
-  );
+  await closeServerIfStarted(server);
 });
 
 beforeEach(async () => {
@@ -122,7 +121,7 @@ describe('GET /auth/gmail', () => {
 
     // The nonce survives the misconfiguration and works once configured.
     process.env.GMAIL_CLIENT_ID = 'gmail-client-id.apps.googleusercontent.example';
-    const retry = await fetch(`${baseUrl}/auth/gmail?nonce=${nonce}`, { redirect: 'manual' });
+    const retry = await confirmConnect(`${baseUrl}/auth/gmail?nonce=${nonce}`);
     expect(retry.status).toBe(302);
   });
 
@@ -134,7 +133,7 @@ describe('GET /auth/gmail', () => {
 
   it('redirects to Google consent with the refresh-token prerequisites', async () => {
     const nonce = await issueExchangeStartNonce({ userId, orgId, redirect: '/app', provider: 'gmail' });
-    const res = await fetch(`${baseUrl}/auth/gmail?nonce=${nonce}`, { redirect: 'manual' });
+    const res = await confirmConnect(`${baseUrl}/auth/gmail?nonce=${nonce}`);
     expect(res.status).toBe(302);
 
     const loc = new URL(res.headers.get('location') as string);

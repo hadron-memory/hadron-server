@@ -10,7 +10,7 @@
  *   - resolveUrn's agent branch resolves a PUBLIC agent for any caller (share
  *     links), otherwise falls back to membership.
  *   - Field exposure (PR #552 review): the Agent's OWN definition
- *     (systemPrompt / memoryItems / imports / importedBy) is public on a PUBLIC
+ *     (description / memoryItems / imports / importedBy) is public on a PUBLIC
  *     agent, but the "who uses this agent" fields (apps / appAgents / orgGrants
  *     / appCount) are NOT — apps/appAgents return other tenants' App objects
  *     (whose keys/members aren't re-gated), so they are scoped to the caller's
@@ -58,13 +58,13 @@ beforeEach(async () => {
     data: {
       id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:pub-agent`,
       name: 'Pub Agent', visibility: 'PUBLIC',
-      systemPrompt: 'SECRET-PROMPT', systemMemoryId: sysMem.id,
+      description: 'SECRET-PROMPT', systemMemoryId: sysMem.id,
     },
   });
   orgAgentA = await db.agent.create({
     data: {
       id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:org-agent`,
-      name: 'Org Agent', visibility: 'ORGANIZATION', systemPrompt: 'ORG-PROMPT',
+      name: 'Org Agent', visibility: 'ORGANIZATION', description: 'ORG-PROMPT',
     },
   });
 });
@@ -262,7 +262,7 @@ describe('installAgentIntoApp — CONTRIBUTOR floor + cross-org PUBLIC (issue #5
 /**
  * #757 — `Agent.importedBy` returns OTHER tenants' parent agents, and
  * `AgentImport.parentAgent` hydrates each with no gate of its own. On a PUBLIC
- * agent that leaked foreign orgs' private agent definitions (systemPrompt) to
+ * agent that leaked foreign orgs' private agent definitions (description) to
  * any caller, including anonymous. Same class as #552.
  */
 describe('Agent.importedBy — cross-tenant parent-agent scoping (#757)', () => {
@@ -276,7 +276,7 @@ describe('Agent.importedBy — cross-tenant parent-agent scoping (#757)', () => 
       data: {
         id: generateId(), organizationId: orgB.id, urn: `${orgB.urn}:suite`,
         name: 'Org B Suite', visibility: 'ORGANIZATION',
-        systemPrompt: 'ORG-B-PROPRIETARY-PROMPT',
+        description: 'ORG-B-PROPRIETARY-PROMPT',
       },
     });
     await createDbAgentImport(db, orgBPrivateParent.id, pubAgentA.id);
@@ -319,16 +319,16 @@ describe('Agent.importedBy — cross-tenant parent-agent scoping (#757)', () => 
     expect(anonRows.map((r: { parentAgentId: string }) => r.parentAgentId)).toEqual([publicParent.id]);
   });
 
-  it('the leak is closed end-to-end: the foreign systemPrompt is unreachable', async () => {
+  it('the leak is closed end-to-end: the foreign description is unreachable', async () => {
     // The pre-#757 exploit: read the PUBLIC agent, walk importedBy →
-    // parentAgent → systemPrompt.
+    // parentAgent → description.
     const agent = await Q.agent(null, { ref: pubAgentA.id }, asAnon());
     expect(agent).not.toBeNull();
     const rows = await A.importedBy(agent, {}, asAnon());
     const parents = await Promise.all(
       rows.map((r: unknown) => (resolvers.AgentImport as any).parentAgent(r, {}, asAnon())),
     );
-    expect(parents.map((p: { systemPrompt: string } | null) => p?.systemPrompt))
+    expect(parents.map((p: { description: string } | null) => p?.description))
       .not.toContain('ORG-B-PROPRIETARY-PROMPT');
   });
 
@@ -376,7 +376,7 @@ describe('Agent.importedBy — cross-tenant parent-agent scoping (#757)', () => 
 
   it('the agent’s OWN definition stays public (#551 not regressed)', async () => {
     const agent = await Q.agent(null, { ref: pubAgentA.id }, asAnon());
-    expect(agent.systemPrompt).toBe('SECRET-PROMPT');
+    expect(agent.description).toBe('SECRET-PROMPT');
     expect(await A.imports(agent, {}, asAnon())).toEqual([]);
   });
 });

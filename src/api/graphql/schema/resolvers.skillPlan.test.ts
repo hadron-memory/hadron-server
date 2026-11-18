@@ -308,6 +308,27 @@ describe('includes in an exported body (#2041, cor:dmo:150:03 R9)', () => {
   });
 });
 
+describe('an include tag is not a literal-text placeholder (#2943, hadron-cli#1166)', () => {
+  const template = (entry: { findings: Array<{ rule: string }> }) => entry.findings.filter(f => f.rule === 'skill-content-has-template');
+
+  it('a body whose only braces are include tags gets no template finding; a {{var}} beside them still does', async () => {
+    await mkNode('policies:conduct', { content: 'Be kind.', isRunnable: false });
+    await mkNode('tasks:only-include', { properties: declaration({ name: 'skill-only-include' }), content: '# Body\n\n{{> policies:conduct}}' });
+    await mkNode('tasks:with-var', { properties: declaration({ name: 'skill-with-var' }), content: '{{> policies:conduct}}\n\nHi {{name}}' });
+    for (const intent of ['LINT', 'EXPORT']) {
+      const got = await plan({ intent, files: [] });
+      const entries = got.entries as any[];
+      expect(entries, intent).toHaveLength(2);
+      const only = entries.find((e) => JSON.stringify(e).includes('only-include'));
+      const withVar = entries.find((e) => JSON.stringify(e).includes('with-var'));
+      expect(template(only), intent).toEqual([]);
+      expect(template(withVar).map((f: any) => f.message), intent).toEqual([
+        'content contains a {{…}} placeholder — export is verbatim, so it ships as literal text; keep it only if the skill is meant to carry a template',
+      ]);
+    }
+  });
+});
+
 describe('a broken include warns in skill lint (#2048 S11d, cor:dmo:150:03 R9)', () => {
   const rule = (entry: { findings: Array<{ rule: string; severity: string; message: string }> }) => entry.findings.filter(f => f.rule === 'skill-include-broken');
 

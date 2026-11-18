@@ -63,8 +63,8 @@ describe('export — the INCREMENTAL mirror path emits them too', () => {
     try {
       writeNodeFile(dir, {
         id: 'reserved', loc: 'pas:010:01', name: 'Reserved', tags: [],
-        role: 'spec', isRunnable: null, isPlaceholder: true, outgoingEdges: [],
-      });
+        role: 'spec', isRunnable: null, isPlaceholder: true, authorshipKind: null, authoredByTask: null, authoredByRevision: null, outgoingEdges: [],
+      }, undefined, false);
       expect(readFileSync(join(dir, 'pas', '010', '01.md'), 'utf-8')).toMatch(/^placeholder: true$/m);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -86,8 +86,8 @@ describe('export — the INCREMENTAL mirror path emits them too', () => {
         role: 'review',
         isRunnable: true,
         isPlaceholder: false,
-        outgoingEdges: [],
-      });
+        authorshipKind: null, authoredByTask: null, authoredByRevision: null, outgoingEdges: [],
+      }, undefined, false);
       const written = readFileSync(join(dir, 'topic.md'), 'utf-8');
       expect(written).toMatch(/^role: review$/m);
       expect(written).toMatch(/^runnable: true$/m);
@@ -101,9 +101,9 @@ describe('export — the INCREMENTAL mirror path emits them too', () => {
     try {
       writeNodeFile(dir, {
         id: 'n6', loc: 'plain', name: 'P', tags: [],
-        role: null, isRunnable: null, outgoingEdges: [],
+        role: null, isRunnable: null, authorshipKind: null, authoredByTask: null, authoredByRevision: null, outgoingEdges: [],
         isPlaceholder: false,
-      });
+      }, undefined, false);
       const written = readFileSync(join(dir, 'plain.md'), 'utf-8');
       expect(written).not.toMatch(/^role:/m);
       expect(written).not.toMatch(/^runnable:/m);

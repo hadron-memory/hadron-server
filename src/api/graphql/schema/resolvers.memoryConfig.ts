@@ -70,6 +70,7 @@ import { assertValidRuleRole, lockMemoryConfigExclusive } from '../../../lib/gov
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { generateId } from '../../../lib/id.js';
 import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
+import { taskVisibilityWarnings } from './resolvers.memoryConfigWarnings.js';
 
 export type Writers = 'ALL' | 'OWNER' | 'ADMIN';
 export type Validator = 'AGENT' | 'PLATFORM';
@@ -238,7 +239,7 @@ export function requireWriter(ctx: Context): string {
   return ctx.userId;
 }
 
-type RefKind = 'authorTask' | 'validationTask' | 'descriptionNode';
+export type RefKind = 'authorTask' | 'validationTask' | 'descriptionNode';
 
 /**
  * Resolve an inbound reference for a rule write. Order matters: existence and
@@ -378,9 +379,12 @@ export async function materializeConfig(tx: Prisma.TransactionClient, memoryId: 
   // #1400: taken BEFORE the row can exist, so a node write that found no
   // config either commits first or sees this memory's first rules.
   await lockMemoryConfigExclusive(tx, memoryId);
+  // #3196: created_at is written explicitly as UTC. The column is a naive
+  // timestamp holding UTC, and its DEFAULT CURRENT_TIMESTAMP would land as the
+  // session's wall time, hours off under a non-UTC session.
   await tx.$executeRaw`
-    INSERT INTO "memory_configs" ("id", "memory_id", "created_by", "updated_by")
-    VALUES (${generateId()}, ${memoryId}, ${actor}, ${actor})
+    INSERT INTO "memory_configs" ("id", "memory_id", "created_by", "updated_by", "created_at")
+    VALUES (${generateId()}, ${memoryId}, ${actor}, ${actor}, (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3))
     ON CONFLICT ("memory_id") DO NOTHING`;
   const row = await tx.memoryConfig.findUniqueOrThrow({ where: { memoryId }, select: { id: true } });
   return row.id;
@@ -410,7 +414,7 @@ async function configForManagedMemory(db: PrismaClient, memoryId: string) {
  */
 type RefView = { urn: string | null; id: string | null; state: RefState };
 const refViewCache = new WeakMap<object, Map<string, Promise<RefView>>>();
-function refViewOnce(ctx: Context, rule: RuleRefRow, kind: RefKind): Promise<RefView> {
+export function refViewOnce(ctx: Context, rule: RuleRefRow, kind: RefKind): Promise<RefView> {
   let perRule = refViewCache.get(rule);
   if (!perRule) refViewCache.set(rule, (perRule = new Map()));
   let pending = perRule.get(kind);
@@ -418,6 +422,10 @@ function refViewOnce(ctx: Context, rule: RuleRefRow, kind: RefKind): Promise<Ref
     const cols = REF_COLUMNS[kind];
     pending = refView(ctx, rule[cols.id], cols.required ? rule[cols.required] : false);
     perRule.set(kind, pending);
+    // Keep no rejection in the memo (#1327): a one-shot projection fault must
+    // not replay through `authorTaskState` on a rule that was already saved.
+    const memo = perRule;
+    pending.catch(() => memo.delete(kind));
   }
   return pending;
 }
@@ -489,7 +497,7 @@ export const memoryConfigMutations = {
         await touchConfig(tx, configId, actor);
         return created;
       });
-      return { rule, warnings: [] };
+      return { rule, warnings: await taskVisibilityWarnings(ctx, memory.id, [rule]) };
     } catch (e) {
       translateRoleTaken(e, role);
     }
@@ -538,7 +546,8 @@ export const memoryConfigMutations = {
       await touchConfig(tx, current.configId, actor);
       return after;
     });
-    return { rule, warnings: [] };
+    // #1327: advisory, computed from the committed rule in the caller's own reference projection.
+    return { rule, warnings: await taskVisibilityWarnings(ctx, memoryId, [rule]) };
   },
 
   deleteNodeRoleRule: async (
@@ -624,6 +633,15 @@ export const ruleRefFieldResolvers = {
   },
 };
 
+type SkipRow = { templateRuleId: string | null; field: string };
+/** The skipped rule's reference as the calling manager sees it now. A rule since removed has nothing to show. */
+async function skipView(ctx: Context, row: SkipRow): Promise<RefView> {
+  if (row.templateRuleId == null || !(row.field in REF_COLUMNS)) return { urn: null, id: null, state: 'BROKEN' };
+  const rule = await ctx.db.memoryConfigTemplateRule.findUnique({ where: { id: row.templateRuleId } });
+  if (!rule) return { urn: null, id: null, state: 'BROKEN' };
+  return refViewOnce(ctx, rule, row.field as RefKind);
+}
+
 export const memoryConfigFieldResolvers = {
   Memory: {
     /** Null for anyone who does not manage the memory (H4), however they reached it. */
@@ -642,6 +660,34 @@ export const memoryConfigFieldResolvers = {
       config.id == null
         ? []
         : ctx.db.nodeRoleRule.findMany({ where: { configId: config.id }, orderBy: { role: 'asc' } }),
+    /**
+     * #3426 (C6): the org-default rules skipped when this memory was created. The parent is already behind the manage
+     * gate, and this asks it AGAIN (#552: a field must not lean on its parent's gate), so a non-manager gets the
+     * not-found a missing memory gets. `ref`/`refState` are recomputed from the template rule for THIS caller, never
+     * stored; a template or rule since removed reads as unavailable.
+     */
+    defaultSkips: async (config: { memoryId: string }, _: unknown, ctx: Context) => {
+      const memory = await ctx.db.memory.findFirst({ where: { id: config.memoryId, deletedAt: null }, select: MEMORY_GATE_SELECT });
+      if (!memory || !(await canManageMemoryConfig(ctx, memory))) throw new MemoryNotFoundError(config.memoryId);
+      const rows = await ctx.db.memoryConfigDefaultSkip.findMany({ where: { memoryId: memory.id }, orderBy: [{ role: 'asc' }, { field: 'asc' }] });
+      return rows.map((row) => ({ row }));
+    },
+  },
+  MemoryConfigDefaultSkip: {
+    role: ({ row }: { row: { role: string } }) => row.role,
+    field: ({ row }: { row: { field: string } }) => row.field,
+    reason: ({ row }: { row: { reason: string } }) => row.reason,
+    createdAt: ({ row }: { row: { createdAt: Date } }) => row.createdAt,
+    sourceTemplate: async ({ row }: { row: { templateId: string | null } }, _: unknown, ctx: Context) => {
+      if (row.templateId == null) return null;
+      const t = await ctx.db.memoryConfigTemplate.findUnique({ where: { id: row.templateId }, select: { id: true, name: true, deletedAt: true } });
+      return t ? { id: t.id, name: t.name, deleted: t.deletedAt != null } : null;
+    },
+    ref: async ({ row }: { row: SkipRow }, _: unknown, ctx: Context) => (await skipView(ctx, row)).urn,
+    refState: async ({ row }: { row: SkipRow }, _: unknown, ctx: Context) => {
+      const v = await skipView(ctx, row);
+      return row.field === 'descriptionNode' && v.state === 'BROKEN' ? 'NONE' : v.state;
+    },
   },
   NodeRoleRule: {
     ...ruleRefFieldResolvers,

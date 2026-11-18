@@ -14,6 +14,7 @@ import { setAgentAssetUploadEnabled, SetAssetEnabledError } from '../../../contr
 import { AssetUploadError } from '../../../controller/operations/beginAssetUpload.js';
 import { softDeleteAsset } from '../../../controller/operations/softDeleteAsset.js';
 import { setAssetPublicLink } from '../../../lib/asset/publicLink.js';
+import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { restoreAsset } from '../../../controller/operations/restoreAsset.js';
 import {
   type Context,
@@ -135,9 +136,9 @@ export const assetMutations = {
 
     setAssetPublicLink: async (
       _: unknown,
-      { assetRef, enabled }: { assetRef: string; enabled: boolean },
+      { assetRef, enabled, instruction }: { assetRef: string; enabled: boolean; instruction?: ActInstruction | null },
       ctx: Context,
-    ) => setAssetPublicLink(ctx, assetRef, enabled),
+    ) => setAssetPublicLink(ctx, assetRef, enabled, instruction),
 
     softDeleteAsset: async (
       _: unknown,

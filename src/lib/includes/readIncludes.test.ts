@@ -233,15 +233,18 @@ describe('traversal-safe memoization (Xavier GAPS item 3)', () => {
     expect(again).toBe(`BD${BROKEN_INCLUDE_NOTICE}CD${BROKEN_INCLUDE_NOTICE}`);
   });
 
-  it('two revision settings serve two revisions; signed is ignored until signing ships (D7); approved with no approval is the notice', async () => {
-    const t = await mk('t', 'v2');
-    await db.nodeRevision.create({
-      data: { id: generateId(), nodeId: t.id, memoryId, revNo: 1, loc: 't', name: 't', content: 'v1', tags: [] },
-    });
-    await mk('a', '{{> t}} {{> t rev=1}} {{> t rev=9}} {{> t signed}} {{> t rev=1 signed}} {{> t approved}} {{> t approved signed}}');
-    const out = (await run(NODE_Q, as(reader), { ref: urn('a') })).data as { node: { content: string } };
-    const N = BROKEN_INCLUDE_NOTICE;
-    expect(out.node.content).toBe(`v2 v1 ${N} v2 v1 ${N} ${N}`);
+  it.each(['false', 'true'])('revision and signed settings follow deployment policy (flag=%s)', async flag => {
+    vi.stubEnv('PASSKEY_SIGNING_ENABLED', flag);
+    try {
+      const t = await mk('t', 'v2');
+      await db.nodeRevision.create({
+        data: { id: generateId(), nodeId: t.id, memoryId, revNo: 1, loc: 't', name: 't', content: 'v1', tags: [] },
+      });
+      await mk('a', '{{> t}} {{> t rev=1}} {{> t rev=9}} {{> t signed}} {{> t rev=1 signed}} {{> t approved}} {{> t approved signed}}');
+      const out = (await run(NODE_Q, as(reader), { ref: urn('a') })).data as { node: { content: string } };
+      const N = BROKEN_INCLUDE_NOTICE;
+      expect(out.node.content).toBe(flag === 'false' ? `v2 v1 ${N} v2 v1 ${N} ${N}` : `v2 v1 ${N} ${N} ${N} ${N} ${N}`);
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it('readers with different access in one process never share a result', async () => {
