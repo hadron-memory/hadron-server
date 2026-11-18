@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Prisma } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
 import * as sessionActivity from '../../lib/sessionActivity.js';
@@ -99,6 +99,30 @@ describe('#4406 loadLastEventBySession: one index probe per session', () => {
     expect(r.groupBy.buffers).toBeGreaterThan(r.fix.buffers * 10);
   });
 
+  it('the probe keys the session by a RANGE: without the session-keyed indexes it never walks created_at_idx, where an equality would', async () => {
+    // With "= s.id" the planner treats session_id as a constant and drops it from ORDER BY, so "ORDER BY created_at DESC
+    // LIMIT 1" can be served by walking usage_events_created_at_idx backwards (the 2026-10-14 outage). The range keeps
+    // session_id in the sort. With both session-keyed indexes gone the equality shape has exactly one index path left.
+    const WALK = 'usage_events_created_at_idx';
+    const equality = (sql: Prisma.Sql): Prisma.Sql => {
+      const from = 'x.session_id >= s.id AND x.session_id <= s.id';
+      // Absent when the shipped text is already an equality: then the control below is the shipped plan itself.
+      const strings = sql.strings.map((t) => t.replace(from, 'x.session_id = s.id'));
+      return Prisma.sql(Object.assign(strings, { raw: strings }) as TemplateStringsArray, ...sql.values);
+    };
+    const plans = await rolledBack(async (tx) => {
+      await seed(tx, 20_000);
+      await tx.$executeRawUnsafe('DROP INDEX usage_events_session_activity_idx');
+      await tx.$executeRawUnsafe('DROP INDEX usage_events_session_id_idx');
+      return {
+        shipped: await analyze(tx, sessionActivity.lastEventBySessionSql(IDS)),
+        equality: await analyze(tx, equality(sessionActivity.lastEventBySessionSql(IDS))),
+      };
+    });
+    expect(plans.equality.indexes, plans.equality.text).toContain(WALK);
+    expect(plans.shipped.indexes, plans.shipped.text).not.toContain(WALK);
+  });
+
   it('answers exactly what the groupBy answered: 0, 1 and many events, mixed counted rows, ids with none (cor:agt:020:11)', async () => {
     const r = await rolledBack(async (tx) => {
       await seed(tx, 300);
@@ -123,6 +147,16 @@ describe('#4406 loadLastEventBySession: one index probe per session', () => {
     await sessionActivity.loadLastEventBySession(db as never, IDS);
     const seen = await Promise.all(Array.from({ length: 40 }, () => show()));
     for (const s of seen) expect(s).toBe(before);
+  });
+
+  it('on the shared client the whole read is one transaction, however many ids it asks about', async () => {
+    const tx = vi.spyOn(db, '$transaction');
+    try {
+      await sessionActivity.loadLastEventBySession(db as never, IDS);
+      expect(tx).toHaveBeenCalledTimes(1);
+    } finally {
+      tx.mockRestore();
+    }
   });
 
   it('on a caller transaction client it opens no nested transaction and the setting stays local to that caller transaction', async () => {
