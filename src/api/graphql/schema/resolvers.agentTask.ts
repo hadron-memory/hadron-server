@@ -3516,10 +3516,14 @@ export async function logStalledHorizon(db: Context['db'], appId: string): Promi
     // Observability only: the served page is byte-identical whatever happens here. F3: visible, not silent.
     // #4408 item 3 (Bob P3.3): the line carries the error's class and code, never its message — a Prisma
     // connection error's message names the DB host and port, and internal logs are no reason to repeat
-    // them. `code` is a string on Prisma errors (P1001, P2028); absent on others, and the key is omitted
-    // rather than nulled. A non-Error throw names its kind; there is no message to leak and none invented.
-    const code = typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'string'
-      ? (error as { code: string }).code : undefined;
+    // them. The two Prisma carriers spell the code differently: `code` on PrismaClientKnownRequestError
+    // (P2028 …), `errorCode` on PrismaClientInitializationError (P1001, the usual DB-unreachable fault —
+    // Jonas's BLIND P2 on #4433 caught the first cut reading only `code`). Either way a string or the key
+    // is omitted rather than nulled; other errors carry neither. A non-Error throw names its kind; there
+    // is no message to leak and none invented.
+    const fault = typeof error === 'object' && error !== null ? (error as { code?: unknown; errorCode?: unknown }) : undefined;
+    const code = typeof fault?.code === 'string' ? fault.code
+      : typeof fault?.errorCode === 'string' ? fault.errorCode : undefined;
     console.log(JSON.stringify({
       event: 'team_events.horizon_probe_error', appId, ms: Date.now() - startedAt,
       errorName: error instanceof Error ? error.name : typeof error,

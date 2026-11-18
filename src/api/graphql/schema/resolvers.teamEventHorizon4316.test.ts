@@ -400,22 +400,30 @@ describe('#4408: the #4372 review follow-ups (eviction, timer clear, sanitized f
 
   it('a probe fault line carries the error class and code, never the message (#4408 item 3)', async () => {
     const sentinelHost = 'postgresql://secret-probe-host-4408.example:5432/hadron';
-    const fault = Object.assign(new Error(`connect ECONNREFUSED ${sentinelHost}`), { name: 'PrismaClientInitializationError', code: 'P1001' });
-    await logStalledHorizon(probeDbOf(() => Promise.reject(fault)), 'sanitize-app-4408');
+    // The REAL installed shapes (@prisma/client runtime client.d.mts): PrismaClientInitializationError
+    // declares `errorCode?: string` and NO `code` — P1001 (DB unreachable, the usual probe fault) rides
+    // `errorCode`. PrismaClientKnownRequestError declares `code: string` (P2028 et al). The first fixture
+    // below used `code` on the init shape, which is why this pin passed before Jonas's BLIND P2 on #4433.
+    const initFault = Object.assign(new Error(`connect ECONNREFUSED ${sentinelHost}`), { name: 'PrismaClientInitializationError', errorCode: 'P1001' });
+    await logStalledHorizon(probeDbOf(() => Promise.reject(initFault)), 'sanitize-app-4408');
+    const knownFault = Object.assign(new Error('statements can fail'), { name: 'PrismaClientKnownRequestError', code: 'P2028' });
+    await logStalledHorizon(probeDbOf(() => Promise.reject(knownFault)), 'sanitize-app-4408-known');
     const lines = probeErrorLines(log);
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatchObject({ event: 'team_events.horizon_probe_error', appId: 'sanitize-app-4408', errorName: 'PrismaClientInitializationError', errorCode: 'P1001' });
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatchObject({ event: 'team_events.horizon_probe_error', appId: 'sanitize-app-4408', errorName: 'PrismaClientInitializationError', errorCode: 'P1001' }); // RED at 917f732fd: the catch read only `code`
+    expect(lines[1]).toMatchObject({ event: 'team_events.horizon_probe_error', appId: 'sanitize-app-4408-known', errorName: 'PrismaClientKnownRequestError', errorCode: 'P2028' });
     const serialized = JSON.stringify(lines[0]);
     expect(serialized).not.toContain(sentinelHost); // RED pre-#4408: the raw message named the DB host
     expect(serialized).not.toContain('ECONNREFUSED');
     expect(Object.keys(lines[0]).sort()).toEqual(['appId', 'at', 'errorCode', 'errorName', 'event', 'ms']);
+    expect(Object.keys(lines[1]).sort()).toEqual(['appId', 'at', 'errorCode', 'errorName', 'event', 'ms']);
     // A non-Error throw names its kind and carries no code — nothing to leak, nothing to invent.
     await logStalledHorizon(probeDbOf(() => Promise.reject('boom')), 'sanitize-app-4408-string');
-    const both = probeErrorLines(log);
-    expect(both).toHaveLength(2);
-    expect(both[1]).toMatchObject({ event: 'team_events.horizon_probe_error', appId: 'sanitize-app-4408-string', errorName: 'string' });
-    expect(both[1]).not.toHaveProperty('errorCode');
-    expect(JSON.stringify(both[1])).not.toContain('boom'); // RED pre-#4408: String(error) put it in the line
+    const all = probeErrorLines(log);
+    expect(all).toHaveLength(3);
+    expect(all[2]).toMatchObject({ event: 'team_events.horizon_probe_error', appId: 'sanitize-app-4408-string', errorName: 'string' });
+    expect(all[2]).not.toHaveProperty('errorCode');
+    expect(JSON.stringify(all[2])).not.toContain('boom'); // RED pre-#4408: String(error) put it in the line
   });
 });
 
