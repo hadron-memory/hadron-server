@@ -62,7 +62,7 @@ beforeEach(async () => {
   appY = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Y', urn: `${org.urn}:y` } });
   await db.appMember.create({ data: { appId: appX.id, userId: member.id, role: 'member' } });
   await db.appMember.create({ data: { appId: appY.id, userId: member.id, role: 'member' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, userCtx());
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, userCtx());
   anne = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: appX.id, agentId: agent.id, name: 'Anne', slug: 'anne' }, select: { id: true } });
   bert = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: appX.id, agentId: agent.id, name: 'Bert', slug: 'bert' }, select: { id: true } });
   keyX = await db.appKey.create({ data: { id: generateId(), appId: appX.id, keyHash: `h-${generateId()}`, keyPreview: 'abcd' }, select: { id: true } });

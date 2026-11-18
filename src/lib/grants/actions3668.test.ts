@@ -17,7 +17,8 @@ import { PLATFORM_ACTIONS, upsertPlatformActions, type ActionDefinition } from '
 
 const act = (name: string, over: Partial<ActionDefinition> = {}): ActionDefinition => ({
   name, source: 'PLATFORM', parameters: [{ name: 'entryNode', type: 'node-ref', refusesWildcard: true }], tool: null,
-  enforcement: 'SERVER', issuerRule: 'TEST_ONLY', summaryTemplate: 'Create a thing in {app} at {entryNode}', ...over,
+  // #3730: a REAL closed-set key — the upsert refuses anything else now, and these rows only exercise upsert mechanics.
+  enforcement: 'SERVER', issuerRule: 'APP_SCHEDULE_ADMIN', summaryTemplate: 'Create a thing in {app} at {entryNode}', ...over,
 });
 type Row = { name: string; xmin: string; updated_at: Date; summary_template: string };
 const rows = () => db.$queryRawUnsafe<Row[]>(`SELECT name, xmin::text AS xmin, updated_at, summary_template FROM actions WHERE name LIKE 'test.s1a.%' ORDER BY name`);
@@ -65,6 +66,16 @@ describe('upsertPlatformActions is idempotent and never deletes', () => {
     await expect(upsertPlatformActions(db, [act('test.s1a.ok'), act('')])).rejects.toThrow(/action/i);
     await expect(upsertPlatformActions(db, [act('test.s1a.dup'), act('test.s1a.dup')])).rejects.toThrow(/duplicate/i);
     await expect(upsertPlatformActions(db, [act('test.s1a.bad', { enforcement: 'WISHFUL' as never })])).rejects.toThrow(/enforcement/i);
+    expect(await rows()).toEqual([]);
+  });
+  // #3730 item 1: the issuer-rule registry is CLOSED. A key that only LOOKS like one — an inherited property name such as
+  // 'toString'/'__proto__', or a typo — is refused at validation, before any write, instead of reaching the issuer door
+  // where a plain Record lookup would answer it with a "gate" that either never refuses or is not callable.
+  it('#3730: refuses an issuerRule outside the closed set before writing anything — including inherited property names', async () => {
+    for (const bad of ['toString', '__proto__', 'constructor', 'APP_SCHEDULE_ADMIX', '']) {
+      await expect(upsertPlatformActions(db, [act(`test.s1a.k${bad.length}`, { issuerRule: bad as never })]),
+        JSON.stringify(bad)).rejects.toThrow(/issuerRule/i);
+    }
     expect(await rows()).toEqual([]);
   });
 });

@@ -45,7 +45,7 @@ beforeEach(async () => {
  await db.orgMember.create({data:{organizationId:org.id,userId:holder.id,role:'ADMIN'}});
  const app = await db.app.create({data:{organizationId:org.id,name:'Team',urn:'preview3599.test:team'}});
  f={holder,outsider,org,app};
- const agent = await M.createAgent({}, {orgId:org.id,name:'Role',personaRole:'server-engineer'},ctx());
+ const agent = await M.createAgent({}, {orgRef:org.id,name:'Role',personaRole:'server-engineer'},ctx());
  await db.appAgent.create({data:{appId:app.id,agentId:agent.id}});
  const caller = await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,appId:app.id,agentId:agent.id,name:'Caller',slug:'caller',heldByUserId:holder.id}});
  const session = await db.session.create({data:{id:generateId(),appId:app.id,agentId:agent.id,workerId:caller.id,userId:holder.id,tool:'vitest'}});

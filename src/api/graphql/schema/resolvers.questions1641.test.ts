@@ -543,7 +543,7 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
     await createLog().then((log) => ask(log.row.id));
     await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'ordinary', name: 'Ordinary' } });
     expect(await codeOf(M.deleteMemory(null, { id: memory.id }, as()))).toBe('QUESTION_CONTAINED');
-    expect(await codeOf(M.updateMemory(null, { id: memory.id, source: 'https://github.com/x/y' }, as()))).toBe('QUESTION_LOG_MIRRORED');
+    expect(await codeOf(M.updateMemory(null, { ref: memory.id, source: 'https://github.com/x/y' }, as()))).toBe('QUESTION_LOG_MIRRORED');
     const clone = await M.cloneMemory(null, { ref: memory.id, targetUrn: 'hrn:mem:decision.example:copy' }, as());
     const cloned = await db.node.findMany({ where: { memoryId: clone.id } });
     expect(cloned.filter((n) => n.role?.startsWith('question'))).toEqual([]);
@@ -646,7 +646,7 @@ describe('Rook §10 on #1690 — where a question log may not live', () => {
     await db.memory.update({ where: { id: memory.id }, data: { class: 'system' as never, visibility: null } });
     expect(await codeOf(createLog())).toBe('QUESTION_LOG_SYSTEM_MEMORY');
     const app = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Anon', urn: `${orgId.toLowerCase()}:anon` } });
-    const agent = await M.createAgent(null, { orgId, name: 'Anon Agent' }, as(admin.id, { roles: ['READER'] }));
+    const agent = await M.createAgent(null, { orgRef: orgId, name: 'Anon Agent' }, as(admin.id, { roles: ['READER'] }));
     await db.memory.update({ where: { id: memory.id }, data: { class: 'app' as never, appId: app.id, userMemoryOfAgentId: agent.id, userId: null } });
     expect(await codeOf(createLog())).toBe('QUESTION_LOG_ANONYMOUS_MEMORY');
     expect(await db.node.count({ where: { memoryId: memory.id, role: 'question.log' } })).toBe(0);

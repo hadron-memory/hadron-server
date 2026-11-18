@@ -165,6 +165,30 @@ const quote = (name: string) => `"${name.replace(/"/g, '""')}"`;
 /** The same server, user and query string (sslmode and the rest), with only the database path replaced. */
 export const withDb = (url: string, name: string) => { const u = new URL(url); u.pathname = `/${name}`; return u.toString(); };
 
+/**
+ * Drop each scratch database independently and report a failure by name (#4338 BLIND F3): a run that leaves one behind
+ * fails, so a green check never hides a leak. Returns the names that could not be dropped.
+ */
+export async function dropScratch(
+  query: (sql: string) => Promise<unknown>, dbs: string[], log: (line: string) => void,
+): Promise<string[]> {
+  const failed: string[] = [];
+  for (const db of dbs) {
+    try { await query(`DROP DATABASE IF EXISTS ${quote(db)} WITH (FORCE)`); }
+    catch (e) { failed.push(db); log(`CLEANUP FAILED: could not drop scratch database ${db}: ${(e as Error).message}`); }
+  }
+  return failed;
+}
+
+/**
+ * #4395 item 1: a reader that closes the pipe early (`--print | head`) makes the next write fail with EPIPE, and an
+ * unhandled stream error kills the process before the `finally` drops the scratch databases. A closed reader only
+ * means nobody reads the rest: EPIPE is swallowed (later writes go nowhere) and any other stream error still crashes.
+ */
+export function ignoreClosedPipe(stream: NodeJS.WriteStream): void {
+  stream.on('error', (e: NodeJS.ErrnoException) => { if (e.code !== 'EPIPE') throw e; });
+}
+
 const cleanupFailed: string[] = [];
 
 async function main(): Promise<number> {
@@ -190,6 +214,7 @@ async function main(): Promise<number> {
   const refDb = `hadron_replayref434_${tag}`;
   const admin = new Client({ connectionString: adminUrl });
   await admin.connect();
+  let r: ReturnType<typeof evaluate>;
   try {
     for (const db of [replayDb, refDb]) await admin.query(`CREATE DATABASE ${quote(db)} TEMPLATE template0`);
     const replayUrl = withDb(adminUrl, replayDb);
@@ -207,21 +232,19 @@ async function main(): Promise<number> {
     const reference = await snap(refUrl);
     const replay = await snap(replayUrl);
     const { entries, details } = differenceEntries(reference, replay);
-    const r = evaluate({ entries, details, print, baseline, baseBaseline, allowGrowth: process.env.MIGRATION_REPLAY_ALLOW_GROWTH === 'true' });
-    for (const line of r.out) console.log(line);
-    for (const line of r.err) console.error(line);
-    return r.code;
+    r = evaluate({ entries, details, print, baseline, baseBaseline, allowGrowth: process.env.MIGRATION_REPLAY_ALLOW_GROWTH === 'true' });
   } finally {
-    // #4338 BLIND F3: drop each scratch database independently and report a failure by name; a run that leaves one
-    // behind fails, so a green check never hides a leak.
-    for (const db of [replayDb, refDb]) {
-      try { await admin.query(`DROP DATABASE IF EXISTS ${quote(db)} WITH (FORCE)`); }
-      catch (e) { cleanupFailed.push(db); console.error(`CLEANUP FAILED: could not drop scratch database ${db}: ${(e as Error).message}`); }
-    }
+    cleanupFailed.push(...await dropScratch((sql) => admin.query(sql), [replayDb, refDb], (line) => console.error(line)));
     await admin.end().catch(() => {});
   }
+  // #4395 item 1: the result is written only once the scratch databases are gone, so no write can race the cleanup.
+  for (const line of r.out) console.log(line);
+  for (const line of r.err) console.error(line);
+  return r.code;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  ignoreClosedPipe(process.stdout);
+  ignoreClosedPipe(process.stderr);
   main().then((code) => process.exit(exitCode(code, cleanupFailed.length)), (e) => { console.error(e); process.exit(2); });
 }

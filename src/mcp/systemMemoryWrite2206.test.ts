@@ -75,7 +75,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: u.revoked.id, role: 'ADMIN', deletedAt: new Date() },
     { organizationId: other.id, userId: u.foreignAdmin.id, role: 'ADMIN' },
   ] });
-  const a = await M.createAgent({}, { orgId: org.id, name: 'Org Agent' }, ctxOf(u.orgAdmin));
+  const a = await M.createAgent({}, { orgRef: org.id, name: 'Org Agent' }, ctxOf(u.orgAdmin));
   orgAgent = { id: a.id, systemMemoryId: a.systemMemoryId };
   const ua = await M.createAgent({}, { name: 'Personal Agent' }, ctxOf(u.agentOwner));
   userAgent = { id: ua.id, systemMemoryId: ua.systemMemoryId };

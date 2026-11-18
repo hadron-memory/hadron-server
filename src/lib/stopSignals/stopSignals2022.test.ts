@@ -74,7 +74,7 @@ beforeEach(async () => {
   max = await u(71, 'max');
   mia = await u(72, 'mia');
   await db.orgMember.create({ data: { organizationId: org.id, userId: max.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(max.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(max.id));
   agentId = agent.id;
   await serveEveryAgent(db); // #2712: binds are served
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true } });

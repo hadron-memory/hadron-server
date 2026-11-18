@@ -22,7 +22,11 @@ import { typeDefs } from './typeDefs.js';
 
 /** The expected reference-argument names, per cor:api:140. */
 const EXPECTED_REF_ARGS: Record<string, string[]> = {
-  updateAgent: ['ref'],
+  updateAgent: ['ref', 'systemMemoryRef'],
+  // #4140 (S4): memory, org and agent writes take refs; a foreign ref is `<entity>Ref`.
+  updateMemory: ['ref', 'orgRef'],
+  updateOrganization: ['ref'],
+  createAgent: ['orgRef', 'systemMemoryRef'],
   deleteAgent: ['ref'],
   repairAgentSystemMemory: ['agentRef'],
   addMemoryToAgent: ['agentRef', 'memoryRef'],
@@ -64,7 +68,7 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
  * Args that legitimately stay `<entity>Id` because they are genuine PKs, per
  * the convention ("output fields, DB columns, resolved locals" → `<entity>Id`).
  */
-const ALLOWED_ID_ARGS = new Set(['systemMemoryId', 'userId']);
+const ALLOWED_ID_ARGS = new Set(['userId']);
 
 const mutationFields = () => {
   const schema = buildSchema(typeDefs);

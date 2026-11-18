@@ -68,7 +68,7 @@ beforeAll(async () => {
   await db.app.create({ data: { id: appId, organizationId: org.id, name: 'Unauth App', urn: `${org.urn}:team` } });
   // The team chat bootstraps through its Team Agent, which needs a roles: branch.
   const ctx: Context = { db, userId: member.id, roles: ['READER'] };
-  const teamAgent = await (resolvers.Mutation as any).createAgent({}, { orgId: org.id, name: 'Unauth Team Agent' }, ctx);
+  const teamAgent = await (resolvers.Mutation as any).createAgent({}, { orgRef: org.id, name: 'Unauth Team Agent' }, ctx);
   await db.node.create({ data: {
     id: generateId(), memoryId: teamAgent.systemMemoryId, loc: 'roles:backend-engineer', name: 'backend-engineer',
     content: 'You are {{name}}, a {{role}}.', data: { names: ['Iris'] },

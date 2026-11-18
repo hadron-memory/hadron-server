@@ -24,7 +24,7 @@ const ctx = (): Context => ({ db, userId: user.id, roles: ['READER'] });
 async function agent(name: string, personaRole: string) {
   const a = await M.createAgent(
     {},
-    { orgId: org.id, name, personaRole },
+    { orgRef: org.id, name, personaRole },
     ctx(),
   );
   await serveAgentBootPrompt(db, a.id, 'DERIVED {{worker.role}}');

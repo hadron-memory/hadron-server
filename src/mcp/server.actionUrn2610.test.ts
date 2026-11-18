@@ -94,14 +94,14 @@ beforeEach(async () => {
   });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
 
-  const created = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, gqlCtx(admin.id));
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, gqlCtx(admin.id));
   const teamRow = await db.agent.findUniqueOrThrow({ where: { id: created.id } });
   teamAgent = { id: teamRow.id, urn: teamRow.urn };
   teamMemoryId = teamRow.systemMemoryId as string;
   teamMemoryUrn = (await db.memory.findUniqueOrThrow({ where: { id: teamMemoryId } })).urn;
   await node(teamMemoryId, 'roles'); // the Team Agent marker (locateTeamAgent)
 
-  const createdChild = await M.createAgent({}, { orgId: org.id, name: 'Child Agent' }, gqlCtx(admin.id));
+  const createdChild = await M.createAgent({}, { orgRef: org.id, name: 'Child Agent' }, gqlCtx(admin.id));
   await db.agent.update({ where: { id: createdChild.id }, data: { extendsAgentId: teamAgent.id } });
   const childRow = await db.agent.findUniqueOrThrow({ where: { id: createdChild.id } });
   childAgent = { id: childRow.id, urn: childRow.urn };

@@ -20,7 +20,7 @@ beforeEach(async () => {
   admin = await makeUser(); member = await makeUser();
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   agents = [];
-  for (const name of ['First', 'Second']) agents.push(await M.createAgent({}, { orgId: org.id, name }, ctx(admin.id)));
+  for (const name of ['First', 'Second']) agents.push(await M.createAgent({}, { orgRef: org.id, name }, ctx(admin.id)));
   ({ app } = await createDbAppWithKey(db, 'run-fold', org.id));
   for (const [i, a] of agents.entries()) await db.appAgent.create({ data: { appId: app.id, agentId: a.id, createdAt: new Date(1700000000000 + i * 1000) } });
   await createDbAppMember(db, app.id, member.id, 'member');
@@ -34,7 +34,7 @@ async function expectReadOnly(auth: AuthContext, id: string) {
 async function foreignAgent() {
   const foreign = await db.organization.create({ data: { id: generateId(), name: 'Foreign', urn: `foreign-${generateId().toLowerCase()}.example` } });
   await db.orgMember.create({ data: { organizationId: foreign.id, userId: admin.id, role: 'ADMIN' } });
-  const a = await M.createAgent({}, { orgId: foreign.id, name: 'Licensed foreign' }, ctx(admin.id));
+  const a = await M.createAgent({}, { orgRef: foreign.id, name: 'Licensed foreign' }, ctx(admin.id));
   await createDbAppAgent(db, app.id, a.id);
   return a as { id: string; systemMemoryId: string };
 }
@@ -45,7 +45,7 @@ describe.each([false, true])('#3233 run on-behalf-of=%s', onBehalf => {
   });
   it('does not inherit the on-behalf user participation in another App', async () => {
     const { app: other } = await createDbAppWithKey(db, 'other-fold', org.id);
-    const a = await M.createAgent({}, { orgId: org.id, name: 'Other app only' }, ctx(admin.id));
+    const a = await M.createAgent({}, { orgRef: org.id, name: 'Other app only' }, ctx(admin.id));
     await createDbAppAgent(db, other.id, a.id); await createDbAppMember(db, other.id, member.id, 'member');
     expect((await getPrincipalAppMemoryAccess(db, run(onBehalf))).has(a.systemMemoryId)).toBe(false);
   });
