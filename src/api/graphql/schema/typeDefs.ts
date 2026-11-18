@@ -7571,6 +7571,8 @@ export const typeDefs = `#graphql
   type Grant {
     id: ID!
     appId: ID!
+    "#3709 — the grant's computed address hrn:grant:<root>:<app-slug>:<grant-id> (never stored: composed from the App's current urn plus the row id, so after an App rename only the new spelling is emitted while both spellings keep resolving through the alias map, hrn:node:hadronmemory.com:specs:cor:urn:030). Null only when the stored App urn cannot compose."
+    urn: String
     "The registered action this grant allows."
     action: String!
     "The values it allows (a single value, a list or a wildcard); never a secret."
@@ -8513,10 +8515,13 @@ export const typeDefs = `#graphql
   \`kind\` is the URN's type segment: memory | node | agent | org | app | user |
   apprun | worker | noderev | aiconf (#3857: an AI service config, behind the same
   gate as aiServiceConfig(ref:); an unreadable config answers null, as a missing
-  one does, hrn:node:hadronmemory.com:specs:cor:urn:010:01).
+  one does, hrn:node:hadronmemory.com:specs:cor:urn:010:01) | grant (#3709: behind
+  the same gate as grant(ref:); an unreadable grant answers null, as a missing
+  one does).
   \`id\` is the resolved entity's primary id. \`memoryId\` is set only for
-  nodes (their owning memory), \`organizationId\` for apps, app runs, and
-  workers (their owning org), and for an aiconf (#3857) the org that owns it or
+  nodes (their owning memory), \`organizationId\` for apps, app runs,
+  workers (their owning org), grants (#3709, their App's org), and for an
+  aiconf (#3857) the org that owns it or
   its App or Agent (null for a server-owned config or a user-owned App or
   Agent) — both are the extra ids those resources' canonical routes require.
   """
@@ -11609,8 +11614,8 @@ export const typeDefs = `#graphql
     "The caller's own connection grants; connectionRef narrows to one connection."
     connectionGrants(connectionRef: String, limit: Int, offset: Int): ConnectionGrantsPage!
     """
-    One grant by id (#3789). Read only by a BOUND WORKER SESSION, in its own App, for a grant naming that worker directly, a pending one it requested itself, or (#3711) one held by its role agent in this App while the agent is installed and licensed here.
-    Every other caller, a soft-deleted App and a missing id all answer null: no error and no existence oracle.
+    One grant by id or hrn:grant URN (#3789; URN per #3709). Read only by a BOUND WORKER SESSION, in its own App, for a grant naming that worker directly, a pending one it requested itself, or (#3711) one held by its role agent in this App while the agent is installed and licensed here.
+    Every other caller, a soft-deleted App and a missing id all answer null: no error and no existence oracle. A well-formed URN naming nothing answers the same null; a malformed or wrong-type URN is the typed input refusal URN_NOT_QUALIFIED (hrn:node:hadronmemory.com:specs:cor:api:140:01) — and so is a ref that is neither an id nor a URN, which the entity-ref convention treats as a URN attempt.
     """
     grant(ref: ID!): Grant
     "The bound worker's own grants (#3789): the rows naming it directly as holder, the pending ones it requested, and (#3711) every row, in every state, held by its role agent in this App while that agent is installed and licensed here (never another App's, never a base agent's). Any other caller gets an empty page, never an error. limit 0 returns the count only."

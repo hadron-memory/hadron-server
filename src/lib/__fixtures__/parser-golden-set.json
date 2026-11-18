@@ -306,7 +306,7 @@
       "expectedParserRewrites": ["type-marker-optionality"]
     },
     {
-      "_section": "#679 — secret owner-scoped shape (owner root :: [app|memory:slug ::] name). The app:/memory: marker is LOAD-BEARING and must NOT be stripped.",
+      "_section": "#679/#696 — secret URNs. Bare owner-scoped shape (owner root :: name) still parses; the pre-v2 SCOPED :: spelling is REFUSED at parse since urn-lib-js 0.0.22 (corpus v24, urn-lib-js#40; server-side refusal already stood per D-2026-07-15-006, #4154) — scoped secrets use the flat v2 arm hrn:secret:<root>:app:<app-slug>:<name>.",
       "input": "hrn:secret:acme.com::stripe-key",
       "expectedType": "secret",
       "expectedParserCanonical": "hrn:secret:acme.com::stripe-key",
@@ -326,30 +326,40 @@
       "expectedParserRewrites": []
     },
     {
-      "_note": "app-owned: the app: marker survives canonicalization (no type-marker-optionality rewrite).",
+      "_note": "pre-v2 scoped :: spelling — REFUSED at parse since urn-lib-js 0.0.22 (corpus v24, urn-lib-js#40); was parse-OK in 0.0.18. secretRef has refused it all along (D-2026-07-15-006, #4154).",
       "input": "hrn:secret:acme.com::app:internal-ops::stripe-key",
-      "expectedType": "secret",
-      "expectedParserCanonical": "hrn:secret:acme.com::app:internal-ops::stripe-key",
-      "expectedParserRewrites": []
+      "expectedReject": "invalid-segment-shape",
+      "offendingSegment": "app:internal-ops"
     },
     {
       "input": "hrn:secret:@holger::app:gmail-app::stripe-key",
-      "expectedType": "secret",
-      "expectedParserCanonical": "hrn:secret:@holger::app:gmail-app::stripe-key",
-      "expectedParserRewrites": []
+      "expectedReject": "invalid-segment-shape",
+      "offendingSegment": "app:gmail-app"
     },
     {
-      "_note": "memory-owned: the memory: marker survives too.",
+      "_note": "memory-owned :: spelling refused like the app: one.",
       "input": "hrn:secret:acme.com::memory:secureid::stripe-key",
+      "expectedReject": "invalid-segment-shape",
+      "offendingSegment": "memory:secureid"
+    },
+    {
+      "_note": "legacy urn: scheme spelling refused the same way (the refusal precedes scheme normalization).",
+      "input": "urn:secret:acme.com::app:internal-ops::stripe-key",
+      "expectedReject": "invalid-segment-shape",
+      "offendingSegment": "app:internal-ops"
+    },
+    {
+      "_note": "flat v2 scoped arm (urn-lib-js 0.0.22 corpus v24, urn-lib-js#40): the spelling secretRef documents for App-owned secrets (#4154). Canonical is the input itself, no rewrites.",
+      "input": "hrn:secret:acme.com:app:internal-ops:stripe-key",
       "expectedType": "secret",
-      "expectedParserCanonical": "hrn:secret:acme.com::memory:secureid::stripe-key",
+      "expectedParserCanonical": "hrn:secret:acme.com:app:internal-ops:stripe-key",
       "expectedParserRewrites": []
     },
     {
-      "_note": "legacy urn: scheme normalizes to hrn: for secrets too.",
-      "input": "urn:secret:acme.com::app:internal-ops::stripe-key",
+      "_note": "legacy urn: scheme normalizes to hrn: on the flat v2 arm too.",
+      "input": "urn:secret:acme.com:app:internal-ops:stripe-key",
       "expectedType": "secret",
-      "expectedParserCanonical": "hrn:secret:acme.com::app:internal-ops::stripe-key",
+      "expectedParserCanonical": "hrn:secret:acme.com:app:internal-ops:stripe-key",
       "expectedParserRewrites": ["legacy-urn-scheme"]
     },
     {
