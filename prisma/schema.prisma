@@ -4024,28 +4024,50 @@ model AppAgent {
   @@map("app_agents")
 }
 
-/// #974 — a **Worker**: the named casting of an installed Agent into an App
-/// (cor:dmo:050:11, cor:agt:020:01). The Agent carries the reusable persona
-/// dressing (`personaRole` and its compiled boot prompt); the Worker is the
-/// local named identity ("Iris") that does attributable work. Casting is
-/// opt-in (an installed agent with no Worker row is just an agent) and
-/// requires the agent installed in the App at cast time; multiple Workers may
-/// cast the SAME agent in one App (Iris and Henry, both `backend-engineer`).
+/// A named member of a team: one Agent that is installed in an App, cast under a name of its own (for example
+/// "Iris"). The Agent carries the reusable part, its persona role and compiled boot prompt. The Worker is the local
+/// identity that work is attributed to: sessions, chat posts, agent tasks and commit trailers name the Worker.
 ///
-/// **Name uniqueness**: unique per App, case-insensitively — the functional
-/// unique `workers_app_name_uniq` on `(app_id, lower(name))` in post-push.sql
-/// (Prisma cannot express functional uniques). Deliberately NOT filtered on
-/// retirement: a name binds to one casting forever (cor:agt:020:02 — PR
-/// trailers and chat archives reference it, and a recycled name would
-/// silently re-attribute old work).
+/// Relationships: belongs to one App and is deleted with it. `agent` is the Agent it casts (Restrict: an Agent that
+/// is cast cannot be hard-deleted from under it). `memory` is the worker's own working memory, provisioned at cast;
+/// it is identified by `memoryId`, never by its URN. `heldBy` is the User who holds the name (SetNull: deleting the
+/// user releases the name and keeps the casting). `reportsTo` is another Worker of the same App. Sessions,
+/// AgentTasks, RegisterEntry and ChannelReadState rows, availability, wake and delivery records, host operations,
+/// context resets and stop signals point at the Worker. `bootPromptNodeId` is a plain node id with no foreign key,
+/// because nodes are hard-deleted on some paths; `retiredBy` and `leaveAloneBy` are plain user ids that record who
+/// acted.
 ///
-/// **Lifecycle**: workers RETIRE (`retiredAt`), never soft-delete — the row
-/// must survive the agent's uninstall and keep resolving for history. There
-/// is no `deletedAt`; the only removal escape is the hard delete of a
-/// never-used miscast (no sessions ever bound, empty working memory).
-/// `agentId` is `Restrict` so a referenced casting can never lose its agent
-/// silently (agent deletion is soft everywhere; the hard-delete compensation
-/// paths only ever remove agents without castings).
+/// Behaviour:
+/// - Casting is opt-in: an installed Agent with no Worker row is just an Agent. The Agent must be installed in the
+///   App at cast time, and several Workers may cast the same Agent in one App.
+/// - `name` is unique per App, case-insensitively: the functional unique index `workers_app_name_uniq` on `(app_id,
+///   lower(name))` in prisma/post-push.sql, which Prisma cannot express. The index is not filtered on retirement. A
+///   name binds to one casting forever, because commit trailers and chat archives refer to it and a reused name would
+///   attribute old work to someone else.
+/// - `slug` is the last part of the worker's URN (`hrn:worker:<root>:<app-slug>:<slug>`). It is derived from the name
+///   at cast and never changes. It is unique per App (`workers_app_slug_uniq`), and the mint tries `-2`, `-3` and so
+///   on instead of refusing, so the name stays the only collision a caller can see.
+/// - A name is held by a person (`heldByUserId`, `heldAt`) until it is released. A session that ends or expires never
+///   frees it, and the next bind of an unheld worker holds it (hrn:node:hadronmemory.com:specs:cor:agt:020:09).
+/// - Workers retire (`retiredAt`); there is no soft delete. A retired worker cannot author and refuses new session
+///   bindings, and its name stays reserved. A row is hard-deleted in three cases only: `deleteWorker` on a released
+///   casting that nothing refers to, the cascade when its App is deleted, and the erasure of the account that owns
+///   its Agent (src/controller/operations/deleteUser.ts).
+/// - `signature` and `trailer` are templates the platform fills in and delivers at each bind
+///   (hrn:node:hadronmemory.com:specs:cor:agt:040:04). `bootPromptNodeId` and `bootPromptUrn` are set only for a
+///   customised worker, both or neither, and only through `setBootPromptPointer`
+///   (hrn:node:hadronmemory.com:specs:cor:agt:040:07).
+/// - `reportsToWorkerId` is a property of the casting, not of a session: a non-retired Worker of the same App, never
+///   itself and never a cycle. It is written only by src/lib/workerReportsTo.ts, which also appends the event that
+///   keeps its history.
+/// - `terminal` is the latest report a host made about the worker's terminal; it is stored and shown, and decides
+///   nothing. `leaveAlone` tells the host sweep to observe the worker and never start, stop or repair it.
+///   `lastUsedFamily`, `lastUsedModel` and `lastUsedEffort` are what the worker's session last reported: a report,
+///   not a control.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:050:11. Rules:
+/// hrn:node:hadronmemory.com:specs:cor:agt:020:01, hrn:node:hadronmemory.com:specs:cor:agt:020:02. Background: #974,
+/// #991, #1050, #1726, #2045, #2771, #4041, #4224, #4291.
 model Worker {
   id                String    @id @default(cuid())
   darkWorkerEpisodes DarkWorkerEpisode[]
@@ -4222,22 +4244,24 @@ model Worker {
   @@map("workers")
 }
 
-/// Asymmetric cross-user grant for personal-class memory (spec 023
-/// US3 / FR-017–FR-022). Composite PK `(memoryId, granteeId)` — one
-/// row per (Memory, grantee).
+/// A grant by the owner of a personal memory that lets one other user into it, as a reader or as a writer. It is the
+/// only way someone other than the owner reaches a personal memory.
 ///
-/// **Scope**: applies ONLY to personal-class Memories (FR-018).
-/// Application-layer guard in `createMemoryShare.ts` enforces this.
+/// Relationships: `memory` is the shared Memory, `grantee` the User who receives access, `grantor` the User the grant
+/// is made on behalf of. One row per memory and grantee (the primary key). The row is deleted with the memory, the
+/// grantee or the grantor.
 ///
-/// **Grantor semantics** (FR-019): `grantorId` is the **principal**
-/// (`Memory.userId`), recorded explicitly so the row is
-/// self-describing without a JOIN to `memories` at read time. The
-/// API actor (which may be an App backend acting on the principal's
-/// behalf) is recorded in `createdBy`.
+/// Behaviour:
+/// - Applies only to memories of class `personal`; `createMemoryShare` refuses every other class. The check is in the
+///   operation, not in the database.
+/// - `grantorId` is always the memory's owner (`Memory.userId`), stored on the row so it can be read without a join.
+///   Whoever made the API call, which may be an App backend acting for the owner, is recorded in `createdBy`.
+/// - A personal memory that an organization owns can be shared only with a current member of that organization.
+/// - There is no time window. To keep grantees apart over time, a new personal memory is made for each pairing.
+/// - `role` can be changed (`updateMemoryShareRole`). Revoking deletes the row; there is no soft delete.
 ///
-/// **No time-window** (FR-021): isolation between grantees over time
-/// is modeled by creating a new personal Memory per pairing — not by
-/// time-slicing one Memory.
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:060:08. Background (history, not law): the Spec Kit spec
+/// 023-app-shape. Background: #778.
 model MemoryShare {
   memoryId  String          @map("memory_id")
   granteeId String          @map("grantee_id")
@@ -4260,24 +4284,24 @@ model MemoryShare {
   @@map("memory_shares")
 }
 
-/// Symmetric team membership for group-class memory (spec 023 US4 /
-/// FR-026–FR-031). Composite PK `(memoryId, userId)` — one row per
-/// (Memory, member).
+/// One user's membership in a group memory, with a role. Membership is what decides who is in a team-shared memory
+/// and what each person may do there.
 ///
-/// **Scope**: applies ONLY to group-class Memories (FR-027).
-/// Application-layer guard in `addMemoryMember.ts` enforces this.
+/// Relationships: joins Memory and User, one row per pair (the primary key), and is deleted with either.
 ///
-/// **Role capabilities**:
-///   `reader` — read.
-///   `writer` — read + write nodes within the Memory.
-///   `owner`  — read + write + manage member list, delete/rename the
-///              Memory, change Memory configuration (FR-036).
+/// Behaviour:
+/// - Applies only to memories of class `group`; `addMemoryMember` refuses every other class. The check is in the
+///   operation, not in the database.
+/// - `role`: `reader` may read; `writer` may also write nodes in the memory; `owner` may also manage the member list,
+///   rename or delete the memory and change its configuration.
+/// - The last remaining `owner` cannot be removed or demoted. `removeMemoryMember` and `updateMemoryMemberRole`
+///   enforce this; the database would allow the delete.
+/// - Removing a member deletes the row; there is no soft delete. Removing the last member who is not an owner does
+///   not delete the memory.
+/// - Rows are also written when a group memory is created, cloned, extracted from a subtree or transferred.
 ///
-/// **Last-owner protection** (FR-038): the platform rejects removal
-/// or demotion of the sole remaining `owner`. The MemoryMember row
-/// can still be deleted; the operation-layer guard enforces the
-/// invariant (`removeMemoryMember.ts`, `updateMemoryMemberRole.ts`).
-/// FR-031: removing the last non-owner does NOT delete the Memory.
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:060:07. Background (history, not law): the Spec Kit spec
+/// 023-app-shape.
 model MemoryMember {
   memoryId  String           @map("memory_id")
   userId    String           @map("user_id")
@@ -4298,27 +4322,34 @@ model MemoryMember {
   @@map("memory_members")
 }
 
-/// User-owned API key — the credential primitive for user-scoped MCP
-/// access (spec 025-oauth-for-mcp; D-2026-05-13-001, D-2026-05-17-001).
-/// Mirrors AppKey but resolves to a User instead of an App. The raw key is
-/// `hdr_user_<…>`; we store SHA-256 (not bcrypt) for the same reason
-/// AppKey does — direct hash lookup needs a deterministic hash, and the
-/// 256-bit raw key (32 bytes / 64 hex chars) already makes dictionary
-/// attacks irrelevant.
+/// An API key that authenticates a caller as one user. It is the credential behind user-scoped access, MCP in
+/// particular, and the counterpart of AppKey, which authenticates as an App.
 ///
-/// Tokens issued by the OAuth /token endpoint share this shape and storage
-/// path so a single `resolveUserApiKey` middleware validates both
-/// portal-minted and OAuth-issued tokens (FR-015). The path the key
-/// arrived through is recorded in `issuedVia` (not `createdBy`); see the
-/// column docstrings.
+/// Relationships: belongs to one User and is deleted with the user. `mintedByKey` is the UserApiKey that was used to
+/// create this one, and `mintedKeys` the keys created with it. `originSignIn` is the SignIn this key descends from,
+/// when it has one; the composite key (`originSignInId`, `userId`) makes sure both belong to the same user.
 ///
-/// **Audit fields omitted (matches AppKey precedent):** no `updatedAt` /
-/// `updatedBy` / `deletedAt` / `deletedBy`. UserApiKey rows are
-/// append-once with a single terminal state transition (revoked);
-/// `revokedAt` carries the lifecycle info, and there is no edit
-/// operation. Soft-delete is meaningless for a revocable credential.
-/// #2659 (cor:dmo:070:03): its user may HARD-delete a key
-/// (`deleteUserApiKey`); the trace is a separate UserApiKeyDeletion row.
+/// Behaviour:
+/// - The raw key is `hdr_user_` followed by random characters and is shown once. Only its SHA-256 hash is stored
+///   (`keyHash`, unique), plus the last four characters for display (`keyPreview`). A plain hash is used, not a slow
+///   password hash, because the key is looked up by its hash and its 256 bits of randomness make guessing pointless.
+/// - Keys minted in the portal and keys issued by the OAuth token endpoint are the same kind of row and are validated
+///   by one path (`resolveUserApiKey`). `issuedVia` records how the key came to be: `portal`, `oauth:<client_id>`,
+///   `admin` for the bootstrap command, or the value of the key that minted it. `oauthScopes` are copied from the
+///   authorization code and never change; an empty list is an unrestricted key
+///   (hrn:node:hadronmemory.com:specs:cor:aut:010:02).
+/// - A key does not authenticate when it is revoked, when its user is deleted, or when the SignIn it descends from
+///   has been ended. `lastUsedAt` is updated on use.
+/// - Rows are written once. The only state change is revocation (`revokedAt`), which also revokes every key minted
+///   from it, down the whole tree. `hiddenAt` hides a revoked key from its owner's default list and is never read by
+///   authentication.
+/// - The key's own user may hard-delete it (`deleteUserApiKey`). A live key is revoked first, with its subtree; keys
+///   it minted stay, revoked, with `mintedByKeyId` cleared; and one UserApiKeyDeletion row records the deletion.
+/// - There are no `updatedAt` or `deletedAt` columns: there is no edit operation, and a revocable credential has no
+///   use for a soft delete.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:070:03. Background (history, not law): the Spec Kit spec
+/// 025-oauth-for-mcp. Background: #1253, #1897, #2298, #2659.
 model UserApiKey {
   id          String    @id @default(cuid())
   userId      String    @map("user_id")
@@ -4369,26 +4400,31 @@ model UserApiKey {
   @@map("user_api_keys")
 }
 
-/// Admin-impersonation audit record AND revocation source of truth. One row
-/// per impersonation session: an org ADMIN/OWNER (or platform admin) viewing
-/// the platform read-only as the target user, scoped to the single
-/// organization shared by admin and target. The target's other organizations
-/// and all personal-class resources (personal/private memories, chats,
-/// mailbox, assets, personal credentials) stay invisible.
+/// One session in which an administrator views the platform, read-only, as another user. The row is both the audit
+/// record of the session (who impersonated whom, in which organization, when and why) and the thing every request
+/// checks to decide whether the session is still allowed.
 ///
-/// A session is LIVE iff `endedAt IS NULL AND expiresAt > now()`. Expiry is
-/// derived from `expiresAt` at read time and never written back.
+/// Relationships: `adminUser` is the User who impersonates, `targetUser` the User being impersonated, `organization`
+/// the one Organization both belong to, which limits what the session can read. The row is deleted only when one of
+/// those three is hard-deleted. `endedBy` is a plain user id.
 ///
-/// `endedAt` and `endedBy` together distinguish how a session finished:
-///   - `endedAt` set, `endedBy` set  — a person explicitly stopped it.
-///   - `endedAt` set, `endedBy` NULL — the system REVOKED it (#878). Every
-///     request re-derives both parties' current org roles, so losing the
-///     admin role, a promotion that breaches peer-or-below, the target
-///     leaving the org, or the admin's account being deleted ends it at once.
-///   - `endedAt` NULL, past `expiresAt` — it simply lapsed.
+/// Behaviour:
+/// - Started by an organization ADMIN or OWNER, or a platform admin, for a member of the same organization
+///   (src/api/graphql/schema/resolvers.impersonation.ts). The session sees what the target sees inside that
+///   organization only. The target's other organizations and everything that is theirs as a person (personal and
+///   private memories, chats, mailbox, assets, personal credentials) stay invisible.
+/// - The session's token only names the row. Every request reads the row again and derives both users' current roles
+///   again (`resolveJwt`, src/middleware/auth.ts).
+/// - A session is live while `endedAt` is null and `expiresAt` is in the future. Expiry is read from `expiresAt` and
+///   never written back.
+/// - How a session finished can be read from the row. `endedAt` and `endedBy` both set: a person stopped it.
+///   `endedAt` set and `endedBy` null: the system revoked it, because the administrator lost the role, the target was
+///   promoted above what the administrator may impersonate, the target left the organization, or the administrator's
+///   account was deleted. `endedAt` null and `expiresAt` passed: it ran out.
+/// - Stopping and revoking never delete the row.
 ///
-/// Rows are never deleted by the stop path — the table is the durable audit
-/// trail (who impersonated whom, where, when).
+/// Rules: hrn:node:hadronmemory.com:specs:cor:acl:100:01, hrn:node:hadronmemory.com:specs:cor:acl:100:03,
+/// hrn:node:hadronmemory.com:specs:cor:acl:100:04. Background: #878.
 model ImpersonationSession {
   id             String    @id @default(cuid())
   /// Actor (the admin). Schema-wide audit-actor convention: `User.id`.
@@ -4419,26 +4455,29 @@ model ImpersonationSession {
   @@map("impersonation_sessions")
 }
 
-/// OAuth 2.1 client registry (spec 025-oauth-for-mcp; D-2026-05-17-002).
-/// Rows are populated by `POST /oauth/register` (RFC 7591 DCR) or seeded
-/// explicitly. Public clients only (no `clientSecret`); PKCE S256 is the
-/// auth proof. Per Q-025-001, only the `'test'` row will be seeded by
-/// `prisma/seed.ts` (spec 025 task T009 — not yet in this PR);
-/// `'claude-desktop'` and other real clients self-register via DCR.
+/// A registered OAuth client: an application that is allowed to start a sign-in against the platform. The table is
+/// the registry that the authorize and token endpoints check.
 ///
-/// **PK note:** `clientId` is the PK (no separate cuid `id`) because
-/// `clientId` is the natural key — it's the public, immutable identifier
-/// the client sends on every `/authorize` / `/token` request and is
-/// referenced by `AuthCode.clientId` as the FK target. Precedent for a
-/// non-cuid PK: `Session.id` is caller-generated. Diverges from PR 137's
-/// reference (which carried a separate cuid `id`) — see
-/// `spec-kits/specs/025-oauth-for-mcp/data-model.md` §OAuthClient.
+/// Relationships: AuthCode rows point at the client and are deleted with it. `clientId` is the primary key and there
+/// is no separate generated id, because the client id is the public, permanent name the client sends on every
+/// request.
 ///
-/// Carries the full standard audit-field set per the schema-top
-/// convention because edit / delete affordances are anticipated (admin
-/// "rename a client", "rotate redirect URIs", etc.); v1 has no such
-/// surface, but the columns are cheap to add now and would otherwise
-/// need a backfill later.
+/// Behaviour:
+/// - A row is created by `POST /oauth/register` (dynamic client registration), which is unauthenticated, or by a
+///   seed. A registered client gets the id `dcr_` plus 32 hex characters; seeded fixtures use fixed ids such as
+///   `test`.
+/// - All clients are public. No client secret is stored; the proof at the token endpoint is PKCE (S256).
+/// - `redirectUris` is the list the authorize endpoint checks a request's redirect URI against.
+/// - `expiresAt` is set to 30 days from registration and moved forward by every token redemption. A daily job
+///   (src/jobs/gcOauthClients.ts) soft-deletes a client that is more than 7 days past it, with `deletedBy =
+///   'system:gc'`; the job only counts and changes nothing unless `OAUTH_CLIENT_GC_ENABLED` is `true`. A null
+///   `expiresAt` never expires (seeded and hand-made clients).
+/// - A soft-deleted client is refused at the authorize and token endpoints. Its authorization codes and the keys
+///   already issued for it are not touched.
+/// - The full set of audit columns is present although no edit or delete operation exists for a person yet.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:070:02. Background (history, not law): the Spec Kit spec
+/// 025-oauth-for-mcp. Background: #155.
 model OAuthClient {
   /// The public client identifier. DCR-registered:
   /// `dcr_<32 hex>` (16 bytes / 128 bits). Seeded fixtures use stable
@@ -4465,28 +4504,30 @@ model OAuthClient {
   @@map("oauth_clients")
 }
 
-/// Short-lived OAuth authorization code (spec 025-oauth-for-mcp;
-/// RFC 6749 §4.1). Issued by `POST /oauth/authorize` on
-/// `decision=approve`, redeemed once at `POST /oauth/token`. Stores PKCE
-/// S256 challenge + RFC 8707 resource indicators for verification at
-/// redemption. Single-use via race-safe `updateMany`-with-conditional
-/// `redeemedAt: null` pattern (FR-013). PKCE / resource mismatch at
-/// /token also marks `redeemedAt` to prevent probing.
+/// A short-lived, single-use OAuth authorization code: what a client receives when a user approves it, and trades
+/// once at the token endpoint for a UserApiKey.
 ///
-/// **Code storage:** the raw code value is hashed (SHA-256) before
-/// storage, matching `AppKey.keyHash` and `UserApiKey.keyHash` — auth
-/// codes are credentials in their 10-minute redemption window and should
-/// not be plaintext in the DB. `/oauth/authorize` returns the raw code
-/// to the client; `/oauth/token` hashes the supplied code and looks up
-/// by hash. Diverges from PR 137's reference (which stored plaintext)
-/// — see `spec-kits/specs/025-oauth-for-mcp/contracts/oauth-endpoints.md`
-/// §`POST /oauth/token`.
+/// Relationships: belongs to the User who approved and to the OAuthClient it was issued to; deleted with either.
+/// `signIn` is the SignIn the approving session descends from, when it has one; it is passed on to the key as
+/// `UserApiKey.originSignInId`.
 ///
-/// **Audit fields omitted (matches AppKey precedent):** no `updatedAt` /
-/// `updatedBy` / `deletedAt` / `deletedBy`. AuthCode rows are append-once
-/// with two terminal state transitions (redeemed / expired); `redeemedAt`
-/// and `expiresAt` carry the lifecycle info. Soft-delete is meaningless
-/// for a single-use, expiring credential.
+/// Behaviour:
+/// - Issued by `POST /oauth/authorize` when the user approves (src/auth/oauth.ts). The raw code goes to the client;
+///   only its SHA-256 hash is stored (`codeHash`, unique), and the token endpoint looks the row up by the hash of
+///   what it is given.
+/// - It expires 10 minutes after it is issued (`expiresAt`).
+/// - It carries what the token endpoint verifies: the client, the redirect URI, the PKCE S256 challenge
+///   (`codeChallenge`) and the resource it was issued for (`resource`). `oauthScopes` are the scopes the user
+///   approved and are copied unchanged to the key.
+/// - Single use: redemption claims the row with a guarded update on `redeemedAt` being null, so of two concurrent
+///   attempts only one succeeds. A wrong PKCE verifier or a wrong resource also sets `redeemedAt`, so the same code
+///   cannot be tried again.
+/// - When a SignIn is ended, its unredeemed codes are marked redeemed (`endSignInsCompletedBy`). The root never
+///   changes after creation (a trigger in prisma/signin-invariants.sql).
+/// - There are no `updatedAt` or `deletedAt` columns: `redeemedAt` and `expiresAt` carry the whole lifecycle.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:070:01. Background (history, not law): the Spec Kit spec
+/// 025-oauth-for-mcp. Background: #1897.
 model AuthCode {
   id            String    @id @default(cuid())
   /// SHA-256 hash of the raw code value handed to the client. Looked up
@@ -4525,8 +4566,34 @@ model AuthCode {
   @@map("auth_codes")
 }
 
-/// #1631 S2a: one browser-bound, purpose-bound, single-use ceremony step.
-/// Expiry and consumption are decided on the database clock.
+/// One step of a passkey ceremony that a browser has opened and not yet finished: signing a node or a grant,
+/// registering a passkey, revoking one, or the passkey step of a sign-in. The row is the server's proof that this
+/// browser started this step for this purpose, and it can be used once.
+///
+/// Relationships: `user` and `vouchPasskey` are set only once a ceremony is bound to a person: the User who
+/// registers, revokes or signs, and the PasskeyCredential that vouched for a registration or a revocation. The row is
+/// deleted with the user; a PasskeyCredential that a ceremony names cannot be deleted (Restrict). PendingEmailSignIn
+/// names its current ceremony by a plain id.
+///
+/// Behaviour:
+/// - `purpose` says which step it is: `SIGN_IN`, `STEP_UP_ONLY`, `REGISTER`, `REVOKE`, `SIGN_PROOF`, `SIGN`,
+///   `GRANT_SIGN_PROOF` or `GRANT_SIGN` (the `CeremonyPurpose` type, src/lib/passkeys/ceremony.ts).
+/// - `browserNonceHash` is the SHA-256 of the nonce in the browser's ceremony cookie, and `challengeHash` the SHA-256
+///   of the WebAuthn challenge issued for the step. A ceremony is never created without a challenge.
+/// - Consuming sets `consumedAt` once. It succeeds only for the same browser nonce and the same purpose, and before
+///   `expiresAt`. Expiry and consumption are decided on the database clock at the statement, and the consume runs in
+///   the caller's transaction, so a later refusal rolls it back.
+/// - Some ceremonies are bound to a person, once. A REGISTER ceremony is bound at its proof step to who registers and
+///   how they proved it: `kind` `first` with the fresh sign-in's method and that browser's hash, or `later` with the
+///   vouching passkey, plus the new random WebAuthn user handle (hrn:node:hadronmemory.com:specs:cor:aut:040:02). A
+///   REVOKE ceremony is bound the same way with `kind` `revoke`. A SIGN or GRANT_SIGN ceremony is created already
+///   bound to the person its proof step proved (`kind` `sign`). Every other ceremony leaves these columns null. A
+///   CHECK allows exactly these shapes, and a trigger refuses a second binding and a binding after consumption
+///   (prisma/passkey-registration-invariants.sql).
+/// - A job deletes a retired ceremony 30 days after the later of its expiry and its consumption
+///   (src/jobs/sweepPasskeyCeremonies.ts, `PASSKEY_CEREMONY_RETENTION_SECONDS`). Credentials are never deleted by it.
+///
+/// Background: #1631, #1632, #3122, #3649.
 model PasskeyCeremony {
   id                 String             @id
   purpose            String
@@ -4552,8 +4619,24 @@ model PasskeyCeremony {
   @@map("passkey_ceremonies")
 }
 
-/// #1631 PR2 (cor:aut:040:02): every registration's email notice, written in the registering transaction and sent
-/// by a loop. A first passkey's carries its cancel token encrypted until sent. seenAt records the in-app notice.
+/// The email notice that tells a user a passkey was registered on their account. There is one for every registration,
+/// and it is written in the same transaction as the passkey, so a passkey never exists without its notice.
+///
+/// Relationships: one per PasskeyCredential (`passkeyId` is unique) and belongs to the User who owns it. Both are
+/// Restrict: the notice is never deleted, and a trigger refuses any delete
+/// (prisma/passkey-registration-invariants.sql).
+///
+/// Behaviour:
+/// - `kind` is `first` or `later`. The notice of a first passkey carries its cancel link: `cancelTokenEnc` holds the
+///   raw cancel token, encrypted, until the notice reaches a final state, and is then cleared.
+/// - A loop sends the notices (src/jobs/sendPasskeyRegistrationNotices.ts). Each try is claimed first (`attempts`,
+///   `leaseUntil`, `claimToken`), and the number of tries is capped. The notice ends as sent (`sentAt`) or failed
+///   (`failedAt`), each set once.
+/// - A user with no email address, or a deployment with no mail sender, settles the notice as failed at once.
+///   Deleting the user's account settles an unsent notice as failed and clears its token.
+/// - `seenAt` is for the in-app notice. The trigger lets it be set once; no code sets it today.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:aut:040:02. Background: #1631.
 model PasskeyRegistrationNotice {
   id             String            @id
   passkeyId      String            @unique @map("passkey_id")
@@ -4576,8 +4659,24 @@ model PasskeyRegistrationNotice {
   @@map("passkey_registration_notices")
 }
 
-/// #1631 PR2 (cor:aut:040:07-08): a first passkey's cancel link. One per first passkey, stored as SHA-256,
-/// spent once, never deleted; the cancel itself is recorded on the credential. Times come from the guard trigger.
+/// The token behind the cancel link in the email about a user's first passkey. Following the link revokes that
+/// passkey without a sign-in, which is how the real owner undoes a passkey that someone else registered.
+///
+/// Relationships: one per first PasskeyCredential (`passkeyId` is unique, Restrict). The token is never deleted; a
+/// trigger refuses it (prisma/passkey-registration-invariants.sql).
+///
+/// Behaviour:
+/// - Issued in the registering transaction, only for a first passkey whose cooling-off window is open
+///   (`issueCancelToken`, src/lib/passkeys/cancel.ts). The raw token goes only into the email; the row stores its
+///   SHA-256 (`tokenHash`, unique).
+/// - It works once (`usedAt`) and only while the passkey's window is open, the passkey is not revoked and its owner
+///   is not deleted. Every refusal looks the same to the caller.
+/// - A successful cancel revokes the passkey, records the time, IP address and user agent on the PasskeyCredential,
+///   spends the token and ends every SignIn that passkey completed, all in one transaction (`cancelFirstPasskey`).
+/// - The trigger sets `createdAt` and `usedAt` from the database clock and keeps the token's identity unchanged.
+///
+/// Rules: hrn:node:hadronmemory.com:specs:cor:aut:040:07, hrn:node:hadronmemory.com:specs:cor:aut:040:08. Background:
+/// #1631, #3746.
 model PasskeyCancelToken {
   id        String            @id
   passkeyId String            @unique @map("passkey_id")
@@ -4589,9 +4688,27 @@ model PasskeyCancelToken {
   @@map("passkey_cancel_tokens")
 }
 
-/// #1631 PR1b slice 2 (cor:aut:040:09): a fresh sign-in bound to the ceremony browser. Signs the person in to
-/// nothing. Counts once confirmed by the same browser, and is consumed once. Times are set by the guard trigger
-/// from the database clock; identity is immutable. Rows are disposable after 24 hours.
+/// Proof that a person has just proved who they are, to one browser, for one passkey step. It signs the person in to
+/// nothing: no session, token or key comes from it. Registering a first passkey, ending a first passkey's cooling-off
+/// window early and revoking a passkey each spend one.
+///
+/// Relationships: belongs to one User and is deleted with the user.
+///
+/// Behaviour:
+/// - `method` is how the person proved it: `github`, `google` or `apple` (the identity provider's callback writes the
+///   row) or `email` (a link requested from the ceremony page).
+/// - Two secrets must meet before the row counts. `legHash` is the SHA-256 of the one-time leg id or of the emailed
+///   token, held by the browser that finished the proof. `browserNonceHash` is the SHA-256 of the ceremony cookie,
+///   held by the browser that started it. Neither raw value is stored. `confirmedAt` is set when both are presented
+///   together.
+/// - `consumedAt` and `consumedFor` (`register`, `end-window` or `revoke`) are set once, when a step spends the row.
+///   The step must begin no more than 10 minutes after the identity proof (`signedInAt`), and a `revoke` never
+///   accepts the `email` method (src/lib/passkeys/freshSignIn.ts).
+/// - A trigger writes the times from the database clock and keeps the row's identity unchanged
+///   (prisma/fresh-sign-in-invariants.sql).
+/// - Rows older than 24 hours are deleted when a new proof is started. Deleting the user's account deletes them too.
+///
+/// Definition: hrn:node:hadronmemory.com:specs:cor:aut:040:09. Background: #1631.
 model FreshSignIn {
   id               String    @id
   userId           String    @map("user_id")
@@ -4614,10 +4731,26 @@ model FreshSignIn {
   @@map("fresh_sign_ins")
 }
 
-/// #1897 slice B1: an email sign-in waiting for its passkey. Created when a magic link is claimed for a user who
-/// has a passkey, and completed only by that passkey's assertion over a SIGN_IN ceremony bound to this browser.
-/// Publishes nothing: no handoff code, no JWT, no cookie, no key exists until it completes. Identity and
-/// continuation are immutable; completion is set once, together with the sign-in it produced.
+/// An email sign-in that has been held back until the user's passkey confirms it. While the row is pending nothing is
+/// issued: no handoff code, no session token, no cookie session and no key.
+///
+/// Relationships: belongs to one User and is deleted with the user. `signIn` is the SignIn the completion produced.
+/// `ceremonyId` names the current SIGN_IN PasskeyCeremony as a plain id.
+///
+/// Behaviour:
+/// - Nothing on a sign-in path creates these rows any more: signing in never depends on a passkey
+///   (hrn:node:hadronmemory.com:specs:cor:aut:030:03). The code that creates and completes them is kept
+///   (`beginPasskeySignIn`, src/api/passkeySignInRoutes.ts) and is called only by tests.
+/// - `continuation` says where the flow resumes: `PORTAL` (with `clientStateHash`, `redirect`, `isNew`) or `OAUTH`
+///   (with `returnTo`). Each kind carries exactly its own columns (a CHECK).
+/// - The row is found by `browserHash`, the SHA-256 of the pending cookie; the cookie value is never stored. It lives
+///   10 minutes, or 30 when the user must first add a passkey, by the database clock.
+/// - It completes once, together with the SignIn it produced (`completedAt`, `signInId`), and only through a passkey
+///   assertion over a SIGN_IN ceremony bound to the same browser hash. A trigger keeps identity and continuation
+///   unchanged (prisma/pending-email-sign-in-invariants.sql).
+/// - Rows older than 24 hours are deleted when a new one is created.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:aut:030:03. Background: #1897, #4339.
 model PendingEmailSignIn {
   id              String    @id
   userId          String    @map("user_id")
@@ -4646,8 +4779,33 @@ model PendingEmailSignIn {
   @@map("pending_email_sign_ins")
 }
 
-/// #1631 schema-first: shared credential registry (cor:aut:040:05), no enrollment route yet.
-/// Identity/public-key fields are immutable; records are never deleted, revokedAt is set once.
+/// One passkey that a user has registered: the public half of the credential, and the facts about its life. The
+/// platform checks every passkey assertion against this record, whether it signs a node, signs a grant, vouches for
+/// another passkey or proves ownership for a revocation. The private key never reaches the platform.
+///
+/// Relationships: belongs to one User (`ownerId`, Restrict). NodeSignature, GrantSignature and SignIn rows name the
+/// passkey that made them. It has at most one PasskeyCancelToken and one PasskeyRegistrationNotice, and
+/// PasskeyCeremony rows name it as the vouching passkey. A record is never deleted: a trigger refuses it
+/// (prisma/passkey-invariants.sql).
+///
+/// Behaviour:
+/// - Written by the registration ceremony (src/lib/passkeys/registration.ts). `credentialId` is unique across the
+///   deployment, and the identifier of a revoked passkey is never registered again.
+/// - The first passkey a user holds gets a cooling-off window (`windowEndsAt`), during which its signatures are
+///   pending. The window closes once: `windowOutcome` is `ran-out`, `ended-early` or `cancelled`
+///   (hrn:node:hadronmemory.com:specs:cor:aut:040:07).
+/// - `revokedAt` is set once. From then on every assertion from the passkey is refused. Every revocation also ends
+///   the SignIn rows the passkey completed (hrn:node:hadronmemory.com:specs:cor:aut:040:08). A use of the cancel link
+///   is also recorded with its time, IP address and user agent (`cancelledAt`, `cancelIp`, `cancelUserAgent`).
+/// - An assertion counts only while `enrollmentRpId` equals the deployment's relying party id
+///   (hrn:node:hadronmemory.com:specs:cor:aut:040:06). `counter` and `lastUsedAt` move forward on use and never
+///   backwards.
+/// - The trigger keeps the credential id, public key, owner and label unchanged and writes the times from the
+///   platform clock. One change to the label is allowed: deleting the owner's account replaces it with "Erased
+///   passkey" and blanks the cancel IP address and user agent. The record itself stays, so that old signatures can
+///   still be verified.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:aut:040:05. Background: #1631.
 model PasskeyCredential {
   id                 String    @id @default(cuid())
   ownerId            String    @map("owner_id")
@@ -4693,12 +4851,23 @@ model PasskeyCredential {
   @@map("passkey_credentials")
 }
 
-/// #2659 (hrn:node:hadronmemory.com:specs:cor:dmo:070:03, ruling 0007 A): the one append-only trace of a user
-/// deleting one of their own API keys. Who (the key's own user: ruling 0006 lets no one else delete it), which key
-/// (its id and masked preview) and when; never its secret or its hash. `revokedKeyIds` names the keys the delete itself
-/// revoked (the key when live, and its live subtree, cor:aut:010:02 rule 9); `mintedKeyIds` names the keys it had
-/// minted, whose link to it broke (ruling 0005 B: they stay, revoked, with no parent). No FK to the key: it is gone.
-/// Never updated, and never deleted while its user row exists (prisma/user-api-key-deletion-invariants.sql).
+/// The record that a user deleted one of their own API keys. It keeps what can be kept once the key is gone: whose
+/// key it was, which key, and when.
+///
+/// Relationships: belongs to one User and is deleted only with the user. `keyId` is a plain value with no foreign
+/// key, because the UserApiKey row no longer exists.
+///
+/// Behaviour:
+/// - Written once by `deleteUserApiKey`, in the transaction that deletes the key. Only the key's own user can delete
+///   it.
+/// - It stores the key's id and its masked preview (`keyPreview`), never the secret or its hash.
+/// - `revokedKeyIds` are the keys the deletion itself revoked: the key, when it was live, and the live keys below it.
+///   `mintedKeyIds` are the keys it had minted, whose link to it was cut; they stay, revoked, with no parent.
+/// - A trigger refuses every update, and every delete while the user row exists
+///   (prisma/user-api-key-deletion-invariants.sql).
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:070:03. Rule: hrn:node:hadronmemory.com:specs:cor:aut:010:02.
+/// Background: #2659.
 model UserApiKeyDeletion {
   id            String   @id @default(cuid())
   userId        String   @map("user_id")
@@ -4714,11 +4883,36 @@ model UserApiKeyDeletion {
   @@map("user_api_key_deletions")
 }
 
-/// #1897 / cor:aut:030:02 + R66: a completed, factor-protected sign-in. Its id is
-/// the `sid` claim of the JWT it publishes and the root of every code/key that
-/// descends from it, so ending it (the first-passkey cancel link) can revoke
-/// exactly that lineage. Identity/lineage fields are immutable; only `endedAt`/
-/// `endReason` are set, once. Rows are never deleted while descendants exist.
+/// A record of one completed sign-in that can be ended later, together with everything that came from it. Its id is
+/// the `sid` claim of the session token it publishes and the root of every handoff code, authorization code and API
+/// key that descends from it, so ending the row ends exactly that lineage and nothing else.
+///
+/// Relationships: belongs to one User and is deleted with the user. `passkey` is the PasskeyCredential whose
+/// assertion completed the sign-in (Restrict; a trigger requires it to belong to the same user). AuthHandoffCode,
+/// AuthCode, UserApiKey and PendingEmailSignIn rows point back at it through the pair (`id`, `userId`), so a
+/// descendant always has the same owner as its root.
+///
+/// Behaviour:
+/// - The only writer is `createSignIn` (src/auth/signIn.ts). Its one caller is the completion step of the
+///   server-hosted passkey sign-in page (src/api/passkeySignInRoutes.ts), which records `method` `email` and the
+///   passkey that completed it.
+/// - No sign-in route starts that page any more, because signing in never depends on a passkey
+///   (hrn:node:hadronmemory.com:specs:cor:aut:030:03). A sign-in by email link, GitHub, Google or Apple therefore
+///   creates no row, and its token carries no `sid`.
+/// - A token that carries `sid` authenticates only while its row is not ended and `expiresAt` has not passed
+///   (`verifyAuthenticatedJwt`). A UserApiKey whose root is ended does not authenticate either. A token or key with
+///   no root is not affected.
+/// - Revoking the passkey that completed a sign-in, through the owner's revocation or through the cancel link of a
+///   first passkey, ends every sign-in that passkey completed in the same transaction (`endSignInsCompletedBy`;
+///   hrn:node:hadronmemory.com:specs:cor:aut:040:08). `endedAt` and `endReason` are set, the unredeemed handoff and
+///   authorization codes below it are marked redeemed, and the keys below it are revoked. A merge of two accounts
+///   ends the source account's sign-ins.
+/// - Triggers keep the rest fixed (prisma/signin-invariants.sql): the user, method, passkey and times never change, a
+///   row is ended once, a descendant never changes its root, and a row that still has descendant keys cannot be
+///   deleted.
+///
+/// Rules: hrn:node:hadronmemory.com:specs:cor:aut:030:03, hrn:node:hadronmemory.com:specs:cor:aut:040:08. Background:
+/// #1897.
 model SignIn {
   id                   String    @id @default(cuid())
   userId               String    @map("user_id")
@@ -4743,15 +4937,27 @@ model SignIn {
   @@map("sign_ins")
 }
 
-/// #1632 / cor:dmo:130:03 — a request for a person to sign one node's content.
-/// Pinned at creation and immutable: the node, its revision, the v1 approval
-/// hash and the payload version. It is open, then ends exactly once:
-/// completed | declined | expired | stale | withdrawn. Ended requests are kept
-/// for the node's lifetime (#10019). Every timestamp comes from the DB clock,
-/// set by the guard trigger (prisma/signing-invariants.sql), which also
-/// enforces the single end; application code only names the end state.
-/// User / App / worker ids are sealed history with no FK (an FK action would
-/// be a write the guard refuses): see conventions:append-only-table-trigger.
+/// A request for a person to sign the content of one node. Whoever may read the node, an agent included, creates the
+/// request and hands its link to the person, who signs or declines on the signing page the server hosts.
+///
+/// Relationships: belongs to one Node and is deleted with it. A completed request has exactly one NodeSignature.
+/// `namedSignerId`, `requesterUserId`, `requesterAppId`, `requesterWorkerId` and `requesterSessionId` are plain ids
+/// with no foreign key: they are sealed history, and a foreign-key action would be a write that the guard trigger
+/// refuses.
+///
+/// Behaviour:
+/// - What the request pins is fixed at creation and never changes: the node, its `revision`, the approval hash of its
+///   content and the payload version. The id is 128 random bits, so it cannot be guessed.
+/// - `namedSignerId` is the one person who may sign or decline. Null means anyone who may sign the node, which is a
+///   writer of its memory.
+/// - `state` starts as `open` and ends exactly once: `completed`, `declined`, `expired`, `stale` (the content the
+///   request pinned changed) or `withdrawn` (by the requester). Application code only names the end state
+///   (src/lib/signing/requests.ts).
+/// - The guard trigger (prisma/signing-invariants.sql) sets every timestamp from the database clock, enforces the
+///   single end, lets a request complete only together with its signature record, and refuses a delete while the node
+///   exists. Ended requests are kept for the node's lifetime.
+///
+/// Lifecycle: hrn:node:hadronmemory.com:specs:cor:dmo:130:03. Background: #1632.
 model SigningRequest {
   /// 128 bits of randomness, base64url (plan SEC-8): never guessable.
   id                 String    @id
@@ -4779,10 +4985,31 @@ model SigningRequest {
   @@map("signing_requests")
 }
 
-/// #1632 / cor:dmo:130:07 — an append-only signature record: no update or
-/// delete surface at all (cor:dmo:130:05). Removed only with its node (hard
-/// delete, memory delete). State is never stored; it is derived on every read
-/// by re-verifying the stored assertion (src/lib/signing/state.ts).
+/// The record that one person signed one node at one revision with a passkey. It holds the assertion exactly as the
+/// authenticator returned it, so the signature can be verified again at any later time.
+///
+/// Relationships: belongs to one Node and is removed only with it (a hard delete of the node or of its memory).
+/// `signingRequest` is the SigningRequest it completed, one record per request. `passkey` is the PasskeyCredential
+/// that made it (Restrict). `stampSigningKey` is the StampSigningKey that verifies its stamp (Restrict). `signerId`
+/// is a plain user id with no foreign key: sealed history. The signer is always a person.
+///
+/// Behaviour:
+/// - Written once, by the signing ceremony, when a request completes. There is no update or delete operation, and the
+///   guard trigger refuses both (`hadron_guard_node_signature`, prisma/signing-invariants.sql). The trigger also
+///   requires an open request, the exact revision and approval hash the request pinned, the named signer when there
+///   is one, and the signer's own unrevoked passkey.
+/// - A signature's state is never stored. Every read works it out by verifying the stored assertion again
+///   (src/lib/signing/state.ts).
+/// - `rpId` is the relying party id the signature was made under. Verification uses it, never the current
+///   configuration, so a change of domain does not invalidate old signatures.
+/// - The stamp (`ceremonyStamp`, `stampKeyId`, `stampMemoryId`, `stampOwnerKind`, `stampOwnerId`) records what the
+///   ceremony judged at signing: the node's memory, and the Agent or App the signer managed, if any. The tag is an
+///   HMAC-SHA256 under a StampSigningKey over those values and the row's own identity, so none of them can be changed
+///   or copied to another row without breaking it. All five are null on a row written before stamps existed, and such
+///   a signature counts toward no requirement (hrn:node:hadronmemory.com:specs:cor:dmo:130:09).
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:130:07. Rule: hrn:node:hadronmemory.com:specs:cor:dmo:130:05.
+/// Background: #1632, #2973.
 model NodeSignature {
   id                  String   @id @default(cuid())
   nodeId              String   @map("node_id")
@@ -4842,20 +5069,26 @@ model NodeSignature {
   @@map("node_signatures")
 }
 
-/// #2973 C1 — the retained versioned registry of stamp HMAC keys. Random
-/// 32-byte purpose-scoped keys (never derived from `HADRON_ENCRYPTION_KEY`:
-/// retaining an old root would retain a key that decrypts everything, while a
-/// stamp key retains only stamp power), stored wrapped via AES-256-GCM with
-/// AAD `hadron:stamp-key:v1:<id>` so a ciphertext planted from any other
-/// tokenCrypto use fails its tag and the row is unusable (Rico #92969 §1).
-/// Rotating the root RE-WRAPS rows (decrypt under the old, wrap under the
-/// new), never invalidates them: verification keys are retained forever
-/// (`retiredAt` retires minting only, and nothing in PR1 sets it — no ops
-/// surface). Minting always uses the newest unretired key; a stamp names the
-/// key that must verify it.
-/// #3996 (S1 of #3991) — an App's data key, wrapped (AES-256-GCM) under the platform root key `SECRET_ROOT_KEY`.
-/// AAD `hadron:secret-app-key:v1:<appId>:<keyVersion>`; a plaintext that is not exactly 32 bytes makes the row
-/// unusable (fail closed). The partial unique index (one ACTIVE key per App) is in secret-app-keys-invariants.sql.
+/// One version of an App's own data key, the key that the App's secrets are encrypted under. Each App has its own
+/// key, so one App's key never decrypts another App's secrets.
+///
+/// Relationships: belongs to one App and is deleted with it. SecretVersion rows name the key version that encrypted
+/// them (Restrict: a key version cannot be deleted while a version still uses it). The primary key is the pair
+/// (`appId`, `keyVersion`).
+///
+/// Behaviour:
+/// - Created on first need by src/lib/secrets/appKeys.ts: a random 32-byte key, stored only wrapped (AES-256-GCM)
+///   under the platform root key `SECRET_ROOT_KEY`. The additional data of the wrap names the App and the key version
+///   (`hadron:secret-app-key:v1:<appId>:<keyVersion>`), so a row copied to another App or version fails to unwrap.
+/// - Everything fails closed: a missing root key, a row that does not unwrap, or a plaintext that is not exactly 32
+///   bytes makes the key unusable, and every operation on the App's secrets is refused.
+/// - An App has at most one active key, the one with `retiredAt` null (a partial unique index in
+///   prisma/secret-app-keys-invariants.sql). A retired key encrypts nothing new and still decrypts the versions
+///   written under it. No code retires a key today.
+/// - `wrappedKey` is never selected for display and never logged. The raw key itself encrypts nothing: callers get
+///   subkeys derived from it for one purpose each.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:sec:010:04. Background: #3991, #3996.
 model SecretAppKey {
   appId      String    @map("app_id")
   keyVersion Int       @map("key_version")
@@ -4872,9 +5105,26 @@ model SecretAppKey {
   @@map("secret_app_keys")
 }
 
-/// #3997 (S2 of #3991): one stored value of an App-owned secret. Append-only in practice (a version is never edited);
-/// `superseded_at` is set when a newer one is stored. The ciphertext is left out of every default select at the client
-/// layer (`omit`, R12): only the store path and (S3) the read path select it by name.
+/// One stored value of a secret that an App owns. Every store adds a new version; the newest one is the secret's
+/// current value and the older ones are superseded.
+///
+/// Relationships: belongs to one Secret and is deleted with it. `appKey` is the SecretAppKey version that encrypted
+/// it (Restrict). `writtenByUserId`, `writtenByWorkerId` and `writtenBySessionId` are plain ids that record who
+/// stored it.
+///
+/// Behaviour:
+/// - Written by the store path in src/lib/secrets/appSecrets.ts. A version is never edited; `versionNo` counts up per
+///   secret and is unique with `secretId`.
+/// - `valueEncrypted` is the value under a subkey of the App's key, bound to the secret and the version by its
+///   additional data. The Prisma client leaves the column out of every default select; only the store path and the
+///   server-side read select it by name.
+/// - Storing a newer version stamps the earlier ones `supersededAt`. A secret keeps at most 50 versions: the oldest
+///   superseded ones are deleted first, and the current one never is.
+/// - A trigger requires the version's App to be the App that owns its secret (prisma/secret-versions-invariants.sql).
+///   No secret outlives its App: deleting the App row deletes its secrets and their versions first.
+/// - `sizeBytes` is the size of the stored plaintext JSON, the unit the size cap is counted in.
+///
+/// Lifecycle: hrn:node:hadronmemory.com:specs:cor:sec:010:03. Background: #3991, #3997.
 model SecretVersion {
   id             String    @id @default(cuid())
   secretId       String    @map("secret_id")
@@ -4899,9 +5149,22 @@ model SecretVersion {
   @@map("secret_versions")
 }
 
-/// #3997: the append-only audit trail of App secrets. Plain values only (no foreign keys, so the trail outlives the
-/// secret and its App); never a value, ciphertext or fingerprint. A guard trigger refuses update, and refuses delete
-/// except the one-year purge S8 builds (`secret-events-invariants.sql`).
+/// One entry in the audit trail of App secrets: who did what to which secret, when, and with what outcome. It is how
+/// an auditor can list every store and change of a secret after the fact.
+///
+/// Relationships: none by foreign key. `ownerId`, `secretId`, `actorUserId`, `workerId`, `sessionId` and `runId` are
+/// plain values, so the trail outlives the secret and its App.
+///
+/// Behaviour:
+/// - Written by `recordSecretEvent` (src/lib/secrets/appSecrets.ts) in the transaction of the act it records. `kind`
+///   names the act (`STORE`, `VERSION`, `METADATA` or `DELETE`) and `outcome` its result. `secretName` and
+///   `versionNo` are copied in, so the entry reads on its own.
+/// - An entry never holds a value, a ciphertext or a fingerprint of one.
+/// - A trigger refuses every update. It refuses a delete too, with one exception: the events of an App whose
+///   SecretOwnerTombstone is at least a year old and which is no longer live (prisma/secret-versions-invariants.sql).
+///   No code runs that purge today.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:sec:010:05. Background: #3991, #3997.
 model SecretEvent {
   id          String   @id @default(cuid())
   ownerType   String   @map("owner_type")
@@ -4923,8 +5186,19 @@ model SecretEvent {
   @@map("secret_events")
 }
 
-/// #3997 (R25): the durable start of the one-year event retention for a deleted owner. One row per deleted App that has
-/// events, written once; never updated; deleted only by the purge, last.
+/// The recorded moment at which an App that had secret events was deleted. The one-year retention of that App's
+/// SecretEvent rows is counted from it.
+///
+/// Relationships: none by foreign key. The primary key is the pair (`ownerType`, `ownerId`), a plain value, because
+/// the row has to outlive the App it names.
+///
+/// Behaviour:
+/// - Written once per deleted App that has events: by `deleteApp` when it soft-deletes the App, and by a trigger on
+///   the hard delete of an App row when no tombstone exists yet. A later hard delete keeps the first time.
+/// - A trigger refuses every update. It allows the delete only when the tombstone is at least a year old and the
+///   owner has no events left, so a purge removes it last (prisma/secret-versions-invariants.sql).
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:sec:010:05. Background: #3997.
 model SecretOwnerTombstone {
   ownerType String   @map("owner_type")
   ownerId   String   @map("owner_id")
@@ -4934,6 +5208,26 @@ model SecretOwnerTombstone {
   @@map("secret_owner_tombstones")
 }
 
+/// One key in the registry of keys that the platform uses to stamp a signature at signing time. The stamp on a
+/// NodeSignature records what the signing ceremony judged about the signer, and this key is what makes that stamp
+/// impossible to forge or copy by someone who can only write rows.
+///
+/// Relationships: NodeSignature rows name the key that verifies their stamp (`stampKeyId`, Restrict), so a key that
+/// has stamps can never be deleted.
+///
+/// Behaviour:
+/// - A key is 32 random bytes with one purpose. It is never derived from `HADRON_ENCRYPTION_KEY`: keeping an old root
+///   key around would keep a key that decrypts everything, while an old stamp key can only verify stamps.
+/// - `keyMaterial` is the key wrapped with AES-256-GCM under `HADRON_ENCRYPTION_KEY`, with the additional data
+///   `hadron:stamp-key:v1:<id>`. A ciphertext copied in from any other use fails its tag, and a plaintext that is not
+///   exactly 32 bytes makes the row unusable.
+/// - Minting a stamp uses the newest key that is not retired, and creates the first key when there is none
+///   (`mintStampSigningKey`, src/lib/signing/stampKeys.ts). A stamp names the key that must verify it; an unknown key
+///   id never counts.
+/// - Keys are kept for verification forever. `retiredAt` stops minting under a key only, and no code sets it today.
+///   Changing the root key re-wraps the rows (`rewrapStampSigningKeys`) and never invalidates them.
+///
+/// Definition: hrn:node:hadronmemory.com:specs:cor:dmo:130:09. Background: #2973.
 model StampSigningKey {
   id          Int       @id @default(autoincrement())
   /// base64(iv[12] | gcm-tag[16] | ciphertext), AES-256-GCM under
@@ -4949,21 +5243,30 @@ model StampSigningKey {
   @@map("stamp_signing_keys")
 }
 
-/// Short-lived, single-use handoff codes that keep the session JWT out of
-/// browser-visible URLs (#477). Two kinds share the same shape:
-///   - 'login'          — minted after GitHub/email auth; the portal's server
-///                        `load` redeems it at POST /auth/session for the JWT,
-///                        which it sets as an HttpOnly cookie. For the GitHub
-///                        flow `clientStateHash` binds the finishing browser to
-///                        the login it started (session-fixation defense); the
-///                        email flow leaves it null (magic links open cross-device).
-///   - 'exchange_start' — minted by POST /auth/microsoft/start (Bearer-authed,
-///                        server-to-server) so the long-lived JWT never rides in
-///                        the /auth/microsoft redirect URL.
-/// The raw code is only ever handed out once; the DB stores its SHA-256 hash.
-/// Single use is enforced by an atomic `updateMany(redeemedAt: null)` claim,
-/// mirroring AuthCode. DB-backed (not in-memory) so it survives multi-worker
-/// deploys, unlike the legacy pendingStates maps.
+/// A short-lived, single-use code that stands in for a credential during one browser redirect, so that the long-lived
+/// session token never appears in a URL the browser can see.
+///
+/// Relationships: belongs to one User and is deleted with the user. `signIn` is the SignIn a login code publishes,
+/// when there is one. `orgId` and `flowId` are plain ids; `flowId` has no foreign key because the ConnectionFlow
+/// outlives the code.
+///
+/// Behaviour:
+/// - Two uses share the table (src/auth/authHandoff.ts). A `login` code is minted after a sign-in by email, GitHub,
+///   Google or Apple; the portal's server redeems it at `POST /auth/session` for the session token and sets that as
+///   an HttpOnly cookie. An `exchange_start` code is minted by a mailbox-connect start route for a signed-in caller
+///   and redeemed by the provider's authorize route. Its stored `kind` also names the provider and the door that
+///   started the flow, so a code minted for one provider cannot be redeemed at another.
+/// - The raw code is handed out once. The row stores only its SHA-256 (`codeHash`, unique).
+/// - It expires 2 minutes after it is minted. Redemption claims the row with a guarded update that requires
+///   `redeemedAt` to be null and the code to be unexpired, so only one caller succeeds.
+/// - `clientStateHash` is the SHA-256 of a nonce the portal set in the browser when the login started. When it is
+///   set, the redeemer must present the matching nonce, so the browser that finishes a login is the one that started
+///   it.
+/// - `loginEvidence` is the verified time and method of the login, carried through to the token. A login code that
+///   has a `signInId` is refused when that SignIn has been ended, and ending a SignIn marks its unredeemed codes
+///   redeemed.
+///
+/// Background: #477, #505, #1897, #2897, #2913.
 model AuthHandoffCode {
   id              String    @id @default(cuid())
   /// SHA-256 hash of the raw code handed to the browser/portal.
@@ -4998,16 +5301,27 @@ model AuthHandoffCode {
   @@map("auth_handoff_codes")
 }
 
-/// Durable pending login state for the first-party auth flows (GitHub /
-/// Google / Apple, `src/auth/pendingLoginState.ts`). Carries the OAuth
-/// state-CSRF token minted at the start route until the provider callback
-/// claims it (atomic delete-by-PK — single use). Replaces the three
-/// in-process `pendingStates` Maps in server.ts, which died on every
-/// deploy/restart: the provider callback then 400d mid-login — the failure
-/// mode behind the Apple App Review "the app failed to login with Apple"
-/// rejection (Apple's callback is a cross-site form POST after a flow that
-/// can involve slow 2FA). DB-backed rows survive restarts and multi-worker
-/// deploys. No user FK: the row exists BEFORE we know who is logging in.
+/// A sign-in with GitHub, Google or Apple that has been started and is waiting for the provider to call back. The row
+/// carries the OAuth `state` value, and what the callback needs to finish, from the start route to the callback.
+///
+/// Relationships: none. There is no User yet: the row exists before the platform knows who is signing in.
+///
+/// Behaviour:
+/// - Written by the start routes (`createPendingLoginState`, src/auth/pendingLoginState.ts) and kept in the database,
+///   not in process memory, so a restart or a second server instance does not break a login that is under way.
+/// - `state` is a random value, stored as it is, and is the primary key. The callback claims the row by deleting it,
+///   in one statement that also matches `provider`. That makes it single use, and a state minted for one provider
+///   cannot be claimed by another provider's callback.
+/// - It expires 15 minutes after it is written. Expiry is checked after the claim, so an expired state is used up as
+///   well. Each start also deletes the rows that have expired.
+/// - `redirect` and `returnTo` say where to go after the login. `clientState` is the portal's browser nonce, stored
+///   as it is and copied, hashed, onto the login AuthHandoffCode.
+/// - `ceremonyNonceHash` (SHA-256 of the ceremony browser cookie) marks a state that is the sign-in step of a passkey
+///   ceremony: it carries no `returnTo` or `clientState` (a CHECK), and its callback creates no session.
+///   `providerNonceHash` is the SHA-256 of the OIDC nonce sent to Google or Apple; a CHECK requires it on new rows
+///   for those two providers (prisma/login-nonce-invariants.sql).
+///
+/// Background: #477, #1631, #2204.
 model PendingLoginState {
   /// The OAuth `state` CSRF token (random hex) — handed to the IdP at the
   /// start route and echoed back on the callback.
@@ -5061,12 +5375,38 @@ enum AppRunTriggerKind {
   SPAWN
 }
 
-/// One headless run (cor:agt:010:02). Simultaneously the audit record AND —
-/// v1, D-2026-07-04-D — the activation: created only after the launch gate
-/// passes; every action inside the run re-checks status + policy and
-/// decrements the live budgets; zeroing a budget or setting CANCELLED halts
-/// the run at its next action (the kill switch). Also the outbox row for
-/// run.requested.v1 (publishedAt NULL ⇒ sweep republishes).
+/// One headless run: an Agent's automation executed for an App with no person present, started by a schedule, a
+/// webhook, a manual request, an integration event or another run. The row is the run's durable record, and it is
+/// also what allows the run to go on: every action inside the run checks the row again.
+///
+/// Relationships: no foreign keys to its owners. `organizationId`, `appId`, `agentId`, `userId`, `triggerId` and
+/// `parentRunId` are plain ids, so the database deletes nothing with them. ManualAutomationPin, WebFetchPollBinding
+/// and WebFetchEventReceipt rows point at a run, and so does the record of the prompt a run was served (a foreign key
+/// in prisma/served-prompt-invariants.sql).
+///
+/// Behaviour:
+/// - Created only after the launch gate has passed (`mintAppRun`, src/jobs/appRuns.ts). No separate credential is
+///   issued for a run.
+/// - `userId` is the user the run acts on behalf of, taken from its trigger. Null means the run acts as the App alone
+///   and reaches no personal memory (hrn:node:hadronmemory.com:specs:cor:agt:010:01).
+/// - `triggerKind` and `triggerId` say what started it: SCHEDULE, WEBHOOK, MANUAL, INTEGRATION, or SPAWN for a run
+///   another run started, in which case `triggerId` is the parent run's id.
+/// - `policy`, `scopeSnapshot` and `registerSnapshot` are copied at creation, so a run does not change meaning when
+///   someone edits a policy or a scope while it runs. The two snapshots are data only: every use intersects them with
+///   what the run may reach at that moment.
+/// - `budgetTokens` and `budgetActions` are what remains and are decremented as the run spends. Setting a budget to
+///   zero, or `status` to CANCELLED, stops the run at its next action. `tokensSpent`, `actionsSpent` and
+///   `costMicroCents` add up what was spent.
+/// - `status` goes from PENDING to RUNNING and ends as COMPLETED, FAILED, TIMED_OUT or CANCELLED. `curNodeUrn` is
+///   where the run is, `hops` the path it walked, `derivedLog` the derived prompt blocks each hop saw, and `failure`
+///   what went wrong.
+/// - `data` is the envelope of values that flow nodes extract as the run advances; `eventData` is the trigger's
+///   payload and does not change. `spawn` is the state of a parent run that fanned out.
+/// - The row is also the outbox for the "run requested" message: while `publishedAt` is null, a sweep publishes it
+///   again.
+///
+/// Rules: hrn:node:hadronmemory.com:specs:cor:agt:010:01, hrn:node:hadronmemory.com:specs:cor:agt:010:02. Background:
+/// #538, #832, #1719, #2047, #2438, #2439. Background (history, not law): the Spec Kit specs 040 and 049.
 model AppRun {
   id                   String               @id
   organizationId       String               @map("organization_id")
@@ -5183,9 +5523,29 @@ model AppRun {
   @@map("app_runs")
 }
 
-/// Recurring trigger (cor:agt:010, D-2026-07-04-E) — per-kind table
-/// mirroring the decided AgentWebhook shape. The scheduler claims rows by
-/// (enabled, nextRunAt) and mints an AppRun per due tick.
+/// A trigger that starts a headless run on a timetable: either repeatedly, on a cron expression, or once at a set
+/// time. Each time it is due, the scheduler creates one AppRun.
+///
+/// Relationships: `scope` is the optional Scope that its runs carry (SetNull). `organizationId`, `appId`, `agentId`
+/// and `userId` are plain ids with no foreign key.
+///
+/// Behaviour:
+/// - Created and edited through the schedule mutations (src/api/graphql/schema/resolvers.appRun.ts). `userId` is the
+///   user its runs act on behalf of, captured at creation (hrn:node:hadronmemory.com:specs:cor:agt:010:01).
+/// - Exactly one of `cron` and `runAt` is set (`chk_agent_schedule_cron_xor_run_at`). `cron` is a 5-field expression
+///   evaluated in `timezone`.
+/// - The scheduler (src/jobs/scheduler.ts) claims a due row (`enabled`, not deleted, `nextRunAt` passed) by moving
+///   `nextRunAt` to the next occurrence in one guarded update, so only one instance starts the run. A one-shot
+///   schedule is disabled by the claim. An overdue schedule runs once, not once for every missed slot, and a tick
+///   that is skipped because the previous run is still going still moves `nextRunAt`.
+/// - `entryNodeUrn` and `entryNodeId` name the automation's entry node. `automationPin` is the complete automation
+///   its owner adopted; a null pin makes the run fail before it executes.
+/// - `budgetTokens` and `budgetActions` are optional limits for each run; null uses the platform default. `policy` is
+///   the trigger's own allow-list and `aiConfigName` its AI configuration override.
+/// - Deleting is a soft delete (`deletedAt`).
+///
+/// Specs: hrn:node:hadronmemory.com:specs:cor:agt:010, hrn:node:hadronmemory.com:specs:cor:agt:010:01. Background:
+/// #510, #1719, #2438, #2479.
 model AgentSchedule {
   id             String    @id
   organizationId String    @map("organization_id")
@@ -5238,9 +5598,21 @@ model AgentSchedule {
   @@map("agent_schedules")
 }
 
-/// Continuous quota tier (cor:acl:050:01/:04): windowed counters per App and
-/// per org for run.execute + llm.tokens. Checked at the launch gate and
-/// decremented live during runs.
+/// A usage counter for one App or one organization: how much of one metered action has been used in the current day,
+/// and the limit. It is the first of the two quota tiers, the continuous one.
+///
+/// Relationships: none by foreign key. `scopeKind` (`app` or `org`) and `scopeId` name the owner as plain values. One
+/// row per owner, action and window.
+///
+/// Behaviour:
+/// - The metered actions are `run.execute` (runs), `llm.tokens` (model tokens), `sms.send` and `email.send`. The only
+///   `window` is `day`.
+/// - A row is created on first use with the platform default as its `limit` (src/jobs/appRuns.ts). After that the
+///   stored `limit` is what is enforced, and it can be changed per row (`setQuotaLimit`); 0 pauses the owner.
+/// - `used` is checked at the launch gate and raised while a run executes. When `resetAt` has passed, the next touch
+///   sets `used` back to 0 and moves `resetAt` to the next midnight UTC.
+///
+/// Rules: hrn:node:hadronmemory.com:specs:cor:acl:050:01, hrn:node:hadronmemory.com:specs:cor:acl:050:04.
 model QuotaCounter {
   id        String   @id
   scopeKind String   @map("scope_kind")
@@ -5255,9 +5627,22 @@ model QuotaCounter {
   @@map("quota_counters")
 }
 
-/// Consumable quota tier (cor:acl:050:01/:04): TAN-style tickets, v1 required
-/// only for the outbound-communication action class. The ledger answers
-/// "where did they all go?" — every consumption names the run.
+/// A ticket that allows one use of a sensitive action. It is the second of the two quota tiers: each use of the
+/// action spends one ticket, and the table is the ledger that shows where every ticket went.
+///
+/// Relationships: none by foreign key. `organizationId`, `appId`, `mintedBy` and `consumedByRunId` are plain ids.
+///
+/// Behaviour:
+/// - Tickets are minted in batches by a mutation (src/api/graphql/schema/resolvers.appRun.ts), for an organization or
+///   for one App in it. Today only the action `comm.outbound` can be minted: anything that leaves the platform for
+///   good, such as an email or a text message.
+/// - A run that wants to perform the action must spend one (`consumeActionTicket`, src/jobs/appRuns.ts). A ticket of
+///   the App is preferred over one of the whole organization. The claim is a guarded update that sets `consumedAt`
+///   and `consumedByRunId`, so a ticket is spent once and names the run that spent it.
+/// - A ticket past its `expiresAt` cannot be spent. When there is none to spend, the run skips the action and records
+///   why.
+///
+/// Rules: hrn:node:hadronmemory.com:specs:cor:acl:050:01, hrn:node:hadronmemory.com:specs:cor:acl:050:04.
 model ActionTicket {
   id              String    @id
   organizationId  String    @map("organization_id")
@@ -5274,17 +5659,26 @@ model ActionTicket {
   @@map("action_tickets")
 }
 
-/// Provider price row for one (provider, model, tier) triple — the rate
-/// source for UsageEvent.costMicroCents AND the debit markup (spec 046
-/// FR-002/FR-003). Effective-dated: lookup takes the latest
-/// `effectiveAt <= eventTime` with `deletedAt IS NULL`; price changes
-/// append a new row, never mutate an old one (historical costs stay
-/// auditable — stamped costs are snapshots, so soft-deleting a mispriced
-/// row is safe and is the "retire" lever). Prices are in micro-cents
-/// (1e-8 USD) per MILLION tokens — e.g. $3/MTok input = 30_000_000.
-/// Operator-managed via `setAiModelPrice` (platform admin); an absent
-/// triple means "no cost computed", never a blocked call.
-/// String columns, no enums — validation lives in src/lib/metering.
+/// The price of one AI model from one provider, from a given moment on. The platform uses it to work out what a unit
+/// of model usage cost, and what markup applies when that cost is charged to an organization's credits.
+///
+/// Relationships: none. UsageEvent rows store the cost that was computed from a price; they do not point at the price
+/// row.
+///
+/// Behaviour:
+/// - One row per `provider`, `model`, `tier` and `effectiveAt`. A lookup takes the newest row whose `effectiveAt` is
+///   not after the time of the usage and that is not soft-deleted (`getAiModelPrice`, src/lib/metering/index.ts).
+/// - A price change adds a new row and never edits an old one, so the rate in force at the time of the work stays on
+///   record. A cost stored on a usage event is a snapshot and is never recomputed, which is why soft-deleting a wrong
+///   row is safe.
+/// - Prices are in micro-cents (1e-8 USD) per million tokens, separately for input and output. `markupBasisPoints` is
+///   the markup at this tier (2500 = 25%); null falls back to `CREDIT_MARKUP_PERCENT`.
+/// - `tier` is 1 to 3 and everything resolves tier 1 today. The columns are strings and integers with no enum or
+///   CHECK; validation is in src/lib/metering.
+/// - Managed by a platform admin (`setAiModelPrice`). A model with no price row gets no cost; the call itself is
+///   never blocked.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:100:02. Background (history, not law): the Spec Kit spec 046.
 model AiModelPrice {
   id                      String    @id
   provider                String
@@ -5319,17 +5713,26 @@ model AiModelPrice {
   @@map("ai_model_prices")
 }
 
-/// Append-only monetary ledger for an organization's AI credits (spec 046
-/// FR-005). Signed amounts: grants +, debits −, adjustments ±; balance is
-/// SUM(amountMicroCents). Rows are NEVER mutated, deleted, or reset — this
-/// is the durable billing record (unlike QuotaCounter's daily counters).
-/// `expiresAt` on grants is stored policy only in Phase 0 (jurisdictions
-/// restrict prepaid expiry — see the spec's legal notes); FIFO expiry
-/// enforcement is a later phase. Automatic usage debits are gated by
-/// BILLING_DEBIT_ENABLED and apply only to platform-key spend (FR-004/006).
-/// Audit columns follow the schema-wide convention; the SANCTIONED
-/// correction is an `adjustment` row — soft-delete is break-glass ops only
-/// (balance and reads exclude soft-deleted rows, codebase-wide semantic).
+/// One entry in an organization's ledger of AI credits: an amount added or taken away. The balance of an organization
+/// is the sum of its entries; no balance is stored anywhere.
+///
+/// Relationships: belongs to one Organization and is deleted with it. `sourceType` and `sourceId` name where the
+/// entry came from as plain values, for example a UsageEvent or the administrator who granted it.
+///
+/// Behaviour:
+/// - `kind` is `grant` (a positive amount), `debit` (negative) or `adjustment` (either). `amountMicroCents` is
+///   signed, in micro-cents (1e-8 USD).
+/// - Grants are written by a platform admin (`grantCredits`) and debits by usage metering (`debitCredits`,
+///   src/lib/metering/index.ts). A debit is written only when `BILLING_DEBIT_ENABLED` is on, and only for usage on
+///   the platform's own provider key (hrn:node:hadronmemory.com:specs:cor:dmo:100:03). No code writes an `adjustment`
+///   today.
+/// - Entries are never edited or reset. A correction is a new `adjustment` entry. Soft-deleting an entry is an
+///   emergency measure for operators only; the balance leaves soft-deleted entries out.
+/// - At most one entry per (`sourceType`, `sourceId`), so a payment notification that arrives twice produces one
+///   entry. Entries with no source are not limited.
+/// - `expiresAt` on a grant is stored and not enforced.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:100:04. Background (history, not law): the Spec Kit spec 046.
 model CreditLedgerEntry {
   id               String    @id
   organizationId   String    @map("organization_id")
@@ -5361,11 +5764,27 @@ model CreditLedgerEntry {
   @@map("credit_ledger_entries")
 }
 
-/// Webhook trigger (D-2026-05-02, spec 040 plan §8) — per-kind table like
-/// AgentSchedule. URL shape: /hooks/<secret>/<name>?hpt=<platform JWT>.
-/// The opaque secret is the lookup key (no app/agent IDs in the URL);
-/// the time-limited platform JWT is the second factor — a leaked URL is
-/// useless without it (D-2026-05-02-006).
+/// A trigger that starts a headless run when an outside system calls a URL. Each accepted call creates one AppRun.
+///
+/// Relationships: `scope` is the optional Scope that its runs carry (SetNull). `organizationId`, `appId`, `agentId`
+/// and `userId` are plain ids with no foreign key.
+///
+/// Behaviour:
+/// - The URL is `/hooks/<secret>/<name>?hpt=<token>` (src/api/webhooks.ts). `secret` is a random value, unique,
+///   stored as it is, and is how the webhook is looked up, so the URL names no App or Agent.
+/// - The `hpt` token is the second factor: a time-limited token the platform signs for this one webhook and shows
+///   once, at creation or rotation. It is not stored. The secret alone is not enough: a call without a valid token is
+///   refused.
+/// - `userId` is the user its runs act on behalf of, captured at creation
+///   (hrn:node:hadronmemory.com:specs:cor:agt:010:01).
+/// - `entryNodeUrn` and `entryNodeId` name the automation's entry node. `automationPin` is the complete automation
+///   its owner adopted; a null pin makes the run fail before it executes.
+/// - `argsSchema` is a JSON Schema for the posted arguments. It is stored and not yet enforced.
+/// - `budgetTokens` and `budgetActions` are optional limits for each run; null uses the platform default.
+///   `lastCalledAt` is updated on each accepted call. Deleting is a soft delete.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:010:01. Background (history, not law): the Spec Kit spec 040.
+/// Background: #1719, #2438, #2479.
 model AgentWebhook {
   id             String    @id
   organizationId String    @map("organization_id")
@@ -5408,31 +5827,25 @@ model AgentWebhook {
   @@map("agent_webhooks")
 }
 
-/// #1012 — a client's DURABLE MCP selections (active App, active memory).
+/// What one MCP client of one user has selected: its active App, memory, organization and scope. The row lets those
+/// selections survive a server restart or a reconnect, which the in-process state of an MCP connection does not.
 ///
-/// The in-process selection maps in `src/mcp/server.ts` live for exactly one MCP
-/// TRANSPORT session, and clients re-initialize transparently after a server
-/// restart — so a selection silently evaporated mid-conversation (#1005). #1009
-/// made that loss legible and recoverable for callers holding a Hadron session
-/// id; this table is the remedy for everyone else, including plain memory work
-/// with no session at all.
+/// Relationships: belongs to one User and is deleted with the user. `app`, `memory`, `organization` and `scope` are
+/// the selections, each optional and SetNull, so a deleted target reads as "nothing selected".
 ///
-/// Keyed on (userId, clientKey), NOT on the MCP session id — which is exactly
-/// the thing that does not survive. `clientKey` is the caller's own stable
-/// instance id, supplied per request via the `X-Hadron-Client-Id` header. A
-/// client that sends none is not persisted at all and keeps the pre-#1012
-/// in-memory behaviour, so nothing regresses for clients that never opt in.
+/// Behaviour:
+/// - One row per user and `clientKey`, written by upsert when a selection changes (src/lib/mcpSessionState.ts).
+///   `clientKey` is the client's own stable id, sent in the `X-Hadron-Client-Id` header. A client that sends none is
+///   not stored at all and keeps its selections in memory only.
+/// - The key is the client, not the MCP session id, because the session id is what does not survive. It is per client
+///   and not per user, so that one person using several clients at once does not have one of them change the active
+///   App of the others.
+/// - The row remembers a choice and grants nothing. Each selection is authorized again when it is read: the App by
+///   current participation, the memory by the memory read gate, the organization by current membership, the scope by
+///   whether the caller can read it.
+/// - The memory is stored by id, not by URN, so a rename does not lose it.
 ///
-/// Per-CLIENT rather than per-USER on purpose: one person may drive Claude
-/// Desktop, Cursor and the CLI at once, and a per-user row would let one switch
-/// the others' active App mid-conversation — turning a lost selection into a
-/// silently wrong one, which is worse than the bug being fixed.
-///
-/// This is a CACHE of a choice, never a grant. Both pointers are re-authorized
-/// on read (`isAppParticipant` for the App, the memory read gate for the
-/// memory), because a stored selection outlives the membership that justified
-/// it (#475 / the #1007 review finding). Both are nullable and `SetNull`, so a
-/// deleted App or memory degrades to "nothing selected" rather than dangling.
+/// Background: #1005, #1009, #1012. Background (history, not law): the Spec Kit spec 049.
 model McpSessionState {
   id        String @id @default(cuid())
   userId    String @map("user_id")
@@ -5497,34 +5910,31 @@ enum UrnAliasReason {
   V1_MIGRATION
 }
 
-/// #1079 — every URN an entity USED to answer to.
+/// A URN that an entity used to answer to. URNs are published in places that cannot be rewritten later (commit
+/// trailers, pull requests, chat messages, exported documents), so when a rename or a move changes an entity's URN,
+/// the old one is kept here and goes on resolving.
 ///
-/// A URN is the platform's stable, publishable identifier: it goes into commit
-/// trailers, PR descriptions, issue signatures, chat messages and exported
-/// documents, none of which can be rewritten after the fact. Four entities
-/// store their URN in a column, and all four can be renamed; a node's composed
-/// URN also changes when its loc or memory changes. Without this table those
-/// changes silently turned published references into a 404.
+/// Relationships: none by foreign key. `entityType` (ORGANIZATION, MEMORY, AGENT, APP or NODE) and `entityId` name
+/// the entity as plain values.
 ///
-/// The blast radius is wider than the four rows, because most URNs in the
-/// platform are COMPOSED on read from one of them: a node URN carries its
-/// memory's slug, a worker URN carries its App's slug, an apprun URN likewise.
-/// Renaming one memory therefore orphans every published node URN under it.
-/// Aliasing the four storing entities heals parent renames. A node move also
-/// records the old composed node URN, because its loc or memory can change
-/// while both stored parent URNs remain unchanged (#1391).
+/// Behaviour:
+/// - Written by `recordUrnRename` (src/lib/urnAlias.ts) in the same transaction as the rename. `reason` says why: a
+///   rename of the entity itself, an organization rename that carried over to a child, or the URN an entity had
+///   before the version 2 format.
+/// - Organizations, memories, agents and Apps store their URN, and renaming one of them also changes every URN
+///   composed from it, such as a node URN under a renamed memory. Aliasing those four covers that. A node gets its
+///   own alias when a move changes its memory or loc while both parents keep their URNs.
+/// - `urn` is stored in the normalized form the resolvers look up (prefix removed, `::` collapsed to `:`).
+///   `replacedByUrn` is for the record only and is never matched.
+/// - A live URN always wins: resolvers try the entity's own URN first and read this table only on a miss. An old URN
+///   can be taken by a new entity, so two entities may have held the same URN at different times. The alias URN is
+///   therefore not unique, and a lookup that matches more than one live entity is refused, not guessed.
+/// - One row per URN and entity, so renaming back and forth adds no duplicates.
+/// - A row stores no liveness and gives no access. The entity is read again through its normal gate, so an alias
+///   never brings back a deleted entity and never shows one to a caller who may not see it.
 ///
-/// **Liveness is not stored here.** A row records only that a URN once
-/// addressed an entity; whether that entity is still readable, uninstalled or
-/// soft-deleted is answered by re-querying it, so an alias can never resurrect
-/// a dead row or leak one past its own gate.
-///
-/// **A live URN always wins.** An old URN becomes free on rename and may be
-/// taken by a new entity, so every resolver tries the `urn` column first and
-/// consults this table only on a miss. Two entities may therefore legitimately
-/// have held the SAME urn at different times; that is why the alias urn is not
-/// unique, and an ambiguous lookup fails loudly rather than guessing (the
-/// `AmbiguousLegacyUrnError` rule this shares with the `legacy_urn` fallback).
+/// Rules: hrn:node:hadronmemory.com:specs:cor:urn:030:01, hrn:node:hadronmemory.com:specs:cor:urn:030:02. Background:
+/// #337, #697, #1079, #1391.
 model UrnAlias {
   id String @id @default(cuid())
 
@@ -5555,21 +5965,32 @@ model UrnAlias {
   @@map("urn_aliases")
 }
 
-/// Spec 049 Phase 2 (D-2026-09-13-001) — a named search SCOPE ("lens"): an
-/// ORDERED list of memories with exactly one owner — organization, Agent, or
-/// App — as three nullable FKs with a CHECK (`chk_scope_owner`,
-/// `num_nonnulls(...) = 1`), never an `ownerKind` string. The Scope pattern
-/// the register table copies (plan §2 S1). A scope selects memories only
-/// (filters stay per call; no saved filter, no retrieval parameters) and
-/// NEVER grants: every consumer intersects it with the caller's accessible
-/// set (D-2026-09-13-004, `lib/auth/narrowToAccessible.ts`).
+/// A named, ordered list of memories that a caller selects to narrow what a search or read looks at. A scope is a
+/// lens: it changes what the caller is looking at, never what the caller may reach.
 ///
-/// `name` is unique PER OWNER among live rows — partial unique indexes in
-/// post-push.sql / the migration, since Prisma cannot express them and a plain
-/// @@unique would let a soft-deleted row block the name forever. Collisions
-/// across owners in an App's context resolve App › Agent › organization,
-/// namespaced, never unioned (`lib/scopes.ts`). `global` and `app` are
-/// reserved ladder tokens and refused at create.
+/// Relationships: owned by exactly one of an Organization, an Agent or an App, as three nullable foreign keys with a
+/// CHECK (`chk_scope_owner`), and deleted with its owner. ScopeMemory rows hold its memories. McpSessionState,
+/// AgentSchedule and AgentWebhook rows may point at a scope (SetNull).
+///
+/// Behaviour:
+/// - Created and changed through the scope mutations (src/api/graphql/schema/resolvers.scope.ts); the rules are in
+///   src/lib/scopes.ts.
+/// - A scope selects memories only. It stores no filter and no retrieval settings; those stay per call.
+/// - A scope never grants. Every use intersects its memories with the ones the caller can already read, and reports
+///   how many were left out (hrn:node:hadronmemory.com:specs:cor:acl:120:01).
+/// - `name` is unique per owner among rows that are not soft-deleted. The partial unique indexes are in
+///   prisma/post-push.sql, because Prisma cannot express them and a plain unique would let a deleted scope block its
+///   name forever.
+/// - When several owners in an App's context have a scope of the same name, the App's wins over the Agent's, and the
+///   Agent's over the organization's. The lists are never merged (hrn:node:hadronmemory.com:specs:cor:acl:120:03).
+/// - The names `global` and `app` are reserved for the built-in views and are refused at creation
+///   (hrn:node:hadronmemory.com:specs:cor:acl:120:02).
+/// - A schedule or webhook that names a scope copies its memory list into each run at creation
+///   (`AppRun.scopeSnapshot`).
+///
+/// Specs: hrn:node:hadronmemory.com:specs:cor:acl:120:00, hrn:node:hadronmemory.com:specs:cor:acl:120:01,
+/// hrn:node:hadronmemory.com:specs:cor:acl:120:02, hrn:node:hadronmemory.com:specs:cor:acl:120:03. Background
+/// (history, not law): the Spec Kit spec 049.
 model Scope {
   id             String    @id @default(cuid())
   name           String
@@ -5598,11 +6019,18 @@ model Scope {
   @@map("scopes")
 }
 
-/// The ordered memory list of a Scope. A join row rather than an id array so
-/// that "which scopes include this memory" is a query (D-2026-09-13-001
-/// rejected ids-in-JSON for exactly that — `scope explain` and memory deletion
-/// need the reverse lookup) and so a deleted memory cascades out of every
-/// scope. Composite PK: listed in `MODELS_WITHOUT_ID` (db/client.ts).
+/// One memory in a Scope's list, with its position in the list.
+///
+/// Relationships: joins Scope and Memory, one row per pair (the primary key), and is deleted with either, so a
+/// deleted memory drops out of every scope.
+///
+/// Behaviour:
+/// - It is a table and not a list of ids on the Scope, so that "which scopes include this memory" is a query.
+/// - `position` is the 0-based order within the scope, unique per scope. The order is stored for operations where a
+///   deliberate sequence matters; search ignores it (hrn:node:hadronmemory.com:specs:cor:acl:120:00).
+/// - The model has no `id` column and is listed in `MODELS_WITHOUT_ID` (src/integrations/db/client.ts).
+///
+/// Spec: hrn:node:hadronmemory.com:specs:cor:acl:120:00. Background (history, not law): the Spec Kit spec 049.
 model ScopeMemory {
   scopeId  String @map("scope_id")
   memoryId String @map("memory_id")
@@ -5627,42 +6055,36 @@ enum ChannelKind {
   CHAT
 }
 
-/// Spec 049 Phase 4 (D-2026-09-13-006) — a CHANNEL: a durable, ordered message
-/// stream hosted in ONE memory at ONE reserved address, server-ordered and
-/// server-attributed, that people and Agents post to and an Agent can be told
-/// about. NOT a chatbot conversation (`cor:cht`). A PLATFORM ENTITY, not the
-/// chat-root node: the row is created EAGERLY, one-to-one with its chat root
-/// (`chatRootNodeId`, unique), in the same transaction — that is what makes
-/// "the canonical reference is the PK of the chat node" and the table one
-/// thing, and what leaves nothing unprotected before the first post.
+/// A durable, ordered stream of messages that people and Agents post to, hosted in one memory at one reserved address
+/// (for example `chats:team`). The server orders the messages and records who wrote each one. A channel is not a
+/// chatbot conversation.
 ///
-/// Creating a row RESERVES and PROTECTS its address: every generic node write
-/// under `loc` (and any subtree operation overlapping it) is refused
-/// (`src/lib/protectedLoc.ts`, spec 049 §2 S4 shape B). The Channel table is
-/// the protection's ONLY source: D-2026-08-25-004 added `Memory.protectedLocs`
-/// as a second one and #1201 removed it again — governance of authored kinds
-/// moved to `Node.role` + `isRunnable`, a property of the WRITE rather than of
-/// the address. ADDRESS-based protection is a Channel concept and only that.
-/// The owning operations write
-/// through their own gate. This is hadron-server#1047's closure: the loc is
-/// operation-exclusive because it is protected, and protected because this
-/// row declared it.
+/// Relationships: belongs to the Memory that hosts it and is deleted with it. `chatRoot` is the Node at the channel's
+/// address, one-to-one (`chatRootNodeId` is unique), and the channel is deleted with that node. An App may name a
+/// channel as its default. RegisterEntry and ChannelReadState rows point at the channel and are deleted with it.
 ///
-/// `lastSeq` / `lastMessageAt` are the platform-maintained WATERMARK
-/// (D-2026-09-13-009) — the allocator's output, written inside
-/// `appendChatMessage`'s lock in the same transaction as the seq. The chat
-/// root's `data.messageCount` stays what it is, a routing operand; two numbers,
-/// two jobs. `lastSeq − lastSeenSeq` is a watermark delta, never a message
-/// count (gaps and the known prod duplicate are preserved).
+/// Behaviour:
+/// - The row is a platform entity of its own, not the chat root node. Both are created together in one transaction,
+///   so neither exists without the other and the address is protected before the first post
+///   (hrn:node:hadronmemory.com:specs:cor:dmo:090:01).
+/// - Creating the row reserves and protects `loc`. Every generic node write under it, and every subtree operation
+///   that overlaps it, is refused (src/lib/protectedLoc.ts); posts go through the channel's own operations. This
+///   table is the only source of address protection (hrn:node:hadronmemory.com:specs:cor:dmo:090:02).
+/// - `lastSeq` and `lastMessageAt` are the channel's high-water mark. The message append writes them under its lock,
+///   in the same transaction that allocates the sequence number. The difference between `lastSeq` and a reader's
+///   `lastSeenSeq` is a distance between two marks, not a count of messages, because sequence numbers can have gaps.
+/// - Deleting is a soft delete, in step with the chat root; the protection holds while either exists. Reusing the
+///   address of a deleted channel marks the old transcript deleted, resets the marks and raises `incarnation`, so a
+///   request that was resolved against the earlier channel cannot post to or delete the new one. Sequence numbers
+///   continue above the old maximum, so a reader's kept cursor cannot hide a new message
+///   (hrn:node:hadronmemory.com:specs:cor:dmo:090:03).
+/// - A channel has no access rules of its own. Who may read and post is decided by the host memory
+///   (hrn:node:hadronmemory.com:specs:cor:acl:030:01).
+/// - `kind` is CHAT, the only kind today.
 ///
-/// Reusing a soft-deleted Channel address tombstones its old transcript and
-/// resets these Channel watermarks to the empty state, but preserves the root
-/// allocator history. The first new post therefore resumes above the old seq
-/// maximum, which prevents a retained read cursor from hiding that message.
-///
-/// The audience is the HOST MEMORY's (`cor:acl:030:01`): a Channel has no
-/// access layer of its own. Participation, reads and posts follow the memory.
-/// Soft-deleted in step with its root; the protection holds while either exists.
+/// Specs: hrn:node:hadronmemory.com:specs:cor:dmo:090:01, hrn:node:hadronmemory.com:specs:cor:dmo:090:02,
+/// hrn:node:hadronmemory.com:specs:cor:dmo:090:03, hrn:node:hadronmemory.com:specs:cor:acl:030:01. Background: #1047,
+/// #1201. Background (history, not law): the Spec Kit spec 049.
 model Channel {
   id             String      @id @default(cuid())
   memoryId       String      @map("memory_id")
@@ -5705,20 +6127,27 @@ enum RegisterRole {
   BOTH
 }
 
-/// Spec 049 Phase 5 — a REGISTER ENTRY (D-2026-09-13-007, §14 corrections 1
-/// and 2): "this attendee takes part in this Channel". Owned by exactly ONE of
-/// an organization or an App (S1: `chk_register_owner`). The attendee is a
-/// Worker when cast, otherwise an Agent in an App; BOTH NULL means every
-/// attendee in the owner's context (org-wide for an org row, App-wide for an
-/// App row) — one row for "every Agent attends the announcements channel".
+/// A statement that an attendee takes part in a Channel: it should be told about what is posted there, may post
+/// there, or both. The register is how the platform knows which channels to bring to the attention of which Worker or
+/// Agent.
 ///
-/// Not a trigger list: a row here never starts a run. Not exportable
-/// (D-2026-08-25-006): platform instrumentation, excluded from memory export
-/// and the git mirror. The register never grants — `canRead` / `canPost` are
-/// the host memory's gates, evaluated at read time (Phase 6).
+/// Relationships: owned by exactly one of an Organization or an App (`chk_register_owner`) and deleted with it.
+/// `channel` is the Channel it is about. The attendee is `attendeeWorker` when a Worker is cast, otherwise
+/// `attendeeAgent`, an Agent in the owner's context. The row is deleted with the channel and with the attendee.
 ///
-/// Partial uniques per (owner, channel, attendee) WHERE deleted_at IS NULL —
-/// the install default's natural key (`post-push.sql`, the migration).
+/// Behaviour:
+/// - When both attendee columns are null, the entry means every attendee in the owner's context: the whole
+///   organization for an organization's entry, the whole App for an App's entry.
+/// - `role` is WATCH, POST or BOTH and states intent, never permission. The register grants nothing: whether an
+///   attendee can read or post is decided by the channel's host memory when it is used.
+/// - A row never starts a run. `mentionOnly` limits what counts as new for the attendee to messages that mention it.
+/// - `installDefault` marks the row that installing an Agent created for the App's default channel
+///   (src/lib/registerInstall.ts). An App may remove it, and uninstalling removes it.
+/// - Entries are platform records, not content: they are left out of memory export and the git mirror.
+/// - Among rows that are not soft-deleted there is one entry per owner, channel and attendee (partial unique indexes
+///   in prisma/post-push.sql).
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:090:04. Background (history, not law): the Spec Kit spec 049.
 model RegisterEntry {
   id               String       @id @default(cuid())
   organizationId   String?      @map("organization_id")
@@ -5754,19 +6183,29 @@ model RegisterEntry {
   @@map("register_entries")
 }
 
-/// Spec 049 Phase 7 — per ATTENDEE per Channel: where this attendee is up to
-/// (D-2026-09-13-009, §14 correction 1). OUTSIDE the register: a cursor on the
-/// register row "mixes what-I-attend with where-I-am and the relay would keep
-/// a second copy". Keyed on the attendee, not the bare Agent — two Workers
-/// cast from one Agent in one App must not share a cursor. Advances are
-/// MONOTONIC (`GREATEST`, `lib/channelReadState.ts`): an older transaction
-/// never overwrites a newer cursor; concurrent runs may both see a window as
-/// new — duplicate attention, never skipped attention. Mute is session state,
-/// never a column here (D16 local).
+/// How far one attendee has read in one Channel. What is unread is not stored anywhere: it is worked out from this
+/// row's `lastSeenSeq` and the channel's `lastSeq`.
 ///
-/// CHECKs `chk_read_state_attendee` (exactly one of worker / agent) and
-/// `chk_read_state_agent_app` (an Agent attendee carries its App); partial
-/// uniques on (worker, channel) and (agent, app, channel) — post-push.sql.
+/// Relationships: the attendee is exactly one of a Worker (`workerId`) or an Agent in an App (`agentId` with
+/// `appId`), enforced by `chk_read_state_attendee` and `chk_read_state_agent_app`. The row is deleted with the
+/// Worker, the Agent, the App or the Channel.
+///
+/// Behaviour:
+/// - The row is separate from RegisterEntry on purpose: what an attendee attends and how far it has read are
+///   different facts. It is keyed on the attendee, not on the Agent alone, so two Workers cast from one Agent in one
+///   App do not share a cursor.
+/// - `advanceReadState` (src/lib/channelReadState.ts) creates the row or raises `lastSeenSeq`. It only ever moves
+///   forward (`GREATEST`), so an older transaction cannot overwrite a newer cursor. Two runs at the same time may
+///   both see the same messages as new: attention can be repeated, never skipped.
+/// - `channelIncarnation` is the Channel incarnation the cursor was last raised under. Null means it is not known,
+///   and it is never filled in afterwards.
+/// - `lastCheckedAt` is when the worker last checked the channel through its own bound session, even when nothing was
+///   new. Only `stampChannelCheck` writes it; a read by a person or by another worker does not.
+/// - One row per worker and channel, and per agent, App and channel (partial unique indexes in prisma/post-push.sql).
+///   Muting is session state and has no column here.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:090:06. Background: #2138, #2181. Background (history, not law): the
+/// Spec Kit spec 049.
 model ChannelReadState {
   id                 String    @id @default(cuid())
   workerId           String?   @map("worker_id")
