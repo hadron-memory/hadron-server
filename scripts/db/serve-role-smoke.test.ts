@@ -139,6 +139,10 @@ async function checkpointReading(): Promise<unknown> {
                          FROM pg_buffercache b LEFT JOIN pg_database d ON d.oid = b.reldatabase
                         WHERE b.isdirty GROUP BY 1 ORDER BY count(*) DESC LIMIT 20`],
     databases: [`SELECT count(*) AS total, count(*) FILTER (WHERE datname LIKE 'hadron_test_r%') AS clones FROM pg_database`],
+    // Files on disk per test database. A TRUNCATEd relation's old file stays until the next checkpoint unlinks it,
+    // so the count that disappears across the drop is the checkpoint's unlink backlog. Needs a superuser (CI's role).
+    files: [`SELECT d.datname AS db, (SELECT count(*) FROM pg_ls_dir('base/' || d.oid) AS f) AS files
+               FROM pg_database d WHERE d.datname LIKE 'hadron_test_r%' OR d.datname = $1 ORDER BY 2 DESC LIMIT 20`, [DB]],
     settings: [`SELECT name, setting FROM pg_settings WHERE name IN ('shared_buffers', 'track_io_timing', 'fsync', 'checkpoint_timeout', 'max_wal_size')`],
   }, 2_000);
   const cap = new Promise<{ error: string }>((resolve) => setTimeout(() => resolve({ error: 'reading capped at 2000ms' }), 2_000).unref());
