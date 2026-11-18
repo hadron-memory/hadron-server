@@ -60,7 +60,7 @@ async function snapshot(id: string) {
 
 /** An Agent with no system memory yet (the updateAgent first-attach shape). */
 async function brainlessAgent(where: 'user' | 'org', name: string): Promise<{ id: string }> {
-  const args = where === 'org' ? { orgId: org.id, name } : { name, visibility: 'PERSONAL' };
+  const args = where === 'org' ? { orgRef: org.id, name } : { name, visibility: 'PERSONAL' };
   const created = await M.createAgent({}, args, userCtx(owner.id));
   await db.agent.update({ where: { id: created.id }, data: { systemMemoryId: null } });
   return { id: created.id };
@@ -95,8 +95,8 @@ describe('createAgent(systemMemoryId) refuses a private or personal source (A-D)
       const before = await snapshot(src.id);
       const agents = await agentCount();
       const args = s.where === 'org'
-        ? { orgId: org.id, name: 'B', systemMemoryId: src.id }
-        : { name: 'B', systemMemoryId: src.id, visibility: 'PERSONAL' };
+        ? { orgRef: org.id, name: 'B', systemMemoryRef: src.id }
+        : { name: 'B', systemMemoryRef: src.id, visibility: 'PERSONAL' };
       const err = await refusal(M.createAgent({}, args, userCtx(owner.id)));
       expect(err).toBeInstanceOf(GraphQLError);
       expect(err.extensions?.code).toBe('BAD_USER_INPUT');
@@ -178,24 +178,28 @@ describe('controls and concealment', () => {
   it('a non-reader of the private source gets the byte-identical not-found of a missing id, never the class refusal', async () => {
     const src = await source('private', 'org');
     const missing = generateId();
-    const mk = (id: string) => M.createAgent({}, { orgRef: org.id, name: 'S', systemMemoryId: id }, userCtx(stranger.id));
+    const mk = (id: string) => M.createAgent({}, { orgRef: org.id, name: 'S', systemMemoryRef: id }, userCtx(stranger.id));
     const real = await refusal(mk(src.id));
     const gone = await refusal(mk(missing));
-    expect(real.extensions?.code).toBe('MEMORY_NOT_FOUND');
-    expect(wire(real)).toBe(wire(gone));
+    // #4140 (cor:api:140:03): the uniform not-found names only the caller's OWN reference, so the two differ in that ref alone.
+    const code = (e: unknown) => (e as { code?: string }).code;
+    const noRef = (e: GraphQLError, ref: string) => wire(e).split(ref).join('<ref>');
+    expect(code(real)).toBe('MEMORY_NOT_FOUND');
+    expect(code(gone)).toBe('MEMORY_NOT_FOUND');
+    expect(noRef(real, src.id)).toBe(noRef(gone, missing));
     const brainless = await brainlessAgent('org', 'S2');
     const upd = await refusal(M.updateAgent({}, { ref: brainless.id, systemMemoryRef: src.id }, userCtx(stranger.id)));
-    expect(upd.extensions?.code).toBe('MEMORY_NOT_FOUND');
+    expect(code(upd)).toBe('MEMORY_NOT_FOUND');
     // updateAgent's message must not carry the class either: compare its wire bytes with a missing id's (Dara P3).
     const updGone = await refusal(M.updateAgent({}, { ref: brainless.id, systemMemoryRef: missing }, userCtx(stranger.id)));
-    expect(wire(upd)).toBe(wire(updGone));
+    expect(noRef(upd, src.id)).toBe(noRef(updGone, missing));
   });
 
   it('a plain knowledge memory (not private or personal) is still promotable', async () => {
     const plain = await db.memory.create({
       data: { id: generateId(), urn: `plain4216-${generateId()}`, name: 'plain', class: 'knowledge', organizationId: org.id },
     });
-    const b = await M.createAgent({}, { orgRef: org.id, name: 'P', systemMemoryId: plain.id }, userCtx(owner.id));
+    const b = await M.createAgent({}, { orgRef: org.id, name: 'P', systemMemoryRef: plain.id }, userCtx(owner.id));
     expect(b.systemMemoryId).toBe(plain.id);
   });
 });
