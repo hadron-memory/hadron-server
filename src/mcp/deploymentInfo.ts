@@ -105,7 +105,15 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // so a lagging build silently records the session fallback — a healthy-looking
 // receipt with the wrong attribution. Clients gate on the `worklog-model`
 // capability token rather than the version.
-export const HADRON_SERVER_VERSION = '0.21.0';
+// 0.22.0 — #2027 S11: the attention API is RETIRED. The GraphQL fields
+// `teamAttention` / `teamAttentionPage` / `teamAttentionPreviewPage` /
+// `teamAttentionSwitchoverPreview` and the `confirmTeamAttentionSwitchover`
+// mutation are gone, and with them the `hadron_team_attention*` MCP tools
+// (already wire-disabled by #3082). A router still polling must move to the
+// wake path (`dueWakes` / the CLI's `hadron team wakes`); the explicit
+// `markOwnTeamChatRead` mark and every wake/mark/resume rule it shared a module
+// with are unchanged.
+export const HADRON_SERVER_VERSION = '0.22.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

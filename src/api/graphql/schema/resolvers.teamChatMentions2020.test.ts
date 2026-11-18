@@ -20,7 +20,6 @@ import { getMemoryEncryptionInfo, encryptNodeFieldsWithKey } from '../../../lib/
 import { generateDataKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { runAsActor } from '../../../lib/requestActor.js';
-import { teamAttentionPage } from '../../../lib/teamAttention.js';
 import { resolvers, type Context } from './resolvers.js';
 import { teamChatMutations } from './resolvers.teamChat.js';
 
@@ -78,18 +77,6 @@ async function mentionsOf(w: W, extra: Record<string, unknown> = {}): Promise<nu
   expect(page.total).toBe(page.items.length);
   return page.items.map((m: any) => m.seq);
 }
-/** The attention scan's mention count for one worker (the Orca router's number). */
-async function attentionMentions(w: W): Promise<number> {
-  let n = 0;
-  for (let page: string | null = null, guard = 0; guard < 50; guard++) {
-    const r: any = await teamAttentionPage(ctx(w.holder), app.id, { since: null, page });
-    for (const item of r.items) if (item.worker === w.id) n += item.unreadMentions;
-    if (r.scanComplete || !r.nextPage) break;
-    page = r.nextPage;
-  }
-  return n;
-}
-
 beforeEach(async () => {
   await cleanDb(db);
   const suffix = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
@@ -113,7 +100,6 @@ describe('a stamped broadcast reaches every worker (the #20231 red)', () => {
     expect(m.mentions).toEqual(['all']);
     expect(await mentionsOf(liam)).toEqual([m.seq]);
     expect(await mentionsOf(rook)).toEqual([m.seq]);
-    expect(await attentionMentions(liam)).toBe(1);
   });
 
   it('a grant holder\'s @all reaches the others, never its author', async () => {
@@ -136,14 +122,12 @@ describe('an unstamped broadcast is ordinary unread, not a mention', () => {
     const m = await workerSays(rook, 'quoting the @all token');
     expect(m.mentions).toEqual(['all']);
     expect(await mentionsOf(liam)).toEqual([]);
-    expect(await attentionMentions(liam)).toBe(0);
   });
 
   it('a plain member\'s @all and @team are not mentions either', async () => {
     await humanSays(holderB.id, 'hey @all');
     await humanSays(holderB.id, 'hey @team');
     expect(await mentionsOf(liam)).toEqual([]);
-    expect(await attentionMentions(liam)).toBe(0);
   });
 });
 
@@ -160,7 +144,6 @@ describe('names, replies and own posts', () => {
     const self = await workerSays(liam, 'note to @liam');
     expect(self.mentions).toEqual(['liam']);
     expect(await mentionsOf(liam)).toEqual([]);
-    expect(await attentionMentions(liam)).toBe(0);
   });
 });
 
@@ -172,7 +155,6 @@ describe('a worker whose name yields no mention token (Riana §10 P2)', () => {
     await workerSays(rook, 'quoting @all');
     await workerSays(bang, 'its own @all');
     expect(await mentionsOf(bang)).toEqual([stamped.seq]);
-    expect(await attentionMentions(bang)).toBe(1);
   });
 });
 
@@ -206,7 +188,6 @@ describe('legacy and malformed stamps', () => {
     await rawRow({ mentions: 'all', broadcastWakes: true });
     const ok = await rawRow({ mentions: ['all'], broadcastWakes: true });
     expect(await mentionsOf(liam)).toEqual([ok]);
-    expect(await attentionMentions(liam)).toBe(1);
   });
 });
 
@@ -253,7 +234,6 @@ describe('an encrypted team chat', () => {
     const sealed = await db.node.findMany({ where: { memoryId: memory.id, nodeType: 'chat-message' }, select: { data: true } });
     for (const s of sealed) expect(s.data).toHaveProperty('__enc');
     expect(await mentionsOf(liam)).toEqual([stamped.seq]);
-    expect(await attentionMentions(liam)).toBe(1);
     sessionKeyCache.evict('mr-2020');
   });
 });
@@ -272,8 +252,6 @@ describe('one eligibility set (every wake gate open)', () => {
     await humanSays(manager.id, '@nova over to you');
     const all = [liam, rook, nova];
     expect(await reached(all)).toEqual([nova.id]);
-    expect(await attentionMentions(nova)).toBe(1);
-    expect(await attentionMentions(liam)).toBe(0);
     expect(await due()).toEqual([nova.id]);
   });
 
@@ -308,9 +286,7 @@ describe('S3 real post/filter/history integration', () => {
     expect(post.teamBroadcastWorkerIds?.sort()).toEqual([liam.id, rook.id].sort());
     expect(post.teamTags).toEqual([{headId: rook.id, label: '@team.rook'}]);
     expect(await mentionsOf(liam)).toEqual([post.seq]);
-    expect(await attentionMentions(liam)).toBe(1);
     expect(await mentionsOf(outsider)).toEqual([]);
-    expect(await attentionMentions(outsider)).toBe(0);
     const page = await Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: rook.id, limit: 0}, ctx(holderA.id));
     expect(page).toMatchObject({items: [], total: 1});
     expect((await Q.teamChatMessages({}, {appRef: app.id, untagged: true}, ctx(holderA.id))).total).toBe(0);

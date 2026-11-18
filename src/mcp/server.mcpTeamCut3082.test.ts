@@ -1,6 +1,7 @@
 /**
  * #3082 (MCP team cut S1, plans:mcp-team-cut rev 2, V7 R1/R2/R4): the agent team works through the CLI and the portal,
- * not MCP. 71 team tools are disabled (unknown-tool on the wire, absent from tools/list); `hadron_start_session` refuses a
+ * not MCP. 68 team tools are disabled (unknown-tool on the wire, absent from tools/list); the three attention tools the cut
+ * had disabled were later retired outright by #2027 S11; `hadron_start_session` refuses a
  * worker binding with MCP_WORKER_BINDING_UNSUPPORTED before any read or write. Pins in two groups:
  *   RED on main: the disabled list, the unknown-tool answer, the R2 refusal and its no-write proof, server_info, the
  *     text that pointed at a disabled tool.
@@ -50,9 +51,6 @@ const DISABLED = [
   'hadron_team_chat_mark_read',
   'hadron_team_chat_inbox',
   'hadron_team_chat_inbox_ack',
-  'hadron_team_attention',
-  'hadron_team_attention_page',
-  'hadron_team_attention_switchover',
   'hadron_task_create',
   'hadron_task_update',
   'hadron_task_assign',
@@ -99,6 +97,13 @@ const DISABLED = [
   'hadron_agent_ticker_template_delete',
 ] as const;
 const DISABLED_SET = new Set<string>(DISABLED);
+/** #2027 S11: the attention tools #3082 had disabled were later retired outright — their registrations are deleted,
+ * so they appear in neither the disabled list nor tools/list. */
+const RETIRED_2027_SET = new Set<string>([
+  'hadron_team_attention',
+  'hadron_team_attention_page',
+  'hadron_team_attention_switchover',
+]);
 const KEPT_SAMPLE = [
   'hadron_start_session', 'hadron_end_session', 'hadron_whoami', 'hadron_server_info', 'hadron_search', 'hadron_get_node',
   'hadron_create_node', 'hadron_list_apps', 'hadron_agent_tasks', 'hadron_agent_processes', 'hadron_agent_set_base',
@@ -163,20 +168,21 @@ beforeAll(async () => {
   await serveEveryAgent(db);
 });
 
-describe('#3082 R1: the 71 team tools are disabled', () => {
-  it('the frozen list has 71 distinct names', () => {
-    expect(DISABLED.length).toBe(71);
-    expect(DISABLED_SET.size).toBe(71);
+describe('#3082 R1: the 68 team tools are disabled', () => {
+  it('the frozen list has 68 distinct names', () => {
+    expect(DISABLED.length).toBe(68);
+    expect(DISABLED_SET.size).toBe(68);
   });
 
   for (const [label, auth] of PRINCIPALS) {
-    it(`tools/list for ${label} lists none of the 71 and every other tool the surface listed before`, async () => {
+    it(`tools/list for ${label} lists none of the 68 and every other tool the surface listed before`, async () => {
       const listed = await listNames(auth());
       expect(listed.filter((n) => DISABLED_SET.has(n)), 'a disabled tool is still registered').toEqual([]);
       const variant = { user: 'userWithApp', 'app-key': 'appKeyOnly', impersonation: 'impersonation' }[label]!;
-      // The complete pre-#3082 name set for this principal (frozen from main at the cut), minus exactly the 71 retired names.
+      // The complete pre-#3082 name set for this principal (frozen from main at the cut), minus exactly the 68 disabled
+      // names and the three attention tools #2027 S11 later RETIRED outright (deleted, so they are in neither list).
       const before = JSON.parse(fs.readFileSync(BEFORE_NAMES, 'utf8')) as Record<string, string[]>;
-      expect([...listed].sort(), 'the kept tool set is exactly the pre-change set minus the 71').toEqual(before[variant].filter((n) => !DISABLED_SET.has(n)).sort());
+      expect([...listed].sort(), 'the kept tool set is exactly the pre-change set minus the 68').toEqual(before[variant].filter((n) => !DISABLED_SET.has(n) && !RETIRED_2027_SET.has(n)).sort());
       for (const k of KEPT_SAMPLE) {
         if (label === 'app-key' && ['hadron_create_task', 'hadron_update_task'].includes(k)) continue;
         expect(listed, k).toContain(k);
@@ -318,7 +324,6 @@ describe('#3082 GREEN by design: GraphQL still serves each team family (the reso
     workers: ['castWorker', 'updateWorker', 'deleteWorker', 'changeWorkerAgent', 'setWorkerReportsTo'],
     'channels/register': ['createChannel', 'registerAdd', 'registerRemove'],
     chat: ['postTeamChat', 'teamChatMessages', 'teamChatMarkRead'],
-    attention: ['teamAttention'],
     tasks: ['createAgentTask', 'updateAgentTask', 'startAgentTask', 'finishAgentTask', 'agentTasks'],
     'roster/events/alarms/availability': ['teamRoster', 'teamEvents', 'ackAlarm', 'setWorkerAvailability', 'setStallSchedule'],
     'stop signals/pause': ['setStopSignal', 'liftStopSignal', 'teamStopSignals', 'setTeamPause'],
