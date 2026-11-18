@@ -174,7 +174,7 @@ test('exit 0 with no load line is an invalid run, not a pass', () => {
   const f = fixture('empty');
   try {
     const r = f.run();
-    expect(r.status).toBe(5);
+    expect(r.status).toBe(7);
     expect(r.stderr).toContain('printed no load line');
     expect(readFileSync(join(f.dir, 'down'), 'utf8')).toBe('down\n');
   } finally { f.clean(); }
@@ -194,7 +194,7 @@ test('a missing timeout(1) or staged load.mjs refuses before any settling', () =
 });
 
 // Bronwyn's survivor: the extra pre-settle sleep is gated on DIAG_SNAPSHOTS=1 / DIAG_W2=1.
-test('the pre-settle idle runs only when snapshots or W2 perturb the stack', () => {
+test('the pre-settle idle runs only when snapshots perturb the stack (the W2 half of the same condition needs the host activity driver and is not exercised here)', () => {
   const settles = (extra) => {
     const f = fixture('cap');
     try {

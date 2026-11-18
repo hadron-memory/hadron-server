@@ -147,7 +147,7 @@ if [ -n "$load_line" ]; then
 elif [ "$load_rc" -eq 0 ]; then
   # #4453 N4: exit 0 with no line leaves report.mjs nothing to read; that is an invalid run, not a pass.
   echo 'load generator exited 0 but printed no load line; diagnosis is invalid' >&2
-  exit 5
+  exit 7   # not 5: that is the generator's acceptance code and cleanup_rc's
 fi
 # A failed generator still explains itself: the line is echoed and stashed above, the EXIT trap
 # re-appends it to DIAG_OUT after preserve_samples, and the rc propagates (samples and private

@@ -97,7 +97,7 @@ test('anything unobserved degrades to not-sampled or null, never a phantom zero 
   const line = perSessionLine({ samples: [s(1_000), s(80_000)], load: { workload: 'held', cap: 10, ok: 11, startAt: 5_000, endAt: 90_000 } });
   expect(line.rssPerSessionBytes).toBe(0); // an OBSERVED zero delta is a real zero; only absence degrades below
   const bare = perSessionLine({ samples: [s(1_000, { rss: undefined }), s(80_000, { rss: undefined })],
-    load: { workload: 'held', cap: 10, startAt: 5_000, endAt: 90_000 } });
+    load: { workload: 'held', cap: 10, ok: 11, startAt: 5_000, endAt: 90_000 } });
   expect(bare.baselineRssBytes).toBeNull();
   expect(bare.loadedRssBytes).toBeNull();
   expect(bare.rssPerSessionBytes).toBe(NOT_SAMPLED);
