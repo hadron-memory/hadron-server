@@ -34,6 +34,7 @@ state="${XDG_STATE_HOME:-$HOME/.local/state}/hadron-e2e/$project"
 case "${E2E_BACKEND:-incus}" in incus|auto) export E2E_BACKEND=incus;; *) echo 'diagnosis requires the Incus backend' >&2; exit 2;; esac
 acquire_stack_reservation "$state" "$project" || exit 2
 stage=''
+load_line=''   # #4453 N6: always defined, so the trap never depends on set -u luck
 down() {
   rc=$?
   trap - EXIT
@@ -45,7 +46,9 @@ down() {
     [ "$rc" = 0 ] || preserve_samples "$DIAG_OUT"
     # #4453 BLIND review: preserve_samples replaces DIAG_OUT with the container's series, so a load
     # line captured before a failed exit is re-appended here — the counts explain the invalid run.
-    if [ "$rc" != 0 ] && [ -n "${load_line:-}" ]; then printf '%s\n' "$load_line" >> "$DIAG_OUT" 2>/dev/null || true; fi
+    # #4453 N6: append only if the line is not already there, so this holds whether or not
+    # preserve_samples replaced the file.
+    if [ "$rc" != 0 ] && [ -n "$load_line" ] && ! grep -qxF -- "$load_line" "$DIAG_OUT" 2>/dev/null; then printf '%s\n' "$load_line" >> "$DIAG_OUT" 2>/dev/null || true; fi
     if [ "$rc" != 0 ]; then keep_logs_private "$DIAG_OUT.private.log" bash -c 'cd "$1" && scripts/e2e/stack.sh logs "$2"' _ "$stage/src" "$worker"; fi
     # Heap snapshots hold real values: purge before the stack goes, and a purge that fails or cannot be verified fails the run.
     purge_snapshots || cleanup_rc=5
@@ -95,6 +98,10 @@ compose_exec() {
 app_exec() { compose_exec app "$@"; }
 limit=$(app_exec cat /sys/fs/cgroup/memory.max | tr -d '\r')
 [ "$limit" = 6442450944 ] || { echo "cgroup limit is '$limit', not 6 GB; refusing" >&2; exit 4; }
+# #4453 P3: the load step assumes the staged overlay is mounted at /app/scripts/e2e/diagnose and that
+# the image has timeout(1); find out now, not after the settle window.
+app_exec sh -c 'command -v timeout >/dev/null && test -f /app/scripts/e2e/diagnose/load.mjs' \
+  || { echo 'app container lacks timeout(1) or the staged load.mjs; refusing' >&2; exit 4; }
 HADRON_DIAG_ADMIN_KEY=$(app_exec node -e "process.stdout.write(require('/fixtures/credentials.json')['alpha-admin'])")
 export HADRON_DIAG_ADMIN_KEY
 # take_snapshot <label>: ask the server for a snapshot, reduce it in the stub container (outside the server's cgroup),
@@ -137,12 +144,18 @@ load_line=$(app_exec sh -c 'HADRON_DIAG_KEY=$(node -e "$1") DIAG_SESSION_CAP="${
 if [ -n "$load_line" ]; then
   printf '%s\n' "$load_line" >&2
   printf '%s\n' "$load_line" > "$stage/load-line.json"
+elif [ "$load_rc" -eq 0 ]; then
+  # #4453 N4: exit 0 with no line leaves report.mjs nothing to read; that is an invalid run, not a pass.
+  echo 'load generator exited 0 but printed no load line; diagnosis is invalid' >&2
+  exit 7   # not 5: that is the generator's acceptance code and cleanup_rc's
 fi
 # A failed generator still explains itself: the line is echoed and stashed above, the EXIT trap
 # re-appends it to DIAG_OUT after preserve_samples, and the rc propagates (samples and private
 # logs are kept on any non-zero exit).
 if [ "$load_rc" -ne 0 ]; then
-  echo "load generator exited $load_rc; the counts above explain the invalid run" >&2
+  if [ -n "$load_line" ]; then echo "load generator exited $load_rc; the counts above explain the invalid run" >&2
+  elif [ "$load_rc" -eq 124 ]; then echo 'load generator hit its wall-clock budget (exit 124) and printed no load line; there are no counts for this run' >&2
+  else echo "load generator exited $load_rc and printed no load line; there are no counts for this run" >&2; fi
   exit "$load_rc"
 fi
 take_snapshot load

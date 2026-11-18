@@ -25,7 +25,8 @@ async function initialize(base, key, fetchImpl) {
 export async function run({ base, key, workload, durationMs, signal, cap = 25, fetchImpl = fetch, probeN = 0, now = Date.now }) {
   const w = parseWorkload(workload, cap);
   const counts = { ok: 0, capRefused: 0, other: 0, closeOk: 0, closeFailed: 0, missingSession: 0 };
-  const note = ({status, sid}) => { if (status === 200) { counts.ok++; if (!sid) { counts.missingSession++; if (w.close) counts.closeFailed++; } } else if (status === 429) counts.capRefused++; else counts.other++; };
+  // ok = sessions actually opened: a 200 without a session id is missingSession, not ok (#4453 N2)
+  const note = ({status, sid}) => { if (status === 200) { if (sid) counts.ok++; else { counts.missingSession++; if (w.close) counts.closeFailed++; } } else if (status === 429) counts.capRefused++; else counts.other++; };
   const startAt = now();
   const end = startAt + durationMs;
   // The probe rides the most recently initialized session. The server's cap rule evicts the principal's
@@ -54,11 +55,12 @@ export async function run({ base, key, workload, durationMs, signal, cap = 25, f
 // (the same open() sequence the server's own MCP tests use); latencies are wall-clock round trips.
 // #4453 BLIND review: a 200 can still carry a JSON-RPC error object — in a JSON body or an SSE data
 // line. That is a failed request, not a slow one, so it counts under errors, never as a latency.
-function jsonRpcError(text) {
+// #4453 N7: a 200 with neither a result nor an error is not a sample either.
+function jsonRpcResult(text) {
   const bodies = [];
   try { bodies.push(JSON.parse(text)); } catch { /* SSE or non-JSON */ }
   for (const m of String(text).matchAll(/data:\s*(\{.*\})/g)) { try { bodies.push(JSON.parse(m[1])); } catch { /* partial line */ } }
-  return bodies.some((b) => b && typeof b === 'object' && b.error !== undefined);
+  return bodies.some((b) => b && typeof b === 'object' && b.error === undefined && b.result !== undefined);
 }
 
 export async function probeHeldSession({ base, key, sid, n = 50, fetchImpl = fetch, now = Date.now }) {
@@ -72,7 +74,7 @@ export async function probeHeldSession({ base, key, sid, n = 50, fetchImpl = fet
     try {
       const res = await post({ jsonrpc: '2.0', id: 2 + i, method: 'tools/list', params: {} });
       const body = await res.text();
-      if (res.status === 200 && !jsonRpcError(body)) latencies.push(now() - t0); else errors++;
+      if (res.status === 200 && jsonRpcResult(body)) latencies.push(now() - t0); else errors++;
     } catch { errors++; }
   }
   const p = latencyPercentiles(latencies);

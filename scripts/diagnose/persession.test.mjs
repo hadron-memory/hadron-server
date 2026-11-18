@@ -94,10 +94,10 @@ test('poolTimeouts is the LAST sample\'s cumulative counters; poolWaiters stays 
 });
 
 test('anything unobserved degrades to not-sampled or null, never a phantom zero or NaN', () => {
-  const line = perSessionLine({ samples: [s(1_000), s(80_000)], load: { workload: 'held', cap: 10, startAt: 5_000, endAt: 90_000 } });
+  const line = perSessionLine({ samples: [s(1_000), s(80_000)], load: { workload: 'held', cap: 10, ok: 11, startAt: 5_000, endAt: 90_000 } });
   expect(line.rssPerSessionBytes).toBe(0); // an OBSERVED zero delta is a real zero; only absence degrades below
   const bare = perSessionLine({ samples: [s(1_000, { rss: undefined }), s(80_000, { rss: undefined })],
-    load: { workload: 'held', cap: 10, startAt: 5_000, endAt: 90_000 } });
+    load: { workload: 'held', cap: 10, ok: 11, startAt: 5_000, endAt: 90_000 } });
   expect(bare.baselineRssBytes).toBeNull();
   expect(bare.loadedRssBytes).toBeNull();
   expect(bare.rssPerSessionBytes).toBe(NOT_SAMPLED);
@@ -168,12 +168,12 @@ test('baselineBasis records which baseline path was taken, with its sample count
 });
 
 // #4453 BLIND P3: ok is validated exactly like cap — a corrupt count degrades to null, never to a divisor.
-test('a non-integer ok degrades to null and the divisor falls back to the cap', () => {
+test('a non-integer ok is not sampled and the per-session figure is not sampled, never cap-divided', () => {
   const line = perSessionLine({ samples: [s(1_000, { rss: 300 }), s(80_000, { rss: 700 })],
     load: { workload: 'held', cap: 100, ok: 'many', startAt: 5_000, endAt: 90_000 } });
-  expect(line.okOpens).toBeNull();
-  expect(line.held).toBe(100);
-  expect(line.rssPerSessionBytes).toBe(4);
+  expect(line.okOpens).toBe(NOT_SAMPLED);
+  expect(line.held).toBeNull();
+  expect(line.rssPerSessionBytes).toBe(NOT_SAMPLED);
 });
 
 test('the emitted line is secret-free', () => {
@@ -184,4 +184,15 @@ test('the emitted line is secret-free', () => {
   const text = JSON.stringify(line);
   expect(() => assertSecretFree(text)).not.toThrow();
   expect(text).not.toContain('mcp-session-id');
+});
+
+// #4453 N1/N5: neither bound stands in for the other, and an absent load line reads not sampled.
+test('an unknown cap does not fall back to ok, and an absent load line reads not sampled', () => {
+  const samples = [s(1_000, { rss: 300 }), s(80_000, { rss: 700 })];
+  const noCap = perSessionLine({ samples, load: { workload: 'held', ok: 50, startAt: 5_000, endAt: 90_000 } });
+  expect(noCap.held).toBeNull();
+  expect(noCap.rssPerSessionBytes).toBe(NOT_SAMPLED);
+  const none = perSessionLine({ samples, load: null });
+  expect(none.workload).toBe(NOT_SAMPLED);
+  expect(none.okOpens).toBe(NOT_SAMPLED);
 });
