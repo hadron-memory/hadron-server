@@ -1,6 +1,6 @@
 /** #2025 / cor:agt:080:05 — one cadence/window dial and App delivery settings.
  * Busy/stuck bounds and their strict relation are Proposed, approved to build
- * by the scoped #2025 gate. Standby fields remain deprecated compatibility constants (#3606).
+ * by the scoped #2025 gate. Deprecated standby inputs and outputs are removed (#3696).
  */
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../generated/prisma/index.js';
@@ -29,8 +29,6 @@ export type DeliverySettings = {
   batchWindowSeconds: number;
   busyDelaySeconds: number;
   stuckWindowSeconds: number;
-  standbyEnabled: boolean;
-  standbyEffective: boolean;
   /** #2138 §3.2: a worker with a task is expected to check its team channel every period (seconds). Default 600. */
   checkPeriodSeconds: number;
   /** #2138 §3.2: OVERDUE after this many missed periods (+5 minutes slack). At least 1. Default 2. */
@@ -39,24 +37,23 @@ export type DeliverySettings = {
   darkAlarmWindowSeconds: number;
 };
 export type DeliverySettingsPatch = Partial<Pick<DeliverySettings,
-  'batchWindowSeconds' | 'busyDelaySeconds' | 'stuckWindowSeconds' | 'standbyEnabled' | 'checkPeriodSeconds' | 'failedChecksToOverdue' | 'darkAlarmWindowSeconds'>>;
+  'batchWindowSeconds' | 'busyDelaySeconds' | 'stuckWindowSeconds' | 'checkPeriodSeconds' | 'failedChecksToOverdue' | 'darkAlarmWindowSeconds'>>;
 const error = (code: string, message: string, details: Record<string, unknown> = {}) =>
   new GraphQLError(message, { extensions: { code, ...details } });
 
 /** Both transports call this inside the deciding manager transaction; no unknown/null input is silently ignored. */
 export function parseDeliverySettingsPatch(raw: unknown): DeliverySettingsPatch {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw error('BAD_USER_INPUT', 'input must be a settings object.');
-  const allowed = ['batchWindowSeconds', 'busyDelaySeconds', 'stuckWindowSeconds', 'standbyEnabled', 'checkPeriodSeconds', 'failedChecksToOverdue', 'darkAlarmWindowSeconds'];
+  const allowed = ['batchWindowSeconds', 'busyDelaySeconds', 'stuckWindowSeconds', 'checkPeriodSeconds', 'failedChecksToOverdue', 'darkAlarmWindowSeconds'];
   for (const [field, value] of Object.entries(raw)) {
     if (!allowed.includes(field)) throw error('BAD_USER_INPUT', 'Unknown delivery setting.');
     if (value === null || value === undefined) throw error('BAD_USER_INPUT', `${field} cannot be null; omit it to preserve its value.`);
-    if (field === 'standbyEnabled' && typeof value !== 'boolean') throw error('BAD_USER_INPUT', 'standbyEnabled must be a boolean.');
   }
   return raw as DeliverySettingsPatch;
 }
 
 /** Validate the final candidate, not just the changed scalar: neither settings writer can evade the relation. */
-export function validateDeliverySettings(settings: DeliverySettings, patch: DeliverySettingsPatch): void {
+export function validateDeliverySettings(settings: DeliverySettings): void {
   for (const [field, min, max] of [
     ['busyDelaySeconds', DELIVERY_BUSY_MIN_SECONDS, DELIVERY_BUSY_MAX_SECONDS],
     ['stuckWindowSeconds', DELIVERY_STUCK_MIN_SECONDS, DELIVERY_STUCK_MAX_SECONDS],
@@ -79,9 +76,6 @@ export function validateDeliverySettings(settings: DeliverySettings, patch: Deli
   if (settings.stuckWindowSeconds <= settings.busyDelaySeconds + settings.batchWindowSeconds) {
     throw error('DELIVERY_SETTINGS_CONFLICT', 'stuckWindowSeconds must be greater than busyDelaySeconds + the shared cadence floor (batchWindowSeconds / minCadenceSeconds).');
   }
-  if (patch.standbyEnabled === true) {
-    throw error('DELIVERY_STANDBY_UNAVAILABLE', 'Standby cannot be enabled until standby delivery behavior is available (S7b).');
-  }
 }
 
 /** Internal read seam for S1/S5, after their own authorization; public callers use the resolver gate. */
@@ -91,8 +85,6 @@ export async function loadDeliverySettings(db: Pick<Prisma.TransactionClient, 'a
     batchWindowSeconds: s.tickerMinCadenceSeconds,
     busyDelaySeconds: s.deliveryBusyDelaySeconds,
     stuckWindowSeconds: s.deliveryStuckWindowSeconds,
-    standbyEnabled: false,
-    standbyEffective: false, // #3606 phase-1 compatibility constant
     checkPeriodSeconds: s.deliveryCheckPeriodSeconds,
     failedChecksToOverdue: s.deliveryFailedChecksToOverdue,
     darkAlarmWindowSeconds: s.deliveryDarkAlarmWindowSeconds,

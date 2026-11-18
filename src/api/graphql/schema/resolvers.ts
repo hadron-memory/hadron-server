@@ -105,6 +105,7 @@ import {
 } from './resolvers.agentTaskAlarms.js';
 import { agentTaskMatchingQueries, agentTaskMatchingFieldResolvers } from './resolvers.agentTaskMatching.js';
 import { accountUsageQueries } from './resolvers.accountUsage.js';
+import { reviewQualityQueries } from './resolvers.reviewQuality.js';
 import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers } from './resolvers.memoryConfig.js';
 import { memoryConfigApplyMutations } from './resolvers.memoryConfigApply.js';
 import { nodeApprovalFieldResolvers, nodeApprovalMutations, nodeApprovalQueries } from './resolvers.nodeApproval.js';
@@ -241,6 +242,7 @@ export const resolvers = {
     ...agentTaskAlarmQueries,
     ...agentTaskMatchingQueries,
     ...accountUsageQueries,
+    ...reviewQualityQueries,
     ...utilizationQueries,
     ...registerRoleCandidateQueries,
     ...registerRolePickQueries,

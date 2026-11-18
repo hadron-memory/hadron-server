@@ -27,7 +27,8 @@ BEGIN
     WHEN 'worktree.create' THEN required := ARRAY['workerId', 'repo', 'baseBranch', 'branchName', 'label'];
     -- #4230 (S1b, decision G1): a start may carry its assignment's typed launcher profile and its Agent's lifecycle,
     -- never a command.
-    WHEN 'worker.start' THEN required := ARRAY['workerId', 'worktree', 'family']; optional := ARRAY['taskId', 'model', 'effort', 'accountProfile', 'lifecycle'];
+    -- #4291 (S14): a start whose task names a generic tier carries the tier instead of a model.
+    WHEN 'worker.start' THEN required := ARRAY['workerId', 'worktree', 'family']; optional := ARRAY['taskId', 'model', 'effort', 'accountProfile', 'lifecycle', 'tier'];
     WHEN 'worker.deliver' THEN required := ARRAY['workerId', 'sessionId', 'eventId'];
     WHEN 'worker.end' THEN required := ARRAY['workerId', 'sessionId'];
     WHEN 'worktree.remove' THEN required := ARRAY['workerId', 'worktree'];
@@ -55,6 +56,8 @@ BEGIN
       IF NOT host_launcher_model_ok(v #>> '{}') THEN RETURN false; END IF;
     ELSIF op_type = 'worker.start' AND k = 'lifecycle' THEN
       IF (v #>> '{}') NOT IN ('LONG_LIVED', 'SHORT_LIVED') THEN RETURN false; END IF;
+    ELSIF op_type = 'worker.start' AND k = 'tier' THEN
+      IF (v #>> '{}') NOT IN ('high', 'mid', 'low') THEN RETURN false; END IF;
     ELSIF NOT host_operation_token_ok(v #>> '{}') THEN
       RETURN false;
     END IF;

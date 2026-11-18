@@ -26,7 +26,7 @@ import express from 'express';
 import rateLimit from 'express-rate-limit';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../../server.js';
+import { createServerOnCleanDb } from '../startServerFixture.js';
 import { buildOAuthRouter, handleClientRegistration } from '../../auth/oauth.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
@@ -58,7 +58,7 @@ describe('POST /oauth/register — happy path + validation', () => {
   }
 
   beforeAll(async () => {
-    const app = await createServer();
+    const app = await createServerOnCleanDb();
     server = createHttpServer(app);
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as AddressInfo).port;
@@ -212,7 +212,7 @@ describe('POST /oauth/register — DB failure returns 500 (not a crash)', () => 
   let baseUrl: string;
 
   beforeAll(async () => {
-    const app = await createServer();
+    const app = await createServerOnCleanDb();
     server = createHttpServer(app);
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as AddressInfo).port;
@@ -278,7 +278,7 @@ describe('POST /oauth/register — #156 dcr_registered log line', () => {
     spy.mock.calls.filter((call) => call[0] === '[oauth] dcr_registered');
 
   beforeAll(async () => {
-    const app = await createServer();
+    const app = await createServerOnCleanDb();
     server = createHttpServer(app);
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

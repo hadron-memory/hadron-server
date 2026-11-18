@@ -98,6 +98,7 @@ describe('#4231: a long-lived worker that should run and has no session is start
     const ops = await starts();
     expect(ops, 'the sweep did not start a long-lived worker that should run').toHaveLength(1);
     expect(ops[0]).toMatchObject({ hostId: 'orca1', issuedBy: 'platform', issuedReason: 'DESIRED_RUNNING', status: 'issued', holdUserId: bo.id });
+    // #4267 HOST control: under `host` the start carries no launcher profile and no lifecycle.
     expect(ops[0]!.args).toEqual({ workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude' });
   });
 
@@ -187,6 +188,21 @@ describe('#4231 under hostSetupSource SERVER: only through a live host the worke
     expect(ops).toHaveLength(1);
     expect(ops[0]).toMatchObject({ hostId: 'orca1', issuedReason: 'DESIRED_RUNNING' });
     expect(ops[0]!.args).toMatchObject({ worktree: 'hadron-server/kit' });
+  });
+
+  it('#4267: the start carries the assignment\'s launcher profile and the Agent\'s lifecycle, as the other start paths do', async () => {
+    await M.assignHostWorker({}, { input: {
+      appRef: app.id, hostId: 'orca1', worker: 'Kit', workdir: 'hadron-server/kit', family: 'claude',
+      model: 'claude-opus-5-5', effort: 'high', accountProfile: 'worker',
+    } }, ctx(admin.id));
+    await server();
+    await tick();
+    const ops = await starts();
+    expect(ops).toHaveLength(1);
+    expect(ops[0]!.args, 'a desired-state start under SERVER dropped the launcher profile or the lifecycle').toEqual({
+      workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude',
+      model: 'claude-opus-5-5', effort: 'high', accountProfile: 'worker', lifecycle: 'LONG_LIVED',
+    });
   });
 
   it('not assigned anywhere: not started, though orca1 registers it', async () => {

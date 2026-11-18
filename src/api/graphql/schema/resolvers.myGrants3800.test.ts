@@ -9,7 +9,6 @@ import { randomBytes } from 'node:crypto';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createServer } from '../../../server.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -20,6 +19,7 @@ import { isGrantLive } from '../../../lib/grants/live.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { formatGraphQLError } from '../formatError.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../../test/startServerFixture.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -28,12 +28,12 @@ let http: Server;
 let base: string;
 const direct = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError, includeStacktraceInErrorResponses: false });
 beforeAll(async () => {
-  http = httpServer(await createServer());
+  http = httpServer(await createServerOnCleanDb());
   await new Promise<void>((r) => http.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
   await direct.start();
 });
-afterAll(async () => { await new Promise<void>((r) => http.close(() => r())); await direct.stop(); await cleanDb(db); await dropTestActions(); });
+afterAll(async () => { await closeServerIfStarted(http); await direct?.stop(); await cleanDb(db); await dropTestActions(); });
 
 let w: World;
 let personKey: string;
@@ -231,8 +231,25 @@ describe('allows', () => {
       expect(item.allows, name).toBe(allows);
       const row = await db.grant.findUniqueOrThrow({ where: { id: item.id } });
       const [{ now }] = await db.$queryRaw<Array<{ now: Date }>>`SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS now`;
-      expect(isGrantLive({ ...row, appDeletedAt: null }, now), `isGrantLive ${name}`).toBe(allows);
+      expect(isGrantLive({ ...row, appDeletedAt: null, actionMaxUses: null, actionLifetimeSeconds: null }, now), `isGrantLive ${name}`).toBe(allows);
     }
+  });
+});
+
+describe('allows reads the ACTION\'s limits (#4163)', () => {
+  const setLimits = (max: string, life: string) => db.$executeRawUnsafe(`UPDATE actions SET max_uses = ${max}, lifetime_seconds = ${life} WHERE name LIKE 'test.s1a.%'`);
+  it('an hour-old grant and a once-used grant read allows false though the row states no limit; a fresh one reads true', async () => {
+    await setLimits('1', '3600');
+    try {
+      const old = await mine({ activated_at: raw(`${DB_NOW} - interval '2 hours'`) });
+      const used = await mine({ use_count: 1 });
+      const fresh = await mine({ activated_at: raw(`${DB_NOW} - interval '10 minutes'`) });
+      const r = await asMe();
+      const by = new Map((r.data.myGrants.items as Array<{ id: string; allows: boolean }>).map((i) => [i.id, i.allows]));
+      expect(by.get(old)).toBe(false);
+      expect(by.get(used)).toBe(false);
+      expect(by.get(fresh)).toBe(true);
+    } finally { await setLimits('NULL', 'NULL'); }
   });
 });
 

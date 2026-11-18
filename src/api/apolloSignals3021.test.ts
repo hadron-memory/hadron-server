@@ -14,6 +14,8 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer } from '../server.js';
+import { db } from '../integrations/db/client.js';
+import { cleanDb } from '../test/helpers.js';
 
 const SIGNALS = ['SIGTERM', 'SIGINT'] as const;
 const originalEnv = process.env.NODE_ENV;
@@ -25,6 +27,7 @@ afterEach(() => {
 
 describe('#3021 createServer leaves termination signals to src/index.ts', () => {
   it('adds no SIGTERM or SIGINT listener when NODE_ENV is not test', async () => {
+    await cleanDb(db);
     process.env.NODE_ENV = 'development';
     const before = SIGNALS.map(s => process.listenerCount(s));
     await createServer();
