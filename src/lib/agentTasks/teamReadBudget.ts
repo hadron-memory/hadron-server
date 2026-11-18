@@ -21,6 +21,13 @@
  * without parsing prose (conventions:the-error-code-is-the-contract-the-prose-is-not).
  * The refusal is an availability signal, not a caller fault, so it stays
  * REPORTED in Sentry — the incident was found by counting these.
+ *
+ * #4476: the budget now bites ON the statement. The wrapper sets `SET LOCAL
+ * statement_timeout` from the same constant, so Postgres itself cancels a
+ * running statement at the budget instead of letting it run to completion
+ * inside an already-expired transaction (prod's roster statements ran
+ * 20–175 s inside the 5 s budget). The cancel surfaces as P2010 carrying
+ * SQLSTATE 57014 on `meta.code` and converts through the classifier below.
  */
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../generated/prisma/index.js';
@@ -100,5 +107,18 @@ export function busyReason(error: unknown): TeamReadBusyReason {
  * budget; `originalError` keeps the true cause inspectable.
  */
 export function isPrismaBusyExhaustion(error: unknown): error is Prisma.PrismaClientKnownRequestError {
-  return error instanceof Prisma.PrismaClientKnownRequestError && (error.code === 'P2028' || error.code === 'P2024');
+  return error instanceof Prisma.PrismaClientKnownRequestError && (
+    error.code === 'P2028' || error.code === 'P2024' || isStatementBudgetCancel(error)
+  );
+}
+
+/** #4476: the driver's own SQLSTATE for a statement cancelled at `statement_timeout`, as Prisma
+ *  carries it on a raw-statement failure (P2010's `meta.code`). */
+const STATEMENT_CANCELLED_SQLSTATE = '57014';
+
+/** #4476: Postgres cancelled the running statement at the read's own `SET LOCAL statement_timeout`.
+ *  Matched on the STRUCTURED meta code only — a P2010 wrapping any other database code is a real
+ *  failure and stays untyped, and driver message prose is never read. */
+function isStatementBudgetCancel(error: Prisma.PrismaClientKnownRequestError): boolean {
+  return error.code === 'P2010' && (error.meta as { code?: unknown } | undefined)?.code === STATEMENT_CANCELLED_SQLSTATE;
 }

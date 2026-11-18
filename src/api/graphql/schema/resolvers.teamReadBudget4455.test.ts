@@ -107,7 +107,7 @@ describe('#4455: which driver errors convert, and what the refusal carries', () 
   const known = (message: string, code: string) =>
     new Prisma.PrismaClientKnownRequestError(message, { code, clientVersion: 'test' });
 
-  it('isPrismaBusyExhaustion converts exactly P2028 and P2024 — dropping either arm fails this pin', () => {
+  it('isPrismaBusyExhaustion keeps its #4455 arms (P2028, P2024) — dropping either arm fails this pin (#4476 added the P2010/57014 statement-cancel arm, pinned next to it in teamReadStatementTimeout4476.test.ts)', () => {
     expect(isPrismaBusyExhaustion(known('Transaction already closed during query execution.', 'P2028'))).toBe(true);
     expect(isPrismaBusyExhaustion(known('Timed out fetching a new connection from the connection pool.', 'P2024'))).toBe(true);
     // Not busy: another known code, a plain Error wearing the busy prose, a GraphQLError.

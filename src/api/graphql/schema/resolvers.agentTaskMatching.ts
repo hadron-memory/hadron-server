@@ -37,6 +37,13 @@ export async function withRosterAppRead<T>(ctx: Context, appRef: string, project
         // statement for a few ms of work, which a burst of rosters on a small box turned into the 20 s budget. SET
         // LOCAL lasts only as long as this transaction and changes no answer.
         await tx.$executeRawUnsafe('SET LOCAL jit = off');
+        // #4476: the budget must bite ON the statement, not after it. #4455's transaction timeout
+        // only lands once the running statement returns — prod's roster statements ran 20–175 s
+        // (p50 66 s, Hugo's alpha journal, #118308) inside the 5 s budget, holding a pooled
+        // connection long after every client had given up. statement_timeout from the same
+        // constant makes Postgres itself cancel the running statement at the budget (SQLSTATE
+        // 57014), which the catch below classifies as the same typed retryable refusal.
+        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${TEAM_READ_TX_TIMEOUT_MS}`);
         const readCtx = withoutRequestCaches(ctx, tx);
         const { app } = await resolveParticipatedApp(readCtx, appRef);
         return project(readCtx, app);
