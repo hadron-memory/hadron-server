@@ -7436,7 +7436,8 @@ model WorkerWakeAck {
 ///   it rises.
 /// - `respondedAt` is when the worker last checked a channel the ticker covers after that wake was issued, and
 ///   null until it does. The channel check writes it (src/lib/channelReadState.ts) and a newer delivery clears
-///   it. The worker's check status reads it to decide whether the worker is overdue
+///   it, unless the response was made at or after the newer wake was issued, in which case it is kept as that
+///   wake's response (src/lib/tickers/acknowledge.ts). The worker's check status reads it to decide whether the worker is overdue
 ///   (hrn:node:hadronmemory.com:specs:cor:agt:100:03).
 /// - The due-wake calculation reads the row to find the oldest tick not yet acknowledged.
 ///
