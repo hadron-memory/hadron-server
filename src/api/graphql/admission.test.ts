@@ -14,6 +14,7 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { parse } from 'graphql';
 import { createServer } from '../../server.js';
+import { createServerOnCleanDb } from '../../test/startServerFixture.js';
 import { resolvers } from './schema/resolvers.js';
 import {
   GRAPHQL_ADMISSION_DEFAULTS,
@@ -37,7 +38,7 @@ async function bootReal(env: Record<string, string> = {}): Promise<string> {
   const saved: Record<string, string | undefined> = {};
   for (const k of Object.keys(env)) { saved[k] = process.env[k]; process.env[k] = env[k]; }
   try {
-    return await listen(await createServer());
+    return await listen(await createServerOnCleanDb());
   } finally {
     for (const k of Object.keys(env)) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
   }

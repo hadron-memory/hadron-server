@@ -2,7 +2,6 @@ import { randomBytes } from 'node:crypto';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createServer } from '../../../server.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -14,6 +13,7 @@ import { newSigningRequestId } from '../../../lib/signing/requests.js';
 import { clearSignatureVerifyCache } from '../../../lib/signing/verify.js';
 import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
 import { insertSoftPasskey, softPasskey } from '../../../test/softPasskey.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../../test/startServerFixture.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -27,11 +27,11 @@ let base: string;
 beforeAll(async () => {
   // The schema is built once at boot from the signing switch (deploymentSchema, #1895): on for these reads.
   vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
-  http = httpServer(await createServer());
+  http = httpServer(await createServerOnCleanDb());
   await new Promise<void>((r) => http.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
 });
-afterAll(async () => { await new Promise<void>((r) => http.close(() => r())); await cleanDb(db); await dropTestActions(); });
+afterAll(async () => { await closeServerIfStarted(http); await cleanDb(db); await dropTestActions(); });
 
 let w: World;
 let rawKey: string;

@@ -5,6 +5,7 @@ import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createServer } from '../../server.js';
 import { resolvers } from './schema/resolvers.js';
+import { createServerOnCleanDb } from '../../test/startServerFixture.js';
 type Body = { errors?: Array<{ extensions: { code: string; limit: string; max: number } }> };
 const readBody = async (response: Response): Promise<Body> => await response.json() as Body;
 const query = readFileSync(new URL('./nodeFind2372.graphql', import.meta.url), 'utf8');
@@ -16,7 +17,7 @@ let find: ReturnType<typeof vi.spyOn>;
 beforeAll(async () => {
   node = vi.spyOn(resolvers.Query, 'node').mockResolvedValue(null as never);
   find = vi.spyOn(resolvers.Query, 'findNodes').mockResolvedValue({ hits: [], passages: [], total: 0, reason: null, degraded: false } as never);
-  server = httpServer(await createServer());
+  server = httpServer(await createServerOnCleanDb());
   servers.push(server);
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

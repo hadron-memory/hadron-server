@@ -10,6 +10,7 @@ import type { AddressInfo } from 'node:net';
 import { buildSchema, parse, print } from 'graphql';
 import { getComplexity, simpleEstimator } from 'graphql-query-complexity';
 import { createServer } from '../../server.js';
+import { createServerOnCleanDb } from '../../test/startServerFixture.js';
 import { resolvers } from './schema/resolvers.js';
 import { typeDefs } from './schema/typeDefs.js';
 import { readGraphqlAdmissionConfig, GRAPHQL_ADMISSION_DEFAULTS, type GraphqlAdmissionConfig } from './admission.js';
@@ -157,7 +158,7 @@ async function boot(env: Record<string, string> = {}): Promise<string> {
   const saved: Record<string, string | undefined> = {};
   for (const k of Object.keys(env)) { saved[k] = process.env[k]; process.env[k] = env[k]; }
   try {
-    const server = createHttpServer(await createServer());
+    const server = createHttpServer(await createServerOnCleanDb());
     servers.push(server);
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
