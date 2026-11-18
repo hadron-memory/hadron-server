@@ -2,7 +2,7 @@ import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRowsForWorkerSession 
 import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
-import { NOT_DECISION_FAMILY_WHERE } from '../../lib/questions/index.js';
+import { NOT_QUESTION_FAMILY_WHERE } from '../../lib/questions/index.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { mapChatSeqConflict } from '../../lib/prismaErrors.js';
 import { generateId } from '../../lib/id.js';
@@ -184,9 +184,9 @@ export async function cloneMemoryGraph(
 function copyableNodeWhere(memoryId: string): Prisma.NodeWhereInput {
   return {
     memoryId, deletedAt: null, nodeType: { notIn: [COMMENT_NODE_TYPE, COMPILED_BOOT_PROMPT_NODE_TYPE] },
-    // #1641 §3.2 — nor decisions or their logs: a copy would mint decisions
-    // no decision operation wrote, under codes that belong to the source log.
-    AND: [NOT_DECISION_FAMILY_WHERE],
+    // #1641 §3.2 — nor questions or their logs: a copy would mint questions
+    // no question operation wrote, under codes that belong to the source log.
+    AND: [NOT_QUESTION_FAMILY_WHERE],
   };
 }
 

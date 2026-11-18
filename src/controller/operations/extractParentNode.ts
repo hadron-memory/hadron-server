@@ -1,7 +1,7 @@
 import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { decisionContainedError, isDecisionFamilyRole } from '../../lib/questions/index.js';
+import { questionContainedError, isQuestionFamilyRole } from '../../lib/questions/index.js';
 import { assertBatchMutable } from '../../lib/bulkMutationGate.js';
 import { assertNoMintedSpecRemoval } from '../../lib/mintedSpecPermanence.js';
 import { Prisma } from '../../generated/prisma/index.js';
@@ -125,13 +125,13 @@ export async function extractParentNodeGraph(
       if (!parent) {
         throw new ParentNodeNotFoundError(args.parentLoc, args.sourceMemoryId);
       }
-      // #1641 §3.2 — a decision or a log is neither moved nor copied out of
-      // its log: a move would delete it here, and a copy would mint decisions
-      // no decision operation wrote. (The move/delete statements below act on
+      // #1641 §3.2 — a question or a log is neither moved nor copied out of
+      // its log: a move would delete it here, and a copy would mint questions
+      // no question operation wrote. (The move/delete statements below act on
       // these ids only, so a log created after this read is never swept.)
-      const decisions = selectedNodes.filter((n) => isDecisionFamilyRole(n.role));
-      if (decisions.length > 0) {
-        throw decisionContainedError(args.move ? 'Extracting and moving this subtree' : 'Extracting this subtree', decisions.map((n) => n.loc));
+      const questions = selectedNodes.filter((n) => isQuestionFamilyRole(n.role));
+      if (questions.length > 0) {
+        throw questionContainedError(args.move ? 'Extracting and moving this subtree' : 'Extracting this subtree', questions.map((n) => n.loc));
       }
 
       // ── The two gates every per-node writer consults (#1191) ────────────

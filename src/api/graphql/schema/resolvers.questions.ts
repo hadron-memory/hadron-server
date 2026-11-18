@@ -1,30 +1,30 @@
 /**
- * #1641 S1 — the decision doors and reads (plan of record:
+ * #1641 S1 — the question doors and reads (plan of record:
  * `hrn:node:hadronmemory.com:hadron-server:design:decision-nodes`, r4; §n
  * below are its sections; spec placement `cor:dmo:140`, not yet authored).
  *
- * The ONLY way a decision or a decision log is written. Each state change is
+ * The ONLY way a question or a question log is written. Each state change is
  * its own operation (§7) — there is no generic create/update pair — and every
- * one re-renders the decision's `content` from its structured payload, so the
+ * one re-renders the question's `content` from its structured payload, so the
  * approval hash covers exactly what a decider sees (§5.2).
  *
- * S1 ships: createDecisionLog, setDecisionLogDeciders, askDecision,
- * amendDecision, withdrawDecision, purgeUnansweredDecision, and the reads
- * decisionLog / decision / decisions (incl. awaitingMe) / verifyDecision.
+ * S1 ships: createQuestionLog, setQuestionLogDeciders, askQuestion,
+ * amendQuestion, withdrawQuestion, purgeUnansweredQuestion, and the reads
+ * questionLog / question / questions (incl. awaitingMe) / verifyQuestion.
  * Answering, superseding and decider approval are S2; the signed tier is S3
- * (#1614 S2b), so an authorizing decision can be asked but never DECIDED yet
+ * (#1614 S2b), so an authorizing question can be asked but never DECIDED yet
  * (Q11).
  *
  * Gates (§6.1): a log is created and its deciders changed by memory MANAGE
  * or an owner-role member of the memory's App (Holger, team chat #7790);
- * a decision is asked and amended (before an answer) by memory WRITERS,
+ * a question is asked and amended (before an answer) by memory WRITERS,
  * agents included; after an answer only a decider amends; withdrawal is the
  * asker's or a decider's; purge is a platform admin's, of a never-answered
- * decision only. Reads use the log memory's read gate. Every write re-runs
+ * question only. Reads use the log memory's read gate. Every write re-runs
  * its gate under the memory's authority anchors (`withAuthorizedMemoryTx`).
  *
  * Lock order (§7): authority anchors → the log row (ask, purge, deciders) →
- * the decision row. Never a log lock taken while a decision row is held.
+ * the question row. Never a log lock taken while a question row is held.
  */
 import { createHash } from 'crypto';
 import { canWriteToMemory } from '../../../mcp/access-control.js';
@@ -58,55 +58,55 @@ import { hardDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
 import { NODE_APPROVAL_ROW_SELECT, approvalRecordOf, loadApprovedSnapshots } from '../../../lib/nodeApproval.js';
 import { ensureCurrentNodeRevisionInTransaction, revisionStateHashRefreshMarker } from '../../../lib/nodeRevisionSnapshot.js';
 import {
-  DECISION_FAMILY_WHERE,
-  DECISION_LOG_ROLE,
-  DECISION_ROLE,
-  decisionContainedError,
-  decisionError,
+  QUESTION_FAMILY_WHERE,
+  QUESTION_LOG_ROLE,
+  QUESTION_ROLE,
+  questionContainedError,
+  questionError,
 } from '../../../lib/questions/index.js';
 import {
-  DECISION_CODEC,
-  DECISION_LOG_CODEC,
+  QUESTION_CODEC,
+  QUESTION_LOG_CODEC,
   MAX_DECIDERS,
   MAX_PARTS,
   amendInputSchema,
   askInputSchema,
   checkPart,
-  decisionDataSchema,
-  decisionLogDataSchema,
-  invalidDecision,
+  questionDataSchema,
+  questionLogDataSchema,
+  invalidQuestion,
   optionsOf,
   parseOrRefuse,
-  type DecisionActor,
-  type DecisionAnswer,
-  type DecisionData,
-  type DecisionLogData,
-  type DecisionPart,
-  type DecisionPartInput,
-  type DecisionRef,
+  type QuestionActor,
+  type QuestionAnswer,
+  type QuestionData,
+  type QuestionLogData,
+  type QuestionPart,
+  type QuestionPartInput,
+  type QuestionRef,
 } from '../../../lib/questions/codec.js';
 import {
-  CURRENT_DECISION_RENDERER,
-  canonicalDecisionJson,
-  decisionName,
-  renderDecision,
-  renderDecisionAbstract,
-  renderDecisionLog,
+  CURRENT_QUESTION_RENDERER,
+  canonicalQuestionJson,
+  questionName,
+  renderQuestion,
+  renderQuestionAbstract,
+  renderQuestionLog,
 } from '../../../lib/questions/render.js';
-import { evaluateDecision, type DecisionEvaluation, type DecisionNodeRow, type DecisionState } from '../../../lib/questions/evaluate.js';
-import { DEFAULT_DECISION_PREFIX, DECISION_PREFIX_RE, decisionCode, decisionLoc, parseDecisionCitation } from '../../../lib/questions/codes.js';
+import { evaluateQuestion, type QuestionEvaluation, type QuestionNodeRow, type QuestionState } from '../../../lib/questions/evaluate.js';
+import { DEFAULT_QUESTION_PREFIX, QUESTION_PREFIX_RE, questionCode, questionLoc, parseQuestionCitation } from '../../../lib/questions/codes.js';
 
 type Tx = Prisma.TransactionClient;
 
-/** A list above this many decisions refuses rather than paging on unevaluated hints (§5.5). */
-export const DECISION_LIST_EVALUATION_CAP = 5_000;
+/** A list above this many questions refuses rather than paging on unevaluated hints (§5.5). */
+export const QUESTION_LIST_EVALUATION_CAP = 5_000;
 
 /** Reasons ride in `NodeRevision.revLabel`, so they share its cap. */
 const REASON_MAX = 500;
 
 // ─── Rows ────────────────────────────────────────────────────────────────────
 
-const DECISION_ROW_SELECT = {
+const QUESTION_ROW_SELECT = {
   ...NODE_APPROVAL_ROW_SELECT,
   data: true,
   role: true,
@@ -114,7 +114,7 @@ const DECISION_ROW_SELECT = {
   deletedAt: true,
 } as const satisfies Prisma.NodeSelect;
 
-type DecisionRow = Prisma.NodeGetPayload<{ select: typeof DECISION_ROW_SELECT }>;
+type QuestionRow = Prisma.NodeGetPayload<{ select: typeof QUESTION_ROW_SELECT }>;
 
 const LOG_ROW_SELECT = {
   id: true, memoryId: true, loc: true, name: true, role: true, data: true, revSeq: true, deletedAt: true,
@@ -122,31 +122,31 @@ const LOG_ROW_SELECT = {
 
 type LogRow = Prisma.NodeGetPayload<{ select: typeof LOG_ROW_SELECT }>;
 
-/** The evaluated decision a `Decision` field resolver reads. */
-export interface DecisionView {
-  row: DecisionRow;
-  evaluation: DecisionEvaluation;
+/** The evaluated question a `Question` field resolver reads. */
+export interface QuestionView {
+  row: QuestionRow;
+  evaluation: QuestionEvaluation;
   /** What the card shows: the authenticated block, else the cache, else nothing (TAMPERED / UNVERIFIABLE). */
-  shown: DecisionData | null;
+  shown: QuestionData | null;
 }
 
-/** The log a `DecisionLog` field resolver reads. */
-export interface DecisionLogView {
+/** The log a `QuestionLog` field resolver reads. */
+export interface QuestionLogView {
   row: LogRow;
-  data: DecisionLogData;
+  data: QuestionLogData;
 }
 
 // ─── Principals and gates ────────────────────────────────────────────────────
 
 /** The authenticated actor of this request, server-taken (§7 provenance). */
-function actorOf(ctx: Context): DecisionActor {
+function actorOf(ctx: Context): QuestionActor {
   return { userId: ctx.userId ?? null, workerId: currentActor().workerId, appId: ctx.appId ?? null };
 }
 
-/** Decisions are never written under impersonation (a support session is read-only for them). */
+/** Questions are never written under impersonation (a support session is read-only for them). */
 function refuseImpersonation(ctx: Context): void {
   if (ctx.impersonation) {
-    throw decisionError('DECISION_IMPERSONATION_REFUSED', 'Decisions cannot be written under impersonation.');
+    throw questionError('QUESTION_IMPERSONATION_REFUSED', 'Questions cannot be written under impersonation.');
   }
 }
 
@@ -165,19 +165,19 @@ function callerIdentities(ctx: Context): Promise<Set<string>> {
 /** #1715 — the account each id now is, for a NEW write that names users (stored records are never rewritten). */
 const survivors = (db: Tx | Context['db'], ids: readonly string[]) => survivorsOf(db, ids);
 
-/** §6.1 — the caller is one of the decision's deciders: a user principal, never an App key or impersonation. */
-async function isDecider(ctx: Context, d: Pick<DecisionData, 'deciders'>): Promise<boolean> {
+/** §6.1 — the caller is one of the question's deciders: a user principal, never an App key or impersonation. */
+async function isDecider(ctx: Context, d: Pick<QuestionData, 'deciders'>): Promise<boolean> {
   if (ctx.impersonation || !ctx.userId) return false;
   const ids = await callerIdentities(ctx);
   return d.deciders.some((id) => ids.has(id));
 }
 
 /**
- * Whether the caller asked the decision: the same worker, the same user, or the same bare App key.
+ * Whether the caller asked the question: the same worker, the same user, or the same bare App key.
  * The worker arm needs a person behind the request (Rook's P3-3 on #1690, the #1713 interim): a
  * pure App key may bind any session of its App, so its worker id alone proves nothing.
  */
-async function isAsker(ctx: Context, d: Pick<DecisionData, 'askedBy'>): Promise<boolean> {
+async function isAsker(ctx: Context, d: Pick<QuestionData, 'askedBy'>): Promise<boolean> {
   const actor = actorOf(ctx);
   if (ctx.userId && d.askedBy.workerId && d.askedBy.workerId === actor.workerId) return true;
   if (d.askedBy.userId && ctx.userId && (await callerIdentities(ctx)).has(d.askedBy.userId)) return true;
@@ -185,24 +185,24 @@ async function isAsker(ctx: Context, d: Pick<DecisionData, 'askedBy'>): Promise<
 }
 
 /** Whether any part was ever answered (an answer now, or one in its history). */
-function everAnswered(d: DecisionData): boolean {
+function everAnswered(d: QuestionData): boolean {
   return d.parts.some((p) => p.answer != null || p.answerHistory.length > 0);
 }
 
 function validateReason(reason: string): string {
   if (typeof reason !== 'string' || reason.trim().length === 0 || reason.length > REASON_MAX) {
-    invalidDecision([{ pointer: '/reason', message: `a reason is required, at most ${REASON_MAX} characters` }]);
+    invalidQuestion([{ pointer: '/reason', message: `a reason is required, at most ${REASON_MAX} characters` }]);
   }
   return reason;
 }
 
 /** The write gate, typed (§6.1: memory writers, agents included). */
-async function requireDecisionWrite(ctx: Context, memoryId: string): Promise<void> {
+async function requireQuestionWrite(ctx: Context, memoryId: string): Promise<void> {
   try {
     await requireMemoryWriteAccess(ctx, memoryId);
   } catch (error) {
     if (isAuthorizationDenial(error)) {
-      throw decisionError('DECISION_FORBIDDEN', 'Asking or changing a decision needs write access to its memory.');
+      throw questionError('QUESTION_FORBIDDEN', 'Asking or changing a question needs write access to its memory.');
     }
     throw error;
   }
@@ -268,14 +268,14 @@ async function requireLogManage(ctx: Context, memoryId: string, concealRef?: str
     else await concealUnreadableDenial(ctx, memoryId, concealRef, gate);
   } catch (error) {
     if (isAuthorizationDenial(error)) {
-      throw decisionError('DECISION_FORBIDDEN', "Creating a decision log or changing its deciders needs management rights on the memory.");
+      throw questionError('QUESTION_FORBIDDEN', "Creating a question log or changing its deciders needs management rights on the memory.");
     }
     throw error;
   }
 }
 
-const decisionMissing = (ref: string) => decisionError('DECISION_NOT_FOUND', `Decision not found: "${ref}"`, { ref });
-const logMissing = (ref: string) => decisionError('DECISION_LOG_NOT_FOUND', `Decision log not found: "${ref}"`, { ref });
+const questionMissing = (ref: string) => questionError('QUESTION_NOT_FOUND', `Question not found: "${ref}"`, { ref });
+const logMissing = (ref: string) => questionError('QUESTION_LOG_NOT_FOUND', `Question log not found: "${ref}"`, { ref });
 
 /** Resolve a ref to a live, readable node of `role`, or the typed miss (no existence oracle). */
 async function resolveGovernedNode(
@@ -307,9 +307,9 @@ async function assertDecidersEligible(tx: Tx, memoryId: string, userIds: readonl
     const writable = user && !user.deletedAt &&
       await canWriteToMemory(tx as unknown as Context['db'], { userId, roles: [] }, memoryId);
     if (!writable) {
-      throw decisionError(
-        'DECISION_DECIDER_NOT_ELIGIBLE',
-        `User ${userId} cannot be a decider here: a decider is a user who can write the decision log's memory.`,
+      throw questionError(
+        'QUESTION_DECIDER_NOT_ELIGIBLE',
+        `User ${userId} cannot be a decider here: a decider is a user who can write the question log's memory.`,
         { userId },
       );
     }
@@ -318,34 +318,34 @@ async function assertDecidersEligible(tx: Tx, memoryId: string, userIds: readonl
 
 function uniqueIds(ids: readonly string[], pointer: string): string[] {
   const out = [...new Set(ids)];
-  if (out.length !== ids.length) invalidDecision([{ pointer, message: 'a user is listed twice' }]);
-  if (out.length > MAX_DECIDERS) invalidDecision([{ pointer, message: `at most ${MAX_DECIDERS} users` }]);
+  if (out.length !== ids.length) invalidQuestion([{ pointer, message: 'a user is listed twice' }]);
+  if (out.length > MAX_DECIDERS) invalidQuestion([{ pointer, message: `at most ${MAX_DECIDERS} users` }]);
   return out;
 }
 
 // ─── Log helpers ─────────────────────────────────────────────────────────────
 
-function parseLogData(row: LogRow): DecisionLogData {
-  const parsed = decisionLogDataSchema.safeParse(row.data);
+function parseLogData(row: LogRow): QuestionLogData {
+  const parsed = questionLogDataSchema.safeParse(row.data);
   // A log is written only by its doors; an unparseable one is a server fault, loudly.
-  if (!parsed.success) throw new Error(`decision log ${row.id} has an invalid payload`);
+  if (!parsed.success) throw new Error(`question log ${row.id} has an invalid payload`);
   return parsed.data;
 }
 
 /**
  * Lock the log row (`FOR NO KEY UPDATE`, the allocator lock) and re-read it
  * live, in `memoryId`. With `expectedRevision` (a door that revises the log),
- * the token is checked first and drift reconciled after, as for a decision
- * ({@link lockDecision}).
+ * the token is checked first and drift reconciled after, as for a question
+ * ({@link lockQuestion}).
  */
-async function lockLog(tx: Tx, logId: string, memoryId: string, ref: string, expectedRevision?: number): Promise<{ row: LogRow; data: DecisionLogData }> {
+async function lockLog(tx: Tx, logId: string, memoryId: string, ref: string, expectedRevision?: number): Promise<{ row: LogRow; data: QuestionLogData }> {
   // The channel-host key before the first row lock, as createLog takes it: the drift
   // reconcile below writes a revision that may name a worker (F(W)), and writeNodeCore
   // asks for this key only after, which closes a cycle through the root-seq key (#2805).
   await lockEdgeEndpointMemories(tx, [memoryId]);
   await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${logId} FOR NO KEY UPDATE`;
   const seen = await tx.node.findUnique({ where: { id: logId }, select: LOG_ROW_SELECT });
-  if (!seen || seen.deletedAt || seen.memoryId !== memoryId || seen.role !== DECISION_LOG_ROLE) throw logMissing(ref);
+  if (!seen || seen.deletedAt || seen.memoryId !== memoryId || seen.role !== QUESTION_LOG_ROLE) throw logMissing(ref);
   if (expectedRevision !== undefined) requireRevision(seen, expectedRevision);
   // Every path, not only the OCC one (Rook's P3-2 on #1690): the counter write
   // that follows asks for a fingerprint refresh, which would otherwise absorb
@@ -356,94 +356,94 @@ async function lockLog(tx: Tx, logId: string, memoryId: string, ref: string, exp
   return { row, data: parseLogData(row) };
 }
 
-/** The log a decision belongs to: its parent loc. */
-async function logOfDecision(db: Pick<Tx, 'node'>, decision: { memoryId: string; loc: string }): Promise<LogRow | null> {
-  const cut = decision.loc.lastIndexOf(':');
+/** The log a question belongs to: its parent loc. */
+async function logOfQuestion(db: Pick<Tx, 'node'>, question: { memoryId: string; loc: string }): Promise<LogRow | null> {
+  const cut = question.loc.lastIndexOf(':');
   if (cut <= 0) return null;
   const row = await db.node.findUnique({
-    where: { loc_memoryId: { loc: decision.loc.slice(0, cut), memoryId: decision.memoryId } },
+    where: { loc_memoryId: { loc: question.loc.slice(0, cut), memoryId: question.memoryId } },
     select: LOG_ROW_SELECT,
   });
-  return row && row.role === DECISION_LOG_ROLE ? row : null;
+  return row && row.role === QUESTION_LOG_ROLE ? row : null;
 }
 
-function logContentOf(name: string, data: DecisionLogData) {
+function logContentOf(name: string, data: QuestionLogData) {
   return {
-    content: renderDecisionLog(name, data),
+    content: renderQuestionLog(name, data),
     abstract: `Decision log: codes ${data.prefix}A, ${data.prefix}B, … issued in sequence, never reused.`,
     data: data as unknown as Record<string, unknown>,
     properties: { prefix: data.prefix } as Record<string, unknown>,
   };
 }
 
-// ─── Decision helpers ────────────────────────────────────────────────────────
+// ─── Question helpers ────────────────────────────────────────────────────────
 
 /**
- * Lock the decision row, check the caller's OCC token against the revision
+ * Lock the question row, check the caller's OCC token against the revision
  * they read, then reconcile any unrevisioned drift as its own revision
  * (#1323) and re-read. The door's write then guards on the reconciled
  * revision: left to `writeNodeCore`, the reconcile would move `revSeq` past
- * its compare-and-swap and roll back with the refusal, so a decision with
+ * its compare-and-swap and roll back with the refusal, so a question with
  * harmless drift could never be changed again. Drift that alters what the
- * decision renders evaluates TAMPERED and is refused by the caller.
+ * question renders evaluates TAMPERED and is refused by the caller.
  */
-async function lockDecision(tx: Tx, id: string, memoryId: string, ref: string, expectedRevision?: number): Promise<DecisionRow> {
+async function lockQuestion(tx: Tx, id: string, memoryId: string, ref: string, expectedRevision?: number): Promise<QuestionRow> {
   await lockEdgeEndpointMemories(tx, [memoryId]); // before any row lock or fence write, as lockLog (#2805)
   await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
   const seen = await tx.node.findUnique({ where: { id }, select: { memoryId: true, role: true, deletedAt: true, revSeq: true } });
-  if (!seen || seen.deletedAt || seen.memoryId !== memoryId || seen.role !== DECISION_ROLE) throw decisionMissing(ref);
+  if (!seen || seen.deletedAt || seen.memoryId !== memoryId || seen.role !== QUESTION_ROLE) throw questionMissing(ref);
   if (expectedRevision !== undefined) requireRevision(seen, expectedRevision);
   await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: memoryId });
-  return tx.node.findUniqueOrThrow({ where: { id }, select: DECISION_ROW_SELECT });
+  return tx.node.findUniqueOrThrow({ where: { id }, select: QUESTION_ROW_SELECT });
 }
 
 function requireRevision(row: { revSeq: number }, expectedRevision: number): void {
   if (row.revSeq !== expectedRevision) {
     throw new GraphQLError(
-      `NODE_WRITE_CONFLICT: the decision is at revision ${row.revSeq}, not ${expectedRevision}. Reload and retry.`,
+      `NODE_WRITE_CONFLICT: the question is at revision ${row.revSeq}, not ${expectedRevision}. Reload and retry.`,
       { extensions: { code: 'NODE_WRITE_CONFLICT', currentRevision: row.revSeq } },
     );
   }
 }
 
-async function evaluateRows(db: Pick<Tx, 'nodeRevision'>, rows: DecisionRow[]): Promise<DecisionView[]> {
-  // Decision logs never live in encrypted memories (§5.4), so every field is plaintext.
+async function evaluateRows(db: Pick<Tx, 'nodeRevision'>, rows: QuestionRow[]): Promise<QuestionView[]> {
+  // Question logs never live in encrypted memories (§5.4), so every field is plaintext.
   const snapshots = await loadApprovedSnapshots(db as Tx, rows);
   // #1715: each approver's merge-aware identities, once per distinct approver.
   const approvers = [...new Set(rows.map((r) => r.approvedBy).filter((id): id is string => id != null))];
   const identities = new Map(await Promise.all(approvers.map(async (id) => [id, await identitiesOf(db as Tx, id)] as const)));
   return rows.map((row) => {
     const snaps = snapshots.get(row.id);
-    const evaluation = evaluateDecision(
-      row as DecisionNodeRow,
+    const evaluation = evaluateQuestion(
+      row as QuestionNodeRow,
       snaps ? snaps.map((snap) => ({ title: snap.name, abstract: snap.abstract, content: snap.content })) : null,
       row.approvedBy ? identities.get(row.approvedBy) : undefined,
     );
-    const cached = evaluation.decision ? null : decisionDataSchema.safeParse(row.data);
-    return { row, evaluation, shown: evaluation.decision ?? (cached?.success ? cached.data : null) };
+    const cached = evaluation.question ? null : questionDataSchema.safeParse(row.data);
+    return { row, evaluation, shown: evaluation.question ?? (cached?.success ? cached.data : null) };
   });
 }
 
 /**
- * Refuse a door write on a decision whose state forbids it: corrupt evidence
+ * Refuse a door write on a question whose state forbids it: corrupt evidence
  * first (§5.5 precedence), then the terminal states.
  */
-function requireWritable(view: DecisionView): DecisionData {
-  const { state, decision } = view.evaluation;
-  if (state === 'TAMPERED' || state === 'UNVERIFIABLE' || !decision) {
-    throw decisionError(
-      'DECISION_INVALID',
-      `This decision is ${state} and cannot be changed through the decision operations; run verifyDecision for the findings.`,
+function requireWritable(view: QuestionView): QuestionData {
+  const { state, question } = view.evaluation;
+  if (state === 'TAMPERED' || state === 'UNVERIFIABLE' || !question) {
+    throw questionError(
+      'QUESTION_INVALID',
+      `This question is ${state} and cannot be changed through the question operations; run verifyQuestion for the findings.`,
       { state },
     );
   }
-  if (state === 'WITHDRAWN') throw decisionError('DECISION_WITHDRAWN', `${decision.code} was withdrawn.`, { decisionCode: decision.code });
-  if (state === 'SUPERSEDED') throw decisionError('DECISION_SUPERSEDED', `${decision.code} was superseded.`, { decisionCode: decision.code });
-  return decision;
+  if (state === 'WITHDRAWN') throw questionError('QUESTION_WITHDRAWN', `${question.code} was withdrawn.`, { questionCode: question.code });
+  if (state === 'SUPERSEDED') throw questionError('QUESTION_SUPERSEDED', `${question.code} was superseded.`, { questionCode: question.code });
+  return question;
 }
 
 /** The derived, never-authoritative property projection for filters (§5.3). */
-function propertiesOf(d: DecisionData): Record<string, unknown> {
+function propertiesOf(d: QuestionData): Record<string, unknown> {
   const answeredAt = d.parts.map((p) => p.answer?.at).filter((a): a is string => !!a).sort().pop() ?? null;
   return {
     code: d.code, n: d.n, status: d.status, tier: d.tier, authorizes: d.authorizes, urgency: d.urgency,
@@ -452,28 +452,28 @@ function propertiesOf(d: DecisionData): Record<string, unknown> {
 }
 
 /** The card hint (§6.3): never read by a relying consumer. */
-function statusHint(d: DecisionData): DecisionData['status'] {
+function statusHint(d: QuestionData): QuestionData['status'] {
   if (d.withdrawn) return 'withdrawn';
   if (d.supersededBy) return 'superseded';
   return d.parts.every((p) => p.answer != null) ? 'answered' : 'open';
 }
 
-/** Every rendered field of a decision node, from its payload (§5.2). */
-function renderedFields(d: DecisionData) {
+/** Every rendered field of a question node, from its payload (§5.2). */
+function renderedFields(d: QuestionData) {
   return {
-    name: decisionName(d),
-    abstract: renderDecisionAbstract(d),
-    content: renderDecision(d),
+    name: questionName(d),
+    abstract: renderQuestionAbstract(d),
+    content: renderQuestion(d),
     data: d as unknown as Record<string, unknown>,
     properties: propertiesOf(d),
   };
 }
 
-function buildPart(input: DecisionPartInput, n: number, actor: DecisionActor, pointer: string): DecisionPart {
+function buildPart(input: QuestionPartInput, n: number, actor: QuestionActor, pointer: string): QuestionPart {
   if (input.recommendation && input.noRecommendation) {
-    invalidDecision([{ pointer, message: 'give either a recommendation or noRecommendation, not both' }]);
+    invalidQuestion([{ pointer, message: 'give either a recommendation or noRecommendation, not both' }]);
   }
-  const part: DecisionPart = {
+  const part: QuestionPart = {
     n,
     question: input.question,
     options: optionsOf(input, pointer) ?? [],
@@ -489,16 +489,16 @@ function buildPart(input: DecisionPartInput, n: number, actor: DecisionActor, po
 }
 
 /** Re-validate a payload a door built, so a door bug fails loudly rather than persisting. */
-function finalize(d: DecisionData): DecisionData {
-  const parsed = decisionDataSchema.parse(d);
+function finalize(d: QuestionData): QuestionData {
+  const parsed = questionDataSchema.parse(d);
   parsed.parts.forEach((p, i) => checkPart(p, `/parts/${i}`));
   return parsed;
 }
 
-/** Highest decision number ever issued under the log: the counter, or a decision child above it. */
-async function highWaterN(tx: Tx, log: LogRow, data: DecisionLogData): Promise<number> {
+/** Highest question number ever issued under the log: the counter, or a question child above it. */
+async function highWaterN(tx: Tx, log: LogRow, data: QuestionLogData): Promise<number> {
   const top = await tx.node.findFirst({
-    where: { memoryId: log.memoryId, loc: { startsWith: `${log.loc}:` }, role: DECISION_ROLE },
+    where: { memoryId: log.memoryId, loc: { startsWith: `${log.loc}:` }, role: QUESTION_ROLE },
     orderBy: { seq: 'desc' },
     select: { seq: true },
   });
@@ -525,17 +525,17 @@ function toUrgency(v: string | null | undefined): 'normal' | 'urgent' | null {
 
 type AskArgs = { logRef: string; input: Record<string, unknown> };
 
-export const decisionMutations = {
+export const questionMutations = {
   /**
-   * §3.3, §7 — create a decision log: memory MANAGE or an App owner (`requireLogManage`); refused in an encrypted
+   * §3.3, §7 — create a question log: memory MANAGE or an App owner (`requireLogManage`); refused in an encrypted
    * (Q5) or git-mirrored memory, at a loc that holds anything, or inside a
-   * decision's or log's subtree.
+   * question's or log's subtree.
    */
-  createDecisionLog: async (
+  createQuestionLog: async (
     _: unknown,
     args: { memoryRef: string; loc: string; name?: string | null; prefix?: string | null; defaultDeciders: string[]; eligibleDeciders?: string[] | null },
     ctx: Context,
-  ): Promise<DecisionLogView> => {
+  ): Promise<QuestionLogView> => {
     refuseImpersonation(ctx);
     const { id: memoryId } = await resolveMemoryRef(ctx.db, args.memoryRef);
     try {
@@ -544,12 +544,12 @@ export const decisionMutations = {
       if (error instanceof InvalidLocError) throw new GraphQLError(error.message, { extensions: { code: error.name, loc: error.loc, segment: error.segment } });
       throw error;
     }
-    const prefix = args.prefix ?? DEFAULT_DECISION_PREFIX;
-    if (!DECISION_PREFIX_RE.test(prefix)) invalidDecision([{ pointer: '/prefix', message: 'a prefix is one to three upper-case letters' }]);
+    const prefix = args.prefix ?? DEFAULT_QUESTION_PREFIX;
+    if (!QUESTION_PREFIX_RE.test(prefix)) invalidQuestion([{ pointer: '/prefix', message: 'a prefix is one to three upper-case letters' }]);
     const name = (args.name ?? '').trim() || 'Decisions';
-    if (name.length > 300 || name.includes('\n')) invalidDecision([{ pointer: '/name', message: 'a single line of at most 300 characters' }]);
+    if (name.length > 300 || name.includes('\n')) invalidQuestion([{ pointer: '/name', message: 'a single line of at most 300 characters' }]);
     const defaults = uniqueIds(args.defaultDeciders, '/defaultDeciders');
-    if (defaults.length === 0) invalidDecision([{ pointer: '/defaultDeciders', message: 'name at least one decider' }]);
+    if (defaults.length === 0) invalidQuestion([{ pointer: '/defaultDeciders', message: 'name at least one decider' }]);
     const eligible = uniqueIds((args.eligibleDeciders ?? []).filter((u) => !defaults.includes(u)), '/eligibleDeciders');
     await requireLogManage(ctx, memoryId, args.memoryRef);
 
@@ -563,15 +563,15 @@ export const decisionMutations = {
         select: { isEncrypted: true, source: true, class: true, userId: true, userMemoryOfAgentId: true },
       });
       // Rook's §10 P2 on #1690: an agent's definition memory is not a
-      // decision home (§3.4 uses personal and App memories), and
+      // question home (§3.4 uses personal and App memories), and
       // restoreRevision rewrites a system memory wholesale: it would
-      // resurrect a withdrawn decision as OPEN and erase later ones.
-      if (memory.class === 'system') throw decisionError('DECISION_LOG_SYSTEM_MEMORY', 'A decision log cannot live in a system memory (an agent\'s definition, which a snapshot restore rewrites).', { memoryId });
+      // resurrect a withdrawn question as OPEN and erase later ones.
+      if (memory.class === 'system') throw questionError('QUESTION_LOG_SYSTEM_MEMORY', 'A question log cannot live in a system memory (an agent\'s definition, which a snapshot restore rewrites).', { memoryId });
       // Rook's P3-1: an anonymous per-user memory is encrypted wholesale on
       // its promotion (linkMemoryToUser), a path outside the §5.4 pairing.
-      if (memory.userMemoryOfAgentId && !memory.userId) throw decisionError('DECISION_LOG_ANONYMOUS_MEMORY', 'A decision log cannot live in an anonymous memory (its promotion may encrypt every node).', { memoryId });
-      if (memory.isEncrypted) throw decisionError('DECISION_LOG_ENCRYPTED', 'A decision log cannot live in an encrypted memory (a decision is verified by re-rendering its plaintext).', { memoryId });
-      if (memory.source) throw decisionError('DECISION_LOG_MIRRORED', 'A decision log cannot live in a git-mirrored memory (a mirror could forge decisions).', { memoryId });
+      if (memory.userMemoryOfAgentId && !memory.userId) throw questionError('QUESTION_LOG_ANONYMOUS_MEMORY', 'A question log cannot live in an anonymous memory (its promotion may encrypt every node).', { memoryId });
+      if (memory.isEncrypted) throw questionError('QUESTION_LOG_ENCRYPTED', 'A question log cannot live in an encrypted memory (a question is verified by re-rendering its plaintext).', { memoryId });
+      if (memory.source) throw questionError('QUESTION_LOG_MIRRORED', 'A question log cannot live in a git-mirrored memory (a mirror could forge questions).', { memoryId });
       await lockEdgeEndpointMemories(tx, [memoryId]);
       await acquireLockSet(tx, [...ancestorLocs(args.loc).map((loc) => ({ memoryId, loc })), { memoryId, loc: args.loc }]);
       const occupied = await tx.node.findFirst({
@@ -579,33 +579,33 @@ export const decisionMutations = {
         select: { loc: true },
       });
       if (occupied) {
-        throw decisionError('DECISION_LOG_EXISTS', `"${args.loc}" already holds a node (or a deleted one) at or under it; a decision log needs an empty loc.`, { loc: occupied.loc });
+        throw questionError('QUESTION_LOG_EXISTS', `"${args.loc}" already holds a node (or a deleted one) at or under it; a question log needs an empty loc.`, { loc: occupied.loc });
       }
       const ancestors = ancestorLocs(args.loc);
       const container = ancestors.length === 0 ? null : await tx.node.findFirst({
-        where: { memoryId, loc: { in: ancestors }, ...DECISION_FAMILY_WHERE }, select: { loc: true },
+        where: { memoryId, loc: { in: ancestors }, ...QUESTION_FAMILY_WHERE }, select: { loc: true },
       });
-      if (container) throw decisionContainedError('Creating a decision log here', [container.loc]);
+      if (container) throw questionContainedError('Creating a question log here', [container.loc]);
       // #1715: name who each decider is now, never a merged-away account.
       const nowDefaults = await survivors(tx, defaults);
       const nowEligible = (await survivors(tx, eligible)).filter((u) => !nowDefaults.includes(u));
       await assertDecidersEligible(tx, memoryId, [...nowDefaults, ...nowEligible]);
 
-      const data: DecisionLogData = decisionLogDataSchema.parse({
-        codec: DECISION_LOG_CODEC, kind: 'decision.log', prefix, lastCode: 0,
+      const data: QuestionLogData = questionLogDataSchema.parse({
+        codec: QUESTION_LOG_CODEC, kind: questionLogDataSchema.shape.kind.value, prefix, lastCode: 0,
         defaultDeciders: nowDefaults, eligibleDeciders: nowEligible, purges: [],
         lastAction: { op: 'create', by: actorOf(ctx), at: new Date().toISOString(), reason: null },
       });
       const node = await writeNodeCore(
         {
-          memoryId, loc: args.loc, name, role: DECISION_LOG_ROLE, nodeType: 'info',
+          memoryId, loc: args.loc, name, role: QUESTION_LOG_ROLE, nodeType: 'info',
           ...logContentOf(name, data),
           description: null, contentType: null, alias: null, tags: [], llmModel: null, aiAgent: null,
           isLink: false, objectType: null, edges: [],
         },
         txCtx,
         'create',
-        { authoring: { kind: 'platform', record: 'decision' }, ownsKind: 'decision', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
+        { authoring: { kind: 'platform', record: 'question' }, ownsKind: 'question', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
       );
       const row = await tx.node.findUniqueOrThrow({ where: { id: (node as { id: string }).id }, select: LOG_ROW_SELECT });
       return { row, data };
@@ -616,18 +616,18 @@ export const decisionMutations = {
 
   /**
    * §6.1, Q6 — replace a log's default (and other eligible) deciders, as an
-   * audited revision of the log. Existing decisions keep their frozen sets.
+   * audited revision of the log. Existing questions keep their frozen sets.
    */
-  setDecisionLogDeciders: async (
+  setQuestionLogDeciders: async (
     _: unknown,
     args: { logRef: string; defaultDeciders: string[]; eligibleDeciders?: string[] | null; expectedRevision: number; reason: string },
     ctx: Context,
-  ): Promise<DecisionLogView> => {
+  ): Promise<QuestionLogView> => {
     refuseImpersonation(ctx);
     const reason = validateReason(args.reason);
     const defaults = uniqueIds(args.defaultDeciders, '/defaultDeciders');
-    if (defaults.length === 0) invalidDecision([{ pointer: '/defaultDeciders', message: 'name at least one decider' }]);
-    const log = await resolveGovernedNode(ctx, args.logRef, DECISION_LOG_ROLE, logMissing);
+    if (defaults.length === 0) invalidQuestion([{ pointer: '/defaultDeciders', message: 'name at least one decider' }]);
+    const log = await resolveGovernedNode(ctx, args.logRef, QUESTION_LOG_ROLE, logMissing);
     await requireLogManage(ctx, log.memoryId);
     const effects: Array<() => void> = [];
     const view = await withAuthorizedMemoryTx(ctx, log.memoryId, [], (txCtx) => requireLogManage(txCtx, log.memoryId), async (tx, txCtx) => {
@@ -639,7 +639,7 @@ export const decisionMutations = {
       const nowDefaults = await survivors(tx, defaults);
       const eligible = (await survivors(tx, listed)).filter((u) => !nowDefaults.includes(u));
       await assertDecidersEligible(tx, log.memoryId, [...nowDefaults, ...eligible]);
-      const data: DecisionLogData = decisionLogDataSchema.parse({
+      const data: QuestionLogData = questionLogDataSchema.parse({
         ...prior,
         defaultDeciders: nowDefaults,
         eligibleDeciders: eligible,
@@ -649,8 +649,8 @@ export const decisionMutations = {
         { memoryId: log.memoryId, loc: row.loc, ...logContentOf(row.name, data), reason },
         txCtx,
         'update',
-        { authoring: { kind: 'platform', record: 'decision' },
-          targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'decision', governedContext: 'node-write',
+        { authoring: { kind: 'platform', record: 'question' },
+          targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'question', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
       );
@@ -661,26 +661,26 @@ export const decisionMutations = {
   },
 
   /**
-   * §4, §7 — ask a decision: allocate the next code under the log lock, write
+   * §4, §7 — ask a question: allocate the next code under the log lock, write
    * the payload and its rendering as revision 1. Memory writers, agents
    * included. `authorizes: true` forces the signed tier (§6.2).
    */
-  askDecision: async (_: unknown, args: AskArgs, ctx: Context): Promise<DecisionView> => {
+  askQuestion: async (_: unknown, args: AskArgs, ctx: Context): Promise<QuestionView> => {
     refuseImpersonation(ctx);
     const input = parseOrRefuse(askInputSchema, lowerEnums(args.input));
-    const log = await resolveGovernedNode(ctx, args.logRef, DECISION_LOG_ROLE, logMissing);
-    await requireDecisionWrite(ctx, log.memoryId);
+    const log = await resolveGovernedNode(ctx, args.logRef, QUESTION_LOG_ROLE, logMissing);
+    await requireQuestionWrite(ctx, log.memoryId);
     const authorizes = input.authorizes ?? false;
     const tier = input.tier ?? (authorizes ? 'signed' : 'approved');
     if (authorizes && tier !== 'signed') {
-      throw decisionError('DECISION_TIER_TOO_LOW', 'A decision that authorizes something must be at the signed tier.', { tier });
+      throw questionError('QUESTION_TIER_TOO_LOW', 'A question that authorizes something must be at the signed tier.', { tier });
     }
-    if (!authorizes && input.grant != null) invalidDecision([{ pointer: '/grant', message: 'a grant needs authorizes: true' }]);
+    if (!authorizes && input.grant != null) invalidQuestion([{ pointer: '/grant', message: 'a grant needs authorizes: true' }]);
     const actor = actorOf(ctx);
     const parts = input.parts.map((p, i) => buildPart(p, i + 1, actor, `/parts/${i}`));
 
     const effects: Array<() => void> = [];
-    const id = await withAuthorizedMemoryTx(ctx, log.memoryId, [], (txCtx) => requireDecisionWrite(txCtx, log.memoryId), async (tx, txCtx) => {
+    const id = await withAuthorizedMemoryTx(ctx, log.memoryId, [], (txCtx) => requireQuestionWrite(txCtx, log.memoryId), async (tx, txCtx) => {
       const { row: logRow, data: logData } = await lockLog(tx, log.id, log.memoryId, args.logRef);
       // #1715: the log's sets may name merged-away accounts; compare, and
       // store, who each one is now. The log's own record is not rewritten.
@@ -688,24 +688,24 @@ export const decisionMutations = {
       const deciders = await survivors(tx, input.deciders ? uniqueIds(input.deciders, '/deciders') : logData.defaultDeciders);
       const outside = deciders.filter((u) => !eligibleSet.has(u));
       if (outside.length > 0) {
-        throw decisionError('DECISION_DECIDER_NOT_ELIGIBLE', `Deciders can be narrowed from the log's set, never widened: ${outside.join(', ')} ${outside.length === 1 ? 'is' : 'are'} not eligible in this log.`, { userIds: outside });
+        throw questionError('QUESTION_DECIDER_NOT_ELIGIBLE', `Deciders can be narrowed from the log's set, never widened: ${outside.join(', ')} ${outside.length === 1 ? 'is' : 'are'} not eligible in this log.`, { userIds: outside });
       }
       await assertDecidersEligible(tx, log.memoryId, deciders);
 
       const n = (await highWaterN(tx, logRow, logData)) + 1;
-      const code = decisionCode(logData.prefix, n);
-      const loc = decisionLoc(logRow.loc, code);
+      const code = questionCode(logData.prefix, n);
+      const loc = questionLoc(logRow.loc, code);
       const squatter = await tx.node.findUnique({ where: { loc_memoryId: { loc, memoryId: log.memoryId } }, select: { id: true } });
       if (squatter) {
         // Unreachable through the guarded paths (a log's code space is closed
         // to every other writer); loud, so an operator can move the squatter.
-        throw decisionError('DECISION_CONTAINED', `The next code ${code} is occupied by another node at "${loc}"; move it out of the log before asking.`, { loc });
+        throw questionError('QUESTION_CONTAINED', `The next code ${code} is occupied by another node at "${loc}"; move it out of the log before asking.`, { loc });
       }
       const data = finalize({
-        codec: DECISION_CODEC, renderer: CURRENT_DECISION_RENDERER, kind: 'decision',
+        codec: QUESTION_CODEC, renderer: CURRENT_QUESTION_RENDERER, kind: questionDataSchema.shape.kind.value,
         logId: logRow.id, code, n,
         title: input.title, urgency: input.urgency ?? 'normal', tier, authorizes,
-        grant: (input.grant ?? null) as DecisionData['grant'], archival: false,
+        grant: (input.grant ?? null) as QuestionData['grant'], archival: false,
         deciders, askedBy: actor, askedAt: new Date().toISOString(),
         context: input.context ?? null,
         blocks: input.blocks ?? [], sources: input.sources ?? [], followUps: input.followUps ?? [],
@@ -713,81 +713,81 @@ export const decisionMutations = {
       });
       const node = await writeNodeCore(
         {
-          memoryId: log.memoryId, loc, role: DECISION_ROLE, nodeType: 'info', seq: n,
+          memoryId: log.memoryId, loc, role: QUESTION_ROLE, nodeType: 'info', seq: n,
           ...renderedFields(data),
           description: null, contentType: null, alias: null, tags: [], llmModel: null, aiAgent: null,
           isLink: false, objectType: null, edges: [],
         },
         txCtx,
         'create',
-        { authoring: { kind: 'platform', record: 'decision' }, ownsKind: 'decision', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
+        { authoring: { kind: 'platform', record: 'question' }, ownsKind: 'question', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
       );
       // The counter, as chat roots keep theirs: a sanctioned direct write that
       // asks for a fingerprint refresh, so it is not reconciled as drift. The
       // rendered content carries the issued count, so it is re-rendered in the
       // same write (Diego's P3 on #1690): no revision, and never stale.
-      const counted: DecisionLogData = { ...logData, lastCode: n };
+      const counted: QuestionLogData = { ...logData, lastCode: n };
       await tx.node.update({
         where: { id: logRow.id },
         data: {
           data: counted as unknown as Prisma.InputJsonValue,
-          content: renderDecisionLog(logRow.name, counted),
+          content: renderQuestionLog(logRow.name, counted),
           revisionContentHash: revisionStateHashRefreshMarker(),
         },
       });
       return (node as { id: string }).id;
     }, { timeout: 60_000 });
     for (const effect of effects) effect();
-    return loadDecisionView(ctx, id);
+    return loadQuestionView(ctx, id);
   },
 
   /**
-   * §7 — amend a decision: question, options, recommendation, context and
+   * §7 — amend a question: question, options, recommendation, context and
    * references; add parts; raise the tier. Before any answer, any memory
    * writer; after one, a decider only (and the evidence goes stale). Urgency
    * is changed by a decider (Q14); the tier is lowered only by a decider,
-   * before an answer, never for an authorizing decision (§6.2). Answers never
+   * before an answer, never for an authorizing question (§6.2). Answers never
    * change here.
    */
-  amendDecision: async (
+  amendQuestion: async (
     _: unknown,
     args: { ref: string; input: Record<string, unknown>; expectedRevision: number; reason: string },
     ctx: Context,
-  ): Promise<DecisionView> => {
+  ): Promise<QuestionView> => {
     refuseImpersonation(ctx);
     const reason = validateReason(args.reason);
     const patch = parseOrRefuse(amendInputSchema, lowerEnums(args.input));
-    const target = await resolveGovernedNode(ctx, args.ref, DECISION_ROLE, decisionMissing);
-    await requireDecisionWrite(ctx, target.memoryId);
+    const target = await resolveGovernedNode(ctx, args.ref, QUESTION_ROLE, questionMissing);
+    await requireQuestionWrite(ctx, target.memoryId);
     const actor = actorOf(ctx);
     const effects: Array<() => void> = [];
-    await withAuthorizedMemoryTx(ctx, target.memoryId, [], (txCtx) => requireDecisionWrite(txCtx, target.memoryId), async (tx, txCtx) => {
-      const row = await lockDecision(tx, target.id, target.memoryId, args.ref, args.expectedRevision);
+    await withAuthorizedMemoryTx(ctx, target.memoryId, [], (txCtx) => requireQuestionWrite(txCtx, target.memoryId), async (tx, txCtx) => {
+      const row = await lockQuestion(tx, target.id, target.memoryId, args.ref, args.expectedRevision);
       const [view] = await evaluateRows(tx, [row]);
       const current = requireWritable(view);
       const decider = await isDecider(txCtx, current);
       const answered = everAnswered(current);
       if (answered && !decider) {
-        throw decisionError('DECISION_NOT_DECIDER', `${current.code} has an answer, so only one of its deciders may amend it.`, { decisionCode: current.code });
+        throw questionError('QUESTION_NOT_DECIDER', `${current.code} has an answer, so only one of its deciders may amend it.`, { questionCode: current.code });
       }
-      const next: DecisionData = structuredClone(current);
+      const next: QuestionData = structuredClone(current);
       if (patch.title != null) next.title = patch.title;
       if (patch.context !== undefined) next.context = patch.context ?? null;
       if (patch.blocks != null) next.blocks = patch.blocks;
       if (patch.sources != null) next.sources = patch.sources;
       if (patch.followUps != null) next.followUps = patch.followUps;
       if (patch.urgency != null && patch.urgency !== current.urgency) {
-        if (!decider) throw decisionError('DECISION_NOT_DECIDER', 'Only a decider changes the urgency of an asked decision.', { decisionCode: current.code });
+        if (!decider) throw questionError('QUESTION_NOT_DECIDER', 'Only a decider changes the urgency of an asked question.', { questionCode: current.code });
         next.urgency = patch.urgency;
       }
       if (patch.tier != null && patch.tier !== current.tier) {
         if (patch.tier === 'approved') {
           if (current.authorizes || answered) {
-            throw decisionError('DECISION_TIER_TOO_LOW', current.authorizes
-              ? 'A decision that authorizes something stays at the signed tier.'
+            throw questionError('QUESTION_TIER_TOO_LOW', current.authorizes
+              ? 'A question that authorizes something stays at the signed tier.'
               : 'The tier cannot be lowered once a part is answered.', { tier: patch.tier });
           }
-          if (!decider) throw decisionError('DECISION_NOT_DECIDER', 'Only a decider lowers the tier.', { decisionCode: current.code });
+          if (!decider) throw questionError('QUESTION_NOT_DECIDER', 'Only a decider lowers the tier.', { questionCode: current.code });
         }
         next.tier = patch.tier;
       }
@@ -795,16 +795,16 @@ export const decisionMutations = {
         const pointer = `/parts/${i}`;
         const part = next.parts.find((p) => p.n === pp.n);
         if (!part) {
-          throw decisionError('DECISION_PART_RENUMBER', `${current.code} has no part ${pp.n}; parts keep their numbers and new ones are added with addParts.`, { part: pp.n });
+          throw questionError('QUESTION_PART_RENUMBER', `${current.code} has no part ${pp.n}; parts keep their numbers and new ones are added with addParts.`, { part: pp.n });
         }
-        if (pp.recommendation && pp.noRecommendation) invalidDecision([{ pointer, message: 'give either a recommendation or noRecommendation, not both' }]);
+        if (pp.recommendation && pp.noRecommendation) invalidQuestion([{ pointer, message: 'give either a recommendation or noRecommendation, not both' }]);
         if (pp.question != null) part.question = pp.question;
         const options = optionsOf({ options: pp.options, yesno: pp.yesno }, pointer);
         if (options) {
           const keys = new Set(options.map((o) => o.key));
-          const lost = [part.answer, ...part.answerHistory].filter((a): a is DecisionAnswer => a?.key != null && !keys.has(a.key));
+          const lost = [part.answer, ...part.answerHistory].filter((a): a is QuestionAnswer => a?.key != null && !keys.has(a.key));
           if (lost.length > 0) {
-            throw decisionError('DECISION_ANSWER_IMMUTABLE', `Part ${part.n}'s options must keep every option it was answered with (${lost.map((a) => a.key).join(', ')}).`, { part: part.n });
+            throw questionError('QUESTION_ANSWER_IMMUTABLE', `Part ${part.n}'s options must keep every option it was answered with (${lost.map((a) => a.key).join(', ')}).`, { part: part.n });
           }
           part.options = options;
         }
@@ -818,56 +818,56 @@ export const decisionMutations = {
         checkPart(part, pointer);
       }
       for (const [i, added] of (patch.addParts ?? []).entries()) {
-        if (next.parts.length >= MAX_PARTS) invalidDecision([{ pointer: `/addParts/${i}`, message: `a decision has at most ${MAX_PARTS} parts` }]);
+        if (next.parts.length >= MAX_PARTS) invalidQuestion([{ pointer: `/addParts/${i}`, message: `a question has at most ${MAX_PARTS} parts` }]);
         next.parts.push(buildPart(added, next.parts.length + 1, actor, `/addParts/${i}`));
       }
       next.status = statusHint(next);
       const final = finalize(next);
-      if (canonicalDecisionJson(final) === canonicalDecisionJson(current)) return; // nothing changed: no revision
+      if (canonicalQuestionJson(final) === canonicalQuestionJson(current)) return; // nothing changed: no revision
       await writeNodeCore(
         { memoryId: target.memoryId, loc: row.loc, ...renderedFields(final), reason },
         txCtx,
         'update',
-        { authoring: { kind: 'platform', record: 'decision' },
-          targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'decision', governedContext: 'node-write',
+        { authoring: { kind: 'platform', record: 'question' },
+          targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'question', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
       );
     }, { timeout: 60_000 });
     for (const effect of effects) effect();
-    return loadDecisionView(ctx, target.id);
+    return loadQuestionView(ctx, target.id);
   },
 
   /**
-   * §7 — withdraw a decision (terminal; its code stays consumed). The asker
+   * §7 — withdraw a question (terminal; its code stays consumed). The asker
    * or a decider; once a part is answered, a decider only. Refused for a
-   * DECIDED decision (supersede it instead) and for a terminal one.
+   * DECIDED question (supersede it instead) and for a terminal one.
    */
-  withdrawDecision: async (
+  withdrawQuestion: async (
     _: unknown,
     args: { ref: string; reason: string; expectedRevision: number },
     ctx: Context,
-  ): Promise<DecisionView> => {
+  ): Promise<QuestionView> => {
     refuseImpersonation(ctx);
     const reason = validateReason(args.reason);
-    const target = await resolveGovernedNode(ctx, args.ref, DECISION_ROLE, decisionMissing);
-    await requireDecisionWrite(ctx, target.memoryId);
+    const target = await resolveGovernedNode(ctx, args.ref, QUESTION_ROLE, questionMissing);
+    await requireQuestionWrite(ctx, target.memoryId);
     const effects: Array<() => void> = [];
-    await withAuthorizedMemoryTx(ctx, target.memoryId, [], (txCtx) => requireDecisionWrite(txCtx, target.memoryId), async (tx, txCtx) => {
-      const row = await lockDecision(tx, target.id, target.memoryId, args.ref, args.expectedRevision);
+    await withAuthorizedMemoryTx(ctx, target.memoryId, [], (txCtx) => requireQuestionWrite(txCtx, target.memoryId), async (tx, txCtx) => {
+      const row = await lockQuestion(tx, target.id, target.memoryId, args.ref, args.expectedRevision);
       const [view] = await evaluateRows(tx, [row]);
       const current = requireWritable(view);
       if (view.evaluation.state === 'DECIDED') {
-        throw decisionError('DECISION_ANSWERED_DECIDED', `${current.code} is DECIDED; a decided decision is superseded, not withdrawn.`, { decisionCode: current.code });
+        throw questionError('QUESTION_ANSWERED_DECIDED', `${current.code} is DECIDED; a decided question is superseded, not withdrawn.`, { questionCode: current.code });
       }
       const decider = await isDecider(txCtx, current);
       if (everAnswered(current) ? !decider : !(decider || (await isAsker(txCtx, current)))) {
-        throw decisionError(
-          everAnswered(current) ? 'DECISION_NOT_DECIDER' : 'DECISION_NOT_ASKER',
+        throw questionError(
+          everAnswered(current) ? 'QUESTION_NOT_DECIDER' : 'QUESTION_NOT_ASKER',
           everAnswered(current)
             ? `${current.code} has an answer, so only one of its deciders may withdraw it.`
             : `Only the asker of ${current.code} or one of its deciders may withdraw it.`,
-          { decisionCode: current.code },
+          { questionCode: current.code },
         );
       }
       const next = finalize({ ...current, withdrawn: { by: actorOf(ctx), at: new Date().toISOString(), reason }, status: 'withdrawn' });
@@ -875,47 +875,47 @@ export const decisionMutations = {
         { memoryId: target.memoryId, loc: row.loc, ...renderedFields(next), reason },
         txCtx,
         'update',
-        { authoring: { kind: 'platform', record: 'decision' },
-          targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'decision', governedContext: 'node-write',
+        { authoring: { kind: 'platform', record: 'question' },
+          targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'question', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
       );
     }, { timeout: 60_000 });
     for (const effect of effects) effect();
-    return loadDecisionView(ctx, target.id);
+    return loadQuestionView(ctx, target.id);
   },
 
   /**
-   * Q8 — a platform admin hard-deletes a decision that was NEVER answered,
+   * Q8 — a platform admin hard-deletes a question that was NEVER answered,
    * recording actor, reason, code and the content's hash on the log (a log
    * revision). The code stays consumed.
    */
-  purgeUnansweredDecision: async (_: unknown, args: { ref: string; reason: string }, ctx: Context): Promise<boolean> => {
+  purgeUnansweredQuestion: async (_: unknown, args: { ref: string; reason: string }, ctx: Context): Promise<boolean> => {
     refuseImpersonation(ctx);
     const reason = validateReason(args.reason);
-    const target = await resolveGovernedNode(ctx, args.ref, DECISION_ROLE, decisionMissing);
+    const target = await resolveGovernedNode(ctx, args.ref, QUESTION_ROLE, questionMissing);
     const requireAdmin = async (c: Context) => {
-      if (!isPlatformAdmin(c)) throw decisionError('DECISION_FORBIDDEN', 'Only a platform admin may purge a decision.');
+      if (!isPlatformAdmin(c)) throw questionError('QUESTION_FORBIDDEN', 'Only a platform admin may purge a question.');
     };
     await requireAdmin(ctx);
     const effects: Array<() => void> = [];
     await withAuthorizedMemoryTx(ctx, target.memoryId, [], requireAdmin, async (tx, txCtx) => {
-      const logRow = await logOfDecision(tx, target);
-      if (!logRow) throw new Error(`decision ${target.id} has no log`);
+      const logRow = await logOfQuestion(tx, target);
+      if (!logRow) throw new Error(`question ${target.id} has no log`);
       const { row: lockedLog, data: logData } = await lockLog(tx, logRow.id, target.memoryId, args.ref);
-      const row = await lockDecision(tx, target.id, target.memoryId, args.ref);
+      const row = await lockQuestion(tx, target.id, target.memoryId, args.ref);
       const [view] = await evaluateRows(tx, [row]);
-      const d = view.evaluation.decision;
+      const d = view.evaluation.question;
       if (!d) {
-        throw decisionError('DECISION_INVALID', `This decision is ${view.evaluation.state}; its answers cannot be established, so it is not purged.`, { state: view.evaluation.state });
+        throw questionError('QUESTION_INVALID', `This question is ${view.evaluation.state}; its answers cannot be established, so it is not purged.`, { state: view.evaluation.state });
       }
-      const cached = decisionDataSchema.safeParse(row.data);
+      const cached = questionDataSchema.safeParse(row.data);
       if (everAnswered(d) || (cached.success && everAnswered(cached.data))) {
-        throw decisionError('DECISION_ANSWERED', `${d.code} has been answered, so it is never purged; withdraw or supersede it.`, { decisionCode: d.code });
+        throw questionError('QUESTION_ANSWERED', `${d.code} has been answered, so it is never purged; withdraw or supersede it.`, { questionCode: d.code });
       }
       const descendants = await tx.node.count({ where: { memoryId: target.memoryId, loc: { startsWith: `${row.loc}:` } } });
-      if (descendants > 0) throw decisionContainedError('Purging this decision', [row.loc]);
-      const data: DecisionLogData = decisionLogDataSchema.parse({
+      if (descendants > 0) throw questionContainedError('Purging this question', [row.loc]);
+      const data: QuestionLogData = questionLogDataSchema.parse({
         ...logData,
         lastCode: Math.max(logData.lastCode, d.n),
         purges: [...logData.purges, {
@@ -928,15 +928,15 @@ export const decisionMutations = {
         { memoryId: target.memoryId, loc: lockedLog.loc, ...logContentOf(lockedLog.name, data), reason: `purge ${d.code}: ${reason}`.slice(0, REASON_MAX) },
         txCtx,
         'update',
-        { authoring: { kind: 'platform', record: 'decision' },
-          targetNodeId: lockedLog.id, ownsKind: 'decision', governedContext: 'node-write',
+        { authoring: { kind: 'platform', record: 'question' },
+          targetNodeId: lockedLog.id, ownsKind: 'question', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
       );
       await hardDeleteThreadsOfTargets(tx, [row.id]);
       await deletePendingEdgesTargetingNodes(tx, [row.id]);
       const res = await tx.node.deleteMany({ where: { id: row.id, memoryId: target.memoryId } });
-      if (res.count !== 1) throw decisionMissing(args.ref);
+      if (res.count !== 1) throw questionMissing(args.ref);
     }, { timeout: 60_000 });
     for (const effect of effects) effect();
     return true;
@@ -945,31 +945,31 @@ export const decisionMutations = {
 
 // ─── Reads ───────────────────────────────────────────────────────────────────
 
-async function loadDecisionView(ctx: Context, id: string): Promise<DecisionView> {
-  const row = await ctx.db.node.findUnique({ where: { id }, select: DECISION_ROW_SELECT });
-  if (!row || row.deletedAt || row.role !== DECISION_ROLE) throw decisionMissing(id);
+async function loadQuestionView(ctx: Context, id: string): Promise<QuestionView> {
+  const row = await ctx.db.node.findUnique({ where: { id }, select: QUESTION_ROW_SELECT });
+  if (!row || row.deletedAt || row.role !== QUESTION_ROLE) throw questionMissing(id);
   const [view] = await evaluateRows(ctx.db as unknown as Tx, [row]);
   return view;
 }
 
-async function loadLogView(ctx: Context, ref: string): Promise<DecisionLogView | null> {
+async function loadLogView(ctx: Context, ref: string): Promise<QuestionLogView | null> {
   let log: { id: string };
   try {
-    log = await resolveGovernedNode(ctx, ref, DECISION_LOG_ROLE, logMissing);
+    log = await resolveGovernedNode(ctx, ref, QUESTION_LOG_ROLE, logMissing);
   } catch (error) {
-    if (error instanceof GraphQLError && error.extensions.code === 'DECISION_LOG_NOT_FOUND') return null;
+    if (error instanceof GraphQLError && error.extensions.code === 'QUESTION_LOG_NOT_FOUND') return null;
     throw error;
   }
   const row = await ctx.db.node.findUniqueOrThrow({ where: { id: log.id }, select: LOG_ROW_SELECT });
   return { row, data: parseLogData(row) };
 }
 
-const STATE_ORDER: Record<DecisionState, number> = {
+const STATE_ORDER: Record<QuestionState, number> = {
   OPEN: 0, ANSWERED_UNCONFIRMED: 1, STALE: 2, TAMPERED: 3, UNVERIFIABLE: 4, DECIDED: 5, WITHDRAWN: 6, SUPERSEDED: 7,
 };
 
-function sortViews(views: DecisionView[], sort: 'PORTAL_DEFAULT' | 'CODE'): DecisionView[] {
-  const n = (v: DecisionView) => v.shown?.n ?? v.row.seq ?? 0;
+function sortViews(views: QuestionView[], sort: 'PORTAL_DEFAULT' | 'CODE'): QuestionView[] {
+  const n = (v: QuestionView) => v.shown?.n ?? v.row.seq ?? 0;
   if (sort === 'CODE') return [...views].sort((a, b) => n(a) - n(b) || a.row.loc.localeCompare(b.row.loc));
   // Uma's list sort (§8.4): urgency, then open-before-answered, then newest ask.
   return [...views].sort((a, b) =>
@@ -979,71 +979,71 @@ function sortViews(views: DecisionView[], sort: 'PORTAL_DEFAULT' | 'CODE'): Deci
     n(b) - n(a));
 }
 
-export const decisionQueries = {
+export const questionQueries = {
   /** §6.1a — a log's settings, under its memory's read gate. Null when missing or unreadable. */
-  decisionLog: (_: unknown, { ref }: { ref: string }, ctx: Context) => loadLogView(ctx, ref),
+  questionLog: (_: unknown, { ref }: { ref: string }, ctx: Context) => loadLogView(ctx, ref),
 
   /**
-   * One decision by ref (id or URN), or by code (`DU`, or a citation `DU-1`)
+   * One question by ref (id or URN), or by code (`DU`, or a citation `DU-1`)
    * within a log. Null when missing or unreadable (no existence oracle).
    */
-  decision: async (
+  question: async (
     _: unknown,
     args: { ref?: string | null; code?: string | null; logRef?: string | null },
     ctx: Context,
-  ): Promise<DecisionView | null> => {
+  ): Promise<QuestionView | null> => {
     if ((args.ref == null) === (args.code == null)) {
       throw new GraphQLError('Give exactly one of ref and code (with logRef).', { extensions: { code: 'BAD_USER_INPUT' } });
     }
     let id: string;
     if (args.ref != null) {
       try {
-        ({ id } = await resolveGovernedNode(ctx, args.ref, DECISION_ROLE, decisionMissing));
+        ({ id } = await resolveGovernedNode(ctx, args.ref, QUESTION_ROLE, questionMissing));
       } catch (error) {
-        if (error instanceof GraphQLError && error.extensions.code === 'DECISION_NOT_FOUND') return null;
+        if (error instanceof GraphQLError && error.extensions.code === 'QUESTION_NOT_FOUND') return null;
         throw error;
       }
     } else {
       if (args.logRef == null) throw new GraphQLError('A code needs logRef.', { extensions: { code: 'BAD_USER_INPUT' } });
       const log = await loadLogView(ctx, args.logRef);
       if (!log) return null;
-      const cited = parseDecisionCitation(args.code!, log.data.prefix);
+      const cited = parseQuestionCitation(args.code!, log.data.prefix);
       if (!cited) return null;
       const row = await ctx.db.node.findUnique({
-        where: { loc_memoryId: { loc: decisionLoc(log.row.loc, cited.code), memoryId: log.row.memoryId } },
+        where: { loc_memoryId: { loc: questionLoc(log.row.loc, cited.code), memoryId: log.row.memoryId } },
         select: { id: true, role: true, deletedAt: true },
       });
-      if (!row || row.deletedAt || row.role !== DECISION_ROLE) return null;
+      if (!row || row.deletedAt || row.role !== QUESTION_ROLE) return null;
       id = row.id;
     }
-    return loadDecisionView(ctx, id);
+    return loadQuestionView(ctx, id);
   },
 
   /**
-   * §8.1 — the decisions of one log, or (`awaitingMe`) the OPEN decisions the
+   * §8.1 — the questions of one log, or (`awaitingMe`) the OPEN questions the
    * caller decides across every memory they can read: the portal's pull cue
    * (r4). Every candidate is evaluated BEFORE filtering, sorting and paging
    * (§5.5); `properties` only narrows the candidate scan, never the answer.
    */
-  decisions: async (
+  questions: async (
     _: unknown,
     args: {
       logRef?: string | null; awaitingMe?: boolean | null;
-      state?: DecisionState[] | null; tier?: string | null; urgency?: string[] | null; authorizes?: boolean | null;
+      state?: QuestionState[] | null; tier?: string | null; urgency?: string[] | null; authorizes?: boolean | null;
       sort?: 'PORTAL_DEFAULT' | 'CODE' | null; limit?: number | null; offset?: number | null;
     },
     ctx: Context,
-  ): Promise<{ items: DecisionView[]; total: number }> => {
+  ): Promise<{ items: QuestionView[]; total: number }> => {
     const limit = Math.min(Math.max(args.limit ?? 20, 1), 200);
     const offset = Math.max(args.offset ?? 0, 0);
     let where: Prisma.NodeWhereInput;
     if (args.awaitingMe) {
       if (!ctx.userId || ctx.impersonation) return { items: [], total: 0 };
       const accessible = await getAccessibleMemoryIds(ctx);
-      // #1715: a decision names the caller by any id merged into theirs.
+      // #1715: a question names the caller by any id merged into theirs.
       const me = [...(await callerIdentities(ctx))];
       where = {
-        role: DECISION_ROLE, deletedAt: null,
+        role: QUESTION_ROLE, deletedAt: null,
         memoryId: { in: accessible },
         OR: me.map((id) => ({ properties: { path: ['deciders'], array_contains: [id] } })),
       };
@@ -1056,18 +1056,18 @@ export const decisionQueries = {
       if (!args.logRef) throw new GraphQLError('Give logRef, or awaitingMe: true.', { extensions: { code: 'BAD_USER_INPUT' } });
       const log = await loadLogView(ctx, args.logRef);
       if (!log) return { items: [], total: 0 };
-      where = { role: DECISION_ROLE, deletedAt: null, memoryId: log.row.memoryId, loc: { startsWith: `${log.row.loc}:` } };
+      where = { role: QUESTION_ROLE, deletedAt: null, memoryId: log.row.memoryId, loc: { startsWith: `${log.row.loc}:` } };
     }
     const count = await ctx.db.node.count({ where });
-    if (count > DECISION_LIST_EVALUATION_CAP) {
-      throw decisionError('DECISION_LOG_TOO_LARGE_FOR_FILTER', `${count} decisions exceed the ${DECISION_LIST_EVALUATION_CAP} this list evaluates at once.`, { count, cap: DECISION_LIST_EVALUATION_CAP });
+    if (count > QUESTION_LIST_EVALUATION_CAP) {
+      throw questionError('QUESTION_LOG_TOO_LARGE_FOR_FILTER', `${count} questions exceed the ${QUESTION_LIST_EVALUATION_CAP} this list evaluates at once.`, { count, cap: QUESTION_LIST_EVALUATION_CAP });
     }
-    // Only askDecision writes the decision role, always directly under a log.
-    const rows = await ctx.db.node.findMany({ where, select: DECISION_ROW_SELECT });
+    // Only askQuestion writes the question role, always directly under a log.
+    const rows = await ctx.db.node.findMany({ where, select: QUESTION_ROW_SELECT });
     let views = await evaluateRows(ctx.db as unknown as Tx, rows);
     if (args.awaitingMe) {
       const me = await callerIdentities(ctx);
-      views = views.filter((v) => v.evaluation.state === 'OPEN' && !!v.evaluation.decision?.deciders.some((id) => me.has(id)));
+      views = views.filter((v) => v.evaluation.state === 'OPEN' && !!v.evaluation.question?.deciders.some((id) => me.has(id)));
     }
     const tier = toTier(args.tier);
     const urgencies = args.urgency?.map(toUrgency);
@@ -1081,10 +1081,10 @@ export const decisionQueries = {
   },
 
   /** §8.1 — the integrity and evidence check, through the one evaluation. */
-  verifyDecision: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
-    const { id } = await resolveGovernedNode(ctx, ref, DECISION_ROLE, decisionMissing);
-    const view = await loadDecisionView(ctx, id);
-    const block = view.evaluation.decision;
+  verifyQuestion: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+    const { id } = await resolveGovernedNode(ctx, ref, QUESTION_ROLE, questionMissing);
+    const view = await loadQuestionView(ctx, id);
+    const block = view.evaluation.question;
     const cachedCodec = (view.row.data as { codec?: unknown } | null)?.codec;
     const cachedRenderer = (view.row.data as { renderer?: unknown } | null)?.renderer;
     return {
@@ -1104,15 +1104,15 @@ export const decisionQueries = {
 
 const ENUM = (v: string) => v.toUpperCase().replace(/-/g, '_');
 
-function refOut(r: DecisionRef) {
+function refOut(r: QuestionRef) {
   return { ref: 'ref' in r ? r.ref : null, node: 'node' in r ? r.node : null, spec: 'spec' in r ? r.spec : null };
 }
 
-function answerOut(a: DecisionAnswer) {
+function answerOut(a: QuestionAnswer) {
   return { ...a, via: ENUM(a.via), byUserId: a.by, recordedByUserId: a.recordedBy, source: a.source ? refOut(a.source) : null };
 }
 
-async function actorOut(ctx: Context, a: DecisionActor) {
+async function actorOut(ctx: Context, a: QuestionActor) {
   return {
     userId: a.userId, workerId: a.workerId, appId: a.appId,
     user: a.userId ? await loadCommentActor(ctx, 'user', a.userId) : null,
@@ -1151,22 +1151,22 @@ async function identityMergesOf(ctx: Context, payload: unknown) {
 const users = (ctx: Context, ids: readonly string[]) =>
   Promise.all(ids.map((id) => loadCommentActor(ctx, 'user', id))).then((refs) => refs.filter((r): r is CommentActorRef => r != null));
 
-export const decisionFieldResolvers = {
-  Decision: {
-    id: (v: DecisionView) => v.row.id,
-    urn: (v: DecisionView, _: unknown, ctx: Context) => resolveNodeUrnField(v.row, ctx),
-    portalUrl: async (v: DecisionView, _: unknown, ctx: Context) => portalUrlForUrn(await resolveNodeUrnField(v.row, ctx)),
-    code: (v: DecisionView) => v.shown?.code ?? v.row.loc.slice(v.row.loc.lastIndexOf(':') + 1),
-    n: (v: DecisionView) => v.shown?.n ?? v.row.seq ?? 0,
-    logId: (v: DecisionView) => v.shown?.logId ?? null,
-    title: (v: DecisionView) => v.shown?.title ?? v.row.name,
-    urgency: (v: DecisionView) => ENUM(v.shown?.urgency ?? 'normal'),
-    tier: (v: DecisionView) => ENUM(v.shown?.tier ?? 'signed'),
-    authorizes: (v: DecisionView) => v.shown?.authorizes ?? false,
-    archival: (v: DecisionView) => v.shown?.archival ?? false,
-    state: (v: DecisionView) => v.evaluation.state,
-    context: (v: DecisionView) => v.shown?.context ?? null,
-    parts: (v: DecisionView) => (v.shown?.parts ?? []).map((p) => ({
+export const questionFieldResolvers = {
+  Question: {
+    id: (v: QuestionView) => v.row.id,
+    urn: (v: QuestionView, _: unknown, ctx: Context) => resolveNodeUrnField(v.row, ctx),
+    portalUrl: async (v: QuestionView, _: unknown, ctx: Context) => portalUrlForUrn(await resolveNodeUrnField(v.row, ctx)),
+    code: (v: QuestionView) => v.shown?.code ?? v.row.loc.slice(v.row.loc.lastIndexOf(':') + 1),
+    n: (v: QuestionView) => v.shown?.n ?? v.row.seq ?? 0,
+    logId: (v: QuestionView) => v.shown?.logId ?? null,
+    title: (v: QuestionView) => v.shown?.title ?? v.row.name,
+    urgency: (v: QuestionView) => ENUM(v.shown?.urgency ?? 'normal'),
+    tier: (v: QuestionView) => ENUM(v.shown?.tier ?? 'signed'),
+    authorizes: (v: QuestionView) => v.shown?.authorizes ?? false,
+    archival: (v: QuestionView) => v.shown?.archival ?? false,
+    state: (v: QuestionView) => v.evaluation.state,
+    context: (v: QuestionView) => v.shown?.context ?? null,
+    parts: (v: QuestionView) => (v.shown?.parts ?? []).map((p) => ({
       ...p,
       citation: `${v.shown!.code}-${p.n}`,
       noRecommendationReason: p.noRecommendation?.reason ?? null,
@@ -1174,25 +1174,25 @@ export const decisionFieldResolvers = {
       answerHistory: p.answerHistory.map(answerOut),
       recommendation: p.recommendation ? { ...p.recommendation } : null,
     })),
-    blocks: (v: DecisionView) => (v.shown?.blocks ?? []).map(refOut),
-    sources: (v: DecisionView) => (v.shown?.sources ?? []).map(refOut),
-    followUps: (v: DecisionView) => (v.shown?.followUps ?? []).map(refOut),
-    deciderIds: (v: DecisionView) => v.shown?.deciders ?? [],
-    deciders: (v: DecisionView, _: unknown, ctx: Context) => users(ctx, v.shown?.deciders ?? []),
-    viewerIsDecider: async (v: DecisionView, _: unknown, ctx: Context) => !!v.shown && (await isDecider(ctx, v.shown)),
-    identityMerges: (v: DecisionView, _: unknown, ctx: Context) => identityMergesOf(ctx, v.shown),
-    askedBy: (v: DecisionView, _: unknown, ctx: Context) => actorOut(ctx, v.shown?.askedBy ?? { userId: null, workerId: null, appId: null }),
-    askedAt: (v: DecisionView) => v.shown?.askedAt ?? null,
-    answeredAt: (v: DecisionView) => {
+    blocks: (v: QuestionView) => (v.shown?.blocks ?? []).map(refOut),
+    sources: (v: QuestionView) => (v.shown?.sources ?? []).map(refOut),
+    followUps: (v: QuestionView) => (v.shown?.followUps ?? []).map(refOut),
+    deciderIds: (v: QuestionView) => v.shown?.deciders ?? [],
+    deciders: (v: QuestionView, _: unknown, ctx: Context) => users(ctx, v.shown?.deciders ?? []),
+    viewerIsDecider: async (v: QuestionView, _: unknown, ctx: Context) => !!v.shown && (await isDecider(ctx, v.shown)),
+    identityMerges: (v: QuestionView, _: unknown, ctx: Context) => identityMergesOf(ctx, v.shown),
+    askedBy: (v: QuestionView, _: unknown, ctx: Context) => actorOut(ctx, v.shown?.askedBy ?? { userId: null, workerId: null, appId: null }),
+    askedAt: (v: QuestionView) => v.shown?.askedAt ?? null,
+    answeredAt: (v: QuestionView) => {
       const parts = v.shown?.parts ?? [];
       if (parts.length === 0 || parts.some((p) => !p.answer)) return null;
       return parts.map((p) => p.answer!.at).sort().pop() ?? null;
     },
-    withdrawn: async (v: DecisionView, _: unknown, ctx: Context) => {
+    withdrawn: async (v: QuestionView, _: unknown, ctx: Context) => {
       const w = v.shown?.withdrawn;
       return w ? { at: w.at, reason: w.reason, by: await actorOut(ctx, w.by) } : null;
     },
-    evidence: async (v: DecisionView, _: unknown, ctx: Context) => {
+    evidence: async (v: QuestionView, _: unknown, ctx: Context) => {
       const record = approvalRecordOf(v.row);
       return {
         approval: record ? {
@@ -1205,25 +1205,25 @@ export const decisionFieldResolvers = {
         } : null,
       };
     },
-    revSeq: (v: DecisionView) => v.row.revSeq,
-    /** The node itself, under the ordinary read gate (the Decision was returned only after it). */
-    node: (v: DecisionView, _: unknown, ctx: Context) => ctx.db.node.findUnique({ where: { id: v.row.id } }),
+    revSeq: (v: QuestionView) => v.row.revSeq,
+    /** The node itself, under the ordinary read gate (the Question was returned only after it). */
+    node: (v: QuestionView, _: unknown, ctx: Context) => ctx.db.node.findUnique({ where: { id: v.row.id } }),
   },
-  DecisionLog: {
-    id: (v: DecisionLogView) => v.row.id,
-    urn: (v: DecisionLogView, _: unknown, ctx: Context) => resolveNodeUrnField(v.row, ctx),
-    portalUrl: async (v: DecisionLogView, _: unknown, ctx: Context) => portalUrlForUrn(await resolveNodeUrnField(v.row, ctx)),
-    loc: (v: DecisionLogView) => v.row.loc,
-    name: (v: DecisionLogView) => v.row.name,
-    prefix: (v: DecisionLogView) => v.data.prefix,
-    lastCode: (v: DecisionLogView) => v.data.lastCode,
-    revSeq: (v: DecisionLogView) => v.row.revSeq,
-    defaultDeciderIds: (v: DecisionLogView) => v.data.defaultDeciders,
-    eligibleDeciderIds: (v: DecisionLogView) => v.data.eligibleDeciders,
-    defaultDeciders: (v: DecisionLogView, _: unknown, ctx: Context) => users(ctx, v.data.defaultDeciders),
-    eligibleDeciders: (v: DecisionLogView, _: unknown, ctx: Context) => users(ctx, v.data.eligibleDeciders),
-    identityMerges: (v: DecisionLogView, _: unknown, ctx: Context) => identityMergesOf(ctx, v.data),
-    purges: (v: DecisionLogView, _: unknown, ctx: Context) => Promise.all(v.data.purges.map(async (p) => ({
+  QuestionLog: {
+    id: (v: QuestionLogView) => v.row.id,
+    urn: (v: QuestionLogView, _: unknown, ctx: Context) => resolveNodeUrnField(v.row, ctx),
+    portalUrl: async (v: QuestionLogView, _: unknown, ctx: Context) => portalUrlForUrn(await resolveNodeUrnField(v.row, ctx)),
+    loc: (v: QuestionLogView) => v.row.loc,
+    name: (v: QuestionLogView) => v.row.name,
+    prefix: (v: QuestionLogView) => v.data.prefix,
+    lastCode: (v: QuestionLogView) => v.data.lastCode,
+    revSeq: (v: QuestionLogView) => v.row.revSeq,
+    defaultDeciderIds: (v: QuestionLogView) => v.data.defaultDeciders,
+    eligibleDeciderIds: (v: QuestionLogView) => v.data.eligibleDeciders,
+    defaultDeciders: (v: QuestionLogView, _: unknown, ctx: Context) => users(ctx, v.data.defaultDeciders),
+    eligibleDeciders: (v: QuestionLogView, _: unknown, ctx: Context) => users(ctx, v.data.eligibleDeciders),
+    identityMerges: (v: QuestionLogView, _: unknown, ctx: Context) => identityMergesOf(ctx, v.data),
+    purges: (v: QuestionLogView, _: unknown, ctx: Context) => Promise.all(v.data.purges.map(async (p) => ({
       ...p, byUserId: p.by, by: await loadCommentActor(ctx, 'user', p.by),
     }))),
   },
