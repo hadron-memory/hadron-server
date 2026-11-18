@@ -111,15 +111,22 @@ describe('#4037 detour and return', () => {
   it.each(['concurrent', 'serialized'] as const)('D6: two %s completions on separate connections return the detour once', async (schedule) => {
     await edge('conversations:recent:s1', 'conversations:anger', { timing: 'always', behavior: 'detour' });
     const chat = await start(); await respond(chat.chatId);
-    if (schedule === 'serialized') {
-      await respond(chat.chatId, { goal_reached: true });
-      await respond(chat.chatId, { goal_reached: true }, other as never);
-    } else {
-      await Promise.all([respond(chat.chatId, { goal_reached: true }), respond(chat.chatId, { goal_reached: true }, other as never)]);
-    }
+    const completions = schedule === 'serialized'
+      ? [await respond(chat.chatId, { goal_reached: true }), await respond(chat.chatId, { goal_reached: true }, other as never)]
+      : await Promise.all([respond(chat.chatId, { goal_reached: true }), respond(chat.chatId, { goal_reached: true }, other as never)]);
     const e = await state(chat.chatId);
     expect(e.routeHistory.filter((r: any) => r.trigger?.type === 'DETOUR_RETURN')).toHaveLength(1);
     expect(e.goalStack.filter((g: any) => g.detourTo && g.status === 'COMPLETED')).toHaveLength(1);
-    expect(e).toMatchObject({ conversationName: 'recent' });
+    expect(completions.filter((r) => r.detourReturned)).toHaveLength(1);
+    // #4256: Promise.all does not guarantee overlapping turn snapshots. A
+    // serialized second turn lawfully fires the still-active always edge (Q3).
+    if (completions.some((r) => r.routingSkipped)) {
+      expect(e).toMatchObject({ conversationName: 'recent', stageName: 's1' });
+      expect(e.goalStack.filter((g: any) => g.detourTo && g.status === 'ACTIVE')).toHaveLength(0);
+    } else {
+      expect(e).toMatchObject({ conversationName: 'anger', stageName: 'hot' });
+      expect(e.routeHistory.at(-1)).toMatchObject({ action: 'ENTER', trigger: { type: 'DETOUR_EDGE' } });
+      expect(e.goalStack.filter((g: any) => g.detourTo && g.status === 'ACTIVE')).toHaveLength(1);
+    }
   });
 });
