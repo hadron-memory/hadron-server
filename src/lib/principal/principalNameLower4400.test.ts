@@ -83,6 +83,15 @@ describe('#4400 the migration refuses on data instead of guessing', () => {
     expect(await db.principal.count({ where: { name: 'Legacy.Example' } })).toBe(0);
   });
 
+  it('adds the same CHECK the test database gets from post-push.sql', () => {
+    // The test database is built from prisma/post-push.sql, so the pins above judge that copy. A deployed database
+    // gets the constraint from this migration: pin that the two say the same thing.
+    const postPush = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
+    const expr = (text: string) => /ADD CONSTRAINT "?chk_principals_name_lower"?\s+CHECK \(([^;]+)\);/.exec(text)?.[1].replace(/\s+/g, ' ');
+    expect(expr(sql)).toBe('name = lower(name)');
+    expect(expr(postPush)).toBe(expr(sql));
+  });
+
   it('passes on a pool that is already lower case', async () => {
     await mintPrincipal(db, { kind: 'org', name: 'Clean.Example' });
     await expect(db.$executeRawUnsafe(preflight)).resolves.toBeDefined();
