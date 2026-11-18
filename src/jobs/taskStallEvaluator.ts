@@ -40,6 +40,7 @@ import { sweepSessionEndRequests } from '../lib/hostOperations/sessionEnd.js';
 import { sweepUnreportedHostOperations } from '../lib/hostOperations/settle.js';
 import { anchorNow } from '../lib/stopSignals/state.js';
 import { sweepContextResets } from '../lib/contextReset/contextReset.js';
+import { recordStallPass } from '../lib/agentTasks/stallGap.js';
 import { evaluateDarkWorkers } from '../lib/agentTasks/darkWorker.js';
 import { evaluateCoordinatorCadence } from '../lib/agentTasks/coordinatorCadence.js';
 import { evaluateStaleSweeps, postPendingSweepSummaries } from '../lib/agentTasks/sweepRuns.js';
@@ -124,9 +125,17 @@ export async function taskStallTick(db: PrismaClient, now = new Date()): Promise
 }
 
 /**
- * #3775 A (cor:agt:050:32): the production pass. STUB for the red pins; the gap bookkeeping lands in the next commit.
+ * #3775 A (cor:agt:050:32): the production pass. Records that a pass starts at `now` (a gap of more than 5 minutes since
+ * the previous recorded pass joins its end to the silence floors) and then runs {@link taskStallTick}. A failure to
+ * record is logged and the tick still runs: a missed record can only under-floor, never raise an alarm that was not due.
+ * `taskStallTick` itself keeps no gap bookkeeping, so tests of the other stall rules tick any clock they like.
  */
 export async function taskStallPass(db: PrismaClient, now = new Date()): Promise<TaskStallTickResult> {
+  try {
+    await recordStallPass(db, now);
+  } catch (err) {
+    console.error('[task-stall] recording the pass failed:', err);
+  }
   return taskStallTick(db, now);
 }
 
@@ -138,7 +147,7 @@ export function startTaskStallEvaluatorLoop(db: PrismaClient, opts: { intervalMs
     // A pass slower than the interval is skipped rather than stacked.
     if (running) return;
     running = true;
-    taskStallTick(db)
+    taskStallPass(db)
       .catch((err) => console.error('[task-stall] tick error:', err))
       .finally(() => {
         running = false;

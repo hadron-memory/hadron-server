@@ -8,6 +8,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
+import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { taskStallPass } from '../../jobs/taskStallEvaluator.js';
 import { recordStallPass } from './stallGap.js';
@@ -47,13 +48,17 @@ const toAnne = (assignedAt: string, extra: TaskData = {}) =>
   task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at(assignedAt), createdAt: at(assignedAt), ...extra });
 const startedByAnne = (extra: TaskData = {}) => toAnne('09:30', { status: 'started', startedAt: at('10:00'), ...extra });
 const drive = (t: string) =>
-  db.session.create({ data: { appId: app.id, workerId: anne.id, agentId, startedAt: at(t), updatedAt: at(t) } });
+  db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at(t), updatedAt: at(t) } });
 const pass = (t: string) => taskStallPass(db, at(t));
+/** Passes every 5 minutes (the threshold itself is jitter, cor:agt:050:32) from `from` to `to`, both included. */
+const passes = async (from: string, to: string) => {
+  for (let t = at(from).getTime(); t <= at(to).getTime(); t += 5 * 60_000) await taskStallPass(db, new Date(t));
+};
 const alarms = () => db.agentTeamEvent.findMany({ where: { severity: 'alarm', taskId: { not: null } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
 const state = () => db.stallEvaluatorState.findUnique({ where: { id: 'platform' } });
 const queued = async () => {
-  const t = await task({ ownerWorkerId: ada.id, createdAt: at('09:00') });
-  await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type: 'assignment.queued', createdAt: at('09:00') } });
+  const t = await task({ ownerWorkerId: ada.id, createdAt: at('10:00') });
+  await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type: 'assignment.queued', createdAt: at('10:00') } });
   return t;
 };
 
@@ -61,12 +66,12 @@ describe('#3775 A — a gap in the evaluator does not count as silence', () => {
   it('1. no-progress: a window that began before a 2h gap raises nothing in the first pass after it, then one window after the gap end', async () => {
     await startedByAnne();
     await drive('10:00');
-    await pass('10:30'); // the last pass before the outage; the no-progress window (60 min) began at 10:00
+    await passes('10:05', '10:30'); // the last passes before the outage; the no-progress window (60 min) began at 10:00
     await pass('12:30'); // first pass after a 2h gap: without the rule the window is long overdue
     expect(await alarms()).toEqual([]);
-    await pass('13:29');
+    await passes('12:35', '13:25');
     expect(await alarms()).toEqual([]);
-    await pass('13:30');
+    await passes('13:30', '13:30');
     expect(await alarms()).toEqual([expect.objectContaining({ type: 'stall.no-progress', episodeStart: at('12:30') })]);
   });
 
@@ -74,23 +79,27 @@ describe('#3775 A — a gap in the evaluator does not count as silence', () => {
     const pending = await toAnne('10:00'); // not-started, 15 min
     const queuedTask = await queued(); // unassignable, 15 min
     const parent = await startedByAnne();
-    await drive('12:25'); // keeps the parent's no-progress quiet; the child below drives owner-unreactive
+    await drive('10:00'); // before the child ends (10:10): Anne has not reacted since; the parent's own no-progress window also began before the gap
     await task({ parentTaskId: parent.id, ownerWorkerId: anne.id, assigneeWorkerId: ada.id, assignedAt: at('10:00'), status: 'finished', startedAt: at('10:00'), finishedAt: at('10:10'), resultOutcome: 'succeeded', createdAt: at('10:00') });
-    await pass('10:05');
+    await passes('10:05', '10:05');
     await pass('12:30'); // 2h25m gap
     expect((await alarms()).filter((a) => a.taskId === pending.id || a.taskId === queuedTask.id)).toEqual([]);
     expect((await alarms()).filter((a) => a.type === 'stall.owner-unreactive')).toEqual([]);
+    await passes('12:35', '12:40');
     await pass('12:44');
     expect(await alarms()).toEqual([]);
-    await pass('12:45');
-    const types = (await alarms()).map((a) => a.type).sort();
-    expect(types).toEqual(['assignment.unassignable', 'stall.not-started', 'stall.owner-unreactive'].sort());
+    await pass('12:45'); // not-started: 15 min after the gap end
+    expect((await alarms()).map((a) => a.type)).toEqual(['stall.not-started']);
+    await passes('12:50', '12:55'); // owner-unreactive: 20 min after the gap end
+    expect((await alarms()).map((a) => a.type).sort()).toEqual(['stall.not-started', 'stall.owner-unreactive']);
+    await passes('13:00', '13:00'); // unassignable: 30 min after the gap end
+    expect((await alarms()).map((a) => a.type).sort()).toEqual(['assignment.unassignable', 'stall.not-started', 'stall.owner-unreactive']);
   });
 
   it('3. a gap under the threshold (4 minutes) moves no window', async () => {
     await startedByAnne();
     await drive('10:00');
-    await pass('10:55');
+    await passes('10:00', '10:55');
     await pass('10:59'); // 4 minutes
     await pass('11:00');
     expect(await alarms()).toEqual([expect.objectContaining({ type: 'stall.no-progress', episodeStart: at('10:00') })]);
@@ -109,7 +118,7 @@ describe('#3775 A — a gap in the evaluator does not count as silence', () => {
     await startedByAnne({ finishBy: at('11:00') });
     await pass('10:30');
     await pass('12:30');
-    expect(await alarms()).toEqual([expect.objectContaining({ type: 'stall.finish-by' })]);
+    expect(await alarms()).toEqual([expect.objectContaining({ type: 'stall.finish-by', episodeStart: at('11:00') })]); // the deadline's own episode, not the gap end
   });
 
   it('5. an alarm raised before the gap is still running after it, episode start unchanged', async () => {
@@ -129,10 +138,10 @@ describe('#3775 A — a gap in the evaluator does not count as silence', () => {
 
   it('6. two concurrent passes after a gap record one gap end', async () => {
     await recordStallPass(db, at('10:00'));
-    const results = await Promise.all([recordStallPass(db, at('12:00')), recordStallPass(db, at('12:00:01'))]);
+    const results = await Promise.all([recordStallPass(db, at('12:00')), recordStallPass(db, new Date(at('12:00').getTime() + 1000))]);
     expect(results.filter((r) => r.gapEnded).length).toBe(1);
     const row = await state();
-    expect([at('12:00').getTime(), at('12:00:01').getTime()]).toContain(row!.lastGapEndedAt!.getTime());
+    expect([at('12:00').getTime(), at('12:00').getTime() + 1000]).toContain(row!.lastGapEndedAt!.getTime());
     expect(await db.stallEvaluatorState.count()).toBe(1);
   });
 
