@@ -47,7 +47,11 @@ export async function withRosterAppRead<T>(ctx: Context, appRef: string, project
       // query/lock or test timeouts, and the read semantics are unchanged (cor:agt:050:22).
       }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: TEAM_READ_TX_TIMEOUT_MS, maxWait: TEAM_READ_TX_MAX_WAIT_MS });
     } catch (error) {
-      if (isPrismaBusyExhaustion(error)) throw new TeamReadBusyError();
+      // #4455: the original driver error rides along on .cause (never crossed to the client;
+      // .originalError would unwrap the refusal back to the foreign Prisma error) so the
+      // tx-timeout / maxWait / pool-starvation arms stay distinguishable after the typed
+      // conversion; the non-busy error rethrows untouched.
+      if (isPrismaBusyExhaustion(error)) throw new TeamReadBusyError(error);
       throw error;
     }
 }

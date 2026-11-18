@@ -22,7 +22,8 @@ import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { withRosterAppRead } from './resolvers.agentTaskMatching.js';
-import { TeamReadBusyError } from '../../../lib/agentTasks/teamReadBudget.js';
+import { TeamReadBusyError, isPrismaBusyExhaustion } from '../../../lib/agentTasks/teamReadBudget.js';
+import { Prisma } from '../../../generated/prisma/index.js';
 import { formatGraphQLError, isExpectedClientError, isTrustedRefusal } from '../formatError.js';
 import { INTERNAL_ERROR_CODE } from '../../../lib/internalFault.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
@@ -100,22 +101,75 @@ describe('#4455: the bounded team-read budget', () => {
   }, 25_000);
 });
 
-describe('#4455: the refusal reaches the wire typed', () => {
-  it('formatError maps TeamReadBusyError to its code with retryable and the budget, and stays reportable', () => {
-    const err = new TeamReadBusyError();
+describe('#4455: which driver errors convert, and what the refusal carries', () => {
+  // Real Prisma shapes, not plain Errors: the classifier is an instanceof + code test, and the
+  // #4455 refusal must never swallow a driver error it does not own (blind review F3).
+  const known = (message: string, code: string) =>
+    new Prisma.PrismaClientKnownRequestError(message, { code, clientVersion: 'test' });
+
+  it('isPrismaBusyExhaustion converts exactly P2028 and P2024 — dropping either arm fails this pin', () => {
+    expect(isPrismaBusyExhaustion(known('Transaction already closed during query execution.', 'P2028'))).toBe(true);
+    expect(isPrismaBusyExhaustion(known('Timed out fetching a new connection from the connection pool.', 'P2024'))).toBe(true);
+    // Not busy: another known code, a plain Error wearing the busy prose, a GraphQLError.
+    expect(isPrismaBusyExhaustion(known('The table does not exist.', 'P2021'))).toBe(false);
+    expect(isPrismaBusyExhaustion(new Error('Transaction already closed during query execution.'))).toBe(false);
+    expect(isPrismaBusyExhaustion(new GraphQLError('x'))).toBe(false);
+  });
+
+  it('the refusal preserves the original driver error and names its arm (tx budget vs pool wait)', () => {
+    const budget = new TeamReadBusyError(known('Transaction already closed during query execution.', 'P2028'));
+    expect(budget.extensions).toMatchObject({ code: 'TEAM_READ_BUSY', retryable: true, budgetMs: 5_000, reason: 'TRANSACTION_BUDGET' });
+    expect(budget.cause).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    // Prisma reuses P2028 for the expired maxWait; its message prefix is the only discriminator.
+    const poolMaxWait = new TeamReadBusyError(known('Unable to start a transaction: the pool was full.', 'P2028'));
+    expect(poolMaxWait.extensions.reason).toBe('POOL_WAIT');
+    const poolTimeout = new TeamReadBusyError(known('Timed out fetching a new connection from the connection pool.', 'P2024'));
+    expect(poolTimeout.extensions.reason).toBe('POOL_WAIT');
+  });
+
+  it('a NON-busy driver error from the read rethrows unconverted (the typed refusal is only for busy exhaustion)', async () => {
+    const foreign = known('An operation failed because it depends on one or more records that were required but not found.', 'P2025');
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async () => {
+      throw foreign;
+    }) as unknown as never);
+    try {
+      await expect(withRosterAppRead(ctx(mia.id), app.id, async () => 'projected')).rejects.toBe(foreign);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('a busy P2028 raised by the $transaction call itself converts, with its arm named', async () => {
+    const holder = known('Transaction already closed during query execution.', 'P2028');
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async () => {
+      throw holder;
+    }) as unknown as never);
+    try {
+      await expect(withRosterAppRead(ctx(mia.id), app.id, async () => 'projected')).rejects.toMatchObject({
+        extensions: { code: 'TEAM_READ_BUSY', reason: 'TRANSACTION_BUDGET' },
+        cause: holder,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('formatError maps TeamReadBusyError to its code with retryable, budget and arm, and stays reportable', () => {
+    const err = new TeamReadBusyError(known('Transaction already closed during query execution.', 'P2028'));
     expect(isTrustedRefusal(err)).toBe(true);
     // Apollo wraps what the resolver threw; the mapping must surface the domain message and extensions over the wrap.
     const wrapped = new GraphQLError('Apollo wrap', { originalError: err });
     const formatted = formatGraphQLError({ message: 'Apollo wrap', extensions: { code: INTERNAL_ERROR_CODE } }, wrapped);
     expect(formatted.message).toBe(err.message);
-    expect(formatted.extensions).toMatchObject({ code: 'TEAM_READ_BUSY', retryable: true, budgetMs: 5_000 });
+    expect(formatted.extensions).toMatchObject({ code: 'TEAM_READ_BUSY', retryable: true, budgetMs: 5_000, reason: 'TRANSACTION_BUDGET' });
+    // The original driver error never crosses to the client — only the typed extensions do.
+    expect(JSON.stringify(formatted)).not.toContain('Transaction already closed');
     // NOT silenced: the busy refusal is the availability signal — the #4380 incident was found by counting these.
     expect(isExpectedClientError(err)).toBe(false);
   });
 
-  it('a raw P2028 from the store is NOT the typed refusal (only withRosterAppRead converts its own)', () => {
-    const raw = new (Error.prototype.constructor as unknown as new (m: string) => Error)('x');
-    expect(isTrustedRefusal(raw)).toBe(false);
+  it('a raw driver P2028 thrown OUTSIDE withRosterAppRead is NOT the typed refusal (only the wrapper converts)', () => {
+    expect(isTrustedRefusal(known('Transaction already closed during query execution.', 'P2028'))).toBe(false);
   });
 });
 
