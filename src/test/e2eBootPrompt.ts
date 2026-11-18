@@ -18,6 +18,10 @@ import { workerNames } from './e2eWorkerNames.js';
 
 export const E2E_STOCK_ROLES = ['coordinator', 'qa-engineer'] as const;
 
+/** #3160: the one conversation the seed gives the stock Agents, so stack QA can start a chat with `coordinator`. */
+export const E2E_CONVERSATION = 'welcome';
+export const E2E_CONVERSATION_PROMPT = 'Greet the tester and say this is a disposable E2E fixture.';
+
 export const E2E_BOOT_PROMPT = 'You are {{worker.name}}, the synthetic {{worker.role}} fixture.';
 
 export interface E2eBootPromptInput {
@@ -92,4 +96,14 @@ export async function seedE2eStockAgents(db: PrismaClient, o: {
     await seedE2eBootPrompt(db, { agentId: o.id(`${o.org}:${role}`), memoryId: o.systemMemoryId, slot: role, approvedAt: o.approvedAt,
       idFor: part => o.id(`${o.org}:${role}:boot-${part}`) });
   }
+  // #3160: one ordinary top-level conversation (cor:cht:020:01 step 1: neither setup nor fallback) with one stage, in the
+  // shared system memory, so an unnamed `startChat` on the coordinator opens it instead of AGENT_HAS_NO_CONVERSATIONS.
+  // The root `conversations` node, the conversation (data.stageOrder) and its one stage carrying the prompt.
+  const conv = async (loc: string, data: object | null, content: string | null) => {
+    await db.node.create({ data: { id: o.id(`${o.org}:${loc}`), memoryId: o.systemMemoryId, loc, name: loc.split(':').pop()!,
+      nodeType: 'system', data: data as never, content, tags: ['e2e'] } });
+  };
+  await conv('conversations', null, null);
+  await conv(`conversations:${E2E_CONVERSATION}`, { stageOrder: ['greet'] }, null);
+  await conv(`conversations:${E2E_CONVERSATION}:greet`, {}, E2E_CONVERSATION_PROMPT);
 }

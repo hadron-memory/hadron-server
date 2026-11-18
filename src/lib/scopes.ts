@@ -340,7 +340,7 @@ export async function resolveScopeMemoryRefs(ctx: Context, memoryRefs: string[])
     } catch {
       throw badInput(`No match for memoryRef "${ref}".`);
     }
-    if (accessible !== null && !accessible.includes(id)) {
+    if (!accessible.includes(id)) {
       throw badInput(`No match for memoryRef "${ref}".`);
     }
     if (!ids.includes(id)) ids.push(id);
@@ -428,7 +428,7 @@ export interface ScopeExplanation {
 export async function explainScope(ctx: Context, scopeId: string, loc?: string | null): Promise<ScopeExplanation> {
   const ordered = await scopeMemoryIds(ctx.db, scopeId);
   const accessible = await getAccessibleMemoryIds(ctx);
-  const { kept, droppedIds } = narrowToAccessible(ordered, accessible === null ? 'unrestricted' : new Set(accessible));
+  const { kept, droppedIds } = narrowToAccessible(ordered, new Set(accessible));
   let winnerMemoryId: string | null = null;
   if (loc && kept.length) {
     const holders = await ctx.db.node.findMany({
@@ -641,7 +641,7 @@ async function appView(ctx: Context, appId: string, source: SearchScopeResolutio
   const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null }, select: { urn: true } });
   const listed = await appScopeMemoryIds(ctx.db, appId);
   const accessible = await getAccessibleMemoryIds(ctx);
-  const { kept, droppedIds } = narrowToAccessible(listed, accessible === null ? 'unrestricted' : new Set(accessible));
+  const { kept, droppedIds } = narrowToAccessible(listed, new Set(accessible));
   return {
     kind: 'app',
     source,
@@ -671,7 +671,7 @@ async function globalView(
             where: {
               deletedAt: null,
               class: { not: 'system' }, // the broad-search default, kept on the materialised path
-              ...(accessible === null ? {} : { id: { in: accessible } }),
+              id: { in: accessible },
               OR: [{ ownerUserId: ctx.userId }, { class: { in: ['personal', 'private'] }, userId: ctx.userId }],
             },
             orderBy: { createdAt: 'asc' },
@@ -715,7 +715,7 @@ async function globalView(
         deletedAt: null,
         class: { not: 'system' }, // the broad-search default, kept on the materialised path
         organizationId: activeOrg.organizationId,
-        ...(accessible === null ? {} : { id: { in: accessible } }),
+        id: { in: accessible },
       },
       orderBy: { createdAt: 'asc' },
       select: { id: true },
@@ -887,7 +887,7 @@ export async function resolveRunScope(
   const snap = parseRunScopeSnapshot(run.scopeSnapshot);
   if (!snap) return appView(ctx, run.appId, 'trigger');
   const accessible = await getAccessibleMemoryIds(ctx);
-  const { kept, droppedIds } = narrowToAccessible(snap.memoryIds, accessible === null ? 'unrestricted' : new Set(accessible));
+  const { kept, droppedIds } = narrowToAccessible(snap.memoryIds, new Set(accessible));
   const ownerUrn =
     snap.ownerType === 'APP'
       ? ((await ctx.db.app.findUnique({ where: { id: snap.ownerId }, select: { urn: true } }))?.urn ?? null)

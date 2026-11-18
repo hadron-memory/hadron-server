@@ -14,6 +14,8 @@ import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js',()=>({writeNodeToGit:vi.fn().mockResolvedValue(undefined)}));
 const mutation=resolvers.Mutation as any;
+/** An explicit guard in place of a `!`: a null makes the test fail with a named reason instead of a later opaque error. */
+function present<T>(value:T|null|undefined,what:string):T{ if(value===null||value===undefined) throw new Error(`expected ${what} to exist`); return value; }
 let ownerId:string, outsiderId:string, orgId:string, agentId:string, appId:string, installMemoryId:string;
 const context=(userId=ownerId):Context=>({db,userId,roles:['READER']});
 beforeEach(async()=>{
@@ -97,7 +99,7 @@ it('required and explicitly requested optional dependencies remain rejected befo
 
 it('system-definition point and participant folds agree for current, foreign and revoked principals',async()=>{
  const agent=await db.agent.findUniqueOrThrow({where:{id:agentId},select:{systemMemoryId:true}});
- const id=agent.systemMemoryId!;
+ const id=present(agent.systemMemoryId,'the Agent system memory');
  expect(await canReadMemory(db,context(),id)).toBe(true);
  expect(await canReadMemory(db,context(outsiderId),id)).toBe(false);
  expect((await participantSystemMemoryFolds(db,context(outsiderId))).some(fold=>fold.map.has(id))).toBe(false);
@@ -119,7 +121,7 @@ it('the owner own-Agent control needs no subscription',async()=>{
 });
 
 it('session App-key system-memory provenance still requires the individual current membership',async()=>{
- const id=(await db.agent.findUniqueOrThrow({where:{id:agentId},select:{systemMemoryId:true}})).systemMemoryId!;
+ const id=present((await db.agent.findUniqueOrThrow({where:{id:agentId},select:{systemMemoryId:true}})).systemMemoryId,'the Agent system memory');
  const own=await db.session.create({data:{id:generateId(),appId,agentId,userId:ownerId}});
  const other=await db.session.create({data:{id:generateId(),appId,agentId,userId:outsiderId}});
  expect(await sessionScopedMemoryIds(db,appId,own.id)).toContain(id);
@@ -160,7 +162,7 @@ it('a recorded worker briefing stops returning org text when the owner membershi
 });
 
 async function seedChatConversation() {
- const memoryId=(await db.agent.findUniqueOrThrow({where:{id:agentId}})).systemMemoryId!;
+ const memoryId=present((await db.agent.findUniqueOrThrow({where:{id:agentId}})).systemMemoryId,'the Agent system memory');
  const nodes=[
   {loc:'conversations',name:'conversations'},
   {loc:'conversations:research',name:'research',data:{stageOrder:['scope'],isSetup:false}},
@@ -184,9 +186,23 @@ it('a later chat turn cannot re-serve org text after the individual participant 
  const caller={...context(outsiderId),appId};
  const started=await mutation.startChat({}, {agentId,scope:'private'},caller);
  expect(started.systemMessage).toContain('PRIVATE ORG CHAT SENTINEL');
- // Use a legal user-owned holding memory so its independent write right survives org removal.
+ // Keep the licensed personal App and its tenant owner (ownerUserId); userId remains
+ // outsiderId, the personal memory's strict owner, whose write right survives org removal.
+ // This is createMemoryInApp's personal-App shape; App-less homes require managers (#4112).
  const chat=await chatNodeByLocOrThrow(db,started.chatId);
- await db.memory.update({where:{id:chat.memoryId},data:{organizationId:null,ownerUserId:outsiderId,appId:null}});
+ await db.memory.update({where:{id:chat.memoryId},data:{organizationId:null,ownerUserId:ownerId}});
+ // Pin the shape against the OTHER rows, not against the literals just written: the chat home must be the App's own
+ // personal home (tenant = the App's owner, App = this App, strict owner = the participant), and the participant must be a
+ // CURRENT member of the Agent's organisation at this point (ruling 0235: reach needs current membership while the licence holds).
+ const home=await db.memory.findUniqueOrThrow({where:{id:chat.memoryId}});
+ const app=await db.app.findUniqueOrThrow({where:{id:appId}});
+ expect(home.class).toBe('personal');
+ expect(home.organizationId).toBeNull();
+ expect(home.appId).toBe(app.id);
+ expect(home.ownerUserId).toBe(app.ownerUserId);
+ expect(home.userId).toBe(outsiderId);
+ expect(home.ownerUserId).not.toBe(home.userId);
+ expect(await db.orgMember.findFirst({where:{organizationId:orgId,userId:outsiderId,deletedAt:null}})).not.toBeNull();
  expect((await mutation.sendChatMessage({}, {chatId:started.chatId,userMessage:'Member control'},caller)).systemMessage).toContain('PRIVATE ORG CHAT SENTINEL');
  await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:outsiderId}},data:{deletedAt:new Date()}});
  await expect(mutation.sendChatMessage({}, {chatId:started.chatId,userMessage:'Continue'},caller))
@@ -276,7 +292,14 @@ it('a refused bind conceals the current name of an unreadable retained Agent',as
  expect(await db.session.count({where:{workerId:worker.id}})).toBe(0);
  expect(await db.servedPrompt.count({where:{workerId:worker.id}})).toBe(0);
 });
+// #3653 / cor:agt:040:10 (ruling 0235): serving checks the owner's licence, so while it holds a userless caller passes the
+// gate and stops at the target memory with no text. Once it lapses it is refused as before. A run with this shape is
+// synthetic: mintAppRun refuses a personal App.
 for(const clientId of ['app-key','run:synthetic1148']) it(`userless ${clientId} gains no personal org chat text`,async()=>{
+ await seedChatConversation();
+ await expect(mutation.startChat({}, {agentId,scope:'private'},{db,appId,clientId,roles:[]}))
+  .rejects.toThrow('No target memory available for this chat');
+ await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{deletedAt:new Date()}});
  await expect(mutation.startChat({}, {agentId,scope:'private'},{db,appId,clientId,roles:[]}))
   .rejects.toMatchObject({code:'AGENT_NOT_FOUND'});
 });

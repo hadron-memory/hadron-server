@@ -8,10 +8,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 import {
   hashUserApiKey,
   USER_API_KEY_PREFIX,
@@ -22,16 +22,14 @@ let baseUrl: string;
 let userId: string;
 
 beforeAll(async () => {
-  const app = await createServer();
+  const app = await createServerOnCleanDb();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 
 afterAll(async () => {
-  await new Promise<void>((resolve, reject) => {
-    server.close((err) => (err ? reject(err) : resolve()));
-  });
+  await closeServerIfStarted(server);
 });
 
 beforeEach(async () => {

@@ -51,7 +51,19 @@ import {
   refuseLegacyBaseUrl,
   type AiApiStyle,
 } from '../../lib/aiEndpoint.js';
-import { assertModelBuildable, generateText, LlmInvocationError, type KnobReport, type LlmRequest, type LlmResult } from '../../lib/llm/index.js';
+import {
+  assertModelBuildable,
+  generateChatProbe,
+  generateText,
+  LlmInvocationError,
+  providerSupportsTools,
+  type ChatProbeResult,
+  type KnobReport,
+  type LlmRequest,
+  type LlmResult,
+} from '../../lib/llm/index.js';
+import { chatToolChoiceFor, RESPOND_ONCE_INSTRUCTION, sdkToolChoiceFor } from '../../lib/llm/chatToolChoice.js';
+import { respondToolDefinition } from '../../api/graphql/schema/resolvers.helpers.js';
 import { recordLlmUsage } from '../../lib/metering/index.js';
 import { decryptToken, encryptToken } from '../../lib/tokenCrypto.js';
 import { defaultQuotaLimit, reserveQuota, settleReservation } from '../../jobs/appRuns.js';
@@ -102,7 +114,22 @@ export interface AiConfigTestResult {
    * call's adapter warnings are unknown, so its knobs cannot be reported truthfully.
    */
   knobs: KnobReport[];
+  /**
+   * #4005: the chat probe's outcome. Null unless the caller asked for it
+   * (`chatProbe: true`); a closed status and nothing else, so no key, model
+   * text or provider text can ride it.
+   */
+  chat: { status: ChatProbeStatus } | null;
 }
+
+export type ChatProbeStatus =
+  | 'PASS'
+  | 'FAIL_TEXT_ONLY'
+  | 'FAIL_OTHER_TOOL'
+  | 'FAIL_MULTIPLE_CALLS'
+  | 'FAIL_MALFORMED'
+  | 'FAIL_PROVIDER_UNAVAILABLE'
+  | 'UNSUPPORTED_PROVIDER';
 
 /** The fixed probe: a one-word answer, so a test costs a few dozen tokens. */
 export const AI_CONFIG_TEST_REQUEST: LlmRequest = {
@@ -120,6 +147,75 @@ export const AI_CONFIG_TEST_REQUEST: LlmRequest = {
  * own, not part of the config being tested.
  */
 export const AI_CONFIG_TEST_PROBE_MAX_TOKENS = 16;
+
+/**
+ * #4005: the chat probe's own output cap. 64 holds a minimal valid respond
+ * call (a string message plus the required fields) with formatting margin;
+ * the encoded fixtures prove the request, not a provider's token adequacy.
+ * Applied to an override's maxTokens exactly as the run probe's cap is.
+ */
+export const AI_CONFIG_CHAT_PROBE_MAX_TOKENS = 64;
+
+/** The chat probe's fixed user turn. */
+const CHAT_PROBE_PROMPT = 'Say hello.';
+
+/**
+ * #4028: characters per token assumed when sizing the chat probe's reservation from its ENCODED request. Three is
+ * deliberately below the usual ~4 for English prose: JSON schema text (braces, quotes, short keys) tokenizes worse,
+ * and over-reserving only holds back quota that settles to the real count, while under-reserving lets a probe spend
+ * past what it held.
+ */
+export const AI_CONFIG_CHAT_PROBE_CHARS_PER_TOKEN = 3;
+
+/**
+ * #4028: the platform-funded reservation base for the chat probe: an upper estimate of its input tokens from what is
+ * actually sent (the user turn, the optional system line, and every tool's name, description and parameter schema, wrapped
+ * as the widest wire shape (the OpenAI function envelope) wraps it), plus the same fixed margin the run probe holds for provider framing. Derived from the request, so a respond
+ * tool that grows is covered without anyone re-measuring a constant. The reservation is this base plus the output cap
+ * (the finding `ai-config-probe-cap-and-reservation-must-agree`); the cap itself is unchanged.
+ */
+export function chatProbeReserveBase(
+  req: { prompt: string; system?: string },
+  tools: ReadonlyArray<{ name: string; description: string; parameters: unknown }>,
+): number {
+  const encoded =
+    req.prompt.length +
+    (req.system?.length ?? 0) +
+    JSON.stringify(
+      tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } })),
+    ).length;
+  return Math.ceil(encoded / AI_CONFIG_CHAT_PROBE_CHARS_PER_TOKEN) + AI_CONFIG_TEST_TOKEN_RESERVE;
+}
+
+/**
+ * Judge one chat-probe call against the chat turn's own respond schema:
+ * exactly ONE respond call carrying a string `message` and every required
+ * field of the right type passes, whichever tool choice was sent. An empty
+ * message is still a string (cor:cht:020:01): no judgment of content.
+ * Exported for tests.
+ */
+export function classifyChatProbe(out: ChatProbeResult): ChatProbeStatus {
+  if (out.calls.length === 0) return 'FAIL_TEXT_ONLY';
+  if (out.calls.length > 1) return 'FAIL_MULTIPLE_CALLS';
+  const call = out.calls[0];
+  if (call.name !== 'respond') return 'FAIL_OTHER_TOOL';
+  if (call.invalid) return 'FAIL_MALFORMED';
+  const schema = respondToolDefinition({})[0].parameters as {
+    required: string[];
+    properties: Record<string, { type?: string | string[] }>;
+  };
+  const input = call.input;
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return 'FAIL_MALFORMED';
+  const args = input as Record<string, unknown>;
+  for (const key of schema.required) {
+    const want = schema.properties[key]?.type;
+    const have = args[key];
+    if (have === undefined || have === null) return 'FAIL_MALFORMED';
+    if (want === 'string' && typeof have !== 'string') return 'FAIL_MALFORMED';
+    if (want === 'boolean' && typeof have !== 'boolean') return 'FAIL_MALFORMED';
+  }
+  return 'PASS';
+}
 
 // ── Rate limit ───────────────────────────────────────────────────────────
 // A test is a real provider call, so the button must not be a free relay.
@@ -318,6 +414,8 @@ export interface AiConfigTestDeps {
   now: () => number;
   /** The probe's hard deadline; an endpoint that never answers is a failed test, not a hung request. */
   timeoutMs: number;
+  /** #4005: the chat leg's call; defaults to the real client. */
+  generateChat?: typeof generateChatProbe;
   /** Local refusals (no network), run before anything is charged. */
   preflight: (resolved: Parameters<typeof assertModelBuildable>[0]) => void;
 }
@@ -348,6 +446,8 @@ export async function testAiServiceConfig(
   id: string,
   override: AiConfigTestOverride = {},
   deps: AiConfigTestDeps = defaultDeps,
+  /** #4005: also run the chat probe (opt-in; the run probe is unchanged either way). */
+  chatProbe = false,
 ): Promise<AiConfigTestResult> {
   const row = await ctx.db.aiServiceConfig.findUnique({ where: { id } });
   if (!row) throw new AiServiceConfigNotFoundError(id);
@@ -438,6 +538,11 @@ export async function testAiServiceConfig(
     apiStyle: effectiveApiStyle(tested),
     used,
     knobs: [] as KnobReport[],
+    // #4005: until the chat leg runs, a requested probe reports why it did
+    // not: a provider that cannot be offered tools, else no call was made.
+    chat: (chatProbe
+      ? { status: providerSupportsTools({ provider, params }) ? 'FAIL_PROVIDER_UNAVAILABLE' : 'UNSUPPORTED_PROVIDER' }
+      : null) as AiConfigTestResult['chat'],
   };
   if (keySource === 'NONE') {
     return {
@@ -494,6 +599,8 @@ export async function testAiServiceConfig(
       apiKeyEncrypted: overrideKey ? encryptToken(overrideKey) : keySource === 'SAVED' ? row.apiKeyEncrypted : null,
     },
     ownerType: owner.ownerType,
+    // #4042: the probe's own pair (saved or the edit under test), judged by the same one predicate as everything else.
+    toolChoice: chatToolChoiceFor(provider, model),
   };
 
   // An override key is the caller's own; a platform credential, stored or the
@@ -552,6 +659,91 @@ export async function testAiServiceConfig(
     });
   }
 
+  async function runChatLeg(): Promise<ChatProbeStatus> {
+    const chatMaxTokens = Math.min(paramsMaxTokens ?? AI_CONFIG_CHAT_PROBE_MAX_TOKENS, AI_CONFIG_CHAT_PROBE_MAX_TOKENS);
+    const choice = chatToolChoiceFor(provider, model);
+    // #4028: the tool is built BEFORE the reservation so the base is sized from the request that will be sent. A throw
+    // building it is judged below exactly as before (an internal error, settled, never the provider's); the
+    // reservation then holds only the run probe's margin, since nothing is sent.
+    let hasInternal = false;
+    let internal: unknown;
+    let tools: ReturnType<typeof respondToolDefinition> | null = null;
+    try {
+      tools = respondToolDefinition({});
+    } catch (e) {
+      hasInternal = true;
+      internal = e;
+    }
+    const chatReserve =
+      (tools
+        ? chatProbeReserveBase({ prompt: CHAT_PROBE_PROMPT, ...(choice === 'AUTO' ? { system: RESPOND_ONCE_INSTRUCTION } : {}) }, tools)
+        : AI_CONFIG_TEST_TOKEN_RESERVE) + chatMaxTokens;
+    const chatReservation = quotaScope
+      ? await reserveQuota(ctx.db, 'org', quotaScope, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens'), chatReserve)
+      : null;
+    if (quotaScope && !chatReservation) return 'FAIL_PROVIDER_UNAVAILABLE';
+    let result: ChatProbeResult | null = null;
+    let status: ChatProbeStatus = 'FAIL_PROVIDER_UNAVAILABLE';
+    // Only the provider call's failure is the provider's: its text is never
+    // surfaced on this leg, the closed status is all it reports. A throw from
+    // OUR code (building the tool, judging the call) is an internal error: it
+    // is logged (scrubbed, name and message only) and rethrown AFTER the usage
+    // row and the reservation settle, so it can neither read as a provider
+    // failure nor leak the reservation (#4021 BLIND replacement seat, P2).
+    if (tools) {
+      try {
+        result = await (deps.generateChat ?? generateChatProbe)(
+          resolved,
+          {
+            prompt: CHAT_PROBE_PROMPT,
+            ...(choice === 'AUTO' ? { system: RESPOND_ONCE_INSTRUCTION } : {}),
+            maxTokens: chatMaxTokens,
+            timeoutMs: deps.timeoutMs,
+          },
+          tools,
+          sdkToolChoiceFor(choice),
+        );
+      } catch {
+        status = 'FAIL_PROVIDER_UNAVAILABLE';
+      }
+      if (result) {
+        try {
+          status = classifyChatProbe(result);
+        } catch (e) {
+          hasInternal = true;
+          internal = e;
+        }
+      }
+    }
+    if (hasInternal) {
+      // Name and message are both scrubbed and bounded: either can carry a secret.
+      const name = scrub(String((internal as Error | null | undefined)?.name ?? 'Error'), secrets).slice(0, 80);
+      console.error(
+        '[testAiServiceConfig] chat probe internal error:',
+        name,
+        scrub(String((internal as Error | null | undefined)?.message ?? internal), secrets).slice(0, 500),
+      );
+    }
+    const spentIn = result?.tokensIn ?? 0;
+    const spentOut = result?.tokensOut ?? 0;
+    await recordLlmUsage(ctx.db, {
+      type: 'ai-config-test-chat',
+      userId: ctx.userId,
+      organizationId,
+      provider,
+      model,
+      tokensIn: spentIn,
+      tokensOut: spentOut,
+      keyOwnerType,
+      createdBy: ctx.userId,
+    });
+    if (quotaScope && chatReservation) {
+      await settleReservation(ctx.db, 'org', quotaScope, 'llm.tokens', spentIn + spentOut - chatReserve, chatReservation);
+    }
+    if (hasInternal) throw internal;
+    return status;
+  }
+
   const started = deps.now();
   let out: LlmResult | null = null;
   let error: AiConfigTestResult['error'] = null;
@@ -602,8 +794,17 @@ export async function testAiServiceConfig(
     await settleReservation(ctx.db, 'org', quotaScope, 'llm.tokens', tokensIn + tokensOut - reserveTokens, reservation);
   }
 
+  // #4005: the chat leg, only when asked for and the provider can be offered
+  // tools. Its own reservation, deadline, attempt and usage row; the
+  // admission above already paid the one rate-limit unit for both.
+  let chat = base.chat;
+  if (chatProbe && providerSupportsTools({ provider, params })) {
+    chat = { status: await runChatLeg() };
+  }
+
   return {
     ...base,
+    chat,
     endpoint: probeTarget(tested, bedrockRegionOf(overrideKey ?? savedKey), process.env),
     ok: out != null,
     latencyMs,

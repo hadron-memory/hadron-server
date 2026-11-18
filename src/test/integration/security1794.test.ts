@@ -3,20 +3,20 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import { createHash } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { hashAppKey } from '../../middleware/auth.js';
 import { signJwt } from '../../auth/jwt.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 
 let server: Server;
 let baseUrl: string;
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
-afterAll(async () => { await new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve())); });
+afterAll(async () => { await closeServerIfStarted(server); });
 beforeEach(async () => { await cleanDb(db); });
 const post = (path: string, body: unknown, token?: string) => fetch(baseUrl + path, {
   method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },

@@ -16,7 +16,6 @@ import { getMemoryEncryptionInfo } from '../nodeCrypto.js';
 import { evaluateDarkWorkers } from './darkWorker.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { runAsActor } from '../requestActor.js';
-import { setS7AvailableForTest } from '../tickers/s7Availability.js';
 
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 
@@ -105,13 +104,13 @@ describe('#2755 a due wake left unacknowledged past the window', () => {
     expect(await evaluateDarkWorkers(db, after(11))).toHaveLength(1);
   });
 
-  it('raises none for NO_SESSION, a paused or isolated worker, or a paused team', async () => {
+  it('raises none for NO_SESSION, paused workers, or a paused team', async () => {
     await say('hello @tove @liam', ['tove', 'liam']);
     expect(await evaluateDarkWorkers(db, after(40))).toEqual([]); // no live session
     await bind('Tove', after(40));
     await bind('Liam', after(40));
     await db.workerWakeSettings.create({ data: { workerId: w.Tove.id, pausedUntil: after(120) } });
-    await db.workerWakeSettings.create({ data: { workerId: w.Liam.id, isolatedUntil: after(120) } });
+    await db.workerWakeSettings.create({ data: { workerId: w.Liam.id, pausedUntil: after(120) } });
     expect(await evaluateDarkWorkers(db, after(40))).toEqual([]);
     await db.workerWakeSettings.deleteMany({});
     await db.app.update({ where: { id: app.id }, data: { teamPausedAt: after(1) } });
@@ -225,50 +224,5 @@ describe('#2755 an exemption ended on purpose, or by isolation expiring, restart
     expect((await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId: w.Tove.id } })).exemptEndedAt?.getTime()).toBe(after(20).getTime());
     expect(await evaluateDarkWorkers(db, after(35))).toEqual([]); // 15 minutes since the pause ended, window 30
     expect(await evaluateDarkWorkers(db, after(51))).toHaveLength(1);
-  });
-
-  it('clearWorkerIsolation keeps an expired isolation end, and stamps now for a running one', async () => {
-    setS7AvailableForTest(true);
-    try {
-      await bind('Tove', after(200));
-      await say('hello @tove', ['tove']);
-      await db.workerWakeSettings.create({ data: { workerId: w.Tove.id, isolatedUntil: after(20) } });
-      vi.useFakeTimers({ toFake: ['Date'] });
-      try {
-        vi.setSystemTime(after(45));
-        await M.clearWorkerIsolation({}, { workerRef: w.Tove.id }, holderCtx());
-      } finally {
-        vi.useRealTimers();
-      }
-      expect((await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId: w.Tove.id } })).exemptEndedAt?.getTime()).toBe(after(20).getTime());
-      await db.workerWakeSettings.update({ where: { workerId: w.Tove.id }, data: { isolatedUntil: after(120), exemptEndedAt: null } });
-      vi.useFakeTimers({ toFake: ['Date'] });
-      try {
-        vi.setSystemTime(after(50));
-        await M.clearWorkerIsolation({}, { workerRef: w.Tove.id }, holderCtx());
-      } finally {
-        vi.useRealTimers();
-      }
-      expect((await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId: w.Tove.id } })).exemptEndedAt?.getTime()).toBe(after(50).getTime());
-    } finally {
-      setS7AvailableForTest(false);
-    }
-  });
-
-  it('an isolation that expires, and one that is cleared early, each restart the age', async () => {
-    setS7AvailableForTest(true);
-    try {
-      await bind('Tove', after(200));
-      await bind('Liam', after(200));
-      await say('hello @tove @liam', ['tove', 'liam']);
-      await db.workerWakeSettings.create({ data: { workerId: w.Tove.id, isolatedUntil: after(20) } });
-      await db.workerWakeSettings.create({ data: { workerId: w.Liam.id, isolatedUntil: after(120) } });
-      expect(await evaluateDarkWorkers(db, after(10))).toEqual([]);
-      await db.workerWakeSettings.update({ where: { workerId: w.Liam.id }, data: { isolatedUntil: null, exemptEndedAt: after(20) } });
-      expect(await evaluateDarkWorkers(db, after(35))).toEqual([]);
-      expect(await evaluateDarkWorkers(db, after(51))).toHaveLength(2);
-    } finally {
-      setS7AvailableForTest(false);
-    }
   });
 });

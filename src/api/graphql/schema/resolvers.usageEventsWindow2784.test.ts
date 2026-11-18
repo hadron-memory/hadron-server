@@ -97,8 +97,9 @@ it.each(['usageEvents', 'usageEventsPage'])('%s never exposes unreadable-memory 
 });
 
 
-it.each(['usageEvents', 'usageEventsPage'])('%s preserves missing/unreadable-memory and App-key refusals with a window', async field => {
-  const appKey: Context = { db, appId: generateId(), roles: [] };
+it.each(['usageEvents', 'usageEventsPage'])('%s preserves missing/unreadable-memory refusals and the App key\'s empty result with a window', async field => {
+  // An hdr_app_ key context carries the key's own id (middleware/auth.ts resolveAppKey; #2817).
+  const appKey: Context = { db, appId: generateId(), appKeyId: generateId(), roles: [] };
   for (const [resource, ctx] of [
     [{ memoryId: foreignId }, principal],
     [{ memoryId: generateId() }, principal],
@@ -106,15 +107,21 @@ it.each(['usageEvents', 'usageEventsPage'])('%s preserves missing/unreadable-mem
   ] as const) {
     const unwindowed = await read(field, resource, ctx);
     const windowed = await read(field, { ...resource, since: times[1], until: times[2] }, ctx);
-    expect(unwindowed.errors).toHaveLength(1);
+    // #2817 (cor:acl:090:01): an App key naming no resource is admitted with an empty result, not an error.
+    if (ctx === appKey) {
+      expect(unwindowed.errors).toBeUndefined();
+      expect(field === 'usageEvents' ? unwindowed.data![field] : (unwindowed.data![field] as any).items).toEqual([]);
+    } else expect(unwindowed.errors).toHaveLength(1);
     expect(windowed.errors?.map(({ message, extensions }) => ({ message, code: extensions?.code }))).toEqual(
-      unwindowed.errors!.map(({ message, extensions }) => ({ message, code: extensions?.code })),
+      unwindowed.errors?.map(({ message, extensions }) => ({ message, code: extensions?.code })),
     );
     expect(windowed.data).toEqual(unwindowed.data);
   }
 });
 
-it.each(['usageEvents', 'usageEventsPage'])('%s narrows the existing readable-memory feed, not to own activity', async field => {
+// #2817 (cor:acl:090:01) reversed the old rule here: with no resource named the window narrows the caller's
+// OWN activity, so another principal's event in the same readable memory is not in it.
+it.each(['usageEvents', 'usageEventsPage'])('%s narrows own activity, never adding another principal\'s events', async field => {
   const otherEvent = await db.usageEvent.create({ data: {
     id: generateId(), type: 'read', memoryId, userId: null, createdAt: new Date(times[1]),
   } });
@@ -126,8 +133,9 @@ it.each(['usageEvents', 'usageEventsPage'])('%s narrows the existing readable-me
     const value = result.data![field] as any;
     return (field === 'usageEvents' ? value : value.items) as { id: string }[];
   };
-  expect(rows(all)).toHaveLength(4);
-  expect(rows(windowed).map(row => row.id).sort()).toEqual([eventIds[1], otherEvent.id].sort());
+  expect(rows(all).map(row => row.id).sort()).toEqual([...eventIds].sort());
+  expect(rows(windowed).map(row => row.id)).toEqual([eventIds[1]]);
+  expect(rows(all).map(row => row.id)).not.toContain(otherEvent.id);
 });
 
 it.each(['usageEvents', 'usageEventsPage'])('%s keeps its own default and requested limit handling', async field => {
@@ -135,14 +143,14 @@ it.each(['usageEvents', 'usageEventsPage'])('%s keeps its own default and reques
     id: generateId(), type: 'read', memoryId, createdAt: new Date(new Date(times[1]).getTime() + i + 1),
   })) });
   for (const limit of [undefined, null, 0, 5000]) {
-    // A window encompassing every fixture row must preserve exact row order,
-    // count-only semantics and the legacy list/page difference (issue2817).
+    // A window encompassing every fixture row must preserve exact row order and
+    // count-only semantics. #2817 (cor:api:120:04): the legacy list is now capped like the page.
     const all = await read(field, { memoryId, limit });
     const windowed = await read(field, { memoryId, limit, since: times[0], until: '2026-10-04T00:00:00Z' });
     expect(all.errors).toBeUndefined();
     expect(windowed.errors).toBeUndefined();
     const value = windowed.data![field] as any;
-    const expected = limit === 0 ? 0 : limit == null ? 20 : field === 'usageEvents' ? 213 : 200;
+    const expected = limit === 0 ? 0 : limit == null ? 20 : 200;
     expect(field === 'usageEvents' ? value : value.items).toHaveLength(expected);
     // Unique timestamps avoid claiming a new ordering guarantee for legacy ties.
     if (field === 'usageEvents') expect(value.map((row: any) => row.id).sort()).toEqual(

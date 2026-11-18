@@ -18,8 +18,10 @@ export function hasIncompleteMirrorMutation(localPath: string): boolean {
  * Checkpoint only this operation's file and legacy paths, after preceding healthy
  * operations. Never reset HEAD or the whole tree: that would discard those siblings.
  * A crash or failed rollback leaves a marker that blocks ALL mirror commits on this
- * checkout until operator repair. Backup and marker share checkout storage lifetime;
- * see docs/runbooks/git-mirror-checkout-recovery.md (no automatic reset/re-clone).
+ * checkout until operator repair. #3264: callers list only exact files they may change
+ * (the legacy sidecar contributes just its `edges.yaml`, never the directory), so the
+ * rollback's `rmSync(recursive)` below never reaches a sidecar or repository metadata.
+ * Backup and marker share checkout storage lifetime; see docs/runbooks/git-mirror-checkout-recovery.md (no automatic reset/re-clone).
  */
 export function mutateMirrorFiles(localPath: string, paths: readonly string[], mutate: () => void): void {
   const marker = mirrorMutationMarker(localPath);

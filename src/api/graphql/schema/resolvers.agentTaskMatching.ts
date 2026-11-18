@@ -21,21 +21,43 @@ import type { WorkerCheckStatus } from '../../../lib/workerCheckStatus.js';
 import { loadAppModelGroups, loadAppWorkerCheckStatuses, maySeeWorkerInternals } from './resolvers.worker.js';
 import { workerTerminalView, type StoredWorkerTerminal } from '../../../lib/workerTerminal.js';
 import { groupComposition } from '../../../lib/agentTasks/composition.js';
+import { TEAM_READ_TX_MAX_WAIT_MS, TEAM_READ_TX_TIMEOUT_MS, TeamReadBusyError, isPrismaBusyExhaustion } from '../../../lib/agentTasks/teamReadBudget.js';
 import { canSeeUserPersonalFieldsMany } from '../../../lib/auth/userVisibility.js';
 
 const toGqlWord = (s: string): string => s.toUpperCase().replace(/-/g, '_');
 
 /** Shared projected rows. Person and run reads use RepeatableRead; run reads also hold live authority anchors through projection. */
-async function readTeamRoster(ctx: Context, appRef: string) {
-    if (isRunPrincipal(ctx) && !ctx.userId) return withReadableApp(ctx, appRef, projectTeamRoster, true);
+export async function withRosterAppRead<T>(ctx: Context, appRef: string, project: (readCtx: Context, app: TaskApp) => Promise<T>): Promise<T> {
+    if (isRunPrincipal(ctx) && !ctx.userId) return withReadableApp(ctx, appRef, project, true);
     // Admission, status and assignment projections share one read snapshot, including MCP callers.
-    return ctx.db.$transaction(async (tx) => {
-      const readCtx = withoutRequestCaches(ctx, tx);
-      const { app } = await resolveParticipatedApp(readCtx, appRef);
-      return projectTeamRoster(readCtx, app);
-    // An explicit, bounded read budget avoids imposing Prisma's implicit 5s interactive-transaction default
-    // on the now-serialized bulk roster loaders. This does not change query/lock or test timeouts.
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 20_000 });
+    try {
+      return await ctx.db.$transaction(async (tx) => {
+        // #4271: no JIT for this read. The roster's aggregates are priced in millions (the planner cannot see that a
+        // closed session's usage-event probe is skipped), so Postgres JIT-compiled each one: about 0.4 s of CPU per
+        // statement for a few ms of work, which a burst of rosters on a small box turned into the 20 s budget. SET
+        // LOCAL lasts only as long as this transaction and changes no answer.
+        await tx.$executeRawUnsafe('SET LOCAL jit = off');
+        const readCtx = withoutRequestCaches(ctx, tx);
+        const { app } = await resolveParticipatedApp(readCtx, appRef);
+        return project(readCtx, app);
+      // #4455: one snapshot still, but bounded — a 20 s interactive transaction was the P2028 incident's steady
+      // holder (#4380), holding one of prod's ~9 pool connections while its serialized statements ran. 5 s of
+      // transaction plus an explicit 2 s pool wait (see lib/agentTasks/teamReadBudget.ts) and the budget's expiry
+      // surfaces as the typed, retryable TEAM_READ_BUSY refusal instead of a raw driver fault. This does not change
+      // query/lock or test timeouts, and the read semantics are unchanged (cor:agt:050:22).
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: TEAM_READ_TX_TIMEOUT_MS, maxWait: TEAM_READ_TX_MAX_WAIT_MS });
+    } catch (error) {
+      // #4455: the original driver error rides along on .cause (never crossed to the client;
+      // .originalError would unwrap the refusal back to the foreign Prisma error) so the
+      // tx-timeout / maxWait / pool-starvation arms stay distinguishable after the typed
+      // conversion; the non-busy error rethrows untouched.
+      if (isPrismaBusyExhaustion(error)) throw new TeamReadBusyError(error);
+      throw error;
+    }
+}
+
+async function readTeamRoster(ctx: Context, appRef: string) {
+  return withRosterAppRead(ctx, appRef, projectTeamRoster);
 }
 
 async function projectTeamRoster(readCtx: Context, app: TaskApp) {
@@ -58,10 +80,10 @@ async function projectTeamRoster(readCtx: Context, app: TaskApp) {
   return {
     appId: app.id,
     asOf,
-    workers: entries.map((e) => ({ ...e, appId: app.id, teamPlacement: workingStateVisible ? e.teamPlacement : null, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
+    workers: entries.map((e): RosterRow => ({ ...e, appId: app.id, teamPlacement: workingStateVisible ? e.teamPlacement : null, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
       pausedUntil: pauses.get(e.workerId) ?? null, currentTask: tasks.get(e.workerId) ?? null,
       heldBy: holders.get(e.workerId)?.heldBy ?? null, heldAt: holders.get(e.workerId)?.heldAt ?? null,
-      terminal: terminals.get(e.workerId) ?? null })),
+      terminal: terminals.get(e.workerId) ?? null, internalsVisible: workingStateVisible })),
   };
 }
 
@@ -123,6 +145,8 @@ type RosterRow = Omit<RosterEntry, 'teamPlacement'> & {
   teamPlacement: RosterEntry['teamPlacement'] | null;
   appUrn: string; checkStatus: WorkerCheckStatus | null; pausedUntil: Date | null; currentTask: RosterTaskSummary | null;
   heldBy: RosterHolder | null; heldAt: Date | null; terminal: StoredWorkerTerminal | null;
+  /** maySeeWorkerInternals for this read: the one switch that also withholds a USER setter's identity (#3865). */
+  internalsVisible: boolean;
 };
 
 /** Optional live metadata is outside the core roster transaction: a failed lookup must not
@@ -141,6 +165,10 @@ export const agentTaskMatchingFieldResolvers = {
     freeForWork: (r: RosterRow) => r.free,
     unavailableReason: (r: RosterRow) => (r.unavailable?.reason ? toGqlWord(r.unavailable.reason) : null),
     unavailableUntil: (r: RosterRow) => r.unavailable?.until ?? null,
+    // #3981: only an explicit decision from maySeeWorkerInternals admits the USER setter identity; malformed rows fail closed.
+    availability: (r: RosterRow) => (r.availabilityRecord
+      ? { ...r.availabilityRecord.row, ...(r.internalsVisible === true ? {} : { setByUserId: null }), __inEffect: r.availabilityRecord.inEffect }
+      : null),
     startedTasks: (r: RosterRow) => r.startedTaskIds,
     pendingTasks: (r: RosterRow) => r.pendingTaskIds,
     waitingOn: (r: RosterRow) => r.waitingOnTaskIds,

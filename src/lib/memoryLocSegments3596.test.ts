@@ -7,7 +7,16 @@ import { readLocSegments, decodeLocSegmentsCursor } from './memoryLocSegments.js
 
 let memoryId: string;
 const plans: any[] = [];
+// Planner-sensitive implementation choice, not a contract or page-work bound.
+// Keep fixtures tied to it, and verify both emitted block queries below.
+const flatBatchSize = 64;
 function nodes(plan: any): any[] { return [plan, ...(plan.Plans ?? []).flatMap(nodes)]; }
+// EXPLAIN reports rounded per-loop averages. This estimates tuple visits, not
+// distinct rows, buffers, CPU or elapsed time; rounding error scales with loops.
+function tupleVisits(node: any): number {
+  return ((node['Actual Rows'] ?? 0) + (node['Rows Removed by Filter'] ?? 0)
+    + (node['Rows Removed by Index Recheck'] ?? 0)) * (node['Actual Loops'] ?? 0);
+}
 // Only fixture values enter EXECUTE; render literals explicitly because utility
 // EXECUTE cannot forward the outer extended-protocol bind parameters.
 function literal(value: unknown): string {
@@ -21,19 +30,42 @@ function literal(value: unknown): string {
 const observe = (client: Pick<PrismaClient, '$queryRaw' | '$executeRawUnsafe' | '$queryRawUnsafe'>, generic = false) => ({
   async $queryRaw(strings: TemplateStringsArray, ...values: unknown[]) {
     const sql = Prisma.sql(strings, ...values);
+    if (sql.text.includes(') batch')) {
+      const limits = [...sql.text.matchAll(/LIMIT (\d+)(?: OFFSET \d+)?\s*\) batch/g)].map(match => Number(match[1]));
+      expect(limits).toEqual([flatBatchSize, flatBatchSize]);
+    }
     if (generic) {
-      await client.$executeRawUnsafe(`PREPARE loc3596_probe AS ${sql.text}`);
+      await client.$executeRawUnsafe('SAVEPOINT loc3596_observer');
+      let prepared = false;
+      let primary: unknown;
       try {
+        await client.$executeRawUnsafe(`PREPARE loc3596_probe AS ${sql.text}`);
+        prepared = true;
         await client.$executeRawUnsafe('SET LOCAL plan_cache_mode = force_generic_plan');
-        const execute = `EXECUTE loc3596_probe(${sql.values.map(literal).join(',')})`;
+        const execute = `EXECUTE loc3596_probe${sql.values.length ? `(${sql.values.map(literal).join(',')})` : ''}`;
         const result: any = await client.$queryRawUnsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${execute}`);
         plans.push(result[0]['QUERY PLAN'][0]);
         const counters: any = await client.$queryRawUnsafe("SELECT generic_plans, custom_plans FROM pg_prepared_statements WHERE name = 'loc3596_probe'");
         expect(counters).toEqual([{ generic_plans: 1n, custom_plans: 0n }]);
         return await client.$queryRawUnsafe(execute);
+      } catch (error) {
+        primary = error;
+        // SQL errors abort the transaction. Recover our savepoint before cleanup;
+        // PREPARE is session-scoped and survives rollback.
+        try { await client.$executeRawUnsafe('ROLLBACK TO SAVEPOINT loc3596_observer'); }
+        catch (cleanup) {
+          primary = new AggregateError([error, cleanup], 'Observer rollback failed', { cause: error });
+          throw primary;
+        }
+        throw error;
       } finally {
-        // An aborted EXECUTE transaction rejects DEALLOCATE too; preserve its primary error.
-        await client.$executeRawUnsafe('DEALLOCATE loc3596_probe').catch(() => {});
+        try {
+          if (prepared) await client.$executeRawUnsafe('DEALLOCATE loc3596_probe');
+          await client.$executeRawUnsafe('RELEASE SAVEPOINT loc3596_observer');
+        } catch (cleanup) {
+          if (primary !== undefined) throw new AggregateError([primary, cleanup], 'Observer cleanup failed', { cause: primary });
+          throw cleanup;
+        }
       }
     }
     const result: any = await client.$queryRaw(Prisma.sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sql}`);
@@ -56,7 +88,14 @@ function expectFlat(plan: any) {
   expect(walk.every(n => n['Actual Rows'] === 0)).toBe(true);
   expect(all.some(n => /^flat_node(?:_\d+)?$/.test(n.Alias ?? '') && n['Actual Loops'] > 0)).toBe(true);
 }
-const observed = observe(db);
+// These are test-owned SQL deadlines, not a production latency promise.
+const observed = {
+  $queryRaw: (strings: TemplateStringsArray, ...values: unknown[]) =>
+    db.$transaction(async tx => {
+      await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '5s'");
+      return observe(tx).$queryRaw(strings, ...values);
+    }, { timeout: 15_000 }),
+} as unknown as PrismaClient;
 const wideExclusions = ['shadow3596', 'wide-shadow3596'];
 const read = (parent: string) => readLocSegments(observed, { memoryIds: [memoryId], excludeNodeIds: wideExclusions, parent, limit: 20, after: null });
 
@@ -94,11 +133,72 @@ beforeAll(async () => {
 afterAll(async () => { await cleanDb(db); }, 120_000);
 
 describe('#3596 sibling-bounded hybrid', () => {
+  it('counts repeated filtered and index-rechecked tuple visits, including zero-loop nodes', () => {
+    expect(tupleVisits({ 'Actual Rows': 2, 'Rows Removed by Filter': 3,
+      'Rows Removed by Index Recheck': 5, 'Actual Loops': 7 })).toBe(70);
+    expect(tupleVisits({ 'Actual Rows': 900, 'Actual Loops': 0 })).toBe(0);
+  });
+
+  it('does not silently suppress an unrelated deallocation failure', async () => {
+    const cleanupFailure = new Error('owned cleanup transport failure');
+    await expect(db.$transaction(async tx => {
+      await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '5s'");
+      const client = {
+        $queryRaw: tx.$queryRaw.bind(tx),
+        $queryRawUnsafe: tx.$queryRawUnsafe.bind(tx),
+        $executeRawUnsafe: async (sql: string) => {
+          if (sql === 'DEALLOCATE loc3596_probe') {
+            await tx.$executeRawUnsafe(sql);
+            throw cleanupFailure;
+          }
+          return tx.$executeRawUnsafe(sql);
+        },
+      } as Pick<PrismaClient, '$queryRaw' | '$queryRawUnsafe' | '$executeRawUnsafe'>;
+      await observe(client, true).$queryRaw`SELECT ${1}::int AS value`;
+    }, { timeout: 15_000 })).rejects.toBe(cleanupFailure);
+  }, 30_000);
+
+  it('SQL deadline cancellation cleans the owned statement and permits a second observation', async () => {
+    await db.$transaction(async tx => {
+      await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '30ms'");
+      await expect(observe(tx, true).$queryRaw`SELECT pg_sleep(${0.2}::float8)`)
+        .rejects.toMatchObject({ meta: { code: '57014' } });
+      await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '5s'");
+      expect(await tx.$queryRawUnsafe(
+        "SELECT name FROM pg_prepared_statements WHERE name = 'loc3596_probe'")).toEqual([]);
+      expect(await observe(tx, true).$queryRaw`SELECT ${9}::int AS value`).toEqual([{ value: 9 }]);
+    }, { timeout: 15_000 });
+  }, 30_000);
+
+  it('a failed generic observation preserves its SQL error and leaves no prepared statement', async () => {
+    await db.$transaction(async tx => {
+      await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '5s'");
+      await tx.$executeRawUnsafe('SAVEPOINT caller_control');
+      let original: unknown;
+      try {
+        await observe(tx, true).$queryRaw`SELECT 1 / ${0}::int AS value`;
+      } catch (error) { original = error; }
+      expect(original).toMatchObject({ meta: { code: '22012' } });
+      // Recover the caller's transaction, then inspect the SAME connection.
+      await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT caller_control');
+      const retained = await tx.$queryRawUnsafe<Array<{ name: string }>>(
+        "SELECT name FROM pg_prepared_statements WHERE name = 'loc3596_probe'");
+      try {
+        expect(retained).toEqual([]);
+        expect(await observe(tx, true).$queryRaw`SELECT ${7}::int AS value`).toEqual([{ value: 7 }]);
+      } finally {
+        // Baseline reproduction owns this name; never leave it in the pool.
+        if (retained.length) await tx.$executeRawUnsafe('DEALLOCATE loc3596_probe');
+      }
+    }, { timeout: 15_000 });
+  }, 30_000);
+
   it.each(['custom', 'generic'])('100k flat siblings avoid recursive probes and unrelated rows (%s plan)', async mode => {
     const page = mode === 'custom' ? await read('wide') : await db.$transaction(async tx => {
+      await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '5s'");
       await tx.$executeRaw`SET LOCAL plan_cache_mode = force_generic_plan`;
       return readLocSegments(observe(tx, true), { memoryIds:[memoryId], excludeNodeIds:wideExclusions, parent:'wide', limit:20, after:null });
-    });
+    }, { timeout: 15_000 });
     expect(page.items.map(row => row.segment)).toEqual(['n099999', ...Array.from({length:19}, (_, i) => `n${String(i+1).padStart(6,'0')}`)]);
     expect(page.items.every(row => row.hasNode && row.memoryId === memoryId)).toBe(true);
     expect(page.hasMore).toBe(true);
@@ -109,9 +209,10 @@ describe('#3596 sibling-bounded hybrid', () => {
     expect(flatScans.length).toBeGreaterThan(0);
     for (const scan of flatScans) {
       expect(scan['Index Name']).toBe('nodes_memory_segment_key_eligible_idx');
-      expect(scan['Rows Removed by Filter'] ?? 0).toBeLessThanOrEqual(5);
-      expect(scan['Actual Rows']).toBeLessThanOrEqual(1000);
+      // Per-loop bounds alone would hide work repeated across every block.
+      expect(tupleVisits(scan)).toBeLessThanOrEqual(110_000);
     }
+    expect(flatScans.reduce((sum, scan) => sum + tupleVisits(scan), 0)).toBeLessThanOrEqual(110_000);
     const blocks = nodes(plan.Plan).find(n => n['Subplan Name'] === 'CTE flat_blocks');
     expect(blocks?.['Actual Rows']).toBeGreaterThan(0);
     expect(blocks?.['Actual Rows']).toBeLessThan(5000);
@@ -123,7 +224,7 @@ describe('#3596 sibling-bounded hybrid', () => {
     expect(page.hasMore).toBe(false);
     const plan = plans.at(-1);
     const scans = nodes(plan.Plan).filter(n => n['Relation Name'] === 'nodes');
-    const work = scans.reduce((sum,n) => sum + ((n['Actual Rows']??0)+(n['Rows Removed by Filter']??0)+(n['Rows Removed by Index Recheck']??0))*(n['Actual Loops']??0),0);
+    const work = scans.reduce((sum,n) => sum + tupleVisits(n),0);
     expect(work).toBeLessThanOrEqual(12);
     const flatScans = scans.filter(n => /^flat_node(?:_\d+)?$/.test(n.Alias ?? ''));
     expect(flatScans.length).toBeGreaterThan(0);
@@ -132,29 +233,33 @@ describe('#3596 sibling-bounded hybrid', () => {
 
   it('a generic prepared plan keeps the deep prefix range bounded before 100k unrelated rows', async () => {
     const page = await db.$transaction(async tx => {
+      await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '5s'");
       await tx.$executeRaw`SET LOCAL plan_cache_mode = force_generic_plan`;
       return readLocSegments(observe(tx, true), { memoryIds: [memoryId], excludeNodeIds: [], parent: 'deep', limit:20, after:null });
-    });
+    }, { timeout: 15_000 });
     expect(page.items.map(row => row.segment)).toEqual(['alpha','beta']);
     const plan = plans.at(-1);
     const scans = nodes(plan.Plan).filter(n => n['Relation Name'] === 'nodes');
-    const work = scans.reduce((sum,n) => sum + ((n['Actual Rows']??0)+(n['Rows Removed by Filter']??0)+(n['Rows Removed by Index Recheck']??0))*(n['Actual Loops']??0),0);
+    const work = scans.reduce((sum,n) => sum + tupleVisits(n),0);
     expect(work).toBeLessThanOrEqual(12);
   }, 120_000);
 
 
   it.each([false, true])('the flat arm retains memory, deletion, system/comment and inherited-shadow eligibility (generic %s)', async generic => {
     const args = { memoryIds:[memoryId], excludeNodeIds:['shadow3596'], parent:'filtered', limit:20, after:null };
-    const page = generic ? await db.$transaction(tx => readLocSegments(observe(tx, true), args)) : await readLocSegments(observed, args);
+    const page = generic ? await db.$transaction(async tx => {
+      await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '5s'");
+      return readLocSegments(observe(tx, true), args);
+    }, { timeout: 15_000 }) : await readLocSegments(observed, args);
     expect(page.items).toEqual([{segment:'live', hasNode:true, memoryId}]);
     expect(page.hasMore).toBe(false);
     expectFlat(plans.at(-1));
     const scans = nodes(plans.at(-1).Plan).filter(n => n['Relation Name'] === 'nodes');
-    const examined = scans.reduce((sum, n) => sum + (n['Actual Rows'] + (n['Rows Removed by Filter'] ?? 0)) * n['Actual Loops'], 0);
+    const examined = scans.reduce((sum, n) => sum + tupleVisits(n), 0);
     expect(examined).toBeLessThanOrEqual(20);
   }, 120_000);
 
-  it.each([64, 65, 128, 129])('pages %i flat siblings across block boundaries exactly once', async count => {
+  it.each([flatBatchSize, flatBatchSize + 1, 2 * flatBatchSize, 2 * flatBatchSize + 1])('pages %i flat siblings across block boundaries exactly once', async count => {
     const parent = `pages${count}`;
     await db.node.createMany({ data: Array.from({ length: count }, (_, i) => ({
       id: `pages3596-${count}-${i}`, memoryId, loc: `${parent}:n${String(i).padStart(3, '0')}`,
@@ -176,6 +281,10 @@ describe('#3596 sibling-bounded hybrid', () => {
         return readLocSegments(observe(tx), { ...args, after });
       }, { timeout: 10_000 });
       expectFlat(plans.at(-1));
+      const blocks = nodes(plans.at(-1).Plan).find(n => n['Subplan Name'] === 'CTE flat_blocks');
+      // Whole-sibling traversal repeats on each page; output limit is not a work limit.
+      expect(blocks['Actual Rows']).toBeGreaterThanOrEqual(Math.ceil(count / flatBatchSize));
+      expect(blocks['Actual Rows']).toBeLessThanOrEqual(Math.ceil(count / flatBatchSize) + 1);
       seen.push(...page.items);
       if (!page.hasMore) { expect(page.endCursor).toBeNull(); ended = true; break; }
       expect(page.endCursor).not.toBeNull();
@@ -196,15 +305,11 @@ describe('#3596 sibling-bounded hybrid', () => {
       name: 'page', seq: i === 128 ? -5 : i === 64 ? 2 : null,
     }))) });
     const args = { memoryIds, excludeNodeIds: [], parent: 'multipages', limit: 31, after: null };
-    async function collect(client: PrismaClient, checkPlan: boolean) {
+    async function collect(readPage: (after: ReturnType<typeof decodeLocSegmentsCursor>) => ReturnType<typeof readLocSegments>) {
       const seen: Awaited<ReturnType<typeof readLocSegments>>['items'] = [];
       let after: ReturnType<typeof decodeLocSegmentsCursor> = null;
       for (let i = 0; i < 10; i++) {
-        const page = checkPlan ? await db.$transaction(async tx => {
-          await tx.$executeRaw`SET LOCAL statement_timeout = '5s'`;
-          return readLocSegments(observe(tx), { ...args, after });
-        }, { timeout: 10_000 }) : await readLocSegments(client, { ...args, after });
-        if (checkPlan) expectFlat(plans.at(-1));
+        const page = await readPage(after);
         seen.push(...page.items);
         if (!page.hasMore) { expect(page.endCursor).toBeNull(); return seen; }
         after = decodeLocSegmentsCursor(page.endCursor!);
@@ -212,8 +317,14 @@ describe('#3596 sibling-bounded hybrid', () => {
       }
       throw new Error('Multi-memory pagination did not terminate');
     }
-    const expected = await collect(skipOnly, false);
-    const seen = await collect(observed, true);
+    const expected = await collect(after => readLocSegments(skipOnly, { ...args, after }));
+    const seen = await collect(async after => {
+      const page = await readLocSegments(observed, { ...args, after });
+      expectFlat(plans.at(-1));
+      const blocks = nodes(plans.at(-1).Plan).find(n => n['Subplan Name'] === 'CTE flat_blocks');
+      expect(blocks['Actual Rows']).toBeGreaterThanOrEqual(memoryIds.length * Math.ceil(129 / flatBatchSize));
+      return page;
+    });
     expect(seen).toEqual(expected);
     expect(seen).toHaveLength(258);
     expect(new Set(seen.map(row => `${row.memoryId}:${row.segment}`)).size).toBe(258);

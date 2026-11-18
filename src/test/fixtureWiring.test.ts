@@ -13,6 +13,8 @@ it.each([
   ['A4', (s: string) => s.replace('await lifetime.drain(closeResources);', 'client=undefined; await lifetime.drain(closeResources);'), 'await drain before any setup'],
   ['A5', (s: string) => s.replace('afterEach(()=>lifetime.drain(closeResources));', 'afterEach(()=>{ "afterEach(()=>lifetime.drain(closeResources))"; });'), 'afterEach must join drain'],
   ['A6', (s: string) => s.replace('closeFixtureResources(resources)', 'Promise.resolve() /* closeFixtureResources(resources) */'), 'closeResources must delegate to closeFixtureResources(resources)'],
+  ['A6b', (s: string) => s.replace('closeFixtureResources(resources)', 'closeFixtureResources(other)'), 'closeResources must delegate to closeFixtureResources(resources)'],
+  ['A6c', (s: string) => s.replace('closeFixtureResources(resources)', 'closeFixtureResource(resources)'), 'closeResources must delegate to closeFixtureResources(resources)'],
 ] as const)('rejects %s with an intended wiring error', (_name, mutate, message) => {
   const changed = mutate(source);
   expect(changed).not.toBe(source);

@@ -26,7 +26,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
-import { validateLoc } from '../../../lib/validateLoc.js';
+import { InvalidLocError, validateLoc } from '../../../lib/validateLoc.js';
 import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
 import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
@@ -36,10 +36,10 @@ import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
  */
 type ChannelWithHostUrn = Channel & { memory?: { urn: string } | null };
 
-/** The caller's readable-memory clause, or null for the unrestricted principal. */
-async function readableMemoryWhere(ctx: Context): Promise<Prisma.MemoryWhereInput | null> {
+/** The caller's readable-memory clause: always a list-backed filter, never an unrestricted principal (#3921). */
+async function readableMemoryWhere(ctx: Context): Promise<Prisma.MemoryWhereInput> {
   const accessible = await getAccessibleMemoryIds(ctx);
-  return accessible === null ? null : { id: { in: accessible } };
+  return { id: { in: accessible } };
 }
 
 async function readableChannel(ctx: Context, ref: string): Promise<Channel | null> {
@@ -51,7 +51,7 @@ async function readableChannel(ctx: Context, ref: string): Promise<Channel | nul
   const row = await ctx.db.channel.findFirst({ where: { id, deletedAt: null } });
   if (!row) return null;
   const accessible = await getAccessibleMemoryIds(ctx);
-  if (accessible !== null && !accessible.includes(row.memoryId)) return null;
+  if (!accessible.includes(row.memoryId)) return null;
   return row;
 }
 
@@ -73,9 +73,7 @@ export const channelQueries = {
     const empty = { items: [] as Channel[], total: 0 };
     const scope = await resolveOrgScope(ctx, orgId);
     if (!scope) return empty;
-    const memoryWhere: Prisma.MemoryWhereInput[] = [{ deletedAt: null }];
-    const readable = await readableMemoryWhere(ctx);
-    if (readable) memoryWhere.push(readable);
+    const memoryWhere: Prisma.MemoryWhereInput[] = [{ deletedAt: null }, await readableMemoryWhere(ctx)];
     if (scope.scopedOrgId) memoryWhere.push({ organizationId: scope.scopedOrgId });
     if (filter?.memoryRef) {
       try {
@@ -130,7 +128,19 @@ export const channelMutations = {
     // #1316: a memory the caller cannot open answers as resolveMemoryRef's miss.
     await concealUnreadableDenial(ctx, memoryId, memoryRef, () => requireMemoryWriteAccess(ctx, memoryId));
     const loc = input.loc.trim();
-    validateLoc(loc);
+    // #3136: the one GraphQL validateLoc site that still threw raw — every
+    // sibling (upsertNode and friends) wraps typed, so a bad loc here surfaced
+    // INTERNAL_SERVER_ERROR instead of the code the other nine sites deliver.
+    try {
+      validateLoc(loc);
+    } catch (e) {
+      if (e instanceof InvalidLocError) {
+        throw new GraphQLError(e.message, {
+          extensions: { code: e.name, loc: e.loc, segment: e.segment },
+        });
+      }
+      throw e;
+    }
     const name = input.name.trim();
     if (!name) throw new GraphQLError('name is required.', { extensions: { code: 'BAD_USER_INPUT' } });
     // The overlap check (LOC_OVERLAPS_CHANNEL) and the live-occupant check

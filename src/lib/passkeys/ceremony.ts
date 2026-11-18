@@ -9,8 +9,11 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import { verifyAssertionOverChallenge, type AssertionParts, type VerifierCredential } from '../signing/verify.js';
 
-/** `SIGN_PROOF` and `SIGN` are the signing ceremony's two single-use steps (#1632 S2b-2, `lib/signing/signingCeremony.ts`). */
-export type CeremonyPurpose = 'SIGN_IN' | 'STEP_UP_ONLY' | 'REGISTER' | 'REVOKE' | 'SIGN_PROOF' | 'SIGN';
+/**
+ * `SIGN_PROOF` and `SIGN` are the signing ceremony's two single-use steps (#1632 S2b-2, `lib/signing/signingCeremony.ts`);
+ * `GRANT_SIGN_PROOF` and `GRANT_SIGN` are the grant signing ceremony's (#3649 slice C, `lib/signing/grantCeremony.ts`).
+ */
+export type CeremonyPurpose = 'SIGN_IN' | 'STEP_UP_ONLY' | 'REGISTER' | 'REVOKE' | 'SIGN_PROOF' | 'SIGN' | 'GRANT_SIGN_PROOF' | 'GRANT_SIGN';
 
 /** Open a ceremony for the browser identified by `browserNonceHash`. */
 export async function createCeremony(

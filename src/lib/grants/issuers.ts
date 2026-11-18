@@ -1,0 +1,56 @@
+/**
+ * #3707 (S1b, cor:acl:140:02, cor:acl:140:04): who may ISSUE a grant for an action. An action's `issuerRule` is a closed key
+ * the server maps to a gate function here; it is never SQL or code. "A manager can't grant what they can't do": the issuer is
+ * whoever may do the thing themselves, so each rule delegates to the gate the creating mutation already uses, not a copy of it.
+ *
+ * Today `createAgentSchedule` AND `createAgentWebhook` both call `requireScheduleAdmin` (the App's owner or an org ADMIN;
+ * revoked membership and user-owned Apps judged as that gate judges them). The two keys stay separate so the two actions can
+ * diverge with their creating mutations without a schema change. The production caller is the grant signing ceremony
+ * (#3649 slice C, src/lib/signing/grantCeremony.ts — the proof, completion and decline doors all judge the issuer here);
+ * #3730 item 1 closed the registry: the keys are a literal union, and the lookup is an OWN-property hit, so a key that only
+ * looks like one (an inherited property name) has no gate and its action has no issuer.
+ */
+import { GraphQLError } from 'graphql';
+import { authorizationDenied } from '../auth/authorizationDenied.js';
+import { requirePersonOnlyAct } from '../auth/personAsThemselves.js';
+import type { Context } from '../../api/graphql/schema/resolvers.js';
+import { requireScheduleAdmin } from '../../api/graphql/schema/resolvers.appRun.js';
+import { PLATFORM_ACTIONS, type IssuerRuleKey } from './actions.js';
+import { managesApp } from '../auth/appManagement.js';
+import { resolveAppRef } from '../entityRef/appRef.js';
+
+/** #3823: whoever manages the App (the gate the boot-prompt actions' signer faces; the node-specific part is judged where the grant is spent). */
+async function requireAppManager(ctx: Context, appRef: string): Promise<void> {
+  const { id } = await resolveAppRef(ctx.db, appRef);
+  const app = await ctx.db.app.findFirst({ where: { id, deletedAt: null }, select: { id: true, organizationId: true, ownerUserId: true } });
+  if (!app || !(await managesApp(ctx, app))) throw authorizationDenied();
+}
+
+type IssuerGate = (ctx: Context, appRef: string) => Promise<unknown>;
+
+/** #3730 item 1: keyed by the closed {@link IssuerRuleKey} union — every key has a gate, and no other key can be indexed. */
+export const ISSUER_RULES: Readonly<Record<IssuerRuleKey, IssuerGate>> = {
+  APP_SCHEDULE_ADMIN: requireScheduleAdmin,
+  APP_WEBHOOK_ADMIN: requireScheduleAdmin,
+  APP_MANAGER: requireAppManager,
+};
+
+/**
+ * Throws unless the caller may issue a grant for `actionName` in the App `appRef` (id or URN). Two conditions, in this order:
+ * (1) the caller is a PERSON acting as themselves (cor:acl:140:04, cor:dmo:050:12, ruling 0099: giving a grant is person-only, so
+ * a worker carrying its holder's user id, a run principal, an impersonation or an App key is refused, exactly as every other grant
+ * door refuses it via `requirePersonOnlyAct`); (2) that person may do the thing themselves (the action's gate). Authority over the
+ * App is necessary, never sufficient. An unknown action, or one whose rule has no gate, has NO issuer: it refuses everyone,
+ * platform admins included. Never answers for a caller it cannot identify.
+ */
+export async function requireActionIssuer(ctx: Context, actionName: string, appRef: string): Promise<void> {
+  const action = PLATFORM_ACTIONS.find((a) => a.name === actionName);
+  // #3730 item 1: an OWN-property hit on the closed record only — a plain Record lookup would answer an inherited property
+  // name ('toString' is a function that never refuses; '__proto__' an object that is not callable), so a rule key that only
+  // LOOKS like one must land here as "no gate", exactly like a typo: the action has no issuer and refuses everyone.
+  const gate = action && Object.hasOwn(ISSUER_RULES, action.issuerRule) ? ISSUER_RULES[action.issuerRule] : undefined;
+  if (!action || !gate) throw new GraphQLError('Unknown action.', { extensions: { code: 'BAD_USER_INPUT' } });
+  if (ctx.appKeyId) throw authorizationDenied();
+  await requirePersonOnlyAct(ctx, 'grant.give', authorizationDenied);
+  await gate(ctx, appRef);
+}

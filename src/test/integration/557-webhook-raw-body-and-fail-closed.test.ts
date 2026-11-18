@@ -33,7 +33,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } 
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import crypto from 'node:crypto';
-import { createServer } from '../../server.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 
 const SECRET = 'test-secret-for-557';
 
@@ -47,7 +47,7 @@ beforeAll(async () => {
   priorNodeEnv = process.env.NODE_ENV;
   process.env.GITHUB_WEBHOOK_SECRET = SECRET;
 
-  const app = await createServer();
+  const app = await createServerOnCleanDb();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -66,7 +66,7 @@ afterEach(() => {
 afterAll(async () => {
   if (priorSecret === undefined) delete process.env.GITHUB_WEBHOOK_SECRET;
   else process.env.GITHUB_WEBHOOK_SECRET = priorSecret;
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await closeServerIfStarted(server);
 });
 
 /**

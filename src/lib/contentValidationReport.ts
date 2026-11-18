@@ -213,8 +213,12 @@ export interface ContentValidationReportResult {
 }
 
 /** The node's validation rules: each rule key of its current state that names or requires a validation task. */
-function validationRules(role: string | null, runnable: boolean | null, rules: readonly NodeRoleRule[]): NodeRoleRule[] {
-  const out: NodeRoleRule[] = [];
+export function validationRules<R extends Pick<NodeRoleRule, 'role' | 'enabled' | 'strictSubRoles' | 'validationTaskId' | 'validationTaskRequired'>>(
+  role: string | null,
+  runnable: boolean | null,
+  rules: readonly R[],
+): R[] {
+  const out: R[] = [];
   for (const key of ruleKeysOf(role, runnable)) {
     const resolution = resolveNodeRoleRule(key, rules);
     if (resolution.kind !== 'RULE') continue;
@@ -222,6 +226,77 @@ function validationRules(role: string | null, runnable: boolean | null, rules: r
     if (resolution.rule.validationTaskId || resolution.rule.validationTaskRequired) out.push(resolution.rule);
   }
   return out;
+}
+
+/** What judging a rule's task needs from the task's row. */
+export const VALIDATION_TASK_SELECT = {
+  id: true, loc: true, memoryId: true, revSeq: true, isRunnable: true, deletedAt: true,
+  memory: { select: { urn: true, deletedAt: true } },
+} as const;
+export type ValidationTaskRow = Prisma.NodeGetPayload<{ select: typeof VALIDATION_TASK_SELECT }>;
+
+/** A task a report may name: its id or `taskRef` matches, at any revision up to `revision`. */
+export interface ListedValidationTask { broken: false; taskId: string; taskRef: string; revision: number }
+/** One rule whose reference is broken. It carries no identity (#3659 gate, R3). */
+export interface BrokenValidationTask { broken: true; taskId: null; taskRef: null; revision: null }
+
+/** The answer for one caller and node; each state but READY is one refusal of every report. */
+export type ValidationTaskSet =
+  | { state: 'NOT_CONFIGURED' | 'UNAVAILABLE'; tasks: [] }
+  | { state: 'BROKEN'; tasks: Array<ListedValidationTask | BrokenValidationTask> }
+  | { state: 'READY'; tasks: ListedValidationTask[] };
+
+/**
+ * #3659: which validation tasks a report for this node may name now. This is the recorder's own
+ * judgement, and `Node.validationTasks` calls it too, so the read cannot list what the write
+ * refuses. A task is loaded only when a rule applies, and tasks come back in rule-key order with
+ * duplicates dropped.
+ *
+ * Unavailable is judged first and names nothing, so a broken rule cannot reveal a hidden task.
+ */
+export async function judgeValidationTaskSet(input: {
+  role: string | null;
+  runnable: boolean | null;
+  rules: readonly NodeRoleRule[];
+  loadTasks: (taskIds: string[]) => Promise<readonly ValidationTaskRow[]>;
+  /** See {@link ContentValidationReportInput.canReadTaskMemory}; absent means unreadable. */
+  canReadTaskMemory?: (memoryId: string) => Promise<boolean>;
+}): Promise<ValidationTaskSet> {
+  const rules = validationRules(input.role, input.runnable, input.rules);
+  if (rules.length === 0) return { state: 'NOT_CONFIGURED', tasks: [] };
+  const taskIds = [...new Set(rules.flatMap((rule) => (rule.validationTaskId ? [rule.validationTaskId] : [])))];
+  const tasks = await input.loadTasks(taskIds);
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  // Ruling 0199 (cor:dmo:160:01 r6, refusal 3): a caller who cannot read a validation task the
+  // rule names gets the same wrong-task refusal on EVERY report. Judged over the rule's tasks
+  // before anything else about them: before the broken-rule check (or TASK_BROKEN would say a
+  // hidden task is broken), before the reference is matched (or the check's cost would confirm
+  // a right URN, §10 P3-11), and before the revision, author and run-id checks (or they would
+  // confirm the hidden task and its revision). A reference that no longer resolves (the task
+  // deleted, or its memory deleted) has no task left to hide: it is broken for every caller and
+  // is left to the broken-rule check (Vera's reading of 0199, PR #3534 comment 6672675613).
+  for (const t of tasks) {
+    if (t.deletedAt || t.memory.deletedAt) continue;
+    if (!(input.canReadTaskMemory && (await input.canReadTaskMemory(t.memoryId)))) {
+      return { state: 'UNAVAILABLE', tasks: [] };
+    }
+  }
+  const listed: Array<ListedValidationTask | BrokenValidationTask> = [];
+  const seen = new Set<string>();
+  let broken = false;
+  for (const rule of rules) {
+    const task = rule.validationTaskId ? byId.get(rule.validationTaskId) : undefined;
+    // D-2026-09-25-E: an operation relying on a broken rule fails closed.
+    if (!task || task.deletedAt || task.memory.deletedAt || task.isRunnable !== true) {
+      broken = true;
+      listed.push({ broken: true, taskId: null, taskRef: null, revision: null });
+    } else if (!seen.has(task.id)) {
+      seen.add(task.id);
+      listed.push({ broken: false, taskId: task.id, taskRef: safeNodeUrnV2(task.memory.urn, task.loc), revision: task.revSeq });
+    }
+  }
+  if (broken) return { state: 'BROKEN', tasks: listed };
+  return { state: 'READY', tasks: listed as ListedValidationTask[] };
 }
 
 /**
@@ -256,38 +331,17 @@ export async function recordContentValidationReportInTx(
   if (input.nodeRevision > node.rev_seq) throw new ContentValidationRefusal('CONTENT_VALIDATION_NODE_REVISION_INVALID');
   await lockMemoryConfigShared(tx, input.memoryId);
   const config = await tx.memoryConfig.findUnique({ where: { memoryId: input.memoryId }, include: { rules: true } });
-  const rules = validationRules(node.role, node.is_runnable, config?.rules ?? []);
-  if (rules.length === 0) throw new ContentValidationRefusal('CONTENT_VALIDATION_NOT_CONFIGURED');
-  const taskIds = [...new Set(rules.flatMap((rule) => (rule.validationTaskId ? [rule.validationTaskId] : [])))];
-  const tasks = await tx.node.findMany({
-    where: { id: { in: taskIds } },
-    select: { id: true, loc: true, memoryId: true, revSeq: true, isRunnable: true, deletedAt: true, memory: { select: { urn: true, deletedAt: true } } },
+  const judged = await judgeValidationTaskSet({
+    role: node.role, runnable: node.is_runnable, rules: config?.rules ?? [],
+    loadTasks: (taskIds) => tx.node.findMany({ where: { id: { in: taskIds } }, select: VALIDATION_TASK_SELECT }),
+    canReadTaskMemory: input.canReadTaskMemory,
   });
-  const byId = new Map(tasks.map((task) => [task.id, task]));
-  // Ruling 0199 (cor:dmo:160:01 r6, refusal 3): a caller who cannot read a validation task the
-  // rule names gets the same wrong-task refusal on EVERY report. Judged over the rule's tasks
-  // before anything else about them: before the broken-rule check (or TASK_BROKEN would say a
-  // hidden task is broken), before the reference is matched (or the check's cost would confirm
-  // a right URN, §10 P3-11), and before the revision, author and run-id checks (or they would
-  // confirm the hidden task and its revision). A reference that no longer resolves (the task
-  // deleted, or its memory deleted) has no task left to hide: it is broken for every caller and
-  // is left to the broken-rule check (Vera's reading of 0199, PR #3534 comment 6672675613).
-  for (const t of tasks) {
-    if (t.deletedAt || t.memory.deletedAt) continue;
-    if (!(input.canReadTaskMemory && (await input.canReadTaskMemory(t.memoryId)))) {
-      throw new ContentValidationRefusal('CONTENT_VALIDATION_WRONG_TASK');
-    }
-  }
-  for (const rule of rules) {
-    const task = rule.validationTaskId ? byId.get(rule.validationTaskId) : undefined;
-    // D-2026-09-25-E: an operation relying on a broken rule fails closed.
-    if (!task || task.deletedAt || task.memory.deletedAt || task.isRunnable !== true) {
-      throw new ContentValidationRefusal('CONTENT_VALIDATION_TASK_BROKEN');
-    }
-  }
-  const task = tasks.find((t) => input.validationTaskRef === t.id || input.validationTaskRef === safeNodeUrnV2(t.memory.urn, t.loc));
+  if (judged.state === 'NOT_CONFIGURED') throw new ContentValidationRefusal('CONTENT_VALIDATION_NOT_CONFIGURED');
+  if (judged.state === 'UNAVAILABLE') throw new ContentValidationRefusal('CONTENT_VALIDATION_WRONG_TASK');
+  if (judged.state === 'BROKEN') throw new ContentValidationRefusal('CONTENT_VALIDATION_TASK_BROKEN');
+  const task = judged.tasks.find((t) => input.validationTaskRef === t.taskId || input.validationTaskRef === t.taskRef);
   if (!task) throw new ContentValidationRefusal('CONTENT_VALIDATION_WRONG_TASK');
-  if (input.validationTaskRevision > task.revSeq) throw new ContentValidationRefusal('CONTENT_VALIDATION_TASK_REVISION_INVALID');
+  if (input.validationTaskRevision > task.revision) throw new ContentValidationRefusal('CONTENT_VALIDATION_TASK_REVISION_INVALID');
 
   // 4. The author of R. The current revision's stamp is on the locked row; an older one is on
   // its snapshot (a snapshot captures the pre-edit state at its number). A snapshot pruned past
@@ -309,7 +363,7 @@ export async function recordContentValidationReportInTx(
     if (stored) {
       if (sameReporter(stored, input.reporter) &&
           stored.nodeRevSeq === input.nodeRevision &&
-          stored.validationTaskId === task.id &&
+          stored.validationTaskId === task.taskId &&
           stored.validationTaskRevSeq === input.validationTaskRevision) {
         return { report: stored, replayed: true, lockedNodeRevision: node.rev_seq };
       }
@@ -322,7 +376,7 @@ export async function recordContentValidationReportInTx(
       nodeId: input.nodeId,
       memoryId: input.memoryId,
       nodeRevSeq: input.nodeRevision,
-      validationTaskId: task.id,
+      validationTaskId: task.taskId,
       validationTaskRevSeq: input.validationTaskRevision,
       outcome: input.outcome,
       runId: input.runId,
