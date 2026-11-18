@@ -46,6 +46,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { db } from '../db/client.js';
 import { cleanDb } from '../../test/helpers.js';
+import { generateId } from '../../lib/id.js';
 import { waitForLockWaitersOfType } from '../../test/lockWait.js';
 import { withTestOperationKey } from '../../test/operationKey.js';
 import { parseDataKey } from '../../lib/crypto.js';
@@ -63,7 +64,7 @@ vi.mock('./execGit.js', () => ({ execGit: vi.fn() }));
 vi.mock('./gitBranch.js', () => ({ prepareWriteBranch: vi.fn(async () => {}) }));
 vi.mock('./githubApp.js', async original => ({ ...await original<typeof import('./githubApp.js')>(), getInstallationToken: vi.fn(async () => 'synthetic-3178') }));
 
-const dataKey = Buffer.alloc(32, 46).toString('base64');
+const dataKey = Buffer.alloc(32, 46).toString('base64'); // 32 bytes of '.' — a well-formed base64 data key.
 const ORIGINAL = 'anonymous session plaintext';
 const PLAINTEXT_CONTROL = 'synthetic plaintext control';
 let memoryId: string;
@@ -71,8 +72,8 @@ let originalUrn: string;
 let nodeId: string;
 let ownerId: string;
 let localPath: string;
-const appCtx = (): Context => ({ db, appId: appContextId, roles: [] });
 let appContextId: string;
+const appCtx = (): Context => ({ db, appId: appContextId, roles: [] });
 const userCtx = (): Context => ({ db, userId: ownerId, roles: [] });
 const promote = () => withTestOperationKey(dataKey, appContextId, () =>
   resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'promotion-owner-3178' }, appCtx()));
@@ -124,21 +125,26 @@ afterEach(() => {
  * node rows must still be freely updatable: the promotion took the MEMORY lock
  * before any NODE lock (#1346/#1776 order). Under the mutant that removes the
  * entry `FOR UPDATE`, the promotion locks every node first and only then blocks
- * at its claim UPDATE — this probe then times out, which is test 2's red.
+ * at its claim UPDATE — this probe then reports 'blocked', which is test 2's red.
+ *
+ * `FOR UPDATE NOWAIT` conflicts with EVERY row-lock mode (FOR KEY SHARE
+ * included), fires no UPDATE triggers, and in autocommit holds nothing past
+ * the statement. The row count is the vacuity guard (BLIND P2): this reads the
+ * same per-worker `process.env.DATABASE_URL` the `db` client is built from, and
+ * a probe that matched no row — a diverged URL, a missing node — is a HARD
+ * ERROR, never a 'free' that test 2 would pass on vacuously.
  */
-async function probeNodeLockState(): Promise<'free' | 'blocked'> {
+async function probeNodeLockState(probeId: string = nodeId): Promise<'free' | 'blocked'> {
   const client = new Client({ connectionString: process.env.DATABASE_URL });
   await client.connect();
   try {
-    await client.query('BEGIN');
-    await client.query("SET LOCAL lock_timeout = '1s'");
-    await client.query('UPDATE nodes SET id = id WHERE id = $1', [nodeId]);
+    const r = await client.query('SELECT 1 FROM nodes WHERE id = $1 FOR UPDATE NOWAIT', [probeId]);
+    if (r.rowCount !== 1) throw new Error(`probe matched ${r.rowCount} node rows for ${probeId} — wrong database or no row; refusing a vacuous 'free'`);
     return 'free';
   } catch (error) {
     if ((error as { code?: string }).code === '55P03') return 'blocked'; // lock_not_available
     throw error;
   } finally {
-    await client.query('ROLLBACK').catch(() => {});
     await client.end();
   }
 }
@@ -146,10 +152,15 @@ async function probeNodeLockState(): Promise<'free' | 'blocked'> {
 /**
  * TEST-ONLY bypass (like #1346's harness): no-op exactly the encrypted branch's
  * entry `SELECT id FROM memories … FOR UPDATE` ($queryRaw), leaving every other
- * statement — including the node locks and the claim UPDATE — real.
+ * statement — including the node locks and the claim UPDATE — real. The
+ * interception returns the SAME ROW SHAPE the real statement returns (the
+ * caller must not branch on an unexpected empty result), counts every
+ * interception, and the caller asserts the count is exactly one — a second,
+ * unplanned interception shows as its own red instead of a confusing one.
  */
 function bypassPromotionEntryLock() {
   const transaction = db.$transaction.bind(db) as typeof db.$transaction;
+  let intercepted = 0;
   const spy = vi.spyOn(db, '$transaction').mockImplementation(((input: unknown, options: unknown) => {
     if (typeof input !== 'function') return transaction(input as never, options as never);
     return transaction((tx: object) => input(new Proxy(tx, {
@@ -158,14 +169,15 @@ function bypassPromotionEntryLock() {
         return async (strings: TemplateStringsArray, ...values: unknown[]) => {
           const sql = strings.join('');
           if (sql.includes('FROM memories') && sql.includes('FOR UPDATE') && !sql.includes('FROM nodes')) {
-            return [] as unknown[];
+            intercepted++;
+            return [{ id: memoryId }] as unknown[];
           }
           return (target as { $queryRaw: (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown> }).$queryRaw(strings, ...values);
         };
       },
     })) as never, options as never);
   }) as typeof db.$transaction);
-  return { restore: () => spy.mockRestore() };
+  return { restore: () => { spy.mockRestore(); return intercepted; } };
 }
 
 describe('#3178 anonymous promotion vs the Git mirror row fence', () => {
@@ -184,13 +196,20 @@ describe('#3178 anonymous promotion vs the Git mirror row fence', () => {
   }, 20_000);
 
   it('an admitted mirror fences the real promotion: bytes leave plaintext, the flag flips only after push, and no node lock is held while it waits', async () => {
-    let conversion: ReturnType<typeof promote> | undefined;
+    // Settled at creation (BLIND P3-5): a rejecting promotion can never surface as an
+    // unhandled rejection or mask the mirror's own error; its outcome is asserted below.
+    let conversion: Promise<{ ok: boolean; e?: unknown }> | undefined;
+    const flagAtFetch: boolean[] = [];
+    const flagInMirror: boolean[] = [];
     const flagsAtPush: boolean[] = [];
+    // Positive control for test 1's `not.toHaveBeenCalled()` (BLIND P3-6): the same spy,
+    // observed firing here, proves the mechanism sees this module's calls.
+    const fenceSpy = vi.spyOn(locks, 'withMirrorCheckoutLock');
     vi.mocked(execGit).mockImplementation(async args => {
-      if (args[0] === 'fetch') {
-        conversion = promote();
+      if (args[0] === 'fetch' && !conversion) { // Guard (BLIND P3-4): a second fetch never starts a second promotion.
+        conversion = promote().then((): { ok: true } => ({ ok: true }), (e: unknown): { ok: false; e: unknown } => ({ ok: false, e }));
         await waitForLockWaitersOfType(db, 'transactionid', 1, 2_000); // The promotion is blocked on the fence-holder's transaction.
-        expect(await flag()).toBe(false);
+        flagAtFetch.push(await flag());
       }
       if (args[0] === 'push') flagsAtPush.push(await flag());
       return { stdout: ' M node.md\n', stderr: '' };
@@ -199,7 +218,10 @@ describe('#3178 anonymous promotion vs the Git mirror row fence', () => {
     const probeResults: string[] = [];
     try {
       const outcome = await mirror(async () => {
-        expect(await flag()).toBe(false); // Still plaintext inside the admitted mirror.
+        // Recorded, asserted after (BLIND P3-3): a red inside the mirror's callback must
+        // surface as its own named assertion, not be swallowed by the mirror's failure
+        // classification of a thrown expect.
+        flagInMirror.push(await flag());
         writeFileSync(join(localPath, 'node.md'), PLAINTEXT_CONTROL);
         bytesAtMirror.push(readFileSync(join(localPath, 'node.md'), 'utf8'));
         // Mutant killer: blocked at the MEMORY fence, the promotion holds no node row lock.
@@ -210,14 +232,18 @@ describe('#3178 anonymous promotion vs the Git mirror row fence', () => {
       expect(probeResults).toEqual(['free']);
       expect(outcome).toBe('mirrored');
     } finally {
-      if (conversion) await conversion; // Releases nothing itself; the mirror's commit freed the fence.
+      if (conversion) await conversion; // Settled form: never throws, never masks.
     }
+    expect(flagAtFetch).toEqual([false]); // Blocked at the fence: still plaintext.
+    expect(flagInMirror).toEqual([false]); // Still plaintext inside the admitted mirror.
+    expect(fenceSpy).toHaveBeenCalledTimes(1);
     expect(flagsAtPush).toEqual([false]); // Nothing encrypted existed when bytes left the process.
     expect(bytesAtMirror).toEqual([PLAINTEXT_CONTROL]);
     expect(vi.mocked(execGit).mock.calls.some(([args]) => args[0] === 'remote' && args[1] === 'set-url')).toBe(true);
     expect(readFileSync(join(localPath, 'node.md'), 'utf8')).toBe(PLAINTEXT_CONTROL);
     // The promotion then completes for real: ciphertext, class, owner, window closed, urn reminted.
     expect(conversion).toBeDefined();
+    expect(await conversion).toEqual({ ok: true });
     const row = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
     expect(row.isEncrypted).toBe(true);
     expect(row.class).toBe('private');
@@ -233,21 +259,24 @@ describe('#3178 anonymous promotion vs the Git mirror row fence', () => {
 
   it('TEST-ONLY entry-lock bypass: the claim UPDATE still fences the flag (the redundant arm), but the node rows are already locked — test 2 is what kills the mutant', async () => {
     const bypass = bypassPromotionEntryLock();
-    let conversion: ReturnType<typeof promote> | undefined;
+    let conversion: Promise<{ ok: boolean; e?: unknown }> | undefined;
+    const flagAtFetch: boolean[] = [];
+    const flagInMirror: boolean[] = [];
     const flagsAtPush: boolean[] = [];
+    let bypassed = 0;
     try {
       vi.mocked(execGit).mockImplementation(async args => {
-        if (args[0] === 'fetch') {
-          conversion = promote();
+        if (args[0] === 'fetch' && !conversion) { // Same guard: one promotion, however often fetch runs.
+          conversion = promote().then((): { ok: true } => ({ ok: true }), (e: unknown): { ok: false; e: unknown } => ({ ok: false, e }));
           await waitForLockWaitersOfType(db, 'transactionid', 1, 2_000); // Blocked — but at the claim UPDATE now.
-          expect(await flag()).toBe(false);
+          flagAtFetch.push(await flag());
         }
         if (args[0] === 'push') flagsAtPush.push(await flag());
         return { stdout: ' M node.md\n', stderr: '' };
       });
       const probeResults: string[] = [];
       const outcome = await mirror(async () => {
-        expect(await flag()).toBe(false); // The urn-rewriting claim UPDATE (a key column) still conflicts with the KEY SHARE fence.
+        flagInMirror.push(await flag()); // The urn-rewriting claim UPDATE (a key column) still conflicts with the KEY SHARE fence.
         writeFileSync(join(localPath, 'node.md'), PLAINTEXT_CONTROL);
         probeResults.push(await probeNodeLockState()); // Node locks were taken BEFORE the memory fence — the mutant's signature.
       });
@@ -255,10 +284,24 @@ describe('#3178 anonymous promotion vs the Git mirror row fence', () => {
       expect(outcome).toBe('mirrored');
     } finally {
       if (conversion) await conversion;
-      bypass.restore();
+      bypassed = bypass.restore();
     }
+    // The bypass no-opped exactly the ONE entry statement (BLIND P3-7) — a second,
+    // unplanned interception is its own red, not a confusing downstream one.
+    expect(bypassed).toBe(1);
+    expect(conversion).toBeDefined();
+    expect(await conversion).toEqual({ ok: true });
+    expect(flagAtFetch).toEqual([false]);
+    expect(flagInMirror).toEqual([false]);
     expect(flagsAtPush).toEqual([false]); // Flag-timing alone would NOT kill this mutant; this documents why.
     expect(await flag()).toBe(true);
     expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).content).toMatch(/^enc:v1:/);
   }, 20_000);
+
+  // BLIND P2, red first: a probe that touches no row must be a HARD ERROR, never a
+  // 'free' that test 2's killer assertion could pass on vacuously (wrong database URL,
+  // a deleted node, a fixture drift). On the pre-fix probe this returns 'free'.
+  it('the lock probe refuses a vacuous free: a node id that matches no row is a hard error', async () => {
+    await expect(probeNodeLockState(generateId())).rejects.toThrow(/matched 0 node rows/);
+  });
 });
