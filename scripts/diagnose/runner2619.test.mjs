@@ -16,16 +16,14 @@ case "$1" in
  apply|add) :;;
  *) exit 8;;
 esac\n`);
- put('node',`if [[ "\${1:-}" = */load.mjs ]]; then
- if [ "$MODE" = held ]; then touch "$FIXTURE/ready"; for i in {1..200}; do [ -e "$FIXTURE/release" ] && exit 0; sleep .02; done; exit 9; fi
- exit 0
-fi
-exec '${process.execPath}' "$@"\n`);
+ put('node',`exec '${process.execPath}' "$@"\n`);
  put('incus',`case "$1" in
  list) [ "$MODE" != list-failure ] || exit 7; [ ! -e "$FIXTURE/instance" ] || echo hadron-e2e-fixture;;
  config) cat "$FIXTURE/instance";;
  exec)
   case "$*" in
+   *load.mjs*) printf '%s\\n' '{"kind":"load","workload":"idle","cap":25,"startAt":0,"endAt":0,"ok":0,"probe":"not exercised"}';
+    if [ "$MODE" = held ]; then touch "$FIXTURE/ready"; for i in {1..200}; do [ -e "$FIXTURE/release" ] && exit 0; sleep .02; done; exit 9; fi;;
    *memory.max*) echo 6442450944;;
    *diagnose-samples.jsonl*) printf '{"kind":"sample","at":%s}\\n' "$(date +%s%3N)"; if [ "$MODE" = abort ]; then echo '{"kind":"abort","why":"rss"}'; fi;;
    *credentials.json*) echo synthetic-private-key;;
