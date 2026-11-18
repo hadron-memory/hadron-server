@@ -20,7 +20,7 @@ beforeEach(async () => {
   const org=await db.organization.create({data:{name:'Match now',urn:`mn-${n}.example`}});
   await db.orgMember.create({data:{organizationId:org.id,userId:owner.id,role:'ADMIN'}});
   ctx={db,userId:owner.id,roles:['READER']};
-  agent=await M.createAgent({}, {orgId:org.id,name:'Team'},ctx);
+  agent=await M.createAgent({}, {orgRef:org.id,name:'Team'},ctx);
   app=await db.app.create({data:{organizationId:org.id,name:'Match',urn:`${org.urn}:app`}});
 });
 afterEach(()=>{delete process.env.DISABLE_TASK_MATCHER;});

@@ -37,7 +37,7 @@ beforeEach(async () => {
   const mem = await resolvers.Mutation.createMemory({}, { orgId, name: 'intel' }, admin());
   memId = mem.id;
   memUrn = mem.urn;
-  await (resolvers.Mutation as any).updateMemory(null, { id: memId, schema }, admin());
+  await (resolvers.Mutation as any).updateMemory(null, { ref: memId, schema }, admin());
 });
 
 describe('object store MCP tools', () => {

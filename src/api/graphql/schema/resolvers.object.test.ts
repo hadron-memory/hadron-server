@@ -29,7 +29,7 @@ const updateObject = (input: Record<string, unknown>, c: Context = admin()) => M
 const deleteObject = (input: Record<string, unknown>) => M().deleteObject(null, input, admin());
 const getObject = (ref: string) => Q().object(null, { ref }, admin());
 const findObjects = (input: Record<string, unknown>) => Q().findObjects(null, input, admin());
-const setSchema = (schema: unknown) => M().updateMemory(null, { id: memId, schema }, admin());
+const setSchema = (schema: unknown) => M().updateMemory(null, { ref: memId, schema }, admin());
 
 const competitorSchema = {
   objectTypes: {

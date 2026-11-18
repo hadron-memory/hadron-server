@@ -27,6 +27,15 @@ export const REFERENCE_PARAMETER_TYPES: ReadonlySet<string> = new Set(['node-ref
 
 export type GrantReach = 'WORKER' | 'WORKER_OR_ROLE_AGENT' | 'NO_WORKER';
 
+/**
+ * #3730 item 1: the CLOSED set of issuer-rule keys — exactly the keys `ISSUER_RULES` (./issuers.ts) maps to a gate. A key
+ * outside this set has no gate, so an action naming it has no issuer and refuses everyone. Typed as a literal union so a
+ * definition that names a key the registry does not provide is a compile error, and re-checked at validation because the
+ * registry is code and definitions may arrive from anywhere a list can.
+ */
+export const ISSUER_RULE_KEYS = ['APP_SCHEDULE_ADMIN', 'APP_WEBHOOK_ADMIN', 'APP_MANAGER', 'SECRET_READ_CLIENT'] as const;
+export type IssuerRuleKey = (typeof ISSUER_RULE_KEYS)[number];
+
 export interface ActionDefinition {
   /** The dotted code, unique. */
   name: string;
@@ -35,8 +44,8 @@ export interface ActionDefinition {
   /** The tool that performs it, if any. */
   tool: string | null;
   enforcement: ActionEnforcement;
-  /** A closed key the server maps to a gate function; never SQL or code. */
-  issuerRule: string;
+  /** A closed key ({@link IssuerRuleKey}) the server maps to a gate function; never SQL or code. */
+  issuerRule: IssuerRuleKey;
   /** The plain-language template the platform fills from the action and a grant's values only. */
   summaryTemplate: string;
   /** #4162: who may hold a grant of this action for it to cover a worker's act (see {@link GrantReach}). Absent means `WORKER`, the narrowest. Code-only: never stored or served. */
@@ -119,6 +128,12 @@ function validate(list: readonly ActionDefinition[]): void {
     if (!(ACTION_ENFORCEMENT as readonly string[]).includes(a.enforcement)) throw new Error(`action ${a.name}: unknown enforcement level`);
     if (a.source !== 'PLATFORM') throw new Error(`action ${a.name}: source must be PLATFORM`);
     if (!a.issuerRule || !a.summaryTemplate) throw new Error(`action ${a.name}: issuerRule and summaryTemplate are required`);
+    // #3730 item 1: the registry is closed. A key that only LOOKS like one — an inherited property name ('toString',
+    // '__proto__'), or a typo — is refused here, before any write; at the issuer door a plain Record lookup would answer
+    // such a key with a "gate" that either never refuses (an inherited function) or is not callable.
+    if (!(ISSUER_RULE_KEYS as readonly string[]).includes(a.issuerRule)) {
+      throw new Error(`action ${a.name}: unknown issuerRule ${JSON.stringify(a.issuerRule)} (closed set: ${ISSUER_RULE_KEYS.join(', ')})`);
+    }
     if (a.reach !== undefined && !(['WORKER', 'WORKER_OR_ROLE_AGENT', 'NO_WORKER'] as readonly string[]).includes(a.reach)) throw new Error(`action ${a.name}: unknown reach`);
     for (const n of a.listParameters ?? []) {
       const p = a.parameters.find((x) => x.name === n);

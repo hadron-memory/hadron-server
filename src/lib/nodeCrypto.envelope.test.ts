@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { generateDataKey } from './crypto.js';
-import { decryptNodeFieldsWithKey, encryptNodeFieldsWithKey } from './nodeCrypto.js';
+import { decryptNodeFields, decryptNodeFieldsWithKey, encryptNodeFields, encryptNodeFieldsWithKey, SessionExpiredError } from './nodeCrypto.js';
 
 describe('authenticated node envelopes', () => {
   it('encrypts marker-shaped plaintext instead of trusting its marker', () => {
@@ -27,5 +27,37 @@ describe('authenticated node envelopes', () => {
     expect(() => decryptNodeFieldsWithKey({ content: stored.content }, wrongKey)).toThrow();
     expect(() => decryptNodeFieldsWithKey({ abstract: stored.abstract }, wrongKey)).toThrow();
     expect(() => decryptNodeFieldsWithKey({ data: stored.data }, wrongKey)).toThrow();
+  });
+});
+
+describe('#3136 — a keyless encrypted memory refuses at the source with the typed class', () => {
+  // The local seat's mutant M5: reverting encryptNodeFields' throw to a bare
+  // Error('SESSION_EXPIRED: …') left the whole suite green — the class mapping
+  // and the decrypt path had pins (formatError.test.ts, the recovery HTTP leg),
+  // but nothing drove a keyless WRITE. These pins hold both throw sites at the
+  // source, so the bare-Error mutant dies here. The memory ids are unique to
+  // this file, so sessionKeyCache never holds a key for them.
+  it('encryptNodeFields throws SessionExpiredError with the memoryId', () => {
+    let caught: unknown;
+    try {
+      encryptNodeFields({ content: 'x' }, { id: 'mem_keyless_write_3136', isEncrypted: true });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(SessionExpiredError);
+    expect((caught as SessionExpiredError).memoryId).toBe('mem_keyless_write_3136');
+    expect((caught as Error).message.startsWith('SESSION_EXPIRED')).toBe(true);
+  });
+
+  it('decryptNodeFields throws SessionExpiredError with the memoryId', () => {
+    let caught: unknown;
+    try {
+      decryptNodeFields({ content: 'enc:v1:x' }, { id: 'mem_keyless_read_3136', isEncrypted: true });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(SessionExpiredError);
+    expect((caught as SessionExpiredError).memoryId).toBe('mem_keyless_read_3136');
+    expect((caught as Error).message.startsWith('SESSION_EXPIRED')).toBe(true);
   });
 });

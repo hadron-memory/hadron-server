@@ -5,15 +5,17 @@
  *
  * Today `createAgentSchedule` AND `createAgentWebhook` both call `requireScheduleAdmin` (the App's owner or an org ADMIN;
  * revoked membership and user-owned Apps judged as that gate judges them). The two keys stay separate so the two actions can
- * diverge with their creating mutations without a schema change. NOTHING calls this yet: producers of grants are S2a, which
- * the gate's S1a hold still covers.
+ * diverge with their creating mutations without a schema change. The production caller is the grant signing ceremony
+ * (#3649 slice C, src/lib/signing/grantCeremony.ts — the proof, completion and decline doors all judge the issuer here);
+ * #3730 item 1 closed the registry: the keys are a literal union, and the lookup is an OWN-property hit, so a key that only
+ * looks like one (an inherited property name) has no gate and its action has no issuer.
  */
 import { GraphQLError } from 'graphql';
 import { authorizationDenied } from '../auth/authorizationDenied.js';
 import { requirePersonOnlyAct } from '../auth/personAsThemselves.js';
 import type { Context } from '../../api/graphql/schema/resolvers.js';
 import { requireScheduleAdmin } from '../../api/graphql/schema/resolvers.appRun.js';
-import { PLATFORM_ACTIONS } from './actions.js';
+import { PLATFORM_ACTIONS, type IssuerRuleKey } from './actions.js';
 import { managesApp } from '../auth/appManagement.js';
 import { resolveAppRef } from '../entityRef/appRef.js';
 import { requireSecretReadClientIssuer } from '../secrets/readClientIssuer.js';
@@ -37,7 +39,8 @@ async function requireSecretReadIssuer(ctx: Context, appRef: string, values?: un
   if (issuance.appId !== appId) throw authorizationDenied();
 }
 
-export const ISSUER_RULES: Readonly<Record<string, IssuerGate>> = {
+/** #3730 item 1: keyed by the closed {@link IssuerRuleKey} union — every key has a gate, and no other key can be indexed. */
+export const ISSUER_RULES: Readonly<Record<IssuerRuleKey, IssuerGate>> = {
   APP_SCHEDULE_ADMIN: requireScheduleAdmin,
   APP_WEBHOOK_ADMIN: requireScheduleAdmin,
   APP_MANAGER: requireAppManager,
@@ -54,7 +57,10 @@ export const ISSUER_RULES: Readonly<Record<string, IssuerGate>> = {
  */
 export async function requireActionIssuer(ctx: Context, actionName: string, appRef: string, values?: unknown): Promise<void> {
   const action = PLATFORM_ACTIONS.find((a) => a.name === actionName);
-  const gate = action ? ISSUER_RULES[action.issuerRule] : undefined;
+  // #3730 item 1: an OWN-property hit on the closed record only — a plain Record lookup would answer an inherited property
+  // name ('toString' is a function that never refuses; '__proto__' an object that is not callable), so a rule key that only
+  // LOOKS like one must land here as "no gate", exactly like a typo: the action has no issuer and refuses everyone.
+  const gate = action && Object.hasOwn(ISSUER_RULES, action.issuerRule) ? ISSUER_RULES[action.issuerRule] : undefined;
   if (!action || !gate) throw new GraphQLError('Unknown action.', { extensions: { code: 'BAD_USER_INPUT' } });
   if (ctx.appKeyId) throw authorizationDenied();
   await requirePersonOnlyAct(ctx, 'grant.give', authorizationDenied);

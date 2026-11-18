@@ -22,7 +22,7 @@ const locsOf = async (memoryId: string) =>
 const nodeAt = (memoryId: string, loc: string) => db.node.findFirst({ where: { memoryId, loc } });
 
 async function createAgent(name: string): Promise<{ id: string; systemMemoryId: string }> {
-  const a = await resolvers.Mutation.createAgent({}, { orgId, name, visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId: adminId });
+  const a = await resolvers.Mutation.createAgent({}, { orgRef: orgId, name, visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId: adminId });
   return a as unknown as { id: string; systemMemoryId: string };
 }
 
@@ -56,7 +56,7 @@ describe('#3833 create-time seeding', () => {
   it('promoting an existing memory keeps its nodes untouched and adds only the absent locs', async () => {
     const m = await db.memory.create({ data: { id: generateId(), organizationId: orgId, urn: 'promo-3833', name: 'promo', class: 'knowledge' } });
     await db.node.create({ data: { id: generateId(), memoryId: m.id, loc: 'tasks', name: 'My Tasks', content: 'keep me' } });
-    const a = await resolvers.Mutation.createAgent({}, { orgId, name: 'promoted', visibility: 'ORGANIZATION', systemMemoryId: m.id }, { db, roles: ['ADMIN'], userId: adminId }) as unknown as { systemMemoryId: string };
+    const a = await resolvers.Mutation.createAgent({}, { orgRef: orgId, name: 'promoted', visibility: 'ORGANIZATION', systemMemoryRef: m.id }, { db, roles: ['ADMIN'], userId: adminId }) as unknown as { systemMemoryId: string };
     const t = await nodeAt(a.systemMemoryId, 'tasks');
     expect(t!.name).toBe('My Tasks');
     expect(t!.content).toBe('keep me');

@@ -3458,18 +3458,35 @@ const horizonLagLastCheckedAt = new Map<string, number>();
  * pool-starved probe releases its bookkeeping instead of holding it forever (Baylor F2), and a fault is no
  * longer silent: the catch emits its own `team_events.horizon_probe_error` line (Baylor F3 — "ran and found
  * nothing" stays silent, "errored" is now visible). The once-per-window map is capped (Baylor F5).
+ *
+ * #4408 (the #4372 review follow-ups): the cap EVICTS the least-recently-checked App instead of clearing
+ * every throttle at once; the race timer is cleared on every path, not only success; and the fault line
+ * carries the error's class and code, never its message.
  */
-async function logStalledHorizon(db: Context['db'], appId: string): Promise<void> {
+/** Exported for the #4408 direct pins (resolvers.teamEventHorizon4316.test.ts): the throttle bookkeeping, the race timer and the fault line, driven on a stand-in root client. */
+export async function logStalledHorizon(db: Context['db'], appId: string): Promise<void> {
   const now = Date.now();
   const last = horizonLagLastCheckedAt.get(appId);
   if (last != null && now - last < HORIZON_LAG_LOG_INTERVAL_MS) return;
-  // Baylor F5: a long-lived server would otherwise accumulate one entry per App forever. Crude and honest:
-  // past the cap the cadence restarts, at most once per 1_000 Apps per window.
-  if (horizonLagLastCheckedAt.size >= 1_000) horizonLagLastCheckedAt.clear();
+  // Baylor F5: a long-lived server would otherwise accumulate one entry per App forever. #4408 item 1:
+  // past the cap, evict the least-recently-checked App — NOT the whole map. Clear-all reset every App's
+  // settle-throttle at once, so a hot fleet re-probed in a burst the moment any 1_001st App arrived;
+  // eviction loses one window for one App. The scan is O(cap) and runs only when a NEW App arrives at the
+  // cap (a re-check updates a stamp in place); ties evict the earliest-inserted (Map iteration order),
+  // which is deterministic. Caller-visible behaviour is unchanged (FIT, #4408): the throttle only paces
+  // probes, so what a caller is served — which events, and the more-remain answer — is the same.
+  if (horizonLagLastCheckedAt.size >= 1_000) {
+    let oldestApp: string | undefined;
+    let oldestStamp = Infinity;
+    for (const [app, stamp] of horizonLagLastCheckedAt) {
+      if (stamp < oldestStamp) { oldestStamp = stamp; oldestApp = app; }
+    }
+    horizonLagLastCheckedAt.delete(oldestApp!);
+  }
   horizonLagLastCheckedAt.set(appId, now);
   const startedAt = now;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    let timeout: ReturnType<typeof setTimeout> | undefined;
     const [row] = await Promise.race([
       db.$queryRaw<{ heldBack: number; oldestAgeMs: number | null }[]>`
         SELECT count(*)::int AS "heldBack",
@@ -3480,11 +3497,16 @@ async function logStalledHorizon(db: Context['db'], appId: string): Promise<void
       // Baylor F2: bounded — the probe's promise settles at 5 s even if its statement never returns (the
       // pool connection heals when the statement eventually does; the bookkeeping does not wait for it).
       new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error('horizon probe timeout')), 5_000);
+        timeout = setTimeout(() => {
+          // #4408 item 3: the bound's own fault is identified by its class on the log line below, never
+          // by message text (a plain Error's name says nothing; this one says "the bound fired").
+          const timedOut = new Error('horizon probe timeout');
+          timedOut.name = 'HorizonProbeTimeoutError';
+          reject(timedOut);
+        }, 5_000);
         (timeout as unknown as { unref?: () => void }).unref?.();
       }),
     ]);
-    clearTimeout(timeout);
     if (!row?.oldestAgeMs || row.oldestAgeMs < HORIZON_LAG_MIN_AGE_MS) return;
     console.log(JSON.stringify({
       event: 'team_events.horizon_lag', appId, heldBack: row.heldBack, oldestAgeMs: row.oldestAgeMs,
@@ -3492,11 +3514,28 @@ async function logStalledHorizon(db: Context['db'], appId: string): Promise<void
     }));
   } catch (error) {
     // Observability only: the served page is byte-identical whatever happens here. F3: visible, not silent.
+    // #4408 item 3 (Bob P3.3): the line carries the error's class and code, never its message — a Prisma
+    // connection error's message names the DB host and port, and internal logs are no reason to repeat
+    // them. The two Prisma carriers spell the code differently: `code` on PrismaClientKnownRequestError
+    // (P2028 …), `errorCode` on PrismaClientInitializationError (P1001, the usual DB-unreachable fault —
+    // Jonas's BLIND P2 on #4433 caught the first cut reading only `code`). Either way a string or the key
+    // is omitted rather than nulled; other errors carry neither. A non-Error throw names its kind; there
+    // is no message to leak and none invented.
+    const fault = typeof error === 'object' && error !== null ? (error as { code?: unknown; errorCode?: unknown }) : undefined;
+    const code = typeof fault?.code === 'string' ? fault.code
+      : typeof fault?.errorCode === 'string' ? fault.errorCode : undefined;
     console.log(JSON.stringify({
       event: 'team_events.horizon_probe_error', appId, ms: Date.now() - startedAt,
-      error: error instanceof Error ? error.message : String(error),
+      errorName: error instanceof Error ? error.name : typeof error,
+      ...(code ? { errorCode: code } : {}),
       at: new Date().toISOString(),
     }));
+  } finally {
+    // #4408 item 2 (Bob P3.2): cleared on EVERY path. The clear used to sit on the success path only, so
+    // a faulted probe left the unref'd 5 s timer armed to fire harmlessly later — harmless, and still one
+    // armed timer per fault. clearTimeout on an already-fired timer is a no-op, so this one clear point
+    // serves the success, fault and bound-fired paths alike.
+    clearTimeout(timeout);
   }
 }
 

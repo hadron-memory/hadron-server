@@ -32,7 +32,7 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { githubId: 24760, githubUsername: 'admin-2476', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   const created = await resolvers.Mutation.createAgent(
-    {}, { orgId: org.id, name: 'agent-2476', visibility: 'PERSONAL' },
+    {}, { orgRef: org.id, name: 'agent-2476', visibility: 'PERSONAL' },
     { db, roles: ['ADMIN'], userId: admin.id },
   );
   agentId = created.id;

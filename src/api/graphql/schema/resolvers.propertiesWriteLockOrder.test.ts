@@ -68,7 +68,9 @@ describe.each(writers)('%s takes the write authority before its own locks', (_na
       release();
       await demotion;
     }
-    expect(await writing).not.toBe('wrote');
+    const refusal = await writing;
+    expect(refusal).not.toBe('wrote');
+    expect(refusal).toMatchObject({ message: expect.stringContaining('no write access to this memory'), extensions: { code: 'FORBIDDEN' } });
     expect((await db.node.findUniqueOrThrow({ where: { id: systemNodeId } })).properties).toBeNull();
     // Control: the owner's write is unaffected by the platform actor's demotion.
     await write(ctxOf(agentOwner), systemNodeId, { ok: true });
@@ -97,7 +99,7 @@ describe.each(writers)('%s takes the write authority before its own locks', (_na
         await tx.$executeRaw`SET LOCAL lock_timeout = '400ms'`;
         await lockAuthorityAnchors(tx, [{ kind: 'user', id: actor.id }], 'exclusive');
       }, { timeout: 10_000 });
-      await expect(probe).rejects.toThrow();
+      await expect(probe).rejects.toMatchObject({ meta: { code: '55P03' } });
     } finally {
       release();
       await blocker;

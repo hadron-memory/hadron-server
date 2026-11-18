@@ -18,7 +18,7 @@ beforeEach(async () => {
   const user = await db.user.create({ data: { handle: 'chat4043-manager' } });
   userId = user.id;
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Chat agent', visibility: 'ORGANIZATION' }, ctx());
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Chat agent', visibility: 'ORGANIZATION' }, ctx());
   agentId = agent.id; systemId = agent.systemMemoryId;
   const app = await db.app.create({ data: {
     name: 'Chat app', urn: `${org.urn}:chat`, organizationId: org.id,
