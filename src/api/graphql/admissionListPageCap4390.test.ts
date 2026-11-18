@@ -74,10 +74,10 @@ describe.each(surfaces)('%s admission cost', (_key, q) => {
 describe('over real HTTP at the production ceiling', () => {
   let server: Server, url: string, key: string;
   beforeAll(async () => {
+    await cleanDb(db);
     server = createHttpServer(await createServer());
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/graphql`;
-    await cleanDb(db);
     const user = await db.user.create({ data: { handle: `adm4390-${generateId()}`, roles: ['READER'] } });
     key = (await mintUserApiKey(db, { userId: user.id, label: null, createdBy: user.id, issuedVia: 'test' })).rawKey;
   });
