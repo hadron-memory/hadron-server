@@ -16101,6 +16101,15 @@ export const typeDefs = `#graphql
     summary: String
     "A URL or a node URN."
     evidence: String
+    "#4414: the role tasks (runnable instruction nodes) the assignee followed, in the order given, each with its URN and the revision it had at finish (hrn:node:hadronmemory.com:specs:cor:agt:050:30). Null when the finish gave none. Not the previous task."
+    workedFromRoleTaskRefs: [AgentTaskRoleTaskRef!]
+  }
+
+  "#4414: one role task an assignee followed, kept as it was when the task finished."
+  type AgentTaskRoleTaskRef {
+    nodeId: ID!
+    urn: String!
+    revision: Int!
   }
 
   """
@@ -16139,6 +16148,8 @@ export const typeDefs = `#graphql
     evidence: String
     "#2662: optional immutable findings, at most 100 (hrn:node:hadronmemory.com:specs:cor:agt:050:30); omitted/null preserves legacy finish."
     findings: [AgentTaskFindingInput!]
+    "#4414: optional role tasks followed: node ids or URNs, at most 10, each a live runnable node you may read, none twice (hrn:node:hadronmemory.com:specs:cor:agt:050:30). Anything else refuses TASK_ROLE_TASK_REFS_INVALID, one answer for a node you may not read and one that does not exist, and the task stays started. Omitted/null: none, as before."
+    workedFromRoleTaskRefs: [ID!]
   }
 
   "#2068 (hrn:node:hadronmemory.com:specs:cor:agt:080:01, :10) — why a ticker fires. A closed set; several fire it when any one holds."

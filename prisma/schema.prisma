@@ -7316,7 +7316,7 @@ model AutomationVersion {
 /// - The foreign key to the parent is NO ACTION: the database refuses to delete a task row that still has
 ///   child rows.
 /// - `requirements` say which workers the matcher may choose for a task with no assignee.
-/// - The result (`resultOutcome`, `resultSummary`, `resultEvidence`, `resultFindings`) is set only when the
+/// - The result (`resultOutcome`, `resultSummary`, `resultEvidence`, `resultFindings`, `resultWorkedFromRoleTaskRefs`) is set only when the
 ///   task is finished.
 /// - Tasks are created through `createAgentTask`, `createAgentTasks` and `cloneAgentTask`
 ///   (src/api/graphql/schema/resolvers.agentTask.ts) and assigned by hand or by the matcher
@@ -7391,6 +7391,9 @@ model AgentTask {
   resultEvidence       String?   @map("result_evidence")
   /// #2662: immutable ordered findings, set only with the finish result; null is legacy/omitted.
   resultFindings       Json?     @map("result_findings")
+  /// #4414 (hrn:node:hadronmemory.com:specs:cor:agt:050:30): the role tasks the assignee followed, [{nodeId, urn, revision}] in the order given, set only with the
+  /// finish result and immutable after it; null is legacy/omitted.
+  resultWorkedFromRoleTaskRefs Json? @map("result_worked_from_role_task_refs")
   /// #2663: latest disposition for each finding, stored beside the immutable result (at most100).
   findingDispositions  Json      @default("[]") @map("finding_dispositions")
   /// Derived by the database trigger from resultFindings + findingDispositions; filter before SQL paging.

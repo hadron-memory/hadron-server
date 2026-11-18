@@ -101,8 +101,8 @@ describe('#4414 workedFromRoleTaskRefs on finish', () => {
       expect(await events()).toHaveLength(0);
     });
     it('the unreadable refusal and the missing refusal are byte-identical (no existence oracle)', async () => {
-      const unreadable = await finish([(await node(hidden, 'tasks:secret')).id]).catch(e => e);
-      const missing = await finish([generateId()]).catch(e => e);
+      const unreadable = await finish([(await node(hidden, 'tasks:secret')).id]).catch((e: any) => e);
+      const missing = await finish([generateId()]).catch((e: any) => e);
       expect(unreadable.message).toBe(missing.message);
       expect(unreadable.extensions).toEqual(missing.extensions);
       expect(JSON.stringify(unreadable.extensions)).not.toContain('secret');
@@ -153,10 +153,12 @@ describe('the database guard (as agent_task_findings_immutable)', () => {
     await expect(db.agentTask.update({ where: { id: task.id }, data: { resultWorkedFromRoleTaskRefs: null as any } })).rejects.toThrow();
     expect((await stored()).resultWorkedFromRoleTaskRefs).toEqual(one);
   });
-  it('refuses a list of eleven even written directly', async () => {
-    await finish();
-    const eleven = Array.from({ length: 11 }, (_, i) => ({ nodeId: `n${i}`, urn: `u${i}`, revision: 1 }));
-    await expect(db.$executeRaw`UPDATE agent_tasks SET result_worked_from_role_task_refs = ${JSON.stringify(eleven)}::jsonb WHERE id = ${task.id}`).rejects.toThrow();
+  it('the CHECK refuses a list of eleven, and a non-list, even written directly (finishing in the same statement, so only the CHECK can say no)', async () => {
+    const mk = (n: number) => JSON.stringify(Array.from({ length: n }, (_, i) => ({ nodeId: `n${i}`, urn: `u${i}`, revision: 1 })));
+    const write = (json: string) => db.$executeRaw`UPDATE agent_tasks SET status = 'finished', result_outcome = 'x', finished_at = now(), result_worked_from_role_task_refs = ${json}::jsonb WHERE id = ${task.id}`;
+    await expect(write(mk(11))).rejects.toThrow(/chk_agent_task_role_task_refs/);
+    await expect(write('{"a":1}')).rejects.toThrow(/chk_agent_task_role_task_refs/);
+    await expect(write(mk(10))).resolves.toBe(1);
   });
   it('SQL NULL and JSON null both mean none', async () => {
     await finish();
