@@ -433,6 +433,10 @@ export function stallCandidates(
   // #2648: a blocked task RAISES nothing, but a finish-by episode is not ended by blocking (cor:agt:050:14: it ends
   // only when the task ends or its finish-by time is edited), so the running question still names it.
   if (task.blocked && !(running && task.finishBy)) return [];
+  // #3775 B (cor:agt:050:14, :15 exception; Holger R5): a task assigned to a PERSON raises no stall alarm of any kind
+  // (not-started, no-progress, owner-unreactive, finish-by), and so has no episode to keep running either. A worker
+  // assignee wins when both are somehow set, as `assigneeOf` does. Worker-assigned and queued tasks are untouched.
+  if (task.assigneeUserId && !task.assigneeWorkerId) return [];
   // #2648: clearing a finish-by time brings the ordinary windows back from the edit, so it floors them like a release.
   const floor = (d: Date) => latest(d, task.releasedAt, inputs.finishByEditedAt) as Date;
   const assignee = assigneeOf(task);
