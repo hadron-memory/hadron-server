@@ -14120,7 +14120,9 @@ export const typeDefs = `#graphql
     """
     Reveal an App secret's value through a read client (hrn:node:hadronmemory.com:specs:cor:sec:060), spending exactly one use. Only the
     worker session the client's grant names; a person, an App key, a run and an impersonation get SECRET_READ_CLIENT_NOT_FOUND, as does
-    an unknown client id or another holder's. The use and the audit event commit before the value is returned.
+    an unknown client id or another holder's; a wrong holder's read of a real client is recorded on the secret, an unknown id's is not. The
+    use and the audit event commit before the value is returned. One operation may select this field once: two or more are all refused with
+    SECRET_REVEAL_ONE_PER_OPERATION before any reads (send each as its own operation).
     """
     revealSecret(clientId: ID!): SecretRevealed!
 

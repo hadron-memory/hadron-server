@@ -90,7 +90,7 @@ describe('#3998 secret_read_clients', () => {
 
   it('keeps the migration and post-push in step with the invariants file', () => {
     const inv = readFileSync(new URL('../../../prisma/secret-read-clients-invariants.sql', import.meta.url), 'utf8');
-    const mig = readFileSync(new URL('../../../prisma/migrations/20261114140000_secret_read_clients/migration.sql', import.meta.url), 'utf8');
+    const mig = readFileSync(new URL('../../../prisma/migrations/20261118100100_secret_read_clients/migration.sql', import.meta.url), 'utf8');
     expect(mig.endsWith(inv)).toBe(true);
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir secret-read-clients-invariants.sql');
   });

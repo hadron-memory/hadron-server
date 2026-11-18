@@ -50,10 +50,14 @@ describe('#3998 revealSecret', () => {
 
   it('a pending grant reveals nothing', async () => {
     expect(await code(reveal(workerId))).toBe('SECRET_READ_CLIENT_PENDING');
-    // The holder's refused read is recorded; a stranger's leaves nothing.
+    // The holder's refused read is recorded, and so is a wrong holder's on a REAL client (cor:sec:060:02, cor:sec:010:05).
     expect(await db.secretEvent.count({ where: { secretId, kind: 'REVEAL', outcome: 'SECRET_READ_CLIENT_PENDING' } })).toBe(1);
-    await code(reveal(otherWorkerId));
-    expect(await db.secretEvent.count({ where: { secretId, kind: 'REVEAL' } })).toBe(1);
+    expect(await code(reveal(otherWorkerId))).toBe('SECRET_READ_CLIENT_NOT_FOUND');
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'REVEAL', outcome: 'SECRET_READ_CLIENT_NOT_FOUND' } })).toBe(1);
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'REVEAL' } })).toBe(2);
+    // An unknown client id leaves none: it names no secret to record on.
+    await code(reveal(workerId, 'nope'));
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'REVEAL' } })).toBe(2);
   });
 
   it('the bound holder reads: one use and one USE event each, the budget ends it SPENT', async () => {

@@ -223,9 +223,9 @@ async function summaryFor(ctx: Context, tx: Prisma.TransactionClient, g: GrantRo
   const values = g.action_values as Record<string, unknown>;
   const refs: Record<string, { urn: string }> = {};
   for (const p of action.parameters) {
-    const id = values[p.name];
     if (p.type === 'secret-ref') {
       // #3998: the secret shows as its canonical App secret URN (urn-lib-js 0.0.22). A gone or foreign secret is unsignable.
+      const id = values[p.name];
       if (typeof id !== 'string') continue;
       const secret = await tx.secret.findFirst({ where: { id, ownerType: 'app', ownerId: g.app_id }, select: { name: true } });
       if (!secret) return null;

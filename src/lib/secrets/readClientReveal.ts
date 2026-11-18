@@ -73,8 +73,9 @@ async function revealAs(ctx: Context, clientId: string, holder: Holder): Promise
     ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
   ];
   const actor = secretActorOf(ctx);
-  // A refused read on the holder's own client is recorded (cor:sec:060:02, cor:sec:010:05). The refusal rolls its transaction back,
-  // so the record is written afterwards in its own, and only once the holder check has passed: a stranger leaves no trace.
+  // A refused read on a KNOWN client is recorded (cor:sec:060:02, cor:sec:010:05), a wrong holder's included: the answer to the caller
+  // stays the one uniform not-found, but the secret's owner sees that someone presented a real client id. An unknown id names no
+  // secret, so it leaves nothing. The refusal rolls its transaction back, so the record is written afterwards in its own.
   let known: { ownerId: string; secretId: string; secretName: string } | null = null;
   try {
   return await withAuthorizedTx(ctx, anchors, async () => undefined, async (tx, txCtx) => {
@@ -87,10 +88,11 @@ async function revealAs(ctx: Context, clientId: string, holder: Holder): Promise
     const heldBy = holder.kind === 'worker'
       ? grant.workerId === holder.workerId
       : grant.userId === holder.userId && grant.workerId === null && grant.agentId === null;
+    // From here the client is a real one in this App for this action: every refusal below, a wrong holder's too, is recorded.
+    known = { ownerId: client.appId, secretId: client.secretId, secretName: client.secretName };
     if (!heldBy) throw notFound();
     // A person holder must still be an App participant at every read (R5).
     if (holder.kind === 'person' && !(await isAppParticipant({ ...txCtx, db: tx } as Context, app))) throw notFound();
-    known = { ownerId: client.appId, secretId: client.secretId, secretName: client.secretName };
     if (!secretLocked || client.endedAt) throw refusal('SECRET_DELETED', 'The secret this client read has been deleted.');
     const secret = await tx.secret.findUnique({ where: { id: client.secretId }, select: { id: true, name: true, kind: true, ownerId: true, ownerType: true } });
     if (!secret || secret.ownerType !== 'app' || secret.ownerId !== client.appId) throw refusal('SECRET_DELETED', 'The secret this client read has been deleted.');
@@ -129,7 +131,7 @@ async function revealAs(ctx: Context, clientId: string, holder: Holder): Promise
   } catch (e) {
     const code = e instanceof GraphQLError ? String(e.extensions?.code ?? '') : '';
     const k = known as { ownerId: string; secretId: string; secretName: string } | null;
-    if (k && code && code !== SECRET_READ_CLIENT_NOT_FOUND) {
+    if (k && code) {
       await recordSecretEvent(ctx.db as never, { ...k, kind: 'REVEAL', outcome: code, actor }).catch(() => undefined);
     }
     throw e;

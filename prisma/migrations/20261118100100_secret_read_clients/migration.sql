@@ -35,7 +35,7 @@ ALTER TABLE "secret_read_clients" ADD CONSTRAINT "secret_read_clients_app_id_fke
 
 
 -- #3998 (S3 of #3991) — secret read clients: the association of one grant with one App secret. Prisma cannot model these.
--- One source, shared verbatim with migration 20261114140000_secret_read_clients; applied after grant-invariants.sql.
+-- One source, shared verbatim with migration 20261118100100_secret_read_clients; applied after grant-invariants.sql.
 
 ALTER TABLE secret_read_clients DROP CONSTRAINT IF EXISTS chk_secret_read_client_end;
 ALTER TABLE secret_read_clients ADD CONSTRAINT chk_secret_read_client_end CHECK (
