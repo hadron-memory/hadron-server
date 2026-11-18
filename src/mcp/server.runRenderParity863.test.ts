@@ -68,7 +68,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: owner.id, role: 'ADMIN' } });
   ownerId = owner.id;
   const ctx: Context = { db, roles: ['ADMIN'], userId: owner.id };
-  const created = (await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `Flow-${generateId()}` }, ctx)) as { id: string };
+  const created = (await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: `Flow-${generateId()}` }, ctx)) as { id: string };
   const mem = await db.memory.findUniqueOrThrow({ where: { id: created.id }, select: { id: true, urn: true } });
   memId = mem.id;
   memUrn = mem.urn;
@@ -156,7 +156,7 @@ describe('#863: the reads a compile makes stay inside the run node\'s own memory
     // The other memory belongs to the same owner, so the caller could read it directly. The render still does not
     // follow the tag: a compile is given no reader filter for a foreign memory, so it must not turn a URN into a read.
     const org = await db.organization.findFirstOrThrow();
-    const other = (await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `Other-${generateId()}` }, { db, roles: ['ADMIN'], userId: ownerId } as Context)) as { id: string };
+    const other = (await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: `Other-${generateId()}` }, { db, roles: ['ADMIN'], userId: ownerId } as Context)) as { id: string };
     const otherUrn = (await db.memory.findUniqueOrThrow({ where: { id: other.id }, select: { urn: true } })).urn;
     await db.node.create({ data: { id: generateId(), memoryId: other.id, loc: 'secret', name: 'secret', nodeType: 'info', content: FOREIGN, tags: [] } });
     const crossing = await mkNode('tasks:crossing', 'Crossing', `Start. {{> hrn:node:${otherUrn}:secret}} End. {{subject}}`, { isRunnable: true });
