@@ -22,7 +22,10 @@ import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { withRosterAppRead } from './resolvers.agentTaskMatching.js';
-import { TeamReadBusyError, isPrismaBusyExhaustion } from '../../../lib/agentTasks/teamReadBudget.js';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { TeamReadBusyError, busyReason, isPrismaBusyExhaustion } from '../../../lib/agentTasks/teamReadBudget.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { formatGraphQLError, isExpectedClientError, isTrustedRefusal } from '../formatError.js';
 import { INTERNAL_ERROR_CODE } from '../../../lib/internalFault.js';
@@ -119,12 +122,34 @@ describe('#4455: which driver errors convert, and what the refusal carries', () 
   it('the refusal preserves the original driver error and names its arm (tx budget vs pool wait)', () => {
     const budget = new TeamReadBusyError(known('Transaction already closed during query execution.', 'P2028'));
     expect(budget.extensions).toMatchObject({ code: 'TEAM_READ_BUSY', retryable: true, budgetMs: 5_000, reason: 'TRANSACTION_BUDGET' });
+    expect(budget.extensions).not.toHaveProperty('maxWaitMs');
     expect(budget.cause).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
     // Prisma reuses P2028 for the expired maxWait; its message prefix is the only discriminator.
     const poolMaxWait = new TeamReadBusyError(known('Unable to start a transaction: the pool was full.', 'P2028'));
     expect(poolMaxWait.extensions.reason).toBe('POOL_WAIT');
+    // #4467: the pool arm names the bound that fired (maxWait, 2 s), not the transaction budget.
+    expect(poolMaxWait.extensions).toMatchObject({ code: 'TEAM_READ_BUSY', retryable: true, maxWaitMs: 2_000, reason: 'POOL_WAIT' });
+    expect(poolMaxWait.extensions).not.toHaveProperty('budgetMs');
     const poolTimeout = new TeamReadBusyError(known('Timed out fetching a new connection from the connection pool.', 'P2024'));
     expect(poolTimeout.extensions.reason).toBe('POOL_WAIT');
+    expect(poolTimeout.extensions).toMatchObject({ maxWaitMs: 2_000 });
+    expect(poolTimeout.extensions).not.toHaveProperty('budgetMs');
+  });
+
+  it('#4467: busyReason splits on the INSTALLED query engine\'s real P2028 texts, not hand-written ones', () => {
+    // The engine raises both arms as P2028; the texts live in the native binary. Pin that the
+    // installed engine still carries exactly the strings busyReason relies on, so a Prisma
+    // upgrade that rewords either fails here instead of silently reclassifying pool waits.
+    const dir = fileURLToPath(new URL('../../../generated/prisma/', import.meta.url));
+    const engines = readdirSync(dir).filter((f) => /^libquery_engine-.*\.node$/.test(f));
+    expect(engines.length).toBeGreaterThan(0);
+    const binary = readFileSync(join(dir, engines[0]!)).toString('latin1');
+    const poolText = 'Unable to start a transaction in the given time.';
+    const budgetText = 'Transaction already closed: ';
+    expect(binary).toContain(poolText);
+    expect(binary).toContain(budgetText);
+    expect(busyReason(known(poolText, 'P2028'))).toBe('POOL_WAIT');
+    expect(busyReason(known(`${budgetText}A query cannot be executed on an expired transaction.`, 'P2028'))).toBe('TRANSACTION_BUDGET');
   });
 
   it('a NON-busy driver error from the read rethrows unconverted (the typed refusal is only for busy exhaustion)', async () => {
