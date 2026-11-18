@@ -134,7 +134,33 @@ jobs:
         # slices and runs slice i here; a non-zero exit fails the job. NOTE: the
         # flag is passed WITHOUT a `--` separator — `pnpm test -- --shard=…`
         # drops the arg in pnpm 11 and silently runs the whole suite.
-        run: pnpm test --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+        # #4278: hosted runners have vanished mid-shard ("lost communication with the server", about 50 min in), leaving
+        # no result and no log of why. The theory under test is memory exhaustion: three forks, each with its own
+        # Postgres clone, plus the service cluster on one VM. So:
+        # - a sampler prints memory, disk and the largest processes into THIS step's log every 60 s. It goes to stdout,
+        #   because an upload step never runs once the VM is gone. It stops when the step ends; its sleep writes
+        #   nowhere, so nothing holds the log open after the suite exits.
+        # - a 45 min step timeout (healthy shards take 15-26 min) makes a hang fail as this named step, log kept,
+        #   inside the job's 60.
+        # - the fork count pinned at 3, vitest's default on these 4-vCPU runners (CPUs - 1), so a changed runner size
+        #   can't silently change it. A trial of 2 (Hugo's rule: pin 3 if any shard's median grew more than 30%) grew
+        #   shard 4's median by 39%, while healthy shards peaked at 3.7 GB used of 16 GB at 2 forks.
+        timeout-minutes: 45
+        env:
+          HADRON_TEST_MAX_WORKERS: '3'
+        run: |
+          echo "[sampler] nproc=$(nproc)"
+          (
+            set +e
+            trap 'kill "$nap" 2>/dev/null; exit 0' TERM
+            while :; do
+              echo "[sampler] $(date -u +%FT%TZ)"; free -m; df -h /; ps -eo rss,comm --sort=-rss | head -5
+              sleep 60 >/dev/null 2>&1 & nap=$!; wait "$nap"
+            done
+          ) &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
+          pnpm test --shard=${{ matrix.shard }}/${{ strategy.job-total }}
 
       # #4377 (measurement): the cluster's own checkpoint log (PG16 logs checkpoints by default). Each
       # "checkpoint complete" line splits write, sync and total time, so time spent outside the buffer writes shows.

@@ -39,6 +39,11 @@ permissions:
   # #4378 item 2: on a push to main, the merged PR's labels decide whether its baseline growth was approved.
   pull-requests: read
 
+# Match the other workflows: cancel superseded PR runs while keeping non-PR runs independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   replay-from-empty:
     runs-on: ubuntu-latest
