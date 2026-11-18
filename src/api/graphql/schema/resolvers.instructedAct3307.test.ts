@@ -245,7 +245,8 @@ for (const door of ['signature', 'agent']) for (const earlierTransaction of [fal
 it(`#3335 ${door} holds the live manager membership after ${earlierTransaction ? 'an earlier transaction' : 'one transaction'}`, async () => {
  let held!: () => void, release!: () => void;
  let earlierReady!: () => void, releaseEarlier!: () => void;
- let blockerPid!: number;
+ let blockerPid!: number, earlierPid!: number, waiterPid!: number;
+ let earlierSettled = false;
  const ready = new Promise<void>(r => { held = r; });
  const gate = new Promise<void>(r => { release = r; });
  const earlierGate = new Promise<void>(r => { releaseEarlier = r; });
@@ -266,7 +267,11 @@ it(`#3335 ${door} holds the live manager membership after ${earlierTransaction ?
    // Controlled multi-transaction fixture: keep the earlier backend occupied so a later
    // admission must use another PID. This exercises retry/preflight robustness without
    // pretending a synthetic serialization error is a real production retry.
-   earlier = observer.client.$transaction(async () => { earlierReady(); await earlierGate; }, { timeout: 30000 });
+   earlier = observer.client.$transaction(async tx => {
+    const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    earlierPid = pid; // captured before readiness: the held backend's real identity (#3542 A2)
+    earlierReady(); await earlierGate;
+   }, { timeout: 30000 }).finally(() => { earlierSettled = true; });
    void earlier.catch(() => {});
    await Promise.race([earlierStarted, earlier.then(() => { throw new Error('earlier transaction ended before readiness'); })]);
   }
@@ -274,13 +279,24 @@ it(`#3335 ${door} holds the live manager membership after ${earlierTransaction ?
   const deadline = Date.now() + 5000;
   for (;;) {
    const pids = [...observer.activePids];
-   const [{ n }] = await db.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database() AND pid=ANY(${pids}::int[]) AND wait_event_type='Lock' AND ${blockerPid}=ANY(pg_blocking_pids(pid))`;
-   if (n > 0) break;
+   const waiters = await db.$queryRaw<Array<{ pid: number }>>`SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND pid=ANY(${pids}::int[]) AND wait_event_type='Lock' AND ${blockerPid}=ANY(pg_blocking_pids(pid)) ORDER BY pid`;
+   if (waiters.length > 0) { waiterPid = waiters[0].pid; break; }
    if (settled) throw new Error('worker act completed before its blocked backend was observed');
    if (Date.now() >= deadline) throw new Error('worker act never waited on the known blocker');
    await new Promise(r => setTimeout(r, 25));
   }
-  if (earlierTransaction) expect(new Set(observer.observedPids).size).toBeGreaterThanOrEqual(2);
+  // #3542 A1: the witness is a PID the real known-blocker lock-wait query returned, in the CURRENT active set.
+  expect(waiterPid).toBeGreaterThan(0);
+  expect(observer.activePids.has(waiterPid)).toBe(true);
+  expect(waiterPid).not.toBe(blockerPid);
+  if (earlierTransaction) {
+   // #3542 A2: the earlier hold is a distinct, still-active, unsettled backend at the observation.
+   expect(earlierPid).toBeGreaterThan(0);
+   expect(observer.activePids.has(earlierPid)).toBe(true);
+   expect(waiterPid).not.toBe(earlierPid);
+   expect(earlierSettled).toBe(false);
+   expect(new Set(observer.observedPids).size).toBeGreaterThanOrEqual(2);
+  }
   let denied = false;
   try {
    await db.$transaction(async tx => {
