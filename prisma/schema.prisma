@@ -346,26 +346,36 @@ enum AssetScanStatus {
 
 // ─── Models ────────────────────────────────────────────────────────────
 
-/// A person who uses Hadron, authenticated via GitHub OAuth (or email
-/// in future). N:N to Organization via OrgMember. (Spec 048: signup no
-/// longer auto-creates a personal organization — an individual owns
-/// Apps/Agents/Memories directly via spec 047 user-owned tenancy.)
+/// A person with an account on this server. Every authenticated request that acts for a human resolves to one User
+/// row, and the row is the root of what that person owns, holds and may do.
 ///
-/// **Invitation chain**: UserInvitationActivation links each User back
-/// to their UserInvitation, whose senderUserId points to the inviter,
-/// recursively up to the root (senderUserId IS NULL = system seed from
-/// Baragaun).
+/// A user signs in through an identity provider (`identityProvider`; the provider's own account id is in `githubId`,
+/// `googleId` or `appleId`) or by email, and is addressed by a unique `handle`. An App can also provision a user for
+/// one of its own end users; (`externalAppId`, `externalId`) is the key that finds that user again.
 ///
-/// **Referral quota** (`maxReferrals`): the maximum number of new
-/// platform users this user is allowed to onboard. Unaccepted
-/// invitations don't count; the count is on accepted activations only.
-/// Quota is tracked transitively up the chain — if A invites B and B
-/// invites C, both A's and B's quotas decrement when C joins. When
-/// sending an invite, `UserInvitation.maxActivations` must not exceed
-/// the minimum free quota across the inviter's referral chain. There
-/// is a known race condition: if a referral starts onboarding and the
-/// "create account" request would push the chain over quota, the
-/// account is still created (don't block a real human on a counter).
+/// Relationships:
+/// - Organizations: many-to-many through OrgMember. A user needs no organization: it can own Apps, Agents and
+///   Memories directly (`ownedApps`, `ownedAgents`, `tenantMemories`), and signup creates no personal organization.
+/// - Principal: `principalId` points at the row that reserves the handle in the one namespace handles share with
+///   organization names.
+/// - Memories: `ownedMemories` are the personal and private memories whose strict owner is this user
+///   (`Memory.userId`). That is a different relation from `tenantMemories` (`Memory.ownerUserId`).
+/// - Credentials and sign-in: UserApiKey, PasskeyCredential, AuthCode, SignIn and the pending sign-in models.
+/// - Team work: the Worker names this person holds, the Sessions attributed to them, the AgentTasks they own or
+///   are assigned.
+/// - UserMerge: `mergedInto` is set when this account was merged into another; `mergedFrom` lists the accounts
+///   merged into this one.
+///
+/// Invitation chain: UserInvitationActivation links a user to the UserInvitation that brought them in, whose
+/// `senderUserId` is the inviter, and so on up to a root invitation with no sender (a system seed).
+///
+/// Referral quota (`maxReferrals`): the number of new platform users this user may bring in. Only accepted
+/// activations count, and they count for every inviter up the chain: when A invites B and B invites C, C joining
+/// uses quota of both A and B. An invitation's `UserInvitation.maxActivations` must not exceed the smallest free
+/// quota in the inviter's chain. A person who is already signing up is never refused for the quota: if the account
+/// creation would exceed it, the account is created anyway.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:040:01.
 model User {
   id               String            @id @default(cuid())
   /// Unique username, e.g. "holger"; displayed as `@holger` in UI and node
@@ -497,17 +507,21 @@ model User {
   @@map("users")
 }
 
-/// #1715 — one account merge (`mergeUsers`): the source account was merged
-/// into the target, which survives. Written in the merge transaction and never
-/// changed, so it is keyed on the source: an account is merged away at most
-/// once (it is soft-deleted, so it can never be a merge's target later, which
-/// also keeps the chains acyclic).
+/// The record of one account merge (`mergeUsers`): the source account was merged into the target account, and the
+/// target survives. Readers use these rows to find the surviving account behind a user id that was stored before
+/// the merge.
 ///
-/// Records that store user ids inside authenticated data (decision and
-/// decision-log payloads, #1641) are never rewritten by a merge. Readers
-/// follow a stored id through these rows, transitively, to the account that
-/// survives (src/lib/userMerges.ts). So `targetUserId` is deliberately NOT
-/// retargeted by a later merge of the target: the chain is what resolves it.
+/// Relationships: `source` and `target` are both Users. The row is keyed on the source, so an account is merged
+/// away at most once. `consentHash` and `consentReceipt` hold the sealed evidence that both accounts approved (see
+/// UserMergeConsent); they are absent only on merges recorded before that evidence existed.
+///
+/// Behaviour: written inside the merge transaction and never changed. The source account is soft-deleted by the
+/// merge, so it can never be the target of a later merge, which keeps the chains free of cycles. A merge does not
+/// rewrite user ids stored inside authenticated data (decision and decision-log payloads); a reader follows the
+/// stored id through these rows, one merge after another, to the surviving account (src/lib/userMerges.ts). For
+/// that reason `targetUserId` is not updated when the target is itself merged later: the chain resolves it.
+///
+/// Background: #1715, #1641, #1642.
 model UserMerge {
   sourceUserId   String   @id @map("source_user_id")
   targetUserId   String   @map("target_user_id")
@@ -525,8 +539,21 @@ model UserMerge {
   @@map("user_merges")
 }
 
-/// #1642: a single-use approval for one ordered, full-account consolidation.
-/// User ids are sealed snapshots, deliberately not retargeted on later merges.
+/// A request for the consent of both accounts to one merge: this source into this target, in that order, for a
+/// full consolidation (`scope`). `mergeUsers` goes ahead only on a request that both accounts approved after a
+/// fresh login and that has not expired or been used.
+///
+/// Relationships: none by foreign key. `sourceUserId`, `targetUserId` and `requestedBy` are user ids stored as
+/// sealed snapshots, so a later merge of one of those accounts does not change them. A consumed request leaves its
+/// evidence on the UserMerge row (`consentHash`, `consentReceipt`).
+///
+/// Behaviour: an administrator starts the request (src/lib/userMergeConsent.ts). The server hands back a random
+/// proof and stores only its SHA-256 digest (`proofHash`). Each account approves by signing in; the login time and
+/// method are recorded per side. The request expires after 15 minutes, is single-use (`consumedAt`), and one
+/// requester may hold at most 10 live requests. A sweep deletes a retired request 30 days after the later of its
+/// expiry and its consumption.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:api:010:02. Background: #1642, #1770.
 model UserMergeConsent {
   id                String    @id @default(cuid())
   proofHash         String    @unique @map("proof_hash")
@@ -554,10 +581,17 @@ enum DashboardWidgetType {
   USAGE_ACTIVITY
 }
 
-/// A widget the user has placed on their /app/dashboard grid (#772) —
-/// user-scoped layout configuration, one row per placed widget, ordered by
-/// `position`. Owner-only: no org, no sharing. The whole set is read via
-/// `dashboardWidgets` and replaced atomically via `setDashboardWidgets`.
+/// One widget a user has placed on their portal dashboard (`/app/dashboard`). The rows of one user, ordered by
+/// `position`, are that user's dashboard layout.
+///
+/// Relationships: belongs to one User and is deleted with it. `type` names the kind of widget
+/// (DashboardWidgetType); each kind has a server-side data provider behind the `dashboardWidgetData` query. A
+/// DashboardWidgetPreset can be copied into `config`, but the widget keeps no link to the preset.
+///
+/// Behaviour: owner-only; it belongs to no organization and cannot be shared. The whole set is read with
+/// `dashboardWidgets` and replaced in one step with `setDashboardWidgets`.
+///
+/// Background: #772, #788.
 model DashboardWidget {
   id        String              @id @default(cuid())
   userId    String              @map("user_id")
@@ -583,13 +617,17 @@ model DashboardWidget {
   @@map("dashboard_widgets")
 }
 
-/// A named, user-scoped widget configuration (#806) — a palette entry the
-/// portal COPIES into a placement's `config` on apply. Deliberately not a live
-/// link: editing a preset never reaches back into placements already seeded
-/// from it, and deleting one never orphans a placement. Generic over widget
-/// types so the next configurable widget inherits the mechanism.
+/// A named widget configuration a user has saved, to apply to dashboard widgets later. It is a palette entry, not
+/// a placement: it does not appear on the dashboard by itself.
 ///
-/// Owner-only in every direction, like DashboardWidget: no org, no sharing.
+/// Relationships: belongs to one User and is deleted with it. The name is unique per user and widget type. It is
+/// generic over DashboardWidgetType, so any configurable widget kind can have presets.
+///
+/// Behaviour: the portal copies the preset's `config` into a DashboardWidget's `config` when the user applies it.
+/// The copy is not a live link: editing a preset does not change widgets already made from it, and deleting a
+/// preset leaves them as they are. Owner-only, like DashboardWidget: no organization, no sharing.
+///
+/// Background: #806.
 model DashboardWidgetPreset {
   id     String              @id @default(cuid())
   userId String              @map("user_id")
@@ -610,8 +648,26 @@ model DashboardWidgetPreset {
   @@map("dashboard_widget_presets")
 }
 
-/// A company, team, or group that owns memories and has members.
-/// Must have at least one OrgMember with role OWNER (can have many).
+/// A company, team or other group that owns resources on this server and has members. Its `urn` is its domain
+/// name (for example "example.com") and is the first part of the URN of everything it owns.
+///
+/// Relationships:
+/// - Members: Users through OrgMember. An organization must keep at least one member with the role OWNER.
+/// - Owned resources: Memories, Agents and Apps, plus the organization-level configuration that hangs off them
+///   (AiServiceConfig, McpServer, HomeAssistantInstance, ResendSender, the mail, calendar, drive and Slack
+///   connections, Scopes, RegisterEntries, MemoryConfigTemplates).
+/// - Other organizations' resources: MemorySubscription (a memory another organization owns) and AgentOrgGrant
+///   (an Agent another organization owns).
+/// - Principal: `principalId` points at the row that reserves the organization's name in the namespace it shares
+///   with user handles.
+/// - Billing: UsageEvent and CreditLedgerEntry rows are attributed to the organization.
+///
+/// Behaviour: `policy` is the organization's layer of the action-policy chain, an allow-list that is copied into
+/// each run when the run is created, so an edit applies to later runs only. The GitHub App fields let the server
+/// mint short-lived tokens to sync the organization's Git-backed memories; the private key is stored encrypted.
+/// `listedOnMarketplace` controls advertisement only, not who may read the organization.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:040:02.
 model Organization {
   id                           String    @id @default(cuid())
   name                         String
@@ -687,20 +743,20 @@ model Organization {
   @@map("organizations")
 }
 
-/// #692 — the unified per-server PRINCIPAL POOL. One row per root name (a user
-/// handle OR an organization name), enforcing CROSS-KIND uniqueness by
-/// constraint so a URN `<root>` atom resolves to exactly one principal without
-/// an `@` sigil or kind marker (GitHub's model). Users and Organizations FK
-/// into this; their own `handle` / `urn` columns stay the denormalized read
-/// source-of-truth, kept in sync inside the mint transaction.
+/// One reserved root name: a user's handle or an organization's name. The table is the single pool both kinds of
+/// name are taken from, so the first part of a URN names exactly one owner without a marker that says which kind
+/// it is.
 ///
-/// A released root name is TOMBSTONED (`status = 'released'`, the owning
-/// user/org detached) — the row is kept, and the `name @unique` spans ALL
-/// statuses, so a released name is reserved FOREVER (indefinite, no recycling —
-/// the identity guarantee the `@`-sigil rename-safety is replaced by). Reserved
-/// platform words (`hadron`, `platform`, …) are pre-seeded rows with
-/// `status = 'reserved'`. `name` is written lowercased everywhere, so the plain
-/// (Prisma-modeled) unique doubles as case-insensitive and backs `findUnique`.
+/// Relationships: at most one User or one Organization points at a principal (`User.principalId`,
+/// `Organization.principalId`). Their own `handle` and `urn` columns remain what reads use; the principal row is
+/// written in the same transaction that sets them, so the two stay equal.
+///
+/// Behaviour: `name` is unique across every status and is always written in lower case, so the plain unique index
+/// is also case-insensitive. A name that is given up is kept as a tombstone (`status = 'released'`, owner
+/// detached) and is never handed out again, so an old URN can never come to mean a different owner. Words the
+/// platform keeps for itself (for example `hadron`, `platform`) are rows with `status = 'reserved'`.
+///
+/// Background: #692.
 model Principal {
   id         String    @id @default(cuid())
   /// The canonical root name, stored lowercase. `@unique` is a plain (case-
@@ -724,10 +780,19 @@ model Principal {
   @@map("principals")
 }
 
-/// Associates a User with an Organization. To remove a User from an
-/// Organization, delete the OrgMember row. Must NOT delete the
-/// OrgMember if it is the only one with role OWNER (enforced at the
-/// resolver, not the schema).
+/// The membership of one User in one Organization, with the role the user has there. This row is what makes a
+/// person a member of an organization; organization-level access checks read it.
+///
+/// Relationships: joins User and Organization, one row per pair. OrgMemberInvitation rows name the member that
+/// sent them (`sentMemberInvitations`).
+///
+/// Behaviour: `role` is the member's role in the organization (OWNER > ADMIN > CONTRIBUTOR > READER). Removing a
+/// user from an organization soft-deletes this row (`deletedAt`), and such a row authorizes nothing. The last
+/// member with the role OWNER cannot be removed; the resolver enforces that, not the schema. `canInvite` allows
+/// inviting existing platform users into the organization; inviting a new platform user is governed by
+/// `User.maxReferrals` instead.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:040:03.
 model OrgMember {
   id             String    @id @default(cuid())
   organizationId String    @map("organization_id")
@@ -753,32 +818,44 @@ model OrgMember {
   @@map("org_members")
 }
 
-/// A Hadron knowledge graph, owned by an Organization. The four-way
-/// `class` field (system / app / knowledge / personal) governs
-/// addressing and access — see the MemoryClass enum doc.
+/// A knowledge graph: a named container of Nodes and the Edges between them, with its own URN, owner, access
+/// rules and settings. Everything an agent or a person stores in Hadron is stored in a memory.
 ///
-/// **Git-backed memories** — the root `node.yaml` in the repo is the
-/// **memory manifest**, declaring the memory's urn and marketplace
-/// metadata. On import the server reads this manifest and creates or
-/// updates the Memory row. The org portion of the URN must match an
-/// existing Organization on the server.
+/// Ownership: exactly one of `organizationId` and `ownerUserId` is set (`chk_memory_owner_xor`), so a memory
+/// belongs to an organization or directly to a user.
 ///
-/// **Git authentication** — the server first tries the owning
-/// Organization's `githubInstallationId` to mint ephemeral tokens
-/// (1-hour expiry). If the repo is outside the GitHub App's scope
-/// (different GitHub org, personal repo, GitLab, etc.), the server
-/// falls back to `sourceTokenEncrypted`. The GitHub App's private key
-/// (used to sign JWT requests for installation tokens) lives in the
-/// server's environment/secrets manager — not in the database. For
-/// the SaaS server, Baragaun manages this key.
+/// Class: `class` decides how the memory is addressed and who may read and write it (see the MemoryClass enum):
+/// `system` (an Agent's definition, or an App's install memory that customises an Agent), `app` (what an App
+/// writes through an Agent), `knowledge` (reference content), `group` (shared by its MemoryMembers), `personal`
+/// and `private` (owned by one user, `userId`). The columns `appId`, `userId`, `userMemoryOfAgentId`,
+/// `sharedMemoryOfAgentId`, `installOfAgentId` and `isInstallMemory` say which App, user and Agent the memory
+/// belongs to; database CHECK constraints tie each of them to the class.
 ///
-/// **Token encryption** — `sourceTokenEncrypted` uses AES-256-GCM
-/// with a symmetric key from the server's environment
-/// (HADRON_ENCRYPTION_KEY). Plaintext never stored or shown after
-/// initial entry. To replace an expired/revoked token, the user
-/// pastes a new one (overwrites the old encrypted value). Key
-/// rotation: re-encrypt all stored tokens with the new key in a
-/// single migration.
+/// Relationships:
+/// - Content: Nodes, Edges, Assets, NodeEmbeddings.
+/// - Access: MemoryShare (a personal memory shared with another user), MemoryMember (members of a group memory),
+///   MemorySubscription and MemoryLicense (another organization's access), AgentMemoryItem (an Agent's access),
+///   AppMemoryWriteGrant and AppAutomationReadGrant (an App's runs).
+/// - Configuration: MemoryConfig (the memory's rulebook, created on the first rule write) and
+///   MemoryConfigDefaultSkip.
+/// - Use: Sessions that write to it, the Worker whose working memory it is, Channels, Scopes it is part of.
+/// - Records: MemoryLogEntry, GitMirrorObligation.
+///
+/// Git-backed memories: when `source` is set the memory is synced from a Git repository. The root `node.yaml` of
+/// the repository is the memory manifest: it declares the memory's URN and marketplace metadata, and an import
+/// creates or updates this row from it. The organization part of the URN must match an Organization that exists
+/// on the server.
+/// To read the repository the server first uses the owning organization's GitHub App installation to mint a token
+/// that lasts one hour. For a repository outside that installation (another GitHub organization, a personal
+/// repository, another Git host) it uses `sourceTokenEncrypted`. The GitHub App's private key is not stored on
+/// this row.
+///
+/// Token encryption: `sourceTokenEncrypted` is encrypted with AES-256-GCM under the server's
+/// `HADRON_ENCRYPTION_KEY`. The plaintext is never stored or shown again after it is entered; to replace an
+/// expired or revoked token the user enters a new one. Rotating the server key means re-encrypting every stored
+/// token in one migration.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:060:01.
 model Memory {
   id                    String  @id @default(cuid())
   organizationId        String? @map("organization_id")
@@ -1088,27 +1165,34 @@ model Memory {
   @@map("memories")
 }
 
-/// A user-uploaded file (document, image) bound to a Memory. Bytes
-/// live in object storage (Cloudflare R2 in v1; MinIO for local dev);
-/// this row carries metadata, the storage pointer, and virus-scan
-/// state. Spec: `hadron-concept/spec-kits/specs/004-asset-upload/spec.md` (sister repo).
+/// A file (a document or an image) stored for a Memory. The bytes are in object storage; this row holds the
+/// file's metadata, the key of the stored object, and the state of its malware scan.
 ///
-/// **Why a separate table (not a `nodeType`)**: normalization (asset
-/// and node schemas diverge), scale (raw-material assets shouldn't
-/// bloat the knowledge-node table), and FK-shape (containment is
-/// foreign-key-shaped, not graph-shaped). See
-/// `hadron-concept/design-discussions/hadron-platform/2026-04-28-asset-upload-design/010-summary.md`
-/// (sister repo) §"Why this summary supersedes 007-summary.md".
+/// Relationships: belongs to one Memory and is deleted with it. `memoryId` is null while the asset is staged:
+/// uploaded but not yet attached to a memory. Nodes do not reference assets by foreign key.
 ///
-/// **URN form** (computed, NOT stored): grammar v2
-/// `hrn:asset:<root>:<mem...>:assets:<asset.id>`, emitted by `emitAssetUrnV2`
-/// from the holding memory's stored bare urn. The GraphQL `Asset.urn` docstring
-/// carries the full contract, including the two degraded shapes a parser has to
-/// tolerate and why `<mem...>` is not always a single atom.
+/// Behaviour:
+/// - Scan: an upload starts as PENDING and is downloadable only when CLEAN. A BLOCKED row is kept as a record of
+///   the verdict and its bytes are deleted. `scanDueAt` is the queue of the background scan: a due row is scanned
+///   again, or has its leftover bytes purged.
+/// - Retention: a staged asset that is not attached within 24 hours, and a soft-deleted asset 24 hours after its
+///   deletion, are removed by the asset janitor together with their bytes.
+/// - Missing bytes: `bytesCheckedAt` is the cursor of the sweep that checks that the object behind a live row
+///   still exists.
+/// - Public link: `publicLinkEnabled` is the per-asset opt-in for the anonymous link
+///   (hrn:node:hadronmemory.com:specs:cor:dmo:060:15). It is stored policy, not proof that the link works: the
+///   deployment must also allow it, and the asset must be CLEAN.
+/// - URN: computed, not stored: `hrn:asset:<root>:<mem...>:assets:<asset.id>`, built from the holding memory's
+///   URN. The GraphQL `Asset.urn` description has the full contract.
 ///
-/// **Cross-references from nodes** are reserved for a future spec —
-/// `Node.attachedAssetId?` (one-asset case) or a `node_assets` join
-/// (many-to-many). Not in v1.
+/// Why a table of its own and not a node type: an asset's columns differ from a node's, uploaded raw material
+/// should not grow the node table, and an asset is contained in a memory by a foreign key, not by a graph edge.
+///
+/// Background (history, not law): the Spec Kit specs 004-asset-upload and 006-asset-upload-redesign. Issues #896
+/// (scan), #1140 (missing bytes), #1667 (public link).
+///
+/// Specs: hrn:node:hadronmemory.com:specs:cor:dmo:060:10, hrn:node:hadronmemory.com:specs:cor:dmo:060:12,
+/// hrn:node:hadronmemory.com:specs:cor:dmo:060:13.
 model Asset {
   id            String          @id @default(cuid())
   // 006-asset-upload-redesign (2026-05-01): nullable to support staging.
@@ -1190,44 +1274,6 @@ model Asset {
   @@map("assets")
 }
 
-/// A single node in a Memory. `loc` is the colon-delimited path
-/// within the memory (e.g. `auth:tokens`), memory-relative. The full
-/// URN is computed `memory.urn + ":" + loc` (e.g.
-/// `baragaun.com:secureid:auth:tokens`) and **not stored**. `id` is
-/// optional in YAML; the server assigns it on import if missing.
-///
-/// **Node types** — the authoritative canonical list for ordinary nodes:
-///   - `abstract`        — agent-generated summaries (chat summaries,
-///                         topic abstracts); searched first by retrieval flows.
-///   - `chat`            — chat session and message nodes.
-///   - `data`            — the structured payload is the artifact, with no
-///                         human-authored content body.
-///   - `info` (default)  — reference content: articles, guides, extracted facts;
-///                         the default for user-authored knowledge.
-///   - `prompt`          — system prompt content for an LLM call.
-///   - `record`          — append-mostly stored data: user profiles, session
-///                         logs, append-only event logs.
-///   - `reference`       — external sources or cross-memory pointers: papers,
-///                         URLs, legislation, asset references.
-///   - `system`          — agent-internal configuration: conversation designs,
-///                         stages, topics; typically in an Agent's system
-///                         memory and hidden from end-user search.
-/// `comment` is platform-reserved for governed feedback (see `commentMeta`);
-/// the canonical ordinary-node list is not a closed set of stored values.
-/// (The earlier `asset` node-type was promoted to its own Asset table
-/// in spec 004-asset-upload.)
-///
-/// **Column type is free-form `String` (not enum)** to preserve extensibility
-/// for third-party agents and apps: no Prisma enum or DB CHECK constraint.
-/// Hadron core does not special-case non-canonical third-party values.
-///
-/// **Chat-root `data.scope`** (spec 017, 2026-05-12) — chat-root nodes
-/// (loc `chats:<id>`, depth 2, nodeType `record`) carry a `scope` field
-/// in `data` recording the chat's visibility tier (`private` | `shared`).
-/// Set at chat creation and immutable thereafter (FR-002).
-/// Denormalized from `Memory.class` for chat-list query performance;
-/// MUST stay consistent with the holding memory's class per the
-/// invariant validator in `src/api/graphql/schema/chat-scope.ts`.
 /// #1326 — how the server attributed the current content. NULL on legacy or
 /// as-yet-unstamped writes; callers cannot choose this through NodeInput.
 enum NodeAuthorshipKind {
@@ -1260,6 +1306,57 @@ enum NodeContentValidationReporterKind {
   APP_KEY
 }
 
+/// One node of a Memory's knowledge graph: a titled piece of content at an address. Nodes are what agents and
+/// people read, write and search; almost everything stored in a memory is a node.
+///
+/// Address: `loc` is the node's colon-delimited path inside its memory (for example `auth:tokens`), unique per
+/// memory. The node's URN is computed from the memory's URN and the `loc`; it is not stored. `id` stays the same
+/// when the node moves.
+///
+/// Relationships:
+/// - Memory: belongs to one Memory and is deleted with it.
+/// - Graph: Edges leave and enter it (`outgoingEdges`, `incomingEdges`); a PendingEdge waits for a target that
+///   does not exist yet.
+/// - History: NodeRevision holds earlier states, NodeEdgeRemoval the edges removed with them,
+///   CompiledPromptRevision the provenance of a compiled prompt.
+/// - Review: NodeSignature and SigningRequest (signatures), NodeContentValidationReport (validation results),
+///   CommentMeta (the node is a comment, or has comments).
+/// - Search: NodeEmbedding rows hold its vectors.
+/// - Other roles: the chat root of a Channel; the tasks or processes index of an Agent; the author task,
+///   validation task or description of a NodeRoleRule.
+///
+/// Three fields say what kind of node it is, and they are independent:
+/// - `nodeType` is the platform's kind. It is a free string, not an enum and not constrained in the database, so
+///   that third-party agents and Apps can add their own values; the platform gives no special treatment to values
+///   it does not know. The canonical values for ordinary nodes:
+///   - `abstract`: agent-generated summaries (chat summaries, topic abstracts); retrieval flows search them first.
+///   - `chat`: chat sessions and messages.
+///   - `data`: the structured payload is the artifact; there is no human-written body.
+///   - `info` (the default): reference content such as articles, guides and extracted facts.
+///   - `prompt`: system prompt content for an LLM call.
+///   - `record`: stored data that is mostly appended to, such as user profiles and event logs.
+///   - `reference`: pointers to external sources or to other memories, such as papers, URLs and asset references.
+///   - `system`: an agent's internal configuration, such as conversation designs, stages and topics; usually in
+///     an Agent's system memory and hidden from end-user search.
+///   `comment` is reserved by the platform for governed feedback (see CommentMeta).
+/// - `objectType` names the collection the node is an instance of, in a memory that declares a schema.
+/// - `role` says what the node is for; a small closed set of values routes writes to that kind's own path.
+///
+/// Behaviour:
+/// - Content: `name`, `abstract` and `content` are the text. `abstractOriginHash` records which content the
+///   abstract was written for, so a reader can tell a stale abstract.
+/// - Revisions: `revSeq` is the current revision number. A revisioned edit saves the state before the edit as a
+///   NodeRevision and advances the number.
+/// - Approval and minting: the `approved*` columns hold the latest approval and the `minted*` columns the mint,
+///   both on the live row because the current revision has no NodeRevision row.
+/// - Attribution: the `authored*` and `createdBy*`/`updatedBy*` columns are set by the server from the
+///   authenticated request, never by the caller.
+/// - Embedding: the `embedding*` columns are the work queue and the failure record of the vector index.
+/// - Chat roots: a chat-root node (`chats:<id>`, `nodeType` `record`) carries `data.scope` (`private` or `shared`),
+///   set when the chat is created and never changed. It repeats the class of the holding memory and must stay
+///   consistent with it (src/api/graphql/schema/chat-scope.ts).
+///
+/// Specs: hrn:node:hadronmemory.com:specs:cor:dmo:060:02, hrn:node:hadronmemory.com:specs:cor:dmo:020:04.
 model Node {
   chatRootCounter ChatRootCounter?
   chatRootEngineState ChatRootEngineState?
@@ -1551,13 +1648,24 @@ enum EmbeddingKind {
   chunk // N rows per node — vector of one content chunk
 }
 
-/// 033-rag-vector-retrieval: a stored embedding vector for a node's abstract
-/// or one of its content chunks. Vectors are computed on plaintext at write
-/// time (FR-027) and stored plaintext (pgvector). The `embedding` column is
-/// `Unsupported("vector(768)")` — Prisma has no native vector type, so it is
-/// NEVER read/written through the generated client; all access is raw SQL
-/// (`$queryRaw`/`$executeRaw`). The HNSW index + abstract partial-unique index
-/// live in the migration + post-push.sql (not expressible in Prisma schema).
+/// One stored embedding vector of a Node: either the vector of the node's abstract (one per node) or the vector
+/// of one chunk of its content (several per node). Vector search over a memory reads these rows.
+///
+/// Relationships: belongs to one Node and is deleted with it. `memoryId` repeats the node's memory so a search
+/// can filter by memory before it orders by distance.
+///
+/// Behaviour: rows exist only for memories with `Memory.vectorIndexEnabled`; `Memory.embeddingSource` decides
+/// whether abstracts, chunks or both are embedded. The embedding job writes them from the plaintext, and the
+/// vectors are stored unencrypted. `provider`, `model` and `dim` record which model produced the vector, so a
+/// later change of model can find the rows to re-embed. For a chunk, `chunkIndex`, `charStart`, `charEnd` and
+/// `chunkText` locate the text the vector stands for.
+///
+/// The `embedding` column is a pgvector `vector(768)`, a type Prisma does not have. It is never read or written
+/// through the generated client: every access is raw SQL. The HNSW index and the partial unique index that allows
+/// one abstract vector per node are in the migration and prisma/post-push.sql, because the Prisma schema cannot
+/// express them.
+///
+/// Background (history, not law): the Spec Kit spec 033-rag-vector-retrieval.
 model NodeEmbedding {
   id         String                      @id @default(cuid())
   nodeId     String                      @map("node_id")
@@ -1596,14 +1704,26 @@ model NodeEmbedding {
   @@map("node_embeddings")
 }
 
-/// Directed edge between two Nodes. The optional `name` describes the
-/// relationship — e.g. "imports", "depends_on", "related-to", "cites",
-/// "abstract-of". An edge whose target is not yet synced lives in
-/// PendingEdge until the target arrives.
-/// A directed Node→Node relation, upgraded to a first-class, addressable
-/// entity (it has its own URN `hrn:edge:<root>:<memory>:<loc>`). Edges
-/// drive task execution/automation and the chatbot/conversation platform,
-/// not just describe graph relationships.
+/// Directed edge between two Nodes: it says that the source node relates to the target node, and optionally how.
+/// Edges are what make a memory a graph. They also drive behaviour: an edge can be runnable and can carry a
+/// condition, which is how task automation and conversation flows move from one node to the next.
+///
+/// An edge is an addressable entity of its own. `loc` is its path inside the memory, unique per memory, and the
+/// suffix of its URN (`hrn:edge:<root>:<memory>:<loc>`); it is derived from the two endpoints and the name when
+/// the author gives none (src/lib/edgeLoc.ts). The optional `name` describes the relationship, for example
+/// "imports", "depends_on", "related-to", "cites" or "abstract-of".
+///
+/// Relationships: `source` and `target` are Nodes, and the edge is deleted with either. `memoryId` is the
+/// source node's memory, also for an edge whose target is in another memory. An edge whose target does not exist
+/// yet is stored as a PendingEdge until the target arrives.
+///
+/// Behaviour: among the edges that leave one node, `priority` orders resolution (lower first) and `condition`, a
+/// JSONLogic expression, decides whether the edge fires (null: always). `governedKind` marks an edge the platform
+/// owns: the anchor or reply edge of a comment, or an edge derived from an include tag. A governed edge cannot be
+/// created, changed or deleted through the generic edge writes, and the database keeps it immutable
+/// (hrn:node:hadronmemory.com:specs:cor:dmo:110:01, hrn:node:hadronmemory.com:specs:cor:dmo:110:04).
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:060:03.
 model Edge {
   id                 String            @id @default(cuid())
   /// Denormalized from the SOURCE node's memory so `loc` can be made
@@ -1704,17 +1824,35 @@ enum CommentThreadState {
   RESOLVED
 }
 
-/// #1606 — the comment-specific state of a `nodeType = 'comment'` node, 1:1.
-/// The body is the node's `content`; the quote and moderation reasons live in
-/// the node's `data`, so an encrypted memory encrypts them with the body. The
-/// columns here are what a constraint or an index must see in plaintext.
+/// The comment-specific state of a comment. A comment is a Node with `nodeType = 'comment'`, and every such node
+/// has exactly one row here. The comment's text is the node's `content`; this row says what the comment is on,
+/// which thread it belongs to, who wrote it, and whether the thread is open, resolved, retracted or deleted.
 ///
-/// Invariants (prisma/post-push.sql + migration `20261005200000_comment_nodes`):
-/// meta ⇔ comment type; comment, target and thread root share one memory of a
-/// commentable class; a target is never a comment; `targetNodeId`,
-/// `threadRootId` and `authorKey` are immutable and equal the governed edges'
-/// endpoints; at most one open, live top-level thread per (target, author)
-/// (`comment_meta_one_open_thread`, a partial unique index Prisma can't model).
+/// Relationships: `node` is the comment node (one to one). `target` is the commented node. `threadRootId` is null
+/// for a top-level comment and names the thread's top-level comment for a reply. The same facts exist as governed
+/// Edges (comment to target, reply to thread root), and the columns here always equal those edges' endpoints.
+///
+/// Why these columns are here and not in the node's `data`: the quoted text and the moderation reasons are in the
+/// node's `data`, so an encrypted memory encrypts them with the body. The columns in this table are the ones a
+/// constraint or an index has to read in plaintext.
+///
+/// Behaviour and invariants (prisma/post-push.sql and migration `20261005200000_comment_nodes`):
+/// - A node has a CommentMeta row exactly when it is a comment.
+/// - The comment, its target and its thread root are in one memory, of a class that allows comments.
+/// - The target of a comment is never itself a comment.
+/// - `targetNodeId`, `threadRootId` and `authorKey` never change.
+/// - One author has at most one open, live top-level thread per target (`comment_meta_one_open_thread`, a partial
+///   unique index Prisma cannot model).
+/// - Only a top-level comment has a `threadState` (OPEN or RESOLVED).
+/// - Deleting a comment that has live replies leaves a stub with its text blanked (`retractedAt`); a comment
+///   without replies is soft-deleted. `threadDeleted*` repeats the soft delete of the comment node, and its cause,
+///   so the one-open-thread index can leave the row out.
+///
+/// Rules: hrn:node:hadronmemory.com:specs:cor:dmo:110:01 (governed edges),
+/// hrn:node:hadronmemory.com:specs:cor:dmo:110:03 (the author), hrn:node:hadronmemory.com:specs:cor:dmo:110:05
+/// (thread state). Background: #1606, #1721.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:110:12.
 model CommentMeta {
   nodeId             String              @id @map("node_id")
   /// The commented node. Immutable. `ON DELETE CASCADE` only so a whole-memory
@@ -1756,9 +1894,19 @@ model CommentMeta {
   @@map("comment_meta")
 }
 
-/// An edge whose target Node has not been synced yet; stored without
-/// a foreign key to the target. When the target Node is synced, the
-/// PendingEdge is converted to a regular Edge.
+/// An edge whose target Node does not exist on this server yet. It keeps what was written (source, intended
+/// target, name, description, data and, if one was given, the `loc`) until the target arrives, and is then turned
+/// into a regular Edge.
+///
+/// Relationships: `source` is a Node, and the row is deleted with it. `targetId` is the id of the intended target
+/// and deliberately not a foreign key, because that node is not there. One row per (source, target).
+///
+/// Behaviour: created when a write or a Git sync names a target that is missing. When the target node is
+/// created or synced, the pending edge is promoted to an Edge (src/lib/pendingEdgePromotion.ts); the Edge derives
+/// a `loc` when this row has none. `Memory.pendingEdgeCount` counts the live unresolved rows whose source is in
+/// that memory.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:060:05.
 model PendingEdge {
   id          String    @id @default(cuid())
   sourceId    String    @map("source_id")
@@ -1788,9 +1936,6 @@ model PendingEdge {
   @@map("pending_edges")
 }
 
-/// Tracks a unit of work by an App: an AI/agent conversation, a
-/// chatbot interaction, an automation run. Sessions are the top-level
-/// tracking concept; UsageEvent rows are recorded within a session.
 /// #1156 / cor:dmo:070:05: only an end writer supplies a cause; legacy NULL stays unknown.
 enum SessionEndReason {
   ended
@@ -1800,6 +1945,33 @@ enum SessionEndReason {
   agent_absent
 }
 
+/// One stretch of work by a person, an agent or an automation: an interactive coding session, a chat with an
+/// end user through an App, an automation run, or a run started by an edge (`type`). A session is the unit that
+/// usage is recorded in, and it is what binds a Worker to the process that is doing its work.
+///
+/// Relationships:
+/// - Who: `user` (the person the work is attributed to), `app`, `agent`, and `worker` when the session is bound
+///   to a Worker; `role` is that worker's role at the time of the bind
+///   (hrn:node:hadronmemory.com:specs:cor:dmo:050:11, hrn:node:hadronmemory.com:specs:cor:agt:020:03).
+/// - Where it writes: `memory`, the session's active write memory when there is exactly one.
+/// - Other sessions: `parent` (this session was started by another, as a sub-agent) and `prev` (this session
+///   continues an earlier one); `supersededBySessionId` names the session that replaced this one at a bind.
+/// - Usage: UsageEvent rows are recorded inside a session.
+/// - Launch: for a session a host started, `launchHostId`, `launchOperationId`, `launchTaskId` and
+///   `launchIssuedBy` name the host, the start operation, the task it was started for and who issued the start
+///   (hrn:node:hadronmemory.com:specs:cor:agt:070:08). All four are null for a session a person started by hand.
+///
+/// Behaviour:
+/// - The caller chooses the `id`.
+/// - A session is open until `endedAt` is set. `endReason` says how it ended; the first end wins.
+/// - Silence never ends a session. Whether a session is live (driven recently) is derived when it is read
+///   (src/lib/sessionActivity.ts) and changes nothing stored. The session reaper ends a session only when it is
+///   past `expiresAt`, which is set only for sessions started with an App's session timeout.
+/// - `llmModel`, `family`, `effort` and `tool` are what the session reported about itself. They are inputs to
+///   matching work to workers, never to authorization.
+/// - Token counts, turn and error counts, `summary` and the `outcome*` fields are reports about the work done.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:070:05.
 model Session {
   id                String            @id // caller-generated (e.g. UUID from h-start-session)
   type              SessionType       @default(DEVELOPER)
@@ -1958,12 +2130,26 @@ model Session {
   @@map("sessions")
 }
 
-/// Record of a single operation within a Session (read, write,
-/// action run, edge traversal, session summary).
+/// The record of one operation: a node read or write, an action run, an embedding call, an App run. Usage
+/// reporting, billing and the activity charts are computed from these rows, and a session's liveness counts the
+/// events recorded in it.
 ///
-/// **Column `type` is `String` (not enum)** — intended values:
-/// `read | write | action-run | edge-traversal | session-summary`.
-/// Tightening to a Prisma enum is reserved for a future cleanup spec.
+/// Relationships: an event can name the Session it happened in, the Node it touched, the App and AppKey that
+/// made the request, the User it is attributed to and the Organization that is billed. All of those are set to
+/// null when the row they point at is deleted, so the event outlives them. `nodeLoc` and `memoryId` are stored as
+/// plain values, with no foreign key, for the same reason: the event stays in its memory's history after the
+/// node or the memory is gone.
+///
+/// Behaviour:
+/// - `type` is a string, not an enum. Values written today include `read`, `write`, `action-run`, `embedding`
+///   and `app-run`.
+/// - Cost: `provider`, `model`, the token counts and `keyOwnerType` describe an LLM call. `costMicroCents` is the
+///   cost at the price in force when the event was recorded (AiModelPrice) and is never recomputed.
+/// - Activity: `countsAsActivity` is true only when the session was live and owned by the recording principal
+///   when the event was written, so a request attributed to a lapsed session does not make it live again.
+/// - Rollup: database triggers on this table maintain UsageActivityCell.
+///
+/// Specs: hrn:node:hadronmemory.com:specs:cor:dmo:080:02, hrn:node:hadronmemory.com:specs:cor:dmo:100:02.
 model UsageEvent {
   id               String    @id @default(cuid())
   type             String
@@ -2058,17 +2244,23 @@ model UsageEvent {
   @@map("usage_events")
 }
 
-/// #2719 slice 2: the usage-activity rollup. One row per (scope, 15-minute UTC cell) holding the live `read` and
-/// `write` event counts of that cell, maintained by statement-level triggers on `usage_events`
-/// (prisma/usage-activity-rollup-invariants.sql), never written by application code. `scopeKind` is `user` (events
-/// attributed to the user) or `memory` (events attributed to the event's own `memoryId`); no FK on purpose, the rollup
-/// follows the events and an event outlives its memory (#796).
+/// A precomputed count of usage for one scope in one 15-minute interval: how many live `read` and `write`
+/// UsageEvents fall into that interval for one user or one memory. The usage-activity charts read these rows so
+/// they do not have to count `usage_events` each time.
 ///
-/// CORRECTION (#4320) of a comment in prisma/usage-activity-rollup-invariants.sql ("A cell that nets to zero or below
-/// … is removed"): removal is when BOTH counters are non-positive, so a cell at `reads = -1, writes = 3` stays. Such a
-/// cell exists only before `applies_from` while the backfill is incomplete, where the reader does not trust cells and
-/// the backfill rebuilds them. The SQL file is carried byte for byte by the applied migration and is never edited;
-/// this comment is where a reader of the model lands on that.
+/// Relationships: none by foreign key, on purpose. `scopeKind` is `user` (events attributed to that user) or
+/// `memory` (events whose own `memoryId` is that memory), and `scopeId` is the id. The cells follow the events,
+/// and an event outlives its memory. `cell` is the start of the interval, in UTC.
+///
+/// Behaviour: maintained only by statement-level triggers on `usage_events`
+/// (prisma/usage-activity-rollup-invariants.sql); application code never writes it. A cell is removed when both
+/// counters are zero or below. So a cell such as `reads = -1, writes = 3` stays; one can exist only for an
+/// interval before `UsageActivityRollupState.appliesFrom` while the backfill is incomplete, where the reader does
+/// not use cells and the backfill rebuilds them. A comment in that SQL file describes the removal differently ("a
+/// cell that nets to zero or below is removed"); the file is carried byte for byte by the applied migration and
+/// is never edited, so the correction is recorded here (#4320).
+///
+/// Background: #2719, #796.
 model UsageActivityCell {
   scopeKind String   @map("scope_kind")
   scopeId   String   @map("scope_id")
@@ -2080,10 +2272,18 @@ model UsageActivityCell {
   @@map("usage_activity_cells")
 }
 
-/// #2719 slice 2: the rollup's single state row (`id = 1`). The triggers maintain every cell at or after `appliesFrom`;
-/// cells before it enter by the backfill job, which sets `complete`. Until then the reader answers earlier cells from
-/// `usage_events`, so deploying before the backfill is correct, only not faster. `appliesFrom` stays a real timestamp
-/// (Prisma cannot read -infinity); `complete` carries the "all history" meaning.
+/// The single row (`id = 1`) that says how far the usage-activity rollup can be trusted. A reader of
+/// UsageActivityCell checks it to decide whether to answer from the cells or from `usage_events`.
+///
+/// Relationships: none; it describes the UsageActivityCell table as a whole.
+///
+/// Behaviour: the triggers maintain every cell at or after `appliesFrom`. Cells before it are written by the
+/// backfill job (src/jobs/usageActivityRollup.ts), which sets `complete` when all history is in. Until then the
+/// reader answers intervals before `appliesFrom` from `usage_events`, so the answers are correct before the
+/// backfill has run, only slower. `appliesFrom` is a real timestamp because Prisma cannot read `-infinity`;
+/// `complete` is what means "all history".
+///
+/// Background: #2719.
 model UsageActivityRollupState {
   id          Int      @id @default(1)
   appliesFrom DateTime @map("applies_from")
@@ -2092,21 +2292,46 @@ model UsageActivityRollupState {
   @@map("usage_activity_rollup_state")
 }
 
-/// **The Agent definition** — what a Builder creates and what the
-/// marketplace sells. One Agent row holds the canonical conversation
-/// design (system memory), the default AI config, the declared
-/// memory-provisioning policy, and the declared installation policy.
-/// Spec: 008-agent-installation (2026-05-02).
+/// The definition of an agent: what a builder creates, and what an organization or a person installs. One row
+/// holds the agent's identity (`urn`, `name`), a pointer to the memory with its instructions (`systemMemoryId`),
+/// and the policies it declares for every installation.
 ///
-/// An **App** is the *deployment* of an Agent in some org. The Agent
-/// is what is shared across installations; the App is what
-/// authenticates, holds members, and accumulates per-deployment data.
-/// (PWA analogy: you build an Agent, and when someone installs it,
-/// the running instance is called an App.)
+/// Agent, App and Worker: an Agent is the definition and is shared by all its installations. An App is one
+/// deployment: it authenticates, has members and collects its own data, and it installs Agents through AppAgent.
+/// A Worker is a named casting of an installed Agent inside an App. Examples of agents: "Mealplan" (a family
+/// meal planner) and "Juno" (a mentoring chat agent installed by several organizations).
 ///
-/// Examples: "Mealplan" (the Agent your family meal planner is built
-/// from), "Juno" (the mentee chat agent shared across MicroMentor
-/// orgs).
+/// Ownership: exactly one of `organizationId` and `ownerUserId` is set (`chk_agent_owner_xor`).
+///
+/// Relationships:
+/// - Memories: its system memory (`systemMemoryId`); the knowledge memories attached through AgentMemoryItem; and
+///   the memories that exist per installation or per user (`installMemories`, `sharedMemories`, `userMemories`).
+/// - Installation: AppAgent (the Apps that installed it), AppAgentCustomization, AgentOrgGrant (another
+///   organization allowed to install it), AgentSubscription (a user's subscription to it).
+/// - Composition: `extendsAgent` is the one base Agent whose system-memory nodes this Agent inherits
+///   (hrn:node:hadronmemory.com:specs:cor:dmo:050:14); AgentImport lists the Agents it imports.
+/// - Work: Workers cast from it (hrn:node:hadronmemory.com:specs:cor:dmo:050:11), Sessions it drives, the tickers
+///   it declares (AgentTickerTemplate), its ModelGroups and AiServiceConfigs.
+/// - Its lists: `tasksIndex` and `processesIndex` are the Nodes that list the Agent's tasks and processes
+///   (hrn:node:hadronmemory.com:specs:cor:dmo:050:15, hrn:node:hadronmemory.com:specs:cor:dmo:050:16).
+///
+/// Behaviour:
+/// - `visibility` says who may see and install the Agent; PERSONAL is the creator-only draft state.
+///   `listedOnMarketplace` controls advertisement only.
+/// - `memoryProvisioning` and `installationPolicy` are the Agent's declarations for each App that installs it:
+///   which App memory to create, how many members the App may have and which member roles exist.
+/// - `publishedRevisionLoc` names the published revision of the system memory, so a builder can work on a draft
+///   without changing running Apps. `editorLockUserId` is the one builder who holds the edit lock.
+/// - `bootPromptNodeId` and `bootPromptUrn` point at the Agent's compiled boot prompt
+///   (hrn:node:hadronmemory.com:specs:cor:agt:040:07).
+/// - `usesTasks`, `lifecycle`, `resetContextAfterTask` and `contextCap` apply to every Worker cast from the Agent:
+///   whether it is expected to hold tasks, whether its process runs always or only while it has a task, and when
+///   its host is asked to reset its context.
+/// - `personaRole` is descriptive metadata; no server behaviour depends on it.
+///
+/// Background (history, not law): the Spec Kit spec 008-agent-installation.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:050:01.
 model Agent {
   id                    String          @id @default(cuid())
   /// #2138 §3.5 — false: every worker cast from this Agent counts as HAVING a task (coordinators, the
@@ -2297,12 +2522,19 @@ model Agent {
   tickerTemplates       AgentTickerTemplate[]
 }
 
-/// Associates a Memory with an Agent, with a per-memory access level.
-/// The Agent controls which memories are read-only vs read-write
-/// per-attached-memory. After 005-agent-subscription,
-/// `AgentMemoryItem.role` is the sole per-knowledge-memory write cap
-/// (the AppAgent-level cap was first relaxed in 005, then the
-/// AppAgent join itself was dropped in 008-agent-installation).
+/// Attaches one Memory to one Agent and says whether the Agent may only read it or also write it. This is how an
+/// Agent is given its knowledge memories. The row limits and never grants: the memory's own access rules must
+/// also allow what the Agent does there.
+///
+/// Relationships: joins Agent and Memory, one row per pair, and is deleted with either.
+///
+/// Behaviour: `role` is `read` (the default) or `read-write` and is the upper limit of what the Agent may do in
+/// that memory. The access fold reads these rows together with the Agent's system memory
+/// (`foldAgentIntoAccessMap`, src/mcp/access-control.ts). A memory that another organization owns can be attached
+/// only while the Agent's own organization has a live MemorySubscription to it, and `read-write` only when that
+/// subscription allows writing (src/lib/auth/memorySubscriptionAccess.ts).
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:050:09.
 model AgentMemoryItem {
   id        String    @id @default(cuid())
   agentId   String    @map("agent_id")
@@ -2324,8 +2556,19 @@ model AgentMemoryItem {
   @@map("agent_memory_items")
 }
 
-/// Commercial usage grant of a Memory; defines capacity and terms.
-/// Consumed via MemorySubscription.licenseId.
+/// A commercial grant to use a Memory: how many consumers may use it (`seats`), for which period (`validFrom` to
+/// `validUntil`), under which terms, and the license keys. A memory with `Memory.requiresLicense` is meant to be
+/// subscribed to only under a valid license.
+///
+/// Relationships: belongs to one Memory and is deleted with it. A MemorySubscription names the license it uses
+/// (`MemorySubscription.licenseId`).
+///
+/// Behaviour: `licenseType` is a string with the intended values `user`, `app` and `organization`. No mutation
+/// creates or edits a license today, and no access check reads one: a subscription gives access with or without
+/// a license (src/lib/auth/memorySubscriptionAccess.ts). The only code that reads the table is the memory
+/// transfer, which refuses to move a memory that has live licenses.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:060:06.
 model MemoryLicense {
   id          String    @id @default(cuid())
   memoryId    String    @map("memory_id")
@@ -2356,62 +2599,25 @@ model MemoryLicense {
   @@map("memory_licenses")
 }
 
-/// An Organization subscribes to another Organization's Memory.
-/// Governed by a MemoryLicense when the memory requires one.
+/// An Organization's subscription to a Memory that another organization owns. A live row is what lets the
+/// subscribing organization reach that memory: its members can read it, and its Agents can be attached to it.
 ///
-/// **Access evaluation order** (cross-org chain — extended in
-/// 005-agent-subscription with the App↔Agent and User↔Agent gates;
-/// 008-agent-installation added AgentOrgGrant; 023-app-shape replaced the
-/// direct `App.agentId` with the `AppAgent` join (an App can install N Agents)):
-///   1. **App ↔ Agent** — the App has the Agent installed (an `AppAgent`
-///      row links them) AND `Agent.visibility` allows the App's org.
-///      Cross-org installs (`App.organizationId != Agent.organizationId`)
-///      additionally require an active `AgentOrgGrant(App.organizationId,
-///      agentId)`. Same-org installs auto-pass.
-///   2. **Agent ↔ Memory (knowledge / app / system)** — current
-///      implementation (`src/mcp/access-control.ts#foldAgentIntoAccessMap`):
-///      `AgentMemoryItem(agent, memory)` exists OR memory is the
-///      Agent's `systemMemoryId`. When cross-org for knowledge:
-///      `MemorySubscription(orgB, memory)` AND any required
-///      `MemoryLicense` valid (not expired, seats available).
-///      **Known gap** (tracked in
-///      [issue #115](https://github.com/hadron-memory/hadron-server/issues/115)):
-///      this gate does NOT auto-grant access to app-class memories
-///      where `memory.appId = App.id` AND `memory.class = 'app'`.
-///      Today an explicit `AgentMemoryItem` row is required for
-///      app-class memories to be reachable through the MCP/GraphQL
-///      gates. The spec called for auto-grant; the implementation
-///      currently does not.
-///   3. **User ↔ Agent (personal-class memory only)** —
-///      `AgentSubscription(user, agentId)` exists AND active per
-///      the predicate, AND `Memory.appId = App.id` (the per-App
-///      isolation that User Story 2 hangs on — a session through App
-///      A cannot read the personal memory at `(B.id, user.id)` for
-///      some other App B of the same Agent).
-///   4. **Effective role** — most restrictive of
-///      `AgentMemoryItem.role` and `MemorySubscription.role`. (The
-///      legacy `AppAgent.role` is dropped post-008 — system memory is
-///      universally read-only from any App.) `personal`/`private`-class
-///      memories enforce strict ownership *additionally*: even an
-///      ADMIN/OWNER who would otherwise satisfy gate 2 cannot read a
-///      `personal`/`private` memory they do not own (FR-016).
+/// Relationships: joins the subscribing Organization (`organizationId`, never the owner) and the Memory, one row
+/// per pair. `license` is the MemoryLicense the subscription was made under, if any.
 ///
-/// **Worked example** (the four-org Juno scenario, 008 vocabulary):
-/// an App in `OrgA` deploys Juno (Agent in `OrgB` with
-/// visibility=ORGANIZATION since Alice is a Micromentor org-member;
-/// or PUBLIC for marketplace shape) which references a knowledge
-/// Memory in `OrgC`. The cross-org App↔Agent gate is satisfied by an
-/// active `AgentOrgGrant(OrgA, juno)`. End-user Alice (personal org
-/// `personal-alice`) chats through that App; her records land in a
-/// personal Memory at `(App.id, alice.id)` (`Memory.userId = alice`,
-/// `Memory.appId = App.id`, `class = personal`, `visibility = null`).
-/// The cross-org write into Alice's
-/// personal memory is granted by `AgentSubscription(alice, juno)` —
-/// without it, Juno has zero access. If Alice installs Juno into a
-/// *second* App (different Org), her records there go to a separate
-/// `(B.id, alice.id)` row — fully isolated from the OrgA installation.
-/// Each gate above must clear in order; failure denies at the right
-/// layer with a typed error.
+/// Behaviour:
+/// - Reach: a subscription reaches only an ordinary shared memory: not a `personal`, `private`, `group` or
+///   `system` memory, and not one that belongs to an App or to one user of an Agent. One predicate decides this
+///   for a member's read and for attaching an Agent (`subscribedMemoryWhere`,
+///   src/lib/auth/memorySubscriptionAccess.ts).
+/// - Role: READER is read-only, CONTRIBUTOR is read and write. The column is the full Role enum, but those two
+///   are the intended values. A member may write only when both their role in the subscribing organization and
+///   the subscription's role are CONTRIBUTOR or higher.
+/// - `activated` says whether the memory is merged into the subscriber's blended graph. It is not an access
+///   check, and neither is the license: a read makes no check on either.
+/// - A soft-deleted row (`deletedAt`) gives no access.
+///
+/// Specs: hrn:node:hadronmemory.com:specs:cor:dmo:060:09, hrn:node:hadronmemory.com:specs:cor:dmo:050:09.
 model MemorySubscription {
   id             String    @id @default(cuid())
   memoryId       String    @map("memory_id")
@@ -2441,9 +2647,17 @@ model MemorySubscription {
   @@map("memory_subscriptions")
 }
 
-/// Represents a running Hadron server instance (SaaS or self-hosted).
-/// Each organization connects to one server; a server serves one or
-/// many organizations.
+/// One running Hadron server instance, hosted or self-hosted. The row gives the server an identity that
+/// server-owned things can belong to and be addressed by.
+///
+/// Relationships: owns the server-level AiServiceConfigs (the last step of the configuration lookup), the
+/// server-owned MemoryConfigTemplates, and the ServerLogEntry rows. `organizationId` is the organization that
+/// operates the server and is null for the hosted service.
+///
+/// Behaviour: a database may hold more than one row. "The server answering" is the oldest live row
+/// (src/lib/hadronServer.ts), so a server-owned thing has the same identity in every address.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:080:01.
 model HadronServer {
   id              String    @id @default(cuid())
   /// The organization that owns/operates this server; NULL for the
@@ -2472,16 +2686,26 @@ model HadronServer {
   @@map("hadron_server")
 }
 
-/// Named AI service configuration (spec 036). Owned by exactly one of
-/// HadronServer / Organization / App / Agent — enforced by the Postgres
-/// CHECK `chk_ai_service_config_owner` (see prisma/post-push.sql; Prisma
-/// cannot express it). Resolved by name walking App -> Agent -> Org (of
-/// the App, else of the Agent) -> HadronServer; the first ENABLED config
-/// with the requested name wins. Well-known fallback name: 'default'
-/// (conventional extras: 'fast', 'frontier'). Name is unique per owner
-/// via four partial unique indexes (also post-push.sql). Replaces the
-/// legacy Agent.ai_* / App.ai_* columns, which the 036 migration dropped
-/// without backfill (stored values confirmed disposable 2026-06-11).
+/// A named configuration of an AI service: which provider and model to call, with which key, endpoint and
+/// parameters. Wherever the platform calls an LLM for an App or an Agent, it resolves one of these rows by name.
+///
+/// Ownership: exactly one of HadronServer, Organization, App or Agent owns a config
+/// (`chk_ai_service_config_owner` in prisma/post-push.sql; Prisma cannot express it). The name is unique per
+/// owner, by four partial unique indexes in the same file.
+///
+/// Relationships: the four possible owners, each of which deletes its configs with itself. An App can also name
+/// one config as its chatbot's (`App.chatbotAiConfigId`, the `chatbotOfApps` relation).
+///
+/// Behaviour: a lookup by name walks from the App to the Agent, to the organization (of the App, else of the
+/// Agent), to the server, and the first enabled config with that name wins; a disabled config is skipped. The
+/// conventional fallback name is `default`; `fast` and `frontier` are conventional extras. The API key is stored
+/// encrypted (`apiKeyEncrypted`), and `apiKeyPreview` is the masked form for display. `provider`, `params`,
+/// `endpoint` and `apiStyle` are validated when the config is written (src/lib/aiConfig.ts, src/lib/aiEndpoint.ts).
+///
+/// Background (history, not law): the Spec Kit spec 036-ai-service-config, which replaced the earlier AI columns
+/// on Agent and App. Issue #1373 (endpoint and protocol).
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:050:10.
 model AiServiceConfig {
   id              String    @id @default(cuid())
   /// Lookup name used by the resolution walk; lower-case canonical.
@@ -2535,9 +2759,16 @@ model AiServiceConfig {
   @@map("ai_service_configs")
 }
 
-/// Log entry for the Hadron server, surfaced in hadron-portal for
-/// troubleshooting. Examples: memory sync failures, GitHub App
-/// errors, system-level events.
+/// A log entry about the server as a whole, kept in the database so that an operator can read it in the portal:
+/// for example a failed memory sync, a GitHub App error or another system-level event.
+///
+/// Relationships: belongs to one HadronServer and is deleted with it. `memoryId` is set when the entry is about
+/// one memory; it is a plain value with no foreign key.
+///
+/// Behaviour: `HadronServer.logLevel` is the lowest level meant to be recorded. No code path writes this table
+/// today; the memory transfer counts a memory's rows so that they move with it.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:080:03.
 model ServerLogEntry {
   id        String    @id @default(cuid())
   serverId  String    @map("server_id")
@@ -2561,9 +2792,15 @@ model ServerLogEntry {
   @@map("server_log")
 }
 
-/// Log entry for a specific memory, surfaced in hadron-portal for
-/// troubleshooting. Examples: sync failures, license expirations,
-/// pending edge resolution, branch conflicts.
+/// A log entry about one Memory, kept in the database so that the memory's managers can see what happened to
+/// it: for example a sync failure, an expired license, an unresolved pending edge or a branch conflict.
+///
+/// Relationships: belongs to one Memory and is deleted with it.
+///
+/// Behaviour: `eventType` (SYNC, LICENSE, EDGE, OTHER) lets a reader filter the entries. The entries written
+/// today record a memory clone, the extraction of a subtree into a new memory, and a memory transfer.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:080:03.
 model MemoryLogEntry {
   id        String             @id @default(cuid())
   memoryId  String             @map("memory_id")
