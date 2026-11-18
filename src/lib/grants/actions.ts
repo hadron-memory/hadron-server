@@ -102,7 +102,8 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
     ],
     summaryTemplate: 'Read the value of the secret {secret} of {app}, and {auto-delete}',
     // #4162: the read is the holder's own session presenting its own client (readClientReveal.ts judges grant.workerId === the bound worker);
-    // nothing a role agent holds reaches it, so the narrowest reach is the true one. A person holder reads on the passkey page, not as a worker.
+    // an agent holder is refused when the client is requested (S3 does not build it; hadron-server#4434 will, as WORKER_OR_ROLE_AGENT), so the
+    // narrowest reach is the true one. A person holder reads on the passkey page, not as a worker.
     reach: 'WORKER',
   },
 ];

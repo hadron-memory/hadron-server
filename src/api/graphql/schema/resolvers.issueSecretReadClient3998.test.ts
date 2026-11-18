@@ -4,6 +4,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
 
 let ownerId: string; let memberId: string; let outsiderId: string; let appId: string; let secretId: string; let workerId: string;
@@ -59,6 +60,18 @@ describe('#3998 issueSecretReadClient', () => {
 
   it('a person holder is only the issuer themself', async () => {
     expect(await code(issue(ownerId, { holderRef: memberId }))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+  });
+
+  it.each(['AGENT', 'APP'])('refuses a %s holder before any write (#4434: agent-held reads are not built)', async (holderKind) => {
+    // A REAL worker of the App: without the early refusal the holder would be read as a worker and the client would be made.
+    const org = await db.organization.create({ data: { id: generateId(), name: 'o', urn: `${generateId().toLowerCase()}.test` } });
+    const agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'A', urn: `${org.urn}:a`, visibility: 'ORGANIZATION' } });
+    await db.appAgent.create({ data: { appId, agentId: agent.id } });
+    workerId = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: agent.id, name: 'Liam', slug: 'liam', heldByUserId: ownerId, heldAt: new Date() }, select: { id: true } })).id;
+    const before = await db.grant.count();
+    expect(await code(issue(ownerId, { holderKind, holderRef: workerId }))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    expect(await db.grant.count()).toBe(before);
+    expect(await db.secretReadClient.count()).toBe(0);
   });
 
   it('refuses a missing secret exactly as it refuses someone who may not issue', async () => {

@@ -495,7 +495,7 @@ async function revealSecretMutation(ctx: Context, clientId: string, info?: Revea
 const MAX_LIVE_READ_CLIENTS = 100;
 
 interface IssueReadClientInput {
-  secretRef: string; holderKind: 'USER' | 'WORKER'; holderRef?: string | null; autoDelete: boolean;
+  secretRef: string; holderKind: 'USER' | 'WORKER' | 'AGENT' | 'APP'; holderRef?: string | null; autoDelete: boolean;
   startsAt?: Date | string | null; expiresAt?: Date | string | null; maxReads?: number | null; reason: string;
 }
 
@@ -522,6 +522,10 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
   if (!found || found.ownerType !== 'app') throw authorizationDenied();
   const app = await loadLiveApp(ctx, found.ownerId);
   if (!app) throw authorizationDenied();
+  // #4434: an agent holder (or an App) is not built here, and a read client nothing can read must never exist: refuse before any write.
+  if (input.holderKind === 'AGENT' || input.holderKind === 'APP') {
+    throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A read client is held by a person or a worker.');
+  }
   const startsAt = asTime(input.startsAt);
   const expiresAt = asTime(input.expiresAt);
   const maxUses = input.maxReads ?? null;
