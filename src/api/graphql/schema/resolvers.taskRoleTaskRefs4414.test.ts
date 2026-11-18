@@ -10,6 +10,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { ROLE_TASK_REFS_MAX } from '../../../lib/agentTasks/roleTaskRefs.js';
 import { resolvers } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -71,7 +72,7 @@ describe('#4414 workedFromRoleTaskRefs on finish', () => {
     expect(R.AgentTask.result(await stored()).workedFromRoleTaskRefs).toEqual([]);
   });
   it('accepts ten references', async () => {
-    const ns = await Promise.all(Array.from({ length: 10 }, (_, i) => node(mem, `tasks:n${i}`)));
+    const ns = await Promise.all(Array.from({ length: ROLE_TASK_REFS_MAX }, (_, i) => node(mem, `tasks:n${i}`)));
     await finish(ns.map(n => n.id));
     expect(((await stored()).resultWorkedFromRoleTaskRefs as any[]).map(r => r.nodeId)).toEqual(ns.map(n => n.id));
   });
@@ -82,11 +83,13 @@ describe('#4414 workedFromRoleTaskRefs on finish', () => {
       ['a missing node', async () => [generateId()]],
       ['a missing URN', async () => [`hrn:node:${mem.urn.replace(':', '.')}:tasks:nope`]],
       ['a non-runnable node', async () => [(await node(mem, 'notes:plain', { isRunnable: false })).id]],
+      ['a hard-deleted node', async () => { const n = await node(mem, 'tasks:hard'); await db.node.delete({ where: { id: n.id } }); return [n.id]; }],
+      ['a URN with invalid syntax', async () => ['hrn:node:::not a urn']],
       ['a node with no runnable flag', async () => [(await node(mem, 'notes:unset', { isRunnable: null })).id]],
       ['a soft-deleted node', async () => [(await node(mem, 'tasks:gone', { deletedAt: new Date() })).id]],
       ['the same node twice', async () => { const n = await node(mem, 'tasks:dup'); return [n.id, n.id]; }],
       ['an id and the URN of the same node', async () => { const n = await node(mem, 'tasks:dup'); return [n.id, urnOf(mem, n)]; }],
-      ['eleven references', async () => (await Promise.all(Array.from({ length: 11 }, (_, i) => node(mem, `tasks:n${i}`)))).map(n => n.id)],
+      ['eleven references', async () => (await Promise.all(Array.from({ length: ROLE_TASK_REFS_MAX + 1 }, (_, i) => node(mem, `tasks:n${i}`)))).map(n => n.id)],
       ['a valid node beside an invalid one', async () => [(await node(mem, 'tasks:ok')).id, generateId()]],
       ['a non-string entry', async () => [42]],
       ['a blank entry', async () => ['  ']],
@@ -109,6 +112,14 @@ describe('#4414 workedFromRoleTaskRefs on finish', () => {
     });
   });
 
+  it('the lazy result path returns the list too: a wide row that omits the findings payload reloads the full row (list/tree/relation reads)', async () => {
+    const a = await node(mem, 'tasks:alpha'); await finish([a.id]);
+    const wide = await db.agentTask.findUniqueOrThrow({ where: { id: task.id }, omit: { resultFindings: true } });
+    expect(Object.hasOwn(wide, 'resultFindings')).toBe(false);
+    const result = await R.AgentTask.result(wide, {}, ctx());
+    expect(result.workedFromRoleTaskRefs).toEqual([{ nodeId: a.id, urn: urnOf(mem, a), revision: 1 }]);
+    expect(await R.AgentTask.result(wide, {}, ctx(outsider.id))).toBeNull();
+  });
   it('only the assignee sets it (as for the rest of the result)', async () => {
     const a = await node(mem, 'tasks:alpha'); const before = await stored();
     await expect(finish([a.id], ctx(owner.id))).rejects.toMatchObject({ extensions: { code: 'TASK_NOT_ASSIGNEE' } });
@@ -156,9 +167,9 @@ describe('the database guard (as agent_task_findings_immutable)', () => {
   it('the CHECK refuses a list of eleven, and a non-list, even written directly (finishing in the same statement, so only the CHECK can say no)', async () => {
     const mk = (n: number) => JSON.stringify(Array.from({ length: n }, (_, i) => ({ nodeId: `n${i}`, urn: `u${i}`, revision: 1 })));
     const write = (json: string) => db.$executeRaw`UPDATE agent_tasks SET status = 'finished', result_outcome = 'x', finished_at = now(), result_worked_from_role_task_refs = ${json}::jsonb WHERE id = ${task.id}`;
-    await expect(write(mk(11))).rejects.toThrow(/chk_agent_task_role_task_refs/);
+    await expect(write(mk(ROLE_TASK_REFS_MAX + 1))).rejects.toThrow(/chk_agent_task_role_task_refs/);
     await expect(write('{"a":1}')).rejects.toThrow(/chk_agent_task_role_task_refs/);
-    await expect(write(mk(10))).resolves.toBe(1);
+    await expect(write(mk(ROLE_TASK_REFS_MAX))).resolves.toBe(1);
   });
   it('SQL NULL and JSON null both mean none', async () => {
     await finish();
