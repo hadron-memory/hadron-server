@@ -93,10 +93,30 @@ describe('#4037 detour and return', () => {
     expect(await respond(chat.chatId)).toMatchObject({ newStageName: 's2', conversationHandoff: null });
     expect(await state(chat.chatId)).toMatchObject({ conversationName: 'recent', stageName: 's2' });
   });
-  it('D6: two simultaneous completions on separate connections return the detour once', async () => {
+  it('#4256: a serialized second completion lawfully takes the still-active detour rule again', async () => {
     await edge('conversations:recent:s1', 'conversations:anger', { timing: 'always', behavior: 'detour' });
     const chat = await start(); await respond(chat.chatId);
-    await Promise.all([respond(chat.chatId, { goal_reached: true }), respond(chat.chatId, { goal_reached: true }, other as never)]);
+    const returned = await respond(chat.chatId, { goal_reached: true });
+    const repeated = await respond(chat.chatId, { goal_reached: true }, other as never);
+    expect(returned).toMatchObject({ detourReturned: true });
+    expect(repeated).toMatchObject({ detourReturned: false, conversationHandoff: 'anger' });
+    expect(repeated.routingSkipped).not.toBe(true);
+    const e = await state(chat.chatId);
+    expect(e).toMatchObject({ conversationName: 'anger', stageName: 'hot' });
+    expect(e.routeHistory.filter((r: any) => r.trigger?.type === 'DETOUR_RETURN')).toHaveLength(1);
+    expect(e.routeHistory.at(-1)).toMatchObject({ action: 'ENTER', trigger: { type: 'DETOUR_EDGE' } });
+    expect(e.goalStack.filter((g: any) => g.detourTo && g.status === 'COMPLETED')).toHaveLength(1);
+    expect(e.goalStack.filter((g: any) => g.detourTo && g.status === 'ACTIVE')).toHaveLength(1);
+  });
+  it.each(['concurrent', 'serialized'] as const)('D6: two %s completions on separate connections return the detour once', async (schedule) => {
+    await edge('conversations:recent:s1', 'conversations:anger', { timing: 'always', behavior: 'detour' });
+    const chat = await start(); await respond(chat.chatId);
+    if (schedule === 'serialized') {
+      await respond(chat.chatId, { goal_reached: true });
+      await respond(chat.chatId, { goal_reached: true }, other as never);
+    } else {
+      await Promise.all([respond(chat.chatId, { goal_reached: true }), respond(chat.chatId, { goal_reached: true }, other as never)]);
+    }
     const e = await state(chat.chatId);
     expect(e.routeHistory.filter((r: any) => r.trigger?.type === 'DETOUR_RETURN')).toHaveLength(1);
     expect(e.goalStack.filter((g: any) => g.detourTo && g.status === 'COMPLETED')).toHaveLength(1);
