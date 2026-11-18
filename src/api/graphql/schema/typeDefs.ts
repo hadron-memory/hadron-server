@@ -1,3 +1,14 @@
+/**
+ * #4464 stage 1 — the deprecation notice for the App's own `role`, applied to
+ * exactly three places: the `App.role` field and the `role` arg of
+ * `createApp` and `updateApp`. ONE edit point by design: the notice period is
+ * product policy (Holger's to rule; the issue's builder-proposal comment is on
+ * #4464), so his answer changes this constant alone and all three annotations
+ * move with it. No date ships in the SDL until the period is ruled.
+ */
+export const APP_ROLE_DEPRECATION_NOTICE =
+  'Deprecated (#4464): App.role is a constant READER — the stored value is ignored and the field will be removed; the notice period is ruled in that issue.';
+
 export const typeDefs = `#graphql
   "#1156 — hrn:node:hadronmemory.com:specs:cor:dmo:070:05: closed end causes; unknown is reserved for legacy rows."
   enum SessionEndReason {
@@ -3333,7 +3344,7 @@ export const typeDefs = `#graphql
     """
     sharedMemory: Memory
     appType: AppType!
-    role: AppMembershipRole!
+    role: AppMembershipRole! @deprecated(reason: "${APP_ROLE_DEPRECATION_NOTICE}")
     description: String
     agentTools: [String!]!
     # 036-ai-service-config: the three AI fields below are registry-backed
@@ -14687,7 +14698,7 @@ export const typeDefs = `#graphql
       name: String!
       urn: String
       appType: AppType
-      role: AppMembershipRole
+      role: AppMembershipRole @deprecated(reason: "${APP_ROLE_DEPRECATION_NOTICE}")
       description: String
       agentTools: [String!]
       aiProvider: String
@@ -14724,7 +14735,7 @@ export const typeDefs = `#graphql
       name: String
       urn: String
       appType: AppType
-      role: AppMembershipRole
+      role: AppMembershipRole @deprecated(reason: "${APP_ROLE_DEPRECATION_NOTICE}")
       description: String
       agentTools: [String!]
       aiProvider: String
