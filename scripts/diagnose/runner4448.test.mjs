@@ -42,9 +42,9 @@ esac\n`);
      timeout) exit 124;;
      empty) exit 0;;
     esac
-    printf '%s\\n' '${LOAD_LINE}'; [ "$MODE" != fail ] || exit 5;;
+    printf '%s\\n' '${LOAD_LINE}'; case "$MODE" in fail|failkept) exit 5;; esac;;
    *memory.max*) echo 6442450944;;
-   *diagnose-samples.jsonl*) printf '{"kind":"sample","at":%s}\\n' "$(date +%s%3N)";;
+   *diagnose-samples.jsonl*) printf '{"kind":"sample","at":%s}\\n' "$(date +%s%3N)"; [ "$MODE" != failkept ] || printf '%s\\n' '${LOAD_LINE}';;
    *credentials.json*) echo synthetic-private-key;;
    *pg_stat_activity*) echo 2;;
    *health*) while [ "$1" != app ]; do shift; done; shift; NODE_OPTIONS="--import $FIXTURE/health.mjs" "$@";;
@@ -149,10 +149,12 @@ test('a failed load generator propagates its exit AND keeps the line that explai
   } finally { f.clean(); }
 });
 
+// #4453 N6 / #4466 LOCAL P2: the preserved samples here ALREADY hold the load line (the fixture's container
+// series carries it), so without the dedupe guard the trap would append a second copy.
 test('a failed run does not duplicate a load line already in the preserved samples', () => {
-  const f = fixture('fail');
+  const f = fixture('failkept');
   try {
-    f.run();
+    expect(f.run().status).toBe(5);
     const out = readFileSync(join(f.dir, 'samples'), 'utf8');
     expect(out.split('\n').filter((l) => l.includes('"kind":"load"')).length).toBe(1);
   } finally { f.clean(); }
