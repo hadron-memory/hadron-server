@@ -1,5 +1,5 @@
 /** #3998 S3: revealSecret — a bound worker under a live secret.reveal grant reads the value; exactly one use per read, every other shape the same refusal. */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -46,6 +46,18 @@ describe('#3998 revealSecret', () => {
     // The issuer (the App's owner) is no longer the owner: the driver's own standing never substitutes.
     await db.app.update({ where: { id: appId }, data: { ownerUserId: driver } });
     expect(await code(asDriver())).toBe('SECRET_READ_CLIENT_ISSUER_GONE');
+  });
+
+  it('a failed audit write on a refused read keeps the uniform refusal and is logged, not swallowed (Dara P2)', async () => {
+    const create = vi.spyOn(db.secretEvent, 'create').mockRejectedValueOnce(new Error('audit down'));
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      expect(await code(reveal(otherWorkerId))).toBe('SECRET_READ_CLIENT_NOT_FOUND');
+      expect(create).toHaveBeenCalledTimes(1);
+      const call = log.mock.calls.find((c) => c[0] === '[revealSecret] audit write failed');
+      expect(call).toBeDefined();
+      expect(JSON.stringify(call, (_k, v) => (v instanceof Error ? v.message : v))).not.toContain('hunter2');
+    } finally { create.mockRestore(); log.mockRestore(); }
   });
 
   it('a pending grant reveals nothing', async () => {
