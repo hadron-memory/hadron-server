@@ -123,6 +123,7 @@ jobs:
         env:
           MIGRATION_REPLAY_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hadron_test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hadron_test # prisma.config reads it to generate
         # The suite's setup files load the Prisma client, which this job otherwise never generates.
         run: |
           pnpm prisma generate
