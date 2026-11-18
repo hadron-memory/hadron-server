@@ -2588,10 +2588,18 @@ model MemoryLogEntry {
   @@map("memory_log")
 }
 
-/// An invitation sent to an existing platform User to join an
-/// Organization. The `role` cannot be higher than that of the sender.
-/// (Contrast with UserInvitation, which is for inviting *new* platform
-/// users.)
+/// An invitation for a person who already has an account to join an Organization. (Inviting someone who has no
+/// account yet is a UserInvitation.)
+///
+/// Relationships: `sender` is the OrgMember that sent it, which also names the organization; `recipient` is the
+/// invited User. The invitation is deleted with either.
+///
+/// Behaviour: `role` is the role the recipient gets on acceptance. It cannot be higher than the sender's own
+/// role, and OWNER is not given by invitation. `expiresAt` is when the invitation expires and `acceptedAt` when
+/// the recipient accepted. No mutation creates these invitations today; the code that reads the table is the
+/// revocation of an organization's open invitations (src/lib/auth/revokeOrgInvitations.ts).
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:040:04.
 model OrgMemberInvitation {
   id              String    @id @default(cuid())
   /// fk to OrgMember.id — the sender of the invitation.
@@ -2619,27 +2627,27 @@ model OrgMemberInvitation {
   @@map("org_member_invitations")
 }
 
-/// Invitation sent out to one or more persons that do not yet have a
-/// user account. If `maxActivations = 1` this invitation is
-/// single-use. If `email` or `githubUsername` is given, the new user
-/// is validated against this — which essentially locks the identity
-/// of the new person and sets `maxActivations` to 1.
+/// An invitation for one or more people who do not have an account yet to join the platform, and optionally an
+/// Organization with it. The invitation's `slug` makes its unique invite link.
 ///
-/// **Quota** is tracked on `User.maxReferrals`, not on the invitation.
-/// When a new user is created from this invitation, their
-/// `maxReferrals` is set by the onboarding process (e.g. from the
-/// sender's remaining quota or a system default).
+/// Relationships: `sender` is the inviting User (null for a system or seed invitation). `organization` is the
+/// organization the new user is added to on signup, if any. Each account created from the invitation is one
+/// UserInvitationActivation.
 ///
-/// **Race conditions**: if a referral arrives at the landing page
-/// after activations exceed `maxActivations`, the page shows
-/// "The invitation has expired. Please contact the sender." If
-/// onboarding has *started* and the create-account request would push
-/// the count above the cap, the account is still created (don't block
-/// a real human on a counter).
+/// Behaviour:
+/// - Use count: `maxActivations` is how many accounts the invitation may create; the current count is the number
+///   of activations. With `maxActivations = 1` it is single-use.
+/// - Locked identity: when `email` or `githubUsername` is given, the person signing up must match it, which
+///   also makes the invitation single-use.
+/// - Roles: `userRole` (a global role, usually none) cannot be higher than the sender's, and `memberRole` cannot
+///   be higher than the sender's OrgMember role in the target organization.
+/// - Quota: how many people a user may bring in is tracked on `User.maxReferrals`, not here. The new user's own
+///   `maxReferrals` is set during onboarding.
+/// - Over the limit: a person who opens the link after the activations are used up is told the invitation has
+///   expired. A person who has already started signing up is never refused for the count: if creating the
+///   account would exceed `maxActivations`, the account is created anyway.
 ///
-/// **Role bounds**: `userRole` cannot be higher than the sender's;
-/// `memberRole` cannot be higher than the sender's OrgMember role in
-/// the target org.
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:040:05.
 model UserInvitation {
   id             String    @id @default(cuid())
   /// fk to User.id — the sender; NULL for system/seed invitations
@@ -2685,9 +2693,17 @@ model UserInvitation {
   @@map("user_invitations")
 }
 
-/// One row per User created in response to a UserInvitation. Role
-/// bounds match UserInvitation's: `userRole` and `memberRole` cannot
-/// exceed the sender's at activation time.
+/// The record that one User account was created from one UserInvitation. The rows of an invitation count how
+/// often it has been used, and a user's row leads back to who invited them.
+///
+/// Relationships: joins the UserInvitation and the new User, and is deleted with either. Following
+/// `invitation.sender` from user to user gives the invitation chain that the referral quota is counted along
+/// (see User).
+///
+/// Behaviour: written when the account is created. The roles the new user gets are bounded as on the
+/// invitation: they cannot exceed the sender's at the time of the activation.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:040:05.
 model UserInvitationActivation {
   id           String    @id @default(cuid())
   /// The invitation that was accepted.
@@ -2707,7 +2723,16 @@ model UserInvitationActivation {
   @@map("user_invitation_activations")
 }
 
-/// Temporary token for email verification during signup.
+/// A single-use token that proves a person controls an email address. It is the secret inside the sign-in link
+/// the server emails; presenting it completes the sign-in for that address.
+///
+/// Relationships: none by foreign key. `email` is the address the link was sent to (src/auth/email.ts).
+///
+/// Behaviour: the token expires at `expiresAt` and is marked used at `usedAt`. `clientStateHash` is the SHA-256
+/// of a nonce the portal set in the browser that requested the link. It is carried into the login handoff code
+/// when the token is verified, so only the browser that asked for the link can finish the sign-in (#505).
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:070:04.
 model EmailVerificationToken {
   id              String    @id @default(cuid())
   email           String
@@ -2726,16 +2751,23 @@ model EmailVerificationToken {
   @@map("email_verification_tokens")
 }
 
-/// #2046 (S9, R38): the immutable provenance of ONE compiled boot-prompt
-/// revision, written by the compile in the same transaction as that revision.
-/// Keyed by the revision, not the node: a recompile inserts a new row and never
-/// rewrites an older one (an UPDATE is refused at the SQL layer). It records
-/// what the compile selected (the root source and every include or replacing
-/// node, each as {nodeId, revNo, hash} with its effective selection settings and
-/// its place in the expansion), never copied source text, names or titles. The
-/// live compiled-from edge is a derived index of the LATEST compile; this row,
-/// read through readCompiledRevision, is the authority for a given revision.
-/// Operational state: excluded from revisions, approval and content hashes.
+/// The provenance of one revision of a compiled boot prompt: which source nodes, at which revisions, the compile
+/// put together to produce that text. A boot prompt is compiled from a root source node and the nodes it
+/// includes; this row is the authority for what went into one compiled revision.
+///
+/// Relationships: belongs to the compiled Node (`compiledNode`) and is deleted with it. The key is the compiled
+/// node and its revision number, so there is one row per compiled revision. `targetAgentId`, `targetAppId` and
+/// `targetWorkerId` name what the prompt was compiled for (`targetKind`: AGENT, APP_AGENT or WORKER); they are
+/// plain ids.
+///
+/// Behaviour: written by the compile in the same transaction as the revision it describes. A recompile inserts a
+/// new row and never rewrites an older one; the database refuses an UPDATE. `provenance` records the root source
+/// and every included or replacing node as {nodeId, revNo, hash}, with its selection settings and its place in
+/// the expansion. It never holds copied source text, names or titles. The live compiled-from edge is only an
+/// index of the latest compile; for a given revision this row is read (`readCompiledRevision`). The row is
+/// operational state: it is not part of node revisions, approvals or content hashes.
+///
+/// Background: #2046.
 model CompiledPromptRevision {
   compiledNodeId  String   @map("compiled_node_id")
   compiledRevNo   Int      @map("compiled_rev_no")
@@ -2757,8 +2789,28 @@ model CompiledPromptRevision {
   @@map("compiled_prompt_revisions")
 }
 
-/// A versioned snapshot of a Node's content. Written every time a
-/// Node is updated, so the full history is recoverable.
+/// A snapshot of a Node as it was before an edit. The revisions of a node are its history: what it said, who
+/// changed it, and which fields each edit changed. A reader can list them, compare them and restore one.
+///
+/// Relationships: belongs to one Node and is deleted with it. `memoryId` is the memory the node was in when the
+/// snapshot was taken; a node can move between memories, and history is gated on the memory the content
+/// belonged to, not only on the node's current one. `approvedByUser` is the User who approved that revision.
+///
+/// Behaviour:
+/// - A revisioned edit saves the state before the edit here, under the node's revision number at that time
+///   (`revNo`), and advances `Node.revSeq`. The current state of a node therefore has no row; it is the Node.
+/// - `revNo` is the per-node number in the revision's URN (`hrn:noderev:<root>:<mem>:<loc...>:<rev>`).
+/// - `changes` lists the fields that the edit which replaced this snapshot changed. `editedBy`, `editedByInfo`,
+///   `editedByWorkerId` and `editedByAgentId` name who made that edit; `revLabel` is a label or the reason given.
+/// - The snapshot holds the content fields of the node. Operational fields (the embedding queue, token counts,
+///   sync provenance, audit stamps) are deliberately not versioned. A null `nodeType` marks a row from before
+///   the full snapshot existed; restoring such a row leaves the fields it does not hold as they are.
+/// - The `approved*` columns copy the node's approval when an approved revision is edited away. The approval of
+///   record is on the Node.
+/// - History is bounded: `Memory.maxRevCount` (default 10) is how many revisions are kept per node, and the
+///   oldest are pruned when a new one is written.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:060:04. Background: #620, #696, #1591.
 model NodeRevision {
   id                 String              @id @default(cuid())
   nodeId             String              @map("node_id")
@@ -2873,10 +2925,28 @@ model NodeRevision {
   @@map("node_revisions")
 }
 
-/// #1326 — append-only content-validation evidence. It names the exact Node
-/// revision and validation-task revision observed by its producer. Reports do
-/// not edit Node, mint an authorship stamp, or fire node-written events. A
-/// late report for revision N stays historical when live content reaches N+1.
+/// The result of one content validation of a Node: a validation task looked at one revision of the node and
+/// reported PASS, FAIL or ERROR. The reports are evidence about a node's content; they are advice and never
+/// block a write.
+///
+/// Relationships: belongs to one Node and is deleted with it. `memoryId` is the memory the node was in when the
+/// report was made, so a later move to another memory does not show the report to readers of only the new
+/// memory. `validationTaskId` is the id of the task node that did the validation; it is a plain id, so deleting
+/// the task keeps the history.
+///
+/// Behaviour:
+/// - Append-only. A report names the exact node revision (`nodeRevSeq`) and task revision
+///   (`validationTaskRevSeq`) that were looked at. A report for revision N stays as history when the node
+///   reaches revision N+1.
+/// - Writing a report does not edit the node, does not stamp authorship and fires no node-written event.
+/// - The reporter is derived by the server from the request and cannot be changed afterwards: a headless run, a
+///   worker session, a person, or an App key (`reporterKind` and the matching id column). Only `reporterUserId`
+///   moves, to the surviving account after a user merge.
+/// - `authorCheck` records whether the node's recorded author was compared with the reporter.
+/// - `runId` is an optional caller-supplied id that makes a repeated insert idempotent, unique per node and
+///   memory. It is never an identity.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:160:01. Background: #1326, #1332.
 model NodeContentValidationReport {
   id                   String                       @id @default(cuid())
   nodeId               String                       @map("node_id")
@@ -2920,9 +2990,16 @@ model NodeContentValidationReport {
   @@map("node_content_validation_reports")
 }
 
-/// Temporary record holding an encrypted API key for a newly
-/// provisioned workspace, consumed during first-time setup. The raw
-/// key is the `hdr_app_<…>` value, shown once via `/setup/info`.
+/// The API key of a newly provisioned workspace, held encrypted until the user has seen it once during
+/// first-time setup. The key is the raw `hdr_app_…` key of the workspace's App.
+///
+/// Relationships: one per User, for one App; deleted with either.
+///
+/// Behaviour: `rawKeyEncrypted` is the key under AES-256-GCM, and `consumed` records that it was shown. No code
+/// path creates or reads these rows today; the only code that touches the table is the deletion of a user's
+/// account, which removes that user's row (src/controller/operations/deleteUser.ts).
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:040:06.
 model PendingSetup {
   id              String   @id @default(cuid())
   userId          String   @unique @map("user_id")
@@ -2940,10 +3017,21 @@ model PendingSetup {
   @@map("pending_setups")
 }
 
-/// A connected email mailbox (identity record). Provider state — refresh
-/// tokens, Graph subscriptions — lives in the provider capability tool
-/// (hadrontool-ms-exchange, #396); mail operations route through
-/// src/lib/emailClient.ts using `toolConnectionId`.
+/// A connected account at an external provider: a mailbox, a calendar or a drive that a user connected so that
+/// the platform can read and act in it for them. Despite the name, it is not limited to Microsoft Exchange:
+/// `provider` says which provider tool serves the connection (`ms-exchange` by default).
+///
+/// Relationships: belongs to an Organization and to the User who connected the account, and is deleted with
+/// either. ConnectionGrant rows give other principals access to the connection. One row per (organization,
+/// provider, account address), so a calendar connection and a mail connection for the same account are two rows.
+///
+/// Behaviour: this row is the identity record only. The provider state (refresh tokens, change subscriptions)
+/// lives in the provider's capability tool, and operations go through src/lib/emailClient.ts with
+/// `toolConnectionId`. Operations on a connection are for its owner, or for a principal with a ConnectionGrant.
+/// `syncEnabled` pauses sync without removing the connection; `syncStatus`, `lastSyncAt` and `lastError` report
+/// the last sync. `refreshTokenEncrypted` is a legacy column, null on new rows.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:080:04. Background: #396.
 model ExchangeConnection {
   id                    String     @id @default(cuid())
   organizationId        String     @map("organization_id")
@@ -2995,10 +3083,20 @@ model ExchangeConnection {
   @@map("exchange_connections")
 }
 
-/// #2913 (cor:dmo:080:04 "Finding the connection a flow made"): where one GraphQL-started connect flow is. Created
-/// pending by `startConnection`; settled once by the callback with the connection id (the existing row on a
-/// reconnect) or the done page's failure code. Readable only by `userId`, for one hour from `startedAt` judged on the
-/// database clock. `connectionId` is a plain id, not a relation: a flow that resolved keeps saying which connection it made.
+/// The state of one attempt to connect an external account (a mailbox, calendar or drive) that was started
+/// through GraphQL. A client that started a connect flow reads this row to learn whether the flow is still
+/// pending, which connection it made, or why it failed.
+///
+/// Relationships: belongs to the User who started the flow and to the Organization the connection is for, and is
+/// deleted with either. `connectionId` is the id of the ExchangeConnection the flow made. It is a plain id, not
+/// a relation, so a settled flow keeps saying which connection it made.
+///
+/// Behaviour: `startConnection` creates the row as pending. The provider callback settles it exactly once
+/// (`settledAt`), with the connection id (the existing row, on a reconnect) or with the failure code of the done
+/// page. Only the user who started the flow can read it, and only for one hour from `startedAt` on the database
+/// clock.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:080:04 ("Finding the connection a flow made"). Background: #2913.
 model ConnectionFlow {
   id             String    @id
   userId         String    @map("user_id")
@@ -3018,20 +3116,26 @@ model ConnectionFlow {
   @@map("connection_flows")
 }
 
-/// User→App scoped delegation on a user-owned connection (spec-042 Track B,
-/// #593; supersedes the deferred AgentEmailGrant). Lets a connection's OWNER
-/// grant a specific App install scoped access (e.g. `mail.read`) to their
-/// mailbox/calendar. Enforced in `requireEmailConnection` (owner OR live grant
-/// covering the operation's scope).
+/// A grant by the owner of a connected account (an ExchangeConnection) that lets one App use that connection
+/// for a set of operations, for example reading mail. It is how an agent running in an App may act in a user's
+/// mailbox or calendar without being that user.
 ///
-/// - Grantee is the App INSTALL (`granteeAppId`), never the Agent — one Agent
-///   in two Apps/orgs is two trust contexts (the Juno fixture).
-/// - Owner-only create/revoke, no org-admin bypass. Revoke is a SOFT delete;
-///   liveness lookups use `findFirst` + `deletedAt: null` (never `findUnique`).
-/// - Cross-org is intended: connection org and grantee-App org may differ; the
-///   grant row is the sole authority.
-/// - Multiple live grants per (connection, App) are valid — union-of-scopes —
-///   so there is deliberately no unique constraint on the pair.
+/// Relationships: `connection` is the ExchangeConnection, `granteeApp` the App that receives the access,
+/// `grantedBy` the User who owns the connection and made the grant. The grant is deleted with any of them.
+///
+/// Behaviour:
+/// - The grantee is an App, never an Agent: one Agent installed in two Apps is two separate grantees.
+/// - Only the connection's owner can create or revoke a grant; an organization administrator cannot.
+/// - `scopes` are the operations covered (for example `mail.read`, `mail.send`, `calendar.read`; see
+///   src/lib/emailOperationScopes.ts). The gate `requireEmailConnection` admits the owner, or a live grant that
+///   covers the operation's scope.
+/// - Several live grants for the same connection and App are allowed, and their scopes add up. There is
+///   deliberately no unique constraint on the pair.
+/// - Revoking is a soft delete (`deletedAt`); `expiresAt` is an optional end. A revoked or expired grant gives
+///   nothing.
+/// - The connection's organization and the App's organization may differ; the grant row alone decides.
+///
+/// Background: #593.
 model ConnectionGrant {
   id              String    @id @default(cuid())
   connectionId    String    @map("connection_id")
@@ -3064,15 +3168,18 @@ model ConnectionGrant {
   @@map("connection_grants")
 }
 
-/// An individual action grant — the ADDITIVE half of the grant model
-/// (design:grant-model; evaluated by @hadron-memory/access-control as a
-/// PrincipalGrantLike). Hands one principal extra management actions
-/// within one organization WITHOUT changing their OrgMember role: the
-/// gate's effective allow-set is union(role bundle, live grants).
-/// Multiple live grants per (principal, org) are valid = union-of-actions
-/// (no unique constraint — the ConnectionGrant precedent). Revocation is
-/// soft delete; expiry optional (NULL = perpetual). Liveness (deletedAt +
-/// expiresAt) is filtered IN the gate's query, never after it.
+/// A grant of extra management actions to one user within one Organization, on top of what the user's OrgMember
+/// role already allows. It lets an organization hand someone a specific permission (for example cloning
+/// memories) without raising their role.
+///
+/// Relationships: `principal` is the User who receives the actions; `organization` is where they apply. The
+/// grant is deleted with either. `principalType` is `USER` today.
+///
+/// Behaviour: the access gate allows the union of the role's actions and the actions of the user's live grants.
+/// `actions` uses the matcher grammar of the access-control package: an exact action (`memory.clone`), a prefix
+/// (`memory.*`) or `*`. Several live grants for the same user and organization are allowed and add up. Revoking
+/// is a soft delete; `expiresAt` is an optional end. Whether a grant is live is decided inside the gate's query,
+/// never after it.
 model PrincipalGrant {
   id             String    @id @default(cuid())
   /// 'USER' (v1). Reserved for future app/agent principals.
@@ -3102,13 +3209,20 @@ model PrincipalGrant {
   @@map("principal_grants")
 }
 
-/// One Slack workspace install of the Hadron Slack app (spec 043).
-/// Org-owned at WORKSPACE granularity (decision 1) — unlike the App-owned
-/// TelegramConnection design and the user-owned ExchangeConnection.
-/// `defaultAppId` names the Hadron App that serves /hadron commands from
-/// this workspace; per-channel App overrides are a later binding table.
-/// The tokens live ENCRYPTED IN THE TOOL (hadrontool-slack) — core stores
-/// identity only, and no token ever appears in a GraphQL field.
+/// One installation of the Hadron Slack app in a Slack workspace, owned by an Organization. It tells the server
+/// which organization and which App a message or command from that workspace belongs to.
+///
+/// Relationships: belongs to an Organization and is deleted with it. `defaultApp` is the App that serves
+/// commands from the workspace. SlackEventReceipt rows refer to the connection by `toolConnectionId`, not by
+/// foreign key.
+///
+/// Behaviour: the row holds identity only: the workspace (`teamId`, `teamName`), the bot's two Slack ids
+/// (`botUserId` for messages it sends, `botId` for the events it causes; the loop filter needs both), and
+/// `toolConnectionId`, the handle of the connection in the Slack capability tool. The Slack tokens are stored
+/// encrypted in that tool and never appear in a GraphQL field. `toolConnectionId` is unique, because incoming
+/// events are routed by it. One live connection per organization and workspace is enforced by a partial unique
+/// index in raw SQL (`slack_connections_org_team_active_uniq`), so a soft-deleted row does not block connecting
+/// the workspace again.
 model SlackConnection {
   id               String    @id @default(cuid())
   organizationId   String    @map("organization_id")
@@ -3159,12 +3273,14 @@ model SlackConnection {
   @@map("slack_connections")
 }
 
-/// Envelope-dedupe receipts for the at-least-once Slack events ingress
-/// (spec 043 decision 5): the tool's persist-before-ack inbox may deliver
-/// an event more than once (a crash between core's 2xx and the tool's row
-/// delete), so dispatch INSERTs here first and drops duplicates on
-/// conflict. `connectionId` is the TOOL's connection id — dedupe runs
-/// before resolution, so no FK by design.
+/// The record that one incoming Slack event has been taken for processing, kept so the same event is not
+/// processed twice. The Slack capability tool delivers events at least once, so a delivery can repeat.
+///
+/// Relationships: none by foreign key. `connectionId` is the tool's connection id
+/// (`SlackConnection.toolConnectionId`); the duplicate check runs before the connection is looked up.
+///
+/// Behaviour: the dispatcher inserts a row for (connection, envelope) before it does anything else, and drops
+/// the event when the insert conflicts.
 model SlackEventReceipt {
   id           String   @id @default(cuid())
   connectionId String   @map("connection_id")
@@ -3176,10 +3292,18 @@ model SlackEventReceipt {
   @@map("slack_event_receipts")
 }
 
-/// Core-owned routing/audit binding for a sidecar-owned webfetch poll job.
-/// Poll state, scheduling, snapshots, and credentials remain in the sidecar;
-/// this immutable snapshot answers which already-authorized run principal an
-/// at-least-once event may wake.
+/// The server's record of one web-polling job that a headless run started: which run, App, agent and user the
+/// job belongs to, and under which policy. When the polling tool later reports a change, this row decides which
+/// run principal that event may wake.
+///
+/// Relationships: `sourceRun` is the AppRun that started the job; the binding is deleted with it. The other ids
+/// (`organizationId`, `appId`, `agentId`, `userId`, `credentialSecretId`) are plain values captured when the job
+/// was created.
+///
+/// Behaviour: the polling tool owns the job itself: its schedule, state, snapshots and credentials. This row is
+/// an immutable snapshot taken at job creation, used for routing and audit; `jobId` is the tool's job id. `url`
+/// is stored without query and fragment and is checked against the origin of incoming events. `cancelledAt`
+/// marks a cancelled job.
 model WebFetchPollBinding {
   jobId              String    @id @map("job_id")
   sourceRunId        String    @map("source_run_id")
@@ -3204,9 +3328,14 @@ model WebFetchPollBinding {
   @@map("webfetch_poll_bindings")
 }
 
-/// Durable completed-dispatch receipt for the at-least-once webfetch event
-/// ingress. An absent snapshot hash is represented by the empty string so the
-/// compound unique key remains effective under Postgres NULL semantics.
+/// The record that one event of a web-polling job has been dispatched to a run, kept so a repeated delivery of
+/// the same event starts no second run. The polling tool delivers events at least once.
+///
+/// Relationships: `routedRun` is the AppRun the event started; the receipt is deleted with it. `jobId` is the
+/// polling job (see WebFetchPollBinding), as a plain value.
+///
+/// Behaviour: unique per (job, snapshot hash, kind). An event without a snapshot hash stores the empty string,
+/// because a null would not take part in the unique key. The receipt is written once the dispatch is complete.
 model WebFetchEventReceipt {
   id           String   @id @default(cuid())
   jobId        String   @map("job_id")
@@ -3223,13 +3352,23 @@ model WebFetchEventReceipt {
   @@map("webfetch_event_receipts")
 }
 
-/// Registered EXTERNAL MCP server — the org-scoped registry behind the
-/// hadrontool-mcp conduit (headless runs calling third-party MCP tools).
-/// The conduit tool is stateless and Hadron-blind (cor:int:030:01); core
-/// owns identity, governance, and the encrypted static headers. A run
-/// reaches a server's tool via the run-tool name `mcp__<slug>__<tool>`,
-/// and every call is gated by the policy chain as `tool.mcp__<slug>__<tool>`
-/// plus the run's action budget — this row grants nothing by itself.
+/// An external MCP server that an Organization has registered, so that headless runs in the organization can
+/// call that server's tools.
+///
+/// Relationships: belongs to one Organization and is deleted with it. A flow node names a tool of the server
+/// as `mcp__<slug>__<tool>`; that reference is by slug, not by foreign key.
+///
+/// Behaviour:
+/// - The row grants nothing by itself. Every call goes through the action-policy chain as
+///   `tool.mcp__<slug>__<tool>` and uses the run's action budget.
+/// - The server is reached through a stateless capability tool that knows nothing about Hadron
+///   (hrn:node:hadronmemory.com:specs:cor:int:030:01). This row holds what that tool is given per call: the URL
+///   and the static request headers.
+/// - `headersEncrypted` is write-only: readers see only whether headers are set.
+/// - `toolAllowlist` limits which of the server's tools are exposed (empty: all). A disabled server's tools
+///   resolve as unknown, like an unregistered slug.
+/// - Deleting is a hard delete: the row is configuration, not history, and a run that still names the server
+///   fails visibly.
 model McpServer {
   id               String   @id @default(cuid())
   organizationId   String   @map("organization_id")
@@ -3264,13 +3403,26 @@ model McpServer {
   @@map("mcp_servers")
 }
 
-/// One named, owner-scoped secret — the general secret store (#677).
-/// Polymorphic owner (`user` | `org` | `app` | `memory`) — deliberately no
-/// FK: entitlement is checked at resolution time under the caller/run
-/// principal, and a dangling owner simply never resolves. A bare name
-/// resolves via the CSS cascade, most-specific-first: memory → app → user
-/// → org. `kind` is extensible (`generic` opaque; `webfetch-auth` typed:
-/// metadata `{ type, urlPrefix }`, origin-bound at use).
+/// One named secret in the platform's secret store, owned by a user, an organization, an App or a memory. A run
+/// or a tool that needs a credential names the secret, and the server resolves and decrypts it for that use.
+///
+/// Relationships: the owner is (`ownerType`, `ownerId`), deliberately without a foreign key. Whether a caller
+/// may use a secret is checked when it is resolved, and a secret whose owner is gone never resolves. An
+/// App-owned secret keeps its value in SecretVersion rows.
+///
+/// Behaviour:
+/// - Resolution: a bare name is looked up from the most specific owner to the least: memory, then App, then
+///   user, then organization. The name is unique per owner.
+/// - `kind` says what the secret is: `generic` is opaque; `webfetch-auth` is typed, with `metadata`
+///   `{ type, urlPrefix }`, and is used only for requests under that URL prefix.
+/// - `metadata` is the part that is not secret and may be shown: a reader can see that a secret exists and where
+///   it applies. `valueEncrypted` is never selected into a read.
+/// - For a user, organization or memory secret the value is in `valueEncrypted`, and a rotation overwrites it.
+///   For an App secret that column is null and the value is the newest SecretVersion (`chk_secret_app_value`).
+///   `protected` has a meaning only for App secrets.
+/// - Deleting is a hard delete; a run that still names the secret fails visibly.
+///
+/// Background: #677, #3997.
 model Secret {
   id             String   @id @default(cuid())
   ownerType      String   @map("owner_type") // 'user' | 'org' | 'app' | 'memory'
@@ -3310,12 +3462,19 @@ model Secret {
   @@map("secrets")
 }
 
-/// One registered Home Assistant instance — the org-scoped registry behind
-/// the hadrontool-home-assistant capability tool (hadron-server#640). Same
-/// posture as McpServer: the row grants nothing by itself (every run-time
-/// call walks the policy chain as `tool.ha__<slug>__<op>` + action budget),
-/// hard delete by design, slug immutable because flow nodes reference it
-/// inside data.tools names.
+/// A Home Assistant installation that an Organization has registered, so that headless runs in the organization
+/// can read its state and call its services.
+///
+/// Relationships: belongs to one Organization and is deleted with it. A flow node names an operation as
+/// `ha__<slug>__<op>`; the reference is by slug, which is why the slug cannot be changed.
+///
+/// Behaviour: the same posture as McpServer. The row grants nothing by itself: every call goes through the
+/// action-policy chain as `tool.ha__<slug>__<op>` and uses the run's action budget. `tokenEncrypted` is the
+/// instance's long-lived access token and is write-only. `opAllowlist` limits the operations (empty: all), so
+/// an administrator can register a read-only instance. A disabled instance's operations resolve as unknown.
+/// Deleting is a hard delete.
+///
+/// Background: #640.
 model HomeAssistantInstance {
   id             String   @id @default(cuid())
   organizationId String   @map("organization_id")
@@ -3348,10 +3507,14 @@ model HomeAssistantInstance {
   @@map("home_assistant_instances")
 }
 
-/// One BYO Resend sender for an organization. Core owns and encrypts the API
-/// key; the stateless hadrontool-resend sidecar receives it only for an
-/// already-authorized send. One sender per org keeps credential selection
-/// deterministic and outside model control.
+/// An Organization's own Resend account for sending email: the sender address and the API key. When a run in
+/// the organization sends mail, it is sent from this sender.
+///
+/// Relationships: at most one per Organization, deleted with it.
+///
+/// Behaviour: the server stores the API key encrypted and write-only. The stateless Resend capability tool
+/// receives the key only for a send that has already been authorized. One sender per organization means the
+/// credential used is never chosen by a model.
 model ResendSender {
   id              String   @id @default(cuid())
   organizationId  String   @unique(map: "resend_senders_organization_id_uniq") @map("organization_id")
@@ -3372,10 +3535,12 @@ model ResendSender {
   @@map("resend_senders")
 }
 
-/// Pre-launch waitlist signup capture from the marketing site. Holds
-/// an email plus an optional free-form "what features would you most
-/// want?" answer. Not connected to User (signups happen before the
-/// user has an account).
+/// One signup on the pre-launch waiting list of the marketing site: an email address and, optionally, what the
+/// person would most like the product to do.
+///
+/// Relationships: none. It is not linked to User, because a signup happens before the person has an account.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:040:07.
 model WaitingListItem {
   id                String   @id @default(cuid())
   email             String
@@ -3388,33 +3553,44 @@ model WaitingListItem {
 
 // ─── Multi-user agent: Apps ────────────────────────────────────────────
 
-/// **The runtime deployment of an Agent in some Organization** — what
-/// someone installs when they pick an Agent off the marketplace (or
-/// install one from their own org). Holds credentials, surfaces,
-/// optional AI override, members, and per-deployment memory pivots.
-/// Per Constitution Technology Invariant #6, this is also the unified
-/// caller-identity entity that authenticates against the Hadron platform.
+/// One deployment of agents: the place where an organization or a person installs Agents and runs them. An App
+/// is what authenticates to the platform, has members, holds its own data and settings, and has a team of
+/// Workers. Where an Agent is a definition shared by all its installations, an App is one installation site with
+/// its own identity and state.
 ///
-/// Per (org, Agent) install: typically one App per pair. Multi-install
-/// of the same Agent across orgs is supported and explicitly isolates
-/// app- and personal-class memory at `(app_id, …)` keys.
+/// Ownership: exactly one of `organizationId` and `ownerUserId` is set (`chk_app_owner_xor`).
 ///
-/// **Auth credentials** live on AppKey rows (one or many per App,
-/// independently revocable). The wire-token prefix `hdr_app_` and the
-/// `appKey` developer-facing identifier are deliberately preserved by
-/// 008 — there is no rename.
+/// Relationships:
+/// - Agents: AppAgent lists the Agents installed in the App (many to many); AppAgentCustomization holds
+///   per-installation settings.
+/// - Credentials: AppKey rows are the App's API keys (`hdr_app_…`), each revocable by itself.
+/// - People: AppMember rows are the App's members and their roles. `users` are the Users the App provisioned for
+///   its own end users.
+/// - Data: the App's Memories (app-class, and personal memories per user), Sessions, UsageEvents, AppLogEntry
+///   rows, AiServiceConfigs (which override an Agent's defaults for this App) and `chatbotAiConfig`.
+/// - Team: Workers (the named castings of installed Agents), AgentTasks, Tickers, grants, host registrations and
+///   operations, alarms and their episodes, stop signals. `defaultChannel` is the App's team chat.
 ///
-/// 008-agent-installation drops the `AppAgent` join: an App now
-/// references its Agent directly via `agentId`. The legacy
-/// OPERATE/DEVELOP role distinction is removed (system memory is
-/// universally read-only from any App context — DEVELOP-from-App is
-/// gone per R-10).
+/// Behaviour:
+/// - URN: unique among live installs only (`apps_urn_active_uniq WHERE uninstalled_at IS NULL`, in raw SQL). An
+///   uninstalled App (`uninstalledAt`) is read-only history and the same URN can be installed again, so a lookup
+///   of the active App must filter on `uninstalledAt: null`.
+/// - Users and sessions: `createUserPermission` and `identifyUserMethod` say whether and how the App may create
+///   and identify its end users. `sessionTimeoutSeconds`, `agentSessionsExpire` and `sessionDormancyDays` bound
+///   the App's agent sessions.
+/// - Policy: `policy` is the App's layer of the action-policy chain
+///   (hrn:node:hadronmemory.com:specs:cor:acl:040:02), copied into each run when the run is created.
+/// - Team settings: the `ticker*`, `delivery*` and `wake*` columns are the App's settings for waking its
+///   workers and judging whether they respond (hrn:node:hadronmemory.com:specs:cor:agt:080:05). `teamPausedAt`
+///   pauses the whole team. `sweepMode` and `hostSetupSource` govern how hosts keep worker processes running.
+/// - `properties` is the App's own JSON object, written whole by whoever manages the App
+///   (hrn:node:hadronmemory.com:specs:cor:dmo:050:20).
+/// - Deleting an App deletes its keys, members, log entries and its app-class and personal memories. Removing
+///   one member does not delete that member's personal memory.
 ///
-/// **Cascade behavior**: hard App deletion cascades to AppKey,
-/// AppLogEntry, AppMember, and the App's `app`/`personal`-class Memory
-/// rows. The orphan-retention behavior in 008 FR-015 (personal memory
-/// survives an AppMember removal) is independent — it's a row delete
-/// in `app_members`, not in `apps`.
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:050:02. Lifecycle:
+/// hrn:node:hadronmemory.com:specs:cor:dmo:050:21. Background (history, not law): the Spec Kit specs
+/// 008-agent-installation, 021 and 023-app-shape.
 model App {
   id                                String               @id @default(cuid())
   secretAppKeys                     SecretAppKey[]
@@ -3494,8 +3670,10 @@ model App {
   /// Null = derived (subscribed workers x (86400 / self-subscribe cadence) x 2).
   wakeDailyBudget                   Int?                 @map("wake_daily_budget")
   /// #3125 S1 (cor:dmo:050:02, cor:dmo:050:20): the App's own JSON object, the App equivalent of `Node.properties`.
-  /// Written whole by whoever manages the App (`setAppProperties`); never a credential. The platform reads only the
-  /// reserved `taskIntegrations` key (cor:agt:120:01). NULL = no properties. CHECK: an object when set.
+  /// Written whole by whoever manages the App (`setAppProperties`); never a credential. The platform still reads and
+  /// validates one reserved key, `taskIntegrations` (src/lib/appProperties.ts). The law has since retired that
+  /// App-property integration in favour of the intake adapter contract (hrn:node:hadronmemory.com:specs:cor:agt:120:04);
+  /// removing the key's handling is tracked in #4085. NULL = no properties. CHECK: an object when set.
   properties                        Json?                @map("properties")
   /// #3125 S1 (V34): moved by every changing `setAppProperties` write, the optional expected-revision check's counter.
   /// Its own column, not `updatedAt`, which every other App write moves.
@@ -3668,26 +3846,24 @@ model App {
   @@map("apps")
 }
 
-/// An API key for an App, independently revocable; multiple keys per
-/// App. The raw key carries the canonical `hdr_app_` prefix and is
-/// shown once at creation; only the SHA-256 hash is stored. (SHA-256,
-/// not bcrypt — bcrypt's per-hash salt would prevent the
-/// constant-time keyHash lookup the auth resolver does. The raw key
-/// is a 256-bit random value, so dictionary attacks against the hash
-/// are not a concern.)
+/// An API key of an App. A request that presents the key acts as that App. An App can have several keys, and
+/// each can be revoked without affecting the others.
 ///
-/// **Auth path**: the resolver at `src/middleware/auth.ts` accepts
-/// `hdr_app_`-prefixed bearer tokens, looks up the AppKey by SHA-256
-/// hash, and resolves the principal to the parent App. Memory access
-/// is then gated by `src/mcp/access-control.ts`, which reads
-/// `App.agentId` directly (the legacy AppAgent join was dropped in
-/// 008-agent-installation) and folds the Agent's `systemMemoryId` +
-/// `memoryItems` into the access map.
+/// Relationships: belongs to one App and is deleted with it. AppKeyScope rows limit what a key may do;
+/// UsageEvents and HostKeyUse rows record what was done with it.
 ///
-/// **Client config field**: hadron-client reads the AppKey value from
-/// the `appKey` field of `.hadron/config.json`. The env var name
-/// `HADRON_CLIENT_KEY` describes location (the client process), not
-/// the entity.
+/// Behaviour:
+/// - The raw key starts with `hdr_app_` and is shown once, when the key is created. Only its SHA-256 hash is
+///   stored (`keyHash`), with the last four characters for display (`keyPreview`). SHA-256 and not a salted
+///   password hash, because the authentication looks the key up by its hash, and the key is a 256-bit random
+///   value that cannot be guessed from a dictionary.
+/// - Authentication (src/middleware/auth.ts) accepts a bearer token with that prefix, finds the key by hash and
+///   resolves the caller to the App. What the App may then read and write is decided by the access rules
+///   (src/mcp/access-control.ts).
+/// - A key with `revokedAt` set no longer authenticates. `lastUsedAt` records the last use.
+/// - The CLI keeps the key in the `appKey` field of `.hadron/config.json`.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:050:05.
 model AppKey {
   id         String    @id @default(cuid())
   appId      String    @map("app_id")
@@ -3712,21 +3888,26 @@ model AppKey {
   @@map("app_keys")
 }
 
-/// The User↔App membership join with a per-member role. Spec:
-/// 008-agent-installation FR-004.
-///
-/// **Per-User lifecycle is reserved for a future spec** — there is no
-/// `revokedAt` / `expiresAt` column. Removing a member is a row delete;
-/// the user's personal-class Memory at `(app_id, user.id)` is
-/// **retained by default** as an orphan (FR-015) and re-attaches
-/// automatically if the user later rejoins the *same* App.
-///
-/// **No deletedAt** — soft-delete is meaningless for a pure join.
 // 008-agent-installation (2026-05-02): User↔App membership join.
 // Per-User lifecycle is reserved for a future spec — there is no
 // revoked_at / expires_at column. Removing a member is a row delete.
 // The user's personal-class Memory at (app_id, user.id) survives the
 // row delete (orphan retention per FR-015).
+/// The membership of one User in one App, with the member's role there. It is what makes a person a member of an
+/// App.
+///
+/// Relationships: joins App and User, one row per pair (the primary key), and is deleted with either.
+///
+/// Behaviour:
+/// - `role` is a free string, checked when it is written against the `memberRoles` that the installed Agent's
+///   `installationPolicy` allows (for example `owner`, `guide`, `cook`). The policy's `maxMembers` is enforced
+///   when an invitation is accepted.
+/// - There is no `deletedAt`, no expiry and no revocation column: removing a member deletes the row.
+/// - Removing a member keeps that user's personal memory for the App. It is found again if the user later
+///   rejoins the same App.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:050:04. Background (history, not law): the Spec Kit spec
+/// 008-agent-installation.
 model AppMember {
   appId     String    @map("app_id")
   userId    String    @map("user_id")
@@ -3750,35 +3931,29 @@ model AppMember {
   @@map("app_members")
 }
 
-/// The Org↔Agent license — authorizes an Org to (a) create Apps that
-/// deploy this Agent, and (b) bundle this Agent in `AgentImport` edges
-/// of Agents the Org owns. Spec: 008-agent-installation FR-006 / R-2.
-///
-/// Sibling to `AgentSubscription` (User↔Agent, from 005). Both share
-/// the lifecycle field shape (`activatedAt`, `expiresAt`, `revokedAt`,
-/// `revokedBy`) and the same active-status predicate. The two-table
-/// split (rather than a polymorphic `subjectType` + `subjectId`)
-/// preserves typed FK integrity and per-table indexing clarity.
-///
-/// For **same-org installs** (an Org deploying its own Agent), the
-/// grant is auto-provisioned by `ensureAgentOrgGrant` on first
-/// contact. **Cross-org installs** require an existing active grant;
-/// PUBLIC Agents can be subscribed to through createAgentOrgGrant.
-///
-/// **No deletedAt** — soft-delete is redundant with the
-/// `revokedAt` lifecycle.
-///
-/// **Active-status predicate** (shared with `AgentSubscription` via
-/// the `isLifecycleActive` helper):
-///
-///     activatedAt IS NOT NULL
-///       AND revokedAt IS NULL
-///       AND (expiresAt IS NULL OR expiresAt > now())
 // 008-agent-installation (2026-05-02): Org↔Agent license. Authorizes
 // (a) creating an App in org_id that uses agent_id, and (b) bundling
 // agent_id as an AgentImport in another Agent that org_id owns. Sibling
 // to AgentSubscription (User↔Agent, from 005); shares the lifecycle
 // shape and the isLifecycleActive predicate.
+/// An Organization's permission to use an Agent: to install it in the organization's Apps, and to import it into
+/// Agents the organization owns. It is the organization-level counterpart of AgentSubscription, which is a
+/// user's permission to use an Agent.
+///
+/// Relationships: joins Organization and Agent, one row per pair (the primary key), and is deleted with either.
+/// An AgentImport names the grant that authorizes it.
+///
+/// Behaviour:
+/// - An organization using its own Agent gets the grant automatically on first use (`ensureAgentOrgGrant`).
+///   Using another organization's Agent needs an active grant; for a PUBLIC Agent an organization can create one
+///   (`createAgentOrgGrant`).
+/// - Active means: `activatedAt` is set, `revokedAt` is null, and `expiresAt` is null or in the future. The same
+///   test is used for AgentSubscription (`isLifecycleActive`).
+/// - An administrator or owner of the Agent's organization revokes a grant (`revokeAgentOrgGrant`).
+/// - There is no `deletedAt`; `revokedAt` is the end of the grant's life.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:050:07. Background (history, not law): the Spec Kit spec
+/// 008-agent-installation.
 model AgentOrgGrant {
   orgId       String    @map("org_id")
   agentId     String    @map("agent_id")
@@ -3804,17 +3979,6 @@ model AgentOrgGrant {
   @@map("agent_org_grants")
 }
 
-/// A directed dependency edge between two Agents — "Agent A imports
-/// Agent B as a dep." Spec: 008-agent-installation FR-005 / User Story 3.
-///
-/// Installing the parent (a row in `apps` with `agentId = parent`)
-/// cascade-installs required deps (creates additional Apps in the
-/// same org, one per dep). Optional deps install only if the caller
-/// passes `installOptional`.
-///
-/// v1 enforces **1-level imports only** — the dep itself must NOT be
-/// a parent of any AgentImport. Cycles are trivially blocked at write
-/// time (`parentAgentId != importedAgentId`).
 // 008-agent-installation (2026-05-02): directed Agent→Agent dependency
 // edge. v1 enforces 1-level imports only (the dep itself must not be
 // a parent of any AgentImport). The composite FK to AgentOrgGrant is
@@ -3822,6 +3986,24 @@ model AgentOrgGrant {
 // agent_subscription_id (FR-005); R-2 renamed it to the new sibling
 // table since the universal-grant role lives on AgentOrgGrant for
 // org-level grants, not AgentSubscription (which stays User↔Agent).
+/// A dependency of one Agent on another: the parent Agent imports the other Agent, so that installing the parent
+/// brings the imported Agent with it. It is how a suite of agents is assembled from existing ones.
+///
+/// Relationships: `parentAgent` is the Agent that imports and `importedAgent` the one imported; one row per pair
+/// (the primary key). Deleting the parent deletes the import. An imported Agent cannot be deleted while an
+/// import names it. `agentOrgGrant` is the AgentOrgGrant that allows the parent's organization to use the
+/// imported Agent, and it cannot be deleted while the import exists.
+///
+/// Behaviour:
+/// - An App that installs the parent also has its imported Agents: the required ones always, the optional ones
+///   (`required = false`) only when the installer chooses them.
+/// - Imports are one level deep: an imported Agent must not itself import anything. An Agent cannot import
+///   itself.
+/// - `position` orders the imports of one parent and is unique per parent. Values are spaced out (100, 200, …)
+///   so an import can be moved without renumbering the others.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:050:06. Background (history, not law): the Spec Kit spec
+/// 008-agent-installation.
 model AgentImport {
   /// The Agent that does the importing (the "Suite"). ON DELETE
   /// CASCADE.
@@ -3855,45 +4037,31 @@ model AgentImport {
   @@map("agent_imports")
 }
 
-/// The User-side license: "this user is authorized to use this agent."
-/// Auto-provisioned on first user-attributed contact (per
-/// `controller/operations/ensureAgentSubscription.ts`); revocable by
-/// an ADMIN/OWNER of the Agent's owning org. Authorizes the cross-org
-/// write from the Agent into the user's *personal*-class Memory.
-///
-/// Sibling to `AgentOrgGrant` (Org↔Agent, added in
-/// 008-agent-installation). Both share the lifecycle field shape and
-/// the same `isLifecycleActive` predicate; AgentSubscription
-/// continues to express User↔Agent grants while AgentOrgGrant covers
-/// Org↔Agent (App-creation + import-bundling) grants.
-///
-/// Spec: 005-agent-subscription (2026-04-30). Composite primary key
-/// on `(userId, agentId)`.
-///
-/// **No deletedAt** — soft-delete is redundant with `revokedAt`.
-///
-/// **Active-status predicate** (used by the access-resolver):
-///
-///     activatedAt IS NOT NULL
-///       AND revokedAt IS NULL
-///       AND (expiresAt IS NULL OR expiresAt > now())
-///
-/// **Revocation behavior** (per FR-028 / FR-029): when revoked, the
-/// user's personal Memory of the Agent is **retained** by default —
-/// the user owns it, may want to keep their notes after a class ends.
-/// The Agent loses write access (per FR-019); the user retains read
-/// access via direct authenticated queries. The
-/// `Memory.userMemoryOfAgentId` pivot is preserved so the memory
-/// remains identifiable as "originally from Agent X." **Single
-/// exception**: if the personal Memory has zero nodes at revocation
-/// time, the platform may hard-delete it alongside the
-/// AgentSubscription (avoids orphan accumulation).
 // User-side license expressing "this user is authorized to use this agent."
 // Auto-provisioned on first user-attributed contact (per
 // `controller/operations/ensureAgentSubscription.ts`); revocable by an
 // ADMIN/OWNER of the Agent's owning org. Spec: 005-agent-subscription
 // (2026-04-30). Authorizes the cross-org write from the Agent into the
 // user's personal-class Memory.
+/// A User's permission to use an Agent. It is what allows the Agent to write to that user's personal memory, and
+/// it is the user-level counterpart of AgentOrgGrant.
+///
+/// Relationships: joins User and Agent, one row per pair (the primary key), and is deleted with either.
+///
+/// Behaviour:
+/// - Created automatically the first time work is attributed to the user through the Agent
+///   (src/controller/operations/ensureAgentSubscription.ts).
+/// - Active means: `activatedAt` is set, `revokedAt` is null, and `expiresAt` is null or in the future
+///   (`isLifecycleActive`). `activatedAt` is set at creation today.
+/// - An administrator or owner of the Agent's organization revokes a subscription (`revokeAgentSubscription`).
+/// - After a revocation the user's personal memory of the Agent is kept: the user owns it and can still read it,
+///   the Agent can no longer write to it, and `Memory.userMemoryOfAgentId` still says which Agent it came from.
+///   One exception: a personal memory with no nodes at the time of the revocation may be deleted with the
+///   subscription.
+/// - There is no `deletedAt`; `revokedAt` is the end of the subscription's life.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:050:08. Background (history, not law): the Spec Kit spec
+/// 005-agent-subscription.
 model AgentSubscription {
   userId      String    @map("user_id")
   agentId     String    @map("agent_id")
@@ -3927,8 +4095,17 @@ model AgentSubscription {
   @@map("agent_subscriptions")
 }
 
-/// Log entry for a specific App, surfaced in hadron-portal for
-/// troubleshooting.
+/// A log entry about one App, kept in the database so that whoever manages the App can see what went wrong in
+/// it.
+///
+/// Relationships: belongs to one App and is deleted with it. `memoryId` and `sessionId` are set when the entry
+/// is about one memory or session; they are plain values with no foreign key.
+///
+/// Behaviour: server code writes entries as diagnostics, for example when a worker's check of its team channel
+/// finds a problem (src/api/graphql/schema/resolvers.deliveryBatch.ts). Such a write is best-effort and happens
+/// after the transaction of the work it describes, so a failed log write never fails that work.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:080:03.
 model AppLogEntry {
   id        String    @id @default(cuid())
   appId     String    @map("app_id")
@@ -3955,30 +4132,19 @@ model AppLogEntry {
 
 // ─── 023-app-shape: multi-Agent App + per-Memory authorization ─────────
 
-/// N:M join between `App` and `Agent`, reintroduced by spec 023.
+/// The App-level customisation of one Agent that an App has through an import: today, the boot prompt the App
+/// uses for that Agent. An Agent that arrives in an App as the import of another Agent has no AppAgent row to
+/// hold this, so it is held here.
 ///
-/// **No `role` column** — system memory is read-only to every App
-/// regardless (the pre-008 OPERATE/DEVELOP distinction stays deleted
-/// per spec 023 FR-003). **No `trainingMode` column** — training mode
-/// is a per-App setting and lives on `App.trainingMode` (spec 023
-/// FR-001; deviates from the 2026-05-12-user-installing-app summary
-/// §3 to avoid per-Agent conflicts on an App-wide setting).
+/// Relationships: joins App and Agent, one row per pair (the primary key), and is deleted with either.
 ///
-/// **Transition note**: `App.agentId` was dropped and consumers
-/// retrofitted in Phase 2b ([hadron-server#129](https://github.com/hadron-memory/hadron-server/pull/129),
-/// 2026-05-17). Install flows go through the `installAgentIntoApp`
-/// mutation (spec 023 US1, [hadron-server#130](https://github.com/hadron-memory/hadron-server/pull/130))
-/// which writes an `AppAgent` row.
+/// Behaviour: this row is not an installation. Whether an Agent is installed in an App is decided only by
+/// AppAgent and AgentImport. `bootPromptNodeId` and `bootPromptUrn` are a boot-prompt pointer of the same kind
+/// as `AppAgent.bootPromptNodeId`: the id of a compiled boot-prompt node with no foreign key, and its URN at the
+/// time it was set. The row outlives the deletion of the install memory or of the compiled node, so a pointer
+/// whose target was deleted is still refused as a deleted target and is not read as "no pointer".
 ///
-/// **Cascade behavior**: hard `App` or `Agent` deletion cascades to
-/// the `AppAgent` row. Uninstalling an Agent from an App (deleting
-/// the row) does NOT cascade-delete the (app_id, agent_id, *) memories
-/// (FR-005; orphan retention preserved). Duplicate inserts for the
-/// same (app_id, agent_id) are rejected by the composite PK.
-/// #2168: App-level customisation state for an installation derived from an
-/// import. This is NOT an install: membership comes only from app_agents or
-/// agent_imports. It outlives deletion of its install memory/compiled target,
-/// so a set pointer whose target is deleted remains a refusal (R27).
+/// Background: #2168.
 model AppAgentCustomization {
   appId String @map("app_id")
   agentId String @map("agent_id")
@@ -3991,6 +4157,24 @@ model AppAgentCustomization {
   @@map("app_agent_customizations")
 }
 
+/// The installation of one Agent in one App. A row here is what "this Agent is installed in this App" means; an
+/// App can install several Agents, and an Agent can be installed in many Apps.
+///
+/// Relationships: joins App and Agent, one row per pair (the primary key), and is deleted with either. The
+/// Workers of an App are cast from Agents installed in it.
+///
+/// Behaviour:
+/// - Installing goes through `installAgentIntoApp`, which writes the row. Uninstalling deletes it; there is no
+///   soft delete. The memories that exist for the pair are not deleted with it.
+/// - There is no role column: an Agent's system memory is read-only from every App. Training mode is a setting
+///   of the App (`App.trainingMode`), not of one installation.
+/// - `bootPromptNodeId` and `bootPromptUrn` point at the installation's compiled boot prompt
+///   (hrn:node:hadronmemory.com:specs:cor:agt:040:07). Because uninstalling deletes the row, a reinstall starts
+///   without a pointer until the App's manager compiles again
+///   (hrn:node:hadronmemory.com:specs:cor:agt:040:06).
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:050:03. Background (history, not law): the Spec Kit spec
+/// 023-app-shape.
 model AppAgent {
   appId            String    @map("app_id")
   agentId          String    @map("agent_id")
