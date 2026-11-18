@@ -2324,7 +2324,7 @@ async function queryWorkerActivity(
   // few thousand sessions, though almost every probe is never executed; JIT then compiled for ~400 ms on a 4 ms plan, and
   // the stall tick reached this read nine times a pass. The setting is local to the transaction it is made in.
   const run = async (tx: Pick<Prisma.TransactionClient, '$executeRaw' | '$queryRaw'>): Promise<Row[]> => {
-    await tx.$executeRaw`SELECT set_config('jit', 'off', true)`;
+    await setWorkerActivityPlanSettings(tx);
     return tx.$queryRaw<Row[]>(workerActivitySql(scope, now));
   };
   // A transaction client exposes no `$transaction`; the shared client does (#4285: one guard instead of two casts).
@@ -2346,6 +2346,20 @@ async function queryWorkerActivity(
       },
     ]),
   );
+}
+
+/**
+ * The planner settings the activity read runs under, both local to the transaction they are made in.
+ *  - `jit` off (#4273): see the note in `queryWorkerActivity`.
+ *  - `enable_incremental_sort` off (#4397): the per-session probe wants ORDER BY session_id DESC, created_at DESC
+ *    LIMIT 1, which the partial (session_id, created_at) index serves with ONE descent. The planner prices an
+ *    Incremental Sort over usage_events_session_id_idx as cheaper, because it assumes the average session's few hundred
+ *    rows per group, and then reads EVERY row of a long-open session (the incident's shape). With it off, a Sort over
+ *    the whole session is never cheaper than the index's near-zero startup, so only the session-activity index
+ *    can serve the probe. Exported so the plan pins run under exactly what ships.
+ */
+export async function setWorkerActivityPlanSettings(tx: Pick<Prisma.TransactionClient, '$executeRaw'>): Promise<void> {
+  await tx.$executeRaw`SELECT set_config('jit', 'off', true), set_config('enable_incremental_sort', 'off', true)`;
 }
 
 /**
@@ -2463,21 +2477,25 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
       ) k
     ) s ON true
     LEFT JOIN LATERAL (
-      -- #1952: the "+ interval '0'" is load-bearing. A bare max(created_at)
-      -- lets the planner serve the max by walking usage_events_created_at_idx
-      -- backwards with a filter, which for a session with no (or ancient)
-      -- activity reads the whole index: the 2026-10-14 outage. Statistics in
-      -- which a few sessions dominate activity choose that walk even with the
-      -- index below present, and ORDER BY … LIMIT 1 is the same plan. No
-      -- created_at index can order this expression, so only session-keyed
-      -- paths remain. Cost: a session's activity rows are all read, bounded
-      -- per App. A stored last-activity column is #1957.
-      SELECT max(e.created_at + interval '0') AS max_created
+      -- #4397 (supersedes #1952's max(created_at + interval '0'), which read EVERY activity row of every open session
+      -- and was the leading suspect for the 2026-11-17 P2028 incident): ONE probe of the partial
+      -- usage_events_session_activity_idx per session, newest first, LIMIT 1.
+      -- Two things are load-bearing and pinned in 1903-session-activity-index.test.ts:
+      --  * The session key is a RANGE (>= s.id AND <= s.id), not "= s.id". With an equality the planner treats
+      --    session_id as a constant and DROPS it from ORDER BY, so "ORDER BY created_at DESC LIMIT 1" can be served by
+      --    walking usage_events_created_at_idx backwards, which for a session with no (or ancient) activity reads the
+      --    whole index: the 2026-10-14 outage, and skewed statistics choose it even with the index below present
+      --    (#1952, findings:minmax-per-session-probe-walks-created-at-index). A range leaves session_id in the sort, so
+      --    only a (session_id, created_at) index can give the order and no created_at-only index has a path.
+      --  * The WHOLE drives-only filter (counts_as_activity and the #4271 exclusion) sits BEFORE the LIMIT, so the one
+      --    row returned is the newest QUALIFYING row, never the newest row (cor:agt:020:11 rules 1, 3; NULL, i.e. no
+      --    row, for a never-driven session, rule 4). Same predicate as isSessionLive: do not fork it.
+      SELECT e.created_at AS max_created
       FROM usage_events e
       -- #1653 / DY-2: only events written while the session was live count.
       -- #1903: served by the partial usage_events_session_activity_idx
       -- (post-push.sql).
-      WHERE e.session_id = s.id AND e.counts_as_activity
+      WHERE e.session_id >= s.id AND e.session_id <= s.id AND e.counts_as_activity
         -- #4271: a session that ended, was not auto-expired and whose updated_at is at or past its end is already
         -- capped by its own stamps: LEAST(GREATEST(started_at, updated_at, x), ended_at) = ended_at for any x, and
         -- live / holdsOpen / bound need an open row. Its usage events cannot change any column, so they are not read
@@ -2486,6 +2504,8 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
         -- COALESCE: a NULL updated_at (or end) proves nothing closed, so the session's events are read (#4272 QA P2:
         -- without it the comparison is NULL, NOT NULL is NULL, and the WHERE dropped them).
         AND NOT COALESCE(s.ended_at IS NOT NULL AND s.auto_expired_at IS NULL AND s.updated_at >= s.ended_at, false)
+      ORDER BY e.session_id DESC, e.created_at DESC
+      LIMIT 1
     ) ue ON true
     WHERE ${scope} AND s.deleted_at IS NULL
     GROUP BY s.worker_id
