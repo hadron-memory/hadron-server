@@ -6862,6 +6862,8 @@ model DarkWorkerEpisode {
 ///   `task.reassigned` with the worker as actor). Assignments made by the matcher do not.
 /// - The 60 minutes run from the latest of the worker's last own assignment, the start of its first session,
 ///   and the moment in CoordinatorCadenceClock.
+/// - A worker is not judged late while its team is paused, it is paused itself, or it is under a stop signal.
+///   Having no live session is not an exemption.
 /// - At most one open row per worker (partial unique index in prisma/coordinator-cadence-invariants.sql). The
 ///   episode ends only at the worker's next own assignment, and `endedAt` is that assignment's time. A lane
 ///   worker turning busy, or the worker being paused, does not end it, so neither raises a second alarm.
@@ -6897,6 +6899,9 @@ model CoordinatorCadenceEpisode {
 /// reaches 60 minutes while a worker it could give work to is free, the platform raises one alarm about it
 /// and opens a CoordinatorCadenceEpisode. The 60 minutes run from the latest of three moments: the worker's
 /// last own assignment, the start of its first session, and `observedAt` in this row.
+///
+/// A worker whose team is paused, that is paused itself or that is under a stop signal is not judged late; a
+/// worker with no live session still is.
 ///
 /// Why the evaluator needs the row: the first two moments can be missing or old. A worker that never assigned
 /// a task and never had a session has neither, and a worker that existed before the evaluator first ran can
