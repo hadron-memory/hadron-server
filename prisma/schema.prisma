@@ -589,7 +589,7 @@ enum DashboardWidgetType {
 /// DashboardWidgetPreset can be copied into `config`, but the widget keeps no link to the preset.
 ///
 /// Behaviour: owner-only; it belongs to no organization and cannot be shared. The whole set is read with
-/// `dashboardWidgets` and replaced in one step with `setDashboardWidgets`.
+/// `dashboardWidgets` and replaced atomically with `setDashboardWidgets`.
 ///
 /// Background: #772, #788.
 model DashboardWidget {
@@ -751,8 +751,10 @@ model Organization {
 /// `Organization.principalId`). Their own `handle` and `urn` columns remain what reads use; the principal row is
 /// written in the same transaction that sets them, so the two stay equal.
 ///
-/// Behaviour: `name` is unique across every status and is always written in lower case, so the plain unique index
-/// is also case-insensitive. A name that is given up is kept as a tombstone (`status = 'released'`, owner
+/// Behaviour: `name` is unique across every status. The unique index is a plain, case-sensitive one, and no
+/// database constraint forces lower case: names differing only in case are kept apart because every writer
+/// (`mintPrincipal` and the backfills) lower-cases the name before it writes.
+/// A name that is given up is kept as a tombstone (`status = 'released'`, owner
 /// detached) and is never handed out again, so an old URN can never come to mean a different owner. Words the
 /// platform keeps for itself (for example `hadron`, `platform`) are rows with `status = 'reserved'`.
 ///
@@ -841,14 +843,17 @@ model OrgMember {
 /// - Use: Sessions that write to it, the Worker whose working memory it is, Channels, Scopes it is part of.
 /// - Records: MemoryLogEntry, GitMirrorObligation.
 ///
-/// Git-backed memories: when `source` is set the memory is synced from a Git repository. The root `node.yaml` of
-/// the repository is the memory manifest: it declares the memory's URN and marketplace metadata, and an import
+/// Git-backed memories: when `source` is set the memory is synced from a Git repository. Only a memory owned by
+/// an organization is synced; a user-owned memory is refused (src/integrations/github/syncGraphFromGithub.ts).
+/// The root `node.yaml` of the repository is the memory manifest: it declares the memory's URN and marketplace metadata, and an import
 /// creates or updates this row from it. The organization part of the URN must match an Organization that exists
 /// on the server.
 /// To read the repository the server first uses the owning organization's GitHub App installation to mint a token
 /// that lasts one hour. For a repository outside that installation (another GitHub organization, a personal
-/// repository, another Git host) it uses `sourceTokenEncrypted`. The GitHub App's private key is not stored on
-/// this row.
+/// repository, another Git host) it uses `sourceTokenEncrypted`. Two different keys are involved, and neither is
+/// on this row: the private key of the platform's own GitHub App is in the server's environment and never in the
+/// database, and an organization that uses a GitHub App of its own stores that App's key, encrypted, in
+/// `Organization.githubAppPrivateKeyEncrypted`.
 ///
 /// Token encryption: `sourceTokenEncrypted` is encrypted with AES-256-GCM under the server's
 /// `HADRON_ENCRYPTION_KEY`. The plaintext is never stored or shown again after it is entered; to replace an
@@ -1311,7 +1316,7 @@ enum NodeContentValidationReporterKind {
 ///
 /// Address: `loc` is the node's colon-delimited path inside its memory (for example `auth:tokens`), unique per
 /// memory. The node's URN is computed from the memory's URN and the `loc`; it is not stored. `id` stays the same
-/// when the node moves.
+/// when the node moves. An imported `node.yaml` may give the `id`; the server assigns one when it does not.
 ///
 /// Relationships:
 /// - Memory: belongs to one Memory and is deleted with it.
@@ -1826,7 +1831,8 @@ enum CommentThreadState {
 
 /// The comment-specific state of a comment. A comment is a Node with `nodeType = 'comment'`, and every such node
 /// has exactly one row here. The comment's text is the node's `content`; this row says what the comment is on,
-/// which thread it belongs to, who wrote it, and whether the thread is open, resolved, retracted or deleted.
+/// which thread it belongs to and who wrote it. For a top-level comment it also holds the thread's state (open or
+/// resolved), and for any comment the markers of a retraction or a deletion.
 ///
 /// Relationships: `node` is the comment node (one to one). `target` is the commented node. `threadRootId` is null
 /// for a top-level comment and names the thread's top-level comment for a reply. The same facts exist as governed
@@ -2616,6 +2622,10 @@ model MemoryLicense {
 /// - `activated` says whether the memory is merged into the subscriber's blended graph. It is not an access
 ///   check, and neither is the license: a read makes no check on either.
 /// - A soft-deleted row (`deletedAt`) gives no access.
+/// - A subscription says nothing about access through an App or to a user's own memories. Which memories an
+///   App and its installed Agents reach is decided per App (hrn:node:hadronmemory.com:specs:cor:dmo:050:17,
+///   src/mcp/access-control.ts), and a `personal` or `private` memory is readable only by its owner and by those
+///   the owner shared it with (MemoryShare), whatever role the caller has in an organization.
 ///
 /// Specs: hrn:node:hadronmemory.com:specs:cor:dmo:060:09, hrn:node:hadronmemory.com:specs:cor:dmo:050:09.
 model MemorySubscription {
