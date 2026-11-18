@@ -34,7 +34,6 @@ import {
   mintPrincipal,
   checkRootAvailable,
   ensureUserPrincipal,
-  type PrincipalDb,
 } from './mintPrincipal.js';
 
 beforeEach(async () => {
@@ -66,7 +65,10 @@ async function expectTypedRefusal(
     `refusal for "${name}" is the TYPED error, not a bare one`,
   ).toBe('RootNameInvalidError');
   expect((settled as Error).message).toMatch(/1–64 lower-case ASCII/);
-  expect((settled as Error).message).toContain(name);
+  // The refusal names the name AS STORED (post-lower-casing): for `İ` the
+  // message carries `i̇`, its lower-cased form — the rule governs the stored
+  // name, and the message shows what was refused about it.
+  expect((settled as Error).message).toContain(name.toLowerCase());
 }
 
 /** Every #4481 refusal, with the guard each one exists to kill (see mutants). */
@@ -163,7 +165,7 @@ describe('checkRootAvailable — agrees with the mint (#4481)', () => {
   it('returns false for every refused name (the probe and the mint are one rule)', async () => {
     for (const { name } of REFUSALS) {
       expect(
-        await checkRootAvailable(db as unknown as PrincipalDb, name),
+        await checkRootAvailable(db, name),
         `checkRootAvailable("${name === '' ? '(empty)' : name}")`,
       ).toBe(false);
     }
@@ -217,7 +219,7 @@ describe('GraphQL surfacing — the shared mapper gives RootNameInvalidError its
     const mapper = (org as { rethrowRootNameErrors?: (err: unknown) => never })
       .rethrowRootNameErrors;
     expect(typeof mapper).toBe('function');
-    const invalid = new (mint as { RootNameInvalidError: new (name: string) => Error })
+    const invalid = new (mint as unknown as { RootNameInvalidError: new (name: string) => Error })
       .RootNameInvalidError('ünï');
     expect(() => mapper!(invalid)).toThrow(GraphQLError);
     try {
@@ -235,7 +237,7 @@ describe('GraphQL surfacing — the shared mapper gives RootNameInvalidError its
     const mapper = (org as { rethrowRootNameErrors?: (err: unknown) => never })
       .rethrowRootNameErrors;
     expect(typeof mapper).toBe('function');
-    const taken = new (mint as { RootNameTakenError: new (name: string) => Error })
+    const taken = new (mint as unknown as { RootNameTakenError: new (name: string) => Error })
       .RootNameTakenError('holger');
     try {
       mapper!(taken);
