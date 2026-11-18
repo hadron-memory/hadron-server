@@ -31,6 +31,7 @@ import { EntityNotFoundError } from '../../lib/entityRef/entityNotFound.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
 import { SetAssetEnabledError } from '../../controller/operations/setAgentAssetUploadEnabled.js';
 import { QueryTooComplexError } from './admissionComplexity.js';
+import { TeamReadBusyError } from '../../lib/agentTasks/teamReadBudget.js';
 import { GitCommandError } from '../../integrations/github/execGit.js';
 
 interface ClientErrorMapping {
@@ -62,6 +63,15 @@ function mapping<E>(
 }
 
 const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
+  // #4455: the bounded team read (roster/composition/utilization) surfacing its budget expiry typed and RETRYABLE.
+  // The error is already a GraphQLError carrying its code, but mapping it here guarantees the extensions merge at
+  // the Apollo boundary and states the Sentry column. NOT silenced: these are the availability signal — the
+  // P2028 incident (#4380) was found by counting them, so the issue stream keeps them.
+  mapping(
+    (err): err is TeamReadBusyError => err instanceof TeamReadBusyError,
+    (err) => ({ ...err.extensions }),
+    { silenceInSentry: false },
+  ),
   // #3009: declining the encrypted-vector disclosure is a caller refusal on both consumers of this list.
   mapping(
     (err): err is EncryptedVectorIndexNotAcknowledgedError => err instanceof EncryptedVectorIndexNotAcknowledgedError,

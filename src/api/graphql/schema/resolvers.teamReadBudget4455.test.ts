@@ -15,11 +15,16 @@
  * change any answer (cor:agt:050:22), only the budget.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
+import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { withRosterAppRead } from './resolvers.agentTaskMatching.js';
+import { TeamReadBusyError } from '../../../lib/agentTasks/teamReadBudget.js';
+import { formatGraphQLError, isExpectedClientError, isTrustedRefusal } from '../formatError.js';
+import { INTERNAL_ERROR_CODE } from '../../../lib/internalFault.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -59,7 +64,7 @@ beforeEach(async () => {
 
 const bind = (name: string, family: string | null, minutesAgo = 0) =>
   db.session.create({
-    data: { appId: app.id, workerId: w[name].id, agentId, family, startedAt: ago(minutesAgo), updatedAt: ago(minutesAgo) },
+    data: { id: generateId(), appId: app.id, workerId: w[name].id, agentId, family, startedAt: ago(minutesAgo), updatedAt: ago(minutesAgo) },
   });
 
 describe('#4455: the bounded team-read budget', () => {
@@ -93,6 +98,25 @@ describe('#4455: the bounded team-read budget', () => {
       }),
     ).rejects.toMatchObject({ extensions: { code: 'TEAM_READ_BUSY', retryable: true } });
   }, 25_000);
+});
+
+describe('#4455: the refusal reaches the wire typed', () => {
+  it('formatError maps TeamReadBusyError to its code with retryable and the budget, and stays reportable', () => {
+    const err = new TeamReadBusyError();
+    expect(isTrustedRefusal(err)).toBe(true);
+    // Apollo wraps what the resolver threw; the mapping must surface the domain message and extensions over the wrap.
+    const wrapped = new GraphQLError('Apollo wrap', { originalError: err });
+    const formatted = formatGraphQLError({ message: 'Apollo wrap', extensions: { code: INTERNAL_ERROR_CODE } }, wrapped);
+    expect(formatted.message).toBe(err.message);
+    expect(formatted.extensions).toMatchObject({ code: 'TEAM_READ_BUSY', retryable: true, budgetMs: 5_000 });
+    // NOT silenced: the busy refusal is the availability signal — the #4380 incident was found by counting these.
+    expect(isExpectedClientError(err)).toBe(false);
+  });
+
+  it('a raw P2028 from the store is NOT the typed refusal (only withRosterAppRead converts its own)', () => {
+    const raw = new (Error.prototype.constructor as unknown as new (m: string) => Error)('x');
+    expect(isTrustedRefusal(raw)).toBe(false);
+  });
 });
 
 describe('#4455: differential — roster, composition and utilization answer the same for the same seed', () => {
