@@ -412,14 +412,14 @@ describe('#2200 — the roster\'s "your move" follows the alarm\'s live episode'
 describe('#2200 — endedAlarmEpisodes classifies on positive proof', () => {
   it('running ⇒ not ended; moved on ⇒ ended; row-terminal ⇒ ended; unknown task ⇒ not ended', async () => {
     const { t, alarm } = await notStartedAlarm();
-    const a = { taskId: t.id, type: alarm.type, episodeStart: alarm.episodeStart };
+    const a = { appId: alarm.appId, taskId: t.id, type: alarm.type, episodeStart: alarm.episodeStart };
     const key = stall.alarmEpisodeKey(a.taskId, a.type, a.episodeStart as Date);
     expect((await endedAlarmEpisodes(db, [a], at('10:20'))).has(key)).toBe(false);
     await db.agentTask.update({ where: { id: t.id }, data: { status: 'started', startedAt: at('10:21') } });
     expect((await endedAlarmEpisodes(db, [a], at('10:22'))).has(key)).toBe(true);
     await cancel(t.id, '10:23');
     expect((await endedAlarmEpisodes(db, [a], at('10:24'))).has(key)).toBe(true);
-    const ghost = { taskId: generateId(), type: a.type, episodeStart: a.episodeStart };
+    const ghost = { appId: a.appId, taskId: generateId(), type: a.type, episodeStart: a.episodeStart };
     expect((await endedAlarmEpisodes(db, [ghost], at('10:24'))).size).toBe(0);
   });
 
@@ -427,7 +427,7 @@ describe('#2200 — endedAlarmEpisodes classifies on positive proof', () => {
     const { t, alarm } = await notStartedAlarm();
     await cancel(t.id, '10:20');
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: at('10:21') } });
-    const a = { taskId: t.id, type: alarm.type, episodeStart: alarm.episodeStart };
+    const a = { appId: alarm.appId, taskId: t.id, type: alarm.type, episodeStart: alarm.episodeStart };
     expect((await endedAlarmEpisodes(db, [a], at('10:30'))).size).toBe(0);
   });
 });

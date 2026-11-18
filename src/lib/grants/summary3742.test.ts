@@ -40,6 +40,15 @@ describe('#3742 pin 1: both platform actions render exact text, the App and the 
     expect(renderGrantSummary(input({}, 'webhook.create'))).toBe(
       'Create a webhook in hrn:app:acme.test:mealplan that starts at the entry node hrn:node:acme.test:kb:plans:weekly');
   });
+  // A batch grant names several nodes (cor:agt:040:11): each is written as its URN, in the stored order, so the signer reads every one.
+  it('a list is written as each entry\'s canonical URN, in the stored order', () => {
+    const daily = { urn: 'hrn:node:acme.test:kb:plans:daily' };
+    expect(renderGrantSummary({ action: byName('bootprompt.compile.approve'), app: APP, values: { compiledNode: ['n2', 'n1'] }, refs: { n1: NODE, n2: daily } })).toBe(
+      'Compile and approve the boot prompts hrn:node:acme.test:kb:plans:daily, hrn:node:acme.test:kb:plans:weekly in hrn:app:acme.test:mealplan, any number of times within an hour');
+  });
+  it('a list of one reads exactly as the single value does', () => {
+    expect(renderGrantSummary(input({ values: { entryNode: ['n1'] } }))).toBe(EXPECTED);
+  });
   it('the URN is written even when a node carries a name: the function takes no name at all', () => {
     const withName = { urn: NODE.urn, name: 'Totally Trusted Plan' } as unknown as { urn: string };
     expect(renderGrantSummary(input({ refs: { n1: withName } }))).toBe(EXPECTED);
@@ -62,6 +71,11 @@ describe('#3742 pin 2: the seed refuses a template naming a placeholder the acti
       .rejects.toThrow(/app/i);
     expect(await testRows()).toEqual([]);
   });
+  it('a template that never names one of its action\'s parameters is refused: the signer would sign a value they were not shown', async () => {
+    await expect(upsertPlatformActions(db, [act('test.s1a.ok'), act('test.s1a.unnamed', { summaryTemplate: 'Create a thing in {app}' })]))
+      .rejects.toThrow(/never names the parameter/i);
+    expect(await testRows()).toEqual([]);
+  });
   it('a template naming only {app} and its declared parameters is accepted', async () => {
     await upsertPlatformActions(db, [act('test.s1a.fine')]);
     expect((await testRows()).map((r) => r.name)).toEqual(['test.s1a.fine']);
@@ -77,7 +91,11 @@ describe('#3742 pin 3: a value the renderer cannot write refuses with the typed 
     ['absent', { values: {} }, 'MISSING_VALUE'],
     ['null', { values: { entryNode: null } }, 'MISSING_VALUE'],
     ['empty string', { values: { entryNode: '' } }, 'MISSING_VALUE'],
-    ['a list', { values: { entryNode: ['n1'] } }, 'LIST'],
+    ['an empty list', { values: { entryNode: [] } }, 'MISSING_VALUE'],
+    ['a list holding a wildcard', { values: { entryNode: ['n1', '*'] } }, 'WILDCARD'],
+    ['a list holding a number', { values: { entryNode: ['n1', 7] } }, 'UNSUPPORTED_TYPE'],
+    ['a list with one unresolved entry', { values: { entryNode: ['n1', 'n2'] } }, 'MISSING_VALUE'],
+    ['a list with one entry that is not a canonical node URN', { values: { entryNode: ['n1', 'n2'] }, refs: { n1: NODE, n2: { urn: 'Weekly plan' } } }, 'NOT_CANONICAL'],
     ['a wildcard', { values: { entryNode: '*' } }, 'WILDCARD'],
     ['an object', { values: { entryNode: { any: true } } }, 'WILDCARD'],
     ['a number', { values: { entryNode: 7 } }, 'UNSUPPORTED_TYPE'],

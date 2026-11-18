@@ -28,6 +28,7 @@
  * inherited node without `via` still reads as having none.
  */
 
+import { validateListPageInput } from '../../../lib/listPage.js';
 import { resolveInheritedEdges, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { isMemoryReadableCached } from './resolvers.helpers.js';
 import type { Context } from './resolvers.js';
@@ -68,7 +69,7 @@ async function inheritedEdges(parent: { id: string; inheritedFrom?: InheritedFro
 }
 
 /** Field → what an inherited node returns, given the field's normal value. */
-const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: any, ctx: any) => unknown> = {
+const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: any, ctx: any, args?: any) => unknown> = {
   // Ordinary inherited reads admit only live nodes; recovery never inherits.
   deletedAt: none,
   memory: none,
@@ -87,6 +88,10 @@ const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: a
   asComment: none,
   asset: none,
   signingRequests: empty,
+  signingRequestsPage: (_value, _parent, _ctx, args) => {
+    validateListPageInput(args ?? {});
+    return { items: [], total: 0, hasMore: false, nextCursor: null };
+  },
   commentSummary: () => ({ openThreads: 0, resolvedThreads: 0, comments: 0, viewerOpenThreadId: null, oldestOpenThreadAt: null }),
   approvalStatus: async (value) => {
     const s = await value();
@@ -118,7 +123,7 @@ export function withInheritedNodeProjection<T extends Record<string, any>>(node:
     const original: Resolver = node[field] ?? ((parent) => parent[field]);
     out[field] = (parent, args, ctx, info) =>
       parent?.inheritedFrom
-        ? project(async () => original(parent, args, ctx, info), parent, ctx)
+        ? project(async () => original(parent, args, ctx, info), parent, ctx, args)
         : original(parent, args, ctx, info);
   }
   return out as T;

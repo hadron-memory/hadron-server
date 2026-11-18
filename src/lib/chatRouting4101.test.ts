@@ -34,6 +34,23 @@ describe('#4101 skipped on_complete observability', () => {
     const warn = vi.spyOn(console, 'warn'), error = vi.spyOn(console, 'error');
     await decide(); expect(info).not.toHaveBeenCalled(); expect(warn).not.toHaveBeenCalled(); expect(error).not.toHaveBeenCalled();
   });
+  // #4201 (LOCAL on #4192): the switch is the exact literal `true` (#4101's design note), so every other spelling is OFF. The
+  // empty string alone let a truthiness gate (`!value`) and a case- or space-normalizing gate survive as mutants.
+  it.each([
+    ['unset', undefined], ['1', '1'], ['yes', 'yes'], ['TRUE', 'TRUE'], ['false', 'false'], ['leading space', ' true'], ['trailing space', 'true '],
+  ] as const)('stays off when the switch is %s: routing unchanged, nothing logged', async (_label, value) => {
+    vi.stubEnv('HADRON_CHAT_ON_COMPLETE_SKIP_METRICS', value as string);
+    if (value === undefined) delete process.env.HADRON_CHAT_ON_COMPLETE_SKIP_METRICS;
+    const warn = vi.spyOn(console, 'warn'), error = vi.spyOn(console, 'error');
+    const result = await decide(false, [rule('one'), rule('two')]);
+    expect(result.result.conversationHandoff).toBeNull();
+    expect(info).not.toHaveBeenCalled(); expect(warn).not.toHaveBeenCalled(); expect(error).not.toHaveBeenCalled();
+  });
+  it('the exact lowercase `true` is the one spelling that turns it on (the positive control for the rows above)', async () => {
+    vi.stubEnv('HADRON_CHAT_ON_COMPLETE_SKIP_METRICS', 'true');
+    await decide(false, [rule('one'), rule('two')]);
+    expect(info).toHaveBeenCalledExactlyOnceWith(JSON.stringify(snapshot('false', 1, 2)));
+  });
   it('true still completes and fires the rule, with no skip signal', async () => {
     expect((await decide(true)).result.conversationHandoff).toBe('private-target'); expect(info).not.toHaveBeenCalled();
   });

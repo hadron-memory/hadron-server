@@ -19,6 +19,7 @@ import { dropTestActions, insertGrant, seedWorld, type World } from '../../../li
 import type { Context } from './resolvers.js';
 import { deploymentSchema } from './deploymentSchema.js';
 import { formatGraphQLError } from '../formatError.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../../test/startServerFixture.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -28,15 +29,14 @@ let base: string;
 let direct: ApolloServer<Context>;
 beforeAll(async () => {
   vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
-  const { createServer } = await import('../../../server.js');
-  http = httpServer(await createServer());
+  http = httpServer(await createServerOnCleanDb());
   await new Promise<void>((r) => http.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
   const schema = deploymentSchema();
   direct = new ApolloServer<Context>({ typeDefs: schema.typeDefs, resolvers: schema.resolvers, formatError: formatGraphQLError, includeStacktraceInErrorResponses: false });
   await direct.start();
 });
-afterAll(async () => { await new Promise<void>((r) => http.close(() => r())); await direct.stop(); await cleanDb(db); await dropTestActions(); vi.unstubAllEnvs(); });
+afterAll(async () => { await closeServerIfStarted(http); await direct?.stop(); await cleanDb(db); await dropTestActions(); vi.unstubAllEnvs(); });
 
 let w: World;
 let workerKey: string; let sessionId: string;

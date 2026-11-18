@@ -22,6 +22,7 @@ import { appendChatMessage } from '../chatRoot.js';
 import { getMemoryEncryptionInfo } from '../nodeCrypto.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { teamChatMutations } from '../../api/graphql/schema/resolvers.teamChat.js';
+import { computeDueWakes } from './dueWakes.js';
 import { registerHost } from '../agentTasks/hosts.js';
 import { declareAllStopLanes } from '../../test/stopLanes.js';
 
@@ -188,8 +189,31 @@ describe('#3455: a preview never lets the caller read more than the spending rea
     const normal = await read(keyCtx(w.keyId));
     await db.appWakeReservation.deleteMany({ where: { appId: w.appId } });
     const preview = await read(keyCtx(w.keyId), true);
+    // Explicit values, not only equality: two empty answers would also be "equal".
+    expect(slugsOf(normal)).toEqual([]);
+    expect(slugsOf(preview)).toEqual([]);
     expect(slugsOf(preview)).toEqual(slugsOf(normal));
     expect(preview.wakes.map((x: any) => x.channels.length)).toEqual(normal.wakes.map((x: any) => x.channels.length));
+  });
+});
+
+describe('#3756 (follow-up to #3455): a caller-bounded preview does not read the App\'s tasks for a caller who may not', () => {
+  it('an outsider previewing as if a manager sees no task reason and no wake; the platform\'s own preview sees it', async () => {
+    await build({ workers: 1, budget: 5 });
+    const outsider = await db.user.create({ data: { githubId: 3756001, githubUsername: `p3756-${generateId()}`, roles: ['READER'] } });
+    const rook = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: w.appId, agentId: w.agentId, name: 'Rook', slug: 'rook', heldByUserId: w.userId, heldAt: new Date() } });
+    const t = await db.agentTask.create({ data: { appId: w.appId, title: 'Review #42', ownerWorkerId: rook.id, assigneeWorkerId: w.workers[0]!.id, assignedAt: new Date() }, select: { id: true } });
+    await db.agentTeamEvent.create({ data: { appId: w.appId, taskId: t.id, type: 'task.assigned', subjectWorkerId: w.workers[0]!.id, actorUserId: w.userId } });
+    const app = await db.app.findUniqueOrThrow({ where: { id: w.appId }, select: { id: true, organizationId: true, ownerUserId: true } });
+    const ctx = { db, userId: outsider.id, roles: ['READER'] } as Context;
+    const due = (extra: Record<string, unknown>) => computeDueWakes({ ctx, app, reader: { manager: true, userId: outsider.id }, requester: { userId: outsider.id }, now: new Date(), ...extra });
+    // Control: the platform's own preview (not caller-bounded) reads every task, so the worker is due for the task.
+    const platform = await due({ preview: true });
+    expect(platform.wakes.map((x) => x.workerId)).toEqual([w.workers[0]!.id]);
+    // The caller's preview is bounded by the caller's own reading rights: no task reason, so no wake.
+    const bounded = await due({ preview: true, callerBounded: true });
+    expect(bounded.wakes).toEqual([]);
+    expect(await reservations()).toBe(0);
   });
 });
 
@@ -199,7 +223,7 @@ describe('#3455: a preview proof cannot be acknowledged, so the preview cannot s
     await mention('w0');
     const preview = await read(keyCtx(w.keyId), true);
     const proofs = preview.wakes.map((x: any) => x.proof);
-    expect(proofs).toHaveLength(1);
+    expect(proofs).toEqual(['']); // a preview holds no reservation, so its proof is empty
     const ack = await attempt(() => M.acknowledgeWakes({}, { proofs }, keyCtx(w.keyId)));
     expect(ack.value).toBeNull();
     expect(codeOf(ack.error)).toBe('WAKE_PROOF_INVALID');

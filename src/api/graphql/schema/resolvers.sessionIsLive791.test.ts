@@ -66,9 +66,9 @@ describe('hadron-cli#791 — Session.isLive', () => {
     expect(res.body.singleResult.data).toEqual({ session: { id: deleted.id, isLive: false } });
   });
 
-  it('a session list costs ONE grouped usage-event query, not one per row', async () => {
+  it('a session list costs ONE batched last-event read (#4406: one short transaction), not one per row', async () => {
     for (let i = 0; i < 6; i++) await session({ startedAt: new Date(Date.now() - i * H) });
-    const groupBy = vi.spyOn(db.usageEvent, 'groupBy');
+    const groupBy = vi.spyOn(db, '$transaction');
     try {
       const flags = await liveness();
       expect(Object.values(flags)).toHaveLength(6);

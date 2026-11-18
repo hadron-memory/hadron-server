@@ -284,7 +284,7 @@ describe('a repair outcome is judged per worker, the rest of the batch stands', 
   it('the stored report keeps its exact keys: the outcome is not stored on it', async () => {
     await send([dark(kit.id, { repair: 'RELAUNCHED', attempt: 1 })]);
     const t = (await db.worker.findUniqueOrThrow({ where: { id: kit.id } })).terminal as any;
-    expect(Object.keys(t).sort()).toEqual(['checkedAt', 'host', 'lastTurnAt', 'prompt', 'reason', 'reportedAt', 'status']);
+    expect(Object.keys(t).sort()).toEqual(['checkedAt', 'contextMeasuredAt', 'contextTokens', 'host', 'lastTurnAt', 'prompt', 'reason', 'reportedAt', 'status']);
   });
 });
 
