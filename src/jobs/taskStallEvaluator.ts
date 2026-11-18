@@ -123,6 +123,13 @@ export async function taskStallTick(db: PrismaClient, now = new Date()): Promise
   return result;
 }
 
+/**
+ * #3775 A (cor:agt:050:32): the production pass. STUB for the red pins; the gap bookkeeping lands in the next commit.
+ */
+export async function taskStallPass(db: PrismaClient, now = new Date()): Promise<TaskStallTickResult> {
+  return taskStallTick(db, now);
+}
+
 /** Start the periodic loop (default 60s). Returns the interval handle. */
 export function startTaskStallEvaluatorLoop(db: PrismaClient, opts: { intervalMs?: number } = {}): NodeJS.Timeout {
   const intervalMs = opts.intervalMs ?? 60_000;

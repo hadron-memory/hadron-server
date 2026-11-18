@@ -7661,6 +7661,18 @@ model AgentTeamAlarmSchedule {
   @@map("agent_team_alarm_schedule")
 }
 
+/// #3775 A (cor:agt:050:32): the stall evaluator's pass bookkeeping, ONE platform-wide row (id `platform`). `lastPassAt`
+/// is when the latest pass started; `lastGapEndedAt` is the start of the first pass after the latest gap (a pass that
+/// began more than 5 minutes after the previous one), which floors the silence windows. Written only by
+/// `recordStallPass` (conditional update on the `lastPassAt` it read, so two instances record one gap end).
+model StallEvaluatorState {
+  id             String    @id
+  lastPassAt     DateTime  @map("last_pass_at")
+  lastGapEndedAt DateTime? @map("last_gap_ended_at")
+
+  @@map("stall_evaluator_state")
+}
+
 /// The recorded moment at which an alarm stopped escalating because the condition it was raised for had
 /// ended. One row per alarm, written once. Reads use it to tell whether an alarm is still in effect: an alarm
 /// is in effect while it is unacknowledged and has no row here.
