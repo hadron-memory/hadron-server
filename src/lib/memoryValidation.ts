@@ -271,6 +271,42 @@ export async function validateMemoryNodes(
   return { nodesChecked: nodes.length, findings, totalFindings, totalProblems: totalFindings, totalInformational, skippedChecks };
 }
 
+/**
+ * The MCP prose for a whole report (#3010). `issueLines` / `informationalLines` are the RETAINED findings
+ * (capped at `maxFindings` per scan, problems first); the report's totals are the TRUE counts. Whenever a
+ * list is shorter than its total the header says "showing the first K", and an informational section the
+ * problems crowded out says so rather than printing a count over an empty body. `No issues found.` and the
+ * skipped-check disclosure are unchanged.
+ */
+export function formatValidationProse(
+  report: Pick<ValidationReport, 'nodesChecked' | 'totalFindings' | 'totalInformational' | 'skippedChecks'>,
+  issueLines: string[],
+  informationalLines: string[],
+): string {
+  let informationalNote = '';
+  if (report.totalInformational) {
+    const shown = informationalLines.length;
+    if (shown === 0) {
+      informationalNote = `\n\nInformational findings (${report.totalInformational}): none shown, the findings cap was filled by the issues above.`;
+    } else if (shown < report.totalInformational) {
+      informationalNote = `\n\nInformational findings (${report.totalInformational}, showing the first ${shown}):\n${informationalLines.join('\n')}`;
+    } else {
+      informationalNote = `\n\nInformational findings (${report.totalInformational}):\n${informationalLines.join('\n')}`;
+    }
+  }
+  // A skipped check is stated rather than silently omitted — a clean bill
+  // of health that quietly skipped a check is worse than no report.
+  const skippedNote = report.skippedChecks.length
+    ? `\n\nSkipped checks:\n${report.skippedChecks.map((c) => `- ${c.check}: ${c.reason}`).join('\n')}`
+    : '';
+  if (report.totalFindings === 0) {
+    return `Validated ${report.nodesChecked} nodes. No issues found.${informationalNote}${skippedNote}`;
+  }
+  const shownIssues = issueLines.length;
+  const cappedNote = shownIssues < report.totalFindings ? ` (showing the first ${shownIssues})` : '';
+  return `Found ${report.totalFindings} issue(s) in ${report.nodesChecked} nodes${cappedNote}:\n\n${issueLines.join('\n')}${informationalNote}${skippedNote}`;
+}
+
 /** The MCP prose line for one finding — the pre-#819 wording, preserved. */
 export function formatFindingLine(f: ValidationFinding, nodeUrn: string): string {
   const tag = {

@@ -1044,7 +1044,7 @@ export const decisionQueries = {
       const me = [...(await callerIdentities(ctx))];
       where = {
         role: DECISION_ROLE, deletedAt: null,
-        ...(accessible === null ? {} : { memoryId: { in: accessible } }),
+        memoryId: { in: accessible },
         OR: me.map((id) => ({ properties: { path: ['deciders'], array_contains: [id] } })),
       };
       if (args.logRef) {

@@ -1,3 +1,4 @@
+import { validateListPageInput } from '../../../lib/listPage.js';
 import { lockAppInstallation } from '../../../lib/appInstallations.js';
 import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 /**
@@ -207,6 +208,9 @@ export async function installDeleteAllowed(ctx: Context, memory: InstallMemoryRe
 type InstallMemoryRef = { id: string; class: string; appId: string | null; installOfAgentId: string | null; isInstallMemory: boolean; organizationId: string | null; ownerUserId: string | null };
 
 async function fencedInstallAudience(ctx: Context, memory: InstallMemoryRef) {
+  // A plan reserves nothing. The planner sets READ ONLY before supplying this
+  // internal context, so a future accidental write cannot use this unfenced decision.
+  if (ctx.installWritePreview) return installMemoryAudience(ctx.db as never, ctx, memory);
   const db = ctx.db as unknown as Prisma.TransactionClient & { $transaction?: unknown };
   if (typeof db.$transaction === 'function' || !memory.appId) {
     const audience = await installMemoryAudience(ctx.db as never, ctx, memory);
@@ -382,7 +386,7 @@ function concealedInstallNode(node: Record<string, any>): Record<string, any> {
 type ConcealResolver = (parent: any, args?: any, ctx?: any, info?: any) => unknown;
 
 /** Node field → what a concealed install-write node returns, whatever its resolver would load by id. */
-const CONCEALED_FIELDS: Record<string, () => unknown> = {
+const CONCEALED_FIELDS: Record<string, (args?: any) => unknown> = {
   memory: () => null,
   moveLinkWarnings: () => null,
   authorship: () => null,
@@ -396,6 +400,10 @@ const CONCEALED_FIELDS: Record<string, () => unknown> = {
   asset: () => null,
   inheritedFrom: () => null,
   signingRequests: () => [],
+  signingRequestsPage: (args) => {
+    validateListPageInput(args ?? {});
+    return { items: [], total: 0, hasMore: false, nextCursor: null };
+  },
   outgoingEdges: () => [],
   incomingEdges: () => [],
   commentSummary: () => ({ openThreads: 0, resolvedThreads: 0, comments: 0, viewerOpenThreadId: null, oldestOpenThreadAt: null }),
@@ -418,7 +426,7 @@ export function withInstallConcealment<T extends Record<string, any>>(node: T): 
   const out: Record<string, ConcealResolver> = { ...node };
   for (const [field, empty] of Object.entries(CONCEALED_FIELDS)) {
     const original: ConcealResolver = node[field] ?? ((parent) => parent[field]);
-    out[field] = (parent, args, ctx, info) => (parent?.[INSTALL_CONCEALED] ? empty() : original(parent, args, ctx, info));
+    out[field] = (parent, args, ctx, info) => (parent?.[INSTALL_CONCEALED] ? empty(args) : original(parent, args, ctx, info));
   }
   return out as T;
 }

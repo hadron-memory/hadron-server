@@ -20,6 +20,10 @@ import { enrichTickWakes } from './tickActions.js';
 // worker, its holder is still a participant of the App, the same holder test
 // the channels pass. They wake at once like a mention, under the same floor
 // and budget, and are acknowledged per event through the v2 proof.
+//
+// STOPPED SHORT-LIVED WORKERS (#4234): a worker of a SHORT_LIVED Agent with no
+// open session is not running, so it is due nothing (`isStoppedShortLived`).
+// Nothing is moved: what was due stays due and is handed out once it runs.
 
 import { coveringSignals, timeStoppedWorkers } from '../stopSignals/state.js';
 import { pendingStopNotices, type PendingStopNotice } from '../stopSignals/delivery.js';
@@ -126,6 +130,15 @@ function withoutTasks(wake: WorkerWake): WorkerWake | null {
 
 const utcDay = (d: Date): Date => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
 
+/**
+ * #4234 (S11 of #4229): a worker of a SHORT_LIVED Agent that holds no open session is not running (its stint ended, or
+ * it has not started yet), so no wake can be delivered to it. "Open" is the matcher's reach (`holdsOpenSession`: not
+ * ended, not past its hard expiry, however quiet), not liveness: a running worker deep in one long turn still has a
+ * terminal. A LONG_LIVED worker is never stopped by this rule.
+ */
+export const isStoppedShortLived = (lifecycle: string, activity: { holdsOpenSession: boolean } | undefined): boolean =>
+  lifecycle === 'SHORT_LIVED' && !(activity?.holdsOpenSession ?? false);
+
 /** The default daily wake budget: roster × (86,400 ÷ default self-subscribe cadence) × 2 (Q11). */
 export function defaultWakeBudget(roster: number, selfSubscribeCadenceSeconds: number): number {
   return Math.floor(roster * (86_400 / selfSubscribeCadenceSeconds) * 2);
@@ -156,7 +169,7 @@ async function readableWorkers(
     where,
     orderBy: { id: 'asc' },
     take,
-    select: { id: true, name: true, heldByUserId: true },
+    select: { id: true, name: true, heldByUserId: true, agent: { select: { lifecycle: true } } },
   });
 }
 
@@ -182,7 +195,7 @@ export async function holderAccess(
     // The holder must still be an eligible driver of this App's workers (the register's attendee rule).
     if (await isAppParticipant(actor, app)) {
       const ids = await getAccessibleMemoryIds(actor);
-      result = ids === null ? 'all' : new Set(ids);
+      result = new Set(ids);
     }
   }
   cache.set(holderId, result);
@@ -541,6 +554,10 @@ export async function computeDueWakes(args: {
       };
     });
 
+    // #4234 (S11 of #4229): a SHORT_LIVED worker with no open session is stopped between tasks and has no terminal to
+    // type into, so it is handed nothing. Its mentions wait in the channel for its next run to read; a task starts that
+    // run through the desired state (only a task starts it, G8), with the task as its first prompt.
+    if (isStoppedShortLived(w.agent.lifecycle, activity.get(w.id))) continue;
     const isDormant = isWorkerDormant(activity.get(w.id)?.lastActiveAt, settings.sessionDormancyDays, now);
     if (isDormant) {
       const n = relevantMentionCount(inputs, w.id, workerTokens);

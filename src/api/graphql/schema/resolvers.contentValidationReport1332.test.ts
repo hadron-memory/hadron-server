@@ -221,6 +221,20 @@ describe('#1332 state and history', () => {
     expect(cv.state).not.toBe('PASS');
   });
 
+  it('#3762: an older FAIL is history after the current revision already has PASS', async () => {
+    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(leo));
+    const pass = await report(person(mia), { nodeRevision: 2, outcome: 'PASS' });
+    expect(pass.state).toBe('PASS');
+    const late = await report(person(mia), { nodeRevision: 1, outcome: 'FAIL' });
+    expect(late.report).toMatchObject({ nodeRevision: 1, outcome: 'FAIL' });
+    expect(late.state).toBe('PASS');
+    expect(await reportCount()).toBe(2);
+    const cur = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    const { resolveContentValidation } = await import('./resolvers.types.js');
+    expect((await resolveContentValidation(cur, person(mia))).state).toBe('PASS');
+    expect(cur.revSeq).toBe(2);
+  });
+
   it('7. end to end: author, then a separate context, then PASS, FAIL and STALE are visible', async () => {
     await stamp('TASK');
     const pass = await asRun(await mintRun(validationTask), (c) => report(c, { outcome: 'PASS' }));

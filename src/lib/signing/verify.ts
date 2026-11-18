@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { verifyAuthenticationResponse } from '@simplewebauthn/server';
 import { signatureChallenge, signaturePayloadBytes, type SignaturePayloadInput } from './payload.js';
 import { SigningNotConfiguredError } from './config.js';
+import { grantSignaturePayloadBytes, type GrantSignaturePayloadInput } from './grantPayload.js';
 
 export interface AssertionParts {
   authenticatorData: Buffer;
@@ -128,6 +129,58 @@ export async function signatureRecordVerifies(record: StoredSignature, credentia
   let ok = false;
   try {
     const payload = signaturePayloadBytes(record.payloadVersion, record);
+    const origin = JSON.parse(record.clientDataJson.toString('utf8'))?.origin;
+    if (typeof origin === 'string') {
+      const result = await verifyAuthenticationResponse({
+        response: responseJson(credential.credentialId, record),
+        expectedChallenge: b64url(signatureChallenge(payload)),
+        expectedOrigin: origin,
+        expectedRPID: rpId,
+        expectedType: 'webauthn.get',
+        credential: { id: b64url(credential.credentialId), publicKey: new Uint8Array(credential.publicKey), counter: 0 },
+        requireUserVerification: true,
+      });
+      ok = result.verified && result.authenticationInfo.userVerified;
+    }
+  } catch {
+    ok = false;
+  }
+  if (reverifyCache.size >= REVERIFY_CACHE_MAX) reverifyCache.delete(reverifyCache.keys().next().value!);
+  reverifyCache.set(key, ok);
+  return ok;
+}
+
+/** A stored grant signature record, as re-verification needs it (#3649 slice D). */
+export interface StoredGrantSignature extends AssertionParts, GrantSignaturePayloadInput {
+  id: string;
+  payloadVersion: string;
+}
+
+/**
+ * #3649 slice D (cor:acl:140:07; cor:dmo:130:04 "invalid" mirror): re-verification of a stored GRANT signature on read.
+ * The same checks as {@link signatureRecordVerifies}, with the challenge rebuilt from the record's own pins (grant,
+ * version, terms hash, request) by the grant payload builder, so a node assertion never verifies here and the reverse.
+ * Unlike the node cache, the key binds the rebuilt payload bytes as well as the assertion bytes: a pin altered after a
+ * cached read re-verifies (and fails) instead of reusing the earlier verdict. Any failure is `false`: invalid.
+ */
+export async function grantSignatureRecordVerifies(record: StoredGrantSignature, credential: VerifierCredential, rpId: string): Promise<boolean> {
+  let payload: Buffer;
+  try {
+    payload = grantSignaturePayloadBytes(record.payloadVersion, record);
+  } catch {
+    return false;
+  }
+  const h = createHash('sha256');
+  for (const part of [payload, record.authenticatorData, record.clientDataJson, record.signature, credential.publicKey]) {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(part.length);
+    h.update(len).update(part);
+  }
+  const key = `grant:${record.id}:${rpId}:${h.digest('hex')}`;
+  const hit = reverifyCache.get(key);
+  if (hit !== undefined) return hit;
+  let ok = false;
+  try {
     const origin = JSON.parse(record.clientDataJson.toString('utf8'))?.origin;
     if (typeof origin === 'string') {
       const result = await verifyAuthenticationResponse({

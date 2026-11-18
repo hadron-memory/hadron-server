@@ -1,6 +1,7 @@
 {
   "nonEntityTypes": {
     "AgentTaskMatchFailure": "value",
+    "AgentTaskSkippedCandidate": "value",
     "NodeVectorMeta": "value",
     "NodeHit": "value",
     "FindNodesResult": "envelope",
@@ -52,6 +53,8 @@
     "NodeBatchResult": "envelope",
     "Passage": "value",
     "NodeMoveLinkWarning": "value",
+    "NodeMovePlan": "envelope",
+    "NodeMovePlanEntry": "value",
     "InheritedFrom": "value",
     "AgentListedTask": "value",
     "AgentListedProcess": "value",
@@ -59,6 +62,8 @@
     "RecoveryEdgesPage": "envelope",
     "CompiledBootPrompt": "value",
     "BootPromptServeOutcome": "value",
+    "BootPromptSigningPreview": "envelope",
+    "BootPromptSigningPreviewRow": "value",
     "BootPromptServeDecision": "value",
     "ResumeSessionResult": "envelope",
     "ResumeClaimReceipt": "envelope",
@@ -110,7 +115,8 @@
     "StartImpersonationResult": "envelope",
     "AppCreated": "value",
     "AppAIConfig": "value",
-    "PublicResourceRefPage": "envelope",
+    "MarketplaceResourcePage": "envelope",
+    "PublicResourceRefsPage": "envelope",
     "MemoryTransferDependent": "value",
     "MemoryTransferBlocker": "value",
     "MemoryOwnerTransferPreview": "envelope",
@@ -132,6 +138,7 @@
     "AiServiceConfigTestError": "value",
     "AiServiceConfigTestResult": "envelope",
     "AiConfigTestKnob": "value",
+    "ChatProbeOutcome": "value",
     "AiProviderEndpoint": "value",
     "ResolvedAiConfig": "value",
     "ServedPromptProvenanceEntry": "value",
@@ -180,6 +187,10 @@
     "AgentSchedulesPage": "envelope",
     "ConnectionGrantsPage": "envelope",
     "PrincipalGrantsPage": "envelope",
+    "GrantsPage": "envelope",
+    "GrantActionsPage": "envelope",
+    "GrantAction": "value",
+    "GrantActionParameter": "value",
     "AgentWebhooksPage": "envelope",
     "AgentWebhookCredentials": "value",
     "PolicyLayerVerdict": "value",
@@ -276,6 +287,8 @@
     "AgentTeamAlarmSchedule": "value",
     "HostRegistrationWorker": "value",
     "HostOperationPage": "envelope",
+    "HostSetup": "envelope",
+    "HostRegistrationRefusal": "value",
     "ContextResetStep": "value",
     "WorkerTerminal": "value",
     "WorkerTerminalRef": "value",
@@ -284,6 +297,9 @@
     "ModelGroup": "value",
     "EffectiveModelGroup": "value",
     "WorkerCheckStatus": "value",
+    "WorkerRunSettings": "value",
+    "AgentTaskRunSettings": "value",
+    "AgentTaskAppliedRunSettings": "value",
     "TeamRosterTaskSummary": "value",
     "RegisterRoleCandidatePage": "envelope",
     "ActionRegisterIndexPage": "envelope",
@@ -301,7 +317,15 @@
     "PrProtocolResult": "envelope",
     "PrProtocolAction": "value",
     "PullRequestReadiness": "envelope",
-    "ReviewSlotReadiness": "value"
+    "ReviewSlotReadiness": "value",
+    "GrantSignatureStatus": "value",
+    "TeamUtilization": "value",
+    "WorkerUtilization": "value",
+    "WebPollsPage": "envelope",
+    "SigningRequestsPage": "envelope",
+    "WorkerDesiredState": "value",
+    "HostDesiredState": "envelope",
+    "HostSweepRunLine": "value"
   },
   "entries": {
     "ActionTicketsPage.items": {
@@ -458,6 +482,13 @@
       "projection": "AgentTaskParty",
       "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
       "target": "AgentTaskParty"
+    },
+    "AgentTeamEventsPage.events": {
+      "class": "parent-implies-child",
+      "audience": "the App's readers, the same withReadableApp gate as agentTeamEvents, which it shares a read with (readTeamEvents); outsiders are refused APP_NOT_FOUND before any row",
+      "spec": "cor:agt:050:21",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AgentTeamEvent"
     },
     "AgentTeamEvent.acknowledgedBy": {
       "class": "closed-projection",
@@ -1142,6 +1173,18 @@
       "resolver": "src/api/graphql/schema/resolvers.hostOperation.ts::withReadableApp",
       "target": "HostOperation"
     },
+    "HostSetup.assignments": {
+      "class": "parent-implies-child",
+      "audience": "hostSetup gated by withReadableApp: App participants plus the App's own key; a host key reads only its own host's rows, a revoked host scope reads nothing (#4222)",
+      "resolver": "src/api/graphql/schema/resolvers.hostAssignment.ts::withReadableApp",
+      "target": "HostWorkerAssignment"
+    },
+    "HostWorkerAssignment.worker": {
+      "class": "parent-implies-child",
+      "audience": "hostSetup gated by withReadableApp; assignHostWorker needs resolveParticipatedApp and actorManagesApp; rows limited to the App, a worker of the same App only (DB trigger) (#4222)",
+      "resolver": "src/api/graphql/schema/resolvers.hostAssignment.ts::withReadableApp",
+      "target": "Worker"
+    },
     "HostRegistrationWorker.worker": {
       "class": "parent-implies-child",
       "audience": "hostRegistrations gated by withReadableApp: App participants plus the App's own key",
@@ -1600,6 +1643,77 @@
       "resolver": "src/api/graphql/schema/resolvers.query.org.ts::organizations",
       "target": "Organization"
     },
+    "AccountUsageAccounts.accounts": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:05, :140:03, :050:21, :23; #3853): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. An entry holds an account label, host, family, a timestamp and worker names only, read from the App's own team-space memory: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageAccount"
+    },
+    "AccountUsageMoveTarget.adjusted": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageWindowProjection"
+    },
+    "AccountUsageMoveTarget.baseline": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageWindowProjection"
+    },
+    "ReviewQualityReport.rows": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:130:06, :050:21, :23; #4281): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A row holds a model family and model name as the App's own verdict events recorded them, and counts of the App's own reviews and findings: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "ReviewQualityRow"
+    },
+    "AccountUsageProjection.whatIf": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageWhatIf"
+    },
+    "AccountUsageProjection.windows": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageWindowProjection"
+    },
+    "AccountUsageWhatIf.adjusted": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageWindowProjection"
+    },
+    "AccountUsageWhatIf.target": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageMoveTarget"
+    },
+    "AccountUsageWindowProjection.burn": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageBurnRange"
+    },
+    "AccountUsageWindowProjection.perWorkerBurn": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageBurnRange"
+    },
+    "GrantsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "a bound worker session reading its own App's grants that name it directly (plus its own pending requests) (#3789), or a signed-in person reading only the grants naming them as holder (#3800 myGrants); any other caller gets an empty page",
+      "resolver": "src/api/graphql/schema/resolvers.grant.ts::resolveGrantReader",
+      "target": "Grant"
+    },
+    "GrantSigningRequest.requestedBy": {
+      "class": "open",
+      "evidence": "#3649 slice B: the same SigningRequester shape as SigningRequest.requestedBy, shown to whoever may read the grant (#3789 read gate); the private follow-up (hadron-internal#30) covers both; details withheld",
+      "target": "SigningRequester"
+    },
     "PrincipalGrantsPage.items": {
       "class": "parent-implies-child",
       "audience": "the caller's own grants, or any principal's grants in an org where the caller is an org admin",
@@ -1618,7 +1732,13 @@
       "why": "PublicResourceRef(id,name,urn,description; public-readable rows only)",
       "target": "PublicResourceRef"
     },
-    "PublicResourceRefPage.items": {
+    "MarketplaceResourcePage.items": {
+      "class": "closed-projection",
+      "projection": "PublicResourceRef",
+      "why": "PublicResourceRef(id,name,urn,description; public-readable rows only)",
+      "target": "PublicResourceRef"
+    },
+    "PublicResourceRefsPage.items": {
       "class": "closed-projection",
       "projection": "PublicResourceRef",
       "why": "PublicResourceRef(id,name,urn,description; public-readable rows only)",
@@ -1746,9 +1866,27 @@
     },
     "SecretsPage.items": {
       "class": "parent-implies-child",
-      "audience": "callers passing canSeeSecretOwner: the user themselves (not impersonating) or org members; metadata only, never the value",
+      "audience": "callers passing canSeeSecretOwner: the user themselves (not impersonating), org members, or for an App secret a member of the App or whoever manages it (a person acting as themselves, never an App key, an impersonated session or a run); metadata only, never the value",
       "resolver": "src/api/graphql/schema/resolvers.secret.ts::canSeeSecretOwner",
       "target": "Secret"
+    },
+    "Secret.versions": {
+      "class": "parent-implies-child",
+      "audience": "the callers Query.secret admits for the parent (canSeeSecretOwner); a page of an App secret's versions, paged per parent (cor:api:120:04)",
+      "resolver": "src/api/graphql/schema/resolvers.secret.ts::canSeeSecretOwner",
+      "target": "SecretVersionsPage"
+    },
+    "SecretVersionsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "the callers Query.secret admits for the parent secret (canSeeSecretOwner); versions as metadata only (number, size, authorship), never the value or its ciphertext",
+      "resolver": "src/api/graphql/schema/resolvers.secret.ts::canSeeSecretOwner",
+      "target": "SecretVersion"
+    },
+    "SecretEventsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "any member of the App, as a person acting as themselves: Query.secretEvents answers an empty page to everyone else, an App key, an impersonated session and a run; never a value",
+      "resolver": "src/api/graphql/schema/resolvers.secret.ts::appMember",
+      "target": "SecretEvent"
     },
     "ServedPromptsPage.items": {
       "class": "self-gated",
@@ -1879,6 +2017,13 @@
       "projection": "TeamRosterEntry",
       "why": "a sanitized roster row, never a Worker; admission is resolveParticipatedApp; teamPlacement, heldBy, heldAt and terminal nulled unless maySeeWorkerInternals passes, currentTask unless mayReadAppTasks passes",
       "target": "TeamRosterEntry"
+    },
+    "TeamRosterEntry.availability": {
+      "class": "parent-implies-child",
+      "audience": "the roster read (withRosterAppRead / resolveParticipatedApp): App participants and the App's own key, read-only; the same audience Query.teamAvailability serves the same record to",
+      "spec": "cor:agt:060:02",
+      "resolver": "src/api/graphql/schema/resolvers.agentTaskMatching.ts::withRosterAppRead",
+      "target": "WorkerAvailability"
     },
     "TeamRosterEntry.heldBy": {
       "class": "closed-projection",
@@ -2017,6 +2162,12 @@
       "gate": "requireAppRead",
       "target": "App"
     },
+    "Worker.availability": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.worker.ts::availability",
+      "gate": "maySeeWorkerInternals",
+      "target": "WorkerAvailability"
+    },
     "Worker.continuity": {
       "class": "self-gated",
       "resolver": "src/api/graphql/schema/resolvers.worker.ts::continuity",
@@ -2086,6 +2237,45 @@
       "audience": "the command writer is re-gated as a participant in the task App; every participant reads all tasks of that App (cor:agt:050:21), and no App key writes these commands",
       "resolver": "src/api/graphql/schema/resolvers.prProtocol.ts::prProtocolMutations",
       "target": "AgentTask"
+    },
+    "GrantSignatureStatus.signatures": {
+      "class": "parent-implies-child",
+      "audience": "reached only through Grant.signatureStatus by a bound worker reading its own App's grants (grant(ref:)/grants, the #3789 gate). A person listing their own grants (myGrants, #3800) is given state and integrityProblems only: this list is empty for them, withheld in the field resolver on the parent row's audience mark (gate call, #3800 P2-2); a grant's own signature records, re-verified on read",
+      "spec": "cor:acl:140:07",
+      "resolver": "src/api/graphql/schema/resolvers.grant.ts::grantFieldResolvers",
+      "target": "GrantSignature"
+    },
+    "GrantSignature.signer": {
+      "class": "closed-projection",
+      "projection": "NodeRevisionEditor",
+      "why": "NodeRevisionEditor(handle,urn only; identity tier cor:acl:070:01); an erased signer resolves null (cor:acl:140:08)",
+      "target": "NodeRevisionEditor"
+    },
+    "AgentTaskExternalIdChange.task": {
+      "class": "parent-implies-child",
+      "audience": "the App's readers, the same withReadableApp gate as agentTeamEvents (agentTaskExternalIdChanges reads the App's team events and the tasks they name, both scoped to that App); outsiders are refused APP_NOT_FOUND before any row",
+      "spec": "cor:agt:050:21",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AgentTask"
+    },
+    "AgentTaskExternalIdChangePage.changes": {
+      "class": "parent-implies-child",
+      "audience": "the App's readers, the same withReadableApp gate as agentTeamEvents (agentTaskExternalIdChanges reads the App's team events and the tasks they name, both scoped to that App); outsiders are refused APP_NOT_FOUND before any row",
+      "spec": "cor:agt:050:21",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AgentTaskExternalIdChange"
+    },
+    "WebPollsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "Same org ADMIN and tool.web_poll policy authorization as the existing webPolls list, with org-bound redacted rows.",
+      "resolver": "src/api/graphql/schema/resolvers.webPoll.ts::webPollsPage",
+      "target": "WebPoll"
+    },
+    "SigningRequestsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "Only signing requests of the already readable Node; no authorization widening.",
+      "resolver": "src/api/graphql/schema/resolvers.signing.ts::signingRequestsPage",
+      "target": "SigningRequest"
     }
   }
 }

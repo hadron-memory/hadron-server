@@ -9,7 +9,7 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { buildSchema, parse, print } from 'graphql';
 import { getComplexity, simpleEstimator } from 'graphql-query-complexity';
-import { createServer } from '../../server.js';
+import { createServerOnCleanDb } from '../../test/startServerFixture.js';
 import { resolvers } from './schema/resolvers.js';
 import { typeDefs } from './schema/typeDefs.js';
 import { readGraphqlAdmissionConfig, GRAPHQL_ADMISSION_DEFAULTS, type GraphqlAdmissionConfig } from './admission.js';
@@ -30,21 +30,28 @@ const REVIEWED_PAGED_FIELDS = [
   "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
   "Mutation.claimUntrackedTaskItems", // #3125 S3: limit default 1, cap 10; common omitted bound 100 is conservative.
   "Mutation.collectHostOperations",
+  "Mutation.planNodeMove", // #3424: limit default100/cap1000; common omitted bound100 matches.
   "Node.lintWarnings",
   "Node.signingRequests",
+  "Node.signingRequestsPage", // #4123: default20/cap100, bounded SQL take+1 after effective-state filter.
   "NodeApprovalReceipt.lintWarnings",
+  "PublicOrganization.publicAgentsPage", // #3873: pageArgs, default 20, cap 200.
+  "PublicOrganization.publicMemoriesPage", // #3873: pageArgs, default 20, cap 200.
   "Query.actionRegisterIndex", // #3287: pageArgs, default 20, cap 200; below the common 100, so omission overestimates.
   "Query.actionTickets",
   "Query.agentAssets",
   "Query.agentSchedules",
   "Query.agentSubscriptionsPage", // #2213 S2: pageArgs, default 20, cap 200.
+  "Query.agentTaskExternalIdChanges", // #4084: clampListTake with a floor of 1, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.agentTaskList", // #2421: limit applies only when symptom is present; default 3, cap 3.
   "Query.agentTasks",
   "Query.agentTeamEvents",
+  "Query.agentTeamEventsPage", // #3933: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.agentWebhooks",
   "Query.agents",
   "Query.aiModelPrices",
   "Query.aiServiceConfigs",
+  "Query.appGrants", // #3711: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.appKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.appMemoryScope",
   "Query.appNodes",
@@ -59,7 +66,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.channelMessages",
   "Query.channels",
   "Query.chatHistory",
-  "Query.chatServedPrompts", // #2862: default 50, cap 200 (the field's own paging); under the shared 100 default.
+  "Query.chatServedPrompts", // #2862: default 20, cap 200 (the field's own paging); under the shared 100 default.
   "Query.commentThreads",
   "Query.compiledPromptProvenance",
   "Query.connectionGrants",
@@ -75,9 +82,12 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.findNodes",
   "Query.findObjects",
   "Query.globalSearch",
+  "Query.grantActions", // #3708: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
+  "Query.grants", // #3789: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.heldWorkers",
   "Query.homeAssistantInstances",
   "Query.hostOperations",
+  "Query.hostSweepRuns",
   "Query.impersonationSessions",
   "Query.marketplaceAgents",
   "Query.marketplaceMemories",
@@ -92,11 +102,13 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.myAgentSubscriptionsPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.myChats",
   "Query.myChatsPage", // #2212 A3: pageArgs, default 20, cap 200.
+  "Query.myGrants", // #3800: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.myUserApiKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.nodeEdgeRemovals",
   "Query.nodeRevisions",
   "Query.nodeRevisionsPage",
   "Query.nodeUsage",
+  "Query.orgBootPromptSigningPreview", // #2973 PR2: default 50, cap 200; the common omitted bound 100 is conservative.
   "Query.organizations",
   "Query.principalGrants",
   "Query.publicAgents",
@@ -106,6 +118,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.registerRoleCandidates", // #2608: limit default 20, cap 200 (clampListTake); below the common 100, so omission overestimates.
   "Query.resendSenders",
   "Query.scopes",
+  "Query.secretEvents", // #3997: limit default 20, cap 200 (clampListTake); below the common 100, so omission overestimates.
   "Query.secrets",
   "Query.sessions",
   "Query.sessionsPage",
@@ -125,7 +138,10 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.usageEventsPage",
   "Query.users",
   "Query.validateMemory",
+  "Query.webPolls", // #4123: bounded compatibility list.
+  "Query.webPollsPage", // #4123: default20/cap100.
   "Query.workers",
+  "Secret.versions", // #3997: pageArgs default 20, cap 200; below the common 100, so omission overestimates.
   "ServedPrompt.currentLint", // #2048: default 50, cap 100; shared pageLintWarnings.
   "ServedPrompt.provenance",
   "Session.servedPrompts",
@@ -141,7 +157,7 @@ async function boot(env: Record<string, string> = {}): Promise<string> {
   const saved: Record<string, string | undefined> = {};
   for (const k of Object.keys(env)) { saved[k] = process.env[k]; process.env[k] = env[k]; }
   try {
-    const server = createHttpServer(await createServer());
+    const server = createHttpServer(await createServerOnCleanDb());
     servers.push(server);
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -485,7 +501,7 @@ describe('modes', () => {
       if (bad) expect(message).not.toContain(bad);
     }
     process.env.GRAPHQL_COMPLEXITY_MODE = 'off';
-    try { await expect(createServer()).rejects.toThrow(/refusing to boot/); } finally { delete process.env.GRAPHQL_COMPLEXITY_MODE; }
+    try { await expect(createServerOnCleanDb()).rejects.toThrow(/refusing to boot/); } finally { delete process.env.GRAPHQL_COMPLEXITY_MODE; }
   });
 
   it('observe still measures every request (near_limit is reported) and logs the boot configuration line', async () => {

@@ -63,19 +63,34 @@ export async function provisionSignIns(db: PrismaClient): Promise<SignInEvidence
       expiresAt: new Date(Date.now() + 120000), clientStateHash: createHash('sha256').update(clientState).digest('hex') } });
     const verified = await fetch(`${base}/auth/email/verify?token=${raw}`, { redirect: 'manual' });
     assert.equal(verified.status, 302);
-    const code = new URL(verified.headers.get('location')!).searchParams.get('code');
+    // #4058: branch on the switch THIS server actually runs with (its /capabilities token), never an env guess.
+    const capsRes = await fetch(`${base}/capabilities`);
+    assert.equal(capsRes.status, 200);
+    const caps = await capsRes.json() as { capabilities?: unknown };
+    assert(Array.isArray(caps.capabilities) && caps.capabilities.every(c => typeof c === 'string'), 'capabilities must be a string array');
+    const registrationOn = caps.capabilities.includes('passkey-registration');
+    // The server must report the mode this stack was asked for (registration rides signing, signingSurfacePolicy), so a
+    // dropped or overridden switch fails loudly instead of silently seeding through the OFF branch.
+    const requested = process.env.PASSKEY_SIGNING_ENABLED === 'true' && process.env.PASSKEY_REGISTRATION_ENABLED === 'true';
+    assert.equal(registrationOn, requested, `stack asked for registration=${requested} but /capabilities says ${registrationOn}`);
+    // The Location may be relative, so resolve it against the base.
+    const location = new URL(verified.headers.get('location')!, base);
+    const fresh = await db.user.findUniqueOrThrow({ where: { email: 'fresh-user@e2e.test' } });
+    // #4339: sign-in never depends on a passkey, so the same completion contract holds with the registration switch
+    // ON and OFF: a handoff code, redeemed by the browser that asked for it, and the real identity. No passkey step.
+    assert.notEqual(location.pathname, '/auth/passkey/sign-in');
+    const code = location.searchParams.get('code');
     assert(code);
     const redeemed = await fetch(`${base}/auth/session`, { method: 'POST',
       headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, clientState }) });
     assert.equal(redeemed.status, 200);
     const session = await redeemed.json() as { token: string; isNew: boolean };
     assert.equal(session.isNew, true);
-    const fresh = await db.user.findUniqueOrThrow({ where: { email: 'fresh-user@e2e.test' } });
     const identity = await graphqlIdentity(base, session.token);
     assert.equal(identity.id, fresh.id);
+    evidence['fresh-user'] = { path: 'email-verify-and-handoff', isNew: true };
     assert.equal(await db.orgMember.count({ where: { userId: fresh.id } }), 0);
     assert.equal(await db.memory.count({ where: { OR: [{ userId: fresh.id }, { ownerUserId: fresh.id }, { createdBy: fresh.id }] } }), 0);
-    evidence['fresh-user'] = { path: 'email-verify-and-handoff', isNew: true };
 
     // The only code-entry flow on main is REVIEW_DEMO for an existing account.
     // Exercise its CSRF form and actual signed cookie; never send real email.

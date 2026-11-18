@@ -2,24 +2,24 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../server.js';
 import { signJwt } from '../auth/jwt.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../test/startServerFixture.js';
 let server: Server, url: string, token: string, appId: string, bound: string;
 let rpc = 1;
 const opened: string[] = [];
 beforeAll(async () => {
-  server = httpServer(await createServer());
+  server = httpServer(await createServerOnCleanDb());
   await new Promise<void>(r => server.listen(0,'127.0.0.1',r));
   url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`;
 });
 afterEach(async () => {
   for (const id of opened.splice(0)) await (await fetch(url,{method:'DELETE',headers:{authorization:`Bearer ${token}`,'mcp-session-id':id}})).text();
 });
-afterAll(async () => { server.closeAllConnections?.(); await new Promise<void>(r => server.close(() => r())); });
+afterAll(async () => { server.closeAllConnections?.(); await closeServerIfStarted(server); });
 beforeEach(async () => {
   await cleanDb(db);
   const user = await db.user.create({data:{githubId:266199,githubUsername:'wire2661',roles:['READER']}});

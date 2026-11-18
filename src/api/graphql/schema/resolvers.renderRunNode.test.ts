@@ -4,9 +4,9 @@
  * and renders).
  *
  * The property that matters most is the LAST describe: the preview must be
- * byte-identical to what the MCP run tools produce. A preview that disagrees
- * with the run is worse than no preview, which is why both surfaces now call
- * one shared `renderRunNodeBundle`.
+ * byte-identical to what `runTask` executes. A preview that disagrees with the
+ * run is worse than no preview, which is why every surface calls the one
+ * `assembleRunNodePrompt` (the MCP run tools too, since #863).
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
