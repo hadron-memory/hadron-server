@@ -62,9 +62,14 @@ export class UserNotFoundError extends EntityNotFoundError {
  * a share), the resolver rejects the ambiguous ref — the caller can disambiguate
  * with the exact-case email, the handle, or the id.
  *
- * GraphQL `extensions.code: 'AMBIGUOUS_USER_REF'` (with the `ref`), delivered by
- * the class mapping in `api/graphql/formatError.ts` (#3136) — the same loud-
- * ambiguity treatment `AmbiguousLegacyUrnError` below gets.
+ * NOT in `CLIENT_ERROR_MAPPINGS` (#3136 review, local seat F1): no GraphQL path
+ * throws it raw. Every `resolveUserRefOrEmail` caller already answers the same
+ * condition typed — `resolveRefArg` and `resolveGranteeId` as `BAD_USER_INPUT`,
+ * `workersHeldBy` as an empty page — and `resolveUserRef` (the
+ * effectiveAccess/cloneAgent path) never throws it. A central code would mint a
+ * permanent synonym of that existing answer (cor:agt:110:01) and, since
+ * `resolveUserRefOrEmail` reads the full user table for cross-org shares, an
+ * account-existence oracle no read gate covers (cor:api:140:02/:03).
  */
 export class AmbiguousUserRefError extends Error {
   constructor(public ref: string) {

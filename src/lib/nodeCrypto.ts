@@ -65,9 +65,9 @@ export class SessionExpiredError extends Error {
  * Encrypt the `content` and `data` fields of a node payload in place. If the
  * memory is not encrypted, the payload is returned unchanged.
  *
- * Throws SESSION_EXPIRED_ERROR if the memory is encrypted but no active
- * session key is available — as the typed {@link SessionExpiredError}, mapped
- * to `extensions.code: 'SESSION_EXPIRED'` in `api/graphql/formatError.ts`.
+ * Throws {@link SessionExpiredError} if the memory is encrypted but no active
+ * session key is available — mapped to `extensions.code: 'SESSION_EXPIRED'` in
+ * `api/graphql/formatError.ts`.
  */
 export function encryptNodeFields<T extends Partial<EncryptedNodeFields>>(
   payload: T,

@@ -3,10 +3,12 @@
  *
  * The defect class (issue #3136, epic #3146): a refusal meant to be typed
  * reached the client as INTERNAL_SERVER_ERROR — either a class
- * CLIENT_ERROR_MAPPINGS never mapped (`InvalidChunkConfigError`,
- * `AmbiguousUserRefError`), a bare `new Error('SESSION_EXPIRED…')` from
- * nodeCrypto, or a raw `validateLoc` throw (#3136 re-verification found
- * `createChannel` was the one GraphQL site still unwrapped).
+ * CLIENT_ERROR_MAPPINGS never mapped (`InvalidChunkConfigError`;
+ * `AmbiguousUserRefError` was swept too, then deliberately left UNMAPPED at
+ * review — no GraphQL path throws it raw, see entityRef/errors.ts), a bare
+ * `new Error('SESSION_EXPIRED…')` from nodeCrypto, or a raw `validateLoc`
+ * throw (#3136 re-verification found `createChannel` was the one GraphQL site
+ * still unwrapped).
  *
  * This is a WIRE test in the #918 style: it boots the real express app and
  * posts real GraphQL, because the defect lived entirely in the Apollo

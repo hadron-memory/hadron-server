@@ -16,7 +16,6 @@ import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
 import {
   AgentNotFoundError,
   AmbiguousLegacyUrnError,
-  AmbiguousUserRefError,
   AppNotFoundError,
   AppRunNotFoundError,
   EdgeNotFoundError,
@@ -257,29 +256,28 @@ describe('#3136 — the swept refusals reach extensions.code', () => {
     expect(out.message).toBe('INVALID_CHUNK_CONFIG: chunkTokens must be > 0 (got 0).');
   });
 
-  it('AmbiguousUserRefError → AMBIGUOUS_USER_REF with the ref, mirroring AmbiguousLegacyUrnError', () => {
-    // A case-insensitive email collision is a fact about the caller's ref, the
-    // same call EntityNotFoundError makes — not a server fault.
-    const out = format(new AmbiguousUserRefError('Alice@x.com'));
-    expect(out.extensions?.code).toBe('AMBIGUOUS_USER_REF');
-    expect(out.extensions?.ref).toBe('Alice@x.com');
-    expect(out.message.startsWith('AMBIGUOUS_USER_REF')).toBe(true);
-  });
+  // #3136 review (local seat F1) removed the AmbiguousUserRefError wire pin along
+  // with the mapping: no GraphQL path throws the class raw (every caller answers
+  // BAD_USER_INPUT or conceals), so there is no wire code to pin. The
+  // disposition is recorded on the class doc in entityRef/errors.ts.
 
-  it('all three are silenced in Sentry — caller-state refusals, not faults', () => {
+  it('both are silenced in Sentry — caller-state refusals, not faults', () => {
     // SESSION_EXPIRED: the hand-wrapped sites were already skipped by the
     // plugin's non-INTERNAL_SERVER_ERROR branch; this keeps parity. The other
-    // two are caller-input refusals in the EntityNotFoundError sense.
+    // one is a caller-input refusal in the EntityNotFoundError sense.
     expect(isExpectedClientError(new SessionExpiredError('mem_1'))).toBe(true);
     expect(isExpectedClientError(new InvalidChunkConfigError('x'))).toBe(true);
-    expect(isExpectedClientError(new AmbiguousUserRefError('a@x.com'))).toBe(true);
   });
 
-  it('a site-wrapped typed GraphQLError still passes through untouched (the InvalidLocError pattern)', () => {
-    // channel.createChannel now wraps validateLoc's InvalidLocError the way its
-    // nine sibling sites do; a centrally-mapped class is deliberately NOT added
-    // (the message echoes the offending value — #4106's no-echo direction).
-    // This pins that the site-constructed shape survives the boundary.
+  it('a site-constructed typed GraphQLError passes through the boundary untouched', () => {
+    // Pass-through pin for the shape channel.createChannel now throws (the
+    // createChannel wire leg itself is the integration test): a GraphQLError
+    // that already carries extensions.code survives formatGraphQLError
+    // byte-identical. A central InvalidLocError mapping is deliberately NOT
+    // added — every GraphQL validateLoc site wraps it typed at the site with
+    // the same shape (code/loc/segment), so a central entry would be dead code
+    // today. (The wrap does echo the offending loc; #4106's no-echo question
+    // for this shape is separate from this PR and unchanged by it.)
     const siteWrapped = new GraphQLError('Invalid loc "a:b!".', {
       extensions: { code: 'InvalidLocError', loc: 'a:b!', segment: 'b!' },
     });

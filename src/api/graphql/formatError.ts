@@ -26,7 +26,7 @@ import { GraphQLError as GraphQLErrorClass, Kind, type GraphQLError, type GraphQ
 import { publicErrorExtensions } from '../../lib/errorDiagnostics.js';
 import { faultRequestId, INTERNAL_ERROR_CODE, INTERNAL_ERROR_MESSAGE, logInternalFault } from '../../lib/internalFault.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
-import { AmbiguousLegacyUrnError, AmbiguousUserRefError, EncryptedVectorIndexNotAcknowledgedError, InvalidChunkConfigError } from '../../lib/entityRef/errors.js';
+import { AmbiguousLegacyUrnError, EncryptedVectorIndexNotAcknowledgedError, InvalidChunkConfigError } from '../../lib/entityRef/errors.js';
 import { EntityNotFoundError } from '../../lib/entityRef/entityNotFound.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
 import { SetAssetEnabledError } from '../../controller/operations/setAgentAssetUploadEnabled.js';
@@ -107,17 +107,16 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
     (err) => ({ code: 'AmbiguousLegacyUrnError', offendingValue: err.ref }),
     { silenceInSentry: true },
   ),
-  // #3136: the same loud-ambiguity call for a user ref — an email matching more
-  // than one live account case-insensitively (#774) is a fact about the CALLER's
-  // ref (they can disambiguate with exact case, handle or id), thrown raw from
-  // resolveUserRef through requestUserMerge/cloneAgent/effectiveAccess paths.
-  // Sentry: silenced for the same reason every resolveXxxRef miss is — the
-  // ambiguity is in the ref, not in us.
-  mapping(
-    (err): err is AmbiguousUserRefError => err instanceof AmbiguousUserRefError,
-    (err) => ({ code: 'AMBIGUOUS_USER_REF', ref: err.ref }),
-    { silenceInSentry: true },
-  ),
+  // #3136 review (local seat F1): AmbiguousUserRefError is deliberately NOT
+  // mapped. No GraphQL path throws it raw — every resolveUserRefOrEmail caller
+  // already answers the same condition typed: resolveRefArg and
+  // resolveGranteeId as BAD_USER_INPUT, workersHeldBy as an empty page
+  // (resolveUserRef, which effectiveAccess/cloneAgent call, never throws it).
+  // A central AMBIGUOUS_USER_REF code would mint a permanent synonym of the
+  // existing BAD_USER_INPUT answer (cor:agt:110:01) and — because
+  // resolveUserRefOrEmail reads the full user table for cross-org shares — an
+  // account-existence oracle no read gate covers (cor:api:140:02/:03). The
+  // per-surface disposition lives on the class doc (entityRef/errors.ts).
   // #3136: updateMemory's chunk-dial validation threw this raw, so a mis-set
   // chunkOverlap surfaced as INTERNAL_SERVER_ERROR while calling itself "the
   // friendly typed error at the API boundary". The code is the message's own
