@@ -24,8 +24,9 @@ import { recordEndedEscalations } from '../../../lib/agentTasks/stall.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { appendTaskEvent, type TaskEventPayload } from '../../../lib/agentTasks/events.js';
 import { resolvers, type Context } from './resolvers.js';
-import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 import { typeDefs } from './typeDefs.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 const M = resolvers.Mutation as any;
 const DAY = '2026-10-09';

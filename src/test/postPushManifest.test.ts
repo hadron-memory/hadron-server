@@ -512,7 +512,7 @@ describe('#4382: comments cannot separate a continuation; dollar-path, position 
     expect(refusals(W, "EXECUTE $x$SELECT 1;$x$ -- note\n'CREATE STATISTICS c4_st ON a, b FROM t'")).toEqual([{ unrecognized: W }]);
   });
 
-  it('a comment-separated continuation inside a plain-string DO refuses as the statement', () => {
+  it('a plain-string DO body refuses as the whole statement before any EXECUTE loop — comment text in it changes nothing', () => {
     // The plain-string DO route: the scanner carries the body in the
     // statement text, `payloads` stays empty, and the block refuses before
     // any EXECUTE loop runs — comment text inside it (which the outer
@@ -535,7 +535,7 @@ describe('#4382: comments cannot separate a continuation; dollar-path, position 
   });
 
   it('the glued EXECUTE refuses from any position (third place)', () => {
-    expect(refusals(W, "BEGIN EXECUTE 'SELECT 1'; EXECUTE 'SELECT 2'; EXECUTE 'SELECT 3; ' || 'CREATE STATISTICS p3_st ON a, b FROM t'; END")).toHaveLength(1);
+    expect(refusals(W, "BEGIN EXECUTE 'SELECT 1'; EXECUTE 'SELECT 2'; EXECUTE 'SELECT 3; ' || 'CREATE STATISTICS p3_st ON a, b FROM t'; END")).toEqual([{ unrecognized: W }]);
   });
 
   it('identical EXECUTE texts: replace-by-text stays correct', () => {
@@ -543,15 +543,15 @@ describe('#4382: comments cannot separate a continuation; dollar-path, position 
     // which is always this iteration's match while earlier identical matches
     // are already blanked — so duplicates cannot double-refuse or go silent.
     expect(refusals(W, "BEGIN EXECUTE 'SELECT 1'; EXECUTE 'SELECT 1'; END")).toHaveLength(0);
-    expect(refusals(W, "BEGIN EXECUTE 'SELECT 1'; EXECUTE 'SELECT 1' || 'CREATE STATISTICS p4_st ON a, b FROM t'; END")).toHaveLength(1);
-    expect(refusals(W, "BEGIN EXECUTE 'SELECT 1' || 'CREATE STATISTICS p5_st ON a, b FROM t'; EXECUTE 'SELECT 1'; END")).toHaveLength(1);
+    expect(refusals(W, "BEGIN EXECUTE 'SELECT 1'; EXECUTE 'SELECT 1' || 'CREATE STATISTICS p4_st ON a, b FROM t'; END")).toEqual([{ unrecognized: W }]);
+    expect(refusals(W, "BEGIN EXECUTE 'SELECT 1' || 'CREATE STATISTICS p5_st ON a, b FROM t'; EXECUTE 'SELECT 1'; END")).toEqual([{ unrecognized: W }]);
     // The one shape where text-replace blanks the WRONG copy: an earlier
     // `\b`-shadowed spelling (`vfooEXECUTE` — no word boundary, never a
     // match) contains this match's text, so the replace blanks inside it and
     // the real EXECUTE stays standing in the code-only text. The catch-all
     // then refuses the block — the mis-blank can only over-refuse, never go
     // silent, which is why replace-by-text needs no index arithmetic.
-    expect(refusals(W, "BEGIN vfooEXECUTE 'SELECT 1'; EXECUTE 'SELECT 1'; END")).toHaveLength(1);
+    expect(refusals(W, "BEGIN vfooEXECUTE 'SELECT 1'; EXECUTE 'SELECT 1'; END")).toEqual([{ unrecognized: W }]);
   });
 
   it('USING and format() followers are not continuations (boundary)', () => {
