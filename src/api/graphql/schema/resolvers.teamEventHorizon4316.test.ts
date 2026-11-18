@@ -7,6 +7,8 @@
  *    so a cursor row deleted between the two statements still continues from its key (cor:api:120:05:
  *    a cursor survives the deletion of the row it continues from).
  * This file sets its own test timeout (30 s) instead of importing one as a side effect (#4316 item 3).
+ * #4372 fold 2: every raw-pg fixture goes through openPg() — a leaked BEGIN pins the CLUSTER-wide xmin
+ * (see openPg), so the file force-closes its fixtures in afterEach and lets the server reap wedged ones.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from 'pg';
@@ -15,7 +17,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { teamEventHorizonSettled } from './resolvers.agentTask.js';
+import { readTeamEvents, teamEventHorizonSettled } from './resolvers.agentTask.js';
 import { settleTeamEventHorizon, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 
 useTeamEventHorizonTimeout(); // this file's two-connection pins wait on the horizon
@@ -29,6 +31,37 @@ const settle = () => settleTeamEventHorizon(db);
 /** One `team_events.horizon_lag` line per console.log spy call, parsed; other lines are dropped. */
 const lagLines = (spy: { mock: { calls: unknown[][] } }) =>
   spy.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('team_events.horizon_lag')).map((l) => JSON.parse(l) as Record<string, unknown>);
+
+/**
+ * #4372 fold 2 (Peter #114889): every raw-pg fixture this file opens, so a timed-out or hung test cannot leak
+ * one as 'idle in transaction'. xmin is CLUSTER-WIDE on the shared test Postgres, so one leaked BEGIN blocks
+ * every horizon-settling run on the host, not just this file (observed twice: review-4372 and wt4372, both
+ * wedged mid-test with the fixture's BEGIN still open). Two nets: afterEach force-ends whatever a test failed
+ * to close (its own `finally` stays the primary close), and each connection sets
+ * idle_in_transaction_session_timeout so the SERVER reaps a backend whose process never runs again.
+ */
+const pgFixtures: Client[] = [];
+const openPg = async (): Promise<Client> => {
+  const pg = new Client({ connectionString: process.env.DATABASE_URL });
+  await pg.connect();
+  await pg.query("SET idle_in_transaction_session_timeout = '30s'");
+  pgFixtures.push(pg);
+  return pg;
+};
+/** Runs after the net has closed the fixtures, inside afterEach: a holder the net failed to release fails
+ * the test here (a query on a closed client rejects), so the net is itself pinned (#4372 fold 2, Peter #114929). */
+let afterNet: (() => Promise<void>) | null = null;
+afterEach(async () => {
+  while (pgFixtures.length) {
+    const pg = pgFixtures.pop()!;
+    // end() when the client answers (the ordinary case); destroy the socket when it is wedged, so a stuck
+    // client can never keep the vitest process alive — the process-level hang observed on this host.
+    await Promise.race([pg.end().catch(() => {}), new Promise<void>((r) => setTimeout(r, 1_000))]);
+    pg.connection?.stream?.destroy();
+  }
+  await afterNet?.();
+  afterNet = null;
+});
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -44,8 +77,7 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
   it('a short forward read logs team_events.horizon_lag once, with the App, the count and the oldest age; the page is unchanged', async () => {
     const served = await event(T); // below the horizon: written before the hold opens
     await settle();
-    const pg = new Client({ connectionString: process.env.DATABASE_URL });
-    await pg.connect();
+    const pg = await openPg();
     let open = false;
     try {
       await pg.query('BEGIN');
@@ -97,8 +129,7 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
   it('the page sibling logs too (its read is the same forward read), on its App, when it comes back short', async () => {
     await event(T);
     await settle();
-    const pg = new Client({ connectionString: process.env.DATABASE_URL });
-    await pg.connect();
+    const pg = await openPg();
     let open = false;
     try {
       await pg.query('BEGIN');
@@ -120,8 +151,7 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
   it('a held-back event younger than the 30 s floor stays silent (#4372 fold: the age gate is pinned)', async () => {
     await event(T);
     await settle();
-    const pg = new Client({ connectionString: process.env.DATABASE_URL });
-    await pg.connect();
+    const pg = await openPg();
     let open = false;
     try {
       await pg.query('BEGIN');
@@ -177,6 +207,79 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
     release();
     await teamEventHorizonSettled();
   });
+
+  it('a failed assertion still releases its xmin holder (#4372 fold 2: the net is pinned)', async () => {
+    // The two host outages (#114929) were tests that failed mid-body and never reached their own finally,
+    // leaving a BEGIN open that pinned the CLUSTER-wide xmin until someone killed the process. This pin
+    // fails an assertion with the holder open on purpose (caught, so the file stays green), leaves the
+    // fixture unclosed exactly as an abandoned body would, and lets afterEach's net prove the release:
+    // afterNet's query on the client must reject once the net has ended it.
+    const pg = await openPg();
+    await pg.query('BEGIN');
+    await pg.query('SELECT pg_current_xact_id()'); // the xid-holding shape of every other fixture here
+    let failed = false;
+    try {
+      expect('a body that fails here').toBe('still holds the BEGIN open'); // a real failed assertion
+    } catch {
+      failed = true; // the body's failure path taken; its own finally (in other tests) is bypassed on timeout
+    }
+    expect(failed).toBe(true);
+    expect(pgFixtures).toContain(pg); // still registered: this test deliberately does not close it
+    afterNet = async () => { await expect(pg.query('SELECT 1')).rejects.toThrow(); }; // the net released it
+    // The body now ends with the holder OPEN — only the afterEach net can release it.
+  });
+
+  it('inside a transaction the check runs on the root pooled client, never the read transaction (#4372 fold 2)', async () => {
+    // Bob's P2 / Peter #114870: under `withReadableApp`'s App-key arm the whole read runs inside
+    // `inKeyReadTx`'s transaction, where `c.db` is the TRANSACTION client. An un-awaited probe on it
+    // outlives the resolver's return: the transaction commits under the query, Prisma rejects it P2028
+    // ("Transaction already closed") and the probe's own catch swallows that — a silent no-op in exactly
+    // the incident's error class. This pin drives the shared read through a REAL interactive transaction —
+    // the same shape the key arm serves it in — with the read's own client the transaction client and the
+    // probe's client the ROOT pooled one, so the seam is pinned directly: with the probe on `c.db` (the
+    // pre-fold-2 shape) the "heldBack" statement is issued on the transaction client, the root client
+    // never sees it, and this goes red however the race with the commit lands.
+    await event(T); // below the horizon: written before the hold opens
+    await settle();
+    const pg = await openPg();
+    let open = false;
+    let rootChecks = 0;
+    // A true stand-in for the root client — NOT Object.create(db): the extended client is a proxy-family
+    // object whose prototype CAPTURES property writes, so an Object.create(db) "hook" lands on the SHARED
+    // client itself and every consumer (root, transaction client, resolver context) sees it — verified in
+    // isolation; that leak is exactly what makes client identity un-pinnable through the shared client.
+    // A fresh object exposing only the seam logStalledHorizon uses ($queryRaw) isolates the probe's
+    // client by construction: under the pre-fold-2 shape the probe would run on `c.db` (the transaction
+    // client) and this object would never see the statement.
+    const realQueryRaw = db.$queryRaw.bind(db) as unknown as (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown>;
+    const probeDb = {
+      $queryRaw: (strings: TemplateStringsArray, ...values: unknown[]) => {
+        // The horizon check is the only statement naming "heldBack"; it is counted only when THIS object runs it.
+        if (strings.join('').includes('"heldBack"')) rootChecks += 1;
+        return realQueryRaw(strings, ...values);
+      },
+    } as unknown as Context['db'];
+    let rows: Awaited<ReturnType<typeof readTeamEvents>> = [];
+    try {
+      await pg.query('BEGIN');
+      open = true;
+      await pg.query('SELECT pg_current_xact_id()'); // assigns this connection's xid, holding xmin
+      await event(Date.now() - 60_000); // committed, 60 s old, held back at the horizon
+      // The read's own statements run on the transaction client (as under the key arm); the probe is
+      // handed the ROOT client beside them — exactly what the resolver threads through as probeDb.
+      await db.$transaction(async (tx) => {
+        rows = await readTeamEvents({ db: tx } as unknown as Context, { id: appId }, { appRef: appId, limit: 10 } as never, 10, probeDb);
+      });
+      await teamEventHorizonSettled();
+      expect(rows).toHaveLength(1); // the below-horizon row only: the page is unchanged
+      expect(rootChecks).toBe(1); // the check ran on the ROOT pooled client, not the read's transaction
+      expect(lagLines(log)).toHaveLength(1); // and it was not swallowed: the line landed
+      expect(lagLines(log)[0]).toMatchObject({ event: 'team_events.horizon_lag', appId, heldBack: 1 });
+    } finally {
+      if (open) await pg.query('ROLLBACK');
+      await pg.end();
+    }
+  });
 });
 
 describe('#4316 item 2: the validated cursor key survives the cursor row (cor:api:120:05)', () => {
@@ -194,8 +297,7 @@ describe('#4316 item 2: the validated cursor key survives the cursor row (cor:ap
     const deleteOnce = async () => {
       if (!armed) return;
       armed = false;
-      const del = new Client({ connectionString: process.env.DATABASE_URL });
-      await del.connect();
+      const del = await openPg();
       try {
         await del.query('SET session_replication_role = replica');
         await del.query('DELETE FROM agent_team_events WHERE id = $1', [rowId]);

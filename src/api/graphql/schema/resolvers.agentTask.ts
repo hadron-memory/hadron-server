@@ -3307,7 +3307,7 @@ export const agentTaskQueries = {
    * since stays a coarse time filter, not a continuation. newestFirst/before keep their history order.
    */
   agentTeamEvents: async (_: unknown, args: TeamEventsArgs, ctx: Context) =>
-    withReadableApp(ctx, args.appRef, (c, app) => readTeamEvents(c, app, args, clampListTake(args.limit))),
+    withReadableApp(ctx, args.appRef, (c, app) => readTeamEvents(c, app, args, clampListTake(args.limit), ctx.db)),
 
   /**
    * #3933 (cor:api:120:04, cor:agt:050:11 FIT condition (c)): the same read as agentTeamEvents, the `<field>Page` sibling, so a
@@ -3322,7 +3322,7 @@ export const agentTaskQueries = {
   agentTeamEventsPage: async (_: unknown, args: TeamEventsArgs, ctx: Context) =>
     withReadableApp(ctx, args.appRef, async (c, app) => {
       const take = Math.max(1, clampListTake(args.limit));
-      const rows = await readTeamEvents(c, app, args, take + 1);
+      const rows = await readTeamEvents(c, app, args, take + 1, ctx.db);
       const events = rows.slice(0, take);
       const hasMore = rows.length > take;
       return { events, hasMore, nextCursor: hasMore ? events[events.length - 1]!.id : null };
@@ -3442,14 +3442,21 @@ const horizonLagLastCheckedAt = new Map<string, number>();
  * `created_at` is a UTC-labeled naive column, so the DB clock is read as UTC too — a session TimeZone would
  * skew the age by its offset. Best-effort by design: a failed or slow check must never change, delay or fail
  * the page it explains — the caller does not await it (#4372 fold).
+ *
+ * #4372 fold 2 (Peter, #114870): the check takes the ROOT POOLED CLIENT, never the read's own `c.db`. Under
+ * `withReadableApp`'s App-key arm the whole read runs inside `inKeyReadTx`'s transaction and `c.db` there is
+ * the TRANSACTION client; an un-awaited query on it outlives the resolver's return, dies P2028 ("Transaction
+ * already closed") inside the catch below and is swallowed — the probe silently no-ops in exactly the
+ * incident's error class. Pinned in resolvers.teamEventHorizon4316.test.ts (a key read asserts the check
+ * reached the root client and the line landed).
  */
-async function logStalledHorizon(c: Context, appId: string): Promise<void> {
+async function logStalledHorizon(db: Context['db'], appId: string): Promise<void> {
   const now = Date.now();
   const last = horizonLagLastCheckedAt.get(appId);
   if (last != null && now - last < HORIZON_LAG_LOG_INTERVAL_MS) return;
   horizonLagLastCheckedAt.set(appId, now);
   try {
-    const [row] = await c.db.$queryRaw<{ heldBack: number; oldestAgeMs: number | null }[]>`
+    const [row] = await db.$queryRaw<{ heldBack: number; oldestAgeMs: number | null }[]>`
       SELECT count(*)::int AS "heldBack",
              CASE WHEN min(created_at) IS NULL THEN NULL
                   ELSE round(extract(epoch FROM ((clock_timestamp() AT TIME ZONE 'UTC') - min(created_at))) * 1000)::int END AS "oldestAgeMs"
@@ -3477,7 +3484,8 @@ export async function teamEventHorizonSettled(): Promise<void> {
   while (horizonProbes.size) await Promise.all([...horizonProbes]);
 }
 
-async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsArgs, take: number) {
+/** Exported for the #4372 fold-2 pin: the probe's root-client seam is pinned from inside a REAL transaction (resolvers.teamEventHorizon4316.test.ts). */
+export async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsArgs, take: number, probeDb: Context['db']) {
   const since = args.since == null ? null : parseStartBy(args.since);
   // #3933 (cor:agt:050:11 FIT): the newest-end read. `after` continues forward and `before` backward, so each belongs to one
   // direction; a cursor in the wrong one is refused rather than read as something else.
@@ -3554,9 +3562,11 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
   // #4316: a short forward read is the only read that can mean "the horizon is holding events of this App
   // back"; one best-effort check, never a change to what is served. #4372 fold: not awaited — a slow probe
   // must not delay the page it explains (the function's own contract); tests observe it via
-  // teamEventHorizonSettled().
+  // teamEventHorizonSettled(). #4372 fold 2: the probe runs on `probeDb` (the request's root pooled client,
+  // passed by the resolver) — never on `c.db`, which is the App-key transaction's client under `withReadableApp`'s
+  // key arm and would close under the un-awaited query (see logStalledHorizon).
   if (!newestFirst && events.length < take) {
-    const probe = logStalledHorizon(c, app.id).finally(() => { horizonProbes.delete(probe); });
+    const probe = logStalledHorizon(probeDb, app.id).finally(() => { horizonProbes.delete(probe); });
     horizonProbes.add(probe);
   }
   // #4135: use the stored AgentTask.handle (cor:agt:050:01, Proposed), once per page.
