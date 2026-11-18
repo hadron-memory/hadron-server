@@ -37,11 +37,37 @@ export interface MemoryEncryptionInfo {
 }
 
 /**
+ * #3136 — the memory is encrypted but no active session key is available (never
+ * unlocked in this process, or released by the key-cache idle TTL, #1114). This
+ * used to be a bare `new Error('SESSION_EXPIRED: …')`, so every surface that
+ * did not hand-wrap it into a typed `GraphQLError` (as `resolvers.comments` /
+ * `teamChat` / `teamRole` / `teamAttention` / `channels` do) surfaced
+ * `INTERNAL_SERVER_ERROR` — a caller-state refusal disguised as a server fault.
+ *
+ * The class is mapped once in `api/graphql/formatError.ts`, so the code
+ * `SESSION_EXPIRED` reaches `extensions.code` from every GraphQL path; the
+ * message keeps the `SESSION_EXPIRED:` prefix the internal re-typing catchers
+ * match on (`message.startsWith('SESSION_EXPIRED')`), so they are unchanged.
+ * The prose and the `sessionKeyReleasedHint()` suffix match what the wrapped
+ * paths already put on the wire (fixed text; the hint names no secrets).
+ */
+export class SessionExpiredError extends Error {
+  constructor(public readonly memoryId: string) {
+    super(
+      `SESSION_EXPIRED: memory ${memoryId} is encrypted but no active session key is available. ` +
+        sessionKeyReleasedHint(),
+    );
+    this.name = 'SessionExpiredError';
+  }
+}
+
+/**
  * Encrypt the `content` and `data` fields of a node payload in place. If the
  * memory is not encrypted, the payload is returned unchanged.
  *
  * Throws SESSION_EXPIRED_ERROR if the memory is encrypted but no active
- * session key is available.
+ * session key is available — as the typed {@link SessionExpiredError}, mapped
+ * to `extensions.code: 'SESSION_EXPIRED'` in `api/graphql/formatError.ts`.
  */
 export function encryptNodeFields<T extends Partial<EncryptedNodeFields>>(
   payload: T,
@@ -50,7 +76,7 @@ export function encryptNodeFields<T extends Partial<EncryptedNodeFields>>(
   if (!memory.isEncrypted) return payload;
   const key = sessionKeyCache.getByMemoryId(memory.id);
   if (!key) {
-    throw new Error(`SESSION_EXPIRED: no active session key for this memory. ${sessionKeyReleasedHint()}`);
+    throw new SessionExpiredError(memory.id);
   }
   return applyEncryption(payload, key);
 }
@@ -118,8 +144,9 @@ function applyEncryption<T extends Partial<EncryptedNodeFields>>(
  * Decrypt a node in place. Mutates the object so callers don't have to remap
  * shapes. If the memory is not encrypted, the node is returned unchanged.
  *
- * Throws SESSION_EXPIRED if the memory is encrypted and no key is available.
- * Callers that want a silent miss should check sessionKeyCache first.
+ * Throws SESSION_EXPIRED ({@link SessionExpiredError}) if the memory is
+ * encrypted and no key is available. Callers that want a silent miss should
+ * check sessionKeyCache first.
  */
 export function decryptNodeFields<T extends Partial<EncryptedNodeFields>>(
   node: T,
@@ -128,7 +155,7 @@ export function decryptNodeFields<T extends Partial<EncryptedNodeFields>>(
   if (!memory.isEncrypted) return node;
   const key = sessionKeyCache.getByMemoryId(memory.id);
   if (!key) {
-    throw new Error(`SESSION_EXPIRED: no active session key for this memory. ${sessionKeyReleasedHint()}`);
+    throw new SessionExpiredError(memory.id);
   }
   return applyDecryption(node, key);
 }

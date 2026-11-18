@@ -61,6 +61,10 @@ export class UserNotFoundError extends EntityNotFoundError {
  * coexist. Rather than resolve to an arbitrary account (a wrong-grantee hazard on
  * a share), the resolver rejects the ambiguous ref — the caller can disambiguate
  * with the exact-case email, the handle, or the id.
+ *
+ * GraphQL `extensions.code: 'AMBIGUOUS_USER_REF'` (with the `ref`), delivered by
+ * the class mapping in `api/graphql/formatError.ts` (#3136) — the same loud-
+ * ambiguity treatment `AmbiguousLegacyUrnError` below gets.
  */
 export class AmbiguousUserRefError extends Error {
   constructor(public ref: string) {
@@ -242,11 +246,14 @@ export class NodeAbstractTooLongError extends Error {
 /**
  * Surfaced by `hadron_get_node` when `contentScope` is outside the allowed
  * enum (`'content' | 'abstract' | 'all'`). Zod's `.enum()` produces the
- * validation error at the MCP boundary; this class exists for the
- * GraphQL surface and for any internal caller that re-validates.
+ * validation error at the MCP boundary; this class exists for any internal
+ * caller that re-validates.
  *
- * GraphQL `extensions.code: 'InvalidContentScopeError'` per constitution
- * S2.
+ * #3136 verified: NO GraphQL throw site exists (GraphQL's own enum coercion
+ * rejects an invalid `contentScope` before any resolver runs), so this class
+ * is NOT in `CLIENT_ERROR_MAPPINGS` and delivers no `extensions.code`; the
+ * MCP sites surface its message as `refusalResult` prose, per the MCP
+ * convention (error text, not codes).
  */
 export class InvalidContentScopeError extends Error {
   public readonly allowed = ['content', 'abstract', 'all'] as const;
@@ -309,7 +316,10 @@ export class EncryptedVectorIndexNotAcknowledgedError extends Error {
  * `chk_memory_chunk_tokens_positive` / `chk_memory_chunk_overlap_valid` are the
  * DB backstop; this class is the friendly GraphQL-boundary error.
  *
- * GraphQL `extensions.code: 'InvalidChunkConfigError'`.
+ * GraphQL `extensions.code: 'INVALID_CHUNK_CONFIG'` (with the `reason`), delivered by the
+ * class mapping in `api/graphql/formatError.ts` (#3136; the SCREAMING_SNAKE the message
+ * prefix always carried — the old doc's 'InvalidChunkConfigError' spelling never reached
+ * the wire, so the convention governs).
  */
 export class InvalidChunkConfigError extends Error {
   constructor(public readonly reason: string) {

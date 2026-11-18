@@ -16,9 +16,11 @@ import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
 import {
   AgentNotFoundError,
   AmbiguousLegacyUrnError,
+  AmbiguousUserRefError,
   AppNotFoundError,
   AppRunNotFoundError,
   EdgeNotFoundError,
+  InvalidChunkConfigError,
   MemoryNotFoundError,
   NodeNotFoundError,
   NodeRevisionNotFoundError,
@@ -28,6 +30,7 @@ import {
   UserNotFoundError,
   WorkerNotFoundError,
 } from '../../lib/entityRef/errors.js';
+import { SessionExpiredError } from '../../lib/nodeCrypto.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
 import { SetAssetEnabledError } from '../../controller/operations/setAgentAssetUploadEnabled.js';
 
@@ -226,6 +229,69 @@ describe('EntityNotFoundError → its own code on the wire (#1174)', () => {
     for (const [, err] of FAMILY) expect(isExpectedClientError(err)).toBe(true);
     // And a genuine fault is still reported.
     expect(isExpectedClientError(new Error('boom'))).toBe(false);
+  });
+});
+
+
+describe('#3136 — the swept refusals reach extensions.code', () => {
+  it('SessionExpiredError → SESSION_EXPIRED with memoryId, message prefix intact for the internal catchers', () => {
+    // The re-typing catchers in resolvers.comments/teamChat/teamRole match on
+    // message.startsWith('SESSION_EXPIRED'), so the class mapping must not
+    // reword the prefix — and the wire shape (code + memoryId) is what those
+    // hand-wrapped sites already deliver, now from every path.
+    const err = new SessionExpiredError('mem_1');
+    expect(err.message.startsWith('SESSION_EXPIRED')).toBe(true);
+    const out = format(err);
+    expect(out.extensions?.code).toBe('SESSION_EXPIRED');
+    expect(out.extensions?.memoryId).toBe('mem_1');
+    expect(out.message.startsWith('SESSION_EXPIRED')).toBe(true);
+  });
+
+  it('InvalidChunkConfigError → INVALID_CHUNK_CONFIG with the reason', () => {
+    // updateMemory throws this raw; the doc once promised a code the mapping
+    // never delivered. Nothing ever reached the wire, so the convention's
+    // SCREAMING_SNAKE (the message prefix) applies rather than the class name.
+    const out = format(new InvalidChunkConfigError('chunkTokens must be > 0 (got 0).'));
+    expect(out.extensions?.code).toBe('INVALID_CHUNK_CONFIG');
+    expect(out.extensions?.reason).toBe('chunkTokens must be > 0 (got 0).');
+    expect(out.message).toBe('INVALID_CHUNK_CONFIG: chunkTokens must be > 0 (got 0).');
+  });
+
+  it('AmbiguousUserRefError → AMBIGUOUS_USER_REF with the ref, mirroring AmbiguousLegacyUrnError', () => {
+    // A case-insensitive email collision is a fact about the caller's ref, the
+    // same call EntityNotFoundError makes — not a server fault.
+    const out = format(new AmbiguousUserRefError('Alice@x.com'));
+    expect(out.extensions?.code).toBe('AMBIGUOUS_USER_REF');
+    expect(out.extensions?.ref).toBe('Alice@x.com');
+    expect(out.message.startsWith('AMBIGUOUS_USER_REF')).toBe(true);
+  });
+
+  it('all three are silenced in Sentry — caller-state refusals, not faults', () => {
+    // SESSION_EXPIRED: the hand-wrapped sites were already skipped by the
+    // plugin's non-INTERNAL_SERVER_ERROR branch; this keeps parity. The other
+    // two are caller-input refusals in the EntityNotFoundError sense.
+    expect(isExpectedClientError(new SessionExpiredError('mem_1'))).toBe(true);
+    expect(isExpectedClientError(new InvalidChunkConfigError('x'))).toBe(true);
+    expect(isExpectedClientError(new AmbiguousUserRefError('a@x.com'))).toBe(true);
+  });
+
+  it('a site-wrapped typed GraphQLError still passes through untouched (the InvalidLocError pattern)', () => {
+    // channel.createChannel now wraps validateLoc's InvalidLocError the way its
+    // nine sibling sites do; a centrally-mapped class is deliberately NOT added
+    // (the message echoes the offending value — #4106's no-echo direction).
+    // This pins that the site-constructed shape survives the boundary.
+    const siteWrapped = new GraphQLError('Invalid loc "a:b!".', {
+      extensions: { code: 'InvalidLocError', loc: 'a:b!', segment: 'b!' },
+    });
+    const out = formatGraphQLError(
+      {
+        message: siteWrapped.message,
+        extensions: { code: 'InvalidLocError', loc: 'a:b!', segment: 'b!' },
+      },
+      siteWrapped,
+    );
+    expect(out.extensions?.code).toBe('InvalidLocError');
+    expect(out.extensions?.loc).toBe('a:b!');
   });
 });
 

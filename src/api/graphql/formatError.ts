@@ -26,12 +26,13 @@ import { GraphQLError as GraphQLErrorClass, Kind, type GraphQLError, type GraphQ
 import { publicErrorExtensions } from '../../lib/errorDiagnostics.js';
 import { faultRequestId, INTERNAL_ERROR_CODE, INTERNAL_ERROR_MESSAGE, logInternalFault } from '../../lib/internalFault.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
-import { AmbiguousLegacyUrnError, EncryptedVectorIndexNotAcknowledgedError } from '../../lib/entityRef/errors.js';
+import { AmbiguousLegacyUrnError, AmbiguousUserRefError, EncryptedVectorIndexNotAcknowledgedError, InvalidChunkConfigError } from '../../lib/entityRef/errors.js';
 import { EntityNotFoundError } from '../../lib/entityRef/entityNotFound.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
 import { SetAssetEnabledError } from '../../controller/operations/setAgentAssetUploadEnabled.js';
 import { QueryTooComplexError } from './admissionComplexity.js';
 import { GitCommandError } from '../../integrations/github/execGit.js';
+import { SessionExpiredError } from '../../lib/nodeCrypto.js';
 
 interface ClientErrorMapping {
   matches: (err: unknown) => boolean;
@@ -104,6 +105,45 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   mapping(
     (err): err is AmbiguousLegacyUrnError => err instanceof AmbiguousLegacyUrnError,
     (err) => ({ code: 'AmbiguousLegacyUrnError', offendingValue: err.ref }),
+    { silenceInSentry: true },
+  ),
+  // #3136: the same loud-ambiguity call for a user ref — an email matching more
+  // than one live account case-insensitively (#774) is a fact about the CALLER's
+  // ref (they can disambiguate with exact case, handle or id), thrown raw from
+  // resolveUserRef through requestUserMerge/cloneAgent/effectiveAccess paths.
+  // Sentry: silenced for the same reason every resolveXxxRef miss is — the
+  // ambiguity is in the ref, not in us.
+  mapping(
+    (err): err is AmbiguousUserRefError => err instanceof AmbiguousUserRefError,
+    (err) => ({ code: 'AMBIGUOUS_USER_REF', ref: err.ref }),
+    { silenceInSentry: true },
+  ),
+  // #3136: updateMemory's chunk-dial validation threw this raw, so a mis-set
+  // chunkOverlap surfaced as INTERNAL_SERVER_ERROR while calling itself "the
+  // friendly typed error at the API boundary". The code is the message's own
+  // SCREAMING_SNAKE prefix — nothing ever reached the wire under the doc's old
+  // 'InvalidChunkConfigError' spelling, so the convention governs. Sentry: a
+  // caller's invalid dials are theirs (the DB CHECK backstop still exists for
+  // state that slips past the boundary).
+  mapping(
+    (err): err is InvalidChunkConfigError => err instanceof InvalidChunkConfigError,
+    (err) => ({ code: 'INVALID_CHUNK_CONFIG', reason: err.reason }),
+    { silenceInSentry: true },
+  ),
+  // #3136: encrypt/decrypt on an encrypted memory with no active session key
+  // used to be a bare Error('SESSION_EXPIRED: …') that only the surfaces which
+  // hand-wrapped it (comments/teamChat/teamRole/teamAttention/channels) typed;
+  // every other read/write path surfaced INTERNAL_SERVER_ERROR. Throwing the
+  // typed class at the source (nodeCrypto) and mapping it once gives every path
+  // the code those wrapped sites already deliver — message prefix unchanged, so
+  // the internal startsWith('SESSION_EXPIRED') catchers are untouched.
+  // Sentry: silenced — the hand-wrapped sites were already skipped by the
+  // plugin's non-INTERNAL_SERVER_ERROR branch; this is parity, not a new
+  // silence. The condition is caller session state (never unlocked, or the
+  // key-cache idle TTL #1114 released it), not a server fault.
+  mapping(
+    (err): err is SessionExpiredError => err instanceof SessionExpiredError,
+    (err) => ({ code: 'SESSION_EXPIRED', memoryId: err.memoryId }),
     { silenceInSentry: true },
   ),
   // #918: every asset refusal in one branch, taking the code off the instance —
