@@ -36,8 +36,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0
       '@hadron-memory/urn-lib-js':
-        specifier: 0.0.18
-        version: 0.0.18
+        specifier: 0.0.22
+        version: 0.0.22
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.0
         version: 1.32.0(zod@4.3.6)
@@ -592,8 +592,8 @@ packages:
   '@hadron-memory/access-control@0.3.0':
     resolution: {integrity: sha512-rEMpsY2emeckMtrFpj9uPzJQgApnDHF+pBrNczrGmI6GYo6roahYGvPxtohtSuQzi9MSQXP3Pjnzy71WZrDzVw==}
 
-  '@hadron-memory/urn-lib-js@0.0.18':
-    resolution: {integrity: sha512-L7Ucaq40sQ8h3BoFsg4MPAA0buURuYynVCIV03PZr8Rhh5Wl6edE2FPlpSE2up9fBl++g9waiRWxINh/kBebxg==}
+  '@hadron-memory/urn-lib-js@0.0.22':
+    resolution: {integrity: sha512-5jxc+Mq3EyCJ/sus0eD0yYSMw54VsUBuGy4smF94SlH1D4iLZFAgkingsd9gGZcwdlAXfedbXVa/Dt2w8U0ykQ==}
 
   '@hexagon/base64@1.1.28':
     resolution: {integrity: sha512-lhqDEAvWixy3bZ+UOYbPwUbBkwBq5C1LAJ/xPC8Oi+lL54oyakv/npbA0aU2hgCsx/1NUd4IBvV03+aUBWxerw==}
@@ -1226,8 +1226,8 @@ packages:
   boolbase@1.0.0:
     resolution: {integrity: sha512-JZOSA7Mo9sNGB8+UjSgzdLtokWAky1zbztM3WRLCbZ70/3cTANmQmOdR7y2g+J0e2WXywy1yS468tY+IruqEww==}
 
-  bowser@2.15.0:
-    resolution: {integrity: sha512-xic6KSZglg/I4ymp45fdM4GWfYpBK79Fxd/TOvJktlaPgQqqDxvmGwOPZl2V0dyeS3Lj5c180bLhXF43iyAjZQ==}
+  bowser@2.14.1:
+    resolution: {integrity: sha512-tzPjzCxygAKWFOJP011oxFHs57HzIhOEracIgAePE4pqB3LikALKnSzUyU4MGs9/iCEUuHlAJTjTc5M+u7YEGg==}
 
   brace-expansion@1.1.12:
     resolution: {integrity: sha512-9T9UjW3r0UW5c1Q7GTwllptXwhvYmEzFhzMfZ9H7FQWt+uZePjZPjBP/W1ZEyZ1twGWom5/56TF4lPcqjnDHcg==}
@@ -2879,7 +2879,7 @@ snapshots:
       '@smithy/core': 3.41.0
       '@smithy/signature-v4': 5.7.5
       '@smithy/types': 4.20.0
-      bowser: 2.15.0
+      bowser: 2.14.1
       tslib: 2.8.1
 
   '@aws-sdk/credential-provider-env@3.972.84':
@@ -2923,7 +2923,7 @@ snapshots:
       '@aws-sdk/types': 3.975.1
       '@smithy/core': 3.41.0
       '@smithy/types': 4.20.0
-      tslib: 2.9.1
+      tslib: 2.8.1
 
   '@aws-sdk/credential-provider-node@3.972.97':
     dependencies:
@@ -2984,7 +2984,7 @@ snapshots:
       '@smithy/fetch-http-handler': 5.8.1
       '@smithy/node-http-handler': 4.14.2
       '@smithy/types': 4.20.0
-      tslib: 2.9.1
+      tslib: 2.8.1
 
   '@aws-sdk/s3-request-presigner@3.1171.0':
     dependencies:
@@ -3009,7 +3009,7 @@ snapshots:
       '@aws-sdk/types': 3.975.1
       '@smithy/core': 3.41.0
       '@smithy/types': 4.20.0
-      tslib: 2.9.1
+      tslib: 2.8.1
 
   '@aws-sdk/types@3.975.1':
     dependencies:
@@ -3166,7 +3166,7 @@ snapshots:
 
   '@hadron-memory/access-control@0.3.0': {}
 
-  '@hadron-memory/urn-lib-js@0.0.18': {}
+  '@hadron-memory/urn-lib-js@0.0.22': {}
 
   '@hexagon/base64@1.1.28': {}
 
@@ -3342,14 +3342,14 @@ snapshots:
       '@peculiar/asn1-rsa': 2.10.0
       '@peculiar/asn1-schema': 2.10.0
       asn1js: 3.0.10
-      tslib: 2.9.1
+      tslib: 2.8.1
 
   '@peculiar/asn1-pkcs8@2.10.0':
     dependencies:
       '@peculiar/asn1-schema': 2.10.0
       '@peculiar/asn1-x509': 2.10.0
       asn1js: 3.0.10
-      tslib: 2.9.1
+      tslib: 2.8.1
 
   '@peculiar/asn1-pkcs9@2.10.0':
     dependencies:
@@ -3380,7 +3380,7 @@ snapshots:
       '@peculiar/asn1-schema': 2.10.0
       '@peculiar/asn1-x509': 2.10.0
       asn1js: 3.0.10
-      tslib: 2.9.1
+      tslib: 2.8.1
 
   '@peculiar/asn1-x509-post-quantum@2.10.0':
     dependencies:
@@ -3603,7 +3603,7 @@ snapshots:
   '@smithy/eventstream-codec@4.5.2':
     dependencies:
       '@smithy/core': 3.41.0
-      tslib: 2.9.1
+      tslib: 2.8.1
 
   '@smithy/fetch-http-handler@5.8.1':
     dependencies:
@@ -3630,7 +3630,7 @@ snapshots:
   '@smithy/util-utf8@4.5.2':
     dependencies:
       '@smithy/core': 3.41.0
-      tslib: 2.9.1
+      tslib: 2.8.1
 
   '@stablelib/base64@1.0.1': {}
 
@@ -3906,7 +3906,7 @@ snapshots:
 
   boolbase@1.0.0: {}
 
-  bowser@2.15.0: {}
+  bowser@2.14.1: {}
 
   brace-expansion@1.1.12:
     dependencies:
@@ -5164,7 +5164,8 @@ snapshots:
 
   tslib@2.8.1: {}
 
-  tslib@2.9.1: {}
+  tslib@2.9.1:
+    optional: true
 
   tsx@4.21.0:
     dependencies:
