@@ -30,8 +30,8 @@ beforeEach(async () => {
   admin = await user(); stranger = await user();
   for (const organizationId of [owner.id, importerOrg.id, holder.id])
     await db.orgMember.create({ data: { organizationId, userId: admin.id, role: 'ADMIN' } });
-  target = await M.createAgent({}, {orgId:owner.id,name:'Target',personaRole:'reviewer'},ctx());
-  const parent = await M.createAgent({}, {orgId:importerOrg.id,name:'Parent',personaRole:'suite'},ctx());
+  target = await M.createAgent({}, {orgRef:owner.id,name:'Target',personaRole:'reviewer'},ctx());
+  const parent = await M.createAgent({}, {orgRef:importerOrg.id,name:'Parent',personaRole:'suite'},ctx());
   await serveAgentBootPrompt(db,target.id,'PRIVATE TARGET PROMPT');
   await serveAgentBootPrompt(db,parent.id,'PARENT PROMPT');
   await createDbAgentOrgGrant(db,importerOrg.id,target.id);
@@ -204,7 +204,7 @@ it('the default manual-run Agent ignores unlicensed derived candidates', async (
 });
 
 it('retained own-org derived grants control memory folds, carrier reach and both scope readers', async () => {
-  const own = await M.createAgent({}, {orgId:holder.id,name:'Own',personaRole:'own'},ctx());
+  const own = await M.createAgent({}, {orgRef:holder.id,name:'Own',personaRole:'own'},ctx());
   const physical = await db.appAgent.findFirstOrThrow({where:{appId:app.id},include:{agent:true}});
   await createDbAgentOrgGrant(db,physical.agent.organizationId!,own.id);
   await createDbAgentImport(db,physical.agentId,own.id,{position:101});
@@ -241,7 +241,7 @@ it('teamRoles indexes only licensed derived role Agents', async () => {
 
 it('unlicensed matching imports neither appear in role ambiguity nor prevent a licensed cast', async () => {
   const physical = await db.appAgent.findFirstOrThrow({where:{appId:app.id},include:{agent:true}});
-  const second = await M.createAgent({}, {orgId:owner.id,name:'Second',personaRole:'reviewer'},ctx());
+  const second = await M.createAgent({}, {orgRef:owner.id,name:'Second',personaRole:'reviewer'},ctx());
   await createDbAgentOrgGrant(db,physical.agent.organizationId!,second.id);
   await createDbAgentImport(db,physical.agentId,second.id,{position:101});
   await expect(M.castWorker({}, {appRef:app.id,role:'reviewer',name:'Selected'},ctx()))

@@ -61,7 +61,7 @@ async function graphql(query: string, variables: Record<string, unknown>) {
 
 const UPDATE = `
   mutation Update($id: ID!, $source: String) {
-    updateMemory(id: $id, source: $source) { id source }
+    updateMemory(ref: $id, source: $source) { id source }
   }
 `;
 

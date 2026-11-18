@@ -73,7 +73,7 @@ export async function setUpResetFixture(): Promise<ResetFixture> {
   const manager = await u(81, 'manager');
   const holder = await u(82, 'holder');
   await db.orgMember.create({ data: { organizationId: org.id, userId: manager.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent', resetContextAfterTask: true }, ctx(manager.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent', resetContextAfterTask: true }, ctx(manager.id));
   const agentId = agent.id as string;
   const app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true } });
   await db.appMember.create({ data: { appId: app.id, userId: holder.id, role: 'member' } });

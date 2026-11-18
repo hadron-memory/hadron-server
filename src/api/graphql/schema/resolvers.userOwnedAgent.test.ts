@@ -95,7 +95,7 @@ describe('createAgent — user-owned (no orgId)', () => {
     await expect(
       resolvers.Mutation.createAgent(
         {},
-        { orgId: '', name: 'Ambiguous' },
+        { orgRef: '', name: 'Ambiguous' },
         ctx({ userId: ownerId, roles: ['READER'] }),
       ),
     ).rejects.toThrow(/non-empty organization/i);
@@ -414,14 +414,14 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
     });
     await db.agent.update({ where: { id: agent.id }, data: { systemMemoryId: null } });
     await expect(
-      resolvers.Mutation.updateAgent(null, { ref: agent.id, systemMemoryId: victimMemory.id }, admin()),
+      resolvers.Mutation.updateAgent(null, { ref: agent.id, systemMemoryRef: victimMemory.id }, admin()),
     ).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     const untouched = await db.memory.findUniqueOrThrow({ where: { id: victimMemory.id } });
     expect(untouched.class).toBe('knowledge');
     expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).systemMemoryId).toBeNull();
     // Owner control: the wizard-flow first-attach still works for the owner.
     const ownerAttach = await resolvers.Mutation.updateAgent(
-      null, { ref: agent.id, systemMemoryId: victimMemory.id }, ctx({ userId: ownerId, roles: ['READER'] }),
+      null, { ref: agent.id, systemMemoryRef: victimMemory.id }, ctx({ userId: ownerId, roles: ['READER'] }),
     );
     expect(ownerAttach.systemMemoryId).toBe(victimMemory.id);
     expect((await db.memory.findUniqueOrThrow({ where: { id: victimMemory.id } })).class).toBe('system');

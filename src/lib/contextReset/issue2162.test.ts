@@ -188,7 +188,7 @@ describe('the Agent field', () => {
     expect(off.resetContextAfterTask).toBe(false);
     const kept = await M.updateAgent({}, { ref: f.agentId, resetContextAfterTask: null }, ctx(f.manager.id));
     expect(kept.resetContextAfterTask).toBe(false);
-    const fresh = await M.createAgent({}, { orgId: f.orgId, name: 'Default Agent' }, ctx(f.manager.id));
+    const fresh = await M.createAgent({}, { orgRef: f.orgId, name: 'Default Agent' }, ctx(f.manager.id));
     expect(fresh.resetContextAfterTask).toBe(false);
     await expect(M.updateAgent({}, { ref: f.agentId, resetContextAfterTask: true }, ctx(f.holder.id))).rejects.toThrow();
     expect((await db.agent.findUniqueOrThrow({ where: { id: f.agentId } })).resetContextAfterTask).toBe(false);

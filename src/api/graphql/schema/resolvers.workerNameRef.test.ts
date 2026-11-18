@@ -68,7 +68,7 @@ beforeEach(async () => {
   const role = await M.createAgent(
     {},
     {
-      orgId: org.id,
+      orgRef: org.id,
       name: 'WNR Backend Engineer',
       personaRole: 'backend-engineer',
     },
