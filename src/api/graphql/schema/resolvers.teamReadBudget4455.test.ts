@@ -198,3 +198,52 @@ describe('#4455: differential — roster, composition and utilization answer the
     expect(byFamily.get('codex')).toBe(1);
   });
 });
+
+describe("#4472: the typed refusal is on every withRosterAppRead caller's path", () => {
+  // The wrapper-level pins above prove withRosterAppRead converts a busy store; these prove each
+  // RESOLVER still routes through it — #4460's QA measured teamRoster under load, composition and
+  // utilization only through this shared wrapper, so a resolver refactor that drops the wrapper (or
+  // swallows the refusal into its own shape) must turn one of these red. The mocked $transaction
+  // throws before the projection runs, so the app need not exist; what is pinned is the wiring.
+  const busy = (message: string, code: string) =>
+    new Prisma.PrismaClientKnownRequestError(message, { code, clientVersion: 'test' });
+
+  const eachCallerConverts = async (call: () => Promise<unknown>, reason: 'TRANSACTION_BUDGET' | 'POOL_WAIT') => {
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async () => {
+      throw busy(
+        reason === 'POOL_WAIT' ? 'Unable to start a transaction: the pool was full.' : 'Transaction already closed during query execution.',
+        'P2028',
+      );
+    }) as unknown as never);
+    try {
+      await expect(call()).rejects.toMatchObject({
+        extensions: { code: 'TEAM_READ_BUSY', retryable: true, budgetMs: 5_000, reason },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  };
+
+  it('teamRoster surfaces the typed refusal for both arms (tx budget and pool wait)', async () => {
+    await eachCallerConverts(() => Q.teamRoster({}, { appRef: app.id }, ctx(mia.id)), 'TRANSACTION_BUDGET');
+    await eachCallerConverts(() => Q.teamRoster({}, { appRef: app.id }, ctx(mia.id)), 'POOL_WAIT');
+  });
+
+  it('teamComposition surfaces the typed refusal for both arms (its lane grouping sits outside the wrapper and must not reshape it)', async () => {
+    await eachCallerConverts(() => Q.teamComposition({}, { appRef: app.id }, ctx(mia.id)), 'TRANSACTION_BUDGET');
+    await eachCallerConverts(() => Q.teamComposition({}, { appRef: app.id }, ctx(mia.id)), 'POOL_WAIT');
+  });
+
+  it('teamUtilization surfaces the typed refusal for both arms (its input validation runs inside the wrapper and must not mask it)', async () => {
+    await eachCallerConverts(() => Q.teamUtilization({}, { appRef: app.id }, ctx(mia.id)), 'TRANSACTION_BUDGET');
+    await eachCallerConverts(() => Q.teamUtilization({}, { appRef: app.id, windowHours: 24 }, ctx(mia.id)), 'POOL_WAIT');
+  });
+
+  it('teamUtilization still answers BAD_USER_INPUT for an invalid window BEFORE any store read is blamed as busy', async () => {
+    // The validation throws inside the projection; a busy store must not turn a caller fault into
+    // TEAM_READ_BUSY, and (differentially) an invalid filter must not surface as a store problem.
+    await expect(Q.teamUtilization({}, { appRef: app.id, windowHours: 0 }, ctx(mia.id))).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  });
+});
