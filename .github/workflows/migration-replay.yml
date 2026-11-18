@@ -82,20 +82,29 @@ jobs:
           SHA: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -u
+          set -eu
           if [ "$EVENT" = pull_request ]; then
-            git fetch --no-tags --depth=1 origin "$BASE_REF"
+            git fetch --no-tags --depth=1 origin "$BASE_REF" # a fetch failure fails the step (#4392 BLIND F2)
             src=FETCH_HEAD
-            allow=$(jq -r '[.pull_request.labels[].name] | index("baseline-growth-approved") != null' "$GITHUB_EVENT_PATH")
+            allow=$(jq -r '[.pull_request.labels[].name] | index("baseline-growth-approved") != null' "$GITHUB_EVENT_PATH") \
+              || { echo "::warning::could not read this PR's labels from the event; growth is not approved"; allow=false; }
           else
             src=HEAD^
-            allow=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '[.[].labels[].name] | index("baseline-growth-approved") != null') \
+            # Only the PR whose merge commit IS this push (#4392 BLIND F1): an associated PR that merely contains the
+            # commit (a stacked or batched PR) never lends its label. Merge commits are this repo's only merge method.
+            allow=$(gh api "repos/$REPO/commits/$SHA/pulls" \
+                --jq "[.[] | select(.merge_commit_sha == \"$SHA\") | .labels[].name] | index(\"baseline-growth-approved\") != null") \
               || { echo "::warning::could not read the merged PR's labels; growth is not approved"; allow=false; }
           fi
-          if git show "$src:scripts/db/migration-replay-baseline.txt" > "$RUNNER_TEMP/base-baseline.txt" 2>/dev/null; then
+          # A base without the baseline (the bootstrapping change) is not judged; a base commit git cannot read fails
+          # the step instead of silently disabling the growth check (#4392 BLIND F2).
+          git cat-file -e "$src^{commit}" || { echo "::error::cannot read the base commit $src"; exit 1; }
+          if git cat-file -e "$src:scripts/db/migration-replay-baseline.txt" 2>/dev/null; then
+            git show "$src:scripts/db/migration-replay-baseline.txt" > "$RUNNER_TEMP/base-baseline.txt"
             echo "path=$RUNNER_TEMP/base-baseline.txt" >> "$GITHUB_OUTPUT"
           else
-            echo "the base has no baseline yet"; echo "path=" >> "$GITHUB_OUTPUT"
+            echo "::notice::the base has no migration replay baseline yet (the bootstrapping change); growth is not judged"
+            echo "path=" >> "$GITHUB_OUTPUT"
           fi
           [ "$allow" = true ] || allow=false
           echo "allow=$allow" >> "$GITHUB_OUTPUT"
