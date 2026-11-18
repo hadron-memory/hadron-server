@@ -1496,7 +1496,8 @@ model Node {
   /// `preflight_add --type`.
   ///
   /// GOVERNED values (`src/lib/governedRole.ts`) route a write to that kind's
-  /// own door; every other value is inert. Open so an agent builder may use it
+  /// own door; every other value is inert to the platform, apart from the role rules a memory declares for
+  /// itself (NodeRoleRule). Open so an agent builder may use it
   /// freely, closed where it gates so the gate is never caller-defined.
   role                String?
   /// LLM model that created or last modified this node (e.g.
@@ -1951,7 +1952,7 @@ model PendingEdge {
   @@map("pending_edges")
 }
 
-/// #1156 / hrn:node:hadronmemory.com:specs:cor:dmo:070:05: only an end writer supplies a cause; legacy NULL stays
+/// #1156 / hrn:node:hadronmemory.com:specs:cor:dmo:070:05 — only an end writer supplies a cause; legacy NULL stays
 /// unknown.
 enum SessionEndReason {
   ended
