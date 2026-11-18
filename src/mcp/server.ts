@@ -26,7 +26,7 @@ import { createHmac, randomUUID } from 'crypto';
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentGovernedError, isCommentGovernedError } from '../lib/comments/index.js';
 import { commentHitInfo, commentHitLabel } from '../lib/comments/hitLabel.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, softDeleteThreadsOfTargets } from '../lib/comments/lifecycle.js';
-import { decisionContainedError, decisionFamilyAmong, isDecisionFamilyRole, refuseDecisionFamily } from '../lib/decisions/index.js';
+import { decisionContainedError, decisionFamilyAmong, isDecisionFamilyRole, refuseDecisionFamily } from '../lib/questions/index.js';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import { assertNoGenericMessageSeqWrite, isLegacyMessageSeqError } from '../lib/legacyMessageSeq.js';
 import {

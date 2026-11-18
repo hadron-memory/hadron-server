@@ -1,7 +1,7 @@
 import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { decisionContainedError, isDecisionFamilyRole } from '../../lib/decisions/index.js';
+import { decisionContainedError, isDecisionFamilyRole } from '../../lib/questions/index.js';
 import { assertBatchMutable } from '../../lib/bulkMutationGate.js';
 import { assertNoMintedSpecRemoval } from '../../lib/mintedSpecPermanence.js';
 import { Prisma } from '../../generated/prisma/index.js';

@@ -50,7 +50,7 @@ import { editorFromAuth, reconcileNodeWithIncludeHistory } from '../../../lib/no
 import { mayMintNodes } from './resolvers.nodeApproval.js';
 import { approvalHoldsFor, checkNodeIntegrity, loadApprovedSnapshots } from '../../../lib/nodeApproval.js';
 import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
-import { NOT_DECISION_FAMILY_WHERE } from '../../../lib/decisions/index.js';
+import { NOT_DECISION_FAMILY_WHERE } from '../../../lib/questions/index.js';
 import { unresolvedFeedbackOf, type UnresolvedFeedbackRow } from '../../../lib/comments/summary.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { SubtreeMoveMintedError } from '../../../lib/nodeSubtreeMove.js';

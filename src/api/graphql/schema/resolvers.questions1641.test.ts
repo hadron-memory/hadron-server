@@ -12,8 +12,8 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbWorkerAttribution } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
-import { decisionDataSchema, decisionLogDataSchema, type DecisionData } from '../../../lib/decisions/codec.js';
-import { decisionName, renderDecision, renderDecisionAbstract, renderDecisionLog } from '../../../lib/decisions/render.js';
+import { decisionDataSchema, decisionLogDataSchema, type DecisionData } from '../../../lib/questions/codec.js';
+import { decisionName, renderDecision, renderDecisionAbstract, renderDecisionLog } from '../../../lib/questions/render.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { resolvers, type Context } from './resolvers.js';
 

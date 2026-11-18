@@ -118,7 +118,7 @@ import { withAuthorizedMemoryTx } from './authorizedTx.js';
 // Spec 049 §8.5 — the memory-level lock Channel creation shares with deleteMemory.
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
-import { decisionError, memoryHoldsDecisionLog } from '../../../lib/decisions/index.js';
+import { decisionError, memoryHoldsDecisionLog } from '../../../lib/questions/index.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { validateMemorySchema, MemorySchemaError } from '../../../lib/memorySchema.js';
 import { validateMemorySource, GitSourceError } from '../../../lib/gitSource.js';

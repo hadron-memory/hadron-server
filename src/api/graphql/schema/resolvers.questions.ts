@@ -63,7 +63,7 @@ import {
   DECISION_ROLE,
   decisionContainedError,
   decisionError,
-} from '../../../lib/decisions/index.js';
+} from '../../../lib/questions/index.js';
 import {
   DECISION_CODEC,
   DECISION_LOG_CODEC,
@@ -84,7 +84,7 @@ import {
   type DecisionPart,
   type DecisionPartInput,
   type DecisionRef,
-} from '../../../lib/decisions/codec.js';
+} from '../../../lib/questions/codec.js';
 import {
   CURRENT_DECISION_RENDERER,
   canonicalDecisionJson,
@@ -92,9 +92,9 @@ import {
   renderDecision,
   renderDecisionAbstract,
   renderDecisionLog,
-} from '../../../lib/decisions/render.js';
-import { evaluateDecision, type DecisionEvaluation, type DecisionNodeRow, type DecisionState } from '../../../lib/decisions/evaluate.js';
-import { DEFAULT_DECISION_PREFIX, DECISION_PREFIX_RE, decisionCode, decisionLoc, parseDecisionCitation } from '../../../lib/decisions/codes.js';
+} from '../../../lib/questions/render.js';
+import { evaluateDecision, type DecisionEvaluation, type DecisionNodeRow, type DecisionState } from '../../../lib/questions/evaluate.js';
+import { DEFAULT_DECISION_PREFIX, DECISION_PREFIX_RE, decisionCode, decisionLoc, parseDecisionCitation } from '../../../lib/questions/codes.js';
 
 type Tx = Prisma.TransactionClient;
 

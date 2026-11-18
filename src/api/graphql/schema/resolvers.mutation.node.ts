@@ -9,7 +9,7 @@ import { assertBootPromptWriteAllowedOrGranted, spendEditGrantFor, graphqlEditFa
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, assertNoBootPromptRows, inCompileScope, isBootPromptRole } from '../../../lib/bootPrompt.js';
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
-import { decisionContainedError, isDecisionFamilyRole, refuseDecisionFamily, refuseUnderDecisionLog } from '../../../lib/decisions/index.js';
+import { decisionContainedError, isDecisionFamilyRole, refuseDecisionFamily, refuseUnderDecisionLog } from '../../../lib/questions/index.js';
 import { refuseLiveThreadsOnFold } from '../../../lib/comments/merge.js';
 import { generateId } from '../../../lib/id.js';
 // Spec 049 S4 — the protected-loc gate on the in-place update paths and the bulk skip.

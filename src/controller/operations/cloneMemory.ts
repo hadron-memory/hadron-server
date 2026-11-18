@@ -2,7 +2,7 @@ import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRowsForWorkerSession 
 import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
-import { NOT_DECISION_FAMILY_WHERE } from '../../lib/decisions/index.js';
+import { NOT_DECISION_FAMILY_WHERE } from '../../lib/questions/index.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { mapChatSeqConflict } from '../../lib/prismaErrors.js';
 import { generateId } from '../../lib/id.js';

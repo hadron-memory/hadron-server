@@ -1,5 +1,5 @@
 import type { PrismaClient } from '../generated/prisma/index.js';
-import { DECISION_FAMILY_WHERE } from '../lib/decisions/index.js';
+import { DECISION_FAMILY_WHERE } from '../lib/questions/index.js';
 import { withSweepLock, type SweepLockResult } from '../lib/sweepLock.js';
 
 /**

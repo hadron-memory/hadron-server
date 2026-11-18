@@ -19,7 +19,7 @@ import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import type { EncryptionKey } from '../../../lib/crypto.js';
 import { editorFromAuth } from '../../../lib/nodeRevisionSnapshot.js';
 import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
-import { DECISION_FAMILY_WHERE, DECISION_ROLE } from '../../../lib/decisions/index.js';
+import { DECISION_FAMILY_WHERE, DECISION_ROLE } from '../../../lib/questions/index.js';
 import { unresolvedFeedbackOf } from '../../../lib/comments/summary.js';
 import {
   approvalFieldsOf,

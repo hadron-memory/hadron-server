@@ -47,7 +47,7 @@ import { isTeamChatLoc } from './teamChatLoc.js';
 import { participantAppIds } from './auth/appParticipation.js';
 import { ancestorLocs } from './nodeSubtreeLock.js';
 import { teamSpaceAudienceFilter } from './auth/teamSpace.js';
-import { NOT_DECISION_FAMILY_WHERE } from './decisions/index.js';
+import { NOT_DECISION_FAMILY_WHERE } from './questions/index.js';
 import { governedRoleWhereClauses } from './governedRole.js';
 
 /**

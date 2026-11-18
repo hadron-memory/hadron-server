@@ -40,7 +40,7 @@ import { randomUUID } from 'node:crypto';
  * its own (#1194 is this change's draft ancestor).
  */
 
-import { refuseUnderDecisionLog } from './decisions/index.js';
+import { refuseUnderDecisionLog } from './questions/index.js';
 import { sessionKeyReleasedHint } from './sessionKeyCache.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../generated/prisma/index.js';

@@ -116,7 +116,7 @@ import { agentOfferReadinessFieldResolvers } from './resolvers.agentOfferReadine
 import { agentClonedFromFieldResolvers } from './resolvers.agentClonedFrom.js';
 import { signingFieldResolvers, signingMutations, signingQueries } from './resolvers.signing.js';
 import { commentFieldResolvers, commentMutations, commentQueries } from './resolvers.comments.js';
-import { decisionFieldResolvers, decisionMutations, decisionQueries } from './resolvers.decisions.js';
+import { decisionFieldResolvers, decisionMutations, decisionQueries } from './resolvers.questions.js';
 import { specDocumentQueries } from './resolvers.specDocument.js';
 import {
   specCorpusMintMutations,

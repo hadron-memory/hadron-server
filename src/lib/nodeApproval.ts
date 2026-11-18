@@ -1,6 +1,6 @@
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from './comments/index.js';
-import { DECISION_LOG_ROLE, isDecisionFamilyRole } from './decisions/index.js';
+import { DECISION_LOG_ROLE, isDecisionFamilyRole } from './questions/index.js';
 import { computeApprovalHash, type ApprovalHashFields } from './approvalHash.js';
 import type { EncryptionKey } from './crypto.js';
 import { decryptNodeFieldsWithKey } from './nodeCrypto.js';

@@ -8,7 +8,7 @@ import { assertIncludesWritable, prospectiveNodeId, includeRefusalCode, storedIn
 import { runAsSystem } from '../../lib/requestActor.js';
 import { createDecipheriv } from 'crypto';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
-import { isDecisionFamilyRole } from '../../lib/decisions/index.js';
+import { isDecisionFamilyRole } from '../../lib/questions/index.js';
 import { hardDeleteThreadsOfTargets } from '../../lib/comments/lifecycle.js';
 import { GraphQLError } from 'graphql';
 import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../lib/specCorpus.js';

@@ -50,7 +50,7 @@
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../generated/prisma/index.js';
 import { hasSpecMarker } from './specMint.js';
-import { decisionContainedError, memoryHoldsDecisions } from './decisions/index.js';
+import { decisionContainedError, memoryHoldsDecisions } from './questions/index.js';
 
 /**
  * #1591 — the permanence policy: is minted-spec permanence enforced at all?

@@ -23,7 +23,7 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from './id.js';
 import { clearNodeAuthorship } from './nodeAuthorship.js';
 import { normalizeRole } from './enforceNodeSchema.js';
-import { isDecisionFamilyRole } from './decisions/index.js';
+import { isDecisionFamilyRole } from './questions/index.js';
 import { computeApprovalHash } from './approvalHash.js';
 import { newestApprovedRevisionOf } from './nodeApproval.js';
 import { includeHistoryClient, type IncludeHistoryTransaction } from './includes/includeHistoryFence.js';

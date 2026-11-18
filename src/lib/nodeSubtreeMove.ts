@@ -58,7 +58,7 @@ import { assertBootPromptWriteAllowed } from './bootPrompt.js';
 import { resyncDerivedIncludesForNodes } from './includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from './nodeRoleWriters.js';
 import { COMMENT_NODE_TYPE, COMMENTABLE_CLASSES, commentError, commentGovernedError } from './comments/index.js';
-import { decisionContainedError, isDecisionFamilyRole, refuseUnderDecisionLog } from './decisions/index.js';
+import { decisionContainedError, isDecisionFamilyRole, refuseUnderDecisionLog } from './questions/index.js';
 import { deriveEdgeLoc } from './edgeLoc.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockNodeForDelete } from './nodeSubtreeLock.js';
 import type { Prisma } from '../generated/prisma/index.js';
