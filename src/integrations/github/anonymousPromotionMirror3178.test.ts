@@ -76,7 +76,7 @@ let appContextId: string;
 const appCtx = (): Context => ({ db, appId: appContextId, roles: [] });
 const userCtx = (): Context => ({ db, userId: ownerId, roles: [] });
 const promote = () => withTestOperationKey(dataKey, appContextId, () =>
-  resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'promotion-owner-3178' }, appCtx()));
+  resolvers.Mutation.linkMemoryToUser({}, { memoryRef: memoryId, externalUserId: 'promotion-owner-3178' }, appCtx()));
 const refs = (): MirrorObligationRef[] => [{ nodeId, kind: 'WRITE' }];
 const mirror = (mutate: Parameters<typeof withMirrorCheckout>[1] = vi.fn(() => {})) =>
   withMirrorCheckout({ memoryId, commitSubject: '3178 probe', logPrefix: '[3178]', obligations: refs() }, mutate);
@@ -109,7 +109,7 @@ beforeEach(async () => {
   // REACHABILITY LEG — the real gate path an org OWNER uses to put a source on
   // the anonymous scratch memory. If a future rule closes this, this line goes
   // red and the whole premise must be re-derived, not worked around.
-  await memoryMutations.updateMemory({}, { id: memoryId, source: 'https://github.com/synthetic/promotion3178' }, userCtx());
+  await memoryMutations.updateMemory({}, { ref: memoryId, source: 'https://github.com/synthetic/promotion3178' }, userCtx());
   expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).source).toBe('https://github.com/synthetic/promotion3178');
   localPath = join(fixture.root, org.urn, 'anon3178');
   mkdirSync(join(localPath, '.git'), { recursive: true });

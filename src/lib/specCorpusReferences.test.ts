@@ -417,8 +417,8 @@ describe('former URNs use live-address precedence (@codex P2 on #1453)', () => {
 
   it('does not choose arbitrarily among multiple live aliases for one former address', async () => {
     const formerUrn = draft.urn;
-    const squatter = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs-draft' }, as());
     await resolvers.Mutation.updateMemory(null, { ref: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const squatter = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs-draft' }, as());
     const address = `${formerUrn}:pas:500`;
     await db.urnAlias.createMany({ data: [feature.id, rule.id].map((entityId) => ({
       urn: address, entityType: 'NODE' as const, entityId, reason: 'RENAME' as const,
@@ -452,8 +452,8 @@ describe('former URNs use live-address precedence (@codex P2 on #1453)', () => {
 
   it('finds a former holder’s moved-node alias under that holder’s current memory URN', async () => {
     const formerUrn = draft.urn;
-    const holder = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs-draft' }, as());
     await resolvers.Mutation.updateMemory(null, { ref: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const holder = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs-draft' }, as());
     expect(holder.urn).toBe(formerUrn);
     await resolvers.Mutation.updateMemory(null, { ref: holder.id, urn: 'former-holder-renamed' } as never, as());
     const holderUrn = (await db.memory.findUniqueOrThrow({ where: { id: holder.id } })).urn;
@@ -479,8 +479,8 @@ describe('former URNs use live-address precedence (@codex P2 on #1453)', () => {
 
   it('uses a deleted historical holder only to translate a live moved-node alias', async () => {
     const formerUrn = draft.urn;
-    const holder = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs-draft' }, as());
     await resolvers.Mutation.updateMemory(null, { ref: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const holder = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs-draft' }, as());
     await resolvers.Mutation.updateMemory(null, { ref: holder.id, urn: 'deleted-holder-renamed' } as never, as());
     const holderUrn = (await db.memory.findUniqueOrThrow({ where: { id: holder.id } })).urn;
     const foreign = await db.node.create({ data: {
@@ -936,8 +936,8 @@ describe('an ambiguous citation blocks the mint as MISSING (#1505)', () => {
   /** Rename the draft away and let a new memory take its former URN; return that former URN and the squatter. */
   const vacateFormerUrn = async () => {
     const formerUrn = draft.urn;
-    const squatter = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs-draft' }, as());
     await resolvers.Mutation.updateMemory(null, { ref: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const squatter = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs-draft' }, as());
     expect(squatter.urn).toBe(formerUrn);
     return { formerUrn, squatter };
   };
