@@ -7270,7 +7270,8 @@ model AgentTickerTemplate {
 /// One worker's subscription to one ticker: it says that the ticker's ticks may wake this worker. Without a live
 /// subscription a ticker never wakes a worker.
 ///
-/// Relationships: joins Ticker and Worker and is deleted with either. The worker must belong to the ticker's
+/// Relationships: joins Ticker and Worker. Only the hard delete of the ticker or the worker row removes it;
+/// otherwise a subscription is ended and its row is kept (see Behaviour). The worker must belong to the ticker's
 /// App (trigger `trg_ticker_subscriptions_same_app`, prisma/ticker-invariants.sql). `viaGrantId` and
 /// `viaGrantPersonId`, and their `ended…` twins, are plain ids that record that the change was made by a worker
 /// using its AppGrant, and which person was behind that worker's session.
@@ -7324,7 +7325,8 @@ model TickerSubscription {
 /// - `pausedUntil` belongs to the worker, not to a session: it covers every session of that worker. A paused
 ///   worker is due no wake (hrn:node:hadronmemory.com:specs:cor:agt:080:11).
 /// - `exemptEndedAt` records when a running pause was ended on purpose, because clearing `pausedUntil` erases
-///   the only time that said when the pause ended.
+///   the only time that said when the pause ended. The name comes from what a pause is to the alarms: a paused
+///   worker is exempt from them, and this is when that exemption ended.
 /// - Changed by the worker itself, its holder or whoever manages the App. Read by the due-wake calculation, the
 ///   worker's check status and the roster.
 ///
@@ -7891,7 +7893,7 @@ enum UserDeletionNoticeStatus {
 /// The pending email that tells a user their account was erased by an administrator. The row is written with
 /// the erasure and sent afterwards, so that the notice is not lost if sending fails at that moment.
 ///
-/// Relationships: one row per UserDeletionAudit (`auditId` is the primary key).
+/// Relationships: one row per UserDeletionAudit (`auditId` is the primary key), deleted with that audit row.
 ///
 /// Behaviour:
 /// - Written in the erasure's transaction, next to the audit row. The recipient's address is read before the
@@ -7967,7 +7969,9 @@ enum ServedPromptPointerLevel {
 /// Relationships: the owner is exactly one of a Session (`sessionId`, kind `BIND`), a chat node (`chatId`, kind
 /// `CHAT`) or an AppRun (`runId`, kind `RUN`), and the record is deleted with its owner. Those foreign keys, and
 /// the rule that the record's App, Agent and worker are its owner's own, are declared in SQL
-/// (prisma/served-prompt-invariants.sql), not in this model. `compiledNodeId` is deliberately not a foreign key:
+/// (prisma/served-prompt-invariants.sql), not in this model. `agentId`, and `workerId` when a worker was served,
+/// say whose prompt it was; `pointerLevel` says which boot-prompt pointer supplied it: the worker's own, the
+/// installation's (`APP_AGENT`) or the Agent's. `compiledNodeId` is deliberately not a foreign key:
 /// the record outlives a compiled node that is deleted and then shows the revision as pruned.
 ///
 /// Behaviour:
@@ -8496,6 +8500,7 @@ model ChatRootEngineState {
 /// - `signature` is the GrantSignature that activated it. The grant has many GrantSigningRequest and
 ///   GrantSignature rows, and its history is in GrantEvent.
 /// - `requestedByUserId`, `requestedByWorkerId` and `requestedBySessionId` say who asked for it, as plain ids.
+///   (GrantSigningRequest names the same idea `requester…`; both spellings are the real column names.)
 ///
 /// Behaviour:
 /// - Creating a grant only asks for one. `createGrant` (src/lib/grants/create.ts) is the one writer. Its
