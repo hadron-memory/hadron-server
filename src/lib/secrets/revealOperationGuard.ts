@@ -15,20 +15,35 @@ export interface RevealOperationInfo {
   fragments: Readonly<Record<string, FragmentDefinitionNode>>;
 }
 
+/**
+ * How many `revealSecret` fields the operation selects, CAPPED at 2 (the guard only asks "more than one?"). Each named fragment is
+ * counted once and memoized, and the walk stops the moment the count reaches 2: a valid, acyclic document that reuses fragments in
+ * layers (F spreads G twice, G spreads H twice, ...) would otherwise cost 2^depth visits, and this runs BEFORE the rate limit.
+ * Spreads still count per spread: two spreads of one fragment holding one reveal are two fields. Validation has already refused a
+ * fragment cycle; the `visiting` set is only a backstop so a cycle can never loop here.
+ */
 export function countRevealFields(info: RevealOperationInfo): number {
-  const seen = new Set<string>();
+  const memo = new Map<string, number>();
+  const visiting = new Set<string>();
   const walk = (set: SelectionSetNode): number => {
     let n = 0;
     for (const sel of set.selections) {
-      if (sel.kind === Kind.FIELD) { if (sel.name.value === 'revealSecret') n += 1; continue; }
-      if (sel.kind === Kind.INLINE_FRAGMENT) { n += walk(sel.selectionSet); continue; }
-      // A named fragment counts once per spread: two spreads of one fragment are two fields.
-      const frag = info.fragments[sel.name.value];
-      if (!frag) continue;
-      if (seen.has(sel.name.value)) { n += walk(frag.selectionSet); continue; }
-      seen.add(sel.name.value);
-      n += walk(frag.selectionSet);
+      if (sel.kind === Kind.FIELD) { if (sel.name.value === 'revealSecret') n += 1; }
+      else if (sel.kind === Kind.INLINE_FRAGMENT) n += walk(sel.selectionSet);
+      else n += fragmentCount(sel.name.value);
+      if (n >= 2) return 2;
     }
+    return n;
+  };
+  const fragmentCount = (name: string): number => {
+    const known = memo.get(name);
+    if (known !== undefined) return known;
+    const frag = info.fragments[name];
+    if (!frag || visiting.has(name)) return 0;
+    visiting.add(name);
+    const n = walk(frag.selectionSet);
+    visiting.delete(name);
+    memo.set(name, n);
     return n;
   };
   return walk(info.operation.selectionSet);

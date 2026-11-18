@@ -132,7 +132,11 @@ async function revealAs(ctx: Context, clientId: string, holder: Holder): Promise
     const code = e instanceof GraphQLError ? String(e.extensions?.code ?? '') : '';
     const k = known as { ownerId: string; secretId: string; secretName: string } | null;
     if (k && code) {
-      await recordSecretEvent(ctx.db as never, { ...k, kind: 'REVEAL', outcome: code, actor }).catch(() => undefined);
+      // The caller still gets the uniform refusal, but a lost audit row is an operational fault the owner cannot see: log it (ids and the
+      // error only, never a value) so it is not silent.
+      await recordSecretEvent(ctx.db as never, { ...k, kind: 'REVEAL', outcome: code, actor }).catch((auditError: unknown) => {
+        console.error('[revealSecret] audit write failed', { secretId: k.secretId, ownerId: k.ownerId, outcome: code, error: auditError });
+      });
     }
     throw e;
   }
