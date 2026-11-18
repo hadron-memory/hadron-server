@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { readdirSync, readFileSync } from 'node:fs';
 import { buildSchema, getNullableType, isListType, parse, type GraphQLObjectType } from 'graphql';
 import { getComplexity, simpleEstimator } from 'graphql-query-complexity';
-import { createServer } from '../../server.js';
+import { createServerOnCleanDb } from '../../test/startServerFixture.js';
 import { mintUserApiKey } from '../../middleware/auth.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -74,7 +74,7 @@ describe.each(surfaces)('%s admission cost', (_key, q) => {
 describe('over real HTTP at the production ceiling', () => {
   let server: Server, url: string, key: string;
   beforeAll(async () => {
-    server = createHttpServer(await createServer());
+    server = createHttpServer(await createServerOnCleanDb());
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/graphql`;
     await cleanDb(db);
