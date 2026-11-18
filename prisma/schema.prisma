@@ -195,7 +195,8 @@ enum AgentLifecycle {
   SHORT_LIVED
 }
 
-/// #4291 (S14 of #4229; decision record run-settings-are-not-worker-identity, settled A) — the generic effort scale of a
+/// #4291 (S14 of #4229; decision record run-settings-are-not-worker-identity, settled A) — the generic effort scale
+/// of a
 /// run. LOW..MAX are requests the launcher maps to the family's own values (hadron-cli#2199); UNSET is the family's
 /// default. NOT_APPLICABLE is REPORT-ONLY: a session whose family has no effort control records it, and so may the
 /// worker's last-used record; a task never carries it, and a start that falls back to it sends UNSET.
@@ -209,7 +210,8 @@ enum EffortLevel {
   NOT_APPLICABLE
 }
 
-/// #4224 (S3 of #4229) — the App's sweep switch. OFF (default): the host sweep acts on no worker and every desired-state
+/// #4224 (S3 of #4229) — the App's sweep switch. OFF (default): the host sweep acts on no worker and every
+/// desired-state
 /// row says SWEEP_OFF. OBSERVE: the sweep compares and reports. APPLY: it also repairs.
 enum SweepMode {
   OFF
@@ -753,8 +755,8 @@ model Organization {
 /// written in the same transaction that sets them, so the two stay equal.
 ///
 /// Behaviour: `name` is unique across every status. The unique index is a plain, case-sensitive one, and no
-/// database constraint forces lower case: names differing only in case are kept apart because every writer
-/// (`mintPrincipal` and the backfills) lower-cases the name before it writes.
+/// database constraint forces lower case: two names that differ only in case never arise because every
+/// writer (`mintPrincipal` and the backfills) lower-cases the name before it writes (#4400 asks for a constraint).
 /// A name that is given up is kept as a tombstone (`status = 'released'`, owner
 /// detached) and is never handed out again, so an old URN can never come to mean a different owner. Words the
 /// platform keeps for itself (for example `hadron`, `platform`) are rows with `status = 'reserved'`.
@@ -846,7 +848,8 @@ model OrgMember {
 ///
 /// Git-backed memories: when `source` is set the memory is synced from a Git repository. Only a memory owned by
 /// an organization is synced; a user-owned memory is refused (src/integrations/github/syncGraphFromGithub.ts).
-/// The root `node.yaml` of the repository is the memory manifest: it declares the memory's URN and marketplace metadata, and an import
+/// The root `node.yaml` of the repository is the memory manifest: it declares the memory's URN and marketplace
+/// metadata, and an import
 /// creates or updates this row from it. The organization part of the URN must match an Organization that exists
 /// on the server.
 /// To read the repository the server first uses the owning organization's GitHub App installation to mint a token
@@ -1348,7 +1351,8 @@ enum NodeContentValidationReporterKind {
 ///   further values of its own, for example `task` and `compiled-boot-prompt`.
 /// - `objectType` names the collection the node is an instance of, in a memory that declares a schema.
 /// - `role` says what the node is for. It is an open string; a small closed subset of its values routes writes
-///   to that kind's own path, and every other value has no effect.
+///   to that kind's own path. No platform behaviour depends on any other value, apart from the role rules a
+///   memory declares for itself (NodeRoleRule).
 ///
 /// Behaviour:
 /// - Content: `name`, `abstract` and `content` are the text. `abstractOriginHash` records which content the
@@ -1945,7 +1949,8 @@ model PendingEdge {
   @@map("pending_edges")
 }
 
-/// #1156 / hrn:node:hadronmemory.com:specs:cor:dmo:070:05: only an end writer supplies a cause; legacy NULL stays unknown.
+/// #1156 / hrn:node:hadronmemory.com:specs:cor:dmo:070:05: only an end writer supplies a cause; legacy NULL stays
+/// unknown.
 enum SessionEndReason {
   ended
   superseded
@@ -2336,7 +2341,8 @@ model UsageActivityRollupState {
 ///   (hrn:node:hadronmemory.com:specs:cor:agt:040:07).
 /// - `usesTasks`, `lifecycle`, `resetContextAfterTask` and `contextCap` apply to every Worker cast from the Agent:
 ///   whether its workers work from tasks (`usesTasks` false means they always count as having one, so they are
-///   expected to check in every period), whether a worker's process runs always or only while it has a task, and
+///   expected to check their team channel every `App.deliveryCheckPeriodSeconds`), whether a worker's process runs
+///   always or only while it has a task, and
 ///   when its host is asked to reset its context.
 /// - `personaRole` is descriptive metadata; no server behaviour depends on it.
 ///
@@ -2896,8 +2902,10 @@ model OrgMemberInvitation {
 ///   of activations. With `maxActivations = 1` it is single-use.
 /// - Locked identity: when `email` or `githubUsername` is given, the person signing up must match it, which
 ///   also makes the invitation single-use.
-/// - Roles: `userRole` (a global role, usually none) cannot be higher than the sender's, and `memberRole` cannot
-///   be higher than the sender's OrgMember role in the target organization.
+/// - Roles: `userRole` (a global role, usually none) and `memberRole` are meant not to exceed the sender's own.
+///   What the code checks when an organization invitation is created is that the caller has the ADMIN role in
+///   that organization (src/api/graphql/schema/resolvers.mutation.org.ts); it compares no role with a sender's,
+///   so an invitation with no sender is bounded by that check alone.
 /// - Quota: how many people a user may bring in is tracked on `User.maxReferrals`, not here. The new user's own
 ///   `maxReferrals` is set during onboarding.
 /// - Over the limit: a person who opens the link after the activations are used up is told the invitation has
@@ -3257,7 +3265,9 @@ model NodeContentValidationReport {
 /// Behaviour: `rawKeyEncrypted` is meant to hold the key under AES-256-GCM and `consumed` to record that it was
 /// shown. No code path creates or reads a row, and no `/setup/info` route exists (checked with a search of
 /// src/ for the model and the route). The only code that touches the table is the deletion of a user's account,
-/// which removes that user's row (src/controller/operations/deleteUser.ts).
+/// which removes that user's row (src/controller/operations/deleteUser.ts), and the merge of two accounts, which
+/// moves the source account's row to the target or drops it when the target has one
+/// (src/controller/operations/mergeUsers.ts).
 ///
 /// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:040:06.
 model PendingSetup {
@@ -3395,7 +3405,8 @@ model ConnectionFlow {
 ///   nothing.
 /// - The connection's organization and the App's organization may differ; the grant row alone decides.
 ///
-/// Background: #593.
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:080:04 (operations on a connection are for its owner, with scoped
+/// delegation to one App through a grant; an operation with no scope mapping stays owner-only). Background: #593.
 model ConnectionGrant {
   id              String    @id @default(cuid())
   connectionId    String    @map("connection_id")
@@ -3479,7 +3490,8 @@ model PrincipalGrant {
 /// Behaviour: the row holds identity only: the workspace (`teamId`, `teamName`), the bot's two Slack ids
 /// (`botUserId` for messages it sends, `botId` for the events it causes; the loop filter needs both), and
 /// `toolConnectionId`, the handle of the connection in the Slack capability tool. The Slack tokens are stored
-/// encrypted in that tool and never appear in a GraphQL field. `toolConnectionId` is unique, because incoming
+/// encrypted in that tool and never appear in a GraphQL field
+/// (hrn:node:hadronmemory.com:specs:cor:int:030:01). `toolConnectionId` is unique, because incoming
 /// events are routed by it. One live connection per organization and workspace is enforced by a partial unique
 /// index in raw SQL (`slack_connections_org_team_active_uniq`), so a soft-deleted row does not block connecting
 /// the workspace again.
@@ -3829,7 +3841,8 @@ model WaitingListItem {
 ///   its own end users.
 /// - Data: the App's Memories (app-class, and personal memories per user), Sessions, UsageEvents, AppLogEntry
 ///   rows, AiServiceConfigs (which override an Agent's defaults for this App) and `chatbotAiConfig`.
-/// - Team: Workers (the named castings of installed Agents), AgentTasks, Tickers, AppGrant and Grant rows, host registrations and
+/// - Team: Workers (the named castings of installed Agents), AgentTasks, Tickers, AppGrant and Grant rows, host
+///   registrations and
 ///   operations, alarms and their episodes, stop signals. `defaultChannel` is the App's team chat.
 ///
 /// Behaviour:
@@ -4149,11 +4162,6 @@ model AppKey {
   @@map("app_keys")
 }
 
-// 008-agent-installation (2026-05-02): User↔App membership join.
-// Per-User lifecycle is reserved for a future spec — there is no
-// revoked_at / expires_at column. Removing a member is a row delete.
-// The user's personal-class Memory at (app_id, user.id) survives the
-// row delete (orphan retention per FR-015).
 /// The membership of one User in one App, with the member's role there. It is what makes a person a member of an
 /// App.
 ///
@@ -4195,11 +4203,6 @@ model AppMember {
   @@map("app_members")
 }
 
-// 008-agent-installation (2026-05-02): Org↔Agent license. Authorizes
-// (a) creating an App in org_id that uses agent_id, and (b) bundling
-// agent_id as an AgentImport in another Agent that org_id owns. Sibling
-// to AgentSubscription (User↔Agent, from 005); shares the lifecycle
-// shape and the isLifecycleActive predicate.
 /// An Organization's permission to use an Agent: to install it in the organization's Apps, and to import it into
 /// Agents the organization owns. It is the organization-level counterpart of AgentSubscription, which is a
 /// user's permission to use an Agent.
@@ -4243,13 +4246,6 @@ model AgentOrgGrant {
   @@map("agent_org_grants")
 }
 
-// 008-agent-installation (2026-05-02): directed Agent→Agent dependency
-// edge. v1 enforces 1-level imports only (the dep itself must not be
-// a parent of any AgentImport). The composite FK to AgentOrgGrant is
-// the Builder-grant authorizing this import — the spec named this
-// agent_subscription_id (FR-005); R-2 renamed it to the new sibling
-// table since the universal-grant role lives on AgentOrgGrant for
-// org-level grants, not AgentSubscription (which stays User↔Agent).
 /// A dependency of one Agent on another: the parent Agent imports the other Agent, so that installing the parent
 /// brings the imported Agent with it. It is how a suite of agents is assembled from existing ones.
 ///
@@ -4301,12 +4297,6 @@ model AgentImport {
   @@map("agent_imports")
 }
 
-// User-side license expressing "this user is authorized to use this agent."
-// Auto-provisioned on first user-attributed contact (per
-// `controller/operations/ensureAgentSubscription.ts`); revocable by an
-// ADMIN/OWNER of the Agent's owning org. Spec: 005-agent-subscription
-// (2026-04-30). Authorizes the cross-org write from the Agent into the
-// user's personal-class Memory.
 /// A User's permission to use an Agent. It is what allows the Agent to write to that user's personal memory, and
 /// it is the user-level counterpart of AgentOrgGrant.
 ///
@@ -4971,8 +4961,8 @@ model OAuthClient {
 /// - Single use: redemption claims the row with a guarded update on `redeemedAt` being null, so of two concurrent
 ///   attempts only one succeeds. A wrong PKCE verifier or a wrong resource also sets `redeemedAt`, so the same code
 ///   cannot be tried again.
-/// - When a SignIn is ended, its unredeemed codes are marked redeemed (`endSignInsCompletedBy`). The code's
-///   root, the SignIn in `signInId`, never changes after creation (a trigger in prisma/signin-invariants.sql).
+/// - When a SignIn is ended, its unredeemed codes are marked redeemed (`endSignInsCompletedBy`). The
+///   `signInId` reference never changes after creation (a trigger in prisma/signin-invariants.sql).
 /// - There are no `updatedAt` or `deletedAt` columns: `redeemedAt` and `expiresAt` carry the whole lifecycle.
 ///
 /// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:070:01. Background (history, not law): the Spec Kit spec
@@ -5039,7 +5029,7 @@ model AuthCode {
 ///   bound to the person its proof step proved (`kind` `sign`). Every other ceremony leaves these columns null. A
 ///   CHECK allows exactly these shapes, and a trigger refuses a second binding and a binding after consumption
 ///   (prisma/passkey-registration-invariants.sql).
-/// - A job deletes a retired ceremony 30 days after the later of its expiry and its consumption
+/// - A job deletes a ceremony whose step is over (consumed or expired) 30 days after the later of the two
 ///   (src/jobs/sweepPasskeyCeremonies.ts, `PASSKEY_CEREMONY_RETENTION_SECONDS`). Credentials are never deleted by it.
 ///
 /// Background: #1631, #1632, #3122, #3649.
@@ -5084,7 +5074,8 @@ model PasskeyCeremony {
 ///   `leaseUntil`, `claimToken`), and the number of tries is capped. The notice ends as sent (`sentAt`) or failed
 ///   (`failedAt`), each set once.
 /// - A user with no email address, or a deployment with no mail sender, settles the notice as failed at once.
-///   Deleting the user's account settles an unsent notice as failed and clears its token.
+///   Erasing the user's account (`deleteUser`, which keeps the user row) settles an unsent notice as failed and
+///   clears its token.
 /// - `seenAt` is for the in-app notice. The trigger lets it be set once; no code sets it today.
 ///
 /// Rule: hrn:node:hadronmemory.com:specs:cor:aut:040:02. Background: #1631.
@@ -5252,7 +5243,8 @@ model PendingEmailSignIn {
 ///   (hrn:node:hadronmemory.com:specs:cor:aut:040:06). `counter` and `lastUsedAt` move forward on use and never
 ///   backwards.
 /// - The trigger keeps the credential id, public key, owner and label unchanged and writes the times from the
-///   platform clock. One change to the label is allowed: deleting the owner's account replaces it with "Erased
+///   platform clock. One change to the label is allowed: erasing the owner's account (`deleteUser`, which
+///   keeps the user row, so the Restrict relation holds) replaces it with "Erased
 ///   passkey" and blanks the cancel IP address and user agent. The record itself stays, so that old signatures can
 ///   still be verified.
 ///
@@ -5603,7 +5595,9 @@ model SecretVersion {
 /// One entry in the audit trail of App secrets: who did what to which secret, when, and with what outcome. It is how
 /// an auditor can list every store and change of a secret after the fact.
 ///
-/// Relationships: none by foreign key. `ownerId`, `secretId`, `actorUserId`, `workerId`, `sessionId` and `runId` are
+/// Relationships: none by foreign key. `ownerType` is always `app` today and `ownerId` is that App's id. `clientId`
+/// is a column for the calling client's id that no code sets today. `ownerId`, `secretId`, `actorUserId`,
+/// `workerId`, `sessionId` and `runId` are
 /// plain values, so the trail outlives the secret and its App.
 ///
 /// Behaviour:
@@ -6945,7 +6939,8 @@ model MemoryConfigTemplateRule {
 /// src/api/graphql/schema/resolvers.memoryConfigOrgDefault.ts). `field` is `authorTask`, `validationTask` or
 /// `descriptionNode`. The row stores no task URN and no state: a read recomputes what the caller may see from
 /// `templateRuleId`. It is readable only by those who may manage the memory's config. No application code
-/// updates or deletes a row.
+/// updates or deletes a row. `reason` says why the default was skipped; the one value written today is
+/// `REFERENCE_UNAVAILABLE` (the referenced task is deleted, unreadable to the organization, or not a task).
 ///
 /// Background: #3426.
 model MemoryConfigDefaultSkip {
@@ -7222,7 +7217,8 @@ enum GitMirrorObligationKind {
   @@map("git_mirror_obligation_kind")
 }
 
-/// FAILED = retryable failure; NOT_CLONED = no local clone; EXHAUSTED = sweep cap reached (ordinary writes still settle).
+/// FAILED = retryable failure; NOT_CLONED = no local clone; EXHAUSTED = sweep cap reached (ordinary writes still
+/// settle).
 enum GitMirrorObligationState {
   FAILED
   NOT_CLONED
@@ -7305,11 +7301,15 @@ model AutomationVersion {
 /// - `status` is `backlog`, `pending`, `started`, `finished` or `cancelled`. Whether a task is queued (pending
 ///   with no assignee, hrn:node:hadronmemory.com:specs:cor:agt:050:03) or waiting on its child tasks
 ///   (hrn:node:hadronmemory.com:specs:cor:agt:050:04) is worked out at read time and never stored.
-/// - `taskNumber` and `handle` (for example `AT3.405.16`) are given once at creation and never change.
+/// - `taskNumber` and `handle` (for example `AT3.405.16`) are given once at creation and never change. Each App
+///   has one reserved row, `AT0` ("No project"), which no operation changes; a task created with no parent and
+///   not as a project becomes its child (hrn:node:hadronmemory.com:specs:cor:agt:050:01).
+/// - The foreign key to the parent is NO ACTION: the database refuses to delete a task row that still has
+///   child rows.
 /// - `requirements` say which workers the matcher may choose for a task with no assignee.
 /// - The result (`resultOutcome`, `resultSummary`, `resultEvidence`, `resultFindings`) is set only when the
 ///   task is finished.
-/// - Tasks are created through `createAgentTask` and `cloneAgentTask`
+/// - Tasks are created through `createAgentTask`, `createAgentTasks` and `cloneAgentTask`
 ///   (src/api/graphql/schema/resolvers.agentTask.ts) and assigned by hand or by the matcher
 ///   (src/lib/agentTasks/matcher.ts). The stall evaluator (src/jobs/taskStallEvaluator.ts) reads open tasks to
 ///   raise alarms. What happens to a task is recorded as AgentTeamEvent rows.
@@ -7483,7 +7483,8 @@ model AgentTaskBlocker {
 
 /// The last number issued for the children of one parent task, or, with no parent, for the top-level tasks
 /// (the projects) of an App. A task's handle such as `AT3.405.16` is built from these numbers: each new task
-/// takes the next number under its parent.
+/// takes the next number under its parent. The reserved `AT0` row of an App is number 0, which no counter
+/// issues.
 ///
 /// Relationships: belongs to an App and is deleted with it. `parentTask` is the AgentTask whose children it
 /// counts, and the row is deleted with that task. `parentTaskId` null is the App's own counter for top-level
@@ -7760,6 +7761,8 @@ model DarkWorkerEpisode {
 /// - At most one open row per worker (partial unique index in prisma/coordinator-cadence-invariants.sql). The
 ///   episode ends only at the worker's next own assignment, and `endedAt` is that assignment's time. A lane
 ///   worker turning busy, or the worker being paused, does not end it, so neither raises a second alarm.
+/// - While the worker is exempt the 60 minutes keep running; only the judgment is skipped. A worker that comes
+///   back after a long pause without having assigned anything can be judged late at once.
 /// - AlarmEscalationEnd and the wake schedule read `endedAt` to stop the alarm's escalation.
 ///
 /// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:31. Background: #2763.
@@ -7793,8 +7796,9 @@ model CoordinatorCadenceEpisode {
 /// and opens a CoordinatorCadenceEpisode. The 60 minutes run from the latest of three moments: the worker's
 /// last own assignment, the start of its first session, and `observedAt` in this row.
 ///
-/// A worker whose team is paused, that is paused itself or that is under a stop signal is not judged late; a
-/// worker with no live session still is.
+/// A worker is not judged late while its team is paused, it is paused itself, or it is under a stop signal.
+/// Having no live session is not an exemption. While the worker is exempt the 60 minutes keep running; only the
+/// judgment is skipped.
 ///
 /// Why the evaluator needs the row: the first two moments can be missing or old. A worker that never assigned
 /// a task and never had a session has neither, and a worker that existed before the evaluator first ran can
@@ -8372,8 +8376,9 @@ model HostOperation {
 ///
 /// Behaviour:
 /// - Written by `writeResumeClaim` (src/lib/resumeClaims.ts), which the session mutations in
-///   src/api/graphql/schema/resolvers.mutation.session.ts call (`createResumeClaim` is one). A reset that keeps
-///   the session open (a shed) and one that ends it with a handoff (a rotation) both write one.
+///   src/api/graphql/schema/resolvers.mutation.session.ts call (`createResumeClaim` is one). Two kinds of
+///   reset write one. A shed clears the worker's context and keeps its session open. A rotation ends the session
+///   with a handoff, and the worker starts a new one.
 /// - It lives 60 seconds from the write (`expiresAt`, RESUME_CLAIM_TTL_MS), judged on the database clock.
 /// - Single use: redeeming is one guarded update that sets `consumedAt`, so of two racing redemptions exactly
 ///   one wins. `resumedSessionId` is the session the redemption bound: the claimed one when it was still open,
@@ -8954,7 +8959,8 @@ model WorkerWakeAck {
 /// - `respondedAt` is when the worker last checked a channel the ticker covers after that wake was issued, and
 ///   null until it does. The channel check writes it (src/lib/channelReadState.ts) and a newer delivery clears
 ///   it, unless the response was made at or after the newer wake was issued, in which case it is kept as that
-///   wake's response (src/lib/tickers/acknowledge.ts). The worker's check status reads it to decide whether the worker is overdue
+///   wake's response (src/lib/tickers/acknowledge.ts). The worker's check status reads it to decide whether the
+///   worker is overdue
 ///   (hrn:node:hadronmemory.com:specs:cor:agt:100:03).
 /// - The due-wake calculation reads the row to find the oldest tick not yet acknowledged.
 ///
@@ -9640,8 +9646,6 @@ model AssetPublicLinkAudit {
   @@map("asset_public_link_audits")
 }
 
-// #2063 R1 / cor:dmo:150:07. Plaintext structural metadata, never source prose.
-// No target FK: a source's written address survives target/edge deletion.
 /// One include tag found in one node's text. An include is a reference to another node whose text is put in
 /// its place when the node is read. The row holds the tag's structure: where it points and what it asks for.
 /// The table is an index of who includes what, kept so that the pruning of old revisions can find the revisions
@@ -9691,8 +9695,6 @@ enum IncludeSourceCoverageState {
   NEEDS_AUTHORIZED_REWRITE
 }
 
-// Fingerprints describe STORED bytes (ciphertext when sealed); no plaintext copy.
-// Tombstones remain sources. Only an includer's purge cascades coverage away.
 /// The statement that one node's include tags were captured in full, and for which state of the node. A node
 /// with no tags gets a row too, so that "no rows in IncludeReference" can be told apart from "never looked at".
 ///
@@ -9735,8 +9737,6 @@ enum IncludeRetentionState {
   BLOCKED
 }
 
-// Singleton is absent/inactive until separately authorized maintenance verifies it.
-// R1 adds no activator, operator command, backfill or production caller.
 /// The single row that says whether the index of include tags (IncludeReference and IncludeSourceCoverage) is
 /// complete and may be relied on. Until it says so, nothing may use the index to decide which revisions to
 /// keep.
