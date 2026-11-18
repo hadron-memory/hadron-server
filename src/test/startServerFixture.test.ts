@@ -31,7 +31,7 @@ describe('createServerOnCleanDb (#3066)', () => {
     await retainForeignManifest('previous-file-3066', '5'.repeat(64));
     expect(readRateKeys().keys.has('previous-file-3066')).toBe(false);
     await expect(createServer()).rejects.toBeInstanceOf(RateConfigurationError); // the unhardened shape is red
-    await expect(createServerOnCleanDb()).resolves.toBeDefined();
+    expect(typeof await createServerOnCleanDb()).toBe('function'); // the Express app
     // The valid seeded state is restored, not stubbed: the manifest now names the real ring.
     expect((await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } })).keyIds).toEqual([readRateKeys().current]);
   });
@@ -57,6 +57,10 @@ describe('createServerOnCleanDb (#3066)', () => {
 describe('closeServerIfStarted (#3066)', () => {
   it('is a no-op when the server was never assigned, so the startup error stays primary', async () => {
     await expect(closeServerIfStarted(undefined)).resolves.toBeUndefined();
+  });
+
+  it('does not reject for a server that was created but never listened', async () => {
+    await expect(closeServerIfStarted(createHttpServer())).resolves.toBeUndefined();
   });
 
   it('closes a listening server', async () => {

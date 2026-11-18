@@ -1,26 +1,49 @@
 /**
  * #3066 source-shape guard. A worker's database clone keeps the previous file's rows, and the
  * app refuses to start over a retained rate-limit manifest its keyring cannot account for.
- * A test file that starts the app from `beforeAll` must clean the database first: through
- * `createServerOnCleanDb()` or its own `cleanDb(` earlier in the same hook. A raw
- * `createServer()` in `beforeAll` with no cleanup before it fails here.
+ * A test file that starts the app must clean the database first: through `createServerOnCleanDb()`
+ * or its own `cleanDb(` ahead of the start (earlier in the same hook for `beforeAll`, anywhere in the
+ * file otherwise: the per-test cleanup hook). Aliased imports, dynamic imports and starts inside `it` bodies or boot helpers are
+ * checked too. A textual guard: it cannot prove execution order, it makes the unsafe shapes loud.
  */
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-/** Blank comments and string/template bodies so a lookalike in prose cannot count. */
-export function stripNoise(src: string): string {
+/** Blank comments (and the bodies of string literals) so a lookalike in prose or data cannot count. */
+export function stripNoise(src: string, strings = true): string {
+  const blank = (m: string) => m.replace(/[^\n]/g, ' ');
   return src
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-    .replace(/(^|[^:'"`\\])\/\/[^\n]*/g, (m, p) => p + ' '.repeat(m.length - p.length));
+    .replace(/\/\*[\s\S]*?\*\//g, blank)
+    .replace(/(^|[^:'"`\\])\/\/[^\n]*/g, (m, p: string) => p + ' '.repeat(m.length - p.length))
+    .replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g, (m) => (strings ? m[0] + blank(m.slice(1, -1)) + m[0] : m));
 }
 
-/** Raw `createServer(` calls made directly inside a `beforeAll(` hook, with no `cleanDb(` before them. */
+/** Names this file binds the app's `createServer` to (the plain name, an alias, or a dynamic import). */
+function appStarters(src: string): string[] {
+  const names: string[] = [];
+  const fromImport = /import\s*\{([^}]*)\}\s*from\s*'[^']*\/server\.js'/g;
+  const fromDynamic = /const\s*\{([^}]*)\}\s*=\s*await\s+import\(\s*'[^']*\/server\.js'\s*\)/g;
+  for (const re of [fromImport, fromDynamic]) {
+    for (let m = re.exec(src); m; m = re.exec(src)) {
+      for (const part of m[1]!.split(',')) {
+        const [from, to] = part.trim().split(/\s+as\s+|\s*:\s*/);
+        if (from === 'createServer') names.push(to ?? from);
+      }
+    }
+  }
+  return names;
+}
+
+/**
+ * Line numbers of raw app starts with no cleanup ahead of them: a start inside a `beforeAll(` hook needs
+ * `cleanDb(` earlier in that hook; a start anywhere else (an `it` body, a boot helper called from a hook)
+ * needs `cleanDb(` somewhere in the file (its per-test cleanup hook), and a file that has none is flagged.
+ */
 export function uncleanedStarts(source: string): number[] {
   const src = stripNoise(source);
-  if (!/import[^;]*\bcreateServer\b[^;]*from\s+['"][^'"]*\/server\.js['"]|const\s*\{[^}]*\bcreateServer\b[^}]*\}\s*=\s*await import\(\s*['"][^'"]*\/server\.js['"]/.test(src)) return [];
   const hits: number[] = [];
+  const hooks: Array<[number, number]> = [];
   const hook = /\bbeforeAll\(/g;
   for (let m = hook.exec(src); m; m = hook.exec(src)) {
     let depth = 0, end = m.index + m[0].length - 1;
@@ -28,14 +51,27 @@ export function uncleanedStarts(source: string): number[] {
       if (src[end] === '(') depth++;
       else if (src[end] === ')' && --depth === 0) break;
     }
-    const body = src.slice(m.index, end);
-    const call = /(?<![\w.])createServer\(/.exec(body);
-    if (!call) continue;
-    if (/\bcleanDb\(/.test(body.slice(0, call.index))) continue;
-    hits.push(src.slice(0, m.index + call.index).split('\n').length);
+    hooks.push([m.index, end]);
+  }
+  for (const name of appStarters(stripNoise(source, false))) {
+    const call = new RegExp(`(?<![\\w.$])${name}\\s*\\(`, 'g');
+    for (let m = call.exec(src); m; m = call.exec(src)) {
+      const at = m.index;
+      if (/\bimport\s*\{[^}]*$/.test(src.slice(Math.max(0, at - 200), at))) continue;
+      const inHook = hooks.find(([from, to]) => at > from && at < to);
+      // A hook start needs the cleanup ahead of it in that hook; a start run per test (an `it` body or a boot
+      // helper) follows the file's own cleanup hook, so any cleanup in the file counts.
+      const scope = inHook ? src.slice(inHook[0], at) : src;
+      if (!/\b(?:cleanDb|createServerOnCleanDb)\(/.test(scope)) hits.push(src.slice(0, at).split('\n').length);
+    }
   }
   return hits;
 }
+
+/** Files exempt from the scan, each with its reason. */
+const EXEMPT = [
+  'startServerFixture.guard3066.test.ts',
+];
 
 function testFiles(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -47,18 +83,25 @@ function testFiles(dir: string, out: string[] = []): string[] {
 }
 
 describe('startServerFixture guard (#3066)', () => {
-  it('flags a raw createServer in beforeAll and accepts a cleaned start (self-check)', () => {
+  it('flags unsafe starts and accepts cleaned ones (self-check)', () => {
     const head = "import { createServer } from '../server.js';\n";
     expect(uncleanedStarts(`${head}beforeAll(async () => {\n  app = await createServer();\n});`)).toEqual([3]);
     expect(uncleanedStarts(`${head}beforeAll(async () => {\n  await cleanDb(db);\n  app = await createServer();\n});`)).toEqual([]);
     expect(uncleanedStarts(`${head}beforeAll(async () => { app = await createServerOnCleanDb(); });`)).toEqual([]);
-    expect(uncleanedStarts(`${head}// beforeAll(() => createServer())\nit('x', async () => { await createServer(); });`)).toEqual([]);
-    expect(uncleanedStarts("beforeAll(async () => { await createServer(); });")).toEqual([]); // not the app's createServer
+    // Blind spots a hook-only scan had: an `it` body, a boot helper, an aliased and a dynamic import.
+    expect(uncleanedStarts(`${head}it('x', async () => { await createServer(); });`)).toEqual([2]);
+    expect(uncleanedStarts(`${head}async function boot() { return createServer (); }`)).toEqual([2]);
+    expect(uncleanedStarts("import { createServer as makeApp } from '../server.js';\nconst a = await makeApp();")).toEqual([2]);
+    expect(uncleanedStarts("beforeAll(async () => {\n  const { createServer } = await import('../server.js');\n  await createServer();\n});")).toEqual([3]);
+    // Cleaned by the file's own hook, comment and string lookalikes, and another module's createServer.
+    expect(uncleanedStarts(`${head}beforeEach(async () => { await cleanDb(db); });\nit('x', async () => { await createServer(); });`)).toEqual([]);
+    expect(uncleanedStarts(`${head}// beforeAll(() => createServer())\nconst s = "createServer(";`)).toEqual([]);
+    expect(uncleanedStarts("import { createServer } from 'node:http';\nbeforeAll(async () => { createServer(); });")).toEqual([]);
   });
 
-  it('no test file starts createServer() from beforeAll before cleaning the database', () => {
-    const offenders = testFiles('src')
-      .filter((file) => !file.endsWith('startServerFixture.guard3066.test.ts')) // its self-check holds sample source in strings
+  it('no test file starts the app before cleaning the database', () => {
+    const offenders = testFiles(join(import.meta.dirname, '..'))
+      .filter((file) => !EXEMPT.some((e) => file.endsWith(e)))
       .map((file) => ({ file, lines: uncleanedStarts(readFileSync(file, 'utf8')) }))
       .filter((o) => o.lines.length > 0)
       .map((o) => `${o.file}:${o.lines.join(',')}`);

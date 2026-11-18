@@ -26,7 +26,7 @@ export async function createServerOnCleanDb(): Promise<Express> {
  * this is a no-op, so the startup error stays the one that is reported.
  */
 export async function closeServerIfStarted(server: Server | undefined): Promise<void> {
-  if (!server) return;
+  if (!server?.listening) return; // never assigned, or startup failed before listen: nothing to close
   server.closeAllConnections?.();
   await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
 }
