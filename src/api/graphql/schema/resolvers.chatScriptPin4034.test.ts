@@ -33,7 +33,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'pin-org', urn: 'pin-org' } });
   adminUser = await db.user.create({ data: { githubId: 8434, githubUsername: 'script-pin', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: adminUser.id, role: 'ADMIN' } });
-  const created = await resolvers.Mutation.createAgent({}, { orgId: org.id, name: 'scribe', visibility: 'PERSONAL' }, adminCtx());
+  const created = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'scribe', visibility: 'PERSONAL' }, adminCtx());
   agent = created;
   systemMemory = await db.memory.findUniqueOrThrow({ where: { id: created.systemMemoryId! } });
   await serveEveryAgent(db);

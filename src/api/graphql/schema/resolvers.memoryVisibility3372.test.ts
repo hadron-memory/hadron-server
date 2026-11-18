@@ -62,7 +62,7 @@ describe('#3372 missing visibility refusal cells', () => {
     async ({ memoryClass, visibility }) => {
       const row = await memory(memoryClass);
       const before = await snapshot(row.id);
-      const error = await errorOf({ id: row.id, visibility, name: 'must-not-write', urn: 'must-not-rename' });
+      const error = await errorOf({ ref: row.id, visibility, name: 'must-not-write', urn: 'must-not-rename' });
       expect(error).toBeInstanceOf(GraphQLError);
       expect((error as GraphQLError).extensions.code).toBe('BAD_USER_INPUT');
       expect((error as Error).message).toContain(memoryClass);
@@ -73,7 +73,7 @@ describe('#3372 missing visibility refusal cells', () => {
   it.each([false, true])('knowledge refuses explicit null (appScoped=%s), with no partial write', async appScoped => {
     const row = await memory('knowledge', appScoped);
     const before = await snapshot(row.id);
-    const error = await errorOf({ id: row.id, visibility: null, name: 'must-not-write', urn: 'must-not-rename' });
+    const error = await errorOf({ ref: row.id, visibility: null, name: 'must-not-write', urn: 'must-not-rename' });
     expect(error).toBeInstanceOf(GraphQLError);
     expect((error as GraphQLError).extensions.code).toBe('BAD_USER_INPUT');
     expect((error as Error).message).toContain('knowledge');
@@ -84,27 +84,27 @@ describe('#3372 missing visibility refusal cells', () => {
 describe('#3372 controls and access precedence', () => {
   it.each(noVisibility)('%s still accepts explicit null', async memoryClass => {
     const row = await memory(memoryClass);
-    const result = await M.updateMemory({}, { id: row.id, visibility: null, name: 'allowed' }, ctx());
+    const result = await M.updateMemory({}, { ref: row.id, visibility: null, name: 'allowed' }, ctx());
     expect(result).toMatchObject({ visibility: null, name: 'allowed' });
   });
 
   it.each(allClasses)('%s omitted visibility preserves its value', async memoryClass => {
     const row = await memory(memoryClass);
-    const result = await M.updateMemory({}, { id: row.id, name: 'allowed' }, ctx());
+    const result = await M.updateMemory({}, { ref: row.id, name: 'allowed' }, ctx());
     expect(result).toMatchObject({ visibility: row.visibility, name: 'allowed' });
   });
 
   it.each([false, true])('knowledge PUBLIC/ORGANIZATION transitions still work (appScoped=%s)', async appScoped => {
     const row = await memory('knowledge', appScoped);
     for (const visibility of ['PUBLIC', 'ORGANIZATION']) {
-      expect(await M.updateMemory({}, { id: row.id, visibility }, ctx())).toMatchObject({ visibility });
+      expect(await M.updateMemory({}, { ref: row.id, visibility }, ctx())).toMatchObject({ visibility });
     }
   });
 
   it.each([null, 'PUBLIC', 'ORGANIZATION'])('group/%s keeps its existing refusal code', async visibility => {
     const row = await memory('group');
     const before = await snapshot(row.id);
-    const error = await errorOf({ id: row.id, visibility });
+    const error = await errorOf({ ref: row.id, visibility });
     expect(error).toBeInstanceOf(GraphQLError);
     expect((error as GraphQLError).extensions.code).toBe('INVALID_GROUP_MEMORY_VISIBILITY');
     expect(await snapshot(row.id)).toEqual(before);
@@ -112,18 +112,18 @@ describe('#3372 controls and access precedence', () => {
 
   it('knowledge/GROUP and a restated group/GROUP keep their existing behavior', async () => {
     const knowledge = await memory('knowledge');
-    const error = await errorOf({ id: knowledge.id, visibility: 'GROUP' });
+    const error = await errorOf({ ref: knowledge.id, visibility: 'GROUP' });
     expect((error as GraphQLError).extensions.code).toBe('INVALID_GROUP_MEMORY_VISIBILITY');
     const group = await memory('group');
-    expect(await M.updateMemory({}, { id: group.id, visibility: 'GROUP' }, ctx())).toMatchObject({ visibility: 'GROUP' });
+    expect(await M.updateMemory({}, { ref: group.id, visibility: 'GROUP' }, ctx())).toMatchObject({ visibility: 'GROUP' });
   });
 
   it.each(['private', 'knowledge'] as const)('unreadable %s gives the same concealed error before invalid input', async memoryClass => {
     const row = await memory(memoryClass);
     const caller = ctx(outsiderId);
     const before = await snapshot(row.id);
-    const omitted = await errorOf({ id: row.id }, caller) as GraphQLError;
-    const invalid = await errorOf({ id: row.id, visibility: memoryClass === 'knowledge' ? null : 'PUBLIC' }, caller) as GraphQLError;
+    const omitted = await errorOf({ ref: row.id }, caller) as GraphQLError;
+    const invalid = await errorOf({ ref: row.id, visibility: memoryClass === 'knowledge' ? null : 'PUBLIC' }, caller) as GraphQLError;
     // The resolver throws the typed entity error; GraphQL maps its code on the wire.
     expect(omitted).toMatchObject({ code: 'MEMORY_NOT_FOUND' });
     expect(invalid).toMatchObject({ code: 'MEMORY_NOT_FOUND', message: omitted.message });
@@ -133,8 +133,8 @@ describe('#3372 controls and access precedence', () => {
   it('a reader without manage access gets the same denial before knowledge/null', async () => {
     const row = await memory('knowledge');
     const caller = ctx(readerId);
-    const omitted = await errorOf({ id: row.id }, caller) as GraphQLError;
-    const invalid = await errorOf({ id: row.id, visibility: null }, caller) as GraphQLError;
+    const omitted = await errorOf({ ref: row.id }, caller) as GraphQLError;
+    const invalid = await errorOf({ ref: row.id, visibility: null }, caller) as GraphQLError;
     expect(omitted.extensions.code).toBe('FORBIDDEN');
     expect({ message: invalid.message, extensions: invalid.extensions }).toEqual({ message: omitted.message, extensions: omitted.extensions });
   });
@@ -153,7 +153,7 @@ describe('#3559 retained GROUP direction and readable-reader precedence', () => 
     const row = await memory(memoryClass);
     const before = await snapshot(row.id);
     const error = await errorOf({
-      id: row.id, visibility: 'GROUP', name: 'must-not-write',
+      ref: row.id, visibility: 'GROUP', name: 'must-not-write',
       urn: 'visibility3372.example:must-not-rename',
     });
     expect(error).toBeInstanceOf(GraphQLError);
@@ -174,12 +174,12 @@ describe('#3559 retained GROUP direction and readable-reader precedence', () => 
     }
     expect(await resolvers.Query.memory({}, { ref: row.id }, ctx(readerId))).toMatchObject({ id: row.id });
     const before = await snapshot(row.id);
-    const omitted = await errorOf({ id: row.id }, ctx(readerId)) as GraphQLError;
+    const omitted = await errorOf({ ref: row.id }, ctx(readerId)) as GraphQLError;
     expect(omitted).toBeInstanceOf(GraphQLError);
     expect(omitted.extensions.code).toBe('FORBIDDEN');
     expect(await snapshot(row.id)).toEqual(before);
     const invalid = await errorOf({
-      id: row.id, visibility, name: 'must-not-write',
+      ref: row.id, visibility, name: 'must-not-write',
       urn: 'visibility3372.example:must-not-rename',
     }, ctx(readerId)) as GraphQLError;
     expect(invalid).toBeInstanceOf(GraphQLError);

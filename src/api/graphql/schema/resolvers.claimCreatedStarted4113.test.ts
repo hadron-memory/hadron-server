@@ -120,6 +120,10 @@ describe('#4113 a claim-born STARTED task is not queued, matched or alarmed', ()
 
   it('control: the same horizon DOES raise the not-started alarm for a pending assigned task', async () => {
     const t = await create({ assignee: { user: me.id } });
+    // #3775 B: a person-assigned task raises no stall alarm, so these tests move the assignment to a worker first. 
+    const agent = await db.agent.create({ data: { organizationId: org.id, name: 'Claim Agent', urn: `${org.urn}:agent` } });
+    const w = await db.worker.create({ data: { appId: app.id, agentId: agent.id, name: 'Claimer', slug: 'claimer', signature: '', trailer: '' } });
+    await db.agentTask.update({ where: { id: t.id }, data: { assigneeUserId: null, assigneeWorkerId: w.id } });
     await taskStallTick(db, new Date(Date.now() + 20 * 60 * 1000));
     expect((await db.agentTeamEvent.findMany({ where: { taskId: t.id } })).map((e) => e.type)).toContain('stall.not-started');
   });

@@ -10,7 +10,6 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { buildSchema } from 'graphql';
-import { createServer } from '../../../server.js';
 import { db } from '../../../integrations/db/client.js';
 import { signJwt } from '../../../auth/jwt.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -28,6 +27,7 @@ import { generateId } from '../../../lib/id.js';
 import { memoryMutations } from './resolvers.mutation.memory.js';
 import { resolvers } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../../test/startServerFixture.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 
@@ -76,11 +76,11 @@ const face = (reply: Reply) => JSON.stringify({
 const row = (id: string) => db.memory.findUniqueOrThrow({ where: { id } });
 
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/graphql`;
 });
-afterAll(async () => { await new Promise<void>((resolve) => server.close(() => resolve())); });
+afterAll(async () => { await closeServerIfStarted(server); });
 afterEach(() => sessionKeyCache.clear());
 
 const newPrivate = async (ownerId: string, suffix: string) => {

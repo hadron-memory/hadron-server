@@ -94,7 +94,7 @@ describe('composeWorkerPrompt — filled at each bind', () => {
     userId = user.id;
     await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId, role: 'ADMIN' } });
     const agent = await M.createAgent(
-      {}, { orgId: org.id, name: 'PV Agent', personaRole: 'engineer' }, ctx(userId),
+      {}, { orgRef: org.id, name: 'PV Agent', personaRole: 'engineer' }, ctx(userId),
     );
     agentId = agent.id;
     await serveAgentBootPrompt(db, agentId, TEMPLATE);

@@ -34,7 +34,7 @@ beforeEach(async () => {
     await db.orgMember.create({ data: { organizationId: org.id, userId: u.id, role: u === admin ? 'ADMIN' : 'CONTRIBUTOR' } });
   }
   agent = await resolvers.Mutation.createAgent(
-    {}, { orgId: org.id, name: 'cl40-agent', visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId: admin.id },
+    {}, { orgRef: org.id, name: 'cl40-agent', visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId: admin.id },
   );
   systemMemoryId = (agent as unknown as { systemMemoryId: string }).systemMemoryId;
   const app = await db.app.create({

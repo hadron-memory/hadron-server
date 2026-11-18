@@ -7,7 +7,6 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { inspect } from 'node:util';
 import { randomBytes } from 'node:crypto';
-import { createServer } from '../../../server.js';
 import { db } from '../../../integrations/db/client.js';
 import { signJwt } from '../../../auth/jwt.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -18,6 +17,7 @@ import { deriveDataKeyFromPassphrase, parseKdfParams, stageRequestMemoryKeys, ve
 import { requestOperationKeyStorage } from '../../../lib/requestOperationKey.js';
 import { parseDataKey } from '../../../lib/crypto.js';
 import { resolvers } from './resolvers.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../../test/startServerFixture.js';
 
 const inject = vi.hoisted(() => ({
   /** Fails `resolveMemoryRef` for the refs it names. */
@@ -103,11 +103,11 @@ function expectRedacted(reply: Reply, forbidden: string[]) {
 }
 
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/graphql`;
 });
-afterAll(async () => { await new Promise<void>((resolve) => server.close(() => resolve())); });
+afterAll(async () => { await closeServerIfStarted(server); });
 beforeEach(async () => {
   await cleanDb(db);
   sessionKeyCache.clear();

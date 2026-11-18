@@ -34,7 +34,7 @@ beforeEach(async () => {
     return u.id;
   };
   adminId = await mk('admin', 'ADMIN'); aliceId = await mk('alice', 'CONTRIBUTOR'); bobId = await mk('bob', 'CONTRIBUTOR');
-  const agent = await M.createAgent({}, { orgId, name: 'Rules agent', visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId: adminId });
+  const agent = await M.createAgent({}, { orgRef: orgId, name: 'Rules agent', visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId: adminId });
   agentId = agent.id; systemId = agent.systemMemoryId;
   const app = await db.app.create({ data: { name: 'Rules app', urn: `${org.urn}:app`, organizationId: org.id } });
   appId = app.id;

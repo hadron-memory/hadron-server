@@ -1038,8 +1038,9 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       // #4339 (decision of 2026-11-17, recorded on the private tracker): sign-in never depends on a passkey and never prompts for one, whatever the
       // passkey switches say and whatever passkeys this person holds. A passkey is asked for only by an act that needs
       // one (signing). This reverses the #1897 B1 step that redirected here to /auth/passkey/sign-in (the passkey-for-every-magic-link
-      // rule, cor:aut:030:02, which is superseded),
-      // which dead-ended every user without a passkey. Nothing on a sign-in path begins a passkey step now.
+      // rule, withdrawn 2026-11-18 (Holger)),
+      // which dead-ended every user without a passkey. Nothing on a sign-in path begins a passkey step now: a valid magic
+      // link signs the user in (hrn:node:hadronmemory.com:specs:cor:aut:030:01).
       // #804 Option-C: same contract as the github/google/apple callbacks —
       // set the JWT as an HttpOnly `hadron_token` cookie on THIS server's
       // origin and 302 to the validated server-local return_to (the original

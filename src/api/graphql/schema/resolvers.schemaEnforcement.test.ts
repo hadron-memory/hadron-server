@@ -57,7 +57,7 @@ beforeEach(async () => {
   const mem = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'intel' }, admin());
   memId = mem.id;
   memUrn = mem.urn;
-  await (resolvers.Mutation as any).updateMemory(null, { id: memId, schema }, admin());
+  await (resolvers.Mutation as any).updateMemory(null, { ref: memId, schema }, admin());
   const free = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'free' }, admin());
   freeMemId = free.id;
 });
@@ -114,7 +114,7 @@ describe('createNode — schema enforcement (GraphQL)', () => {
 
 describe('platform-owned exports on typed nodes (#1286)', () => {
   it('allows task-door create/update under a strict collection that declares required text exports', async () => {
-    await (resolvers.Mutation as any).updateMemory(null, { id: memId, schema: typedTaskSchema }, admin());
+    await (resolvers.Mutation as any).updateMemory(null, { ref: memId, schema: typedTaskSchema }, admin());
     const mutation = resolvers.Mutation as any;
     const node = await mutation.createTaskNode(null, {
       input: { memoryId: memId, loc: 'tasks:typed', name: 'Typed', isRunnable: true, objectType: 'task', properties: { title: 'T' } },
@@ -171,7 +171,7 @@ describe('hadron_create_node — schema enforcement (MCP)', () => {
   });
 
   it('accepts exports on strict typed create/update while still rejecting unrelated fields', async () => {
-    await (resolvers.Mutation as any).updateMemory(null, { id: memId, schema: {
+    await (resolvers.Mutation as any).updateMemory(null, { ref: memId, schema: {
       objectTypes: { competitor: { strict: true, fields: { name: { type: 'text', required: true } } } },
     } }, admin());
     const urn = emitNodeUrnV2(memUrn, 'c.exports');

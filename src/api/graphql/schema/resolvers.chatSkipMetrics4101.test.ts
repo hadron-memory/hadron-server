@@ -14,7 +14,7 @@ beforeEach(async () => {
   const user = await db.user.create({ data: { githubId: 41011, githubUsername: 'skip4101', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
   context = { db, roles: ['ADMIN'], userId: user.id };
-  const agent = await resolvers.Mutation.createAgent({}, { orgId: org.id, name: 'Skip fixture', visibility: 'ORGANIZATION' }, context);
+  const agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Skip fixture', visibility: 'ORGANIZATION' }, context);
   agentId = agent.id; const memoryId = agent.systemMemoryId!;
   const ids: Record<string, string> = {};
   for (const [loc, data] of [['config', {}], ['conversations', {}], ['conversations:main', { stageOrder: ['one'] }], ['conversations:main:one', {}], ['conversations:target', { stageOrder: ['arrive'] }], ['conversations:target:arrive', {}]] as const) {

@@ -1,9 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Prisma } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
-import { workerActivitySql, setWorkerActivityPlanSettings, loadAppWorkerActivity } from '../../api/graphql/schema/resolvers.worker.js';
+import { workerActivitySql, loadAppWorkerActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import type { Context } from '../../api/graphql/schema/resolvers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../lib/workerSignature.js';
+import { everyRowProbe, swapProbeFragments, rolledBack as rolledBackIn, type RolledBackOptions } from '../sessionActivityProbe.js';
 
 /**
  * #4397: the roster's per-session latest-activity probe is ONE probe of usage_events_session_activity_idx, not a read
@@ -15,44 +16,13 @@ const NOW = new Date('2026-11-17T12:00:00Z');
 const HEAVY_ROWS = 60_000;
 
 type Tx = Prisma.TransactionClient;
-class RolledBack extends Error {}
-
-async function rolledBack<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
-  let out: { value: T } | undefined;
-  try {
-    await db.$transaction(
-      async (tx) => {
-        await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off');
-        await tx.$executeRawUnsafe('SET LOCAL enable_bitmapscan = off');
-        await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
-        // What queryWorkerActivity sets before the read: the pins run under exactly what ships.
-        await setWorkerActivityPlanSettings(tx);
-        out = { value: await fn(tx) };
-        throw new RolledBack();
-      },
-      { timeout: 120_000 },
-    );
-  } catch (e) {
-    if (!(e instanceof RolledBack)) throw e;
-  }
-  return out!.value;
-}
+const rolledBack = <T>(fn: (tx: Tx) => Promise<T>, o: RolledBackOptions = {}) => rolledBackIn(db, fn, { timeout: 120_000, ...o });
 
 const roster = (): Prisma.Sql => workerActivitySql(Prisma.sql`w.app_id = ${APP}`, NOW);
 
 /** The pre-#4397 probe (#1952's max over `created_at + interval '0'`): reads every activity row of the session. */
 function everyRowShape(sql: Prisma.Sql): Prisma.Sql {
-  const swaps: [string, string][] = [
-    ['SELECT e.created_at AS max_created', "SELECT max(e.created_at + interval '0') AS max_created"],
-    ['e.session_id >= s.id AND e.session_id <= s.id', 'e.session_id = s.id'],
-    ['ORDER BY e.session_id DESC, e.created_at DESC\n      LIMIT 1', ''],
-  ];
-  let strings = sql.strings.slice();
-  for (const [from, to] of swaps) {
-    if (strings.filter((s) => s.includes(from)).length !== 1) throw new Error(`probe fragment not found once: ${from}`);
-    strings = strings.map((s) => s.replace(from, to));
-  }
-  return Prisma.sql(Object.assign(strings, { raw: strings }) as TemplateStringsArray, ...sql.values);
+  return everyRowProbe(sql, "max(e.created_at + interval '0')");
 }
 
 async function seed(tx: Tx, heavy: number): Promise<void> {
@@ -106,23 +76,29 @@ async function analyze(tx: Tx, sql: Prisma.Sql): Promise<{ buffers: number; inde
 }
 
 describe('#4397 roster liveness: one probe per open session', () => {
-  it('reads a bounded number of buffers however many activity rows a session holds, never walks created_at_idx', async () => {
-    const fix = await rolledBack(async (tx) => {
+  // #4399 item 5: the 60k-row seed is the churn (every rolled-back insert leaves a dead tuple), so the two plan pins share ONE
+  // seed and one transaction, and the tables are vacuumed afterwards.
+  let heavyRun: { fix: Awaited<ReturnType<typeof analyze>>; every: Awaited<ReturnType<typeof analyze>> };
+  beforeAll(async () => {
+    heavyRun = await rolledBack(async (tx) => {
       await seed(tx, HEAVY_ROWS);
-      return analyze(tx, roster());
-    });
+      return { fix: await analyze(tx, roster()), every: await analyze(tx, everyRowShape(roster())) };
+    }, { seedWithoutParents: true });
+  }, 120_000);
+  afterAll(async () => {
+    for (const t of ['usage_events', 'sessions', 'workers']) await db.$executeRawUnsafe(`VACUUM ${t}`);
+  }, 120_000);
+
+  it('reads a bounded number of buffers however many activity rows a session holds, never walks created_at_idx', () => {
+    const fix = heavyRun.fix;
     expect(fix.indexes, fix.text).not.toContain('usage_events_created_at_idx');
     expect(fix.indexes, fix.text).toContain('usage_events_session_activity_idx');
     // A probe's cost, not a scan's: the heavy session's 60k activity rows would be hundreds of pages.
     expect(fix.buffers, fix.text).toBeLessThan(150);
   });
 
-  it('the buffers bound is not vacuous: the every-row shape (main) reads far more under the same skew', async () => {
-    const r = await rolledBack(async (tx) => {
-      await seed(tx, HEAVY_ROWS);
-      return { fix: await analyze(tx, roster()), every: await analyze(tx, everyRowShape(roster())) };
-    });
-    expect(r.every.buffers).toBeGreaterThan(r.fix.buffers * 10);
+  it('the buffers bound is not vacuous: the every-row shape (main) reads far more under the same skew', () => {
+    expect(heavyRun.every.buffers).toBeGreaterThan(heavyRun.fix.buffers * 10);
   });
 
   it('the answer is the newest QUALIFYING row, NULL when none (cor:agt:020:11 rules 3, 4)', async () => {
@@ -131,7 +107,7 @@ describe('#4397 roster liveness: one probe per open session', () => {
       return tx.$queryRaw<{ workerId: string; lastActiveAt: Date }[]>(
         Prisma.sql`SELECT r."workerId", r."lastActiveAt" FROM (${roster()}) r ORDER BY r."workerId"`,
       );
-    });
+    }, { seedWithoutParents: true });
     const at = Object.fromEntries(rows.map((r) => [r.workerId, r.lastActiveAt?.toISOString()]));
     // heavy: newest of 100 rows at +10s steps
     expect(at['w4397-heavy']).toBe('2026-11-01T00:16:41.000Z');
@@ -159,5 +135,59 @@ describe('#4397 the plan settings are transaction-local (they never reach the po
     await loadAppWorkerActivity({ db } as unknown as Context, APP, { now: NOW });
     const seen = await Promise.all(Array.from({ length: 40 }, () => show()));
     for (const s of seen) expect(s).toEqual(before);
+  });
+});
+
+describe('#4397 the plan settings are applied by the real read path (#4399 item 3)', () => {
+  // The pins above call setWorkerActivityPlanSettings themselves, so they say nothing about whether queryWorkerActivity
+  // does. These run the shipped entry point WITHOUT the pins' own call and read the settings back on the transaction the
+  // read ran on. set_config(..., true) outside a transaction is a silent no-op, so reading it back in that same
+  // transaction is what shows it took effect.
+  type Settings = { sort: string; jit: string };
+  const show = async (c: Pick<Prisma.TransactionClient, '$queryRaw'>): Promise<Settings> => {
+    const [r] = await c.$queryRaw<Settings[]>`SELECT current_setting('enable_incremental_sort') AS sort, current_setting('jit') AS jit`;
+    return r;
+  };
+
+  it('on a caller\'s transaction, the read leaves incremental sort and jit off for that transaction', async () => {
+    const r = await rolledBack(async (tx) => {
+      const before = await show(tx);
+      await loadAppWorkerActivity({ db: tx } as unknown as Context, APP, { now: NOW });
+      return { before, after: await show(tx) };
+    }, { planSettings: false });
+    expect(r.before.sort).not.toBe('off'); // the pins above set it themselves; here nothing has
+    expect(r.after).toEqual({ sort: 'off', jit: 'off' });
+  });
+
+  it('on the shared client, the settings are in force inside the transaction the read opens', async () => {
+    let inside: Settings | undefined;
+    const spy = new Proxy(db as any, {
+      get(target, prop, recv) {
+        if (prop !== '$transaction') return Reflect.get(target, prop, recv);
+        return (f: (tx: Tx) => Promise<unknown>, ...rest: unknown[]) => target.$transaction(async (tx: Tx) => {
+          const out = await f(tx);
+          inside = await show(tx);
+          return out;
+        }, ...rest);
+      },
+    });
+    await loadAppWorkerActivity({ db: spy } as unknown as Context, APP, { now: NOW });
+    expect(inside).toEqual({ sort: 'off', jit: 'off' });
+  });
+});
+
+describe('swapProbeFragments (the shared shape helper, #4399 item 2)', () => {
+  const sql = Prisma.sql`SELECT a   FROM t
+      ORDER BY x DESC,
+      y DESC LIMIT 1`;
+  const text = (q: Prisma.Sql) => q.strings.join('?');
+
+  it('matches a fragment across any whitespace and inserts the replacement literally ($ is not a pattern)', () => {
+    expect(text(swapProbeFragments(sql, [['ORDER BY x DESC, y DESC LIMIT 1', "$& $1 'x'"]]))).toContain("$& $1 'x'");
+  });
+  it('refuses a fragment that is absent or occurs more than once, counting occurrences not chunks', () => {
+    expect(() => swapProbeFragments(sql, [['NOT THERE', '']])).toThrow(/found 0/);
+    expect(() => swapProbeFragments(Prisma.sql`a b a ${1} c`, [['a', 'z']])).toThrow(/found 2/);
+    expect(() => swapProbeFragments(Prisma.sql`a b a`, [['a', 'z']])).toThrow(/found 2/);
   });
 });

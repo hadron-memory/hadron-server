@@ -94,7 +94,7 @@ beforeAll(async () => {
   await db.orgMember.create({ data: { organizationId: otherOrg.id, userId: outsider.id, role: 'OWNER' } });
 
   const ownerCtx: Context = { db, userId: owner.id, roles: ['READER'] };
-  const created = await (resolvers.Mutation as any).createAgent({}, { orgId: org.id, name: 'Fault Agent' }, ownerCtx);
+  const created = await (resolvers.Mutation as any).createAgent({}, { orgRef: org.id, name: 'Fault Agent' }, ownerCtx);
   const agent = await db.agent.findUniqueOrThrow({ where: { id: created.id } });
   agentUrn = agent.urn;
   const sysMem = await db.memory.findUniqueOrThrow({ where: { id: agent.systemMemoryId as string } });

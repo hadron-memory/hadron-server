@@ -53,7 +53,7 @@ beforeEach(async () => {
 
   const created = await resolvers.Mutation.createAgent(
     {},
-    { orgId: orgA.id, name: 'research-agent', visibility: 'ORGANIZATION' },
+    { orgRef: orgA.id, name: 'research-agent', visibility: 'ORGANIZATION' },
     adminCtx(),
   );
   agent = created;
@@ -656,7 +656,7 @@ describe('chatHistory', () => {
     // provisioned per-user memory lands at class='knowledge'.
     const noAppAgent = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'no-app-agent', visibility: 'ORGANIZATION' },
+      { orgRef: orgA.id, name: 'no-app-agent', visibility: 'ORGANIZATION' },
       adminCtx(),
     );
     // createAgent auto-provisions the system memory (#518); read it back.

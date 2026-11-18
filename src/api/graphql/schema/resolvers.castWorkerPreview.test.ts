@@ -66,7 +66,7 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: org.id, userId: admin.id, role: 'ADMIN' },
   });
 
-  const created = await M.createAgent({}, { orgId: org.id, name: 'CWP Team Agent' }, ctx(admin.id));
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'CWP Team Agent' }, ctx(admin.id));
   teamAgent = { id: created.id, systemMemoryId: created.systemMemoryId };
   // #1050: a LEGACY role node that still carries data.names. Kept in the
   // fixture on purpose — the register is gone, and the proof that it is gone is
@@ -84,7 +84,7 @@ beforeEach(async () => {
   const role = await M.createAgent(
     {},
     {
-      orgId: org.id,
+      orgRef: org.id,
       name: 'CWP Backend Engineer',
       personaRole: 'backend-engineer',
     },

@@ -25,7 +25,7 @@ const rename = async (orgId: string, urn: string) => {
     create: { organizationId: orgId, userId: user.id, role: 'OWNER' },
     update: {},
   });
-  return M.updateOrganization({}, { id: orgId, urn }, ctx());
+  return M.updateOrganization({}, { ref: orgId, urn }, ctx());
 };
 const reasonOf = async (p: Promise<unknown>) => {
   try { await p; return 'NO_ERROR'; } catch (e) {

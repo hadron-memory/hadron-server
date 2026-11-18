@@ -22,7 +22,11 @@ import { typeDefs } from './typeDefs.js';
 
 /** The expected reference-argument names, per cor:api:140. */
 const EXPECTED_REF_ARGS: Record<string, string[]> = {
-  updateAgent: ['ref'],
+  updateAgent: ['ref', 'systemMemoryRef'],
+  // #4140 (S4): memory, org and agent writes take refs; a foreign ref is `<entity>Ref`.
+  updateMemory: ['ref', 'orgRef'],
+  updateOrganization: ['ref'],
+  createAgent: ['orgRef', 'systemMemoryRef'],
   deleteAgent: ['ref'],
   repairAgentSystemMemory: ['agentRef'],
   addMemoryToAgent: ['agentRef', 'memoryRef'],
@@ -104,9 +108,9 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
  * the convention ("output fields, DB columns, resolved locals" → `<entity>Id`).
  */
 const ALLOWED_ID_ARGS = new Set([
-  'systemMemoryId',
   // startChat.userId: a PK compare-and-set against the session's user, not an
-  // entity the caller names (#4142 S6 ruling A) — and #4140's to drop.
+  // entity the caller names (#4142 S6 ruling A). S4 (#4140) already renamed
+  // systemMemoryId away, so it no longer appears here.
   'userId',
   // #4142 (S6): external-system / label args the stray regex catches by
   // spelling, not Hadron entity PK refs.

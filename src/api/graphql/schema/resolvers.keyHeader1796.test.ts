@@ -4,7 +4,6 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
 import { parse, Kind } from 'graphql';
-import { createServer } from '../../../server.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { hashAppKey, mintUserApiKey } from '../../../middleware/auth.js';
@@ -13,6 +12,7 @@ import { verifyDataKey } from '../../../lib/memoryUnlock.js';
 import { decryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { typeDefs } from './typeDefs.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../../test/startServerFixture.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 const header = 'x-hadron-operation-key';
@@ -21,11 +21,11 @@ const wrongKey = Buffer.alloc(32, 72).toString('base64');
 let server: Server, url: string, appId: string, agentId: string, token: string, siblingToken: string;
 
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   url = 'http://127.0.0.1:' + (server.address() as AddressInfo).port + '/graphql';
 });
-afterAll(async () => { await new Promise<void>(resolve => server.close(() => resolve())); });
+afterAll(async () => { await closeServerIfStarted(server); });
 afterEach(() => sessionKeyCache.clear());
 beforeEach(async () => {
   await cleanDb(db);

@@ -2,10 +2,12 @@
  * #1897 slice B1: the server-hosted passkey step of an email sign-in.
  *
  * #4339 (decision of 2026-11-17, recorded on the private tracker): SIGN-IN NO LONGER USES THIS. Sign-in never depends on a passkey and never prompts for
- * one, which reverses the passkey-for-every-magic-link rule this module was built for (cor:aut:030:02, owed a
- * supersession by the specs engineer). Nothing creates a pending flow from a sign-in path now; the routes and the
- * pending-flow machinery stay, unreachable that way, for the add-a-passkey slice (gated separately). Read the rest of
- * this header as the design of the retained machinery, not as live sign-in behavior.
+ * one, which reverses the passkey-for-every-magic-link rule this module was built for (rule withdrawn 2026-11-18
+ * (Holger)). Nothing creates a pending flow from a sign-in path now; the routes and the pending-flow machinery stay,
+ * unreachable that way, for the add-a-passkey slice (gated separately): registering a passkey is an interactive step-up
+ * (hrn:node:hadronmemory.com:specs:cor:aut:040:02) that only the account's owner may take
+ * (hrn:node:hadronmemory.com:specs:cor:aut:040:08). Read the rest of this header as the design of the retained machinery,
+ * not as live sign-in behavior.
  *
  * Mounted only when `signingSurfacePolicy().registration` is on (#1895); while off nothing is mounted, so the
  * paths are ordinary 404s with no switch oracle. {@link beginPasskeySignIn} creates the pending row and redirects

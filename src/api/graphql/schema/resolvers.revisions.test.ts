@@ -54,7 +54,7 @@ beforeEach(async () => {
 
   const created = await resolvers.Mutation.createAgent(
     {},
-    { orgId: orgA.id, name: 'rev-agent', visibility: 'PERSONAL' },
+    { orgRef: orgA.id, name: 'rev-agent', visibility: 'PERSONAL' },
     adminCtx(),
   );
   agent = created;

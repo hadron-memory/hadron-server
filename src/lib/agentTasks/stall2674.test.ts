@@ -4,6 +4,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { effectiveWindows, loadStallInputs, stallCandidates } from './stall.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -24,7 +25,12 @@ it('#2674 title and tags edits preserve the pending assignment episode and deadl
   } }, ctx);
   const now = new Date();
   const assignedAt = new Date(now.getTime() - 3_600_000);
-  await db.agentTask.update({ where: { id: task.id }, data: { assignedAt } });
+  // #3775 B: a person-assigned task raises no stall alarm, so the episode under test is a WORKER assignee's: move the
+  // assignment from the person to a worker (same assignment time) before reading the candidate.
+  const agent = await db.agent.create({ data: { organizationId: org.id, name: 'Episode Agent', urn: `${org.urn}:agent` } });
+  await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+  const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Wren', slug: 'wren', heldByUserId: assignee.id } });
+  await db.agentTask.update({ where: { id: task.id }, data: { assignedAt, assigneeUserId: null, assigneeWorkerId: worker.id } });
   const candidate = async () => {
     const inputs = await loadStallInputs(db, { id: task.id }, now);
     expect(inputs).toHaveLength(1);

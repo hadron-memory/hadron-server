@@ -19,7 +19,8 @@ const input = (over: Partial<SummaryInput> = {}, name = 'schedule.create'): Summ
 });
 const act = (name: string, over: Partial<ActionDefinition> = {}): ActionDefinition => ({
   name, source: 'PLATFORM', parameters: [{ name: 'entryNode', type: 'node-ref', refusesWildcard: true }], tool: null,
-  enforcement: 'SERVER', issuerRule: 'TEST_ONLY', summaryTemplate: 'Create a thing in {app} at {entryNode}', ...over,
+  enforcement: 'SERVER', issuerRule: 'APP_SCHEDULE_ADMIN', // #3730: a real closed-set key (the value is irrelevant to summary rendering)
+    summaryTemplate: 'Create a thing in {app} at {entryNode}', ...over,
 });
 const reasonOf = (fn: () => unknown): GrantSummaryReason | 'DID_NOT_THROW' => {
   try { fn(); } catch (e) { if (e instanceof GrantSummaryError) { expect(e.code).toBe('GRANT_SUMMARY_UNRENDERABLE'); return e.reason; } throw e; }

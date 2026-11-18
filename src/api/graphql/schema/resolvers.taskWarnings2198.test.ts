@@ -67,7 +67,7 @@ beforeEach(async () => {
   member = await db.user.create({ data: { githubId: 218002, githubUsername: 'tw-member', handle: 'tw-member', roles: ['READER'] } });
   outsider = await db.user.create({ data: { githubId: 218003, githubUsername: 'tw-out', handle: 'tw-out', roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   teamAgentId = agent.id;
   const row = await db.agent.findUniqueOrThrow({ where: { id: teamAgentId } });
   teamMemoryId = row.systemMemoryId as string;
@@ -214,7 +214,7 @@ describe('the register: code → role task, through the right chains', () => {
   it('an extended Agent\'s own task wins by depth; the register itself still comes from the Team Agent', async () => {
     await registerEntry(teamMemoryId, 'task.finish.open-children', 'tasks:finish');
     await node(teamMemoryId, 'tasks:finish', { isRunnable: true });
-    const child = await M.createAgent({}, { orgId: org.id, name: 'Child Role' }, ctx(admin.id));
+    const child = await M.createAgent({}, { orgRef: org.id, name: 'Child Role' }, ctx(admin.id));
     const childRow = await db.agent.findUniqueOrThrow({ where: { id: child.id } });
     const childMemUrn = (await db.memory.findUniqueOrThrow({ where: { id: childRow.systemMemoryId as string } })).urn;
     await db.agent.update({ where: { id: child.id }, data: { extendsAgentId: teamAgentId } });
@@ -242,7 +242,7 @@ describe('the register: code → role task, through the right chains', () => {
       await db.orgMember.create({ data: { organizationId: childOrg, userId: foreignAdmin.id, role: 'ADMIN' } });
       creator = foreignAdmin.id;
     }
-    const child = await M.createAgent({}, { orgId: childOrg, name: opts.name ?? 'Child Role' }, ctx(creator));
+    const child = await M.createAgent({}, { orgRef: childOrg, name: opts.name ?? 'Child Role' }, ctx(creator));
     const childRow = await db.agent.findUniqueOrThrow({ where: { id: child.id } });
     await db.agent.update({ where: { id: child.id }, data: { extendsAgentId: teamAgentId } });
     if (opts.install ?? true) await db.appAgent.create({ data: { appId: app.id, agentId: child.id } });
@@ -317,7 +317,7 @@ describe('the register: code → role task, through the right chains', () => {
   });
 
   it('no Team Agent, or two, ⇒ unmapped (never a guess, never a failure)', async () => {
-    const other = await M.createAgent({}, { orgId: org.id, name: 'Other Team' }, ctx(admin.id));
+    const other = await M.createAgent({}, { orgRef: org.id, name: 'Other Team' }, ctx(admin.id));
     const otherRow = await db.agent.findUniqueOrThrow({ where: { id: other.id } });
     await db.appAgent.create({ data: { appId: app.id, agentId: other.id } });
     await node(otherRow.systemMemoryId as string, 'roles');

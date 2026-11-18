@@ -105,7 +105,11 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // so a lagging build silently records the session fallback — a healthy-looking
 // receipt with the wrong attribution. Clients gate on the `worklog-model`
 // capability token rather than the version.
-// 0.22.0 — BREAKING, entity refs S6 (#4142, slices B–F): the GraphQL mutation
+// 0.22.0: #4140 — BREAKING (GraphQL): six argument renames on four mutations, no aliases. updateMemory(id →
+// ref, organizationId → orgRef), updateOrganization(id → ref), createAgent(orgId → orgRef, systemMemoryId →
+// systemMemoryRef), updateAgent(systemMemoryId → systemMemoryRef); the system-memory refs retype String → ID
+// and accept a URN. A client sending the old names gets "Unknown argument" until it upgrades.
+// 0.23.0 — BREAKING, entity refs S6 (#4142, slices B–F): the GraphQL mutation
 // args that name entities renamed to `<entity>Ref` and (where the deprecated
 // `…Id` alias dropped) became REQUIRED — `createMemory.orgRef`,
 // `deleteMemory.ref`, `setMemorySourceToken.ref`, `syncMemory.ref`,
@@ -132,7 +136,7 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // field exists only so legacy callers reach REPLACE_SUBTREE_RETIRED instead
 // of an unknown-argument error (#4219 blind P2-A).
 // (Chunk A, the memory reads, follows #4136.)
-export const HADRON_SERVER_VERSION = '0.22.0';
+export const HADRON_SERVER_VERSION = '0.23.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

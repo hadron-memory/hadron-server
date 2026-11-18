@@ -73,7 +73,7 @@ describe('Memory.data JSON field', () => {
     );
     const updated = await resolvers.Mutation.updateMemory(
       {},
-      { id: mem.id, data: { theme: 'dark' } },
+      { ref: mem.id, data: { theme: 'dark' } },
       adminCtx(),
     );
     expect(updated.data).toEqual({ theme: 'dark' });
@@ -89,7 +89,7 @@ describe('Memory.data JSON field', () => {
     );
     const updated = await resolvers.Mutation.updateMemory(
       {},
-      { id: mem.id, data: { c: 3 } },
+      { ref: mem.id, data: { c: 3 } },
       adminCtx(),
     );
     // JSON columns are replaced as a whole, not deep-merged.
@@ -104,7 +104,7 @@ describe('Memory.data JSON field', () => {
     );
     const updated = await resolvers.Mutation.updateMemory(
       {},
-      { id: mem.id, data: null },
+      { ref: mem.id, data: null },
       adminCtx(),
     );
     expect(updated.data).toBeNull();
@@ -121,7 +121,7 @@ describe('Memory.data JSON field', () => {
     // An unrelated update (no `data` key) must not disturb the stored bag.
     const updated = await resolvers.Mutation.updateMemory(
       {},
-      { id: mem.id, description: 'changed description' },
+      { ref: mem.id, description: 'changed description' },
       adminCtx(),
     );
     expect(updated.data).toEqual({ stable: 'yes' });

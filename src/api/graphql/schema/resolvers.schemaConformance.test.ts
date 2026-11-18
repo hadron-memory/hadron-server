@@ -37,7 +37,7 @@ beforeEach(async () => {
   const mem = await resolvers.Mutation.createMemory({}, { orgRef: orgId, name: 'intel' }, admin());
   memId = mem.id;
   memUrn = mem.urn;
-  await updateMemory({ id: memId, schema: competitorSchema });
+  await updateMemory({ ref: memId, schema: competitorSchema });
 });
 
 describe('hadron_validate — property-schema conformance audit (#725)', () => {
@@ -77,7 +77,7 @@ describe('restoreNodeRevision — enforces the current schema (#737)', () => {
     await updateNode({ memoryId: memId, loc: 'c.r', properties: { name: 'y' } }); // snapshots pre-edit {name:'x'}
     const rev = await db.nodeRevision.findFirst({ where: { nodeId: n.id }, orderBy: { revNo: 'desc' } });
     // Tighten: competitor now also requires `stage` — the snapshot lacks it.
-    await updateMemory({ id: memId, schema: { objectTypes: { competitor: { fields: { name: { type: 'text', required: true }, stage: { type: 'text', required: true } } } } } });
+    await updateMemory({ ref: memId, schema: { objectTypes: { competitor: { fields: { name: { type: 'text', required: true }, stage: { type: 'text', required: true } } } } } });
     await expect((resolvers.Mutation as any).restoreNodeRevision(null, { revisionId: rev!.id }, admin())).rejects.toMatchObject({
       extensions: { code: 'BAD_USER_INPUT' },
     });

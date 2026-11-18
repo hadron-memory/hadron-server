@@ -109,7 +109,7 @@ describe('Memory.data over MCP (hadron_list_memories)', () => {
     const before = await createTestableMcpServer(memberAuth()).callToolText('hadron_list_memories', {});
     expect(before).toMatch(/\n {2}data: /);
 
-    await resolvers.Mutation.updateMemory({}, { id: mem.id, data: null }, gqlCtx());
+    await resolvers.Mutation.updateMemory({}, { ref: mem.id, data: null }, gqlCtx());
 
     const after = await createTestableMcpServer(memberAuth()).callToolText('hadron_list_memories', {});
     expect(after).toContain('clear-later');

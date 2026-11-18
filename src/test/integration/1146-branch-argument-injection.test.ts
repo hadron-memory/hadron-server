@@ -54,7 +54,7 @@ const CREATE = `
 
 const UPDATE = `
   mutation Update($id: ID!, $readBranch: String, $writeBranch: String) {
-    updateMemory(id: $id, readBranch: $readBranch, writeBranch: $writeBranch) {
+    updateMemory(ref: $id, readBranch: $readBranch, writeBranch: $writeBranch) {
       id readBranch writeBranch
     }
   }

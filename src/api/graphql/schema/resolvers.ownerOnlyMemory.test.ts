@@ -119,14 +119,14 @@ describe('private/personal access is owner-only', () => {
       data: { shortDescription: 'private sentinel', data: { secret: 'private sentinel' } },
     });
 
-    expect((await resolvers.Mutation.updateMemory(null, { id: mem.id, description: 'owner edit' }, asOwner())).description)
+    expect((await resolvers.Mutation.updateMemory(null, { ref: mem.id, description: 'owner edit' }, asOwner())).description)
       .toBe('owner edit');
     expect(await resolvers.Query.memory(null, { ref: mem.id }, asOrgAdmin())).toBeNull();
-    await expect(resolvers.Mutation.updateMemory(null, { id: mem.id }, asOrgAdmin()))
+    await expect(resolvers.Mutation.updateMemory(null, { ref: mem.id }, asOrgAdmin()))
       .rejects.toThrow('MEMORY_NOT_FOUND');
-    await expect(resolvers.Mutation.updateMemory(null, { id: mem.id, description: 'admin edit' }, asOrgAdmin()))
+    await expect(resolvers.Mutation.updateMemory(null, { ref: mem.id, description: 'admin edit' }, asOrgAdmin()))
       .rejects.toThrow('MEMORY_NOT_FOUND');
-    await expect(resolvers.Mutation.updateMemory(null, { id: mem.id }, asAdmin()))
+    await expect(resolvers.Mutation.updateMemory(null, { ref: mem.id }, asAdmin()))
       .rejects.toThrow('MEMORY_NOT_FOUND');
     expect((await db.memory.findUniqueOrThrow({ where: { id: mem.id } })).description).toBe('owner edit');
   });
@@ -146,7 +146,7 @@ describe('private/personal access is owner-only', () => {
       },
     });
 
-    await expect(resolvers.Mutation.updateMemory(null, { id: mem.id, description: 'stale owner edit' }, ctx({
+    await expect(resolvers.Mutation.updateMemory(null, { ref: mem.id, description: 'stale owner edit' }, ctx({
       userId: owner.id, roles: ['READER'], db: raceDb,
     }))).rejects.toThrow('MEMORY_NOT_FOUND');
     const after = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
@@ -174,7 +174,7 @@ describe('private/personal access is owner-only', () => {
       },
     });
 
-    await expect(resolvers.Mutation.updateMemory(null, { id: mem.id, description: 'old admin edit' }, ctx({
+    await expect(resolvers.Mutation.updateMemory(null, { ref: mem.id, description: 'old admin edit' }, ctx({
       userId: orgAdmin.id, roles: ['READER'], db: raceDb,
     }))).rejects.toThrow('MEMORY_NOT_FOUND');
     const after = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
@@ -203,7 +203,7 @@ describe('private/personal access is owner-only', () => {
       },
     });
 
-    await expect(resolvers.Mutation.updateMemory(null, { id: mem.id, description: 'stale calculation' }, ctx({
+    await expect(resolvers.Mutation.updateMemory(null, { ref: mem.id, description: 'stale calculation' }, ctx({
       userId: orgAdmin.id, roles: ['READER'], db: raceDb,
     }))).rejects.toMatchObject({ extensions: { code: 'CONFLICT' } });
     expect((await db.memory.findUniqueOrThrow({ where: { id: mem.id } })).description).not.toBe('stale calculation');

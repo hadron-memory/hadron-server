@@ -36,7 +36,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { name: 'Completion4036', urn: 'completion4036.example' } });
   const user = await db.user.create({ data: { githubId: 40361, githubUsername: 'completion4036', roles: ['ADMIN'] } }); userId = user.id;
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
-  const agent = await resolvers.Mutation.createAgent({}, { orgId: org.id, name: 'Completion fixture', visibility: 'ORGANIZATION' }, { ...ctx(), roles: ['ADMIN'] });
+  const agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Completion fixture', visibility: 'ORGANIZATION' }, { ...ctx(), roles: ['ADMIN'] });
   agentId = agent.id; systemId = agent.systemMemoryId!; ids = {};
   for (const [loc, data] of [
     ['config', {}], ['conversations', {}],
