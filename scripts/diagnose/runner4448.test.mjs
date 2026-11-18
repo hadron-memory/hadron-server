@@ -27,13 +27,22 @@ case "$1" in
  apply|add) :;;
  *) exit 8;;
 esac\n`);
+  // A recording sleep: the settle gate is observable as the number of sleeps of the settle length.
+  put('sleep', `printf '%s\\n' "$1" >> "$FIXTURE/sleeps"\n`);
   put('node', `exec '${process.execPath}' "$@"\n`);
   put('incus', `case "$1" in
  list) [ ! -e "$FIXTURE/instance" ] || echo hadron-e2e-fixture;;
  config) cat "$FIXTURE/instance";;
  exec)
   case "$*" in
-   *load.mjs*) printf '%s\\n' "$*" > "$FIXTURE/load-invocation"; printf '%s\\n' '${LOAD_LINE}'; [ "$MODE" != fail ] || exit 5;;
+   *snapshot.mjs*) printf '%s\\n' '{"totals":{"nodes":1,"selfSize":1,"rowsOmitted":0},"rows":[]}';;
+   *"command -v timeout"*) [ "$MODE" != notimeout ] || exit 1;;
+   *load.mjs*) printf '%s\\n' "$*" > "$FIXTURE/load-invocation"
+    case "$MODE" in
+     timeout) exit 124;;
+     empty) exit 0;;
+    esac
+    printf '%s\\n' '${LOAD_LINE}'; [ "$MODE" != fail ] || exit 5;;
    *memory.max*) echo 6442450944;;
    *diagnose-samples.jsonl*) printf '{"kind":"sample","at":%s}\\n' "$(date +%s%3N)";;
    *credentials.json*) echo synthetic-private-key;;
@@ -138,4 +147,63 @@ test('a failed load generator propagates its exit AND keeps the line that explai
     expect(out).toContain('"kind":"load"');
     expect(readFileSync(join(f.dir, 'down'), 'utf8')).toBe('down\n');   // teardown still ran
   } finally { f.clean(); }
+});
+
+test('a failed run does not duplicate a load line already in the preserved samples', () => {
+  const f = fixture('fail');
+  try {
+    f.run();
+    const out = readFileSync(join(f.dir, 'samples'), 'utf8');
+    expect(out.split('\n').filter((l) => l.includes('"kind":"load"')).length).toBe(1);
+  } finally { f.clean(); }
+});
+
+// #4453 N3: no line means no counts; the message must not claim the counts above explain it.
+test('a wall-budget timeout (124) with no line says there are no counts', () => {
+  const f = fixture('timeout');
+  try {
+    const r = f.run();
+    expect(r.status).toBe(124);
+    expect(r.stderr).toContain('wall-clock budget (exit 124)');
+    expect(r.stderr).not.toContain('counts above');
+  } finally { f.clean(); }
+});
+
+// #4453 N4: exit 0 with an empty line must not reach report.mjs with nothing to read.
+test('exit 0 with no load line is an invalid run, not a pass', () => {
+  const f = fixture('empty');
+  try {
+    const r = f.run();
+    expect(r.status).toBe(5);
+    expect(r.stderr).toContain('printed no load line');
+    expect(readFileSync(join(f.dir, 'down'), 'utf8')).toBe('down\n');
+  } finally { f.clean(); }
+});
+
+// #4453 P3 #15: the in-container prerequisites are checked before the settle window, not after.
+test('a missing timeout(1) or staged load.mjs refuses before any settling', () => {
+  const f = fixture('notimeout');
+  try {
+    const r = f.run();
+    expect(r.status).toBe(4);
+    expect(r.stderr).toContain('lacks timeout(1)');
+    expect(existsSync(join(f.dir, 'load-invocation'))).toBe(false);
+    expect(existsSync(join(f.dir, 'sleeps'))).toBe(false);
+    expect(readFileSync(join(f.dir, 'down'), 'utf8')).toBe('down\n');
+  } finally { f.clean(); }
+});
+
+// Bronwyn's survivor: the extra pre-settle sleep is gated on DIAG_SNAPSHOTS=1 / DIAG_W2=1.
+test('the pre-settle idle runs only when snapshots or W2 perturb the stack', () => {
+  const settles = (extra) => {
+    const f = fixture('cap');
+    try {
+      Object.assign(f.env, { DIAG_SETTLE_S: '7' }, extra);
+      const r = f.run();
+      expect(r.status, r.stderr).toBe(0);
+      return readFileSync(join(f.dir, 'sleeps'), 'utf8').split('\n').filter((x) => x === '7').length;
+    } finally { f.clean(); }
+  };
+  expect(settles({})).toBe(1);                         // the settle window before the load only
+  expect(settles({ DIAG_SNAPSHOTS: '1' })).toBe(2);    // plus the idle past the snapshot
 });
