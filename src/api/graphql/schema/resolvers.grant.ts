@@ -10,7 +10,7 @@ import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { getGrantForWorker, isManagerAudience, isPersonAudience, listGrantsForPerson, listGrantsForWorker, type GrantReader, type GrantView } from '../../../lib/grants/read.js';
 import { composeGrantUrn, resolveGrantRef } from '../../../lib/entityRef/grantRef.js';
 import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
-import { UrnNotQualifiedError } from '../../../lib/urn.js';
+import { UrnNotQualifiedError, UrnParseError } from '../../../lib/urn.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { loadGrantSignatureStatuses, type GrantSignatureStatusView, type GrantSignatureView } from '../../../lib/signing/grantStatus.js';
 import { clampListTake, type Context } from './resolvers.helpers.js';
@@ -138,7 +138,11 @@ export const grantFieldResolvers = {
     urn: (g: Pick<GrantView, 'appUrn' | 'id'>): string | null => {
       try {
         return composeGrantUrn(g.appUrn, g.id);
-      } catch {
+      } catch (error) {
+        // Only the compose refusal — the stored App urn cannot form a grant URN — is
+        // null ("a wrong URN is worse than none"). A bare catch cannot tell that from
+        // a fault, and a fault must propagate (#2975, cor:api:260:01).
+        if (!(error instanceof UrnParseError || error instanceof UrnNotQualifiedError)) throw error;
         return null;
       }
     },

@@ -2,7 +2,9 @@
  * resolveGrantRef — convert a grant reference to a definite Grant (#3709, Grants S2a-urn;
  * cor:urn:010:01's Grant row, shape ruled by rulings:0255 item 9). A Grant is addressable
  * two ways:
- *   - a bare Grant id (the `grants.id` column — a 32-hex uuidv7), or
+ *   - a bare Grant id (the `grants.id` column — a Prisma cuid by default; `isId` admits
+ *     both that and the 32-hex `generateId()` form the fixtures use, so every id the
+ *     column can hold takes the id path), or
  *   - a grammar-v2 URN `hrn:grant:<root>:<app-slug>:<grant-id>`.
  *
  * Grant has NO `urn` column (like Worker / AppRun / AiServiceConfig) — the URN is COMPUTED
@@ -24,8 +26,8 @@
  * oracle (cor:api:140:02) — while a MALFORMED or wrong-type URN is the typed input refusal
  * `UrnNotQualifiedError` (cor:api:140:01), which the boundary surfaces as URN_NOT_QUALIFIED.
  */
-import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
-import { isId as isIdFunc } from './shape.js';
+import type { PrismaClient } from '../../generated/prisma/index.js';
+import { isId } from './shape.js';
 import { composeGrantUrnV2, parseUrnV2, composeUrnV2, UrnNotQualifiedError, UrnParseError } from '../urn.js';
 import { AppNotFoundError, GrantNotFoundError } from './errors.js';
 import { resolveAppRef } from './appRef.js';
@@ -33,12 +35,15 @@ import { resolveAppRef } from './appRef.js';
 /**
  * Compose the canonical `hrn:grant:<root>:<app-slug>:<grant-id>` URN from the App's URN
  * (the stored bare `<root>:<slug>` form) and the grant's id — the emit half of #3709.
- * Throws if the app URN isn't a simple `<root>:<slug>` pair: the grant's arity is fixed
- * by design, exactly like the worker's (`composeWorkerUrn`).
+ * Throws {@link UrnParseError} if the app URN isn't a simple `<root>:<slug>` pair, and
+ * delegates the rest to `composeGrantUrnV2`, which refuses an empty root or slug and a
+ * slug carrying a colon (atom charset + per-type arity, #696) — so `root:a:b`, `:x` and
+ * `x:` never compose. The grant's arity is fixed by design, exactly like the worker's
+ * (`composeWorkerUrn`).
  */
 export function composeGrantUrn(appUrn: string, grantId: string): string {
   const firstColon = appUrn.indexOf(':');
-  if (firstColon === -1) throw new Error(`Malformed app URN (no root:slug): ${appUrn}`);
+  if (firstColon === -1) throw new UrnParseError(appUrn, 'invalid-segment-shape');
   const root = appUrn.slice(0, firstColon);
   const slug = appUrn.slice(firstColon + 1);
   return composeGrantUrnV2(root, slug, grantId);
@@ -61,19 +66,21 @@ export function parseGrantUrn(ref: string): { root: string; appSlug: string; gra
     throw new UrnNotQualifiedError(trimmed, err instanceof UrnParseError ? err : undefined);
   }
   if (p.type !== 'grant') throw new UrnNotQualifiedError(trimmed);
+  // No arity guard: parseUrnV2 enforces the per-type arity (#696) — a grant URN with
+  // fewer or more than the two segments `<app-slug>:<grant-id>` throws above, so both
+  // segments are always present here.
   return { root: p.root, appSlug: p.segments[0]!, grantId: p.segments[1]! };
 }
 
 export async function resolveGrantRef(
   db: Pick<PrismaClient, 'grant' | 'app' | 'urnAlias'>,
   ref: string,
-  options?: { appScope?: Prisma.AppWhereInput },
 ): Promise<{ id: string; appId: string }> {
   const trimmed = (ref ?? '').trim();
 
-  if (isIdFunc(trimmed)) {
+  if (isId(trimmed)) {
     const row = await db.grant.findUnique({ where: { id: trimmed }, select: { id: true, appId: true } });
-    if (!row) throw new GrantNotFoundError(ref);
+    if (!row) throw new GrantNotFoundError(trimmed);
     return { id: row.id, appId: row.appId };
   }
 
@@ -83,13 +90,18 @@ export async function resolveGrantRef(
   // the row: an App rename must keep this URN resolving (rulings:0255 item 9 (4)).
   let appId: string;
   try {
-    ({ id: appId } = await resolveAppRef(db, composeUrnV2('app', root, appSlug), { scope: options?.appScope }));
+    ({ id: appId } = await resolveAppRef(db, composeUrnV2('app', root, appSlug)));
   } catch (err) {
-    if (err instanceof AppNotFoundError) throw new GrantNotFoundError(ref);
+    // The conversion is for TYPED callers: the ref named a grant, so the typed answer is
+    // GRANT_NOT_FOUND, never APP_NOT_FOUND. GraphQL callers never see either —
+    // GrantNotFoundError is in `refNamesNothing`'s set, so the arms conceal it.
+    if (err instanceof AppNotFoundError) throw new GrantNotFoundError(trimmed);
     throw err;
   }
 
+  // The leaf must belong to the URN's own App: a URN of another App names nothing even
+  // when its leaf collides with a readable row's id (pinned in resolvers.grantUrn3709).
   const row = await db.grant.findUnique({ where: { id: grantId }, select: { id: true, appId: true } });
-  if (!row || row.appId !== appId) throw new GrantNotFoundError(ref);
+  if (!row || row.appId !== appId) throw new GrantNotFoundError(trimmed);
   return { id: row.id, appId: row.appId };
 }
