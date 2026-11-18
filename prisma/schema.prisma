@@ -5816,13 +5816,25 @@ enum ContentValidator {
   PLATFORM
 }
 
-/// A memory's complete rulebook: exactly one per memory, by construction.
-/// `memoryId @unique` makes it at most one; an ABSENT row reads as the empty
-/// config, so every memory has one without a backfill or a creation hook, and
-/// the first rule write materializes it. Not shared between memories —
-/// templates are the shared, owned thing, and they are COPIED in (Holger,
-/// 2026-09-25, #1325 H4). Read and managed only by the memory's managers;
-/// enforcement loads it internally for any writer.
+/// The rulebook of one memory: the holder of the rules that say, per node role, how nodes of that role are
+/// written in this memory. A memory has exactly one rulebook. The rules themselves are the NodeRoleRule rows.
+///
+/// Relationships: belongs to one Memory (`memoryId` is unique) and is deleted with it. Its `rules` are
+/// NodeRoleRule rows, deleted with the config. A rulebook is never shared between memories: the shared, owned
+/// thing is a MemoryConfigTemplate, and a template's rules are copied in.
+///
+/// Behaviour:
+/// - A memory with no row has the empty rulebook. No row is created with the memory and none is backfilled: the
+///   first rule write creates the row in its own transaction, and until then a read returns an empty config
+///   (src/api/graphql/schema/resolvers.memoryConfig.ts).
+/// - Only the people who manage the memory may read or change it: the owner alone for a personal or private
+///   memory, otherwise the shared memory-management gate. Anyone else gets the answer a missing memory gets.
+/// - Enforcement does not go through that gate. A node write by any writer loads the rules directly
+///   (src/lib/governedRole.ts, src/lib/nodeRoleWriters.ts, src/lib/authoringAttestation.ts).
+/// - Cloning a memory copies its config and rules (src/controller/operations/cloneMemory.ts).
+/// - `updatedAt` and `updatedBy` are stamped by every rule write.
+///
+/// Background: #1325.
 model MemoryConfig {
   id        String    @id @default(cuid())
   memoryId  String    @unique @map("memory_id")
@@ -5837,19 +5849,49 @@ model MemoryConfig {
   @@map("memory_configs")
 }
 
-/// One row per role or dotted sub-role (`spec`, `spec.rule`): the rows ARE
-/// the config's declared roles, and a row may carry no tasks at all
-/// (#1325 H1). `strictSubRoles` on a parent row refuses its undeclared
-/// sub-roles; off, an undeclared sub-role falls back to the nearest declared
-/// ancestor (#1322's lookup).
+/// One rule of a memory's rulebook, for one node role. A rule matches the nodes of its memory whose `role` is
+/// the rule's `role`, and says what a write of such a node must satisfy: which task the author must have
+/// worked from, which task validates the content, and who may write the node at all.
 ///
-/// Task references are node-id FKs — accepted and shown as URNs — so moving a
-/// task keeps the rule (moveNode keeps ids, even across memories). A HARD
-/// delete of the task (replaceSubtree, git sync of a removed file, memory
-/// deletion) nulls the FK; the `*TaskRequired` marker survives it, so the rule
-/// FAILS CLOSED instead of silently ceasing to require the task (#1325 H5).
-/// Cascade and Restrict were rejected: the first drops governance, the second
-/// lets whoever references a public task veto its owner's own deletes.
+/// Which nodes a rule matches: `role` is a role name or a dotted sub-role (`spec`, `spec.rule`). A node whose
+/// role has no row of its own is governed by the nearest enabled ancestor (`spec.rule` falls back to `spec`),
+/// unless that ancestor sets `strictSubRoles`: then a write that would produce an undeclared sub-role is
+/// refused. The rule whose `role` is `task` governs every runnable node, whatever its role label. The rows are
+/// also the list of roles the rulebook declares, so a row may exist with nothing set.
+///
+/// What a rule requires:
+/// - `authorTask`: a write that authors a matching node must state the task it worked from and that task's
+///   revision. A missing, wrong or stale claim is refused (src/lib/authoringAttestation.ts).
+/// - `validationTask`: the task that content-validation reports on matching nodes name
+///   (src/lib/contentValidationReport.ts). Reports are advisory and never block a write.
+/// - `writers`: who may write matching nodes, on top of memory write access: `ALL` (no narrowing), `ADMIN`
+///   (the owning organization's admins and owners, and the owning user) or `OWNER`. `OWNER` is not built:
+///   every write that touches such a role is refused with ROLE_WRITERS_UNSUPPORTED
+///   (src/lib/nodeRoleWriters.ts). The level is checked against the node's state before and after the write
+///   (hrn:node:hadronmemory.com:specs:cor:acl:010:03).
+/// - `descriptionNode` (a node that describes the role) and `validateBy` (who is meant to run the validation
+///   task) are stored and returned by the config API. No other code reads them today.
+///
+/// Relationships: belongs to one MemoryConfig and is deleted with it; one rule per (`configId`, `role`).
+/// `authorTask`, `validationTask` and `descriptionNode` point at Nodes by id, which may live in another memory.
+/// The API accepts and shows them as URNs, and moving the node keeps the rule. `sourceTemplateId` is the
+/// MemoryConfigTemplate the rule was copied from: a plain id with no foreign key, because a template is copied
+/// in and never linked, so deleting a template must not rewrite the configs it was applied to.
+///
+/// Behaviour:
+/// - A hard delete of a referenced task sets the reference to null. The `authorTaskRequired` or
+///   `validationTaskRequired` marker stays set, so the rule fails closed instead of silently ceasing to require
+///   the task. Cascade was rejected because it drops the rule; Restrict because it lets whoever references a
+///   public task block its owner's deletes.
+/// - `enabled` switches the rule off without deleting it. `locked` is set when a required template wrote the
+///   rule; only an organization's admins may then change it.
+/// - `revision` starts at 1 and rises by 1 on every update. A mutation that passes `expectedRevision` is refused
+///   CONFLICT when it no longer matches.
+/// - Written by the config API (resolvers.memoryConfig.ts), by applying a template
+///   (resolvers.memoryConfigApply.ts), by an organization default at memory creation
+///   (resolvers.memoryConfigOrgDefault.ts) and by a memory clone.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:acl:010:03. Background: #1322, #1325, #1328, #1331, #1333, #1334.
 model NodeRoleRule {
   id                     String            @id @default(cuid())
   configId               String            @map("config_id")
@@ -5890,14 +5932,31 @@ model NodeRoleRule {
   @@map("node_role_rules")
 }
 
-/// A reusable rulebook owned by EXACTLY ONE of HadronServer / Organization /
-/// User / App — nullable FKs with a CHECK (`chk_memory_config_template_owner`,
-/// `num_nonnulls(...) = 1`), never an owner-kind string (the Scope /
-/// AiServiceConfig mechanism, plus a User owner AiServiceConfig does not
-/// have). Applied by COPYING its rules into a memory's config (#1334); editing
-/// a template changes no memory until it is re-applied. `required` templates
-/// arrive locked. `name` is unique per owner among live rows (partial unique
-/// indexes in post-push.sql / the migration).
+/// A named, reusable rulebook that can be applied to many memories so they are configured alike. Applying a
+/// template copies its rules into the memory's MemoryConfig; nothing links the memory to the template
+/// afterwards.
+///
+/// Relationships: owned by exactly one of HadronServer, Organization, User (`ownerUser`) or App, through four
+/// nullable foreign keys of which exactly one is set (CHECK `chk_memory_config_template_owner`). It is deleted
+/// with its owner. Its rules are MemoryConfigTemplateRule rows. NodeRoleRule.`sourceTemplateId` and
+/// MemoryConfigDefaultSkip name the template a rule or a skip came from.
+///
+/// Behaviour:
+/// - Read and managed only by its owner's managers: a platform admin, the organization's admins, the user
+///   alone, or the App's managers. Anyone else gets the answer a missing template gets
+///   (src/api/graphql/schema/resolvers.memoryConfigTemplate.ts).
+/// - Editing a template changes no memory until it is applied again. An update replaces the template's rules
+///   as a whole in one transaction, and `revision` (the optimistic-concurrency counter) covers them.
+/// - `required`: applying the template replaces a memory's existing rule for the same role and writes its rules
+///   locked. A template that is not required leaves an existing rule in place (resolvers.memoryConfigApply.ts).
+/// - `orgDefault`: an organization-owned template that is copied into every new `knowledge` or `group` memory
+///   of the organization when `createMemory` creates it, and by nothing else. Only an organization-owned
+///   template may set it (CHECK `chk_memory_config_template_org_default_org_only`). It is independent of
+///   `required`.
+/// - `name` is unique per owner among rows that are not deleted (partial unique indexes in
+///   prisma/post-push.sql and the migration). `deleteMemoryConfigTemplate` is a soft delete (`deletedAt`).
+///
+/// Specs: hrn:node:hadronmemory.com:specs:cor:api:290. Background: #1325, #1334, #3426.
 model MemoryConfigTemplate {
   id             String    @id @default(cuid())
   name           String
@@ -5936,8 +5995,23 @@ model MemoryConfigTemplate {
   @@map("memory_config_templates")
 }
 
-/// A template's rule: NodeRoleRule's columns minus the per-memory provenance
-/// and lock, with the same node-id FK + fail-closed marker semantics.
+/// One rule of a MemoryConfigTemplate, for one node role. It has the same meaning as a NodeRoleRule (which
+/// nodes it matches, and the author task, validation task and writers level it requires of them), but it
+/// governs nothing by itself: it takes effect only as the NodeRoleRule it is copied into when the template is
+/// applied to a memory.
+///
+/// Relationships: belongs to one MemoryConfigTemplate and is deleted with it; one rule per (`templateId`,
+/// `role`). `authorTask`, `validationTask` and `descriptionNode` point at Nodes by id. MemoryConfigDefaultSkip
+/// rows point at the rule they skipped.
+///
+/// Behaviour: it has NodeRoleRule's columns without the ones that belong to a memory (`locked`,
+/// `sourceTemplateId`, `revision` and the audit columns). A hard delete of a referenced task sets the
+/// reference to null and leaves the `authorTaskRequired` or `validationTaskRequired` marker set, as on
+/// NodeRoleRule. Applying a template whose rule has lost a required task this way is refused as a whole, and an
+/// organization default plants such a rule so that it fails closed. Rules are written only together with their
+/// template (src/api/graphql/schema/resolvers.memoryConfigTemplate.ts).
+///
+/// Background: #1325, #1334.
 model MemoryConfigTemplateRule {
   id                     String            @id @default(cuid())
   templateId             String            @map("template_id")
@@ -5965,9 +6039,23 @@ model MemoryConfigTemplateRule {
   @@map("memory_config_template_rules")
 }
 
-/// #3426 (C6) — an org-default rule skipped at memory creation because its reference was deleted, unreadable to the
-/// org or not a task. Written in the creation transaction; readable only behind the memory-config manage gate. It
-/// stores NO task URN and NO state: a manager's read recomputes the current per-caller view from `templateRuleId`.
+/// A record that one reference of an organization's default template rule was left out when a memory was
+/// created. When a new memory receives its organization's default rules, a rule whose author task, validation
+/// task or description node is deleted, is not readable by the organization, or is not a task, is not copied.
+/// One row is written per such field, so the memory's managers can see what their memory did not get.
+///
+/// Relationships: belongs to the Memory that was created and is deleted with it. `template` and `templateRule`
+/// point at the MemoryConfigTemplate and MemoryConfigTemplateRule that were skipped, and are set to null when
+/// either is deleted.
+///
+/// Behaviour: written in the transaction that creates the memory, and only for a default that is not
+/// `required` (a required default plants the rule so that it fails closed instead;
+/// src/api/graphql/schema/resolvers.memoryConfigOrgDefault.ts). `field` is `authorTask`, `validationTask` or
+/// `descriptionNode`. The row stores no task URN and no state: a read recomputes what the caller may see from
+/// `templateRuleId`. It is readable only by those who may manage the memory's config. No code updates or
+/// deletes a row.
+///
+/// Background: #3426.
 model MemoryConfigDefaultSkip {
   id             String   @id @default(cuid())
   memoryId       String   @map("memory_id")
@@ -5989,20 +6077,28 @@ model MemoryConfigDefaultSkip {
   @@map("memory_config_default_skips")
 }
 
-/// #1655 DAE/DAG: immutable compiled code; approval is the temporary DZ-3
-/// bridge until passkey signatures ship. Identity strings preserve audit history.
 enum AutomationTier {
   PERSON
   APP
 }
 
-/// #2441 — append-only record of every approval, decline and revocation of an
-/// automation's consent (cor:agt:010:01). Written in the SAME transaction as
-/// the pin change by `adoptionDoor` (resolvers.automationPin.ts) and nowhere
-/// else. The trigger id, the actor and the org carry no FK on purpose: history
-/// must survive trigger deletion and user erasure, and an FK action would have
-/// to UPDATE a row the trigger refuses to update. The App FK cascades so a hard
-/// delete still works (the trigger lets a DELETE through once the App is gone).
+/// One entry in the history of consent to an automation: an approval, a decline or a revocation of the pin
+/// that says which exact version of a trigger's automation may run. The table is the append-only audit trail
+/// of who consented to what, and when.
+///
+/// Relationships: belongs to an App and is deleted with it. `triggerRef` (the id of the AgentSchedule or
+/// AgentWebhook row, or the origin run's id for a manual trigger), `actorUserId` and `organizationId` are
+/// plain values with no foreign key: the history must survive the deletion of a trigger and the erasure of a
+/// user, and a foreign-key action would have to update a row that may not be updated.
+///
+/// Behaviour: written in the same transaction as the pin change, by `adoptionDoor` in
+/// src/api/graphql/schema/resolvers.automationPin.ts and nowhere else. `action` is APPROVE, DECLINE or REVOKE
+/// and `triggerKind` is SCHEDULE, WEBHOOK or MANUAL (CHECKs in prisma/automation-adoption-invariants.sql).
+/// `pinHash` is the adopted hash on an approval, the hash of the removed pin on a revocation, and null on a
+/// decline with nothing adopted. `organizationId` is the App's organization, null for a user-owned App. A
+/// trigger refuses every update, and lets a delete through only once the App is gone.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:010:01. Background: #2441.
 model AutomationAdoptionEvent {
   id             String   @id @default(cuid())
   appId          String   @map("app_id")
@@ -6027,13 +6123,29 @@ model AutomationAdoptionEvent {
   @@map("automation_adoption_events")
 }
 
-/// #2484 (cor:agt:010:01, epic #2435) — an App's write grant on ONE memory under ONE loc prefix, for its USERLESS
-/// runs only: the register-recorded grant the Open paragraph rules on. One row per (App, memory, prefix); the prefix
-/// is required and matches the loc itself and its `:`-boundary descendants only, judged on the destination after
-/// `writeTo` expansion, at write time (`src/lib/appWriteGrant.ts`). A row is never edited: it ends with a terminal
-/// `revokedAt` (trigger + CHECKs in app-memory-write-grant-invariants.sql, where the partial unique index also lives).
-/// `grantedBy` / `revokedBy` carry no FK on purpose: they are sealed history of who acted and must survive user
-/// erasure. `registerNodeUrn` is a citation of the register line, never evidence that the line exists.
+/// Permission for an App's runs that act for no user to write nodes in one memory, under one loc prefix. A run
+/// with no on-behalf-of user may write only where its App holds such a grant; this row is that grant.
+///
+/// Relationships: belongs to an App and to a Memory, and is deleted with either. `grantedBy` and `revokedBy`
+/// are user ids with no foreign key: they are a sealed record of who acted and must survive the erasure of the
+/// user. Every grant and revocation also writes an AppMemoryWriteGrantEvent.
+///
+/// Behaviour:
+/// - At most one live grant per (App, memory, prefix): a partial unique index in
+///   prisma/app-memory-write-grant-invariants.sql.
+/// - `prefix` is required. It covers the loc itself and its descendants at a `:` boundary, so
+///   `reports:progress` does not cover `reports:progressX`. It is judged on the destination loc, after `writeTo`
+///   expansion, at the moment of each write (src/lib/appWriteGrant.ts).
+/// - The grant allows node create and update only, and only for a userless run of that App. It never allows
+///   delete, move, edge or settings writes, and never serves another App's run, a run for a user, an App key, a
+///   worker session or a person.
+/// - A row is never edited. It ends with a terminal `revokedAt` (trigger and CHECKs in the same SQL file).
+/// - A person who manages the App and can write the memory sets a grant; whoever manages the App revokes it
+///   (src/api/graphql/schema/resolvers.appWriteGrant.ts, the only writer).
+/// - `registerNodeUrn` cites the register entry that records the grant. It is a citation, never evidence that
+///   the entry exists.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:010:01. Background: #2484, #2435.
 model AppMemoryWriteGrant {
   id              String    @id @default(cuid())
   appId           String    @map("app_id")
@@ -6053,11 +6165,19 @@ model AppMemoryWriteGrant {
   @@map("app_memory_write_grants")
 }
 
-/// #2484 — append-only record of every grant and revocation of an App memory write grant: who, which App, which
-/// memory, which prefix, and nothing of any node's content. Written in the SAME transaction as the row change by
-/// `src/lib/appWriteGrant.ts` and nowhere else. The memory, grant and actor carry no FK on purpose: history must
-/// survive their deletion. The App FK cascades so a hard delete still works (the trigger lets a DELETE through once
-/// the App is gone).
+/// One entry in the history of App memory write grants: that a grant was given or revoked, by whom, for which
+/// App, memory and prefix. The table is the append-only audit trail of AppMemoryWriteGrant. It holds nothing
+/// of any node's content.
+///
+/// Relationships: belongs to an App and is deleted with it. `memoryId`, `grantId` and `actorUserId` are plain
+/// ids with no foreign key, so the history survives the deletion of the memory, the grant and the user.
+///
+/// Behaviour: written in the same transaction as the grant row's change, by the grant doors in
+/// src/api/graphql/schema/resolvers.appWriteGrant.ts and nowhere else. `action` is GRANT or REVOKE (CHECK in
+/// prisma/app-memory-write-grant-invariants.sql). A trigger refuses every update, and lets a delete through
+/// only once the App is gone.
+///
+/// Background: #2484.
 model AppMemoryWriteGrantEvent {
   id          String   @id @default(cuid())
   appId       String   @map("app_id")
@@ -6076,14 +6196,30 @@ model AppMemoryWriteGrantEvent {
   @@map("app_memory_write_grant_events")
 }
 
-/// #2883 (ruling 0081 = A; cor:agt:010:01 read-grant rule) — an automation's READ grant on ONE memory, optionally under
-/// one loc prefix (a NULL prefix is the whole memory). "The automation" is the TRIGGER ROW a run executes
-/// (`AgentSchedule` / `AgentWebhook`, keyed `(appId, triggerKind, triggerId)`); the key carries across an edit and a
-/// re-adoption, and the grant ends on revoke or when the trigger is soft-deleted (judged live at the read: no FK, the
-/// trigger is polymorphic). Read-only, consulted only by the run `hadron_read_node` read (`src/lib/automationReadGrant.ts`).
-/// A row is never edited: it ends with a terminal `revokedAt` (trigger + CHECKs in app-automation-read-grant-invariants.sql,
-/// where the partial unique index also lives). `grantedBy` / `revokedBy` carry no FK: sealed history that survives
-/// user erasure.
+/// Permission for one automation to read one memory, or the part of it under one loc prefix, that its runs
+/// could not otherwise read. The automation is the trigger a run executes for: an AgentSchedule or an
+/// AgentWebhook row.
+///
+/// Relationships: belongs to an App and to a Memory, and is deleted with either. The trigger is named by
+/// (`appId`, `triggerKind`, `triggerId`) with no foreign key, because it is one of two models; whether the
+/// trigger is still live is judged at each read. `grantedBy` and `revokedBy` are user ids with no foreign key:
+/// a sealed record that survives the erasure of the user. Every grant and revocation also writes an
+/// AppAutomationReadGrantEvent.
+///
+/// Behaviour:
+/// - `prefix` null means the whole memory; otherwise the loc itself and its descendants at a `:` boundary.
+/// - The grant is keyed on the trigger row, so it carries over an edit and a re-adoption of the automation. It
+///   ends when it is revoked or when the trigger is soft-deleted. Runs that descend from a trigger's run use
+///   their root trigger's grants; a manual run has no trigger and so no grant.
+/// - It only ever adds read access, and is consulted only by a run's `hadron_read_node` read, after the shared
+///   read gate has refused (`runHoldsReadGrant`, src/lib/automationReadGrant.ts).
+/// - A row is never edited. It ends with a terminal `revokedAt` (trigger and CHECKs in
+///   prisma/app-automation-read-grant-invariants.sql, which also holds the partial unique index).
+/// - Whoever manages the target memory (for an Agent's system memory, the Agent) gives a grant, as a person.
+///   The App's managers or the target's manager revoke it
+///   (src/api/graphql/schema/resolvers.automationReadGrant.ts, the only writer).
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:010:01. Background: #2883.
 model AppAutomationReadGrant {
   id          String    @id @default(cuid())
   appId       String    @map("app_id")
@@ -6107,9 +6243,18 @@ model AppAutomationReadGrant {
   @@map("app_automation_read_grants")
 }
 
-/// #2883 — append-only record of every automation read grant and revocation: who, which App, trigger, memory and
-/// prefix, and nothing of any node's content. Written in the SAME transaction as the row change and nowhere else.
-/// Memory, grant and actor carry no FK on purpose; the App FK cascades so a hard delete still works.
+/// One entry in the history of automation read grants: that a grant was given or revoked, by whom, for which
+/// App, trigger, memory and prefix. The table is the append-only audit trail of AppAutomationReadGrant. It
+/// holds nothing of any node's content.
+///
+/// Relationships: belongs to an App and is deleted with it. `memoryId`, `grantId`, `triggerId` and
+/// `actorUserId` are plain ids with no foreign key, so the history survives their deletion.
+///
+/// Behaviour: written in the same transaction as the grant row's change, by the grant doors in
+/// src/api/graphql/schema/resolvers.automationReadGrant.ts and nowhere else. `action` is GRANT or REVOKE (CHECK
+/// in prisma/app-automation-read-grant-invariants.sql).
+///
+/// Background: #2883.
 model AppAutomationReadGrantEvent {
   id          String   @id @default(cuid())
   appId       String   @map("app_id")
@@ -6130,16 +6275,33 @@ model AppAutomationReadGrantEvent {
   @@map("app_automation_read_grant_events")
 }
 
-/// #430 (first slice) — a Git-mirror attempt that did NOT land, recorded so the divergence is no longer silent.
-/// One row per (memory, node, kind, remove_loc, branch): a WRITE row per node/branch, plus one REMOVE row per distinct old loc/branch a move
-/// left behind (remove_loc is '' for WRITE). `node_id` carries NO foreign key on purpose, so a REMOVE row survives the
-/// node's hard delete; the memory FK cascades. A row exists only while the last settled attempt failed: success, and
-/// ordinary writes to a memory that is not mirrored delete it. The sweep leaves ineligible memories untouched.
-/// `attempt_seq` comes from
-/// `git_mirror_attempt_seq`, taken INSIDE the per-memory checkout lock and settled before it releases, so a stale
-/// settle can never overwrite a newer one (src/integrations/github/mirrorObligations.ts). `error_class` is a fixed,
-/// CHECK-constrained set (git-mirror-obligation-invariants.sql); no exception text, URL or token is ever stored.
-/// The sweep retries recorded failures only, with capped attempts; no writer-side PENDING or new triggers.
+/// A file that a memory's Git mirror still owes its repository, because the last attempt to publish it failed.
+/// When a memory is mirrored to Git, every node write is also pushed to the repository; that push can fail
+/// after the database write has committed. This row records the failure, so the difference between the memory
+/// and its repository is visible and can be retried.
+///
+/// Relationships: belongs to a Memory and is deleted with it. `nodeId` is a node id with no foreign key, on
+/// purpose: a REMOVE row must survive the hard delete of its node.
+///
+/// Behaviour:
+/// - One row per (memory, node, `kind`, `removeLoc`, `branch`), which is the primary key. A WRITE row is the
+///   node's current file. A REMOVE row is an old path that a move left behind, named by `removeLoc`
+///   (`removeLoc` is empty for WRITE). `branch` is the branch the attempt resolved to, empty only for older
+///   rows written before the branch was recorded.
+/// - A row exists only while the last settled attempt failed. A success deletes it, and so does an ordinary
+///   write to a memory that is not mirrored (src/integrations/github/mirrorObligations.ts, the only writer).
+/// - `attemptSeq` comes from the sequence `git_mirror_attempt_seq`, taken inside the per-memory checkout lock
+///   and settled before the lock is released. A settle only applies over a lower `attemptSeq`, so a late
+///   settle never overwrites a newer one.
+/// - `state`: FAILED can be retried, NOT_CLONED means there is no local clone, EXHAUSTED means the retry sweep
+///   reached its attempt cap (an ordinary write can still settle the row).
+/// - `errorClass` is one of a fixed set of words (CHECK in prisma/git-mirror-obligation-invariants.sql). No
+///   exception text, URL or token is ever stored.
+/// - The sweep in src/jobs/sweepGitMirrorObligations.ts retries recorded failures with a growing delay and a
+///   cap on attempts. It leaves encrypted and unconfigured memories untouched. Memory validation reports the
+///   rows as findings (src/lib/memoryValidation.ts).
+///
+/// Background: #430, #3042.
 model GitMirrorObligation {
   memoryId      String                   @map("memory_id")
   nodeId        String                   @map("node_id")
@@ -6176,6 +6338,30 @@ enum GitMirrorObligationState {
   @@map("git_mirror_obligation_state")
 }
 
+/// One published version of an automation of an App: the compiled automation as canonical JSON, stored
+/// unchangeably together with its hash, and the record of who approved or revoked it.
+///
+/// Relationships: belongs to an App and is deleted with it. `entrySourceNodeId` (the node the automation
+/// starts from), `runAsUserId`, `publishedBy`, `approvedBy` and `revokedBy` are plain ids with no foreign key,
+/// so the record keeps who acted after a node or a user is gone.
+///
+/// Behaviour:
+/// - `number` counts versions per (App, entry node), starting at 1. `versionHash` is a SHA-256 hash of the
+///   canonical JSON, and `sourceManifest` lists the source of each node of the compiled automation.
+/// - `tier` says whose authority the automation runs with: PERSON has a `runAsUserId`, APP has none (CHECK
+///   `chk_automation_shape`, prisma/automation-invariants.sql).
+/// - The compiled code and its metadata never change (a trigger refuses it). Approval (`approvalHash`,
+///   `approvedBy`, `approvedAt`, with the hash equal to `versionHash`) and revocation (`revokedBy`,
+///   `revokedAt`) are each written once, and a revoked version cannot be approved. A new approval needs a new
+///   version.
+/// - A PERSON version is approved only by its run-as user; an APP version by the App's owner or an admin of
+///   its organization.
+/// - The only code that touches the table is src/lib/automation/versions.ts (`publishAutomationVersion`,
+///   `approveAutomationVersion`, `revokeAutomationVersion`). No API operation calls those functions today and
+///   no run reads the table: what a run may execute is settled by the adoption pin on its trigger (see
+///   AutomationAdoptionEvent).
+///
+/// Background: #1655.
 model AutomationVersion {
   id                String         @id @default(cuid())
   appId             String         @map("app_id")
@@ -6200,20 +6386,43 @@ model AutomationVersion {
   @@map("automation_versions")
 }
 
-/// #1705 (Task Management T1) — one piece of work a team App has assigned, or
-/// wants assigned (cor:agt:050:01). The platform records who holds it, since
-/// when, and how it ended; it never reads what the work is.
+/// One piece of work in a team App: something an owner wants done and, once assigned, the worker or person who
+/// is doing it. The platform records who owns it, who holds it, since when, and how it ended. It never reads
+/// what the work is: `title` and `description` are the team's own words.
 ///
-/// Shape (CHECK `chk_agent_tasks_shape`, prisma/agent-task-invariants.sql):
-/// exactly one owner and at most one assignee, each a Worker OR a User; the
-/// status vocabulary; per-status timestamps; a result only on a finished task.
-/// `queued` (cor:agt:050:03) and `waitingOnChildren` (cor:agt:050:04) are
-/// DERIVED at read time, never stored.
+/// Relationships:
+/// - Belongs to an App and is deleted with it.
+/// - `parent` is the task this one is a child of, always in the same App; `children` are its child tasks.
+///   Parentage is fixed at creation.
+/// - `clonedFrom` is the task this one was cloned from, set to null if that task is deleted.
+/// - The owner is a Worker or a User (`ownerWorker`, `ownerUser`), and so is the assignee (`assigneeWorker`,
+///   `assigneeUser`). These four references are NO ACTION, not RESTRICT: a hard delete of the App removes its
+///   workers and its tasks in one statement, and NO ACTION checks at the end of that statement, after both are
+///   gone. A worker with tasks is otherwise in use (`deleteWorker` refuses WORKER_IN_USE).
+/// - AgentTaskBlocker rows link it to the tasks that block it and the tasks it blocks. AgentTaskCounter rows
+///   count the numbers issued under it. AgentTaskStopHold rows record when a stop signal kept it from being
+///   assigned.
+/// - `createdByRunId` is a plain id with no foreign key: a run is pruned long before its tasks are.
+/// - AgentTeamEvent rows name the task by id with no foreign key, so the history outlives the task.
 ///
-/// Worker / User references are NO ACTION, not RESTRICT: an App hard delete
-/// cascades its workers and its tasks in one statement, and NO ACTION checks at
-/// the END of that statement, after both are gone. A worker with tasks is
-/// otherwise in use (`deleteWorker` refuses WORKER_IN_USE).
+/// Behaviour:
+/// - Shape (CHECK `chk_agent_tasks_shape`, prisma/agent-task-invariants.sql): exactly one owner and at most
+///   one assignee, each a Worker or a User; the status vocabulary; a timestamp per status; a result only on a
+///   finished task.
+/// - `status` is `backlog`, `pending`, `started`, `finished` or `cancelled`. Whether a task is queued (pending
+///   with no assignee, hrn:node:hadronmemory.com:specs:cor:agt:050:03) or waiting on its child tasks
+///   (hrn:node:hadronmemory.com:specs:cor:agt:050:04) is worked out at read time and never stored.
+/// - `taskNumber` and `handle` (for example `AT3.405.16`) are given once at creation and never change.
+/// - `requirements` say which workers the matcher may choose for a task with no assignee.
+/// - The result (`resultOutcome`, `resultSummary`, `resultEvidence`, `resultFindings`) is set only when the
+///   task is finished.
+/// - Tasks are created through `createAgentTask` and `cloneAgentTask`
+///   (src/api/graphql/schema/resolvers.agentTask.ts) and assigned by hand or by the matcher
+///   (src/lib/agentTasks/matcher.ts). The stall evaluator (src/jobs/taskStallEvaluator.ts) reads open tasks to
+///   raise alarms. What happens to a task is recorded as AgentTeamEvent rows.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:050:01. Lifecycle:
+/// hrn:node:hadronmemory.com:specs:cor:agt:050:02. Background: #1705.
 model AgentTask {
   id                   String    @id @default(cuid())
   appId                String    @map("app_id")
@@ -6355,7 +6564,19 @@ model AgentTask {
   @@map("agent_tasks")
 }
 
-/// #2644: same-App acyclic dependency graph, guarded by task-blocker-invariants.sql.
+/// A dependency between two tasks of the same App: `task` may not proceed until `blocker` has ended. One row
+/// is one edge of the App's blocker graph.
+///
+/// Relationships: joins two AgentTask rows, one row per pair (the primary key), and is deleted with either
+/// task.
+///
+/// Behaviour: a trigger in prisma/task-blocker-invariants.sql keeps the graph valid. Both tasks must belong to
+/// the same App, a task cannot block itself, a link that would close a cycle is refused, a link is never
+/// updated, and links change only while the blocked task is `backlog` or `pending`. The same SQL file keeps
+/// AgentTask.`blocked` and `releasedAt` in step with the links, so a blocker that is finished, cancelled or
+/// removed releases the tasks it blocked. Links are written by src/lib/agentTasks/blockers.ts.
+///
+/// Entity spec (of the task): hrn:node:hadronmemory.com:specs:cor:agt:050:01. Background: #2644.
 model AgentTaskBlocker {
   taskId String @map("task_id")
   blockerTaskId String @map("blocker_task_id")
@@ -6367,10 +6588,22 @@ model AgentTaskBlocker {
   @@map("agent_task_blockers")
 }
 
-/// #2553: the last number issued under one parent: `parentTaskId` NULL is the App's project counter. Its own table, so a
-/// task create serializes against other creates under the SAME parent only and never takes the App row exclusively
-/// (the App row stays a shared authority anchor). The one-row-per-App project counter is a partial unique index in
-/// prisma/agent-task-number-invariants.sql (Prisma cannot model it; NULLs are distinct in the unique below).
+/// The last number issued for the children of one parent task, or, with no parent, for the top-level tasks
+/// (the projects) of an App. A task's handle such as `AT3.405.16` is built from these numbers: each new task
+/// takes the next number under its parent.
+///
+/// Relationships: belongs to an App and is deleted with it. `parentTask` is the AgentTask whose children it
+/// counts, and the row is deleted with that task. `parentTaskId` null is the App's own counter for top-level
+/// tasks.
+///
+/// Behaviour: the task create increments the row, or inserts it at 1, in the creating transaction
+/// (`INSERT ... ON CONFLICT DO UPDATE`, src/api/graphql/schema/resolvers.agentTask.ts). The counter is a table
+/// of its own so that a create waits only for other creates under the same parent and never takes the App row
+/// exclusively. A number is never reissued. There is one row per (App, parent); the one row per App with no
+/// parent is enforced by a partial unique index in prisma/agent-task-number-invariants.sql, because NULLs are
+/// distinct in the ordinary unique index.
+///
+/// Background: #2553.
 model AgentTaskCounter {
   id           String  @id @default(cuid())
   appId        String  @map("app_id")
@@ -6385,16 +6618,37 @@ model AgentTaskCounter {
   @@map("agent_task_counters")
 }
 
-/// #1705 — one append-only record of something that happened in a team App's
-/// task work (cor:agt:050:11). Never changed or removed: the trigger in
-/// prisma/agent-task-invariants.sql refuses every UPDATE except the one-time
-/// acknowledgement of an alarm, refuses an INSERT that arrives acknowledged,
-/// and refuses a DELETE unless the App itself is gone (the cascade).
+/// One append-only record of something that happened in a team App's task work: a task created, assigned,
+/// started, finished or cancelled, a worker's availability changed, a host operation's outcome, and so on. An
+/// alarm is also an event, with `severity` set to `alarm`. The table is the team's history and the source the
+/// roster, the wake computation and the alarm evaluators read.
 ///
-/// `payload` carries counts, outcomes, reasons and ids only — never message or
-/// description text (cor:agt:050:11, Proposed); src/lib/agentTasks/events.ts
-/// is its only writer. Actor and subject ids carry no FK on purpose: they are a
-/// sealed record of who acted, and an FK action would have to UPDATE the row.
+/// Relationships:
+/// - Belongs to an App and is deleted with it.
+/// - `taskId`, the actor ids (`actorUserId`, `actorWorkerId`, `actorAgentId`, `actorRunId`, `actorAppKeyId`)
+///   and the subject ids (`subjectWorkerId`, `subjectUserId`) are plain ids with no foreign key. They are a
+///   sealed record of who acted and what it concerned, and a foreign-key action would have to update the row.
+/// - An alarm has AgentTeamAlarmSchedule rows (who it wakes, and when) and at most one AlarmEscalationEnd.
+/// - An alarm that is about no task has one episode row that points at it: DarkWorkerEpisode,
+///   CoordinatorCadenceEpisode, PostLimitEpisode, StartFailingEpisode or HostSweepEpisode.
+/// - WorkerDeliveryTaskEvent rows record the delivery of an event to a worker.
+///
+/// Behaviour:
+/// - Never changed or removed. A trigger in prisma/agent-task-invariants.sql refuses every update except the
+///   one-time acknowledgement of an alarm (`acknowledgedAt` and who), refuses an insert that arrives
+///   acknowledged, and refuses a delete unless the App itself is gone.
+/// - `payload` carries counts, outcomes, reasons and ids only, never message or description text.
+/// - An alarm stores its `chain`, the owners it concerns as they stood when it was raised, nearest first.
+/// - A stall alarm on a task carries `episodeStart`. The unique index on (`taskId`, `type`, `episodeStart`) is
+///   what makes it one alarm per episode across concurrent evaluator passes. The index cannot do that for an
+///   alarm with no task, which is why those have episode tables.
+/// - `txId` is the id of the writing transaction, set by the database, so a reader can page in commit order.
+/// - Most events are written by src/lib/agentTasks/events.ts. The modules that raise an alarm about no task
+///   insert their own alarm rows (darkWorker.ts, coordinatorCadence.ts, postLimit.ts and sweepRuns.ts in
+///   src/lib/agentTasks, and src/lib/desiredState/desiredStart.ts), and src/lib/stopSignals/notices.ts,
+///   src/lib/hostOperations/sessionEnd.ts and src/lib/contextReset/contextReset.ts write events of their own.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:050:11. Background: #1705, #1706.
 model AgentTeamEvent {
   id                     String    @id @default(cuid())
   appId                  String    @map("app_id")
@@ -6465,16 +6719,28 @@ model AgentTeamEvent {
   @@map("agent_team_events")
 }
 
-/// #1706 — who an alarm wakes, and when (cor:agt:050:19). One row per owner in
-/// the alarm's `chain`, by its index there: the nearest owner (index 0) is
-/// woken when the alarm is raised, and owner i is due `i` windows later. The
-/// stall evaluator stamps `wokenAt` once a row is due and its alarm is still
-/// unacknowledged; acknowledging stops every later row (cor:agt:050:20).
+/// When each owner in an alarm's chain is to be woken about it. An alarm lists the owners it concerns, nearest
+/// first; this table has one row per owner, with the time that owner falls due and whether they were woken.
+/// It is how an unacknowledged alarm climbs from the nearest owner to the next.
 ///
-/// A side table because the alarm event is append-only. "Woken" here is the
-/// platform's record that the owner is now due a wake-up; DELIVERING it is the
-/// heartbeat slice's (T5). A person in the chain is recorded as woken the same
-/// way, and the timer runs on past them.
+/// Relationships: belongs to an AgentTeamEvent that is an alarm, and is deleted with it. `chainIndex` is the
+/// owner's position in the alarm's `chain`; the pair is the primary key. It is a table of its own because the
+/// alarm event cannot be updated.
+///
+/// Behaviour:
+/// - The rows are written with the alarm, in the same transaction. The nearest owner (index 0) is woken at
+///   once (`wokenAt` set), and owner i is due i windows later (`dueAt`).
+/// - Each minute the stall evaluator (`wakeDueOwners`, src/lib/agentTasks/stall.ts) stamps `wokenAt` on every
+///   row that is due while its alarm is still unacknowledged. Acknowledging the alarm stops every later row.
+/// - If the alarm's own episode has ended (the condition no longer holds), the evaluator closes every row not
+///   yet woken with `endedAt` instead. A row is woken or ended, never both
+///   (`chk_agent_team_alarm_schedule_shape`).
+/// - `wokenAt` records that the owner is due a wake. Delivering it is not done here: a worker's due wakes are
+///   computed from these rows by src/lib/agentTasks/taskWakes.ts. A person in the chain is recorded as woken
+///   the same way and is not delivered to; the timer runs on past them.
+///
+/// Rules: hrn:node:hadronmemory.com:specs:cor:agt:050:19, hrn:node:hadronmemory.com:specs:cor:agt:050:20.
+/// Background: #1706, #2200.
 model AgentTeamAlarmSchedule {
   eventId    String    @map("event_id")
   chainIndex Int       @map("chain_index")
@@ -6492,11 +6758,27 @@ model AgentTeamAlarmSchedule {
   @@map("agent_team_alarm_schedule")
 }
 
-/// #3934 (cor:agt:050:20, V77; gate disposition on hadron-server#3939): the RECORDED end of an alarm's escalation. The
-/// alarm event stream is append-only, so the end lives here: one row per alarm, written once (a trigger refuses any
-/// UPDATE), by the evaluator pass (every unacknowledged alarm it finds ended) or by the acknowledgement that froze an
-/// ended-but-unrecorded episode. `endedAt` is the earliest end the available history supports at the moment of writing;
-/// it is at most one evaluator tick late and never moves. Reads take the earlier of this and the acknowledgement.
+/// The recorded moment at which an alarm stopped escalating because the condition it was raised for had
+/// ended. One row per alarm, written once. Reads use it to tell whether an alarm is still in effect: an alarm
+/// is in effect while it is unacknowledged and has no row here.
+///
+/// Relationships: belongs to one AgentTeamEvent that is an alarm (`eventId` is the primary key) and is deleted
+/// with it. It is a table of its own because the alarm event cannot be updated.
+///
+/// Behaviour:
+/// - An alarm belongs to an episode: the period during which its condition holds. For a task alarm the
+///   episode ends when the task moves; for an alarm about no task it ends when its episode row is closed (for
+///   example DarkWorkerEpisode.`endedAt`). This row records that end for any kind of alarm.
+/// - Written by the stall evaluator's pass (`recordEndedEscalations`, src/lib/agentTasks/stall.ts) for every
+///   unacknowledged alarm whose episode it finds ended, and by an acknowledgement that finds the episode
+///   already ended but not yet recorded (`freezeEndedEscalation`).
+/// - `endedAt` is the earliest end the available history supports when the row is written. It can be up to one
+///   evaluator pass late, and it never moves: a trigger refuses every update
+///   (prisma/alarm-escalation-end-invariants.sql).
+/// - A read takes the earlier of `endedAt` and the alarm's acknowledgement
+///   (src/api/graphql/schema/resolvers.agentTask.ts).
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:20. Background: #3934.
 model AlarmEscalationEnd {
   eventId    String   @id @map("event_id")
   endedAt    DateTime @map("ended_at")
@@ -6507,10 +6789,31 @@ model AlarmEscalationEnd {
   @@map("alarm_escalation_ends")
 }
 
-/// #2755 — one dark-worker episode (a worker that went OVERDUE or left a due wake unacknowledged past the App's
-/// window). The alarm event stream is append-only, so an episode's end lives here. At most one OPEN row per
-/// worker (partial unique index in prisma/dark-alarm-invariants.sql): the worker's single open episode across both
-/// reasons. `reason` is the trigger that opened it. The episode ends when BOTH conditions have cleared.
+/// One period during which a worker was dark: it did not check its team channel when it was expected to, or
+/// it left a wake that was due to it unacknowledged for too long. The row opens with the alarm raised about
+/// the worker and is closed when the worker is no longer dark.
+///
+/// Episode pattern: an alarm is an AgentTeamEvent, which is append-only, and an alarm about no task cannot be
+/// de-duplicated by that table's unique index. So each period during which the condition holds is one row
+/// here, with at most one open row per worker, inserted in the same transaction as the alarm. That makes it
+/// one alarm per episode, and gives the alarm an end.
+///
+/// Relationships: belongs to an App and to the Worker it is about, and is deleted with either. `event` is the
+/// alarm raised with the episode (an AgentTeamEvent of type `alarm.dark-worker`, with no task), one to one.
+///
+/// Behaviour:
+/// - The stall evaluator's pass (`evaluateDarkWorkers`, src/lib/agentTasks/darkWorker.ts, every minute) opens
+///   an episode for a worker whose check status is OVERDUE, or that has a due wake unacknowledged for longer
+///   than `App.deliveryDarkAlarmWindowSeconds`, and that has no open episode. `reason` (`overdue` or
+///   `wake-unacked`) is the condition that opened it.
+/// - A worker has a single open episode across both conditions (partial unique index in
+///   prisma/dark-alarm-invariants.sql). The pass ends it (`endedAt`) when both conditions have cleared.
+///   Uninstalling the App also ends its open episodes.
+/// - `noticePostedAt` is set when the platform's one team-channel post for the episode was written. The post
+///   is retried on each pass while the episode is open and not yet posted.
+/// - AlarmEscalationEnd and the wake schedule read `endedAt` to stop the alarm's escalation.
+///
+/// Background: #2755.
 model DarkWorkerEpisode {
   id       String    @id @default(cuid())
   appId    String    @map("app_id")
@@ -6532,10 +6835,39 @@ model DarkWorkerEpisode {
   @@map("dark_worker_episodes")
 }
 
-/// #2763 — one coordinator-cadence episode: a coordinator that stopped assigning while a lane worker was free (cor:agt:050:31,
-/// Proposed). It de-duplicates the task-less alarm raised with it (agent_team_events, type `alarm.coordinator-cadence`, task_id
-/// NULL, which `agent_team_events_episode_uniq` cannot dedupe). At most one OPEN row per coordinator (partial unique index in
-/// prisma/coordinator-cadence-invariants.sql); the episode ends only at the coordinator's next counted assignment.
+/// One period during which a worker that is expected to hand out tasks was late doing so: it assigned no task
+/// for 60 minutes while a worker it could have given work to was free. The row opens with the alarm raised
+/// about the worker and is closed when the worker next assigns a task.
+///
+/// Which workers: a Worker whose `role` is the text `coordinator` (compared without regard to case) and that
+/// is not retired. `role` is free text on Worker; this one value is what the platform reads to find the
+/// workers whose assigning it times. The name of the model is historical and under review in #4375.
+///
+/// Episode pattern: an alarm is an AgentTeamEvent, which is append-only, and an alarm about no task cannot be
+/// de-duplicated by that table's unique index. So each period during which the condition holds is one row
+/// here, with at most one open row per worker, inserted in the same transaction as the alarm. That makes it
+/// one alarm per episode, and gives the alarm an end.
+///
+/// Relationships: belongs to an App and to the Worker it is about, and is deleted with either. `event` is the
+/// alarm raised with the episode (an AgentTeamEvent of type `alarm.coordinator-cadence`, with no task), one to
+/// one.
+///
+/// Behaviour:
+/// - The stall evaluator's pass (`evaluateCoordinatorCadence`, src/lib/agentTasks/coordinatorCadence.ts, every
+///   minute) opens an episode when such a worker has made no assignment of its own for 60 minutes and at least
+///   one worker in its lane is free for work. Its lane is the workers whose reporting line leads to it, and
+///   the workers that report to no one. Another such worker, and a worker under a stop signal, never count as
+///   free.
+/// - Only a task the worker itself assigns or reassigns counts (an AgentTeamEvent of type `task.assigned` or
+///   `task.reassigned` with the worker as actor). Assignments made by the matcher do not.
+/// - The 60 minutes run from the latest of the worker's last own assignment, the start of its first session,
+///   and the moment in CoordinatorCadenceClock.
+/// - At most one open row per worker (partial unique index in prisma/coordinator-cadence-invariants.sql). The
+///   episode ends only at the worker's next own assignment, and `endedAt` is that assignment's time. A lane
+///   worker turning busy, or the worker being paused, does not end it, so neither raises a second alarm.
+/// - AlarmEscalationEnd and the wake schedule read `endedAt` to stop the alarm's escalation.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:31. Background: #2763.
 model CoordinatorCadenceEpisode {
   id       String    @id @default(cuid())
   appId    String    @map("app_id")
@@ -6552,8 +6884,36 @@ model CoordinatorCadenceEpisode {
   @@map("coordinator_cadence_episodes")
 }
 
-/// #2763 — when the evaluator first saw each coordinator, so a coordinator that existed before the deploy (or never assigned)
-/// is not late at the first pass. Inserted once, `ON CONFLICT DO NOTHING`; never updated.
+/// The moment the platform first saw a worker as one whose task assigning it times. One row per such worker.
+/// It gives the worker a starting point for its 60-minute window, so that a worker the platform has only just
+/// begun to watch is not reported late at once.
+///
+/// Which workers: a Worker whose `role` is the text `coordinator` (compared without regard to case) and that
+/// is not retired. `role` is free text on Worker; this one value is what the platform reads to find the
+/// workers that are expected to hand out tasks to others. The name of the model is historical and under review
+/// in #4375.
+///
+/// What is timed: how long such a worker has gone without assigning or reassigning a task itself. When that
+/// reaches 60 minutes while a worker it could give work to is free, the platform raises one alarm about it
+/// and opens a CoordinatorCadenceEpisode. The 60 minutes run from the latest of three moments: the worker's
+/// last own assignment, the start of its first session, and `observedAt` in this row.
+///
+/// Why the evaluator needs the row: the first two moments can be missing or old. A worker that never assigned
+/// a task and never had a session has neither, and a worker that existed before the evaluator first ran can
+/// have both far in the past. Without a recorded first sighting, such a worker would be late on the very first
+/// pass. With it, the worker is not late until 60 minutes after the platform first saw it.
+///
+/// Relationships: belongs to the Worker it is about (`workerId` is the primary key) and to that worker's App,
+/// and is deleted with either.
+///
+/// Behaviour: inserted by `observe` in src/lib/agentTasks/coordinatorCadence.ts, which the stall evaluator's
+/// pass (src/jobs/taskStallEvaluator.ts, every minute) runs for each such worker when it decides whether the
+/// worker is late, and again inside the transaction that raises the alarm. The insert is
+/// `ON CONFLICT DO NOTHING`, so the first pass to see a worker sets `observedAt` and concurrent passes agree
+/// on it. No code updates or deletes a row: a worker that stops being watched and is watched again later
+/// keeps its first `observedAt`.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:31. Background: #2763.
 model CoordinatorCadenceClock {
   workerId   String   @id @map("worker_id")
   appId      String   @map("app_id")
@@ -6565,10 +6925,28 @@ model CoordinatorCadenceClock {
   @@map("coordinator_cadence_clocks")
 }
 
-/// #4231 (S8 of #4229) — a worker whose platform starts keep failing: three failed platform `worker.start`s in an hour
-/// stop the desired-state start for it, and ONE `alarm.start-failing` goes to its reporting line per episode. An
-/// episode closes an hour after it opened, so a worker still failing then is alarmed again. At most one open per
-/// worker (a partial unique index, prisma/desired-start-invariants.sql).
+/// One period, at most an hour long, during which the platform's attempts to start a worker kept failing. The
+/// row opens with the alarm raised about the worker, and limits that alarm to one per hour.
+///
+/// Episode pattern: an alarm is an AgentTeamEvent, which is append-only, and an alarm about no task cannot be
+/// de-duplicated by that table's unique index. So the alarm is tied to a row here, with at most one open row
+/// per worker, inserted in the same transaction as the alarm. In this model the episode only de-duplicates:
+/// closing it does not end the alarm, which stays in effect until it is acknowledged.
+///
+/// Relationships: belongs to an App and to the Worker it is about, and is deleted with either. `event` is the
+/// alarm raised with the episode (an AgentTeamEvent of type `alarm.start-failing`, with no task), one to one.
+///
+/// Behaviour:
+/// - The condition: the platform starts a long-lived worker that should be running and has no open session
+///   (src/lib/desiredState/desiredStart.ts, a step of the matcher's one-minute pass). Three failed starts of
+///   one worker within an hour stop these starts for it and call `raiseStartFailingAlarm`.
+/// - That function opens an episode and raises the alarm to the worker's reporting line, unless the worker
+///   already has an open episode (partial unique index in prisma/desired-start-invariants.sql).
+/// - An episode is over an hour after it opened. `endedAt` is written as `openedAt` plus one hour by the next
+///   call for the same worker, which then opens a new episode. So a worker that is still failing an hour later
+///   is alarmed again.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:070:08. Background: #4231, #4229.
 model StartFailingEpisode {
   id       String    @id @default(cuid())
   appId    String    @map("app_id")
@@ -6585,10 +6963,27 @@ model StartFailingEpisode {
   @@map("start_failing_episodes")
 }
 
-/// #2014 — one post-limit episode: the first refusal of a worker's team-chat post by the rate limit in an hour. It only
-/// de-duplicates the alarm raised with it (agent_team_events, type `alarm.post-limit`); the alarm itself stays open until
-/// acknowledged. At most one OPEN row per worker (partial unique index in prisma/post-limit-invariants.sql); an open
-/// episode older than an hour is closed (`endedAt = openedAt + 1 hour`) by the next refusal, which then opens a new one.
+/// One period, at most an hour long, that starts when a worker's team-chat post is refused by the posting
+/// rate limit. The row opens with the alarm raised about the worker, and limits that alarm to one per hour.
+///
+/// Episode pattern: an alarm is an AgentTeamEvent, which is append-only, and an alarm about no task cannot be
+/// de-duplicated by that table's unique index. So the alarm is tied to a row here, with at most one open row
+/// per worker, inserted in the same transaction as the alarm. In this model the episode only de-duplicates:
+/// closing it does not end the alarm, which stays open and keeps escalating until it is acknowledged.
+///
+/// Relationships: belongs to an App and to the Worker it is about, and is deleted with either. `event` is the
+/// alarm raised with the episode (an AgentTeamEvent of type `alarm.post-limit`, with no task), one to one.
+///
+/// Behaviour:
+/// - Not opened by an evaluator. The refusal itself calls `raisePostLimitAlarm`
+///   (src/lib/agentTasks/postLimit.ts, from src/api/graphql/schema/resolvers.teamChat.ts), in a transaction of
+///   its own that commits although the post is refused.
+/// - The first refusal with no open episode opens one and raises the alarm to the worker's reporting line.
+///   Later refusals within the hour raise nothing (partial unique index in prisma/post-limit-invariants.sql).
+/// - An episode is over an hour after it opened. `endedAt` is written as `openedAt` plus one hour by the next
+///   refusal, which then opens a new episode. Times are read on the database clock.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:020:14. Background: #2014.
 model PostLimitEpisode {
   id       String    @id @default(cuid())
   appId    String    @map("app_id")
@@ -6605,11 +7000,31 @@ model PostLimitEpisode {
   @@map("post_limit_episodes")
 }
 
-/// #4233 (S10 of #4229) — one run of a host's one-minute sweep, as the host reported it: when it ran, in which mode, how
-/// many workers it planned to change and what became of them, and up to 50 per-worker lines (`lines`: worker token,
-/// outcome, reason code; never free text). Written once by the host key (`recordHostSweepRun`), never changed except
-/// that `postedAt` is claimed by the run's one summary post. `runKey` is the host's own token for the run: a replayed
-/// report is the same row. Shape: prisma/host-sweep-invariants.sql.
+/// One run of a host's sweep, as the host reported it. A host is a machine that runs the workers of a team
+/// App; its sweep runs about once a minute, plans changes to the workers it runs and, in apply mode, makes
+/// them. This row is the report of one such run: when it ran, in which mode, and how many workers it planned
+/// to change and what became of them.
+///
+/// Relationships: belongs to an App and is deleted with it. `hostId` is the host's id within the App (the
+/// value on HostRegistration), a plain value with no foreign key.
+///
+/// Behaviour:
+/// - Written once by the host's own key through `recordHostSweepRun`
+///   (src/api/graphql/schema/resolvers.hostSweepRuns.ts, src/lib/agentTasks/sweepRuns.ts). `runKey` is the
+///   host's own token for the run and is unique per (App, host): a report sent again is the same row and
+///   changes nothing.
+/// - `mode` is the sweep mode the run ran in. `planned`, `applied`, `skipped` and `failed` count workers.
+///   `lines` holds at most 50 per-worker lines, each a worker token, an outcome and a reason code. No free
+///   text is accepted anywhere in a report. Shape: prisma/host-sweep-invariants.sql.
+/// - A run that applied or failed at least one change produces one summary post in the App's team chat, from
+///   the platform. `postedAt` is claimed in the post's own transaction, so the run posts once. `summaryTriedAt`
+///   records a post that was tried and did not land; the evaluator's pass retries it.
+/// - Recording a run ends the host's open HostSweepEpisode. The stale-sweep check reads the newest
+///   `recordedAt` per host: the platform's clock, never the host's `endedAt`.
+/// - Readable by whoever may read the App's tasks and events. A host key reads only its own host's runs.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:070:09. Rule:
+/// hrn:node:hadronmemory.com:specs:cor:agt:070:10. Background: #4233, #4229, #4255.
 model HostSweepRun {
   id         String    @id
   appId      String    @map("app_id")
@@ -6637,10 +7052,31 @@ model HostSweepRun {
   @@map("host_sweep_runs")
 }
 
-/// #4233 — one stale-sweep episode: a host of an App whose sweep mode is OBSERVE or APPLY whose last run is older than five
-/// minutes. It de-duplicates the task-less alarm raised with it (agent_team_events, type `alarm.stale-sweep`, subject worker
-/// NULL). At most one OPEN row per (App, host) (partial unique index in prisma/host-sweep-invariants.sql); the episode ends
-/// when the host records its next run, or when the App's sweep mode goes OFF.
+/// One period during which a host's sweep had gone quiet: the platform last recorded a HostSweepRun for the
+/// host more than five minutes ago, in an App whose sweep is switched on. The row opens with the alarm raised
+/// about the host and is closed when the host reports again.
+///
+/// Episode pattern: an alarm is an AgentTeamEvent, which is append-only, and an alarm about no task cannot be
+/// de-duplicated by that table's unique index. So each period during which the condition holds is one row
+/// here, with at most one open row per (App, host), inserted in the same transaction as the alarm. That makes
+/// it one alarm per episode, and gives the alarm an end.
+///
+/// Relationships: belongs to an App and is deleted with it. `hostId` is the host's id within the App, a plain
+/// value with no foreign key. `event` is the alarm raised with the episode (an AgentTeamEvent of type
+/// `alarm.stale-sweep`, with no task and no subject worker), one to one.
+///
+/// Behaviour:
+/// - The stall evaluator's pass (`evaluateStaleSweeps`, src/lib/agentTasks/sweepRuns.ts, every minute) opens
+///   an episode for a host of an App whose sweep mode is OBSERVE or APPLY, when the newest run the platform
+///   recorded for it is older than five minutes and it has no open episode (partial unique index in
+///   prisma/host-sweep-invariants.sql). The alarm goes to the App's managers.
+/// - A host that never ran is judged from its registration, and a change of the App's sweep mode restarts the
+///   clock, so switching the sweep on does not alarm in the same minute.
+/// - The episode ends when the host records its next run, or when the App's sweep mode goes OFF (or the App is
+///   deleted or uninstalled).
+/// - AlarmEscalationEnd and the wake schedule read `endedAt` to stop the alarm's escalation.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:070:11. Background: #4233.
 model HostSweepEpisode {
   id       String    @id @default(cuid())
   appId    String    @map("app_id")
@@ -6656,18 +7092,34 @@ model HostSweepEpisode {
   @@map("host_sweep_episodes")
 }
 
-/// #1706 — one worker's availability for work (cor:agt:060:02). At most one
-/// row per worker, and a worker with none is available (Proposed). The row is
-/// kept when the worker becomes available again, for history. An `until` that
-/// has passed reads as available at once, and the matcher's sweep rewrites the
-/// row to `available`, set by `lapse`, with one event (#1766).
+/// Whether one worker is available for work, and if not, why and until when. It is one of the inputs to
+/// whether the matcher may give the worker a task. A worker with no row is available.
 ///
-/// `setBy` names the setter class of cor:agt:060:08: `worker` (itself, only to
-/// unavailable), `holder`, `app-manager`, `reports-to` (#1759: the worker it
-/// reports to, only clearing a stall-rule mark, 060:11), `stall-rule` (060:07)
-/// or `host` (T6); or `lapse` (#1766), the platform recording a passed `until`.
-/// The actor ids follow the #1610 shape. Shape: chk_worker_availability_shape
-/// (prisma/agent-task-stall-invariants.sql).
+/// Relationships: belongs to one Worker (`workerId` is the primary key, so at most one row per worker) and is
+/// deleted with it. `setByUserId`, `setByWorkerId`, `setByAgentId` and `setByHostId` are plain ids that record
+/// who set it. `contextResetId` names the ContextReset that set a `resetting` mark, with no foreign key: both
+/// rows go with their worker.
+///
+/// Behaviour:
+/// - `state` is `available` or `unavailable`. An unavailable row has a `reason`: `stalled`, `out-of-tokens`,
+///   `host-down`, `other` or `resetting`.
+/// - The row is kept when the worker becomes available again, as the record of the last change.
+/// - An `until` that has passed reads as available at once. The matcher's sweep then rewrites the row to
+///   `available`, set by `lapse`, and writes one event.
+/// - `setBy` names the kind of setter: `worker` (itself, only to unavailable), `holder`, `app-manager`,
+///   `reports-to` (the worker it reports to, only to clear a `stalled` mark), `stall-rule` (a stall alarm
+///   marked the stalled worker), `host` (a host that registered the worker, only `out-of-tokens` or
+///   `host-down`, and it clears only its own marks), `lapse`, or `context-reset` (the platform's context
+///   reset, which alone writes `resetting`).
+/// - A `stalled` mark ends at the worker's next activity. A `resetting` mark ends at the worker's first
+///   activity after `clearsOnActivityAfter`.
+/// - Shape: `chk_worker_availability_shape` (prisma/agent-task-stall-invariants.sql). Written by
+///   src/lib/agentTasks/availability.ts, src/lib/contextReset/contextReset.ts and the availability mutations.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:060:02. Rules:
+/// hrn:node:hadronmemory.com:specs:cor:agt:060:07, hrn:node:hadronmemory.com:specs:cor:agt:060:08,
+/// hrn:node:hadronmemory.com:specs:cor:agt:060:11, hrn:node:hadronmemory.com:specs:cor:agt:050:27.
+/// Background: #1706, #1709, #1759, #1766, #2162.
 model WorkerAvailability {
   workerId              String    @id @map("worker_id")
   /// 'available' | 'unavailable'.
@@ -6697,13 +7149,23 @@ model WorkerAvailability {
   @@map("worker_availability")
 }
 
-/// #2831 S1 (cor:agt:060:12) — a model group: an opaque name over a list of model
-/// patterns (globs), declared by the team Agent (`agentId`) or by an App (`appId`,
-/// an override of the Agent's group of that name, or an App-only group). Exactly
-/// one owner (chk_model_group_owner). Resolved LIVE at match time, App's row else
-/// the Agent's (src/lib/agentTasks/modelGroups.ts); never copied at install. The
-/// platform gives name and patterns no meaning, and a group is never an
-/// authorization input. `name` and every pattern are stored lowercase.
+/// A named list of model patterns, for example `large` = [`claude-opus-*`]. A task can require that the worker
+/// it is matched to runs a model in a group, or does not. The platform gives the name and the patterns no
+/// meaning of its own.
+///
+/// Relationships: owned by exactly one of an Agent (`agentId`) or an App (`appId`), and deleted with its owner
+/// (CHECK `chk_model_group_owner`). `name` is unique per owner.
+///
+/// Behaviour:
+/// - The team's Agent declares groups. An App may override a group of the same name, which replaces the whole
+///   list, or add a group of its own.
+/// - A group is resolved at match time, the App's row first and otherwise the Agent's
+///   (src/lib/agentTasks/modelGroups.ts). It is never copied when the Agent is installed, so an edit by the
+///   Agent reaches every App at once.
+/// - `name` and every pattern are stored in lower case. Patterns are globs.
+/// - A group is used for matching only. It is never an input to authorization.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:060:12. Background: #2831.
 model ModelGroup {
   id        String    @id @default(cuid())
   name      String
@@ -6723,9 +7185,19 @@ model ModelGroup {
   @@map("model_groups")
 }
 
-/// #1706 — one model family's availability for work in one App
-/// (cor:agt:060:03): at most one row per App and family; with none, the family
-/// is available. Set only by whoever manages the App (cor:agt:060:09).
+/// Whether one model family (for example `claude` or `codex`) is available for work in one App. It lets a team
+/// pause every worker of a family at once: a worker whose family is unavailable is not available for work.
+///
+/// Relationships: belongs to an App and is deleted with it. At most one row per (App, `family`), the primary
+/// key. `setByUserId`, `setByWorkerId` and `setByAgentId` are plain ids that record who set it.
+///
+/// Behaviour: with no row the family is available. `state` is `available` or `unavailable`, with an optional
+/// `reason` and an optional `until`, after which the row reads as available. Only whoever manages the App sets
+/// it (hrn:node:hadronmemory.com:specs:cor:agt:060:09). The matcher and the roster read it together with
+/// WorkerAvailability (src/lib/agentTasks/availability.ts). Unlike a worker's record, a lapsed family record
+/// is not rewritten by a sweep.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:060:03. Background: #1706.
 model ModelFamilyAvailability {
   appId         String    @map("app_id")
   /// The model family, e.g. `claude`, `codex`, `glm` (cor:agt:060:04).
@@ -6744,10 +7216,28 @@ model ModelFamilyAvailability {
   @@map("model_family_availability")
 }
 
-/// #1706 — an App's stall windows, in minutes (cor:agt:050:14–:17 "What Can
-/// Change"). A NULL column, or no row, means the platform default
-/// (src/lib/agentTasks/stall.ts STALL_WINDOW_DEFAULTS). Tunables, not
-/// contract; set by whoever manages the App.
+/// One App's own settings for the time limits of its task work, in place of the platform's defaults: how long
+/// a task may sit before an alarm is raised, and a few related limits for hosts and sessions.
+///
+/// Relationships: belongs to one App (`appId` is the primary key) and is deleted with it.
+///
+/// Behaviour:
+/// - A null column, or no row, means the platform default.
+/// - The four stall windows, in minutes: `notStartedMinutes` (an assigned task not started,
+///   hrn:node:hadronmemory.com:specs:cor:agt:050:14), `noProgressMinutes` (a started task with no progress,
+///   hrn:node:hadronmemory.com:specs:cor:agt:050:15), `ownerReactionMinutes` (an owner who does not react to a
+///   finished child task, hrn:node:hadronmemory.com:specs:cor:agt:050:16) and `assignmentMinutes` (a task
+///   nobody could be assigned, hrn:node:hadronmemory.com:specs:cor:agt:050:17). The defaults are
+///   STALL_WINDOW_DEFAULTS in src/lib/agentTasks/stall.ts.
+/// - `hostLapseCheckIns`: how many of a host's check-in intervals may pass before its HostRegistration lapses
+///   (2 to 10, default 3).
+/// - `sessionEndGraceMinutes`: how long a worker asked to end its session has before the platform ends it
+///   through its host (1 to 1440, default 10; see TaskSessionEndRequest).
+/// - `hostReportTimeoutMinutes`: how long a host has to report a HostOperation it collected before the
+///   platform fails it (5 to 1440, default 60).
+/// - Set by whoever manages the App (`setAgentTaskStallSchedule`). The values are tunables, not contract.
+///
+/// Background: #1706, #1709, #1763, #1881.
 model AgentTaskStallSchedule {
   appId                    String   @id @map("app_id")
   notStartedMinutes        Int?     @map("not_started_minutes")
@@ -6774,19 +7264,30 @@ model AgentTaskStallSchedule {
   @@map("agent_task_stall_schedule")
 }
 
-/// #1707 — a host's statement of which team App it serves and which workers it
-/// can launch, each with the model family it would run as (cor:agt:070:01).
-/// Identified within its App by `hostId` (Proposed); `label` is for display.
+/// A host's statement that it serves a team App. A host is a machine that runs the App's workers; it
+/// registers itself, lists the workers it can launch, and keeps the registration alive by refreshing it. The
+/// platform uses it to know where a worker with no session can be started.
 ///
-/// The host's identity comes from its key, never from a request: the public
-/// `registerHost` mutation (#1709) takes the host id from the calling key's
-/// `host:operate` scope row (cor:agt:070:04). The writer is
-/// src/lib/agentTasks/hosts.ts.
+/// Relationships: belongs to an App and is deleted with it. One row per (App, `hostId`). Its `workers` are
+/// HostRegistrationWorker rows, one per worker the host can launch. TeamStopSignal rows of host scope name the
+/// registration. HostOperation, HostSweepRun and HostWorkerAssignment name the same host by `hostId`, a plain
+/// value.
 ///
-/// A registration not refreshed within LAPSE_POLLS poll intervals has lapsed
-/// (plan default 3, cor:agt:070:01 open question): its workers stop counting as
-/// launchable through it, and the sweep writes `host.lost` once, stamping
-/// `lostAt`. A refresh clears `lostAt`.
+/// Behaviour:
+/// - The host's identity comes from its key, never from the request: `registerHost` takes the host id from
+///   the `host:operate` scope of the calling App key, which names one App and one host
+///   (hrn:node:hadronmemory.com:specs:cor:agt:070:04). The writer is src/lib/agentTasks/hosts.ts. `label` is
+///   for display only.
+/// - A registration is live while it was refreshed (`refreshedAt`) within a number of its own
+///   `pollIntervalSeconds`. That number is the App's `hostLapseCheckIns` on AgentTaskStallSchedule, 2 to 10,
+///   default 3. Liveness is worked out at read time.
+/// - When a registration has lapsed, its workers stop counting as launchable through it. The matcher's sweep
+///   (`sweepLostHosts`) writes one `host.lost` event and stamps `lostAt`. A refresh clears `lostAt`.
+/// - `capabilities` are the capability-gated operation types the host declared it performs. A host is never
+///   issued such a type unless its live registration lists it; today the only one is `worker.reset-context`.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:070:01. Rule:
+/// hrn:node:hadronmemory.com:specs:cor:agt:070:04. Background: #1707, #1709, #1763, #2162.
 model HostRegistration {
   id                  String    @id @default(cuid())
   appId               String    @map("app_id")
@@ -6809,9 +7310,19 @@ model HostRegistration {
   @@map("host_registrations")
 }
 
-/// #1707 — one worker a registered host can launch, and the model family it
-/// would run as (cor:agt:070:01). A worker may be launchable through several
-/// hosts (Proposed).
+/// One worker that a registered host says it can launch, with the model family the worker would run as
+/// there. The rows of a registration are the list of workers the platform may start on that host.
+///
+/// Relationships: joins a HostRegistration and a Worker, one row per pair (the primary key), and is deleted
+/// with either. A worker may be listed by several hosts.
+///
+/// Behaviour: written with the registration by src/lib/agentTasks/hosts.ts; a refresh replaces the list.
+/// `family` is the model family. `worktrees` are the worker's existing working directories on that host, as
+/// name tokens the host resolves from its own configuration, never paths the platform invents. A worker is
+/// started only in one of them, and an empty list means it has none there
+/// (hrn:node:hadronmemory.com:specs:cor:agt:070:06).
+///
+/// Entity spec (of the registration): hrn:node:hadronmemory.com:specs:cor:agt:070:01. Background: #1707, #1709.
 model HostRegistrationWorker {
   registrationId String   @map("registration_id")
   workerId       String   @map("worker_id")
@@ -6830,12 +7341,30 @@ model HostRegistrationWorker {
   @@map("host_registration_workers")
 }
 
-/// #4222 (S1a of #4229; cor:agt:070:01, change Proposed) — one worker the platform says a host of a team App runs:
-/// the working directory it runs in there (a name token the host resolves: an Orca worktree name, or a plain
-/// directory name for a worker without Git), and its launcher profile (#4230, S1b: family, model, effort, accountProfile,
-/// each a token). Never a path, a command or a credential (cor:agt:070:03). Set and removed by
-/// whoever manages the App. In effect only while the worker is not retired, and used by registration and by starts
-/// only while the App's `hostSetupSource` is `server`. Shape: prisma/host-assignment-invariants.sql.
+/// The platform's own statement that a host of a team App runs a given worker, and how: the working directory
+/// the worker runs in on that host and the launcher settings to start it with. It is the counterpart of
+/// HostRegistrationWorker, where the host states what it can launch.
+///
+/// Relationships: belongs to an App and to a Worker of that same App, and is deleted with either. The foreign
+/// key covers the worker and its App together, so an assignment can only name a worker of its own App, and a
+/// worker with assignments cannot move to another App. `hostId` is the host's id within the App, a plain
+/// value. One row per (App, worker, host). `createdByUserId` is a plain id that outlives the account.
+///
+/// Behaviour:
+/// - Every field a host acts on is a name token the host resolves through its own configuration: `workdir`
+///   (a worktree name, or a plain directory name for a worker without Git), `family`, `model`, `effort` and
+///   `accountProfile`. Never a path, a command or a credential
+///   (hrn:node:hadronmemory.com:specs:cor:agt:070:03). Shape: prisma/host-assignment-invariants.sql.
+/// - Set and removed by whoever manages the App (src/api/graphql/schema/resolvers.hostAssignment.ts). No App
+///   key writes one: a host never assigns itself a worker.
+/// - While the App's `hostSetupSource` is `host` (the default), assignments are only a record. Once it is
+///   `server`, a host may register only the workers assigned to it, a worker is launchable through a host only
+///   while it is assigned there and the host's live registration lists it with the assigned `workdir`, and a
+///   start uses the assignment's `workdir` and `family` (src/lib/hostOperations/assignments.ts).
+/// - An assignment of a retired worker is not in effect.
+///
+/// Entity spec (of the registration): hrn:node:hadronmemory.com:specs:cor:agt:070:01. Rule:
+/// hrn:node:hadronmemory.com:specs:cor:agt:070:03. Background: #4222, #4229, #4230.
 model HostWorkerAssignment {
   id              String   @id
   appId           String   @map("app_id")
@@ -6865,17 +7394,36 @@ model HostWorkerAssignment {
   @@map("host_worker_assignments")
 }
 
-/// #1709 (Task Management T6) — one typed operation the platform issued to one
-/// host of a team App (cor:agt:070:02). `type` is one of the closed set of
-/// cor:agt:070:03 and `args` its typed arguments, validated at issue
-/// (src/lib/hostOperations/types.ts); there is no free-form type.
+/// One instruction the platform issued to one host of a team App, for one worker: for example start this
+/// worker, end its session, or create a worktree. The host collects the operation, carries it out and reports
+/// the outcome. This is the only way the platform asks a host to do anything.
 ///
-/// Status (070:02, `collected` Proposed by #1709): `issued` → `collected` (the
-/// host took it) → `succeeded` | `failed` (the host reported; a failure carries
-/// a reason). Each outcome also writes `host.operation.succeeded` / `.failed`.
-/// Only the host it names collects or reports it (070:04). The issuer is a
-/// person, a worker (through its session) or the platform (`issuedBy`).
-/// Shape: prisma/host-operation-invariants.sql.
+/// Relationships: belongs to an App and to the Worker the operation is for, and is deleted with either.
+/// `hostId` is the host's id within the App, a plain value. The issuer ids (`issuedByUserId`,
+/// `issuedByWorkerId`, `issuedByAgentId`) and `holdUserId` are plain ids. A LaunchGrant, a ContextReset and a
+/// TaskSessionEndRequest name the operation that serves them by id.
+///
+/// Behaviour:
+/// - `type` is one of a closed set (`worktree.create`, `worker.start`, `worker.deliver`, `worker.end`,
+///   `worktree.remove`, `worker.reset-context`) and `args` are its typed arguments, validated when the
+///   operation is issued (src/lib/hostOperations/types.ts). There is no free-form type and no shell command
+///   (hrn:node:hadronmemory.com:specs:cor:agt:070:03).
+/// - `status` moves `issued`, then `collected` (the host took it), then `succeeded` or `failed` (the host
+///   reported; a failure carries `failureReason`). Each outcome also writes a `host.operation.succeeded` or
+///   `host.operation.failed` AgentTeamEvent. A collected operation with no report is failed by the stall
+///   evaluator's pass after the App's report timeout (src/lib/hostOperations/settle.ts).
+/// - Only the host it names collects or reports it, through that host's key
+///   (hrn:node:hadronmemory.com:specs:cor:agt:070:04).
+/// - `issuedBy` is `user`, `worker` (through its session) or `platform`. `issuedReason` says why the platform
+///   issued it when that is not a task: `DESIRED_RUNNING` for the start of a long-lived worker that should run
+///   and has no session.
+/// - For a `worker.start`, `holdUserId` and `holdAt` record the hold on the worker that authorized the start.
+///   A launch grant is minted, and a session bound, only while the worker's hold is still exactly that one.
+/// - Shape: prisma/host-operation-invariants.sql and prisma/desired-start-invariants.sql.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:070:02. Rules:
+/// hrn:node:hadronmemory.com:specs:cor:agt:070:03, hrn:node:hadronmemory.com:specs:cor:agt:070:04.
+/// Background: #1709, #1881, #1883, #4231.
 model HostOperation {
   id               String    @id
   appId            String    @map("app_id")
@@ -6917,17 +7465,29 @@ model HostOperation {
   @@map("host_operations")
 }
 
-/// #1956 (cor:agt:020:03; Holger via Vera #11904, the window #12291) — a resume
-/// claim: written by a worker session's own driver before a deliberate context
-/// reset (a shed keeps the session open; a rotation ends it with its handoff),
-/// so the fresh context can recover its worker with one call and no arguments,
-/// with no binding file. Single use, consumed by a guarded update; it lives
-/// RESUME_CLAIM_TTL_MS (60 s) from the write. Redeemable only by its holder,
-/// judged by the caller's token, never by anything the caller presents: the
-/// claim carries no secret and its id is never shown, so a non-holder has
-/// nothing to present and learns nothing. Same mechanics family as
-/// `LaunchGrant` (#1883), but it authorizes nothing the holder could not
-/// already do by naming the worker.
+/// A short-lived note that lets a worker's agent find its way back to its worker after it deliberately
+/// resets its context. Before the reset, the session's own driver writes a claim; the fresh context then
+/// recovers the worker with one call and no arguments, and needs no local binding file.
+///
+/// Relationships: belongs to an App and is deleted with it. `sessionId`, `workerId`, `holderUserId` and
+/// `resumedSessionId` are plain ids with no foreign key.
+///
+/// Behaviour:
+/// - Written by `writeResumeClaim` (src/lib/resumeClaims.ts), which the session mutations in
+///   src/api/graphql/schema/resolvers.mutation.session.ts call (`createResumeClaim` is one). A reset that keeps
+///   the session open (a shed) and one that ends it with a handoff (a rotation) both write one.
+/// - It lives 60 seconds from the write (`expiresAt`, RESUME_CLAIM_TTL_MS), judged on the database clock.
+/// - Single use: redeeming is one guarded update that sets `consumedAt`, so of two racing redemptions exactly
+///   one wins. `resumedSessionId` is the session the redemption bound: the claimed one when it was still open,
+///   otherwise a new session started for its worker.
+/// - Only its holder can redeem it, and that is judged by the caller's own token, never by anything the
+///   caller presents. The claim carries no secret and its id is never shown, so a caller who is not the holder
+///   has nothing to present and learns nothing.
+/// - A newer claim for the same session replaces an unused older one (`revokedAt`).
+/// - It authorizes nothing the holder could not already do by naming the worker. It works like a LaunchGrant,
+///   without a token.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:020:03. Background: #1956.
 model ResumeClaim {
   id               String    @id
   appId            String    @map("app_id")
@@ -6950,15 +7510,26 @@ model ResumeClaim {
   @@map("resume_claims")
 }
 
-/// #1709 (T6 slice 2; Holger's ruling A, Vera #10761) — a single-use launch
-/// grant: the proof a host passes to the agent it starts, which the agent
-/// redeems at `startSession` for an ordinary worker session. Minted when the
-/// host COLLECTS a `worker.start` (so no secret is stored in the operation),
-/// bound to (worker, host, task, holder), short-lived, stored only as a hash.
-/// Redeemable only by the holder, judged by the caller's token, never by the
-/// grant; consumed atomically. A re-collection revokes the unconsumed grant
-/// before minting a new one. Never a credential: it authorizes nothing the
-/// holder's own token does not.
+/// A single-use proof that a host hands to the agent it starts, so that the agent can open an ordinary worker
+/// session for the worker it was started as. The agent redeems it at `startSession`.
+///
+/// Relationships: belongs to an App and is deleted with it. `operationId` is the `worker.start` HostOperation
+/// it was minted for, and `workerId`, `hostId`, `taskId`, `holderUserId` and `sessionId` are what it is bound
+/// to. All are plain ids with no foreign key.
+///
+/// Behaviour:
+/// - Minted when the host collects a `worker.start` operation (src/lib/hostOperations/launch.ts), so that no
+///   secret is stored in the operation. Only a hash of the token is stored (`tokenHash`, unique).
+/// - It is bound to the worker, the host, the task (if any) and the holder of the worker, and lives 10 minutes
+///   (`expiresAt`, LAUNCH_GRANT_TTL_MS).
+/// - Only the holder can redeem it, and that is judged by the caller's own token, never by the grant. It is
+///   consumed in one guarded update (`consumedAt`, with the `sessionId` it opened). A host key can never redeem
+///   it.
+/// - Collecting the same operation again revokes the grant that was not consumed (`revokedAt`) before a new
+///   one is minted. An operation that ends as failed also revokes it.
+/// - It is never a credential: it authorizes nothing the holder's own token does not.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:020:03. Background: #1709, #1883.
 model LaunchGrant {
   id           String    @id
   appId        String    @map("app_id")
@@ -6980,12 +7551,34 @@ model LaunchGrant {
   @@map("launch_grants")
 }
 
-/// #2162 (cor:agt:050:27) — one context reset of a worker, requested when a task it had started finished or was
-/// cancelled. At most one per task (`taskId` unique: a task ends once). The phase only moves forward:
-/// requested → claimed → checkpointed → stop-granted → agent-stopped → relaunched → done, or to `refused` / `failed`
-/// with a closed `reason`. `epoch` moves at claim and at every cancellation, so a host call naming an older epoch is
-/// refused STALE_EPOCH. The host operation keeps its own 070:02 status; this row is the reset's protocol state.
-/// Never reads or writes the task's outcome.
+/// One reset of a worker's context: the worker's agent is stopped and started again by its host so that it
+/// continues with a fresh context, while its session and its binding to the worker stay as they are. The row
+/// is the state of that procedure, step by step.
+///
+/// Relationships: belongs to an App and to the Worker being reset, and is deleted with either. `sessionId` is
+/// the worker's session that was open when the reset was requested, `taskId` the task whose end caused it
+/// (unique: a task ends once; null for a reset that belongs to no task), `hostId` the host it was issued to,
+/// and `hostOperationId` its `worker.reset-context` HostOperation (unique). All are plain ids with no foreign
+/// key. WorkerAvailability.`contextResetId` names the reset that holds a worker's `resetting` mark.
+///
+/// Behaviour:
+/// - `cause` is `task-end` (a task the worker had started finished or was cancelled, and its Agent has
+///   `resetContextAfterTask` on) or `context-cap` (the worker is over its Agent's context cap). It never
+///   changes (`trg_context_resets_cause_immutable`), and `chk_context_resets_cause` ties it to `taskId`.
+/// - `phase` only moves forward: requested, claimed, checkpointed, stop-granted, agent-stopped, relaunched,
+///   done; or to `refused` or `failed`, with a `reason` from a closed set (src/lib/contextReset/types.ts).
+/// - With no live host that registers the worker and declared the capability, the reset is recorded failed
+///   with HOST_UNSUPPORTED and nothing is issued (`hostId` null).
+/// - The host drives the steps with its key. Each step names the reset's `epoch`, which moves at the claim and
+///   at every cancellation, so a step that names an older epoch is refused STALE_EPOCH.
+/// - While a reset is claimed the worker is marked unavailable with reason `resetting`, so no task is assigned
+///   to it. The mark lapses by itself with the step's lease.
+/// - The host operation keeps its own status; this row is the reset's protocol state. The stall evaluator's
+///   pass ends a reset whose lease lapsed, whose session ended or whose operation settled.
+/// - A reset never reads or writes the task's outcome, and never ends, starts or rebinds a session.
+/// - Written only by src/lib/contextReset/contextReset.ts.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:27. Background: #2162, #4225.
 model ContextReset {
   id                   String    @id
   appId                String    @map("app_id")
@@ -7028,16 +7621,29 @@ model ContextReset {
   @@map("context_resets")
 }
 
-/// #1709 (cor:agt:050:10) — a task's request that its assignee end its worker
-/// session: written when a task with `closeSessionWhenDone` finishes or is
-/// cancelled while its worker assignee has an open session. One per task.
+/// A request that a worker end its session because its task is over. When a task that asks for it finishes or
+/// is cancelled while its worker assignee has an open session, the worker is asked to end that session; if it
+/// has not done so after a grace period, the platform ends the session through the worker's host.
 ///
-/// The worker is asked first; at `dueAt` (the App's grace, default 10 minutes)
-/// the sweep resolves it: `ended` (the session ended, by the worker or
-/// otherwise), `end-issued` (still open: the platform issued `worker.end` for
-/// that exact session to a live host registering the worker; `operationId`),
-/// or `no-live-host` (still open, no live host: nothing more happens). A
-/// replacement session is never touched: only `sessionId` is ever ended.
+/// Relationships: belongs to an App and is deleted with it. `taskId`, `workerId` (the worker that is asked),
+/// `sessionId` (the one session that may be ended), `eventId` (the `task.session-end-requested` AgentTeamEvent
+/// the request wrote), `requestedByWorkerId` and `operationId` (the `worker.end` HostOperation, if one was
+/// issued) are plain ids with no foreign key.
+///
+/// Behaviour:
+/// - Written by src/lib/hostOperations/sessionEnd.ts in the transaction that ends the task, when the task has
+///   `closeSessionWhenDone`. For a worker whose Agent is short-lived the flag is not read: the worker is asked
+///   when the last open task assigned to it ends, is reassigned away from it, or is handed back.
+/// - `taskId` is not unique. A task can have several requests over its life: one each time it ends under a
+///   worker or leaves a short-lived one.
+/// - The worker is asked first. At `dueAt` (the App's grace, default 10 minutes, see AgentTaskStallSchedule)
+///   the stall evaluator's pass resolves the request: `ended` (the session has ended, by the worker or
+///   otherwise), `end-issued` (still open, so the platform issued `worker.end` for that exact session to a
+///   live host that registers the worker), or `no-live-host` (still open and no live host: nothing more
+///   happens).
+/// - Only `sessionId` is ever ended. A session the worker binds later is never touched.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:10. Background: #1709, #4223, #4265.
 model TaskSessionEndRequest {
   id                  String    @id
   appId               String    @map("app_id")
@@ -7064,10 +7670,23 @@ model TaskSessionEndRequest {
   @@map("task_session_end_requests")
 }
 
-/// #1709 — one use of a host key (cor:agt:070:07: every use is recorded):
-/// which key, for which App and host, what it did, and when. `operationId`
-/// names the operation a report was about; `count` how many operations a
-/// collection returned or workers a registration listed.
+/// One use of a host key: the record that a host's App key did something, what, for which App and host, and
+/// when. Every use of a host key is recorded, so the people who manage the App can see what their hosts did.
+///
+/// Relationships: belongs to the AppKey that was used and is deleted with it. `appId`, `hostId` and
+/// `operationId` are plain values with no foreign key.
+///
+/// Behaviour:
+/// - Written by src/lib/hostOperations/hostKey.ts. A use that changes something is recorded in the caller's
+///   transaction, so it commits exactly when the use does. A read, or a call that was refused, is recorded in
+///   a write of its own, so the refused call's rollback keeps it; `refusedCode` is then the refusal's code.
+/// - `action` says what the key did, for example `register`, `collect`, `report`, `availability`, `read` or
+///   `session` (the full set is `HostKeyAction` in that file). `operationId` names the operation a report was
+///   about, and `count` how many operations a collection returned or workers a registration listed.
+/// - Only whoever manages the App can read what its keys did
+///   (src/api/graphql/schema/resolvers.hostOperation.ts).
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:070:07. Background: #1709, #1881.
 model HostKeyUse {
   id          String   @id
   appKeyId    String   @map("app_key_id")
