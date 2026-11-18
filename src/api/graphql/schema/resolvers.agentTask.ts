@@ -3447,28 +3447,56 @@ const horizonLagLastCheckedAt = new Map<string, number>();
  * `withReadableApp`'s App-key arm the whole read runs inside `inKeyReadTx`'s transaction and `c.db` there is
  * the TRANSACTION client; an un-awaited query on it outlives the resolver's return, dies P2028 ("Transaction
  * already closed") inside the catch below and is swallowed — the probe silently no-ops in exactly the
- * incident's error class. Pinned in resolvers.teamEventHorizon4316.test.ts (a key read asserts the check
- * reached the root client and the line landed).
+ * incident's error class. Pinned in resolvers.teamEventHorizon4316.test.ts: the direct-seam test drives
+ * `readTeamEvents` through a REAL transaction and asserts the check ran on the root client (not a key read —
+ * through the resolver the seam is un-pinnable at runtime: the transaction client is created inside
+ * `withReadableApp`, hooking the shared client infects it, and an un-awaited probe on the transaction client
+ * races the commit, so a key-arm behavioral pin cannot be deterministic). The resolver CALL SITES are
+ * source-pinned in the same file (#4372 fold 3).
+ *
+ * #4372 fold 3: the check itself is bounded and observable. The statement races a timeout, so a wedged or
+ * pool-starved probe releases its bookkeeping instead of holding it forever (Baylor F2), and a fault is no
+ * longer silent: the catch emits its own `team_events.horizon_probe_error` line (Baylor F3 — "ran and found
+ * nothing" stays silent, "errored" is now visible). The once-per-window map is capped (Baylor F5).
  */
 async function logStalledHorizon(db: Context['db'], appId: string): Promise<void> {
   const now = Date.now();
   const last = horizonLagLastCheckedAt.get(appId);
   if (last != null && now - last < HORIZON_LAG_LOG_INTERVAL_MS) return;
+  // Baylor F5: a long-lived server would otherwise accumulate one entry per App forever. Crude and honest:
+  // past the cap the cadence restarts, at most once per 1_000 Apps per window.
+  if (horizonLagLastCheckedAt.size >= 1_000) horizonLagLastCheckedAt.clear();
   horizonLagLastCheckedAt.set(appId, now);
+  const startedAt = now;
   try {
-    const [row] = await db.$queryRaw<{ heldBack: number; oldestAgeMs: number | null }[]>`
-      SELECT count(*)::int AS "heldBack",
-             CASE WHEN min(created_at) IS NULL THEN NULL
-                  ELSE round(extract(epoch FROM ((clock_timestamp() AT TIME ZONE 'UTC') - min(created_at))) * 1000)::int END AS "oldestAgeMs"
-      FROM agent_team_events
-      WHERE app_id = ${appId} AND tx_id >= pg_snapshot_xmin(pg_current_snapshot())`;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const [row] = await Promise.race([
+      db.$queryRaw<{ heldBack: number; oldestAgeMs: number | null }[]>`
+        SELECT count(*)::int AS "heldBack",
+               CASE WHEN min(created_at) IS NULL THEN NULL
+                    ELSE round(extract(epoch FROM ((clock_timestamp() AT TIME ZONE 'UTC') - min(created_at))) * 1000)::int END AS "oldestAgeMs"
+        FROM agent_team_events
+        WHERE app_id = ${appId} AND tx_id >= pg_snapshot_xmin(pg_current_snapshot())`,
+      // Baylor F2: bounded — the probe's promise settles at 5 s even if its statement never returns (the
+      // pool connection heals when the statement eventually does; the bookkeeping does not wait for it).
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('horizon probe timeout')), 5_000);
+        (timeout as unknown as { unref?: () => void }).unref?.();
+      }),
+    ]);
+    clearTimeout(timeout);
     if (!row?.oldestAgeMs || row.oldestAgeMs < HORIZON_LAG_MIN_AGE_MS) return;
     console.log(JSON.stringify({
       event: 'team_events.horizon_lag', appId, heldBack: row.heldBack, oldestAgeMs: row.oldestAgeMs,
       at: new Date().toISOString(),
     }));
-  } catch {
-    // Observability only: the served page is byte-identical whatever happens here.
+  } catch (error) {
+    // Observability only: the served page is byte-identical whatever happens here. F3: visible, not silent.
+    console.log(JSON.stringify({
+      event: 'team_events.horizon_probe_error', appId, ms: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : String(error),
+      at: new Date().toISOString(),
+    }));
   }
 }
 
@@ -3477,11 +3505,28 @@ async function logStalledHorizon(db: Context['db'], appId: string): Promise<void
  * served without awaiting its probe, so a test that asserts on (the absence of) a `team_events.horizon_lag`
  * line needs a positive signal the probe has RUN; awaiting this settles every in-flight probe. Production
  * never awaits it — the probes complete on their own and a rejection is impossible (every await sits inside
- * the try above).
+ * the try above; the fold-3 timeout race rejects into the SAME catch, which only logs).
+ *
+ * #4372 fold 3 (Peter #114929/#115033): BOUNDED. A probe that cannot settle (a wedged statement, pool
+ * exhaustion) FAILS the awaiting test after `timeoutMs` instead of hanging the run — the two host wedges
+ * both hung here, freezing every horizon test on the shared host. The bound mirrors settleTeamEventHorizon's
+ * own 10 s (src/test/teamEventHorizon.ts).
  */
 const horizonProbes = new Set<Promise<void>>();
-export async function teamEventHorizonSettled(): Promise<void> {
-  while (horizonProbes.size) await Promise.all([...horizonProbes]);
+export async function teamEventHorizonSettled(timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (horizonProbes.size) {
+    if (Date.now() >= deadline) {
+      throw new Error(`team events horizon: ${horizonProbes.size} probe(s) unsettled after ${timeoutMs} ms`);
+    }
+    await Promise.race([
+      Promise.all([...horizonProbes]),
+      new Promise<void>((resolve) => {
+        const tick = setTimeout(resolve, 100);
+        (tick as unknown as { unref?: () => void }).unref?.();
+      }),
+    ]);
+  }
 }
 
 /** Exported for the #4372 fold-2 pin: the probe's root-client seam is pinned from inside a REAL transaction (resolvers.teamEventHorizon4316.test.ts). */
@@ -3566,7 +3611,9 @@ export async function readTeamEvents(c: Context, app: { id: string }, args: Team
   // passed by the resolver) — never on `c.db`, which is the App-key transaction's client under `withReadableApp`'s
   // key arm and would close under the un-awaited query (see logStalledHorizon).
   if (!newestFirst && events.length < take) {
-    const probe = logStalledHorizon(probeDb, app.id).finally(() => { horizonProbes.delete(probe); });
+    // F1 (Baylor's #4372 delta): the .catch makes the chain self-absorbing — the promise parked in
+    // horizonProbes can never reject, whatever the function's own catch body does or stops doing.
+    const probe = logStalledHorizon(probeDb, app.id).catch(() => {}).finally(() => { horizonProbes.delete(probe); });
     horizonProbes.add(probe);
   }
   // #4135: use the stored AgentTask.handle (cor:agt:050:01, Proposed), once per page.

@@ -12,6 +12,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from 'pg';
+import { readFileSync } from 'node:fs';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -45,6 +46,10 @@ const openPg = async (): Promise<Client> => {
   const pg = new Client({ connectionString: process.env.DATABASE_URL });
   await pg.connect();
   await pg.query("SET idle_in_transaction_session_timeout = '30s'");
+  // Baylor P3: a server-side reap (the timeout above) makes the client emit 'error'; with no listener that
+  // is an uncaught exception that fails an UNRELATED test. The listener makes the reap visible to the net
+  // (end/destroy) instead of to the process.
+  pg.on('error', () => {});
   pgFixtures.push(pg);
   return pg;
 };
@@ -56,11 +61,17 @@ afterEach(async () => {
     const pg = pgFixtures.pop()!;
     // end() when the client answers (the ordinary case); destroy the socket when it is wedged, so a stuck
     // client can never keep the vitest process alive — the process-level hang observed on this host.
-    await Promise.race([pg.end().catch(() => {}), new Promise<void>((r) => setTimeout(r, 1_000))]);
+    // (`connection.stream` is a pg-internal field — tolerated deliberately: it is the load-bearing half of
+    // the net, and it type-checks; a pg upgrade that drops it fails HERE loudly, not silently. Baylor P3.)
+    let giveUp: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([pg.end().catch(() => {}), new Promise<void>((r) => { giveUp = setTimeout(r, 1_000); })]);
+    clearTimeout(giveUp);
     pg.connection?.stream?.destroy();
   }
-  await afterNet?.();
+  // Baylor P3: reset BEFORE awaiting — a rejecting net must not re-run in the next test's afterEach.
+  const net = afterNet;
   afterNet = null;
+  await net?.();
 });
 
 beforeEach(async () => {
@@ -278,6 +289,26 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
     } finally {
       if (open) await pg.query('ROLLBACK');
       await pg.end();
+    }
+  });
+
+  it('both resolver call sites thread the ROOT pooled client to the probe (#4372 fold 3)', () => {
+    // Bob's P2 (the #4372 LOCAL delta at 9c5f46462; Baylor's and Celine's P3s agree): reverting a resolver
+    // call site to `c.db` is the ORIGINAL regression and survives every runtime pin — verified by his run.
+    // The wiring cannot be pinned at runtime instead: under the App-key arm the transaction client is
+    // created INSIDE withReadableApp (no test-visible object), hooking the shared client infects it
+    // (findings:objectcreate-db-standin-infects-client), and a behavioral key-arm pin is racy — an
+    // un-awaited probe on the transaction client races the commit, and one that completes inside the
+    // transaction logs the same line as one on the root client. A real key-arm read "through the resolver
+    // that goes red when c.db is passed" (Peter #115033's preferred shape) is therefore NOT deterministic,
+    // so the call sites are pinned at the source. This goes red the moment either call site passes anything
+    // but `ctx.db`, and the length pin forces a third caller to be pinned too.
+    const src = readFileSync(new URL('./resolvers.agentTask.ts', import.meta.url), 'utf8');
+    const callSites = src.split('\n').filter((line) => line.includes('readTeamEvents(c, app, args'));
+    expect(callSites).toHaveLength(2); // agentTeamEvents and its Page sibling
+    for (const call of callSites) {
+      expect(call).toContain('ctx.db'); // the request's root pooled client, threaded as probeDb
+      expect(call).not.toMatch(/\bc\.db\b/); // the transaction client under the key arm — the incident
     }
   });
 });
