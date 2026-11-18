@@ -28,7 +28,9 @@ export async function run({ base, key, workload, durationMs, signal, cap = 25, f
   const note = ({status, sid}) => { if (status === 200) { counts.ok++; if (!sid) { counts.missingSession++; if (w.close) counts.closeFailed++; } } else if (status === 429) counts.capRefused++; else counts.other++; };
   const startAt = now();
   const end = startAt + durationMs;
-  // The probe rides the most recently initialized session: with cap+1 opened, the first one is the eviction victim.
+  // The probe rides the most recently initialized session. The server's cap rule evicts the principal's
+  // least-recently-ACTIVE transport with nothing in flight (server.ts, #2261), so the first-opened,
+  // never-used session is the victim — the newest is the safe probe target.
   let probeSid = null;
   if (w.hold) for (let i = 0; i < w.hold; i++) { const r = await initialize(base, key, fetchImpl); note(r); if (r.status === 200 && r.sid) probeSid = r.sid; }
   let probe = 'not exercised';
@@ -50,6 +52,15 @@ export async function run({ base, key, workload, durationMs, signal, cap = 25, f
 
 // #4448: a simple request on a held session, timed. tools/list needs the initialized notification first
 // (the same open() sequence the server's own MCP tests use); latencies are wall-clock round trips.
+// #4453 BLIND review: a 200 can still carry a JSON-RPC error object — in a JSON body or an SSE data
+// line. That is a failed request, not a slow one, so it counts under errors, never as a latency.
+function jsonRpcError(text) {
+  const bodies = [];
+  try { bodies.push(JSON.parse(text)); } catch { /* SSE or non-JSON */ }
+  for (const m of String(text).matchAll(/data:\s*(\{.*\})/g)) { try { bodies.push(JSON.parse(m[1])); } catch { /* partial line */ } }
+  return bodies.some((b) => b && typeof b === 'object' && b.error !== undefined);
+}
+
 export async function probeHeldSession({ base, key, sid, n = 50, fetchImpl = fetch, now = Date.now }) {
   const post = (body) => fetchImpl(`${base}/mcp`, { method: 'POST', body: JSON.stringify(body),
     headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json', authorization: `Bearer ${key}`, 'mcp-session-id': sid } });
@@ -60,8 +71,8 @@ export async function probeHeldSession({ base, key, sid, n = 50, fetchImpl = fet
     const t0 = now();
     try {
       const res = await post({ jsonrpc: '2.0', id: 2 + i, method: 'tools/list', params: {} });
-      await res.text();
-      if (res.status === 200) latencies.push(now() - t0); else errors++;
+      const body = await res.text();
+      if (res.status === 200 && !jsonRpcError(body)) latencies.push(now() - t0); else errors++;
     } catch { errors++; }
   }
   const p = latencyPercentiles(latencies);
@@ -87,10 +98,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
   const [base, workload, durS] = process.argv.slice(2);
   const key = process.env.HADRON_DIAG_KEY;
   if (!key) { console.error('HADRON_DIAG_KEY is required'); process.exit(2); }
+  // 25 mirrors the server default (src/mcp/transportBounds.ts DEFAULT_MAX_SESSIONS_PER_PRINCIPAL)
+  // and compose.patch's ${DIAG_SESSION_CAP:-25}; scripts/ is standalone, so the constant cannot be
+  // imported — computed once for run() and the line (#4453 BLIND review).
+  const cap = Number(process.env.DIAG_SESSION_CAP) || 25;
   const { counts, probe, startAt, endAt } = await run({ base, key, workload, durationMs: Number(durS) * 1000,
-    cap: Number(process.env.DIAG_SESSION_CAP) || 25, probeN: Number(process.env.DIAG_PROBE_N) || 0 });
+    cap, probeN: Number(process.env.DIAG_PROBE_N) || 0 });
   // The session id never reaches the output; the line is counts, latencies and epoch ms only.
-  const line = { kind: 'load', workload, cap: Number(process.env.DIAG_SESSION_CAP) || 25, startAt, endAt, probe, ...counts };
+  const line = { kind: 'load', workload, cap, startAt, endAt, probe, ...counts };
   const text = JSON.stringify(line);
   assertSecretFree(text);
   console.log(text);

@@ -52,8 +52,25 @@ test('probe on a transport failure reports errors, never a phantom latency', asy
   expect(probe).toEqual({ method: 'tools/list', requests: 0, errors: 2 });
 });
 
+// #4453 BLIND P3: a 200 carrying a JSON-RPC error object — in a JSON body or an SSE data line — is a
+// failed request, not a slow one.
+test('a JSON-RPC error inside a 200 counts as an error, never as a latency', async () => {
+  const clock = { t: 100, now: () => (clock.t += 10) };
+  const jsonErr = res(200, '{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"synthetic"}}');
+  const sseErr = res(200, 'event: message\ndata: {"jsonrpc":"2.0","id":3,"error":{"code":-32601}}\n\n');
+  const sseOk = res(200, 'data: {"jsonrpc":"2.0","id":4,"result":{"tools":[]}}\n\n');
+  const replies = [jsonErr, sseErr, sseOk];
+  const fetchImpl = async (_u, init) => (JSON.parse(init.body).method === 'tools/list' ? replies.shift() : res(202));
+  const probe = await probeHeldSession({ base: 'http://x', key: 'k', sid, n: 3, fetchImpl, now: clock.now });
+  expect(probe.requests).toBe(1);   // only the SSE success line timed
+  expect(probe.errors).toBe(2);
+  expect(probe.minMs).toBe(10);
+});
+
 test('run() probes only the held workload and only when asked', async () => {
-  const fetchImpl = async (_u, init) => (JSON.parse(init.body).method === 'initialize' ? res(200, '') && { status: 200, headers: { get: () => sid }, text: async () => '' } : res(200));
+  const fetchImpl = async (_u, init) => (JSON.parse(init.body).method === 'initialize'
+    ? { status: 200, headers: { get: () => sid }, text: async () => '' }
+    : res(200));
   // A fake monotonic clock: a wall-clock step (NTP) on the shared host must not be able to fail this.
   const clock = { t: 1_000, now: () => (clock.t += 1) };
   const held = await run({ base: 'http://x', key: 'k', workload: 'held', durationMs: 5, cap: 2, probeN: 3, fetchImpl, now: clock.now });

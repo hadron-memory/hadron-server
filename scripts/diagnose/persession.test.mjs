@@ -25,7 +25,7 @@ test('divides the loaded-minus-baseline RSS delta by the held count (the cap)', 
   expect(line.loadedRssBytes).toBe(700);
   expect(line.rssPerSessionBytes).toBe(4); // (700 - 300) / 100
   expect(line.peakRssDuringLoadBytes).toBe(900); // max inside the load window, not the median
-  expect(line.basis).toContain('perSession=(loaded-baseline)/held');
+  expect(line.basis).toContain('perSession=(loaded-baseline)/min(ok,cap)');
 });
 
 test('the baseline is the settled last 60 s before startAt, not the boot-flushed tail (the first 100-run inverted its sign)', () => {
@@ -112,6 +112,68 @@ test('an empty or absent load line yields held=null without throwing', () => {
   expect(perSessionLine({ samples: [s(1_000)], load: null }).held).toBeNull();
   expect(perSessionLine({ samples: [], load }).held).toBe(100);
   expect(perSessionLine({ samples: [], load: null }).rssPerSessionBytes).toBe(NOT_SAMPLED);
+});
+
+// #4453 BLIND P2: a load window shorter than 30 s must not reach back before startAt for its median.
+test('the loaded window is floored at startAt, so a short load cannot mix baseline samples in', () => {
+  // startAt=100_000, endAt=105_000 (a 5 s load). The old window (endAt-30s = 75_000) swallowed all
+  // 20 settled samples too, and their majority dragged the "loaded" median down to the baseline —
+  // a per-session delta of ~0 from a run that really loaded memory.
+  const settledSamples = Array.from({ length: 20 }, (_, i) => s(80_000 + i * 1_000, { rss: 300 })); // settled, pre-load
+  const loadedSamples = Array.from({ length: 5 }, (_, i) => s(101_000 + i * 1_000, { rss: 700 })); // inside the load window
+  const line = perSessionLine({ samples: [...settledSamples, ...loadedSamples],
+    load: { workload: 'held', cap: 10, ok: 11, startAt: 100_000, endAt: 105_000 } });
+  expect(line.baselineRssBytes).toBe(300);
+  expect(line.loadedRssBytes).toBe(700);
+  expect(line.rssPerSessionBytes).toBe(40); // (700 - 300) / 10
+});
+
+// #4453 BLIND P2: per-session arithmetic is a measurement only for the held workload.
+test('a non-held workload gets no per-session division — the number would read as a measurement', () => {
+  const churnLoad = { workload: 'churn', cap: 100, ok: 101, startAt: 5_000, endAt: 90_000 };
+  const line = perSessionLine({ samples: [s(1_000, { rss: 300 }), s(80_000, { rss: 700 })], load: churnLoad });
+  expect(line.held).toBeNull();
+  expect(line.rssPerSessionBytes).toBe(NOT_SAMPLED);
+  expect(line.basis).toContain('workload held only');
+  // The windowed medians are still real observations and stay.
+  expect(line.baselineRssBytes).toBe(300);
+  expect(line.loadedRssBytes).toBe(700);
+});
+
+// #4453 BLIND P2: the divisor is min(ok, cap) — the server holds at most cap and no more than opened.
+test('held with ok < cap divides by the sessions that actually opened', () => {
+  const line = perSessionLine({ samples: [s(1_000, { rss: 300 }), s(80_000, { rss: 500 })],
+    load: { workload: 'held', cap: 100, ok: 40, startAt: 5_000, endAt: 90_000 } });
+  expect(line.held).toBe(40);
+  expect(line.rssPerSessionBytes).toBe(5); // (500 - 300) / 40
+  // ok=0 (nothing opened) is no basis for a division at all.
+  const none = perSessionLine({ samples: [s(1_000, { rss: 300 }), s(80_000, { rss: 500 })],
+    load: { workload: 'held', cap: 100, ok: 0, startAt: 5_000, endAt: 90_000 } });
+  expect(none.held).toBeNull();
+  expect(none.rssPerSessionBytes).toBe(NOT_SAMPLED);
+});
+
+// #4453 BLIND P2: which baseline path ran must be visible — the fallback leaks the boot tail, and a
+// long DIAG_SAMPLE_MS can make it the norm instead of the exception.
+test('baselineBasis records which baseline path was taken, with its sample count', () => {
+  const settled = Array.from({ length: 15 }, (_, i) => s(5_000 - 30_000 + i * 1_000, { rss: 397_000 }));
+  const good = perSessionLine({ samples: [...settled, s(80_000, { rss: 411_000 })], load });
+  expect(good.baselineBasis).toBe('settled-last-60s');
+  expect(good.baselineSamples).toBe(15);
+  const few = [s(5_000 - 30_000, { rss: 397_000 }), s(5_000 - 20_000, { rss: 399_000 }), s(5_000 - 10_000, { rss: 401_000 })];
+  const boot = Array.from({ length: 9 }, (_, i) => s(5_000 - 300_000 + i * 1_000, { rss: 455_000 }));
+  const bad = perSessionLine({ samples: [...boot, ...few, s(80_000, { rss: 500_000 })], load });
+  expect(bad.baselineBasis).toBe('fallback-all-pre-load');
+  expect(bad.baselineSamples).toBe(12);
+});
+
+// #4453 BLIND P3: ok is validated exactly like cap — a corrupt count degrades to null, never to a divisor.
+test('a non-integer ok degrades to null and the divisor falls back to the cap', () => {
+  const line = perSessionLine({ samples: [s(1_000, { rss: 300 }), s(80_000, { rss: 700 })],
+    load: { workload: 'held', cap: 100, ok: 'many', startAt: 5_000, endAt: 90_000 } });
+  expect(line.okOpens).toBeNull();
+  expect(line.held).toBe(100);
+  expect(line.rssPerSessionBytes).toBe(4);
 });
 
 test('the emitted line is secret-free', () => {

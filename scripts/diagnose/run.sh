@@ -24,6 +24,7 @@ worker=${1:?worker}; api=${2:?api port}; portal=${3:?portal port}; workload=${4:
 if [ -n "${DIAG_SESSION_CAP:-}" ]; then
   [[ "$DIAG_SESSION_CAP" =~ ^[0-9]+$ ]] && [ "$DIAG_SESSION_CAP" -ge 1 ] && [ "$DIAG_SESSION_CAP" -le 1000 ] \
     || { echo 'DIAG_SESSION_CAP must be an integer 1..1000' >&2; exit 2; }
+  DIAG_SESSION_CAP=$((10#$DIAG_SESSION_CAP))   # 0100 bakes as 100, not an octal-looking literal
 fi
 here=$(cd "$(dirname "$0")" && pwd); . "$here/cleanup.sh"; root=$(git -C "$here" rev-parse --show-toplevel)
 project="hadron-e2e-$worker"
@@ -42,6 +43,9 @@ down() {
   # up colliding with a stack created outside this harness.
   if stack_owned; then
     [ "$rc" = 0 ] || preserve_samples "$DIAG_OUT"
+    # #4453 BLIND review: preserve_samples replaces DIAG_OUT with the container's series, so a load
+    # line captured before a failed exit is re-appended here — the counts explain the invalid run.
+    if [ "$rc" != 0 ] && [ -n "${load_line:-}" ]; then printf '%s\n' "$load_line" >> "$DIAG_OUT" 2>/dev/null || true; fi
     if [ "$rc" != 0 ]; then keep_logs_private "$DIAG_OUT.private.log" bash -c 'cd "$1" && scripts/e2e/stack.sh logs "$2"' _ "$stage/src" "$worker"; fi
     # Heap snapshots hold real values: purge before the stack goes, and a purge that fails or cannot be verified fails the run.
     purge_snapshots || cleanup_rc=5
@@ -110,6 +114,10 @@ take_snapshot start
 if [ "${DIAG_W2:-}" = 1 ]; then
   node "$here/activity.mjs" "http://127.0.0.1:$api" > "$stage/w2-created.json"
 fi
+# #4453 BLIND review: a heap snapshot (and a forced GC under DIAG_EXPOSE_GC=1) and the W2 setup can
+# move RSS for a while after they return. With either on, idle past them BEFORE the settle window
+# opens, so the baseline window (the last 60 s before the load) holds only post-perturbation samples.
+if [ "${DIAG_SNAPSHOTS:-}" = 1 ] || [ "${DIAG_W2:-}" = 1 ]; then sleep "${DIAG_SETTLE_S:-60}"; fi
 # #4448: an idle baseline measured against boot-flushed RSS is not an idle baseline (the first run's
 # pre-load window was 8 boot-phase samples at +45 MB over settled). Idle first, then load.
 sleep "${DIAG_SETTLE_S:-60}"
@@ -121,9 +129,22 @@ sleep "${DIAG_SETTLE_S:-60}"
 # itself carries counts, probe latencies and epoch ms only (load.mjs asserts it secret-free); it is
 # captured so DIAG_OUT holds the full record — its stdout previously evaporated.
 credjs="const c=require('/fixtures/credentials.json');process.stdout.write(c.shared||Object.values(c).find(k=>k.startsWith('hdr_user_')))"
-load_line=$(app_exec sh -c 'HADRON_DIAG_KEY=$(node -e "$1") DIAG_SESSION_CAP="${2:-}" DIAG_PROBE_N="${3:-}" exec timeout "$6" node /app/scripts/e2e/diagnose/load.mjs http://127.0.0.1:4000 "$4" "$5"' - "$credjs" "${DIAG_SESSION_CAP:-}" "${DIAG_PROBE_N:-}" "$workload" "$dur" "$((dur + 300))")
-printf '%s\n' "$load_line" >&2
-printf '%s\n' "$load_line" > "$stage/load-line.json"
+# #4453 BLIND review: capture the generator's exit instead of letting set -e abort on the assignment —
+# the counts on the load line are exactly what explains an invalid run (5: acceptance failed,
+# 124: wall-budget timeout), so the line is persisted and echoed before that exit propagates.
+load_rc=0
+load_line=$(app_exec sh -c 'HADRON_DIAG_KEY=$(node -e "$1") DIAG_SESSION_CAP="${2:-}" DIAG_PROBE_N="${3:-}" exec timeout "$6" node /app/scripts/e2e/diagnose/load.mjs http://127.0.0.1:4000 "$4" "$5"' - "$credjs" "${DIAG_SESSION_CAP:-}" "${DIAG_PROBE_N:-}" "$workload" "$dur" "$((dur + 300))") || load_rc=$?
+if [ -n "$load_line" ]; then
+  printf '%s\n' "$load_line" >&2
+  printf '%s\n' "$load_line" > "$stage/load-line.json"
+fi
+# A failed generator still explains itself: the line is echoed and stashed above, the EXIT trap
+# re-appends it to DIAG_OUT after preserve_samples, and the rc propagates (samples and private
+# logs are kept on any non-zero exit).
+if [ "$load_rc" -ne 0 ]; then
+  echo "load generator exited $load_rc; the counts above explain the invalid run" >&2
+  exit "$load_rc"
+fi
 take_snapshot load
 # pg_stat_activity control: the effective pool size is only believed if the database agrees.
 conns=$(compose_exec db psql -U e2e -d e2e -Atc "select count(*) from pg_stat_activity where datname='e2e' and pid <> pg_backend_pid()" | tr -d '\r')
@@ -137,7 +158,8 @@ app_exec node -e "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.o
 take_snapshot idle
 finish_samples "$DIAG_OUT" "$conns" "$expected_end"
 w2=null; heap=null
-# #4448: the load line and its per-session reduction join the record (both asserted secret-free at write).
+# #4448: the load line and its per-session reduction join the record after finish_samples has placed
+# the container's series (both asserted secret-free at write).
 printf '%s\n' "$load_line" >> "$DIAG_OUT"
 node "$here/report.mjs" per-session "$DIAG_OUT" "$stage/load-line.json" >> "$DIAG_OUT"
 if [ "${DIAG_W2:-}" = 1 ]; then

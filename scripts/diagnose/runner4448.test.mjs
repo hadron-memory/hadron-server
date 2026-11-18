@@ -33,7 +33,7 @@ esac\n`);
  config) cat "$FIXTURE/instance";;
  exec)
   case "$*" in
-   *load.mjs*) printf '%s\\n' "$*" > "$FIXTURE/load-invocation"; printf '%s\\n' '${LOAD_LINE}';;
+   *load.mjs*) printf '%s\\n' "$*" > "$FIXTURE/load-invocation"; printf '%s\\n' '${LOAD_LINE}'; [ "$MODE" != fail ] || exit 5;;
    *memory.max*) echo 6442450944;;
    *diagnose-samples.jsonl*) printf '{"kind":"sample","at":%s}\\n' "$(date +%s%3N)";;
    *credentials.json*) echo synthetic-private-key;;
@@ -109,5 +109,33 @@ test.each(['0', '1001', '-5', 'abc'])('a cap of %j is refused before any reserva
     expect(r.stderr).toContain('DIAG_SESSION_CAP must be an integer 1..1000');
     expect(existsSync(join(f.dir, 'state'))).toBe(false);
     expect(existsSync(join(f.dir, 'load-invocation'))).toBe(false);
+  } finally { f.clean(); }
+});
+
+// #4453 BLIND P3: 0100 is decimal 100, not an octal-looking literal baked into the compose.
+test('a zero-padded cap is normalised to decimal before it is baked', () => {
+  const f = fixture('cap');
+  try {
+    f.env.DIAG_SESSION_CAP = '0100';
+    expect(f.run().status).toBe(0);
+    expect(readFileSync(join(f.dir, 'staged-compose.yaml'), 'utf8')).toContain("MCP_MAX_SESSIONS_PER_PRINCIPAL: '100'");
+    expect(readFileSync(join(f.dir, 'load-invocation'), 'utf8')).toContain(' 100 7 held 1 301');
+  } finally { f.clean(); }
+});
+
+// #4453 BLIND P2: under set -e the load-line assignment used to abort before anything was echoed or
+// persisted — the counts that explain an invalid run (here: acceptance exit 5) were lost.
+test('a failed load generator propagates its exit AND keeps the line that explains it', () => {
+  const f = fixture('fail');
+  try {
+    const r = f.run();
+    expect(r.status).toBe(5);
+    expect(r.stderr).toContain('load generator exited 5');
+    expect(r.stderr).toContain('"kind":"load"');          // echoed before the exit
+    expect(r.stderr).toContain('failure logs kept privately');   // the trap kept raw logs
+    const out = readFileSync(join(f.dir, 'samples'), 'utf8');   // preserved samples + the re-appended line
+    expect(out).toContain('"kind":"sample"');
+    expect(out).toContain('"kind":"load"');
+    expect(readFileSync(join(f.dir, 'down'), 'utf8')).toBe('down\n');   // teardown still ran
   } finally { f.clean(); }
 });
