@@ -219,6 +219,8 @@ enum SweepMode {
   APPLY
 }
 
+/// Severity of a log entry (ServerLogEntry, MemoryLogEntry, AppLogEntry), and the lowest level a server records
+/// (`HadronServer.logLevel`).
 enum LogLevel {
   DEBUG
   INFO
@@ -2352,7 +2354,7 @@ model UsageActivityRollupState {
 model Agent {
   id                    String          @id @default(cuid())
   /// #2138 §3.5 — false: every worker cast from this Agent counts as HAVING a task (coordinators, the
-  /// lifecycle agent), so it is expected to check every period.
+  /// lifecycle agent), so it is expected to check every period (`App.deliveryCheckPeriodSeconds`).
   usesTasks             Boolean         @default(true) @map("uses_tasks")
   /// #2162 (hrn:node:hadronmemory.com:specs:cor:agt:050:27) — when a task one of this Agent's workers had started finishes or is cancelled, and it holds
   /// no other started task, the platform asks the worker's host to reset its context: a shed, never a session end.
@@ -2902,10 +2904,9 @@ model OrgMemberInvitation {
 ///   of activations. With `maxActivations = 1` it is single-use.
 /// - Locked identity: when `email` or `githubUsername` is given, the person signing up must match it, which
 ///   also makes the invitation single-use.
-/// - Roles: `userRole` (a global role, usually none) and `memberRole` are meant not to exceed the sender's own.
-///   What the code checks when an organization invitation is created is that the caller has the ADMIN role in
-///   that organization (src/api/graphql/schema/resolvers.mutation.org.ts); it compares no role with a sender's,
-///   so an invitation with no sender is bounded by that check alone.
+/// - Roles: `userRole` (a global role, usually none) and `memberRole` are the roles the new user gets. They are
+///   meant not to exceed the sender's own. Creating an invitation for an organization requires the ADMIN role
+///   in that organization (src/api/graphql/schema/resolvers.mutation.org.ts).
 /// - Quota: how many people a user may bring in is tracked on `User.maxReferrals`, not here. The new user's own
 ///   `maxReferrals` is set during onboarding.
 /// - Over the limit: a person who opens the link after the activations are used up is told the invitation has
@@ -4297,7 +4298,8 @@ model AgentImport {
   @@map("agent_imports")
 }
 
-/// A User's permission to use an Agent. It is what allows the Agent to write to that user's personal memory, and
+/// A User's permission to use an Agent. It is what allows the Agent, which may belong to another organization,
+/// to write to that user's personal memory, and
 /// it is the user-level counterpart of AgentOrgGrant.
 ///
 /// Relationships: joins User and Agent, one row per pair (the primary key), and is deleted with either.
@@ -5803,6 +5805,8 @@ model PendingLoginState {
 // Design: D-2026-07-04 A–F over the 2026-05/06 design corpus (the spec-040 plan
 // is retired; see git history). Spec: cor:agt:010 (+ cor:acl:040/:050).
 
+/// Where a headless run is: PENDING until it starts, RUNNING while it executes, then one final state. COMPLETED
+/// is a normal end; FAILED, TIMED_OUT and CANCELLED say why it stopped early. See `AppRun.status`.
 enum AppRunStatus {
   PENDING
   RUNNING
@@ -5812,6 +5816,8 @@ enum AppRunStatus {
   CANCELLED
 }
 
+/// What started a headless run: a schedule, a webhook call, a manual request, an integration event, or another
+/// run. See `AppRun.triggerKind`.
 enum AppRunTriggerKind {
   SCHEDULE
   WEBHOOK
@@ -7210,6 +7216,8 @@ model GitMirrorObligation {
   @@map("git_mirror_obligations")
 }
 
+/// What a pending Git-mirror obligation owes the repository: WRITE a node's file or REMOVE it. See
+/// GitMirrorObligation.
 enum GitMirrorObligationKind {
   WRITE
   REMOVE
@@ -9407,6 +9415,9 @@ model UserDeletionAudit {
   @@map("user_deletion_audits")
 }
 
+/// Delivery state of the notice sent after an administrator erased a user's account: PENDING until sent, then
+/// SENT, FAILED after the retries, or UNAVAILABLE when there is no address or no mail sender. See
+/// UserDeletionNotice.
 enum UserDeletionNoticeStatus {
   PENDING
   SENT
@@ -9474,12 +9485,16 @@ model WorkerReferenceFence {
   @@map("worker_reference_fences")
 }
 
+/// What a boot prompt was served to: a worker session at its bind (BIND), a chatbot chat (CHAT) or a headless
+/// run (RUN). See ServedPrompt.
 enum ServedPromptKind {
   BIND
   CHAT
   RUN
 }
 
+/// Which boot-prompt pointer supplied a served prompt: the worker's own, the installation's (APP_AGENT) or the
+/// Agent's. See `ServedPrompt.pointerLevel`.
 enum ServedPromptPointerLevel {
   WORKER
   APP_AGENT
@@ -9684,11 +9699,13 @@ model IncludeReference {
   @@map("include_references")
 }
 
+/// How an include tag names its target: by `loc` inside the same memory, or by full `urn`. See IncludeReference.
 enum IncludeReferenceKind {
   loc
   urn
 }
 
+/// The coverage state of one source node's include tags. The values are described on IncludeSourceCoverage.
 enum IncludeSourceCoverageState {
   COMPLETE_EMPTY
   COMPLETE_TAGS
@@ -9729,6 +9746,7 @@ model IncludeSourceCoverage {
   @@map("include_source_coverage")
 }
 
+/// The stage of the include-retention generation. The values are described on IncludeRetentionGeneration.
 enum IncludeRetentionState {
   PREPARING
   BACKFILLING
