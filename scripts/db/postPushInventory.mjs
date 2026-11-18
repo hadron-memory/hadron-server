@@ -409,8 +409,8 @@ function scan(entryFile) {
  *  snapshot-true (#4381 E1).
  *
  *  invariant: no comment can sit in the gap this guard reads. The DO body is
- *  comment-stripped once (`const body = stripPayloadComments(stmt.payloads …)`,
- *  before either EXECUTE loop runs) and both loops slice their matches out of
+ *  comment-stripped once by `stripPayloadComments` — the shared strip before
+ *  either EXECUTE loop runs — and both loops slice their matches out of
  *  that stripped text, so by the time the guard looks, the gap is code or
  *  whitespace only. If that ever stops holding — a new comment style the
  *  stripper leaves standing, or a loop fed unstripped text — the comment-gap

@@ -612,7 +612,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'Read a team App\'s roster: each worker that is not retired, with one derived state ' +
       '(YOUR_MOVE, UNAVAILABLE, WAITING, WORKING, ASSIGNED_NOT_STARTED, AVAILABLE, NO_FAMILY, NOT_LAUNCHABLE) and the ' +
       'facts behind it: model family, free for work, availability, its tasks and alarms. The states are defined by ' +
-      'hrn:node:hadronmemory.com:specs:cor:agt:050:22 (Proposed); NO_FAMILY is served but not yet defined there. ' +
+      'hrn:node:hadronmemory.com:specs:cor:agt:050:22 (Proposed). ' +
       'Readers: the App\'s participants.',
     SHAPE_HADRON_TEAM_ROSTER,
     async ({ session, appRef }) =>
