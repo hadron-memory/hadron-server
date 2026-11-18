@@ -90,9 +90,17 @@ describe('#3998 secret.reveal summary line', () => {
   const action = PLATFORM_ACTIONS.find((x) => x.name === 'secret.reveal')!;
   const app = { urn: 'hrn:app:acme.com:ops' };
   const urn = composeAppSecretUrnV2('acme.com', 'ops', 'stripe-key');
-  it('writes the App secret as its canonical URN', () => {
+  it('writes the App secret as its canonical URN, and the mark the signer is bound by', () => {
     expect(renderGrantSummary({ action, app, values: { secret: 'S1', 'auto-delete': 'keep' }, refs: { S1: { urn } } }))
-      .toBe(`Read the value of the secret ${urn} of hrn:app:acme.com:ops`);
+      .toBe(`Read the value of the secret ${urn} of hrn:app:acme.com:ops and keep the secret`);
+    expect(renderGrantSummary({ action, app, values: { secret: 'S1', 'auto-delete': 'delete' }, refs: { S1: { urn } } }))
+      .toBe(`Read the value of the secret ${urn} of hrn:app:acme.com:ops and delete the secret with the last read`);
+  });
+  it.each(['Keep', 'KEEP', 'yes', 'true', '*'])('refuses the mark %s, never printing it', (bad) => {
+    expect(() => renderGrantSummary({ action, app, values: { secret: 'S1', 'auto-delete': bad }, refs: { S1: { urn } } })).toThrow();
+  });
+  it('refuses a missing mark', () => {
+    expect(() => renderGrantSummary({ action, app, values: { secret: 'S1' }, refs: { S1: { urn } } })).toThrow(/auto-delete/);
   });
   it.each(['hrn:secret:acme.com:stripe-key', 'stripe-key', `${urn}#data`, `${urn} x`])('refuses %s', (bad) => {
     expect(() => renderGrantSummary({ action, app, values: { secret: 'S1', 'auto-delete': 'keep' }, refs: { S1: { urn: bad } } })).toThrow();

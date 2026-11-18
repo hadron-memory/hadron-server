@@ -92,15 +92,15 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
   // #3998 (S3 of #3991, cor:acl:140:09 secret forms, byte review passed at checkpoint 1): reveal the value of ONE App secret. Seeded once,
   // complete: the secret as its stored id (a single value, never a name, a list or the wildcard) and the mark, exactly "keep" or "delete"
   // (the secret is deleted by the read that spends the last use). The window and the budget are the grant's own starts, expires and
-  // max uses, so nothing about them is a parameter. The mark has no placeholder: its hyphenated name cannot be one, and the signing
-  // page shows it beside the sentence. `secret.use` is S5's and is not seeded here.
+  // max uses, so nothing about them is a parameter. The mark is named in the sentence ({auto-delete}), which the signing page
+  // shows whole: a term the signer is not shown is not a term the signature may cover. `secret.use` is S5's and is not seeded here.
   {
     name: 'secret.reveal', source: 'PLATFORM', tool: null, enforcement: 'SERVER', issuerRule: 'SECRET_READ_CLIENT',
     parameters: [
       { name: 'secret', type: 'secret-ref', refusesWildcard: true },
       { name: 'auto-delete', type: 'secret-mark', refusesWildcard: true },
     ],
-    summaryTemplate: 'Read the value of the secret {secret} of {app}',
+    summaryTemplate: 'Read the value of the secret {secret} of {app} and {auto-delete}',
   },
 ];
 

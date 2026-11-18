@@ -34,7 +34,9 @@ export interface SummaryInput {
   refs: Readonly<Record<string, { urn: string }>>;
 }
 
-const TOKEN = /\{([A-Za-z][A-Za-z0-9_]*)\}/g;
+// A name may carry hyphens: an action's parameter names are its spec's own words (`auto-delete`, cor:acl:140:09), and a parameter the
+// template cannot name is a term the signer is never shown (#3998).
+const TOKEN = /\{([A-Za-z][A-Za-z0-9_-]*)\}/g;
 
 /**
  * The placeholder names of a template, in order. Throws when any brace is left once the valid `{name}` tokens are removed
@@ -71,13 +73,23 @@ function canonicalSecret(placeholder: string, urn: unknown): string {
   if (!ok) throw new GrantSummaryError('NOT_CANONICAL', `summary placeholder {${placeholder}} needs a canonical App secret URN`);
   return urn as string;
 }
+/**
+ * The secret mark (cor:acl:140:09), written as the plain consequence the signer reads: exactly `keep` or `delete`, nothing else.
+ * `delete` is the read that spends the last use deleting the secret (cor:sec:060), so the sentence says so.
+ */
+function secretMark(placeholder: string, mark: unknown): string {
+  if (mark === 'keep') return 'keep the secret';
+  if (mark === 'delete') return 'delete the secret with the last read';
+  throw new GrantSummaryError('NOT_CANONICAL', `summary placeholder {${placeholder}} needs the mark "keep" or "delete"`);
+}
 export const SUMMARY_FORMATTERS = {
   app: (urn: string) => canonical('app', 'app', urn),
   'node-ref': (urn: string, placeholder: string) => canonical('node-ref', placeholder, urn),
   'secret-ref': (urn: string, placeholder: string) => canonicalSecret(placeholder, urn),
+  'secret-mark': (mark: string, placeholder: string) => secretMark(placeholder, mark),
 } as const;
 
-export type SummaryFormatters = { app: (urn: string) => string; 'node-ref': (urn: string, placeholder: string) => string; 'secret-ref': (urn: string, placeholder: string) => string };
+export type SummaryFormatters = { app: (urn: string) => string; 'node-ref': (urn: string, placeholder: string) => string; 'secret-ref': (urn: string, placeholder: string) => string; 'secret-mark': (mark: string, placeholder: string) => string };
 
 export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters = SUMMARY_FORMATTERS): string {
   const { action, app, values, refs } = input;
@@ -101,6 +113,12 @@ export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters =
     for (const entry of entries) {
       if (entry === undefined || entry === null || entry === '') throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no value`);
       if (entry === '*' || typeof entry === 'object') throw new GrantSummaryError('WILDCARD', `summary placeholder {${name}} has a wildcard or structured value`);
+      if (param.type === 'secret-mark') {
+        // A mark is its own words, not a reference: there is nothing to resolve, and a list of marks names nothing.
+        if (Array.isArray(value)) throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a list value`);
+        written.push(fmt['secret-mark'](entry as string, name));
+        continue;
+      }
       if (param.type !== 'node-ref' && param.type !== 'secret-ref') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a parameter type the summary cannot write`);
       if (typeof entry !== 'string') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a value of a type the summary cannot write`);
       const ref = Object.prototype.hasOwnProperty.call(refs, entry) ? refs[entry] : undefined;
