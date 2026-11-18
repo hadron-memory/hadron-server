@@ -15,7 +15,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import type { Request, Response } from 'express';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../server.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../test/startServerFixture.js';
 import {
   buildProtectedResourceMetadata,
   buildAuthorizationServerMetadata,
@@ -117,7 +117,7 @@ let server: Server;
 let baseUrl: string;
 
 beforeAll(async () => {
-  const app = await createServer();
+  const app = await createServerOnCleanDb();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
@@ -125,9 +125,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await new Promise<void>((resolve, reject) => {
-    server.close((err) => (err ? reject(err) : resolve()));
-  });
+  await closeServerIfStarted(server);
 });
 
 describe('GET /.well-known/oauth-protected-resource (PRM endpoint)', () => {

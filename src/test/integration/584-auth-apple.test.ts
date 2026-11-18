@@ -12,7 +12,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import { createServer as createHttpServer, type Server } from 'node:http';
-import { createServer } from '../../server.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 
 let server: Server;
 let baseUrl: string;
@@ -33,7 +33,7 @@ beforeAll(async () => {
   process.env.APPLE_TEAM_ID = 'TEAMID9999';
   process.env.APPLE_KEY_ID = 'KEYID88888';
   process.env.APPLE_PRIVATE_KEY = 'test-only-placeholder-pem';
-  const app = await createServer();
+  const app = await createServerOnCleanDb();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
@@ -45,9 +45,7 @@ afterAll(async () => {
     if (savedEnv[v] === undefined) delete process.env[v];
     else process.env[v] = savedEnv[v];
   }
-  await new Promise<void>((resolve, reject) => {
-    server.close((err) => (err ? reject(err) : resolve()));
-  });
+  await closeServerIfStarted(server);
 });
 
 async function getAuthApple(qs: string): Promise<Response> {
