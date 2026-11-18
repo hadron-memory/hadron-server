@@ -30,6 +30,7 @@ import { renderLintWarnings } from '../../../lib/bootPromptLint.js';
 import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
 import { previewServedBootPrompt, readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt, type PageServedMemo, type ServeTarget } from '../../../lib/bootPrompt/serve.js';
 import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
+import { workerRunRecordOf, type WorkerRunRecord } from '../../../lib/agentTasks/runSettings.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { generateId } from '../../../lib/id.js';
@@ -2306,15 +2307,31 @@ export type WorkerActivity = {
  * live session is open AND inside its type-specific idle window; deleted
  * sessions do not count; reaper writes are not genuine activity; and activity
  * after an end is capped at the end instant.
+ *
+ * Side effect (#4273; documented for #4285, Arianna's BLIND P3): the read first runs `set_config('jit', 'off', true)`,
+ * which is LOCAL to the transaction it runs in. On the shared client (which has `$transaction`) both statements run in ONE
+ * short transaction of their own, at the client's default isolation, so the setting dies with it and never reaches the next
+ * pool user. On a caller's transaction client (no `$transaction`) both run ON that transaction: no nested transaction is
+ * opened, its isolation is unchanged, and JIT stays off for the rest of the CALLER's transaction.
  */
 async function queryWorkerActivity(
   ctx: Context,
   scope: Prisma.Sql,
   now: Date,
 ): Promise<Map<string, WorkerActivity>> {
-  const rows = await ctx.db.$queryRaw<
-    { workerId: string; live: boolean; holdsOpen: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null; bindingModel: string | null; modelReportedAt: Date | null }[]
-  >(workerActivitySql(scope, now));
+  type Row = { workerId: string; live: boolean; holdsOpen: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null; bindingModel: string | null; modelReportedAt: Date | null };
+  // #4273: the per-session usage probe below is estimated per session and so crosses jit_above_cost on any App with a
+  // few thousand sessions, though almost every probe is never executed; JIT then compiled for ~400 ms on a 4 ms plan, and
+  // the stall tick reached this read nine times a pass. The setting is local to the transaction it is made in.
+  const run = async (tx: Pick<Prisma.TransactionClient, '$executeRaw' | '$queryRaw'>): Promise<Row[]> => {
+    await setWorkerActivityPlanSettings(tx);
+    return tx.$queryRaw<Row[]>(workerActivitySql(scope, now));
+  };
+  // A transaction client exposes no `$transaction`; the shared client does (#4285: one guard instead of two casts).
+  type Runner = { $transaction: <T>(f: (tx: Prisma.TransactionClient) => Promise<T>) => Promise<T> };
+  const db = ctx.db as unknown as Prisma.TransactionClient | Runner;
+  const opensItsOwn = (c: typeof db): c is Runner => typeof (c as Partial<Runner>).$transaction === 'function';
+  const rows = opensItsOwn(db) ? await db.$transaction((tx) => run(tx)) : await run(db);
   return new Map<string, WorkerActivity>(
     rows.map((row) => [
       row.workerId,
@@ -2329,6 +2346,20 @@ async function queryWorkerActivity(
       },
     ]),
   );
+}
+
+/**
+ * The planner settings the activity read runs under, both local to the transaction they are made in.
+ *  - `jit` off (#4273): see the note in `queryWorkerActivity`.
+ *  - `enable_incremental_sort` off (#4397): the per-session probe wants ORDER BY session_id DESC, created_at DESC
+ *    LIMIT 1, which the partial (session_id, created_at) index serves with ONE descent. The planner prices an
+ *    Incremental Sort over usage_events_session_id_idx as cheaper, because it assumes the average session's few hundred
+ *    rows per group, and then reads EVERY row of a long-open session (the incident's shape). With it off, a Sort over
+ *    the whole session is never cheaper than the index's near-zero startup, so only the session-activity index
+ *    can serve the probe. Exported so the plan pins run under exactly what ships.
+ */
+export async function setWorkerActivityPlanSettings(tx: Pick<Prisma.TransactionClient, '$executeRaw'>): Promise<void> {
+  await tx.$executeRaw`SELECT set_config('jit', 'off', true), set_config('enable_incremental_sort', 'off', true)`;
 }
 
 /**
@@ -2405,28 +2436,111 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
            -- was still driving the worker. Postgres LEAST ignores a null end,
            -- so an open session remains uncapped.
            ), s.ended_at)) AS "lastActiveAt"
-    FROM sessions s
-    JOIN workers w ON w.id = s.worker_id
+    FROM workers w
+    -- #4273: only the sessions that can change an answer. Every open session stays (live, holdsOpen, bound and the binding's
+    -- family, model and report time come from open sessions alone). An ENDED session reaches only lastActiveAt, as
+    -- LEAST(GREATEST(started_at, ...), ended_at), which is at least its own started_at and at most its ended_at; so an
+    -- ended session that ended BEFORE the worker's latest start is beaten by that later session (whose activity is at least
+    -- its own start) and cannot be the maximum. The kept ended sessions are those ending at or after that start, served
+    -- by sessions_worker_ended_idx and sessions_worker_started_idx, so the rows read follow the open and overlapping
+    -- sessions, never the worker's lifetime of them. A session that ended before it started (never written by the
+    -- platform) does not set the latest start. #4285 (Arianna New-4): so a worker whose ONLY sessions all ended before they
+    -- started has no latest start, the walk below keeps nothing, and the fold returns no row for it (before #4273 it had
+    -- one, with lastActiveAt = ended_at). No real worker is affected while the platform never writes such a session.
+    -- Reading every session made each liveness read, five per stall tick, grow
+    -- with the App's whole session history (QA: 42,000 -> 84,000 rows on doubled history).
+    JOIN LATERAL (
+      SELECT s1.* FROM sessions s1
+      WHERE s1.worker_id = w.id AND s1.deleted_at IS NULL AND s1.ended_at IS NULL
+      UNION ALL
+      -- The ended ones are walked from the newest end backwards, one index probe per step (ORDER BY ... LIMIT 1 on
+      -- sessions_worker_ended_idx), and the walk stops at the first one that ends before the worker's latest start: a bare
+      -- range condition leaves the planner free to read every session of the worker through sessions_worker_id_idx instead.
+      SELECT k.* FROM (
+        WITH RECURSIVE bound AS (
+          SELECT max(x.started_at) AS at FROM sessions x
+          WHERE x.worker_id = w.id AND x.deleted_at IS NULL AND (x.ended_at IS NULL OR x.ended_at >= x.started_at)
+        ), walk AS (
+          (SELECT t.* FROM sessions t
+           WHERE t.worker_id = w.id AND t.deleted_at IS NULL AND t.ended_at IS NOT NULL
+           ORDER BY t.ended_at DESC, t.id DESC LIMIT 1)
+          UNION ALL
+          SELECT n.* FROM walk, bound, LATERAL (
+            SELECT t.* FROM sessions t
+            WHERE t.worker_id = w.id AND t.deleted_at IS NULL AND t.ended_at IS NOT NULL
+              AND (t.ended_at, t.id) < (walk.ended_at, walk.id)
+            ORDER BY t.ended_at DESC, t.id DESC LIMIT 1
+          ) n
+          WHERE walk.ended_at >= bound.at
+        )
+        SELECT walk.* FROM walk, bound WHERE walk.ended_at >= bound.at
+      ) k
+    ) s ON true
     LEFT JOIN LATERAL (
-      -- #1952: the "+ interval '0'" is load-bearing. A bare max(created_at)
-      -- lets the planner serve the max by walking usage_events_created_at_idx
-      -- backwards with a filter, which for a session with no (or ancient)
-      -- activity reads the whole index: the 2026-10-14 outage. Statistics in
-      -- which a few sessions dominate activity choose that walk even with the
-      -- index below present, and ORDER BY … LIMIT 1 is the same plan. No
-      -- created_at index can order this expression, so only session-keyed
-      -- paths remain. Cost: a session's activity rows are all read, bounded
-      -- per App. A stored last-activity column is #1957.
-      SELECT max(e.created_at + interval '0') AS max_created
+      -- #4397 (supersedes #1952's max(created_at + interval '0'), which read EVERY activity row of every open session
+      -- and was the leading suspect for the 2026-11-17 P2028 incident): ONE probe of the partial
+      -- usage_events_session_activity_idx per session, newest first, LIMIT 1.
+      -- Two things are load-bearing and pinned in 1903-session-activity-index.test.ts:
+      --  * The session key is a RANGE (>= s.id AND <= s.id), not "= s.id". With an equality the planner treats
+      --    session_id as a constant and DROPS it from ORDER BY, so "ORDER BY created_at DESC LIMIT 1" can be served by
+      --    walking usage_events_created_at_idx backwards, which for a session with no (or ancient) activity reads the
+      --    whole index: the 2026-10-14 outage, and skewed statistics choose it even with the index below present
+      --    (#1952, findings:minmax-per-session-probe-walks-created-at-index). A range leaves session_id in the sort, so
+      --    only a (session_id, created_at) index can give the order and no created_at-only index has a path.
+      --  * The WHOLE drives-only filter (counts_as_activity and the #4271 exclusion) sits BEFORE the LIMIT, so the one
+      --    row returned is the newest QUALIFYING row, never the newest row (cor:agt:020:11 rules 1, 3; NULL, i.e. no
+      --    row, for a never-driven session, rule 4). Same predicate as isSessionLive: do not fork it.
+      SELECT e.created_at AS max_created
       FROM usage_events e
       -- #1653 / DY-2: only events written while the session was live count.
       -- #1903: served by the partial usage_events_session_activity_idx
       -- (post-push.sql).
-      WHERE e.session_id = s.id AND e.counts_as_activity
+      WHERE e.session_id >= s.id AND e.session_id <= s.id AND e.counts_as_activity
+        -- #4271: a session that ended, was not auto-expired and whose updated_at is at or past its end is already
+        -- capped by its own stamps: LEAST(GREATEST(started_at, updated_at, x), ended_at) = ended_at for any x, and
+        -- live / holdsOpen / bound need an open row. Its usage events cannot change any column, so they are not read
+        -- (a condition on the outer row only: a one-time filter, no scan). Reading them made every roster grow with
+        -- the App's whole usage history.
+        -- COALESCE: a NULL updated_at (or end) proves nothing closed, so the session's events are read (#4272 QA P2:
+        -- without it the comparison is NULL, NOT NULL is NULL, and the WHERE dropped them).
+        AND NOT COALESCE(s.ended_at IS NOT NULL AND s.auto_expired_at IS NULL AND s.updated_at >= s.ended_at, false)
+      ORDER BY e.session_id DESC, e.created_at DESC
+      LIMIT 1
     ) ue ON true
     WHERE ${scope} AND s.deleted_at IS NULL
     GROUP BY s.worker_id
   `;
+}
+
+/**
+ * #4271: ONE App-wide activity fold shared by every liveness read inside one read-only roster pass. The roster reached
+ * this aggregate four times per call (work states, availability and both stall-input passes), each a full fold. Shared
+ * only inside one TRANSACTION, only at the pass's own instant, and only for workers of that App; any other read falls
+ * through to its own query (each boundary pinned in sharedWorkerActivity4276.test.ts). Keyed by the transaction
+ * client, so concurrent requests on the shared client never see it.
+ *
+ * What one fold means depends on the transaction's isolation (#4276, Clark's #4272 blind note). Both callers of
+ * `loadTeamRoster` read at RepeatableRead: the person path (`withRosterAppRead`) and the run-tool path
+ * (`teamSnapshotTools.ts` through `inRunTeamReadTx`, which opens `inAnchoredAppTx` with `coherentRunRead`). There the
+ * transaction is one snapshot, so the shared answer is the one every reader would have computed. A caller at Read
+ * Committed (each statement its own snapshot) would get ONE statement's answer for every reader instead: no less
+ * consistent than separate folds, but not a transaction-wide snapshot.
+ */
+const sharedActivity = new WeakMap<object, { appId: string; at: number; workerIds: Set<string>; fold: Promise<Map<string, WorkerActivity>> }>();
+
+/** Run `read` with one shared activity fold of `appId` at `now` (see {@link sharedActivity}); `db` must be a transaction. */
+export async function withSharedWorkerActivity<T>(db: Prisma.TransactionClient, appId: string, now: Date, read: () => Promise<T>): Promise<T> {
+  // A transaction client has no $transaction of its own; on the shared client the memo would cross requests.
+  if (sharedActivity.has(db) || typeof (db as { $transaction?: unknown }).$transaction === 'function') return read();
+  const workers = await db.worker.findMany({ where: { appId }, select: { id: true } });
+  const fold = queryWorkerActivity({ db } as unknown as Context, Prisma.sql`w.app_id = ${appId}`, now);
+  fold.catch(() => undefined); // awaited by its readers; never an unhandled rejection
+  sharedActivity.set(db, { appId, at: now.getTime(), workerIds: new Set(workers.map((w) => w.id)), fold });
+  try {
+    return await read();
+  } finally {
+    sharedActivity.delete(db);
+  }
 }
 
 /** One aggregate query for the bounded #1344 page, never one per App/worker. */
@@ -2436,6 +2550,11 @@ export async function loadWorkersActivity(
   now = new Date(),
 ): Promise<Map<string, WorkerActivity>> {
   if (workerIds.length === 0) return new Map();
+  const shared = sharedActivity.get(ctx.db);
+  if (shared && shared.at === now.getTime() && workerIds.every((id) => shared.workerIds.has(id))) {
+    const fold = await shared.fold;
+    return new Map(workerIds.flatMap((id) => (fold.has(id) ? [[id, fold.get(id)!] as const] : [])));
+  }
   return queryWorkerActivity(
     ctx,
     Prisma.sql`w.id IN (${Prisma.join(workerIds)})`,
@@ -2474,7 +2593,10 @@ export async function loadAppWorkerActivity(
   const cached = cache?.get(appId);
   if (cached) return cached;
 
-  const pending = queryWorkerActivity(ctx, Prisma.sql`w.app_id = ${appId}`, now);
+  const shared = sharedActivity.get(ctx.db);
+  const pending = shared && shared.appId === appId && shared.at === now.getTime()
+    ? shared.fold.then((fold) => new Map(fold))
+    : queryWorkerActivity(ctx, Prisma.sql`w.app_id = ${appId}`, now);
 
   cache?.set(appId, pending);
   return pending;
@@ -3418,6 +3540,23 @@ export const workerFieldResolvers = {
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<string | null> => tierOf((await bindingModelOf(ctx, worker, info))?.bindingModel),
+    /**
+     * #4291 (cor:agt:060:04, Proposed) — the worker's record of what its session last reported (family, model, effort),
+     * kept when it unbinds. A working-state field on the same gate as `family`: null when the caller may not see the
+     * worker's working state. Self-declared; never authorization.
+     */
+    lastUsed: async (
+      worker: WorkerActivityParent & { lastUsedFamily?: string | null; lastUsedModel?: string | null; lastUsedEffort?: string | null },
+      _: unknown,
+      ctx: Context,
+    ): Promise<WorkerRunRecord | null> => {
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      // A parent projected without the record's columns reads them here, never as an empty record.
+      const row = worker.lastUsedFamily !== undefined
+        ? worker
+        : await ctx.db.worker.findUnique({ where: { id: worker.id }, select: { lastUsedFamily: true, lastUsedModel: true, lastUsedEffort: true } });
+      return workerRunRecordOf(row ?? {});
+    },
     /**
      * hadron-cli#487 — when this worker was last DRIVEN, across every session
      * it has ever had; null for a worker nobody has ever bound.

@@ -10,13 +10,13 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { SignJWT } from 'jose';
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { signJwt } from '../../auth/jwt.js';
 import { createSignIn } from '../../auth/signIn.js';
 import { USER_API_KEY_PREFIX, hashUserApiKey } from '../../middleware/auth.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../test/startServerFixture.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -25,11 +25,11 @@ let http: Server;
 let base: string;
 
 beforeAll(async () => {
-  http = httpServer(await createServer());
+  http = httpServer(await createServerOnCleanDb());
   await new Promise<void>((r) => http.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
 });
-afterAll(async () => { await new Promise<void>((r) => http.close(() => r())); });
+afterAll(async () => { await closeServerIfStarted(http); });
 afterEach(() => vi.restoreAllMocks());
 
 const Q = '{ authenticationStatus }';

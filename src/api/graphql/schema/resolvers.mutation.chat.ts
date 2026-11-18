@@ -61,7 +61,7 @@ import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent, chatAuthorityAnchors, chatCarrierApps } from './agentChatAccess.js';
 import { withAuthorizedMemoryTx, withAuthorizedTx } from './authorizedTx.js';
 import { activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
-import { chatHomeAgentIfLicensed, refuseUnreachableChatHomeAgent, resolveChatHomeAgent } from '../../../lib/chatHomeAgent.js';
+import { chatHomeAgentIfReachable, refuseUnreachableChatHomeAgent, resolveChatHomeAgent } from '../../../lib/chatHomeAgent.js';
 import { canManageAgentSystemMemory } from '../../../lib/auth/managedSystemMemory.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
 import { GraphQLError } from 'graphql';
@@ -578,7 +578,7 @@ export const chatMutations = {
       }
       if (!target.targetMemoryId && !target.ensureTarget) throw new Error('No target memory available for this chat');
       if (target.appId) {
-        if (!await chatHomeAgentIfLicensed(ctx.db, { appId: target.appId }, agent)) {
+        if (!await chatHomeAgentIfReachable(ctx.db, { appId: target.appId }, agent)) {
           throw new AgentNotFoundError(agentId);
         }
       } else if (!await canManageAgentSystemMemory(ctx.db, ctx, systemMemoryId)) {
@@ -666,7 +666,7 @@ export const chatMutations = {
             }
             // Re-judge the start route after waiting for authority anchors (#4046).
             if (target.appId
-              ? !await chatHomeAgentIfLicensed(txCtx.db, { appId: target.appId }, current)
+              ? !await chatHomeAgentIfReachable(txCtx.db, { appId: target.appId }, current)
               : !await canManageAgentSystemMemory(txCtx.db, txCtx, systemMemoryId)) {
               throw new AgentNotFoundError(agentId);
             }

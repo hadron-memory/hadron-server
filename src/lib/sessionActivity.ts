@@ -21,7 +21,7 @@ import { ownsSession } from './sessionOwnership.js';
  * so a change here reaches every surface a human reads an "idle since" off.
  */
 
-import type { SessionType } from '../generated/prisma/index.js';
+import { Prisma, type SessionType } from '../generated/prisma/index.js';
 
 /**
  * The three-input activity instant for ONE session.
@@ -73,33 +73,59 @@ export function sessionActivityAt(
 }
 
 /**
- * The latest attributed `UsageEvent` per session, in one grouped query.
- *
- * Returns an empty map for an empty input rather than issuing a query whose
- * `IN ()` matches everything or nothing depending on the engine.
+ * The SQL of `loadLastEventBySession`, exported so its PLAN can be pinned (#4406): one probe of the partial
+ * `usage_events_session_activity_idx` per session id, newest first, LIMIT 1. Same shape and same two load-bearing
+ * points as the roster's per-session probe (#4397, `workerActivitySql`):
+ *  - The session key is a RANGE (>= id AND <= id), not "= id". With an equality the planner treats session_id as a
+ *    constant and drops it from ORDER BY, so "ORDER BY created_at DESC LIMIT 1" can be served by walking
+ *    usage_events_created_at_idx backwards (the 2026-10-14 outage). A range keeps session_id in the sort, so only the
+ *    (session_id, created_at) index can give the order.
+ *  - The drives-only filter (counts_as_activity, #1653 / DY-2) sits BEFORE the LIMIT, so the one row returned is the
+ *    newest COUNTED row, never the newest row (cor:agt:020:11 rule 3). A session with no counted row yields no row
+ *    here, exactly as the grouped read omitted it.
  */
-export async function loadLastEventBySession(
-  db: {
-    usageEvent: {
-      groupBy: (args: unknown) => Promise<{ sessionId: string | null; _max: { createdAt: Date | null } }[]>;
-    };
-  },
-  sessionIds: string[],
-): Promise<Map<string, Date | null>> {
+export function lastEventBySessionSql(sessionIds: string[]): Prisma.Sql {
+  return Prisma.sql`
+    SELECT s.id AS "sessionId", e.created_at AS "lastEventAt"
+    FROM unnest(${sessionIds}::text[]) AS s(id)
+    JOIN LATERAL (
+      SELECT x.created_at
+      FROM usage_events x
+      -- #1653 / DY-2: only events written while the session was live and owned count. An event attributed to a lapsed
+      -- session is attribution, never a drive, so it cannot revive the session behind DA's back.
+      WHERE x.session_id >= s.id AND x.session_id <= s.id AND x.counts_as_activity
+      ORDER BY x.session_id DESC, x.created_at DESC
+      LIMIT 1
+    ) e ON true`;
+}
+
+type LastEventRunner = Pick<Prisma.TransactionClient, '$executeRaw' | '$queryRaw'>;
+type LastEventDb = LastEventRunner | (LastEventRunner & { $transaction: <T>(f: (tx: Prisma.TransactionClient) => Promise<T>) => Promise<T> });
+
+/**
+ * The latest attributed `UsageEvent` per session, one index probe per session id (#4406; it was a GroupAggregate over
+ * EVERY counted event of those sessions, so its cost followed the sessions' history, not their number).
+ *
+ * Returns an empty map for an empty input rather than issuing a query whose `IN ()` matches everything or nothing
+ * depending on the engine. A session with no counted event has no entry.
+ *
+ * Side effect, as `queryWorkerActivity` documents for #4397: `enable_incremental_sort` is set off for the read, LOCAL to
+ * the transaction it runs in. The planner prices an Incremental Sort over usage_events_session_id_idx as cheaper (it
+ * assumes a few hundred rows per session) and then reads EVERY row of a long-open session; with it off only the
+ * session-activity index can serve the probe. On the shared client (which has `$transaction`) both statements run in
+ * ONE short transaction of their own, so the setting dies with it and never reaches the next pool user. On a caller's
+ * transaction client (no `$transaction`) both run ON that transaction: none is nested, its isolation is unchanged, and
+ * the setting stays off for the rest of the CALLER's transaction.
+ */
+export async function loadLastEventBySession(db: LastEventDb, sessionIds: string[]): Promise<Map<string, Date | null>> {
   if (sessionIds.length === 0) return new Map();
-  const rows = await db.usageEvent.groupBy({
-    by: ['sessionId'],
-    // #1653 / DY-2: only events written while the session was live and owned
-    // count. An event attributed to a lapsed session is attribution, never a
-    // drive, so it cannot revive the session behind DA's back.
-    where: { sessionId: { in: sessionIds }, countsAsActivity: true },
-    _max: { createdAt: true },
-  });
-  return new Map(
-    rows
-      .filter((r): r is { sessionId: string; _max: { createdAt: Date | null } } => !!r.sessionId)
-      .map((r) => [r.sessionId, r._max.createdAt]),
-  );
+  const run = async (tx: LastEventRunner) => {
+    await tx.$executeRaw`SELECT set_config('enable_incremental_sort', 'off', true)`;
+    return tx.$queryRaw<{ sessionId: string; lastEventAt: Date | null }[]>(lastEventBySessionSql(sessionIds));
+  };
+  const own = db as { $transaction?: <T>(f: (tx: Prisma.TransactionClient) => Promise<T>) => Promise<T> };
+  const rows = typeof own.$transaction === 'function' ? await own.$transaction((tx) => run(tx)) : await run(db);
+  return new Map(rows.map((r) => [r.sessionId, r.lastEventAt]));
 }
 
 /**
@@ -365,8 +391,7 @@ export async function touchSessionIfLive(
 export async function preserveHeartbeatIfLapsed(
   db: {
     session: { findUnique: (args: { where: { id: string }; select: Record<string, true> }) => Promise<unknown> };
-    usageEvent: { groupBy: (args: unknown) => Promise<{ sessionId: string | null; _max: { createdAt: Date | null } }[]> };
-  },
+  } & LastEventDb,
   sessionId: string,
 ): Promise<{ updatedAt?: Date | null }> {
   const current = (await db.session.findUnique({
@@ -453,8 +478,7 @@ export function recentlyTouchedFilter(now: Date) {
 export async function usageEventCountsAsActivity(
   db: {
     session: { findUnique: (args: { where: { id: string }; select: Record<string, true> }) => Promise<unknown> };
-    usageEvent: { groupBy: (args: unknown) => Promise<{ sessionId: string | null; _max: { createdAt: Date | null } }[]> };
-  },
+  } & LastEventDb,
   principal: { userId?: string | null; appId?: string | null; impersonation?: unknown },
   sessionId: string | null | undefined,
   now: Date = new Date(),

@@ -31,11 +31,11 @@ import type { AddressInfo } from 'node:net';
 import { createHash } from 'node:crypto';
 import { buildOAuthRouter } from '../../auth/oauth.js';
 import { buildEmailRecipientRateLimit, buildEmailSendPerIpRateLimit } from '../../auth/email.js';
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { signJwt } from '../../auth/jwt.js';
 import { generateId } from '../../lib/id.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 
 // Mock ONLY sendMagicLink (it calls Resend). verifyMagicLink and the
 // rest of the module stay real — the verify tests below exercise the
@@ -57,7 +57,7 @@ const RESOURCE_URL = 'https://hadron.example/mcp';
 let testClientId: string;
 
 beforeAll(async () => {
-  const app = await createServer();
+  const app = await createServerOnCleanDb();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
@@ -65,9 +65,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await new Promise<void>((resolve, reject) => {
-    server.close((err) => (err ? reject(err) : resolve()));
-  });
+  await closeServerIfStarted(server);
 });
 
 beforeEach(async () => {

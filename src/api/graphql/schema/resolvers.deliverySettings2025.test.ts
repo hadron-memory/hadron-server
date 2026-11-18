@@ -18,7 +18,7 @@ const get = (c = ctx(manager.id), appRef = appId) => Promise.resolve().then(() =
 const set = (input: Record<string, unknown>, c = ctx(manager.id), appRef = appId) =>
   Promise.resolve().then(() => M.setAppDeliverySettings({}, { appRef, input }, c));
 const oldSet = (input: Record<string, unknown>) => M.setAppTickerSettings({}, { appRef: appId, input }, ctx(manager.id));
-const defaults = { batchWindowSeconds: 120, busyDelaySeconds: 600, stuckWindowSeconds: 900, standbyEnabled: false, standbyEffective: false, checkPeriodSeconds: 600, failedChecksToOverdue: 2, darkAlarmWindowSeconds: 1800 };
+const defaults = { batchWindowSeconds: 120, busyDelaySeconds: 600, stuckWindowSeconds: 900, checkPeriodSeconds: 600, failedChecksToOverdue: 2, darkAlarmWindowSeconds: 1800 };
 async function code(p: Promise<unknown>, expected: string) {
   await expect(p).rejects.toMatchObject({ extensions: { code: expected } });
 }
@@ -60,7 +60,7 @@ describe('delivery settings #2025', () => {
     await Promise.all([set({ busyDelaySeconds: 500 }), set({ stuckWindowSeconds: 1000 })]);
     expect(await get()).toMatchObject({ busyDelaySeconds: 500, stuckWindowSeconds: 1000 });
   });
-  it.each(['batchWindowSeconds', 'busyDelaySeconds', 'stuckWindowSeconds', 'standbyEnabled'])('explicit null %s is refused without a partial write', async (field) => {
+  it.each(['batchWindowSeconds', 'busyDelaySeconds', 'stuckWindowSeconds'])('explicit null %s is refused without a partial write', async (field) => {
     const before = await db.app.findUniqueOrThrow({ where: { id: appId } });
     await code(set({ busyDelaySeconds: 500, [field]: null }), 'BAD_USER_INPUT');
     expect(await db.app.findUniqueOrThrow({ where: { id: appId } })).toEqual(before);
@@ -88,10 +88,6 @@ describe('delivery settings #2025', () => {
   it('retains live-ticker conflicts on the new writer', async () => {
     await M.createTicker({}, { appRef: appId, input: { name: 'Fast', cadenceSeconds: 120 } }, ctx(member.id));
     await code(set({ batchWindowSeconds: 180 }), 'TICKER_SETTINGS_CONFLICT');
-  });
-  it('S7a is inert: enabling standby is refused with the typed error and nothing is written', async () => {
-    await code(set({ standbyEnabled: true }), 'DELIVERY_STANDBY_UNAVAILABLE');
-    expect(await set({ standbyEnabled: false })).toEqual(defaults);
   });
   it('refuses ordinary members, keys, impersonation, invalid bindings and foreign Apps', async () => {
     await code(set({ busyDelaySeconds: 500 }, ctx(member.id)), 'FORBIDDEN');
@@ -176,7 +172,7 @@ describe('delivery settings #2025', () => {
     const { typeDefs } = await import('./typeDefs.js');
     const server = new ApolloServer<Context>({ typeDefs, resolvers });
     try {
-      const r = await server.executeOperation({ query: 'mutation($a:String!,$i:AppDeliverySettingsInput!){setAppDeliverySettings(appRef:$a,input:$i){batchWindowSeconds busyDelaySeconds stuckWindowSeconds standbyEnabled standbyEffective checkPeriodSeconds failedChecksToOverdue darkAlarmWindowSeconds}}', variables: { a: appId, i: { busyDelaySeconds: 500 } } }, { contextValue: ctx(manager.id) });
+      const r = await server.executeOperation({ query: 'mutation($a:String!,$i:AppDeliverySettingsInput!){setAppDeliverySettings(appRef:$a,input:$i){batchWindowSeconds busyDelaySeconds stuckWindowSeconds checkPeriodSeconds failedChecksToOverdue darkAlarmWindowSeconds}}', variables: { a: appId, i: { busyDelaySeconds: 500 } } }, { contextValue: ctx(manager.id) });
       expect(r.body.kind).toBe('single');
       if (r.body.kind !== 'single') throw new Error('unexpected multipart result');
       expect(r.body.singleResult.errors).toBeUndefined();

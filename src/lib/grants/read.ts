@@ -14,10 +14,11 @@
  * A row that is out of scope is simply absent. No error, no different answer from a missing id, no count that discloses it.
  *
  * The projection is ids and scalars only, with `allows` from S1a's one live function ({@link grantLiveSql}, the database
- * clock). There is NO state label: nothing here names the cor:acl:140:03 Open cases.
+ * clock) and `state` from the one derivation (#4173, state.ts).
  */
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { grantLiveSql } from './live.js';
+import { grantStateSql, type GrantState } from './state.js';
 import { roleAgentReachedBy } from './reach.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -52,8 +53,10 @@ export interface GrantView {
   /** #3711 (V56): the revoker and the holder's departure, filled ONLY on a manager's read ({@link listGrantsForManager}); undefined elsewhere. */
   revokedBy?: string | null;
   holderDepartedAt?: Date | null;
-  /** Live right now, on the database clock (S1a's definition). Never a state name. */
+  /** Live right now, on the database clock (S1a's definition). */
   allows: boolean;
+  /** #4173 (cor:acl:140:03): the lifecycle state, derived from the record by the one derivation ({@link grantStateSql}), never stored. Every audience reads it. */
+  state: GrantState;
 }
 
 interface Row {
@@ -61,7 +64,7 @@ interface Row {
   issuer_user_id: string | null; requested_by_user_id: string | null; requested_by_worker_id: string | null; requested_by_session_id: string | null;
   action: string; action_values: unknown; starts_at: Date | null; expires_at: Date | null; max_uses: number | null; use_count: number;
   reason: string; created_at: Date; activated_at: Date | null; verification_kind: string | null; verified_by: string | null;
-  signature_id: string | null; revoked_at: Date | null; revoked_by: string | null; holder_departed_at: Date | null; allows: boolean;
+  signature_id: string | null; revoked_at: Date | null; revoked_by: string | null; holder_departed_at: Date | null; allows: boolean; state: GrantState;
 }
 
 function holderOf(r: Row): { kind: GrantHolderKind; id: string } {
@@ -80,7 +83,7 @@ function view(r: Row, manager = false): GrantView {
     issuerUserId: r.issuer_user_id, requestedByUserId: r.requested_by_user_id, requestedByWorkerId: r.requested_by_worker_id,
     requestedBySessionId: r.requested_by_session_id, startsAt: r.starts_at, expiresAt: r.expires_at, maxUses: r.max_uses,
     useCount: r.use_count, reason: r.reason, createdAt: r.created_at, activatedAt: r.activated_at, verificationKind: r.verification_kind,
-    verifiedBy: r.verified_by, signatureId: r.signature_id, revokedAt: r.revoked_at, allows: r.allows,
+    verifiedBy: r.verified_by, signatureId: r.signature_id, revokedAt: r.revoked_at, allows: r.allows, state: r.state,
   };
 }
 
@@ -106,7 +109,7 @@ const COLUMNS = Prisma.sql`g.id, g.app_id, g.user_id, g.agent_id, g.worker_id, g
   g.signature_id, g.revoked_at,
   -- #3711: the revoker is a person; an erased account reads null, as issuer_user_id does (read-side mapping, never written).
   (SELECT u.id FROM users u WHERE u.id = g.revoked_by AND u.deleted_at IS NULL) AS revoked_by,
-  g.holder_departed_at, ${grantLiveSql('g')} AS allows`;
+  g.holder_departed_at, ${grantLiveSql('g')} AS allows, ${grantStateSql('g')} AS state`;
 
 /** The reader's grants, newest first. `take` 0 is count-only. The caller clamps `take` and `skip`. */
 export async function listGrantsForWorker(db: Db, reader: GrantReader, page: { take?: number; skip?: number }): Promise<{ items: GrantView[]; total: number }> {
@@ -144,7 +147,7 @@ export async function getGrantForWorker(db: Db, reader: GrantReader, id: string)
  * (leaving an Org is not a departure under cor:acl:140:03). The row is ids and scalars, and each item is marked
  * ({@link markPersonAudience}) so the one nested field that reaches another tenant's person, `Grant.signatureStatus`'s
  * signature list (signer handle/URN, passkey label), is withheld from this audience (gate call, #3800 P2-2). A soft-deleted App
- * conceals its grants. No state label, as above.
+ * conceals its grants.
  */
 export async function listGrantsForPerson(db: Db, userId: string, page: { take?: number; skip?: number }): Promise<{ items: GrantView[]; total: number }> {
   const take = page.take ?? 20;
