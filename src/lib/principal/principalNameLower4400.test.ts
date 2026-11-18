@@ -42,6 +42,15 @@ describe('#4400 principals.name is lower case in the database', () => {
     expect(await refusal(rawInsert('ReservedWord', 'reserved'))).toContain('chk_principals_name_lower');
   });
 
+  it('refuses a name with an upper-case letter outside ASCII, where the database folds it', async () => {
+    // lower() folds beyond ASCII only under a UTF-8 character type (not under C/POSIX). The test database is
+    // en_US.UTF-8 (the collation prerequisite in CLAUDE.md); production's ctype is read by the #4400 preflight.
+    const [{ datctype }] = await db.$queryRaw<{ datctype: string }[]>`
+      SELECT datctype FROM pg_database WHERE datname = current_database()`;
+    expect(datctype.toLowerCase()).toMatch(/utf-?8/);
+    expect(await refusal(rawInsert('École.example'))).toContain('chk_principals_name_lower');
+  });
+
   it('refuses an UPDATE that would put a stored name into mixed case', async () => {
     const p = await mintPrincipal(db, { kind: 'org', name: 'acme.example' });
     const said = await refusal(db.$executeRaw`UPDATE principals SET name = 'Acme.Example' WHERE id = ${p.id}`);
