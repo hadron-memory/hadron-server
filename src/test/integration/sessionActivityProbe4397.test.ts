@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { Prisma } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
-import { workerActivitySql, setWorkerActivityPlanSettings } from '../../api/graphql/schema/resolvers.worker.js';
+import { workerActivitySql, setWorkerActivityPlanSettings, loadAppWorkerActivity } from '../../api/graphql/schema/resolvers.worker.js';
+import type { Context } from '../../api/graphql/schema/resolvers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../lib/workerSignature.js';
 
 /**
@@ -142,5 +143,21 @@ describe('#4397 roster liveness: one probe per open session', () => {
     expect(at['w4397-closed']).toBe('2026-11-06T00:00:00.000Z');
     // auto-expired: the exclusion does not apply, its events are read (newest 18:00 is before the end, so uncapped)
     expect(at['w4397-expired']).toBe('2026-11-05T18:00:00.000Z');
+  });
+});
+
+describe('#4397 the plan settings are transaction-local (they never reach the pool)', () => {
+  // A leak would silently change plans fleet-wide. The read goes through the shipped entry point, then EVERY pooled
+  // connection is asked for the two settings: set_config(..., false) (session scope) leaves one of them off on the
+  // connection the read used, so the sweep below finds it. The defaults are read first, not assumed.
+  it('after the roster read, no pooled connection sees enable_incremental_sort or jit changed', async () => {
+    const show = async (): Promise<{ sort: string; jit: string }> => {
+      const [r] = await db.$queryRaw<{ sort: string; jit: string }[]>`SELECT current_setting('enable_incremental_sort') AS sort, current_setting('jit') AS jit`;
+      return r;
+    };
+    const before = await show();
+    await loadAppWorkerActivity({ db } as unknown as Context, APP, { now: NOW });
+    const seen = await Promise.all(Array.from({ length: 40 }, () => show()));
+    for (const s of seen) expect(s).toEqual(before);
   });
 });
