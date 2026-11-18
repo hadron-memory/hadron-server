@@ -3,12 +3,16 @@
  * controls (a seeded new object, the stale IF-NOT-EXISTS redefinition, a baselined object changed again, a removed and a
  * stale baseline line, the green unaltered head) run as steps of the Migration Replay workflow itself (#4338 BLIND F4).
  */
+import { execFileSync, spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Client } from 'pg';
 import { describe, expect, it } from 'vitest';
 import { diff, differenceKind } from '../../src/test/catalogSnapshot.js';
 import {
-  BASELINE_PATH, BaselineFormatError, baselineGrowth, differenceEntries, encodeKey, evaluate, exitCode, fingerprint, isEngineBookkeeping,
-  judge, parseBaseline, withDb,
+  BASELINE_PATH, BaselineFormatError, baselineGrowth, differenceEntries, dropScratch, encodeKey, evaluate, exitCode, fingerprint,
+  isEngineBookkeeping, judge, parseBaseline, withDb,
 } from './migration-replay.js';
 
 describe('#434 Slice C: the replay baseline is shrink-only', () => {
@@ -146,5 +150,95 @@ describe('#4378: baseline-line validation, the exit-code contract and the pure s
       const kind = differenceKind(k, before.get(k), after.get(k));
       expect(kind === null ? 'same' : `${kind} ${k}`).toBe(k === 'idx:same' ? 'same' : expected.find((e) => e.endsWith(` ${k}`)));
     }
+  });
+});
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ROOT = join(HERE, '..', '..');
+
+describe('#4395 item 1: an early-closed stdout cannot skip the scratch-database cleanup', () => {
+  it('a drop that fails is reported by name, and an otherwise clean run then exits 2 (the CLEANUP FAILED rule)', async () => {
+    const logged: string[] = [];
+    const failed = await dropScratch(
+      async (sql) => { if (sql.includes('hadron_replayref434_t')) throw new Error('boom'); },
+      ['hadron_replay434_t', 'hadron_replayref434_t'],
+      (line) => logged.push(line),
+    );
+    expect(failed).toEqual(['hadron_replayref434_t']);
+    expect(logged).toEqual(['CLEANUP FAILED: could not drop scratch database hadron_replayref434_t: boom']);
+    expect(exitCode(0, failed.length)).toBe(2);
+  });
+
+  // A real run: the full replay takes about a minute and needs a CREATEDB role, so it runs where
+  // MIGRATION_REPLAY_ADMIN_URL is set (the Migration Replay workflow, or by hand), and is skipped in the main suite.
+  const adminUrl = process.env.MIGRATION_REPLAY_ADMIN_URL;
+  it.skipIf(!adminUrl)('`--print` with stdout closed before the first write leaves no hadron_replay*434_* database behind', async () => {
+    // `node --import tsx` keeps the script in THIS process id, which names its scratch databases (`<prefix>_<pid>_<hex>`).
+    const child = spawn(process.execPath, ['--import', 'tsx', join(HERE, 'migration-replay.ts'), '--print'], {
+      cwd: ROOT, env: { ...process.env, MIGRATION_REPLAY_ADMIN_URL: adminUrl }, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout!.destroy(); // the reader is gone before anything is written, as `| head` is once it has its lines
+    let stderr = '';
+    child.stderr!.on('data', (d) => { stderr += String(d); });
+    const code = await new Promise<number | null>((res) => child.on('exit', (c) => res(c)));
+    const admin = new Client({ connectionString: adminUrl });
+    await admin.connect();
+    try {
+      const { rows } = await admin.query<{ datname: string }>(
+        `SELECT datname FROM pg_database WHERE datname LIKE 'hadron\\_replay%434\\_' || $1 || '\\_%'`, [String(child.pid)],
+      );
+      // Leave nothing behind even when the pin is red.
+      for (const r of rows) await admin.query(`DROP DATABASE IF EXISTS "${r.datname}" WITH (FORCE)`);
+      expect(rows.map((r) => r.datname), `leaked scratch databases; exit ${code}; stderr:\n${stderr}`).toEqual([]);
+    } finally {
+      await admin.end();
+    }
+    expect(code, stderr).toBe(0);
+  }, 300_000);
+});
+
+describe('#4395 item 2: the workflow\'s growth-approval label filters (scripts/db/growth-approval.sh)', () => {
+  const SCRIPT = join(HERE, 'growth-approval.sh');
+  const run = (args: string[], payload: unknown) =>
+    execFileSync('bash', [SCRIPT, ...args], { input: JSON.stringify(payload), encoding: 'utf8' }).trim();
+  const SHA = 'a'.repeat(40);
+  const label = (name: string) => ({ name });
+
+  it('push: the PR whose merge commit IS the push lends its label', () => {
+    expect(run(['push', SHA], [{ number: 1, merge_commit_sha: SHA, labels: [label('x'), label('baseline-growth-approved')] }])).toBe('true');
+  });
+  it('push: a stacked PR that only contains the commit does not, even with the label', () => {
+    expect(run(['push', SHA], [
+      { number: 2, merge_commit_sha: 'b'.repeat(40), labels: [label('baseline-growth-approved')] },
+      { number: 1, merge_commit_sha: SHA, labels: [label('x')] },
+    ])).toBe('false');
+  });
+  it('push: an empty response is not approved', () => {
+    expect(run(['push', SHA], [])).toBe('false');
+  });
+  it('push: a PR with no labels field is not approved, and the filter does not error', () => {
+    expect(run(['push', SHA], [{ number: 1, merge_commit_sha: SHA }])).toBe('false');
+  });
+  it('pr: the PR\'s own label approves; without it, or with no labels field, it does not', () => {
+    expect(run(['pr'], { pull_request: { labels: [label('baseline-growth-approved')] } })).toBe('true');
+    expect(run(['pr'], { pull_request: { labels: [label('other')] } })).toBe('false');
+    expect(run(['pr'], { pull_request: {} })).toBe('false');
+  });
+  it('an unknown mode or a push without a SHA is a usage error, never an approval', () => {
+    expect(() => run(['nope'], {})).toThrow();
+    expect(() => run(['push'], [])).toThrow();
+  });
+});
+
+describe('#4395 item 2: --print ignores the baselines', () => {
+  it('evaluate with print: true gives the same code and output with or without a baseline and a base baseline', () => {
+    const fp = '0123456789abcdef';
+    const entries = [`added idx:new ${fp}`, `changed col:t.c ${fp}`];
+    const details = new Map<string, string>();
+    const bare = evaluate({ entries, details, print: true, baseline: undefined, baseBaseline: undefined, allowGrowth: false });
+    // A baseline that would make the run red three ways: a stale line, an unlisted entry and growth over the base.
+    const loaded = evaluate({ entries, details, print: true, baseline: [`added idx:gone ${fp}`], baseBaseline: [], allowGrowth: false });
+    expect(loaded).toEqual(bare);
+    expect(bare).toEqual({ code: 0, out: entries, err: [] });
   });
 });
