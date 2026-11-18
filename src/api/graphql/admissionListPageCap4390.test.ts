@@ -12,7 +12,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { LIST_PAGE_CAP, listPageTake, validateListPageInput } from '../../lib/listPage.js';
 import { typeDefs } from './schema/typeDefs.js';
-import { hadronListEstimator, LIST_PAGE_FIELDS, PAGE_ARGS_FIELDS } from './admissionComplexity.js';
+import { hadronListEstimator, LIST_PAGE_ARGS_FIELDS, PAGE_ARGS_FIELDS } from './admissionComplexity.js';
 
 const schema = buildSchema(typeDefs);
 const cost = (query: string) => getComplexity({ schema, query: parse(query), variables: {}, estimators: [hadronListEstimator({ maxCost: 200000, listFactor: 10 }), simpleEstimator({ defaultComplexity: 1 })] });
@@ -31,24 +31,32 @@ it('the shared constant is the resolver clamp', () => {
   expect(listPageTake(null)).toBe(validateListPageInput({}).take);
 });
 
-describe('LIST_PAGE_FIELDS cannot drift from the resolvers (#4390 blind P2-1)', () => {
+describe('LIST_PAGE_ARGS_FIELDS cannot drift from the resolvers (#4390 blind P2-1)', () => {
   it('every key is a real list-or-page field with a page argument, and no key is also a pageArgs field', () => {
-    for (const key of LIST_PAGE_FIELDS) {
+    expect(LIST_PAGE_ARGS_FIELDS.size).toBe(4);
+    for (const key of LIST_PAGE_ARGS_FIELDS) {
       const [type, name] = key.split('.');
-      const field = (schema.getType(type) as GraphQLObjectType).getFields()[name];
+      const parent = schema.getType(type) as GraphQLObjectType | undefined;
+      expect(parent, key).toBeDefined();
+      const field = parent!.getFields()[name];
       expect(field, key).toBeDefined();
       expect(field.args.some(a => a.name === 'first'), key).toBe(true);
       expect(isListType(getNullableType(field.type)) || /Page$/.test(name), key).toBe(true);
       expect(PAGE_ARGS_FIELDS.has(key), key).toBe(false);
     }
   });
-  it('the resolver files that clamp through listPageArgs/validateListPageInput are exactly the audited set: a new one fails here until its fields are registered', () => {
+  it('every listPageArgs/validateListPageInput call site is audited: a new file OR a new call inside an audited file fails here until its fields are registered', () => {
     const dir = new URL('./schema/', import.meta.url);
-    const users = readdirSync(dir)
-      .filter(f => f.endsWith('.ts') && !f.endsWith('.test.ts'))
-      .filter(f => /\b(listPageArgs|validateListPageInput)\(/.test(readFileSync(new URL(f, dir), 'utf8')))
-      .sort();
-    expect(users).toEqual(['installMemory.ts', 'resolvers.inheritedNode.ts', 'resolvers.signing.ts', 'resolvers.webPoll.ts']);
+    const sites: Record<string, number> = {};
+    for (const f of readdirSync(dir).filter(f => f.endsWith('.ts') && !f.endsWith('.test.ts')).sort()) {
+      const n = (readFileSync(new URL(f, dir), 'utf8').match(/\b(listPageArgs|validateListPageInput)\(/g) ?? []).length;
+      if (n) sites[f] = n;
+    }
+    // Audited sites and the LIST_PAGE_ARGS_FIELDS key each serves:
+    //  resolvers.webPoll.ts 2: loadWebPolls (validate + window), shared by Query.webPollsPage and Query.webPolls.
+    //  resolvers.signing.ts 1: signingRequestsWindow, shared by Node.signingRequestsPage and Node.signingRequests.
+    //  installMemory.ts 1, resolvers.inheritedNode.ts 1: the Node.signingRequestsPage twins (same type and field name).
+    expect(sites).toEqual({ 'installMemory.ts': 1, 'resolvers.inheritedNode.ts': 1, 'resolvers.signing.ts': 1, 'resolvers.webPoll.ts': 2 });
   });
 });
 
