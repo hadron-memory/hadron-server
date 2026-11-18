@@ -33,7 +33,7 @@ export function registerSecretTools(server: McpServer, { db, auth }: { db: Prism
   const context = (): Context => ({
     db, transport: 'mcp', userId: auth.userId ?? undefined, appId: auth.appId ?? undefined, appKeyId: auth.appKeyId ?? undefined,
     clientId: auth.clientId ?? undefined, roles: auth.roles as Context['roles'], impersonation: auth.impersonation,
-    organizationId: auth.organizationId ?? undefined, apiKeyId: auth.apiKeyId ?? undefined,
+    organizationId: auth.organizationId ?? undefined, apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId ?? undefined,
   });
   const result = async (run: () => Promise<unknown>) => {
     try { return { content: [{ type: 'text' as const, text: JSON.stringify(await run()) }] }; }
