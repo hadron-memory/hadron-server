@@ -2596,8 +2596,9 @@ model MemoryLogEntry {
 ///
 /// Behaviour: `role` is the role the recipient gets on acceptance. It cannot be higher than the sender's own
 /// role, and OWNER is not given by invitation. `expiresAt` is when the invitation expires and `acceptedAt` when
-/// the recipient accepted. No mutation creates these invitations today; the code that reads the table is the
-/// revocation of an organization's open invitations (src/lib/auth/revokeOrgInvitations.ts).
+/// the recipient accepted. No mutation creates these invitations today. The only code that touches the table
+/// revokes an organization's open invitations (src/lib/auth/revokeOrgInvitations.ts, also used when an
+/// organization is soft-deleted).
 ///
 /// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:040:04.
 model OrgMemberInvitation {
@@ -2700,8 +2701,9 @@ model UserInvitation {
 /// `invitation.sender` from user to user gives the invitation chain that the referral quota is counted along
 /// (see User).
 ///
-/// Behaviour: written when the account is created. The roles the new user gets are bounded as on the
-/// invitation: they cannot exceed the sender's at the time of the activation.
+/// Behaviour: written when the account is created. The row holds no roles: the roles the new user gets are the
+/// invitation's (`UserInvitation.userRole`, `memberRole`), which cannot exceed the sender's at the time of the
+/// activation.
 ///
 /// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:040:05.
 model UserInvitationActivation {
@@ -3213,7 +3215,7 @@ model PrincipalGrant {
 /// which organization and which App a message or command from that workspace belongs to.
 ///
 /// Relationships: belongs to an Organization and is deleted with it. `defaultApp` is the App that serves
-/// commands from the workspace. SlackEventReceipt rows refer to the connection by `toolConnectionId`, not by
+/// commands from the workspace; deleting that App deletes the connection too. SlackEventReceipt rows refer to the connection by `toolConnectionId`, not by
 /// foreign key.
 ///
 /// Behaviour: the row holds identity only: the workspace (`teamId`, `teamName`), the bot's two Slack ids
@@ -3558,7 +3560,8 @@ model WaitingListItem {
 /// Workers. Where an Agent is a definition shared by all its installations, an App is one installation site with
 /// its own identity and state.
 ///
-/// Ownership: exactly one of `organizationId` and `ownerUserId` is set (`chk_app_owner_xor`).
+/// Ownership: exactly one of `organizationId` and `ownerUserId` is set (`chk_app_owner_xor`). The App is
+/// deleted with that organization or user.
 ///
 /// Relationships:
 /// - Agents: AppAgent lists the Agents installed in the App (many to many); AppAgentCustomization holds
