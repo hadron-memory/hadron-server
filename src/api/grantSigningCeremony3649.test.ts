@@ -368,6 +368,20 @@ describe('#3998: signing a secret.reveal grant creates its read client', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ issuerUserId: admin.id, selfIssued: false, secretId: secret.id, secretName: 'api-token', appId });
   });
+
+  it.each([['keep', 'keep the secret'], ['delete', 'delete the secret at the last read or when the grant ends, whichever comes first']] as const)('the signing page shows the mark %s in the signed sentence: what the signer reads is what the signature covers (F3/F1)', async (mark, words) => {
+    const secret = await db.secret.create({ data: { ownerType: 'app', ownerId: appId, name: 'mark-token', kind: 'revealable' } as never });
+    {
+      const id = generateId();
+      await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, max_uses, created_at, updated_at)
+        VALUES ($1, $2, $3, 'secret.reveal', $4::jsonb, 'read it', 3, (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
+      id, appId, workerId, JSON.stringify({ secret: secret.id, 'auto-delete': mark }));
+      const req = await openRequest(id);
+      const p = await prove(req.id, admin);
+      expect(p.json.canSign).toBe(true);
+      expect(p.json.view.summary).toMatch(new RegExp(`^Read the value of the secret hrn:secret:\\S+ of ${appUrn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, and ${words}$`));
+    }
+  });
 });
 
 describe('refusals at completion are judged before any write', () => {

@@ -100,7 +100,10 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
       { name: 'secret', type: 'secret-ref', refusesWildcard: true },
       { name: 'auto-delete', type: 'secret-mark', refusesWildcard: true },
     ],
-    summaryTemplate: 'Read the value of the secret {secret} of {app} and {auto-delete}',
+    summaryTemplate: 'Read the value of the secret {secret} of {app}, and {auto-delete}',
+    // #4162: the read is the holder's own session presenting its own client (readClientReveal.ts judges grant.workerId === the bound worker);
+    // nothing a role agent holds reaches it, so the narrowest reach is the true one. A person holder reads on the passkey page, not as a worker.
+    reach: 'WORKER',
   },
 ];
 

@@ -19,6 +19,7 @@
  * memory-owned scope stays superseded (#696, D-2026-07-15-006).
  */
 import { GraphQLError } from 'graphql';
+import { assertOneRevealPerOperation, type RevealOperationInfo } from '../../../lib/secrets/revealOperationGuard.js';
 import { pageArgs, pageEnvelope, type Context } from './resolvers.helpers.js';
 import {
   clampListTake,
@@ -262,7 +263,7 @@ export interface UpdateSecretArgs {
 
 export const secretMutations = {
   /** Issue a read client for an App secret: a pending reveal grant and its client, made together (cor:sec:060:01). */
-  revealSecret: (_: unknown, { clientId }: { clientId: string }, ctx: Context) => revealSecretMutation(ctx, clientId),
+  revealSecret: (_: unknown, { clientId }: { clientId: string }, ctx: Context, info?: RevealOperationInfo) => revealSecretMutation(ctx, clientId, info),
   issueSecretReadClient: (_: unknown, { input }: { input: IssueReadClientInput }, ctx: Context) => issueSecretReadClient(ctx, input),
 
   /** Create a named, owner-scoped secret (gate per the matrix above). */
@@ -483,7 +484,9 @@ async function deleteAppSecret(ctx: Context, found: SecretRow) {
   );
 }
 
-async function revealSecretMutation(ctx: Context, clientId: string) {
+async function revealSecretMutation(ctx: Context, clientId: string, info?: RevealOperationInfo) {
+  // R8: judged whole, before the rate limit or any read, so two fields in one operation are both refused and neither reads.
+  assertOneRevealPerOperation(info);
   await admitOperationRate(ctx, ctx.db, 'CREDENTIALS', appRateIdentity(ctx));
   return revealWithReadClient(ctx, clientId);
 }

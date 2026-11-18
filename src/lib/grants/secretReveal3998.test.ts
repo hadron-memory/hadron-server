@@ -92,9 +92,9 @@ describe('#3998 secret.reveal summary line', () => {
   const urn = composeAppSecretUrnV2('acme.com', 'ops', 'stripe-key');
   it('writes the App secret as its canonical URN, and the mark the signer is bound by', () => {
     expect(renderGrantSummary({ action, app, values: { secret: 'S1', 'auto-delete': 'keep' }, refs: { S1: { urn } } }))
-      .toBe(`Read the value of the secret ${urn} of hrn:app:acme.com:ops and keep the secret`);
+      .toBe(`Read the value of the secret ${urn} of hrn:app:acme.com:ops, and keep the secret`);
     expect(renderGrantSummary({ action, app, values: { secret: 'S1', 'auto-delete': 'delete' }, refs: { S1: { urn } } }))
-      .toBe(`Read the value of the secret ${urn} of hrn:app:acme.com:ops and delete the secret with the last read`);
+      .toBe(`Read the value of the secret ${urn} of hrn:app:acme.com:ops, and delete the secret at the last read or when the grant ends, whichever comes first`);
   });
   it.each(['Keep', 'KEEP', 'yes', 'true', '*'])('refuses the mark %s, never printing it', (bad) => {
     expect(() => renderGrantSummary({ action, app, values: { secret: 'S1', 'auto-delete': bad }, refs: { S1: { urn } } })).toThrow();

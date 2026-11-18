@@ -75,11 +75,11 @@ function canonicalSecret(placeholder: string, urn: unknown): string {
 }
 /**
  * The secret mark (cor:acl:140:09), written as the plain consequence the signer reads: exactly `keep` or `delete`, nothing else.
- * `delete` is the read that spends the last use deleting the secret (cor:sec:060), so the sentence says so.
+ * `delete` ends the secret at its last read or at the end of the grant's window, whichever comes first (cor:sec:060:03), so the sentence says both (Victor, #116292).
  */
 function secretMark(placeholder: string, mark: unknown): string {
   if (mark === 'keep') return 'keep the secret';
-  if (mark === 'delete') return 'delete the secret with the last read';
+  if (mark === 'delete') return 'delete the secret at the last read or when the grant ends, whichever comes first';
   throw new GrantSummaryError('NOT_CANONICAL', `summary placeholder {${placeholder}} needs the mark "keep" or "delete"`);
 }
 export const SUMMARY_FORMATTERS = {
