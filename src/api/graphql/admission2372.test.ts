@@ -3,7 +3,6 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../../server.js';
 import { resolvers } from './schema/resolvers.js';
 import { createServerOnCleanDb } from '../../test/startServerFixture.js';
 type Body = { errors?: Array<{ extensions: { code: string; limit: string; max: number } }> };
@@ -47,7 +46,7 @@ describe('#2372 portal NodeFind admission', () => {
   it('honors an explicit operator cap of 25000 rather than overriding it', async () => {
     const saved = process.env.GRAPHQL_MAX_COST;
     let app;
-    try { process.env.GRAPHQL_MAX_COST = '25000'; app = await createServer(); }
+    try { process.env.GRAPHQL_MAX_COST = '25000'; app = await createServerOnCleanDb(); }
     finally { if (saved === undefined) delete process.env.GRAPHQL_MAX_COST; else process.env.GRAPHQL_MAX_COST = saved; }
     const tight = httpServer(app);
     servers.push(tight);

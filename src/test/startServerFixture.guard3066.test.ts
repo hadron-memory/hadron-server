@@ -13,22 +13,24 @@ import { join } from 'node:path';
 /** Blank comments (and the bodies of string literals) so a lookalike in prose or data cannot count. */
 export function stripNoise(src: string, strings = true): string {
   const blank = (m: string) => m.replace(/[^\n]/g, ' ');
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, blank)
-    .replace(/(^|[^:'"`\\])\/\/[^\n]*/g, (m, p: string) => p + ' '.repeat(m.length - p.length))
-    .replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g, (m) => (strings ? m[0] + blank(m.slice(1, -1)) + m[0] : m));
+  // One pass, so a `//` inside a string or a quote inside a comment cannot be misread; templates are blanked too.
+  return src.replace(
+    /\/\*[\s\S]*?\*\/|\/\/[^\n]*|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g,
+    (m) => (m[0] === '/' ? blank(m) : strings || m[0] === '`' ? m[0] + blank(m.slice(1, -1)) + m[0] : m),
+  );
 }
 
 /** Names this file binds the app's `createServer` to (the plain name, an alias, or a dynamic import). */
 function appStarters(src: string): string[] {
   const names: string[] = [];
-  const fromImport = /import\s*\{([^}]*)\}\s*from\s*'[^']*\/server\.js'/g;
-  const fromDynamic = /const\s*\{([^}]*)\}\s*=\s*await\s+import\(\s*'[^']*\/server\.js'\s*\)/g;
+  const fromImport = /import\s*\{([^}]*)\}\s*from\s*['"][^'"]*\/server\.js['"]/g;
+  const fromDynamic = /const\s*\{([^}]*)\}\s*=\s*await\s+import\(\s*['"][^'"]*\/server\.js['"]\s*\)/g;
   for (const re of [fromImport, fromDynamic]) {
     for (let m = re.exec(src); m; m = re.exec(src)) {
       for (const part of m[1]!.split(',')) {
         const [from, to] = part.trim().split(/\s+as\s+|\s*:\s*/);
-        if (from === 'createServer') names.push(to ?? from);
+        const local = to ?? from;
+        if (from === 'createServer' && local && /^[A-Za-z_$][\w$]*$/.test(local)) names.push(local);
       }
     }
   }
@@ -61,8 +63,9 @@ export function uncleanedStarts(source: string): number[] {
       const inHook = hooks.find(([from, to]) => at > from && at < to);
       // A hook start needs the cleanup ahead of it in that hook; a start run per test (an `it` body or a boot
       // helper) follows the file's own cleanup hook, so any cleanup in the file counts.
-      const scope = inHook ? src.slice(inHook[0], at) : src;
-      if (!/\b(?:cleanDb|createServerOnCleanDb)\(/.test(scope)) hits.push(src.slice(0, at).split('\n').length);
+      // `createServerOnCleanDb(` is a start, not a cleanup: it blesses a raw start only earlier in the same hook.
+      const cleaned = inHook ? /\b(?:cleanDb|createServerOnCleanDb)\(/.test(src.slice(inHook[0], at)) : /\bcleanDb\(/.test(src);
+      if (!cleaned) hits.push(src.slice(0, at).split('\n').length);
     }
   }
   return hits;
@@ -70,6 +73,8 @@ export function uncleanedStarts(source: string): number[] {
 
 /** Files exempt from the scan, each with its reason. */
 const EXEMPT = [
+  // Deliberately exercises the raw, rejecting start (the negative control); the fixture is what it is tested against.
+  'startServerFixture.test.ts',
   'startServerFixture.guard3066.test.ts',
 ];
 
@@ -93,6 +98,11 @@ describe('startServerFixture guard (#3066)', () => {
     expect(uncleanedStarts(`${head}async function boot() { return createServer (); }`)).toEqual([2]);
     expect(uncleanedStarts("import { createServer as makeApp } from '../server.js';\nconst a = await makeApp();")).toEqual([2]);
     expect(uncleanedStarts("beforeAll(async () => {\n  const { createServer } = await import('../server.js');\n  await createServer();\n});")).toEqual([3]);
+    // A fixture start elsewhere in the file does not bless a raw start in an `it` body.
+    expect(uncleanedStarts(`${head}it('a', async () => { await createServerOnCleanDb(); });\nit('b', async () => { await createServer(); });`)).toEqual([3]);
+    // A `//` inside a string, and a template literal, cannot hide or fabricate a start.
+    expect(uncleanedStarts(`${head}const u = '/a//b'; await createServer();`)).toEqual([2]);
+    expect(uncleanedStarts(`${head}const t = \`beforeAll(\`;\nit('x', async () => { await createServer(); });`)).toEqual([3]);
     // Cleaned by the file's own hook, comment and string lookalikes, and another module's createServer.
     expect(uncleanedStarts(`${head}beforeEach(async () => { await cleanDb(db); });\nit('x', async () => { await createServer(); });`)).toEqual([]);
     expect(uncleanedStarts(`${head}// beforeAll(() => createServer())\nconst s = "createServer(";`)).toEqual([]);

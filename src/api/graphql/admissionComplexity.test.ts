@@ -9,7 +9,6 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { buildSchema, parse, print } from 'graphql';
 import { getComplexity, simpleEstimator } from 'graphql-query-complexity';
-import { createServer } from '../../server.js';
 import { createServerOnCleanDb } from '../../test/startServerFixture.js';
 import { resolvers } from './schema/resolvers.js';
 import { typeDefs } from './schema/typeDefs.js';
@@ -502,7 +501,7 @@ describe('modes', () => {
       if (bad) expect(message).not.toContain(bad);
     }
     process.env.GRAPHQL_COMPLEXITY_MODE = 'off';
-    try { await expect(createServer()).rejects.toThrow(/refusing to boot/); } finally { delete process.env.GRAPHQL_COMPLEXITY_MODE; }
+    try { await expect(createServerOnCleanDb()).rejects.toThrow(/refusing to boot/); } finally { delete process.env.GRAPHQL_COMPLEXITY_MODE; }
   });
 
   it('observe still measures every request (near_limit is reported) and logs the boot configuration line', async () => {

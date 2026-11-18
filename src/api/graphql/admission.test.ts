@@ -13,7 +13,6 @@ import { createHash } from 'node:crypto';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { parse } from 'graphql';
-import { createServer } from '../../server.js';
 import { createServerOnCleanDb } from '../../test/startServerFixture.js';
 import { resolvers } from './schema/resolvers.js';
 import {
@@ -282,7 +281,7 @@ describe('configuration', () => {
   it('createServer itself refuses boot, and the refusal does not echo the value', async () => {
     process.env.GRAPHQL_MAX_TOKENS = 'SENTINEL_BAD';
     try {
-      const err: Error | null = await createServer().then(() => null, (e: unknown) => e as Error);
+      const err: Error | null = await createServerOnCleanDb().then(() => null, (e: unknown) => e as Error);
       expect(err?.message).toMatch(/GRAPHQL_MAX_TOKENS must be a positive integer/);
       expect(err?.message).not.toContain('SENTINEL_BAD');
     } finally { delete process.env.GRAPHQL_MAX_TOKENS; }
