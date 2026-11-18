@@ -122,6 +122,20 @@ export class WorkerNotFoundError extends EntityNotFoundError {
 }
 
 /**
+ * Surfaced by `resolveGrantRef` when the inbound reference (a Grant id or an
+ * `hrn:grant:<root>:<app-slug>:<grant-id>` URN, #3709) does not name a grant —
+ * or when the URN's App doesn't resolve (including through the rename alias
+ * map). Callers that conceal rather than refuse catch it (it is in
+ * `refNamesNothing`'s set via the {@link EntityNotFoundError} base).
+ */
+export class GrantNotFoundError extends EntityNotFoundError {
+  constructor(ref: string) {
+    super('GRANT_NOT_FOUND', ref);
+    this.name = 'GrantNotFoundError';
+  }
+}
+
+/**
  * Surfaced by `resolveNodeRevRef` when the inbound reference (a NodeRevision ID
  * or an end-anchored `hrn:noderev:<root>:<mem>:<loc...>:<rev>` URN, #696) does
  * not name a revision — or when the URN is malformed / its node doesn't resolve.
