@@ -7092,7 +7092,26 @@ model HostKeyUse {
   @@map("host_key_uses")
 }
 
-/// #1719: mutable manual-trigger consent kept apart from the immutable run snapshot.
+/// The current consent for one manually started run: the record of exactly which automation a person approved
+/// that run to execute. An automation is the set of flow nodes and edges a run walks, plus the identities of the
+/// model and tool registrations it uses; the pin holds their hashes. A schedule or a webhook keeps its consent on
+/// its own row (`automationPin`); a manual run has no trigger row, so its consent lives here.
+///
+/// Relationships: one row per AppRun (`runId` is the primary key) and deleted with it. `adoptedBy` is the id of
+/// the user who approved, stored as a plain value.
+///
+/// Behaviour:
+/// - Creating a manual run writes the row with the pin captured at launch (src/jobs/appRuns.ts).
+/// - Approving or re-adopting the run's automation replaces `pin` and stamps `adoptedAt` and `adoptedBy`;
+///   declining an adopted one deletes the row. Both go through the adoption door in
+///   src/api/graphql/schema/resolvers.automationPin.ts, which writes an AutomationAdoptionEvent in the same
+///   transaction.
+/// - The row can change, while `AppRun.automationPin` is the snapshot taken when the run was created and never
+///   changes. That is why the two are kept apart.
+/// - A run started by an event that traces back to a manual run takes its pin from here, so it runs under the
+///   consent as it is now (`currentOriginPin`, src/lib/automation/pins.ts).
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:010:01. Background: #1719, #2438, #2441.
 model ManualAutomationPin {
   runId     String   @id @map("run_id")
   pin       Json
@@ -7103,16 +7122,40 @@ model ManualAutomationPin {
   @@map("manual_automation_pins")
 }
 
-/// #1747 (Tickers S1) — a named wake schedule owned by one team App
-/// (cor:agt:080:01). Ticks are COMPUTED from `anchorAt` + k x `cadenceSeconds`,
-/// never stored (cor:agt:080:06). Nothing reads a ticker until S2.
+/// A named wake schedule that one team App owns. A ticker fires at a fixed cadence, and each time it fires it
+/// may wake the workers subscribed to it, so that they look at their team channel or do a regular piece of work.
 ///
-/// The NAME is unique among live tickers, ignoring case, and reusable after a
-/// delete (partial index `tickers_app_name_live_uniq`); the SLUG is permanent:
-/// unique within the App forever, deleted rows included (`tickers_app_slug_uniq`),
-/// so a re-created `engineering` gets `engineering-2` (#8083).
-/// Owner is exactly one of user / worker, taken from `currentActor()`, never an
-/// argument (CHECK `chk_tickers_shape`, prisma/ticker-invariants.sql).
+/// How the pieces fit: a ticker fires on its cadence; a TickerSubscription says which worker it wakes; the caller
+/// that delivers wakes (a host's App key, the worker's holder or whoever manages the App) reads the wakes that
+/// are due, delivers them and acknowledges them; WorkerDeliveryTick records the last tick acknowledged for a
+/// worker; AppWakeDay counts the acknowledged wakes against the App's daily budget.
+///
+/// Relationships: belongs to one App and is deleted with it. Has many TickerSubscription and WorkerDeliveryTick
+/// rows. The owner is exactly one of a user (`ownerUserId`) or a Worker (`ownerWorkerId`); both are plain ids.
+/// `sourceTemplateId` names the AgentTickerTemplate a generated ticker was made from, as a plain id with no
+/// foreign key, so that removing a template never reaches the tickers made from it.
+///
+/// Behaviour:
+/// - Ticks are computed, never stored: tick k falls at `anchorAt` plus k times `cadenceSeconds`
+///   (hrn:node:hadronmemory.com:specs:cor:agt:080:06). The cadence is at most one day.
+/// - `reasons` says when a tick wakes a subscriber: `read-team-channel` (there is relevant unread in the
+///   ticker's channels), `every-tick` (always) or `live-check` (the worker has not checked its team channel
+///   within the cadence). Any one is enough; a ticker with no reasons never fires. `quietHours` and `enabled`
+///   switch firing off.
+/// - The name is unique among the App's live tickers, ignoring case, and can be reused after a delete (partial
+///   index `tickers_app_name_live_uniq`). The slug is permanent: unique within the App for ever, deleted rows
+///   included (`tickers_app_slug_uniq`), so a re-created `engineering` gets `engineering-2`.
+/// - The owner is taken from the caller that creates the ticker, never from an argument (CHECK
+///   `chk_tickers_shape`, prisma/ticker-invariants.sql).
+/// - Deleting is a soft delete (`deletedAt`) that also ends the ticker's live subscriptions.
+/// - Casting a Worker from an Agent creates one ticker per AgentTickerTemplate of that Agent, owned by the new
+///   worker. Such a ticker carries `sourceTemplateId`, `sourceTemplateRevision` and `generatedForWorkerId`, all
+///   three or none, and there is at most one live generated ticker per worker and template (partial index
+///   `tickers_generated_live_uniq`).
+/// - Tickers are created, edited and deleted through src/api/graphql/schema/resolvers.ticker.ts and read by the
+///   due-wake calculation (src/lib/tickers/dueWakes.ts).
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:080:01. Background: #1747, #2024, #2096.
 model Ticker {
   id                String    @id @default(cuid())
   appId             String    @map("app_id")
@@ -7174,12 +7217,30 @@ model Ticker {
   @@map("tickers")
 }
 
-/// #2024 (S8, cor:agt:080:33) — one ticker an Agent declares. Casting a worker from the Agent into an App creates
-/// the worker's tickers from these (a SNAPSHOT: a later edit or removal reaches only future casts, R96 A) and
-/// subscribes it. Identity is `id`, never the name or a position; `revision` counts edits so a stale writer is
-/// refused (`expectedRevision`); `shapeVersion` lets a future shape be decoded explicitly (an unknown one is
-/// refused). Soft-deleted rows stay, because generated tickers keep their provenance.
-/// Live names are unique per Agent ignoring case; the CHECKs mirror the ticker's (prisma/agent-ticker-template-invariants.sql).
+/// One ticker that an Agent declares for every worker cast from it, for example a 10-minute base tick. The
+/// template lives on the Agent, so that casting a worker into any App gives the worker its tickers with no setup
+/// in that App.
+///
+/// Relationships: belongs to one Agent and is deleted with it. A Ticker made from a template records the
+/// template's id and revision (`Ticker.sourceTemplateId`, `Ticker.sourceTemplateRevision`) as plain values, not
+/// as a foreign key.
+///
+/// Behaviour:
+/// - Casting a Worker from the Agent creates one Ticker per live template, owned by the new worker, and
+///   subscribes the worker to it, in the cast's own transaction
+///   (hrn:node:hadronmemory.com:specs:cor:agt:080:34). It is a snapshot: a later edit or removal of the template
+///   reaches only later casts.
+/// - `cadenceSeconds` is the cadence asked for; the cast raises it to the App's minimum cadence when it is
+///   faster.
+/// - A template is identified by `id`, never by its name or position. `revision` counts edits, and a writer that
+///   sends an older revision is refused. `shapeVersion` names the shape of the row; only shape 1 exists.
+/// - Live names are unique within the Agent, ignoring case. `reasons` holds at least one value from the closed
+///   set a Ticker uses. Both, and the other bounds, are CHECKs and an index in
+///   prisma/agent-ticker-template-invariants.sql.
+/// - Removing a template is a soft delete; the row stays because generated tickers still name it.
+/// - Written by whoever may edit the Agent (src/api/graphql/schema/resolvers.agentTickerTemplate.ts).
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:080:33. Background: #2024.
 model AgentTickerTemplate {
   id             String    @id @default(cuid())
   agentId        String    @map("agent_id")
@@ -7206,11 +7267,24 @@ model AgentTickerTemplate {
   @@map("agent_ticker_templates")
 }
 
-/// #1747 — a worker's subscription to one ticker (cor:agt:080:02). Workers of the
-/// ticker's App only, never Agents. One LIVE row per (ticker, worker) (partial
-/// index `ticker_subscriptions_live_uniq`). History is kept, never hard-deleted.
-/// `endedReason` is UNSUBSCRIBED | WORKER_RETIRED | TICKER_DELETED, never
-/// dormancy (#8099). `viaGrantId` + `viaGrantPersonId` record a grant use (N2).
+/// One worker's subscription to one ticker: it says that the ticker's ticks may wake this worker. Without a live
+/// subscription a ticker never wakes a worker.
+///
+/// Relationships: joins Ticker and Worker and is deleted with either. The worker must belong to the ticker's
+/// App (trigger `trg_ticker_subscriptions_same_app`, prisma/ticker-invariants.sql). `viaGrantId` and
+/// `viaGrantPersonId`, and their `ended…` twins, are plain ids that record that the change was made by a worker
+/// using its AppGrant, and which person was behind that worker's session.
+///
+/// Behaviour:
+/// - There is at most one live row per ticker and worker (partial index `ticker_subscriptions_live_uniq`). A row
+///   is live while `endedAt` is null.
+/// - Rows are history: a subscription is ended, never deleted. `endedReason` is `UNSUBSCRIBED`, `WORKER_RETIRED`
+///   or `TICKER_DELETED`. A worker going quiet never ends a subscription.
+/// - Written by the subscribe and unsubscribe calls, by deleting a ticker, by retiring a worker, and by the cast
+///   that subscribes a new worker to the tickers generated for it.
+/// - Read by the due-wake calculation (src/lib/tickers/dueWakes.ts) and the worker's check status.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:080:02. Background: #1747.
 model TickerSubscription {
   id                    String    @id @default(cuid())
   tickerId              String    @map("ticker_id")
@@ -7237,9 +7311,24 @@ model TickerSubscription {
   @@map("ticker_subscriptions")
 }
 
-/// #1747 — one worker's wake settings (cor:agt:080:03), created lazily.
-/// `mentions` is IMMEDIATE | OFF (no ON_TICK, #8090). `pausedUntil` belongs to
-/// the worker, not a session (#8077).
+/// One worker's own wake settings: whether a mention wakes it at once, and an optional pause during which
+/// nothing wakes it.
+///
+/// Relationships: at most one row per Worker (`workerId` is the primary key), deleted with it. The `updatedBy…`
+/// columns are plain ids of who made the last change.
+///
+/// Behaviour:
+/// - The row is created on the first change (`setWorkerWakeSettings`); a worker with no row has the defaults.
+/// - `mentions` is `IMMEDIATE` or `OFF` (CHECK `chk_worker_wake_settings_shape`). There is no setting that holds
+///   mentions back until the next tick.
+/// - `pausedUntil` belongs to the worker, not to a session: it covers every session of that worker. A paused
+///   worker is due no wake (hrn:node:hadronmemory.com:specs:cor:agt:080:11).
+/// - `exemptEndedAt` records when a running pause was ended on purpose, because clearing `pausedUntil` erases
+///   the only time that said when the pause ended.
+/// - Changed by the worker itself, its holder or whoever manages the App. Read by the due-wake calculation, the
+///   worker's check status and the roster.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:080:03. Background: #1747, #2755.
 model WorkerWakeSettings {
   workerId          String    @id @map("worker_id")
   mentions          String    @default("IMMEDIATE")
@@ -7257,9 +7346,24 @@ model WorkerWakeSettings {
   @@map("worker_wake_settings")
 }
 
-/// #1747 — the delivery record, part 1 (cor:agt:080:04): the newest seq a wake
-/// for a channel was acknowledged for. Created here, WRITTEN ONLY by S2's
-/// `acknowledgeWakes`. It only rises.
+/// How far the messages of one channel have been delivered to one worker: the sequence number of the newest
+/// message whose text reached it. It is what stops the same messages being delivered to the worker twice.
+///
+/// Relationships: one row per Worker and channel (the primary key), deleted with the worker. `channelId` is a
+/// plain id with no foreign key. The `ackedBy…` columns are plain ids of who acknowledged the newest delivery: a
+/// person, the worker whose session it was, or an App key.
+///
+/// Behaviour:
+/// - `deliveredThroughSeq` only rises. It starts again only when the channel is recreated, which
+///   `channelIncarnation` records.
+/// - The one writer is `raiseDeliveryMark` (src/lib/workerMarks.ts). It runs when a delivery that carried the
+///   messages' text is acknowledged, and when the worker reads its own mentions.
+/// - Acknowledging a wake that carried no text does not move it; that is recorded in WorkerWakeAck.
+/// - What is still waiting for a worker is worked out from the messages above this mark and its read position;
+///   there is no stored list of waiting messages.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:080:04. Rule:
+/// hrn:node:hadronmemory.com:specs:cor:agt:080:16. Background: #1747, #2017, #2018, #2072.
 model WorkerDeliveryChannel {
   workerId            String   @map("worker_id")
   channelId           String   @map("channel_id")
@@ -7278,11 +7382,28 @@ model WorkerDeliveryChannel {
   @@map("worker_delivery_channels")
 }
 
-/// #2072 (Holger R53, cor:agt:080:04/:13/:15) — the receipt of an acknowledged wake, per (worker, wake key). A wake
-/// carries no message text, so its acknowledgement moves no message mark; this row is what it records instead: the
-/// floor's clock (`ackedAt`) and the budget's once-per-wake test. A row is (re)written only by an acknowledgement of a
-/// proof issued AFTER both the receipt and its accepted-issue watermark, so a repeat or an older proof's replay changes nothing
-/// while the same wake offered again after the floor counts again.
+/// The receipt that one wake was delivered to one worker. A wake is a nudge that carries no message text, so
+/// acknowledging it moves no message mark; this row is what the acknowledgement records instead.
+///
+/// Relationships: one row per Worker and wake key (the primary key), deleted with the worker. `wakeKey`
+/// identifies the wake: a hash of the channel ranges, ticks and task events it named. The `ackedBy…` columns are
+/// plain ids of who acknowledged: a person, a worker's session or an App key.
+///
+/// Behaviour:
+/// - Written only by `acknowledgeWakes` (src/lib/tickers/acknowledge.ts).
+/// - `ackedAt` is the clock for the limit on how often a worker can be woken
+///   (hrn:node:hadronmemory.com:specs:cor:agt:080:13): the next wake waits until the App's minimum cadence has
+///   passed since the newest receipt.
+/// - The row also decides whether an acknowledgement counts as a new delivery, and so whether it is charged to
+///   the App's daily budget (hrn:node:hadronmemory.com:specs:cor:agt:080:15). It is rewritten only by a wake
+///   issued after both `ackedAt` and `issuedAt`. A repeated acknowledgement, or one for an older wake, changes
+///   nothing. The same wake offered again later counts again.
+/// - `issuedAt` is the issue time of the wake that was accepted. It is null on rows written before the column
+///   existed; for those the comparison uses `ackedAt`.
+/// - When a later wake absorbed earlier ones, their keys get this receipt too, so that a late acknowledgement
+///   of an earlier wake is not charged again.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:080:04. Background: #2072, #2069, #3022.
 model WorkerWakeAck {
   workerId        String   @map("worker_id")
   wakeKey         String   @map("wake_key")
@@ -7301,8 +7422,23 @@ model WorkerWakeAck {
   @@map("worker_wake_acks")
 }
 
-/// #1747 — the delivery record, part 2: the last tick acknowledged per ticker.
-/// WRITTEN ONLY by S2.
+/// The last tick of one ticker that was delivered to one worker and acknowledged. It is what stops the same
+/// tick waking the worker twice, and it records whether the worker answered the wake by checking its channel.
+///
+/// Relationships: one row per Worker and Ticker (the primary key), deleted with either. The `ackedBy…` columns
+/// are plain ids of who acknowledged: a person, a worker's session or an App key.
+///
+/// Behaviour:
+/// - Written by `acknowledgeWakes` (src/lib/tickers/acknowledge.ts) for each tick the acknowledged wake named.
+///   `lastAckedTick` is the tick's number and only rises; `ackedAt` and the `ackedBy…` columns change only when
+///   it rises.
+/// - `respondedAt` is when the worker last checked a channel the ticker covers after that wake was issued, and
+///   null until it does. The channel check writes it (src/lib/channelReadState.ts) and a newer delivery clears
+///   it. The worker's check status reads it to decide whether the worker is overdue
+///   (hrn:node:hadronmemory.com:specs:cor:agt:100:03).
+/// - The due-wake calculation reads the row to find the oldest tick not yet acknowledged.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:080:04. Background: #1747, #3509, #3680.
 model WorkerDeliveryTick {
   workerId        String   @map("worker_id")
   tickerId        String   @map("ticker_id")
@@ -7322,14 +7458,25 @@ model WorkerDeliveryTick {
   @@map("worker_delivery_ticks")
 }
 
-/// #1708 (Task Management T5) — the delivery record, part 3: one row per
-/// (worker, task event, alarm chain position). `deliveredAt` is set ONLY by
-/// `acknowledgeWakes` (a wake proof naming the event), and is the receipt that
-/// the nudge for this event reached this worker. It is never an alarm
-/// acknowledgement (cor:agt:050:20): that stays `acknowledgeAlarm`'s.
-/// `undeliverableAt` is set by the stall-evaluator tick when the subject is
-/// dormant (cor:agt:080:11); a later delivery still records `deliveredAt`.
-/// `chainIndex` is 0 for an ordinary event and the woken position for an alarm.
+/// The receipt that the nudge for one team event reached one worker. Team events are things such as a task
+/// being assigned, a stall alarm or a stop-signal notice; each one that should wake a worker stays due until
+/// this row says it was delivered.
+///
+/// Relationships: one row per Worker, AgentTeamEvent and `chainIndex` (the primary key), deleted with the
+/// worker or the event. The `ackedBy…` columns are plain ids of who acknowledged the delivery.
+///
+/// Behaviour:
+/// - `chainIndex` is 0 for an ordinary event. For an alarm it is the position, in the alarm's chain of owners,
+///   of the worker that was woken.
+/// - `deliveredAt` is set only by `acknowledgeWakes`, from a wake that named the event, and only once.
+/// - It is a receipt of delivery and never an acknowledgement of the alarm: acknowledging an alarm is a
+///   separate act that stops its escalation (hrn:node:hadronmemory.com:specs:cor:agt:050:20).
+/// - `undeliverableAt` is set by the stall evaluator when the worker is dormant, with `undeliverableReason`
+///   `dormant` (hrn:node:hadronmemory.com:specs:cor:agt:080:11). A later delivery still sets `deliveredAt`.
+/// - Stop-signal notices are delivered through the same receipt, at `chainIndex` 0
+///   (hrn:node:hadronmemory.com:specs:cor:agt:090:04).
+///
+/// Background: #1708, #2022.
 model WorkerDeliveryTaskEvent {
   workerId            String    @map("worker_id")
   eventId             String    @map("event_id")
@@ -7351,10 +7498,21 @@ model WorkerDeliveryTaskEvent {
   @@map("worker_delivery_task_events")
 }
 
-/// #1748 — wakes acknowledged per App per UTC day (cor:agt:080:15). `wakes` is
-/// the budget counter (exempt wakes are not counted); `noticePostedAt` is the
-/// once-a-day "budget spent" notice claim. Written only by `acknowledgeWakes`
-/// and the notice claim.
+/// The count of wakes delivered in one App on one UTC day. Each App has a daily wake budget; this row is the
+/// counter the budget is checked against.
+///
+/// Relationships: one row per App and day (the primary key), deleted with the App.
+///
+/// Behaviour:
+/// - `wakes` rises by one each time `acknowledgeWakes` records a delivered wake that is not exempt. A wake is
+///   exempt when a mention by whoever manages the App caused it.
+/// - When the budget is spent, further wakes are withheld and stay due. The platform then posts one notice in
+///   the App's team chat for that day; `noticePostedAt` is the claim that makes it one. The claim is taken in
+///   the same transaction as the post (src/api/graphql/schema/resolvers.wake.ts).
+/// - The due-wake calculation adds this count to the App's outstanding AppWakeReservation rows before it hands
+///   out a wake.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:080:15. Background: #1748.
 model AppWakeDay {
   appId          String    @map("app_id")
   day            DateTime  @map("day") @db.Date
@@ -7367,12 +7525,24 @@ model AppWakeDay {
   @@map("app_wake_days")
 }
 
-/// #1748 cycle 1 — an outstanding budget reservation: `dueWakes` issued a
-/// non-exempt wake proof for this worker and has not yet seen it acknowledged.
-/// Counted against the day's budget for as long as the proof could still be
-/// acknowledged (15 minutes), so concurrent readers cannot hand out more than
-/// the budget (cor:agt:080:15). One row per worker; refreshed by a re-read,
-/// removed by the acknowledgement.
+/// A wake that was handed out for one worker and has not been acknowledged yet. It holds a place in the App's
+/// daily wake budget until the wake is acknowledged or lapses, so that callers reading at the same time cannot
+/// between them hand out more wakes than the budget allows.
+///
+/// Relationships: at most one row per Worker (`workerId` is the primary key); belongs to the worker's App and is
+/// deleted with either.
+///
+/// Behaviour:
+/// - The due-wake read writes the row when it issues a wake that is not exempt from the budget
+///   (src/lib/tickers/dueWakes.ts). It counts against the day's budget for 15 minutes from `reservedAt`, which
+///   is as long as the wake can still be acknowledged.
+/// - `wake` is the wake itself. A second read inside that time hands out the same wake again, exactly.
+/// - `wakeKey` identifies the wake (see WorkerWakeAck). An acknowledgement removes only the reservation that
+///   carries its own key, so an old wake acknowledged late cannot cancel the place a newer wake holds.
+/// - `absorbedKeys` lists earlier wakes that this one took in when another reason fell due. They share this one
+///   place in the budget and are not charged again (hrn:node:hadronmemory.com:specs:cor:agt:080:12).
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:080:15. Background: #1748, #2069.
 model AppWakeReservation {
   workerId     String   @id @map("worker_id")
   appId        String   @map("app_id")
@@ -7393,12 +7563,30 @@ model AppWakeReservation {
   @@map("app_wake_reservations")
 }
 
-/// #2022 (S6, cor:agt:090:01) — a stop signal: team state that stops work for the workers it covers until it ends.
-/// Level `pause-dispatch` | `pause` | `halt`; scope `worker` | `team` | `host`. A worker or team signal names its
-/// target worker (a team by its head); a host signal names its host registration. Who set it is a person
-/// (`setByUserId`) or a host key (`setByAppKeyId`), never both. It is live while `endedAt` is null and `until` (when
-/// given) has not passed: an expiry is in effect at `until` even before the sweep records it. The level, scope,
-/// target, setter and set time never change; the end is recorded once (prisma/stop-signal-invariants.sql). No text.
+/// An instruction to stop work, kept in a team App, that the platform enforces for the workers it covers until
+/// it ends. It is how a person stops one worker, a whole team or everything on one host.
+///
+/// Relationships: belongs to one App. A signal of scope `worker` or `team` names a Worker (`targetWorker`; a
+/// team is named by the worker at its head); a signal of scope `host` names a HostRegistration (`targetHost`).
+/// The row is deleted with its App or its target. It has many TeamStopCoverage rows. `setByUserId`,
+/// `setByAppKeyId`, `endedByUserId` and `endedByAppKeyId` are plain ids.
+///
+/// Behaviour:
+/// - `level` is `pause-dispatch`, `pause` or `halt`; `scope` is `worker`, `team` or `host`. The target must
+///   belong to the signal's App (trigger `trg_team_stop_signals_same_app`).
+/// - It is set by exactly one of a person or a host's App key, never both. Whoever manages the App may set any
+///   signal; a host key may set only a `halt` on its own host.
+/// - It is live while `endedAt` is null and `until`, when given, has not passed. At `until` the signal has
+///   ended, even before the sweep records it (hrn:node:hadronmemory.com:specs:cor:agt:090:05).
+/// - The level, scope, target, setter, set time and `until` never change. The end is recorded once: `endKind`
+///   is `lifted` (with who lifted it) or `expired`. A trigger enforces both
+///   (prisma/stop-signal-invariants.sql).
+/// - Several live signals can cover one worker, and each applies. Which workers a signal covers is worked out
+///   each time it is checked (hrn:node:hadronmemory.com:specs:cor:agt:090:02).
+/// - The row holds no free text.
+/// - Written by src/lib/stopSignals/lifecycle.ts; read on every assignment, tick and stall pass.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:090:01. Background: #2022.
 model TeamStopSignal {
   id                       String    @id
   appId                    String    @map("app_id")
@@ -7427,11 +7615,25 @@ model TeamStopSignal {
   @@map("team_stop_signals")
 }
 
-/// #2169 (S6b, R95) — one serving lane's declaration that its consumer takes stop notices: a `dueWakes` call that
-/// passes `accepts: [STOP]` upserts the row of the lane it serves (a host registration id for a host key, `unhosted` for a
-/// person who manages the App or a non-host key). A declaration is FRESH for STOP_CONSUMER_FRESH_SECONDS; setting a stop
-/// signal is refused while any worker it would cover has no fresh lane. `lane` is deliberately not a foreign key: it is
-/// either a registration id or the literal `unhosted`, and a stale row for a deleted registration is simply never read.
+/// The latest time at which the caller that delivers wakes for one serving lane of an App said that it also
+/// delivers stop-signal notices. A stop signal may be set only while every worker it would cover is on a lane
+/// with a recent declaration, so that no worker is stopped without being told.
+///
+/// Relationships: one row per App and lane (the primary key), deleted with the App. `lane` is deliberately not a
+/// foreign key: it is either the id of a HostRegistration or the literal `unhosted`, and a row left behind by a
+/// deleted registration is never read.
+///
+/// Behaviour:
+/// - A due-wake read that passes `accepts: [STOP]` and covers its whole lane upserts the row
+///   (`recordStopConsumerDeclaration`, src/lib/stopSignals/delivery.ts). A host's App key declares the lane of
+///   its own live registration. A key that is not a host key, and a person who manages the App, declare
+///   `unhosted`, the lane of the workers that no live registration lists.
+/// - A declaration counts for STOP_CONSUMER_FRESH_SECONDS (600 by default). Setting a stop signal is refused
+///   while any worker it would cover has no lane with a declaration that recent
+///   (hrn:node:hadronmemory.com:specs:cor:agt:090:04).
+/// - Enforcing a stop signal never reads this table.
+///
+/// Background: #2169.
 model StopConsumerDeclaration {
   appId      String   @map("app_id")
   lane       String
@@ -7443,10 +7645,24 @@ model StopConsumerDeclaration {
   @@map("stop_consumer_declarations")
 }
 
-/// #2022 (R95) — when a stop signal covered a worker: the HISTORY that stall clocks and notices read. Enforcement never
-/// reads it; it works coverage out live (cor:agt:090:02). Kept by `reconcileStopCoverage` under the App's stop fence:
-/// one open interval per (signal, worker) (partial unique index, prisma/stop-signal-invariants.sql). An interval ends
-/// at the earliest of `leftAt`, its signal's end and its signal's `until`.
+/// One period during which one stop signal covered one worker. The rows are the history of who was stopped and
+/// when; the stall clocks and the notices need that history after the fact.
+///
+/// Relationships: belongs to one TeamStopSignal and is deleted with it. `workerId` and `appId` are plain ids
+/// with no foreign key.
+///
+/// Behaviour:
+/// - Enforcement never reads these rows: whether a signal covers a worker now is worked out live from the
+///   reporting lines and the host registration (hrn:node:hadronmemory.com:specs:cor:agt:090:02).
+/// - `reconcileStopCoverage` (src/lib/stopSignals/lifecycle.ts) is the only writer. Under the App's stop lock it
+///   compares live coverage with the open periods, closes the ones that no longer hold (`leftAt`), opens the
+///   new ones, and sends each worker the notice for the change.
+/// - There is at most one open period per signal and worker (partial index `team_stop_coverage_open_uniq`,
+///   prisma/stop-signal-invariants.sql).
+/// - A period ends at the earliest of `leftAt`, the signal's end and the signal's `until`.
+/// - Read by the stall rules, which do not count stopped time, and by the worker's check status.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:090:04. Background: #2022.
 model TeamStopCoverage {
   id        String    @id
   appId     String    @map("app_id")
@@ -7463,14 +7679,24 @@ model TeamStopCoverage {
   @@map("team_stop_coverage")
 }
 
-/// #2022 (R68, Vera's receipt §5) — a time when stop signals were what kept a queued task from being assigned: every
-/// worker that would otherwise match it was covered, or its creator was under a `pause` or `halt` (R71). The
-/// couldn't-be-assigned clock (cor:agt:050:17) doesn't count it. Opened and closed by the matcher's pass; one open
-/// hold per task (partial unique index).
-/// #3825 (cor:agt:060:13, V37/V44): the latest DECIDED match outcome per App and combination (family, tier, role; an
-/// open dimension is the empty string, V41). One upserted row, no append log; `failingSince` is the first no-worker
-/// outcome of the current streak and is cleared by a MATCHED. Rows older than 168 h are purged by the matcher sweep.
-/// Read only through `latestMatchOutcomes`; never returned on its own, never a per-candidate record (V22).
+/// The latest result of trying to match a queued task to a worker, for one App and one combination of model
+/// family, tier and role. It tells readers whether tasks that ask for that combination are finding a worker.
+///
+/// Relationships: one row per App and combination (the primary key), deleted with the App. A dimension that the
+/// task's requirements leave open is stored as the empty string, so that the key holds no null.
+///
+/// Behaviour:
+/// - The matcher upserts the row each time a match reaches a result (`recordMatchOutcome`,
+///   src/lib/agentTasks/matchOutcomes.ts), for every combination the task's requirements name. There is no log
+///   of earlier outcomes, and nothing is kept per candidate worker.
+/// - `outcome` is `MATCHED` or `NO_WORKER`; `reason` is the coarse reason of a `NO_WORKER`.
+/// - `failingSince` is the first `NO_WORKER` of the current run of failures; a `MATCHED` clears it.
+///   `lastMatchedAt` orders outcomes that arrive late.
+/// - Times come from the database clock, at microsecond precision.
+/// - The matcher's sweep deletes rows older than 168 hours.
+/// - `latestMatchOutcomes` is the only read. No resolver calls it yet.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:060:13. Background: #3825, #3883.
 model AgentMatchOutcome {
   appId         String    @map("app_id")
   family        String    @default("")
@@ -7495,6 +7721,22 @@ model AgentMatchOutcome {
   @@map("agent_match_outcomes")
 }
 
+/// One period during which stop signals were the reason a queued task could not be assigned: every worker that
+/// could otherwise take it was covered by a live stop signal, or the worker that created it was under a `pause`
+/// or `halt`. The alarm for a task nobody could be assigned does not count this time.
+///
+/// Relationships: belongs to one AgentTask and is deleted with it. `appId` is a plain id.
+///
+/// Behaviour:
+/// - The matcher opens and closes holds after each matching pass (`recordStopHolds`,
+///   src/lib/agentTasks/matcher.ts): it opens one for each queued task that stop signals are holding back, and
+///   closes the open hold of every other task.
+/// - There is at most one open hold per task (partial index `agent_task_stop_holds_open_uniq`,
+///   prisma/stop-signal-invariants.sql). A hold is open while `endedAt` is null.
+/// - The stall rules read the holds and leave their time out of the wait that raises the alarm
+///   (src/lib/agentTasks/stall.ts). A task that nobody can take for another reason keeps counting.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:17. Background: #2022.
 model AgentTaskStopHold {
   id        String    @id
   appId     String    @map("app_id")
@@ -7508,10 +7750,25 @@ model AgentTaskStopHold {
   @@map("agent_task_stop_holds")
 }
 
-/// #1747 — a narrow, named App grant held by a WORKER (cor:agt:080:24). One
-/// live row per (app, grantee, name) (partial index `app_grants_live_uniq`).
-/// `name` is a closed list: `ticker.subscribe-workers`. Given and revoked only
-/// by whoever manages the App.
+/// A narrow, named permission that whoever manages an App gives to one worker of that App, so that the worker
+/// can do one kind of thing without managing the App. It is separate from Grant, the signed grant for a
+/// registered action.
+///
+/// Relationships: belongs to one App and to one Worker (`grantee`), and is deleted with either. The worker must
+/// be in the same App. `grantedBy` and `revokedBy` are plain user ids.
+///
+/// Behaviour:
+/// - `name` comes from a closed list (CHECK `chk_app_grants_shape`, prisma/ticker-invariants.sql):
+///   `ticker.subscribe-workers` lets the worker subscribe other workers to tickers, and lets its `@all` and
+///   `@team` mentions wake everyone at once when a person is behind its session; `workers.staff` lets the
+///   worker's session use the staffing calls, and `app.members` the member calls, without a per-call
+///   instruction from its holder. In each case the holder must still have the right.
+/// - There is at most one live row per App, worker and name (partial index `app_grants_live_uniq`). A row is
+///   live while `revokedAt` is null; revoking keeps the row.
+/// - Only whoever manages the App gives or revokes a grant, and giving is done by a person as themselves. A
+///   retired worker cannot be given one.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:080:24. Background: #1747, #3308.
 model AppGrant {
   id              String    @id @default(cuid())
   appId           String    @map("app_id")
@@ -7530,9 +7787,27 @@ model AppGrant {
   @@map("app_grants")
 }
 
-/// A scope an App key holds (cor:aut:010:03, #1749). A closed list; today only `attention:deliver`. At most one LIVE
-/// row per key and scope (a partial unique index, prisma/app-key-scope-invariants.sql). Granted and revoked only by
-/// whoever manages the App; read from the database on every call it gates, never cached in the auth context.
+/// One extra permission that an App key holds. A plain App key cannot use certain calls; a scope switches one
+/// group of them on for that key.
+///
+/// Relationships: belongs to one AppKey and is deleted with it. `grantedByUserId` and `revokedByUserId` are
+/// plain user ids.
+///
+/// Behaviour:
+/// - `scope` comes from a closed list (CHECK `chk_app_key_scopes_shape`, prisma/app-key-scope-invariants.sql):
+///   `attention:deliver`, which reading and acknowledging due wakes require, and `host:operate`, which makes
+///   the key a host key.
+/// - `hostId` names the one host a `host:operate` scope is bound to. It is required for that scope and absent
+///   for every other (hrn:node:hadronmemory.com:specs:cor:agt:070:04).
+/// - A key holds a scope at most once (partial index `app_key_scopes_live_uniq`). A revoked row stays as the
+///   record of who gave the scope and who took it back.
+/// - Only whoever manages the App gives or revokes a scope. A new key holds none, and a rotated key is a new
+///   key.
+/// - Every call that a scope gates reads the row from the database at that call; it is never cached in the
+///   request's credentials. A revocation therefore takes effect at the key's next call
+///   (hrn:node:hadronmemory.com:specs:cor:aut:010:04).
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:aut:010:03. Background: #1749, #1709.
 model AppKeyScope {
   id              String    @id
   appKeyId        String    @map("app_key_id")
@@ -7551,7 +7826,18 @@ model AppKeyScope {
   @@map("app_key_scopes")
 }
 
-/// One row per App-key `dueWakes` call: which key read, how many workers it was shown, when (#1749, cor:agt:080:23).
+/// A record that an App key read the due wakes of its App: which key, how many workers the answer showed, and
+/// when. It is the audit trail of what a key that delivers wakes has looked at.
+///
+/// Relationships: belongs to one AppKey and is deleted with it. `appId` is a plain id.
+///
+/// Behaviour: one row is written for every due-wake read an App key makes, also when nothing was due, in the
+/// transaction that decides the key may be given the answer (`decideKeyAnswer`,
+/// src/api/graphql/schema/resolvers.wake.ts). A read by a person writes no row. Nothing in the server reads
+/// the table.
+///
+/// Rules: hrn:node:hadronmemory.com:specs:cor:agt:080:22, hrn:node:hadronmemory.com:specs:cor:agt:080:23.
+/// Background: #1749.
 model AppKeyWakeRead {
   id          String   @id
   appKeyId    String   @map("app_key_id")
@@ -7565,10 +7851,24 @@ model AppKeyWakeRead {
   @@map("app_key_wake_reads")
 }
 
-/// #1647 (cor:aut:020:03): one row per erasure a platform admin performs on ANOTHER user's account. Written in the
-/// deletion's own SERIALIZABLE transaction, so the audit and the erasure commit or roll back together. User ids are
-/// plain columns, deliberately NOT foreign keys: the audit must outlive any cascade. Immutable (trigger in
-/// post-push.sql + the migration) and exposed on no read surface.
+/// A record that a platform administrator erased another user's account: who did it, whose account, the reason
+/// given, and when.
+///
+/// Relationships: has at most one UserDeletionNotice. `actorUserId` and `targetUserId` are plain values,
+/// deliberately not foreign keys, so that the record outlives everything the erasure deletes. There is at most
+/// one row per erased account (`targetUserId` is unique).
+///
+/// Behaviour:
+/// - Written by `deleteUserAccount` (src/controller/operations/deleteUser.ts) only when the caller gives a
+///   reason, which is the case of an administrator erasing someone else. A user deleting their own account
+///   writes no row.
+/// - The row is written in the erasure's own SERIALIZABLE transaction, so the audit and the erasure commit or
+///   roll back together.
+/// - The table is append-only: a trigger refuses every update and delete (`user_deletion_audits_immutable`,
+///   prisma/post-push.sql). `reason` is trimmed and 1 to 500 characters long (CHECK).
+/// - No API returns these rows.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:aut:020:03. Background: #1647.
 model UserDeletionAudit {
   id           String   @id @map("id")
   actorUserId  String   @map("actor_user_id")
@@ -7588,9 +7888,24 @@ enum UserDeletionNoticeStatus {
   UNAVAILABLE
 }
 
-/// #1647: the outbox for the deleted user's notice. Written in the deletion's transaction with the recipient address
-/// encrypted (tokenCrypto); a post-commit worker sends it and clears the ciphertext at a terminal state. The notice
-/// text never carries the audit reason.
+/// The pending email that tells a user their account was erased by an administrator. The row is written with
+/// the erasure and sent afterwards, so that the notice is not lost if sending fails at that moment.
+///
+/// Relationships: one row per UserDeletionAudit (`auditId` is the primary key).
+///
+/// Behaviour:
+/// - Written in the erasure's transaction, next to the audit row. The recipient's address is read before the
+///   account is scrubbed and stored encrypted in `recipientCiphertext`. With no address the row starts as
+///   `UNAVAILABLE`.
+/// - A job sends the notice after the commit (src/jobs/sendUserDeletionNotices.ts): `PENDING` becomes `SENT`
+///   when the mail provider accepts it, a failure is retried up to 3 times and then becomes `FAILED`, and with
+///   no mail sender configured the row becomes `UNAVAILABLE`.
+/// - `leaseUntil` and `claimToken` give one pass the exclusive right to send. Delivery is at least once: a
+///   lease that runs out during a send can allow a second send.
+/// - The ciphertext is cleared at every final state.
+/// - The notice text never carries the reason recorded in the audit.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:aut:020:03. Background: #1647.
 model UserDeletionNotice {
   auditId             String                   @id @map("audit_id")
   status              UserDeletionNoticeStatus @default(PENDING)
@@ -7608,10 +7923,24 @@ model UserDeletionNotice {
   @@map("user_deletion_notices")
 }
 
-/// #1162: internal MVCC coordination, not authored history or a Worker FK.
-/// Writers and miscast deletion update this version in their own transaction.
-/// Retained after deletion to fence older snapshots; no public API.
-/// The key is an immutable Worker id.
+/// A version counter per worker, used only to make two kinds of transaction collide: one that writes a new
+/// reference to a worker, and one that deletes that worker. It is internal coordination data, not a record of
+/// anything.
+///
+/// Relationships: none. `subjectId` is a Worker id stored as a plain value, with no foreign key, and the row is
+/// kept after the worker is deleted.
+///
+/// Behaviour:
+/// - A trigger on each table that can name a worker (`worker_reference_fence_1162`,
+///   prisma/worker-reference-invariants.sql) raises `version` when a row starts to name a worker, a session of a
+///   worker or a worker's working memory, and then refuses the write if that worker does not exist.
+/// - Deleting a worker that was cast by mistake raises the same counter after it locks the worker
+///   (src/api/graphql/schema/resolvers.worker.ts). The two writes touch the same row, so a writer that started
+///   before the deletion cannot commit a reference to a worker that is gone.
+/// - No API reads or returns the table.
+///
+/// Specs: hrn:node:hadronmemory.com:specs:cor:dmo:050:11 (a worker that is referenced is never hard deleted).
+/// Background: #1162.
 model WorkerReferenceFence {
   subjectId String @id @map("subject_id")
   version   BigInt @default(0)
@@ -7631,16 +7960,31 @@ enum ServedPromptPointerLevel {
   AGENT
 }
 
-/// #2047 (S10, cor:agt:040:03): what a bind, a chatbot chat or a headless run was given. IMMUTABLE platform data, not
-/// memory content: it names the compiled revision served, the pointer level that chose it, that revision's own
-/// provenance (copied from the revision at serve time, so a recompile never rewrites it, R38) and the values the
-/// platform variables were filled with. No composed text, no derived blocks (run progress holds those), no export.
+/// A record of the boot prompt that one worker session, one chatbot chat or one headless run was given: which
+/// compiled prompt, which revision of it, what that revision was compiled from, and the values the platform
+/// variables were filled with. It lets a reader see later exactly what an agent was told.
 ///
-/// Identity of a revision is `(compiledNodeId, servedRevSeq)`: `Node.revSeq`, never `contentRevSeq`. `compiledNodeId` is
-/// deliberately not a foreign key: the record outlives a deliberately deleted node and shows it as pruned.
+/// Relationships: the owner is exactly one of a Session (`sessionId`, kind `BIND`), a chat node (`chatId`, kind
+/// `CHAT`) or an AppRun (`runId`, kind `RUN`), and the record is deleted with its owner. Those foreign keys, and
+/// the rule that the record's App, Agent and worker are its owner's own, are declared in SQL
+/// (prisma/served-prompt-invariants.sql), not in this model. `compiledNodeId` is deliberately not a foreign key:
+/// the record outlives a compiled node that is deleted and then shows the revision as pruned.
 ///
-/// Owner (exactly one of session / chat node / run), the owner-consistency foreign keys, immutability and the
-/// owner-absence delete gate are database facts Prisma cannot model: prisma/served-prompt-invariants.sql.
+/// Behaviour:
+/// - `recordServedPrompt` (src/lib/bootPrompt/serve.ts) writes the row in the transaction that creates the
+///   owner.
+/// - A bind and a run have one record. A chat records again, with the next `ordinal`, when its served revision
+///   or its filled variables change.
+/// - A revision is identified by `compiledNodeId` and `servedRevSeq` (`Node.revSeq`). `provenance` is copied
+///   from that revision when it is served, so a later recompile never rewrites it.
+/// - The record holds no prompt text and no derived blocks.
+/// - It is immutable: a trigger refuses every update, and a delete is allowed only once the owner row is gone.
+/// - `appId` is null only for a chat held in a memory that no App owns.
+/// - Read by whoever may read the worker's internals or the run; for a chat, by whoever manages its App. The
+///   pruning of node revisions also reads it: the revision an open session or an unfinished run was served is
+///   kept.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:040:03. Background: #2047, #3096.
 model ServedPrompt {
   id                  String                   @id
   kind                ServedPromptKind
@@ -7669,10 +8013,25 @@ model ServedPrompt {
   @@map("served_prompts")
 }
 
-/// #2245 (R170.6): one append-only record per Agent clone. Written in the clone's own transaction, so the audit and
-/// the copy commit or roll back together. Ids are plain columns, deliberately NOT foreign keys: the record must
-/// outlive the Agents, orgs and users it names. Exactly one of the two targets is set (CHECK in post-push.sql);
-/// S1 only writes `targetOrgId`. Immutable (trigger) and exposed on no read surface.
+/// A record that an Agent was cloned: who cloned it, which Agent was the source, which new Agent was made, for
+/// which organization, and how much was copied.
+///
+/// Relationships: none by foreign key. `actorUserId`, `sourceAgentId`, `newAgentId`, `targetOrgId` and
+/// `targetUserId` are plain values, so that the record outlives the Agents, organizations and users it names.
+///
+/// Behaviour:
+/// - `cloneAgent` (src/lib/agentClone/cloneAgent.ts) writes the row in the clone's own transaction, so the
+///   record and the copy commit or roll back together.
+/// - Exactly one of `targetOrgId` and `targetUserId` is set (CHECK `chk_agent_clone_audit_one_target`). The
+///   code sets `targetOrgId` only.
+/// - The counts are what the copy of the system memory contained: nodes, edges, edges left out, imports and
+///   links.
+/// - The table is append-only: a trigger refuses every update and delete (`agent_clone_audits_immutable`,
+///   prisma/post-push.sql).
+/// - No API returns the rows. `Agent.clonedFromAgentRef` reads them to find a clone's source by id, and shows
+///   that source only to a caller who may read it.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:050:18. Background: #2245, #2281.
 model AgentCloneAudit {
   id                String   @id @map("id")
   actorUserId       String?  @map("actor_user_id")
@@ -7691,10 +8050,24 @@ model AgentCloneAudit {
   @@map("agent_clone_audits")
 }
 
-/// #2517, cor:dmo:010:04 (Proposed) — a separate audit entry, written on each SOURCE node, when a hard
-/// delete cascades an edge that node held to the deleted target. Deliberately NOT a NodeRevision (a
-/// node's revisions stay snapshots of its own fields). The source is a real FK (the trace dies with the
-/// source); the target is NOT one, since the target row is gone by the time anyone reads this.
+/// A trace left on a node when one of its outgoing edges disappeared because the node it pointed at was hard
+/// deleted. Without it, the source node would lose an edge with no sign that it ever had one.
+///
+/// Relationships: belongs to the source Node and is deleted with it. `targetId`, `targetMemoryId`, `targetLoc`,
+/// `edgeId` and `edgeLoc` are plain values: the target and the edge are gone by the time anyone reads the row.
+/// `memoryId` is the memory the source was in when the edge was removed, because a node can be moved later.
+///
+/// Behaviour:
+/// - The hard delete of a node writes one row for each edge that pointed at it from a node that survives
+///   (src/api/graphql/schema/resolvers.mutation.node.ts). Edges the platform owns, such as comment and include
+///   edges, are not recorded.
+/// - `reason` is `TARGET_HARD_DELETED`, the only value today. `removedBy` is the same value `Node.deletedBy`
+///   would carry.
+/// - It is deliberately not a NodeRevision: a node's revisions stay snapshots of its own fields.
+/// - Read by the `nodeEdgeRemovals` query, which shows a row only where the caller may read the memory it was
+///   recorded in, and hides the target's address where the caller cannot read the target's memory.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:010:04. Background: #2517.
 model NodeEdgeRemoval {
   id             String   @id @default(cuid())
   sourceId       String   @map("source_id")
@@ -7718,10 +8091,20 @@ model NodeEdgeRemoval {
   @@map("node_edge_removals")
 }
 
-/// #1667, cor:dmo:060:15 — append-only record of every successful per-asset
-/// public-link switch call: who, when, to what. Written in the SAME transaction
-/// as the flag. Deliberately NO foreign keys: the record must outlive the asset
-/// row (the janitor hard-deletes assets) and the actor.
+/// A record that someone switched the public link of one asset on or off: who, when, and from what to what.
+/// The public link lets anyone who has the asset's link download it without signing in.
+///
+/// Relationships: none by foreign key. `assetId`, `memoryId` and `actorUserId` are plain values, so that the
+/// record outlives the asset, which is hard deleted after its retention period, and the user.
+///
+/// Behaviour:
+/// - Every successful call of the switch writes one row, in the same transaction that sets
+///   `Asset.publicLinkEnabled` (src/lib/asset/publicLink.ts), also when the value did not change: `enabled` is
+///   the new value and `previouslyEnabled` the old one.
+/// - Only whoever manages the asset's memory can make the switch.
+/// - The code only inserts rows. No trigger enforces that, and no API returns the rows.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:060:15. Background: #1667.
 model AssetPublicLinkAudit {
   id                String   @id @map("id")
   assetId           String   @map("asset_id")
@@ -7737,6 +8120,24 @@ model AssetPublicLinkAudit {
 
 // #2063 R1 / cor:dmo:150:07. Plaintext structural metadata, never source prose.
 // No target FK: a source's written address survives target/edge deletion.
+/// One include tag found in one node's text. An include is a reference to another node whose text is put in
+/// its place when the node is read. The row holds the tag's structure: where it points and what it asks for.
+/// The table is an index of who includes what, kept so that the pruning of old revisions can find the revisions
+/// that includes rely on without reading or decrypting any node text.
+///
+/// Relationships: belongs to the including Node (`includer`) and is deleted with it. `targetMemoryId` and
+/// `targetLoc` name the target as resolved when the row was written. There is deliberately no foreign key to
+/// the target: the address the source wrote must survive the deletion of the target or of the edge.
+///
+/// Behaviour:
+/// - `ordinal` is the tag's position in the node's text; `kind` says whether `reference` is a loc or a node
+///   URN. `pinnedRevNo`, `requiresApproved` and `requiresSigned` are the tag's settings.
+/// - The row is plaintext structural metadata. It never holds text from the node.
+/// - `replaceStructuralReferences` (src/lib/includes/structuralReferences.ts) replaces all rows of a node
+///   together with its IncludeSourceCoverage row. `reliedRevisionsOf` reads the rows by target.
+/// - No code path of the running server calls either function yet, so the table is empty outside tests.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:150:07. Background: #2063.
 model IncludeReference {
   id                 String  @id @default(cuid())
   includerId         String  @map("includer_id")
@@ -7770,6 +8171,23 @@ enum IncludeSourceCoverageState {
 
 // Fingerprints describe STORED bytes (ciphertext when sealed); no plaintext copy.
 // Tombstones remain sources. Only an includer's purge cascades coverage away.
+/// The statement that one node's include tags were captured in full, and for which state of the node. A node
+/// with no tags gets a row too, so that "no rows in IncludeReference" can be told apart from "never looked at".
+///
+/// Relationships: at most one row per Node (`includerId` is unique), deleted only when that node is purged. A
+/// soft-deleted node keeps its row.
+///
+/// Behaviour:
+/// - The row pins what was parsed: the node's revision, memory and loc, a fingerprint of the stored content
+///   bytes (the ciphertext when the memory is encrypted, never a plaintext copy), the parser version, and the
+///   number of IncludeReference rows.
+/// - `state` is `COMPLETE_EMPTY`, `COMPLETE_TAGS` or `NEEDS_AUTHORIZED_REWRITE`.
+/// - `replaceStructuralReferences` (src/lib/includes/structuralReferences.ts) upserts it with the node's
+///   references. `verifyIncludeCoverage` checks every node against its row and passes only when all of them are
+///   current.
+/// - No code path of the running server calls either function yet, so the table is empty outside tests.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:150:07. Background: #2063.
 model IncludeSourceCoverage {
   id                       String @id @default(cuid())
   includerId               String @unique @map("includer_id")
@@ -7797,6 +8215,23 @@ enum IncludeRetentionState {
 
 // Singleton is absent/inactive until separately authorized maintenance verifies it.
 // R1 adds no activator, operator command, backfill or production caller.
+/// The single row that says whether the index of include tags (IncludeReference and IncludeSourceCoverage) is
+/// complete and may be relied on. Until it says so, nothing may use the index to decide which revisions to
+/// keep.
+///
+/// Relationships: none. There is one row at most, with the fixed id `singleton`.
+///
+/// Behaviour:
+/// - `state` is `PREPARING`, `BACKFILLING`, `VERIFYING`, `ACTIVE` or `BLOCKED`. The index counts as usable only
+///   when the row exists, is `ACTIVE`, carries the schema and parser versions the code expects, and its
+///   `verifiedBindingGeneration` equals its `bindingGeneration`. Otherwise the readers refuse with
+///   `INCLUDE_RETENTION_INACTIVE`.
+/// - `metadataGeneration` is stamped on every IncludeReference and IncludeSourceCoverage row written under it.
+///   The counters and cursors are for a backfill.
+/// - Nothing creates or changes the row today: there is no activator, no operator command and no backfill, so
+///   the row is absent and the index is inactive.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:150:07. Background: #2063.
 model IncludeRetentionGeneration {
   id                        String @id @default("singleton")
   schemaVersion             Int @default(1) @map("schema_version")
@@ -7814,7 +8249,26 @@ model IncludeRetentionGeneration {
   @@map("include_retention_generation")
 }
 
-/// #1793: server-owned policy; defaults seed once, mode deploys LOG_ONLY.
+/// The request limits for one class of API calls. The platform sorts rate-limited calls into five classes
+/// (`CREDENTIALS`, `OUTBOUND`, `WRITES`, `FAN_OUT_READS`, `OTHER_READS`), and each class has one row.
+///
+/// Relationships: none. `fieldClass` is the primary key. RateLimitBucket and RateLimitPolicyAudit name a class
+/// by the same value.
+///
+/// Behaviour:
+/// - A call may be counted against up to three subjects: its principal (a user or an App), its key and its IP
+///   address. `principalLimit`, `keyLimit` and `ipLimit` are how many calls each may make in one window of
+///   `windowSeconds`.
+/// - `enforcementMode` is `LOG_ONLY` (a call over the limit is logged and let through) or `ENFORCING` (it is
+///   refused with `RATE_LIMITED`). New rows start as `LOG_ONLY`.
+/// - The server creates the rows once, from built-in defaults that environment variables can override, and
+///   never overwrites a row afterwards (`seedRateConfig`, src/lib/rateLimit/index.ts).
+/// - Only a platform administrator changes a row (`setRateLimitPolicy`). `version` rises with each change, and
+///   a change must name the version it read. Each change writes a RateLimitPolicyAudit row. The window and
+///   `retentionSeconds` cannot be changed.
+/// - Every admission reads the row (`admitRateInTx`).
+///
+/// Background: #1793.
 model RateLimitPolicy {
   fieldClass      String   @id @map("field_class")
   principalLimit  Int      @map("principal_limit")
@@ -7828,7 +8282,23 @@ model RateLimitPolicy {
   @@map("rate_limit_policies")
 }
 
-/// #1793: HMAC subjects only. Window-independent advisory locks protect absent rows too.
+/// The count of calls one subject made in one class during one time window. It is the counter a request is
+/// checked against before it is let through.
+///
+/// Relationships: none by foreign key. `fieldClass` names a RateLimitPolicy. There is one row per class,
+/// dimension, subject and window start.
+///
+/// Behaviour:
+/// - `dimension` is `principal`, `key` or `ip`. `subject` is never the user id, key id or address itself: it is
+///   a keyed hash (HMAC) of it, prefixed with the id of the hashing key, so the table holds no identity.
+/// - An admission adds one to the row of each subject of the call, creating the row when needed
+///   (`admitRateInTx`, src/lib/rateLimit/index.ts). It takes an advisory lock per subject first; the lock does
+///   not depend on the window, so it also protects a row that does not exist yet.
+/// - While two hashing keys are valid at once, a subject has one row per key and the larger count decides.
+/// - `expiresAt` is one day after the window ends. A cleanup loop deletes expired rows in batches
+///   (`cleanupRateBuckets`).
+///
+/// Background: #1793.
 model RateLimitBucket {
   id          String   @id
   fieldClass  String   @map("field_class")
@@ -7842,7 +8312,22 @@ model RateLimitBucket {
   @@map("rate_limit_buckets")
 }
 
-/// #1793: no secrets, only key IDs and fingerprints. Operators fence overlap/drain transitions.
+/// The record of which secret keys are used to hash the subjects in RateLimitBucket. It holds the ids of the
+/// keys and a fingerprint of each, never a key itself; the keys come from the server's environment. It lets
+/// every server process check that it hashes with the same keys as the others.
+///
+/// Relationships: none. There is one row, with the id `global`.
+///
+/// Behaviour:
+/// - The server creates the row at first use with the current key (`seedRateConfig`,
+///   src/lib/rateLimit/index.ts). Every admission and the readiness check compare the keys in the environment
+///   with `keyIds` and `fingerprints` and refuse to serve when they differ.
+/// - `keyIds` holds one key, or two while a key is being replaced. `beginRateKeyOverlap` adds the new key and
+///   sets `overlapStartedAt`; `retireRateKey` removes the old one, and only after 24 hours
+///   (src/lib/rateLimit/lifecycle.ts). No API calls these two functions; they are for an operator.
+/// - `version` rises with each change.
+///
+/// Background: #1793.
 model RateLimitManifest {
   id                String   @id
   keyIds            String[] @map("key_ids")
@@ -7852,7 +8337,21 @@ model RateLimitManifest {
   @@map("rate_limit_manifests")
 }
 
-/// #1793: platform-admin-only configuration audit; contains no subject/counter/secret.
+/// A record that a platform administrator changed the limits of one rate-limit class: who, when, the values
+/// before and after, and the reference the administrator gave for the change.
+///
+/// Relationships: none by foreign key. `fieldClass` names a RateLimitPolicy and `actorId` is a user id, both as
+/// plain values.
+///
+/// Behaviour:
+/// - `setRateLimitPolicy` (src/api/graphql/schema/resolvers.rateLimit.ts) writes one row in the same
+///   transaction as the change. A call that changes nothing writes no row.
+/// - Only a platform administrator signed in as themselves can make the change: an App key, a session, an
+///   impersonation and a headless run are refused.
+/// - `before` and `after` are the policy's settings. The row holds no subject, no counter and no secret.
+/// - The code only inserts rows. No trigger enforces that, and no API returns the rows.
+///
+/// Background: #1793.
 model RateLimitPolicyAudit {
   id              String   @id
   fieldClass      String   @map("field_class")
@@ -7864,8 +8363,25 @@ model RateLimitPolicyAudit {
   @@map("rate_limit_policy_audits")
 }
 
-/// #3350 / ruling 0112 amended: a read-only team snapshot grant on one automation, never an App-wide permission.
-/// Rows are immutable except for terminal revoke; live trigger identity is checked on every read.
+/// A permission for the headless runs of one automation (one schedule or one webhook of an App) to read that
+/// App's roster and tasks. Without it a run cannot read them. It is given per automation and is never a
+/// permission for the whole App.
+///
+/// Relationships: belongs to one App and is deleted with it. `triggerId` is the id of an AgentSchedule or an
+/// AgentWebhook, chosen by `triggerKind`, as a plain value. `grantedBy` and `revokedBy` are plain user ids.
+///
+/// Behaviour:
+/// - Given by a person who manages the App, as themselves (`setAutomationTeamSnapshotGrant`); revoked by
+///   whoever manages the App. Each writes an AppAutomationTeamSnapshotGrantEvent in the same transaction.
+/// - There is at most one live row per App and trigger (partial index
+///   `app_automation_team_snapshot_grants_live_uq`). A revoked row stays and does not block a new one.
+/// - A row never changes except that it is revoked once, and it is deleted only with its App; a trigger
+///   enforces both (prisma/app-automation-team-snapshot-grant-invariants.sql).
+/// - The read is allowed only for a running run of that App whose root trigger still exists and holds a live
+///   grant. This is checked again at every read (`runMayReadTeam`, src/lib/auth/runTeamRead.ts). The grant
+///   gives reading only.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:23. Background: #3350, #2925.
 model AppAutomationTeamSnapshotGrant {
   id          String    @id @default(cuid())
   appId       String    @map("app_id")
@@ -7881,7 +8397,22 @@ model AppAutomationTeamSnapshotGrant {
   @@map("app_automation_team_snapshot_grants")
 }
 
-/// #3350: one append-only content-free event per give/revoke, in the same transaction. Actor and grant ids survive erasure.
+/// A record that a team snapshot grant was given or revoked: which automation, which grant, who did it and
+/// when. It is the history of AppAutomationTeamSnapshotGrant.
+///
+/// Relationships: belongs to one App and is deleted with it. `grantId`, `triggerId` and `actorUserId` are plain
+/// values with no foreign key, so that they stay readable after the user is erased or the trigger is deleted.
+///
+/// Behaviour:
+/// - `action` is `GRANT` or `REVOKE`. One row is written for each grant created and each grant revoked, in the
+///   same transaction (src/api/graphql/schema/resolvers.runTeamSnapshot.ts). A call that changes nothing writes
+///   no row.
+/// - The actor is a person who manages the App.
+/// - The row holds ids only, no content.
+/// - The table is append-only: a trigger refuses every update, and refuses a delete while the App exists
+///   (prisma/app-automation-team-snapshot-grant-invariants.sql).
+///
+/// Background: #3350.
 model AppAutomationTeamSnapshotGrantEvent {
   id          String   @id @default(cuid())
   appId       String   @map("app_id")
@@ -7898,8 +8429,24 @@ model AppAutomationTeamSnapshotGrantEvent {
   @@map("app_automation_team_snapshot_grant_events")
 }
 
-/// #3496 — operational chat state; deliberately outside NodeRevision's fingerprint.
-/// Classified plaintext under cor:sec:040:03; survives message deletion, not root hard deletion.
+/// The message count and the time of the last message of one chat. A chat is a root node with its messages
+/// below it; these two values change with every message, so they are kept here and not on the node, where each
+/// change would make a new revision.
+///
+/// Relationships: one row per chat root Node (`chatRootNodeId` is the primary key), deleted when that node is
+/// hard deleted.
+///
+/// Behaviour:
+/// - The row is created with the chat. Appending a message sets `messageCount` to the message's sequence number
+///   and `lastMessageAt` to now (src/lib/chatRoot.ts).
+/// - Deleting a message does not lower the count.
+/// - For a chat made before this table existed, the row is created on the first write from the values that
+///   were stored in the node's data, and those keys are then removed from the node
+///   (src/lib/chatRootCounters.ts).
+/// - The values are plaintext, also in an encrypted memory
+///   (hrn:node:hadronmemory.com:specs:cor:sec:040:03). A read answers 0 and null while the memory is locked.
+///
+/// Background: #3496.
 model ChatRootCounter {
   chatRootNodeId String @id @map("chat_root_node_id")
   messageCount Int @default(0) @map("message_count")
@@ -7909,7 +8456,22 @@ model ChatRootCounter {
   @@map("chat_root_counters")
 }
 
-/// #3501 — encrypted conversational operational state, never revisioned.
+/// The working state of the conversation engine for one chat: which conversation and stage the chat is in,
+/// which conversations it completed, its route history, its goal stack and the last time it went off track.
+/// It changes on every turn, so it is kept here and not on the chat's node, where each change would make a new
+/// revision.
+///
+/// Relationships: one row per chat root Node (`chatRootNodeId` is the primary key), deleted with it.
+///
+/// Behaviour:
+/// - `state` is a JSON object with only those keys. In an encrypted memory it is stored encrypted, in the same
+///   way as a node's data.
+/// - The row is created with the chat. For a chat made before this table existed, it is created on the first
+///   write from the values that were stored in the node's data (src/lib/chatRootEngineState.ts).
+/// - A chat turn reads and writes it under the chat root's lock. A read never creates or repairs the row.
+/// - Copying a memory copies the rows of its chats, and encrypting a memory encrypts them.
+///
+/// Background: #3501, #3557.
 model ChatRootEngineState {
   chatRootNodeId String @id @map("chat_root_node_id")
   state Json
@@ -7918,12 +8480,53 @@ model ChatRootEngineState {
   @@map("chat_root_engine_states")
 }
 
-/// #3668 (S1a, cor:acl:140:01/:03/:08) — one grant: exactly one HOLDER (a user, an agent, a worker or an App), one App, one
-/// REGISTERED action (`actions`), the values it allows, its time frame and count, and why. Whether it is live is WORKED OUT
-/// (src/lib/grants/live.ts and the matching SQL fragment), never stored. Nothing in the server writes a row yet; the
-/// database guards (prisma/grant-invariants.sql) fix what any later writer may do: a row arrives pending, ends once by
-/// revocation or by its holder going (#3690 S2a-h: ruling 0255 item 3, 0259; the holder ids are sealed, with no foreign key),
-/// loses an erased issuer, and follows a user merge.
+/// A permission for one holder to perform one registered action, with stated values, within one App. A worker
+/// or an agent asks for a grant; it allows nothing until a person who may do the thing themselves signs it with
+/// a passkey. It is how an agent gets leave for a specific act, such as creating one schedule, without holding
+/// a standing right.
+///
+/// Relationships:
+/// - `app` is the App the grant is valid in; deleting the App deletes its grants.
+/// - The holder is exactly one of `userId`, `agentId`, `workerId` or `granteeAppId` (CHECK
+///   `chk_grants_exactly_one_holder`). These are plain ids with no foreign key: when the holder goes the grant
+///   ends and the record stays, so the id must outlive the row it names.
+/// - `actionDef` is the Action the grant allows. An Action that a grant names cannot be deleted.
+/// - `issuer` is the User whose signature activated the grant. The link is set to null when that account is
+///   erased; the grant and its reason stay (hrn:node:hadronmemory.com:specs:cor:acl:140:08).
+/// - `signature` is the GrantSignature that activated it. The grant has many GrantSigningRequest and
+///   GrantSignature rows, and its history is in GrantEvent.
+/// - `requestedByUserId`, `requestedByWorkerId` and `requestedBySessionId` say who asked for it, as plain ids.
+///
+/// Behaviour:
+/// - Creating a grant only asks for one. `createGrant` (src/lib/grants/create.ts) is the one writer. Its
+///   callers are a worker's session, for the worker itself or its role agent, and a person who manages the App,
+///   for a worker of the App or an agent installed in it. The code creates worker and agent holders only.
+/// - A row arrives pending: not activated, not verified, not signed, not revoked and not used. The database
+///   refuses any other insert, and an insert whose holder does not exist or has gone.
+/// - It activates once, when a person signs it. The signer must be allowed to issue the action
+///   (`Action.issuerRule`) and becomes the issuer. `activatedAt`, `verificationKind`, `verifiedBy` and
+///   `signatureId` are set together and never change again
+///   (hrn:node:hadronmemory.com:specs:cor:acl:140:07, hrn:node:hadronmemory.com:specs:cor:acl:140:04).
+/// - Whether a grant allows anything is worked out at each use and never stored (src/lib/grants/live.ts). It
+///   must be activated, not revoked, its holder not gone, its App not deleted, started (`startsAt`), not expired
+///   (`expiresAt`), below `maxUses`, and inside the limits of its Action.
+/// - `values` holds one value per parameter of the action: a single id, a list or a wildcard, where the action
+///   accepts it. The grant covers an act only on the thing its values name
+///   (hrn:node:hadronmemory.com:specs:cor:acl:140:10).
+/// - Using a grant adds one to `useCount` under the row's lock, in the transaction of the act it allows, and
+///   writes a `USE` GrantEvent. A grant with `maxUses` 1 is single-use: its first use spends it.
+/// - A grant reaches its holder only. A grant held by an agent also reaches that agent's live workers in the
+///   App, for the actions that say so (hrn:node:hadronmemory.com:specs:cor:acl:140:06).
+/// - It ends once, and the first end stands. A person revokes it (`revokedAt` with `revokedBy`); the requester
+///   withdraws a grant that was never activated (`withdrawnAt`, equal to `revokedAt`); or its holder goes
+///   (`holderDepartedAt`: a person erased or leaving the App's organization, a worker retired or deleted, an
+///   agent deleted or no longer installed in the App).
+/// - Apart from those moves a row is never edited. A user merge moves the person links from the merged account
+///   to the surviving one. A trigger enforces all of this (prisma/grant-invariants.sql).
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:acl:140:01. Lifecycle:
+/// hrn:node:hadronmemory.com:specs:cor:acl:140:03. Rule: hrn:node:hadronmemory.com:specs:cor:acl:140:05.
+/// Background: #3668, #3690, #3711, #3483, #4173.
 model Grant {
   id                    String    @id @default(cuid())
   appId                 String    @map("app_id")
@@ -7986,14 +8589,30 @@ model Grant {
   @@map("grants")
 }
 
-/// #3649 slice B (cor:acl:140:07; the node-signing mirror cor:dmo:130:03) — a request for a person to sign ONE grant (gate
-/// selection 1: a single grant; a selection is later scope). Pinned at creation and immutable: the grant, its record version,
-/// the terms hash (cor:acl:140:09) and the payload version. No signer is named (ruling 0255, item 12): whoever signs must be
-/// able to issue the grant (cor:acl:140:04), judged at completion (slice C). It is open, then ends exactly once:
-/// completed | declined | expired | stale | withdrawn. Every timestamp is the DB clock, set by the guard trigger
-/// (prisma/grant-signing-invariants.sql), which also enforces the single end; a grant that is revoked, loses its holder or
-/// moves its terms ends its open requests stale. Kept for the grant's lifetime (it cascades only with the grant). User, App,
-/// worker and session ids are sealed history with no FK (conventions:append-only-table-trigger).
+/// A request for a person to sign one pending Grant. It is what the signing page opens: it fixes exactly which
+/// grant, and which version of its terms, the person is asked to sign.
+///
+/// Relationships: belongs to one Grant and is deleted only with it. Has at most one GrantSignature, the one
+/// that completed it. `requesterUserId`, `requesterAppId`, `requesterWorkerId` and `requesterSessionId` are
+/// plain ids with no foreign key; they are kept as history.
+///
+/// Behaviour:
+/// - `id` is 128 random bits, so it cannot be guessed.
+/// - `grantId`, `version`, `termsHash` and `payloadVersion` are fixed when the request is created and never
+///   change. `termsHash` is a hash of the grant's terms: its App, holder, action, values, start, expiry, count
+///   and reason (hrn:node:hadronmemory.com:specs:cor:acl:140:09).
+/// - A request can be created only for a grant that is still pending, at the grant's current version.
+/// - It names no signer. Whoever signs must be allowed to issue the grant, which is judged when they sign
+///   (hrn:node:hadronmemory.com:specs:cor:acl:140:04).
+/// - `state` starts as `open` and ends exactly once: `completed` (signed), `declined` (the person refused),
+///   `expired` (`expiresAt` passed), `withdrawn` (the account that asked took it back) or `stale`.
+/// - A request goes `stale` when its grant is revoked, loses its holder, changes its terms, or is activated
+///   through another request, so that no request completes over terms the person was not shown.
+/// - Every time is the database clock. A trigger sets the times and enforces the fixed fields and the single
+///   end (prisma/grant-signing-invariants.sql).
+/// - Written by src/lib/signing/grantRequests.ts and src/lib/signing/grantCeremony.ts.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:acl:140:07. Background: #3649.
 model GrantSigningRequest {
   /// 128 bits of randomness, base64url: never guessable (the node-signing id mint).
   id                 String    @id
@@ -8020,10 +8639,30 @@ model GrantSigningRequest {
   @@map("grant_signing_requests")
 }
 
-/// #3649 slice B (cor:acl:140:07, :09) — an append-only grant signature record: inserted only against an open request whose
-/// pins it repeats, never updated, deleted only with its grant. It keeps the SIGNED holder (kind and id) beside the version
-/// and terms hash, because a user merge may later move the grant's holder link and a later read must rebuild the terms the
-/// person signed, not the current row's (cor:acl:140:09). State is never stored; slice D derives it on read.
+/// The record of one person's passkey signature on one Grant. It proves that this person, with this passkey,
+/// signed exactly these terms of this grant in answer to this signing request. Recording it is what activates
+/// the grant.
+///
+/// Relationships: belongs to one Grant (`grant`) and to the GrantSigningRequest it completed, one signature per
+/// request; it is deleted only with the grant. `passkey` is the PasskeyCredential that signed, and that
+/// credential cannot be deleted while the signature exists. `activatedGrant` is the Grant whose `signatureId`
+/// names this row. `signerId` is the person's user id as a plain value with no foreign key.
+///
+/// Behaviour:
+/// - The signing ceremony inserts the row (`completeGrantSigning`, src/lib/signing/grantCeremony.ts). In one
+///   transaction it verifies the passkey assertion, records the signature, completes the request and activates
+///   the grant, with the signer as issuer.
+/// - The database accepts the row only against an open, unexpired request whose `version`, `termsHash` and
+///   `payloadVersion` it repeats, from the signer's own unrevoked passkey, on a grant that is still pending.
+/// - What the passkey signed is the SHA-256 of a payload that names the grant, its version, its terms hash and
+///   the request (hrn:node:hadronmemory.com:specs:cor:acl:140:09). `authenticatorData`, `clientDataJson`,
+///   `signature` and `rpId` are kept so that the signature can be verified again at any later read.
+/// - `holderKind` and `holderId` are the holder as it was signed. A user merge can later move the grant's
+///   holder link, and a later read must rebuild the terms the person signed, not the row as it is now.
+/// - The row is never updated (prisma/grant-signing-invariants.sql). Whether a signature is current, earlier or
+///   invalid is worked out at each read and never stored (src/lib/signing/grantStatus.ts).
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:acl:140:07. Background: #3649, #3827.
 model GrantSignature {
   id                  String   @id @default(cuid())
   grantId             String   @map("grant_id")
@@ -8054,9 +8693,26 @@ model GrantSignature {
   @@map("grant_signatures")
 }
 
-/// #3668 (S1a, cor:acl:140:01) — append-only history of a grant: who did what, when. Grant, App-scope and actor ids carry no
-/// foreign key on purpose (sealed history; the App FK cascades so a hard delete still works). The CHECKs and triggers live
-/// in prisma/grant-invariants.sql.
+/// One entry in the history of a Grant: what happened to it, when, and who did it.
+///
+/// Relationships: belongs to one App and is deleted with it. `grantId` names a Grant as a plain value with no
+/// foreign key; a trigger checks at insert that the grant exists and is in the event's App. `actorUserId`,
+/// `workerId`, `sessionId` and `runId` are plain ids, kept as history.
+///
+/// Behaviour:
+/// - `action` is `CREATE`, `ACTIVATE`, `REVOKE`, `WITHDRAW` or `USE` (CHECK `chk_grant_events_shape`,
+///   prisma/grant-invariants.sql).
+/// - `ACTIVATE` is written when a person's signature activates the grant and names the signer. `REVOKE` and
+///   `WITHDRAW` are written when a person ends the grant and name that person and, when the act came through a
+///   worker's session, the worker and session. `USE` is written each time the grant is used and names the
+///   worker and session that used it. Each is written in the transaction of the act it records.
+/// - No code writes a `CREATE` event today, and a grant that ends because its holder went gets no event.
+/// - `at` is the database clock.
+/// - The table is append-only: a trigger refuses every update, and refuses a delete while the App exists.
+/// - For an action that limits its uses, the check of whether a grant is spent also counts the grant's `USE`
+///   events (src/lib/grants/cover.ts).
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:acl:140:01. Background: #3668, #4173.
 model GrantEvent {
   id           String   @id @default(cuid())
   grantId      String   @map("grant_id")
@@ -8076,10 +8732,33 @@ model GrantEvent {
   @@map("grant_events")
 }
 
-/// #3668 (S1a, cor:acl:140:02) — a thing a grant can allow. Written ONLY by the idempotent deploy-time upsert
-/// (src/lib/grants/actions.ts, scripts/db/upsert-actions.ts) from a list in the server; no GraphQL, MCP, CLI or run-tool
-/// write exists, and the serve role holds no INSERT/UPDATE/DELETE on it (prisma/runtime-role.sql). The platform list is
-/// EMPTY in S1a. A row is never deleted by the upsert: a grant may name it (FK RESTRICT).
+/// One thing a Grant can allow, such as creating a schedule. The platform keeps the list of actions so that
+/// people, agents and the server all read the same list of what can be granted.
+///
+/// Relationships: has many Grant rows, each of which names its action by `name`. An action that a grant names
+/// cannot be deleted or renamed.
+///
+/// Behaviour:
+/// - The list lives in the server's code (`PLATFORM_ACTIONS`, src/lib/grants/actions.ts). An upsert writes it
+///   to this table at deploy (scripts/db/upsert-actions.ts): it inserts what is missing, updates what differs
+///   and never deletes a row.
+/// - Nothing else writes the table. No GraphQL, MCP, CLI or run-tool call does, and the role the server runs
+///   as has no insert, update or delete right on it (prisma/runtime-role.sql). An agent's author therefore
+///   cannot invent an action.
+/// - The list holds `schedule.create`, `webhook.create`, `bootprompt.source.edit` and
+///   `bootprompt.compile.approve`.
+/// - `parameters` names each value a grant of the action must carry, its type, and whether it refuses a
+///   wildcard.
+/// - `issuerRule` is a closed key that the server maps to a function that decides who may issue a grant of the
+///   action, which is whoever may do the thing themselves (src/lib/grants/issuers.ts). It is never SQL or code.
+/// - `enforcement` says what enforces the action: `SERVER`, `CREDENTIAL`, `HARNESS_INSTRUCTION` or
+///   `RECORDED_ONLY`.
+/// - `summaryTemplate` is the plain sentence shown to the person who signs, filled from the App and the grant's
+///   values.
+/// - `maxUses` and `lifetimeSeconds` are limits that apply to every grant of the action; a grant's own count
+///   and expiry can only narrow them.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:acl:140:02. Background: #3668, #3707, #4163.
 model Action {
   name            String   @id
   /// PLATFORM now; a tool's id later (phase 5).
