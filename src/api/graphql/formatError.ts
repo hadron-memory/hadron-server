@@ -32,6 +32,7 @@ import { AssetUploadError } from '../../controller/operations/beginAssetUpload.j
 import { SetAssetEnabledError } from '../../controller/operations/setAgentAssetUploadEnabled.js';
 import { QueryTooComplexError } from './admissionComplexity.js';
 import { TeamReadBusyError } from '../../lib/agentTasks/teamReadBudget.js';
+import { AuthStoreBusyError } from '../../lib/auth/storeBusy.js';
 import { GitCommandError } from '../../integrations/github/execGit.js';
 import { SessionExpiredError } from '../../lib/nodeCrypto.js';
 
@@ -70,6 +71,15 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   // P2028 incident (#4380) was found by counting them, so the issue stream keeps them.
   mapping(
     (err): err is TeamReadBusyError => err instanceof TeamReadBusyError,
+    (err) => ({ ...err.extensions }),
+    { silenceInSentry: false },
+  ),
+  // #4471: a pool wait during request authentication (before any resolver ran), same convention and same Sentry
+  // call as TEAM_READ_BUSY above. The conversion happens in the auth middleware — the one point both API-key arms
+  // share — and this entry guarantees the domain message and extensions survive Apollo's context-failure wrap at
+  // this boundary.
+  mapping(
+    (err): err is AuthStoreBusyError => err instanceof AuthStoreBusyError,
     (err) => ({ ...err.extensions }),
     { silenceInSentry: false },
   ),

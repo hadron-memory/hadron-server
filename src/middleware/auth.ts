@@ -13,6 +13,8 @@ import type { HadronJwtPayload } from '../auth/jwt.js';
 import { canImpersonate, type ImpersonationContext } from '../lib/auth/impersonation.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { publishActor, publishUser } from '../lib/requestActor.js';
+import { AuthStoreBusyError } from '../lib/auth/storeBusy.js';
+import { isPrismaBusyExhaustion } from '../lib/agentTasks/teamReadBudget.js';
 
 export interface AuthContext {
   /** Server-owned, captured before active-App/session selection; never read from request arguments. */
@@ -238,15 +240,29 @@ async function resolveAuthContextInner(
   const token = authHeader.slice(7);
 
   let ctx: AuthContext;
-  if (token.startsWith(APP_KEY_PREFIX)) {
-    ctx = await resolveAppKey(token, db);
-  } else if (token.startsWith(USER_API_KEY_PREFIX)) {
-    ctx = await resolveUserApiKey(token, db);
-  } else if (/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) {
-    // JWTs have the form header.payload.signature — three base64url segments.
-    ctx = await resolveJwt(token, db);
-  } else {
-    return { auth: {}, credentialStatus: 'refused' };
+  try {
+    if (token.startsWith(APP_KEY_PREFIX)) {
+      ctx = await resolveAppKey(token, db);
+    } else if (token.startsWith(USER_API_KEY_PREFIX)) {
+      ctx = await resolveUserApiKey(token, db);
+    } else if (/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) {
+      // JWTs have the form header.payload.signature — three base64url segments.
+      ctx = await resolveJwt(token, db);
+    } else {
+      return { auth: {}, credentialStatus: 'refused' };
+    }
+  } catch (error) {
+    // #4471: a pool wait while looking up an API key (Prisma P2024, or the P2028 'unable to start'
+    // class) is an availability fault in the CHECK — not a verdict, and not a server defect. Left
+    // alone it rejected the context builder and reached the client as an untyped
+    // INTERNAL_SERVER_ERROR (#4460 QA: 176 failures stayed untyped this way). Convert it to the
+    // typed, retryable AUTH_STORE_BUSY refusal: cor:aut:010:05 S5 — a check that could not complete
+    // is the internal error, NEVER refused. One shared conversion point for both key arms, so the
+    // code cannot vary with which credential was presented; everything else rethrows untouched.
+    // The JWT arm cannot reach this catch: resolveJwt owns its own catch-all (#3532) and answers an
+    // incomplete check as credentialStatus 'unavailable' — that path's S5-compliant answer, kept.
+    if (isPrismaBusyExhaustion(error)) throw new AuthStoreBusyError(error);
+    throw error;
   }
 
   // Ruling 0194: the status describes the credential, so it is fixed BEFORE the worker-session binding is tried.
