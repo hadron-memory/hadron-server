@@ -3459,7 +3459,8 @@ const horizonLagLastCheckedAt = new Map<string, number>();
  * longer silent: the catch emits its own `team_events.horizon_probe_error` line (Baylor F3 — "ran and found
  * nothing" stays silent, "errored" is now visible). The once-per-window map is capped (Baylor F5).
  */
-async function logStalledHorizon(db: Context['db'], appId: string): Promise<void> {
+/** Exported for the #4408 direct pins (resolvers.teamEventHorizon4316.test.ts): the throttle bookkeeping, the race timer and the fault line, driven on a stand-in root client. */
+export async function logStalledHorizon(db: Context['db'], appId: string): Promise<void> {
   const now = Date.now();
   const last = horizonLagLastCheckedAt.get(appId);
   if (last != null && now - last < HORIZON_LAG_LOG_INTERVAL_MS) return;

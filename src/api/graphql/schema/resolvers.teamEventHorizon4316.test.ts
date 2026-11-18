@@ -18,7 +18,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { readTeamEvents, teamEventHorizonSettled } from './resolvers.agentTask.js';
+import { logStalledHorizon, readTeamEvents, teamEventHorizonSettled } from './resolvers.agentTask.js';
 import { settleTeamEventHorizon, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 
 useTeamEventHorizonTimeout(); // this file's two-connection pins wait on the horizon
@@ -32,6 +32,14 @@ const settle = () => settleTeamEventHorizon(db);
 /** One `team_events.horizon_lag` line per console.log spy call, parsed; other lines are dropped. */
 const lagLines = (spy: { mock: { calls: unknown[][] } }) =>
   spy.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('team_events.horizon_lag')).map((l) => JSON.parse(l) as Record<string, unknown>);
+
+/**
+ * #4408 item 4: the probe's own fault line, same shape of helper. A silence assertion that reads only
+ * `lagLines` cannot tell "the probe ran and found nothing" from "the probe errored" — the two lines are
+ * distinct events, and quiet must mean quiet on both.
+ */
+const probeErrorLines = (spy: { mock: { calls: unknown[][] } }) =>
+  spy.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('team_events.horizon_probe_error')).map((l) => JSON.parse(l) as Record<string, unknown>);
 
 /**
  * #4372 fold 2 (Peter #114889): every raw-pg fixture this file opens, so a timed-out or hung test cannot leak
@@ -96,12 +104,14 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
       await pg.query('SELECT pg_current_xact_id()'); // assigns this connection's xid, holding xmin
       const held = await event(Date.now() - 60_000); // committed, 60 s old, at or above the held horizon
       expect(lagLines(log)).toEqual([]); // nothing logged yet: no read has happened
+      expect(probeErrorLines(log)).toEqual([]); // #4408 item 4: and no fault either
       // #4372 fold (the vacuous-assertion P2s): the newest-first read comes FIRST — before any forward read
       // of this App — and its silence is asserted after the probe has settled, so the once-per-minute limit
       // cannot be the reason nothing appears. Dropping the !newestFirst guard makes this red on its own.
       await resolvers.Query.agentTeamEvents({}, { appRef: appId, limit: 10, newestFirst: true }, context());
       await teamEventHorizonSettled();
       expect(lagLines(log)).toEqual([]); // a newest-first read is not a forward read: no line
+      expect(probeErrorLines(log)).toEqual([]); // #4408 item 4
       const rows = await resolvers.Query.agentTeamEvents({}, { appRef: appId, limit: 10 }, context());
       await teamEventHorizonSettled(); // the probe is fire-and-forget: settle before reading the spy
       // The log changes nothing: the page is exactly the below-horizon row, byte-identical in shape.
@@ -119,6 +129,7 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
       expect(await resolvers.Query.agentTeamEvents({}, { appRef: appId, limit: 10 }, context())).toEqual(rows);
       await teamEventHorizonSettled();
       expect(lagLines(log)).toHaveLength(1);
+      expect(probeErrorLines(log)).toEqual([]); // #4408 item 4: the probe that logged succeeded, not faulted
       await pg.query('ROLLBACK');
       open = false;
       await settle();
@@ -131,6 +142,7 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
       await resolvers.Query.agentTeamEvents({}, { appRef: afterApp, limit: 10 }, context());
       await teamEventHorizonSettled();
       expect(lagLines(log)).toHaveLength(1); // nothing held back any more: a short read logs nothing
+      expect(probeErrorLines(log)).toEqual([]); // #4408 item 4: and never a fault line
     } finally {
       if (open) await pg.query('ROLLBACK');
       await pg.end();
@@ -153,6 +165,7 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
       expect(page.events).toHaveLength(1);
       expect(lagLines(log)).toHaveLength(1);
       expect(lagLines(log)[0]).toMatchObject({ event: 'team_events.horizon_lag', appId, heldBack: 1 });
+      expect(probeErrorLines(log)).toEqual([]); // #4408 item 4
     } finally {
       if (open) await pg.query('ROLLBACK');
       await pg.end();
@@ -173,6 +186,7 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
       await teamEventHorizonSettled();
       expect(rows).toHaveLength(1); // the below-horizon row only; the young held row is not served
       expect(lagLines(log)).toEqual([]); // young lag is not yet worth a line — dropping the floor makes this red
+      expect(probeErrorLines(log)).toEqual([]); // #4408 item 4: silence is silence on both lines
     } finally {
       if (open) await pg.query('ROLLBACK');
       await pg.end();
@@ -195,6 +209,7 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
     await teamEventHorizonSettled();
     expect(checks).toBe(1); // the first poll checks; the next two are inside the window and check nothing
     expect(lagLines(log)).toEqual([]); // and a healthy App never logs
+    expect(probeErrorLines(log)).toEqual([]); // #4408 item 4
   });
 
   it('a slow check never delays the page it explains (#4372 fold: the probe is not awaited)', async () => {
@@ -286,6 +301,7 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
       expect(rootChecks).toBe(1); // the check ran on the ROOT pooled client, not the read's transaction
       expect(lagLines(log)).toHaveLength(1); // and it was not swallowed: the line landed
       expect(lagLines(log)[0]).toMatchObject({ event: 'team_events.horizon_lag', appId, heldBack: 1 });
+      expect(probeErrorLines(log)).toEqual([]); // #4408 item 4: the root-client check succeeded, not faulted
     } finally {
       if (open) await pg.query('ROLLBACK');
       await pg.end();
@@ -310,6 +326,96 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
       expect(call).toContain('ctx.db'); // the request's root pooled client, threaded as probeDb
       expect(call).not.toMatch(/\bc\.db\b/); // the transaction client under the key arm — the incident
     }
+  });
+});
+
+describe('#4408: the #4372 review follow-ups (eviction, timer clear, sanitized fault line)', () => {
+  let log: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => { log = vi.spyOn(console, 'log').mockImplementation(() => {}); });
+  afterEach(() => { log.mockRestore(); });
+
+  /**
+   * A stand-in root client for the direct seam, same isolation idea as the fold-2 pin below:
+   * logStalledHorizon touches only $queryRaw, so a fresh object exposing exactly that surface proves
+   * which client ran the statement and lets the test decide what the statement does.
+   */
+  const probeDbOf = (onQuery: (appId: string) => Promise<unknown>) =>
+    ({ $queryRaw: ((_strings: TemplateStringsArray, ...values: unknown[]) => onQuery(String(values[0]))) }) as unknown as Context['db'];
+
+  it('past the 1_000-App cap the throttle map evicts the oldest entry only — every other App keeps its window (#4408 item 1)', async () => {
+    const checks = new Map<string, number>();
+    const probeDb = probeDbOf((app) => {
+      checks.set(app, (checks.get(app) ?? 0) + 1);
+      return Promise.resolve([]); // no held-back rows: the probe runs, logs nothing, settles at once
+    });
+    // Fill PAST the cap: earlier tests in this file leave a few real stamps in the same module-level map,
+    // which cannot be read or reset, so the fill overshoots by more than any of them (well under a dozen)
+    // to put the assertions on known ground — the overshoot's validity bound is ~480 stale stamps.
+    for (let i = 0; i < 1_020; i++) await logStalledHorizon(probeDb, `evict-app-${i}`);
+    expect(checks.size).toBe(1_020); // every App checked exactly once, whatever the map held at the start
+    await logStalledHorizon(probeDb, 'evict-app-new'); // a NEW App arrives while the map is at its cap
+    // evict-app-0 is the least-recently-checked of the fill: main's clear-all wipes it, #4408's eviction
+    // takes exactly it (any earlier-test stamps are older still and go first). Either way its window is
+    // gone and it re-checks — a "fix" that just grew the cap would leave it throttled, so this stays red.
+    await logStalledHorizon(probeDb, 'evict-app-0');
+    expect(checks.get('evict-app-0')).toBe(2);
+    // A mid-fill App keeps its window under eviction. RED on main: the clear-all wiped evict-app-500's
+    // stamp when the fill crossed the cap, so it re-checked too — the burst the issue describes.
+    await logStalledHorizon(probeDb, 'evict-app-500');
+    expect(checks.get('evict-app-500')).toBe(1);
+    expect(lagLines(log)).toEqual([]); // the stub serves no rows: nothing logs either way
+    expect(probeErrorLines(log)).toEqual([]);
+  });
+
+  it('a failed probe leaves no armed 5 s statement-race timer (#4408 item 2)', async () => {
+    // Only the two timer primitives are faked: Date.now stays real (the window math must not move), and the
+    // probe settles through microtasks alone. Pre-#4408 the clearTimeout sat on the success path only, so a
+    // probe that faulted left the unref'd timer armed — invisible to the log, visible to the fake clock.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const fault = Object.assign(new Error('statements can fail'), { name: 'PrismaClientKnownRequestError', code: 'P2028' });
+      await logStalledHorizon(probeDbOf(() => Promise.reject(fault)), 'timer-error-app-4408');
+      expect(vi.getTimerCount()).toBe(0); // RED pre-#4408: the race timer is still armed on the error path
+      expect(probeErrorLines(log)).toHaveLength(1); // and the fault is the visible kind
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the 5 s race rejects into the catch and the line names the timeout by class, never by message (#4408 item 3)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const wedged = logStalledHorizon(probeDbOf(() => new Promise(() => {})), 'timer-race-app-4408'); // a statement that never returns
+      await vi.advanceTimersByTimeAsync(5_000); // the race fires at its bound instead of waiting for the statement
+      await wedged;
+      const lines = probeErrorLines(log);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatchObject({ event: 'team_events.horizon_probe_error', appId: 'timer-race-app-4408', errorName: 'HorizonProbeTimeoutError' });
+      // RED pre-#4408: the line carried the message string under `error` and had no errorName at all.
+      expect(Object.keys(lines[0]).sort()).toEqual(['appId', 'at', 'errorName', 'event', 'ms']); // no errorCode, never the message
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a probe fault line carries the error class and code, never the message (#4408 item 3)', async () => {
+    const sentinelHost = 'postgresql://secret-probe-host-4408.example:5432/hadron';
+    const fault = Object.assign(new Error(`connect ECONNREFUSED ${sentinelHost}`), { name: 'PrismaClientInitializationError', code: 'P1001' });
+    await logStalledHorizon(probeDbOf(() => Promise.reject(fault)), 'sanitize-app-4408');
+    const lines = probeErrorLines(log);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ event: 'team_events.horizon_probe_error', appId: 'sanitize-app-4408', errorName: 'PrismaClientInitializationError', errorCode: 'P1001' });
+    const serialized = JSON.stringify(lines[0]);
+    expect(serialized).not.toContain(sentinelHost); // RED pre-#4408: the raw message named the DB host
+    expect(serialized).not.toContain('ECONNREFUSED');
+    expect(Object.keys(lines[0]).sort()).toEqual(['appId', 'at', 'errorCode', 'errorName', 'event', 'ms']);
+    // A non-Error throw names its kind and carries no code — nothing to leak, nothing to invent.
+    await logStalledHorizon(probeDbOf(() => Promise.reject('boom')), 'sanitize-app-4408-string');
+    const both = probeErrorLines(log);
+    expect(both).toHaveLength(2);
+    expect(both[1]).toMatchObject({ event: 'team_events.horizon_probe_error', appId: 'sanitize-app-4408-string', errorName: 'string' });
+    expect(both[1]).not.toHaveProperty('errorCode');
+    expect(JSON.stringify(both[1])).not.toContain('boom'); // RED pre-#4408: String(error) put it in the line
   });
 });
 
