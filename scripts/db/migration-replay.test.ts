@@ -4,6 +4,7 @@
  * stale baseline line, the green unaltered head) run as steps of the Migration Replay workflow itself (#4338 BLIND F4).
  */
 import { execFileSync, spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 import { diff, differenceKind } from '../../src/test/catalogSnapshot.js';
 import {
   BASELINE_PATH, BaselineFormatError, baselineGrowth, differenceEntries, dropScratch, encodeKey, evaluate, exitCode, fingerprint,
-  isEngineBookkeeping, judge, parseBaseline, withDb,
+  ignoreClosedPipe, isEngineBookkeeping, judge, parseBaseline, withDb,
 } from './migration-replay.js';
 
 describe('#434 Slice C: the replay baseline is shrink-only', () => {
@@ -169,8 +170,17 @@ describe('#4395 item 1: an early-closed stdout cannot skip the scratch-database 
     expect(exitCode(0, failed.length)).toBe(2);
   });
 
-  // A real run: the full replay takes about a minute and needs a CREATEDB role, so it runs where
-  // MIGRATION_REPLAY_ADMIN_URL is set (the Migration Replay workflow, or by hand), and is skipped in the main suite.
+  it('a closed reader (EPIPE) on the output stream is swallowed; any other stream error still crashes', () => {
+    const stream = new EventEmitter();
+    ignoreClosedPipe(stream as unknown as NodeJS.WriteStream);
+    const err = (code: string) => Object.assign(new Error(code), { code });
+    expect(() => stream.emit('error', err('EPIPE'))).not.toThrow();
+    expect(() => stream.emit('error', err('EIO'))).toThrow('EIO');
+  });
+
+  // A real run of the script: it needs a CREATEDB role, so it runs where MIGRATION_REPLAY_ADMIN_URL is set (the Migration
+  // Replay workflow, or by hand) and is skipped in the main suite. Red on main: the run died on `write EPIPE` and left both
+  // scratch databases. The guard (pinned above) and writing the result only after cleanup each prevent it on their own.
   const adminUrl = process.env.MIGRATION_REPLAY_ADMIN_URL;
   it.skipIf(!adminUrl)('`--print` with stdout closed before the first write leaves no hadron_replay*434_* database behind', async () => {
     // `node --import tsx` keeps the script in THIS process id, which names its scratch databases (`<prefix>_<pid>_<hex>`).
