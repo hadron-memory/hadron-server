@@ -2994,7 +2994,7 @@ model NodeContentValidationReport {
 }
 
 /// A table for the API key of a newly provisioned workspace: the raw `hdr_app_…` key of the workspace's App, to
-/// be held encrypted until the user had seen it once during first-time setup. That setup flow is not in the
+/// be held encrypted until the user has seen it once during first-time setup. That setup flow is not in the
 /// code today, so nothing fills the table (see Behaviour).
 ///
 /// Relationships: one per User, for one App; deleted with either.
@@ -3218,8 +3218,8 @@ model PrincipalGrant {
 /// which organization and which App a message or command from that workspace belongs to.
 ///
 /// Relationships: belongs to an Organization and is deleted with it. `defaultApp` is the App that serves
-/// commands from the workspace; deleting that App deletes the connection too. SlackEventReceipt rows refer to the connection by `toolConnectionId`, not by
-/// foreign key.
+/// commands from the workspace; deleting that App deletes the connection too. SlackEventReceipt rows refer to
+/// the connection by `toolConnectionId`, not by foreign key.
 ///
 /// Behaviour: the row holds identity only: the workspace (`teamId`, `teamName`), the bot's two Slack ids
 /// (`botUserId` for messages it sends, `botId` for the events it causes; the loop filter needs both), and
@@ -3908,7 +3908,8 @@ model AppKey {
 /// - `role` is a free string. When it is written it must be a role the App offers: the union of the
 ///   `memberRoles` in the `installationPolicy` of every Agent installed in the App (for example `owner`, `guide`,
 ///   `cook`). An App with no installed Agent accepts no members (src/controller/operations/ensureAppMember.ts).
-/// - The member limit is the `maxMembers` of the App's primary Agent. It is checked when a new member row is
+/// - The member limit is the `maxMembers` of the App's primary Agent, which is the Agent of the App's oldest
+///   AppAgent row (`getPrimaryAgentId`, src/lib/appAgent.ts). It is checked when a new member row is
 ///   inserted, not when an existing member's role changes.
 /// - There is no `deletedAt`, no expiry and no revocation column: removing a member deletes the row.
 /// - Removing a member keeps that user's personal memory for the App. It is found again if the user later
