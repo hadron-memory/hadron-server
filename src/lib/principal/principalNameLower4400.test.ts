@@ -3,6 +3,7 @@
  * regardless of case. Before #4400 that rested only on every writer lower-casing; these pins go to the database
  * with a raw insert that skips the writer, so they hold only when the database itself refuses.
  */
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -55,5 +56,35 @@ describe('#4400 principals.name is lower case in the database', () => {
       const row = await db.principal.findUniqueOrThrow({ where: { id: p.id } });
       expect(row.name).toBe(name.toLowerCase());
     }
+  });
+});
+
+describe('#4400 the migration refuses on data instead of guessing', () => {
+  const sql = readFileSync(
+    new URL('../../../prisma/migrations/20261117900000_principals_name_lower_check/migration.sql', import.meta.url), 'utf8');
+  const preflight = sql.slice(sql.indexOf('DO $$'), sql.indexOf('END $$;') + 'END $$;'.length);
+
+  it('raises SQLSTATE HDPRF when a mixed-case row exists, and changes nothing', async () => {
+    let state = 'NO ERROR';
+    await db.$transaction(async (tx) => {
+      // A database from before the constraint: drop it inside this transaction only, then roll everything back.
+      await tx.$executeRawUnsafe('ALTER TABLE principals DROP CONSTRAINT chk_principals_name_lower');
+      await tx.$executeRaw`INSERT INTO principals (id, name, kind, status, created_at, updated_at)
+        VALUES (${generateId()}, 'Legacy.Example', 'org', 'released', now(), now())`;
+      await tx.$executeRawUnsafe('SAVEPOINT before_preflight');
+      try { await tx.$executeRawUnsafe(preflight); } catch (e) {
+        state = JSON.stringify((e as { meta?: unknown }).meta ?? {}) + String((e as { message?: string }).message);
+      }
+      await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT before_preflight');
+      throw new Error('rollback');
+    }).catch((e) => { if ((e as Error).message !== 'rollback') throw e; });
+    expect(state).toContain('HDPRF');
+    expect(state).toContain('1 row(s) are not lower case');
+    expect(await db.principal.count({ where: { name: 'Legacy.Example' } })).toBe(0);
+  });
+
+  it('passes on a pool that is already lower case', async () => {
+    await mintPrincipal(db, { kind: 'org', name: 'Clean.Example' });
+    await expect(db.$executeRawUnsafe(preflight)).resolves.toBeDefined();
   });
 });
