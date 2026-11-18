@@ -216,8 +216,11 @@ describe("#4472: the typed refusal is on every withRosterAppRead caller's path",
       );
     }) as unknown as never);
     try {
+      // Only code/retryable/reason here: this pins WHICH caller surfaces the refusal, not the
+      // per-arm envelope (budgetMs vs maxWaitMs), which the wrapper-level pins above own and
+      // #4467 is refining — asserting the scalar here would couple this PR to that one's order.
       await expect(call()).rejects.toMatchObject({
-        extensions: { code: 'TEAM_READ_BUSY', retryable: true, budgetMs: 5_000, reason },
+        extensions: { code: 'TEAM_READ_BUSY', retryable: true, reason },
       });
     } finally {
       spy.mockRestore();
