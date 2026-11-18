@@ -301,7 +301,7 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
   const own = <T extends { taskId: string | null; appId: string }>(rows: T[]): T[] => rows.filter((r) => r.taskId !== null && appOf.get(r.taskId) === r.appId);
   const userCallAt = new Map(userCalls.map((r) => [`${r.appId}:${r.actorUserId}`, r.at]));
   const { intervals: stopIntervals, holds: stopHoldsBy } = await loadStopIntervals(db, workerIds, ids);
-  const gapEndedAt = await loadLastGapEnd(db as PrismaClient);
+  const gapEndedAt = await loadLastGapEnd(db);
   const progressBy = new Map(own(progress).map((p) => [p.taskId, p._max.createdAt]));
   const queuedBy = new Map(own(queued).map((q) => [q.taskId, q._max.createdAt]));
   const editedBy = new Map(own(startByEdits).map(e => [e.taskId, e._max.createdAt]));

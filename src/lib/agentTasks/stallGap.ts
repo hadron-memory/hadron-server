@@ -40,6 +40,6 @@ export async function recordStallPass(db: PrismaClient, now: Date): Promise<{ ga
 }
 
 /** The end of the latest recorded gap, or null. Read by `loadStallInputs` for every candidate it builds. */
-export async function loadLastGapEnd(db: PrismaClient): Promise<Date | null> {
+export async function loadLastGapEnd(db: Pick<PrismaClient, 'stallEvaluatorState'>): Promise<Date | null> {
   return (await db.stallEvaluatorState.findUnique({ where: { id: ROW_ID }, select: { lastGapEndedAt: true } }))?.lastGapEndedAt ?? null;
 }

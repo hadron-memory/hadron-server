@@ -127,14 +127,16 @@ export async function taskStallTick(db: PrismaClient, now = new Date()): Promise
 /**
  * #3775 A (cor:agt:050:32): the production pass. Records that a pass starts at `now` (a gap of more than 5 minutes since
  * the previous recorded pass joins its end to the silence floors) and then runs {@link taskStallTick}. A failure to
- * record is logged and the tick still runs: a missed record can only under-floor, never raise an alarm that was not due.
- * `taskStallTick` itself keeps no gap bookkeeping, so tests of the other stall rules tick any clock they like.
+ * record SKIPS this pass (BLIND P2, #4452): running the tick un-floored after a real gap would raise alarms that count the
+ * downtime as silence, and they persist. The recorded pass time does not move, so the next pass records the same gap and
+ * floors it; the cost is one deferred minute. `taskStallTick` itself keeps no gap bookkeeping, so tests of the other stall rules tick any clock they like.
  */
 export async function taskStallPass(db: PrismaClient, now = new Date()): Promise<TaskStallTickResult> {
   try {
     await recordStallPass(db, now);
   } catch (err) {
-    console.error('[task-stall] recording the pass failed:', err);
+    console.error('[task-stall] recording the pass failed; skipping this pass:', err);
+    return { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0, darkRaised: 0, cadenceRaised: 0, staleSweepRaised: 0, sweepSummariesPosted: 0 };
   }
   return taskStallTick(db, now);
 }

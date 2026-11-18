@@ -5,7 +5,7 @@
  * raised keeps running; two concurrent passes record one gap end; the very first pass floors nothing.
  * Tests drive `taskStallPass` (the production pass: gap bookkeeping + the tick) with a controllable clock.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
@@ -152,6 +152,19 @@ describe('#3775 A — a gap in the evaluator does not count as silence', () => {
     expect(await alarms()).toEqual([expect.objectContaining({ type: 'stall.no-progress', episodeStart: at('10:00') })]);
     const row = await state();
     expect(row).toMatchObject({ lastPassAt: at('12:00'), lastGapEndedAt: null });
+  });
+
+  it('8. a record failure on the first pass after a gap skips the pass; the next pass floors the gap (BLIND P2)', async () => {
+    await startedByAnne();
+    await drive('10:00');
+    await passes('10:05', '10:30');
+    const spy = vi.spyOn(db.stallEvaluatorState, 'findUnique').mockRejectedValueOnce(new Error('db blip'));
+    await pass('12:30'); // record throws: no tick, so no un-floored alarm
+    spy.mockRestore();
+    expect(await alarms()).toEqual([]);
+    await pass('12:31'); // records the same gap (lastPassAt still 10:30)
+    expect(await alarms()).toEqual([]);
+    expect((await state())!.lastGapEndedAt).toEqual(at('12:31'));
   });
 
   it('a pass whose clock is not later than the recorded one moves nothing back', async () => {
