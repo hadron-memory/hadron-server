@@ -4,8 +4,11 @@ ALTER TABLE agent_tasks DROP CONSTRAINT IF EXISTS chk_agent_tasks_external_id;
 ALTER TABLE agent_tasks ADD CONSTRAINT chk_agent_tasks_external_id CHECK (
   external_id IS NULL OR char_length(external_id) BETWEEN 1 AND 512
 );
--- #3125 S2 (V29, V45): one task per external id within an App, whatever its state (a finished or cancelled task still
--- counts as picked up). Per App, so another App's task never conflicts and is never disclosed. createAgentTask turns a
--- violation of exactly this index into TASK_EXTERNAL_ID_TAKEN.
-CREATE UNIQUE INDEX IF NOT EXISTS agent_tasks_app_external_id_uniq ON agent_tasks (app_id, external_id)
-  WHERE external_id IS NOT NULL;
+-- #3125 S2 (V29, V45), amended by #4217 (cor:agt:120:02, Holger 2026-11-14): an external id is held by at most ONE ACTIVE task
+-- (backlog, pending or started) within an App. A finished or cancelled task keeps its id but no longer blocks a new claim,
+-- so an item can have a history of tasks. Per App, so another App's task never conflicts and is never disclosed.
+-- createAgentTask turns a violation of exactly this index into TASK_EXTERNAL_ID_TAKEN. Dropped and rebuilt, because
+-- IF NOT EXISTS would keep an older, all-status index: the predicate only narrows, so no existing row can fail it.
+DROP INDEX IF EXISTS agent_tasks_app_external_id_uniq;
+CREATE UNIQUE INDEX agent_tasks_app_external_id_uniq ON agent_tasks (app_id, external_id)
+  WHERE external_id IS NOT NULL AND status IN ('backlog', 'pending', 'started');

@@ -1,3 +1,4 @@
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 /**
  * #2766 (S2a of #2483) — the five member and staffing doors RECORD the act: `ensureAppMember`, `removeAppMember`,
  * `castWorker` (GraphQL and MCP), `retireWorker`, `deleteWorker`. One `AgentTeamEvent` per successful act, written
@@ -11,6 +12,7 @@ import { generateId } from '../../../lib/id.js';
 import { currentActor, runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -309,9 +311,9 @@ describe('#2766 payloads hold ids and role words only', () => {
 describe('#2766 read surface: the new events ride the agentTeamEvents read for the readers it has today', () => {
   it('a participant reads them; an outsider does not', async () => {
     await ensure(ctxOf(admin.id), target.id, 'member');
-    const seen = await (resolvers.Query as any).agentTeamEvents({}, { appRef: app.id, types: ['member.added'] }, ctxOf(target.id));
+    const seen = await (settledTeamEventQueries(resolvers.Query, db) as any).agentTeamEvents({}, { appRef: app.id, types: ['member.added'] }, ctxOf(target.id));
     expect(seen.map((e: any) => e.type)).toContain('member.added');
-    await expect((resolvers.Query as any).agentTeamEvents({}, { appRef: app.id, types: ['member.added'] }, ctxOf(outsider.id)))
+    await expect((settledTeamEventQueries(resolvers.Query, db) as any).agentTeamEvents({}, { appRef: app.id, types: ['member.added'] }, ctxOf(outsider.id)))
       .rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
   });
 });

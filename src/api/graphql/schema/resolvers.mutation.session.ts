@@ -117,6 +117,8 @@ import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../../../lib/bootPrompt.js';
+import { effortFromToken, fillEmptyAppliedRunSettings, isEffortLevel, recordRunSettings, type EffortLevel } from '../../../lib/agentTasks/runSettings.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
@@ -217,7 +219,11 @@ async function lockSessionAppActive(tx: Prisma.TransactionClient, appId: string)
  */
 // ── #1709: redeeming a launch grant ────────────────────────────────────────
 
-type LaunchCtx = { grant: LoadedGrant; issuedBy: 'platform' | 'manager'; hold: { holdUserId: string | null; holdAt: Date | null } };
+type LaunchCtx = {
+  grant: LoadedGrant; issuedBy: 'platform' | 'manager'; hold: { holdUserId: string | null; holdAt: Date | null };
+  /** #4291: the settings the start named (`family`, and `model` and `effort` when it carried them): what a bind that reports none runs as. #4306: empty when the bind said the start did not apply them. */
+  args: { family?: string; model?: string; effort?: string };
+};
 
 const launchGrantInvalid = () =>
   new GraphQLError('This launch grant is not valid: unknown, expired, already used, or not yours.', { extensions: { code: 'LAUNCH_GRANT_INVALID' } });
@@ -266,6 +272,11 @@ const LAUNCH_STATE_REFUSALS: Record<string, string> = {
  * changes nothing (no oracle, and no way to fail another's start).
  */
 async function withLaunch<T>(given: SessionInput, ctx: Context, run: (input: SessionInput, launch: LaunchCtx | null) => Promise<T>): Promise<T> {
+  // #4306: `startSettingsApplied: false` qualifies a START. With no launch grant there is no start to qualify, so it
+  // is refused here, before anything is read or written. true, null and absent say nothing and pass.
+  if (given.startSettingsApplied === false && given.launchGrant == null) {
+    throw new GraphQLError('startSettingsApplied: false is only accepted with a launchGrant: it says the start that grant came from did not apply its run settings.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
   if (given.launchGrant == null) return run(given, null);
   if (!ctx.userId || ctx.impersonation) throw launchGrantInvalid();
   if (given.force) {
@@ -274,9 +285,16 @@ async function withLaunch<T>(given: SessionInput, ctx: Context, run: (input: Ses
   const now = new Date();
   const grant = await loadLiveGrant(ctx.db, given.launchGrant, now);
   if (!grant || grant.holderUserId !== ctx.userId) throw launchGrantInvalid();
-  const op = await ctx.db.hostOperation.findUniqueOrThrow({ where: { id: grant.operationId }, select: { issuedBy: true, holdUserId: true, holdAt: true } });
+  const op = await ctx.db.hostOperation.findUniqueOrThrow({ where: { id: grant.operationId }, select: { issuedBy: true, holdUserId: true, holdAt: true, args: true } });
+  const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
+  const opArgs = (op.args ?? {}) as Record<string, unknown>;
   const launch: LaunchCtx = {
     grant, issuedBy: op.issuedBy === 'platform' ? 'platform' : 'manager', hold: { holdUserId: op.holdUserId, holdAt: op.holdAt },
+    // #4306 (cor:agt:070:08, the exception Proposed): a start whose host could not apply its run settings (an exec-path
+    // worker runs its own fixed argv) says so on the bind, and the bind then inherits NONE of them: the session, the
+    // worker's last-used record and the task's applied stamp hold only what the bind itself reports. Emptied here, the
+    // one place the start's args enter a bind, so no later read of `launch.args` can inherit by another path.
+    args: given.startSettingsApplied === false ? {} : { family: str(opArgs.family), model: str(opArgs.model), effort: str(opArgs.effort) },
   };
   try {
     return await run({ ...given, workerRef: given.workerRef ?? grant.workerId }, launch);
@@ -503,6 +521,11 @@ export async function writeSessionHandoff(
 
 // ── #2086 / #1931 / #1948: refresh a bound session's model and family ─────────────────────────────────────────
 /** A supplied family must be a valid token; checked before any write (and, on a resume, before the claim is spent). */
+/** #4244: an Agent revision that is not there (unknown or retired loc), refused before any write. */
+function revisionNotFound(revisionLoc: string): GraphQLError {
+  return new GraphQLError(`Revision not found: ${revisionLoc}`, { extensions: { code: 'BAD_USER_INPUT' } });
+}
+
 function explicitFamilyOrThrow(family: string | null | undefined): string | null {
   const explicit = family != null ? normalizeFamily(family) : null;
   if (family != null && !explicit) {
@@ -521,10 +544,21 @@ function modelFamilyRefresh(
   explicitFamily: string | null,
   llmModel: string | null | undefined,
   storedTool: string | null,
-): { llmModel?: string; modelReportedAt?: Date; family?: string } {
+  /** #4291: the effort the session reports, written beside the model and family; null or omitted never clears. */
+  effort: EffortLevel | null = null,
+): { llmModel?: string; modelReportedAt?: Date; family?: string; effort?: EffortLevel } {
   const family = explicitFamily ?? (llmModel != null ? deriveFamily({ llmModel, tool: storedTool }) : null);
   // #2252: a supplied model IS a report, so it stamps the time (a repeat of the same model refreshes it).
-  return { ...(llmModel != null ? { llmModel, modelReportedAt: new Date() } : {}), ...(family != null ? { family } : {}) };
+  return { ...(llmModel != null ? { llmModel, modelReportedAt: new Date() } : {}), ...(family != null ? { family } : {}), ...(effort != null ? { effort } : {}) };
+}
+
+/** #4291: a supplied effort must be one of the generic scale; checked before any write (and, on a resume, before the claim is spent). */
+function explicitEffortOrThrow(effort: string | null | undefined): EffortLevel | null {
+  if (effort == null) return null;
+  if (!isEffortLevel(effort)) {
+    throw new GraphQLError('effort is one of LOW, MEDIUM, HIGH, XHIGH, MAX, UNSET or NOT_APPLICABLE.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  return effort;
 }
 
 // ── #1956: resume claims ───────────────────────────────────────────────────
@@ -537,6 +571,8 @@ type ResumeSessionInput = {
   host?: string | null;
   llmModel?: string | null;
   family?: string | null;
+  /** #4291: refreshed on an open session it resumes, recorded on one it starts. */
+  effort?: string | null;
   transcriptPath?: string | null;
   /** #3822: the worker the caller expects to recover (the CLI worktree's last-bound worker). */
   expectedWorkerId?: string | null;
@@ -787,7 +823,17 @@ export const sessionMutations = {
         }
       } else {
         family = deriveFamily({ llmModel: input.llmModel, tool: input.tool });
+        // #4291: a host-started bind that reports no family runs as its start said. A model the bind itself reports
+        // still decides first; with none, the start's family wins over a guess from the tool.
+        const started = normalizeFamily(launch?.args.family);
+        if (started && (input.llmModel == null || family === null)) family = started;
       }
+      // #4291: the effort a host-started bind runs with is its start's, unless the bind reports its own; so is the model.
+      const effort: EffortLevel | null = explicitEffortOrThrow(input.effort) ?? effortFromToken(launch?.args.effort);
+      // The start's model belongs to the start's family: a bind that reports ANOTHER family (and no model) does not
+      // inherit it, or the session and the worker's record would pair a family with another family's model (#4295 BLIND, Clark F2).
+      const startedModel = launch?.args.model && family === normalizeFamily(launch.args.family) ? launch.args.model : null;
+      const boundModel: string | null = input.llmModel ?? startedModel;
 
       const workerRef = input.workerRef?.trim();
       if (workerRef) {
@@ -1534,9 +1580,10 @@ export const sessionMutations = {
           prNumber: input.prNumber,
           customerId: input.customerId,
           language: input.language,
-          llmModel: input.llmModel,
-          // #2252: a model given at bind is a report.
+          llmModel: boundModel,
+          // #2252: a model given at bind is a report (one taken from the start's args is not self-reported).
           modelReportedAt: input.llmModel != null ? new Date() : null,
+          effort,
           parentSessionId: input.parentSessionId,
           prevSessionId: input.prevSessionId ?? supersedes[0]?.id ?? derivedPrevSessionId,
           // #928 coding-session provenance.
@@ -1561,6 +1608,12 @@ export const sessionMutations = {
         // #1709: the grant is spent by THIS bind, atomically: of two concurrent redemptions one loses here, and its
         // whole bind rolls back.
         if (launch && !(await consumeGrant(tx, launch.grant.id, created.id, new Date()))) throw launchGrantInvalid();
+        // #4291: the bind is the first report; the worker's record follows it (the worker row is held FOR UPDATE above).
+        if (workerId) {
+          await recordRunSettings(tx, created.id);
+          // #4301: a started task reassigned to this worker while it had no session now shows this run.
+          await fillEmptyAppliedRunSettings(tx, created.id);
+        }
         // #1726: set who the worker reports to, in one step with the bind (a
         // spawn brief). Only onto a worker that reports to nobody, or to the
         // same worker (nothing to do): naming a different one would move a
@@ -1621,7 +1674,7 @@ export const sessionMutations = {
     // session ends, and late attribution is better than none.
     updateSession: async (
       _: unknown,
-      { id, prNumber, branch, llmModel, family }: { id: string; prNumber?: number | null; branch?: string | null; llmModel?: string | null; family?: string | null },
+      { id, prNumber, branch, llmModel, family, effort }: { id: string; prNumber?: number | null; branch?: string | null; llmModel?: string | null; family?: string | null; effort?: string | null },
       ctx: Context,
     ) => {
       const session = await ctx.db.session.findUnique({ where: { id } });
@@ -1631,18 +1684,27 @@ export const sessionMutations = {
       await requireSessionWriteAccess(ctx, session);
       // #1931: refresh a binding without guessing a model family from its host.
       // Null/omitted metadata never clears an existing family during recovery.
-      const refresh = modelFamilyRefresh(explicitFamilyOrThrow(family), llmModel, session.tool);
-      return ctx.db.session.update({
-        where: { id },
-        data: {
-          ...(prNumber !== undefined ? { prNumber } : {}),
-          ...(branch !== undefined ? { branch } : {}),
-          ...refresh,
-          updatedBy: ctx.userId ?? ctx.clientId ?? null,
-          // #1543 — a pr/branch edit must not revive a lapsed session.
-          ...(await preserveHeartbeatIfLapsed(ctx.db as never, id)),
-        },
-        include: SESSION_INCLUDE,
+      const refresh = modelFamilyRefresh(explicitFamilyOrThrow(family), llmModel, session.tool, explicitEffortOrThrow(effort));
+      const data = {
+        ...(prNumber !== undefined ? { prNumber } : {}),
+        ...(branch !== undefined ? { branch } : {}),
+        ...refresh,
+        updatedBy: ctx.userId ?? ctx.clientId ?? null,
+        // #1543 — a pr/branch edit must not revive a lapsed session.
+        ...(await preserveHeartbeatIfLapsed(ctx.db as never, id)),
+      };
+      // #4291: a report on a worker's session also moves the worker's record, in one transaction. The worker row is
+      // locked BEFORE the session row is written, the order a bind takes them in (recordRunSettings, LOCK ORDER). An
+      // update that reports nothing, or a session bound to no worker, stays the single write it was.
+      if (!session.workerId || Object.keys(refresh).length === 0) {
+        return ctx.db.session.update({ where: { id }, data, include: SESSION_INCLUDE });
+      }
+      const workerId = session.workerId;
+      return ctx.db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM workers WHERE id = ${workerId} FOR UPDATE`;
+        const updated = await tx.session.update({ where: { id }, data, include: SESSION_INCLUDE });
+        await recordRunSettings(tx, id);
+        return updated;
       });
     },
 
@@ -1777,6 +1839,7 @@ export const sessionMutations = {
       // #2086: a bad family refuses BEFORE any claim is read or spent. It sits after the NOTHING_TO_RESUME line
       // above, so an App key or an impersonation learns nothing about the value either way.
       const explicitFamily = explicitFamilyOrThrow(given.family);
+      const explicitEffort = explicitEffortOrThrow(given.effort);
       // #3822: likewise a blank expected worker refuses before any read. Null or omitted means no narrowing.
       const expectedWorkerId = given.expectedWorkerId == null ? null : given.expectedWorkerId.trim();
       if (expectedWorkerId === '') {
@@ -1852,8 +1915,12 @@ export const sessionMutations = {
             // #2086: only after the gate permits, inside its transaction, so a refusal or a lost claim writes nothing.
             if (ok) {
               const stored = await tx.session.findUniqueOrThrow({ where: { id: sessionId }, select: { tool: true } });
-              const refresh = modelFamilyRefresh(explicitFamily, given.llmModel, stored.tool);
-              if (Object.keys(refresh).length) await tx.session.update({ where: { id: sessionId }, data: { ...refresh, updatedBy: userId } });
+              const refresh = modelFamilyRefresh(explicitFamily, given.llmModel, stored.tool, explicitEffort);
+              if (Object.keys(refresh).length) {
+                await tx.session.update({ where: { id: sessionId }, data: { ...refresh, updatedBy: userId } });
+                // #4291: the record follows the report (the gate above holds the worker row FOR UPDATE).
+                await recordRunSettings(tx, sessionId);
+              }
             }
             if (claimId) {
               if (!(await consumeResumeClaim(tx, claimId, userId))) throw lost;
@@ -1886,6 +1953,7 @@ export const sessionMutations = {
             host: given.host ?? undefined,
             llmModel: given.llmModel ?? undefined,
             family: given.family ?? undefined,
+            effort: given.effort ?? undefined,
             transcriptPath: given.transcriptPath ?? undefined,
           } as SessionInput,
         }, ctx);
@@ -2277,7 +2345,8 @@ export const sessionMutations = {
       // Snapshot all non-revision nodes + edges in the system memory
       const nodes = await ctx.db.node.findMany({
         where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
-        select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true, tags: true, seq: true },
+        // #4244: `role` is recorded so a boot-prompt source recreated by a restore keeps the role a compile needs.
+        select: { loc: true, name: true, nodeType: true, role: true, description: true, content: true, data: true, tags: true, seq: true },
       });
       const nodeIds = (await ctx.db.node.findMany({
         where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
@@ -2378,7 +2447,7 @@ export const sessionMutations = {
       const revNode = await ctx.db.node.findFirst({
         where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
       });
-      if (!revNode) throw new Error(`Revision "${revisionLoc}" not found`);
+      if (!revNode) throw revisionNotFound(revisionLoc);
 
       const revData = (revNode.data as Record<string, unknown>) ?? {};
       const label = versionLabel ?? (revData.label as string) ?? revisionLoc;
@@ -2414,7 +2483,7 @@ export const sessionMutations = {
       const revNode = await ctx.db.node.findFirst({
         where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
       });
-      if (!revNode) throw new Error(`Revision "${revisionLoc}" not found`);
+      if (!revNode) throw revisionNotFound(revisionLoc);
 
       const revData = (revNode.data as Record<string, unknown>) ?? {};
       const snapshot = revData.snapshot as { edgeFormat?: number; nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> } | undefined;
@@ -2450,8 +2519,17 @@ export const sessionMutations = {
           // snapshot does not restore is a removal; one it restores must not
           // come back without its marker. Both are checked under the guard's
           // row locks, and only the locked rows are tombstoned.
+          // #4244 (cor:agt:040:12): compiling is the only way a compiled boot prompt is written, so a restore leaves
+          // each one as it is. It is not tombstoned here (a retired compiled node would refuse every bind,
+          // cor:agt:040:10), not written below, and a snapshot's copy of one is ignored.
+          //
+          // #4313: every statement of this step leaves compiled rows out BY TYPE, in its own WHERE. It used to leave
+          // them out by the ids of an earlier read, so a compile that committed between that read and this one (the
+          // transaction is READ COMMITTED and shares no lock with a compile) was tombstoned, or had its edges
+          // retired. No statement here depends on what an earlier one saw of compiled rows.
+          const notCompiled = { nodeType: { not: COMPILED_BOOT_PROMPT_NODE_TYPE } };
           const live = await tx.node.findMany({
-            where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
+            where: { memoryId: sysMemId, deletedAt: null, ...notCompiled, NOT: { loc: { startsWith: 'revisions' } } },
             select: { id: true, loc: true },
           });
           const snapshotTags = new Map(snapshot.nodes.map((n) => [n.loc as string, (n.tags as string[]) ?? []]));
@@ -2464,19 +2542,27 @@ export const sessionMutations = {
             'restore a snapshot of',
           );
           await tx.node.updateMany({
-            where: { id: { in: live.map((n) => n.id) }, deletedAt: null },
+            where: { id: { in: live.map((n) => n.id) }, deletedAt: null, ...notCompiled },
             data: { deletedAt: new Date() },
           });
 
-          // Delete all edges in the system memory
-          const currentNodeIds = (await tx.node.findMany({
-            where: { memoryId: sysMemId },
-            select: { id: true },
-          })).map((n) => n.id);
+          // Delete all edges in the system memory, except those FROM a compiled prompt (#4244), decided in the
+          // statement: the source is not a compiled row now (#4313).
           await tx.edge.updateMany({
-            where: { sourceId: { in: currentNodeIds }, deletedAt: null, governedKind: null },
+            where: { source: { memoryId: sysMemId, ...notCompiled }, deletedAt: null, governedKind: null },
             data: { deletedAt: new Date() },
           });
+
+          // The compiled rows as they are NOW, after the tombstone step: `compiled` holds every loc one sits at,
+          // retired ones included, plus the locs the snapshot holds one at. None of them is written below.
+          const compiledRows = await tx.node.findMany({
+            where: { memoryId: sysMemId, nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+            select: { id: true, loc: true },
+          });
+          const compiled = new Set([
+            ...compiledRows.map((n) => n.loc),
+            ...snapshot.nodes.filter((n) => n.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE).map((n) => n.loc as string),
+          ]);
 
           // Restore nodes from snapshot (upsert to handle soft-deleted rows
           // that still hold the unique (loc, memoryId) constraint).
@@ -2486,7 +2572,7 @@ export const sessionMutations = {
           // drift reconciled as its own revision, the real predecessor
           // snapshotted, the fingerprint refreshed. Rows are taken in loc
           // order so two concurrent restores lock in the same sequence.
-          const restoreOrder = [...snapshot.nodes].sort((a, b) =>
+          const restoreOrder = snapshot.nodes.filter((n) => !compiled.has(n.loc as string)).sort((a, b) =>
             (a.loc as string) < (b.loc as string) ? -1 : (a.loc as string) > (b.loc as string) ? 1 : 0,
           );
           for (const n of restoreOrder) {
@@ -2518,6 +2604,15 @@ export const sessionMutations = {
               if (current.loc !== loc || current.memoryId !== sysMemId) {
                 throw new Error(`restoreRevision: "${loc}" moved during the restore; retry.`);
               }
+              // #4313: a compile wrote a compiled prompt at this address after the compiled rows were read above.
+              // The row is locked now, and it is the compile's: leave it as it is.
+              if (current.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
+                // Known as a compiled address from here on: an edge TO it is still restored (the id is in the
+                // map), and a snapshot edge FROM this address is the ordinary node's, not the compiled prompt's.
+                compiled.add(loc);
+                locToId.set(loc, current.id);
+                continue;
+              }
               const changes = diffNodeChanges(current, nodeData);
               // Agent snapshots predate #1326 and contain no attribution.
               // Restoring their authored fields cannot inherit the current
@@ -2536,7 +2631,8 @@ export const sessionMutations = {
             }
             const upserted = await tx.node.upsert({
               where: { loc_memoryId: { loc, memoryId: sysMemId } },
-              create: { id: generateId(), memoryId: sysMemId, loc, ...nodeData },
+              // #4244: a row made anew takes the snapshot's role; over an existing row the live role stays.
+              create: { id: generateId(), memoryId: sysMemId, loc, ...nodeData, role: (n.role as string | null | undefined) ?? null },
               update: {
                 ...nodeData,
                 ...(clearRestoredAuthorship ? clearNodeAuthorship() : {}),
@@ -2553,7 +2649,10 @@ export const sessionMutations = {
           // Restore edges from snapshot. Spec 037: derive loc when an older
           // snapshot predates the edge `loc`/`name` fields (it would carry the
           // legacy `label`); memoryId is the system memory being restored into.
+          // #4244: an edge TO a compiled prompt is another node's and is restored; an edge FROM one was left alone above.
+          for (const c of compiledRows) locToId.set(c.loc, c.id);
           for (const e of snapshot.edges) {
+            if (compiled.has(e.sourceLoc as string)) continue;
             const sourceId = locToId.get(e.sourceLoc as string);
             const targetId = locToId.get(e.targetLoc as string);
             if (sourceId && targetId) {

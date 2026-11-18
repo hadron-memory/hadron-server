@@ -30,7 +30,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../lib/workerSignature.js';
 import { describe, it, expect } from 'vitest';
 import { Prisma } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
-import { workerActivitySql } from '../../api/graphql/schema/resolvers.worker.js';
+import { workerActivitySql, setWorkerActivityPlanSettings } from '../../api/graphql/schema/resolvers.worker.js';
 
 const INDEX = 'usage_events_session_activity_idx';
 const WALK = 'usage_events_created_at_idx';
@@ -47,6 +47,7 @@ async function rolledBack<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
       async (tx) => {
         await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off');
         await tx.$executeRawUnsafe('SET LOCAL enable_bitmapscan = off');
+        await setWorkerActivityPlanSettings(tx);
         out = { value: await fn(tx) };
         throw new RolledBack();
       },
@@ -64,15 +65,21 @@ class RolledBack extends Error {}
 const roster = (): Prisma.Sql => workerActivitySql(Prisma.sql`w.app_id = ${APP}`, NOW);
 
 /**
- * The pre-#1952 probe shape (a bare `max(e.created_at)`), derived from the
- * live SQL so the parity pin compares the shipped query against exactly one
- * difference.
+ * The pre-#1952 probe shape (a bare `max(e.created_at)`), derived from the live SQL so the parity pin compares the
+ * shipped query against exactly one difference: the aggregate in place of #4397's ordered one-row probe.
  */
 function incidentShape(sql: Prisma.Sql): Prisma.Sql {
-  const D = "max(e.created_at + interval '0')";
-  const hits = sql.strings.filter((s) => s.includes(D)).length;
-  if (hits !== 1) throw new Error(`expected the probe shape exactly once, found ${hits}`);
-  const strings = sql.strings.map((s) => s.replace(D, 'max(e.created_at)'));
+  const swaps: [string, string][] = [
+    ['SELECT e.created_at AS max_created', 'SELECT max(e.created_at) AS max_created'],
+    ['e.session_id >= s.id AND e.session_id <= s.id', 'e.session_id = s.id'],
+    ['ORDER BY e.session_id DESC, e.created_at DESC\n      LIMIT 1', ''],
+  ];
+  let strings = sql.strings.slice();
+  for (const [from, to] of swaps) {
+    const hits = strings.filter((s) => s.includes(from)).length;
+    if (hits !== 1) throw new Error(`expected the probe fragment exactly once, found ${hits}: ${from}`);
+    strings = strings.map((s) => s.replace(from, to));
+  }
   return Prisma.sql(Object.assign(strings, { raw: strings }) as TemplateStringsArray, ...sql.values);
 }
 
