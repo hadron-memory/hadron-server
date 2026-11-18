@@ -399,6 +399,27 @@ function scan(entryFile) {
   return statements;
 }
 
+/** An EXECUTE match whose literal is concatenated on either side — by `||`, or
+ *  by an adjacent literal (Postgres concatenates quoted strings across
+ *  whitespace holding a newline) — is unanalyzable: the tail can carry DDL
+ *  only the code-only rule knows, and the loop's replace would hide the verb
+ *  from it. Both loops call this with their own match: it reads `m.input`,
+ *  the string the match came from, never a mutable copy — the plain loop
+ *  rewrites its `remainder` between iterations while `m.index` stays
+ *  snapshot-true (#4381 E1).
+ *
+ *  invariant: no comment can sit in the gap this guard reads. The DO body is
+ *  comment-stripped once (`const body = stripPayloadComments(stmt.payloads …)`,
+ *  before either EXECUTE loop runs) and both loops slice their matches out of
+ *  that stripped text, so by the time the guard looks, the gap is code or
+ *  whitespace only. If that ever stops holding — a new comment style the
+ *  stripper leaves standing, or a loop fed unstripped text — the comment-gap
+ *  pins in src/test/postPushManifest.test.ts ('comments cannot separate a
+ *  continuation') go red; they fail on a stripper bypass, not just on a guard
+ *  regression. */
+const isGlued = (m) =>
+  /^\s*(?:\|\||')/.test(m.input.slice(m.index + m[0].length)) || /\|\|\s*$/.test(m.input.slice(0, m.index));
+
 /**
  * Strip `-- comments` from a DO payload WITHOUT touching string literals: a
  * bare global replace would cut at a `--` inside a quoted message and shift
@@ -409,18 +430,6 @@ function scan(entryFile) {
  * string is open and keep a LATER comment (delta2 A4: that is how a
  * commented-out `-- EXECUTE 'CREATE INDEX …'` came back as a phantom row).
  */
-/** An EXECUTE match whose literal is concatenated on either side — by `||`, or
- *  by an adjacent literal (Postgres concatenates quoted strings across
- *  whitespace holding a newline) — is unanalyzable: the tail can carry DDL
- *  only the code-only rule knows, and the loop's replace would hide the verb
- *  from it. Both loops call this with their own match: it reads `m.input`,
- *  the string the match came from, never a mutable copy — the plain loop
- *  rewrites its `remainder` between iterations while `m.index` stays
- *  snapshot-true (#4381 E1). Comments cannot appear in the gap:
- *  stripPayloadComments has already turned both comment styles into a space
- *  before either loop runs (#4382 review, pinned). */
-const isGlued = (m) =>
-  /^\s*(?:\|\||')/.test(m.input.slice(m.index + m[0].length)) || /\|\|\s*$/.test(m.input.slice(0, m.index));
 
 function stripPayloadComments(body) {
   let out = '';

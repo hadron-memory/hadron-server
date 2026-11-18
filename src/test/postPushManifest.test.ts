@@ -493,42 +493,65 @@ describe('#4381: the plain-loop guard reads the match\'s own string; implicit li
   });
 });
 
-describe('#4382 folds: comment separators, dollar-path E1, position and duplicate edges', () => {
+describe('#4382: comments cannot separate a continuation; dollar-path, position and duplicate edges', () => {
   const refusals = (sql: string, payloads?: string) =>
     classify({ sql, ...(payloads === undefined ? {} : { payloads }) }).filter((c) => 'unrecognized' in c);
   const W = 'DO $do$ … $do$;';
 
-  it('a comment between the literals still refuses (BLIND P2-1, pinned unreachable)', () => {
-    // stripPayloadComments turns both comment styles into a space BEFORE the
-    // guard slices the text, so `-- note`⏎/`/* x */` between the literals
-    // can never reach the forward test: the gap is whitespace only. Probed
-    // before folding; these pin that the unreachability holds.
-    expect(refusals(W, "BEGIN EXECUTE 'SELECT 1; ' -- note\n'CREATE STATISTICS c1_st ON a, b FROM t'; END")).toHaveLength(1);
-    expect(refusals(W, "BEGIN EXECUTE 'SELECT 1; ' /* x */ 'CREATE STATISTICS c2_st ON a, b FROM t'; END")).toHaveLength(1);
-    expect(refusals(W, "BEGIN EXECUTE 'SELECT 1; ' /* x */\n'CREATE STATISTICS c3_st ON a, b FROM t'; END")).toHaveLength(1);
-    expect(refusals(W, "EXECUTE $x$SELECT 1;$x$ -- note\n'CREATE STATISTICS c4_st ON a, b FROM t'")).toHaveLength(1);
+  it('a comment between the literals still refuses, as the whole DO statement', () => {
+    // The DO body is comment-stripped before either EXECUTE loop runs, so a
+    // `-- note`⏎ or `/* x */` between the literals becomes whitespace by the
+    // time the guard reads the gap: the adjacent literal is an implicit
+    // continuation and the block refuses. The assertion names the refusal's
+    // source — the whole DO statement, exactly one — so a bypass of the
+    // stripper (the comment surviving into the gap) fails here instead of
+    // being refused by whichever later layer trips first.
+    expect(refusals(W, "BEGIN EXECUTE 'SELECT 1; ' -- note\n'CREATE STATISTICS c1_st ON a, b FROM t'; END")).toEqual([{ unrecognized: W }]);
+    expect(refusals(W, "BEGIN EXECUTE 'SELECT 1; ' /* x */ 'CREATE STATISTICS c2_st ON a, b FROM t'; END")).toEqual([{ unrecognized: W }]);
+    expect(refusals(W, "BEGIN EXECUTE 'SELECT 1; ' /* x */\n'CREATE STATISTICS c3_st ON a, b FROM t'; END")).toEqual([{ unrecognized: W }]);
+    expect(refusals(W, "EXECUTE $x$SELECT 1;$x$ -- note\n'CREATE STATISTICS c4_st ON a, b FROM t'")).toEqual([{ unrecognized: W }]);
   });
 
-  it('a consumed dollar EXECUTE before a glued one still refuses (BLIND P2-2 pin)', () => {
+  it('a comment-separated continuation inside a plain-string DO refuses as the statement', () => {
+    // The plain-string DO route: the scanner carries the body in the
+    // statement text, `payloads` stays empty, and the block refuses before
+    // any EXECUTE loop runs — comment text inside it (which the outer
+    // stripper would treat as string content anyway) changes nothing. The
+    // refusal text is the statement with classify's whitespace flattening
+    // (every run, newlines included, becomes one space).
+    const stmt = "DO 'BEGIN EXECUTE ''SELECT 1; '' -- note\n''CREATE STATISTICS c5_st ON a, b FROM t''; END'";
+    expect(refusals(stmt)).toEqual([
+      { unrecognized: "DO 'BEGIN EXECUTE ''SELECT 1; '' -- note ''CREATE STATISTICS c5_st ON a, b FROM t''; END'" },
+    ]);
+  });
+
+  it('a consumed dollar EXECUTE before a glued one still refuses (dollar path)', () => {
     // The dollar loop's matchAll runs over `body`, which is never reassigned,
-    // so m.input === body there: the swap from `body.slice` to m.input is a
+    // so m.input === body there: reading m.input instead of `body` is a
     // no-op on that path and E1 cannot exist in the dollar spelling — locked
     // by pinning the shape anyway. Mixed orderings included.
-    expect(refusals(W, "BEGIN EXECUTE $a$SELECT 1;$a$; EXECUTE $b$SELECT 2;$b$ || 'CREATE STATISTICS p1_st ON a, b FROM t'; END")).toHaveLength(1);
-    expect(refusals(W, "BEGIN EXECUTE $a$SELECT 1;$a$; EXECUTE 'SELECT 2; ' || 'CREATE STATISTICS p2_st ON a, b FROM t'; END")).toHaveLength(1);
+    expect(refusals(W, "BEGIN EXECUTE $a$SELECT 1;$a$; EXECUTE $b$SELECT 2;$b$ || 'CREATE STATISTICS p1_st ON a, b FROM t'; END")).toEqual([{ unrecognized: W }]);
+    expect(refusals(W, "BEGIN EXECUTE $a$SELECT 1;$a$; EXECUTE 'SELECT 2; ' || 'CREATE STATISTICS p2_st ON a, b FROM t'; END")).toEqual([{ unrecognized: W }]);
   });
 
   it('the glued EXECUTE refuses from any position (third place)', () => {
     expect(refusals(W, "BEGIN EXECUTE 'SELECT 1'; EXECUTE 'SELECT 2'; EXECUTE 'SELECT 3; ' || 'CREATE STATISTICS p3_st ON a, b FROM t'; END")).toHaveLength(1);
   });
 
-  it('identical EXECUTE texts: replace-by-text stays correct (LOCAL P3, pinned not refactored)', () => {
+  it('identical EXECUTE texts: replace-by-text stays correct', () => {
     // `remainder.replace(m[0], ' ')` blanks the first REMAINING occurrence,
     // which is always this iteration's match while earlier identical matches
     // are already blanked — so duplicates cannot double-refuse or go silent.
     expect(refusals(W, "BEGIN EXECUTE 'SELECT 1'; EXECUTE 'SELECT 1'; END")).toHaveLength(0);
     expect(refusals(W, "BEGIN EXECUTE 'SELECT 1'; EXECUTE 'SELECT 1' || 'CREATE STATISTICS p4_st ON a, b FROM t'; END")).toHaveLength(1);
     expect(refusals(W, "BEGIN EXECUTE 'SELECT 1' || 'CREATE STATISTICS p5_st ON a, b FROM t'; EXECUTE 'SELECT 1'; END")).toHaveLength(1);
+    // The one shape where text-replace blanks the WRONG copy: an earlier
+    // `\b`-shadowed spelling (`vfooEXECUTE` — no word boundary, never a
+    // match) contains this match's text, so the replace blanks inside it and
+    // the real EXECUTE stays standing in the code-only text. The catch-all
+    // then refuses the block — the mis-blank can only over-refuse, never go
+    // silent, which is why replace-by-text needs no index arithmetic.
+    expect(refusals(W, "BEGIN vfooEXECUTE 'SELECT 1'; EXECUTE 'SELECT 1'; END")).toHaveLength(1);
   });
 
   it('USING and format() followers are not continuations (boundary)', () => {
@@ -539,7 +562,7 @@ describe('#4382 folds: comment separators, dollar-path E1, position and duplicat
     expect(refusals(W, "BEGIN PERFORM 1; EXECUTE format('SELECT %s', 1); END")).toHaveLength(1);
   });
 
-  it('a || glued BEFORE the literal refuses — the backward half of isGlued (LOCAL P3)', () => {
+  it('a || glued BEFORE the literal refuses — the backward half of isGlued', () => {
     // The guard's contract is both sides (delta5 D1); this half had no pin.
     // The shape is contrived as SQL — a concatenation cannot really precede
     // the EXECUTE verb in plpgsql — but the analyzer's contract is textual,
