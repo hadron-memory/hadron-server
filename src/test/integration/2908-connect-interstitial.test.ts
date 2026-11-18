@@ -8,11 +8,11 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import { createServer as createHttpServer, type Server } from 'node:http';
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { confirmConnect } from '../connectInterstitial.js';
 import { connectInterstitialToken, issueExchangeStartNonce } from '../../auth/authHandoff.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 
 const ENV_KEYS = ['BASE_URL', 'GMAIL_CLIENT_ID', 'MICROSOFT_CLIENT_ID'] as const;
 const savedEnv: Record<string, string | undefined> = {};
@@ -24,7 +24,7 @@ let orgId: string;
 
 beforeAll(async () => {
   for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -34,7 +34,7 @@ afterAll(async () => {
     if (savedEnv[k] === undefined) delete process.env[k];
     else process.env[k] = savedEnv[k];
   }
-  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  await closeServerIfStarted(server);
 });
 
 beforeEach(async () => {

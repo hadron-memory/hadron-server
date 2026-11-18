@@ -593,11 +593,48 @@ describe('the platform starts an assigned worker with no live session (cor:agt:0
     expect(ops[0]!.args).toMatchObject({ workerId: kit.id, family: 'claude', taskId: made.id });
   });
 
-  it('#10773 (5): a worker whose every session is dormant is started on a new session', async () => {
+  // #4237 (V16, ruling 0265, narrowing #10773 (5)): every platform start for an assignment needs NO open session. A
+  // quiet open session is reached through that session by the assignment notice, never started over (#1114, #3818).
+  const quietOpenSession = async () => {
     const quiet = new Date(Date.now() - 60 * 86_400_000);
-    await db.session.create({ data: { id: generateId(), appId: app.id, workerId: kit.id, userId: holder.id, startedAt: quiet, updatedAt: quiet } });
+    return db.session.create({ data: { id: generateId(), appId: app.id, workerId: kit.id, userId: holder.id, startedAt: quiet, updatedAt: quiet, family: 'claude' }, select: { id: true } });
+  };
+  const starts = () => db.hostOperation.count({ where: { type: 'worker.start' } });
+
+  it('#4237 (V16): assigning Kit by hand over its quiet open session issues no worker.start', async () => {
+    await quietOpenSession();
     const t = await task();
     await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: kit.id } }, ctx(manager.id));
-    expect(await db.hostOperation.count({ where: { type: 'worker.start' } })).toBe(1);
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).assigneeWorkerId).toBe(kit.id);
+    expect(await starts(), 'a hand assignment started Kit over its quiet open session').toBe(0);
+  });
+
+  it('#4237 (V16): reassigning to Kit over its quiet open session issues no worker.start', async () => {
+    await quietOpenSession();
+    const t = await db.agentTask.create({ data: { appId: app.id, title: 'Do it', ownerUserId: manager.id, assigneeWorkerId: ada.id, assignedAt: new Date(), closeSessionWhenDone: false }, select: { id: true } });
+    await M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: kit.id } }, ctx(manager.id));
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).assigneeWorkerId).toBe(kit.id);
+    expect(await starts(), 'a reassign started Kit over its quiet open session').toBe(0);
+  });
+
+  it('#4237 (V16): a create naming Kit over its quiet open session issues no worker.start', async () => {
+    await quietOpenSession();
+    const made = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Named', assignee: { worker: kit.id }, closeSessionWhenDone: false } }, ctx(manager.id));
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: made.id } })).assigneeWorkerId).toBe(kit.id);
+    expect(await starts(), 'a named create started Kit over its quiet open session').toBe(0);
+  });
+
+  it('#4237 (control): once that session has ended, the hand assignment starts Kit as before', async () => {
+    const s = await quietOpenSession();
+    await db.session.update({ where: { id: s.id }, data: { endedAt: new Date(Date.now() - 59 * 86_400_000) } });
+    const t = await task();
+    await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: kit.id } }, ctx(manager.id));
+    expect(await starts()).toBe(1);
+  });
+
+  it('#4237: a manager\'s own start (cor:agt:070:05) keeps the live test: it may start Kit over a quiet open session', async () => {
+    await quietOpenSession();
+    expect((await issueStart()).type).toBe('worker.start');
+    expect(await starts()).toBe(1);
   });
 });

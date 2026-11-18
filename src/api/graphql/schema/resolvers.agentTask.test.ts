@@ -1,3 +1,4 @@
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #1705 — agent tasks (Task Management T1): authorization matrix, lifecycle,
@@ -22,6 +23,7 @@ import { isAppParticipant } from './resolvers.helpers.js';
 import { mergeUsers } from '../../../test/mergeConsent.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { ownerChain } from '../../../lib/agentTasks/stall.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -31,7 +33,7 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({
 }));
 
 const M = resolvers.Mutation as any;
-const Q = resolvers.Query as any;
+const Q = settledTeamEventQueries(resolvers.Query, db) as any;
 const F = resolvers as any;
 
 function ctx(userId?: string, extra: Partial<Context> = {}): Context {

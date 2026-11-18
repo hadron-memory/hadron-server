@@ -374,7 +374,9 @@ describe('#2755 one worker failing does not stop the App\'s pass', () => {
     const real = db.$transaction.bind(db);
     let calls = 0;
     const tx = vi.spyOn(db, '$transaction').mockImplementation(((...args: unknown[]) => {
-      if (calls++ === 0) throw new Error('fence refused');
+      // #4273: the liveness read runs in its own (JIT-off) transaction, so "the first raise" is the first SERIALIZABLE one.
+      const raising = (args[1] as { isolationLevel?: string } | undefined)?.isolationLevel === 'Serializable';
+      if (raising && calls++ === 0) throw new Error('fence refused');
       return (real as (...a: unknown[]) => unknown)(...args);
     }) as never);
     try {

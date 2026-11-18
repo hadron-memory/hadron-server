@@ -94,6 +94,28 @@ jobs:
 
       - run: pnpm prisma generate
 
+      # #3877: this service cluster is throwaway, so it runs without durability. On PG16, every DROP DATABASE (the
+      # suite's per-worker clones, the serve-role smoke's owned database) waits on an immediate checkpoint of the WHOLE
+      # cluster, and with fsync on that checkpoint writes and syncs every dirty buffer the shard's parallel test
+      # databases produced: 13-22 s for the smoke's 30 s afterAll on green runs, more under load. Off, the checkpoint
+      # is nearly free. A crash loses only this job's data, which nothing keeps. Only THIS cluster: the
+      # restore-private-cluster, migration-smoke and seed jobs exercise real durability paths and stay stock.
+      # All three settings reload without a restart (a service container takes no command line, so no -c flags).
+      - name: Run the throwaway test cluster without durability (#3877)
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q \
+            -c "ALTER SYSTEM SET fsync = off" \
+            -c "ALTER SYSTEM SET full_page_writes = off" \
+            -c "ALTER SYSTEM SET synchronous_commit = off" \
+            -c "SELECT pg_reload_conf()"
+          # pg_reload_conf() only signals the server: a fresh session sees the new values once the reload lands.
+          for _ in $(seq 1 10); do
+            got=$(psql "$DATABASE_URL" -Atc "SELECT current_setting('fsync') || current_setting('full_page_writes') || current_setting('synchronous_commit')")
+            [ "$got" = "offoffoff" ] && exit 0
+            sleep 1
+          done
+          echo "durability settings did not apply: $got"; exit 1
+
       # No schema step (#1922): the vitest globalSetup builds the test template
       # itself, from an empty database, for this checkout's schema fingerprint
       # (src/test/schemaTemplate.ts). Pushing to `hadron_test` here would build

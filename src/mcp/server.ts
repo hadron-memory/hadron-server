@@ -169,7 +169,7 @@ import {
   releaseOnceOnResponseEnd,
 } from './transportBounds.js';
 import { unstorableTextRefusal, refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
-import { edgeTextFields, unstorableTextText } from '../lib/unstorableTextInput.js';
+import { edgeTextFields, findUnstorableText, unstorableTextMessage, unstorableTextText } from '../lib/unstorableTextInput.js';
 import { refNamesNothing } from '../lib/entityRef/refNamesNothing.js';
 import { textResult } from './textResult.js';
 import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
@@ -227,7 +227,8 @@ import { resolveSuppliedKey, MemoryUnlockError } from '../lib/memoryUnlock.js';
 import { resolveNodeRef, isConcealedNodeRefAmbiguity } from '../lib/entityRef/nodeRef.js';
 import { resolveChannelRefId } from '../lib/entityRef/channelRef.js';
 import { sortSiblings } from '../lib/siblingOrder.js';
-import { renderRunNodeBundle } from '../lib/runNodeRender.js';
+import { assembleRunNodePrompt } from '../lib/runNodeRender.js';
+import { compileTemplate } from '../lib/template.js';
 import {
   NodeNotFoundError,
   AmbiguousLegacyUrnError,
@@ -262,9 +263,9 @@ import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
-import { resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
+import { chargeRequestServed, resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
 import {
-  CONTENT_RESOLUTION_LIMIT_EXCEEDED, isContentResolutionLimitError, resolutionLimitPhrase,
+  CONTENT_RESOLUTION_LIMIT_EXCEEDED, isContentResolutionLimitError, resolutionLimitMessage, resolutionLimitPhrase,
   type ResolutionLimit,
 } from '../lib/includes/resolutionBudget.js';
 import { checkNodeTypesFilter, NodeTypesFilterError } from '../lib/retrieval/nodeTypeList.js';
@@ -484,7 +485,10 @@ export const GOVERNED_MCP_DOOR_FIELDS: readonly string[] = [
 /**
  * Whether a generic MCP node write could be replayed through `kind`'s door
  * (`op`): every field it sets is one that door carries, and it clears neither
- * `content` nor `abstract` (the doors take strings only).
+ * `content`, `abstract` nor `data` (the doors take strings for the first two
+ * and an OBJECT for data — none of the three is nullable, so a null cannot
+ * replay; #3729, which became reachable when #3721 made the generic update
+ * schema's `data` nullable).
  *
  * The kind SIGNALS are door-specific (@copilot + @codex, PR #1305): only the
  * task update door carries `isRunnable`, only the review update door carries
@@ -528,7 +532,10 @@ export function mcpDoorCanReplay(
       continue;
     }
     if (!GOVERNED_MCP_DOOR_FIELDS.includes(key)) return false;
-    if ((key === 'content' || key === 'abstract') && value === null) return false;
+    // #3729 — a null cannot replay: content/abstract take strings on the
+    // doors, and `data` takes an object (governedDoorArgs.data is optional,
+    // never nullable), so a bag-clearing `data: null` has no door either.
+    if ((key === 'content' || key === 'abstract' || key === 'data') && value === null) return false;
   }
   // The create doors require a non-blank name (callGovernedDoor), which the
   // generic create tool does not (@codex, PR #1305).
@@ -903,6 +910,10 @@ export async function addEdge(args: {
   // Spec 037: the edge's identity is its loc within the source memory.
   // Author-supplied loc is validated; otherwise derive it deterministically
   // so re-running with the same endpoints + name stays idempotent.
+  // #4106: caller text Postgres would reject (NUL, lone surrogate) is refused typed, after the gates above and before
+  // the loc derives from `name`; `loc` itself is validated just below.
+  const unstorable = findUnstorableText({ name, loc: authoredLoc, description });
+  if (unstorable) return { error: `[bad_user_input] ${unstorableTextMessage(unstorable)}` };
   const edgeLoc =
     authoredLoc != null && authoredLoc !== '' ? authoredLoc : deriveEdgeLoc(sourceNode.loc, name, target.loc);
   try {
@@ -3456,7 +3467,7 @@ export function createMcpServerInstance(
             'Use hadron_set_active_memory to work in it.',
         );
       } catch (e) {
-        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_memory:resolver');
+        return toolErrorResult(e, () => unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_memory:resolver');
       }
     },
   );
@@ -3479,7 +3490,7 @@ export function createMcpServerInstance(
         const created = await resolvers.Mutation.createAppMemory({}, { appRef: app, name, shortDescription, description, tags }, ctx);
         return textResult(`Memory created: ${safeEmitEntityUrnV2('memory', created.urn)} (class: app, id: ${created.id}).`);
       } catch (e) {
-        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_app_memory:resolver');
+        return toolErrorResult(e, () => unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_app_memory:resolver');
       }
     },
   );
@@ -7955,7 +7966,7 @@ export function createMcpServerInstance(
           )}`,
         );
       } catch (err) {
-        return roleWriterRefusalText(err) !== null ? refusalResult(roleWriterRefusalText(err) as string) : toolErrorResult(err, () => String((err as Error)?.message ?? err), 'hadron_update_edge');
+        return roleWriterRefusalText(err) !== null ? refusalResult(roleWriterRefusalText(err) as string) : toolErrorResult(err, () => unstorableTextText(err) ?? String((err as Error)?.message ?? err), 'hadron_update_edge');
       }
     },
   );
@@ -8745,7 +8756,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_run_action',
-    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). An action URN (hrn:action:<root>:<agent-slug>:<code>) is also accepted: it is a register entry\'s second address, resolved to that entry and run exactly as by its node URN, under the same memory read gate (the action address additionally needs the Agent\'s system memory to be readable, so a refusal reads as not found).',
+    'Load an action node and resolve its dependencies. Returns the prompt a run of the node executes (hrn:node:hadronmemory.com:specs:cor:api:060:05): its instructions with {{placeholders}} filled from args and then from the memory default data (an unsupplied placeholder renders empty), followed by the content of every referenced node you can read. The next-step edges of a flow (next, next.<label>) are routing, not references, and are not included. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). An action URN (hrn:action:<root>:<agent-slug>:<code>) is also accepted: it is a register entry\'s second address, resolved to that entry and run exactly as by its node URN, under the same memory read gate (the action address additionally needs the Agent\'s system memory to be readable, so a refusal reads as not found).',
     SHAPE_HADRON_RUN_ACTION,
     async ({ urn: rawUrn, args }) => {
       // #2718 — an action URN is a register entry's SECOND address. Resolve it
@@ -8765,13 +8776,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // not-found (cor:api:140:03).
         const viaEntry = await loadRunNodeById(entry);
         if ('error' in viaEntry) return unreadable();
-        return textResult(await renderRunNode(viaEntry.node, viaEntry.loc, args));
+        return runBundleResult(viaEntry.node, viaEntry.loc, args);
       }
       // Spec 022 qualification + loading + rendering are shared with hadron_run_task
       // (cor:api:060) via loadNodeForRun / renderRunNode below.
       const loaded = await loadNodeForRun(rawUrn);
       if ('error' in loaded) return refusalResult(loaded.error);
-      return textResult(await renderRunNode(loaded.node, loaded.loc, args));
+      return runBundleResult(loaded.node, loaded.loc, args);
     },
   );
 
@@ -8849,14 +8860,28 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     });
   }
 
-  // {{arg}} substitution + inlined edge-linked node content + one action-run
-  // usage event. Returns the rendered markdown bundle.
+  /**
+   * #863: the run bundle as a tool result. A read over a content resolution limit (#40) is the tool's named refusal,
+   * with nothing partial returned and nothing recorded; every other fault stays a fault.
+   */
+  async function runBundleResult(node: RunNode, loc: string, args?: Record<string, string>) {
+    try {
+      return textResult(await renderRunNode(node, loc, args));
+    } catch (e) {
+      if (!isContentResolutionLimitError(e)) throw e;
+      return refusalResult(`Refused (${CONTENT_RESOLUTION_LIMIT_EXCEEDED}): ${resolutionLimitMessage(e.limit)}`);
+    }
+  }
+
+  // The rendered run bundle (the template compile, then the content of every
+  // edge-linked reference) plus one action-run usage event.
   //
-  // #818: the SUBSTITUTION + INLINING is now `renderRunNodeBundle` in
-  // src/lib/runNodeRender.ts, shared with the GraphQL `renderRunNode` query so
-  // a preview cannot disagree with what actually executes. The `action-run`
-  // UsageEvent stays HERE — it meters a tool invocation, and the read-only
-  // GraphQL preview must not inflate the ledger with one.
+  // #818, #863: the assembly is `assembleRunNodePrompt` in
+  // src/lib/runNodeRender.ts, the function `runTask` executes and the GraphQL
+  // `renderRunNode` query previews with, so a preview cannot disagree with
+  // what runs. The `action-run` UsageEvent stays HERE — it meters a tool
+  // invocation, and the read-only GraphQL preview must not inflate the ledger
+  // with one.
   async function renderRunNode(
     node: RunNode,
     loc: string,
@@ -8892,11 +8917,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       }
       return pending;
     };
-    const rendered = await renderRunNodeBundle(node, args, {
+    // #863 (cor:api:060:05): the SAME assembler `runTask` and the GraphQL `renderRunNode` preview call, with the
+    // dependencies they pass: a Mustache compile over the node's memory, and no flow-routing edge inlined. A limit
+    // refusal (#40) is thrown before anything is recorded and becomes the tool's named refusal in `runBundleResult`.
+    const readCtx = scopeCtx();
+    const rendered = await assembleRunNodePrompt({ ...node, loc }, args, {
       memoryUrnOf: memoizedMemoryUrnLookup(),
+      compileTemplate: (content, data, memoryId) =>
+        compileTemplate(content, data, memoryId, db, {}).then((text) => chargeRequestServed(readCtx, content, text)),
       // The run node's OWN memory was gated by loadNodeForRun; this gates each
       // dependency separately, because an edge can cross memories (#781).
-      includeTarget: (target) => canRead(target.memoryId),
+      includeTarget: (target) => !!target && canRead(target.memoryId),
       onTargetInlined: (target) => inlined.push(target),
     });
     trackUsageWrite(db, db.usageEvent
@@ -9289,7 +9320,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_run_task',
-    "Render or execute a node. By-name task discovery, resolution and listing require isRunnable=true (hrn:node:hadronmemory.com:specs:cor:api:060:01); an explicit fully-qualified `urn` skips resolution and does not require that flag. Give `task` (and optionally `memory`); the server resolves both against what you can read and runs the match. When a name is ambiguous or omitted you get a list to choose from (an interactive picker where the client supports it, otherwise a numbered list to re-invoke with `urn`). Pass a fully-qualified `urn` to skip resolution and run directly. By DEFAULT this RENDERS the task — returns the assembled instructions ({{arg}} substitution + inlined dependencies) for YOU to execute. Pass `appRef` to EXECUTE server-side instead (#529): the server mints a MANUAL app run and returns the run id to poll. Spec cor:api:060.",
+    "Render or execute a node. By-name task discovery, resolution and listing require isRunnable=true (hrn:node:hadronmemory.com:specs:cor:api:060:01); an explicit fully-qualified `urn` skips resolution and does not require that flag. Give `task` (and optionally `memory`); the server resolves both against what you can read and runs the match. When a name is ambiguous or omitted you get a list to choose from (an interactive picker where the client supports it, otherwise a numbered list to re-invoke with `urn`). Pass a fully-qualified `urn` to skip resolution and run directly. By DEFAULT this RENDERS the task — returns the assembled instructions (placeholders filled, referenced nodes inlined; the same prompt an execution runs) for YOU to execute. Pass `appRef` to EXECUTE server-side instead (#529): the server mints a MANUAL app run and returns the run id to poll. Spec cor:api:060.",
     SHAPE_HADRON_RUN_TASK,
     async (rawArgs) => {
       // createTestableMcpServer bypasses zod — normalize args defensively.
@@ -9350,7 +9381,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         const loaded = await loadNodeForRun(nodeUrn);
         if ('error' in loaded) return refusalResult(loaded.error);
-        return textResult(await renderRunNode(loaded.node, loaded.loc, args));
+        return runBundleResult(loaded.node, loaded.loc, args);
       };
 
       // URN bypass — run directly, exactly like hadron_run_action (cor:api:060:02).

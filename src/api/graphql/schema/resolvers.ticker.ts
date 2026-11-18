@@ -47,14 +47,14 @@ import { RegisterLookup, type RegisterEntry } from '../../../lib/actionRegister/
 import { boundedRead, emitTaskWarnings } from './resolvers.taskWarnings.js';
 import { tickCodeOfSlug } from '../../../lib/tickers/tickCode.js';
 import { loadDeliverySettings, parseDeliverySettingsPatch, validateDeliverySettings, type DeliverySettings } from '../../../lib/tickers/deliverySettings.js';
-import { Prisma } from '../../../generated/prisma/index.js';
+import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
+import { launchAfterTeamResume } from '../../../lib/hostOperations/launch.js';
 import { type Context, getAccessibleMemoryIds, pageArgs, pageEnvelope } from './resolvers.helpers.js';
 import {
   type TaskApp,
   type TaskActor,
   actorManagesApp,
   inTaskWriteTx,
-  admitOnHolderRight,
   loadApp,
   managerArmAfterOwn,
   recordInstructedManagerAct,
@@ -753,13 +753,11 @@ export async function writeAppSettings(
       batchWindowSeconds: floor,
       busyDelaySeconds: patch.busyDelaySeconds ?? cur.deliveryBusyDelaySeconds,
       stuckWindowSeconds: patch.stuckWindowSeconds ?? cur.deliveryStuckWindowSeconds,
-      standbyEnabled: false,
-      standbyEffective: false,
       checkPeriodSeconds: patch.checkPeriodSeconds ?? cur.deliveryCheckPeriodSeconds,
       failedChecksToOverdue: patch.failedChecksToOverdue ?? cur.deliveryFailedChecksToOverdue,
       darkAlarmWindowSeconds: patch.darkAlarmWindowSeconds ?? cur.deliveryDarkAlarmWindowSeconds,
     };
-    validateDeliverySettings(delivery, patch);
+    validateDeliverySettings(delivery);
     const written = {
       tickerMinCadenceSeconds: floor, tickerSelfSubscribeCadenceSeconds: self,
       tickerLiveCap: cap, wakeDailyBudget: budget,
@@ -786,16 +784,22 @@ export async function writeTeamPause(ctx: Context, appRef: string, paused: boole
   const participated = await resolveParticipatedApp(ctx, appRef);
   const { app } = participated;
   const actor = withInstruction(participated.actor, instruction);
-  return writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
+  // #4223: the pause this call lifted, if it lifted one (reset on a retried attempt).
+  let lifted: Date | null = null;
+  const view = await writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
     if (!(await actorManagesApp(txCtx, fresh, actor, actor.instructed))) {
       throw taskError('FORBIDDEN', 'Only whoever manages this App can pause or resume the team.');
     }
     const cur = await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: { teamPausedAt: true } });
+    lifted = !paused ? cur.teamPausedAt : null;
     if (paused && !cur.teamPausedAt) await tx.app.update({ where: { id: fresh.id }, data: { teamPausedAt: new Date() } });
     if (!paused && cur.teamPausedAt) await tx.app.update({ where: { id: fresh.id }, data: { teamPausedAt: null, teamResumedAt: new Date() } }); // the end restarts every worker's check clock
     if (paused !== (cur.teamPausedAt !== null)) await recordInstructedManagerAct(tx, fresh.id, actor, paused ? 'team.pause' : 'team.resume');
     return { teamPausedAt: (await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: { teamPausedAt: true } })).teamPausedAt };
   }, { lockMode: 'exclusive' });
+  // #4223: the lift committed. Tasks assigned during the pause were not started (launchForAssignment); start them now.
+  if (lifted) await launchAfterTeamResume(ctx.db as PrismaClient, app.id, lifted);
+  return view;
 }
 
 // ── Settings projections ──────────────────────────────────────────────────
@@ -826,46 +830,6 @@ function wakeSettingsOut(workerId: string, row: WakeSettingsRow | null) {
   return {
     workerId, mentions: row?.mentions ?? 'IMMEDIATE', pausedUntil: row?.pausedUntil ?? null,
   };
-}
-
-// ── Isolation (S7, #2023, R85) ─────────────────────────────────────────────
-
-const isolationForbidden = () => taskError(
-  'WORKER_ISOLATION_FORBIDDEN',
-  'Only a person managing this App, or the person holding this worker, acting as themselves, can isolate it or lift its isolation.',
-);
-
-/** #3606 / cor:agt:080:29: retain the original clear audience only; capability is now constant false. */
-async function mayClearRetiredIsolation(
-  ctx: Context, app: TaskApp, actor: TaskActor | null,
-  worker: { heldByUserId: string | null; retiredAt: Date | null },
-): Promise<boolean> {
-  if (!actor || ctx.impersonation || ctx.sessionBindingRefused || app.uninstalledAt || worker.retiredAt) return false;
-  if (actor.kind === 'user') return await actorManagesApp(ctx, app, actor, actor.instructed) || worker.heldByUserId === actor.userId;
-  // #3321 (ruling 0118, cor:agt:080:29): a worker only on an instruction, on either right of its holder. A read carries
-  // none. This holder arm remains only for the deprecated clear door.
-  if (!actor.instructed) return false;
-  if (await actorManagesApp(ctx, app, actor, actor.instructed)) return true;
-  return admitOnHolderRight(ctx, app, actor, actor.instructed, () => worker.heldByUserId !== null && worker.heldByUserId === ctx.userId);
-}
-
-/** #3606: deprecated compatibility doors; preserve main's distinct set and clear admission order. */
-async function deprecatedIsolationDoor(ctx: Context, workerRef: string, clear: boolean, instruction?: ActInstruction | null) {
-  const target = await workerForRead(ctx, workerRef);
-  const app = await appOf(ctx, target.appId);
-  const resolved = await resolveTaskActor(ctx, app);
-  if (!resolved || (resolved.kind !== 'user' && instruction == null)) throw isolationForbidden();
-  const actor = withInstruction(resolved, instruction);
-  // Set never reached the full audience check, or parsed until, on inert main.
-  if (!clear) throw taskError('WORKER_ISOLATION_UNAVAILABLE', 'Isolating a worker is not available yet (S7b). Nothing was changed.');
-  const row = await writeInApp(ctx, app, actor, () => workerNotFound(workerRef), async (tx, txCtx, fresh) => {
-    const w = await lockWorker(tx, target.id);
-    if (!w || w.appId !== fresh.id || w.retiredAt) throw workerNotFound(workerRef);
-    if (!(await mayClearRetiredIsolation(txCtx, fresh, actor, w))) throw isolationForbidden();
-    // No row creation, exemption change, or manager act. Legacy stored values stay inert and byte-identical.
-    return tx.workerWakeSettings.findUnique({ where: { workerId: w.id } });
-  });
-  return wakeSettingsOut(target.id, row);
 }
 
 // ── Subscriptions ─────────────────────────────────────────────────────────
@@ -935,6 +899,19 @@ async function changeSubscription(
     const worker = { id: w.id, name: w.name, heldByUserId: w.heldByUserId };
     if (op === 'subscribe') {
       if (w.retiredAt) throw taskError('WORKER_RETIRED', 'A retired worker cannot be subscribed.');
+      // #4234 (S11 of #4229): a SHORT_LIVED Agent's worker runs only while it holds a task and is handed no wake
+      // while stopped (`isStoppedShortLived`), so its ticks would mostly never fire. Refused, after authorization so
+      // the refusal discloses nothing to a caller who may not subscribe it. A plain read, no lock: a lifecycle change
+      // racing this write is covered by the delivery rule, which reads the lifecycle at every dueWakes.
+      // Unsubscribing stays allowed, for a subscription made before the Agent became short-lived.
+      const agent = await tx.agent.findUnique({ where: { id: w.agentId }, select: { lifecycle: true } });
+      if (agent?.lifecycle === 'SHORT_LIVED') {
+        throw taskError(
+          'TICKER_ON_SHORT_LIVED',
+          'This worker\'s Agent is short-lived: it runs only while it holds a task, so a ticker could not wake it. ' +
+            'Give it the work as a task instead. Nothing was changed.',
+        );
+      }
       if (live) return { subscription: live, authority: decision.authority, changed: false, ticker: t, worker, grantee };
       const created = await tx.tickerSubscription.create({
         data: {
@@ -1142,11 +1119,6 @@ const wakeAndGrantMutations = {
     return wakeSettingsOut(target.id, row);
   },
 
-  isolateWorker: (_: unknown, a: { workerRef: string; until?: Date | string | null; instruction?: ActInstruction | null }, ctx: Context) =>
-    deprecatedIsolationDoor(ctx, a.workerRef, false, a.instruction),
-  clearWorkerIsolation: (_: unknown, a: { workerRef: string; instruction?: ActInstruction | null }, ctx: Context) =>
-    deprecatedIsolationDoor(ctx, a.workerRef, true, a.instruction),
-
   // ── The may-subscribe-workers grant (cor:agt:080:24) ──────────────────────
 
   grantApp: (_: unknown, a: { appRef: string; workerRef: string; name: string }, ctx: Context) => changeGrant(ctx, a, 'grant'),
@@ -1300,7 +1272,6 @@ export const tickerFieldResolvers = {
   },
 
   WorkerWakeSettings: {
-    canManageIsolation: () => false,
     worker: (w: { workerId: string }, _: unknown, ctx: Context) => ctx.db.worker.findUnique({ where: { id: w.workerId } }),
     subscriptions: (w: { workerId: string }, _: unknown, ctx: Context) =>
       ctx.db.tickerSubscription.findMany({
@@ -1315,10 +1286,6 @@ export const tickerFieldResolvers = {
       });
       return fastest._min.cadenceSeconds ?? null;
     },
-    isolated: () => false,
-    isolatedUntil: () => null,
-    isolatedAt: () => null,
-    isolatedByHandle: () => null,
     dormant: async (w: { workerId: string }, _: unknown, ctx: Context) => {
       const worker = await ctx.db.worker.findUnique({ where: { id: w.workerId }, select: { app: { select: { sessionDormancyDays: true } } } });
       if (!worker) return false;

@@ -10,7 +10,6 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { buildSchema, parse } from 'graphql';
 import { getComplexity, simpleEstimator } from 'graphql-query-complexity';
-import { createServer } from '../../server.js';
 import { mintUserApiKey } from '../../middleware/auth.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -18,6 +17,7 @@ import { generateId } from '../../lib/id.js';
 import { typeDefs } from './schema/typeDefs.js';
 import { pageArgs } from './schema/resolvers.helpers.js';
 import { hadronListEstimator } from './admissionComplexity.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../test/startServerFixture.js';
 
 let agentId: string;
 let key: string;
@@ -25,11 +25,11 @@ let server: Server;
 let baseUrl: string;
 
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
-afterAll(async () => { await new Promise<void>((resolve) => server.close(() => resolve())); });
+afterAll(async () => { await closeServerIfStarted(server); });
 
 beforeEach(async () => {
   await cleanDb(db);

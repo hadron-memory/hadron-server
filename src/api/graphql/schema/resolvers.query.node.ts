@@ -608,10 +608,9 @@ export const nodeQueries = {
      * nothing about whether content was returned, and it was.
      *
      * Assembles with `assembleRunNodePrompt` — the SAME function `runTask`
-     * executes (Mustache via compileTemplate; flow-routing edges skipped) —
-     * NOT the legacy `renderRunNodeBundle` the MCP tools call, which does a
-     * literal replaceAll and inlines every edge. A preview that disagrees with
-     * the run is worse than none (#858 review, Codex P1).
+     * executes (Mustache via compileTemplate; flow-routing edges skipped),
+     * and since #863 the one the MCP run tools call too. A preview that
+     * disagrees with the run is worse than none (#858 review, Codex P1).
      */
     renderRunNode: async (
       _: unknown,
