@@ -4740,7 +4740,7 @@ model FreshSignIn {
 /// Behaviour:
 /// - Nothing on a sign-in path creates these rows any more: signing in never depends on a passkey
 ///   (hrn:node:hadronmemory.com:specs:cor:aut:030:03). The code that creates and completes them is kept
-///   (`beginPasskeySignIn`, src/api/passkeySignInRoutes.ts) and is called only by tests.
+///   (the begin and complete steps in src/api/passkeySignInRoutes.ts) and is called only by tests.
 /// - `continuation` says where the flow resumes: `PORTAL` (with `clientStateHash`, `redirect`, `isNew`) or `OAUTH`
 ///   (with `returnTo`). Each kind carries exactly its own columns (a CHECK).
 /// - The row is found by `browserHash`, the SHA-256 of the pending cookie; the cookie value is never stored. It lives
