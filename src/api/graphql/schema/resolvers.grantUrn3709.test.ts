@@ -195,6 +195,20 @@ describe('#3709 — grant(ref:) accepts the computed URN under the id read gate'
 
     const wrongType = await asWorker(ONE, { r: `hrn:worker:${orgUrn}:${APP_SLUG}:g-worker` });
     expect(wrongType.errors?.[0]?.extensions?.code).toBe('URN_NOT_QUALIFIED');
+
+    // A ref that is neither an id nor a URN is the SAME refusal — the entity-ref
+    // convention treats anything that isn't a known id shape as a URN attempt
+    // (entityRef/shape.ts), and the SDL says so.
+    const junk = await asWorker(ONE, { r: 'not-a-ref-at-all' });
+    expect(junk.errors?.[0]?.extensions?.code).toBe('URN_NOT_QUALIFIED');
+
+    // resolveUrn conceals what grant(ref:) refuses: the same malformed grant URN
+    // (typed `grant`, arity wrong) answers null there, error-free — the arms'
+    // documented split. A wrong-TYPE URN is not this arm's case (resolveUrn
+    // dispatches it to that type's own arm).
+    const concealed = await asWorker(RESOLVE, { u: `hrn:grant:${orgUrn}` });
+    expect(concealed.errors, JSON.stringify(concealed.errors)).toBeUndefined();
+    expect(concealed.data.resolveUrn).toBeNull();
   });
 
   it('after an App rename the old-slug URN still resolves through the alias map (acceptance 2)', async () => {
