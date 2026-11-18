@@ -7571,7 +7571,7 @@ export const typeDefs = `#graphql
   type Grant {
     id: ID!
     appId: ID!
-    "#3709 — the grant's computed address hrn:grant:<root>:<app-slug>:<grant-id> (never stored: composed from the App's current urn plus the row id, so after an App rename only the new spelling is emitted while both spellings keep resolving through the alias map, cor:urn:030). Null only when the stored App urn cannot compose."
+    "#3709 — the grant's computed address hrn:grant:<root>:<app-slug>:<grant-id> (never stored: composed from the App's current urn plus the row id, so after an App rename only the new spelling is emitted while both spellings keep resolving through the alias map, hrn:node:hadronmemory.com:specs:cor:urn:030). Null only when the stored App urn cannot compose."
     urn: String
     "The registered action this grant allows."
     action: String!
@@ -11615,7 +11615,7 @@ export const typeDefs = `#graphql
     connectionGrants(connectionRef: String, limit: Int, offset: Int): ConnectionGrantsPage!
     """
     One grant by id or hrn:grant URN (#3789; URN per #3709). Read only by a BOUND WORKER SESSION, in its own App, for a grant naming that worker directly, a pending one it requested itself, or (#3711) one held by its role agent in this App while the agent is installed and licensed here.
-    Every other caller, a soft-deleted App and a missing id all answer null: no error and no existence oracle. A well-formed URN naming nothing answers the same null; a malformed or wrong-type URN is the typed input refusal URN_NOT_QUALIFIED (cor:api:140:01).
+    Every other caller, a soft-deleted App and a missing id all answer null: no error and no existence oracle. A well-formed URN naming nothing answers the same null; a malformed or wrong-type URN is the typed input refusal URN_NOT_QUALIFIED (hrn:node:hadronmemory.com:specs:cor:api:140:01).
     """
     grant(ref: ID!): Grant
     "The bound worker's own grants (#3789): the rows naming it directly as holder, the pending ones it requested, and (#3711) every row, in every state, held by its role agent in this App while that agent is installed and licensed here (never another App's, never a base agent's). Any other caller gets an empty page, never an error. limit 0 returns the count only."
