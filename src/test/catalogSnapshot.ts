@@ -128,13 +128,26 @@ export function diff(before: Snapshot, after: Snapshot): string[] {
   const out: string[] = [];
   for (const [k, d] of before) {
     const a = after.get(k);
-    if (a === undefined) out.push(`removed ${k}`);
-    else if (a !== d) {
-      const kind = k.startsWith('fn:') && squash(a) === squash(d) ? 'reformatted' : 'changed';
-      out.push(`${kind} ${k}\n  before: ${d}\n  after:  ${a}`);
-    }
+    const kind = differenceKind(k, d, a);
+    if (kind === 'removed') out.push(`removed ${k}`);
+    else if (kind !== null) out.push(`${kind} ${k}\n  before: ${d}\n  after:  ${a}`);
   }
   for (const k of after.keys()) if (!before.has(k)) out.push(`added ${k}`);
   return out;
+}
+
+export type DifferenceKind = 'added' | 'removed' | 'changed' | 'reformatted';
+
+/**
+ * THE kind decision for one key, shared by {@link diff} and the migration replay check (scripts/db/migration-replay.ts
+ * `differenceEntries`), so the two can never classify a difference by different rules (#4378 item 5). `null` when the
+ * definitions are equal. `added` exists only after, `removed` only before; a function whose body differs only in SQL
+ * whitespace is `reformatted` ({@link squash}), anything else `changed`.
+ */
+export function differenceKind(key: string, before: string | undefined, after: string | undefined): DifferenceKind | null {
+  if (before === after) return null;
+  if (before === undefined) return 'added';
+  if (after === undefined) return 'removed';
+  return key.startsWith('fn:') && squash(before) === squash(after) ? 'reformatted' : 'changed';
 }
 
