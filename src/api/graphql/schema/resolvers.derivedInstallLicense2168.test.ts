@@ -13,6 +13,7 @@ import { locateTeamAgent } from './resolvers.worker.js';
 import { chatCarrierApps } from './agentChatAccess.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
 import { isAgentInstalled, isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
+import { compileBootPrompt } from './compileBootPrompt.js';
 import { mintAppRun } from '../../../jobs/appRuns.js';
 import { assertManualRunAllowed } from './resolvers.appRun.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -255,4 +256,98 @@ it('an explicit derived cast validates its license before role-mismatch metadata
   await expect(M.castWorker({},input,ctx())).rejects.toMatchObject({extensions:{code:'WORKER_AGENT_NOT_INSTALLED'}});
   await createDbAgentOrgGrant(db,holder.id,target.id);
   await expect(M.castWorker({},input,ctx())).rejects.toMatchObject({extensions:{code:'WORKER_ROLE_OVERRIDE_REFUSED'}});
+});
+
+/** Ruling 0234 / cor:agt:040:15 S8: membership without a grant is not customisation authority. */
+it.each(['missing', 'revoked', 'expired', 'unactivated'] as const)(
+  '#3476 customisation of an unlicensed DERIVED Agent (%s) is typed and writes nothing',
+  async (state) => {
+    if (state !== 'missing') {
+      await createDbAgentOrgGrant(db, holder.id, target.id);
+      await db.agentOrgGrant.update({
+        where: { orgId_agentId: { orgId: holder.id, agentId: target.id } },
+        data: state === 'revoked' ? { revokedAt: new Date() }
+          : state === 'expired' ? { expiresAt: new Date('2000-01-01') }
+          : { activatedAt: null },
+      });
+    }
+    const snapshot = async () => ({
+      memories: await db.memory.count(), nodes: await db.node.count(),
+      revisions: await db.nodeRevision.count(), customisations: await db.appAgentCustomization.count(),
+    });
+    const before = await snapshot();
+    await expect(M.createNode({}, {
+      input: { install: { appRef: app.id, agentRef: target.id }, loc: 'custom:3476', name: 'No write', content: 'refused' },
+    }, ctx())).rejects.toMatchObject({ extensions: { code: 'AGENT_ORG_GRANT_REQUIRED' } });
+    expect(await snapshot()).toEqual(before);
+    expect(await db.memory.count({ where: { appId: app.id, installOfAgentId: target.id } })).toBe(0);
+  },
+);
+
+it('#3476 an active grant permits the same DERIVED customisation without a physical install row', async () => {
+  await createDbAgentOrgGrant(db, holder.id, target.id);
+  const written = await M.createNode({}, {
+    input: { install: { appRef: app.id, agentRef: target.id }, loc: 'custom:3476', name: 'Allowed', content: 'customised' },
+  }, ctx());
+  expect(written).toMatchObject({ loc: 'custom:3476', content: 'customised' });
+  expect(await db.memory.findUniqueOrThrow({ where: { id: written.memoryId } }))
+    .toMatchObject({ appId: app.id, installOfAgentId: target.id, isInstallMemory: true });
+  expect(await db.appAgent.count({ where: { appId: app.id, agentId: target.id } })).toBe(0);
+});
+
+it('#3476 an absent Agent still answers AGENT_NOT_INSTALLED before writes (S9)', async () => {
+  await db.agentImport.deleteMany({ where: { importedAgentId: target.id } });
+  const before = { memories: await db.memory.count(), nodes: await db.node.count() };
+  await expect(M.createNode({}, {
+    input: { install: { appRef: app.id, agentRef: target.id }, loc: 'custom:3476', name: 'Absent', content: 'no write' },
+  }, ctx())).rejects.toMatchObject({ extensions: { code: 'AGENT_NOT_INSTALLED' } });
+  expect({ memories: await db.memory.count(), nodes: await db.node.count() }).toEqual(before);
+});
+
+
+it.each(['ROW', 'DERIVED'] as const)('#3476 compile keeps its existing missing-grant refusal for %s, without writes', async kind => {
+  if (kind === 'ROW') await db.appAgent.create({ data: { appId: app.id, agentId: target.id } });
+  const agent = await db.agent.findUniqueOrThrow({ where: { id: target.id } });
+  await db.node.create({ data: { memoryId: agent.systemMemoryId!, loc: 'boot:source', name: 'Source', content: 'Compile source', role: 'boot-prompt' } });
+  const before = { memories: await db.memory.count(), nodes: await db.node.count(), revisions: await db.nodeRevision.count(), grants: await db.agentOrgGrant.count() };
+  await expect(compileBootPrompt(ctx(), { kind: 'APP_AGENT', appId: app.id, agentId: target.id }))
+    .rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_INCLUDE_UNAVAILABLE' } });
+  expect({ memories: await db.memory.count(), nodes: await db.node.count(), revisions: await db.nodeRevision.count(), grants: await db.agentOrgGrant.count() }).toEqual(before);
+});
+
+
+it('#3476 preserves the physical ROW customisation door without adding the DERIVED refusal', async () => {
+  await db.appAgent.create({ data: { appId: app.id, agentId: target.id } });
+  const written = await M.createNode({}, {
+    input: { install: { appRef: app.id, agentRef: target.id }, loc: 'custom:row3476', name: 'Physical', content: 'physical baseline' },
+  }, ctx());
+  expect(written).toMatchObject({ loc: 'custom:row3476', content: 'physical baseline' });
+});
+
+
+it('#3476 licensed DERIVED compile still succeeds through the unchanged compile door', async () => {
+  await createDbAgentOrgGrant(db, holder.id, target.id);
+  const agent = await db.agent.findUniqueOrThrow({ where: { id: target.id } });
+  await db.node.create({ data: { memoryId: agent.systemMemoryId!, loc: 'boot:source', name: 'Source', content: 'Compile control', role: 'boot-prompt' } });
+  const compiled = await compileBootPrompt(ctx(), { kind: 'APP_AGENT', appId: app.id, agentId: target.id });
+  expect(await db.node.findUniqueOrThrow({ where: { id: compiled.nodeId } })).toMatchObject({ content: 'Compile control', nodeType: 'compiled-boot-prompt' });
+});
+
+it('#3476 physical ROW compile still reports a retired target after permission', async () => {
+  await db.appAgent.create({ data: { appId: app.id, agentId: target.id } });
+  await db.agent.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
+  const before = { memories: await db.memory.count(), nodes: await db.node.count() };
+  await expect(compileBootPrompt(ctx(), { kind: 'APP_AGENT', appId: app.id, agentId: target.id }))
+    .rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_TARGET_RETIRED' } });
+  expect({ memories: await db.memory.count(), nodes: await db.node.count() }).toEqual(before);
+});
+
+it('#3476 a non-manager participant gets no typed grant disclosure and writes nothing', async () => {
+  await db.appMember.create({ data: { appId: app.id, userId: stranger.id, role: 'member' } });
+  const before = { memories: await db.memory.count(), nodes: await db.node.count() };
+  await expect(M.createNode({}, {
+    input: { install: { appRef: app.id, agentRef: target.id }, loc: 'custom:3476', name: 'Unmanaged', content: 'no write' },
+  }, { db, userId: stranger.id, roles: ['READER'] } as Context))
+    .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  expect({ memories: await db.memory.count(), nodes: await db.node.count() }).toEqual(before);
 });

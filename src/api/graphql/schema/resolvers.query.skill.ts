@@ -621,7 +621,7 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
       memoryIds = [];
       for (const ref of [...new Set(input.memories)]) {
         const { id } = await resolveMemoryRef(ctx.db, ref);
-        if (accessible !== null && !accessible.includes(id)) {
+        if (!accessible.includes(id)) {
           // Named rather than silently dropped: a caller who asked for a
           // memory by name and got an empty plan would read it as "nothing
           // declared here", which is the same wrong answer as a short read.

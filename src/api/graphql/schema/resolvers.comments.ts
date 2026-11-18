@@ -62,6 +62,7 @@ import {
   type CommentNodeData,
   type CommentOp,
 } from '../../../lib/comments/index.js';
+import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { openThreadCounts, viewerOpenThreads, type CommentCounts } from '../../../lib/comments/summary.js';
 import { deleteThreadsInTx } from '../../../lib/comments/lifecycle.js';
 
@@ -872,9 +873,11 @@ export const commentMutations = {
     const body = validateBody(args.body);
     const quote = validateQuote(args.quote);
     const { authorKey, node: target } = await prepareWrite(ctx, args.targetRef, 'target', 'write');
-    let id: string;
+    // #4106: caller text a NUL or lone surrogate would make Postgres reject (22021) is refused typed, after the gates.
+    assertStorableText({ body, quote });
+    let view: CommentView;
     try {
-      id = await commentTx(ctx, target.memoryId, 'write', async (tx, txCtx) => {
+      view = await commentTx(ctx, target.memoryId, 'write', async (tx, txCtx) => {
         // Hold the target still while its revision is hashed; the target row is
         // only READ (cor:dmo:110:06).
         await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${target.id} FOR SHARE`;
@@ -903,16 +906,22 @@ export const commentMutations = {
             'You already have an open thread on this node: reply there, or resolve or delete it first.',
             { threadId: open.nodeId });
         }
-        return insertComment(tx, txCtx, {
+        const id = await insertComment(tx, txCtx, {
           memoryId: row.memoryId, targetNodeId: row.id, targetName: row.name, threadRootId: null,
           authorKey, body, quote, key: writeKey, anchor: { revNo: revision, hash },
         });
+        // #3524 (A2): the response is the comment as of THIS commit, built on the fence's own client with the
+        // in-fence key, for the inserted id only. Nothing after the commit (key lookup, a re-read of the row)
+        // can turn a committed write into a refusal. A projection that finds nothing rolls the write back.
+        const [created] = await loadCommentViews(tx, [id], writeKey);
+        if (!created) throw commentMissing();
+        return created;
       });
     } catch (error) {
       if (isOpenThreadUniqueViolation(error)) throw await openThreadConflict(ctx.db, target.id, authorKey);
       throw error;
     }
-    return indexed(ctx, await viewOf(ctx, id, await keyForMemory(ctx.db, target.memoryId)));
+    return indexed(ctx, view);
   },
 
   /**
@@ -922,6 +931,7 @@ export const commentMutations = {
   replyToComment: async (_: unknown, args: { commentRef: string; body: string }, ctx: Context): Promise<CommentView> => {
     const body = validateBody(args.body);
     const { authorKey, node, key } = await prepareWrite(ctx, args.commentRef, 'comment', 'write');
+    assertStorableText({ body }); // #4106
     const id = await commentTx(ctx, node.memoryId, 'write', async (tx, txCtx) => {
       const { root } = await lockInThread(tx, node.id, node.memoryId);
       refuseStub(root.commentMeta!);
@@ -948,6 +958,7 @@ export const commentMutations = {
     return changeComment(ctx, args.commentRef, 'write', 'edit', (row, actorKey) => {
       requireAuthor(row.commentMeta!, actorKey);
       refuseStub(row.commentMeta!);
+      assertStorableText({ body, quote }); // #4106: before the patch is applied
       return { patch: { content: body, data: quote !== undefined ? { quote } : {} }, meta: {} };
     }, args.expectedRevision);
   },

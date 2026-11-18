@@ -112,8 +112,12 @@ describe('#3101 importNode into a live install memory', () => {
       const value = Reflect.get(target, key);
       return typeof value === 'function' ? value.bind(target) : value;
     } });
-    await expect(resolvers.Mutation.importNode({}, { input: f[shape] as never }, context(f.manager.id, wrapped as never))).rejects.toThrow();
+    const error: any = await resolvers.Mutation.importNode({}, { input: f[shape] as never }, context(f.manager.id, wrapped as never)).catch((e: unknown) => e);
+    // The refusal must be the authorization refusal, not any unrelated throw.
+    expect(error).toBeInstanceOf(Error);
+    expect(error.extensions?.code).toBe('FORBIDDEN');
     expect(crossed).toBe(true);
+    expect((await db.orgMember.findUniqueOrThrow({ where: { organizationId_userId: { organizationId: f.org.id, userId: f.manager.id } } })).role).toBe('READER');
     expect(await stored(f.install.id, f.inline.loc)).toBeNull();
     expect(await db.appRun.count()).toBe(0);
   });

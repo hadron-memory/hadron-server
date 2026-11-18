@@ -62,7 +62,7 @@ describe('passkey credential schema (#1631)', () => {
   it('the migration and both schema-push paths carry the same guard', () => {
     const guard = readFileSync('prisma/passkey-invariants.sql','utf8');
     // The newest migration that touches the guard carries it verbatim (#1631 PR1b re-applies it).
-    expect(readFileSync('prisma/migrations/20261022020000_passkey_erasure/migration.sql','utf8').endsWith(guard)).toBe(true);
+    expect(readFileSync('prisma/migrations/20261108180000_passkey_clock_seam/migration.sql','utf8').endsWith(guard)).toBe(true);
     expect(readFileSync('prisma/post-push.sql','utf8')).toContain('\\ir passkey-invariants.sql');
     // #434: post-push.sql (above) is the test template's only path; the vitest global setup no longer re-applies it.
     expect(readFileSync('src/test/globalSetup.ts','utf8')).not.toContain('passkey-invariants.sql');

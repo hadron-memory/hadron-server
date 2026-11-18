@@ -127,7 +127,7 @@ it('read gate precedes target existence and monitor combination refuses', async 
     const { s, channel } = await fixture(false);
     for (const replyToSeq of [1, 900]) {
         expect(await code(Q.channelMessages({}, { channelRef: channel.id, replyToSeq }, context(member.id)))).toBe('CHANNEL_NOT_FOUND');
-        expect(await code(Q.teamChatMessages({}, { appRef: app.id, replyToSeq }, context(member.id)))).toBe('FORBIDDEN');
+        expect(await code(Q.teamChatMessages({}, { appRef: app.id, replyToSeq }, context(member.id)))).toBe('APP_NOT_FOUND');
     }
 });
 it('a reply-filtered read attributes activity but does not acknowledge unseen channel messages (fenced or not)', async () => {

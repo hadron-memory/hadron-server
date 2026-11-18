@@ -1,4 +1,5 @@
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { refuseLegacyBaseUrl, requireEndpointFor, requireKeyFor, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
 import { testAiServiceConfig, type AiConfigTestOverride } from '../../../controller/operations/testAiServiceConfig.js';
@@ -43,7 +44,9 @@ import {
 } from '../../../controller/operations/publishAgentImport.js';
 import { assertMaySubscribeOrgToPublicAgent } from '../../../controller/operations/subscribeOrgToPublicAgent.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
+import { endGrantsOfAgentsNoLongerInstalled, liveAppsWhereInstalled } from '../../../lib/grants/agentInstallDeparture.js';
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
+import { retryOnDeadlock } from '../../../lib/serializableRetry.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { writeAgentBase } from '../../../lib/agentBase.js';
 import { AgentNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -53,6 +56,7 @@ import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
 import { normalizeHandleOrNull } from '../../../lib/userHandle.js';
 import { generateId } from '../../../lib/id.js';
+import { seedAgentSkeleton } from '../../../lib/agentSkeleton.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -76,6 +80,8 @@ import {
   getAccessibleMemoryIds,
   requireMemoryWriteAccess,
   AGENT_INCLUDE,
+  assertAiConfigAppOwnerInstalled,
+  lockAiConfigAppOwnerInstalled,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
@@ -131,6 +137,10 @@ export interface CreateAgentCoreInput {
   usesTasks?: boolean | null;
   /** #2162 (cor:agt:050:27): reset a worker's context when its task ends. Default false; null means the default. */
   resetContextAfterTask?: boolean | null;
+  /** #4224 (S3 of #4229): how long this Agent's workers run. Default LONG_LIVED; null means the default. */
+  lifecycle?: 'LONG_LIVED' | 'SHORT_LIVED' | null;
+  /** #4225 (S4b of #4229): the context cap in tokens; omitted or null is no cap. */
+  contextCap?: number | null;
   /** #2171 (R211): omitted/null = the default, owner and member. */
   memberRoles?: string[] | null;
 }
@@ -182,6 +192,7 @@ type PromotionTarget = {
  * 3. it is not a `group` memory, even for its owner or a writer: its audience
  *    is its MemoryMember rows (cor:acl:010:01), which a system memory drops,
  *    so the promotion would lock the owner out and widen the audience;
+ * 3b. it is not a `private` or `personal` memory (#4216, cor:dmo:050:01);
  * 4. it is not an App's install memory ({@link assertNotInstallMemory});
  * 5. it is not a memory an Agent holds for a person or an App
  *    ({@link assertNotAgentHolding}), even when its owner asks.
@@ -192,13 +203,25 @@ async function assertPromotableSystemMemory(ctx: Context, target: PromotionTarge
   const notFound = promotionTargetNotFound;
   if (!target || target.deletedAt) throw notFound();
   const readable = await getAccessibleMemoryIds(ctx, target.id);
-  if (readable !== null && !readable.includes(target.id)) throw notFound();
+  if (!readable.includes(target.id)) throw notFound();
   // The refusals below reach only a reader, so their order discloses nothing;
   // the specific ones come before the write gate so a reader learns why.
   if (target.class === 'group') {
     throw new GraphQLError("A group memory cannot become an Agent's system memory: its members would lose it.", {
       extensions: { code: 'BAD_USER_INPUT' },
     });
+  }
+  // #4216 (ruled option A, cor:dmo:050:01): a private or personal memory is
+  // strict-owner by class (cor:dmo:060:01) and carries `user_id`; a system
+  // memory is readable through every App that installs the Agent and must not.
+  // Promotion would set visibility NULL under a set `user_id` and break
+  // chk_personal_visibility_user (INTERNAL), so it is refused, whoever owns the
+  // Agent. After the readable check, so a non-reader learns nothing of its class.
+  if (target.class === 'private' || target.class === 'personal') {
+    throw new GraphQLError(
+      `A ${target.class} memory cannot become an Agent's system memory: it belongs to one person.`,
+      { extensions: { code: 'BAD_USER_INPUT' } },
+    );
   }
   assertNotInstallMemory(target);
   assertNotAgentHolding(target);
@@ -314,7 +337,10 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   const existing = await ctx.db.agent.findUnique({ where: { urn: agentUrn } });
   if (existing) {
     if (existing.deletedAt) {
-      await ctx.db.agent.delete({ where: { id: existing.id } }).catch((e: unknown) => {
+      // A retained install memory still needs this identity to enforce its org-text audience.
+      const reclaimed = await ctx.db.agent.deleteMany({
+        where: { id: existing.id, installMemories: { none: {} } },
+      }).catch((e: unknown) => {
         // P2003 = a Worker casting still references the tombstone (Restrict):
         // the URN slot is genuinely occupied — refuse typed, don't 500.
         if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2003') {
@@ -325,6 +351,9 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
         }
         throw e;
       });
+      if (reclaimed.count === 0) {
+        throw new AgentUrnTakenError(agentUrn, `URN "${agentUrn}" belongs to a deleted agent whose retained install memories keep it reserved.`);
+      }
     } else {
       throw new AgentUrnTakenError(agentUrn);
     }
@@ -447,7 +476,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
       resolvedSystemMemoryId = systemMemory.id;
     }
 
-    return tx.agent.create({
+    const agent = await tx.agent.create({
       data: {
         // #2171 (R211): a NEW Agent offers owner and member unless told otherwise.
         // The column default stays owner-only so no existing row changes meaning.
@@ -460,10 +489,15 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
         personaRole: personaRoleNorm,
         ...(input.usesTasks != null ? { usesTasks: input.usesTasks } : {}),
         ...(input.resetContextAfterTask != null ? { resetContextAfterTask: input.resetContextAfterTask } : {}),
+        ...(input.lifecycle != null ? { lifecycle: input.lifecycle } : {}),
+        ...(input.contextCap != null ? { contextCap: parseContextCap(input.contextCap) } : {}),
         createdBy: ctx.userId ?? ctx.clientId ?? null,
       },
       include: AGENT_INCLUDE,
     });
+    // #3833: the skeleton parents (boot, boot:rules, processes, tasks), only the locs the effective memory lacks.
+    await seedAgentSkeleton(tx, resolvedSystemMemoryId, ctx.userId ?? ctx.clientId ?? null);
+    return agent;
   }).catch((e: unknown) => {
     // #935: under CONCURRENT creates the pre-check above races — the loser
     // surfaces as P2002 on the agent (or derived system-memory) urn unique
@@ -482,7 +516,8 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // #2199 (cor:rag:010:01 r17): a memory promoted to class='system' is always summary-indexed. Its existing nodes were
   // written while it was an ordinary memory, so stamp them for the drain (post-commit; a fresh auto-provisioned memory
   // is empty and every later write enqueues itself). Never fails the create.
-  if (systemMemoryId && createdAgent.systemMemoryId) {
+  // #3833: a fresh memory now holds the seeded skeleton too, so stamp on every create.
+  if (createdAgent.systemMemoryId) {
     await backfillMemoryEmbeddings(ctx.db, createdAgent.systemMemoryId).catch((err) => {
       console.warn('[createAgent] system memory embedding backfill failed:', err);
     });
@@ -585,10 +620,18 @@ async function requireKnownImportedAgent(
   }
 }
 
+/** #4225 (S4b): a context cap is a whole number of tokens from 1 (the column is a 32-bit integer), or null for none. */
+function parseContextCap(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 1 || v > 2_147_483_647) {
+    throw new GraphQLError('contextCap is a whole number of tokens from 1 to 2147483647, or null for no cap.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  return v;
+}
+
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemMemoryId, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask, memberRoles }: { orgId?: string | null; name: string; description?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; memberRoles?: string[] | null },
+      { orgId, name, description, systemMemoryId, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask, lifecycle, contextCap, memberRoles }: { orgId?: string | null; name: string; description?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; lifecycle?: 'LONG_LIVED' | 'SHORT_LIVED' | null; contextCap?: number | null; memberRoles?: string[] | null },
       ctx: Context,
     ) => {
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
@@ -647,13 +690,15 @@ export const agentMutations = {
         personaRole,
         usesTasks,
         resetContextAfterTask,
+        lifecycle,
+        contextCap,
         memberRoles,
       });
     },
 
     updateAgent: async (
       _: unknown,
-      { ref, name, urn, description, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, registerDefaults, memberRoles }: { ref: string; name?: string; urn?: string; description?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; registerDefaults?: { mentionOnly?: boolean | null } | null; memberRoles?: string[] | null },
+      { ref, name, urn, description, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, lifecycle, contextCap, registerDefaults, memberRoles }: { ref: string; name?: string; urn?: string; description?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; lifecycle?: 'LONG_LIVED' | 'SHORT_LIVED' | null; contextCap?: number | null; registerDefaults?: { mentionOnly?: boolean | null } | null; memberRoles?: string[] | null },
       ctx: Context,
     ) => {
       // #929 review: normalize persona dressing (blank-after-trim clears).
@@ -1041,6 +1086,12 @@ export const agentMutations = {
           // #2162 (cor:agt:050:27, R116): the same gate and lock as usesTasks; null and omitted change nothing. Turning
           // it off cancels nothing in flight: a reset's claim re-reads it (SETTING_OFF).
           ...(resetContextAfterTask != null ? { resetContextAfterTask } : {}),
+          // #4224 (S3 of #4229): the same gate and lock as usesTasks; null and omitted change nothing. It moves no
+          // session or process by itself: the desired-state query reads it at each call.
+          ...(lifecycle != null ? { lifecycle } : {}),
+          // #4225 (S4b of #4229): the same gate and lock as usesTasks. Omitted leaves it; an explicit null clears it (no
+          // cap). Lowering or removing it cancels nothing in flight: a reset's claim re-reads it (SETTING_OFF).
+          ...(contextCap === null ? { contextCap: null } : contextCap !== undefined ? { contextCap: parseContextCap(contextCap) } : {}),
           // Spec 049 Phase 5: the install-row defaults — a scalar declaration,
           // stored as given; null clears to the platform defaults.
           ...(mergedPolicy !== undefined ? { installationPolicy: mergedPolicy } : {}),
@@ -1156,7 +1207,12 @@ export const agentMutations = {
           });
         }
         const deletedAt = new Date();
+        // #4172 D4 is vacuous on main: assertNoLiveAgentReferences (above) refuses deleting an agent installed in a live App, so a
+        // deleted parent never witnesses a derived install there; pinned in resolvers.agentUninstallDeparture4172.test.ts.
         await tx.agent.update({ where: { id }, data: { deletedAt } });
+        // #3690 / ruling 0259: any agent delete, soft delete included, is a departure. No FK action fires on a soft delete, so the grants
+        // the agent HOLDS end here, after the `agents FOR UPDATE` lock (afterLock below): the grant row lock is the last one.
+        await endHeldGrants(tx, 'agent', id);
         if (agent.systemMemoryId) {
           await tx.memory.updateMany({ where: { id: agent.systemMemoryId }, data: { deletedAt } });
         }
@@ -1355,7 +1411,7 @@ export const agentMutations = {
       });
       if (!isLifecycleActive(grant)) {
         throw new GraphQLError(
-          'An AgentOrgGrant already exists for this organization and Agent, but it is not active. Ask the Agent owner to issue a new grant or clear the revocation.',
+          'An AgentOrgGrant already exists for this organization and Agent, but it is not active. A revoked or expired grant is not reactivated by createAgentOrgGrant (cor:dmo:050:07).',
           {
             extensions: {
               code: 'AGENT_ORG_GRANT_INACTIVE',
@@ -1426,6 +1482,15 @@ export const agentMutations = {
               updatedBy: ctx.userId ?? ctx.clientId ?? null,
             },
           });
+          // #4172 (D3): the licence stopped being usable, so an install of this agent in the org's Apps that existed ONLY by derivation
+          // through an importing parent is gone. Candidates: the org's live Apps where a parent that imports it is installed.
+          const parents = await tx.agentImport.findMany({ where: { importedAgentId: resolvedAgentId }, select: { parentAgentId: true } });
+          const candidateApps = new Set<string>();
+          for (const { parentAgentId } of parents) {
+            for (const appId of await liveAppsWhereInstalled(tx, parentAgentId, resolvedOrgId)) candidateApps.add(appId);
+          }
+          await endGrantsOfAgentsNoLongerInstalled(
+            tx, [...candidateApps].map((appId) => ({ appId, agentId: resolvedAgentId })), ctx.userId ?? null);
           return tx.agentOrgGrant.findUnique({
             where: { orgId_agentId: { orgId: resolvedOrgId, agentId: resolvedAgentId } },
           });
@@ -1519,7 +1584,27 @@ export const agentMutations = {
       if (!edge) {
         await requireReadableAgent(ctx, await ctx.db.agent.findUnique({ where: { id: resolvedImportedId } }), importedAgentRef);
       }
-      await removeAgentImport(ctx.db, resolvedParentId, resolvedImportedId);
+      // #4172: one authorized transaction, so the edge delete and the grants it ends commit or roll back together.
+      // #4318: two removals whose parents were installed into each other's Apps between their fence reads can deadlock
+      // (40P01 aborts the whole transaction), so the WHOLE transaction is retried: each attempt re-takes the anchors,
+      // re-runs the re-check and re-reads the Apps under its own locks before deciding which grants end (one unit).
+      await retryOnDeadlock(() => withAuthorizedTx(
+        ctx,
+        [
+          { kind: 'agent', id: resolvedParentId },
+          ...(parent.organizationId ? [{ kind: 'org' as const, id: parent.organizationId }] : []),
+          ...(parent.ownerUserId ? [{ kind: 'user' as const, id: parent.ownerUserId }] : []),
+        ],
+        async (txCtx) => {
+          const current = await txCtx.db.agent.findUniqueOrThrow({ where: { id: resolvedParentId } });
+          if (current.organizationId !== parent.organizationId || current.ownerUserId !== parent.ownerUserId) {
+            throw new Error('Agent ownership changed; retry the operation');
+          }
+          await requireAgentAccess(txCtx, current, 'ADMIN');
+        },
+        (tx) => removeAgentImport(tx, resolvedParentId, resolvedImportedId, ctx.userId ?? null),
+        { lockMode: 'exclusive' },
+      ));
       return true;
     },
 
@@ -1754,6 +1839,7 @@ export const agentMutations = {
     ) => {
       try {
         const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, args.ownerType, args.ownerId);
+        await assertAiConfigAppOwnerInstalled(ctx.db, ownerWhere.appId);
         const name = validateAiConfigName(args.name);
         validateProviderAndParams(args.provider, args.params ?? null);
         validateParamRanges(args.provider, args.params ?? null);
@@ -1765,7 +1851,9 @@ export const agentMutations = {
         // No upsert: a P2002 from the partial unique (owner, name) index is
         // the duplicate-name typed error, not a retry (upsert is not
         // race-safe on the cold path).
-        const config = await ctx.db.aiServiceConfig.create({
+        const config = await ctx.db.$transaction(async (tx) => {
+          await lockAiConfigAppOwnerInstalled(tx, ownerWhere.appId);
+          return tx.aiServiceConfig.create({
           data: {
             ...ownerWhere,
             name,
@@ -1786,6 +1874,7 @@ export const agentMutations = {
             enabled: args.enabled ?? true,
             createdBy: ctx.userId ?? null,
           },
+          });
         });
         return toGqlAiServiceConfig(config);
       } catch (e: unknown) {
@@ -1816,7 +1905,8 @@ export const agentMutations = {
         const existing = await ctx.db.aiServiceConfig.findUnique({ where: { id: args.id } });
         if (!existing) throw new AiServiceConfigNotFoundError(args.id);
         const owner = aiConfigOwnerOf(existing);
-        await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
+        const { ownerWhere: updateOwnerWhere } = await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
+        await assertAiConfigAppOwnerInstalled(ctx.db, updateOwnerWhere.appId);
         if (args.params !== undefined) refuseLegacyBaseUrl(args.params);
         // Omitted = unchanged; null or '' = clear back to the provider default.
         const endpoint =
@@ -1847,6 +1937,7 @@ export const agentMutations = {
         // write can't leave a config the write-time rules refuse, including a
         // provider/style pair neither of two racing updates judged.
         const config = await ctx.db.$transaction(async (tx) => {
+          await lockAiConfigAppOwnerInstalled(tx, updateOwnerWhere.appId);
           const cur = await lockAiServiceConfig(tx, existing.id);
           if (!cur) throw new AiServiceConfigNotFoundError(args.id);
           const provider = judge(cur);
@@ -1880,11 +1971,11 @@ export const agentMutations = {
 
     testAiServiceConfig: async (
       _: unknown,
-      { id, override }: { id: string; override?: AiConfigTestOverride | null },
+      { id, override, chatProbe }: { id: string; override?: AiConfigTestOverride | null; chatProbe?: boolean | null },
       ctx: Context,
     ) => {
       try {
-        return await testAiServiceConfig(ctx, id, override ?? {});
+        return await testAiServiceConfig(ctx, id, override ?? {}, undefined, chatProbe === true);
       } catch (e) {
         rethrowAiConfigTyped(e);
       }
@@ -1895,8 +1986,11 @@ export const agentMutations = {
         const existing = await ctx.db.aiServiceConfig.findUnique({ where: { id } });
         if (!existing) throw new AiServiceConfigNotFoundError(id);
         const owner = aiConfigOwnerOf(existing);
-        await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
-        await ctx.db.aiServiceConfig.delete({ where: { id: existing.id } });
+        const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
+        await ctx.db.$transaction(async (tx) => {
+          await lockAiConfigAppOwnerInstalled(tx, ownerWhere.appId);
+          await tx.aiServiceConfig.delete({ where: { id: existing.id } });
+        });
         return true;
       } catch (e) {
         rethrowAiConfigTyped(e);

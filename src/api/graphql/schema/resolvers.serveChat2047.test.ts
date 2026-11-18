@@ -131,9 +131,9 @@ describe('#2047 chat', () => {
     const start = await M.startChat({}, { agentId: agent.id }, ctx());
     const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
     await recompileApproved(node, 'v2 {{agent.name}}');
-    const s2 = await serveChatPrompt(db, agent, app.id);
+    const s2 = await serveChatPrompt(db, agent, app.id, null, {db,userId:user.id,roles:['ADMIN']});
     await recompileApproved(node, 'v3 {{agent.name}}');
-    const s3 = await serveChatPrompt(db, agent, app.id);
+    const s3 = await serveChatPrompt(db, agent, app.id, null, {db,userId:user.id,roles:['ADMIN']});
     await Promise.all([recordChatServedIfChanged(db, chatNode.id, agent.id, app.id, s2), recordChatServedIfChanged(db, chatNode.id, agent.id, app.id, s3)]);
     const recs = await db.servedPrompt.findMany({ where: { chatId: chatNode.id }, orderBy: { ordinal: 'asc' } });
     expect(recs.map((r) => r.servedRevSeq).sort()).toEqual([1, 2, 3]);

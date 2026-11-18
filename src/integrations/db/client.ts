@@ -23,7 +23,15 @@ export const MODELS_WITHOUT_ID: ReadonlySet<string> = new Set(
 );
 
 const datasourceUrl = poolDatasourceUrl(process.env.DATABASE_URL, process.env);
-const basePrisma = new PrismaClient(datasourceUrl === undefined ? undefined : { datasourceUrl });
+/**
+ * #3997 (R12): a secret version's ciphertext is left out of every default select, at the client layer, so a reader that
+ * forgets a `select` still carries none. Only the store path and (S3) the read path ask for it by name
+ * (`omit: { valueEncrypted: false }`).
+ */
+const basePrisma = new PrismaClient({
+  ...(datasourceUrl === undefined ? {} : { datasourceUrl }),
+  omit: { secretVersion: { valueEncrypted: true } },
+});
 
 type NodeData = Record<string, unknown>;
 

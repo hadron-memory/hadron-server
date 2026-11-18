@@ -1,0 +1,21 @@
+# TEST-AUTHORED remaining-surface regression. NOT released/deployed client evidence for C1/R1(b).
+fragment AppDeliverySettingsFields on AppDeliverySettings {
+  darkAlarmWindowSeconds
+  batchWindowSeconds
+  busyDelaySeconds
+  stuckWindowSeconds
+  checkPeriodSeconds
+  failedChecksToOverdue
+}
+
+query TeamDeliverySettings($appRef: String!) {
+  appDeliverySettings(appRef: $appRef) {
+    ...AppDeliverySettingsFields
+  }
+}
+
+mutation TeamDeliverySettingsSet($appRef: String!, $input: AppDeliverySettingsInput!) {
+  setAppDeliverySettings(appRef: $appRef, input: $input) {
+    ...AppDeliverySettingsFields
+  }
+}

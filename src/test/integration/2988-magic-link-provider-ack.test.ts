@@ -10,10 +10,10 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { sendMagicLink } from '../../auth/email.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 
 const sendMock = vi.hoisted(() => vi.fn());
 vi.mock('resend', () => ({
@@ -33,14 +33,14 @@ let baseUrl: string;
 
 beforeAll(async () => {
   process.env.RESEND_API_KEY = 're_test_2988';
-  const app = await createServer();
+  const app = await createServerOnCleanDb();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 
 afterAll(async () => {
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await closeServerIfStarted(server);
 });
 
 beforeEach(async () => {

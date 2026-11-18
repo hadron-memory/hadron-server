@@ -1,4 +1,5 @@
 /** #3332: existing App participation gates, extracted without body changes. */
+import { isRunPrincipal } from './runPrincipal.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { cachedManagerOrgRole } from './managerOrgRoles.js';
 import { authorizationDenied } from './authorizationDenied.js';
@@ -127,3 +128,24 @@ export async function isAppParticipant(
   return false;
 }
 
+
+/**
+ * #3843 (CHECKED amendment 6766414749) — may this caller READ as a participant of `app`?
+ *  - a caller with a person (a user, or a hybrid user with a SELECTED active App) is judged by {@link isAppParticipant}
+ *    alone: a selected App is never App-key authority (findings:auth-appid-credential-vs-selection);
+ *  - a pure App key (authenticated with an `hdr_app_` key, `appKeyId` set) only for its OWN App;
+ *  - anything else is refused, including an anonymous caller and ANY headless run (`isRunPrincipal`), checked first
+ *    because an on-behalf-of run carries its person's `userId`: a run's `appId` is not an App key, and this grants no
+ *    run authority.
+ * Used by the served-prompt read (`readAgentServedBootPrompt`); `isAppParticipant` and the pointer fields are unchanged.
+ */
+export async function mayReadAsAppParticipant(
+  ctx: Context,
+  app: { id: string; organizationId: string | null; ownerUserId: string | null },
+): Promise<boolean> {
+  // A run first: an on-behalf-of run carries its person's userId, so a userId check alone can't tell it from that person.
+  if (isRunPrincipal(ctx)) return false;
+  if (ctx.userId) return await isAppParticipant(ctx, app);
+  if (!ctx.appKeyId) return false;
+  return !!ctx.appId && ctx.appId === app.id;
+}

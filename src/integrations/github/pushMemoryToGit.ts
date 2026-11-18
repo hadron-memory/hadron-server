@@ -16,6 +16,7 @@ import {
   nodeFilePath,
   orphanedLegacyPaths,
 } from './nodeFrontmatter.js';
+import { removeLegacySidecar } from './legacySidecar.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { hasIncompleteMirrorMutation } from './mirrorFileMutation.js';
 import { withMirrorCheckoutLock, EncryptedMemoryFenceError } from './mirrorCheckoutLock.js';
@@ -247,7 +248,7 @@ async function pushMemoryToGitUnderLock(
         const legacy = orphanedLegacyPaths(localPath, node.loc);
         // The same-memory LIVE snapshot is authoritative; stale/id-less parent READMEs must not roll back rows on sync (#3507).
         if (!liveLocs.has(node.loc + ':README')) rmSync(legacy.readme, { force: true });
-        rmSync(legacy.sidecar, { recursive: true, force: true });
+        removeLegacySidecar(legacy.sidecar);
       }
     }
 

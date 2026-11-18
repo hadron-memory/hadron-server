@@ -41,21 +41,20 @@ import { type ActAdmission, type ActInstruction } from '../../../lib/auth/instru
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { admitAppManagement, requireInstructedActKeepingRuns, callerIsWorkerSession, lockCallerSession, readActInstruction } from './resolvers.instruction.js';
 import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
-import { s7Available } from '../../../lib/tickers/s7Availability.js';
 import { isDeepStrictEqual } from 'node:util';
 import { GraphQLError, type GraphQLResolveInfo } from 'graphql';
 import { RegisterLookup, type RegisterEntry } from '../../../lib/actionRegister/lookup.js';
 import { boundedRead, emitTaskWarnings } from './resolvers.taskWarnings.js';
 import { tickCodeOfSlug } from '../../../lib/tickers/tickCode.js';
 import { loadDeliverySettings, parseDeliverySettingsPatch, validateDeliverySettings, type DeliverySettings } from '../../../lib/tickers/deliverySettings.js';
-import { Prisma } from '../../../generated/prisma/index.js';
+import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
+import { launchAfterTeamResume } from '../../../lib/hostOperations/launch.js';
 import { type Context, getAccessibleMemoryIds, pageArgs, pageEnvelope } from './resolvers.helpers.js';
 import {
   type TaskApp,
   type TaskActor,
   actorManagesApp,
   inTaskWriteTx,
-  admitOnHolderRight,
   loadApp,
   managerArmAfterOwn,
   recordInstructedManagerAct,
@@ -174,7 +173,7 @@ type TickerSettings = {
 };
 export const SETTINGS_SELECT = {
   tickerMinCadenceSeconds: true, tickerSelfSubscribeCadenceSeconds: true, tickerLiveCap: true, wakeDailyBudget: true,
-  deliveryBusyDelaySeconds: true, deliveryStuckWindowSeconds: true, deliveryStandbyEnabled: true, deliveryDarkAlarmWindowSeconds: true,
+  deliveryBusyDelaySeconds: true, deliveryStuckWindowSeconds: true, deliveryDarkAlarmWindowSeconds: true,
   deliveryCheckPeriodSeconds: true, deliveryFailedChecksToOverdue: true,
 } as const;
 
@@ -241,7 +240,7 @@ async function checkChannels(ctx: Context, ids: unknown): Promise<string[]> {
     select: { id: true, memoryId: true },
   });
   const accessible = await getAccessibleMemoryIds(ctx);
-  const ok = new Set(rows.filter((r) => accessible === null || accessible.includes(r.memoryId)).map((r) => r.id));
+  const ok = new Set(rows.filter((r) => accessible.includes(r.memoryId)).map((r) => r.id));
   if (unique.some((id) => !ok.has(id))) throw badInput('A channel in channelIds does not exist or is not readable by you.');
   return unique;
 }
@@ -754,25 +753,22 @@ export async function writeAppSettings(
       batchWindowSeconds: floor,
       busyDelaySeconds: patch.busyDelaySeconds ?? cur.deliveryBusyDelaySeconds,
       stuckWindowSeconds: patch.stuckWindowSeconds ?? cur.deliveryStuckWindowSeconds,
-      standbyEnabled: patch.standbyEnabled ?? cur.deliveryStandbyEnabled,
-      standbyEffective: false,
       checkPeriodSeconds: patch.checkPeriodSeconds ?? cur.deliveryCheckPeriodSeconds,
       failedChecksToOverdue: patch.failedChecksToOverdue ?? cur.deliveryFailedChecksToOverdue,
       darkAlarmWindowSeconds: patch.darkAlarmWindowSeconds ?? cur.deliveryDarkAlarmWindowSeconds,
     };
-    validateDeliverySettings(delivery, patch);
+    validateDeliverySettings(delivery);
     const written = {
       tickerMinCadenceSeconds: floor, tickerSelfSubscribeCadenceSeconds: self,
       tickerLiveCap: cap, wakeDailyBudget: budget,
       deliveryBusyDelaySeconds: delivery.busyDelaySeconds,
       deliveryStuckWindowSeconds: delivery.stuckWindowSeconds,
-      deliveryStandbyEnabled: delivery.standbyEnabled,
       deliveryCheckPeriodSeconds: delivery.checkPeriodSeconds,
       deliveryFailedChecksToOverdue: delivery.failedChecksToOverdue,
       deliveryDarkAlarmWindowSeconds: delivery.darkAlarmWindowSeconds,
     };
-    await tx.app.update({ where: { id: fresh.id }, data: written });
     if (Object.entries(written).some(([k, v]) => cur[k as keyof typeof written] !== v)) {
+      await tx.app.update({ where: { id: fresh.id }, data: written });
       await recordInstructedManagerAct(tx, fresh.id, actor, rawDeliveryPatch === undefined ? 'app.ticker-settings' : 'app.delivery-settings');
     }
     return { ticker: await settingsOut(tx, fresh.id), delivery: await loadDeliverySettings(tx, fresh.id) };
@@ -788,16 +784,22 @@ export async function writeTeamPause(ctx: Context, appRef: string, paused: boole
   const participated = await resolveParticipatedApp(ctx, appRef);
   const { app } = participated;
   const actor = withInstruction(participated.actor, instruction);
-  return writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
+  // #4223: the pause this call lifted, if it lifted one (reset on a retried attempt).
+  let lifted: Date | null = null;
+  const view = await writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
     if (!(await actorManagesApp(txCtx, fresh, actor, actor.instructed))) {
       throw taskError('FORBIDDEN', 'Only whoever manages this App can pause or resume the team.');
     }
     const cur = await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: { teamPausedAt: true } });
+    lifted = !paused ? cur.teamPausedAt : null;
     if (paused && !cur.teamPausedAt) await tx.app.update({ where: { id: fresh.id }, data: { teamPausedAt: new Date() } });
     if (!paused && cur.teamPausedAt) await tx.app.update({ where: { id: fresh.id }, data: { teamPausedAt: null, teamResumedAt: new Date() } }); // the end restarts every worker's check clock
     if (paused !== (cur.teamPausedAt !== null)) await recordInstructedManagerAct(tx, fresh.id, actor, paused ? 'team.pause' : 'team.resume');
     return { teamPausedAt: (await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: { teamPausedAt: true } })).teamPausedAt };
   }, { lockMode: 'exclusive' });
+  // #4223: the lift committed. Tasks assigned during the pause were not started (launchForAssignment); start them now.
+  if (lifted) await launchAfterTeamResume(ctx.db as PrismaClient, app.id, lifted);
+  return view;
 }
 
 // ── Settings projections ──────────────────────────────────────────────────
@@ -823,90 +825,11 @@ async function settingsOut(db: Pick<Context['db'], 'app' | 'worker'>, appId: str
 
 type WakeSettingsRow = {
   mentions: string; pausedUntil: Date | null;
-  isolatedUntil?: Date | null; isolatedAt?: Date | null; isolatedByUserId?: string | null;
 };
 function wakeSettingsOut(workerId: string, row: WakeSettingsRow | null) {
   return {
     workerId, mentions: row?.mentions ?? 'IMMEDIATE', pausedUntil: row?.pausedUntil ?? null,
-    // Inert until S7b: a stored isolation projects as none, matching its (absent) effect.
-    isolatedUntil: s7Available() ? row?.isolatedUntil ?? null : null, isolatedAt: s7Available() ? row?.isolatedAt ?? null : null,
-    isolatedByUserId: s7Available() ? row?.isolatedByUserId ?? null : null,
   };
-}
-
-// ── Isolation (S7, #2023, R85) ─────────────────────────────────────────────
-
-/** D-2026-10-16-005: the default; the maximum is an engineering bound (tunable), recorded in the S7 attach. */
-export const ISOLATION_DEFAULT_MS = 2 * 3_600_000;
-export const ISOLATION_MAX_MS = 7 * 24 * 3_600_000;
-const isolationForbidden = () => taskError(
-  'WORKER_ISOLATION_FORBIDDEN',
-  'Only a person managing this App, or the person holding this worker, acting as themselves, can isolate it or lift its isolation.',
-);
-
-/** #2660 / cor:agt:080:29: the same person-manager-or-holder predicate for the writer and its capability. S7 availability is separate. */
-async function canManageWorkerIsolation(
-  ctx: Context, app: TaskApp, actor: TaskActor | null,
-  worker: { heldByUserId: string | null; retiredAt: Date | null },
-): Promise<boolean> {
-  if (!actor || ctx.impersonation || ctx.sessionBindingRefused || app.uninstalledAt || worker.retiredAt) return false;
-  if (actor.kind === 'user') return await actorManagesApp(ctx, app, actor, actor.instructed) || worker.heldByUserId === actor.userId;
-  // #3321 (ruling 0118, cor:agt:080:29): a worker only on an instruction, on either right of its holder. A read carries
-  // none, so `canManageIsolation` stays false for a worker session. No other door's holder arm takes an instruction.
-  if (!actor.instructed) return false;
-  if (await actorManagesApp(ctx, app, actor, actor.instructed)) return true;
-  return admitOnHolderRight(ctx, app, actor, actor.instructed, () => worker.heldByUserId !== null && worker.heldByUserId === ctx.userId);
-}
-
-/**
- * The ONE isolation writer (GraphQL and MCP both reach it). Its audience is a human who manages the App or holds the
- * worker, as themselves, or their held worker on a clear instruction, recorded (ruling 0118; MCP passes none). Any other
- * worker session, an App key and an impersonation are refused, and the row is unchanged. Never reads or writes
- * paused_until: the worker's own pause is untouched (R85).
- */
-async function writeWorkerIsolation(
-  ctx: Context, workerRef: string, op: { kind: 'set'; until?: Date | string | null } | { kind: 'clear' }, instruction?: ActInstruction | null,
-) {
-  const target = await workerForRead(ctx, workerRef);
-  const app = await appOf(ctx, target.appId);
-  const resolved = await resolveTaskActor(ctx, app);
-  if (!resolved || (resolved.kind !== 'user' && instruction == null)) throw isolationForbidden();
-  const actor = withInstruction(resolved, instruction);
-  if (op.kind === 'set' && !s7Available()) {
-    throw taskError('WORKER_ISOLATION_UNAVAILABLE', 'Isolating a worker is not available yet (S7b). Nothing was changed.');
-  }
-  const until = op.kind === 'set' && op.until != null ? parseDate(op.until, 'until') : null;
-  const row = await writeInApp(ctx, app, actor, () => workerNotFound(workerRef), async (tx, txCtx, fresh) => {
-    const w = await lockWorker(tx, target.id);
-    if (!w || w.appId !== fresh.id || w.retiredAt) throw workerNotFound(workerRef);
-    if (!(await canManageWorkerIsolation(txCtx, fresh, actor, w))) throw isolationForbidden();
-    const now = new Date();
-    const stamp = updatedStamp(txCtx);
-    if (op.kind === 'clear') {
-      // #2755: an isolation still running ends now, and that moment is kept (see exemptEndedAt).
-      // An isolation that already expired keeps its own expiry as the end (the latest anchor wins).
-      const prior = await tx.workerWakeSettings.findUnique({ where: { workerId: w.id }, select: { isolatedUntil: true, exemptEndedAt: true } });
-      const ended = prior?.isolatedUntil ? (prior.isolatedUntil.getTime() > now.getTime() ? now : prior.isolatedUntil) : null;
-      const kept = ended && (!prior?.exemptEndedAt || prior.exemptEndedAt.getTime() < ended.getTime()) ? ended : null;
-      if (prior?.isolatedUntil) await recordInstructedManagerAct(tx, fresh.id, actor, 'worker.isolation-clear', { workerId: w.id });
-      return tx.workerWakeSettings.upsert({
-        where: { workerId: w.id },
-        create: { workerId: w.id },
-        update: { isolatedUntil: null, isolatedAt: null, isolatedByUserId: null, ...(kept ? { exemptEndedAt: kept } : {}) },
-      });
-    }
-    const end = until ?? new Date(now.getTime() + ISOLATION_DEFAULT_MS);
-    if (end.getTime() <= now.getTime()) throw badInput('until must be in the future.');
-    if (end.getTime() > now.getTime() + ISOLATION_MAX_MS) throw badInput(`until is at most ${ISOLATION_MAX_MS / 86_400_000} days ahead.`);
-    const set = { isolatedUntil: end, isolatedAt: now, isolatedByUserId: actor.userId };
-    await recordInstructedManagerAct(tx, fresh.id, actor, 'worker.isolate', { workerId: w.id });
-    return tx.workerWakeSettings.upsert({
-      where: { workerId: w.id },
-      create: { workerId: w.id, ...set, updatedBy: stamp.updatedBy, updatedByWorkerId: stamp.updatedByWorkerId, updatedByAgentId: stamp.updatedByAgentId },
-      update: { ...set, updatedAt: now, updatedBy: stamp.updatedBy, updatedByWorkerId: stamp.updatedByWorkerId, updatedByAgentId: stamp.updatedByAgentId },
-    });
-  });
-  return wakeSettingsOut(target.id, row);
 }
 
 // ── Subscriptions ─────────────────────────────────────────────────────────
@@ -976,6 +899,19 @@ async function changeSubscription(
     const worker = { id: w.id, name: w.name, heldByUserId: w.heldByUserId };
     if (op === 'subscribe') {
       if (w.retiredAt) throw taskError('WORKER_RETIRED', 'A retired worker cannot be subscribed.');
+      // #4234 (S11 of #4229): a SHORT_LIVED Agent's worker runs only while it holds a task and is handed no wake
+      // while stopped (`isStoppedShortLived`), so its ticks would mostly never fire. Refused, after authorization so
+      // the refusal discloses nothing to a caller who may not subscribe it. A plain read, no lock: a lifecycle change
+      // racing this write is covered by the delivery rule, which reads the lifecycle at every dueWakes.
+      // Unsubscribing stays allowed, for a subscription made before the Agent became short-lived.
+      const agent = await tx.agent.findUnique({ where: { id: w.agentId }, select: { lifecycle: true } });
+      if (agent?.lifecycle === 'SHORT_LIVED') {
+        throw taskError(
+          'TICKER_ON_SHORT_LIVED',
+          'This worker\'s Agent is short-lived: it runs only while it holds a task, so a ticker could not wake it. ' +
+            'Give it the work as a task instead. Nothing was changed.',
+        );
+      }
       if (live) return { subscription: live, authority: decision.authority, changed: false, ticker: t, worker, grantee };
       const created = await tx.tickerSubscription.create({
         data: {
@@ -1183,11 +1119,6 @@ const wakeAndGrantMutations = {
     return wakeSettingsOut(target.id, row);
   },
 
-  isolateWorker: (_: unknown, a: { workerRef: string; until?: Date | string | null; instruction?: ActInstruction | null }, ctx: Context) =>
-    writeWorkerIsolation(ctx, a.workerRef, { kind: 'set', until: a.until }, a.instruction),
-  clearWorkerIsolation: (_: unknown, a: { workerRef: string; instruction?: ActInstruction | null }, ctx: Context) =>
-    writeWorkerIsolation(ctx, a.workerRef, { kind: 'clear' }, a.instruction),
-
   // ── The may-subscribe-workers grant (cor:agt:080:24) ──────────────────────
 
   grantApp: (_: unknown, a: { appRef: string; workerRef: string; name: string }, ctx: Context) => changeGrant(ctx, a, 'grant'),
@@ -1297,7 +1228,7 @@ export const tickerFieldResolvers = {
       // The list is not a grant: show only the channels the reader can read.
       const accessible = await getAccessibleMemoryIds(ctx);
       const rows = await ctx.db.channel.findMany({ where: { id: { in: t.channelIds }, deletedAt: null } });
-      return rows.filter((c) => accessible === null || accessible.includes(c.memoryId));
+      return rows.filter((c) => accessible.includes(c.memoryId));
     },
     owner: (t: TickerRow, _: unknown, ctx: Context) => actorRef(ctx, t.ownerWorkerId, t.ownerUserId),
     subscribers: async (t: TickerRow, a: { first?: number | null; after?: string | null }, ctx: Context) => {
@@ -1341,12 +1272,6 @@ export const tickerFieldResolvers = {
   },
 
   WorkerWakeSettings: {
-    canManageIsolation: async (w: { workerId: string }, _: unknown, ctx: Context) => {
-      // Keep the existing read refusal before computing a permission; never reveal an unreadable worker.
-      const worker = await workerForRead(ctx, w.workerId);
-      const app = await appOf(ctx, worker.appId);
-      return canManageWorkerIsolation(ctx, app, await resolveTaskActor(ctx, app), worker);
-    },
     worker: (w: { workerId: string }, _: unknown, ctx: Context) => ctx.db.worker.findUnique({ where: { id: w.workerId } }),
     subscriptions: (w: { workerId: string }, _: unknown, ctx: Context) =>
       ctx.db.tickerSubscription.findMany({
@@ -1361,9 +1286,6 @@ export const tickerFieldResolvers = {
       });
       return fastest._min.cadenceSeconds ?? null;
     },
-    isolated: (w: { isolatedUntil?: Date | null }) => s7Available() && !!w.isolatedUntil && w.isolatedUntil.getTime() > Date.now(),
-    isolatedByHandle: async (w: { isolatedByUserId?: string | null }, _: unknown, ctx: Context) =>
-      w.isolatedByUserId ? (await ctx.db.user.findUnique({ where: { id: w.isolatedByUserId }, select: { handle: true } }))?.handle ?? null : null,
     dormant: async (w: { workerId: string }, _: unknown, ctx: Context) => {
       const worker = await ctx.db.worker.findUnique({ where: { id: w.workerId }, select: { app: { select: { sessionDormancyDays: true } } } });
       if (!worker) return false;

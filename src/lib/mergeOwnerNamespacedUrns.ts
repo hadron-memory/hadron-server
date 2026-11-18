@@ -137,11 +137,11 @@ export async function mergeOwnerNamespacedUrns(
       desiredSlug: slugOf(a.urn),
       authorRoot,
       isTaken: (u) =>
-        tx.agent.findFirst({ where: { urn: u, deletedAt: null }, select: { id: true } }).then(Boolean),
+        tx.agent.findFirst({ where: { urn: u, OR: [{ deletedAt: null }, { installMemories: { some: {} } }] }, select: { id: true } }).then(Boolean),
     });
     // Surgical reclaim of a soft-deleted holder at this exact URN — see the
     // memory loop above (agents.urn is likewise a full unique over tombstones).
-    await tx.agent.deleteMany({ where: { urn: newUrn, deletedAt: { not: null } } });
+    await tx.agent.deleteMany({ where: { urn: newUrn, deletedAt: { not: null }, installMemories: { none: {} } } });
     await tx.agent.update({
       where: { id: a.id },
       data: { urn: newUrn, ownerUserId: targetUserId, legacyUrn: a.urn },

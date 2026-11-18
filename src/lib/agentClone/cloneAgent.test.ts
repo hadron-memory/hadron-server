@@ -164,3 +164,14 @@ describe('cloneAgent: refusals leave nothing behind', () => {
     expect(await codeOf(clone(readerA, { source: src.urn, target: orgA.urn }))).toBe('FORBIDDEN');
   });
 });
+
+it('does not reclaim an Agent tombstone that retains install-memory provenance', async () => {
+ const src=await sourceAgent(orgA,'ORGANIZATION');
+ const ghost=await sourceAgent(orgA,'ORGANIZATION','held');
+ await db.agent.update({where:{id:ghost.id},data:{deletedAt:new Date()}});
+ await db.memory.update({where:{id:ghost.memId},data:{deletedAt:new Date()}});
+ const app=await db.app.create({data:{id:generateId(),ownerUserId:adminA,name:'Retained',urn:'clone-retained-app'}});
+ const memory=await db.memory.create({data:{class:'system',appId:app.id,ownerUserId:adminA,isInstallMemory:true,installOfAgentId:ghost.id,name:'Retained',urn:'clone-retained-memory'}});
+ expect(await codeOf(clone(adminA,{source:src.urn,target:orgA.urn,slug:'held'}))).toBe('AGENT_URN_TAKEN');
+ expect((await db.memory.findUniqueOrThrow({where:{id:memory.id}})).installOfAgentId).toBe(ghost.id);
+});

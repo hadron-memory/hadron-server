@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from 'fs';
 import { validateNodeDataExtractionSpecs } from '../../lib/edge-conditions/reserved-names.js';
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
 import { join, relative, sep, basename, dirname } from 'path';
+import { isReservedSidecarName } from '../github/legacySidecar.js';
 import { parse } from 'yaml';
 import type { Node } from '../../index.d.js';
 import { NodeAbstractTooLongError } from '../../lib/entityRef/errors.js';
@@ -637,6 +638,8 @@ function loadSidecarEdges(mdPath: string): Array<LoadedEdge> {
     ? join(dirname(dir), '.' + basename(dir))   // server/README.md → .server/
     : join(dir, '.' + fileName);                 // architecture.md → .architecture/
 
+  // #3264: the same reserved set the mirror's cleanup refuses to touch, so a stale edges.yaml there cannot mask inline edges.
+  if (isReservedSidecarName(basename(sidecarDir))) return [];
   const edgesPath = join(sidecarDir, 'edges.yaml');
   if (!existsSync(edgesPath)) return [];
 

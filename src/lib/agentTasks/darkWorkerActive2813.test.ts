@@ -19,7 +19,6 @@ import { runAsActor } from '../requestActor.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../middleware/auth.js';
 import { randomBytes } from 'node:crypto';
 import { sessionActivityAt } from '../sessionActivity.js';
-import { setS7AvailableForTest } from '../tickers/s7Availability.js';
 
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 

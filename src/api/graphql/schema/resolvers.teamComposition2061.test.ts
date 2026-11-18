@@ -129,7 +129,9 @@ describe('#2061 teamComposition', () => {
       expect((result.data as any).teamComposition.appId).toBe(appId);
       expect(load).toHaveBeenCalledTimes(1);
       expect(transaction).toHaveBeenCalledTimes(1);
-      expect(transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'RepeatableRead', timeout: 20_000 });
+      // #4455: the team read's interactive transaction is bounded at 5 s with an explicit 2 s pool maxWait
+      // (the 20 s budget was the #4380 P2028 incident's steady holder).
+      expect(transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'RepeatableRead', timeout: 5_000, maxWait: 2_000 });
       expect(Object.is(load.mock.calls[0][0], db)).toBe(false);
       expect(load.mock.calls[0][1]).toBe(appId);
     } finally {

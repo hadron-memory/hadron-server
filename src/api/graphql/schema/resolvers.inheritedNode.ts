@@ -28,6 +28,7 @@
  * inherited node without `via` still reads as having none.
  */
 
+import { validateListPageInput } from '../../../lib/listPage.js';
 import { resolveInheritedEdges, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { isMemoryReadableCached } from './resolvers.helpers.js';
 import type { Context } from './resolvers.js';
@@ -43,12 +44,14 @@ async function inheritedEdges(parent: { id: string; inheritedFrom?: InheritedFro
   const via = parent.inheritedFrom?.via;
   if (!via) return [];
   const load = async (remaining?: number) => {
-    const resolved = await resolveInheritedEdges(ctx.db, {
+    const args = {
       nodeId: parent.id, via, direction,
-      canReadMemory: (memoryId) => isMemoryReadableCached(ctx, memoryId),
-      maxResults: remaining, identityOnly: remaining !== undefined,
+      canReadMemory: (memoryId: string) => isMemoryReadableCached(ctx, memoryId),
       onLimit: batchReadEdgeOverflow,
-    });
+    };
+    const resolved = remaining === undefined
+      ? await resolveInheritedEdges(ctx.db, args)
+      : await resolveInheritedEdges(ctx.db, { ...args, maxResults: remaining, identityOnly: true });
     return resolved.map(({ edge, endpoint }) => {
       if (remaining === undefined) return direction === 'out'
         ? { ...edge, sourceId: parent.id, source: parent, targetId: endpoint.id, target: endpoint }
@@ -66,7 +69,7 @@ async function inheritedEdges(parent: { id: string; inheritedFrom?: InheritedFro
 }
 
 /** Field → what an inherited node returns, given the field's normal value. */
-const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: any, ctx: any) => unknown> = {
+const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: any, ctx: any, args?: any) => unknown> = {
   // Ordinary inherited reads admit only live nodes; recovery never inherits.
   deletedAt: none,
   memory: none,
@@ -85,6 +88,10 @@ const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: a
   asComment: none,
   asset: none,
   signingRequests: empty,
+  signingRequestsPage: (_value, _parent, _ctx, args) => {
+    validateListPageInput(args ?? {});
+    return { items: [], total: 0, hasMore: false, nextCursor: null };
+  },
   commentSummary: () => ({ openThreads: 0, resolvedThreads: 0, comments: 0, viewerOpenThreadId: null, oldestOpenThreadAt: null }),
   approvalStatus: async (value) => {
     const s = await value();
@@ -102,6 +109,8 @@ const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: a
     const s = await value();
     return { state: s.state, latestReport: null };
   },
+  // #3659: the rules are the base memory's, and a report is recorded against the base node.
+  validationTasks: none,
 };
 
 /** The fields {@link withInheritedNodeProjection} covers, for the drift pin. */
@@ -114,7 +123,7 @@ export function withInheritedNodeProjection<T extends Record<string, any>>(node:
     const original: Resolver = node[field] ?? ((parent) => parent[field]);
     out[field] = (parent, args, ctx, info) =>
       parent?.inheritedFrom
-        ? project(async () => original(parent, args, ctx, info), parent, ctx)
+        ? project(async () => original(parent, args, ctx, info), parent, ctx, args)
         : original(parent, args, ctx, info);
   }
   return out as T;

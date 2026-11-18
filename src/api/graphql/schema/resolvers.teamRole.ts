@@ -24,7 +24,7 @@ import { listAppInstallationsWithDerivedLicense } from '../../../lib/appAgent.js
 // provenance to tidy a field with no reader.
 
 import { GraphQLError } from 'graphql';
-import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { resolveAppRefConcealed } from '../../../lib/auth/workerRead.js';
 import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
@@ -237,7 +237,7 @@ type AppRow = {
 };
 
 async function resolveApp(ctx: Context, appRef: string): Promise<AppRow> {
-  const { id: appId } = await resolveAppRef(ctx.db, appRef);
+  const { id: appId } = await resolveAppRefConcealed(ctx.db, appRef);
   return ctx.db.app.findUniqueOrThrow({ where: { id: appId } }) as Promise<AppRow>;
 }
 
@@ -720,12 +720,13 @@ export const teamRoleQueries = {
     ctx: Context,
   ) => {
     const app = await resolveApp(ctx, appRef);
+    // #3977: the read gate decides can-reach first and answers a deleted App as an absent one.
+    await requireWorkerReadAccess(ctx, app);
     if (app.deletedAt) {
       throw new GraphQLError(`App not found: ${appRef}`, {
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }
-    await requireWorkerReadAccess(ctx, app);
     const teamAgent = await locateTeamAgent(ctx, app.id, teamAgentRef);
     if (!teamAgent.systemMemoryId) {
       return { items: [], total: 0 };

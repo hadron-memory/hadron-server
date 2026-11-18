@@ -9,7 +9,7 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { buildSchema, parse, print } from 'graphql';
 import { getComplexity, simpleEstimator } from 'graphql-query-complexity';
-import { createServer } from '../../server.js';
+import { createServerOnCleanDb } from '../../test/startServerFixture.js';
 import { resolvers } from './schema/resolvers.js';
 import { typeDefs } from './schema/typeDefs.js';
 import { readGraphqlAdmissionConfig, GRAPHQL_ADMISSION_DEFAULTS, type GraphqlAdmissionConfig } from './admission.js';
@@ -30,21 +30,28 @@ const REVIEWED_PAGED_FIELDS = [
   "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
   "Mutation.claimUntrackedTaskItems", // #3125 S3: limit default 1, cap 10; common omitted bound 100 is conservative.
   "Mutation.collectHostOperations",
+  "Mutation.planNodeMove", // #3424: limit default100/cap1000; common omitted bound100 matches.
   "Node.lintWarnings",
   "Node.signingRequests",
+  "Node.signingRequestsPage", // #4123: default20/cap100, bounded SQL take+1 after effective-state filter.
   "NodeApprovalReceipt.lintWarnings",
+  "PublicOrganization.publicAgentsPage", // #3873: pageArgs, default 20, cap 200.
+  "PublicOrganization.publicMemoriesPage", // #3873: pageArgs, default 20, cap 200.
   "Query.actionRegisterIndex", // #3287: pageArgs, default 20, cap 200; below the common 100, so omission overestimates.
   "Query.actionTickets",
   "Query.agentAssets",
   "Query.agentSchedules",
   "Query.agentSubscriptionsPage", // #2213 S2: pageArgs, default 20, cap 200.
+  "Query.agentTaskExternalIdChanges", // #4084: clampListTake with a floor of 1, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.agentTaskList", // #2421: limit applies only when symptom is present; default 3, cap 3.
   "Query.agentTasks",
   "Query.agentTeamEvents",
+  "Query.agentTeamEventsPage", // #3933: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.agentWebhooks",
   "Query.agents",
   "Query.aiModelPrices",
   "Query.aiServiceConfigs",
+  "Query.appGrants", // #3711: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.appKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.appMemoryScope",
   "Query.appNodes",
@@ -59,7 +66,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.channelMessages",
   "Query.channels",
   "Query.chatHistory",
-  "Query.chatServedPrompts", // #2862: default 50, cap 200 (the field's own paging); under the shared 100 default.
+  "Query.chatServedPrompts", // #2862: default 20, cap 200 (the field's own paging); under the shared 100 default.
   "Query.commentThreads",
   "Query.compiledPromptProvenance",
   "Query.connectionGrants",
@@ -75,9 +82,12 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.findNodes",
   "Query.findObjects",
   "Query.globalSearch",
+  "Query.grantActions", // #3708: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
+  "Query.grants", // #3789: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.heldWorkers",
   "Query.homeAssistantInstances",
   "Query.hostOperations",
+  "Query.hostSweepRuns",
   "Query.impersonationSessions",
   "Query.marketplaceAgents",
   "Query.marketplaceMemories",
@@ -92,11 +102,13 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.myAgentSubscriptionsPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.myChats",
   "Query.myChatsPage", // #2212 A3: pageArgs, default 20, cap 200.
+  "Query.myGrants", // #3800: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.myUserApiKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.nodeEdgeRemovals",
   "Query.nodeRevisions",
   "Query.nodeRevisionsPage",
   "Query.nodeUsage",
+  "Query.orgBootPromptSigningPreview", // #2973 PR2: default 50, cap 200; the common omitted bound 100 is conservative.
   "Query.organizations",
   "Query.principalGrants",
   "Query.publicAgents",
@@ -106,6 +118,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.registerRoleCandidates", // #2608: limit default 20, cap 200 (clampListTake); below the common 100, so omission overestimates.
   "Query.resendSenders",
   "Query.scopes",
+  "Query.secretEvents", // #3997: limit default 20, cap 200 (clampListTake); below the common 100, so omission overestimates.
   "Query.secrets",
   "Query.sessions",
   "Query.sessionsPage",
@@ -125,7 +138,10 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.usageEventsPage",
   "Query.users",
   "Query.validateMemory",
+  "Query.webPolls", // #4123: bounded compatibility list.
+  "Query.webPollsPage", // #4123: default20/cap100.
   "Query.workers",
+  "Secret.versions", // #3997: pageArgs default 20, cap 200; below the common 100, so omission overestimates.
   "ServedPrompt.currentLint", // #2048: default 50, cap 100; shared pageLintWarnings.
   "ServedPrompt.provenance",
   "Session.servedPrompts",
@@ -141,7 +157,7 @@ async function boot(env: Record<string, string> = {}): Promise<string> {
   const saved: Record<string, string | undefined> = {};
   for (const k of Object.keys(env)) { saved[k] = process.env[k]; process.env[k] = env[k]; }
   try {
-    const server = createHttpServer(await createServer());
+    const server = createHttpServer(await createServerOnCleanDb());
     servers.push(server);
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -155,7 +171,7 @@ const post = (base: string, body: unknown): Promise<Reply> =>
 const Query = resolvers.Query as Record<string, (...a: unknown[]) => unknown>;
 let nodeSpy: ReturnType<typeof vi.spyOn>;
 let edgesSpy: ReturnType<typeof vi.spyOn>;
-let usageSpy: ReturnType<typeof vi.spyOn>;
+let sessionsSpy: ReturnType<typeof vi.spyOn>;
 let serverInfoSpy: ReturnType<typeof vi.spyOn>;
 let logSpy: { mock: { calls: unknown[][] }; mockRestore(): void };
 
@@ -164,18 +180,19 @@ const l4Lines = (): Array<Record<string, unknown>> =>
 const noResolverCalls = () => {
   expect(nodeSpy).not.toHaveBeenCalled();
   expect(edgesSpy).not.toHaveBeenCalled();
-  expect(usageSpy).not.toHaveBeenCalled();
+  expect(sessionsSpy).not.toHaveBeenCalled();
   expect(serverInfoSpy).not.toHaveBeenCalled();
 };
 
 beforeAll(() => {
   nodeSpy = vi.spyOn(Query, 'node').mockResolvedValue(null as never);
   edgesSpy = vi.spyOn(Query, 'edges').mockResolvedValue({ items: [], total: 0 } as never);
-  usageSpy = vi.spyOn(Query, 'usageEvents').mockResolvedValue([] as never);
+  // #2817: `usageEvents` now clamps through pageArgs (PAGE_ARGS_FIELDS), so the raw-size stand-in is `sessions`.
+  sessionsSpy = vi.spyOn(Query, 'sessions').mockResolvedValue([] as never);
   serverInfoSpy = vi.spyOn(Query, 'serverInfo').mockResolvedValue({ version: 'test' } as never);
 });
 beforeEach(() => {
-  nodeSpy.mockClear(); edgesSpy.mockClear(); usageSpy.mockClear(); serverInfoSpy.mockClear();
+  nodeSpy.mockClear(); edgesSpy.mockClear(); sessionsSpy.mockClear(); serverInfoSpy.mockClear();
   logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined) as unknown as typeof logSpy;
 });
 afterEach(() => { logSpy.mockRestore(); });
@@ -285,7 +302,7 @@ describe('cost (graphql-query-complexity), enforce', () => {
   });
 
   it('a list that states its page size multiplies by it; a wrapper around a list does too (the dominant shape)', () => {
-    expect(cost('{ usageEvents(limit: 200) { id } }')).toBe(1 + 200 * 1);
+    expect(cost('{ sessions(limit: 200) { id } }')).toBe(1 + 200 * 1);
     // edges is EdgesPage { items [Edge] total }: items costs 1 + 10 x 1 = 11, total 1, wrapper = 1 + (200 / 10) x 12
     expect(cost('{ edges(limit: 200) { items { id } total } }')).toBe(1 + 20 * 12);
     // below the factor the wrapper never goes under its children
@@ -300,10 +317,10 @@ describe('cost (graphql-query-complexity), enforce', () => {
   });
 
   it('zero is not free, a negative size is its magnitude, and omitted/null falls back to the largest common default', () => {
-    expect(cost('{ usageEvents(limit: 0) { id } }')).toBe(1 + 1);
-    expect(cost('{ usageEvents(limit: -300) { id } }')).toBe(1 + 300);
-    expect(cost('{ usageEvents { id } }')).toBe(1 + 100);
-    expect(cost('{ usageEvents(limit: null) { id } }')).toBe(1 + 100);
+    expect(cost('{ sessions(limit: 0) { id } }')).toBe(1 + 1);
+    expect(cost('{ sessions(limit: -300) { id } }')).toBe(1 + 300);
+    expect(cost('{ sessions { id } }')).toBe(1 + 100);
+    expect(cost('{ sessions(limit: null) { id } }')).toBe(1 + 100);
     expect(cost('{ memoryNodes(memoryRef: "m") { nodes { id } } }')).toBe(1 + 100 * (1 + 10));
   });
 
@@ -353,13 +370,13 @@ describe('cost (graphql-query-complexity), enforce', () => {
   });
 
   it('saturates: a huge page size cannot wrap around or go non-finite', () => {
-    expect(cost('{ usageEvents(limit: 2147483647) { id } }')).toBe(25_001);
+    expect(cost('{ sessions(limit: 2147483647) { id } }')).toBe(25_001);
     expect(cost('{ edges(limit: 2147483647) { items { id } } }')).toBe(25_001);
   });
 
   it('mutant control: the simple estimator alone undercounts both pins (so they bite)', () => {
     const simple = (q: string) => getComplexity({ schema, query: parse(q), variables: {}, estimators: [simpleEstimator({ defaultComplexity: 1 })] });
-    expect(simple('{ usageEvents(limit: 2147483647) { id } }')).toBe(2);
+    expect(simple('{ sessions(limit: 2147483647) { id } }')).toBe(2);
     expect(simple('{ edges(limit: 5000) { items { id } } }')).toBeLessThan(10);
   });
 
@@ -398,8 +415,8 @@ describe('cost (graphql-query-complexity), enforce', () => {
 
     it('limit 2147483647 on a list is refused, as a literal and as a variable', async () => {
       for (const body of [
-        { query: '{ usageEvents(limit: 2147483647) { id } }' },
-        { query: 'query($n: Int) { usageEvents(limit: $n) { id } }', variables: { n: 2147483647 } },
+        { query: '{ sessions(limit: 2147483647) { id } }' },
+        { query: 'query($n: Int) { sessions(limit: $n) { id } }', variables: { n: 2147483647 } },
         { query: 'query($n: Int) { edges(limit: $n) { items { id } } }', variables: { n: 2147483647 } },
       ]) {
         const res = await post(base, body);
@@ -416,18 +433,18 @@ describe('cost (graphql-query-complexity), enforce', () => {
     });
 
     it('the unselected operation is never costed: an over-limit A does not stop B', async () => {
-      const doc = `query A { ${'usageEvents(limit: 2147483647) { id } '} } query B { serverInfo { version } }`;
+      const doc = `query A { ${'sessions(limit: 2147483647) { id } '} } query B { serverInfo { version } }`;
       const b = await post(base, { query: doc, operationName: 'B' });
       expect((await b.json()).errors).toBeUndefined();
       expect(serverInfoSpy).toHaveBeenCalledTimes(1);
-      expect(usageSpy).not.toHaveBeenCalled();
+      expect(sessionsSpy).not.toHaveBeenCalled();
       expect(l4Lines().filter((l) => l.outcome !== 'near_limit')).toEqual([]);
       const a = await post(base, { query: doc, operationName: 'A' });
       expect(a.status).toBe(400);
     });
 
     it('a bad variable gets the ordinary variable error, not this refusal, and no resolver call or L4 line', async () => {
-      const res = await post(base, { query: 'query($n: Int) { usageEvents(limit: $n) { id } }', variables: { n: 'x' } });
+      const res = await post(base, { query: 'query($n: Int) { sessions(limit: $n) { id } }', variables: { n: 'x' } });
       const body = await res.json();
       expect(body.errors[0].extensions.code).not.toBe(QUERY_TOO_COMPLEX);
       expect(body.errors[0].message).toBe('Invalid GraphQL variable input.');
@@ -448,31 +465,31 @@ describe('cost (graphql-query-complexity), enforce', () => {
 });
 
 describe('modes', () => {
-  const over = { query: '{ usageEvents(limit: 2147483647) { id } }' };
+  const over = { query: '{ sessions(limit: 2147483647) { id } }' };
 
   it('observe: the same over-limit request executes and returns its data; exactly one would_refuse line, with no source or values in it', async () => {
     const base = await boot({ GRAPHQL_COMPLEXITY_MODE: 'observe' });
     const marker = 'MARKER_ARG_VALUE_123';
-    const res = await post(base, { query: 'query Probe($m: String) { MARKER_ALIAS_QQ: usageEvents(limit: 2147483647, loc: $m) { id } }', variables: { m: marker } });
+    const res = await post(base, { query: 'query Probe($m: String) { MARKER_ALIAS_QQ: sessions(limit: 2147483647, repo: $m) { id } }', variables: { m: marker } });
     const body = await res.json();
     expect(body.errors).toBeUndefined();
-    expect(usageSpy).toHaveBeenCalledTimes(1);
+    expect(sessionsSpy).toHaveBeenCalledTimes(1);
     const lines = l4Lines().filter((l) => l.outcome === 'would_refuse');
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatchObject({ mode: 'observe', outcome: 'would_refuse', limit: 'cost', max: 200_000, operationType: 'query', operationName: 'Probe', principal: 'anonymous' });
     expect(typeof lines[0]!.queryHash).toBe('string');
     expect(JSON.stringify(lines)).not.toContain(marker);
-    expect(JSON.stringify(lines)).not.toContain('usageEvents');
+    expect(JSON.stringify(lines)).not.toContain('sessions');
     expect(JSON.stringify(lines)).not.toContain('MARKER_ALIAS_QQ');
   });
 
   it('the same request is refused under enforce and admitted under observe: only the environment differs', async () => {
     const enforce = await post(await boot({ GRAPHQL_COMPLEXITY_MODE: 'enforce' }), over);
     expect(enforce.status).toBe(400);
-    expect(usageSpy).not.toHaveBeenCalled();
+    expect(sessionsSpy).not.toHaveBeenCalled();
     const observe = await post(await boot({ GRAPHQL_COMPLEXITY_MODE: 'observe' }), over);
     expect((await observe.json()).errors).toBeUndefined();
-    expect(usageSpy).toHaveBeenCalledTimes(1);
+    expect(sessionsSpy).toHaveBeenCalledTimes(1);
   });
 
   it('an unset mode is enforce, and off, Observe, an empty value or a number refuse boot without echoing it', async () => {
@@ -484,7 +501,7 @@ describe('modes', () => {
       if (bad) expect(message).not.toContain(bad);
     }
     process.env.GRAPHQL_COMPLEXITY_MODE = 'off';
-    try { await expect(createServer()).rejects.toThrow(/refusing to boot/); } finally { delete process.env.GRAPHQL_COMPLEXITY_MODE; }
+    try { await expect(createServerOnCleanDb()).rejects.toThrow(/refusing to boot/); } finally { delete process.env.GRAPHQL_COMPLEXITY_MODE; }
   });
 
   it('observe still measures every request (near_limit is reported) and logs the boot configuration line', async () => {
@@ -538,7 +555,7 @@ describe('plugin branches the stack cannot reach', () => {
       const esm = await import('graphql/index.mjs');
       const foreign = esm.buildSchema(typeDefs);
       const cjs = require('graphql');
-      const document = cjs.parse('{ usageEvents(limit: 2147483647) { id } }');
+      const document = cjs.parse('{ sessions(limit: 2147483647) { id } }');
       const lines = [];
       const plugin = complexityAdmissionPlugin({ maxDepth: 12, maxCost: 25000, listFactor: 10, complexityMode: 'observe' }, { log: (l) => lines.push(l) });
       const hooks = await plugin.requestDidStart({});
@@ -554,14 +571,14 @@ describe('plugin branches the stack cannot reach', () => {
   it('operation names are untrusted labels: only a plain identifier is logged, cut to 100 characters', async () => {
     const lines: string[] = [];
     const p = complexityAdmissionPlugin(cfg('observe'), { log: (l) => lines.push(l) });
-    await run(p, 'query Ok { usageEvents(limit: 2147483647) { id } }', { request: { variables: {}, operationName: 'x"; DROP' } });
-    await run(p, 'query Ok { usageEvents(limit: 2147483646) { id } }', { queryHash: 'h2', request: { variables: {}, operationName: 'A'.repeat(300) } });
+    await run(p, 'query Ok { sessions(limit: 2147483647) { id } }', { request: { variables: {}, operationName: 'x"; DROP' } });
+    await run(p, 'query Ok { sessions(limit: 2147483646) { id } }', { queryHash: 'h2', request: { variables: {}, operationName: 'A'.repeat(300) } });
     expect(JSON.parse(lines[0]!).operationName).toBeNull();
     expect(JSON.parse(lines[1]!).operationName).toBeNull(); // 300 chars exceeds the identifier bound
   });
 
   describe('log bounds', () => {
-    const overQuery = 'query { usageEvents(limit: 2147483647) { id } }';
+    const overQuery = 'query { sessions(limit: 2147483647) { id } }';
     it('100 identical over-limit requests log one line; the count rides on the next permitted line, never as an extra line', async () => {
       let t = 1_000_000;
       const lines: string[] = [];
@@ -626,7 +643,7 @@ describe('plugin branches the stack cannot reach', () => {
     it('the printed query never reaches the log', async () => {
       const lines: string[] = [];
       const p = complexityAdmissionPlugin(cfg('observe'), { log: (l) => lines.push(l) });
-      await run(p, 'query Probe { usageEvents(limit: 2147483647, loc: "SECRET_LITERAL") { id } }');
+      await run(p, 'query Probe { sessions(limit: 2147483647, repo: "SECRET_LITERAL") { id } }');
       expect(lines.join('')).not.toContain('SECRET_LITERAL');
       expect(print(parse(small))).toBeTruthy();
     });

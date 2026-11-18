@@ -14,7 +14,6 @@ import type { FindingCounts } from './findings.js';
  * passing a bag through.
  */
 
-import { raiseDeliveredOnAssignment } from '../tickers/standbyAssignment.js';
 import type { Prisma } from '../../generated/prisma/index.js';
 import { currentActor } from '../requestActor.js';
 import { generateId } from '../id.js';
@@ -43,6 +42,8 @@ export const TASK_EVENT_TYPES = [
   'task.properties-changed',
   // #2651 (cor:agt:050:29): a started task handed back by its assignee; the reason code only, never its text.
   'task.handed-back',
+  // #4084 (cor:agt:120:02, V87 Proposed): a task's external id released; the payload names the released id.
+  'task.external-id-released',
 ] as const;
 export type TaskEventType = (typeof TASK_EVENT_TYPES)[number];
 
@@ -62,8 +63,18 @@ export const ASSIGNMENT_EVENT_TYPES = ['assignment.queued', 'assignment.matched'
  */
 export const ASSIGNED_EVENT_TYPES = ['task.assigned', 'task.reassigned', 'assignment.matched'] as const;
 
+/**
+ * #3934 (cor:agt:050:02): the events that CLEAR a task's assignee, so whoever held it stops holding it there. A hand-back to the
+ * queue is the only writer that does (a park to backlog refuses an assigned task, and a worker cannot be deleted while it holds
+ * one). Typed against the event union below, so renaming the event type on the writer side breaks the build here instead of
+ * silently desynchronising the reader of the holding stints (`endedAlarmEpisodeInstants`).
+ */
+export const ASSIGNEE_CLEARED_EVENT_TYPES = ['task.handed-back'] as const satisfies readonly TaskEventPayload['type'][];
+
 /** Passive history must be excluded from EVERY later-event/activity predicate when a kind is added here. */
-export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed'] as const;
+// #4286: a defect link (review.defect-linked) is a QA fact about the task, not its assignee acting on it, so it never
+// clears an assignment or child-end wake (taskWakes.ts).
+export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed', 'task.external-id-released', 'review.defect-linked'] as const;
 /** #2609: only facts already readable by every team-event reader. Assignee state and future codes are excluded. */
 export const RECORDED_TASK_WARNING_CODES = ['task.create.no-source', 'task.finish.open-children'] as const;
 export type RecordedTaskWarningCode = (typeof RECORDED_TASK_WARNING_CODES)[number];
@@ -113,6 +124,17 @@ export type TaskEventPayload =
   | { type: 'task.cancelled'; fromStatus: 'backlog' | 'pending' | 'started'; openChildCount: number }
   /** #2651: the code only. The optional reason text is on the task row, never here (cor:agt:050:29). */
   | { type: 'task.handed-back'; code: TaskHandBackCode }
+  /**
+   * #4280 (S12b, Proposed cor:agt:130:05): a defect found after the PR merged traces to this build task's PR. `defect`
+   * is the issue URL as given; `introducedAtHead` a head frozen on this task, or null. Never a readiness input.
+   */
+  | { type: 'review.defect-linked'; defect: string; introducedAtHead: string | null }
+  /**
+   * #4084 (cor:agt:120:02, V87 Proposed): the external id a release cleared. The id is readable to every reader of the
+   * team's events already (it is on the task, under the same read gate, cor:agt:050:21), so naming it discloses nothing
+   * new; the team's reconcile pass needs it, because the task no longer holds it.
+   */
+  | { type: 'task.external-id-released'; externalId: string }
   | { type: 'task.parked' }
   | { type: 'task.ready' }
   | { type: 'assignment.queued' }
@@ -143,8 +165,12 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
   switch (e.type) {
     case 'review.scheduled': return { slots: e.slots };
     case 'pr.frozen': return { head: e.head, pullRequest: e.pullRequest };
+    case 'review.defect-linked': return { defect: e.defect, introducedAtHead: e.introducedAtHead };
     case 'review.seat.assigned': return { slot: e.slot, head: e.head, supersedes: e.supersedes };
-    case 'review.verdict': return { slot: e.slot, head: e.head, verdict: e.verdict, node: e.node, receipt: e.receipt };
+    case 'review.verdict': return {
+      slot: e.slot, head: e.head, verdict: e.verdict, node: e.node, receipt: e.receipt,
+      reviewerFamily: e.reviewerFamily, reviewerModel: e.reviewerModel, modelReportedAt: e.modelReportedAt,
+    };
     case 'pr.ready': return { head: e.head };
     case 'task.edited':
       if (e.fields.some(f => !(TASK_EDIT_FIELDS as readonly string[]).includes(f))) throw new Error('Unsupported task edit field');
@@ -177,6 +203,8 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
     case 'task.handed-back':
       if (!(TASK_HAND_BACK_CODES as readonly string[]).includes(e.code)) throw new Error('Unsupported task hand-back code');
       return { code: e.code };
+    case 'task.external-id-released':
+      return { externalId: e.externalId };
     case 'task.parked':
     case 'task.ready':
     case 'assignment.queued':
@@ -211,11 +239,6 @@ export async function appendTaskEvent(
   },
 ): Promise<void> {
   const subject = subjectWorkerId(args.event) ?? args.forParty?.workerId ?? null;
-  // S7 (#2023, R90): an assignment to a worker that was on standby raises its delivered mark past the held messages, in this
-  // same transaction, and the count rides the event so the task wake returns it exactly once.
-  const standbyHeld = subject && (ASSIGNED_EVENT_TYPES as readonly string[]).includes(args.event.type)
-    ? await raiseDeliveredOnAssignment(tx, { workerId: subject, taskId: args.taskId, actor: { userId: args.actor.userId, workerId: args.actor.workerId }, now: args.createdAt })
-    : 0;
   await tx.agentTeamEvent.create({
     data: {
       appId: args.appId,
@@ -228,7 +251,7 @@ export async function appendTaskEvent(
       actorAppKeyId: args.actor.appKeyId ?? null,
       subjectWorkerId: subject,
       subjectUserId: args.forParty?.userId ?? null,
-      payload: standbyHeld > 0 ? { ...payloadJson(args.event), standbyHeld } : payloadJson(args.event),
+      payload: payloadJson(args.event),
       ...(args.createdAt ? { createdAt: args.createdAt } : {}),
     },
   });
@@ -254,6 +277,10 @@ export const ALARM_EVENT_TYPES = [
   'alarm.coordinator-cadence',
   // #2014: a worker's team-chat post refused by the rate limit. Task-less; its episode lives in `post_limit_episodes`.
   'alarm.post-limit',
+  // #4231: a worker whose platform starts keep failing (three in an hour). Task-less; its episode lives in `start_failing_episodes`.
+  'alarm.start-failing',
+  // #4233: a host whose sweep stopped reporting (S10 of #4229). Task-less and workerless; its episode lives in `host_sweep_episodes`.
+  'alarm.stale-sweep',
 ] as const;
 export type AlarmEventType = (typeof ALARM_EVENT_TYPES)[number];
 
@@ -609,6 +636,45 @@ export async function appendReportsToEvent(
   });
 }
 
+/**
+ * #4224 (S3 of #4229): one `worker.leave-alone-changed` event per change of a worker's leave-alone marker, in the
+ * write's own transaction. The marker's new value only: the reason is text and stays on the worker row
+ * (cor:agt:050:11, ids only).
+ */
+export async function appendLeaveAloneChangedEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; workerId: string; leaveAlone: boolean },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: 'worker.leave-alone-changed',
+      actorUserId: args.actor.userId,
+      actorWorkerId: args.actor.workerId,
+      actorAgentId: args.actor.agentId,
+      subjectWorkerId: args.workerId,
+      payload: { leaveAlone: args.leaveAlone },
+    },
+  });
+}
+
+/** #4224 (S3 of #4229): one `team.sweep-mode-changed` event per change of the App's sweep mode: from and to. */
+export async function appendSweepModeChangedEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; from: string; to: string },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: 'team.sweep-mode-changed',
+      actorUserId: args.actor.userId,
+      actorWorkerId: args.actor.workerId,
+      actorAgentId: args.actor.agentId,
+      payload: { from: args.from, to: args.to },
+    },
+  });
+}
+
 /** #3307 / cor:dmo:050:12: one instruction record for a signature/trailer act; no template text is recorded. */
 export async function appendWorkerSignatureInstructionEvent(
  tx: Prisma.TransactionClient,
@@ -656,6 +722,8 @@ export type CredentialAct =
   | 'app-key.list' | 'app-write-grant.list'
   | 'automation-read-grant.revoke' | 'automation-read-grant.list'
   | 'automation-team-snapshot-grant.revoke' | 'automation-team-snapshot-grant.list'
+  /** #3711: an instructed revoke of a grant (cor:acl:140:05). */
+  | 'grant.revoke'
   /** #3322: an instructed switch of an App memory asset's public link that changed the flag. */
   | 'asset.public-link';
 
@@ -680,14 +748,20 @@ export async function appendCredentialInstructionEvent(
 /** #3323: which S4a door an instructed App-manager act went through (hrn:node:hadronmemory.com:specs:cor:dmo:050:12). */
 export type ManagerAct =
   | 'task.assign' | 'task.reassign' | 'task.cancel' | 'task.park' | 'task.ready' | 'task.update'
-  | 'task.finding-dispose' | 'task.priority' | 'task.blocker-add' | 'task.blocker-remove' | 'task.create'
+  | 'task.finding-dispose' | 'task.priority' | 'task.release-external-id' | 'task.blocker-add' | 'task.blocker-remove' | 'task.create'
   | 'alarm.acknowledge' | 'worker.availability' | 'model-family.availability' | 'app.stall-schedule'
   | 'app.model-group.set' | 'app.model-group.delete' | 'app.properties'
   // #3321 (S4b): the host-operation, stop-signal, ticker, settings, isolation and wake doors.
   | `host-operation.${'worker.start' | 'worker.end' | 'worktree.create' | 'worktree.remove'}`
   | 'stop.set' | 'stop.lift' | 'ticker.update' | 'ticker.delete' | 'ticker.subscribe' | 'ticker.unsubscribe'
-  | 'ticker.templates-apply' | 'worker.wake-settings' | 'worker.isolate' | 'worker.isolation-clear'
-  | 'app.ticker-settings' | 'app.delivery-settings' | 'team.pause' | 'team.resume' | 'wake.read';
+  | 'ticker.templates-apply' | 'worker.wake-settings'
+  | 'app.ticker-settings' | 'app.delivery-settings' | 'team.pause' | 'team.resume' | 'wake.read'
+  // #4224 (S3 of #4229): the leave-alone marker and the App's sweep mode.
+  | 'worker.leave-alone' | 'app.sweep-mode'
+  // #4222: the host-setup doors (which workers a host runs, and the App's switch for it).
+  | 'host-setup.assign' | 'host-setup.unassign' | 'host-setup.source'
+  // #4280 (S12b): linking a post-merge defect to the PR it escaped from.
+  | 'review.defect-link';
 
 /** The ids an instructed App-manager act concerns; never content (cor:agt:050:11). */
 export type ManagerActSubject = { taskId?: string; workerId?: string; eventId?: string; tickerId?: string; signalId?: string };

@@ -50,7 +50,9 @@ export type EvaluateResult =
  *   3. Pre-resolve variables (memory cascade + chat/agent/message/time).
  *      Encrypted-memory failures surface here.
  *   4. Run JSONLogic engine over the pre-resolved bag.
- *   5. Return fired = Boolean(result).
+ *   5. Return fired = jsonLogic.truthy(result) (#4056, V85: JSONLogic's own
+ *      truthiness, in which an empty array is falsy — so a bare `missing` /
+ *      `missing_some` that finds nothing missing does not fire).
  */
 export async function evaluateEdgeCondition(
   req: EvaluateRequest,
@@ -84,7 +86,10 @@ export async function evaluateEdgeCondition(
   // The JSONLogic engine's RulesLogic type is over-constrained for our
   // runtime-validated inputs; cast to the loose runtime API.
   const result = jsonLogic.apply(req.condition as never, resolved.bag);
-  return { ok: true, fired: Boolean(result) };
+  // #4056 (V85): JSONLogic truthiness, the predicate `!` / `and` / `or` already apply inside the engine.
+  // Boolean(result) differs on exactly one value, `[]`, which `missing` returns when nothing is missing and which
+  // `and` / `or` hand back raw. Absent-condition success and every refusal above are unchanged.
+  return { ok: true, fired: jsonLogic.truthy(result) };
 }
 
 // Re-export validateEdgeCondition for consumers who only need save-time

@@ -1,4 +1,6 @@
-import { requireWorkerReadAccess, locateTeamAgent, forbidden, type AppRow } from '../../../lib/auth/workerRead.js';
+import { endHeldGrants } from '../../../lib/grants/departure.js';
+import { personalOrgAgentServeAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
+import { requireWorkerReadAccess, locateTeamAgent, forbidden, appNotFound, resolveAppRefConcealed, isAppGateRefusal, type AppRow } from '../../../lib/auth/workerRead.js';
 export { requireWorkerReadAccess, locateTeamAgent, ROLES_BRANCH_PREFIX } from '../../../lib/auth/workerRead.js';
 import { listAppInstallations, resolveAppInstallation, resolveUnfilteredAppInstallation, lockAppInstallation } from '../../../lib/appInstallations.js';
 import { lockStaffingAct } from '../../../lib/auth/staffingAct.js';
@@ -28,10 +30,10 @@ import { renderLintWarnings } from '../../../lib/bootPromptLint.js';
 import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
 import { previewServedBootPrompt, readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt, type PageServedMemo, type ServeTarget } from '../../../lib/bootPrompt/serve.js';
 import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
+import { workerRunRecordOf, type WorkerRunRecord } from '../../../lib/agentTasks/runSettings.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { generateId } from '../../../lib/id.js';
-import { s7Available } from '../../../lib/tickers/s7Availability.js';
 import { GraphQLError } from 'graphql';
 import { WORKER_SIGNATURE_DEFAULTS, normalizeWorkerSignature, withWorkerSignatures } from '../../../lib/workerSignature.js';
 import { assertWorkerNameNotConfusable, lockWorkerNames } from '../../../lib/workerName.js';
@@ -85,9 +87,12 @@ import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.j
 import { deletePristineGeneratedTickers, miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { runMayReadTeam } from '../../../lib/auth/runTeamRead.js';
 import { managesApp, lockAppManagerMemberships } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx, liveTxContext } from './authorizedTx.js';
+import { recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
+import { tickBatch } from './tickBatch.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { appendWorkerCastEvent, appendWorkerCastingEvent, appendWorkerDeletedEvent, appendWorkerRetiredEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import { assertCastable, provisionCastGrants, requireWorkerAgentRole, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
@@ -96,8 +101,8 @@ import { workerTerminalView, type StoredWorkerTerminal } from '../../../lib/work
 import {
   type Context,
   requireOrgRole,
+  requireAppRead,
   requireReadableAgent,
-  requireOwnerOrOrgRole,
   isNonReaderAppMember,
   isPlatformAdmin,
   clampListTake,
@@ -127,6 +132,10 @@ const SLUG_RACE_RETRY_LIMIT = 50;
  * rights. Impersonation sessions are read-only support views — never staff.
  */
 async function requireWorkerStaffAccess(ctx: Context, app: AppRow): Promise<void> {
+  // #3977 (V58): this gate answers FORBIDDEN, so it is only ever reached by a caller who CAN reach the App: every
+  // caller decides reach first with `requireWorkerReadAccess` (the cast target, `admitWorkerStaffAct`, the
+  // in-transaction recheck, and the worker-ref surfaces through `resolveReadableWorkerRef`). Staffing is a subset
+  // of the read audience.
   if (ctx.impersonation) throw forbidden();
   if (!ctx.userId) throw forbidden();
   if (app.ownerUserId !== null) {
@@ -158,9 +167,23 @@ async function admitWorkerStaffAct(
   ctx: Context, scope: AppRow, instruction?: ActInstruction | null, expected?: StaffActAdmission, lock = false,
 ): Promise<StaffActAdmission> {
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: scope.id } });
-  if (app.deletedAt || app.organizationId !== scope.organizationId || app.ownerUserId !== scope.ownerUserId) throw forbidden();
+  // #3977: reach is decided before any step that differs for an existing App (a deleted App is unreachable).
+  try { await requireWorkerReadAccess(ctx, app); } catch (e) {
+    // See the instructed-act note below: a holder who lost reach is FORBIDDEN as before (#3599).
+    if (instruction && e instanceof GraphQLError && e.extensions?.code === 'APP_NOT_FOUND') throw forbidden();
+    throw e;
+  }
+  if (app.organizationId !== scope.organizationId || app.ownerUserId !== scope.ownerUserId) throw forbidden();
   const admission = await requireInstructedAct(ctx, app.id, instruction,
-    async () => { await requireWorkerStaffAccess(ctx, app); return true; }, readActInstruction, forbidden,
+    async () => {
+      try { await requireWorkerStaffAccess(ctx, app); } catch (e) {
+        // An instructed act is judged on the HOLDER's authority, not as an outsider's probe: a holder who lost reach
+        // since the first admission is refused FORBIDDEN as before (#3599); only a direct caller gets the not-found.
+        if (instruction && e instanceof GraphQLError && e.extensions?.code === 'APP_NOT_FOUND') throw forbidden();
+        throw e;
+      }
+      return true;
+    }, readActInstruction, forbidden,
     { name: 'workers.staff', lock });
   if (expected && !sameActPrincipal(expected, admission)) throw forbidden();
   return admission;
@@ -196,7 +219,16 @@ export async function requireWorkerProfileAccess(ctx: Context, app: AppRow): Pro
       throw forbidden();
     }
   }
-  if (!ctx.userId || isRunPrincipal(ctx)) return requireWorkerReadAccess(ctx, app);
+  if (!ctx.userId || isRunPrincipal(ctx)) {
+    // The profile surface keeps its own FORBIDDEN contract (#3977 leaves the profile-link exception alone; its
+    // callers collapse it into the worker-not-found answer): the participant gate's not-found answer maps back.
+    try {
+      return await requireWorkerReadAccess(ctx, app);
+    } catch (e) {
+      if (e instanceof GraphQLError && e.extensions?.code === 'APP_NOT_FOUND') throw forbidden();
+      throw e;
+    }
+  }
 }
 
 /**
@@ -214,6 +246,12 @@ export async function requireWorkerProfileAccess(ctx: Context, app: AppRow): Pro
  */
 async function workerReadableWhere(ctx: Context): Promise<Prisma.WorkerWhereInput> {
   if (!ctx.userId) {
+    // #3360: a userless run reaches its own App only under its automation's grant, the same arm
+    // `requireWorkerReadAccess` applies; a key reaches its own App unconditionally.
+    if (isRunPrincipal(ctx)) {
+      const app = ctx.appId ? await ctx.db.app.findUnique({ where: { id: ctx.appId }, select: { id: true, organizationId: true, deletedAt: true } }) : null;
+      return { appId: { in: app && await runMayReadTeam(ctx, app) ? [app.id] : [] } };
+    }
     return { appId: { in: ctx.appId ? [ctx.appId] : [] } };
   }
   if (!isPlatformAdmin(ctx)) {
@@ -339,7 +377,7 @@ export async function resolveReadableWorkerRef(
   try {
     await requireWorkerReadAccess(ctx, app);
   } catch (e) {
-    if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+    if (!isAppGateRefusal(e)) throw e;
     throw workerNotFound(workerRef);
   }
   return { worker, app };
@@ -358,7 +396,7 @@ async function resolveProfileWorkerRef(ctx: Context, workerRef: string): Promise
   try {
     await requireWorkerProfileAccess(ctx, app);
   } catch (e) {
-    if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+    if (!isAppGateRefusal(e)) throw e;
     throw workerNotFound(workerRef);
   }
   return worker;
@@ -464,7 +502,7 @@ export async function resolveWorkerBindCandidatesByName(ctx: Context, name: stri
     try {
       await requireWorkerReadAccess(ctx, app);
     } catch (e) {
-      if (!(e instanceof GraphQLError && e.extensions.code === 'FORBIDDEN')) throw e;
+      if (!isAppGateRefusal(e)) throw e;
       continue;
     }
     const id = await resolveWorkerIdByName(ctx.db, app.id, name);
@@ -533,7 +571,7 @@ export async function resolveWorkerIdByNameGated(
     // identical. Deliberately opposite reasoning to the collapse this function
     // exists for: hiding WHY a caller was refused is the point; hiding THAT the
     // database is down never is.
-    if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+    if (!isAppGateRefusal(e)) throw e;
     return null;
   }
   return resolveWorkerIdByName(ctx.db, appId, name);
@@ -825,8 +863,10 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
   }
 
   // 1. Resolve the App (cor:api:140 — PK or URN) and gate.
-  const { id: appId } = await resolveAppRef(ctx.db, appRef);
+  const { id: appId } = await resolveAppRefConcealed(ctx.db, appRef);
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+  // #3977: can-reach is decided BEFORE the uninstalled refusal, which only an existing App can give.
+  await requireWorkerReadAccess(ctx, app);
   if (app.uninstalledAt) {
     throw new GraphQLError('Cannot cast a worker in an uninstalled App.', {
       extensions: { code: 'APP_UNINSTALLED', appId },
@@ -837,9 +877,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
   if (choice.kind === 'REPORTS_TO') {
     if (!(await managesApp(ctx, app))) throw new GraphQLError('Only whoever manages the App may name a reporting head at cast.', { extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN' } });
     // Ada36559 supersedes the dropped push-model S5/S7 dependency (#2138r4/#2130).
-    // A future pull-shaped standby activation MUST initialize coverage for existing reports
-    // before removing this guard and admitting new reports atomically under its common bracket.
-    if (s7Available()) throw new GraphQLError('Casting with a reporting head is not available while standby integration is incomplete.', { extensions: { code: 'WORKER_REPORTING_CAST_UNAVAILABLE' } });
+    // Standby is withdrawn and not planned (#3606); its stored column was dropped by #3701.
     reportingHeadId = await resolveCastReportingHead(ctx, appId, choice.ref);
     const head = await ctx.db.worker.findUniqueOrThrow({ where: { id: reportingHeadId }, select: { retiredAt: true } });
     if (head.retiredAt) throw new GraphQLError('A worker cannot report to a retired worker.', { extensions: { code: 'WORKER_REPORTS_TO_RETIRED', reportsTo: reportingHeadId } });
@@ -1030,7 +1068,7 @@ export const workerMutations = {
             }
             // The early read preserves refusal ordering; the deciding row is fresh after membership waits.
             const freshApp = await tx.app.findUniqueOrThrow({ where: { id: appId } });
-            if (freshApp.deletedAt) throw forbidden();
+            await requireWorkerReadAccess(txCtx, freshApp);
             if (freshApp.organizationId !== app.organizationId || freshApp.ownerUserId !== app.ownerUserId) throw castTargetChanged();
             await requireWorkerStaffAccess(txCtx, freshApp);
             const freshAgent = await tx.agent.findUniqueOrThrow({ where: { id: agent.id } });
@@ -1206,6 +1244,9 @@ export const workerMutations = {
         // keep their value; the roster flags them (`reportsToRetired`) rather
         // than the platform silently clearing a structure someone set.
         if (retired.count > 0) {
+          // #3690 / ruling 0259 ("Retire ends grants too"): the grants this worker HOLDS end with it, in this transaction, after the
+          // worker row lock (lockStaffingAct, step 5): the grant row lock is the last one taken. Only when THIS call retired it.
+          await endHeldGrants(tx, 'worker', worker.id);
           await appendWorkerRetiredEvent(tx, { appId: worker.appId, actor: staffingActActor(admission), instruction: staffingInstruction(admission), workerId: worker.id });
           await writeReportsTo(tx, { workerId: worker.id, appId: worker.appId, to: null, actor: staffingActActor(admission), setBy: 'retirement' });
           // #1747 / cor:agt:080:02: a retired worker's ticker subscriptions end
@@ -1845,6 +1886,12 @@ export const workerQueries = {
    * No attestation input or durable reservation (hrn:node:hadronmemory.com:specs:cor:agt:020:03).
    * An instructed read records its claim with the target as subject, so bookkeeping never poisons the census
    * (hrn:node:hadronmemory.com:specs:cor:dmo:050:12). Never return census details.
+   *
+   * #3608: the preview takes no target lock, so the real delete can commit between the census and the
+   * claim, and the fence then refuses the claim. The worker has gone, so the door answers as the
+   * census would (cor:dmo:050:11). Caught outside the transaction, so the claim stays rolled back.
+   * `workerRef` is on the fence's refusal only for a worker reference. One naming another worker (the
+   * actor) or a session is a different fact and passes through.
    */
   deleteWorkerPreview: async (
     _: unknown,
@@ -1855,28 +1902,35 @@ export const workerQueries = {
     const initial = await admitWorkerStaffAct(ctx, app, instruction);
     // The real delete deliberately supports retained uninstalled Apps. Reuse its exact authority
     // prologue, not withAuthorizedTx's stricter App/org liveness checks (#3599 FIT correction).
-    return ctx.db.$transaction(async (tx) => {
-      await lockAuthorityAnchors(tx, [
-        { kind: 'app', id: app.id }, ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
-        ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
-        ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
-      ], 'shared');
-      await tx.$queryRaw`SELECT id FROM apps WHERE id = ${app.id} FOR SHARE`;
-      const txCtx = await liveTxContext(ctx, tx);
-      let admission = await admitWorkerStaffAct(txCtx, app, instruction, initial);
-      // Caller/grant locks only: never the target worker or the delete's MVCC fence.
-      await lockStaffingAct(tx, app, admission, ctx.sessionId);
-      admission = await admitWorkerStaffAct(txCtx, app, instruction, admission, true);
-      const current = await tx.worker.findUnique({ where: { id: worker.id } });
-      if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND', workerRef } });
-      if (await miscastHasReferences(tx, current)) {
-        throw new GraphQLError('This worker has persisted references, an unreleased stint, or encrypted attribution that cannot be verified. Retire it instead.', {
-          extensions: { code: 'WORKER_IN_USE', workerId: worker.id },
-        });
+    try {
+      return await ctx.db.$transaction(async (tx) => {
+        await lockAuthorityAnchors(tx, [
+          { kind: 'app', id: app.id }, ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
+          ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+          ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+        ], 'shared');
+        await tx.$queryRaw`SELECT id FROM apps WHERE id = ${app.id} FOR SHARE`;
+        const txCtx = await liveTxContext(ctx, tx);
+        let admission = await admitWorkerStaffAct(txCtx, app, instruction, initial);
+        // Caller/grant locks only: never the target worker or the delete's MVCC fence.
+        await lockStaffingAct(tx, app, admission, ctx.sessionId);
+        admission = await admitWorkerStaffAct(txCtx, app, instruction, admission, true);
+        const current = await tx.worker.findUnique({ where: { id: worker.id } });
+        if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND', workerRef } });
+        if (await miscastHasReferences(tx, current)) {
+          throw new GraphQLError('This worker has persisted references, an unreleased stint, or encrypted attribution that cannot be verified. Retire it instead.', {
+            extensions: { code: 'WORKER_IN_USE', workerId: worker.id },
+          });
+        }
+        await appendStaffingInstructionClaim(tx, { appId: app.id, admission, operation: 'worker.delete-preview', workerId: worker.id });
+        return { workerId: worker.id, attestationRequired: true };
+      });
+    } catch (error) {
+      if (error instanceof GraphQLError && error.extensions.code === 'WORKER_REFERENCE_NOT_FOUND' && error.extensions.workerRef === worker.id) {
+        throw workerNotFound(workerRef);
       }
-      await appendStaffingInstructionClaim(tx, { appId: app.id, admission, operation: 'worker.delete-preview', workerId: worker.id });
-      return { workerId: worker.id, attestationRequired: true };
-    });
+      throw error;
+    }
   },
   /**
    * Read one worker (cor:api:120 find-one). The ref is a Worker id, an
@@ -1937,12 +1991,12 @@ export const workerQueries = {
           extensions: { code: 'WORKER_NOT_FOUND', workerRef: trimmed },
         });
       }
-      return ctx.db.worker.findUniqueOrThrow({ where: { id: byName } });
+      return singleWorkerActivityRow(await ctx.db.worker.findUniqueOrThrow({ where: { id: byName } }));
     }
     // #1149: by id or URN the caller names one worker, so the PROFILE gate
     // admits; the field resolvers mask everything beyond the profile.
     const worker = await resolveProfileWorkerRef(ctx, ref);
-    return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    return singleWorkerActivityRow(await ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } }));
   },
 
   /**
@@ -1960,7 +2014,7 @@ export const workerQueries = {
     }: { appRef: string; includeRetired?: boolean | null; limit?: number | null; offset?: number | null },
     ctx: Context,
   ) => {
-    const { id: appId } = await resolveAppRef(ctx.db, appRef);
+    const { id: appId } = await resolveAppRefConcealed(ctx.db, appRef);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
     await requireWorkerReadAccess(ctx, app);
     const where = {
@@ -2049,6 +2103,7 @@ export const workerQueries = {
         ...row,
         __heldWorkerActivity: activity.get(row.id) ?? {
           hasLiveSession: false,
+          holdsOpenSession: false,
           lastActiveAt: null,
           bound: false,
           bindingFamily: null,
@@ -2185,20 +2240,55 @@ export const workerQueries = {
  * lapsed but open session keeps its family; only an end, or a newer bind,
  * clears or replaces it (#1723 review, Diego P2-2).
  */
+/** #3674: only Query.worker marks its one-row result. Lists keep the App fold (no N+1). */
+const singleWorkerActivityRows = new WeakSet<object>();
+function singleWorkerActivityRow<T extends object>(row: T): T {
+  singleWorkerActivityRows.add(row);
+  return row;
+}
+type WorkerActivityParent = {
+  id: string; appId: string; __heldWorkerActivity?: WorkerActivity;
+};
+
+/** Same SQL/predicate as the roster and binder; only the rows whose history is folded change. */
+async function workerFieldActivity(
+  ctx: Context,
+  worker: WorkerActivityParent,
+  info?: { operation?: { operation?: string } },
+): Promise<Map<string, WorkerActivity>> {
+  const memoize = info?.operation?.operation === 'query';
+  if (!singleWorkerActivityRows.has(worker)) return loadAppWorkerActivity(ctx, worker.appId, { memoize });
+  // Query-only, request-local and separate from the App cache: an alias/list in
+  // the same operation must never inherit this single-worker result. Mutations
+  // and unmarked nested rows retain their existing fresh/App-wide behavior.
+  type Cache = Map<string, Promise<Map<string, WorkerActivity>>>;
+  const holder = ctx as Context & { singleWorkerActivityCache?: Cache };
+  const cache = memoize ? (holder.singleWorkerActivityCache ??= new Map()) : null;
+  const key = JSON.stringify([worker.appId, worker.id]);
+  let pending = cache?.get(key);
+  if (!pending) {
+    pending = queryWorkerActivity(ctx, Prisma.sql`w.app_id = ${worker.appId} AND w.id = ${worker.id}`, new Date());
+    cache?.set(key, pending);
+  }
+  return pending;
+}
+
 /** The #2252 fields' shared read: masked to null on the family gate, else the activity row of the one fold. */
 async function bindingModelOf(
   ctx: Context,
-  worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+  worker: WorkerActivityParent,
   info?: { operation?: { operation?: string } },
 ): Promise<WorkerActivity | null> {
   if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
   if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity;
-  const activity = await loadAppWorkerActivity(ctx, worker.appId, { memoize: info?.operation?.operation === 'query' });
+  const activity = await workerFieldActivity(ctx, worker, info);
   return activity.get(worker.id) ?? null;
 }
 
 export type WorkerActivity = {
   hasLiveSession: boolean;
+  /** #3815: an open session not past its hard expiry, however quiet: the matcher's reach (a quiet session is not gone, #1114). */
+  holdsOpenSession: boolean;
   lastActiveAt: Date | null;
   bound: boolean;
   bindingFamily: string | null;
@@ -2217,20 +2307,37 @@ export type WorkerActivity = {
  * live session is open AND inside its type-specific idle window; deleted
  * sessions do not count; reaper writes are not genuine activity; and activity
  * after an end is capped at the end instant.
+ *
+ * Side effect (#4273; documented for #4285, Arianna's BLIND P3): the read first runs `set_config('jit', 'off', true)`,
+ * which is LOCAL to the transaction it runs in. On the shared client (which has `$transaction`) both statements run in ONE
+ * short transaction of their own, at the client's default isolation, so the setting dies with it and never reaches the next
+ * pool user. On a caller's transaction client (no `$transaction`) both run ON that transaction: no nested transaction is
+ * opened, its isolation is unchanged, and JIT stays off for the rest of the CALLER's transaction.
  */
 async function queryWorkerActivity(
   ctx: Context,
   scope: Prisma.Sql,
   now: Date,
 ): Promise<Map<string, WorkerActivity>> {
-  const rows = await ctx.db.$queryRaw<
-    { workerId: string; live: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null; bindingModel: string | null; modelReportedAt: Date | null }[]
-  >(workerActivitySql(scope, now));
+  type Row = { workerId: string; live: boolean; holdsOpen: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null; bindingModel: string | null; modelReportedAt: Date | null };
+  // #4273: the per-session usage probe below is estimated per session and so crosses jit_above_cost on any App with a
+  // few thousand sessions, though almost every probe is never executed; JIT then compiled for ~400 ms on a 4 ms plan, and
+  // the stall tick reached this read nine times a pass. The setting is local to the transaction it is made in.
+  const run = async (tx: Pick<Prisma.TransactionClient, '$executeRaw' | '$queryRaw'>): Promise<Row[]> => {
+    await setWorkerActivityPlanSettings(tx);
+    return tx.$queryRaw<Row[]>(workerActivitySql(scope, now));
+  };
+  // A transaction client exposes no `$transaction`; the shared client does (#4285: one guard instead of two casts).
+  type Runner = { $transaction: <T>(f: (tx: Prisma.TransactionClient) => Promise<T>) => Promise<T> };
+  const db = ctx.db as unknown as Prisma.TransactionClient | Runner;
+  const opensItsOwn = (c: typeof db): c is Runner => typeof (c as Partial<Runner>).$transaction === 'function';
+  const rows = opensItsOwn(db) ? await db.$transaction((tx) => run(tx)) : await run(db);
   return new Map<string, WorkerActivity>(
     rows.map((row) => [
       row.workerId,
       {
         hasLiveSession: row.live,
+        holdsOpenSession: row.holdsOpen,
         lastActiveAt: row.lastActiveAt,
         bound: row.bound,
         bindingFamily: normalizeFamily(row.bindingFamily),
@@ -2239,6 +2346,20 @@ async function queryWorkerActivity(
       },
     ]),
   );
+}
+
+/**
+ * The planner settings the activity read runs under, both local to the transaction they are made in.
+ *  - `jit` off (#4273): see the note in `queryWorkerActivity`.
+ *  - `enable_incremental_sort` off (#4397): the per-session probe wants ORDER BY session_id DESC, created_at DESC
+ *    LIMIT 1, which the partial (session_id, created_at) index serves with ONE descent. The planner prices an
+ *    Incremental Sort over usage_events_session_id_idx as cheaper, because it assumes the average session's few hundred
+ *    rows per group, and then reads EVERY row of a long-open session (the incident's shape). With it off, a Sort over
+ *    the whole session is never cheaper than the index's near-zero startup, so only the session-activity index
+ *    can serve the probe. Exported so the plan pins run under exactly what ships.
+ */
+export async function setWorkerActivityPlanSettings(tx: Pick<Prisma.TransactionClient, '$executeRaw'>): Promise<void> {
+  await tx.$executeRaw`SELECT set_config('jit', 'off', true), set_config('enable_incremental_sort', 'off', true)`;
 }
 
 /**
@@ -2288,6 +2409,8 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
   return Prisma.sql`
     SELECT s.worker_id AS "workerId",
            bool_or(${sessionLive}) AS "live",
+           -- #3815: open and inside any hard expiry; the idle window plays no part (silence is not abandonment, #1114).
+           COALESCE(bool_or(s.ended_at IS NULL AND (s.expires_at IS NULL OR s.expires_at > ${toNaiveUtc(now)}::timestamp)), false) AS "holdsOpen",
            -- #1707: the BINDING is any open session, live or quiet; its family
            -- is the newest open session's (the latest bind), null included —
            -- a newer bind that reported none does not inherit an older one's.
@@ -2313,28 +2436,111 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
            -- was still driving the worker. Postgres LEAST ignores a null end,
            -- so an open session remains uncapped.
            ), s.ended_at)) AS "lastActiveAt"
-    FROM sessions s
-    JOIN workers w ON w.id = s.worker_id
+    FROM workers w
+    -- #4273: only the sessions that can change an answer. Every open session stays (live, holdsOpen, bound and the binding's
+    -- family, model and report time come from open sessions alone). An ENDED session reaches only lastActiveAt, as
+    -- LEAST(GREATEST(started_at, ...), ended_at), which is at least its own started_at and at most its ended_at; so an
+    -- ended session that ended BEFORE the worker's latest start is beaten by that later session (whose activity is at least
+    -- its own start) and cannot be the maximum. The kept ended sessions are those ending at or after that start, served
+    -- by sessions_worker_ended_idx and sessions_worker_started_idx, so the rows read follow the open and overlapping
+    -- sessions, never the worker's lifetime of them. A session that ended before it started (never written by the
+    -- platform) does not set the latest start. #4285 (Arianna New-4): so a worker whose ONLY sessions all ended before they
+    -- started has no latest start, the walk below keeps nothing, and the fold returns no row for it (before #4273 it had
+    -- one, with lastActiveAt = ended_at). No real worker is affected while the platform never writes such a session.
+    -- Reading every session made each liveness read, five per stall tick, grow
+    -- with the App's whole session history (QA: 42,000 -> 84,000 rows on doubled history).
+    JOIN LATERAL (
+      SELECT s1.* FROM sessions s1
+      WHERE s1.worker_id = w.id AND s1.deleted_at IS NULL AND s1.ended_at IS NULL
+      UNION ALL
+      -- The ended ones are walked from the newest end backwards, one index probe per step (ORDER BY ... LIMIT 1 on
+      -- sessions_worker_ended_idx), and the walk stops at the first one that ends before the worker's latest start: a bare
+      -- range condition leaves the planner free to read every session of the worker through sessions_worker_id_idx instead.
+      SELECT k.* FROM (
+        WITH RECURSIVE bound AS (
+          SELECT max(x.started_at) AS at FROM sessions x
+          WHERE x.worker_id = w.id AND x.deleted_at IS NULL AND (x.ended_at IS NULL OR x.ended_at >= x.started_at)
+        ), walk AS (
+          (SELECT t.* FROM sessions t
+           WHERE t.worker_id = w.id AND t.deleted_at IS NULL AND t.ended_at IS NOT NULL
+           ORDER BY t.ended_at DESC, t.id DESC LIMIT 1)
+          UNION ALL
+          SELECT n.* FROM walk, bound, LATERAL (
+            SELECT t.* FROM sessions t
+            WHERE t.worker_id = w.id AND t.deleted_at IS NULL AND t.ended_at IS NOT NULL
+              AND (t.ended_at, t.id) < (walk.ended_at, walk.id)
+            ORDER BY t.ended_at DESC, t.id DESC LIMIT 1
+          ) n
+          WHERE walk.ended_at >= bound.at
+        )
+        SELECT walk.* FROM walk, bound WHERE walk.ended_at >= bound.at
+      ) k
+    ) s ON true
     LEFT JOIN LATERAL (
-      -- #1952: the "+ interval '0'" is load-bearing. A bare max(created_at)
-      -- lets the planner serve the max by walking usage_events_created_at_idx
-      -- backwards with a filter, which for a session with no (or ancient)
-      -- activity reads the whole index: the 2026-10-14 outage. Statistics in
-      -- which a few sessions dominate activity choose that walk even with the
-      -- index below present, and ORDER BY … LIMIT 1 is the same plan. No
-      -- created_at index can order this expression, so only session-keyed
-      -- paths remain. Cost: a session's activity rows are all read, bounded
-      -- per App. A stored last-activity column is #1957.
-      SELECT max(e.created_at + interval '0') AS max_created
+      -- #4397 (supersedes #1952's max(created_at + interval '0'), which read EVERY activity row of every open session
+      -- and was the leading suspect for the 2026-11-17 P2028 incident): ONE probe of the partial
+      -- usage_events_session_activity_idx per session, newest first, LIMIT 1.
+      -- Two things are load-bearing and pinned in 1903-session-activity-index.test.ts:
+      --  * The session key is a RANGE (>= s.id AND <= s.id), not "= s.id". With an equality the planner treats
+      --    session_id as a constant and DROPS it from ORDER BY, so "ORDER BY created_at DESC LIMIT 1" can be served by
+      --    walking usage_events_created_at_idx backwards, which for a session with no (or ancient) activity reads the
+      --    whole index: the 2026-10-14 outage, and skewed statistics choose it even with the index below present
+      --    (#1952, findings:minmax-per-session-probe-walks-created-at-index). A range leaves session_id in the sort, so
+      --    only a (session_id, created_at) index can give the order and no created_at-only index has a path.
+      --  * The WHOLE drives-only filter (counts_as_activity and the #4271 exclusion) sits BEFORE the LIMIT, so the one
+      --    row returned is the newest QUALIFYING row, never the newest row (cor:agt:020:11 rules 1, 3; NULL, i.e. no
+      --    row, for a never-driven session, rule 4). Same predicate as isSessionLive: do not fork it.
+      SELECT e.created_at AS max_created
       FROM usage_events e
       -- #1653 / DY-2: only events written while the session was live count.
       -- #1903: served by the partial usage_events_session_activity_idx
       -- (post-push.sql).
-      WHERE e.session_id = s.id AND e.counts_as_activity
+      WHERE e.session_id >= s.id AND e.session_id <= s.id AND e.counts_as_activity
+        -- #4271: a session that ended, was not auto-expired and whose updated_at is at or past its end is already
+        -- capped by its own stamps: LEAST(GREATEST(started_at, updated_at, x), ended_at) = ended_at for any x, and
+        -- live / holdsOpen / bound need an open row. Its usage events cannot change any column, so they are not read
+        -- (a condition on the outer row only: a one-time filter, no scan). Reading them made every roster grow with
+        -- the App's whole usage history.
+        -- COALESCE: a NULL updated_at (or end) proves nothing closed, so the session's events are read (#4272 QA P2:
+        -- without it the comparison is NULL, NOT NULL is NULL, and the WHERE dropped them).
+        AND NOT COALESCE(s.ended_at IS NOT NULL AND s.auto_expired_at IS NULL AND s.updated_at >= s.ended_at, false)
+      ORDER BY e.session_id DESC, e.created_at DESC
+      LIMIT 1
     ) ue ON true
     WHERE ${scope} AND s.deleted_at IS NULL
     GROUP BY s.worker_id
   `;
+}
+
+/**
+ * #4271: ONE App-wide activity fold shared by every liveness read inside one read-only roster pass. The roster reached
+ * this aggregate four times per call (work states, availability and both stall-input passes), each a full fold. Shared
+ * only inside one TRANSACTION, only at the pass's own instant, and only for workers of that App; any other read falls
+ * through to its own query (each boundary pinned in sharedWorkerActivity4276.test.ts). Keyed by the transaction
+ * client, so concurrent requests on the shared client never see it.
+ *
+ * What one fold means depends on the transaction's isolation (#4276, Clark's #4272 blind note). Both callers of
+ * `loadTeamRoster` read at RepeatableRead: the person path (`withRosterAppRead`) and the run-tool path
+ * (`teamSnapshotTools.ts` through `inRunTeamReadTx`, which opens `inAnchoredAppTx` with `coherentRunRead`). There the
+ * transaction is one snapshot, so the shared answer is the one every reader would have computed. A caller at Read
+ * Committed (each statement its own snapshot) would get ONE statement's answer for every reader instead: no less
+ * consistent than separate folds, but not a transaction-wide snapshot.
+ */
+const sharedActivity = new WeakMap<object, { appId: string; at: number; workerIds: Set<string>; fold: Promise<Map<string, WorkerActivity>> }>();
+
+/** Run `read` with one shared activity fold of `appId` at `now` (see {@link sharedActivity}); `db` must be a transaction. */
+export async function withSharedWorkerActivity<T>(db: Prisma.TransactionClient, appId: string, now: Date, read: () => Promise<T>): Promise<T> {
+  // A transaction client has no $transaction of its own; on the shared client the memo would cross requests.
+  if (sharedActivity.has(db) || typeof (db as { $transaction?: unknown }).$transaction === 'function') return read();
+  const workers = await db.worker.findMany({ where: { appId }, select: { id: true } });
+  const fold = queryWorkerActivity({ db } as unknown as Context, Prisma.sql`w.app_id = ${appId}`, now);
+  fold.catch(() => undefined); // awaited by its readers; never an unhandled rejection
+  sharedActivity.set(db, { appId, at: now.getTime(), workerIds: new Set(workers.map((w) => w.id)), fold });
+  try {
+    return await read();
+  } finally {
+    sharedActivity.delete(db);
+  }
 }
 
 /** One aggregate query for the bounded #1344 page, never one per App/worker. */
@@ -2344,6 +2550,11 @@ export async function loadWorkersActivity(
   now = new Date(),
 ): Promise<Map<string, WorkerActivity>> {
   if (workerIds.length === 0) return new Map();
+  const shared = sharedActivity.get(ctx.db);
+  if (shared && shared.at === now.getTime() && workerIds.every((id) => shared.workerIds.has(id))) {
+    const fold = await shared.fold;
+    return new Map(workerIds.flatMap((id) => (fold.has(id) ? [[id, fold.get(id)!] as const] : [])));
+  }
   return queryWorkerActivity(
     ctx,
     Prisma.sql`w.id IN (${Prisma.join(workerIds)})`,
@@ -2382,7 +2593,10 @@ export async function loadAppWorkerActivity(
   const cached = cache?.get(appId);
   if (cached) return cached;
 
-  const pending = queryWorkerActivity(ctx, Prisma.sql`w.app_id = ${appId}`, now);
+  const shared = sharedActivity.get(ctx.db);
+  const pending = shared && shared.appId === appId && shared.at === now.getTime()
+    ? shared.fold.then((fold) => new Map(fold))
+    : queryWorkerActivity(ctx, Prisma.sql`w.app_id = ${appId}`, now);
 
   cache?.set(appId, pending);
   return pending;
@@ -2590,6 +2804,8 @@ async function readServedWorkerText(
   page?: Parameters<typeof resolveServedBootPrompt>[2],
 ): Promise<{ text: string | null; refusal: string | null }> {
   const where = { surface: 'bind' as const, agentName };
+  const app = await ctx.db.app.findUnique({where:{id:worker.appId},select:{organizationId:true,ownerUserId:true}});
+  if (app && !(await personalOrgAgentServeAllowed(ctx.db, app, worker.agentId, ctx.userId))) return { text: null, refusal: 'FORBIDDEN' };
   try {
     const recorded = ctx.sessionId
       ? await ctx.db.servedPrompt.findFirst({ where: { sessionId: ctx.sessionId, workerId: worker.id }, orderBy: { ordinal: 'desc' } })
@@ -2781,7 +2997,7 @@ async function maySeeWorkerProfile(ctx: Context, appId: string): Promise<boolean
         await requireWorkerProfileAccess(ctx, app);
         return true;
       } catch (e) {
-        if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+        if (!isAppGateRefusal(e)) throw e;
         return false;
       }
     })();
@@ -2890,6 +3106,20 @@ async function resolveWorkerUrnField(
   }
 }
 
+const workerAvailabilityOf = tickBatch<string, Record<string, unknown> | null>(async (ctx, ids) => {
+  const rows = await ctx.db.workerAvailability.findMany({ where: { workerId: { in: ids } } });
+  // inEffect needs session activity; read it once for the whole batch (the roster does the same) and carry the
+  // answer on the row so WorkerAvailability.inEffect issues no per-worker aggregate.
+  const now = new Date();
+  const activity = await loadWorkersActivity(ctx, rows.map((r) => r.workerId), now);
+  return new Map(
+    rows.map((r) => [
+      r.workerId,
+      { ...r, __inEffect: recordInEffect(r, now, activity.get(r.workerId)?.lastActiveAt ?? null) } as Record<string, unknown>,
+    ]),
+  );
+}, null);
+
 export const workerFieldResolvers = {
   /**
    * #1073 — the release receipt's holder, resolved lazily as a SANITIZED
@@ -2955,6 +3185,13 @@ export const workerFieldResolvers = {
     urn: (u: { handle?: string | null }) => userUrn(u.handle),
   },
   Worker: {
+    /**
+     * #3865: the worker's stored availability record (reason, setter, set-at), the same record and type
+     * `TeamRosterEntry.availability` and `teamAvailability` return. Worker internals gate: null for a reader who
+     * may not see them, and null when the worker has no record. One batched read per request (no per-row query).
+     */
+    availability: async (w: { id: string; appId: string }, _: unknown, ctx: Context) =>
+      (await maySeeWorkerInternals(ctx, w.appId)) ? workerAvailabilityOf(ctx, w.id) : null,
     /** #2047: the record of the open session, self-authorized (worker internals). */
     servedPrompt: servedPromptOwnerFields.workerServedPrompt,
     promptLintWarnings: async (w: { id: string; appId: string }, args: { first?: number | null; after?: string | null }, ctx: Context) => {
@@ -3242,16 +3479,14 @@ export const workerFieldResolvers = {
      * and that conflation IS hadron-cli#487.
      */
     hasLiveSession: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<boolean | null> => {
       if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
       if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity.hasLiveSession;
-      const activity = await loadAppWorkerActivity(ctx, worker.appId, {
-        memoize: info?.operation?.operation === 'query',
-      });
+      const activity = await workerFieldActivity(ctx, worker, info);
       return activity.get(worker.id)?.hasLiveSession ?? false;
     },
     /**
@@ -3262,28 +3497,26 @@ export const workerFieldResolvers = {
      * as hasLiveSession). A matching input, never authorization.
      */
     family: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<string | null> => {
       if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
       if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity.bindingFamily;
-      const activity = await loadAppWorkerActivity(ctx, worker.appId, {
-        memoize: info?.operation?.operation === 'query',
-      });
+      const activity = await workerFieldActivity(ctx, worker, info);
       return activity.get(worker.id)?.bindingFamily ?? null;
     },
     /** #2252 — the model its binding last reported (the newest open session's; same gate and fold as `family`). Self-declared; never authorization. */
     model: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<string | null> => (await bindingModelOf(ctx, worker, info))?.bindingModel ?? null,
     /** Live advisory membership uses the same newest-open model and working-state gate as `model`. */
     modelGroups: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
@@ -3295,18 +3528,35 @@ export const workerFieldResolvers = {
     },
     /** #2252 — when that model was self-reported; null when the session never reported one. */
     modelReportedAt: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<Date | null> => (await bindingModelOf(ctx, worker, info))?.modelReportedAt ?? null,
     /** #2252 / R189 — the coarse tier of `model` from the server's one mapping; null when unmapped. Advisory only. */
     tier: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<string | null> => tierOf((await bindingModelOf(ctx, worker, info))?.bindingModel),
+    /**
+     * #4291 (cor:agt:060:04, Proposed) — the worker's record of what its session last reported (family, model, effort),
+     * kept when it unbinds. A working-state field on the same gate as `family`: null when the caller may not see the
+     * worker's working state. Self-declared; never authorization.
+     */
+    lastUsed: async (
+      worker: WorkerActivityParent & { lastUsedFamily?: string | null; lastUsedModel?: string | null; lastUsedEffort?: string | null },
+      _: unknown,
+      ctx: Context,
+    ): Promise<WorkerRunRecord | null> => {
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      // A parent projected without the record's columns reads them here, never as an empty record.
+      const row = worker.lastUsedFamily !== undefined
+        ? worker
+        : await ctx.db.worker.findUnique({ where: { id: worker.id }, select: { lastUsedFamily: true, lastUsedModel: true, lastUsedEffort: true } });
+      return workerRunRecordOf(row ?? {});
+    },
     /**
      * hadron-cli#487 — when this worker was last DRIVEN, across every session
      * it has ever had; null for a worker nobody has ever bound.
@@ -3321,16 +3571,14 @@ export const workerFieldResolvers = {
      * shows and the one the reaper acts on. Masked on deny, as above.
      */
     lastActiveAt: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<Date | null> => {
       if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
       if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity.lastActiveAt;
-      const activity = await loadAppWorkerActivity(ctx, worker.appId, {
-        memoize: info?.operation?.operation === 'query',
-      });
+      const activity = await workerFieldActivity(ctx, worker, info);
       return activity.get(worker.id)?.lastActiveAt ?? null;
     },
     /**
@@ -3401,7 +3649,10 @@ export const workerFieldResolvers = {
       const app = await ctx.db.app.findUnique({ where: { id: worker.appId } });
       if (!app || app.deletedAt) return null;
       try {
-        await requireOwnerOrOrgRole(ctx, app, 'READER');
+        // #2089: the App-specific read gate, so Worker.app agrees with Query.app
+        // (org arms unchanged, plus a current owner-role member of a user-owned
+        // App). The App's children keep their own per-field withholding.
+        await requireAppRead(ctx, app);
       } catch {
         return null;
       }

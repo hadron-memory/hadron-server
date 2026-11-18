@@ -1,3 +1,4 @@
+import { personalOrgAgentTextAllowed } from './personalOrgAgentInstall.js';
 /**
  * The App-key-with-active-session memory scope — the hard isolation boundary
  * for multi-user agents, as ONE predicate with two callers.
@@ -67,7 +68,7 @@ export async function sessionScopedMemoryIds(
   const app = await db.app.findUnique({
     where: { id: appId },
     select: {
-      deletedAt: true, uninstalledAt: true,
+      organizationId:true, ownerUserId:true, deletedAt: true, uninstalledAt: true,
       organization: { select: { deletedAt: true } },
     },
   });
@@ -98,7 +99,8 @@ export async function sessionScopedMemoryIds(
   const hasLicensedInstall = async (): Promise<boolean> => {
     if (session.agentId === null) return false;
     if (licensedInstall === undefined) {
-      licensedInstall = await isAgentInstalledAndLicensed(db, appId, session.agentId);
+      licensedInstall = await isAgentInstalledAndLicensed(db, appId, session.agentId) &&
+        await personalOrgAgentTextAllowed(db,app,session.agentId,session.userId);
     }
     return licensedInstall;
   };

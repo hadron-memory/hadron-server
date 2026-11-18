@@ -34,6 +34,11 @@ export async function buildPrismaMemoryLayer(
   memoryId: string,
   sourceLoc: string,
   personId?: string | null,
+  /**
+   * #4034: the ancestor nodes (`data` plus the source's loc chain) read from a pinned snapshot instead of the
+   * database. Everything else (encryption, the live memory-wide-field list per ruling Q10) is unchanged.
+   */
+  preloadedNodes?: ReadonlyArray<{ loc: string; data: unknown }>,
 ): Promise<MemoryLayerHandle> {
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
@@ -68,10 +73,12 @@ export async function buildPrismaMemoryLayer(
       ancestors.push(parts.slice(0, i).join(':'));
     }
   }
-  const nodes = await db.node.findMany({
-    where: { memoryId, loc: { in: ancestors }, deletedAt: null },
-    select: { loc: true, data: true },
-  });
+  const nodes = preloadedNodes
+    ? preloadedNodes.map((n) => ({ loc: n.loc, data: n.data }))
+    : await db.node.findMany({
+      where: { memoryId, loc: { in: ancestors }, deletedAt: null },
+      select: { loc: true, data: true },
+    });
   if (isEncrypted) {
     for (const n of nodes) {
       decryptNodeFields(n, { id: memoryId, isEncrypted: true });

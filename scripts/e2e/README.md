@@ -42,6 +42,26 @@ that choice consistent for teardown; auto teardown uses the recorded choice. Doc
 the Incus publication binds the disposable instance's interfaces, reachable
 only through the private QA bridge and the host-loopback forwarder.
 
+### Private env file for mocked capability tools (Incus only)
+
+A stack whose Compose interpolates private variables (for example a mocked
+capability tool's token) is booted with an explicit opt-in:
+
+```sh
+E2E_PRIVATE_ENV_FILE=/path/to/mock.env scripts/e2e/stack.sh up NAME 18400 18500
+```
+
+The file is copied mode 600 (owner root) into `/opt/hadron-private/env` inside
+the owned instance and passed as `--env-file` to every inner Compose call
+(`up`, `exec`, `logs`, validation). `compose config --quiet` runs before `up`;
+its output and errors are discarded, so a failure prints only a generic line
+and neither the file's values nor the resolved configuration reach harness
+output. The copy dies with the instance on `down`, which also removes the
+stack's `private-env` state marker; other stacks are untouched. Nothing else
+from the host environment is forwarded. Use synthetic values only. The Docker
+backend refuses the option with a message (Compose there already reads the
+host environment). Without the option nothing changes.
+
 On Incus, `dns-guard.sh` probes name resolution inside the fresh instance before
 anything needs the network (`E2E_DNS_POLL_SECONDS`, `E2E_DNS_SEED_AFTER`,
 `E2E_DNS_WAIT_PROBES`). A resolver that comes up by itself is left alone. Only
@@ -94,6 +114,8 @@ In **each org**:
 - `team` App with its admin, coordinator and QA role agents, two cast workers
   (`Test Coordinator`, `Test Reviewer`), worker memories, an App key and a
   default team Channel in the `app` memory; runnable `tasks:check-stack`.
+  The role agents' shared `system` memory holds one conversation, `welcome` (one stage,
+  `greet`), so an unnamed `startChat` on the coordinator opens it (#3160).
 - `specs` memory with `rule:001` and `rule:002`: current approvals, mint
   hashes and revision fingerprints. Its `spec.rule` role has a locked
   ADMIN-writer rule, so member-authored edits are protected.

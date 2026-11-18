@@ -18,6 +18,8 @@ import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { ensureAgentOrgGrant } from '../controller/operations/ensureAgentOrgGrant.js';
 import { classifyOrgAgentLicense } from './auth/orgAgentInstallLicense.js';
+import { personalOrgAgentLicenseHolds } from './auth/personalOrgAgentInstall.js';
+import { bootPromptRefusal } from './bootPrompt/refusal.js';
 import { parseCompiledProvenance } from './bootCompile/provenance.js';
 
 type Db = Pick<PrismaClient, 'app' | 'appAgentCustomization' | 'agentImport' | 'agent' | 'agentOrgGrant' | 'agentSubscription' | 'appAgent' | 'compiledPromptRevision' | 'node'> | Prisma.TransactionClient;
@@ -84,6 +86,11 @@ async function planLicence(db: Db, app: CastingApp, agentId: string, include: bo
   // A user-owned App: the owner's own Agent, or the owner's active subscription.
   const agent = await db.agent.findUnique({ where: { id: agentId }, select: { ownerUserId: true, deletedAt: true } });
   if (!agent || agent.deletedAt) throw unavailable();
+  if (!(await personalOrgAgentLicenseHolds(db as Prisma.TransactionClient, app, agentId))) {
+    // Included Agents keep the existing non-disclosing include refusal.
+    if (include) throw inactive();
+    throw bootPromptRefusal('BOOT_PROMPT_INSTALL_LICENSE_INACTIVE', { surface: 'bind', agentName: '' });
+  }
   if (app.ownerUserId && agent.ownerUserId === app.ownerUserId) return false;
   const sub = app.ownerUserId
     ? await db.agentSubscription.findUnique({ where: { userId_agentId: { userId: app.ownerUserId, agentId } } })

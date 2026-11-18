@@ -38,7 +38,6 @@ import type { Request, Response } from 'express';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
@@ -49,6 +48,7 @@ import {
   USER_API_KEY_PREFIX,
 } from '../../middleware/auth.js';
 import { handleMcpRequest } from '../../mcp/server.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 
 // ── Test fixtures + helpers ──────────────────────────────────────────
 
@@ -63,7 +63,7 @@ let testUser: { id: string };
 let testJwt: string;
 
 beforeAll(async () => {
-  const app = await createServer();
+  const app = await createServerOnCleanDb();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
@@ -71,9 +71,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await new Promise<void>((resolve, reject) => {
-    server.close((err) => (err ? reject(err) : resolve()));
-  });
+  await closeServerIfStarted(server);
 });
 
 beforeEach(async () => {
