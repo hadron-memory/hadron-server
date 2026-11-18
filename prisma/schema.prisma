@@ -6052,8 +6052,8 @@ model MemoryConfigTemplateRule {
 /// `required` (a required default plants the rule so that it fails closed instead;
 /// src/api/graphql/schema/resolvers.memoryConfigOrgDefault.ts). `field` is `authorTask`, `validationTask` or
 /// `descriptionNode`. The row stores no task URN and no state: a read recomputes what the caller may see from
-/// `templateRuleId`. It is readable only by those who may manage the memory's config. No code updates or
-/// deletes a row.
+/// `templateRuleId`. It is readable only by those who may manage the memory's config. No application code
+/// updates or deletes a row.
 ///
 /// Background: #3426.
 model MemoryConfigDefaultSkip {
@@ -6077,6 +6077,7 @@ model MemoryConfigDefaultSkip {
   @@map("memory_config_default_skips")
 }
 
+/// Whose authority an automation version runs with: a person's or the App's. See `AutomationVersion.tier`.
 enum AutomationTier {
   PERSON
   APP
@@ -6353,7 +6354,7 @@ enum GitMirrorObligationState {
 /// - The compiled code and its metadata never change (a trigger refuses it). Approval (`approvalHash`,
 ///   `approvedBy`, `approvedAt`, with the hash equal to `versionHash`) and revocation (`revokedBy`,
 ///   `revokedAt`) are each written once, and a revoked version cannot be approved. A new approval needs a new
-///   version.
+///   version. Approval by a named person is a temporary bridge until passkey signatures take its place.
 /// - A PERSON version is approved only by its run-as user; an APP version by the App's owner or an admin of
 ///   its organization.
 /// - The only code that touches the table is src/lib/automation/versions.ts (`publishAutomationVersion`,
