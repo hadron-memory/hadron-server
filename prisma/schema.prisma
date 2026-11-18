@@ -2596,9 +2596,10 @@ model MemoryLogEntry {
 ///
 /// Behaviour: `role` is the role the recipient gets on acceptance. It cannot be higher than the sender's own
 /// role, and OWNER is not given by invitation. `expiresAt` is when the invitation expires and `acceptedAt` when
-/// the recipient accepted. No mutation creates these invitations today. The only code that touches the table
-/// revokes an organization's open invitations (src/lib/auth/revokeOrgInvitations.ts, also used when an
-/// organization is soft-deleted).
+/// the recipient accepted. No mutation creates these invitations today (a search of src/ finds no create of
+/// the model), so the acceptance described here is the table's design, not a live flow. The only code that
+/// touches the table revokes an organization's open invitations (src/lib/auth/revokeOrgInvitations.ts, also
+/// used when an organization is soft-deleted).
 ///
 /// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:040:04.
 model OrgMemberInvitation {
@@ -2992,14 +2993,16 @@ model NodeContentValidationReport {
   @@map("node_content_validation_reports")
 }
 
-/// The API key of a newly provisioned workspace, held encrypted until the user has seen it once during
-/// first-time setup. The key is the raw `hdr_app_…` key of the workspace's App.
+/// A table for the API key of a newly provisioned workspace: the raw `hdr_app_…` key of the workspace's App, to
+/// be held encrypted until the user had seen it once during first-time setup. That setup flow is not in the
+/// code today, so nothing fills the table (see Behaviour).
 ///
 /// Relationships: one per User, for one App; deleted with either.
 ///
-/// Behaviour: `rawKeyEncrypted` is the key under AES-256-GCM, and `consumed` records that it was shown. No code
-/// path creates or reads these rows today; the only code that touches the table is the deletion of a user's
-/// account, which removes that user's row (src/controller/operations/deleteUser.ts).
+/// Behaviour: `rawKeyEncrypted` is meant to hold the key under AES-256-GCM and `consumed` to record that it was
+/// shown. No code path creates or reads a row, and no `/setup/info` route exists (checked with a search of
+/// src/ for the model and the route). The only code that touches the table is the deletion of a user's account,
+/// which removes that user's row (src/controller/operations/deleteUser.ts).
 ///
 /// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:040:06.
 model PendingSetup {
@@ -3571,7 +3574,7 @@ model WaitingListItem {
 ///   its own end users.
 /// - Data: the App's Memories (app-class, and personal memories per user), Sessions, UsageEvents, AppLogEntry
 ///   rows, AiServiceConfigs (which override an Agent's defaults for this App) and `chatbotAiConfig`.
-/// - Team: Workers (the named castings of installed Agents), AgentTasks, Tickers, grants, host registrations and
+/// - Team: Workers (the named castings of installed Agents), AgentTasks, Tickers, AppGrant and Grant rows, host registrations and
 ///   operations, alarms and their episodes, stop signals. `defaultChannel` is the App's team chat.
 ///
 /// Behaviour:
@@ -3902,9 +3905,11 @@ model AppKey {
 /// Relationships: joins App and User, one row per pair (the primary key), and is deleted with either.
 ///
 /// Behaviour:
-/// - `role` is a free string, checked when it is written against the `memberRoles` that the installed Agent's
-///   `installationPolicy` allows (for example `owner`, `guide`, `cook`). The policy's `maxMembers` is enforced
-///   when an invitation is accepted.
+/// - `role` is a free string. When it is written it must be a role the App offers: the union of the
+///   `memberRoles` in the `installationPolicy` of every Agent installed in the App (for example `owner`, `guide`,
+///   `cook`). An App with no installed Agent accepts no members (src/controller/operations/ensureAppMember.ts).
+/// - The member limit is the `maxMembers` of the App's primary Agent. It is checked when a new member row is
+///   inserted, not when an existing member's role changes.
 /// - There is no `deletedAt`, no expiry and no revocation column: removing a member deletes the row.
 /// - Removing a member keeps that user's personal memory for the App. It is found again if the user later
 ///   rejoins the same App.
