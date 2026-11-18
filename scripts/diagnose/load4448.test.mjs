@@ -54,13 +54,15 @@ test('probe on a transport failure reports errors, never a phantom latency', asy
 
 test('run() probes only the held workload and only when asked', async () => {
   const fetchImpl = async (_u, init) => (JSON.parse(init.body).method === 'initialize' ? res(200, '') && { status: 200, headers: { get: () => sid }, text: async () => '' } : res(200));
-  const held = await run({ base: 'http://x', key: 'k', workload: 'held', durationMs: 5, cap: 2, probeN: 3, fetchImpl, now: Date.now });
+  // A fake monotonic clock: a wall-clock step (NTP) on the shared host must not be able to fail this.
+  const clock = { t: 1_000, now: () => (clock.t += 1) };
+  const held = await run({ base: 'http://x', key: 'k', workload: 'held', durationMs: 5, cap: 2, probeN: 3, fetchImpl, now: clock.now });
   expect(held.counts.ok).toBe(3); // cap + 1
   expect(held.probe.requests).toBe(3);
   expect(held.probe.errors).toBe(0);
   expect(Number.isFinite(held.startAt)).toBe(true);
   expect(held.endAt).toBeGreaterThanOrEqual(held.startAt + 5);
-  const quiet = await run({ base: 'http://x', key: 'k', workload: 'held', durationMs: 5, cap: 2, fetchImpl, now: Date.now });
+  const quiet = await run({ base: 'http://x', key: 'k', workload: 'held', durationMs: 5, cap: 2, fetchImpl, now: clock.now });
   expect(quiet.probe).toBe('not exercised');
 });
 

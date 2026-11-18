@@ -43,7 +43,7 @@ case "$1" in
  logs) echo private-log;;
 esac\n`,{mode:0o755});
  writeFileSync(join(dir,'health.mjs'),"globalThis.fetch=async()=>{if(process.env.MODE==='dead')throw new Error('synthetic');return {ok:process.env.MODE!=='unhealthy'};};\n");
- const env={...process.env,FIXTURE:dir,MODE:mode,PATH:bin+':'+process.env.PATH,TMPDIR:dir,XDG_STATE_HOME:join(dir,'state'),DIAG_OUT:join(dir,'samples'),DIAG_IDLE_S:'0.01',E2E_BACKEND:'incus'};
+ const env={...process.env,FIXTURE:dir,MODE:mode,PATH:bin+':'+process.env.PATH,TMPDIR:dir,XDG_STATE_HOME:join(dir,'state'),DIAG_OUT:join(dir,'samples'),DIAG_IDLE_S:'0.01',DIAG_SETTLE_S:'0.01',E2E_BACKEND:'incus'};
  const args=[join(here,'run.sh'),'fixture','41001','41002','idle','1'];
  return {dir,env,args,run:()=>spawnSync('bash',args,{env,encoding:'utf8',timeout:10_000}),clean:()=>rmSync(dir,{recursive:true,force:true})};
 }

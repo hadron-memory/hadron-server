@@ -24,7 +24,26 @@ test('divides the loaded-minus-baseline RSS delta by the held count (the cap)', 
   expect(line.baselineRssBytes).toBe(300);
   expect(line.loadedRssBytes).toBe(700);
   expect(line.rssPerSessionBytes).toBe(4); // (700 - 300) / 100
+  expect(line.peakRssDuringLoadBytes).toBe(900); // max inside the load window, not the median
   expect(line.basis).toContain('perSession=(loaded-baseline)/held');
+});
+
+test('the baseline is the settled last 60 s before startAt, not the boot-flushed tail (the first 100-run inverted its sign)', () => {
+  // 15 boot-phase samples at startAt-5 min with rss 455 MB, 15 settled samples at startAt-30 s with rss 397 MB.
+  const boot = Array.from({ length: 15 }, (_, i) => s(5_000 - 300_000 + i * 1_000, { rss: 455_000 }));
+  const settled = Array.from({ length: 15 }, (_, i) => s(5_000 - 30_000 + i * 1_000, { rss: 397_000 }));
+  const line = perSessionLine({ samples: [...boot, ...settled, s(80_000, { rss: 411_000 })], load });
+  expect(line.baselineRssBytes).toBe(397_000);
+  expect(line.rssPerSessionBytes).toBe(140); // (411000 - 397000) / 100 — positive, as measured
+});
+
+test('with fewer than 10 settled samples the baseline falls back to every pre-load sample', () => {
+  const few = [s(5_000 - 30_000, { rss: 397_000 }), s(5_000 - 20_000, { rss: 399_000 }), s(5_000 - 10_000, { rss: 401_000 })];
+  const boot = Array.from({ length: 9 }, (_, i) => s(5_000 - 300_000 + i * 1_000, { rss: 455_000 }));
+  const line = perSessionLine({ samples: [...boot, ...few, s(80_000, { rss: 500_000 })], load });
+  // Median of all 12 pre-load samples — the boot tail leaks in (9 of 12 at 455k). That leak is why
+  // run.sh defaults DIAG_SETTLE_S=60: a real run always has ≥10 settled samples and never falls back.
+  expect(line.baselineRssBytes).toBe(455_000);
 });
 
 test('the loaded window is the last 30 s at or before endAt; the baseline strictly before startAt', () => {

@@ -33,7 +33,7 @@ export async function run({ base, key, workload, durationMs, signal, cap = 25, f
   if (w.hold) for (let i = 0; i < w.hold; i++) { const r = await initialize(base, key, fetchImpl); note(r); if (r.status === 200 && r.sid) probeSid = r.sid; }
   let probe = 'not exercised';
   if (w.hold && probeN > 0 && probeSid && !signal?.aborted) probe = await probeHeldSession({ base, key, sid: probeSid, n: probeN, fetchImpl, now });
-  while (w.perMin && Date.now() < end && !signal?.aborted) {
+  while (w.perMin && now() < end && !signal?.aborted) {
     const { status, sid } = await initialize(base, key, fetchImpl);
     note({status, sid});
     if (w.close && sid) {
@@ -44,7 +44,7 @@ export async function run({ base, key, workload, durationMs, signal, cap = 25, f
     }
     await new Promise((r) => setTimeout(r, 60_000 / w.perMin));
   }
-  if (!w.perMin) await new Promise((r) => setTimeout(r, Math.max(0, end - Date.now())));
+  if (!w.perMin) await new Promise((r) => setTimeout(r, Math.max(0, end - now())));
   return { counts, probe, startAt, endAt: now() };
 }
 

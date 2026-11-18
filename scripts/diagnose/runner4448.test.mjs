@@ -53,7 +53,7 @@ case "$1" in
 esac\n`, { mode: 0o755 });
   writeFileSync(join(dir, 'health.mjs'), "globalThis.fetch=async()=>({ok:true});\n");
   const env = { ...process.env, FIXTURE: dir, MODE: mode, PATH: bin + ':' + process.env.PATH,
-    TMPDIR: dir, XDG_STATE_HOME: join(dir, 'state'), DIAG_OUT: join(dir, 'samples'), DIAG_IDLE_S: '0.01', E2E_BACKEND: 'incus',
+    TMPDIR: dir, XDG_STATE_HOME: join(dir, 'state'), DIAG_OUT: join(dir, 'samples'), DIAG_IDLE_S: '0.01', DIAG_SETTLE_S: '0.01', E2E_BACKEND: 'incus',
     DIAG_SESSION_CAP: mode === 'range' ? '1001' : '100', DIAG_PROBE_N: '7' };
   const args = [join(here, 'run.sh'), 'fixture', '41001', '41002', 'held', '1'];
   return { dir, env, args, run: () => spawnSync('bash', args, { env, encoding: 'utf8', timeout: 20_000 }), clean: () => rmSync(dir, { recursive: true, force: true }) };

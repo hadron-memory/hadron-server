@@ -9,8 +9,9 @@
 # env: DIAG_OUT (default $TMPDIR/diagnose-<project>.jsonl), DIAG_IDLE_S (default 300).
 #   DIAG_SESSION_CAP (1..1000) bakes MCP_MAX_SESSIONS_PER_PRINCIPAL into the staged stack (the held
 #   workload opens cap+1; the measured held count is the cap), DIAG_PROBE_N (held only) times tools/list
-#   round trips on a held session (#4448). The load line (counts, latencies, epoch ms) is appended to DIAG_OUT
-#   with the per-session reduction.
+#   round trips on a held session (#4448), DIAG_SETTLE_S (default 60) idles before the load so the
+#   per-session baseline is settled, not boot-flushed. The load line (counts, latencies, epoch ms) is
+#   appended to DIAG_OUT with the per-session reduction.
 #   The load generator itself runs inside the app container, never on the shared host (the #4448 host
 #   rule, finding synthetic-load-never-on-shared-host); only its counts-only line comes back out.
 # Failed samples/logs are retained only with verified instance ownership; otherwise private state is left for inspection.
@@ -109,6 +110,9 @@ take_snapshot start
 if [ "${DIAG_W2:-}" = 1 ]; then
   node "$here/activity.mjs" "http://127.0.0.1:$api" > "$stage/w2-created.json"
 fi
+# #4448: an idle baseline measured against boot-flushed RSS is not an idle baseline (the first run's
+# pre-load window was 8 boot-phase samples at +45 MB over settled). Idle first, then load.
+sleep "${DIAG_SETTLE_S:-60}"
 # #4448 host rule (finding synthetic-load-never-on-shared-host): the load generator runs INSIDE the app
 # container against its loopback server, never on the shared host. The shared user key is read from the
 # mounted credentials file inside the container, so it never reaches a host argv or the host environment;
