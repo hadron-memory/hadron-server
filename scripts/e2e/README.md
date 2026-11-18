@@ -114,6 +114,8 @@ In **each org**:
 - `team` App with its admin, coordinator and QA role agents, two cast workers
   (`Test Coordinator`, `Test Reviewer`), worker memories, an App key and a
   default team Channel in the `app` memory; runnable `tasks:check-stack`.
+  The role agents' shared `system` memory holds one conversation, `welcome` (one stage,
+  `greet`), so an unnamed `startChat` on the coordinator opens it (#3160).
 - `specs` memory with `rule:001` and `rule:002`: current approvals, mint
   hashes and revision fingerprints. Its `spec.rule` role has a locked
   ADMIN-writer rule, so member-authored edits are protected.

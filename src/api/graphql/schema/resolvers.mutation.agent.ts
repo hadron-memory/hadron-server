@@ -46,6 +46,7 @@ import { assertMaySubscribeOrgToPublicAgent } from '../../../controller/operatio
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { endGrantsOfAgentsNoLongerInstalled, liveAppsWhereInstalled } from '../../../lib/grants/agentInstallDeparture.js';
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
+import { retryOnDeadlock } from '../../../lib/serializableRetry.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { writeAgentBase } from '../../../lib/agentBase.js';
 import { AgentNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -1584,7 +1585,10 @@ export const agentMutations = {
         await requireReadableAgent(ctx, await ctx.db.agent.findUnique({ where: { id: resolvedImportedId } }), importedAgentRef);
       }
       // #4172: one authorized transaction, so the edge delete and the grants it ends commit or roll back together.
-      await withAuthorizedTx(
+      // #4318: two removals whose parents were installed into each other's Apps between their fence reads can deadlock
+      // (40P01 aborts the whole transaction), so the WHOLE transaction is retried: each attempt re-takes the anchors,
+      // re-runs the re-check and re-reads the Apps under its own locks before deciding which grants end (one unit).
+      await retryOnDeadlock(() => withAuthorizedTx(
         ctx,
         [
           { kind: 'agent', id: resolvedParentId },
@@ -1600,7 +1604,7 @@ export const agentMutations = {
         },
         (tx) => removeAgentImport(tx, resolvedParentId, resolvedImportedId, ctx.userId ?? null),
         { lockMode: 'exclusive' },
-      );
+      ));
       return true;
     },
 

@@ -355,31 +355,92 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     const events: { at: number; what: string }[] = [];
     let releasingAt = Infinity;
     let stop = false;
-    const hammer = (role: string) =>
-      (async () => {
-        while (!stop) {
-          if (await tryConnect(B.url(target, role, F.PASSWORD))) events.push({ at: performance.now(), what: role });
-          await new Promise((r) => setTimeout(r, 5));
+    // #4322: a denied attempt briefly occupies a slot of the database's CONNECTION LIMIT (after authentication, until its
+    // ACL refusal), so the probes' concurrency must stay under the working phase's spare slots.
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const roles = [F.ROLES.serve, F.ROLES.owner, F.ROLES.other];
+    // Every probe goes through here, so the in-flight count covers the background loop and the checkpoint alike. Admission is
+    // recorded the moment connect() resolves, whatever happens to the close; a refusal keeps its SQLSTATE and text (a limit or
+    // transport failure must not pass for an ACL refusal, and the code does not depend on the server's locale).
+    type Probe =
+      | { connected: true; admittedAt: number; code: null; error: null }
+      | { connected: false; admittedAt: null; code: string | null; error: string };
+    // A client that was admitted and then failed to close may still hold a slot, which would make the slot accounting below
+    // wrong; count those and fail the test on any, instead of swallowing them.
+    let closeFailures = 0;
+    const probe = async (role: string): Promise<Probe> => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      const c = new Client({ connectionString: B.url(target, role, F.PASSWORD), connectionTimeoutMillis: 2_000 });
+      try {
+        try {
+          await c.connect();
+        } catch (e) {
+          await c.end().catch(() => { closeFailures++; }); // release whatever a refused or timed-out connect left open; the original outcome is kept, a failed cleanup is counted
+          return { connected: false, admittedAt: null, code: (e as { code?: string } | null)?.code ?? null, error: String((e as Error | null)?.message ?? e) };
         }
-      })();
-    const loops = [F.ROLES.serve, F.ROLES.owner, F.ROLES.other].map(hammer);
-    await restoreWithRebase(
-      base({
-        target,
-        log: (e) => {
-          if (e.event === 'releasing') releasingAt = performance.now();
-        },
-      }),
+        const admittedAt = performance.now(); // the instant of admission, taken before the close can delay it
+        await c.end().catch(() => { closeFailures++; });
+        return { connected: true, admittedAt, code: null, error: null };
+      } finally {
+        inFlight--;
+      }
+    };
+    // One loop, roles in turn: at most ONE background probe in flight, so the probes can never take the slots pg_restore
+    // needs. (Three parallel loops did, and refused pg_restore's own connection: 'too many connections for database'.)
+    // Its failure is captured the moment it happens, so it can neither go unhandled nor mask a restore error.
+    const probeLoop = (async () => {
+      for (let i = 0; !stop; i++) {
+        const role = roles[i % roles.length]!;
+        const result = await probe(role);
+        if (result.connected) events.push({ at: result.admittedAt, what: role });
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    })().then(
+      () => ({ failed: false as const }),
+      (reason: unknown) => ({ failed: true as const, reason }), // tagged, so even a falsy rejection is rethrown
     );
-    await new Promise((r) => setTimeout(r, 300));
-    stop = true;
-    await Promise.all(loops);
+    // Coverage that cannot race the restore: at the 'fenced' checkpoint (ACL fence done, admission on, pg_restore not yet
+    // started) each role is probed once, in turn, and must be refused for lack of CONNECT. The log hook is awaited by the
+    // caller; the S3 event below proves it (the checkpoint is complete before the restore reports S3).
+    const checkpoint: Record<string, Probe> = {};
+    let checkpointCompleteAtS3 = false;
+    try {
+      await restoreWithRebase(
+        base({
+          target,
+          log: async (e) => {
+            if (e.event === 'releasing') releasingAt = performance.now();
+            if (e.stage === 'S2' && e.event === 'fenced') for (const role of roles) checkpoint[role] = await probe(role);
+            if (e.stage === 'S3' && e.event === 'restored') checkpointCompleteAtS3 = Object.keys(checkpoint).length === roles.length;
+          },
+        }),
+      );
+      await new Promise((r) => setTimeout(r, 300));
+    } finally {
+      // Stop and join the loop even when the restore throws; the restore's own error still propagates.
+      stop = true;
+      await probeLoop; // never rejects: its outcome is tagged
+    }
+    const loopOutcome = await probeLoop;
+    if (loopOutcome.failed) throw loopOutcome.reason;
     // 'releasing' is logged immediately before the release statement is sent: no connect may succeed before it.
     expect(releasingAt).toBeLessThan(Infinity);
     const early = events.filter((e) => e.at < releasingAt);
     expect(early).toEqual([]);
     expect(events.some((e) => e.what === F.ROLES.serve)).toBe(true);
     expect(events.some((e) => e.what === F.ROLES.other)).toBe(false);
+    // #4322: the limit is 4: the pipeline's session and pg_restore's leave two spare slots, so at most two probes may be in flight.
+    expect(maxInFlight).toBeLessThanOrEqual(2);
+    expect(closeFailures).toBe(0); // no probe, admitted or refused, left a connection behind to eat a slot
+    // ...and each role, the serve role included, was refused for lack of CONNECT at the working-phase checkpoint, before the restore went on.
+    expect(checkpointCompleteAtS3).toBe(true);
+    for (const role of roles) {
+      expect(checkpoint[role]?.connected).toBe(false);
+      expect(checkpoint[role]?.code).toBe('42501'); // insufficient_privilege: the ACL fence, not the limit (53300) or the network
+      expect(checkpoint[role]?.error).toMatch(/permission denied for database/);
+    }
   });
 
   it('P3: a foreign (superuser) session at the hard fence aborts; it is never killed, so the plain drop fails and leaves it', async () => {

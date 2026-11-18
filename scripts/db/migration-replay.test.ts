@@ -5,7 +5,11 @@
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { BASELINE_PATH, baselineGrowth, differenceEntries, encodeKey, fingerprint, isEngineBookkeeping, judge, parseBaseline } from './migration-replay.js';
+import { diff, differenceKind } from '../../src/test/catalogSnapshot.js';
+import {
+  BASELINE_PATH, BaselineFormatError, baselineGrowth, differenceEntries, encodeKey, evaluate, exitCode, fingerprint, isEngineBookkeeping,
+  judge, parseBaseline, withDb,
+} from './migration-replay.js';
 
 describe('#434 Slice C: the replay baseline is shrink-only', () => {
   const baseline = ['added idx:a', 'changed col:t.c'];
@@ -26,7 +30,8 @@ describe('#434 Slice C: the replay baseline is shrink-only', () => {
     expect(judge(['added idx:a'], ['added idx:a', 'added idx:a']).stale).toEqual(['added idx:a']);
   });
   it('the baseline file parses: comments and blanks skipped, every entry a known kind, a key and a fingerprint, unique', () => {
-    expect(parseBaseline('# c\n\n added idx:a \n#x\nchanged col:t.c\n')).toEqual(['added idx:a', 'changed col:t.c']);
+    expect(parseBaseline('# c\n\n added idx:a 0123456789abcdef \n#x\nchanged col:t.c fedcba9876543210\n'))
+      .toEqual(['added idx:a 0123456789abcdef', 'changed col:t.c fedcba9876543210']);
     const entries = parseBaseline(readFileSync(BASELINE_PATH, 'utf8'));
     // An EMPTY baseline is valid once every listed drift is fixed (#4338 BLIND F6). A key may hold spaces (F2).
     for (const e of entries) expect(e).toMatch(/^(added|removed|changed|reformatted) (col|con|idx|fn|seq|view|tg):.+ [0-9a-f]{16}$/);
@@ -74,5 +79,72 @@ describe('#434 Slice C: the replay baseline is shrink-only', () => {
     expect(baselineGrowth(['a 1', 'b 2', 'c 3'], ['a 1', 'b 2'])).toEqual(['c 3']);
     expect(baselineGrowth(['a 1'], ['a 1', 'b 2'])).toEqual([]);
     expect(baselineGrowth(['a 9'], ['a 1'])).toEqual(['a 9']); // a re-fingerprinted line is growth too
+  });
+});
+
+describe('#4378: baseline-line validation, the exit-code contract and the pure seams', () => {
+  const fp = '0123456789abcdef';
+
+  it('red-first: parseBaseline refuses a malformed line, naming its line number and the line', () => {
+    for (const bad of ['garbage', 'added idx:a', 'added idx:a 0123', `grew idx:a ${fp}`, `added zz:a ${fp}`, `added idx: ${fp}`, `added idx:a ${fp.toUpperCase()}`]) {
+      expect(() => parseBaseline(`# header\nchanged col:t.c ${fp}\n${bad}\n`)).toThrow(BaselineFormatError);
+      expect(() => parseBaseline(`# header\nchanged col:t.c ${fp}\n${bad}\n`)).toThrow(`line 3: ${bad.trim()}`);
+    }
+  });
+  it('parseBaseline accepts a key with spaces and an escaped key, and keeps blanks and comments skipped', () => {
+    expect(parseBaseline(`\n  # c\nchanged fn:f(x integer, y text) ${fp}\nadded col:"a\\nb".c ${fp}\n`))
+      .toEqual([`changed fn:f(x integer, y text) ${fp}`, `added col:"a\\nb".c ${fp}`]);
+    expect(parseBaseline('# only comments\n\n')).toEqual([]);
+  });
+
+  it('exit codes: 1 is detection, 2 is operational; a cleanup failure on an otherwise clean run is 2, never 1', () => {
+    expect(exitCode(0, 0)).toBe(0);
+    expect(exitCode(1, 0)).toBe(1);
+    expect(exitCode(0, 1)).toBe(2);
+    expect(exitCode(1, 2)).toBe(1); // drift found AND a leak: the detection is still reported as a detection
+    expect(exitCode(2, 1)).toBe(2);
+  });
+
+  it('withDb replaces only the database path and keeps the query string', () => {
+    expect(withDb('postgresql://u:p@h:5432/postgres?sslmode=require&x=1', 'scratch_db'))
+      .toBe('postgresql://u:p@h:5432/scratch_db?sslmode=require&x=1');
+    expect(withDb('postgresql://u@h/postgres', 'n')).toBe('postgresql://u@h/n');
+  });
+
+  describe('evaluate', () => {
+    const details = new Map([[`added idx:new ${fp}`, '  defs']]);
+    it('--print returns 0 and prints the entries without judging them (no baseline read)', () => {
+      const r = evaluate({ entries: [`added idx:new ${fp}`], details, print: true, baseline: undefined, baseBaseline: undefined, allowGrowth: false });
+      expect(r).toEqual({ code: 0, out: [`added idx:new ${fp}`], err: [] });
+    });
+    it('green: the baseline lists exactly the differences', () => {
+      expect(evaluate({ entries: [`added idx:new ${fp}`], details, print: false, baseline: [`added idx:new ${fp}`], baseBaseline: [`added idx:new ${fp}`], allowGrowth: false }).code).toBe(0);
+    });
+    it('new drift is 1, naming the entry and its definitions', () => {
+      const r = evaluate({ entries: [`added idx:new ${fp}`], details, print: false, baseline: [], baseBaseline: [], allowGrowth: false });
+      expect(r.code).toBe(1);
+      expect(r.err).toEqual([`NEW DRIFT (not in the baseline): added idx:new ${fp}\n  defs`]);
+    });
+    it('growth over the base is 1 without approval, 0 with it, and not judged without a base baseline', () => {
+      const args = { entries: [`added idx:new ${fp}`], details, print: false, baseline: [`added idx:new ${fp}`] };
+      expect(evaluate({ ...args, baseBaseline: [], allowGrowth: false }).code).toBe(1);
+      const ok = evaluate({ ...args, baseBaseline: [], allowGrowth: true });
+      expect(ok.code).toBe(0);
+      expect(ok.err).toEqual([`APPROVED BASELINE GROWTH: added idx:new ${fp}`]);
+      expect(evaluate({ ...args, baseBaseline: undefined, allowGrowth: false }).code).toBe(0);
+    });
+  });
+
+  it('ONE kind decision: catalogSnapshot.diff and differenceEntries agree on every kind (#4338 BLIND F5)', () => {
+    const before = new Map([['idx:same', 'S'], ['idx:gone', 'G'], ['idx:chg', 'A'], ['fn:f()', 'BEGIN  RETURN 1; END'], ['fn:g()', 'BEGIN RETURN 1; END']]);
+    const after = new Map([['idx:same', 'S'], ['idx:new', 'N'], ['idx:chg', 'B'], ['fn:f()', 'BEGIN RETURN 1; END'], ['fn:g()', 'BEGIN RETURN 2; END']]);
+    const kinds = (lines: string[]) => lines.map((l) => l.split('\n')[0]!.split(' ').slice(0, 2).join(' ')).sort();
+    const expected = ['added idx:new', 'changed fn:g()', 'changed idx:chg', 'reformatted fn:f()', 'removed idx:gone'];
+    expect(kinds(diff(before, after))).toEqual(expected);
+    expect(kinds(differenceEntries(before, after).entries)).toEqual(expected);
+    for (const k of new Set([...before.keys(), ...after.keys()])) {
+      const kind = differenceKind(k, before.get(k), after.get(k));
+      expect(kind === null ? 'same' : `${kind} ${k}`).toBe(k === 'idx:same' ? 'same' : expected.find((e) => e.endsWith(` ${k}`)));
+    }
   });
 });

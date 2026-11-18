@@ -9,7 +9,9 @@
 # The check FAILS on any difference missing from this file (new drift) and on any line here whose difference is gone,
 # so a fix deletes its lines in the same PR. Never add a line to make new drift pass: a new line is a schema decision.
 # Review: adding a line needs the change manager's gate on the PR (named in its body) and the reviewing seats'
-# sign-off on that exact line. Deleting a line needs only the fix that removes the difference.
+# sign-off on that exact line. CI enforces it: a line not on the base's baseline fails unless the PR carries the
+# baseline-growth-approved label (on a push to main, the merged PR's). Deleting a line needs only the fix that removes
+# the difference.
 #
 # Recorded at origin/main 4954deaf (Bradley, 2026-11-17; spike https://github.com/hadron-memory/hadron-server/issues/434#issuecomment-6949698384).
 

@@ -1,4 +1,4 @@
-import { settledTeamEventQueries } from '../../test/teamEventHorizon.js';
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../test/teamEventHorizon.js';
 /** #3255 (cor:agt:050:27 part 10): a late stop is recorded once, never a new reset transition or alarm. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -6,6 +6,7 @@ import { code, ctx, M, NEW_PROC, PROC, setUpResetFixture, type ResetFixture } fr
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { reportContextResetAgentStopped } from './contextReset.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
