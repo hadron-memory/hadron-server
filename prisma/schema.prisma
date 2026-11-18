@@ -665,7 +665,8 @@ model DashboardWidgetPreset {
 /// Behaviour: `policy` is the organization's layer of the action-policy chain, an allow-list that is copied into
 /// each run when the run is created, so an edit applies to later runs only. The GitHub App fields let the server
 /// mint short-lived tokens to sync the organization's Git-backed memories; the private key is stored encrypted.
-/// `listedOnMarketplace` controls advertisement only, not who may read the organization.
+/// `listedOnMarketplace` controls advertisement: a listed organization can be discovered by non-members, who see
+/// its sanitized public view (src/lib/orgDiscoverability.ts). It gives no access to what the organization holds.
 ///
 /// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:040:02.
 model Organization {
@@ -1343,9 +1344,11 @@ enum NodeContentValidationReporterKind {
 ///   - `reference`: pointers to external sources or to other memories, such as papers, URLs and asset references.
 ///   - `system`: an agent's internal configuration, such as conversation designs, stages and topics; usually in
 ///     an Agent's system memory and hidden from end-user search.
-///   `comment` is reserved by the platform for governed feedback (see CommentMeta).
+///   `comment` is reserved by the platform for governed feedback (see CommentMeta). The platform also uses
+///   further values of its own, for example `task` and `compiled-boot-prompt`.
 /// - `objectType` names the collection the node is an instance of, in a memory that declares a schema.
-/// - `role` says what the node is for; a small closed set of values routes writes to that kind's own path.
+/// - `role` says what the node is for. It is an open string; a small closed subset of its values routes writes
+///   to that kind's own path, and every other value has no effect.
 ///
 /// Behaviour:
 /// - Content: `name`, `abstract` and `content` are the text. `abstractOriginHash` records which content the
@@ -1952,8 +1955,9 @@ enum SessionEndReason {
 }
 
 /// One stretch of work by a person, an agent or an automation: an interactive coding session, a chat with an
-/// end user through an App, an automation run, or a run started by an edge (`type`). A session is the unit that
-/// usage is recorded in, and it is what binds a Worker to the process that is doing its work.
+/// end user through an App, an automation run, or a run started by an edge (`type`). Usage is
+/// recorded against a session where there is one, and a session is what binds a Worker to the process that is
+/// doing its work.
 ///
 /// Relationships:
 /// - Who: `user` (the person the work is attributed to), `app`, `agent`, and `worker` when the session is bound
@@ -2331,8 +2335,9 @@ model UsageActivityRollupState {
 /// - `bootPromptNodeId` and `bootPromptUrn` point at the Agent's compiled boot prompt
 ///   (hrn:node:hadronmemory.com:specs:cor:agt:040:07).
 /// - `usesTasks`, `lifecycle`, `resetContextAfterTask` and `contextCap` apply to every Worker cast from the Agent:
-///   whether it is expected to hold tasks, whether its process runs always or only while it has a task, and when
-///   its host is asked to reset its context.
+///   whether its workers work from tasks (`usesTasks` false means they always count as having one, so they are
+///   expected to check in every period), whether a worker's process runs always or only while it has a task, and
+///   when its host is asked to reset its context.
 /// - `personaRole` is descriptive metadata; no server behaviour depends on it.
 ///
 /// Background (history, not law): the Spec Kit spec 008-agent-installation.
@@ -2538,7 +2543,8 @@ model Agent {
 /// that memory. The access fold reads these rows together with the Agent's system memory
 /// (`foldAgentIntoAccessMap`, src/mcp/access-control.ts). A memory that another organization owns can be attached
 /// only while the Agent's own organization has a live MemorySubscription to it, and `read-write` only when that
-/// subscription allows writing (src/lib/auth/memorySubscriptionAccess.ts).
+/// subscription allows writing (src/lib/auth/memorySubscriptionAccess.ts). A user-owned Agent has no
+/// organization, so it cannot be attached that way.
 ///
 /// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:050:09.
 model AgentMemoryItem {
@@ -2624,8 +2630,9 @@ model MemoryLicense {
 /// - A soft-deleted row (`deletedAt`) gives no access.
 /// - A subscription says nothing about access through an App or to a user's own memories. Which memories an
 ///   App and its installed Agents reach is decided per App (hrn:node:hadronmemory.com:specs:cor:dmo:050:17,
-///   src/mcp/access-control.ts), and a `personal` or `private` memory is readable only by its owner and by those
-///   the owner shared it with (MemoryShare), whatever role the caller has in an organization.
+///   src/mcp/access-control.ts). Whatever role the caller has in an organization, a `personal` memory is
+///   readable only by its owner and by those the owner shared it with (MemoryShare), and a `private` memory by
+///   its owner alone.
 ///
 /// Specs: hrn:node:hadronmemory.com:specs:cor:dmo:060:09, hrn:node:hadronmemory.com:specs:cor:dmo:050:09.
 model MemorySubscription {
@@ -2769,8 +2776,8 @@ model AiServiceConfig {
   @@map("ai_service_configs")
 }
 
-/// A log entry about the server as a whole, kept in the database so that an operator can read it in the portal:
-/// for example a failed memory sync, a GitHub App error or another system-level event.
+/// A log entry about the server as a whole. The table is meant for system-level events an operator needs to
+/// see, such as a failed memory sync or a GitHub App error. Nothing writes or shows it today (see Behaviour).
 ///
 /// Relationships: belongs to one HadronServer and is deleted with it. `memoryId` is set when the entry is about
 /// one memory; it is a plain value with no foreign key.
@@ -2802,8 +2809,9 @@ model ServerLogEntry {
   @@map("server_log")
 }
 
-/// A log entry about one Memory, kept in the database so that the memory's managers can see what happened to
-/// it: for example a sync failure, an expired license, an unresolved pending edge or a branch conflict.
+/// A log entry about one Memory, kept in the database as a record of what happened to it. The table is meant
+/// for events such as a sync failure, an expired license or an unresolved pending edge; what is written today is
+/// narrower (see Behaviour).
 ///
 /// Relationships: belongs to one Memory and is deleted with it.
 ///
