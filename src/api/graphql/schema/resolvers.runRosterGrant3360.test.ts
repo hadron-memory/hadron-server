@@ -15,6 +15,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { formatGraphQLError } from '../formatError.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn(async () => {}) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -35,7 +36,7 @@ async function schedule(forApp = appId) {
   return (await db.agentSchedule.create({ data: { id: generateId(), organizationId: orgId, appId: forApp, name: 'Roster automation', cron: '* * * * *', entryNodeUrn: ENTRY } })).id;
 }
 async function runOf(triggerId: string, forApp = appId): Promise<AppRun> {
-  return db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId: forApp, userId: null, triggerKind: 'SCHEDULE', triggerId, entryNodeUrn: ENTRY, status: 'RUNNING' } });
+  return db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId: forApp, agentId: await testRunAgentId(db, orgId, forApp), userId: null, triggerKind: 'SCHEDULE', triggerId, entryNodeUrn: ENTRY, status: 'RUNNING' } });
 }
 async function grant(triggerId: string, forApp = appId) {
   const out = await wire('mutation($a:ID!,$t:ID!){setAutomationTeamSnapshotGrant(appRef:$a,triggerKind:"SCHEDULE",triggerId:$t){id revokedAt}}',

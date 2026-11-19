@@ -20,6 +20,7 @@ import type { AppRun } from '../../../generated/prisma/index.js';
 import type { RunToolContext } from '../../../lib/runner/tools/types.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
 const M = resolvers.Mutation as any;
@@ -88,7 +89,7 @@ const claimedCount = () => db.agentTask.count({ where: { appId: app.id, external
 
 async function mintRun(forApp = app.id, extra: Record<string, unknown> = {}): Promise<AppRun> {
   return db.appRun.create({
-    data: { id: generateId(), organizationId: org.id, appId: forApp, triggerKind: 'MANUAL', entryNodeUrn: 'ut-org::mem::flow:entry', status: 'RUNNING', ...extra },
+    data: { id: generateId(), organizationId: org.id, appId: forApp, agentId: await testRunAgentId(db, org.id, forApp), triggerKind: 'MANUAL', entryNodeUrn: 'ut-org::mem::flow:entry', status: 'RUNNING', ...extra },
   });
 }
 const toolCtx = (run: AppRun): RunToolContext => ({ log: vi.fn(), db, run, principal: runContext(db, run) });
