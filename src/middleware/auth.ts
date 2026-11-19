@@ -1,5 +1,5 @@
 import { refuseSupersededSession } from '../lib/sessionSuperseded.js';
-import { AuthStoreBusyError, isAuthStoreBusyFault } from '../lib/authStoreBusy.js';
+import { AuthStoreBusyError, isPrismaPoolWaitFault } from '../lib/authStoreBusy.js';
 import { transportRateIdentity, type RateIdentity } from '../lib/rateLimit/identity.js';
 import { ownsSession } from '../lib/sessionOwnership.js';
 import { createHash, randomBytes } from 'crypto';
@@ -242,7 +242,7 @@ async function resolveKeyCredentialLookup(lookup: () => Promise<AuthContext>): P
   try {
     return await lookup();
   } catch (error) {
-    if (isAuthStoreBusyFault(error)) throw new AuthStoreBusyError(error);
+    if (isPrismaPoolWaitFault(error)) throw new AuthStoreBusyError(error);
     throw error;
   }
 }

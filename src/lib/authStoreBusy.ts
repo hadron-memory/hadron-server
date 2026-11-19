@@ -27,7 +27,6 @@
  *     and keeps today's generic handling.
  */
 import { GraphQLError } from 'graphql';
-import type { Response } from 'express';
 import { Prisma } from '../generated/prisma/index.js';
 
 /** Fixed prose, so no driver text can ride the message onto the wire. */
@@ -59,40 +58,30 @@ export class AuthStoreBusyError extends GraphQLError {
 }
 
 /**
- * Whether `error` is a busy-store fault the credential check converts: P2024 is always the pool;
- * P2028 splits on Prisma's own message prefix ("Unable to start a transaction in the given time."
- * is the `maxWait` arm) — the same split `busyReason` rides on, with the engine's strings pinned
- * against the installed Prisma in resolvers.teamReadStatementTimeout4476.test.ts. Anything else
- * is not classified: see the file header.
+ * THE Prisma pool-wait classifier (#4471 BLIND P3): P2024 is always the pool; P2028 splits on
+ * Prisma's own message prefix ("Unable to start a transaction in the given time." is the
+ * `maxWait` arm) — with the engine's strings pinned against the installed Prisma in
+ * resolvers.teamReadStatementTimeout4476.test.ts. TWO consumers call this one predicate — this
+ * conversion here, and the bounded team read's `busyReason` (#4467, lib/agentTasks/teamReadBudget.ts)
+ * — so the arms cannot drift between the credential check and the bounded read. Anything else is
+ * not classified: see the file header.
  */
-export function isAuthStoreBusyFault(error: unknown): boolean {
-  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
+export function isPrismaPoolWaitFault(error: unknown): error is Prisma.PrismaClientKnownRequestError {
   return (
-    error.code === 'P2024' ||
-    (error.code === 'P2028' && /unable to start/i.test(error.message))
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    (error.code === 'P2024' || (error.code === 'P2028' && /unable to start/i.test(error.message)))
   );
 }
 
-/** Type guard for the render branches and tests. */
+/**
+ * Type guard for the render branches and tests: the TYPED error of this module. Deliberately
+ * distinct in name from `isPrismaPoolWaitFault` above (BLIND P3) — that one names the RAW Prisma
+ * fault before conversion, this one the converted GraphQLError after.
+ */
 export function isAuthStoreBusyError(error: unknown): error is AuthStoreBusyError {
   return error instanceof AuthStoreBusyError;
 }
 
-/**
- * The plain-HTTP render (the `/graphql/schema`, `/reload`, `/sessions/:id/outcome` routes), which
- * see this error via `next(err)`. Mirrors `respondSessionSuperseded`: a typed auth-path fault is
- * not genericized by the #1789 envelope — the caller must see AUTH_STORE_BUSY to back off and
- * resend the same key, not conclude the key is bad.
- */
-export function respondAuthStoreBusy(res: Response, error: unknown): boolean {
-  if (!isAuthStoreBusyError(error)) return false;
-  if (res.headersSent) return false; // Delegate to Express's final handler, as #3818 does.
-  const reason = error.extensions.reason;
-  res.status(503).json({
-    error: AUTH_STORE_BUSY_MESSAGE,
-    code: 'AUTH_STORE_BUSY',
-    retryable: true,
-    ...(typeof reason === 'string' ? { reason } : {}),
-  });
-  return true;
-}
+// The plain-HTTP render of this fault (`respondAuthStoreBusy`) lives in internalFault.ts, beside
+// the generic envelope it carves out of: it logs the fault under the request id — the driver
+// error parked on `.cause` reaches only that log — and answers 503 retryable. See there.

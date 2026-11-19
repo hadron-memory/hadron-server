@@ -111,16 +111,23 @@ describe('AuthStoreBusyError → AUTH_STORE_BUSY (#4471)', () => {
     expect(out.message).toBe(AUTH_STORE_BUSY_MESSAGE);
   });
 
-  it('Apollo-genericized (the context-failure wrap): the mapping restores the typed code, not INTERNAL_SERVER_ERROR', () => {
+  it('Apollo-genericized (the context-failure wrap): the mapping restores the typed code and strips the prefix', () => {
     const typed = new AuthStoreBusyError(p2024());
+    // Apollo's actual wrapper for a context-builder throw: its own GraphQLError — the
+    // prefixed message, the default code, the thrown error on .originalError. Built with
+    // wrap()'s shape plus the real prefix (the live round trip is pinned in
+    // authStoreBusyContext4471.test.ts; this unit case isolates the mapping).
+    const error = new GraphQLError(`Context creation failed: ${typed.message}`, { originalError: typed });
     const out = formatGraphQLError(
-      { message: 'Context creation failed.', extensions: { code: 'INTERNAL_SERVER_ERROR' } },
-      typed,
+      { message: error.message, extensions: { code: 'INTERNAL_SERVER_ERROR' } },
+      error,
     );
     expect(out.extensions?.code).toBe('AUTH_STORE_BUSY');
     expect(out.extensions?.retryable).toBe(true);
     expect(out.extensions?.reason).toBe('POOL_WAIT');
+    // The domain prose, not Apollo's decoration of it — the prefix never reaches the wire.
     expect(out.message).toBe(AUTH_STORE_BUSY_MESSAGE);
+    expect(out.message).not.toMatch(/Context creation failed/i);
     // The driver error never rides the wire — not the code, not the prose.
     expect(JSON.stringify(out)).not.toMatch(/P2024|Timed out fetching/i);
   });

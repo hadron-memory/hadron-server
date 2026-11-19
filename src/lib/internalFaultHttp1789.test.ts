@@ -72,16 +72,22 @@ describe('plain HTTP internal faults (#1789)', () => {
     expect(await res.text()).not.toContain('INTERNAL_SERVER_ERROR');
   });
 
-  it('#4471: the typed auth store-busy fault keeps its 503 and its code — not the generic envelope', async () => {
+  it('#4471: the typed auth store-busy fault keeps its 503 and its code — and is logged, not swallowed (BLIND P2-2)', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     const res = await fetch(base + '/auth-store-busy');
     const text = await res.text();
+    const body = JSON.parse(text);
     expect(res.status).toBe(503);
-    expect(JSON.parse(text)).toEqual({
-      error: AUTH_STORE_BUSY_MESSAGE,
-      code: 'AUTH_STORE_BUSY',
-      retryable: true,
-      reason: 'POOL_WAIT',
-    });
+    expect(body.error).toBe(AUTH_STORE_BUSY_MESSAGE);
+    expect(body.code).toBe('AUTH_STORE_BUSY');
+    expect(body.retryable).toBe(true);
+    expect(body.reason).toBe('POOL_WAIT');
+    // Correlation like the generic envelope: the body's id is the request's id.
+    expect(body.requestId).toBe(res.headers.get('x-request-id'));
+    // The fault (driver error on .cause) reaches ONLY the log, under that id — the carve-out
+    // is not a blind spot, so "countable evidence" holds on this surface too.
+    expect(log).toHaveBeenCalledWith('[http] internal_fault', expect.objectContaining({ requestId: body.requestId, site: 'auth-store-busy' }));
     expect(text).not.toMatch(/P2024|Timed out fetching|INTERNAL_SERVER_ERROR/);
+    log.mockRestore();
   });
 });

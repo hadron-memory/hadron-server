@@ -494,12 +494,27 @@ describe('resolveAuthContext', () => {
     // 0192–0194) keeps these faults 'unavailable' and lets the request
     // proceed.
     describe('#4471 — a busy store during the API-key check is typed retryable, never a verdict', () => {
-      // The fault is injected at the lookup, so no real pool exhaustion is needed.
-      const busyDb = (reject: () => unknown) =>
-        ({
-          userApiKey: { findUnique: () => Promise.reject(reject()) },
-          appKey: { findUnique: () => Promise.reject(reject()) },
-        }) as unknown as typeof db;
+      // The fault is injected at the lookup, so no real pool exhaustion is needed. The stub also
+      // COUNTS the fire-and-forget lastUsedAt stamps (BLIND P2-3): the wrap covers the whole
+      // resolver, but the only write inside fires after a successful lookup — the busy path must
+      // reach zero of them. Counting makes that claim a pin instead of an argument.
+      const busyDb = (reject: () => unknown) => {
+        const writes = { userApiKey: 0, appKey: 0 };
+        const withStamp = (model: keyof typeof writes) => ({
+          findUnique: () => Promise.reject(reject()),
+          update: () => {
+            writes[model] += 1;
+            return Promise.resolve();
+          },
+        });
+        return {
+          db: {
+            userApiKey: withStamp('userApiKey'),
+            appKey: withStamp('appKey'),
+          } as unknown as typeof db,
+          writes,
+        };
+      };
 
       const p = (code: string, message: string) =>
         new Prisma.PrismaClientKnownRequestError(message, {
@@ -519,22 +534,22 @@ describe('resolveAuthContext', () => {
         throw new Error('expected a rejection');
       }
 
-      it('a P2024 during the user-key lookup throws the typed fault, not the raw driver error', async () => {
-        const err = await refuse(() =>
-          resolveAuthContextWithStatus(
-            makeReq(`Bearer ${USER_KEY}`),
-            busyDb(() => p('P2024', 'Timed out fetching a new connection from the pool.')),
-          ),
-        );
-        expect(err).toBeInstanceOf(AuthStoreBusyError);
-        const typed = err as AuthStoreBusyError;
-        expect(typed.message).toBe(AUTH_STORE_BUSY_MESSAGE);
-        expect(typed.extensions.code).toBe('AUTH_STORE_BUSY');
-        expect(typed.extensions.retryable).toBe(true);
-        expect(typed.extensions.reason).toBe('POOL_WAIT');
-        // No driver text rides the message; the driver error stays on .cause, server-side only.
-        expect(typed.message).not.toMatch(/P2024|Timed out fetching/i);
-        expect(typed.cause).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      it('a P2024 during the lookup throws the typed fault, not the raw driver error, on both key paths (BLIND P3)', async () => {
+        for (const key of [USER_KEY, APP_KEY]) {
+          const busy = busyDb(() => p('P2024', 'Timed out fetching a new connection from the pool.'));
+          const err = await refuse(() => resolveAuthContextWithStatus(makeReq(`Bearer ${key}`), busy.db));
+          expect(err, key).toBeInstanceOf(AuthStoreBusyError);
+          const typed = err as AuthStoreBusyError;
+          expect(typed.message).toBe(AUTH_STORE_BUSY_MESSAGE);
+          expect(typed.extensions.code).toBe('AUTH_STORE_BUSY');
+          expect(typed.extensions.retryable).toBe(true);
+          expect(typed.extensions.reason).toBe('POOL_WAIT');
+          // No driver text rides the message; the driver error stays on .cause, server-side only.
+          expect(typed.message).not.toMatch(/P2024|Timed out fetching/i);
+          expect(typed.cause).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+          // BLIND P2-3, pinned: nothing was written on the busy path.
+          expect(busy.writes, key).toEqual({ userApiKey: 0, appKey: 0 });
+        }
       });
 
       it('P2028 "Unable to start a transaction" is the same typed fault, on both key paths', async () => {
@@ -542,7 +557,7 @@ describe('resolveAuthContext', () => {
           const err = await refuse(() =>
             resolveAuthContextWithStatus(
               makeReq(`Bearer ${key}`),
-              busyDb(() => p('P2028', 'Unable to start a transaction in the given time.')),
+              busyDb(() => p('P2028', 'Unable to start a transaction in the given time.')).db,
             ),
           );
           expect(err, key).toBeInstanceOf(AuthStoreBusyError);
@@ -551,13 +566,22 @@ describe('resolveAuthContext', () => {
         }
       });
 
+      it('a non-Prisma error wearing code P2024 is NOT classified — the class is closed to Prisma (LOCAL mutant)', async () => {
+        // The classifier must prove instanceof, not read a field any Error can carry.
+        const impostor = Object.assign(new Error('not prisma'), { code: 'P2024' });
+        const err = await refuse(() =>
+          resolveAuthContextWithStatus(makeReq(`Bearer ${USER_KEY}`), busyDb(() => impostor).db),
+        );
+        expect(err).toBe(impostor);
+      });
+
       it('every other fault stays the raw error — the class is closed', async () => {
         // P2028's other arm ("Transaction already closed") has no meaning during a
         // lookup that holds no transaction.
         const closed = await refuse(() =>
           resolveAuthContextWithStatus(
             makeReq(`Bearer ${USER_KEY}`),
-            busyDb(() => p('P2028', 'Transaction already closed')),
+            busyDb(() => p('P2028', 'Transaction already closed')).db,
           ),
         );
         expect(closed).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
@@ -572,7 +596,7 @@ describe('resolveAuthContext', () => {
                 'PostgresError { code: "57014", message: "canceling statement due to statement timeout" }',
                 { clientVersion: '6.19.2' },
               ),
-            ),
+            ).db,
           ),
         );
         expect(cancel).toBeInstanceOf(Prisma.PrismaClientUnknownRequestError);
