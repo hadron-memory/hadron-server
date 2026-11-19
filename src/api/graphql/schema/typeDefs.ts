@@ -2608,39 +2608,49 @@ export const typeDefs = `#graphql
     urn: String
   }
 
-  "#1641 — a question's derived state (hrn:node:hadronmemory.com:hadron-server:design:decision-nodes §6.3). Computed by the one evaluation on every read, never stored. Precedence: TAMPERED, UNVERIFIABLE, WITHDRAWN, SUPERSEDED, STALE, DECIDED, ANSWERED_UNCONFIRMED, OPEN."
+  "#1641, #4426 — a question\'s derived state (hrn:node:hadronmemory.com:specs:cor:dmo:140:07). Computed by the one evaluation on every read, never stored. Precedence: TAMPERED, UNVERIFIABLE, WITHDRAWN, OPEN (no standing answer), DECIDED, STALE, ANSWERED_UNCONFIRMED."
   enum QuestionState {
-    "Not every part is answered."
+    "No answer stands: never answered, or the last entry takes the answer back."
     OPEN
-    "Every part is answered; the tier's evidence (a decider's approval, or later a signature) is missing at the current revision."
+    "Answered, but the tier\'s evidence (a decider\'s approval, or later a signature) is missing at the current revision."
     ANSWERED_UNCONFIRMED
-    "Answered, and the tier's evidence by a decider is intact at the current revision. The only state a ruling may be relied on in."
+    "Answered, and the tier\'s evidence is in: nothing more for the default tier, an intact decider\'s approval for the approved tier. The only state a ruling may be relied on in."
     DECIDED
     "Evidence exists, but for an earlier revision: the question changed after it was approved."
     STALE
     "The rendered content, the structured payload and the approval hash disagree: changed outside the question operations."
     TAMPERED
-    "Written by a codec or renderer this server does not know, so it cannot be verified (fail closed)."
+    "Written by a codec or renderer this server does not know (the pre-#4426 decision format included), so it cannot be verified (fail closed)."
     UNVERIFIABLE
     WITHDRAWN
-    SUPERSEDED
   }
 
-  "#1641 — the assurance a question's answer needs. APPROVED: a decider's approval. SIGNED: a decider's passkey signature (#1614; not available yet, so a SIGNED question stays ANSWERED_UNCONFIRMED)."
+  "#4426 — the assurance a question\'s answer needs. ANSWERED (the default): a decider\'s answer alone settles it. APPROVED: a decider\'s approval too. SIGNED: a decider\'s passkey signature (#1614; not available yet, so a SIGNED question stays ANSWERED_UNCONFIRMED); a question that authorizes something is always SIGNED."
   enum QuestionTier {
+    ANSWERED
     APPROVED
     SIGNED
   }
 
-  enum QuestionUrgency {
+  "#4426 — one ranked priority, lowest to highest."
+  enum QuestionPriority {
+    LOW
     NORMAL
+    HIGH
     URGENT
   }
 
-  "#1641 — list order. PORTAL_DEFAULT: urgent first, then open before answered, then newest ask. CODE: code order."
+  "#1641 — list order. PORTAL_DEFAULT: priority (urgent first), then open before answered, then newest ask. CODE: code order."
   enum QuestionSort {
     PORTAL_DEFAULT
     CODE
+  }
+
+  "#4426 — one entry of a question\'s answer list."
+  enum QuestionAnswerKind {
+    ANSWER
+    "Takes the standing answer back: the question is OPEN again."
+    RETRACTION
   }
 
   "#1641 — where an answer was given, as the answering caller states it (a claim)."
@@ -2648,8 +2658,7 @@ export const typeDefs = `#graphql
     PORTAL
     CLI
     MCP
-    CHAT_RECORDED
-    IMPORT
+    API
   }
 
   "#1641 — a reference: exactly one of an external ref (hadron-server#1640, team:6783), a node id or URN, or a spec citation."
@@ -2679,49 +2688,33 @@ export const typeDefs = `#graphql
     "The option id an answer names."
     key: String!
     label: String!
-    meaning: String
-    cost: String
+    "Why choose it."
+    whyChoose: String
+    "Why not."
+    whyNot: String
+    risks: String
   }
 
   type QuestionRecommendation {
     key: String!
     "Who recorded the recommendation (authenticated)."
     by: QuestionActor!
-    reason: String
-    "A relayed recommendation's original author, as a claim."
-    attributedTo: String
+    reason: String!
   }
 
+  "#4426 — one entry of the answer list: an answer or a retraction. Appended, never edited."
   type QuestionAnswer {
-    "The chosen option; null for a free-text answer."
+    kind: QuestionAnswerKind!
+    "The chosen option; null for a free-text answer and for a retraction."
     key: String
+    "Free text; null for a retraction."
     text: String
-    freeform: Boolean!
+    reason: String
     "The decider whose credential recorded it."
     byUserId: ID!
+    by: CommentActorRef
     at: DateTime!
     via: QuestionAnswerVia!
-    "Where the answer was given (a claim)."
-    source: QuestionRef
-    reason: String
-    "An imported answer's recorded speaker (a claim, never rendered as the authenticated answerer)."
-    claimedBy: String
-    recordedByUserId: ID
-  }
-
-  type QuestionPart {
-    "Permanent within the question; amendments add parts, never renumber."
-    n: Int!
-    "The citation of this part, e.g. DU-1."
-    citation: String!
-    question: String!
-    options: [QuestionOption!]!
-    "Null when the asker deliberately gave none (see noRecommendationReason). Never pre-selected."
-    recommendation: QuestionRecommendation
-    noRecommendationReason: String
-    answer: QuestionAnswer
-    "Earlier answers to this part, oldest first: a re-answer appends, never replaces quietly."
-    answerHistory: [QuestionAnswer!]!
   }
 
   type QuestionApprovalEvidence {
@@ -2757,25 +2750,47 @@ export const typeDefs = `#graphql
     urn: String!
     "The question's own page, where its card renders. Copy it; never build it."
     portalUrl: String
-    "Permanent: DA, DB, … issued in sequence by its log, never reused."
+    "Permanent: QA, QB, … issued in sequence by its log, never reused."
     code: String!
     n: Int!
     logId: ID
+    "The question itself, one line."
     title: String!
-    urgency: QuestionUrgency!
+    "The explanation, in markdown."
+    background: String
+    "Why it is being asked now."
+    whyNow: String
+    priority: QuestionPriority!
     tier: QuestionTier!
     authorizes: Boolean!
-    "Migrated history that is never usable as an authorization."
-    archival: Boolean!
     "DERIVED on every read. Rely on a ruling only while it is DECIDED."
     state: QuestionState!
-    context: String
-    parts: [QuestionPart!]!
+    "True while an answer stands (the last entry is an answer). Derived on every read."
+    answered: Boolean!
+    options: [QuestionOption!]!
+    "Null when the asker deliberately gave none (see noRecommendationReason), and for a free-text question. Never pre-selected."
+    recommendation: QuestionRecommendation
+    noRecommendationReason: String
+    "The answer that stands, or null."
+    answer: QuestionAnswer
+    "Every entry, oldest first: answers and retractions. Appended, never edited."
+    answers: [QuestionAnswer!]!
+    "When the standing answer was given; null while unanswered."
+    answeredAt: DateTime
+    neededBy: DateTime
+    "What happens if it is unanswered by neededBy."
+    defaultAction: String
     "What is waiting on this question."
     blocks: [QuestionRef!]!
     sources: [QuestionRef!]!
-    "Spec citations the ruling must reach."
-    followUps: [QuestionRef!]!
+    "Specs this question touches."
+    specsTouched: [QuestionRef!]!
+    "Specs that must change once it is answered."
+    specsMustChange: [QuestionRef!]!
+    "The user the asker directed this question to, when it named one. Routing only: any decider may answer."
+    assigneeId: ID
+    "The asker\'s agent task this question blocks. Always null until slice S7."
+    taskId: ID
     deciderIds: [ID!]!
     deciders: [CommentActorRef!]!
     "True when the caller is a decider, including through an account merged into theirs (#1715)."
@@ -2784,8 +2799,6 @@ export const typeDefs = `#graphql
     identityMerges: [QuestionIdentityMerge!]!
     askedBy: QuestionActor!
     askedAt: DateTime
-    "When the last part was answered; null while any part is open."
-    answeredAt: DateTime
     withdrawn: QuestionWithdrawal
     evidence: QuestionEvidence!
     "The node's current revision: the expectedRevision of the next change."
@@ -2816,7 +2829,7 @@ export const typeDefs = `#graphql
     portalUrl: String
     loc: String!
     name: String!
-    "Codes are this prefix plus letters: D → DA, DB, …"
+    "Codes are this prefix plus letters: Q → QA, QB, …"
     prefix: String!
     "How many codes have been issued (withdrawn and purged ones included)."
     lastCode: Int!
@@ -2862,67 +2875,68 @@ export const typeDefs = `#graphql
   input QuestionOptionInput {
     key: String!
     label: String!
-    meaning: String
-    cost: String
+    whyChoose: String
+    whyNot: String
+    risks: String
   }
 
   input QuestionRecommendationInput {
     key: String!
-    reason: String
-    "Relaying someone else's recommendation: who (recorded as a claim)."
-    attributedTo: String
+    reason: String!
   }
 
   input QuestionNoRecommendationInput {
     reason: String!
   }
 
-  "#1641 — one part of a question. Give options or yesno, and a recommendation or noRecommendation."
-  input QuestionPartInput {
-    question: String!
-    options: [QuestionOptionInput!]
-    yesno: Boolean
-    recommendation: QuestionRecommendationInput
-    noRecommendation: QuestionNoRecommendationInput
-  }
-
+  "#4426 — one question per node. Give options or yesno (or neither, for a free-text question), and then a recommendation or noRecommendation."
   input AskQuestionInput {
     title: String!
-    urgency: QuestionUrgency
-    "Default APPROVED; SIGNED when authorizes is true (APPROVED is then refused: QUESTION_TIER_TOO_LOW)."
+    background: String
+    whyNow: String
+    "Default NORMAL."
+    priority: QuestionPriority
+    "Default ANSWERED; SIGNED when authorizes is true (a lower tier is then refused: QUESTION_TIER_TOO_LOW)."
     tier: QuestionTier
     authorizes: Boolean
     "The authorization a grant question carries (authorizes: true only)."
     grant: JSON
-    "Narrows the log's default deciders; never widens past its eligible set."
+    "Narrows the log\'s default deciders; never widens past its eligible set."
     deciders: [ID!]
-    context: String
+    "Who the question is routed to; must be one of its deciders (QUESTION_ASSIGNEE_NOT_DECIDER)."
+    assignee: ID
+    neededBy: DateTime
+    "Needs neededBy."
+    defaultAction: String
     blocks: [QuestionRefInput!]
     sources: [QuestionRefInput!]
-    followUps: [QuestionRefInput!]
-    parts: [QuestionPartInput!]!
-  }
-
-  "#1641 — a change to an existing part (by its permanent number). Omitted fields are unchanged; answers never change here."
-  input QuestionPartPatchInput {
-    n: Int!
-    question: String
+    specsTouched: [QuestionRefInput!]
+    specsMustChange: [QuestionRefInput!]
     options: [QuestionOptionInput!]
+    "Shorthand for the options yes and no. Not together with options."
     yesno: Boolean
     recommendation: QuestionRecommendationInput
     noRecommendation: QuestionNoRecommendationInput
   }
 
+  "#4426 — a change to the question. An omitted field is unchanged; for background, whyNow, assignee, neededBy and defaultAction an explicit null clears it. Answers never change here."
   input AmendQuestionInput {
     title: String
-    urgency: QuestionUrgency
+    background: String
+    whyNow: String
+    priority: QuestionPriority
     tier: QuestionTier
-    context: String
+    assignee: ID
+    neededBy: DateTime
+    defaultAction: String
     blocks: [QuestionRefInput!]
     sources: [QuestionRefInput!]
-    followUps: [QuestionRefInput!]
-    parts: [QuestionPartPatchInput!]
-    addParts: [QuestionPartInput!]
+    specsTouched: [QuestionRefInput!]
+    specsMustChange: [QuestionRefInput!]
+    options: [QuestionOptionInput!]
+    yesno: Boolean
+    recommendation: QuestionRecommendationInput
+    noRecommendation: QuestionNoRecommendationInput
   }
 
   "#1606 — a comment thread's state (hrn:node:hadronmemory.com:specs:cor:dmo:110:05). Top-level comments only."
@@ -9969,7 +9983,7 @@ export const typeDefs = `#graphql
 
     "#1641 — a question log's settings by ID or URN; null when missing or unreadable."
     questionLog(ref: ID!): QuestionLog
-    "#1641 — one question by ref (ID or URN), or by code (DU, or a citation DU-1) within logRef. Null when missing or unreadable."
+    "#1641 — one question by ref (ID or URN), or by code (QA) within logRef. Null when missing or unreadable."
     question(ref: ID, code: String, logRef: ID): Question
     """
     #1641 — the questions of one log (logRef), or with awaitingMe the OPEN questions the caller
@@ -9981,7 +9995,7 @@ export const typeDefs = `#graphql
       awaitingMe: Boolean
       state: [QuestionState!]
       tier: QuestionTier
-      urgency: [QuestionUrgency!]
+      priority: [QuestionPriority!]
       authorizes: Boolean
       sort: QuestionSort = PORTAL_DEFAULT
       limit: Int = 20
@@ -12931,20 +12945,20 @@ export const typeDefs = `#graphql
     "#1641 — replace a log's default (and, when given, other eligible) deciders, as an audited revision of the log. Existing questions keep theirs. Needs management rights on the memory, or the owner role in its App."
     setQuestionLogDeciders(logRef: ID!, defaultDeciders: [ID!]!, eligibleDeciders: [ID!], expectedRevision: Int!, reason: String!): QuestionLog!
     """
-    #1641 — ask a question in a log: the server issues the next code using the log prefix (DA, DB, … with default D) and renders the
+    #1641 — ask a question in a log: the server issues the next code using the log prefix (QA, QB, … with default Q) and renders the
     content. Any writer of the log's memory, agents included, outside impersonation. Refusals: QUESTION_INVALID (with JSON
-    pointers), QUESTION_RECOMMENDATION_MISSING, QUESTION_TIER_TOO_LOW, QUESTION_DECIDER_NOT_ELIGIBLE.
+    pointers), QUESTION_RECOMMENDATION_MISSING, QUESTION_TIER_TOO_LOW, QUESTION_ASSIGNEE_NOT_DECIDER, QUESTION_DECIDER_NOT_ELIGIBLE.
     """
     askQuestion(logRef: ID!, input: AskQuestionInput!): Question!
     """
-    #1641 — amend a writable question. Memory write access is always required; before any answer, any writer; after one, a decider only. Urgency is a
+    #1641 — amend a writable question. Memory write access is always required; before any answer, any writer; after one, a decider only. Priority is a
     decider's to change; lowering the tier is a decider's, before an answer, never when it authorizes.
-    Refusals: NODE_WRITE_CONFLICT, QUESTION_PART_RENUMBER, QUESTION_ANSWER_IMMUTABLE, QUESTION_NOT_DECIDER.
+    Refusals: NODE_WRITE_CONFLICT, QUESTION_ANSWER_IMMUTABLE, QUESTION_NOT_DECIDER.
     """
     amendQuestion(ref: ID!, input: AmendQuestionInput!, expectedRevision: Int!, reason: String!): Question!
-    "#1641 — withdraw a question (terminal; the code stays consumed): the asker or a decider, a decider once answered. DECIDED ones are superseded instead (QUESTION_ANSWERED_DECIDED)."
+    "#1641 — withdraw a question (terminal; the code stays consumed): the asker or a decider, a decider once answered, whatever its state."
     withdrawQuestion(ref: ID!, reason: String!, expectedRevision: Int!): Question!
-    "#1641 — a platform admin hard-deletes a question that was never answered, recorded on its log (QUESTION_ANSWERED otherwise). The code stays consumed."
+    "#1641 — a platform admin hard-deletes a question that was never answered (or one stranded in the pre-#4426 format), recorded on its log (QUESTION_ANSWERED otherwise). The code stays consumed."
     purgeUnansweredQuestion(ref: ID!, reason: String!): Boolean!
 
     """

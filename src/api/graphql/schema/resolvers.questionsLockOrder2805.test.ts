@@ -71,7 +71,7 @@ const doors: Door[] = [
     drift: 'log',
     run: (logId) => M.askQuestion(null, {
       logRef: logId,
-      input: { title: 'Q?', parts: [{ question: 'Yes?', yesno: true, recommendation: { key: 'yes', reason: 'ready' } }] },
+      input: { title: 'Q?', yesno: true, recommendation: { key: 'yes', reason: 'ready' } },
     }, as()),
   },
   {
@@ -105,7 +105,7 @@ describe('#2805 question doors vs a root create through the root-seq key', () =>
     // Asked by worker W, so the question's own snapshots name W.
     const asked = await runAsActor({ workerId: W, agentId: null }, () => M.askQuestion(null, {
       logRef: log.row.id,
-      input: { title: 'First?', parts: [{ question: 'Ok?', yesno: true, recommendation: { key: 'yes', reason: 'ready' } }] },
+      input: { title: 'First?', yesno: true, recommendation: { key: 'yes', reason: 'ready' } },
     }, as()));
     const questionId = asked.row.id as string;
 

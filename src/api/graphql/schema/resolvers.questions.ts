@@ -67,22 +67,22 @@ import {
 import {
   QUESTION_CODEC,
   QUESTION_LOG_CODEC,
+  LEGACY_DECISION_CODEC,
   MAX_DECIDERS,
-  MAX_PARTS,
   amendInputSchema,
   askInputSchema,
-  checkPart,
+  checkQuestion,
+  currentAnswer,
+  everAnswered,
   questionDataSchema,
   questionLogDataSchema,
   invalidQuestion,
   optionsOf,
   parseOrRefuse,
+  type AnswerEntry,
   type QuestionActor,
-  type QuestionAnswer,
   type QuestionData,
   type QuestionLogData,
-  type QuestionPart,
-  type QuestionPartInput,
   type QuestionRef,
 } from '../../../lib/questions/codec.js';
 import {
@@ -182,11 +182,6 @@ async function isAsker(ctx: Context, d: Pick<QuestionData, 'askedBy'>): Promise<
   if (ctx.userId && d.askedBy.workerId && d.askedBy.workerId === actor.workerId) return true;
   if (d.askedBy.userId && ctx.userId && (await callerIdentities(ctx)).has(d.askedBy.userId)) return true;
   return !d.askedBy.userId && !ctx.userId && !!d.askedBy.appId && d.askedBy.appId === ctx.appId;
-}
-
-/** Whether any part was ever answered (an answer now, or one in its history). */
-function everAnswered(d: QuestionData): boolean {
-  return d.parts.some((p) => p.answer != null || p.answerHistory.length > 0);
 }
 
 function validateReason(reason: string): string {
@@ -438,24 +433,23 @@ function requireWritable(view: QuestionView): QuestionData {
     );
   }
   if (state === 'WITHDRAWN') throw questionError('QUESTION_WITHDRAWN', `${question.code} was withdrawn.`, { questionCode: question.code });
-  if (state === 'SUPERSEDED') throw questionError('QUESTION_SUPERSEDED', `${question.code} was superseded.`, { questionCode: question.code });
   return question;
 }
 
 /** The derived, never-authoritative property projection for filters (§5.3). */
 function propertiesOf(d: QuestionData): Record<string, unknown> {
-  const answeredAt = d.parts.map((p) => p.answer?.at).filter((a): a is string => !!a).sort().pop() ?? null;
+  const standing = currentAnswer(d);
   return {
-    code: d.code, n: d.n, status: d.status, tier: d.tier, authorizes: d.authorizes, urgency: d.urgency,
-    askedAt: d.askedAt, answeredAt, deciders: d.deciders,
+    code: d.code, n: d.n, status: d.status, answered: standing != null, priority: d.priority, tier: d.tier,
+    authorizes: d.authorizes, askedAt: d.askedAt, answeredAt: standing?.at ?? null, deciders: d.deciders,
+    assignee: d.assignee, askedByUserId: d.askedBy.userId, askedByWorkerId: d.askedBy.workerId, askedByAppId: d.askedBy.appId,
   };
 }
 
 /** The card hint (§6.3): never read by a relying consumer. */
 function statusHint(d: QuestionData): QuestionData['status'] {
   if (d.withdrawn) return 'withdrawn';
-  if (d.supersededBy) return 'superseded';
-  return d.parts.every((p) => p.answer != null) ? 'answered' : 'open';
+  return currentAnswer(d) ? 'answered' : 'open';
 }
 
 /** Every rendered field of a question node, from its payload (§5.2). */
@@ -469,29 +463,10 @@ function renderedFields(d: QuestionData) {
   };
 }
 
-function buildPart(input: QuestionPartInput, n: number, actor: QuestionActor, pointer: string): QuestionPart {
-  if (input.recommendation && input.noRecommendation) {
-    invalidQuestion([{ pointer, message: 'give either a recommendation or noRecommendation, not both' }]);
-  }
-  const part: QuestionPart = {
-    n,
-    question: input.question,
-    options: optionsOf(input, pointer) ?? [],
-    recommendation: input.recommendation
-      ? { key: input.recommendation.key, by: actor, reason: input.recommendation.reason ?? null, attributedTo: input.recommendation.attributedTo ?? null }
-      : null,
-    noRecommendation: input.noRecommendation ?? null,
-    answer: null,
-    answerHistory: [],
-  };
-  checkPart(part, pointer);
-  return part;
-}
-
 /** Re-validate a payload a door built, so a door bug fails loudly rather than persisting. */
 function finalize(d: QuestionData): QuestionData {
   const parsed = questionDataSchema.parse(d);
-  parsed.parts.forEach((p, i) => checkPart(p, `/parts/${i}`));
+  checkQuestion(parsed);
   return parsed;
 }
 
@@ -505,20 +480,48 @@ async function highWaterN(tx: Tx, log: LogRow, data: QuestionLogData): Promise<n
   return Math.max(data.lastCode, top?.seq ?? 0, ...data.purges.map((p) => p.n));
 }
 
-/** GraphQL enum values (`URGENT`, `SIGNED`) to the codec's (`urgent`, `signed`), on an input's top level. */
+/**
+ * #4426 / blind review P1: the old format reserved an answer, an answer history
+ * and an `archival` flag, so "no answer operation existed" is not proof of an
+ * empty history. A legacy node is purgeable only when its payload is readable and
+ * shows none of them; anything else counts as possibly answered.
+ */
+function legacyMayHoldAnswers(data: unknown): boolean {
+  if (data == null || typeof data !== 'object') return true;
+  const rec = data as { archival?: unknown; status?: unknown; parts?: unknown };
+  if (rec.archival !== false) return true;
+  if (rec.status !== 'open' && rec.status !== 'withdrawn') return true;
+  if (!Array.isArray(rec.parts) || rec.parts.length === 0) return true;
+  return rec.parts.some((part: unknown) => {
+    if (part == null || typeof part !== 'object') return true;
+    const p = part as { answer?: unknown; answerHistory?: unknown };
+    return p.answer !== null || !Array.isArray(p.answerHistory) || p.answerHistory.length > 0;
+  });
+}
+
+/**
+ * GraphQL values to the codec's, on an input's top level: enums (`URGENT`,
+ * `SIGNED`) lower-cased, and the `DateTime` scalar's parsed value (a Date) as
+ * an ISO 8601 UTC string.
+ */
 function lowerEnums(input: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = { ...input };
-  for (const key of ['urgency', 'tier'] as const) {
+  for (const key of ['priority', 'tier'] as const) {
     if (typeof out[key] === 'string') out[key] = (out[key] as string).toLowerCase();
+  }
+  if (out.neededBy instanceof Date) {
+    out.neededBy = Number.isNaN(out.neededBy.getTime()) ? 'invalid' : out.neededBy.toISOString();
   }
   return out;
 }
 
-function toTier(v: string | null | undefined): 'approved' | 'signed' | null {
-  return v == null ? null : v === 'SIGNED' || v === 'signed' ? 'signed' : 'approved';
+const TIER_RANK = { answered: 0, approved: 1, signed: 2 } as const;
+
+function toTier(v: string | null | undefined): QuestionData['tier'] | null {
+  return v == null ? null : (v.toLowerCase() as QuestionData['tier']);
 }
-function toUrgency(v: string | null | undefined): 'normal' | 'urgent' | null {
-  return v == null ? null : v === 'URGENT' || v === 'urgent' ? 'urgent' : 'normal';
+function toPriority(v: string | null | undefined): QuestionData['priority'] | null {
+  return v == null ? null : (v.toLowerCase() as QuestionData['priority']);
 }
 
 // ─── Doors ───────────────────────────────────────────────────────────────────
@@ -546,7 +549,7 @@ export const questionMutations = {
     }
     const prefix = args.prefix ?? DEFAULT_QUESTION_PREFIX;
     if (!QUESTION_PREFIX_RE.test(prefix)) invalidQuestion([{ pointer: '/prefix', message: 'a prefix is one to three upper-case letters' }]);
-    const name = (args.name ?? '').trim() || 'Decisions';
+    const name = (args.name ?? '').trim() || 'Questions';
     if (name.length > 300 || name.includes('\n')) invalidQuestion([{ pointer: '/name', message: 'a single line of at most 300 characters' }]);
     const defaults = uniqueIds(args.defaultDeciders, '/defaultDeciders');
     if (defaults.length === 0) invalidQuestion([{ pointer: '/defaultDeciders', message: 'name at least one decider' }]);
@@ -592,7 +595,7 @@ export const questionMutations = {
       await assertDecidersEligible(tx, memoryId, [...nowDefaults, ...nowEligible]);
 
       const data: QuestionLogData = questionLogDataSchema.parse({
-        codec: QUESTION_LOG_CODEC, kind: questionLogDataSchema.shape.kind.value, prefix, lastCode: 0,
+        codec: QUESTION_LOG_CODEC, kind: 'question.log', prefix, lastCode: 0,
         defaultDeciders: nowDefaults, eligibleDeciders: nowEligible, purges: [],
         lastAction: { op: 'create', by: actorOf(ctx), at: new Date().toISOString(), reason: null },
       });
@@ -671,13 +674,13 @@ export const questionMutations = {
     const log = await resolveGovernedNode(ctx, args.logRef, QUESTION_LOG_ROLE, logMissing);
     await requireQuestionWrite(ctx, log.memoryId);
     const authorizes = input.authorizes ?? false;
-    const tier = input.tier ?? (authorizes ? 'signed' : 'approved');
+    const tier = input.tier ?? (authorizes ? 'signed' : 'answered');
     if (authorizes && tier !== 'signed') {
       throw questionError('QUESTION_TIER_TOO_LOW', 'A question that authorizes something must be at the signed tier.', { tier });
     }
     if (!authorizes && input.grant != null) invalidQuestion([{ pointer: '/grant', message: 'a grant needs authorizes: true' }]);
     const actor = actorOf(ctx);
-    const parts = input.parts.map((p, i) => buildPart(p, i + 1, actor, `/parts/${i}`));
+    const options = optionsOf(input, '/options') ?? [];
 
     const effects: Array<() => void> = [];
     const id = await withAuthorizedMemoryTx(ctx, log.memoryId, [], (txCtx) => requireQuestionWrite(txCtx, log.memoryId), async (tx, txCtx) => {
@@ -692,6 +695,7 @@ export const questionMutations = {
       }
       await assertDecidersEligible(tx, log.memoryId, deciders);
 
+      const assignee = input.assignee == null ? null : (await survivors(tx, [input.assignee]))[0];
       const n = (await highWaterN(tx, logRow, logData)) + 1;
       const code = questionCode(logData.prefix, n);
       const loc = questionLoc(logRow.loc, code);
@@ -702,14 +706,19 @@ export const questionMutations = {
         throw questionError('QUESTION_CONTAINED', `The next code ${code} is occupied by another node at "${loc}"; move it out of the log before asking.`, { loc });
       }
       const data = finalize({
-        codec: QUESTION_CODEC, renderer: CURRENT_QUESTION_RENDERER, kind: questionDataSchema.shape.kind.value,
+        codec: QUESTION_CODEC, renderer: CURRENT_QUESTION_RENDERER, kind: 'question',
         logId: logRow.id, code, n,
-        title: input.title, urgency: input.urgency ?? 'normal', tier, authorizes,
-        grant: (input.grant ?? null) as QuestionData['grant'], archival: false,
-        deciders, askedBy: actor, askedAt: new Date().toISOString(),
-        context: input.context ?? null,
-        blocks: input.blocks ?? [], sources: input.sources ?? [], followUps: input.followUps ?? [],
-        parts, status: 'open', withdrawn: null, supersedes: null, supersededBy: null,
+        title: input.title, background: input.background ?? null, whyNow: input.whyNow ?? null,
+        priority: input.priority ?? 'normal', tier, authorizes,
+        grant: (input.grant ?? null) as QuestionData['grant'],
+        deciders, assignee, askedBy: actor, askedAt: new Date().toISOString(),
+        neededBy: input.neededBy ?? null, defaultAction: input.defaultAction ?? null, taskId: null,
+        blocks: input.blocks ?? [], sources: input.sources ?? [],
+        specsTouched: input.specsTouched ?? [], specsMustChange: input.specsMustChange ?? [],
+        options,
+        recommendation: input.recommendation ? { key: input.recommendation.key, by: actor, reason: input.recommendation.reason } : null,
+        noRecommendation: input.noRecommendation ?? null,
+        answers: [], status: 'open', withdrawn: null,
       });
       const node = await writeNodeCore(
         {
@@ -742,10 +751,10 @@ export const questionMutations = {
   },
 
   /**
-   * §7 — amend a question: question, options, recommendation, context and
-   * references; add parts; raise the tier. Before any answer, any memory
-   * writer; after one, a decider only (and the evidence goes stale). Urgency
-   * is changed by a decider (Q14); the tier is lowered only by a decider,
+   * §7 — amend a question: title, background, options, recommendation and
+   * references; raise the tier. Before any answer, any memory writer; after
+   * one, a decider only (and the evidence goes stale). Priority is changed by
+   * a decider (Q14); the tier is lowered only by a decider,
    * before an answer, never for an authorizing question (§6.2). Answers never
    * change here.
    */
@@ -772,54 +781,50 @@ export const questionMutations = {
       }
       const next: QuestionData = structuredClone(current);
       if (patch.title != null) next.title = patch.title;
-      if (patch.context !== undefined) next.context = patch.context ?? null;
+      if (patch.background !== undefined) next.background = patch.background ?? null;
+      if (patch.whyNow !== undefined) next.whyNow = patch.whyNow ?? null;
+      if (patch.neededBy !== undefined) next.neededBy = patch.neededBy ?? null;
+      if (patch.defaultAction !== undefined) next.defaultAction = patch.defaultAction ?? null;
+      if (patch.assignee !== undefined) {
+        next.assignee = patch.assignee == null ? null : (await survivors(tx, [patch.assignee]))[0];
+      }
       if (patch.blocks != null) next.blocks = patch.blocks;
       if (patch.sources != null) next.sources = patch.sources;
-      if (patch.followUps != null) next.followUps = patch.followUps;
-      if (patch.urgency != null && patch.urgency !== current.urgency) {
-        if (!decider) throw questionError('QUESTION_NOT_DECIDER', 'Only a decider changes the urgency of an asked question.', { questionCode: current.code });
-        next.urgency = patch.urgency;
+      if (patch.specsTouched != null) next.specsTouched = patch.specsTouched;
+      if (patch.specsMustChange != null) next.specsMustChange = patch.specsMustChange;
+      if (patch.priority != null && patch.priority !== current.priority) {
+        if (!decider) throw questionError('QUESTION_NOT_DECIDER', 'Only a decider changes the priority of an asked question.', { questionCode: current.code });
+        next.priority = patch.priority;
       }
       if (patch.tier != null && patch.tier !== current.tier) {
-        if (patch.tier === 'approved') {
+        if (TIER_RANK[patch.tier] < TIER_RANK[current.tier]) {
           if (current.authorizes || answered) {
             throw questionError('QUESTION_TIER_TOO_LOW', current.authorizes
               ? 'A question that authorizes something stays at the signed tier.'
-              : 'The tier cannot be lowered once a part is answered.', { tier: patch.tier });
+              : 'The tier cannot be lowered once the question has been answered.', { tier: patch.tier });
           }
           if (!decider) throw questionError('QUESTION_NOT_DECIDER', 'Only a decider lowers the tier.', { questionCode: current.code });
         }
         next.tier = patch.tier;
       }
-      for (const [i, pp] of (patch.parts ?? []).entries()) {
-        const pointer = `/parts/${i}`;
-        const part = next.parts.find((p) => p.n === pp.n);
-        if (!part) {
-          throw questionError('QUESTION_PART_RENUMBER', `${current.code} has no part ${pp.n}; parts keep their numbers and new ones are added with addParts.`, { part: pp.n });
+      const options = optionsOf({ options: patch.options, yesno: patch.yesno }, '/options');
+      if (options) {
+        const keys = new Set(options.map((o) => o.key));
+        const lost = current.answers.filter((a) => a.key != null && !keys.has(a.key));
+        if (lost.length > 0) {
+          throw questionError('QUESTION_ANSWER_IMMUTABLE', `${current.code}'s options must keep every option it was answered with (${[...new Set(lost.map((a) => a.key))].join(', ')}).`, { questionCode: current.code });
         }
-        if (pp.recommendation && pp.noRecommendation) invalidQuestion([{ pointer, message: 'give either a recommendation or noRecommendation, not both' }]);
-        if (pp.question != null) part.question = pp.question;
-        const options = optionsOf({ options: pp.options, yesno: pp.yesno }, pointer);
-        if (options) {
-          const keys = new Set(options.map((o) => o.key));
-          const lost = [part.answer, ...part.answerHistory].filter((a): a is QuestionAnswer => a?.key != null && !keys.has(a.key));
-          if (lost.length > 0) {
-            throw questionError('QUESTION_ANSWER_IMMUTABLE', `Part ${part.n}'s options must keep every option it was answered with (${lost.map((a) => a.key).join(', ')}).`, { part: part.n });
-          }
-          part.options = options;
-        }
-        if (pp.recommendation) {
-          part.recommendation = { key: pp.recommendation.key, by: actor, reason: pp.recommendation.reason ?? null, attributedTo: pp.recommendation.attributedTo ?? null };
-          part.noRecommendation = null;
-        } else if (pp.noRecommendation) {
-          part.recommendation = null;
-          part.noRecommendation = pp.noRecommendation;
-        }
-        checkPart(part, pointer);
+        next.options = options;
+        // A free-text question holds no recommendation.
+        if (options.length === 0) { next.recommendation = null; next.noRecommendation = null; }
       }
-      for (const [i, added] of (patch.addParts ?? []).entries()) {
-        if (next.parts.length >= MAX_PARTS) invalidQuestion([{ pointer: `/addParts/${i}`, message: `a question has at most ${MAX_PARTS} parts` }]);
-        next.parts.push(buildPart(added, next.parts.length + 1, actor, `/addParts/${i}`));
+      if (patch.recommendation && patch.noRecommendation) invalidQuestion([{ pointer: '', message: 'give either a recommendation or noRecommendation, not both' }]);
+      if (patch.recommendation) {
+        next.recommendation = { key: patch.recommendation.key, by: actor, reason: patch.recommendation.reason };
+        next.noRecommendation = null;
+      } else if (patch.noRecommendation) {
+        next.recommendation = null;
+        next.noRecommendation = patch.noRecommendation;
       }
       next.status = statusHint(next);
       const final = finalize(next);
@@ -840,8 +845,8 @@ export const questionMutations = {
 
   /**
    * §7 — withdraw a question (terminal; its code stays consumed). The asker
-   * or a decider; once a part is answered, a decider only. Refused for a
-   * DECIDED question (supersede it instead) and for a terminal one.
+   * or a decider; once the question has ever been answered, a decider only. A
+   * DECIDED question may be withdrawn (no supersession); a terminal one may not.
    */
   withdrawQuestion: async (
     _: unknown,
@@ -857,9 +862,6 @@ export const questionMutations = {
       const row = await lockQuestion(tx, target.id, target.memoryId, args.ref, args.expectedRevision);
       const [view] = await evaluateRows(tx, [row]);
       const current = requireWritable(view);
-      if (view.evaluation.state === 'DECIDED') {
-        throw questionError('QUESTION_ANSWERED_DECIDED', `${current.code} is DECIDED; a decided question is superseded, not withdrawn.`, { questionCode: current.code });
-      }
       const decider = await isDecider(txCtx, current);
       if (everAnswered(current) ? !decider : !(decider || (await isAsker(txCtx, current)))) {
         throw questionError(
@@ -906,26 +908,35 @@ export const questionMutations = {
       const row = await lockQuestion(tx, target.id, target.memoryId, args.ref);
       const [view] = await evaluateRows(tx, [row]);
       const d = view.evaluation.question;
-      if (!d) {
+      // #4426 §6: a node asked in the pre-#4426 format can never have an answer (no
+      // answer operation existed for it) and no door will touch it, so a purge is
+      // its only way out. Any other unparsed node stays refused.
+      const legacy = !d && (row.data as { codec?: unknown } | null)?.codec === LEGACY_DECISION_CODEC && row.seq != null && row.seq >= 1;
+      if (!d && !legacy) {
         throw questionError('QUESTION_INVALID', `This question is ${view.evaluation.state}; its answers cannot be established, so it is not purged.`, { state: view.evaluation.state });
       }
-      const cached = questionDataSchema.safeParse(row.data);
-      if (everAnswered(d) || (cached.success && everAnswered(cached.data))) {
-        throw questionError('QUESTION_ANSWERED', `${d.code} has been answered, so it is never purged; withdraw or supersede it.`, { questionCode: d.code });
+      if (!d && legacyMayHoldAnswers(row.data)) {
+        throw questionError('QUESTION_ANSWERED', 'This question is in the old format and its payload shows an answer, an authorization record or an unreadable history, so it is never purged.', { state: view.evaluation.state });
       }
+      const cached = questionDataSchema.safeParse(row.data);
+      if (d && (everAnswered(d) || (cached.success && everAnswered(cached.data)))) {
+        throw questionError('QUESTION_ANSWERED', `${d.code} has been answered, so it is never purged; withdraw it.`, { questionCode: d.code });
+      }
+      const purgedCode = d ? d.code : row.loc.slice(row.loc.lastIndexOf(':') + 1);
+      const purgedN = d ? d.n : (row.seq as number);
       const descendants = await tx.node.count({ where: { memoryId: target.memoryId, loc: { startsWith: `${row.loc}:` } } });
       if (descendants > 0) throw questionContainedError('Purging this question', [row.loc]);
       const data: QuestionLogData = questionLogDataSchema.parse({
         ...logData,
-        lastCode: Math.max(logData.lastCode, d.n),
+        lastCode: Math.max(logData.lastCode, purgedN),
         purges: [...logData.purges, {
-          code: d.code, n: d.n, by: txCtx.userId!, at: new Date().toISOString(), reason,
+          code: purgedCode, n: purgedN, by: txCtx.userId!, at: new Date().toISOString(), reason,
           contentHash: createHash('sha256').update(row.content ?? '', 'utf8').digest('hex'),
         }],
         lastAction: { op: 'purge', by: actorOf(ctx), at: new Date().toISOString(), reason },
       });
       await writeNodeCore(
-        { memoryId: target.memoryId, loc: lockedLog.loc, ...logContentOf(lockedLog.name, data), reason: `purge ${d.code}: ${reason}`.slice(0, REASON_MAX) },
+        { memoryId: target.memoryId, loc: lockedLog.loc, ...logContentOf(lockedLog.name, data), reason: `purge ${purgedCode}: ${reason}`.slice(0, REASON_MAX) },
         txCtx,
         'update',
         { authoring: { kind: 'platform', record: 'question' },
@@ -965,15 +976,17 @@ async function loadLogView(ctx: Context, ref: string): Promise<QuestionLogView |
 }
 
 const STATE_ORDER: Record<QuestionState, number> = {
-  OPEN: 0, ANSWERED_UNCONFIRMED: 1, STALE: 2, TAMPERED: 3, UNVERIFIABLE: 4, DECIDED: 5, WITHDRAWN: 6, SUPERSEDED: 7,
+  OPEN: 0, ANSWERED_UNCONFIRMED: 1, STALE: 2, TAMPERED: 3, UNVERIFIABLE: 4, DECIDED: 5, WITHDRAWN: 6,
 };
+const PRIORITY_RANK = { urgent: 0, high: 1, normal: 2, low: 3 } as const;
 
 function sortViews(views: QuestionView[], sort: 'PORTAL_DEFAULT' | 'CODE'): QuestionView[] {
   const n = (v: QuestionView) => v.shown?.n ?? v.row.seq ?? 0;
   if (sort === 'CODE') return [...views].sort((a, b) => n(a) - n(b) || a.row.loc.localeCompare(b.row.loc));
-  // Uma's list sort (§8.4): urgency, then open-before-answered, then newest ask.
+  // Uma's list sort (§8.4, #4426): priority (urgent first), open-before-answered, then newest ask.
+  const rank = (v: QuestionView) => PRIORITY_RANK[v.shown?.priority ?? 'normal'];
   return [...views].sort((a, b) =>
-    (b.shown?.urgency === 'urgent' ? 1 : 0) - (a.shown?.urgency === 'urgent' ? 1 : 0) ||
+    rank(a) - rank(b) ||
     STATE_ORDER[a.evaluation.state] - STATE_ORDER[b.evaluation.state] ||
     (b.shown?.askedAt ?? '').localeCompare(a.shown?.askedAt ?? '') ||
     n(b) - n(a));
@@ -984,7 +997,7 @@ export const questionQueries = {
   questionLog: (_: unknown, { ref }: { ref: string }, ctx: Context) => loadLogView(ctx, ref),
 
   /**
-   * One question by ref (id or URN), or by code (`DU`, or a citation `DU-1`)
+   * One question by ref (id or URN), or by code (`QA`)
    * within a log. Null when missing or unreadable (no existence oracle).
    */
   question: async (
@@ -1029,7 +1042,7 @@ export const questionQueries = {
     _: unknown,
     args: {
       logRef?: string | null; awaitingMe?: boolean | null;
-      state?: QuestionState[] | null; tier?: string | null; urgency?: string[] | null; authorizes?: boolean | null;
+      state?: QuestionState[] | null; tier?: string | null; priority?: string[] | null; authorizes?: boolean | null;
       sort?: 'PORTAL_DEFAULT' | 'CODE' | null; limit?: number | null; offset?: number | null;
     },
     ctx: Context,
@@ -1070,11 +1083,11 @@ export const questionQueries = {
       views = views.filter((v) => v.evaluation.state === 'OPEN' && !!v.evaluation.question?.deciders.some((id) => me.has(id)));
     }
     const tier = toTier(args.tier);
-    const urgencies = args.urgency?.map(toUrgency);
+    const priorities = args.priority?.map(toPriority);
     views = views.filter((v) =>
       (!args.state || args.state.includes(v.evaluation.state)) &&
       (!tier || v.shown?.tier === tier) &&
-      (!urgencies || (!!v.shown && urgencies.includes(v.shown.urgency))) &&
+      (!priorities || (!!v.shown && priorities.includes(v.shown.priority))) &&
       (args.authorizes == null || v.shown?.authorizes === args.authorizes));
     const sorted = sortViews(views, args.sort ?? 'PORTAL_DEFAULT');
     return { items: sorted.slice(offset, offset + limit), total: sorted.length };
@@ -1108,9 +1121,14 @@ function refOut(r: QuestionRef) {
   return { ref: 'ref' in r ? r.ref : null, node: 'node' in r ? r.node : null, spec: 'spec' in r ? r.spec : null };
 }
 
-function answerOut(a: QuestionAnswer) {
-  return { ...a, via: ENUM(a.via), byUserId: a.by, recordedByUserId: a.recordedBy, source: a.source ? refOut(a.source) : null };
+async function answerOut(ctx: Context, a: AnswerEntry) {
+  return {
+    kind: ENUM(a.kind), key: a.key, text: a.text, reason: a.reason, byUserId: a.by,
+    by: await loadCommentActor(ctx, 'user', a.by), at: a.at, via: ENUM(a.via),
+  };
 }
+
+const optionOut = (o: QuestionData['options'][number]) => ({ key: o.key, label: o.label, whyChoose: o.whyChoose, whyNot: o.whyNot, risks: o.risks });
 
 async function actorOut(ctx: Context, a: QuestionActor) {
   return {
@@ -1126,7 +1144,7 @@ function userIdsNamedIn(value: unknown, out = new Set<string>()): Set<string> {
   if (Array.isArray(value)) for (const v of value) userIdsNamedIn(v, out);
   else if (value && typeof value === 'object') {
     for (const [key, v] of Object.entries(value)) {
-      if (typeof v === 'string' && (key === 'userId' || key === 'by' || key === 'recordedBy')) out.add(v);
+      if (typeof v === 'string' && (key === 'userId' || key === 'by' || key === 'assignee')) out.add(v);
       else if (Array.isArray(v) && /deciders$/i.test(key)) for (const id of v) if (typeof id === 'string') out.add(id);
       else userIdsNamedIn(v, out);
     }
@@ -1160,34 +1178,39 @@ export const questionFieldResolvers = {
     n: (v: QuestionView) => v.shown?.n ?? v.row.seq ?? 0,
     logId: (v: QuestionView) => v.shown?.logId ?? null,
     title: (v: QuestionView) => v.shown?.title ?? v.row.name,
-    urgency: (v: QuestionView) => ENUM(v.shown?.urgency ?? 'normal'),
+    priority: (v: QuestionView) => ENUM(v.shown?.priority ?? 'normal'),
     tier: (v: QuestionView) => ENUM(v.shown?.tier ?? 'signed'),
     authorizes: (v: QuestionView) => v.shown?.authorizes ?? false,
-    archival: (v: QuestionView) => v.shown?.archival ?? false,
     state: (v: QuestionView) => v.evaluation.state,
-    context: (v: QuestionView) => v.shown?.context ?? null,
-    parts: (v: QuestionView) => (v.shown?.parts ?? []).map((p) => ({
-      ...p,
-      citation: `${v.shown!.code}-${p.n}`,
-      noRecommendationReason: p.noRecommendation?.reason ?? null,
-      answer: p.answer ? answerOut(p.answer) : null,
-      answerHistory: p.answerHistory.map(answerOut),
-      recommendation: p.recommendation ? { ...p.recommendation } : null,
-    })),
+    background: (v: QuestionView) => v.shown?.background ?? null,
+    whyNow: (v: QuestionView) => v.shown?.whyNow ?? null,
+    answered: (v: QuestionView) => !!v.shown && currentAnswer(v.shown) != null,
+    options: (v: QuestionView) => (v.shown?.options ?? []).map(optionOut),
+    recommendation: async (v: QuestionView, _: unknown, ctx: Context) => {
+      const r = v.shown?.recommendation;
+      return r ? { key: r.key, reason: r.reason, by: await actorOut(ctx, r.by) } : null;
+    },
+    noRecommendationReason: (v: QuestionView) => v.shown?.noRecommendation?.reason ?? null,
+    answer: async (v: QuestionView, _: unknown, ctx: Context) => {
+      const a = v.shown ? currentAnswer(v.shown) : null;
+      return a ? answerOut(ctx, a) : null;
+    },
+    answers: (v: QuestionView, _: unknown, ctx: Context) => Promise.all((v.shown?.answers ?? []).map((a) => answerOut(ctx, a))),
+    neededBy: (v: QuestionView) => v.shown?.neededBy ?? null,
+    defaultAction: (v: QuestionView) => v.shown?.defaultAction ?? null,
     blocks: (v: QuestionView) => (v.shown?.blocks ?? []).map(refOut),
     sources: (v: QuestionView) => (v.shown?.sources ?? []).map(refOut),
-    followUps: (v: QuestionView) => (v.shown?.followUps ?? []).map(refOut),
+    specsTouched: (v: QuestionView) => (v.shown?.specsTouched ?? []).map(refOut),
+    specsMustChange: (v: QuestionView) => (v.shown?.specsMustChange ?? []).map(refOut),
+    assigneeId: (v: QuestionView) => v.shown?.assignee ?? null,
+    taskId: (v: QuestionView) => v.shown?.taskId ?? null,
     deciderIds: (v: QuestionView) => v.shown?.deciders ?? [],
     deciders: (v: QuestionView, _: unknown, ctx: Context) => users(ctx, v.shown?.deciders ?? []),
     viewerIsDecider: async (v: QuestionView, _: unknown, ctx: Context) => !!v.shown && (await isDecider(ctx, v.shown)),
     identityMerges: (v: QuestionView, _: unknown, ctx: Context) => identityMergesOf(ctx, v.shown),
     askedBy: (v: QuestionView, _: unknown, ctx: Context) => actorOut(ctx, v.shown?.askedBy ?? { userId: null, workerId: null, appId: null }),
     askedAt: (v: QuestionView) => v.shown?.askedAt ?? null,
-    answeredAt: (v: QuestionView) => {
-      const parts = v.shown?.parts ?? [];
-      if (parts.length === 0 || parts.some((p) => !p.answer)) return null;
-      return parts.map((p) => p.answer!.at).sort().pop() ?? null;
-    },
+    answeredAt: (v: QuestionView) => (v.shown ? currentAnswer(v.shown)?.at ?? null : null),
     withdrawn: async (v: QuestionView, _: unknown, ctx: Context) => {
       const w = v.shown?.withdrawn;
       return w ? { at: w.at, reason: w.reason, by: await actorOut(ctx, w.by) } : null;

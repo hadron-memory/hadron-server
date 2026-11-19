@@ -14,17 +14,19 @@
  * history tampered, and an unknown one is UNVERIFIABLE (fail closed).
  */
 import { canonicalizeTeamJson } from '../teamSpec/canonicalize.js';
-import type { QuestionActor, QuestionAnswer, QuestionData, QuestionLogData, QuestionPart, QuestionRef } from './codec.js';
+import { currentAnswer, type AnswerEntry, type QuestionActor, type QuestionData, type QuestionLogData, type QuestionOption, type QuestionRef } from './codec.js';
 
 /** The renderer every door writes with today. */
-export const CURRENT_QUESTION_RENDERER = 'decision-md/1';
+export const CURRENT_QUESTION_RENDERER = 'question-md/1';
 
 /** RFC 8785 encoding of a question payload (the semantic block's body). */
 export function canonicalQuestionJson(value: unknown): string {
   return canonicalizeTeamJson(value);
 }
 
-const BLOCK_OPEN = '```hadron-decision\n';
+const BLOCK_OPEN = '```hadron-question\n';
+/** The pre-#4426 fence. Only ever READ (so a stranded legacy node is UNVERIFIABLE, not TAMPERED); never written. */
+const LEGACY_BLOCK_OPEN = '```hadron-decision\n';
 const BLOCK_CLOSE = '\n```\n';
 
 function actorText(actor: QuestionActor): string {
@@ -40,38 +42,13 @@ function refText(ref: QuestionRef): string {
   return `spec ${ref.spec}`;
 }
 
-function answerText(answer: QuestionAnswer): string {
+function answerText(answer: AnswerEntry): string {
+  const reason = answer.reason != null ? ` Reason: ${answer.reason}` : '';
+  const meta = `by user ${answer.by}, ${answer.at}, via ${answer.via}`;
+  if (answer.kind === 'retraction') return `Taken back (${meta}).${reason}`;
   const choice = answer.key != null ? `**${answer.key}**` : '*free text*';
   const said = answer.text != null ? `: ${answer.text}` : '';
-  const who = answer.claimedBy != null
-    ? `recorded by user ${answer.recordedBy ?? answer.by}; answered by ${answer.claimedBy} per the record`
-    : `by user ${answer.by}`;
-  const source = answer.source ? `, source ${refText(answer.source)} (claimed)` : '';
-  const reason = answer.reason != null ? ` Reason: ${answer.reason}` : '';
-  return `${choice}${said} (${who}, ${answer.at}, via ${answer.via}${source}).${reason}`;
-}
-
-function renderPart(code: string, part: QuestionPart): string[] {
-  const lines = [`## ${code}-${part.n}: ${part.question.split('\n')[0]}`, ''];
-  if (part.question.includes('\n')) lines.push(part.question, '');
-  if (part.options.length === 0) lines.push('*Free-text answer.*', '');
-  for (const option of part.options) {
-    lines.push(`- **${option.key}**: ${option.label}`);
-    if (option.meaning != null) lines.push(`  - Meaning: ${option.meaning}`);
-    if (option.cost != null) lines.push(`  - Cost: ${option.cost}`);
-  }
-  if (part.options.length > 0) lines.push('');
-  if (part.recommendation) {
-    const rec = part.recommendation;
-    const relayed = rec.attributedTo != null ? `, attributed to ${rec.attributedTo} (claimed)` : '';
-    lines.push(`**Recommendation:** ${rec.key} (by ${actorText(rec.by)}${relayed})${rec.reason != null ? `. ${rec.reason}` : ''}`);
-  } else if (part.noRecommendation) {
-    lines.push(`**No recommendation:** ${part.noRecommendation.reason}`);
-  }
-  lines.push('');
-  for (const [i, prior] of part.answerHistory.entries()) lines.push(`**Earlier answer ${i + 1}:** ${answerText(prior)}`, '');
-  lines.push(part.answer ? `**Answer:** ${answerText(part.answer)}` : '**Answer:** not yet answered.', '');
-  return lines;
+  return `${choice}${said} (${meta}).${reason}`;
 }
 
 function refSection(title: string, refs: QuestionRef[]): string[] {
@@ -79,31 +56,69 @@ function refSection(title: string, refs: QuestionRef[]): string[] {
   return [`## ${title}`, '', ...refs.map((r) => `- ${refText(r)}`), ''];
 }
 
-/** `decision-md/1`: the markdown body (without the semantic block). */
+function optionLines(option: QuestionOption): string[] {
+  const lines = [`- **${option.key}**: ${option.label}`];
+  if (option.whyChoose != null) lines.push(`  - Why choose: ${option.whyChoose}`);
+  if (option.whyNot != null) lines.push(`  - Why not: ${option.whyNot}`);
+  if (option.risks != null) lines.push(`  - Risks: ${option.risks}`);
+  return lines;
+}
+
+/** `question-md/1`: the markdown body (without the semantic block). */
 function renderMarkdownV1(d: QuestionData): string {
   const lines: string[] = [`# ${d.code}: ${d.title}`, ''];
   lines.push(
-    `**Status:** ${d.status} · **Urgency:** ${d.urgency} · **Tier:** ${d.tier} · **Authorizes:** ${d.authorizes ? 'yes' : 'no'}${d.archival ? ' · **Archival record (not usable as an authorization)**' : ''}`,
+    `**Status:** ${d.status} · **Priority:** ${d.priority} · **Tier:** ${d.tier} · **Authorizes:** ${d.authorizes ? 'yes' : 'no'}`,
     `**Asked by:** ${actorText(d.askedBy)} at ${d.askedAt}`,
     `**Deciders:** ${d.deciders.map((u) => `user ${u}`).join(', ')}`,
-    '',
   );
-  if (d.withdrawn) lines.push(`**Withdrawn** by ${actorText(d.withdrawn.by)} at ${d.withdrawn.at}: ${d.withdrawn.reason}`, '');
-  if (d.supersedes) lines.push(`**Supersedes** ${d.supersedes.code}.`, '');
-  if (d.supersededBy) lines.push(`**Superseded by** ${d.supersededBy.code}.`, '');
-  if (d.context != null && d.context.trim() !== '') lines.push('## Context', '', d.context, '');
-  for (const part of d.parts) lines.push(...renderPart(d.code, part));
-  lines.push(...refSection("What's waiting on it", d.blocks));
+  if (d.assignee != null) lines.push(`**Assignee:** user ${d.assignee}`);
+  if (d.neededBy != null) {
+    lines.push(`**Needed by:** ${d.neededBy}.${d.defaultAction != null ? ` If unanswered: ${d.defaultAction}` : ''}`);
+  }
+  if (d.withdrawn) lines.push(`**Withdrawn** by ${actorText(d.withdrawn.by)} at ${d.withdrawn.at}: ${d.withdrawn.reason}`);
+  lines.push('');
+  const hasBackground = d.background != null && d.background.trim() !== '';
+  if (hasBackground || d.whyNow != null) {
+    lines.push('## Explanation', '');
+    if (hasBackground) lines.push(d.background as string, '');
+    if (d.whyNow != null) lines.push(`**Why now:** ${d.whyNow}`, '');
+  }
+  lines.push(...refSection('What this question is blocking', d.blocks));
+  if (d.specsTouched.length > 0 || d.specsMustChange.length > 0) {
+    lines.push('## Specs', '');
+    for (const r of d.specsTouched) lines.push(`- Touches: ${refText(r)}`);
+    for (const r of d.specsMustChange) lines.push(`- Must change once answered: ${refText(r)}`);
+    lines.push('');
+  }
   lines.push(...refSection('Sources', d.sources));
-  lines.push(...refSection('Spec follow-ups', d.followUps));
-  if (d.grant) lines.push('## Grant', '', 'See the semantic block below.', '');
+  if (d.authorizes) lines.push('## Grants', '', 'This question authorizes something. See the record below.', '');
+  lines.push('## Options', '');
+  if (d.options.length === 0) lines.push('*Free-text answer.*');
+  for (const option of d.options) lines.push(...optionLines(option));
+  lines.push('');
+  if (d.recommendation) {
+    const rec = d.recommendation;
+    lines.push(`**Recommendation:** ${rec.key} (by ${actorText(rec.by)}). ${rec.reason}`, '');
+  } else if (d.noRecommendation) {
+    lines.push(`**No recommendation:** ${d.noRecommendation.reason}`, '');
+  }
+  const standing = currentAnswer(d);
+  lines.push('## Answer', '');
+  lines.push(standing ? `**Answer:** ${answerText(standing)}` : '**Answer:** not yet answered.', '');
+  const earlier = d.answers.filter((a) => a !== standing);
+  if (earlier.length > 0) {
+    lines.push('### Earlier entries', '');
+    for (const [i, entry] of earlier.entries()) lines.push(`${i + 1}. ${entry.kind === 'answer' ? 'Answered ' : ''}${answerText(entry)}`);
+    lines.push('');
+  }
   lines.push('---', `Rendered by ${d.renderer}. The block below is the authenticated record; this text is its rendering.`, '');
   return lines.join('\n');
 }
 
 /** Retained renderers, by declared version. Never remove an entry. */
 const RENDERERS: Readonly<Record<string, (d: QuestionData) => string>> = {
-  'decision-md/1': renderMarkdownV1,
+  'question-md/1': renderMarkdownV1,
 };
 
 /** Whether `renderer` is a version this server can verify. */
@@ -118,14 +133,13 @@ export function isKnownRenderer(renderer: string): boolean {
  */
 export function renderQuestion(d: QuestionData): string {
   const render = RENDERERS[d.renderer];
-  if (!render) throw new Error(`unknown decision renderer ${d.renderer}`);
+  if (!render) throw new Error(`unknown question renderer ${d.renderer}`);
   return `${render(d)}\n${BLOCK_OPEN}${canonicalQuestionJson(d)}${BLOCK_CLOSE}`;
 }
 
 /** The one-line abstract of a question. */
 export function renderQuestionAbstract(d: QuestionData): string {
-  const parts = d.parts.length === 1 ? '1 part' : `${d.parts.length} parts`;
-  return `Decision ${d.code} (${d.status}, ${d.urgency}, ${d.tier} tier, ${parts}): ${d.title}`.slice(0, 2000);
+  return `Question ${d.code} (${d.status}, ${d.priority}, ${d.tier} tier): ${d.title}`.slice(0, 2000);
 }
 
 /** The node name of a question: `<code>: <title>`. */
@@ -143,9 +157,11 @@ export function questionName(d: Pick<QuestionData, 'code' | 'title'>): string {
 export function extractQuestionBlock(content: string | null): unknown | null {
   if (content == null || !content.endsWith(BLOCK_CLOSE)) return null;
   const body = content.slice(0, -BLOCK_CLOSE.length);
-  const open = body.lastIndexOf(`\n${BLOCK_OPEN}`);
-  if (open < 0) return null;
-  const json = body.slice(open + 1 + BLOCK_OPEN.length);
+  const current = body.lastIndexOf(`\n${BLOCK_OPEN}`);
+  const legacy = body.lastIndexOf(`\n${LEGACY_BLOCK_OPEN}`);
+  if (current < 0 && legacy < 0) return null;
+  const open = Math.max(current, legacy);
+  const json = body.slice(open + 1 + (open === current ? BLOCK_OPEN : LEGACY_BLOCK_OPEN).length);
   if (json.includes('\n')) return null;
   try {
     return JSON.parse(json);
@@ -159,14 +175,14 @@ export function renderQuestionLog(name: string, d: QuestionLogData): string {
   const lines = [
     `# ${name}`,
     '',
-    `A decision log. Codes are \`${d.prefix}\` plus letters, issued in sequence and never reused; ${d.lastCode} issued so far.`,
+    `A question log. Codes are \`${d.prefix}\` plus letters, issued in sequence and never reused; ${d.lastCode} issued so far.`,
     '',
     `**Default deciders:** ${d.defaultDeciders.map((u) => `user ${u}`).join(', ')}`,
     `**Also eligible:** ${d.eligibleDeciders.length > 0 ? d.eligibleDeciders.map((u) => `user ${u}`).join(', ') : 'none'}`,
     '',
   ];
   if (d.purges.length > 0) {
-    lines.push('## Purged unanswered asks', '');
+    lines.push('## Purged unanswered questions', '');
     for (const p of d.purges) lines.push(`- ${p.code}: purged by user ${p.by} at ${p.at} (${p.reason}); content sha256 ${p.contentHash}`);
     lines.push('');
   }

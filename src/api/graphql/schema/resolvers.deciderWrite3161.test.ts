@@ -12,7 +12,7 @@ let admin: string, candidate: string, orgId: string, memoryId: string;
 const ctx = (): Context => ({ db, userId: admin, roles: ['ADMIN'] });
 const createLog = (decider = admin) => M.createQuestionLog(null,
   { memoryRef: memoryId, loc: 'questions', defaultDeciders: [decider] }, ctx());
-const input = { title: 'Proceed?', parts: [{ question: 'Proceed?', yesno: true, recommendation: { key: 'yes', reason: 'ready' } }] };
+const input = { title: 'Proceed?', yesno: true, recommendation: { key: 'yes', reason: 'ready' } };
 
 beforeEach(async () => {
   await cleanDb(db);

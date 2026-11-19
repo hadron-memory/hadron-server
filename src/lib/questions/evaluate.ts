@@ -4,9 +4,10 @@
  * relying consumer) calls {@link evaluateQuestion}; no other code derives a
  * question's state, and `data.status` is never read for it.
  *
- * Precedence, first match wins (§5.5): TAMPERED → UNVERIFIABLE → WITHDRAWN →
- * SUPERSEDED → STALE → DECIDED → ANSWERED_UNCONFIRMED → OPEN. A terminal or
- * open hint can never mask corrupt evidence.
+ * Precedence, first match wins (#4426 §3): TAMPERED → UNVERIFIABLE →
+ * WITHDRAWN → OPEN (no standing answer) → DECIDED (tier answered, or an intact
+ * decider approval) → STALE → ANSWERED_UNCONFIRMED. A terminal or open hint
+ * can never mask corrupt evidence.
  *
  * Integrity is the semantic block re-rendered with its OWN declared renderer
  * and compared with the whole content, plus the block compared with the
@@ -16,7 +17,7 @@
  */
 import type { ApprovalHashFields } from '../approvalHash.js';
 import { checkNodeIntegrity, type NodeApprovalRow, type NodeIntegrityState } from '../nodeApproval.js';
-import { QUESTION_CODEC, questionDataSchema, type QuestionData } from './codec.js';
+import { QUESTION_CODEC, currentAnswer, questionDataSchema, type QuestionData } from './codec.js';
 import { canonicalQuestionJson, questionName, extractQuestionBlock, isKnownRenderer, renderQuestion, renderQuestionAbstract } from './render.js';
 
 export type QuestionState =
@@ -26,8 +27,7 @@ export type QuestionState =
   | 'STALE'
   | 'TAMPERED'
   | 'UNVERIFIABLE'
-  | 'WITHDRAWN'
-  | 'SUPERSEDED';
+  | 'WITHDRAWN';
 
 /** Why a question is TAMPERED or UNVERIFIABLE, for `verifyQuestion`. */
 export type QuestionIntegrityFinding =
@@ -50,7 +50,8 @@ export interface QuestionEvaluation {
     byDecider: boolean;
     revision: number | null;
   };
-  allAnswered: boolean;
+  /** An answer stands: the last entry of the answer list is an answer (#4426). */
+  answered: boolean;
 }
 
 /** The node fields an evaluation reads. */
@@ -125,22 +126,25 @@ export function evaluateQuestion(
   const tampered = findings.some((f) => f !== 'UNKNOWN_CODEC' && f !== 'UNKNOWN_RENDERER');
   const approver = node.approvedBy == null ? null : (approverIdentities ?? new Set([node.approvedBy]));
   const byDecider = question != null && approver != null && question.deciders.some((id) => approver.has(id));
-  const allAnswered = question != null && question.parts.every((p) => p.answer != null);
+  const answered = question != null && currentAnswer(question) != null;
   const approval = { integrity: integrity.state, byDecider, revision: node.approvedRevNo };
-  const result = (state: QuestionState): QuestionEvaluation => ({ state, question, findings, approval, allAnswered });
+  const result = (state: QuestionState): QuestionEvaluation => ({ state, question, findings, approval, answered });
 
   if (tampered) return result('TAMPERED');
   if (unverifiable || question == null) return result('UNVERIFIABLE');
   if (question.withdrawn) return result('WITHDRAWN');
-  if (question.supersededBy) return result('SUPERSEDED');
+  // Row 4 before the evidence rows on purpose: a question whose answer was
+  // taken back is OPEN again even if an earlier revision was approved.
+  if (!answered) return result('OPEN');
+  // The default tier needs no evidence: a decider's answer alone settles it.
+  if (question.tier === 'answered') return result('DECIDED');
   // Evidence by tier. The approved tier's evidence is a decider's approval;
-  // the signed tier's is a decider's passkey signature (#1614 S2b, slice S3),
-  // which does not exist yet, so a signed question has no evidence and stays
+  // the signed tier's is a decider's passkey signature (#1614 S2b), which
+  // does not exist yet, so a signed question has no evidence and stays
   // ANSWERED_UNCONFIRMED (Q11). An approval never counts for the signed tier.
   if (question.tier === 'approved' && byDecider) {
     if (integrity.state === 'SUPERSEDED') return result('STALE');
-    if (integrity.state === 'INTACT' && allAnswered && !question.archival) return result('DECIDED');
+    if (integrity.state === 'INTACT') return result('DECIDED');
   }
-  if (allAnswered) return result('ANSWERED_UNCONFIRMED');
-  return result('OPEN');
+  return result('ANSWERED_UNCONFIRMED');
 }

@@ -1,8 +1,8 @@
 /**
  * #1641 §4 — question codes. A log issues `n = lastCode + 1` under its lock
- * and the code is `prefix + bijective-base-26(n)`: with prefix `D`, 1 → DA,
- * 26 → DZ, 27 → DAA. Codes are never reused (withdrawn and purged questions
- * consume theirs), so today's DA…DU are preserved by construction.
+ * and the code is `prefix + bijective-base-26(n)`: with prefix `Q`, 1 → QA,
+ * 26 → QZ, 27 → QAA. Codes are never reused (withdrawn and purged questions
+ * consume theirs), so earlier DA…DU codes are preserved by construction.
  */
 
 const A = 'A'.charCodeAt(0);
@@ -28,9 +28,9 @@ export function lettersToNumber(letters: string): number | null {
   return Number.isSafeInteger(n) ? n : null;
 }
 
-/** A log's code prefix: one to three upper-case letters (default `D`). */
+/** A log's code prefix: one to three upper-case letters (default `Q`, #4426). */
 export const QUESTION_PREFIX_RE = /^[A-Z]{1,3}$/;
-export const DEFAULT_QUESTION_PREFIX = 'D';
+export const DEFAULT_QUESTION_PREFIX = 'Q';
 
 /** The code of question `n` in a log with `prefix`. */
 export function questionCode(prefix: string, n: number): string {
@@ -43,16 +43,17 @@ export function questionLoc(logLoc: string, code: string): string {
 }
 
 /**
- * Split a citation `DU` or `DU-1` into its code and optional part number,
- * given the log's prefix. Null when the citation is not of this log's shape.
+ * Split a citation `QA` into its code and number, given the log's prefix.
+ * Null when the citation is not of this log's shape. A part suffix (`QA-1`)
+ * is not accepted: a node holds one question (#4426).
  */
 export function parseQuestionCitation(
   citation: string,
   prefix: string,
-): { code: string; n: number; part: number | null } | null {
-  const m = /^([A-Z]+)(?:-([1-9][0-9]{0,3}))?$/.exec(citation.trim());
+): { code: string; n: number } | null {
+  const m = /^([A-Z]+)$/.exec(citation.trim());
   if (!m || !m[1].startsWith(prefix)) return null;
   const n = lettersToNumber(m[1].slice(prefix.length));
   if (n == null || n < 1) return null;
-  return { code: m[1], n, part: m[2] ? Number(m[2]) : null };
+  return { code: m[1], n };
 }
