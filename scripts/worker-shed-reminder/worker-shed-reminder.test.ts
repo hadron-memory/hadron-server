@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  ESCALATION_TOKENS, FLOOR_TOKENS, HYSTERESIS_TOKENS, LOCK_STALE_MS, REMINDER_TEXT, STATE_MAX_FILES, TAIL_BYTES,
+  ESCALATION_TOKENS, FLOOR_TOKENS, HYSTERESIS_TOKENS, LOCK_STALE_MS, REMINDER_TEXT, STATE_MAX_FILES, TAIL_BYTES, THRESHOLDS,
   decide, escalationFor, observe, run, scanTail, thresholdFor, withLock,
 } from './worker-shed-reminder.mjs';
 
@@ -258,6 +258,26 @@ describe('one arm: threshold fire, one escalation, never a third', () => {
     expect(escalationFor(OPUS)).toBe(ESCALATION_TOKENS);
     expect(escalationFor(SONNET)).toBe(ESCALATION_TOKENS);
     expect(escalationFor(undefined)).toBe(ESCALATION_TOKENS);
+  });
+
+  // #4518 acceptance 3: the GLM change leaves every other family exactly as it was. Literal numbers on purpose: a pin written
+  // against the exported constants would follow a change to them instead of catching it.
+  it('non-GLM policy is byte-identical: Opus 150k and Sonnet 100k with no step of their own, default escalation 50k', () => {
+    expect(THRESHOLDS.filter(([prefix]) => !prefix.startsWith('glm'))).toEqual([['claude-opus', 150_000], ['claude-sonnet', 100_000]]);
+    expect(ESCALATION_TOKENS).toBe(50_000);
+    expect(FLOOR_TOKENS).toBe(67_000);
+    for (const model of [OPUS, SONNET]) expect(escalationFor(model)).toBe(50_000);
+  });
+
+  it('Sonnet escalates at exactly +50k after its 100k fire, the step it had before the GLM change', () => {
+    const b = box();
+    write(b, [asst(occ(100_000), { model: SONNET })]);
+    expect(call(b)).not.toBeNull();
+    write(b, [asst(occ(149_999), { model: SONNET })]);
+    expect(call(b)).toBeNull();
+    write(b, [asst(occ(150_000), { model: SONNET })]);
+    expect(call(b)).not.toBeNull();
+    expect(stateOf(b)).toMatchObject({ fires: 2, atReclaimable: 150_000 });
   });
 
   it('fires once at the threshold, is silent on repeated prompts, escalates once at +50k, then never again', () => {
