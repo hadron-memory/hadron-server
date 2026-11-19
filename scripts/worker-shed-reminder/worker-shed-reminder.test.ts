@@ -232,6 +232,8 @@ describe('bounded and partial transcripts', () => {
 describe('one arm: threshold fire, one escalation, never a third', () => {
   // Incident 2026-11-19: GLM auto-compacts at ~167k occupied (92 measured compactions: min 165k, median 167k). The reminder
   // must fire, and escalate, BEFORE that point or the compaction sheds the worker mid-task and the reminder is moot.
+  // A MEASUREMENT, not a source constant (the minimum of the 92 compactions): if the GLM window or Claude Code's buffer
+  // changes, re-measure and update it here and in the README.
   const GLM_AUTO_COMPACT_OCCUPIED = 165_000;
   it('GLM fires with runway before the auto-compact point, escalates once after 20k more, still before it', () => {
     const b = box();
@@ -258,6 +260,22 @@ describe('one arm: threshold fire, one escalation, never a third', () => {
     expect(escalationFor(OPUS)).toBe(ESCALATION_TOKENS);
     expect(escalationFor(SONNET)).toBe(ESCALATION_TOKENS);
     expect(escalationFor(undefined)).toBe(ESCALATION_TOKENS);
+  });
+
+  it('from the source constants: GLM fire and escalation both land below the measured compaction point', () => {
+    const fire = thresholdFor('glm-5.3');
+    expect(fire).not.toBeNull();
+    expect(FLOOR_TOKENS + (fire as number)).toBeLessThan(GLM_AUTO_COMPACT_OCCUPIED);
+    expect(FLOOR_TOKENS + (fire as number) + escalationFor('glm-5.3')).toBeLessThan(GLM_AUTO_COMPACT_OCCUPIED);
+  });
+
+  it('every per-model escalation step in THRESHOLDS is a positive integer (escalationFor never silently falls back)', () => {
+    for (const entry of THRESHOLDS) {
+      if (entry.length < 3) continue;
+      const step = (entry as readonly [string, number, number])[2];
+      expect(Number.isInteger(step) && step > 0).toBe(true);
+      expect(escalationFor(`${entry[0]}-x`)).toBe(step);
+    }
   });
 
   // #4518 acceptance 3: the GLM change leaves every other family exactly as it was. Literal numbers on purpose: a pin written
