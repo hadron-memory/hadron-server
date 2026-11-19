@@ -234,6 +234,8 @@ describe("#4472: the typed refusal is on every withRosterAppRead caller's path",
     new Prisma.PrismaClientKnownRequestError(message, { code, clientVersion: 'test' });
 
   const eachCallerConverts = async (call: () => Promise<unknown>, reason: 'TRANSACTION_BUDGET' | 'POOL_WAIT') => {
+    // The spy patches the module-level db handle the resolvers read through; a resolver that
+    // opened its own client would bypass it and the pin fails closed (red), not silently green.
     const spy = vi.spyOn(db, '$transaction').mockImplementation((async () => {
       throw busy(
         reason === 'POOL_WAIT' ? 'Unable to start a transaction: the pool was full.' : 'Transaction already closed during query execution.',
