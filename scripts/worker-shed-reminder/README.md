@@ -6,7 +6,7 @@ no PostToolUse or PreCompact hook. Output is one fixed `hookSpecificOutput.addit
 Any failure is silence with exit 0.
 
 - Source and tests: this directory. Policy numbers come from the team shed policy (task `trim-context-clear-and-recover`):
-  Opus 150k, Sonnet and GLM 100k reclaimable; reclaimable = occupied context minus a fixed 67k floor.
+  Opus 150k, Sonnet 100k, GLM 50k (escalating after 20k more) reclaimable; reclaimable = occupied context minus a fixed 67k floor.
 - **Not installed by this change.** Installation is Hugo's separately approved step: manual, per worktree, merged into the
   gitignored `.claude/settings.local.json` as one hook group whose command identifies this script; JSON merge with a `.bak`,
   idempotent, rollback by removing that group. Never the tracked `settings.json`, never Orca's managed groups, no Codex worktree.

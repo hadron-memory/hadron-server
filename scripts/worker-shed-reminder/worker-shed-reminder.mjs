@@ -43,7 +43,15 @@ import { pathToFileURL } from 'node:url';
 
 /** Context occupied by a fresh worker before any work (measured 65.8k-68.4k across four own transcripts). */
 export const FLOOR_TOKENS = 67_000;
-export const THRESHOLDS = [['claude-opus', 150_000], ['claude-sonnet', 100_000], ['glm', 100_000]];
+/**
+ * [model prefix, reclaimable threshold, optional escalation step]. GLM sessions are capped at a 200k window
+ * (claude-glm: CLAUDE_CODE_MAX_CONTEXT_TOKENS) and Claude Code auto-compacts them at about 167k occupied (92 auto
+ * compactions measured 2026-11-19: preTokens min 165k, median 167k). 67k floor + 100k reclaimable is that same 167k, so
+ * a 100k GLM threshold could never fire before the compaction shed the worker mid-task (incident
+ * hrn:node:hadronmemory.com:hadron-dev-team-hugo:incidents:2026-11-19-glm-shed-reminder-never-fires). GLM therefore fires
+ * at 50k reclaimable (117k occupied, about 50k of runway) and escalates after 20k more (137k occupied).
+ */
+export const THRESHOLDS = [['claude-opus', 150_000], ['claude-sonnet', 100_000], ['glm', 50_000, 20_000]];
 export const ESCALATION_TOKENS = 50_000;
 export const HYSTERESIS_TOKENS = 30_000;
 export const MAX_FIRES = 2;
@@ -72,6 +80,13 @@ export function thresholdFor(model) {
   if (typeof model !== 'string') return null;
   for (const [prefix, t] of THRESHOLDS) if (model.startsWith(prefix)) return t;
   return null;
+}
+
+/** Reclaimable growth after the first fire that earns the one escalation; the default unless the model's entry names one. */
+export function escalationFor(model) {
+  if (typeof model !== 'string') return ESCALATION_TOKENS;
+  for (const [prefix, , step] of THRESHOLDS) if (model.startsWith(prefix)) return isCount(step) && step > 0 ? step : ESCALATION_TOKENS;
+  return ESCALATION_TOKENS;
 }
 
 const isCount = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && Number.isInteger(n);
@@ -151,7 +166,7 @@ export function decide(state, obs, now) {
   let fire = false;
   if (next.fires === 0 && reclaimable >= threshold) {
     fire = true; next.fires = 1; next.atReclaimable = reclaimable; next.firedThreshold = threshold;
-  } else if (next.fires === 1 && next.fires < MAX_FIRES && next.atReclaimable !== null && reclaimable >= next.atReclaimable + ESCALATION_TOKENS) {
+  } else if (next.fires === 1 && next.fires < MAX_FIRES && next.atReclaimable !== null && reclaimable >= next.atReclaimable + escalationFor(obs.model)) {
     fire = true; next.fires = 2; next.atReclaimable = reclaimable;
   }
   next.lastReclaimable = reclaimable;

@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ESCALATION_TOKENS, FLOOR_TOKENS, HYSTERESIS_TOKENS, LOCK_STALE_MS, REMINDER_TEXT, STATE_MAX_FILES, TAIL_BYTES,
-  decide, observe, run, scanTail, thresholdFor, withLock,
+  decide, escalationFor, observe, run, scanTail, thresholdFor, withLock,
 } from './worker-shed-reminder.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -60,7 +60,7 @@ const logOf = (b: Box) => (existsSync(join(b.stateDir, 'reminder.log')) ? readFi
 
 describe('thresholds and the floor', () => {
   it.each([
-    [OPUS, 150_000], [SONNET, 100_000], ['glm-5', 100_000],
+    [OPUS, 150_000], [SONNET, 100_000], ['glm-5', 50_000],
   ])('%s: silent just below, fires at and above %i reclaimable', (model, threshold) => {
     const b = box();
     write(b, [asst(occ(threshold - 1), { model })]);
@@ -230,6 +230,36 @@ describe('bounded and partial transcripts', () => {
 });
 
 describe('one arm: threshold fire, one escalation, never a third', () => {
+  // Incident 2026-11-19: GLM auto-compacts at ~167k occupied (92 measured compactions: min 165k, median 167k). The reminder
+  // must fire, and escalate, BEFORE that point or the compaction sheds the worker mid-task and the reminder is moot.
+  const GLM_AUTO_COMPACT_OCCUPIED = 165_000;
+  it('GLM fires with runway before the auto-compact point, escalates once after 20k more, still before it', () => {
+    const b = box();
+    write(b, [asst(occ(49_999), { model: 'glm-5.3' })]);
+    expect(call(b)).toBeNull();
+    write(b, [asst(occ(50_000), { model: 'glm-5.3' })]);
+    expect(call(b)).not.toBeNull();
+    expect(occ(50_000)).toBeLessThan(GLM_AUTO_COMPACT_OCCUPIED - 40_000);
+    expect(escalationFor('glm-5.3')).toBe(20_000);
+    write(b, [asst(occ(50_000 + 20_000 - 1), { model: 'glm-5.3' })]);
+    expect(call(b)).toBeNull();
+    write(b, [asst(occ(50_000 + 20_000), { model: 'glm-5.3' })]);
+    expect(call(b)).not.toBeNull();
+    expect(occ(50_000 + 20_000)).toBeLessThan(GLM_AUTO_COMPACT_OCCUPIED);
+    expect(stateOf(b)).toMatchObject({ fires: 2 });
+    write(b, [asst(occ(50_000 + 100_000), { model: 'glm-5.3' })]);
+    expect(call(b)).toBeNull();
+  });
+
+  it('a fresh GLM recovery context (about 84k occupied, 17k reclaimable) stays silent; Claude models keep the default step', () => {
+    const b = box();
+    write(b, [asst(84_000, { model: 'glm-5.3' })]);
+    expect(call(b)).toBeNull();
+    expect(escalationFor(OPUS)).toBe(ESCALATION_TOKENS);
+    expect(escalationFor(SONNET)).toBe(ESCALATION_TOKENS);
+    expect(escalationFor(undefined)).toBe(ESCALATION_TOKENS);
+  });
+
   it('fires once at the threshold, is silent on repeated prompts, escalates once at +50k, then never again', () => {
     const b = box();
     write(b, [asst(occ(150_000))]);
