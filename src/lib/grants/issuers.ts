@@ -18,6 +18,7 @@ import { requireScheduleAdmin } from '../../api/graphql/schema/resolvers.appRun.
 import { PLATFORM_ACTIONS, type IssuerRuleKey } from './actions.js';
 import { managesApp } from '../auth/appManagement.js';
 import { resolveAppRef } from '../entityRef/appRef.js';
+import { requireSecretReadClientIssuer } from '../secrets/readClientIssuer.js';
 
 /** #3823: whoever manages the App (the gate the boot-prompt actions' signer faces; the node-specific part is judged where the grant is spent). */
 async function requireAppManager(ctx: Context, appRef: string): Promise<void> {
@@ -26,13 +27,24 @@ async function requireAppManager(ctx: Context, appRef: string): Promise<void> {
   if (!app || !(await managesApp(ctx, app))) throw authorizationDenied();
 }
 
-type IssuerGate = (ctx: Context, appRef: string) => Promise<unknown>;
+/** #3998: a gate that depends on what the grant names (one secret) also receives the grant's stored values. */
+type IssuerGate = (ctx: Context, appRef: string, values?: unknown) => Promise<unknown>;
+
+/** The read-client issuer rule (plan R4): judged on the secret the grant names, in the App the grant is for. Any mismatch is the one refusal. */
+async function requireSecretReadIssuer(ctx: Context, appRef: string, values?: unknown): Promise<void> {
+  const id = values && typeof values === 'object' && !Array.isArray(values) ? (values as Record<string, unknown>).secret : undefined;
+  if (typeof id !== 'string') throw authorizationDenied();
+  const { id: appId } = await resolveAppRef(ctx.db, appRef);
+  const issuance = await requireSecretReadClientIssuer(ctx, id);
+  if (issuance.appId !== appId) throw authorizationDenied();
+}
 
 /** #3730 item 1: keyed by the closed {@link IssuerRuleKey} union — every key has a gate, and no other key can be indexed. */
 export const ISSUER_RULES: Readonly<Record<IssuerRuleKey, IssuerGate>> = {
   APP_SCHEDULE_ADMIN: requireScheduleAdmin,
   APP_WEBHOOK_ADMIN: requireScheduleAdmin,
   APP_MANAGER: requireAppManager,
+  SECRET_READ_CLIENT: requireSecretReadIssuer,
 };
 
 /**
@@ -43,7 +55,7 @@ export const ISSUER_RULES: Readonly<Record<IssuerRuleKey, IssuerGate>> = {
  * App is necessary, never sufficient. An unknown action, or one whose rule has no gate, has NO issuer: it refuses everyone,
  * platform admins included. Never answers for a caller it cannot identify.
  */
-export async function requireActionIssuer(ctx: Context, actionName: string, appRef: string): Promise<void> {
+export async function requireActionIssuer(ctx: Context, actionName: string, appRef: string, values?: unknown): Promise<void> {
   const action = PLATFORM_ACTIONS.find((a) => a.name === actionName);
   // #3730 item 1: an OWN-property hit on the closed record only — a plain Record lookup would answer an inherited property
   // name ('toString' is a function that never refuses; '__proto__' an object that is not callable), so a rule key that only
@@ -52,5 +64,5 @@ export async function requireActionIssuer(ctx: Context, actionName: string, appR
   if (!action || !gate) throw new GraphQLError('Unknown action.', { extensions: { code: 'BAD_USER_INPUT' } });
   if (ctx.appKeyId) throw authorizationDenied();
   await requirePersonOnlyAct(ctx, 'grant.give', authorizationDenied);
-  await gate(ctx, appRef);
+  await gate(ctx, appRef, values);
 }

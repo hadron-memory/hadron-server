@@ -790,6 +790,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_secret_read_client_end",
+      "kind": "check-constraint",
+      "file": "secret-read-clients-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_secret_version_shape",
       "kind": "check-constraint",
       "file": "secret-versions-invariants.sql",
@@ -1396,9 +1402,27 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_secret_deleted_ends_clients",
+      "kind": "function",
+      "file": "secret-read-clients-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_secret_event_guard",
       "kind": "function",
       "file": "secret-versions-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_secret_read_client_guard",
+      "kind": "function",
+      "file": "secret-read-clients-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_secret_read_client_secret",
+      "kind": "function",
+      "file": "secret-read-clients-invariants.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
@@ -2428,6 +2452,18 @@
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
+      "name": "secret_read_clients.secret_read_client_guard",
+      "kind": "trigger",
+      "file": "secret-read-clients-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secret_read_clients.secret_read_client_secret",
+      "kind": "trigger",
+      "file": "secret-read-clients-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "secret_versions.secret_version_owner",
       "kind": "trigger",
       "file": "secret-versions-invariants.sql",
@@ -2437,6 +2473,12 @@
       "name": "secret_versions.worker_reference_fence_1162",
       "kind": "trigger",
       "file": "secret-versions-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secrets.secret_deleted_ends_clients",
+      "kind": "trigger",
+      "file": "secret-read-clients-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {

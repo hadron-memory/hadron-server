@@ -1,5 +1,5 @@
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (20261117210000_grant_withdrawn_state) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (20261118100000_grant_use_count_bound) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because
@@ -37,6 +37,7 @@ ALTER TABLE grants ADD CONSTRAINT chk_grants_shape CHECK (
   btrim(reason) <> '' AND
   (max_uses IS NULL OR max_uses > 0) AND
   use_count >= 0 AND
+  (max_uses IS NULL OR use_count <= max_uses) AND
   version >= 1 AND
   (starts_at IS NULL OR expires_at IS NULL OR starts_at < expires_at) AND
   (revoked_at IS NULL) = (revoked_by IS NULL) AND
