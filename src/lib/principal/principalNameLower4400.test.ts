@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
-import { mintPrincipal } from './mintPrincipal.js';
+import { mintPrincipal, RootNameInvalidError } from './mintPrincipal.js';
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -57,13 +57,26 @@ describe('#4400 principals.name is lower case in the database', () => {
     expect(said).toContain('chk_principals_name_lower');
   });
 
-  it('GUARD: what the writer stores always passes, also for names outside ASCII', async () => {
+  it('GUARD: what the writer stores always passes the CHECK', async () => {
     // JavaScript lower-cases in the writer; Postgres lower() judges in the CHECK. A name the writer produced must
-    // be a fixed point of the database's lower(), or a legitimate mint would be refused.
-    for (const name of ['Plain-Name', 'ACME.Example', 'İstanbul', 'ΟΔΟΣ', 'Straße', 'ÉCOLE.example']) {
+    // be a fixed point of the database's lower(), or a legitimate mint would be refused. Since #4481 the pool
+    // itself refuses — typed, BEFORE the insert — any name whose lower-cased form leaves lower-case ASCII, so the
+    // writer can no longer produce non-ASCII output at all and what it does store ([a-z0-9._-]) is a trivial
+    // fixed point. The non-ASCII names keep #4400's evidence in two legs: the pool refuses them (#4481's rule,
+    // which fires ahead of the constraint), and their JS-lowered forms are still fixed points of Postgres
+    // lower() — the CHECK would not have refused a writer that stored them, so no legitimate mint ever dies on
+    // the constraint, whichever layer sees the name first.
+    for (const name of ['Plain-Name', 'ACME.Example']) {
       const p = await mintPrincipal(db, { kind: 'org', name });
       const row = await db.principal.findUniqueOrThrow({ where: { id: p.id } });
       expect(row.name).toBe(name.toLowerCase());
+    }
+    for (const name of ['İstanbul', 'ΟΔΟΣ', 'Straße', 'ÉCOLE.example']) {
+      await expect(mintPrincipal(db, { kind: 'org', name })).rejects.toBeInstanceOf(RootNameInvalidError);
+      const lowered = name.toLowerCase();
+      const [{ fixed }] = await db.$queryRaw<{ fixed: boolean }[]>`
+        SELECT ${lowered} = lower(${lowered}) AS fixed`;
+      expect(fixed).toBe(true);
     }
   });
 });
