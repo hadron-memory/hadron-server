@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  ESCALATION_TOKENS, FLOOR_TOKENS, HYSTERESIS_TOKENS, LOCK_STALE_MS, REMINDER_TEXT, STATE_MAX_FILES, TAIL_BYTES, THRESHOLDS,
+  ESCALATION_TOKENS, FLOOR_TOKENS, HYSTERESIS_TOKENS, LOCK_STALE_MS, REMINDER_TEXT, STATE_MAX_FILES, STOP_REMINDER_TEXT, TAIL_BYTES, THRESHOLDS,
   decide, escalationFor, observe, run, scanTail, thresholdFor, withLock,
 } from './worker-shed-reminder.mjs';
 
@@ -163,7 +163,15 @@ describe('malformed, future and unknown data stay silent', () => {
     expect(call(b)).not.toBeNull();
   });
 
-  it('Stop at a task boundary blocks once with the reminder, never when stop_hook_active, and shares the arm', () => {
+  it('the Stop text claims neither a task boundary nor that nothing is stopped (Stop runs at every end of turn and continues it once)', () => {
+    const text = STOP_REMINDER_TEXT(160, 150);
+    expect(text).not.toMatch(/you are at a task boundary/i);
+    expect(text).not.toMatch(/nothing is stopped/i);
+    expect(text).toMatch(/If you are at a completed-task boundary/);
+    expect(text).toMatch(/mid-task or waiting for an answer, end your turn again/);
+  });
+
+  it('Stop at end of turn blocks once with the reminder, never when stop_hook_active, and shares the arm', () => {
     const b = box();
     write(b, [asst(occ(200_000))]);
     expect(call(b, { hook_event_name: 'Stop', stop_hook_active: true })).toBeNull();

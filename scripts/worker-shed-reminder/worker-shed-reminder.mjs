@@ -24,8 +24,9 @@
  *    the threshold. No worktree-wide cooldown.
  *  - Timestamp: the source line's timestamp must parse and not be in the future. Its AGE does not matter: occupied context
  *    does not shrink while a worker idles, and the first prompt after a task always follows an idle gap.
- *  - Events: UserPromptSubmit adds `additionalContext`; Stop (a task boundary) returns `decision: block` with the reminder,
- *    once per arm (the arm is shared), and never when `stop_hook_active` is set.
+ *  - Events: UserPromptSubmit adds `additionalContext`; Stop (EVERY end of turn, not only a task boundary: the text asks
+ *    the worker to judge) returns `decision: block` with the reminder, which continues the turn once; once per fire of the
+ *    shared arm (so at most twice per arm), and never when `stop_hook_active` is set.
  *  - Untrusted input: session_id must match ^[A-Za-z0-9-]{8,64}$; transcript_path must resolve (realpath) to a regular
  *    file owned by this user under <CLAUDE_CONFIG_DIR or ~/.claude>/projects; only the last TAIL_BYTES are read; the
  *    emitted text, the log and the state never carry transcript text, tool output, usage objects or credentials.
@@ -70,9 +71,10 @@ const SESSION_ID = /^[A-Za-z0-9-]{8,64}$/;
 const STATE_FILE = /^[A-Za-z0-9-]{8,64}\.json$/;
 
 export const STOP_REMINDER_TEXT = (reclaimableK, thresholdK) =>
-  `Context reclaimable is about ${reclaimableK}k (approximate; policy ${thresholdK}k for your model). You are at a task boundary: ` +
-  'run the shed procedure now (task trim-context-clear-and-recover), unless an irreversible operation is still open; ' +
-  'then finish or record it first. This is a reminder: nothing is stopped for you.';
+  `Context reclaimable is about ${reclaimableK}k (approximate; policy ${thresholdK}k for your model). Your turn just ended. ` +
+  'If you are at a completed-task boundary, run the shed procedure now (task trim-context-clear-and-recover); if an ' +
+  'irreversible operation is still open, finish or record it first. If you are mid-task or waiting for an answer, end ' +
+  'your turn again: this reminder continues your turn once and never blocks the next stop.';
 
 export const REMINDER_TEXT = (reclaimableK, thresholdK) =>
   `Context reclaimable is about ${reclaimableK}k (approximate; policy ${thresholdK}k for your model). At your next completed-task ` +
