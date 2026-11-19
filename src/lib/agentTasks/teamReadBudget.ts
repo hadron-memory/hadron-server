@@ -23,17 +23,18 @@
  * REPORTED in Sentry — the incident was found by counting these.
  *
  * #4476: the budget now bites ON the statement. The wrapper sets
- * transaction-local `statement_timeout` AND `transaction_timeout` (PG17+;
- * guarded on the GUC existing, so PG16 CI lanes keep the statement bound only)
- * from the same constant, so Postgres itself cancels a runaway statement —
- * and the whole read at the budget from its start — instead of letting it
- * run to completion inside an already-expired transaction (prod's roster
- * statements ran 20–175 s inside the 5 s budget). A cancel raises SQLSTATE
- * 57014 (statement_timeout's query_canceled) or 25P04 (transaction_timeout's
- * FATAL termination) in two Prisma shapes — P2010 with the SQLSTATE on
- * `meta.code` for a raw statement, or an UnknownRequestError whose only
- * discriminator is the engine's rendered `PostgresError { code: … }` for a
- * model statement — and all of them convert through the classifier below.
+ * transaction-local `statement_timeout` (the per-statement cap, at the
+ * budget) AND `transaction_timeout` (PG17+, the whole-read backstop at the
+ * budget plus TEAM_READ_TX_BACKSTOP_MARGIN_MS; guarded on the GUC existing,
+ * so PG16 CI lanes keep the statement bound only), so Postgres itself cancels
+ * a runaway statement instead of letting it run to completion inside an
+ * already-expired transaction (prod's roster statements ran 20–175 s inside
+ * the 5 s budget). A cancel raises SQLSTATE 57014 (statement_timeout's
+ * query_canceled) or 25P04 (transaction_timeout's FATAL termination) in two
+ * Prisma shapes — P2010 with the SQLSTATE on `meta.code` for a raw statement,
+ * or an UnknownRequestError whose only discriminator is the engine's rendered
+ * `PostgresError { code: … }` for a model statement — and all of them convert
+ * through the classifier below.
  */
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../generated/prisma/index.js';
@@ -41,12 +42,20 @@ import { Prisma } from '../../generated/prisma/index.js';
 /** The interactive team-read transaction's total budget (ms). #4455: 5 s; every client's own timeout is longer. */
 export const TEAM_READ_TX_TIMEOUT_MS = 5_000;
 /**
- * How far past the budget the PG17+ `transaction_timeout` backstop sits (ms). The backstop is
- * deliberately AFTER the statement cancel: a statement_timeout cancel (57014) keeps the pooled
- * connection, while the backstop's cancel is FATAL (25P04) and kills it — on a small pool that is
- * churn worth avoiding when the non-fatal cap already covers the runaway case (#4482 BLIND P2 A /
- * Peter's fold). The backstop only bites what the statement cap cannot: a read that idles between
- * statements or strings many under-budget statements past the budget as a whole.
+ * How far past the budget the PG17+ `transaction_timeout` backstop sits (ms). The real split,
+ * top to bottom (#4482 BLIND delta review item H):
+ *   - a runaway statement that STARTED early enough (within the margin of the read's start)
+ *     is cancelled by its own statement cap first — 57014, non-fatal, the pooled connection
+ *     survives;
+ *   - a statement that started later would outrun the backstop under its own cap, so the
+ *     backstop ends the read — 25P04, FATAL, the connection is killed. That kill is the churn
+ *     the margin exists to make rare: every read whose runaway statement starts past the
+ *     margin still pays it;
+ *   - time idled BETWEEN statements is bounded by Prisma's own interactive timer at the same
+ *     budget (P2028, #4455) before the backstop's margin expires.
+ * The margin buys no safety (the statement cap alone already bounds every statement); it buys
+ * kept connections for the reads whose runaway statement starts early enough that the
+ * non-fatal cancel can win the race.
  */
 export const TEAM_READ_TX_BACKSTOP_MARGIN_MS = 1_000;
 /** The explicit pool wait before the transaction even starts (ms). Prisma's own default, pinned so it cannot drift. */

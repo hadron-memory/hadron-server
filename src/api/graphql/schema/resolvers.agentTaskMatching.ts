@@ -40,23 +40,27 @@ export async function withRosterAppRead<T>(ctx: Context, appRef: string, project
         // #4476: the budget must bite ON the statement, not after it. #4455's transaction timeout
         // only lands once the running statement returns — prod's roster statements ran 20–175 s
         // (p50 66 s, the prod journal at #118308) inside the 5 s budget, holding a pooled
-        // connection long after every client had given up. statement_timeout cancels any ONE
-        // statement that outruns the budget, closing the window where a statement that STARTS near
-        // the expiry would otherwise run a full budget of its own (worst case 2×; BLIND review
-        // P2-1 on #4482). transaction_timeout is the whole-read BACKSTOP at the budget plus a
-        // margin: it sits deliberately AFTER the statement cancel, because its own cancel is FATAL
-        // (25P04) and kills the pooled connection — avoidable churn on a small pool when the
-        // non-fatal cap (57014, connection kept) already covers the runaway statement (#4482 BLIND
-        // P2 A / Peter's fold). The backstop bites what the statement cap cannot: a read that
-        // idles between statements, or strings many under-budget statements past the budget as a
-        // whole. Both are transaction-local (set_config with is_local), so neither reaches the
-        // pooled session, and the catch below classifies both cancel shapes as the same typed
-        // retryable refusal.
+        // connection long after every client had given up. statement_timeout caps any ONE
+        // statement at the budget, cancelling it non-fatally (57014, the pooled connection is
+        // kept). transaction_timeout is the whole-read BACKSTOP at the budget plus a margin; it
+        // bounds what a per-statement cap cannot — the read as a whole: a statement that STARTS
+        // near the expiry could otherwise run a full budget of its own past it (worst case ~2x;
+        // BLIND review P2-1 on #4482). The backstop's own cancel is FATAL (25P04) and kills the
+        // pooled connection, so it deliberately sits AFTER the statement cancel: a read whose
+        // runaway statement starts early enough is cancelled non-fatally first, and the FATAL is
+        // spent only on what the per-statement cap cannot reach in time (#4482 BLIND P2 A /
+        // Peter's fold). Idle time BETWEEN statements stays bounded by Prisma's own interactive
+        // timer at the same budget (#4455, P2028) before the backstop's margin expires. Both GUCs
+        // are transaction-local (set_config with is_local), so neither reaches the pooled session,
+        // and the catch below classifies both cancel shapes as the same typed retryable refusal.
         // transaction_timeout exists only on PG17+ (the platform image). CI's test and migration
         // lanes run pgvector:pg16, where set_config on it errors (42704) on EVERY roster read
         // (LOCAL review P2 on #4482) — so the CASE sets it only when the engine has the GUC at all
         // (current_setting with missing_ok is NULL on engines without it). On PG16 the statement
-        // bound plus Prisma's own interactive timeout still hold: exactly #4455's shipped behavior.
+        // cap still holds (the GUC exists everywhere) but there is no backstop: the whole-read
+        // bound falls to Prisma's interactive timer alone, and a statement that starts near the
+        // expiry can still outrun it — worst case ~2x budget there. Fail-soft, by design (prod is
+        // PG17, Hugo's probe at #118604).
         await tx.$queryRaw`SELECT set_config('statement_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS)}, true) AS statement_timeout,
                            CASE WHEN current_setting('transaction_timeout', true) IS NOT NULL
                                 THEN set_config('transaction_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS + TEAM_READ_TX_BACKSTOP_MARGIN_MS)}, true) END AS transaction_timeout`;

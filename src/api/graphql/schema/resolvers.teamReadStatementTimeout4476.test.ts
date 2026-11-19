@@ -34,6 +34,13 @@ const [gucProbe] = (await db.$queryRawUnsafe(
   "SELECT current_setting('transaction_timeout', true) IS NOT NULL AS present",
 )) as { present: boolean }[];
 const HAS_TX_TIMEOUT = gucProbe.present;
+// #4482 BLIND F (minimum): the PG17-only pins below skip where the GUC is absent, so on a PG16
+// runner their coverage silently vanishes. A lane that EXPECTS PG17 sets TEST_EXPECT_TX_TIMEOUT=1
+// (a future pgvector:pg17 lane; the full-lane ask is the gate owner's), and then the skip is a
+// FAILURE, not a pass — the coverage cannot be lost where it was promised.
+if (!HAS_TX_TIMEOUT && process.env.TEST_EXPECT_TX_TIMEOUT === '1') {
+  throw new Error('TEST_EXPECT_TX_TIMEOUT=1 but this engine has no transaction_timeout GUC — the PG17 pins would silently skip here');
+}
 
 const M = resolvers.Mutation as any;
 const ctx = (userId?: string): Context => ({ db, userId, roles: ['READER'] });
@@ -152,11 +159,15 @@ describe('#4476 red — the budget bites on the statement, per statement kind (b
     }
   }, 25_000);
 
-  it.skipIf(!HAS_TX_TIMEOUT)('BLIND P2-1: a FAST statement near the expiry followed by a blocked one still refuses AT the budget (transaction_timeout closes the 2x window; PG17-only — skips on engines without the GUC)', async () => {
+  it.skipIf(!HAS_TX_TIMEOUT)('BLIND P2-1: a FAST statement near the expiry followed by a blocked one still refuses within the whole-read bound (transaction_timeout closes the 2x window; PG17-only — skips on engines without the GUC)', async () => {
     // statement_timeout alone bounds each statement SEPARATELY: a statement starting at ~the
     // expiry could run a full budget of its own (worst case ~2x). transaction_timeout cancels the
-    // whole read at BUDGET_MS from the transaction's start — this pin refuses that mutant: with
-    // statement_timeout only, the refusal lands at ~4.9 s + 5 s, past REFUSED_BY.
+    // whole read at BUDGET_MS + TEAM_READ_TX_BACKSTOP_MARGIN_MS from the transaction's start —
+    // this pin refuses that mutant: with statement_timeout only, the refusal lands at
+    // ~4.9 s + 5 s. The threshold derives from BUDGET + MARGIN (not the budget alone), so a
+    // margin change reddens it for the RIGHT reason rather than incidentally.
+    const wholeReadBound = BUDGET_MS + TEAM_READ_TX_BACKSTOP_MARGIN_MS;
+    const refusedWithin = wholeReadBound * 1.25; // the backstop plus scheduling slack
     const fastJustUnder = Math.floor(BUDGET_MS * 0.98 / 1000); // 4 s: completes inside its own budget
     const t0 = Date.now();
     const refusal: { resolved?: string; thrown?: unknown } = await withRosterAppRead(ctx(mia.id), app.id, async (readCtx) => {
@@ -168,7 +179,7 @@ describe('#4476 red — the budget bites on the statement, per statement kind (b
       (e) => ({ thrown: e }),
     );
     const elapsed = Date.now() - t0;
-    expect(elapsed, `refusal after ${elapsed} ms — the read as a whole must be cancelled at ${BUDGET_MS} ms, not at ~2x`).toBeLessThan(REFUSED_BY);
+    expect(elapsed, `refusal after ${elapsed} ms — the read as a whole must be cancelled within ${wholeReadBound} ms, not at ~2x`).toBeLessThan(refusedWithin);
     expect(refusal.resolved).toBeUndefined();
     const err = refusal.thrown as TeamReadBusyError;
     expect(err).toBeInstanceOf(TeamReadBusyError);
@@ -203,6 +214,51 @@ describe('#4476 — SET LOCAL scoping (acceptance 2)', () => {
   }, 25_000);
 });
 
+describe('#4482 — both paths asserted, not merely survived (LOCAL delta review P2 at f44245d38)', () => {
+  it('inside the wrapper\'s transaction, statement_timeout is exactly the budget and transaction_timeout exactly budget+margin', async () => {
+    // The delta review found these mutants green at f44245d38: statement_timeout='0' (the backstop
+    // alone passed every pin — but the statement cap is the sole bound on PG16 and the non-fatal
+    // arm the margin exists to protect) and backstop margin=0 (its purpose unpinned). pg_settings
+    // .setting is the internal millisecond value, so the assertion is independent of the engine's
+    // display format ('5s' vs '5000ms'). Runs on every engine: the statement leg is unconditional,
+    // the backstop leg only where the GUC exists (skipIf is unnecessary — the row is simply absent
+    // on no-GUC engines, which is itself pinned by the else arm).
+    const got = await withRosterAppRead(ctx(mia.id), app.id, async (readCtx) => {
+      const rows = await readCtx.db.$queryRawUnsafe(
+        "SELECT name, setting FROM pg_settings WHERE name IN ('statement_timeout', 'transaction_timeout')",
+      ) as { name: string; setting: string }[];
+      return Object.fromEntries(rows.map((r) => [r.name, r.setting]));
+    });
+    expect(
+      got['statement_timeout'],
+      'the statement cap must be exactly the budget — a mutant that disables it (0) or drifts the constant reddens here',
+    ).toBe(String(TEAM_READ_TX_TIMEOUT_MS));
+    if (HAS_TX_TIMEOUT) {
+      expect(
+        got['transaction_timeout'],
+        'the backstop must sit at budget+margin — the margin is what lets the non-fatal statement cancel win the race it can win',
+      ).toBe(String(TEAM_READ_TX_TIMEOUT_MS + TEAM_READ_TX_BACKSTOP_MARGIN_MS));
+    } else {
+      // The guard held: nothing was set on an engine without the GUC (set_config would 42704).
+      expect(got['transaction_timeout']).toBeUndefined();
+    }
+  });
+
+  it('the guard\'s feature-detect shape yields NULL, never 42704, for a GUC absent on EVERY engine (the no-GUC path, runnable without PG16)', async () => {
+    // The wrapper guards transaction_timeout behind current_setting(..., true) IS NOT NULL because
+    // set_config on a missing parameter errors (42704) on engines without it — pg16 CI lanes. This
+    // pin proves the TECHNIQUE on any engine, PG17 included, by asking it about a GUC no engine
+    // has: missing_ok returns NULL instead of raising. The production call site itself is executed
+    // by every wrapper test above, so a guard regression (dropping missing_ok, or CASE WHEN true
+    // unconditionally setting) goes red on CI's pgvector:pg16 lanes — the live no-GUC executor.
+    const rows = await db.$queryRawUnsafe(
+      "SELECT current_setting('jimmy_no_such_guc_4476', true) AS absent, CASE WHEN current_setting('jimmy_no_such_guc_4476', true) IS NOT NULL THEN 'guarded' ELSE 'unguarded' END AS arms",
+    ) as { absent: string | null; arms: string }[];
+    expect(rows[0]!.absent, 'missing_ok must yield NULL for an absent parameter, never raise 42704').toBeNull();
+    expect(rows[0]!.arms).toBe('unguarded');
+  });
+});
+
 describe('#4476 — nothing changes when no statement is slow (acceptance 3)', () => {
   it('a fast projection inside the wrapper still resolves its value', async () => {
     const got = await withRosterAppRead(ctx(mia.id), app.id, async (readCtx) => {
@@ -218,10 +274,16 @@ describe('#4476 unit — the 57014 classifier (binding condition 1: structured c
     new Prisma.PrismaClientKnownRequestError('Raw query failed.', { code, clientVersion: 'test', ...(meta ? { meta } : {}) });
   const unknown = (message: string) =>
     new Prisma.PrismaClientUnknownRequestError(message, { clientVersion: 'test' });
-  // The engine's rendering of a cancelled MODEL statement, captured from the real query engine
-  // (probed live at the fix head; the integration pin below re-proves it against the engine).
-  const cancelledModelRender = (code: string) =>
-    `Invalid \`prisma.user.findMany()\` invocation:\n\nError occurred during query execution:\nConnectorError(ConnectorError { user_facing_error: None, kind: QueryError(PostgresError { code: "${code}", message: "canceling statement due to statement timeout", severity: "ERROR", detail: None, column: None, hint: None }), transient: false })`;
+  // The engine's rendering of a cancelled MODEL statement. The 25P04 arm is CAPTURED VERBATIM
+  // from the real query engine at the fix head (the typed-backstop integration pin below
+  // reproduces the kill and re-proves the live object; a Prisma upgrade that changes this
+  // rendering reddens that pin, not just this fixture — BLIND delta review E). The 57014 arm
+  // keeps the statement-cancel text the live findMany pin below classifies for real.
+  const cancelledModelRender = (code: string) => {
+    const fatal = code === '25P04';
+    const message = fatal ? 'terminating connection due to transaction timeout' : 'canceling statement due to statement timeout';
+    return `Invalid \`prisma.user.findMany()\` invocation:\n${fatal ? '\n\n' : '\n'}Error occurred during query execution:\nConnectorError(ConnectorError { user_facing_error: None, kind: QueryError(PostgresError { code: "${code}", message: "${message}", severity: "${fatal ? 'FATAL' : 'ERROR'}", detail: None, column: None, hint: None }), transient: false })`;
+  };
 
   it('a P2010 carrying either cancel SQLSTATE converts, with reason TRANSACTION_BUDGET', () => {
     // 57014: statement_timeout's query_canceled. 25P04: transaction_timeout's FATAL termination.
@@ -304,7 +366,10 @@ describe('#4476 unit — the 57014 classifier (binding condition 1: structured c
     // the shape must NOT convert. Inside the wrapper this path is unreachable in practice: idle
     // time is bounded by Prisma's own interactive timeout at the same budget (P2028, #4455-pinned)
     // before the backstop's margin expires; the backstop's classified coverage is the
-    // mid-statement kill pinned above.
+    // mid-statement kill pinned above. That unreachability rests on Prisma's rollback landing
+    // within the margin of its own timer — under event-loop or engine stalls (the incident's
+    // conditions) it can be lost, and the failure mode is an UNTYPED error, never a wrong
+    // refusal (#4482 BLIND K); the margin's width is the dial, not this boundary.
     const BACKSTOP_MS = TEAM_READ_TX_TIMEOUT_MS + TEAM_READ_TX_BACKSTOP_MARGIN_MS;
     let caught: unknown;
     await db.$transaction(
@@ -328,6 +393,91 @@ describe('#4476 unit — the 57014 classifier (binding condition 1: structured c
       isPrismaBusyExhaustion(caught),
       `prose-only connection-closed must never convert — got ${String((caught as Error)?.message).slice(0, 200)}`,
     ).toBe(false);
+  });
+
+  it.skipIf(!HAS_TX_TIMEOUT)('BLIND P2 A (narrowed), real engine: a TYPED statement blocked past the backstop is FATAL-killed and the classifier converts the real model-arm shape (live-captured rendering; P2028 must not be the pass)', { timeout: 30_000 }, async () => {
+    // Roster reads are mostly typed queries, which the raw-statement 25P04 pin above does not
+    // cover. Same construction with a typed victim: the statement cap pushed ABOVE the backstop
+    // and Prisma's interactive timer far past it, so the only thing that can end this read is
+    // the backstop — firing while a findMany WAITS on another session's table lock.
+    const BACKSTOP_MS = TEAM_READ_TX_TIMEOUT_MS + TEAM_READ_TX_BACKSTOP_MARGIN_MS;
+    let holderDone = false;
+    const holder = db.$transaction(
+      async (tx) => {
+        await tx.$executeRawUnsafe('LOCK TABLE users IN ACCESS EXCLUSIVE MODE');
+        await new Promise((r) => setTimeout(r, BACKSTOP_MS + 3_000));
+      },
+      { timeout: BACKSTOP_MS * 3 },
+    ).finally(() => { holderDone = true; });
+    let caught: unknown;
+    try {
+      await new Promise((r) => setTimeout(r, 300)); // let the lock land first
+      await db.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT set_config('statement_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS * 2)}, true) AS statement_timeout,
+                             CASE WHEN current_setting('transaction_timeout', true) IS NOT NULL
+                                  THEN set_config('transaction_timeout', ${String(BACKSTOP_MS)}, true) END AS transaction_timeout`;
+          // Burns past the budget (inside its own 2x cap) so the typed statement below is still
+          // WAITING when the backstop expires.
+          await tx.$executeRawUnsafe(`SELECT pg_sleep(${Math.floor(BUDGET_MS / 1000 * 1.1)})`);
+          return tx.user.findMany({ take: 1, select: { id: true } });
+        },
+        { timeout: BACKSTOP_MS * 4, maxWait: TEAM_READ_TX_MAX_WAIT_MS },
+      ).then(
+        (v) => { throw new Error(`resolved instead: ${JSON.stringify(v?.length ?? null)}`); },
+        (e) => { caught = e; },
+      );
+    } finally {
+      await holder.catch(() => {});
+      expect(holderDone).toBe(true);
+    }
+    const diag = `real error: name=${(caught as object)?.constructor?.name} ${String((caught as Error)?.message).slice(0, 400)}`;
+    expect(caught, 'the typed statement must have been terminated by the backstop').toBeDefined();
+    expect(isPrismaBusyExhaustion(caught), `classifier must convert the real typed backstop shape — ${diag}`).toBe(true);
+    expect(busyReason(caught), diag).toBe('TRANSACTION_BUDGET');
+    // The pool must not hand the KILLED connection to the next caller: an ordinary query
+    // answers immediately afterwards (delta review cannot-judge: dead-connection eviction).
+    const t1 = Date.now();
+    await db.$queryRaw`SELECT 1`;
+    expect(Date.now() - t1).toBeLessThan(1_000);
+  });
+
+  it.skipIf(!HAS_TX_TIMEOUT)('BLIND P2 A (narrowed), real engine: through the WRAPPER with Prisma\'s real 5 s timer, a fast statement then a blocked TYPED one still refuses typed TEAM_READ_BUSY (the 5 s/6 s ordering never escapes untyped)', { timeout: 30_000 }, async () => {
+    // The only pin that runs the wrapper itself with every timer at its REAL value: Prisma's
+    // interactive timer expires at the budget while the blocked typed statement still waits,
+    // then the backstop force-ends the read at budget+margin. Whatever arm wins the race, the
+    // wrapper must surface the typed refusal — never the untyped connection-closed prose the
+    // boundary pin freezes out below.
+    const BACKSTOP_MS = TEAM_READ_TX_TIMEOUT_MS + TEAM_READ_TX_BACKSTOP_MARGIN_MS;
+    let holderDone = false;
+    const holder = db.$transaction(
+      async (tx) => {
+        await tx.$executeRawUnsafe('LOCK TABLE users IN ACCESS EXCLUSIVE MODE');
+        await new Promise((r) => setTimeout(r, BACKSTOP_MS * 2));
+      },
+      { timeout: BACKSTOP_MS * 3 },
+    ).finally(() => { holderDone = true; });
+    try {
+      await new Promise((r) => setTimeout(r, 300)); // let the lock land first
+      const t0 = Date.now();
+      const refusal: { resolved?: string; thrown?: unknown } = await withRosterAppRead(ctx(mia.id), app.id, async (readCtx) => {
+        await readCtx.db.$executeRawUnsafe(`SELECT pg_sleep(${Math.ceil(BUDGET_MS / 1000 * 0.3)})`); // ~1.5 s: completes well inside every bound
+        await readCtx.db.user.findMany({ take: 1, select: { id: true } }); // blocks on the lock
+        return 'the blocked findMany completed';
+      }).then(
+        (v) => ({ resolved: v as string }),
+        (e) => ({ thrown: e }),
+      );
+      const elapsed = Date.now() - t0;
+      expect(refusal.resolved).toBeUndefined();
+      const err = refusal.thrown as TeamReadBusyError;
+      expect(err).toBeInstanceOf(TeamReadBusyError);
+      expect(err.extensions).toMatchObject({ code: 'TEAM_READ_BUSY', retryable: true, reason: 'TRANSACTION_BUDGET' });
+      expect(elapsed, `refusal after ${elapsed} ms — the whole read is bounded by budget+margin (${BACKSTOP_MS} ms), not by the blocked statement's return`).toBeLessThan(BACKSTOP_MS * 1.5);
+    } finally {
+      await holder.catch(() => {});
+      expect(holderDone).toBe(true);
+    }
   });
 
   it('P2-2, real engine: a live-cancelled findMany (statement_timeout under a longer tx budget) is classified by the real error object', { timeout: 20_000 }, async () => {
