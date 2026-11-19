@@ -10,6 +10,7 @@ import { generateId } from '../../../lib/id.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 const F = resolvers as any;
 const M = resolvers.Mutation as any;
@@ -32,7 +33,7 @@ async function schedule(appId: string) {
     entryNodeUrn: 'hrn:node:batch3867.example:flows:report' } })).id;
 }
 async function mintRun(appId: string, triggerId: string) {
-  return db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId, userId: null, triggerKind: 'SCHEDULE', triggerId,
+  return db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId, agentId: await testRunAgentId(db, orgId, appId), userId: null, triggerKind: 'SCHEDULE', triggerId,
     entryNodeUrn: 'hrn:node:batch3867.example:flows:report', status: 'RUNNING' } });
 }
 

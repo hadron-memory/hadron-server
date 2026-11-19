@@ -991,8 +991,15 @@ export async function endedAlarmEpisodeInstants(
         CROSS JOIN LATERAL (
           SELECT s.started_at AS t
           UNION ALL SELECT s.updated_at WHERE s.auto_expired_at IS NULL
-          UNION ALL SELECT e.created_at FROM usage_events e WHERE e.session_id = s.id AND e.counts_as_activity
-            AND e.created_at > p.lo AND e.created_at <= p.hi
+          -- #4492: only the EARLIEST qualifying event can be the answer, so one index probe per (window, session)
+          -- (usage_events_session_activity_idx), not every event of the window: a current holder's window runs to
+          -- FOREVER, and on a long, dense session the range scan read its whole history per window (30 s for 300
+          -- windows on the harness). The session's end bounds the probe too: an event past it is not activity, and
+          -- if the earliest in-window event is past it, so is every later one. A session with none yields NULL,
+          -- which the outer x.t test drops, as an absent row was.
+          UNION ALL SELECT (SELECT e.created_at FROM usage_events e WHERE e.session_id = s.id AND e.counts_as_activity
+            AND e.created_at > p.lo AND e.created_at <= p.hi AND (s.ended_at IS NULL OR e.created_at <= s.ended_at)
+            ORDER BY e.created_at LIMIT 1)
         ) x
         WHERE x.t > p.lo AND x.t <= p.hi AND (s.ended_at IS NULL OR x.t <= s.ended_at)
         GROUP BY p.k`

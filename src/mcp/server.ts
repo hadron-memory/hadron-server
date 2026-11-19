@@ -12498,8 +12498,13 @@ function respondMcpAuthenticationRequired(req: Request, res: Response): void {
  * A session ID routes to a transport; it never authenticates its bearer. The
  * bearer must still be live, MCP-scoped, and bound to this transport's principal.
  * Recheck the exact transport after credential resolution, which may await DB.
+ *
+ * Exported for the #4471 pin (mcp/authStoreBusy4471.test.ts). The catch below is an
+ * UNTYPED catch-all that predates #4471 and swallows every rejection identically —
+ * so a busy store answers the fixed 503 whether the middleware threw the typed
+ * AuthStoreBusyError or the raw driver error; that surface is unchanged by construction.
  */
-async function authenticateBoundMcpSession(
+export async function authenticateBoundMcpSession(
   req: Request,
   res: Response,
   sessionId: string,

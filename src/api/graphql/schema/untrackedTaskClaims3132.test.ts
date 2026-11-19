@@ -24,6 +24,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { createStartedClaimFor, loadApp } from './resolvers.agentTask.js';
 import { typeDefs } from './typeDefs.js';
 import { readFileSync } from 'node:fs';
+import { testRunAgentId } from '../../../test/runAgent.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
 const M = resolvers.Mutation as any;
@@ -87,7 +88,7 @@ const noWrites = async () => {
 
 async function mintRun(extra: Record<string, unknown> = {}, forApp = app.id): Promise<AppRun> {
   return db.appRun.create({
-    data: { id: generateId(), organizationId: org.id, appId: forApp, triggerKind: 'MANUAL', entryNodeUrn: 'ut-org::mem::flow:entry', status: 'RUNNING', ...extra },
+    data: { id: generateId(), organizationId: org.id, appId: forApp, agentId: await testRunAgentId(db, org.id, forApp), triggerKind: 'MANUAL', entryNodeUrn: 'ut-org::mem::flow:entry', status: 'RUNNING', ...extra },
   });
 }
 const toolCtx = (run: AppRun): RunToolContext => ({ log: vi.fn(), db, run, principal: runContext(db, run) });
