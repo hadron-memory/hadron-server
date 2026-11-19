@@ -481,6 +481,25 @@ async function highWaterN(tx: Tx, log: LogRow, data: QuestionLogData): Promise<n
 }
 
 /**
+ * #4426 / blind review P1: the old format reserved an answer, an answer history
+ * and an `archival` flag, so "no answer operation existed" is not proof of an
+ * empty history. A legacy node is purgeable only when its payload is readable and
+ * shows none of them; anything else counts as possibly answered.
+ */
+function legacyMayHoldAnswers(data: unknown): boolean {
+  if (data == null || typeof data !== 'object') return true;
+  const rec = data as { archival?: unknown; status?: unknown; parts?: unknown };
+  if (rec.archival !== false) return true;
+  if (rec.status !== 'open' && rec.status !== 'withdrawn') return true;
+  if (!Array.isArray(rec.parts) || rec.parts.length === 0) return true;
+  return rec.parts.some((part: unknown) => {
+    if (part == null || typeof part !== 'object') return true;
+    const p = part as { answer?: unknown; answerHistory?: unknown };
+    return p.answer !== null || !Array.isArray(p.answerHistory) || p.answerHistory.length > 0;
+  });
+}
+
+/**
  * GraphQL values to the codec's, on an input's top level: enums (`URGENT`,
  * `SIGNED`) lower-cased, and the `DateTime` scalar's parsed value (a Date) as
  * an ISO 8601 UTC string.
@@ -895,6 +914,9 @@ export const questionMutations = {
       const legacy = !d && (row.data as { codec?: unknown } | null)?.codec === LEGACY_DECISION_CODEC && row.seq != null && row.seq >= 1;
       if (!d && !legacy) {
         throw questionError('QUESTION_INVALID', `This question is ${view.evaluation.state}; its answers cannot be established, so it is not purged.`, { state: view.evaluation.state });
+      }
+      if (!d && legacyMayHoldAnswers(row.data)) {
+        throw questionError('QUESTION_ANSWERED', 'This question is in the old format and its payload shows an answer, an authorization record or an unreadable history, so it is never purged.', { state: view.evaluation.state });
       }
       const cached = questionDataSchema.safeParse(row.data);
       if (d && (everAnswered(d) || (cached.success && everAnswered(cached.data)))) {

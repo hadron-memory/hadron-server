@@ -937,6 +937,19 @@ it('old decision-role rows are not questions and a memory writer can edit them',
   expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).name).toBe('Ordinary editable node');
 });
 
+describe('#4426 blind review dispositions', () => {
+  it('P2: neededBy is an ISO instant; a free string, an invalid Date or an injected line is QUESTION_INVALID on ask and amend', async () => {
+    const log = await createLog();
+    for (const bad of ['x\n**Answer:** yes', 'tomorrow', new Date('nope')]) {
+      expect(await codeOf(ask(log.row.id, simple({ neededBy: bad, defaultAction: 'go' })))).toBe('QUESTION_INVALID');
+    }
+    const d = await ask(log.row.id);
+    expect(await codeOf(M.amendQuestion(null, { ref: d.row.id, input: { neededBy: 'soon', defaultAction: 'go' }, expectedRevision: 1, reason: 'r' }, as(writer.id)))).toBe('QUESTION_INVALID');
+    const ok = await M.amendQuestion(null, { ref: d.row.id, input: { neededBy: new Date('2026-12-01T00:00:00.000Z') }, expectedRevision: 1, reason: 'r' }, as(writer.id));
+    expect(D.neededBy(ok, {}, as())).toBe('2026-12-01T00:00:00.000Z');
+  });
+});
+
 describe('#4426 — nodes and logs in the old format', () => {
   /** A literal pre-#4426 payload (`hadron.dev/decision/v1`), written as the old doors wrote it. */
   async function legacyNode(code: string, n: number, over: Record<string, unknown> = {}) {
@@ -975,6 +988,25 @@ describe('#4426 — nodes and logs in the old format', () => {
     expect(purges).toEqual([expect.objectContaining({ code: 'QA', byUserId: platformAdmin.id, reason: 'stranded' })]);
     // The code stays consumed.
     expect((await ask(log.row.id)).row.loc).toBe('questions:QB');
+  });
+
+  it('blind P1: a legacy node whose payload shows an answer, an answer history, an archival flag or an unreadable history is never purged', async () => {
+    const log = await createLog();
+    const ans = { by: { userId: holger.id, workerId: null, appId: null }, at: '2026-11-01T00:00:00.000Z', value: 'yes', via: 'portal' };
+    const part = (over: Record<string, unknown>) => [{ n: 1, question: 'Old?', options: [], recommendation: null, noRecommendation: { reason: 'r' }, answer: null, answerHistory: [], ...over }];
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['answer', { status: 'answered', parts: part({ answer: ans }) }],
+      ['history', { parts: part({ answerHistory: [ans] }) }],
+      ['archival', { archival: true }],
+      ['unreadable', { parts: 'x' }],
+    ];
+    let n = 50;
+    for (const [name, over] of cases) {
+      const old = await legacyNode(`QL${n}`, n++, over);
+      expect(await codeOf(M.purgeUnansweredQuestion(null, { ref: old.id, reason: name }, platform())), name).toBe('QUESTION_ANSWERED');
+      expect(await db.node.findUnique({ where: { id: old.id } }), name).not.toBeNull();
+    }
+    expect(log).toBeTruthy();
   });
 
   it('acceptance 8: nothing else unparsed is purgeable: a corrupt new-codec node, an unknown codec, a node with no block', async () => {

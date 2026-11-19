@@ -91,6 +91,10 @@ export type AnswerEntry = z.infer<typeof answerEntrySchema>;
 
 const lifecycleMark = z.strictObject({ by: actorSchema, at: z.string(), reason: nonBlank(SHORT_TEXT_MAX) });
 
+/** An ISO 8601 UTC instant as `Date#toISOString` writes it: nothing else (a free string would reach the rendered card). */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+const isoInstant = z.string().max(40).refine((v) => ISO_INSTANT.test(v) && !Number.isNaN(Date.parse(v)), 'must be an ISO 8601 UTC instant');
+
 /** The stored, authenticated payload of a question (the semantic block, §5.5). One question per node (#4426). */
 export const questionDataSchema = z.strictObject({
   codec: z.literal(QUESTION_CODEC),
@@ -114,7 +118,7 @@ export const questionDataSchema = z.strictObject({
   askedBy: actorSchema,
   askedAt: z.string(),
   /** ISO 8601. */
-  neededBy: z.string().nullable(),
+  neededBy: isoInstant.nullable(),
   defaultAction: text(SHORT_TEXT_MAX).nullable(),
   /** The asker's agent task this question blocks. Reserved: always null until slice S7 sets it. */
   taskId: z.string().nullable(),
@@ -188,7 +192,6 @@ const recommendationInput = z.strictObject({
 const noRecommendationInput = z.strictObject({ reason: nonBlank(SHORT_TEXT_MAX) });
 const priorityEnum = z.enum(['low', 'normal', 'high', 'urgent']);
 const tierEnum = z.enum(['answered', 'approved', 'signed']);
-const isoInstant = z.string().max(40);
 
 export const askInputSchema = z.strictObject({
   title: oneLine(TITLE_MAX),
