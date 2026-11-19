@@ -4,7 +4,7 @@ import type { Request } from 'express';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { Prisma } from '../generated/prisma/index.js';
-import { AUTH_STORE_BUSY_MESSAGE, AuthStoreBusyError } from '../lib/authStoreBusy.js';
+import { AUTH_STORE_BUSY_MESSAGE, AUTH_STORE_UNREACHABLE_MESSAGE, AuthStoreBusyError } from '../lib/authStoreBusy.js';
 import {
   APP_KEY_PREFIX,
   resolveAuthContext,
@@ -522,6 +522,43 @@ describe('resolveAuthContext', () => {
           clientVersion: '6.19.2',
         } as never);
 
+      // #4504: P1xxx faults arrive as PrismaClientInitializationError — and on the per-query
+      // path the engine leaves `errorCode` UNDEFINED (observed on 6.19.2; the code exists
+      // only in the fixed message prefix), so this helper mirrors the real shape: no
+      // errorCode, the message carrying "Can't reach database server at `host:port`" —
+      // driver text the conversion must never forward.
+      const p1001 = () => new Prisma.PrismaClientInitializationError(
+        "Can't reach database server at `127.0.0.1:5432`\n\nPlease make sure your database server is running at `127.0.0.1:5432`.",
+        '6.19.2',
+      );
+
+      // #4504 (QA round, Celine's FAIL at 522fe537): the WARM-POOL shape — a LIVE server whose
+      // database is stopped (`compose stop db` under a warm pool) answers the NEXT QUERY with a
+      // PrismaClientKnownRequestError carrying code 'P1001' (set, on this class), meta.database_location,
+      // and the same engine phrase mid-message. This helper reproduces the captured object
+      // FIELD-FOR-FIELD from her stopped-DB run, per her QA receipts on this PR (FAIL at 522fe537,
+      // PASS at c393e9ca; stack celine4514, engine 6.19.2) — not a tidied stand-in: the invocation
+      // preamble, the source frame, the phrase and the "Please make sure" tail all ride the real
+      // message, so an engine rewording or a reclassified code reddens HERE, not in production.
+      const p1001Warm = () => new Prisma.PrismaClientKnownRequestError(
+        [
+          'Invalid `db.userApiKey.findUnique()` invocation in /app/src/middleware/auth.ts:485:42',
+          '',
+          "    482 // direct lookup by hash. bcrypt would prevent the lookup; the raw key's",
+          '    483 // entropy makes dictionary attacks against the hash a non-issue.',
+          '    484 const keyHash = hashUserApiKey(rawKey);',
+          '  → 485 const userApiKey = await db.userApiKey.findUnique(',
+          "Can't reach database server at `db:5432`",
+          '',
+          'Please make sure your database server is running at `db:5432`.',
+        ].join('\n'),
+        {
+          code: 'P1001',
+          meta: { modelName: 'UserApiKey', database_location: 'db:5432' },
+          clientVersion: '6.19.2',
+        } as never,
+      );
+
       const USER_KEY = USER_API_KEY_PREFIX + 'a'.repeat(64);
       const APP_KEY = APP_KEY_PREFIX + 'b'.repeat(64);
 
@@ -564,6 +601,140 @@ describe('resolveAuthContext', () => {
           expect((err as AuthStoreBusyError).extensions.code).toBe('AUTH_STORE_BUSY');
           expect((err as AuthStoreBusyError).extensions.retryable).toBe(true);
         }
+      });
+
+      it('#4504: a P1001 (unreachable store, new connection) during the lookup throws the typed fault with the sibling reason, on both key paths', async () => {
+        for (const key of [USER_KEY, APP_KEY]) {
+          const busy = busyDb(() => p1001());
+          const err = await refuse(() => resolveAuthContextWithStatus(makeReq(`Bearer ${key}`), busy.db));
+          expect(err, key).toBeInstanceOf(AuthStoreBusyError);
+          const typed = err as AuthStoreBusyError;
+          // Same code, same retryability, sibling reason and prose.
+          expect(typed.message).toBe(AUTH_STORE_UNREACHABLE_MESSAGE);
+          expect(typed.extensions.code).toBe('AUTH_STORE_BUSY');
+          expect(typed.extensions.retryable).toBe(true);
+          expect(typed.extensions.reason).toBe('STORE_UNREACHABLE');
+          // No driver text rides the message — the host:port stays server-side.
+          expect(typed.message).not.toMatch(/Can't reach|P1001|127\.0\.0\.1/i);
+          expect(typed.cause).toBeInstanceOf(Prisma.PrismaClientInitializationError);
+          // The real per-query shape: no errorCode on the instance — the code lives in
+          // the message (behind the client's invocation preamble).
+          expect((typed.cause as Prisma.PrismaClientInitializationError).message).toMatch(/Can't reach database server/i);
+          // The unreachable path wrote nothing either — counted, not argued.
+          expect(busy.writes, key).toEqual({ userApiKey: 0, appKey: 0 });
+        }
+      });
+
+      it('#4504 (QA round): the WARM-POOL P1001 — the live stopped-DB shape, captured not invented — throws the same typed fault on both key paths', async () => {
+        for (const key of [USER_KEY, APP_KEY]) {
+          const busy = busyDb(() => p1001Warm());
+          const err = await refuse(() => resolveAuthContextWithStatus(makeReq(`Bearer ${key}`), busy.db));
+          expect(err, key).toBeInstanceOf(AuthStoreBusyError);
+          const typed = err as AuthStoreBusyError;
+          // Same code, same retryability, sibling reason and prose — identical to the
+          // never-connected shape: an unreachable store is unreachable either way.
+          expect(typed.message).toBe(AUTH_STORE_UNREACHABLE_MESSAGE);
+          expect(typed.extensions.code).toBe('AUTH_STORE_BUSY');
+          expect(typed.extensions.retryable).toBe(true);
+          expect(typed.extensions.reason).toBe('STORE_UNREACHABLE');
+          // No driver text rides the message — db:5432 stays server-side, on .cause only.
+          expect(typed.message).not.toMatch(/Can't reach|P1001|db:5432/i);
+          expect(typed.cause).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+          expect((typed.cause as Prisma.PrismaClientKnownRequestError).code).toBe('P1001');
+          expect((typed.cause as Prisma.PrismaClientKnownRequestError).meta).toMatchObject({ database_location: 'db:5432' });
+          expect(busy.writes, key).toEqual({ userApiKey: 0, appKey: 0 });
+        }
+      });
+
+      it('#4504 (QA round): the warm-pool refusal is identical across key shapes too', async () => {
+        // NOTE: this leg alone cannot redden — a raw (unconverted) error is also identical
+        // across key shapes. It composes with the instanceof leg above, which is the pin;
+        // together they say CONVERTED-and-identical, the property QA observed live.
+        const answers = await Promise.all(
+          [USER_KEY, APP_KEY, USER_API_KEY_PREFIX + 'e'.repeat(64), APP_KEY_PREFIX + 'f'.repeat(64)].map((key) =>
+            refuse(() => resolveAuthContextWithStatus(makeReq(`Bearer ${key}`), busyDb(() => p1001Warm()).db)).then(
+              (err) => {
+                const typed = err as AuthStoreBusyError;
+                return JSON.stringify({ message: typed.message, extensions: typed.extensions });
+              },
+            ),
+          ),
+        );
+        for (const a of answers.slice(1)) expect(a).toBe(answers[0]);
+      });
+
+      it('#4504 (QA round): a neighboring KNOWN-REQUEST fault (P1002 on the warm class) stays the raw error — the warm arm is P1001 only', async () => {
+        const rejected = await refuse(() =>
+          resolveAuthContextWithStatus(
+            makeReq(`Bearer ${USER_KEY}`),
+            busyDb(() => new Prisma.PrismaClientKnownRequestError(
+              'Authentication failed against the database server',
+              { code: 'P1002', clientVersion: '6.19.2' } as never,
+            )).db,
+          ),
+        );
+        expect(rejected).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+        expect(rejected).not.toBeInstanceOf(AuthStoreBusyError);
+      });
+
+      it('#4504: the P1001 refusal is identical across key shapes — an unreachable store cannot tell a verdict it never read', async () => {
+        const verdicts = [USER_KEY, APP_KEY, USER_API_KEY_PREFIX + 'c'.repeat(64), APP_KEY_PREFIX + 'd'.repeat(64)]
+          .map((key) => {
+            const busy = busyDb(() => p1001());
+            return refuse(() => resolveAuthContextWithStatus(makeReq(`Bearer ${key}`), busy.db))
+              .then((err) => {
+                const typed = err as AuthStoreBusyError;
+                return JSON.stringify({ message: typed.message, extensions: typed.extensions });
+              });
+          });
+        const answers = await Promise.all(verdicts);
+        for (const a of answers.slice(1)) expect(a).toBe(answers[0]);
+      });
+
+      it('#4504: a non-Prisma error wearing errorCode P1001 is NOT classified — the class is closed to Prisma', async () => {
+        const impostor = Object.assign(new Error('not prisma'), { errorCode: 'P1001' });
+        const err = await refuse(() =>
+          resolveAuthContextWithStatus(makeReq(`Bearer ${USER_KEY}`), busyDb(() => impostor).db),
+        );
+        expect(err).toBe(impostor);
+      });
+
+      it('#4504: a neighboring initialization fault (P1002, authentication refused) stays the raw error — only P1001 is the unreachable arm', async () => {
+        const rejected = await refuse(() =>
+          resolveAuthContextWithStatus(
+            makeReq(`Bearer ${USER_KEY}`),
+            busyDb(() => new Prisma.PrismaClientInitializationError(
+              'Authentication failed against the database server',
+              '6.19.2',
+              'P1002',
+            )).db,
+          ),
+        );
+        expect(rejected).toBeInstanceOf(Prisma.PrismaClientInitializationError);
+        expect(rejected).not.toBeInstanceOf(AuthStoreBusyError);
+      });
+
+      it('#4504 (Bradley P3, the reachable half of "nothing was written"): the fire-and-forget lastUsedAt stamp cannot produce this fault — its rejection is swallowed', async () => {
+        // A successful lookup followed by a REJECTED stamp: the resolver must still resolve,
+        // because the stamp is never awaited (`.catch(() => {})` in the resolver). Together
+        // with the lookup being the only awaited store operation, this is why the typed fault
+        // can only originate from the lookup itself — where nothing has been written yet.
+        const stampingDb = {
+          userApiKey: {
+            findUnique: () => Promise.resolve({
+              id: 'key-4504',
+              revokedAt: null,
+              originSignIn: null,
+              originSignInId: null,
+              oauthScopes: [],
+              user: { id: 'user-4504', deletedAt: null, roles: ['READER'], githubUsername: 'yuri', email: null },
+            }),
+            update: () => Promise.reject(p('P2024', 'Timed out fetching a new connection from the pool.')),
+          },
+        } as unknown as typeof db;
+        const ctx = await resolveAuthContextWithStatus(makeReq(`Bearer ${USER_KEY}`), stampingDb);
+        expect(ctx.auth.userId).toBe('user-4504');
+        expect(ctx.credentialStatus).toBe('authenticated');
       });
 
       it('a non-Prisma error wearing code P2024 is NOT classified — the class is closed to Prisma (LOCAL mutant)', async () => {
