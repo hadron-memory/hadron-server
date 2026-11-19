@@ -28,16 +28,16 @@ export interface RevealOperationInfo {
  * document can nest far below the engine's stack (the shallowest nesting, `... {`, costs 3 tokens a level, so under 1400 levels at
  * the default 4000 tokens), and the depth/cost plugin runs earlier still, on `didResolveOperation`. A test pins a nest of 1300.
  *
- * `stats`, when given, counts every selection visited, so a test can assert memoization and early stop deterministically (a visit
+ * `visitCounter`, when given, counts every selection visited, so a test can assert memoization and early stop deterministically (a visit
  * count, not a wall-clock budget that can flake under CI load).
  */
-export function countRevealFields(info: RevealOperationInfo, stats?: { visits: number }): number {
+export function countRevealFields(info: RevealOperationInfo, visitCounter?: { visits: number }): number {
   const memo = new Map<string, number>();
   const visiting = new Set<string>();
   const walk = (set: SelectionSetNode): number => {
     let n = 0;
     for (const sel of set.selections) {
-      if (stats) stats.visits += 1;
+      if (visitCounter) visitCounter.visits += 1;
       if (sel.kind === Kind.FIELD) { if (sel.name.value === 'revealSecret') n += 1; }
       else if (sel.kind === Kind.INLINE_FRAGMENT) n += walk(sel.selectionSet);
       else n += fragmentCount(sel.name.value);

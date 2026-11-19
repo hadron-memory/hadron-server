@@ -50,21 +50,21 @@ describe('#3998 R8: one revealSecret per operation', () => {
     const depth = 40;
     const frags = Array.from({ length: depth }, (_, i) => `fragment F${i} on Mutation { ...F${i + 1} ...F${i + 1} }`).join(' ');
     const doc = `mutation { ...F0 } ${frags} fragment F${depth} on Mutation { deleteSecret(id: "a") }`;
-    const stats = { visits: 0 };
-    expect(countRevealFields(infoOf(doc), stats)).toBe(0);
-    expect(stats.visits).toBe(1 + 2 * depth + 1);
+    const visitCounter = { visits: 0 };
+    expect(countRevealFields(infoOf(doc), visitCounter)).toBe(0);
+    expect(visitCounter.visits).toBe(1 + 2 * depth + 1);
   });
 
   it('stops at two: a deep layered document whose bottom holds a reveal is two, not 2^depth', () => {
     const depth = 40;
     const frags = Array.from({ length: depth }, (_, i) => `fragment F${i} on Mutation { ...F${i + 1} ...F${i + 1} }`).join(' ');
     const doc = `mutation { ...F0 } ${frags} fragment F${depth} on Mutation { revealSecret(clientId: "a") { value } }`;
-    const stats = { visits: 0 };
-    expect(countRevealFields(infoOf(doc), stats)).toBe(2);
+    const visitCounter = { visits: 0 };
+    expect(countRevealFields(infoOf(doc), visitCounter)).toBe(2);
     // Exactly: the operation's spread (1), each layer's first spread down to the bottom (depth), the bottom reveal field (1), and ONE
     // second spread (the deepest layer's, answered by the memo as 1, making 2). The walk stops there: an unmemoized walk would cost far
     // more, and a memoized one with no early stop would also visit every upper layer's second spread (depth + 3 + depth - 1 = 82).
-    expect(stats.visits).toBe(depth + 3);
+    expect(visitCounter.visits).toBe(depth + 3);
   });
 
   // #4443 item 3: the guard recurses per nested selection set. It runs after parse, validation and admission, whose byte and token
