@@ -21,13 +21,23 @@ export interface RevealOperationInfo {
  * layers (F spreads G twice, G spreads H twice, ...) would otherwise cost 2^depth visits, and this runs BEFORE the rate limit.
  * Spreads still count per spread: two spreads of one fragment holding one reveal are two fields. Validation has already refused a
  * fragment cycle; the `visiting` set is only a backstop so a cycle can never loop here.
+ *
+ * Recursion depth (#4443 item 3): the walk recurses once per nested selection set or spread. That is safe without an explicit stack
+ * because the guard runs inside the resolver, after the request has been parsed, validated and admitted: the byte, token and
+ * selection bounds (`GRAPHQL_MAX_QUERY_BYTES` / `_MAX_TOKENS` / `_MAX_SELECTIONS`, always enforced, no off value) cap how deep a
+ * document can nest far below the engine's stack (the shallowest nesting, `... {`, costs 3 tokens a level, so under 1400 levels at
+ * the default 4000 tokens), and the depth/cost plugin runs earlier still, on `didResolveOperation`. A test pins a nest of 1300.
+ *
+ * `visitCounter`, when given, counts every selection visited, so a test can assert memoization and early stop deterministically (a visit
+ * count, not a wall-clock budget that can flake under CI load).
  */
-export function countRevealFields(info: RevealOperationInfo): number {
+export function countRevealFields(info: RevealOperationInfo, visitCounter?: { visits: number }): number {
   const memo = new Map<string, number>();
   const visiting = new Set<string>();
   const walk = (set: SelectionSetNode): number => {
     let n = 0;
     for (const sel of set.selections) {
+      if (visitCounter) visitCounter.visits += 1;
       if (sel.kind === Kind.FIELD) { if (sel.name.value === 'revealSecret') n += 1; }
       else if (sel.kind === Kind.INLINE_FRAGMENT) n += walk(sel.selectionSet);
       else n += fragmentCount(sel.name.value);
