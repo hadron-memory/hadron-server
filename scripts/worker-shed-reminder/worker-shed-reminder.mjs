@@ -13,9 +13,12 @@
  *    the transcript tail. If a compact_boundary line is NEWER than that line, the estimate is the boundary's
  *    `postTokens` instead (an older assistant usage is never used after a newer boundary). Both are OCCUPIED
  *    context; reclaimable = max(0, occupied - FLOOR_TOKENS), then compared with the model's policy threshold.
- *  - Policy (team shed policy r16): claude-opus >= 150k, claude-sonnet >= 100k, glm >= 100k reclaimable; any other
- *    model is silent. The model is the last assistant line's; a model change does not erase the arm's fire count.
- *  - One arm: the threshold fire, then ONE escalation at +ESCALATION_TOKENS reclaimable, never a third. An arm resets
+ *  - Policy: claude-opus >= 150k, claude-sonnet >= 100k (team shed policy r16), glm >= 50k reclaimable; any other
+ *    model is silent. The GLM value is a DELIBERATE change to r16's glm >= 100k (#4518): 67k + 100k is the measured GLM
+ *    auto-compaction point, so r16's value could never fire (see THRESHOLDS). The model is the last assistant line's; a
+ *    model change does not erase the arm's fire count.
+ *  - One arm: the threshold fire, then ONE escalation at +escalationFor(model) reclaimable (ESCALATION_TOKENS, 50k, for
+ *    Opus and Sonnet; 20k for GLM, so it too lands before the compaction), never a third. An arm resets
  *    on a new session_id (a /clear or a shed relaunch), on a compaction boundary NOT YET CONSUMED (identity kept in
  *    the same serialized state, so a boundary resets exactly once), and on a genuine drop of HYSTERESIS_TOKENS below
  *    the threshold. No worktree-wide cooldown.

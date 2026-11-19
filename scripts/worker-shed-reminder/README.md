@@ -5,8 +5,16 @@ It reminds and nothing else: no terminal input, no handoff, no process stop, no 
 no PostToolUse or PreCompact hook. Output is one fixed `hookSpecificOutput.additionalContext` JSON object, or nothing.
 Any failure is silence with exit 0.
 
-- Source and tests: this directory. Policy numbers come from the team shed policy (task `trim-context-clear-and-recover`):
-  Opus 150k, Sonnet 100k, GLM 50k (escalating after 20k more) reclaimable; reclaimable = occupied context minus a fixed 67k floor.
+- Source and tests: this directory. Policy numbers come from the team shed policy r16 (task `trim-context-clear-and-recover`),
+  except GLM, which deliberately departs from r16's 100k (next point): Opus 150k, Sonnet 100k, GLM 50k reclaimable;
+  reclaimable = occupied context minus a fixed 67k floor. After the first fire the reminder escalates once: Opus and Sonnet
+  after 50k more, GLM after 20k more.
+- **Why GLM differs** (#4518, 2026-11-19): Claude Code auto-compacts a GLM session at about 167k occupied (92 auto compactions
+  measured in `~/.claude-zai` transcripts: `preTokens` min 165k, median 167k; the `claude-glm` 200k window minus its buffer). The
+  team policy's 100k GLM threshold is 67k + 100k = 167k occupied, the same point, so the compaction always shed the worker first
+  and the reminder never fired. GLM now fires at about 117k occupied and escalates at about 137k, both before the measured 165k
+  minimum (incident `hrn:node:hadronmemory.com:hadron-dev-team-hugo:incidents:2026-11-19-glm-shed-reminder-never-fires`).
+  Opus and Sonnet are unchanged. If the GLM window or the compaction point moves, re-measure and keep both numbers below it.
 - **Not installed by this change.** Installation is Hugo's separately approved step: manual, per worktree, merged into the
   gitignored `.claude/settings.local.json` as one hook group whose command identifies this script; JSON merge with a `.bak`,
   idempotent, rollback by removing that group. Never the tracked `settings.json`, never Orca's managed groups, no Codex worktree.
