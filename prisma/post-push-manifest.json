@@ -124,6 +124,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_agent_task_role_task_refs",
+      "kind": "check-constraint",
+      "file": "agent-task-role-task-refs-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_agent_task_stall_schedule_range",
       "kind": "check-constraint",
       "file": "agent-task-stall-invariants.sql",
@@ -1042,6 +1048,12 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "guard_agent_task_role_task_refs",
+      "kind": "function",
+      "file": "agent-task-role-task-refs-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_agent_clone_audit_immutable",
       "kind": "function",
       "file": "post-push.sql",
@@ -1909,6 +1921,12 @@
       "name": "agent_tasks.agent_task_findings_immutable",
       "kind": "trigger",
       "file": "agent-task-findings-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_tasks.agent_task_role_task_refs_immutable",
+      "kind": "trigger",
+      "file": "agent-task-role-task-refs-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {

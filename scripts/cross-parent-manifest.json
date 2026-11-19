@@ -245,6 +245,7 @@
     "AgentTaskRequirements": "value",
     "AgentTaskResult": "envelope",
     "AgentTaskFinding": "value",
+    "AgentTaskRoleTaskRef": "value",
     "AgentTaskFindingDisposition": "value",
     "AgentTaskFindingDispositionPage": "envelope",
     "AgentTaskFindingPage": "envelope",
