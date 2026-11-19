@@ -536,10 +536,10 @@ describe('resolveAuthContext', () => {
       // database is stopped (`compose stop db` under a warm pool) answers the NEXT QUERY with a
       // PrismaClientKnownRequestError carrying code 'P1001' (set, on this class), meta.database_location,
       // and the same engine phrase mid-message. This helper reproduces the captured object
-      // FIELD-FOR-FIELD from her stopped-DB log (/home/orca/scratch/celine/q4514_logs2.txt:130-141,
-      // stack celine4514, engine 6.19.2) — not a tidied stand-in: the invocation preamble, the source
-      // frame, the phrase and the "Please make sure" tail all ride the real message, so an engine
-      // rewording or a reclassified code reddens HERE, not in production.
+      // FIELD-FOR-FIELD from her stopped-DB run, per her QA receipts on this PR (FAIL at 522fe537,
+      // PASS at c393e9ca; stack celine4514, engine 6.19.2) — not a tidied stand-in: the invocation
+      // preamble, the source frame, the phrase and the "Please make sure" tail all ride the real
+      // message, so an engine rewording or a reclassified code reddens HERE, not in production.
       const p1001Warm = () => new Prisma.PrismaClientKnownRequestError(
         [
           'Invalid `db.userApiKey.findUnique()` invocation in /app/src/middleware/auth.ts:485:42',
