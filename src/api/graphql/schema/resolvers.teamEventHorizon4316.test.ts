@@ -18,7 +18,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { logStalledHorizon, readTeamEvents, teamEventHorizonSettled } from './resolvers.agentTask.js';
+import { horizonThrottleForTest, logStalledHorizon, readTeamEvents, teamEventHorizonSettled } from './resolvers.agentTask.js';
 import { settleTeamEventHorizon, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 
 useTeamEventHorizonTimeout(); // this file's two-connection pins wait on the horizon
@@ -331,14 +331,17 @@ describe('#4316 item 1: a stalled horizon becomes visible on one log line', () =
 
 describe('#4408: the #4372 review follow-ups (eviction, timer clear, sanitized fault line)', () => {
   let log: ReturnType<typeof vi.spyOn>;
-  beforeEach(() => { log = vi.spyOn(console, 'log').mockImplementation(() => {}); });
-  afterEach(() => { log.mockRestore(); });
+  beforeEach(() => { log = vi.spyOn(console, 'log').mockImplementation(() => {}); horizonThrottleForTest.clear(); }); // #4436 item 2: no stamp survives from another test
+  afterEach(() => { log.mockRestore(); vi.useRealTimers(); });
 
   /**
    * A stand-in root client for the direct seam, same isolation idea as the fold-2 pin below:
    * logStalledHorizon touches only $queryRaw, so a fresh object exposing exactly that surface proves
    * which client ran the statement and lets the test decide what the statement does.
    */
+  // #4436 item 3: the stand-in reads the App id as `values[0]` of the tagged template, so it holds only while
+  // logStalledHorizon's FIRST interpolation is the app id (its one statement binds `${appId}` first). A
+  // second interpolation placed before it would silently feed this stand-in the wrong value.
   const probeDbOf = (onQuery: (appId: string) => Promise<unknown>) =>
     ({ $queryRaw: ((_strings: TemplateStringsArray, ...values: unknown[]) => onQuery(String(values[0]))) }) as unknown as Context['db'];
 
@@ -348,15 +351,14 @@ describe('#4408: the #4372 review follow-ups (eviction, timer clear, sanitized f
       checks.set(app, (checks.get(app) ?? 0) + 1);
       return Promise.resolve([]); // no held-back rows: the probe runs, logs nothing, settles at once
     });
-    // Fill PAST the cap: earlier tests in this file leave a few real stamps in the same module-level map,
-    // which cannot be read or reset, so the fill overshoots by more than any of them (well under a dozen)
-    // to put the assertions on known ground — the overshoot's validity bound is ~480 stale stamps.
-    for (let i = 0; i < 1_020; i++) await logStalledHorizon(probeDb, `evict-app-${i}`);
-    expect(checks.size).toBe(1_020); // every App checked exactly once, whatever the map held at the start
+    // #4436 item 2: the throttle map starts empty (beforeEach), so the fill is exactly the cap, not an overshoot
+    // sized to outlast other tests' stale stamps.
+    for (let i = 0; i < 1_000; i++) await logStalledHorizon(probeDb, `evict-app-${i}`);
+    expect(horizonThrottleForTest.size()).toBe(1_000);
+    expect(checks.size).toBe(1_000); // every App checked exactly once
     await logStalledHorizon(probeDb, 'evict-app-new'); // a NEW App arrives while the map is at its cap
     // evict-app-0 is the least-recently-checked of the fill: main's clear-all wipes it, #4408's eviction
-    // takes exactly it (any earlier-test stamps are older still and go first). Either way its window is
-    // gone and it re-checks — a "fix" that just grew the cap would leave it throttled, so this stays red.
+    // takes exactly it. Either way its window is gone and it re-checks — a "fix" that just grew the cap would leave it throttled, so this stays red.
     await logStalledHorizon(probeDb, 'evict-app-0');
     expect(checks.get('evict-app-0')).toBe(2);
     // A mid-fill App keeps its window under eviction. RED on main: the clear-all wiped evict-app-500's
@@ -365,6 +367,24 @@ describe('#4408: the #4372 review follow-ups (eviction, timer clear, sanitized f
     expect(checks.get('evict-app-500')).toBe(1);
     expect(lagLines(log)).toEqual([]); // the stub serves no rows: nothing logs either way
     expect(probeErrorLines(log)).toEqual([]);
+  });
+
+  it('an expired re-check of an App already in the map at the cap evicts nobody, and refreshes its recency (#4436 item 1)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] }); // only the clock: the probes settle through microtasks
+    const T0 = Date.UTC(2026, 10, 1);
+    const probeDb = probeDbOf(() => Promise.resolve([]));
+    for (let i = 0; i < 1_000; i++) { vi.setSystemTime(T0 + i); await logStalledHorizon(probeDb, `recheck-app-${i}`); }
+    expect(horizonThrottleForTest.size()).toBe(1_000);
+    vi.setSystemTime(T0 + 10 * 60_000); // every window has expired
+    await logStalledHorizon(probeDb, 'recheck-app-500'); // already in the map: nothing to make room for
+    expect(horizonThrottleForTest.size()).toBe(1_000);
+    expect(horizonThrottleForTest.has('recheck-app-0')).toBe(true); // RED pre-#4436: the guard evicted the oldest anyway
+    // The re-check is now the MOST recent: a new App at the cap evicts the oldest remaining, never the refreshed one.
+    await logStalledHorizon(probeDb, 'recheck-app-new');
+    expect(horizonThrottleForTest.has('recheck-app-500')).toBe(true);
+    expect(horizonThrottleForTest.has('recheck-app-0')).toBe(false);
+    expect(horizonThrottleForTest.has('recheck-app-1')).toBe(true);
+    expect(horizonThrottleForTest.size()).toBe(1_000);
   });
 
   it('a failed probe leaves no armed 5 s statement-race timer (#4408 item 2)', async () => {
@@ -424,6 +444,22 @@ describe('#4408: the #4372 review follow-ups (eviction, timer clear, sanitized f
     expect(all[2]).toMatchObject({ event: 'team_events.horizon_probe_error', appId: 'sanitize-app-4408-string', errorName: 'string' });
     expect(all[2]).not.toHaveProperty('errorCode');
     expect(JSON.stringify(all[2])).not.toContain('boom'); // RED pre-#4408: String(error) put it in the line
+  });
+
+  it('errorCode is logged only when it has the identifier shape; any other string is dropped, never logged raw (#4436 item 5)', async () => {
+    const hostile = 'connect ECONNREFUSED postgresql://secret-probe-host-4436.example:5432/hadron';
+    const withCode = (code: unknown) => Object.assign(new Error('x'), { code });
+    await logStalledHorizon(probeDbOf(() => Promise.reject(withCode(hostile))), 'shape-app-free-text');
+    await logStalledHorizon(probeDbOf(() => Promise.reject(withCode('P'.repeat(65)))), 'shape-app-too-long');
+    await logStalledHorizon(probeDbOf(() => Promise.reject(withCode(''))), 'shape-app-empty');
+    await logStalledHorizon(probeDbOf(() => Promise.reject(withCode('P'.repeat(64)))), 'shape-app-max');
+    await logStalledHorizon(probeDbOf(() => Promise.reject(withCode('ECONNREFUSED'))), 'shape-app-node-code');
+    const lines = probeErrorLines(log);
+    expect(lines).toHaveLength(5);
+    for (const l of lines.slice(0, 3)) expect(l).not.toHaveProperty('errorCode'); // RED pre-#4436: the free text went out under errorCode
+    expect(JSON.stringify(lines)).not.toContain('secret-probe-host-4436');
+    expect(lines[3]).toMatchObject({ errorCode: 'P'.repeat(64) }); // the bound is inclusive at 64
+    expect(lines[4]).toMatchObject({ errorCode: 'ECONNREFUSED' });
   });
 });
 

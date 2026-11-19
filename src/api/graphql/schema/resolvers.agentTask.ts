@@ -3434,6 +3434,12 @@ const HORIZON_LAG_LOG_INTERVAL_MS = 60_000;
  * because a line can only come from a check.
  */
 const horizonLagLastCheckedAt = new Map<string, number>();
+/** #4436 item 2: the test seam over the module-level throttle map (resolvers.teamEventHorizon4316.test.ts): reset between tests and read the size and membership the eviction pins assert on. Never used by production code. */
+export const horizonThrottleForTest = {
+  clear: (): void => horizonLagLastCheckedAt.clear(),
+  size: (): number => horizonLagLastCheckedAt.size,
+  has: (appId: string): boolean => horizonLagLastCheckedAt.has(appId),
+};
 /**
  * #4316: one operator line when a forward read came back short while committed events of the App are held back
  * at or above the snapshot horizon (cor:agt:050:11 records the horizon as built; a log line changes no
