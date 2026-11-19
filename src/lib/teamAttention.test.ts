@@ -525,6 +525,26 @@ describe('worker session reads and mark-read (resolver level; was the MCP parity
     expect(error).toMatchObject({ message: 'App not found.', extensions: { code: 'APP_NOT_FOUND' } });
   });
 
+  it('conceals an existing App from a non-participant exactly like an absent App (the pilot door)', async () => {
+    // The concealment half resolvePilotApp still owes its pin after S11 retired
+    // the poll that used to carry it: a LIVE App the caller is no participant of
+    // (here: another org's App, so neither the AppMember nor the org arm admits
+    // them) and a nonexistent one must be indistinguishable on the mark path too.
+    const strangerOrgId = generateId();
+    const strangerOrg = await db.organization.create({
+      data: { id: strangerOrgId, name: 'stranger', urn: `stranger-${strangerOrgId}.com` },
+    });
+    const stranger = await db.app.create({
+      data: { id: generateId(), organizationId: strangerOrg.id, name: 'Stranger', urn: `${strangerOrg.urn}:stranger` },
+    });
+    const mark = (appRef: string) =>
+      M.markOwnTeamChatRead({}, { appRef, sessionRef: sessionId, channelRef: channel.id, seq: 1 }, userCtx()).catch((e: unknown) => e);
+    const [existingError, absentError] = await Promise.all([mark(stranger.id), mark(generateId())]);
+    expect(existingError).toMatchObject({ message: 'App not found.', extensions: { code: 'APP_NOT_FOUND' } });
+    expect(absentError).toMatchObject({ message: 'App not found.', extensions: { code: 'APP_NOT_FOUND' } });
+    expect(String(existingError)).toBe(String(absentError));
+  });
+
   it('a convenience read of a registered cross-App team Channel uses the Worker session pilot', async () => {
     await db.appAgent.create({ data: { appId: otherApp.id, agentId: agent.id } });
     await db.appMember.create({ data: { appId: otherApp.id, userId: user.id, role: 'admin' } });

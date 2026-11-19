@@ -72,8 +72,11 @@ export async function fenceChannelIncarnation(tx: Prisma.TransactionClient, chan
   if (row.incarnation !== expected) throw channelIncarnationChanged(channelId, row.incarnation, expected);
 }
 
-/** The raw secret behind `tokenSigningKey`, for the v2 paged-attention codec
- * (its own HMAC domain derivation lives in teamAttentionPage.ts). */
+/** The raw secret behind the wake-proof and delivery-batch-proof HMAC keys
+ * (`tickers/wakeProof.ts`): each derivation labels its own domain
+ * (`hadron-wake-proof-v1`, `hadron-batch-proof-v1`), so the two never share a
+ * key. The v2 paged-attention codec that also consumed this secret was retired
+ * with the attention API (#2027 S11). */
 export function attentionTokenSecret(): string {
   const secret = process.env.TEAM_ATTENTION_TOKEN_SECRET || process.env.JWT_SECRET;
   if (!secret) fail('The team-attention token signer is not configured.', 'TEAM_ATTENTION_NOT_CONFIGURED');

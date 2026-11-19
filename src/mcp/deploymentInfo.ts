@@ -109,7 +109,7 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // ref, organizationId → orgRef), updateOrganization(id → ref), createAgent(orgId → orgRef, systemMemoryId →
 // systemMemoryRef), updateAgent(systemMemoryId → systemMemoryRef); the system-memory refs retype String → ID
 // and accept a URN. A client sending the old names gets "Unknown argument" until it upgrades.
-// 0.22.0 — #2027 S11: the attention API is RETIRED. The GraphQL fields
+// 0.23.0 — BREAKING (#2027 S11): the attention API is RETIRED. The GraphQL fields
 // `teamAttention` / `teamAttentionPage` / `teamAttentionPreviewPage` /
 // `teamAttentionSwitchoverPreview` and the `confirmTeamAttentionSwitchover`
 // mutation are gone, and with them the `hadron_team_attention*` MCP tools
@@ -117,7 +117,7 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // wake path (`dueWakes` / the CLI's `hadron team wakes`); the explicit
 // `markOwnTeamChatRead` mark and every wake/mark/resume rule it shared a module
 // with are unchanged.
-export const HADRON_SERVER_VERSION = '0.22.0';
+export const HADRON_SERVER_VERSION = '0.23.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
