@@ -2308,7 +2308,7 @@ async function withNodeHistoryWrite<T>(ctx: Context, nodeId: string, memoryId: s
     await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${nodeId} FOR UPDATE`;
     const current = await tx.node.findUnique({ where: { id: nodeId }, select: { memoryId: true, role: true, loc: true } });
     if (!current || current.memoryId !== memoryId) throw nodeNotFoundError(nodeId);
-    if (isQuestionFamilyRole(current.role)) throw questionContainedError("Editing a decision's history", [current.loc]);
+    if (isQuestionFamilyRole(current.role)) throw questionContainedError("Editing a question's history", [current.loc]);
     return work(tx, txCtx);
   });
 }
@@ -5163,7 +5163,7 @@ export const nodeMutations = {
       await nodeDoorWritePreflight(ctx, node.memoryId, () => new GraphQLError('Node revision not found', { extensions: { code: 'NOT_FOUND', revisionId } }));
       // #1641 §3.2 — a question's history is its audit trail. Unlocked: no
       // write ever turns an existing node into a question or back.
-      if (isQuestionFamilyRole(node.role)) throw questionContainedError("Deleting a decision's revision", [node.loc]);
+      if (isQuestionFamilyRole(node.role)) throw questionContainedError("Deleting a question's revision", [node.loc]);
       // No protected-loc gate: a revision row is history, not the address.
       return withNodeHistoryWrite(ctx, node.id, node.memoryId, async tx => {
         await tx.nodeRevision.delete({ where: { id: revisionId } });
@@ -5243,7 +5243,7 @@ export const nodeMutations = {
       });
       await nodeDoorWritePreflight(ctx, node.memoryId, () => nodeNotFoundError(nodeRef));
       // #1641 §3.2 — a question's history is its audit trail (as deleteNodeRevision).
-      if (isQuestionFamilyRole(node.role)) throw questionContainedError("Clearing a decision's history", [node.loc]);
+      if (isQuestionFamilyRole(node.role)) throw questionContainedError("Clearing a question's history", [node.loc]);
       return withNodeHistoryWrite(ctx, nodeId, node.memoryId, async tx => {
         const { count } = await tx.nodeRevision.deleteMany({ where: { nodeId } });
         return count;
