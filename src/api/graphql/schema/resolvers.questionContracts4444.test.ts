@@ -9,9 +9,6 @@ import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { computeApprovalHash } from '../../../lib/approvalHash.js';
-import { questionDataSchema, type QuestionData } from '../../../lib/questions/codec.js';
-import { questionName, renderQuestion, renderQuestionAbstract } from '../../../lib/questions/render.js';
 import { questionError, type QuestionRefusalCode } from '../../../lib/questions/index.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -29,21 +26,10 @@ const codeOf = async (p: Promise<unknown>) => {
   try { await p; return 'NO_ERROR'; } catch (e) { return e instanceof GraphQLError ? String(e.extensions.code) : (e as Error).message; }
 };
 const createLog = () => M.createQuestionLog(null, { memoryRef: memory.id, loc: 'questions', defaultDeciders: [holger.id] }, as());
-const ask = (logRef: string) => M.askQuestion(null, { logRef, input: {
-  title: 'Ship the codec?',
-  parts: [{ question: 'Ship it now?', yesno: true, recommendation: { key: 'yes', reason: 'ready' } }],
+const ask = (logRef: string, extra: Record<string, unknown> = {}) => M.askQuestion(null, { logRef, input: {
+  title: 'Ship the codec?', yesno: true, recommendation: { key: 'yes', reason: 'ready' }, ...extra,
 } }, as(writer.id));
 const rowOf = (id: string) => db.node.findUniqueOrThrow({ where: { id } });
-
-/** Rewrite a question consistently (data, content, name, abstract), as the S2 doors will. */
-async function rewrite(id: string, change: (d: QuestionData) => QuestionData): Promise<void> {
-  const next = change(questionDataSchema.parse((await rowOf(id)).data));
-  await db.node.update({ where: { id }, data: {
-    name: questionName(next), abstract: renderQuestionAbstract(next), content: renderQuestion(next), data: next as never, revisionContentHash: 'refresh',
-  } });
-}
-const answered = (d: QuestionData, by: string): QuestionData => ({ ...d, status: 'answered', parts: d.parts.map((p) => ({ ...p,
-  answer: { key: 'yes', text: null, freeform: false, by, at: '2026-10-06T21:00:00.000Z', via: 'portal', source: null, reason: null, claimedBy: null, recordedBy: null } })) });
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -59,15 +45,15 @@ beforeEach(async () => {
   memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'team-shared' }, as());
 });
 
-// The complete public refusal-code set of the question doors (#1641 §7, §8.4), written out. A
+// The complete public refusal-code set of the question doors (#1641 §7, §8.4; one question per node since #4426 S2), written out. A
 // Record keyed by QuestionRefusalCode makes `pnpm tsc` fail on an omitted OR an extra code.
 const CONTRACT: Record<QuestionRefusalCode, true> = {
   QUESTION_NOT_FOUND: true, QUESTION_LOG_NOT_FOUND: true, QUESTION_LOG_EXISTS: true, QUESTION_LOG_ENCRYPTED: true,
   QUESTION_LOG_MIRRORED: true, QUESTION_LOG_SYSTEM_MEMORY: true, QUESTION_LOG_ANONYMOUS_MEMORY: true,
   QUESTION_LOG_NOT_APPROVABLE: true, QUESTION_LOG_TOO_LARGE_FOR_FILTER: true, QUESTION_INVALID: true,
   QUESTION_TIER_TOO_LOW: true, QUESTION_DECIDER_NOT_ELIGIBLE: true, QUESTION_RECOMMENDATION_MISSING: true,
-  QUESTION_PART_RENUMBER: true, QUESTION_ANSWER_IMMUTABLE: true, QUESTION_NOT_DECIDER: true, QUESTION_NOT_ASKER: true,
-  QUESTION_IMPERSONATION_REFUSED: true, QUESTION_WITHDRAWN: true, QUESTION_SUPERSEDED: true, QUESTION_ANSWERED_DECIDED: true,
+  QUESTION_ASSIGNEE_NOT_DECIDER: true, QUESTION_ANSWER_IMMUTABLE: true, QUESTION_NOT_DECIDER: true, QUESTION_NOT_ASKER: true,
+  QUESTION_IMPERSONATION_REFUSED: true, QUESTION_WITHDRAWN: true,
   QUESTION_ANSWERED: true, QUESTION_NOT_APPROVABLE: true, QUESTION_CONTAINED: true, QUESTION_FORBIDDEN: true,
 };
 const CODES = Object.keys(CONTRACT);
@@ -82,9 +68,9 @@ function assertCodeContract(codes: readonly string[]): void {
 }
 
 describe('question refusal-code contract (#4444)', () => {
-  it('names 25 distinct codes, every one QUESTION_*-prefixed and carried verbatim on extensions.code', () => {
-    expect(CODES).toHaveLength(25);
-    expect(new Set(CODES).size).toBe(25);
+  it('names 23 distinct codes, every one QUESTION_*-prefixed and carried verbatim on extensions.code', () => {
+    expect(CODES).toHaveLength(23);
+    expect(new Set(CODES).size).toBe(23);
     expect(() => assertCodeContract(CODES)).not.toThrow();
     for (const code of CODES) expect(questionError(code as QuestionRefusalCode, 'm', { code: 'SHADOW' }).extensions.code).toBe(code);
   });
@@ -100,20 +86,9 @@ describe('question refusal-code contract (#4444)', () => {
     expect(await codeOf(M.withdrawQuestion(null, { ref: generateId(), reason: 'r', expectedRevision: 1 }, as()))).toBe('QUESTION_NOT_FOUND');
   });
 
-  it('QUESTION_ANSWERED_DECIDED: withdrawing a DECIDED question', async () => {
-    const q = await ask((await createLog()).row.id);
-    await rewrite(q.row.id, (d) => answered(d, holger.id));
-    const r = await rowOf(q.row.id);
-    await db.node.update({ where: { id: q.row.id }, data: { approvedBy: holger.id, approvedRevNo: r.revSeq, approvedAt: new Date(),
-      approvalHash: computeApprovalHash({ title: r.name, abstract: r.abstract, content: r.content }) } });
-    expect(await codeOf(M.withdrawQuestion(null, { ref: q.row.id, reason: 'r', expectedRevision: r.revSeq }, as()))).toBe('QUESTION_ANSWERED_DECIDED');
-  });
-
-  it('QUESTION_SUPERSEDED: withdrawing a superseded question', async () => {
-    const q = await ask((await createLog()).row.id);
-    await rewrite(q.row.id, (d) => ({ ...d, status: 'superseded', supersededBy: { nodeId: generateId(), code: 'DB' } }));
-    const r = await rowOf(q.row.id);
-    expect(await codeOf(M.withdrawQuestion(null, { ref: q.row.id, reason: 'r', expectedRevision: r.revSeq }, as()))).toBe('QUESTION_SUPERSEDED');
+  it('QUESTION_ASSIGNEE_NOT_DECIDER: an explicit assignee who is not one of the deciders', async () => {
+    const log = await createLog();
+    expect(await codeOf(ask(log.row.id, { assignee: writer.id }))).toBe('QUESTION_ASSIGNEE_NOT_DECIDER');
   });
 
   it('QUESTION_LOG_TOO_LARGE_FOR_FILTER: a log past the 5000-question evaluation cap', async () => {
@@ -131,16 +106,16 @@ describe('question codec and renderer ids (#4444)', () => {
     const log = await createLog();
     const q = await ask(log.row.id);
     const qr = await rowOf(q.row.id);
-    expect(qr.data).toMatchObject({ codec: 'hadron.dev/decision/v1', renderer: 'decision-md/1' });
-    expect(qr.content).toContain('hadron.dev/decision/v1');
-    expect((await rowOf(log.row.id)).data).toMatchObject({ codec: 'hadron.dev/decision-log/v1' });
+    expect(qr.data).toMatchObject({ codec: 'hadron.dev/question/v1', renderer: 'question-md/1' });
+    expect(qr.content).toContain('hadron.dev/question/v1');
+    expect((await rowOf(log.row.id)).data).toMatchObject({ codec: 'hadron.dev/question-log/v1' });
   });
 
   it('a question stored under another codec id is unverifiable, not silently accepted', async () => {
     const q = await ask((await createLog()).row.id);
     const r = await rowOf(q.row.id);
-    const bad = { ...(r.data as object), codec: 'hadron.dev/decision/v0' };
-    await db.node.update({ where: { id: q.row.id }, data: { data: bad as never, content: (r.content ?? '').replaceAll('hadron.dev/decision/v1', 'hadron.dev/decision/v0') } });
+    const bad = { ...(r.data as object), codec: 'hadron.dev/question/v0' };
+    await db.node.update({ where: { id: q.row.id }, data: { data: bad as never, content: (r.content ?? '').replaceAll('hadron.dev/question/v1', 'hadron.dev/question/v0') } });
     expect(await Q.verifyQuestion(null, { ref: q.row.id }, as())).toMatchObject({ state: 'UNVERIFIABLE', findings: ['UNKNOWN_CODEC'] });
   });
 });
