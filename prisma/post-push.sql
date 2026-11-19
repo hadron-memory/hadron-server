@@ -965,3 +965,14 @@ ALTER TABLE app_runs ALTER COLUMN agent_id SET NOT NULL;
 -- #3998 (S3 of #3991): secret read clients (after grants and secrets exist). Verbatim with migration 20261118100100_secret_read_clients.
 \ir secret-read-clients-invariants.sql
 
+
+-- #4334 (#434 Slice C): the six partial indexes the 20260519180903_baseline_init migration creates. Prisma's schema language
+-- cannot express an index WHERE clause, so `db push` builds none of them, and dev and test databases would lack what production
+-- enforces: in particular apps_urn_active_uniq, the rule that a handle names at most one App that is not uninstalled
+-- (cor:dmo:050:02). Same statements and predicates as the migration (the migration stays the authority; no migration change).
+CREATE INDEX IF NOT EXISTS "agents_urn_migration_pending_idx"   ON "agents"   USING btree (id) WHERE ((urn_normalized_at IS NULL) AND (urn_migration_failed_reason IS NULL));
+CREATE INDEX IF NOT EXISTS "apps_urn_migration_pending_idx"     ON "apps"     USING btree (id) WHERE ((urn_normalized_at IS NULL) AND (urn_migration_failed_reason IS NULL));
+CREATE INDEX IF NOT EXISTS "memories_urn_migration_pending_idx" ON "memories" USING btree (id) WHERE ((urn_normalized_at IS NULL) AND (urn_migration_failed_reason IS NULL));
+CREATE UNIQUE INDEX IF NOT EXISTS "apps_urn_active_uniq"        ON "apps"     USING btree (urn) WHERE (uninstalled_at IS NULL);
+CREATE INDEX IF NOT EXISTS "assets_staged_uploaded_at_idx"      ON "assets"   USING btree (uploaded_at) WHERE (memory_id IS NULL);
+CREATE INDEX IF NOT EXISTS "assets_uploaded_by_staged_idx"      ON "assets"   USING btree (uploaded_by, uploaded_at DESC) WHERE (memory_id IS NULL);
