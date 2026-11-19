@@ -376,11 +376,15 @@ describe('#4408: the #4372 review follow-ups (eviction, timer clear, sanitized f
     for (let i = 0; i < 1_000; i++) { vi.setSystemTime(T0 + i); await logStalledHorizon(probeDb, `recheck-app-${i}`); }
     expect(horizonThrottleForTest.size()).toBe(1_000);
     vi.setSystemTime(T0 + 10 * 60_000); // every window has expired
-    // Re-check the OLDEST App: only the delete-then-set moves it to the back, so a mid-map App (which survives the
-    // next eviction by insertion order alone) could not tell a refresh from no refresh.
-    await logStalledHorizon(probeDb, 'recheck-app-0'); // already in the map: nothing to make room for
+    // Two re-checks, one per guard. A MID-MAP App tells the `!has(appId)` guard apart (an unguarded eviction would drop
+    // app-0 for nothing); the OLDEST App tells the delete-then-set apart (only it moves the oldest to the back, so a
+    // mid-map App survives the next eviction by insertion order alone and could not tell a refresh from none).
+    await logStalledHorizon(probeDb, 'recheck-app-500'); // already in the map: nothing to make room for
     expect(horizonThrottleForTest.size()).toBe(1_000);
-    expect(horizonThrottleForTest.has('recheck-app-1')).toBe(true); // RED pre-#4436: the guard evicted the oldest anyway
+    expect(horizonThrottleForTest.has('recheck-app-0')).toBe(true); // RED pre-#4436 / without the !has guard: the oldest was evicted anyway
+    await logStalledHorizon(probeDb, 'recheck-app-0');
+    expect(horizonThrottleForTest.size()).toBe(1_000);
+    expect(horizonThrottleForTest.has('recheck-app-1')).toBe(true);
     // The re-check is now the MOST recent: a new App at the cap evicts the oldest remaining (app-1), never the refreshed app-0.
     await logStalledHorizon(probeDb, 'recheck-app-new');
     expect(horizonThrottleForTest.has('recheck-app-0')).toBe(true); // RED without the delete-then-set: app-0 keeps its slot and is evicted
