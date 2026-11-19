@@ -38,6 +38,7 @@
  */
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../generated/prisma/index.js';
+import { isPrismaPoolWaitFault } from '../authStoreBusy.js';
 
 /** The interactive team-read transaction's total budget (ms). #4455: 5 s; every client's own timeout is longer. */
 export const TEAM_READ_TX_TIMEOUT_MS = 5_000;
@@ -117,10 +118,11 @@ export class TeamReadBusyError extends GraphQLError {
  * the transaction is the thing the caller asked to be bounded.
  */
 export function busyReason(error: unknown): TeamReadBusyReason {
-  if (error instanceof Prisma.PrismaClientKnownRequestError) {
-    if (error.code === 'P2024') return 'POOL_WAIT';
-    if (error.code === 'P2028' && /unable to start/i.test(error.message)) return 'POOL_WAIT';
-  }
+  // #4471 BLIND P3: the pool-wait arms are decided by the ONE shared classifier
+  // (isPrismaPoolWaitFault in lib/authStoreBusy.ts), so they cannot drift between the bounded
+  // read and the credential check. Anything else converting here still names the budget arm —
+  // the safest reading, since the transaction is the thing the caller asked to be bounded.
+  if (isPrismaPoolWaitFault(error)) return 'POOL_WAIT';
   return 'TRANSACTION_BUDGET';
 }
 

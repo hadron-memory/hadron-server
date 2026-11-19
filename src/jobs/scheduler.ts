@@ -19,6 +19,7 @@
 import { CronExpressionParser } from 'cron-parser';
 import type { PrismaClient, AgentSchedule } from '../generated/prisma/index.js';
 import { mintAppRun, RunLaunchDeniedError } from './appRuns.js';
+import { bootPromptRefusalCode } from '../lib/bootPrompt/refusal.js';
 
 /** Next occurrence strictly after `from` in the schedule's timezone. */
 export function nextCronOccurrence(cron: string, timezone: string, from = new Date()): Date {
@@ -102,6 +103,10 @@ export async function schedulerTick(db: PrismaClient, now = new Date()): Promise
         // Denied launches are normal operation (quota, revoked relationship)
         // — log; the schedule stays enabled and tries again next occurrence.
         console.warn(`[scheduler] launch denied for schedule ${s.id}: ${err.code} ${err.message}`);
+      } else if (bootPromptRefusalCode(err)) {
+        // #3689 (gate R2): no Agent on the schedule, or an unserveable boot prompt, is a launch denial too
+        // (cor:agt:040:07 / 040:10): logged as one, and the schedule tries again next occurrence.
+        console.warn(`[scheduler] launch denied for schedule ${s.id}: ${bootPromptRefusalCode(err)} ${(err as Error).message}`);
       } else {
         console.error(`[scheduler] mint failed for schedule ${s.id}:`, err);
       }

@@ -2510,6 +2510,7 @@ model Agent {
   /// #2044 — the per-App install memories that customise this Agent.
   installMemories    Memory[]            @relation("InstallMemoriesOfAgent")
   sessions           Session[]           @relation("SessionAgent")
+  appRuns            AppRun[]            @relation("AppRunAgent")
   userSubscriptions  AgentSubscription[] @relation("AgentUserSubscriptions")
   // 023-app-shape Phase 2b: App↔Agent goes through `AppAgent` (N:M).
   // The direct `App[]` back-relation is gone (dropped with App.agentId).
@@ -5835,10 +5836,11 @@ enum AppRunTriggerKind {
 /// webhook, a manual request, an integration event or another run. The row is the run's durable record, and it is
 /// also what allows the run to go on: every action inside the run checks the row again.
 ///
-/// Relationships: no foreign keys to its owners. `organizationId`, `appId`, `agentId`, `userId`, `triggerId` and
-/// `parentRunId` are plain ids, so the database deletes nothing with them. ManualAutomationPin, WebFetchPollBinding
-/// and WebFetchEventReceipt rows point at a run, and so does the record of the prompt a run was served (a foreign key
-/// in prisma/served-prompt-invariants.sql).
+/// Relationships: one foreign key to an owner, `agentId` to Agent (#3689): every run names an existing Agent, and
+/// deleting an Agent row deletes its runs. `organizationId`, `appId`, `userId`, `triggerId` and `parentRunId` are plain
+/// ids, so the database deletes nothing with them. ManualAutomationPin, WebFetchPollBinding and WebFetchEventReceipt
+/// rows point at a run, and so does the record of the prompt a run was served (a foreign key in
+/// prisma/served-prompt-invariants.sql).
 ///
 /// Behaviour:
 /// - Created only after the launch gate has passed (`mintAppRun`, src/jobs/appRuns.ts). No separate credential is
@@ -5867,7 +5869,14 @@ model AppRun {
   id                   String               @id
   organizationId       String               @map("organization_id")
   appId                String               @map("app_id")
+  /// #3689 (hrn:node:hadronmemory.com:specs:cor:agt:010:01 rev 45): every run names an existing Agent. The DATABASE
+  /// guarantees it: NOT NULL with a foreign key; an Agent hard delete removes its runs (gate R4). Mint refuses an
+  /// agentless launch first, as BOOT_PROMPT_NOT_SET (hrn:node:hadronmemory.com:specs:cor:agt:040:07). The Prisma field
+  /// stays OPTIONAL on purpose: a migration refused with HDPRF (#3770) is rolled back and this build then serves the old
+  /// nullable column, whose retained agentless runs a required field cannot read (P2032). Tighten it only once the
+  /// migration has applied everywhere (#3910 F1).
   agentId              String?              @map("agent_id")
+  agent                Agent?               @relation("AppRunAgent", fields: [agentId], references: [id], onDelete: Cascade)
   /// On-behalf-of user (hrn:node:hadronmemory.com:specs:cor:agt:010:01, D-2026-07-04-C). NULL ⇒ pure App
   /// service identity — no personal/private reach.
   userId               String?              @map("user_id")
@@ -5974,6 +5983,7 @@ model AppRun {
   @@index([status, publishedAt])
   @@index([appId, createdAt])
   @@index([triggerId, status])
+  @@index([agentId])
   @@index([parentRunId]) // spawn completion checks + child listings (plan-spawn)
   @@index([organizationId, createdAt])
   @@map("app_runs")
