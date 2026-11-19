@@ -170,7 +170,7 @@ describe('enqueue, drain and refresh', () => {
 
 describe('changing the setting or the source never loses the summary', () => {
   const update = (id: string, input: Record<string, unknown>) =>
-    (resolvers.Mutation as any).updateMemory({}, { id, ...input }, adminCtx());
+    (resolvers.Mutation as any).updateMemory({}, { ref: id, ...input }, adminCtx());
 
   it('disabling passages keeps summary vectors and drops chunks; re-enabling restores chunks', async () => {
     const m = await memory({ cls: 'system', flag: true, source: 'both' });
@@ -249,7 +249,7 @@ describe('the provisioning seam: promoting a memory to system stamps its existin
     const m1 = await memory({ cls: 'knowledge', flag: false });
     const n1 = await node(m1, 'a', 'sum');
     await db.node.update({ where: { id: n1.id }, data: { embeddingPendingAt: null } });
-    const agent = await (resolvers.Mutation as any).createAgent({}, { orgId, name: 'Promoter', systemMemoryId: m1 }, adminCtx());
+    const agent = await (resolvers.Mutation as any).createAgent({}, { orgRef: orgId, name: 'Promoter', systemMemoryRef: m1 }, adminCtx());
     expect(agent.systemMemoryId).toBe(m1);
     expect((await db.node.findUniqueOrThrow({ where: { id: n1.id } })).embeddingPendingAt).not.toBeNull();
 
@@ -258,7 +258,7 @@ describe('the provisioning seam: promoting a memory to system stamps its existin
     await db.node.update({ where: { id: n2.id }, data: { embeddingPendingAt: null } });
     // an agent with no system memory yet (first attach is the promote path)
     const plain = await db.agent.create({ data: { id: generateId(), organizationId: orgId, urn: 'idx2199:plain', name: 'Plain' } });
-    await (resolvers.Mutation as any).updateAgent({}, { ref: plain.id, systemMemoryId: m2 }, adminCtx());
+    await (resolvers.Mutation as any).updateAgent({}, { ref: plain.id, systemMemoryRef: m2 }, adminCtx());
     expect((await db.memory.findUniqueOrThrow({ where: { id: m2 } })).class).toBe('system');
     expect((await db.node.findUniqueOrThrow({ where: { id: n2.id } })).embeddingPendingAt).not.toBeNull();
   });

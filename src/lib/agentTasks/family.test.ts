@@ -86,7 +86,7 @@ describe('startSession family, and Worker.family following the binding', () => {
     const admin = await db.user.create({ data: { githubId: 800_000 + n, githubUsername: `fm-admin-${n}`, roles: ['READER'] } });
     mia = await db.user.create({ data: { githubId: 900_000 + n, githubUsername: `fm-mia-${n}`, roles: ['READER'] } });
     await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-    const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+    const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
     app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `fam-${n}.example:team` }, select: { id: true } });
     await db.appMember.create({ data: { appId: app.id, userId: mia.id, role: 'member' } });
     worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit' }, select: { id: true, appId: true } });

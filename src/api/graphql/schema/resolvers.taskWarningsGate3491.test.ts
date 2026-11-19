@@ -39,7 +39,7 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { handle: 'gate-admin' } });
   member = await db.user.create({ data: { handle: 'gate-member' } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  const made = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const made = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   team = await db.agent.findUniqueOrThrow({ where: { id: made.id } });
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
@@ -64,7 +64,7 @@ describe('task warnings join the whole-chain gate', () => {
     });
   it.each([['holds a nearer task', true], ['holds nothing', false]] as const)(
     'an unreadable memory on the caller Agent chain that %s gives withheld', async (_label, holdsTask) => {
-      const callerMade = await M.createAgent({}, { orgId: org.id, name: 'Caller' }, ctx(admin.id));
+      const callerMade = await M.createAgent({}, { orgRef: org.id, name: 'Caller' }, ctx(admin.id));
       const caller = await db.agent.findUniqueOrThrow({ where: { id: callerMade.id } });
       await db.appAgent.create({ data: { appId: app.id, agentId: caller.id } });
       const base = await hiddenBase('caller-base');
@@ -75,7 +75,7 @@ describe('task warnings join the whole-chain gate', () => {
     });
   it('a distinct caller Agent: an unreadable Team base withholds even when the entry sits in the readable Team memory and the caller chain is readable (§10 P3-1)', async () => {
     // The caller is NOT the Team Agent, so the caller-chain loop cannot answer for the Team chain: only the team-chain gate can.
-    const callerMade = await M.createAgent({}, { orgId: org.id, name: 'Caller' }, ctx(admin.id));
+    const callerMade = await M.createAgent({}, { orgRef: org.id, name: 'Caller' }, ctx(admin.id));
     const caller = await db.agent.findUniqueOrThrow({ where: { id: callerMade.id } });
     await db.appAgent.create({ data: { appId: app.id, agentId: caller.id } });
     await task(caller.systemMemoryId!);

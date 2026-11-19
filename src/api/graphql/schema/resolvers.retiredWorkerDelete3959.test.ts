@@ -22,7 +22,7 @@ beforeEach(async () => {
   const app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   appId = app.id;
   context = { db, userId: user.id, roles: ['READER'] };
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Role', personaRole: 'server-engineer' }, context);
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Role', personaRole: 'server-engineer' }, context);
   agentId = agent.id;
   await db.appAgent.create({ data: { appId, agentId } });
 });

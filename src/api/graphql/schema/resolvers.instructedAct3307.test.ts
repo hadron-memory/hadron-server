@@ -33,9 +33,9 @@ beforeEach(async()=>{
  const app=await db.app.create({data:{organizationId:org.id,name:'Team',urn:'instruct3307.test:team'}});
  await db.appMember.create({data:{appId:app.id,userId:holder.id,role:'owner'}});
  f={holder,other,org,app};
- const agent=await M.createAgent({}, {orgId:org.id,name:'Current',personaRole:'server-engineer'},ctx({userId:other.id}));
+ const agent=await M.createAgent({}, {orgRef:org.id,name:'Current',personaRole:'server-engineer'},ctx({userId:other.id}));
  await db.node.create({data:{memoryId:agent.systemMemoryId,loc:'roles',name:'Roles',nodeType:'info'}});
- const next=await M.createAgent({}, {orgId:org.id,name:'Next',personaRole:'qa-engineer'},ctx({userId:other.id}));
+ const next=await M.createAgent({}, {orgRef:org.id,name:'Next',personaRole:'qa-engineer'},ctx({userId:other.id}));
  for(const a of [agent,next]) { await db.appAgent.create({data:{appId:app.id,agentId:a.id}}); await serveAgentBootPrompt(db,a.id,'{{worker.name}} {{worker.role}}'); }
  const worker=await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,appId:app.id,agentId:agent.id,name:'Caller',slug:'caller',heldByUserId:holder.id}});
  const target=await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,appId:app.id,agentId:agent.id,name:'Target',slug:'target'}});

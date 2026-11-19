@@ -76,7 +76,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
 
   // The Team Agent and a child Agent that EXTENDS it (the R138 override carrier).
-  const created = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   const teamRow = await db.agent.findUniqueOrThrow({ where: { id: created.id } });
   teamAgent = { id: teamRow.id, urn: teamRow.urn };
   teamMemoryId = teamRow.systemMemoryId as string;
@@ -87,7 +87,7 @@ beforeEach(async () => {
   // member reads it, an outsider does not (that refusal is pinned on purpose).
   await node(teamMemoryId, 'roles'); // the Team Agent marker (locateTeamAgent)
 
-  const createdChild = await M.createAgent({}, { orgId: org.id, name: 'Child Agent' }, ctx(admin.id));
+  const createdChild = await M.createAgent({}, { orgRef: org.id, name: 'Child Agent' }, ctx(admin.id));
   await db.agent.update({ where: { id: createdChild.id }, data: { extendsAgentId: teamAgent.id } });
   const childRow = await db.agent.findUniqueOrThrow({ where: { id: createdChild.id } });
   childAgent = { id: childRow.id, urn: childRow.urn };

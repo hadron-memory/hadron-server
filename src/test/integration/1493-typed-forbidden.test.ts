@@ -54,7 +54,7 @@ function expectForbidden(r: Gql, message = 'Forbidden') {
   expect(r.errors![0]!.extensions).toEqual({ code: 'FORBIDDEN' });
 }
 
-const UPDATE_ORG = `mutation($id: ID!, $n: String) { updateOrganization(id: $id, name: $n) { id } }`;
+const UPDATE_ORG = `mutation($id: ID!, $n: String) { updateOrganization(ref: $id, name: $n) { id } }`;
 const UPDATE_AGENT = `mutation($r: ID!, $d: String) { updateAgent(ref: $r, description: $d) { id } }`;
 const CREATE_MEMORY = `mutation($o: ID, $n: String!) { createMemory(orgId: $o, name: $n) { id } }`;
 const NODE_REVISIONS = `query($n: ID!) { nodeRevisions(nodeRef: $n) { id } }`;
@@ -91,7 +91,7 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
-  const a = await gql(key.owner, `mutation($o: ID, $n: String!) { createAgent(orgId: $o, name: $n) { id } }`, { o: org.id, n: `agent-${t}` });
+  const a = await gql(key.owner, `mutation($o: ID, $n: String!) { createAgent(orgRef: $o, name: $n) { id } }`, { o: org.id, n: `agent-${t}` });
   expect(a.errors, JSON.stringify(a.errors)).toBeUndefined();
   agentId = a.data!.createAgent.id;
 

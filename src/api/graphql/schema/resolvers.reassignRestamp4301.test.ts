@@ -79,8 +79,8 @@ beforeEach(async () => {
   admin = await u(1, 'admin');
   bo = await u(2, 'bo');
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  longAgent = (await M.createAgent({}, { orgId: org.id, name: 'Coordinator' }, ctx(admin.id))).id;
-  shortAgent = (await M.createAgent({}, { orgId: org.id, name: 'Builder', lifecycle: 'SHORT_LIVED' }, ctx(admin.id))).id;
+  longAgent = (await M.createAgent({}, { orgRef: org.id, name: 'Coordinator' }, ctx(admin.id))).id;
+  shortAgent = (await M.createAgent({}, { orgRef: org.id, name: 'Builder', lifecycle: 'SHORT_LIVED' }, ctx(admin.id))).id;
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true } });
   await db.appMember.create({ data: { appId: app.id, userId: bo.id, role: 'member' } });
   const w = (agentId: string, name: string, role: string) =>

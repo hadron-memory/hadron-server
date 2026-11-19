@@ -76,7 +76,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: orgA.id, userId: admin.id, role: 'ADMIN' } });
   await db.orgMember.create({ data: { organizationId: orgA.id, userId: member.id, role: 'READER' } });
 
-  const created = await M.createAgent({}, { orgId: orgA.id, name: 'secret-agent', visibility: 'ORGANIZATION' },
+  const created = await M.createAgent({}, { orgRef: orgA.id, name: 'secret-agent', visibility: 'ORGANIZATION' },
     { db, roles: ['ADMIN'], userId: admin.id } as Context);
   agent = await db.agent.findUniqueOrThrow({
     where: { id: created.id },
