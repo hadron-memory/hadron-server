@@ -11,10 +11,10 @@ const errs = (query: string): string[] => validate(schema, parse(query)).map((e)
 
 describe('#725 PR B — Memory.schema surface', () => {
   it('updateMemory accepts a schema arg and Memory.schema is selectable', () => {
-    expect(errs(`mutation($s: JSON) { updateMemory(id: "x", schema: $s) { id schema } }`)).toEqual([]);
+    expect(errs(`mutation($s: JSON) { updateMemory(ref: "x", schema: $s) { id schema } }`)).toEqual([]);
   });
 
   it('Memory.schema is a JSON field on the Memory type', () => {
-    expect(errs(`mutation { updateMemory(id: "x") { schema } }`)).toEqual([]);
+    expect(errs(`mutation { updateMemory(ref: "x") { schema } }`)).toEqual([]);
   });
 });

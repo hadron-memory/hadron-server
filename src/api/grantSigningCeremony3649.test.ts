@@ -88,14 +88,19 @@ afterEach(async () => {
 });
 
 async function insertGrant(): Promise<string> {
+  return insertGrantFor(appId, { workerId });
+}
+/** #3730: the same pending grant shape, for an App and holder the default fixture does not cover (a user-owned App, a user holder). */
+async function insertGrantFor(aId: string, holder: { workerId: string; userId?: never } | { userId: string; workerId?: never }): Promise<string> {
   const id = generateId();
-  await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, max_uses, created_at, updated_at)
+  await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, ${holder.userId !== undefined ? 'user_id' : 'worker_id'}, action, action_values, reason, max_uses, created_at, updated_at)
     VALUES ($1, $2, $3, 'schedule.create', $4::jsonb, $5, 3, (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
-  id, appId, workerId, JSON.stringify({ entryNode: entryNodeId }), REASON);
+  id, aId, holder.userId ?? holder.workerId, JSON.stringify({ entryNode: entryNodeId }), REASON);
   return id;
 }
-const openRequest = (grantId: string) => db.$transaction((tx) => createGrantSigningRequestInTransaction(tx, grantId, {
-  appId, requester: { userId: requester.id, appId: null, workerId: null, sessionId: null },
+const openRequest = (grantId: string) => openRequestFor(grantId, appId);
+const openRequestFor = (grantId: string, aId: string) => db.$transaction((tx) => createGrantSigningRequestInTransaction(tx, grantId, {
+  appId: aId, requester: { userId: requester.id, appId: null, workerId: null, sessionId: null },
 }));
 
 const post = (id: string, path: string, body: unknown, cookie?: string, origin: string | null = ORIGIN) =>
@@ -323,6 +328,62 @@ describe('C9 + C5: the proof shows the server-built terms only to someone who ma
     const p = await prove('zzzzzzzzzzzzzzzzzzzzzz', admin);
     expect(p.status).toBe(403);
     expect(p.text).toBe(FORBIDDEN);
+  });
+});
+
+// #3730 item 2 (cor:acl:140:02, reading confirmed under AT0.5588), pinned at the PRODUCER'S DOOR over the real proof POST:
+// the issuer follows the create gate exactly, so every App that gate refuses has no issuer here either — and the door's
+// uniform refusal leaks nothing about WHICH arm refused. The user-owned case is the owner THEMSELF (they pass the owner
+// check; the user-owned arm refuses them); the deleted case throws APP_NOT_FOUND inside the gate and the route's catch
+// makes it the same refusal; the stranger has no membership row anywhere.
+describe('#3730 item 2: the issuer follows the create gate for the Apps it refuses (over the real proof POST)', () => {
+  it('a user-owned App: its OWNER may not issue schedule.create there — nobody may issue what nobody may create', async () => {
+    const owner = await person('gs-uowner', null);
+    const owned = await db.app.create({ data: { ownerUserId: owner.id, name: 'gs-uapp', urn: `gs-uapp-${generateId().slice(0, 6)}` } });
+    const g = await insertGrantFor(owned.id, { userId: owner.id });
+    const req = await openRequestFor(g, owned.id);
+    const p = await prove(req.id, owner);
+    expect(p.status).toBe(403);
+    expect(p.text).toBe(FORBIDDEN);
+    expect(await unconsumedGrantSign(owner.id)).toBe(0);
+  });
+
+  it('a deleted App: the gate refuses APP_NOT_FOUND inside, and the door answers the one refusal', async () => {
+    const g = await insertGrant();
+    const req = await openRequest(g);
+    await db.app.update({ where: { id: appId }, data: { deletedAt: new Date() } });
+    const p = await prove(req.id, admin);
+    expect(p.status).toBe(403);
+    expect(p.text).toBe(FORBIDDEN);
+    expect(await unconsumedGrantSign(admin.id)).toBe(0);
+  });
+
+  // #4463 F3: the completion and decline doors share the proof door's route catch, so a deleted App (APP_NOT_FOUND, not a
+  // GraphQLError) must also reach the wire as the one refusal there, with the request left open and the grant inactive.
+  for (const door of ['complete', 'decline'] as const) {
+    it(`a deleted App after the proof: the ${door} door answers the one refusal, and nothing is spent or activated`, async () => {
+      const g = await insertGrant();
+      const req = await openRequest(g);
+      const p = await prove(req.id, admin);
+      expect(p.json.canSign).toBe(true);
+      await db.app.update({ where: { id: appId }, data: { deletedAt: new Date() } });
+      const body = door === 'complete' ? signingBody(p, admin, 2) : { ceremonyId: p.json.signing.ceremonyId };
+      const r = await post(req.id, door, body, p.cookie);
+      expect(r.status).toBe(403);
+      expect(await r.text()).toBe(FORBIDDEN);
+      expect(await requestState(req.id)).toBe('open');
+      expect((await grantRow(g)).activated_at).toBeNull();
+    });
+  }
+
+  it('a stranger with no membership row at all: the one refusal, no terms, no ceremony', async () => {
+    const stranger = await person('gs-stranger', null);
+    const g = await insertGrant();
+    const req = await openRequest(g);
+    const p = await prove(req.id, stranger);
+    expect(p.status).toBe(403);
+    expect(p.text).toBe(FORBIDDEN);
+    expect(await unconsumedGrantSign(stranger.id)).toBe(0);
   });
 });
 

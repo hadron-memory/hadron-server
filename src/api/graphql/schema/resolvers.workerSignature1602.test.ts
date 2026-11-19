@@ -29,7 +29,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: staff.id, role: 'CONTRIBUTOR' } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'Engineer', personaRole: 'engineer' }, ctx());
+  agent = await M.createAgent({}, { orgRef: org.id, name: 'Engineer', personaRole: 'engineer' }, ctx());
   await serveAgentBootPrompt(db, agent.id, '{{worker.signature}}\n{{worker.trailer}}');
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   const made = await M.castWorker({}, { appRef: app.id, agentRef: agent.id, name: 'Anne' }, ctx());

@@ -251,7 +251,7 @@ describe('#3437 item 4: the seams a `carry` context would silently open', () => 
     let appRef: string;
     let systemMemoryId: string;
     beforeEach(async () => {
-      const agent = await M.createAgent({}, { orgId, name: 'seams team agent' }, ctx());
+      const agent = await M.createAgent({}, { orgRef: orgId, name: 'seams team agent' }, ctx());
       systemMemoryId = agent.systemMemoryId as string;
       appRef = (await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'seams-team', urn: `${ORG}:team` } })).id;
       await db.appAgent.create({ data: { appId: appRef, agentId: agent.id as string } });

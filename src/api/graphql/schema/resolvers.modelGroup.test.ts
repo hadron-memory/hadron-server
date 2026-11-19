@@ -60,11 +60,11 @@ beforeEach(async () => {
   outsider = await user(98104, 'outsider', suffix);
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: contrib.id, role: 'CONTRIBUTOR' } });
-  const team = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const team = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   teamAgent = { id: team.id, systemMemoryId: team.systemMemoryId };
   // The roles: branch is what marks the Team Agent (locateTeamAgent).
   await db.node.create({ data: { id: generateId(), memoryId: teamAgent.systemMemoryId, loc: 'roles:engineer', name: 'engineer', content: '', data: { names: ['Iris'] } } });
-  const other = await M.createAgent({}, { orgId: org.id, name: 'Role Agent' }, ctx(admin.id));
+  const other = await M.createAgent({}, { orgRef: org.id, name: 'Role Agent' }, ctx(admin.id));
   otherAgent = { id: other.id };
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team App', urn: `${org.urn}:team` } });
   await db.appAgent.create({ data: { appId: app.id, agentId: teamAgent.id } });

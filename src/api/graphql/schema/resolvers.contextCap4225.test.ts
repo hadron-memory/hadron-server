@@ -56,9 +56,9 @@ describe('Agent.contextCap', () => {
     expect(await (resolvers as any).Agent.contextCap?.(await read())).toBeUndefined(); // a plain column: no custom resolver needed
   });
   it('is unset by default, and createAgent accepts one', async () => {
-    const a = await M.createAgent({}, { orgId: F.orgId, name: 'Other' }, ctx(F.manager.id));
+    const a = await M.createAgent({}, { orgRef: F.orgId, name: 'Other' }, ctx(F.manager.id));
     expect((await db.agent.findUniqueOrThrow({ where: { id: a.id } }) as any).contextCap).toBeNull();
-    const b = await M.createAgent({}, { orgId: F.orgId, name: 'Capped', contextCap: 50_000 }, ctx(F.manager.id));
+    const b = await M.createAgent({}, { orgRef: F.orgId, name: 'Capped', contextCap: 50_000 }, ctx(F.manager.id));
     expect((await db.agent.findUniqueOrThrow({ where: { id: b.id } }) as any).contextCap).toBe(50_000);
   });
   for (const bad of [0, -1, 1.5, 2_147_483_648]) {

@@ -23,8 +23,8 @@ async function fixture() {
   const admin = await db.user.create({ data: { handle: `mgr-${generateId().toLowerCase()}` } });
   const user = await db.user.create({ data: { handle: `user-${generateId().toLowerCase()}` } });
   await db.orgMember.create({ data: { userId: admin.id, organizationId: org.id, role: 'ADMIN' } });
-  const agent = await mutationResolvers.createAgent({}, { orgId: org.id, name: 'Primary' }, ctx(admin.id));
-  const second = await mutationResolvers.createAgent({}, { orgId: org.id, name: 'Second' }, ctx(admin.id));
+  const agent = await mutationResolvers.createAgent({}, { orgRef: org.id, name: 'Primary' }, ctx(admin.id));
+  const second = await mutationResolvers.createAgent({}, { orgRef: org.id, name: 'Second' }, ctx(admin.id));
   const { app } = await createDbAppWithKey(db, 'items3305', org.id);
   for (const [i, a] of [agent, second].entries()) {
     await db.appAgent.create({ data: { appId: app.id, agentId: a.id, createdAt: new Date(1700000000000 + i * 1000) } });

@@ -436,7 +436,7 @@ describe('#1349 — the agent\'s AUDIENCE, not just the memory\'s tenancy (@code
     expect(attach.errors, JSON.stringify(attach.errors)).toBeUndefined();
     expect(await readsContent(appKey, 'publicKnowledge')).toBe('publicKnowledge SECRET');
 
-    const narrow = await gql(key.victim!, `mutation($id: ID!) { updateMemory(id: $id, visibility: ORGANIZATION) { id visibility } }`, { id: mem.publicKnowledge!.id });
+    const narrow = await gql(key.victim!, `mutation($id: ID!) { updateMemory(ref: $id, visibility: ORGANIZATION) { id visibility } }`, { id: mem.publicKnowledge!.id });
     expect(narrow.errors, JSON.stringify(narrow.errors)).toBeUndefined();
     expect(await readsContent(appKey, 'publicKnowledge')).toBeNull();
     const row = await db.agentMemoryItem.findFirstOrThrow({ where: { agentId } });
@@ -446,7 +446,7 @@ describe('#1349 — the agent\'s AUDIENCE, not just the memory\'s tenancy (@code
     const { agentId: ownAgent } = await agentWithApp(victimOrgId, 'victim-own');
     const ownAttach = await gql(key.victim!, ATTACH, { g: ownAgent, m: mem.publicKnowledge!.urn, r: 'read' });
     expect(ownAttach.errors, JSON.stringify(ownAttach.errors)).toBeUndefined();
-    await gql(key.victim!, `mutation($id: ID!) { updateMemory(id: $id, visibility: ORGANIZATION) { id } }`, { id: mem.publicKnowledge!.id });
+    await gql(key.victim!, `mutation($id: ID!) { updateMemory(ref: $id, visibility: ORGANIZATION) { id } }`, { id: mem.publicKnowledge!.id });
     expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: ownAgent } })).deletedAt).toBeNull();
   });
 });
@@ -485,7 +485,7 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
 
     // Transfer to the other org. Visibility is NOT supplied — the trigger the
     // first version of this sweep missed entirely.
-    const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id } }`, { id: moving.id, o: dstOrg.id });
+    const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(ref: $id, orgRef: $o) { id } }`, { id: moving.id, o: dstOrg.id });
     expect(code(moved)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
     expect((await getPrincipalAppMemoryAccess(db, member)).get(mem.moving.id)).toBe('READ_ONLY');
     expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId } })).deletedAt).toBeNull();
@@ -524,7 +524,7 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
     expect((await getPrincipalAppMemoryAccess(db, writerMember)).get(mem.pubmove.id)).toBe('READ_WRITE');
 
     // Transfer. The memory stays PUBLIC; only its tenant changes.
-    const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id visibility } }`, { id: pub.id, o: dstOrg.id });
+    const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(ref: $id, orgRef: $o) { id visibility } }`, { id: pub.id, o: dstOrg.id });
     expect(code(moved)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
     expect((await db.memory.findUniqueOrThrow({ where: { id: pub.id } })).visibility).toBe('PUBLIC');
 
@@ -557,7 +557,7 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
       data: { id: generateId(), agentId, memoryId: moving.id, role: 'read-write' },
     });
 
-    const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id visibility } }`, { id: moving.id, o: dstOrg.id });
+    const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(ref: $id, orgRef: $o) { id visibility } }`, { id: moving.id, o: dstOrg.id });
     expect(code(moved)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
     expect((await db.agentMemoryItem.findUniqueOrThrow({ where: { id: link.id } })).deletedAt).toBeNull();
   });
@@ -577,7 +577,7 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
     const { agentId } = await agentWithApp(dst.id, 'group-dst-public');
     await db.agent.update({ where: { id: agentId }, data: { visibility: 'PUBLIC' } });
     await db.agentMemoryItem.create({ data: { id: generateId(), agentId, memoryId: group.id, role: 'read-write' } });
-    const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id } }`, { id: group.id, o: dst.id });
+    const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(ref: $id, orgRef: $o) { id } }`, { id: group.id, o: dst.id });
     expect(code(moved)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
     expect((await db.memory.findUniqueOrThrow({ where: { id: group.id } })).organizationId).toBe(src.id);
   });
@@ -597,7 +597,7 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
       } as never,
     });
 
-    const r = await gql(key.attacker!, `mutation($r: ID!, $m: String!) { updateAgent(ref: $r, visibility: PUBLIC, systemMemoryId: $m) { id } }`, { r: agentId, m: brain.id });
+    const r = await gql(key.attacker!, `mutation($r: ID!, $m: ID) { updateAgent(ref: $r, visibility: PUBLIC, systemMemoryRef: $m) { id } }`, { r: agentId, m: brain.id });
     expect(JSON.stringify(r.errors)).toMatch(/read-write knowledge/i);
 
     const after = await db.memory.findUniqueOrThrow({ where: { id: brain.id } });
@@ -655,7 +655,7 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
 
       await Promise.allSettled([
         gql(key.attacker!, ATTACH, { g: agentId, m: mem.ownKnowledge!.urn, r: 'read-write' }),
-        gql(key.attacker!, `mutation($r: ID!, $m: String!) { updateAgent(ref: $r, visibility: PUBLIC, systemMemoryId: $m) { id } }`, { r: agentId, m: brain.id }),
+        gql(key.attacker!, `mutation($r: ID!, $m: ID) { updateAgent(ref: $r, visibility: PUBLIC, systemMemoryRef: $m) { id } }`, { r: agentId, m: brain.id }),
       ]);
 
       const agentRow = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
@@ -709,7 +709,7 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
 
       await Promise.allSettled([
         gql(key.dual!, ATTACH, { g: agentId, m: mem[`race${i}`]!.urn, r: 'read' }),
-        gql(key.victim!, `mutation($id: ID!) { updateMemory(id: $id, visibility: ORGANIZATION) { id } }`, { id: pub.id }),
+        gql(key.victim!, `mutation($id: ID!) { updateMemory(ref: $id, visibility: ORGANIZATION) { id } }`, { id: pub.id }),
       ]);
 
       const finalVisibility = (await db.memory.findUniqueOrThrow({ where: { id: pub.id } })).visibility;
@@ -772,7 +772,7 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
       expect(attach.errors, JSON.stringify(attach.errors)).toBeUndefined();
 
       await Promise.allSettled([
-        gql(key.attacker!, `mutation($id: ID!) { updateMemory(id: $id, visibility: ORGANIZATION) { id } }`, { id: pub.id }),
+        gql(key.attacker!, `mutation($id: ID!) { updateMemory(ref: $id, visibility: ORGANIZATION) { id } }`, { id: pub.id }),
         gql(key.attacker!, `mutation($r: ID!) { updateAgent(ref: $r, visibility: PUBLIC) { id } }`, { r: agentId }),
       ]);
 
@@ -965,8 +965,8 @@ describe("#1349 — the caller must hold it in their OWN right (@codex, PR #1357
         data: { id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:shared-brain-${i}`, name: `sb-${i}`, class: 'knowledge', visibility: 'ORGANIZATION' } as never,
       });
       await Promise.allSettled([
-        gql(key.attacker!, `mutation($r: ID!, $m: String!) { updateAgent(ref: $r, systemMemoryId: $m) { id } }`, { r: a1, m: brain.id }),
-        gql(key.attacker!, `mutation($r: ID!, $m: String!) { updateAgent(ref: $r, systemMemoryId: $m) { id } }`, { r: a2, m: brain.id }),
+        gql(key.attacker!, `mutation($r: ID!, $m: ID) { updateAgent(ref: $r, systemMemoryRef: $m) { id } }`, { r: a1, m: brain.id }),
+        gql(key.attacker!, `mutation($r: ID!, $m: ID) { updateAgent(ref: $r, systemMemoryRef: $m) { id } }`, { r: a2, m: brain.id }),
       ]);
       const claimants = await db.agent.count({ where: { id: { in: [a1, a2] }, systemMemoryId: brain.id } });
       expect(claimants, `iteration ${i}: one memory claimed by two agents`).toBeLessThanOrEqual(1);
@@ -986,8 +986,8 @@ describe("#1349 — the caller must hold it in their OWN right (@codex, PR #1357
         data: { id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:brainB-${i}`, name: `bB-${i}`, class: 'knowledge', visibility: 'ORGANIZATION' } as never,
       });
       await Promise.allSettled([
-        gql(key.attacker!, `mutation($r: ID!, $m: String!) { updateAgent(ref: $r, systemMemoryId: $m) { id } }`, { r: agentId, m: a.id }),
-        gql(key.attacker!, `mutation($r: ID!, $m: String!) { updateAgent(ref: $r, systemMemoryId: $m) { id } }`, { r: agentId, m: b.id }),
+        gql(key.attacker!, `mutation($r: ID!, $m: ID) { updateAgent(ref: $r, systemMemoryRef: $m) { id } }`, { r: agentId, m: a.id }),
+        gql(key.attacker!, `mutation($r: ID!, $m: ID) { updateAgent(ref: $r, systemMemoryRef: $m) { id } }`, { r: agentId, m: b.id }),
       ]);
       const promoted = await db.memory.findMany({ where: { id: { in: [a.id, b.id] }, class: 'system' }, select: { id: true } });
       const agentRow = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
@@ -1264,7 +1264,7 @@ describe("#1357 — the same-App attach (Holger's ruling, 2026-09-26)", () => {
 });
 
 describe('#1357 round 2 — revocation and the same-App branch (@copilot, PR #1357)', () => {
-  const NARROW = `mutation($id: ID!, $v: MemoryVisibility!) { updateMemory(id: $id, visibility: $v) { id visibility } }`;
+  const NARROW = `mutation($id: ID!, $v: MemoryVisibility!) { updateMemory(ref: $id, visibility: $v) { id visibility } }`;
   const mkVictimMem = async (label: string, data: Record<string, unknown>) => {
     const m = await db.memory.create({
       data: { id: generateId(), organizationId: victimOrgId, urn: `victim-${suffix}:${label}`, name: label, class: 'knowledge', ...data } as never,
@@ -1354,7 +1354,7 @@ describe('#1357 round 3 (@codex / @copilot, PR #1357)', () => {
     expect(await db.agentMemoryItem.count({ where: { agentId } })).toBe(0);
   });
 
-  const TRANSFER = `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o, visibility: ORGANIZATION) { id } }`;
+  const TRANSFER = `mutation($id: ID!, $o: ID!) { updateMemory(ref: $id, orgRef: $o, visibility: ORGANIZATION) { id } }`;
   const mkTransferFixture = async (label: string) => {
     // The victim owns two orgs: the memory starts PUBLIC in victimOrg and moves to orgC.
     const orgC = await db.organization.create({ data: { id: generateId(), name: `c-${label}`, urn: `c-${label}-${suffix}` } });
@@ -1405,7 +1405,7 @@ describe('#1357 round 4 (@codex / @copilot, PR #1357)', () => {
     });
     // A pre-existing cross-tenant link — after the transfer it would be same-tenant and survive the sweep.
     await db.agentMemoryItem.create({ data: { id: generateId(), agentId: destPub.id, memoryId: m.id, role: 'read' } });
-    const r = await gql(key.victim!, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id } }`, { id: m.id, o: orgC.id });
+    const r = await gql(key.victim!, `mutation($id: ID!, $o: ID!) { updateMemory(ref: $id, orgRef: $o) { id } }`, { id: m.id, o: orgC.id });
     expect(code(r)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
     expect((await db.memory.findUniqueOrThrow({ where: { id: m.id } })).organizationId).toBe(victimOrgId);
   });
@@ -1519,7 +1519,7 @@ describe('#1357 round 4 — retired owner-change route', () => {
       return real(...a);
     }) as never);
     try {
-      const r = await gql(key.victim!, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id } }`, { id: m.id, o: orgC.id });
+      const r = await gql(key.victim!, `mutation($id: ID!, $o: ID!) { updateMemory(ref: $id, orgRef: $o) { id } }`, { id: m.id, o: orgC.id });
       expect(staged).toBe(false);
       expect(code(r)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
       expect((await db.memory.findUniqueOrThrow({ where: { id: m.id } })).organizationId).toBe(victimOrgId);
@@ -1621,7 +1621,7 @@ describe('#1357 round 6 (@copilot, PR #1357)', () => {
       db.memory.update({ where: { id: target.id }, data: { deletedAt: new Date() } }),
     );
     try {
-      const r = await gql(key.attacker!, `mutation($r: ID!, $m: String!) { updateAgent(ref: $r, systemMemoryId: $m) { id } }`, { r: agentId, m: target.id });
+      const r = await gql(key.attacker!, `mutation($r: ID!, $m: ID) { updateAgent(ref: $r, systemMemoryRef: $m) { id } }`, { r: agentId, m: target.id });
       expect(wasStaged()).toBe(true);
       expect(code(r)).toBe('MEMORY_NOT_FOUND');
       const after = await db.memory.findUniqueOrThrow({ where: { id: target.id } });
@@ -1722,7 +1722,7 @@ describe('#1357 round 6 (@copilot, PR #1357)', () => {
 });
 
 describe('#1357 round 7 — first-attach promotion and renames (@copilot, PR #1357)', () => {
-  const ATTACH_SYS = `mutation($r: ID!, $s: String!) { updateAgent(ref: $r, systemMemoryId: $s) { id } }`;
+  const ATTACH_SYS = `mutation($r: ID!, $s: ID) { updateAgent(ref: $r, systemMemoryRef: $s) { id } }`;
   const RENAME_NAME = `mutation($r: ID!, $n: String!) { updateAgent(ref: $r, name: $n) { name } }`;
   const fixture = async (label: string) => {
     const agent = await db.agent.create({ data: { id: generateId(), organizationId: attackerOrgId, name: 'Old', urn: `attacker-${suffix}:${label}` } as never });
@@ -1895,7 +1895,7 @@ describe('#1357 Claude review — licensed cross-org App knowledge survives a vi
   const CREATE = `mutation($app: ID!, $agent: ID!, $name: String!) {
     createMemoryInApp(appRef: $app, agentRef: $agent, memoryClass: knowledge, name: $name) { id urn }
   }`;
-  const TOUCH = `mutation($id: ID!) { updateMemory(id: $id, visibility: ORGANIZATION) { id } }`;
+  const TOUCH = `mutation($id: ID!) { updateMemory(ref: $id, visibility: ORGANIZATION) { id } }`;
 
   it('keeps the provisioned read link, revokes an unrelated foreign link, and permits an authorized restore', async () => {
     const { app, rawKey: appKey } = await createDbAppWithKey(db, 'claude-cross-org', attackerOrgId);
@@ -1939,7 +1939,7 @@ describe('#1357 Claude review — licensed cross-org App knowledge survives a vi
     // The old owner-change route must refuse this App-scoped memory. The
     // dedicated transfer path reports the App scope as a dependent blocker.
     const moved = await gql(bothKey,
-      `mutation($id: ID!, $org: ID!) { updateMemory(id: $id, organizationId: $org) { id } }`,
+      `mutation($id: ID!, $org: ID!) { updateMemory(ref: $id, orgRef: $org) { id } }`,
       { id: memoryId, org: victimOrgId });
     expect(code(moved)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
     expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).organizationId).toBe(attackerOrgId);

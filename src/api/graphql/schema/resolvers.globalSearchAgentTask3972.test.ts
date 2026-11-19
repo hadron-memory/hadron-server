@@ -148,7 +148,7 @@ describe('the candidate scope keeps every arm the gate admits, and the gate stil
     expect(ids(await search(userCtx(target), 'armzebra'))).toEqual(want);
 
     // The bound worker arm: the worker's own App only, whatever its holder could otherwise read.
-    const agent = await M.createAgent({}, { orgId: orgA.id, name: 'Agent' }, { db, userId: (await ownerOf(orgA)).id, roles: ['READER'] });
+    const agent = await M.createAgent({}, { orgRef: orgA.id, name: 'Agent' }, { db, userId: (await ownerOf(orgA)).id, roles: ['READER'] });
     const wApp = await mkOrgApp(orgA, 'wapp');
     await db.appMember.create({ data: { appId: wApp.id, userId: target.id, role: 'member' } });
     const tW = await mkTask(wApp.id, target.id, 'armzebra worker app');
@@ -158,7 +158,7 @@ describe('the candidate scope keeps every arm the gate admits, and the gate stil
   });
 
   it('the gate decides each candidate: a retired worker\'s App is its candidate, yet it contributes nothing to hits or total', async () => {
-    const agent = await M.createAgent({}, { orgId: orgA.id, name: 'Agent' }, { db, userId: (await ownerOf(orgA)).id, roles: ['READER'] });
+    const agent = await M.createAgent({}, { orgRef: orgA.id, name: 'Agent' }, { db, userId: (await ownerOf(orgA)).id, roles: ['READER'] });
     const wApp = await mkOrgApp(orgA, 'wapp');
     await db.appMember.create({ data: { appId: wApp.id, userId: target.id, role: 'member' } });
     await mkTask(wApp.id, target.id, 'gatezebra worker app');

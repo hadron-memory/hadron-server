@@ -34,7 +34,7 @@ let teamBase: A, team: A, engineer: A, coder: A;
 let coderWorker: { id: string };
 
 async function agent(name: string, opts: { orgId?: string; userId?: string; parent?: string } = {}): Promise<A> {
-  const a = await M.createAgent({}, { orgId: opts.orgId ?? org.id, name }, ctx(opts.userId ?? admin.id));
+  const a = await M.createAgent({}, { orgRef: opts.orgId ?? org.id, name }, ctx(opts.userId ?? admin.id));
   if (opts.parent) await db.agent.update({ where: { id: a.id }, data: { extendsAgentId: opts.parent } });
   const row = await db.agent.findUniqueOrThrow({ where: { id: a.id } });
   return { id: a.id, urn: row.urn, memoryId: row.systemMemoryId as string };

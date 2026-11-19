@@ -239,7 +239,7 @@ describe('the chat path', () => {
   let chatAgent: { id: string; systemMemoryId: string };
   const asMember = (extra: Partial<Context> = {}): Context => ({ db, userId: member.id, roles: ['READER'], ...extra } as Context);
   beforeEach(async () => {
-    const created = await M.createAgent({}, { orgId: org.id, name: 'chat-agent', visibility: 'ORGANIZATION' }, ctx(admin, ['ADMIN']));
+    const created = await M.createAgent({}, { orgRef: org.id, name: 'chat-agent', visibility: 'ORGANIZATION' }, ctx(admin, ['ADMIN']));
     chatAgent = { id: created.id, systemMemoryId: created.systemMemoryId! };
     for (const [loc, data, content] of [
       ['conversations', null, null],

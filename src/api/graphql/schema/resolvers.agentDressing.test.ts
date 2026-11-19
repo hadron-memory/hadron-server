@@ -84,7 +84,7 @@ describe('createAgent — prompt template and persona role (#1241)', () => {
     const agent = await M.createAgent(
       {},
       {
-        orgId: orgA.id,
+        orgRef: orgA.id,
         name: 'Backend Worker',
         personaRole: 'backend-engineer',
       },
@@ -99,13 +99,13 @@ describe('createAgent — prompt template and persona role (#1241)', () => {
   it('trims personaRole', async () => {
     const blank = await M.createAgent(
       {},
-      { orgId: orgA.id, name: 'Blank One', personaRole: ' ' },
+      { orgRef: orgA.id, name: 'Blank One', personaRole: ' ' },
       ctx(adminA.id),
     );
     expect(blank.personaRole).toBeNull();
     const trimmed = await M.createAgent(
       {},
-      { orgId: orgA.id, name: 'Trimmed One', personaRole: '  backend-engineer  ' },
+      { orgRef: orgA.id, name: 'Trimmed One', personaRole: '  backend-engineer  ' },
       ctx(adminA.id),
     );
     expect(trimmed.personaRole).toBe('backend-engineer');
@@ -114,7 +114,7 @@ describe('createAgent — prompt template and persona role (#1241)', () => {
 
 describe('updateAgent — prompt template and persona role (#1241)', () => {
   it('normalizes personaRole', async () => {
-    const agent = await M.createAgent({}, { orgId: orgA.id, name: 'Worker B' }, ctx(adminA.id));
+    const agent = await M.createAgent({}, { orgRef: orgA.id, name: 'Worker B' }, ctx(adminA.id));
 
     const set = await M.updateAgent(
       {},
@@ -143,11 +143,11 @@ describe('updateAgent — prompt template and persona role (#1241)', () => {
 
 describe('createAgent — tombstone URN reclaim (#974)', () => {
   it("reclaims a soft-deleted agent's URN by hard-deleting the tombstone", async () => {
-    const first = await M.createAgent({}, { orgId: orgA.id, name: 'Recast Agent' }, ctx(adminA.id));
+    const first = await M.createAgent({}, { orgRef: orgA.id, name: 'Recast Agent' }, ctx(adminA.id));
     // The REAL delete path (soft-deletes the agent AND its system memory —
     // the memory tombstone is reclaimed by the same create).
     await M.deleteAgent({}, { ref: first.id }, ctx(adminA.id));
-    const second = await M.createAgent({}, { orgId: orgA.id, name: 'Recast Agent' }, ctx(adminA.id));
+    const second = await M.createAgent({}, { orgRef: orgA.id, name: 'Recast Agent' }, ctx(adminA.id));
     expect(second.urn).toBe(first.urn);
     expect(second.id).not.toBe(first.id);
     // The tombstone is gone — reclaim hard-deletes it (name permanence lives
@@ -156,7 +156,7 @@ describe('createAgent — tombstone URN reclaim (#974)', () => {
   });
 
   it('refuses AGENT_URN_TAKEN when a Worker casting still references the tombstone', async () => {
-    const cast = await M.createAgent({}, { orgId: orgA.id, name: 'Cast Agent' }, ctx(adminA.id));
+    const cast = await M.createAgent({}, { orgRef: orgA.id, name: 'Cast Agent' }, ctx(adminA.id));
     const teamApp = await db.app.create({
       data: { id: generateId(), organizationId: orgA.id, name: 'Team App', urn: `${orgA.urn}:team` },
     });
@@ -167,7 +167,7 @@ describe('createAgent — tombstone URN reclaim (#974)', () => {
     await M.deleteAgent({}, { ref: cast.id }, ctx(adminA.id));
 
     await expectCode(
-      M.createAgent({}, { orgId: orgA.id, name: 'Cast Agent' }, ctx(adminA.id)),
+      M.createAgent({}, { orgRef: orgA.id, name: 'Cast Agent' }, ctx(adminA.id)),
       'AGENT_URN_TAKEN',
     );
     // The tombstone and its casting both survive the refused reclaim.
@@ -176,9 +176,9 @@ describe('createAgent — tombstone URN reclaim (#974)', () => {
   });
 
   it('a live agent at the URN still refuses AGENT_URN_TAKEN', async () => {
-    await M.createAgent({}, { orgId: orgA.id, name: 'Live Agent' }, ctx(adminA.id));
+    await M.createAgent({}, { orgRef: orgA.id, name: 'Live Agent' }, ctx(adminA.id));
     await expectCode(
-      M.createAgent({}, { orgId: orgA.id, name: 'Live Agent' }, ctx(adminA.id)),
+      M.createAgent({}, { orgRef: orgA.id, name: 'Live Agent' }, ctx(adminA.id)),
       'AGENT_URN_TAKEN',
     );
   });
@@ -210,7 +210,7 @@ describe('startSession — coding provenance + agentRef (#928)', () => {
   it('resolves agentRef (URN) to Session.agentId for an org member', async () => {
     const agent = await M.createAgent(
       {},
-      { orgId: orgA.id, name: 'Backend Worker' },
+      { orgRef: orgA.id, name: 'Backend Worker' },
       ctx(adminA.id),
     );
     const s = await M.startSession(
@@ -264,7 +264,7 @@ describe('startSession — coding provenance + agentRef (#928)', () => {
   it('refuses to attribute a session to a non-public agent the caller cannot read', async () => {
     const agent = await M.createAgent(
       {},
-      { orgId: orgA.id, name: 'Backend Worker' },
+      { orgRef: orgA.id, name: 'Backend Worker' },
       ctx(adminA.id),
     );
     await expect(

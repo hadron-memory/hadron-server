@@ -53,6 +53,12 @@ export interface GrantView {
   /** #3711 (V56): the revoker and the holder's departure, filled ONLY on a manager's read ({@link listGrantsForManager}); undefined elsewhere. */
   revokedBy?: string | null;
   holderDepartedAt?: Date | null;
+  /**
+   * #3709: the owning App's CURRENT stored bare urn (`<root>:<slug>`), selected from the
+   * scope's own join so the computed `hrn:grant` URN ({@link composeGrantUrn}) needs no
+   * second query. The URN itself is never stored on the row.
+   */
+  appUrn: string;
   /** Live right now, on the database clock (S1a's definition). */
   allows: boolean;
   /** #4173 (cor:acl:140:03): the lifecycle state, derived from the record by the one derivation ({@link grantStateSql}), never stored. Every audience reads it. */
@@ -60,7 +66,7 @@ export interface GrantView {
 }
 
 interface Row {
-  id: string; app_id: string; user_id: string | null; agent_id: string | null; worker_id: string | null; grantee_app_id: string | null;
+  id: string; app_id: string; app_urn: string; user_id: string | null; agent_id: string | null; worker_id: string | null; grantee_app_id: string | null;
   issuer_user_id: string | null; requested_by_user_id: string | null; requested_by_worker_id: string | null; requested_by_session_id: string | null;
   action: string; action_values: unknown; starts_at: Date | null; expires_at: Date | null; max_uses: number | null; use_count: number;
   reason: string; created_at: Date; activated_at: Date | null; verification_kind: string | null; verified_by: string | null;
@@ -79,7 +85,7 @@ function view(r: Row, manager = false): GrantView {
   const holder = holderOf(r);
   return {
     ...(manager ? { revokedBy: r.revoked_by, holderDepartedAt: r.holder_departed_at } : {}),
-    id: r.id, appId: r.app_id, action: r.action, values: r.action_values, holderKind: holder.kind, holderId: holder.id,
+    id: r.id, appId: r.app_id, appUrn: r.app_urn, action: r.action, values: r.action_values, holderKind: holder.kind, holderId: holder.id,
     issuerUserId: r.issuer_user_id, requestedByUserId: r.requested_by_user_id, requestedByWorkerId: r.requested_by_worker_id,
     requestedBySessionId: r.requested_by_session_id, startsAt: r.starts_at, expiresAt: r.expires_at, maxUses: r.max_uses,
     useCount: r.use_count, reason: r.reason, createdAt: r.created_at, activatedAt: r.activated_at, verificationKind: r.verification_kind,
@@ -100,7 +106,7 @@ function scope(reader: GrantReader, roleAgentId: string | null): Prisma.Sql {
            ${agentArm})`;
 }
 
-const COLUMNS = Prisma.sql`g.id, g.app_id, g.user_id, g.agent_id, g.worker_id, g.grantee_app_id, g.issuer_user_id, g.requested_by_user_id,
+const COLUMNS = Prisma.sql`g.id, g.app_id, a.urn AS app_urn, g.user_id, g.agent_id, g.worker_id, g.grantee_app_id, g.issuer_user_id, g.requested_by_user_id,
   g.requested_by_worker_id, g.requested_by_session_id, g.action, g.action_values, g.starts_at, g.expires_at, g.max_uses, g.use_count,
   g.reason, g.created_at, g.activated_at, g.verification_kind,
   -- #3649 slice D (cor:acl:140:08; Anne LOCAL P2-F1 on #3811): verified_by is the signer, a person; once their account is erased

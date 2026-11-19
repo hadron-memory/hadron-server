@@ -79,7 +79,7 @@ beforeEach(async () => {
   await db.orgMember.create({
     data: { id: generateId(), organizationId: org.id, userId: admin.id, role: 'ADMIN' },
   });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'Sysmem Tx Agent' }, { db, userId: admin.id, roles: ['READER'] });
+  agent = await M.createAgent({}, { orgRef: org.id, name: 'Sysmem Tx Agent' }, { db, userId: admin.id, roles: ['READER'] });
   // The fixture must really have a system memory, or these pins would pass
   // down a different path (a first-attach) than the one they describe.
   expect(agent.systemMemoryId).not.toBeNull();
@@ -93,7 +93,7 @@ describe('updateAgent: the in-transaction system-memory guard (#2953)', () => {
     const { ctx, staleReads } = staleCtx(admin.id);
     let err: GraphQLError | undefined;
     try {
-      await M.updateAgent({}, { ref: agent.id, name: 'Renamed', systemMemoryId: otherMemory.id }, ctx);
+      await M.updateAgent({}, { ref: agent.id, name: 'Renamed', systemMemoryRef: otherMemory.id }, ctx);
     } catch (e) {
       err = e as GraphQLError;
     }

@@ -21,6 +21,7 @@ import type { WorkerCheckStatus } from '../../../lib/workerCheckStatus.js';
 import { loadAppModelGroups, loadAppWorkerCheckStatuses, maySeeWorkerInternals } from './resolvers.worker.js';
 import { workerTerminalView, type StoredWorkerTerminal } from '../../../lib/workerTerminal.js';
 import { groupComposition } from '../../../lib/agentTasks/composition.js';
+import { TEAM_READ_TX_BACKSTOP_MARGIN_MS, TEAM_READ_TX_MAX_WAIT_MS, TEAM_READ_TX_TIMEOUT_MS, TeamReadBusyError, isPrismaBusyExhaustion } from '../../../lib/agentTasks/teamReadBudget.js';
 import { canSeeUserPersonalFieldsMany } from '../../../lib/auth/userVisibility.js';
 
 const toGqlWord = (s: string): string => s.toUpperCase().replace(/-/g, '_');
@@ -29,18 +30,57 @@ const toGqlWord = (s: string): string => s.toUpperCase().replace(/-/g, '_');
 export async function withRosterAppRead<T>(ctx: Context, appRef: string, project: (readCtx: Context, app: TaskApp) => Promise<T>): Promise<T> {
     if (isRunPrincipal(ctx) && !ctx.userId) return withReadableApp(ctx, appRef, project, true);
     // Admission, status and assignment projections share one read snapshot, including MCP callers.
-    return ctx.db.$transaction(async (tx) => {
-      // #4271: no JIT for this read. The roster's aggregates are priced in millions (the planner cannot see that a
-      // closed session's usage-event probe is skipped), so Postgres JIT-compiled each one: about 0.4 s of CPU per
-      // statement for a few ms of work, which a burst of rosters on a small box turned into the 20 s budget. SET
-      // LOCAL lasts only as long as this transaction and changes no answer.
-      await tx.$executeRawUnsafe('SET LOCAL jit = off');
-      const readCtx = withoutRequestCaches(ctx, tx);
-      const { app } = await resolveParticipatedApp(readCtx, appRef);
-      return project(readCtx, app);
-    // An explicit, bounded read budget avoids imposing Prisma's implicit 5s interactive-transaction default
-    // on the now-serialized bulk roster loaders. This does not change query/lock or test timeouts.
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 20_000 });
+    try {
+      return await ctx.db.$transaction(async (tx) => {
+        // #4271: no JIT for this read. The roster's aggregates are priced in millions (the planner cannot see that a
+        // closed session's usage-event probe is skipped), so Postgres JIT-compiled each one: about 0.4 s of CPU per
+        // statement for a few ms of work, which a burst of rosters on a small box turned into the 20 s budget. SET
+        // LOCAL lasts only as long as this transaction and changes no answer.
+        await tx.$executeRawUnsafe('SET LOCAL jit = off');
+        // #4476: the budget must bite ON the statement, not after it. #4455's transaction timeout
+        // only lands once the running statement returns — prod's roster statements ran 20–175 s
+        // (p50 66 s, the prod journal at #118308) inside the 5 s budget, holding a pooled
+        // connection long after every client had given up. statement_timeout caps any ONE
+        // statement at the budget, cancelling it non-fatally (57014, the pooled connection is
+        // kept). transaction_timeout is the whole-read BACKSTOP at the budget plus a margin; it
+        // bounds what a per-statement cap cannot — the read as a whole: a statement that STARTS
+        // near the expiry could otherwise run a full budget of its own past it (worst case ~2x;
+        // BLIND review P2-1 on #4482). The backstop's own cancel is FATAL (25P04) and kills the
+        // pooled connection, so it deliberately sits AFTER the statement cancel: a read whose
+        // runaway statement starts early enough is cancelled non-fatally first, and the FATAL is
+        // spent only on what the per-statement cap cannot reach in time (#4482 BLIND P2 A /
+        // Peter's fold). Idle time BETWEEN statements stays bounded by Prisma's own interactive
+        // timer at the same budget (#4455, P2028) before the backstop's margin expires. Both GUCs
+        // are transaction-local (set_config with is_local), so neither reaches the pooled session,
+        // and the catch below classifies both cancel shapes as the same typed retryable refusal.
+        // transaction_timeout exists only on PG17+ (the platform image). CI's test and migration
+        // lanes run pgvector:pg16, where set_config on it errors (42704) on EVERY roster read
+        // (LOCAL review P2 on #4482) — so the CASE sets it only when the engine has the GUC at all
+        // (current_setting with missing_ok is NULL on engines without it). On PG16 the statement
+        // cap still holds (the GUC exists everywhere) but there is no backstop: the whole-read
+        // bound falls to Prisma's interactive timer alone, and a statement that starts near the
+        // expiry can still outrun it — worst case ~2x budget there. Fail-soft, by design (prod is
+        // PG17, Hugo's probe at #118604).
+        await tx.$queryRaw`SELECT set_config('statement_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS)}, true) AS statement_timeout,
+                           CASE WHEN current_setting('transaction_timeout', true) IS NOT NULL
+                                THEN set_config('transaction_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS + TEAM_READ_TX_BACKSTOP_MARGIN_MS)}, true) END AS transaction_timeout`;
+        const readCtx = withoutRequestCaches(ctx, tx);
+        const { app } = await resolveParticipatedApp(readCtx, appRef);
+        return project(readCtx, app);
+      // #4455: one snapshot still, but bounded — a 20 s interactive transaction was the P2028 incident's steady
+      // holder (#4380), holding one of prod's ~9 pool connections while its serialized statements ran. 5 s of
+      // transaction plus an explicit 2 s pool wait (see lib/agentTasks/teamReadBudget.ts) and the budget's expiry
+      // surfaces as the typed, retryable TEAM_READ_BUSY refusal instead of a raw driver fault. This does not change
+      // query/lock or test timeouts, and the read semantics are unchanged (cor:agt:050:22).
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: TEAM_READ_TX_TIMEOUT_MS, maxWait: TEAM_READ_TX_MAX_WAIT_MS });
+    } catch (error) {
+      // #4455: the original driver error rides along on .cause (never crossed to the client;
+      // .originalError would unwrap the refusal back to the foreign Prisma error) so the
+      // tx-timeout / maxWait / pool-starvation arms stay distinguishable after the typed
+      // conversion; the non-busy error rethrows untouched.
+      if (isPrismaBusyExhaustion(error)) throw new TeamReadBusyError(error);
+      throw error;
+    }
 }
 
 async function readTeamRoster(ctx: Context, appRef: string) {
