@@ -8,7 +8,7 @@
 import { randomUUID } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import { respondSessionSuperseded } from './sessionSuperseded.js';
-import { AUTH_STORE_BUSY_MESSAGE, isAuthStoreBusyError } from './authStoreBusy.js';
+import { isAuthStoreBusyError } from './authStoreBusy.js';
 import { currentRequestId } from './requestContext.js';
 
 export const INTERNAL_ERROR_CODE = 'INTERNAL_SERVER_ERROR';
@@ -72,16 +72,26 @@ export function respondOAuthServerError(res: Response, description: string, erro
  * either: the fault is logged under the request id with the driver error on `.cause` reaching
  * only that log, exactly as respondInternalFault does, so "countable evidence" holds on this
  * surface too.
+ *
+ * #4504, on the log/headersSent order (Bradley's "could log twice"): the log fires BEFORE the
+ * headersSent check on purpose — a request whose headers already went out is precisely the one
+ * where the log is the ONLY evidence left, so it must not be skipped. The double-log cannot
+ * happen in this wiring: when headersSent makes this return false, internalFaultErrorHandler's
+ * own headersSent guard delegates via next(err) instead of falling through to
+ * respondInternalFault. That coupling is load-bearing — reorder those checks and the fault logs
+ * twice. Pinned in internalFaultHttp1789.test.ts (exactly one internal_fault line on the
+ * headersSent path).
  */
 export function respondAuthStoreBusy(res: Response, error: unknown): boolean {
   if (!isAuthStoreBusyError(error)) return false;
   const requestId = typeof res.locals?.requestId === 'string' ? res.locals.requestId : faultRequestId();
   logInternalFault('http', 'auth-store-busy', requestId, error);
   if (res.headersSent) return false; // Delegate to Express's final handler, as #3818 does.
-  // `reason` is 'POOL_WAIT' by construction — isAuthStoreBusyError just proved the class
-  // (BLIND P3: no redundant re-validation of what the type already states).
+  // The class fixes the prose per reason (#4504: POOL_WAIT and STORE_UNREACHABLE each carry
+  // their own), and `reason` is one of the two by construction — isAuthStoreBusyError just
+  // proved the class (BLIND P3: no redundant re-validation of what the type already states).
   res.status(503).json({
-    error: AUTH_STORE_BUSY_MESSAGE,
+    error: error.message,
     code: 'AUTH_STORE_BUSY',
     retryable: true,
     reason: error.extensions.reason,

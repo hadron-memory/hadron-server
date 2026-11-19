@@ -10,7 +10,7 @@ import type { AddressInfo } from 'node:net';
 import { Prisma } from '../generated/prisma/index.js';
 import { assignRequestId } from './requestContext.js';
 import { internalFaultErrorHandler, respondInternalFault } from './internalFault.js';
-import { AUTH_STORE_BUSY_MESSAGE, AuthStoreBusyError } from './authStoreBusy.js';
+import { AUTH_STORE_BUSY_MESSAGE, AUTH_STORE_UNREACHABLE_MESSAGE, AuthStoreBusyError } from './authStoreBusy.js';
 
 const secret = 'connect ECONNREFUSED 10.0.0.7:5432 password=hunter2';
 let server: Server;
@@ -26,6 +26,29 @@ beforeAll(async () => {
   // #4471: the auth middleware's typed store-busy fault forwarded via next(err), as the
   // /graphql/schema, /reload and /sessions/:id/outcome routes forward it.
   app.get('/auth-store-busy', (_req, _res, next) => {
+    next(new AuthStoreBusyError(
+      new Prisma.PrismaClientKnownRequestError('Timed out fetching a new connection from the pool.', {
+        code: 'P2024',
+        clientVersion: '6.19.2',
+      } as never),
+    ));
+  });
+  // #4504: the unreachable arm, same forwarding shape.
+  app.get('/auth-store-unreachable', (_req, _res, next) => {
+    next(new AuthStoreBusyError(
+      new Prisma.PrismaClientInitializationError(
+        "Can't reach database server at `127.0.0.1:5432` after 1 attempts",
+        '6.19.2',
+        'P1001',
+      ),
+      'STORE_UNREACHABLE',
+    ));
+  });
+  // #4504 (Bradley P3, the double-log check): headers already gone out when the fault
+  // surfaces — the carve-out must log ONCE and delegate, never answer, never log again.
+  app.get('/auth-store-busy-headers-sent', (_req, res, next) => {
+    res.status(200);
+    res.write('partial ');
     next(new AuthStoreBusyError(
       new Prisma.PrismaClientKnownRequestError('Timed out fetching a new connection from the pool.', {
         code: 'P2024',
@@ -88,6 +111,47 @@ describe('plain HTTP internal faults (#1789)', () => {
     // is not a blind spot, so "countable evidence" holds on this surface too.
     expect(log).toHaveBeenCalledWith('[http] internal_fault', expect.objectContaining({ requestId: body.requestId, site: 'auth-store-busy' }));
     expect(text).not.toMatch(/P2024|Timed out fetching|INTERNAL_SERVER_ERROR/);
+    // #4504 (Bradley P3): exactly one fault line — the carve-out answers this request alone.
+    expect(log).toHaveBeenCalledTimes(1);
+    // #4504 (Bradley P3, the .cause half): the logged error is the typed fault with the
+    // driver error on `.cause` — an operator reading the log sees the P2024 itself.
+    const logged = log.mock.calls[0][1] as { error: AuthStoreBusyError };
+    expect(logged.error).toBeInstanceOf(AuthStoreBusyError);
+    expect(logged.error.cause).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    expect((logged.error.cause as Prisma.PrismaClientKnownRequestError).code).toBe('P2024');
+    log.mockRestore();
+  });
+
+  it('#4504: the unreachable arm keeps the same 503 carve-out with its sibling prose — and its P1001 reaches the log the same way', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await fetch(base + '/auth-store-unreachable');
+    const text = await res.text();
+    const body = JSON.parse(text);
+    expect(res.status).toBe(503);
+    expect(body.error).toBe(AUTH_STORE_UNREACHABLE_MESSAGE);
+    expect(body.code).toBe('AUTH_STORE_BUSY');
+    expect(body.retryable).toBe(true);
+    expect(body.reason).toBe('STORE_UNREACHABLE');
+    expect(body.requestId).toBe(res.headers.get('x-request-id'));
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith('[http] internal_fault', expect.objectContaining({ requestId: body.requestId, site: 'auth-store-busy' }));
+    // The driver error (P1001 with its host:port) reaches ONLY the log.
+    const logged = log.mock.calls[0][1] as { error: AuthStoreBusyError };
+    expect(logged.error.cause).toBeInstanceOf(Prisma.PrismaClientInitializationError);
+    expect((logged.error.cause as Prisma.PrismaClientInitializationError).errorCode).toBe('P1001');
+    expect(text).not.toMatch(/P1001|Can't reach|127\.0\.0\.1|INTERNAL_SERVER_ERROR/);
+    log.mockRestore();
+  });
+
+  it('#4504 (Bradley P3, double-log check): headers already sent → the fault logs EXACTLY once and the handler delegates, never answers', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // With headers gone out, Express's final handler closes the connection; the fetch may
+    // resolve with the partial body or reject on the truncated socket — either is the
+    // delegation we assert. The pin is the log count.
+    await fetch(base + '/auth-store-busy-headers-sent').catch(() => undefined);
+    const faultCalls = log.mock.calls.filter((c) => String(c[0]).includes('internal_fault'));
+    expect(faultCalls).toHaveLength(1);
+    expect(faultCalls[0][1]).toEqual(expect.objectContaining({ site: 'auth-store-busy' }));
     log.mockRestore();
   });
 });
