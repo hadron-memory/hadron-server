@@ -21,7 +21,7 @@ describe('prisma/grant-invariants.sql parity', () => {
     const sql = readFileSync(new URL('../../../prisma/grant-invariants.sql', import.meta.url), 'utf8');
     // #3998: the use-count-bound migration carries the full canonical guard (everything #4173's withdrawn-state migration carried, plus
     // the max_uses bound on use_count), after it.
-    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d === '20261118100000_grant_use_count_bound');
+    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d === '20261118170000_grant_use_count_bound');
     expect(dir).toBeTruthy();
     expect(readFileSync(new URL(`../../../prisma/migrations/${dir}/migration.sql`, import.meta.url), 'utf8').endsWith(sql)).toBe(true);
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir grant-invariants.sql');
