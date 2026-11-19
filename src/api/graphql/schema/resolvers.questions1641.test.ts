@@ -529,6 +529,8 @@ describe('withdrawQuestion (§7)', () => {
     await writeAnswerForTest(d.row.id, { kind: 'retraction', by: holger.id, at: '2026-10-06T22:00:00.000Z' });
     expect(D.state(await Q.question(null, { ref: d.row.id }, as()), {}, as())).toBe('OPEN');
     expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: 1 }, as(writer.id)))).toBe('QUESTION_NOT_DECIDER');
+    // The amend gate reads the same rule: after a retraction the asker still cannot amend.
+    expect(await codeOf(M.amendQuestion(null, { ref: d.row.id, input: { title: 'Ship it?' }, expectedRevision: 1, reason: 'r' }, as(writer.id)))).toBe('QUESTION_NOT_DECIDER');
   });
 });
 
