@@ -1666,6 +1666,30 @@
       "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
+      "name": "agents_urn_migration_pending_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "apps_urn_migration_pending_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "assets_staged_uploaded_at_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "assets_uploaded_by_staged_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
       "name": "coordinator_cadence_episodes_app_id_ended_at_idx",
       "kind": "index",
       "file": "coordinator-cadence-invariants.sql",
@@ -1705,6 +1729,12 @@
       "name": "host_sweep_runs_unposted_idx",
       "kind": "index",
       "file": "host-sweep-invariants.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "memories_urn_migration_pending_idx",
+      "kind": "index",
+      "file": "post-push.sql",
       "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
@@ -2809,6 +2839,12 @@
       "name": "app_runs_served_prompt_owner_uniq",
       "kind": "unique-index",
       "file": "served-prompt-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "apps_urn_active_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
       "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
