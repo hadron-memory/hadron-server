@@ -40,6 +40,7 @@ import { sweepSessionEndRequests } from '../lib/hostOperations/sessionEnd.js';
 import { sweepUnreportedHostOperations } from '../lib/hostOperations/settle.js';
 import { anchorNow } from '../lib/stopSignals/state.js';
 import { sweepContextResets } from '../lib/contextReset/contextReset.js';
+import { recordStallPass } from '../lib/agentTasks/stallGap.js';
 import { evaluateDarkWorkers } from '../lib/agentTasks/darkWorker.js';
 import { evaluateCoordinatorCadence } from '../lib/agentTasks/coordinatorCadence.js';
 import { evaluateStaleSweeps, postPendingSweepSummaries } from '../lib/agentTasks/sweepRuns.js';
@@ -123,6 +124,23 @@ export async function taskStallTick(db: PrismaClient, now = new Date()): Promise
   return result;
 }
 
+/**
+ * #3775 A (cor:agt:050:32): the production pass. Records that a pass starts at `now` (a gap of more than 5 minutes since
+ * the previous recorded pass joins its end to the silence floors) and then runs {@link taskStallTick}. A failure to
+ * record SKIPS this pass (BLIND P2, #4452): running the tick un-floored after a real gap would raise alarms that count the
+ * downtime as silence, and they persist. The recorded pass time does not move, so the next pass records the same gap and
+ * floors it; the cost is one deferred minute. `taskStallTick` itself keeps no gap bookkeeping, so tests of the other stall rules tick any clock they like.
+ */
+export async function taskStallPass(db: PrismaClient, now = new Date()): Promise<TaskStallTickResult> {
+  try {
+    await recordStallPass(db, now);
+  } catch (err) {
+    console.error('[task-stall] recording the pass failed; skipping this pass:', err);
+    return { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0, darkRaised: 0, cadenceRaised: 0, staleSweepRaised: 0, sweepSummariesPosted: 0 };
+  }
+  return taskStallTick(db, now);
+}
+
 /** Start the periodic loop (default 60s). Returns the interval handle. */
 export function startTaskStallEvaluatorLoop(db: PrismaClient, opts: { intervalMs?: number } = {}): NodeJS.Timeout {
   const intervalMs = opts.intervalMs ?? 60_000;
@@ -131,7 +149,7 @@ export function startTaskStallEvaluatorLoop(db: PrismaClient, opts: { intervalMs
     // A pass slower than the interval is skipped rather than stacked.
     if (running) return;
     running = true;
-    taskStallTick(db)
+    taskStallPass(db)
       .catch((err) => console.error('[task-stall] tick error:', err))
       .finally(() => {
         running = false;

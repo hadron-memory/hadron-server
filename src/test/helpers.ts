@@ -158,6 +158,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // afterwards. That also means nothing below cascades it away, so it has to be
   // cleared explicitly or aliases leak between tests.
   await db.urnAlias.deleteMany();
+  // #3775 A — the stall evaluator's single bookkeeping row is FK-free, so nothing cascades it away.
+  await db.stallEvaluatorState.deleteMany();
   // #1667 — the public-link audit is FK-free (it outlives the asset), so nothing cascades it away.
   await db.assetPublicLinkAudit.deleteMany();
   // 036-ai-service-config: configs FK every owner level (incl.
