@@ -1,0 +1,131 @@
+/** #3998 S3: revealSecret — a bound worker under a live secret.reveal grant reads the value; exactly one use per read, every other shape the same refusal. */
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
+import { upsertPlatformActions } from '../../../lib/grants/actions.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { runAsActor } from '../../../lib/requestActor.js';
+import { resolvers, type Context } from './resolvers.js';
+
+let ownerId: string; let appId: string; let secretId: string; let workerId: string; let otherWorkerId: string; let clientId: string; let grantId: string;
+const ctxOf = (userId: string): Context => ({ db, userId, roles: [] } as unknown as Context);
+const asWorker = (id: string | null, p: () => Promise<unknown>) => runAsActor({ workerId: id, agentId: null }, p);
+const reveal = (id: string | null, cid = clientId): Promise<any> => asWorker(id, () => resolvers.Mutation.revealSecret({}, { clientId: cid }, ctxOf(ownerId)));
+const code = (p: Promise<unknown>) => p.then(() => 'OK', (e: { extensions?: { code?: string } }) => e.extensions?.code ?? String(e));
+
+async function activate(id: string) {
+  await db.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+    await tx.$executeRawUnsafe(`UPDATE grants SET activated_at = (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 minute', verification_kind = 'passkey', verified_by = $2, issuer_user_id = $2 WHERE id = $1`, id, ownerId);
+    await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+  });
+}
+
+beforeEach(async () => {
+  process.env.HADRON_ENCRYPTION_KEY = '11'.repeat(32);
+  process.env.SECRET_ROOT_KEY = '22'.repeat(32);
+  await cleanDb(db); await upsertPlatformActions(db);
+  ownerId = (await db.user.create({ data: { email: `${generateId()}@s3.test` } })).id;
+  const app = await db.app.create({ data: { name: 'S3r', ownerUserId: ownerId, urn: `${generateId().toLowerCase()}:rv` } });
+  appId = app.id;
+  const agent = await db.agent.create({ data: { ownerUserId: ownerId, name: 'a', urn: `${generateId().toLowerCase()}:ag` } as never });
+  const mk = async (slug: string) => (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId: agent.id, name: slug, slug } })).id;
+  workerId = await mk('w1'); otherWorkerId = await mk('w2');
+  secretId = (await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'tok', kind: 'generic', value: 'hunter2' }, ctxOf(ownerId))).id;
+  const r: any = await resolvers.Mutation.issueSecretReadClient({}, { input: { secretRef: secretId, holderKind: 'WORKER', holderRef: workerId, autoDelete: false, maxReads: 2, reason: 'need it' } }, ctxOf(ownerId));
+  clientId = r.clientId; grantId = r.grantId;
+});
+
+describe('#3998 revealSecret', () => {
+  it('judges the stored issuer, not the caller: a non-manager driver reads under a manager-issued client, and a demoted issuer stops it', async () => {
+    await activate(grantId);
+    const driver = (await db.user.create({ data: { email: `${generateId()}@s3.test` } })).id;
+    const asDriver = () => asWorker(workerId, () => resolvers.Mutation.revealSecret({}, { clientId }, ctxOf(driver)));
+    expect(await code(asDriver())).toBe('OK');
+    // The issuer (the App's owner) is no longer the owner: the driver's own standing never substitutes.
+    await db.app.update({ where: { id: appId }, data: { ownerUserId: driver } });
+    expect(await code(asDriver())).toBe('SECRET_READ_CLIENT_ISSUER_GONE');
+  });
+
+  it('a failed audit write on a refused read keeps the uniform refusal and is logged, not swallowed (Dara P2)', async () => {
+    const create = vi.spyOn(db.secretEvent, 'create').mockRejectedValueOnce(Object.assign(new Error('audit down SENTINEL-hunter2'), { code: 'P2002', meta: { target: 'SENTINEL-hunter2' } }));
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      expect(await code(reveal(otherWorkerId))).toBe('SECRET_READ_CLIENT_NOT_FOUND');
+      expect(create).toHaveBeenCalledTimes(1);
+      const call = log.mock.calls.find((c) => c[0] === '[revealSecret] audit write failed');
+      expect(call).toBeDefined();
+      // Only the allowlisted code is logged: neither the message nor the metadata of the thrown error reaches the log (Dara P2, head 3).
+      expect(call?.[1]).toMatchObject({ errorCode: 'P2002' });
+      expect(JSON.stringify(call, (_k, v) => (v instanceof Error ? { m: v.message, ...v } : v))).not.toContain('SENTINEL');
+    } finally { create.mockRestore(); log.mockRestore(); }
+  });
+
+  it('a pending grant reveals nothing', async () => {
+    expect(await code(reveal(workerId))).toBe('SECRET_READ_CLIENT_PENDING');
+    // The holder's refused read is recorded, and so is a wrong holder's on a REAL client (cor:sec:060:02, cor:sec:010:05).
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'REVEAL', outcome: 'SECRET_READ_CLIENT_PENDING' } })).toBe(1);
+    expect(await code(reveal(otherWorkerId))).toBe('SECRET_READ_CLIENT_NOT_FOUND');
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'REVEAL', outcome: 'SECRET_READ_CLIENT_NOT_FOUND' } })).toBe(1);
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'REVEAL' } })).toBe(2);
+    // An unknown client id leaves none: it names no secret to record on.
+    await code(reveal(workerId, 'nope'));
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'REVEAL' } })).toBe(2);
+  });
+
+  it('the bound holder reads: one use and one USE event each, the budget ends it SPENT', async () => {
+    await activate(grantId);
+    const a = await reveal(workerId);
+    expect(a).toMatchObject({ secretName: 'tok', value: JSON.stringify('hunter2'), readsLeft: 1 });
+    await reveal(workerId);
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(2);
+    expect(await db.grantEvent.count({ where: { grantId, action: 'USE' } })).toBe(2);
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'REVEAL' } })).toBe(2);
+    expect(await code(reveal(workerId))).toBe('SECRET_READ_CLIENT_SPENT');
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(2);
+  });
+
+  it('a person, another worker and an unknown id are the one uniform refusal', async () => {
+    await activate(grantId);
+    const person = await code(reveal(null));
+    expect(person).toBe('SECRET_READ_CLIENT_NOT_FOUND');
+    expect(await code(reveal(otherWorkerId))).toBe(person);
+    expect(await code(reveal(workerId, 'nope'))).toBe(person);
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
+  });
+
+  it('a revoked grant refuses REVOKED and spends nothing', async () => {
+    await activate(grantId);
+    await db.$executeRawUnsafe(`UPDATE grants SET revoked_at = (clock_timestamp() AT TIME ZONE 'UTC'), revoked_by = $2 WHERE id = $1`, grantId, ownerId);
+    expect(await code(reveal(workerId))).toBe('SECRET_READ_CLIENT_REVOKED');
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
+  });
+
+  it('a newer version by someone else supersedes a writer-issued client; a deleted secret ends it', async () => {
+    await activate(grantId);
+    await resolvers.Mutation.deleteSecret({}, { ref: secretId }, ctxOf(ownerId));
+    expect(await code(reveal(workerId))).toBe('SECRET_DELETED');
+    expect((await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } })).endReason).toBe('SECRET_DELETED');
+  });
+
+  it('mySecretReadClients: the issuer and the bound holder see the client; an outsider and an impersonation see none', async () => {
+    const mine: any = await resolvers.Query.mySecretReadClients({}, {}, ctxOf(ownerId));
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ clientId, grantId, secretName: 'tok', selfIssued: false });
+    const held: any = await asWorker(workerId, () => resolvers.Query.mySecretReadClients({}, {}, ctxOf(ownerId)));
+    expect(held).toHaveLength(1);
+    const outsider = (await db.user.create({ data: { email: `${generateId()}@s3.test` } })).id;
+    expect(await resolvers.Query.mySecretReadClients({}, {}, ctxOf(outsider))).toEqual([]);
+    expect(await resolvers.Query.mySecretReadClients({}, {}, { ...ctxOf(ownerId), impersonation: { by: 'x' } } as never)).toEqual([]);
+  });
+
+  it('an erased issuer (the grant link nulled) stops the reads; a merged issuer follows the grant link', async () => {
+    await activate(grantId);
+    await db.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+    await db.$executeRawUnsafe('UPDATE grants SET issuer_user_id = NULL WHERE id = $1', grantId);
+    await db.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+    expect(await code(reveal(workerId))).toBe('SECRET_READ_CLIENT_ISSUER_GONE');
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
+  });
+});

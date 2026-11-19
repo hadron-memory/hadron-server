@@ -6439,6 +6439,46 @@ export const typeDefs = `#graphql
   secret keeps its values as versions: every store adds one
   (hrn:node:hadronmemory.com:specs:cor:sec:010:03).
   """
+  input IssueSecretReadClientInput {
+    "The App secret, by id or URN."
+    secretRef: ID!
+    "WORKER: a live worker of the App (holderRef is its id). USER: the issuer themself (holderRef omitted)."
+    holderKind: GrantHolderKind!
+    holderRef: ID
+    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refused (SECRET_AUTO_DELETE_NOT_AVAILABLE) until the deletion is built (#4001)."
+    autoDelete: Boolean! = false
+    startsAt: DateTime
+    expiresAt: DateTime
+    maxReads: Int
+    reason: String!
+  }
+
+  type SecretReadClientIssued {
+    clientId: ID!
+    grantId: ID!
+    secretName: String!
+    selfIssued: Boolean!
+  }
+
+  type SecretReadClient {
+    clientId: ID!
+    grantId: ID!
+    secretId: ID!
+    secretName: String!
+    selfIssued: Boolean!
+    "SECRET_DELETED | PROTECTED once the client has ended, else null."
+    endReason: String
+    createdAt: DateTime!
+  }
+
+  type SecretRevealed {
+    secretName: String!
+    "The current value as JSON text."
+    value: String!
+    "Reads left on the grant, or null when it has no budget."
+    readsLeft: Int
+  }
+
   type Secret {
     id: ID!
     "Owner scope: user | org | app."
@@ -11651,6 +11691,11 @@ export const typeDefs = `#graphql
     """
     myGrants(limit: Int, offset: Int): GrantsPage!
     """
+    The read clients the caller issued or holds (hrn:node:hadronmemory.com:specs:cor:sec:060): a client id is shown only to its issuer and
+    its holder. Empty for an App key, a run and an impersonation. Revoke one with revokeGrant on its grantId.
+    """
+    mySecretReadClients(limit: Int, offset: Int): [SecretReadClient!]!
+    """
     #3711 (hrn:node:hadronmemory.com:specs:cor:acl:140:05, ruling 0253 item 4): every grant of one App, in every state (pending, active, expired, spent, revoked, holder departed), newest first, for whoever manages the App as a person. It shows the whole record, including who revoked a grant, when its holder went and each signature's signer and passkey label, never a credential id or public key. Anyone else (a member who does not manage, an outsider, a worker session, an App key, a run, an impersonated session) and an unknown App get an empty page, never an error. limit 0 returns the count only.
     """
     appGrants(appRef: String!, limit: Int, offset: Int): GrantsPage!
@@ -14080,6 +14125,23 @@ export const typeDefs = `#graphql
     deleteSecret(ref: ID!): Boolean!
 
     """
+    Issue a read client for an App secret (hrn:node:hadronmemory.com:specs:cor:sec:060:01): one pending "secret.reveal" grant and
+    its client, made together. A person only (never a worker session, a run, an impersonated session or an App key), who manages the
+    App or wrote the secret's current version. The grant waits for the issuer's passkey signature; the holder is a live worker of the
+    App, or the issuer themself. The client id is returned here, to the issuer, and to the holder; it never reads on its own.
+    """
+    issueSecretReadClient(input: IssueSecretReadClientInput!): SecretReadClientIssued!
+
+    """
+    Reveal an App secret's value through a read client (hrn:node:hadronmemory.com:specs:cor:sec:060), spending exactly one use. Only the
+    worker session the client's grant names; a person, an App key, a run and an impersonation get SECRET_READ_CLIENT_NOT_FOUND, as does
+    an unknown client id or another holder's; a wrong holder's read of a real client is recorded on the secret, an unknown id's is not. The
+    use and the audit event commit before the value is returned. One operation may select this field once: two or more are all refused with
+    SECRET_REVEAL_ONE_PER_OPERATION before any reads (send each as its own operation).
+    """
+    revealSecret(clientId: ID!): SecretRevealed!
+
+    """
     Register a Home Assistant instance (org ADMIN/OWNER). orgRef accepts
     ID or URN (cor:api:140). accessToken is an HA long-lived access token
     — encrypted at rest, write-only, never returned. Registration grants
@@ -16130,6 +16192,15 @@ export const typeDefs = `#graphql
     summary: String
     "A URL or a node URN."
     evidence: String
+    "#4414: the role tasks (runnable instruction nodes) the assignee followed, in the order given, each with its URN and the revision it had at finish (hrn:node:hadronmemory.com:specs:cor:agt:050:30). Null when the finish gave none. Not the previous task."
+    workedFromRoleTaskRefs: [AgentTaskRoleTaskRef!]
+  }
+
+  "#4414: one role task an assignee followed, kept as it was when the task finished."
+  type AgentTaskRoleTaskRef {
+    nodeId: ID!
+    urn: String!
+    revision: Int!
   }
 
   """
@@ -16168,6 +16239,8 @@ export const typeDefs = `#graphql
     evidence: String
     "#2662: optional immutable findings, at most 100 (hrn:node:hadronmemory.com:specs:cor:agt:050:30); omitted/null preserves legacy finish."
     findings: [AgentTaskFindingInput!]
+    "#4414: optional role tasks followed: node ids or URNs, at most 10, each a live runnable node you may read, none twice (hrn:node:hadronmemory.com:specs:cor:agt:050:30). Anything else refuses TASK_ROLE_TASK_REFS_INVALID, one answer for a node you may not read and one that does not exist, and the task stays started. Omitted/null: none, as before."
+    workedFromRoleTaskRefs: [ID!]
   }
 
   "#2068 (hrn:node:hadronmemory.com:specs:cor:agt:080:01, :10) — why a ticker fires. A closed set; several fire it when any one holds."

@@ -209,10 +209,10 @@ export async function approveNodeInTransaction(
   // the per-node predicate that lands with answering (slice S2); until then no
   // path approves one, so a memory writer cannot pre-stamp a question.
   if (role === QUESTION_LOG_ROLE) {
-    throw new NodeApprovalRefusal('QUESTION_LOG_NOT_APPROVABLE', 'A decision log holds settings, not a decision; it is never approved.');
+    throw new NodeApprovalRefusal('QUESTION_LOG_NOT_APPROVABLE', 'A question log holds settings, not a question; it is never approved.');
   }
   if (isQuestionFamilyRole(role)) {
-    throw new NodeApprovalRefusal('QUESTION_NOT_APPROVABLE', 'A decision is approved only by one of its deciders, which is not available yet.');
+    throw new NodeApprovalRefusal('QUESTION_NOT_APPROVABLE', 'A question is approved only by one of its deciders, which is not available yet.');
   }
   // #1607 (cor:dmo:110:06) — a comment is never approved. Refused before the
   // revision check, so the answer does not depend on which revision was named.
