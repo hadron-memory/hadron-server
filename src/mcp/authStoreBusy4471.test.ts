@@ -26,7 +26,7 @@ import { resolveCredentialContextWithStatus } from '../middleware/auth.js';
 
 const p2024 = () => new Prisma.PrismaClientKnownRequestError(
   'Timed out fetching a new connection from the pool.',
-  { code: 'P2024', clientVersion: '6.19.2' } as never,
+  { code: 'P2024', clientVersion: '6.19.2' },
 );
 
 const fakeReq = () => ({ headers: { authorization: 'Bearer hk_user_0000000000000000000000000000000000000000000000000000000000000000' } }) as unknown as Request;
@@ -43,7 +43,7 @@ function fakeRes() {
 
 describe('a busy store during MCP session authentication (#4471)', () => {
   it.each([
-    ['the typed AuthStoreBusyError', () => new AuthStoreBusyError(p2024())],
+    ['the typed AuthStoreBusyError', () => new AuthStoreBusyError(p2024(), 'POOL_WAIT')],
     ['the raw P2024 it replaced', () => p2024()],
   ])('%s answers the same fixed 503 — the catch-all is untyped, the surface unchanged', async (_name, reject) => {
     vi.mocked(resolveCredentialContextWithStatus).mockRejectedValueOnce(reject());

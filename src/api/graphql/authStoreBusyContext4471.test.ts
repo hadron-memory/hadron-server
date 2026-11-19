@@ -46,8 +46,8 @@ beforeAll(async () => {
     context: async () => {
       throw new AuthStoreBusyError(new Prisma.PrismaClientKnownRequestError(
         'Timed out fetching a new connection from the pool.',
-        { code: 'P2024', clientVersion: '6.19.2' } as never,
-      ));
+        { code: 'P2024', clientVersion: '6.19.2' },
+      ), 'POOL_WAIT');
     },
   }));
   // #4504: the unreachable arm on the same real surface — P1001 arrives as an
