@@ -5,9 +5,12 @@
  * The App-key and user-API-key paths resolve their credential by one hash lookup
  * (`appKey.findUnique` / `userApiKey.findUnique`). When the store is too busy to answer it —
  * the pool timed out (P2024) or a transaction could not start within `maxWait` (P2028's
- * "Unable to start" arm) — or cannot be reached at all (P1001, a NEW connection that cannot
- * establish: #4496's QA saw 6–12 of 150 paused-DB requests per case land here as a generic
- * 500) — the lookup rejects, and before #4471/#4504 that rejection propagated raw:
+ * "Unable to start" arm) — or cannot be reached at all (P1001, in both shapes the engine
+ * raises it: a NEW connection that cannot establish on a fresh client, and a LIVE server's
+ * warm pool losing the database mid-flight — #4504's QA round caught the second as a
+ * per-query P1001 KnownRequestError; #4496's QA saw 6–12 of 150 paused-DB requests per case
+ * land here as a generic 500) — the lookup rejects, and before #4471/#4504 that rejection
+ * propagated raw:
  * through the Apollo context builder it reached clients as an untyped INTERNAL_SERVER_ERROR,
  * and through the plain HTTP routes as the generic #1789 envelope.
  *
@@ -34,8 +37,9 @@
  *     this issue;
  *   - a statement cancel during the lookup (P2010/57014/25P04, #4476's shapes) is a bounded-read
  *     concept and stays untyped here: no credential lookup runs under a caller-chosen budget;
- *   - every other fault (a P2028 that is not the "Unable to start" arm, an initialization error
- *     that is not P1001 included) is a real fault and keeps today's generic handling.
+ *   - every other fault (a P2028 that is not the "Unable to start" arm, a known-request or
+ *     initialization error that is not P1001 included) is a real fault and keeps today's
+ *     generic handling.
  */
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../generated/prisma/index.js';
@@ -108,20 +112,36 @@ export function isPrismaPoolWaitFault(error: unknown): error is Prisma.PrismaCli
 /**
  * #4504: THE unreachable-store classifier — P1001, "Can't reach database server at `…`" (the
  * host:port is DRIVER TEXT and must never ride the conversion; the fixed prose above is why it
- * cannot). P1xxx faults arrive as PrismaClientInitializationError, NOT the KnownRequestError
- * the pool-wait arms arrive as — the two classifiers are disjoint by construction. And on the
- * per-query path the engine does NOT attach `errorCode` (observed on 6.19.2: the field is
- * undefined and the code exists only in the message), so the discriminator is the engine's
- * fixed phrase, matched UNANCHORED — the client prepends its "Invalid `db.model.findUnique()`
- * invocation" preamble to the engine text, so the phrase sits mid-message. This is exactly
- * the split `isPrismaPoolWaitFault` already makes for P2028's "Unable to start" arm, pinned
- * end-to-end against the installed engine by the REAL unreachable-DB test
- * (api/graphql/authStoreUnreachable4504.test.ts), which reddens if a Prisma upgrade rewords
- * it. The `errorCode` arm is kept for the day the engine starts attaching it. P1001 ONLY: the
+ * cannot). P1001 arrives in TWO shapes on the installed engine (6.19.2), and BOTH are real —
+ * the QA round caught the first-released classifier accepting only the second:
+ *
+ *   - the WARM-POOL shape (Celine's QA FAIL at 522fe537, fixed here): a LIVE server whose
+ *     database goes away (`compose stop db` under a warm pool) answers the NEXT QUERY with a
+ *     `PrismaClientKnownRequestError` carrying `code: 'P1001'`, `meta.database_location`, and
+ *     the same fixed phrase mid-message behind the client's invocation preamble. This is the
+ *     production scenario #4504 exists for — the paused-DB QA of #4496. On this shape the code
+ *     IS set (that is what makes it a KnownRequestError), so the discriminator is the code
+ *     alone, exactly as `isPrismaPoolWaitFault` reads P2024/P2028 off the same class.
+ *   - the NEVER-CONNECTED shape: a FRESH client against a dead endpoint (boot with the DB
+ *     down, my real-DB test's 127.0.0.1:1) raises `PrismaClientInitializationError`, whose
+ *     per-query `errorCode` is undefined on 6.19.2 — the code exists only in the message, so
+ *     the discriminator there is the engine's fixed phrase, matched UNANCHORED (the phrase
+ *     sits mid-message behind the preamble). The `errorCode` arm is kept for the day the
+ *     engine starts attaching it.
+ *
+ * Pinned both ways: the never-connected shape end-to-end by the REAL unreachable-DB test
+ * (api/graphql/authStoreUnreachable4504.test.ts, reddens if a Prisma upgrade rewords the
+ * engine phrase), the warm-pool shape by capture-built legs in middleware/auth.test.ts — the
+ * error object is reproduced field-for-field from Celine's stopped-DB log (message including
+ * the source frame, code, meta, clientVersion), not invented. P1001 ONLY on either class: the
  * neighboring codes say something else (P1002 the server rejected the authentication, P1008 a
- * connection lost mid-session) and stay untyped faults.
+ * connection lost mid-session) and stay untyped faults; and P1001 ∉ {P2024, P2028}, so the
+ * two busy classifiers stay disjoint by code.
  */
-export function isPrismaStoreUnreachableFault(error: unknown): error is Prisma.PrismaClientInitializationError {
+export function isPrismaStoreUnreachableFault(
+  error: unknown,
+): error is Prisma.PrismaClientKnownRequestError | Prisma.PrismaClientInitializationError {
+  if (error instanceof Prisma.PrismaClientKnownRequestError) return error.code === 'P1001';
   return (
     error instanceof Prisma.PrismaClientInitializationError &&
     (error.errorCode === 'P1001' || /Can't reach database server/i.test(error.message))

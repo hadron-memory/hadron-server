@@ -532,6 +532,33 @@ describe('resolveAuthContext', () => {
         '6.19.2',
       );
 
+      // #4504 (QA round, Celine's FAIL at 522fe537): the WARM-POOL shape — a LIVE server whose
+      // database is stopped (`compose stop db` under a warm pool) answers the NEXT QUERY with a
+      // PrismaClientKnownRequestError carrying code 'P1001' (set, on this class), meta.database_location,
+      // and the same engine phrase mid-message. This helper reproduces the captured object
+      // FIELD-FOR-FIELD from her stopped-DB log (/home/orca/scratch/celine/q4514_logs2.txt:130-141,
+      // stack celine4514, engine 6.19.2) — not a tidied stand-in: the invocation preamble, the source
+      // frame, the phrase and the "Please make sure" tail all ride the real message, so an engine
+      // rewording or a reclassified code reddens HERE, not in production.
+      const p1001Warm = () => new Prisma.PrismaClientKnownRequestError(
+        [
+          'Invalid `db.userApiKey.findUnique()` invocation in /app/src/middleware/auth.ts:485:42',
+          '',
+          "    482 // direct lookup by hash. bcrypt would prevent the lookup; the raw key's",
+          '    483 // entropy makes dictionary attacks against the hash a non-issue.',
+          '    484 const keyHash = hashUserApiKey(rawKey);',
+          '  → 485 const userApiKey = await db.userApiKey.findUnique(',
+          "Can't reach database server at `db:5432`",
+          '',
+          'Please make sure your database server is running at `db:5432`.',
+        ].join('\n'),
+        {
+          code: 'P1001',
+          meta: { modelName: 'UserApiKey', database_location: 'db:5432' },
+          clientVersion: '6.19.2',
+        } as never,
+      );
+
       const USER_KEY = USER_API_KEY_PREFIX + 'a'.repeat(64);
       const APP_KEY = APP_KEY_PREFIX + 'b'.repeat(64);
 
@@ -596,6 +623,58 @@ describe('resolveAuthContext', () => {
           // The unreachable path wrote nothing either — counted, not argued.
           expect(busy.writes, key).toEqual({ userApiKey: 0, appKey: 0 });
         }
+      });
+
+      it('#4504 (QA round): the WARM-POOL P1001 — the live stopped-DB shape, captured not invented — throws the same typed fault on both key paths', async () => {
+        for (const key of [USER_KEY, APP_KEY]) {
+          const busy = busyDb(() => p1001Warm());
+          const err = await refuse(() => resolveAuthContextWithStatus(makeReq(`Bearer ${key}`), busy.db));
+          expect(err, key).toBeInstanceOf(AuthStoreBusyError);
+          const typed = err as AuthStoreBusyError;
+          // Same code, same retryability, sibling reason and prose — identical to the
+          // never-connected shape: an unreachable store is unreachable either way.
+          expect(typed.message).toBe(AUTH_STORE_UNREACHABLE_MESSAGE);
+          expect(typed.extensions.code).toBe('AUTH_STORE_BUSY');
+          expect(typed.extensions.retryable).toBe(true);
+          expect(typed.extensions.reason).toBe('STORE_UNREACHABLE');
+          // No driver text rides the message — db:5432 stays server-side, on .cause only.
+          expect(typed.message).not.toMatch(/Can't reach|P1001|db:5432/i);
+          expect(typed.cause).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+          expect((typed.cause as Prisma.PrismaClientKnownRequestError).code).toBe('P1001');
+          expect((typed.cause as Prisma.PrismaClientKnownRequestError).meta).toMatchObject({ database_location: 'db:5432' });
+          expect(busy.writes, key).toEqual({ userApiKey: 0, appKey: 0 });
+        }
+      });
+
+      it('#4504 (QA round): the warm-pool refusal is identical across key shapes too', async () => {
+        // NOTE: this leg alone cannot redden — a raw (unconverted) error is also identical
+        // across key shapes. It composes with the instanceof leg above, which is the pin;
+        // together they say CONVERTED-and-identical, the property QA observed live.
+        const answers = await Promise.all(
+          [USER_KEY, APP_KEY, USER_API_KEY_PREFIX + 'e'.repeat(64), APP_KEY_PREFIX + 'f'.repeat(64)].map((key) =>
+            refuse(() => resolveAuthContextWithStatus(makeReq(`Bearer ${key}`), busyDb(() => p1001Warm()).db)).then(
+              (err) => {
+                const typed = err as AuthStoreBusyError;
+                return JSON.stringify({ message: typed.message, extensions: typed.extensions });
+              },
+            ),
+          ),
+        );
+        for (const a of answers.slice(1)) expect(a).toBe(answers[0]);
+      });
+
+      it('#4504 (QA round): a neighboring KNOWN-REQUEST fault (P1002 on the warm class) stays the raw error — the warm arm is P1001 only', async () => {
+        const rejected = await refuse(() =>
+          resolveAuthContextWithStatus(
+            makeReq(`Bearer ${USER_KEY}`),
+            busyDb(() => new Prisma.PrismaClientKnownRequestError(
+              'Authentication failed against the database server',
+              { code: 'P1002', clientVersion: '6.19.2' } as never,
+            )).db,
+          ),
+        );
+        expect(rejected).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+        expect(rejected).not.toBeInstanceOf(AuthStoreBusyError);
       });
 
       it('#4504: the P1001 refusal is identical across key shapes — an unreachable store cannot tell a verdict it never read', async () => {
