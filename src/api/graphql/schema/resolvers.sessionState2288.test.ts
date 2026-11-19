@@ -226,6 +226,9 @@ describe('#2288 Session.state', () => {
 describe('#2317 own-App policy queries for Session lists', () => {
   type Row = { id: string; state: string };
   const policyDays = [1, 7, 90];
+  // Isolation: the file's `beforeEach` runs `cleanDb` and rebuilds the org, so every test starts with no Sessions or Apps and
+  // the exact-length asserts (scenario 5: count == limit == 200) see only that test's rows. The `urn` suffix is unique per call,
+  // and App has no unique (organizationId, name), so the repeated `p${i}-${d}` names cannot collide.
   async function appsWith(days: number[]) {
     const org = await db.organization.findFirstOrThrow({ where: { members: { some: { userId: owner.id } } } });
     return Promise.all(days.map((d, i) => db.app.create({ data: { organizationId: org.id, name: `p${i}-${d}`, urn: `${org.urn}:p${i}-${generateId().slice(0, 6)}`, sessionDormancyDays: d } })));
@@ -246,7 +249,10 @@ describe('#2317 own-App policy queries for Session lists', () => {
   }
   const expectedState = (idle: number, days: number) => (idle > days * D ? 'DORMANT' : 'LAPSED');
   // Measured on main: exactly one App read besides the policy batches (the list gate), flat from 6 to 200 rows. A per-row
-  // findUnique/include would raise appReads with the row count and break this pin, which the policy counter alone would miss.
+  // top-level App query (findUnique, findFirst, count, a second findMany) would raise appReads with the row count and break
+  // this pin, which the policy counter alone would miss. Limit: the tracer sees top-level operations only, so an App read nested
+  // in another model's query (`include: { app: true }`) is reported under that model; it costs one extra query, not N.
+  // The pin is exact on purpose: a change in the list gate's cost should be a visible event, not a silent one.
   const OTHER_APP_READS = 1;
   const LIST = '{sessions(limit:200){ id state isLive lapsesAt }}';
 
