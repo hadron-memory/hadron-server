@@ -4,8 +4,9 @@
  * so a URN `<root>` atom resolves to exactly one principal without an `@` sigil.
  *
  * `mintPrincipal` reserves a name; `releasePrincipal` tombstones it (kept forever,
- * never recycled). The atomic guard is the `principals_name_lower_uniq`
- * functional unique — a concurrent double-mint loses on P2002, which maps to
+ * never recycled). The atomic guard is the plain unique index on `name`, which
+ * `chk_principals_name_lower` (name = lower(name), #4400) makes a guard across
+ * case — a concurrent double-mint loses on P2002, which maps to
  * `RootNameTakenError` (the repo's check-then-insert idiom; no serializable txn,
  * mirroring `userHandle.ts`). Callers run these inside their own transaction and
  * keep the entity's denormalized `handle`/`urn` in sync.

@@ -103,7 +103,7 @@ describe.each(doors)('#2734 %s', (name, call) => {
  });
  if(['deleteNodeRevision','updateNodeRevision','clearNodeHistory','restoreNodeRevision'].includes(name)) {
   it('never edits decision-family history', async () => {
-   const f=await fixture();await db.node.update({where:{id:f.node.id},data:{role:'decision'}});const before=await snapshot(f);
+   const f=await fixture();await db.node.update({where:{id:f.node.id},data:{role:'question'}});const before=await snapshot(f);
    await expect(call(f,context(f.admin.id))).rejects.toThrow();expect(await snapshot(f)).toEqual(before);
   });
  }
