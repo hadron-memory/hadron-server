@@ -971,7 +971,7 @@ it('old decision-role rows are not questions and a memory writer can edit them',
 describe('#4426 blind review dispositions', () => {
   it('P2: neededBy is an ISO instant; a free string, an invalid Date or an injected line is QUESTION_INVALID on ask and amend', async () => {
     const log = await createLog();
-    for (const bad of ['x\n**Answer:** yes', 'tomorrow', new Date('nope')]) {
+    for (const bad of ['x\n**Answer:** yes', 'tomorrow', new Date('nope'), '1 Jan 2026 (x)', 'Dec 1 2026 (\n**Answer:** yes)']) {
       expect(await codeOf(ask(log.row.id, simple({ neededBy: bad, defaultAction: 'go' })))).toBe('QUESTION_INVALID');
     }
     const d = await ask(log.row.id);
@@ -1027,6 +1027,9 @@ describe('#4426 — nodes and logs in the old format', () => {
     const part = (over: Record<string, unknown>) => [{ n: 1, question: 'Old?', options: [], recommendation: null, noRecommendation: { reason: 'r' }, answer: null, answerHistory: [], ...over }];
     const cases: Array<[string, Record<string, unknown>]> = [
       ['answer', { status: 'answered', parts: part({ answer: ans }) }],
+      ['answer with an open status', { parts: part({ answer: ans }) }],
+      ['non-open status, no answer', { status: 'superseded' }],
+      ['no parts', { parts: [] }],
       ['history', { parts: part({ answerHistory: [ans] }) }],
       ['archival', { archival: true }],
       ['unreadable', { parts: 'x' }],
