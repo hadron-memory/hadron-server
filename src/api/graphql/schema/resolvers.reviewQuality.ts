@@ -1,5 +1,5 @@
 // #4281 S12c — Query.reviewQualityReport: the monthly review quality measures per reviewer family and model
-// (hrn:node:hadronmemory.com:specs:cor:agt:130:06, Proposed).
+// (Proposed, not yet in the spec corpus).
 //
 // AUTHORIZATION (hrn:node:hadronmemory.com:specs:cor:agt:050:21, the Proposed reader line; Peter, team chat #110352): the
 // measures are worked out from the App's tasks and events, so they are read exactly as those are, through
@@ -42,7 +42,7 @@ const plain = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
  * - a snapshot with no family or no model (null, absent before S12a, or empty) is "not recorded": one row, never a family.
  * - findings are the seat's `result_findings`; the dispositions trigger keeps `finding_dispositions` at most one per
  *   finding and only on findings that exist, so undisposed = findings - dispositions.
- * - #4287, defects missed (#4280's rule; cor:agt:130:05, :06): an approving review misses each defect linked
+ * - #4287, defects missed (#4280's rule): an approving review misses each defect linked
  *   (`review.defect-linked`) to its seat's build task whose `introducedAtHead` is null, or was first frozen on that
  *   task no later than the head the review approved: heads in the order of the build's `pr.frozen` events, a head
  *   frozen twice at its FIRST freeze. Each head's position is that one event's (created_at, tx_id, id), compared as a
