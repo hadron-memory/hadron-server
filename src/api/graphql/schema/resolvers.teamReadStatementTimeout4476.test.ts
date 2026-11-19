@@ -167,8 +167,21 @@ describe('#4476 red — the budget bites on the statement, per statement kind (b
     // ~4.9 s + 5 s. The threshold derives from BUDGET + MARGIN (not the budget alone), so a
     // margin change reddens it for the RIGHT reason rather than incidentally.
     const wholeReadBound = BUDGET_MS + TEAM_READ_TX_BACKSTOP_MARGIN_MS;
-    const refusedWithin = wholeReadBound * 1.25; // the backstop plus scheduling slack
     const fastJustUnder = Math.floor(BUDGET_MS * 0.98 / 1000); // 4 s: completes inside its own budget
+    // #4482 BLIND N: the slack is FIXED, not proportional. Under the old ×1.25 a call-site margin
+    // widened to ≥ ~2.2 s still refused inside the bound (5 s + 2.2 s < 7.5 s) — the mutant
+    // sailed through, because the bound scaled up with the outcome it was supposed to refuse.
+    // Fixed slack keeps the bound put, so a widened margin's later refusal crosses it.
+    const SCHEDULING_SLACK_MS = 1_000;
+    const refusedWithin = wholeReadBound + SCHEDULING_SLACK_MS;
+    // The pin must keep telling its two outcomes apart whichever way the constants drift: the
+    // backstop refusal (~wholeReadBound) keeps at least the scheduling slack beneath the bound,
+    // and the statement-cap-only refusal (the second statement starting at fastJustUnder and
+    // getting a full budget of its own) stays at least as far beyond it. Squeeze either side and
+    // this pin stops distinguishing exactly the two things it exists to distinguish.
+    const capOnlyRefusalMs = fastJustUnder * 1_000 + BUDGET_MS;
+    expect(refusedWithin - wholeReadBound, 'scheduling headroom above the backstop refusal').toBeGreaterThanOrEqual(SCHEDULING_SLACK_MS);
+    expect(capOnlyRefusalMs - refusedWithin, 'the statement-cap-only refusal must stay beyond the bound').toBeGreaterThanOrEqual(SCHEDULING_SLACK_MS);
     const t0 = Date.now();
     const refusal: { resolved?: string; thrown?: unknown } = await withRosterAppRead(ctx(mia.id), app.id, async (readCtx) => {
       await readCtx.db.$executeRaw`SELECT pg_sleep(${fastJustUnder})`; // finishes at ~0.98xBUDGET
@@ -435,6 +448,14 @@ describe('#4476 unit — the 57014 classifier (binding condition 1: structured c
     expect(caught, 'the typed statement must have been terminated by the backstop').toBeDefined();
     expect(isPrismaBusyExhaustion(caught), `classifier must convert the real typed backstop shape — ${diag}`).toBe(true);
     expect(busyReason(caught), diag).toBe('TRANSACTION_BUDGET');
+    // #4482 BLIND L: name the arm that matched. Only the backstop can fire in this construction
+    // (the statement cap sits at 2x, Prisma's interactive timer at 4x) and it fires mid-statement,
+    // so the escaped object IS the model arm — Prisma's UnknownRequestError rendering the FATAL
+    // 25P04. Freezing the arm is what keeps this pin about TYPED statements: if the construction
+    // ever regressed to a raw victim (P2010 + meta) or a re-wrapping, the conversions above would
+    // still pass and the arm identity would redden here.
+    expect(caught, `the escaped object must be the model arm (UnknownRequestError), not a raw or re-wrapped shape — ${diag}`).toBeInstanceOf(Prisma.PrismaClientUnknownRequestError);
+    expect((caught as Prisma.PrismaClientUnknownRequestError).message, `the model arm renders the FATAL 25P04 — ${diag}`).toMatch(/code: "25P04"/);
     // The pool must not hand the KILLED connection to the next caller: an ordinary query
     // answers immediately afterwards (delta review cannot-judge: dead-connection eviction).
     const t1 = Date.now();
