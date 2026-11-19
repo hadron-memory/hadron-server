@@ -125,7 +125,7 @@ export type TaskEventPayload =
   /** #2651: the code only. The optional reason text is on the task row, never here (cor:agt:050:29). */
   | { type: 'task.handed-back'; code: TaskHandBackCode }
   /**
-   * #4280 (S12b, Proposed cor:agt:130:05): a defect found after the PR merged traces to this build task's PR. `defect`
+   * #4280 (S12b): a defect found after the PR merged traces to this build task's PR. `defect`
    * is the issue URL as given; `introducedAtHead` a head frozen on this task, or null. Never a readiness input.
    */
   | { type: 'review.defect-linked'; defect: string; introducedAtHead: string | null }

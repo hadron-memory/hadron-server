@@ -107,7 +107,8 @@ type HandleProbeDb = Pick<PrismaClient, 'principal'>;
  * i.e. some user OR org already holds the name (case-insensitively, including a
  * tombstoned/released row), or it is a reserved platform word. This replaced the
  * users-only probe so an auto-generated handle can never collide with an org
- * name. The `principals_name_lower_uniq` index remains the atomic backstop; this
+ * name. The unique index on `principals.name`, with `chk_principals_name_lower`
+ * keeping every stored name lower case (#4400), remains the atomic backstop; this
  * probe just avoids picking a doomed name. Exported so signup paths can
  * distinguish a handle collision (retryable) from any other conflict.
  */

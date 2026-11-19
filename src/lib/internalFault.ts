@@ -8,6 +8,7 @@
 import { randomUUID } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import { respondSessionSuperseded } from './sessionSuperseded.js';
+import { AUTH_STORE_BUSY_MESSAGE, isAuthStoreBusyError } from './authStoreBusy.js';
 import { currentRequestId } from './requestContext.js';
 
 export const INTERNAL_ERROR_CODE = 'INTERNAL_SERVER_ERROR';
@@ -63,11 +64,42 @@ export function respondOAuthServerError(res: Response, description: string, erro
 }
 
 /**
+ * #4471: the plain-HTTP render of the typed store-busy fault (the `/graphql/schema`, `/reload`,
+ * `/sessions/:id/outcome` routes see it via `next(err)`). Like respondSessionSuperseded above, a
+ * typed auth-path fault is not genericized by the #1789 envelope — the caller must see
+ * AUTH_STORE_BUSY to back off and resend the same key, not read the generic 500 as "bad key".
+ * Unlike the envelope it answers 503 retryable — and (BLIND P2-2) it is no logging blind spot
+ * either: the fault is logged under the request id with the driver error on `.cause` reaching
+ * only that log, exactly as respondInternalFault does, so "countable evidence" holds on this
+ * surface too.
+ */
+export function respondAuthStoreBusy(res: Response, error: unknown): boolean {
+  if (!isAuthStoreBusyError(error)) return false;
+  const requestId = typeof res.locals?.requestId === 'string' ? res.locals.requestId : faultRequestId();
+  logInternalFault('http', 'auth-store-busy', requestId, error);
+  if (res.headersSent) return false; // Delegate to Express's final handler, as #3818 does.
+  // `reason` is 'POOL_WAIT' by construction — isAuthStoreBusyError just proved the class
+  // (BLIND P3: no redundant re-validation of what the type already states).
+  res.status(503).json({
+    error: AUTH_STORE_BUSY_MESSAGE,
+    code: 'AUTH_STORE_BUSY',
+    retryable: true,
+    reason: error.extensions.reason,
+    requestId,
+  });
+  return true;
+}
+
+/**
  * Express's final error handler. A client-class status (body-parser's 400/413, ...) is a framework refusal and keeps
  * today's handling until it is ruled on; only a fault is genericized.
  */
 export function internalFaultErrorHandler(err: unknown, _req: Request, res: Response, next: NextFunction): void {
   if (respondSessionSuperseded(res, err)) return;
+  // #4471: a typed retryable store-busy fault from the auth middleware is not genericized — the
+  // caller must see AUTH_STORE_BUSY to back off and resend the same key, not read the generic
+  // envelope as "bad key". The same carve-out shape respondSessionSuperseded established.
+  if (respondAuthStoreBusy(res, err)) return;
   const e = err as { status?: unknown; statusCode?: unknown } | null;
   const status = e?.status ?? e?.statusCode;
   if (res.headersSent || (typeof status === 'number' && status >= 400 && status < 500)) {

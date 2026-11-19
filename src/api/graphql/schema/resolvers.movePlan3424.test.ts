@@ -80,7 +80,7 @@ describe('planNodeMove #3424', () => {
   });
 
   it.each([
-        ['info', 'decision', 'DECISION_CONTAINED'],
+        ['info', 'question', 'QUESTION_CONTAINED'],
     ['compiled-boot-prompt', 'boot-prompt', 'BOOT_PROMPT_COMPILED_WRITE'],
   ])('uses the real refusal for governed %s/%s', async (nodeType, role, code) => {
     const root = await createDbNode(db, { memoryId: memory.id, loc: 'a' });
