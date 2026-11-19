@@ -3,7 +3,15 @@ import { SignJWT } from 'jose';
 import type { Request } from 'express';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
-import { resolveAuthContext, hashUserApiKey, USER_API_KEY_PREFIX } from './auth.js';
+import { Prisma } from '../generated/prisma/index.js';
+import { AUTH_STORE_BUSY_MESSAGE, AuthStoreBusyError } from '../lib/authStoreBusy.js';
+import {
+  APP_KEY_PREFIX,
+  resolveAuthContext,
+  resolveAuthContextWithStatus,
+  hashUserApiKey,
+  USER_API_KEY_PREFIX,
+} from './auth.js';
 
 // JWT_SECRET is set in vitest.config.ts env
 
@@ -473,6 +481,159 @@ describe('resolveAuthContext', () => {
       const ctx = await resolveAuthContext(makeReq(`Bearer ${rawKey}`), db);
       expect(ctx.appId).toBeUndefined();
       expect(ctx.organizationId).toBeUndefined();
+    });
+
+    // ── #4471: a busy store during the API-key check ──────────────────────
+    //
+    // The App-key and user-API-key paths resolve by one hash lookup. When the
+    // store is too busy to answer it (P2024, or P2028's "Unable to start"
+    // arm), the rejection must surface as the typed RETRYABLE
+    // AUTH_STORE_BUSY — never as the raw driver error an untyped 500 wraps,
+    // and never as a verdict on the key (cor:aut:010:05 S5, cor:agt:040:12).
+    // The JWT path is out of scope by ruling: its own catch (#3532, rulings
+    // 0192–0194) keeps these faults 'unavailable' and lets the request
+    // proceed.
+    describe('#4471 — a busy store during the API-key check is typed retryable, never a verdict', () => {
+      // The fault is injected at the lookup, so no real pool exhaustion is needed.
+      const busyDb = (reject: () => unknown) =>
+        ({
+          userApiKey: { findUnique: () => Promise.reject(reject()) },
+          appKey: { findUnique: () => Promise.reject(reject()) },
+        }) as unknown as typeof db;
+
+      const p = (code: string, message: string) =>
+        new Prisma.PrismaClientKnownRequestError(message, {
+          code,
+          clientVersion: '6.19.2',
+        } as never);
+
+      const USER_KEY = USER_API_KEY_PREFIX + 'a'.repeat(64);
+      const APP_KEY = APP_KEY_PREFIX + 'b'.repeat(64);
+
+      async function refuse(doReject: () => Promise<unknown>): Promise<unknown> {
+        try {
+          await doReject();
+        } catch (e) {
+          return e;
+        }
+        throw new Error('expected a rejection');
+      }
+
+      it('a P2024 during the user-key lookup throws the typed fault, not the raw driver error', async () => {
+        const err = await refuse(() =>
+          resolveAuthContextWithStatus(
+            makeReq(`Bearer ${USER_KEY}`),
+            busyDb(() => p('P2024', 'Timed out fetching a new connection from the pool.')),
+          ),
+        );
+        expect(err).toBeInstanceOf(AuthStoreBusyError);
+        const typed = err as AuthStoreBusyError;
+        expect(typed.message).toBe(AUTH_STORE_BUSY_MESSAGE);
+        expect(typed.extensions.code).toBe('AUTH_STORE_BUSY');
+        expect(typed.extensions.retryable).toBe(true);
+        expect(typed.extensions.reason).toBe('POOL_WAIT');
+        // No driver text rides the message; the driver error stays on .cause, server-side only.
+        expect(typed.message).not.toMatch(/P2024|Timed out fetching/i);
+        expect(typed.cause).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      });
+
+      it('P2028 "Unable to start a transaction" is the same typed fault, on both key paths', async () => {
+        for (const key of [USER_KEY, APP_KEY]) {
+          const err = await refuse(() =>
+            resolveAuthContextWithStatus(
+              makeReq(`Bearer ${key}`),
+              busyDb(() => p('P2028', 'Unable to start a transaction in the given time.')),
+            ),
+          );
+          expect(err, key).toBeInstanceOf(AuthStoreBusyError);
+          expect((err as AuthStoreBusyError).extensions.code).toBe('AUTH_STORE_BUSY');
+          expect((err as AuthStoreBusyError).extensions.retryable).toBe(true);
+        }
+      });
+
+      it('every other fault stays the raw error — the class is closed', async () => {
+        // P2028's other arm ("Transaction already closed") has no meaning during a
+        // lookup that holds no transaction.
+        const closed = await refuse(() =>
+          resolveAuthContextWithStatus(
+            makeReq(`Bearer ${USER_KEY}`),
+            busyDb(() => p('P2028', 'Transaction already closed')),
+          ),
+        );
+        expect(closed).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+        expect(closed).not.toBeInstanceOf(AuthStoreBusyError);
+        // #4476's model-statement cancel shape (an UnknownRequestError carrying the
+        // rendered 57014) is a bounded-read concept, deliberately not classified here.
+        const cancel = await refuse(() =>
+          resolveAuthContextWithStatus(
+            makeReq(`Bearer ${USER_KEY}`),
+            busyDb(() =>
+              new Prisma.PrismaClientUnknownRequestError(
+                'PostgresError { code: "57014", message: "canceling statement due to statement timeout" }',
+                { clientVersion: '6.19.2' },
+              ),
+            ),
+          ),
+        );
+        expect(cancel).toBeInstanceOf(Prisma.PrismaClientUnknownRequestError);
+        expect(cancel).not.toBeInstanceOf(AuthStoreBusyError);
+      });
+
+      it('the verdicts stay byte-identical: unknown, revoked, deleted-user and ended-sign-in keys refuse the same', async () => {
+        const unknown = await resolveAuthContext(
+          makeReq(`Bearer ${USER_API_KEY_PREFIX}${'0'.repeat(64)}`),
+          db,
+        );
+        const revokedPair = await createUserWithKey({ githubUsername: 'vera' });
+        await db.userApiKey.update({
+          where: { id: revokedPair.keyId },
+          data: { revokedAt: new Date() },
+        });
+        const revoked = await resolveAuthContext(makeReq(`Bearer ${revokedPair.rawKey}`), db);
+
+        const deletedPair = await createUserWithKey({ githubUsername: 'walt' });
+        await db.user.update({
+          where: { id: deletedPair.userId },
+          data: { deletedAt: new Date() },
+        });
+        const deleted = await resolveAuthContext(makeReq(`Bearer ${deletedPair.rawKey}`), db);
+
+        // #1897: a key descending from an ended sign-in is dead even if its own row is clean.
+        // originSignInId is immutable ("the sign-in root of a credential never changes"), so the
+        // key is CREATED with it — the same shape signIn.test.ts mints.
+        const { randomBytes } = await import('crypto');
+        const endedUser = await db.user.create({
+          data: { id: 'user-4471-xena', githubUsername: 'xena', email: null, roles: ['READER'] },
+        });
+        const signIn = await db.signIn.create({
+          data: {
+            userId: endedUser.id,
+            method: 'email',
+            expiresAt: new Date(Date.now() + 3_600_000),
+            endedAt: new Date(),
+            endReason: 'signout',
+          },
+        });
+        const endedKey = USER_API_KEY_PREFIX + randomBytes(32).toString('hex');
+        await db.userApiKey.create({
+          data: {
+            userId: endedUser.id,
+            keyHash: hashUserApiKey(endedKey),
+            keyPreview: endedKey.slice(-4),
+            label: 'ended',
+            createdBy: endedUser.id,
+            issuedVia: 'portal',
+            oauthScopes: [],
+            originSignInId: signIn.id,
+          },
+        });
+        const ended = await resolveAuthContext(makeReq(`Bearer ${endedKey}`), db);
+
+        expect(JSON.stringify(unknown)).toBe('{}');
+        for (const ctx of [revoked, deleted, ended]) {
+          expect(JSON.stringify(ctx)).toBe(JSON.stringify(unknown));
+        }
+      });
     });
   });
 

@@ -7,8 +7,10 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { Prisma } from '../generated/prisma/index.js';
 import { assignRequestId } from './requestContext.js';
 import { internalFaultErrorHandler, respondInternalFault } from './internalFault.js';
+import { AUTH_STORE_BUSY_MESSAGE, AuthStoreBusyError } from './authStoreBusy.js';
 
 const secret = 'connect ECONNREFUSED 10.0.0.7:5432 password=hunter2';
 let server: Server;
@@ -21,6 +23,16 @@ beforeAll(async () => {
   app.get('/throws', () => { throw new Error(secret); });
   app.get('/catches', (_req, res) => { try { throw new Error(secret); } catch (e) { respondInternalFault(res, 'test', e); } });
   app.post('/echo', (req, res) => { res.json(req.body); });
+  // #4471: the auth middleware's typed store-busy fault forwarded via next(err), as the
+  // /graphql/schema, /reload and /sessions/:id/outcome routes forward it.
+  app.get('/auth-store-busy', (_req, _res, next) => {
+    next(new AuthStoreBusyError(
+      new Prisma.PrismaClientKnownRequestError('Timed out fetching a new connection from the pool.', {
+        code: 'P2024',
+        clientVersion: '6.19.2',
+      } as never),
+    ));
+  });
   app.use(internalFaultErrorHandler);
   await new Promise<void>((resolve) => { server = app.listen(0, resolve); });
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -58,5 +70,18 @@ describe('plain HTTP internal faults (#1789)', () => {
     const res = await fetch(base + '/echo', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{nope' });
     expect(res.status).toBe(400);
     expect(await res.text()).not.toContain('INTERNAL_SERVER_ERROR');
+  });
+
+  it('#4471: the typed auth store-busy fault keeps its 503 and its code — not the generic envelope', async () => {
+    const res = await fetch(base + '/auth-store-busy');
+    const text = await res.text();
+    expect(res.status).toBe(503);
+    expect(JSON.parse(text)).toEqual({
+      error: AUTH_STORE_BUSY_MESSAGE,
+      code: 'AUTH_STORE_BUSY',
+      retryable: true,
+      reason: 'POOL_WAIT',
+    });
+    expect(text).not.toMatch(/P2024|Timed out fetching|INTERNAL_SERVER_ERROR/);
   });
 });
