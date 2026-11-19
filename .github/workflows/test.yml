@@ -40,6 +40,11 @@ jobs:
         run: node --test scripts/e2e/*.test.mjs
 
   test-shard:
+    # #4487: the shards run on PG17 (prod's major version) so version-dependent behavior (#4476's PG17+
+    # `transaction_timeout` guard) runs at the merge gate. ONE extra lane keeps PG16 (the supported floor) green:
+    # shard 1 of 4 on the pg16 image, where the GUC is absent and the guard's no-GUC branch runs. The job name keeps
+    # the old `test-shard (N)` spelling for the PG17 lanes.
+    name: test-shard (${{ matrix.shard }}${{ matrix.pg == 16 && ', pg16' || '' }})
     runs-on: ubuntu-latest
     # GH default job timeout is 6 hours — a hung vitest worker or
     # deadlocked postgres connection would consume it before failing.
@@ -55,7 +60,13 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
+        pg: [17]
+        include:
+          - shard: 1
+            pg: 16
     env:
+      # The shard TOTAL is fixed: the extra pg16 lane makes strategy.job-total 5, which would re-split the files.
+      SHARD_TOTAL: '4'
       # Used by `prisma db push` below. The vitest config reads
       # `TEST_DATABASE_URL` (also set below) for the test runner's
       # own connection.
@@ -63,9 +74,9 @@ jobs:
       TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hadron_test
     services:
       postgres:
-        # 033-rag-vector-retrieval: pgvector-bearing image (postgres:16 + pgvector)
-        # so `CREATE EXTENSION vector` works in CI. Same PG16, data-compatible.
-        image: pgvector/pgvector:pg16
+        # 033-rag-vector-retrieval: pgvector-bearing image so `CREATE EXTENSION vector` works in CI.
+        # #4487: PG17 like prod, except the one pg16 floor lane (see the matrix).
+        image: pgvector/pgvector:pg${{ matrix.pg }}
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: hadron_test
@@ -92,7 +103,7 @@ jobs:
 
       - run: pnpm prisma generate
 
-      # #3877: this service cluster is throwaway, so it runs without durability. On PG16, every DROP DATABASE (the
+      # #3877: this service cluster is throwaway, so it runs without durability. On PG16 (and 17), every DROP DATABASE (the
       # suite's per-worker clones, the serve-role smoke's owned database) waits on an immediate checkpoint of the WHOLE
       # cluster, and with fsync on that checkpoint writes and syncs every dirty buffer the shard's parallel test
       # databases produced: 13-22 s for the smoke's 30 s afterAll on green runs, more under load. A crash loses only
@@ -128,7 +139,7 @@ jobs:
       # (src/test/schemaTemplate.ts). Pushing to `hadron_test` here would build
       # a database the parallel suite never reads.
 
-      - name: Run vitest suite (shard ${{ matrix.shard }}/${{ strategy.job-total }})
+      - name: Run vitest suite (shard ${{ matrix.shard }}/${{ env.SHARD_TOTAL }}, PG${{ matrix.pg }})
         # Go through the `pnpm test` script (= `vitest run`) so CI can't drift
         # from it. `--shard=i/N` deterministically splits the test FILES into N
         # slices and runs slice i here; a non-zero exit fails the job. NOTE: the
@@ -160,9 +171,18 @@ jobs:
           ) &
           sampler=$!
           trap 'kill "$sampler" 2>/dev/null || true' EXIT
-          pnpm test --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+          psql "$DATABASE_URL" -Atc "SELECT 'cluster: ' || version()"
+          pnpm test --shard=${{ matrix.shard }}/${{ env.SHARD_TOTAL }}
 
-      # #4377 (measurement): the cluster's own checkpoint log (PG16 logs checkpoints by default). Each
+      # #4487: the pg16 floor lane also runs the file holding #4476's version-dependent pins, whichever shard owns it:
+      # here the PG17-only pins skip and the no-GUC guard path is the live executor (the PG17 lanes run the rest).
+      - name: PG16 floor - the transaction_timeout guard's no-GUC path (#4487)
+        if: matrix.pg == 16
+        env:
+          HADRON_TEST_MAX_WORKERS: '1'
+        run: pnpm test src/api/graphql/schema/resolvers.teamReadStatementTimeout4476.test.ts
+
+      # #4377 (measurement): the cluster's own checkpoint log (PG15+ logs checkpoints by default). Each
       # "checkpoint complete" line splits write, sync and total time, so time spent outside the buffer writes shows.
       - name: Checkpoint log of the test cluster (#4377)
         if: always()
