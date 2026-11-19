@@ -22,7 +22,8 @@ const BATCH = 'bootprompt.compile.approve';
 const SCHEDULE = 'schedule.create';
 const synthetic = (name: string, type: string, over: Partial<ActionDefinition> = {}): ActionDefinition => ({
   name, source: 'PLATFORM', parameters: [{ name: 'target', type, refusesWildcard: true }], tool: null, enforcement: 'RECORDED_ONLY',
-  issuerRule: 'TEST_ONLY', summaryTemplate: 'Do it to {target} in {app}', ...over,
+  issuerRule: 'APP_SCHEDULE_ADMIN', // #3730: a real closed-set key (the value is irrelevant to cover logic)
+  summaryTemplate: 'Do it to {target} in {app}', ...over,
 });
 const cover = (action: CoverableAction, param: string, id: string, over: Record<string, unknown> = {}) => findCoveringGrants(db, {
   appId: w.appId, action, workerId: w.workerId, roleAgentId: w.agentId, values: { [param]: id }, order: 'ACTIVATED', ...over,

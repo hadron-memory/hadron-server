@@ -433,6 +433,10 @@ export function stallCandidates(
   // #2648: a blocked task RAISES nothing, but a finish-by episode is not ended by blocking (cor:agt:050:14: it ends
   // only when the task ends or its finish-by time is edited), so the running question still names it.
   if (task.blocked && !(running && task.finishBy)) return [];
+  // #3775 B (cor:agt:050:14, :15 exception; Holger R5): a task assigned to a PERSON raises no stall alarm of any kind
+  // (not-started, no-progress, owner-unreactive, finish-by), and so has no episode to keep running either. A worker
+  // assignee wins when both are somehow set, as `assigneeOf` does. Worker-assigned and queued tasks are untouched.
+  if (task.assigneeUserId && !task.assigneeWorkerId) return [];
   // #2648: clearing a finish-by time brings the ordinary windows back from the edit, so it floors them like a release.
   const floor = (d: Date) => latest(d, task.releasedAt, inputs.finishByEditedAt) as Date;
   const assignee = assigneeOf(task);
@@ -987,8 +991,15 @@ export async function endedAlarmEpisodeInstants(
         CROSS JOIN LATERAL (
           SELECT s.started_at AS t
           UNION ALL SELECT s.updated_at WHERE s.auto_expired_at IS NULL
-          UNION ALL SELECT e.created_at FROM usage_events e WHERE e.session_id = s.id AND e.counts_as_activity
-            AND e.created_at > p.lo AND e.created_at <= p.hi
+          -- #4492: only the EARLIEST qualifying event can be the answer, so one index probe per (window, session)
+          -- (usage_events_session_activity_idx), not every event of the window: a current holder's window runs to
+          -- FOREVER, and on a long, dense session the range scan read its whole history per window (30 s for 300
+          -- windows on the harness). The session's end bounds the probe too: an event past it is not activity, and
+          -- if the earliest in-window event is past it, so is every later one. A session with none yields NULL,
+          -- which the outer x.t test drops, as an absent row was.
+          UNION ALL SELECT (SELECT e.created_at FROM usage_events e WHERE e.session_id = s.id AND e.counts_as_activity
+            AND e.created_at > p.lo AND e.created_at <= p.hi AND (s.ended_at IS NULL OR e.created_at <= s.ended_at)
+            ORDER BY e.created_at LIMIT 1)
         ) x
         WHERE x.t > p.lo AND x.t <= p.hi AND (s.ended_at IS NULL OR x.t <= s.ended_at)
         GROUP BY p.k`

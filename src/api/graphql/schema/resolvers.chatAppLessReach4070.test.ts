@@ -24,7 +24,7 @@ beforeEach(async () => {
   managerId = (await db.user.create({ data: { handle: 'reach4070-manager' } })).id;
   consumerId = (await db.user.create({ data: { handle: 'reach4070-consumer' } })).id;
   await db.orgMember.create({ data: { organizationId: agentOrg.id, userId: managerId, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: agentOrg.id, name: 'Reach agent', visibility: 'ORGANIZATION' }, managerCtx());
+  const agent = await M.createAgent({}, { orgRef: agentOrg.id, name: 'Reach agent', visibility: 'ORGANIZATION' }, managerCtx());
   agentId = agent.id; systemId = agent.systemMemoryId;
   // The licensed App L lives in an org neither user belongs to as a consumer; the consumer has NO org membership at all.
   const licOrg = await db.organization.create({ data: { name: 'Licensed org', urn: 'reach4070.lic' } });

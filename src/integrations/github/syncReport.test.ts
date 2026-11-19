@@ -57,7 +57,7 @@ describe('#3612 reviewed report versions', () => {
     version: 1, outcome: 'failed', recordedAt: now.toISOString(), entries: [], code,
    });
   const v1: SyncReportEntry[] = [
-   ...(['PROTECTED_LOC', 'PROTECTED_COMMENT', 'PROTECTED_BOOT_PROMPT', 'PROTECTED_DECISION'] as const).map(code => ({ kind: 'protected' as const, loc: 'p', code })),
+   ...(['PROTECTED_LOC', 'PROTECTED_COMMENT', 'PROTECTED_BOOT_PROMPT', 'PROTECTED_QUESTION'] as const).map(code => ({ kind: 'protected' as const, loc: 'p', code })),
    { kind: 'object_type_rejected', loc: 'o', code: 'OBJECT_TYPE_REJECTED' },
    { kind: 'undeclared_role', loc: 'u', code: 'ROLE_NOT_DECLARED' },
    ...(['INVALID_INCLUDE', 'INCLUDE_CYCLE', 'INCLUDE_TARGET_UNAVAILABLE'] as const).map(code => ({ kind: 'invalid_include' as const, loc: 'i', code })),

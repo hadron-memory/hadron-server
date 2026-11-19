@@ -83,12 +83,12 @@
     "LintWarning": "value",
     "LintWarningPage": "envelope",
     "ApproveMemoryNodesResult": "envelope",
-    "DecisionOption": "value",
-    "DecisionRecommendation": "value",
-    "DecisionApprovalEvidence": "value",
-    "DecisionWithdrawal": "value",
-    "DecisionPage": "envelope",
-    "DecisionVerification": "value",
+    "QuestionOption": "value",
+    "QuestionRecommendation": "value",
+    "QuestionApprovalEvidence": "value",
+    "QuestionWithdrawal": "value",
+    "QuestionPage": "envelope",
+    "QuestionVerification": "value",
     "CommentThreadPage": "envelope",
     "CommentSummary": "value",
     "RevisionApproval": "value",
@@ -896,152 +896,152 @@
       "resolver": "src/api/graphql/schema/resolvers.dashboard.ts::dashboardWidgetPresetsPage",
       "target": "DashboardWidgetPreset"
     },
-    "Decision.askedBy": {
+    "Question.askedBy": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
-      "target": "DecisionActor"
+      "target": "QuestionActor"
     },
-    "Decision.blocks": {
+    "Question.blocks": {
       "class": "closed-projection",
-      "projection": "DecisionRef",
-      "why": "DecisionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
-      "target": "DecisionRef"
+      "projection": "QuestionRef",
+      "why": "QuestionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
+      "target": "QuestionRef"
     },
-    "Decision.deciders": {
+    "Question.deciders": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "Decision.evidence": {
+    "Question.evidence": {
       "class": "parent-implies-child",
-      "audience": "the node's latest approval record, shown to every reader of the node; a Decision is only produced for readers of the log memory",
+      "audience": "the node's latest approval record, shown to every reader of the node; a Question is only produced for readers of the log memory",
       "spec": "cor:dmo:120:10",
-      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::decisionFieldResolvers",
-      "maskingTest": "src/api/graphql/schema/resolvers.decisions1641.test.ts::decision by code or citation, decisions sorted and filtered after evaluation, awaitingMe; unreadable is null",
-      "target": "DecisionEvidence"
+      "resolver": "src/api/graphql/schema/resolvers.questions.ts::questionFieldResolvers",
+      "maskingTest": "src/api/graphql/schema/resolvers.questions1641.test.ts::question by code or citation, questions sorted and filtered after evaluation, awaitingMe; unreadable is null",
+      "target": "QuestionEvidence"
     },
-    "Decision.followUps": {
+    "Question.followUps": {
       "class": "closed-projection",
-      "projection": "DecisionRef",
-      "why": "DecisionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
-      "target": "DecisionRef"
+      "projection": "QuestionRef",
+      "why": "QuestionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
+      "target": "QuestionRef"
     },
-    "Decision.identityMerges": {
+    "Question.identityMerges": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
-      "target": "DecisionIdentityMerge"
+      "target": "QuestionIdentityMerge"
     },
-    "Decision.node": {
+    "Question.node": {
       "target": "Node",
       "class": "parent-implies-child",
-      "audience": "A Decision is a view of its backing node; decision and decisions are gated on that node's memory.",
-      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::decisionFieldResolvers"
+      "audience": "A Question is a view of its backing node; question and questions are gated on that node's memory.",
+      "resolver": "src/api/graphql/schema/resolvers.questions.ts::questionFieldResolvers"
     },
-    "Decision.parts": {
+    "Question.parts": {
       "class": "parent-implies-child",
-      "audience": "parts are the decision node's own data; every path that yields a Decision first passes the log memory's read or write gate",
-      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::decisionFieldResolvers",
-      "maskingTest": "src/api/graphql/schema/resolvers.decisions1641.test.ts::decision by code or citation, decisions sorted and filtered after evaluation, awaitingMe; unreadable is null",
-      "target": "DecisionPart"
+      "audience": "parts are the question node's own data; every path that yields a Question first passes the log memory's read or write gate",
+      "resolver": "src/api/graphql/schema/resolvers.questions.ts::questionFieldResolvers",
+      "maskingTest": "src/api/graphql/schema/resolvers.questions1641.test.ts::question by code or citation, questions sorted and filtered after evaluation, awaitingMe; unreadable is null",
+      "target": "QuestionPart"
     },
-    "Decision.sources": {
+    "Question.sources": {
       "class": "closed-projection",
-      "projection": "DecisionRef",
-      "why": "DecisionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
-      "target": "DecisionRef"
+      "projection": "QuestionRef",
+      "why": "QuestionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
+      "target": "QuestionRef"
     },
-    "DecisionActor.app": {
+    "QuestionActor.app": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "DecisionActor.user": {
+    "QuestionActor.user": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "DecisionActor.worker": {
+    "QuestionActor.worker": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "DecisionAnswer.source": {
+    "QuestionAnswer.source": {
       "class": "closed-projection",
-      "projection": "DecisionRef",
-      "why": "DecisionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
-      "target": "DecisionRef"
+      "projection": "QuestionRef",
+      "why": "QuestionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
+      "target": "QuestionRef"
     },
-    "DecisionApprovalEvidence.by": {
+    "QuestionApprovalEvidence.by": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "DecisionIdentityMerge.from": {
+    "QuestionIdentityMerge.from": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "DecisionIdentityMerge.to": {
+    "QuestionIdentityMerge.to": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "DecisionLog.defaultDeciders": {
+    "QuestionLog.defaultDeciders": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "DecisionLog.eligibleDeciders": {
+    "QuestionLog.eligibleDeciders": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "DecisionLog.identityMerges": {
+    "QuestionLog.identityMerges": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
-      "target": "DecisionIdentityMerge"
+      "target": "QuestionIdentityMerge"
     },
-    "DecisionLog.purges": {
+    "QuestionLog.purges": {
       "class": "parent-implies-child",
-      "audience": "purge records live in the log node's data; a DecisionLog is produced only through loadLogView (resolveGovernedNode) or the create/set-deciders mutations",
-      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::decisionFieldResolvers",
-      "maskingTest": "src/api/graphql/schema/resolvers.decisions1641.test.ts::decision by code or citation, decisions sorted and filtered after evaluation, awaitingMe; unreadable is null",
-      "target": "DecisionPurge"
+      "audience": "purge records live in the log node's data; a QuestionLog is produced only through loadLogView (resolveGovernedNode) or the create/set-deciders mutations",
+      "resolver": "src/api/graphql/schema/resolvers.questions.ts::questionFieldResolvers",
+      "maskingTest": "src/api/graphql/schema/resolvers.questions1641.test.ts::question by code or citation, questions sorted and filtered after evaluation, awaitingMe; unreadable is null",
+      "target": "QuestionPurge"
     },
-    "DecisionPage.items": {
+    "QuestionPage.items": {
       "class": "parent-implies-child",
-      "audience": "callers who can read the log's memory (resolveGovernedNode requires isMemoryReadableCached); decisions are nodes of that memory",
-      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::resolveGovernedNode",
-      "target": "Decision"
+      "audience": "callers who can read the log's memory (resolveGovernedNode requires isMemoryReadableCached); questions are nodes of that memory",
+      "resolver": "src/api/graphql/schema/resolvers.questions.ts::resolveGovernedNode",
+      "target": "Question"
     },
-    "DecisionPart.answer": {
+    "QuestionPart.answer": {
       "class": "parent-implies-child",
-      "audience": "a Decision is produced only after the decision log's memory read gate (resolveGovernedNode); answers are part of that node's data",
-      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::answerOut",
-      "maskingTest": "src/api/graphql/schema/resolvers.decisions1641.test.ts::decision by code or citation, decisions sorted and filtered after evaluation, awaitingMe; unreadable is null",
-      "target": "DecisionAnswer"
+      "audience": "a Question is produced only after the question log's memory read gate (resolveGovernedNode); answers are part of that node's data",
+      "resolver": "src/api/graphql/schema/resolvers.questions.ts::answerOut",
+      "maskingTest": "src/api/graphql/schema/resolvers.questions1641.test.ts::question by code or citation, questions sorted and filtered after evaluation, awaitingMe; unreadable is null",
+      "target": "QuestionAnswer"
     },
-    "DecisionPart.answerHistory": {
+    "QuestionPart.answerHistory": {
       "class": "parent-implies-child",
-      "audience": "same as DecisionPart.answer: the history is part of the decision node's data, reachable only through a Decision that passed the log memory's read gate",
-      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::answerOut",
-      "maskingTest": "src/api/graphql/schema/resolvers.decisions1641.test.ts::decision by code or citation, decisions sorted and filtered after evaluation, awaitingMe; unreadable is null",
-      "target": "DecisionAnswer"
+      "audience": "same as QuestionPart.answer: the history is part of the question node's data, reachable only through a Question that passed the log memory's read gate",
+      "resolver": "src/api/graphql/schema/resolvers.questions.ts::answerOut",
+      "maskingTest": "src/api/graphql/schema/resolvers.questions1641.test.ts::question by code or citation, questions sorted and filtered after evaluation, awaitingMe; unreadable is null",
+      "target": "QuestionAnswer"
     },
-    "DecisionPurge.by": {
+    "QuestionPurge.by": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "DecisionRecommendation.by": {
+    "QuestionRecommendation.by": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
-      "target": "DecisionActor"
+      "target": "QuestionActor"
     },
-    "DecisionWithdrawal.by": {
+    "QuestionWithdrawal.by": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
-      "target": "DecisionActor"
+      "target": "QuestionActor"
     },
     "DeliveryBatch.worker": {
       "class": "parent-implies-child",

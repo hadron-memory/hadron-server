@@ -1,7 +1,7 @@
 /**
  * #4281 S12c (Team on Orca S12, epic #4229) — the monthly review-quality report per reviewer family and model.
  *
- * cor:agt:130:06 (Definition: review quality measures; Proposed, drafted on the issue, not minted) and the reader line of
+ * the review quality measures (Proposed, drafted on the issue, not in the corpus) and the reader line of
  * cor:agt:050:21 r19 (Proposed; Peter, team chat #110352):
  *  - a review is one FINISHED seat task carrying at least one `review.verdict`; its verdict is the seat's LATEST;
  *  - its row is that verdict's (family, model) snapshot (cor:agt:130:02), split on whether the model was reported; a
@@ -100,7 +100,7 @@ beforeEach(async () => {
   build = await buildIn(app);
 });
 
-describe('the four measures match a hand count (cor:agt:130:06, #4281)', () => {
+describe('the four measures match a hand count (#4281)', () => {
   it('the definition\'s own example: three seats, two approving, findings 0, 1 and 3, two fixed, one rejected, one undisposed', async () => {
     await review({ verdict: 'APPROVE', findings: 0 });
     await review({ verdict: 'APPROVE', findings: 1, dispositions: ['fixed'] });
@@ -340,7 +340,7 @@ describe('the surface', () => {
   });
 });
 
-describe('#4287: defects missed, from the defect links (#4280; cor:agt:130:05, :06)', () => {
+describe('#4287: defects missed, from the defect links (#4280)', () => {
   const [H1, H2, H3] = ['1', '2', '3'].map((d) => d.repeat(40));
   let pr: any;
   /** A build with H1, H2 and H3 frozen in that order (S12b's "later head" order). */
@@ -355,7 +355,7 @@ describe('#4287: defects missed, from the defect links (#4280; cor:agt:130:05, :
   const D = (n: number) => `https://github.com/example/project/issues/${9000 + n}`;
   const byFamily = async () => Object.fromEntries((await rows()).map((r: any) => [r.family, r]));
 
-  it('Victor\'s 130:05 scenario: Ada\'s APPROVE at the introducing head H2 counts; Rico\'s APPROVE at H1 does not', async () => {
+  it('Victor\'s defect-link scenario: Ada\'s APPROVE at the introducing head H2 counts; Rico\'s APPROVE at H1 does not', async () => {
     await review({ inBuild: pr, head: H2, family: 'ada' });
     await review({ inBuild: pr, head: H1, family: 'rico' });
     await link(D(1), H2);

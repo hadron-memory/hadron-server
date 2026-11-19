@@ -1,46 +1,46 @@
 /**
- * #1641 §5.2 / §5.5 — a decision's `content` is RENDERED from its payload, so
+ * #1641 §5.2 / §5.5 — a question's `content` is RENDERED from its payload, so
  * the approval hash (#1591) and later the signature (#1614), which cover
  * title, abstract and content only, cover exactly what the human saw and
  * answered.
  *
  * `content` = the human-readable markdown + a trailing fenced semantic block
  * holding the RFC 8785 (JCS) encoding of the whole payload. The block makes
- * the authenticated text lossless: two decisions that differ in any
+ * the authenticated text lossless: two questions that differ in any
  * authority-bearing field differ in authenticated text.
  *
- * Renderers are versioned pure functions and RETAINED: a decision is always
+ * Renderers are versioned pure functions and RETAINED: a question is always
  * verified with the renderer it declares, so a new renderer never marks
  * history tampered, and an unknown one is UNVERIFIABLE (fail closed).
  */
 import { canonicalizeTeamJson } from '../teamSpec/canonicalize.js';
-import type { DecisionActor, DecisionAnswer, DecisionData, DecisionLogData, DecisionPart, DecisionRef } from './codec.js';
+import type { QuestionActor, QuestionAnswer, QuestionData, QuestionLogData, QuestionPart, QuestionRef } from './codec.js';
 
 /** The renderer every door writes with today. */
-export const CURRENT_DECISION_RENDERER = 'decision-md/1';
+export const CURRENT_QUESTION_RENDERER = 'decision-md/1';
 
-/** RFC 8785 encoding of a decision payload (the semantic block's body). */
-export function canonicalDecisionJson(value: unknown): string {
+/** RFC 8785 encoding of a question payload (the semantic block's body). */
+export function canonicalQuestionJson(value: unknown): string {
   return canonicalizeTeamJson(value);
 }
 
 const BLOCK_OPEN = '```hadron-decision\n';
 const BLOCK_CLOSE = '\n```\n';
 
-function actorText(actor: DecisionActor): string {
+function actorText(actor: QuestionActor): string {
   if (actor.workerId) return `worker ${actor.workerId}${actor.userId ? ` (user ${actor.userId})` : ''}`;
   if (actor.userId) return `user ${actor.userId}`;
   if (actor.appId) return `app ${actor.appId}`;
   return 'unknown';
 }
 
-function refText(ref: DecisionRef): string {
+function refText(ref: QuestionRef): string {
   if ('ref' in ref) return ref.ref;
   if ('node' in ref) return `node ${ref.node}`;
   return `spec ${ref.spec}`;
 }
 
-function answerText(answer: DecisionAnswer): string {
+function answerText(answer: QuestionAnswer): string {
   const choice = answer.key != null ? `**${answer.key}**` : '*free text*';
   const said = answer.text != null ? `: ${answer.text}` : '';
   const who = answer.claimedBy != null
@@ -51,7 +51,7 @@ function answerText(answer: DecisionAnswer): string {
   return `${choice}${said} (${who}, ${answer.at}, via ${answer.via}${source}).${reason}`;
 }
 
-function renderPart(code: string, part: DecisionPart): string[] {
+function renderPart(code: string, part: QuestionPart): string[] {
   const lines = [`## ${code}-${part.n}: ${part.question.split('\n')[0]}`, ''];
   if (part.question.includes('\n')) lines.push(part.question, '');
   if (part.options.length === 0) lines.push('*Free-text answer.*', '');
@@ -74,13 +74,13 @@ function renderPart(code: string, part: DecisionPart): string[] {
   return lines;
 }
 
-function refSection(title: string, refs: DecisionRef[]): string[] {
+function refSection(title: string, refs: QuestionRef[]): string[] {
   if (refs.length === 0) return [];
   return [`## ${title}`, '', ...refs.map((r) => `- ${refText(r)}`), ''];
 }
 
 /** `decision-md/1`: the markdown body (without the semantic block). */
-function renderMarkdownV1(d: DecisionData): string {
+function renderMarkdownV1(d: QuestionData): string {
   const lines: string[] = [`# ${d.code}: ${d.title}`, ''];
   lines.push(
     `**Status:** ${d.status} · **Urgency:** ${d.urgency} · **Tier:** ${d.tier} · **Authorizes:** ${d.authorizes ? 'yes' : 'no'}${d.archival ? ' · **Archival record (not usable as an authorization)**' : ''}`,
@@ -102,7 +102,7 @@ function renderMarkdownV1(d: DecisionData): string {
 }
 
 /** Retained renderers, by declared version. Never remove an entry. */
-const RENDERERS: Readonly<Record<string, (d: DecisionData) => string>> = {
+const RENDERERS: Readonly<Record<string, (d: QuestionData) => string>> = {
   'decision-md/1': renderMarkdownV1,
 };
 
@@ -112,24 +112,24 @@ export function isKnownRenderer(renderer: string): boolean {
 }
 
 /**
- * The full `content` of a decision with its declared renderer: markdown,
+ * The full `content` of a question with its declared renderer: markdown,
  * then the semantic block. Throws for an unknown renderer (a door only ever
  * writes the current one).
  */
-export function renderDecision(d: DecisionData): string {
+export function renderQuestion(d: QuestionData): string {
   const render = RENDERERS[d.renderer];
   if (!render) throw new Error(`unknown decision renderer ${d.renderer}`);
-  return `${render(d)}\n${BLOCK_OPEN}${canonicalDecisionJson(d)}${BLOCK_CLOSE}`;
+  return `${render(d)}\n${BLOCK_OPEN}${canonicalQuestionJson(d)}${BLOCK_CLOSE}`;
 }
 
-/** The one-line abstract of a decision. */
-export function renderDecisionAbstract(d: DecisionData): string {
+/** The one-line abstract of a question. */
+export function renderQuestionAbstract(d: QuestionData): string {
   const parts = d.parts.length === 1 ? '1 part' : `${d.parts.length} parts`;
   return `Decision ${d.code} (${d.status}, ${d.urgency}, ${d.tier} tier, ${parts}): ${d.title}`.slice(0, 2000);
 }
 
-/** The node name of a decision: `<code>: <title>`. */
-export function decisionName(d: Pick<DecisionData, 'code' | 'title'>): string {
+/** The node name of a question: `<code>: <title>`. */
+export function questionName(d: Pick<QuestionData, 'code' | 'title'>): string {
   return `${d.code}: ${d.title}`;
 }
 
@@ -140,7 +140,7 @@ export function decisionName(d: Pick<DecisionData, 'code' | 'title'>): string {
  *
  * @returns the parsed JSON, or null when there is no well-formed block.
  */
-export function extractDecisionBlock(content: string | null): unknown | null {
+export function extractQuestionBlock(content: string | null): unknown | null {
   if (content == null || !content.endsWith(BLOCK_CLOSE)) return null;
   const body = content.slice(0, -BLOCK_CLOSE.length);
   const open = body.lastIndexOf(`\n${BLOCK_OPEN}`);
@@ -154,8 +154,8 @@ export function extractDecisionBlock(content: string | null): unknown | null {
   }
 }
 
-/** The rendered content of a decision LOG: its settings, for readers. Not authenticated. */
-export function renderDecisionLog(name: string, d: DecisionLogData): string {
+/** The rendered content of a question LOG: its settings, for readers. Not authenticated. */
+export function renderQuestionLog(name: string, d: QuestionLogData): string {
   const lines = [
     `# ${name}`,
     '',

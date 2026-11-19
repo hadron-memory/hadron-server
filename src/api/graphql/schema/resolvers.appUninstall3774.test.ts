@@ -51,7 +51,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: orgOwner.id, role: 'OWNER' } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: orgMember.id, role: 'CONTRIBUTOR' } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: otherOrg.id, userId: otherAdmin.id, role: 'ADMIN' } });
-  agentId = (await M.createAgent({}, { orgId: org.id, name: 'Un Agent' }, ctx(admin.id))).id;
+  agentId = (await M.createAgent({}, { orgRef: org.id, name: 'Un Agent' }, ctx(admin.id))).id;
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Un', urn: `${org.urn}:un` }, select: { id: true, urn: true } });
   await db.appMember.create({ data: { appId: app.id, userId: appOwnerRole.id, role: 'owner' } });
 });

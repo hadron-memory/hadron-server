@@ -77,7 +77,7 @@ beforeEach(async () => {
   mia = await db.user.create({ data: { githubId: 400_000 + n, githubUsername: `st-mia-${n}`, roles: ['READER'] } });
   outsider = await db.user.create({ data: { githubId: 500_000 + n, githubUsername: `st-out-${n}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   agentId = agent.id;
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `stall-${n}.example:team` }, select: { id: true } });
   await db.appMember.create({ data: { appId: app.id, userId: mia.id, role: 'member' } });
@@ -195,10 +195,12 @@ describe('cor:agt:050:14 — a task not started in time raises an alarm', () => 
     expect(await alarms()).toEqual([]);
   });
 
-  it('a person assignee is alarmed too, and is never marked unavailable', async () => {
+  // #3775 B (R5): this was "a person assignee is alarmed too"; a person-assigned task now raises no stall alarm at all
+  // (personAssigned3775.test.ts pins every rule), and a person is still never marked unavailable.
+  it('a person assignee raises no alarm and is never marked unavailable', async () => {
     await task({ ownerWorkerId: ada.id, assigneeUserId: mia.id, assignedAt: at('10:00'), createdAt: at('10:00') });
     await tick('10:15');
-    expect((await alarms()).map((a) => [a.type, a.subjectWorkerId])).toEqual([['stall.not-started', null]]);
+    expect(await alarms()).toEqual([]);
     expect(await db.workerAvailability.count()).toBe(0);
   });
 });
@@ -387,7 +389,7 @@ describe('cor:agt:050:16 r2 — an owner who doesn\'t react to a finished child 
   describe('#1848 — a person owner\'s own task calls end the window (cor:agt:050:12)', () => {
     /** Mia owns Rook's child under Ada's parent; the child finishes at 10:00. */
     async function personOwned() {
-      const parent = await task({ ownerWorkerId: ada.id, assigneeUserId: mia.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:10') });
+      const parent = await task({ ownerWorkerId: ada.id, assigneeWorkerId: liam.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:10') }); // #3775 B: a person-assigned parent raises nothing; the child OWNER stays Mia
       await task({
         parentTaskId: parent.id, ownerUserId: mia.id, assigneeWorkerId: rook.id, assignedAt: at('09:20'),
         status: 'finished', startedAt: at('09:30'), finishedAt: at('10:00'), resultOutcome: 'succeeded',
@@ -403,7 +405,7 @@ describe('cor:agt:050:16 r2 — an owner who doesn\'t react to a finished child 
       const parent = await personOwned();
       await db.agentTask.update({ where: { id: parent.id }, data: { assignedAt: at('10:05') } });
       await tick('10:20');
-      expect(await alarms('stall.owner-unreactive')).toEqual([expect.objectContaining({ taskId: parent.id, subjectWorkerId: null })]);
+      expect(await alarms('stall.owner-unreactive')).toEqual([expect.objectContaining({ taskId: parent.id, subjectWorkerId: liam.id })]); // #3775 B: the parent's assignee is a worker now; the person owner of the CHILD is never marked (count below)
       expect(await db.workerAvailability.count()).toBe(0);
     });
 
@@ -856,7 +858,7 @@ describe('cor:agt:060:07 — a stall makes the assignee unavailable until it act
 
     it('a person who owns the parent is alarmed and never marked', async () => {
       const parent = await task({
-        ownerWorkerId: ada.id, assigneeUserId: mia.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:10'),
+        ownerWorkerId: ada.id, assigneeWorkerId: liam.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:10'), // #3775 B: worker-assigned parent
       });
       await task({
         parentTaskId: parent.id, ownerUserId: mia.id, assigneeWorkerId: rook.id, assignedAt: at('09:20'),

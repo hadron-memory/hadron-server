@@ -1,19 +1,19 @@
 /**
- * #1641 §5.1 — the decision codec. A decision's authoritative payload is the
+ * #1641 §5.1 — the question codec. A question's authoritative payload is the
  * semantic block rendered into its `content` (§5.5); `Node.data` is a parsed
  * cache of that block. This module validates both the stored payload
  * (`hadron.dev/decision/v1`) and the client's ask / amend input, and maps a
- * validation failure to `DECISION_INVALID` with JSON pointers.
+ * validation failure to `QUESTION_INVALID` with JSON pointers.
  *
  * Every authenticated actor (`askedBy`, `recommendation.by`, `answer.by`) is
  * server-taken from the principal and absent from the input schemas
  * (§7 provenance): a client cannot supply one.
  */
 import { z } from 'zod';
-import { decisionError } from './index.js';
+import { questionError } from './index.js';
 
-export const DECISION_CODEC = 'hadron.dev/decision/v1';
-export const DECISION_LOG_CODEC = 'hadron.dev/decision-log/v1';
+export const QUESTION_CODEC = 'hadron.dev/decision/v1';
+export const QUESTION_LOG_CODEC = 'hadron.dev/decision-log/v1';
 
 export const TITLE_MAX = 300;
 export const LONG_TEXT_MAX = 20_000;
@@ -43,7 +43,7 @@ export const refSchema = z.union([
   z.strictObject({ node: oneLine(REF_MAX) }),
   z.strictObject({ spec: oneLine(REF_MAX) }),
 ]);
-export type DecisionRef = z.infer<typeof refSchema>;
+export type QuestionRef = z.infer<typeof refSchema>;
 
 /** An authenticated actor, taken from the request's principal. */
 export const actorSchema = z.strictObject({
@@ -51,7 +51,7 @@ export const actorSchema = z.strictObject({
   workerId: z.string().nullable(),
   appId: z.string().nullable(),
 });
-export type DecisionActor = z.infer<typeof actorSchema>;
+export type QuestionActor = z.infer<typeof actorSchema>;
 
 export const optionSchema = z.strictObject({
   key: optionKey,
@@ -59,7 +59,7 @@ export const optionSchema = z.strictObject({
   meaning: text(SHORT_TEXT_MAX).nullable(),
   cost: text(SHORT_TEXT_MAX).nullable(),
 });
-export type DecisionOption = z.infer<typeof optionSchema>;
+export type QuestionOption = z.infer<typeof optionSchema>;
 
 export const recommendationSchema = z.strictObject({
   key: optionKey,
@@ -70,7 +70,7 @@ export const recommendationSchema = z.strictObject({
 });
 
 /**
- * One recorded answer to a part. Written by `answerDecision` (S2); reserved
+ * One recorded answer to a part. Written by `answerQuestion` (S2); reserved
  * in v1 so the codec needs no change when answers land. `claimedBy` /
  * `recordedBy` carry an imported answer's provenance (§10).
  */
@@ -86,7 +86,7 @@ export const answerSchema = z.strictObject({
   claimedBy: oneLine(REF_MAX).nullable(),
   recordedBy: z.string().nullable(),
 });
-export type DecisionAnswer = z.infer<typeof answerSchema>;
+export type QuestionAnswer = z.infer<typeof answerSchema>;
 
 export const partSchema = z.strictObject({
   n: z.number().int().min(1).max(MAX_PARTS),
@@ -97,14 +97,14 @@ export const partSchema = z.strictObject({
   answer: answerSchema.nullable(),
   answerHistory: z.array(answerSchema),
 });
-export type DecisionPart = z.infer<typeof partSchema>;
+export type QuestionPart = z.infer<typeof partSchema>;
 
 const lifecycleMark = z.strictObject({ by: actorSchema, at: z.string(), reason: nonBlank(SHORT_TEXT_MAX) });
-const decisionLink = z.strictObject({ nodeId: z.string(), code: z.string() });
+const questionLink = z.strictObject({ nodeId: z.string(), code: z.string() });
 
-/** The stored, authenticated payload of a decision (the semantic block, §5.5). */
-export const decisionDataSchema = z.strictObject({
-  codec: z.literal(DECISION_CODEC),
+/** The stored, authenticated payload of a question (the semantic block, §5.5). */
+export const questionDataSchema = z.strictObject({
+  codec: z.literal(QUESTION_CODEC),
   renderer: z.string(),
   kind: z.literal('decision'),
   logId: z.string(),
@@ -114,7 +114,7 @@ export const decisionDataSchema = z.strictObject({
   urgency: z.enum(['normal', 'urgent']),
   tier: z.enum(['approved', 'signed']),
   authorizes: z.boolean(),
-  /** The authorization a grant decision carries (§11): reserved, structured by the register epic. */
+  /** The authorization a grant question carries (§11): reserved, structured by the register epic. */
   grant: z.record(z.string(), z.unknown()).nullable(),
   /** Migrated authorization-bearing history (§10): never usable as an authorization. */
   archival: z.boolean(),
@@ -129,20 +129,20 @@ export const decisionDataSchema = z.strictObject({
   /** A hint for the card only (§6.3); every relying consumer uses the derived state. */
   status: z.enum(['open', 'answered', 'withdrawn', 'superseded']),
   withdrawn: lifecycleMark.nullable(),
-  supersedes: decisionLink.nullable(),
-  supersededBy: decisionLink.nullable(),
+  supersedes: questionLink.nullable(),
+  supersededBy: questionLink.nullable(),
 });
-export type DecisionData = z.infer<typeof decisionDataSchema>;
+export type QuestionData = z.infer<typeof questionDataSchema>;
 
-/** The settings a decision log holds (§3.3, §6.1a). Not a decision: never approved. */
-export const decisionLogDataSchema = z.strictObject({
-  codec: z.literal(DECISION_LOG_CODEC),
+/** The settings a question log holds (§3.3, §6.1a). Not a question: never approved. */
+export const questionLogDataSchema = z.strictObject({
+  codec: z.literal(QUESTION_LOG_CODEC),
   kind: z.literal('decision.log'),
   prefix: z.string().regex(/^[A-Z]{1,3}$/),
   lastCode: z.number().int().min(0),
   defaultDeciders: z.array(z.string()).min(1).max(MAX_DECIDERS),
   eligibleDeciders: z.array(z.string()).max(MAX_DECIDERS),
-  /** Q8 audit: each never-answered decision a platform admin purged. */
+  /** Q8 audit: each never-answered question a platform admin purged. */
   purges: z.array(z.strictObject({
     code: z.string(),
     n: z.number().int().min(1),
@@ -159,7 +159,7 @@ export const decisionLogDataSchema = z.strictObject({
     reason: text(SHORT_TEXT_MAX).nullable(),
   }),
 });
-export type DecisionLogData = z.infer<typeof decisionLogDataSchema>;
+export type QuestionLogData = z.infer<typeof questionLogDataSchema>;
 
 // ─── Client input ────────────────────────────────────────────────────────────
 
@@ -184,7 +184,7 @@ export const partInputSchema = z.strictObject({
   recommendation: recommendationInput.nullish(),
   noRecommendation: z.strictObject({ reason: nonBlank(SHORT_TEXT_MAX) }).nullish(),
 });
-export type DecisionPartInput = z.infer<typeof partInputSchema>;
+export type QuestionPartInput = z.infer<typeof partInputSchema>;
 
 export const askInputSchema = z.strictObject({
   title: oneLine(TITLE_MAX),
@@ -200,7 +200,7 @@ export const askInputSchema = z.strictObject({
   followUps: z.array(refSchema).max(MAX_REFS).nullish(),
   parts: z.array(partInputSchema).min(1).max(MAX_PARTS),
 });
-export type AskDecisionInput = z.infer<typeof askInputSchema>;
+export type AskQuestionInput = z.infer<typeof askInputSchema>;
 
 /** A change to one existing part. Omitted fields are unchanged; an answer is never patched (§7). */
 export const partPatchSchema = z.strictObject({
@@ -223,12 +223,12 @@ export const amendInputSchema = z.strictObject({
   parts: z.array(partPatchSchema).max(MAX_PARTS).nullish(),
   addParts: z.array(partInputSchema).max(MAX_PARTS).nullish(),
 });
-export type AmendDecisionInput = z.infer<typeof amendInputSchema>;
+export type AmendQuestionInput = z.infer<typeof amendInputSchema>;
 
 // ─── Validation ──────────────────────────────────────────────────────────────
 
 /** One validation failure, addressed by JSON pointer into the input. */
-export interface DecisionPointer {
+export interface QuestionPointer {
   pointer: string;
   message: string;
 }
@@ -237,27 +237,27 @@ function pointerOf(path: ReadonlyArray<PropertyKey>): string {
   return path.length === 0 ? '' : '/' + path.map((p) => String(p).replace(/~/g, '~0').replace(/\//g, '~1')).join('/');
 }
 
-/** `DECISION_INVALID`, carrying every pointer (bounded). */
-export function invalidDecision(pointers: DecisionPointer[], what = 'decision'): never {
+/** `QUESTION_INVALID`, carrying every pointer (bounded). */
+export function invalidQuestion(pointers: QuestionPointer[], what = 'question'): never {
   const first = pointers[0];
-  throw decisionError(
-    'DECISION_INVALID',
+  throw questionError(
+    'QUESTION_INVALID',
     `Invalid ${what}${first ? ` at ${first.pointer || '/'}: ${first.message}` : ''}.`,
     { pointers: pointers.slice(0, 50) },
   );
 }
 
-/** Parse `input` with `schema`, or throw `DECISION_INVALID` with pointers. */
-export function parseOrRefuse<T extends z.ZodType>(schema: T, input: unknown, what = 'decision'): z.infer<T> {
+/** Parse `input` with `schema`, or throw `QUESTION_INVALID` with pointers. */
+export function parseOrRefuse<T extends z.ZodType>(schema: T, input: unknown, what = 'question'): z.infer<T> {
   const result = schema.safeParse(input);
   if (result.success) return result.data;
-  return invalidDecision(
+  return invalidQuestion(
     result.error.issues.map((issue) => ({ pointer: pointerOf(issue.path), message: issue.message })),
     what,
   );
 }
 
-const YESNO: DecisionOption[] = [
+const YESNO: QuestionOption[] = [
   { key: 'yes', label: 'Yes', meaning: null, cost: null },
   { key: 'no', label: 'No', meaning: null, cost: null },
 ];
@@ -266,9 +266,9 @@ const YESNO: DecisionOption[] = [
 export function optionsOf(
   part: { options?: Array<z.infer<typeof optionInput>> | null; yesno?: boolean | null },
   pointer: string,
-): DecisionOption[] | null {
+): QuestionOption[] | null {
   if (part.yesno && part.options != null) {
-    invalidDecision([{ pointer, message: 'give either options or yesno, not both' }]);
+    invalidQuestion([{ pointer, message: 'give either options or yesno, not both' }]);
   }
   if (part.yesno) return YESNO.map((o) => ({ ...o }));
   if (part.options == null) return null;
@@ -282,23 +282,23 @@ export function optionsOf(
  *   - exactly one of `recommendation` and `noRecommendation` (§8.4: an
  *     absent recommendation is always deliberate and stated).
  */
-export function checkPart(part: DecisionPart, pointer: string): void {
+export function checkPart(part: QuestionPart, pointer: string): void {
   const keys = new Set<string>();
   for (const [i, option] of part.options.entries()) {
-    if (keys.has(option.key)) invalidDecision([{ pointer: `${pointer}/options/${i}/key`, message: `duplicate option key "${option.key}"` }]);
+    if (keys.has(option.key)) invalidQuestion([{ pointer: `${pointer}/options/${i}/key`, message: `duplicate option key "${option.key}"` }]);
     keys.add(option.key);
   }
   if (part.recommendation && part.noRecommendation) {
-    invalidDecision([{ pointer, message: 'give either a recommendation or noRecommendation, not both' }]);
+    invalidQuestion([{ pointer, message: 'give either a recommendation or noRecommendation, not both' }]);
   }
   if (!part.recommendation && !part.noRecommendation) {
-    throw decisionError(
-      'DECISION_RECOMMENDATION_MISSING',
+    throw questionError(
+      'QUESTION_RECOMMENDATION_MISSING',
       `Part ${part.n} has no recommendation. Give one, or state why there is none with noRecommendation.`,
       { pointer, part: part.n },
     );
   }
   if (part.recommendation && !keys.has(part.recommendation.key)) {
-    invalidDecision([{ pointer: `${pointer}/recommendation/key`, message: `"${part.recommendation.key}" is not one of the part's options` }]);
+    invalidQuestion([{ pointer: `${pointer}/recommendation/key`, message: `"${part.recommendation.key}" is not one of the part's options` }]);
   }
 }

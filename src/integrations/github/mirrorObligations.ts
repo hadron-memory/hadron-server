@@ -28,7 +28,7 @@ import type { PrismaClient } from '../../generated/prisma/index.js';
 
 /** The closed set of failure words a row may carry (CHECK in git-mirror-obligation-invariants.sql). */
 export type MirrorErrorClass =
-  | 'TOKEN_UNAVAILABLE' | 'BRANCH_SETUP' | 'TREE_WRITE' | 'PUSH_FAILED' | 'LOCK_FAILED' | 'NOT_CLONED';
+  | 'TOKEN_UNAVAILABLE' | 'BRANCH_SETUP' | 'TREE_WRITE' | 'PUSH_FAILED' | 'PUSH_REJECTED' | 'LOCK_FAILED' | 'NOT_CLONED';
 
 /** One file the mirror owes the repository: a node's current file (WRITE) or an old loc to vacate (REMOVE). */
 export interface MirrorObligationRef {

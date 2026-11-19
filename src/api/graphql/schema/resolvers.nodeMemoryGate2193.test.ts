@@ -20,6 +20,7 @@ import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
 import { MEMORY_INCLUDE } from './resolvers.helpers.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 import { closeServerIfStarted, createServerOnCleanDb } from '../../../test/startServerFixture.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -262,7 +263,7 @@ describe('#2193 — other Node parents: Node.memory still answers as Query.memor
     const admin = await keyFor('admin');
     const urn = (await post(admin, 'query($r: ID!) { node(ref: $r) { urn } }', { r: node.know })).data.node.urn as string;
     const run = await db.appRun.create({
-      data: { id: generateId(), organizationId: org.id, appId, triggerKind: 'MANUAL', entryNodeUrn: urn, status: 'RUNNING' },
+      data: { id: generateId(), organizationId: org.id, appId, agentId: await testRunAgentId(db, org.id, appId), triggerKind: 'MANUAL', entryNodeUrn: urn, status: 'RUNNING' },
     });
     for (const [who, bearer] of await allBearers()) {
       const r = await post(bearer, 'query($r: ID!) { appRun(ref: $r) { entryNode { id memoryId memory { id } } } }', { r: run.id });
@@ -390,24 +391,24 @@ describe('#2193 — App-key and session principals: Node.memory answers as Query
   });
 });
 
-describe('#2193 — Decision.node, with the parent admitting the node', () => {
+describe('#2193 — Question.node, with the parent admitting the node', () => {
   it('serves the node with its memory exactly where Query.memory does', async () => {
     const owner = ctx('owner');
-    const log = await (resolvers as any).Mutation.createDecisionLog(null,
+    const log = await (resolvers as any).Mutation.createQuestionLog(null,
       { memoryRef: mem.know, loc: 'decisions', defaultDeciders: [user.owner] }, owner);
-    const asked = await (resolvers as any).Mutation.askDecision(null, {
+    const asked = await (resolvers as any).Mutation.askQuestion(null, {
       logRef: log.row.id,
       input: { title: 'Ship it?', parts: [{ question: 'Ship it now?', yesno: true, recommendation: { key: 'yes', reason: 'ready' } }] },
     }, owner);
     for (const who of ['owner', 'admin', 'reader', 'stranger']) {
       const bearer = await keyFor(who);
-      const r = await post(bearer, 'query($r: ID!) { decision(ref: $r) { id node { id memoryId memory { id description } } } }', { r: asked.row.id });
-      expect(r.errors, `${who}: decision`).toBeUndefined();
-      const d = r.data.decision;
+      const r = await post(bearer, 'query($r: ID!) { question(ref: $r) { id node { id memoryId memory { id description } } } }', { r: asked.row.id });
+      expect(r.errors, `${who}: question`).toBeUndefined();
+      const d = r.data.question;
       // Stated up front: the org's owner, admin and reader read the ORGANIZATION-visible
-      // memory the decision lives in; a stranger reads neither the decision nor its memory.
+      // memory the question lives in; a stranger reads neither the question nor its memory.
       if (who === 'stranger') { expect(d, 'stranger: concealed').toBeNull(); expect(await oracle(bearer, mem.know)).toBeNull(); continue; }
-      expect(d, `${who}: decision admitted`).not.toBeNull();
+      expect(d, `${who}: question admitted`).not.toBeNull();
       expect(d.node, `${who}: node`).toMatchObject({ id: asked.row.id, memoryId: mem.know });
       expect(await oracle(bearer, mem.know), `${who}: oracle`).toBe(mem.know);
       expect(d.node.memory, `${who}: memory`).toMatchObject({ id: mem.know, description: 'knowledge description' });
@@ -510,7 +511,7 @@ describe('#2193 — run principal', () => {
     const Q = (resolvers as any).Query;
     for (const who of ['admin', 'member']) {
       const run = await db.appRun.create({
-        data: { id: generateId(), organizationId: org.id, appId, userId: user[who], triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:x:y:z', status: 'RUNNING' },
+        data: { id: generateId(), organizationId: org.id, appId, agentId: await testRunAgentId(db, org.id, appId), userId: user[who], triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:x:y:z', status: 'RUNNING' },
       });
       const c: Context = { db, ...runAuthContext(run) };
       for (const [key, memoryId] of [['know', mem.know], ['handoff', mem.work]] as const) {
