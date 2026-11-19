@@ -3434,6 +3434,8 @@ const HORIZON_LAG_LOG_INTERVAL_MS = 60_000;
  * because a line can only come from a check.
  */
 const horizonLagLastCheckedAt = new Map<string, number>();
+/** #4436 item 5: what a logged `errorCode` may look like (P2028, P1001, ECONNREFUSED); anything else is not logged. */
+const HORIZON_ERROR_CODE_SHAPE = /^[A-Za-z0-9_.:-]{1,64}$/;
 /** #4436 item 2: the test seam over the module-level throttle map (resolvers.teamEventHorizon4316.test.ts): reset between tests and read the size and membership the eviction pins assert on. Never used by production code. */
 export const horizonThrottleForTest = {
   clear: (): void => horizonLagLastCheckedAt.clear(),
@@ -3468,8 +3470,14 @@ export const horizonThrottleForTest = {
  * #4408 (the #4372 review follow-ups): the cap EVICTS the least-recently-checked App instead of clearing
  * every throttle at once; the race timer is cleared on every path, not only success; and the fault line
  * carries the error's class and code, never its message.
+ *
+ * #4436: the eviction runs only when a NEW App arrives at the cap, an expired re-check of a mapped App
+ * evicts nobody, and every check moves its App to the newest end of the map, so the oldest entry is
+ * always the first key (O(1)). A logged `errorCode` must have the identifier shape.
+ *
+ * Exported for the #4408 direct pins (resolvers.teamEventHorizon4316.test.ts): the throttle bookkeeping,
+ * the race timer and the fault line, driven on a stand-in root client.
  */
-/** Exported for the #4408 direct pins (resolvers.teamEventHorizon4316.test.ts): the throttle bookkeeping, the race timer and the fault line, driven on a stand-in root client. */
 export async function logStalledHorizon(db: Context['db'], appId: string): Promise<void> {
   const now = Date.now();
   const last = horizonLagLastCheckedAt.get(appId);
@@ -3477,18 +3485,17 @@ export async function logStalledHorizon(db: Context['db'], appId: string): Promi
   // Baylor F5: a long-lived server would otherwise accumulate one entry per App forever. #4408 item 1:
   // past the cap, evict the least-recently-checked App — NOT the whole map. Clear-all reset every App's
   // settle-throttle at once, so a hot fleet re-probed in a burst the moment any 1_001st App arrived;
-  // eviction loses one window for one App. The scan is O(cap) and runs only when a NEW App arrives at the
-  // cap (a re-check updates a stamp in place); ties evict the earliest-inserted (Map iteration order),
+  // eviction loses one window for one App. #4436 item 1: the guard names the case the comment always
+  // claimed — a NEW App at the cap. An App already in the map (its window expired) is simply re-stamped
+  // and makes no room, so it neither scans nor evicts a bystander. Every check does delete-then-set, which
+  // moves the App to the newest end of the Map's insertion order, so that order IS recency order and the
+  // least-recently-checked App is the first key: eviction is O(1), and ties go to the earliest-inserted,
   // which is deterministic. Caller-visible behaviour is unchanged (FIT, #4408): the throttle only paces
   // probes, so what a caller is served — which events, and the more-remain answer — is the same.
-  if (horizonLagLastCheckedAt.size >= 1_000) {
-    let oldestApp: string | undefined;
-    let oldestStamp = Infinity;
-    for (const [app, stamp] of horizonLagLastCheckedAt) {
-      if (stamp < oldestStamp) { oldestStamp = stamp; oldestApp = app; }
-    }
-    horizonLagLastCheckedAt.delete(oldestApp!);
+  if (!horizonLagLastCheckedAt.has(appId) && horizonLagLastCheckedAt.size >= 1_000) {
+    horizonLagLastCheckedAt.delete(horizonLagLastCheckedAt.keys().next().value!);
   }
+  horizonLagLastCheckedAt.delete(appId);
   horizonLagLastCheckedAt.set(appId, now);
   const startedAt = now;
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -3528,8 +3535,12 @@ export async function logStalledHorizon(db: Context['db'], appId: string): Promi
     // is omitted rather than nulled; other errors carry neither. A non-Error throw names its kind; there
     // is no message to leak and none invented.
     const fault = typeof error === 'object' && error !== null ? (error as { code?: unknown; errorCode?: unknown }) : undefined;
-    const code = typeof fault?.code === 'string' ? fault.code
+    const rawCode = typeof fault?.code === 'string' ? fault.code
       : typeof fault?.errorCode === 'string' ? fault.errorCode : undefined;
+    // #4436 item 5 (Baylor F2): the line's fixed-key, no-free-text claim must hold for ANY thrower, not just
+    // Prisma and Node. A code with the identifier shape is logged; any other string is dropped, never
+    // truncated or logged raw, so a thrower that puts a message (a host, a path) in `code` cannot leak it.
+    const code = rawCode !== undefined && HORIZON_ERROR_CODE_SHAPE.test(rawCode) ? rawCode : undefined;
     console.log(JSON.stringify({
       event: 'team_events.horizon_probe_error', appId, ms: Date.now() - startedAt,
       errorName: error instanceof Error ? error.name : typeof error,
