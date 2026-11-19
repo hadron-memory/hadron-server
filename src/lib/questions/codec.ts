@@ -38,7 +38,7 @@ const oneLine = (max: number) =>
   nonBlank(max).refine((s) => !s.includes('\n'), { message: 'must be a single line' });
 
 /** An option key: a short identifier (`A`, `yes`, `option-2`). */
-const optionKey = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/, 'an option key is 1-32 letters, digits, "-" or "_", starting with a letter or digit');
+export const optionKey = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/, 'an option key is 1-32 letters, digits, "-" or "_", starting with a letter or digit');
 
 /** A reference: exactly one of an external ref (`hadron-server#1640`, `team:6783`), a node id or URN, or a spec citation. */
 export const refSchema = z.union([

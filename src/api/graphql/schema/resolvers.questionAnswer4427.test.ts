@@ -306,6 +306,14 @@ describe('the one decider gate: who may act as a decider', () => {
     expect((await dataOf(q.row.id)).answers).toHaveLength(1);
   });
 
+  it('a log decider the asker did not name on this question cannot answer it, though they can write the memory and sit on the log', async () => {
+    const log = await createLog([holger.id, second.id]);
+    const q = await ask(log.row.id, { title: 'Ship it?', yesno: true, recommendation: { key: 'yes', reason: 'ready' }, deciders: [holger.id] });
+    expect(await codeOf(answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq, as(second.id)))).toBe('QUESTION_NOT_DECIDER');
+    expect((await dataOf(q.row.id)).answers).toHaveLength(0);
+    await answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq, as(holger.id));
+  });
+
   it('a stored decider the log no longer names is refused, with the same message as any other failed identity check', async () => {
     const log = await createLog([holger.id, second.id]);
     const q = await ask(log.row.id, undefined, writer.id);
