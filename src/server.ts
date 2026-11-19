@@ -57,6 +57,7 @@ import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
 import { mountSigningCeremonyRoutes } from './api/signingCeremonyRoutes.js';
 import { mountGrantSigningCeremonyRoutes } from './api/grantSigningCeremonyRoutes.js';
+import { mountSecretRevealRoutes } from './api/secretRevealRoutes.js';
 import { mountPasskeySignInRoutes } from './api/passkeySignInRoutes.js';
 import { signingSurfacePolicy } from './lib/signing/surface.js';
 import { completeCeremonyLeg, mountFreshSignInRoutes } from './api/freshSignInRoutes.js';
@@ -1110,6 +1111,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   mountSigningCeremonyRoutes(app);
   // #3649 slice C: the grant signing ceremony, on the same switch.
   mountGrantSigningCeremonyRoutes(app);
+  mountSecretRevealRoutes(app);
   mountPasskeySignInRoutes(app);
   mountFreshSignInRoutes(app, { emailSendPerIpRateLimit, emailRecipientRateLimit });
 

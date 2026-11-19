@@ -684,6 +684,37 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
     expect(bulk.approved.map((r: { loc: string }) => r.loc)).toContain('ordinary');
     expect((await rowOf(d.row.id)).approvedRevNo).toBeNull();
   });
+
+  // #4445: the five non-rendered refusal messages say "question" (the codes are already QUESTION_*).
+  // "deciders" stays (cor:dmo:140:01, :05); the render literals are not touched here.
+  it('the approval and history refusals word the subject as a question, not a decision (#4445)', async () => {
+    const log = await createLog();
+    const d = await ask(log.row.id);
+    const messageOf = async (p: Promise<unknown>) => (await errorOf(p)).message;
+    await M.amendQuestion(null, { ref: d.row.id, input: { title: 'Title 1' }, expectedRevision: 1, reason: 'r1' }, as(writer.id));
+    const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: d.row.id } });
+    const msgs = [
+      await messageOf(M.approveNode(null, { nodeRef: log.row.id }, as(holger.id))),
+      await messageOf(M.approveNode(null, { nodeRef: d.row.id }, as(holger.id))),
+      await messageOf(M.clearNodeHistory(null, { nodeRef: d.row.id }, as())),
+      await messageOf(M.deleteNodeRevision(null, { revisionId: rev.id }, as())),
+    ];
+    expect(msgs[0]).toBe('A question log holds settings, not a question; it is never approved.');
+    expect(msgs[1]).toBe('A question is approved only by one of its deciders, which is not available yet.');
+    expect(msgs[2]).toContain("Clearing a question's history");
+    expect(msgs[3]).toContain("Deleting a question's revision");
+    for (const m of msgs) expect(m).not.toMatch(/\bdecisions?\b/i);
+  });
+
+  it("a question's revision label edit is refused with question wording (#4445)", async () => {
+    const log = await createLog();
+    const d = await ask(log.row.id);
+    await M.amendQuestion(null, { ref: d.row.id, input: { title: 'Title 1' }, expectedRevision: 1, reason: 'r1' }, as(writer.id));
+    const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: d.row.id } });
+    const e = await errorOf(M.updateNodeRevision(null, { revisionId: rev.id, revLabel: 'x' }, as()));
+    expect(e.extensions.code).toBe('QUESTION_CONTAINED');
+    expect(e.message).toContain("Editing a question's history");
+  });
 });
 
 describe('a personal assistant outside any team (§3.4, r4 use case)', () => {

@@ -729,6 +729,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-invariants.sql
 \ir agent-task-findings-invariants.sql
+\ir agent-task-role-task-refs-invariants.sql
 
 -- #2553: the hierarchical task handle (counters, number-filling and permanence triggers, the reserved AT0, NOT NULL). One source,
 -- shared verbatim with migration 20261027100000_agent_task_number (pinned by src/lib/agentTasks/taskNumber2553.test.ts).
@@ -960,3 +961,7 @@ CREATE INDEX IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"
 -- therefore leaves it nullable; this restores the guarantee the 20261117500000_app_run_agent_required migration states.
 -- app-run-agent-pre-push.sql has already filled or deleted every agentless run before the push.
 ALTER TABLE app_runs ALTER COLUMN agent_id SET NOT NULL;
+
+-- #3998 (S3 of #3991): secret read clients (after grants and secrets exist). Verbatim with migration 20261118100100_secret_read_clients.
+\ir secret-read-clients-invariants.sql
+
