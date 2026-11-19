@@ -9,7 +9,7 @@ import { resolvers, type Context } from './resolvers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;
 const refusal = { extensions: { code: 'QUESTION_DECIDER_NOT_ELIGIBLE' } };
-const input = { title: 'Proceed?', parts: [{ question: 'Proceed?', yesno: true, recommendation: { key: 'yes', reason: 'ready' } }] };
+const input = { title: 'Proceed?', yesno: true, recommendation: { key: 'yes', reason: 'ready' } };
 let admin: string, candidate: string, orgId: string, memoryId: string;
 const ctx = (client = db): Context => ({ db: client, userId: admin, roles: ['ADMIN'] });
 const membership = () => ({ organizationId_userId: { organizationId: orgId, userId: candidate } });

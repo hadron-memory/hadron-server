@@ -12,8 +12,8 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbWorkerAttribution } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
-import { questionDataSchema, questionLogDataSchema, type QuestionData } from '../../../lib/questions/codec.js';
-import { questionName, renderQuestion, renderQuestionAbstract, renderQuestionLog } from '../../../lib/questions/render.js';
+import { questionDataSchema, questionLogDataSchema, type AnswerEntry, type QuestionData } from '../../../lib/questions/codec.js';
+import { canonicalQuestionJson, questionName, renderQuestion, renderQuestionAbstract, renderQuestionLog } from '../../../lib/questions/render.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -51,7 +51,8 @@ const createLog = (extra: Record<string, unknown> = {}, userId = admin.id, conte
 
 const simple = (extra: Record<string, unknown> = {}) => ({
   title: 'Ship the codec?',
-  parts: [{ question: 'Ship it now?', yesno: true, recommendation: { key: 'yes', reason: 'ready' } }],
+  yesno: true,
+  recommendation: { key: 'yes', reason: 'ready' },
   ...extra,
 });
 const ask = (logRef: string, input: Record<string, unknown> = simple(), userId = writer.id, extra: Partial<Context> = {}) =>
@@ -61,18 +62,17 @@ const ask = (logRef: string, input: Record<string, unknown> = simple(), userId =
 const rowOf = (id: string) => db.node.findUniqueOrThrow({ where: { id } });
 
 /**
- * Write an S2-shaped answer CONSISTENTLY (data, rendered content, name and
- * abstract together, with a fingerprint refresh), standing in for
- * answerQuestion until S2 ships it. A real door write, minus the door.
+ * Append an answer-list entry CONSISTENTLY (data, rendered content, name and
+ * abstract together, with a fingerprint refresh), standing in for the answer
+ * door until S3 ships it (S3 deletes this helper). A real door write, minus
+ * the door.
  */
-async function answerAsS2(id: string, key: string, by: string): Promise<void> {
+async function writeAnswerForTest(id: string, entry: Partial<AnswerEntry> & Pick<AnswerEntry, 'by'>): Promise<void> {
   const row = await rowOf(id);
   const d = questionDataSchema.parse(row.data);
-  const next: QuestionData = {
-    ...d,
-    status: 'answered',
-    parts: d.parts.map((p) => ({ ...p, answer: { key, text: null, freeform: false, by, at: '2026-10-06T21:00:00.000Z', via: 'portal', source: null, reason: null, claimedBy: null, recordedBy: null } })),
-  };
+  const full: AnswerEntry = { kind: 'answer', key: null, text: null, reason: null, at: '2026-10-06T21:00:00.000Z', via: 'portal', ...entry };
+  const answers = [...d.answers, full];
+  const next: QuestionData = { ...d, answers, status: full.kind === 'answer' ? 'answered' : 'open' };
   await db.node.update({
     where: { id },
     data: {
@@ -81,6 +81,8 @@ async function answerAsS2(id: string, key: string, by: string): Promise<void> {
     },
   });
 }
+/** Answer the question with option `key` as `by`. */
+const answerAsS2 = (id: string, key: string, by: string) => writeAnswerForTest(id, { kind: 'answer', key, by });
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -105,7 +107,7 @@ describe('#1728 Channel roots cannot squat question-code space', () => {
   it.each([0, 1])('refuses the next code after %i questions without consuming it', async (issued) => {
     const log = await createLog();
     for (let i = 0; i < issued; i++) await ask(log.row.id);
-    const code = issued === 0 ? 'DA' : 'DB';
+    const code = issued === 0 ? 'QA' : 'QB';
     const loc = `questions:${code}`;
     const beforeChannels = await db.channel.count({ where: { memoryId: memory.id } });
     expect(await codeOf(M.createChannel(null, {
@@ -132,12 +134,13 @@ describe('createQuestionLog (§3.3, §6.1)', () => {
     expect(await codeOf(createLog({}, writer.id))).toBe('QUESTION_FORBIDDEN');
     expect(await codeOf(createLog({}, outsider.id))).toMatch(/^MEMORY_NOT_FOUND/);
     const log = await createLog({ name: 'Team questions' });
-    expect(L.prefix(log, {}, as())).toBe('D');
+    expect(L.prefix(log, {}, as())).toBe('Q');
     expect(L.lastCode(log, {}, as())).toBe(0);
     expect(L.defaultDeciderIds(log, {}, as())).toEqual([holger.id]);
     const row = await rowOf(log.row.id);
     expect(row).toMatchObject({ role: 'question.log', loc: 'questions', name: 'Team questions' });
-    expect(row.content).toContain('A decision log.');
+    expect(row.content).toContain('A question log.');
+    expect(row.data).toMatchObject({ codec: 'hadron.dev/question-log/v1', kind: 'question.log' });
   });
 
   it('refuses an encrypted memory, a git-mirrored one, an occupied loc, a nested log, and an ineligible decider', async () => {
@@ -276,28 +279,69 @@ describe('the App owner arm under concurrent revocation (#1690 review: Rook P3-1
   });
 });
 
-describe('askQuestion (§4, §5, §7)', () => {
-  it('a writer asks; the server issues DA, renders the content, and the state is OPEN and verifiable', async () => {
+describe('askQuestion (§4, §5, §7; #4426)', () => {
+  it('a writer asks; the server issues QA, renders the content, and the state is OPEN and verifiable', async () => {
     const log = await createLog();
     await createDbWorkerAttribution(db, writer.id, 'worker-ada');
     const d = await runAsActor({ workerId: 'worker-ada', agentId: null }, () => ask(log.row.id, simple({
-      urgency: 'URGENT', context: 'Background.', blocks: [{ ref: 'hadron-server#1641' }],
+      priority: 'URGENT', background: 'Background.', blocks: [{ ref: 'hadron-server#1641' }],
     })));
-    expect(D.code(d, {}, as())).toBe('DA');
+    expect(D.code(d, {}, as())).toBe('QA');
     expect(D.state(d, {}, as())).toBe('OPEN');
-    expect(D.urgency(d, {}, as())).toBe('URGENT');
-    expect(D.tier(d, {}, as())).toBe('APPROVED');
+    expect(D.priority(d, {}, as())).toBe('URGENT');
+    expect(D.tier(d, {}, as())).toBe('ANSWERED');
+    expect(D.answered(d, {}, as())).toBe(false);
     expect(D.deciderIds(d, {}, as())).toEqual([holger.id]);
     const askedBy = await D.askedBy(d, {}, as());
     expect(askedBy).toMatchObject({ userId: writer.id, workerId: 'worker-ada' });
-    const parts = D.parts(d, {}, as());
-    expect(parts[0]).toMatchObject({ n: 1, citation: 'DA-1', options: [{ key: 'yes' }, { key: 'no' }], recommendation: { key: 'yes' } });
+    expect(D.options(d, {}, as())).toMatchObject([{ key: 'yes' }, { key: 'no' }]);
+    expect(await D.recommendation(d, {}, as())).toMatchObject({ key: 'yes', reason: 'ready', by: { userId: writer.id, workerId: 'worker-ada' } });
     const row = await rowOf(d.row.id);
-    expect(row).toMatchObject({ loc: 'questions:DA', role: 'question', seq: 1, name: 'DA: Ship the codec?', revSeq: 1 });
-    expect(row.content).toContain('```hadron-decision');
+    expect(row).toMatchObject({ loc: 'questions:QA', role: 'question', seq: 1, name: 'QA: Ship the codec?', revSeq: 1 });
+    expect(row.content).toContain('```hadron-question');
+    // The stored payload is one question: no parts key (acceptance 1).
+    expect(Object.keys(row.data as object)).not.toContain('parts');
+    expect(row.data).toMatchObject({ codec: 'hadron.dev/question/v1', kind: 'question', answers: [], taskId: null, assignee: null });
     expect((await rowOf(log.row.id)).data).toMatchObject({ lastCode: 1 });
     expect(await Q.verifyQuestion(null, { ref: d.row.id }, as(reader.id))).toMatchObject({ state: 'OPEN', findings: [] });
-    expect((await ask(log.row.id)).row.loc).toBe('questions:DB');
+    expect((await ask(log.row.id)).row.loc).toBe('questions:QB');
+  });
+
+  it('acceptance 1: an input key "parts" is refused QUESTION_INVALID', async () => {
+    const log = await createLog();
+    const e = await errorOf(ask(log.row.id, { title: 't', parts: [{ question: 'q' }] }));
+    expect(e.extensions.code).toBe('QUESTION_INVALID');
+  });
+
+  it('acceptance 2: a full ask renders the sections, verifies OPEN, and the structured fields come back', async () => {
+    const log = await createLog();
+    const d = await ask(log.row.id, simple({
+      yesno: undefined,
+      options: [
+        { key: 'a', label: 'A', whyChoose: 'cheap', whyNot: 'slow', risks: 'drift' },
+        { key: 'b', label: 'B', whyChoose: null, whyNot: null, risks: null },
+        { key: 'c', label: 'C' },
+      ],
+      recommendation: { key: 'a', reason: 'cheapest' },
+      background: 'Why we ask.', whyNow: 'Release Friday.',
+      neededBy: new Date('2026-12-01T00:00:00.000Z'), defaultAction: 'ship A',
+      blocks: [{ ref: 'hadron-server#1' }], sources: [{ ref: 'team:1' }],
+      specsTouched: [{ spec: 'cor:dmo:140:03' }], specsMustChange: [{ spec: 'cor:dmo:140:07' }],
+    }));
+    const row = await rowOf(d.row.id);
+    const headings = ['## Explanation', '## What this question is blocking', '## Specs', '## Sources', '## Options', '## Answer'];
+    let at = -1;
+    for (const h of headings) {
+      const i = row.content!.indexOf(h);
+      expect(i, h).toBeGreaterThan(at);
+      at = i;
+    }
+    expect(row.content).toContain('**Needed by:** 2026-12-01T00:00:00.000Z. If unanswered: ship A');
+    expect(await Q.verifyQuestion(null, { ref: d.row.id }, as(reader.id))).toMatchObject({ state: 'OPEN', findings: [] });
+    expect(D.options(d, {}, as())[0]).toEqual({ key: 'a', label: 'A', whyChoose: 'cheap', whyNot: 'slow', risks: 'drift' });
+    expect(D.neededBy(d, {}, as())).toBe('2026-12-01T00:00:00.000Z');
+    expect(D.specsMustChange(d, {}, as())).toEqual([{ ref: null, node: null, spec: 'cor:dmo:140:07' }]);
+    expect(D.taskId(d, {}, as())).toBeNull();
   });
 
   it('readers and outsiders cannot ask; impersonation is refused', async () => {
@@ -307,20 +351,45 @@ describe('askQuestion (§4, §5, §7)', () => {
     expect(await codeOf(ask(log.row.id, simple(), writer.id, { impersonation: { adminUserId: admin.id } as never }))).toBe('QUESTION_IMPERSONATION_REFUSED');
   });
 
-  it('validates: pointers, a missing recommendation, an authorizing question below the signed tier, deciders narrowed never widened', async () => {
+  it('acceptance 3: validates: pointers, recommendation rules, tiers, assignee, deciders narrowed never widened', async () => {
     const log = await createLog({ eligibleDeciders: [admin.id] });
-    const bad = await errorOf(ask(log.row.id, { title: '', parts: [] }));
+    const bad = await errorOf(ask(log.row.id, { title: '', options: [{ key: '!', label: 'x' }] }));
     expect(bad.extensions.code).toBe('QUESTION_INVALID');
-    expect((bad.extensions.pointers as Array<{ pointer: string }>).map((p) => p.pointer)).toEqual(expect.arrayContaining(['/title', '/parts']));
-    expect(await codeOf(ask(log.row.id, simple({ parts: [{ question: 'q', yesno: true }] })))).toBe('QUESTION_RECOMMENDATION_MISSING');
-    expect(await codeOf(ask(log.row.id, simple({ authorizes: true, tier: 'APPROVED' })))).toBe('QUESTION_TIER_TOO_LOW');
+    expect((bad.extensions.pointers as Array<{ pointer: string }>).map((p) => p.pointer)).toEqual(expect.arrayContaining(['/title', '/options/0/key']));
+    const opts = [{ key: 'a', label: 'A' }, { key: 'b', label: 'B' }];
+    const invalid = async (input: Record<string, unknown>) => codeOf(ask(log.row.id, input));
+    expect(await invalid({ title: 't', options: [...opts, { key: 'a', label: 'dup' }], recommendation: { key: 'a', reason: 'r' } })).toBe('QUESTION_INVALID');
+    expect(await invalid({ title: 't', options: opts, recommendation: { key: 'z', reason: 'r' } })).toBe('QUESTION_INVALID');
+    expect(await invalid({ title: 't', options: opts })).toBe('QUESTION_RECOMMENDATION_MISSING');
+    expect(await invalid({ title: 't', options: opts, recommendation: { key: 'a', reason: 'r' }, noRecommendation: { reason: 'r' } })).toBe('QUESTION_INVALID');
+    expect(await invalid({ title: 't', recommendation: { key: 'a', reason: 'r' } })).toBe('QUESTION_INVALID');
+    expect(await invalid({ title: 't', defaultAction: 'ship' })).toBe('QUESTION_INVALID');
+    expect(await invalid({ title: 't', options: opts, yesno: true, noRecommendation: { reason: 'r' } })).toBe('QUESTION_INVALID');
+    expect(await invalid({ title: 't', authorizes: true, tier: 'ANSWERED', noRecommendation: undefined })).toBe('QUESTION_TIER_TOO_LOW');
+    expect(await invalid(simple({ authorizes: true, tier: 'APPROVED' }))).toBe('QUESTION_TIER_TOO_LOW');
+    expect(await invalid(simple({ assignee: writer.id }))).toBe('QUESTION_ASSIGNEE_NOT_DECIDER');
     const auth = await ask(log.row.id, simple({ authorizes: true }));
     expect(D.tier(auth, {}, as())).toBe('SIGNED');
-    expect(await codeOf(ask(log.row.id, simple({ deciders: [writer.id] })))).toBe('QUESTION_DECIDER_NOT_ELIGIBLE');
-    const narrowed = await ask(log.row.id, simple({ deciders: [admin.id] }));
+    expect(await invalid(simple({ deciders: [writer.id] }))).toBe('QUESTION_DECIDER_NOT_ELIGIBLE');
+    const narrowed = await ask(log.row.id, simple({ deciders: [admin.id], assignee: admin.id }));
     expect(D.deciderIds(narrowed, {}, as())).toEqual([admin.id]);
-    const none = await ask(log.row.id, simple({ parts: [{ question: 'Name it', noRecommendation: { reason: 'no view' } }] }));
-    expect(D.parts(none, {}, as())[0]).toMatchObject({ options: [], recommendation: null, noRecommendationReason: 'no view' });
+    expect(D.assigneeId(narrowed, {}, as())).toBe(admin.id);
+    const free = await ask(log.row.id, { title: 'Name it' });
+    expect(D.options(free, {}, as())).toEqual([]);
+    expect(await D.recommendation(free, {}, as())).toBeNull();
+    const none = await ask(log.row.id, { title: 'Pick', options: opts, noRecommendation: { reason: 'no view' } });
+    expect(D.noRecommendationReason(none, {}, as())).toBe('no view');
+  });
+
+  it('acceptance 10: Node.properties holds priority, answered, assignee and askedByWorkerId', async () => {
+    const log = await createLog();
+    await createDbWorkerAttribution(db, writer.id, 'worker-bea');
+    const d = await runAsActor({ workerId: 'worker-bea', agentId: null }, () => ask(log.row.id, simple({ priority: 'HIGH', assignee: holger.id })));
+    const row = await rowOf(d.row.id);
+    expect(row.properties).toMatchObject({
+      code: 'QA', n: 1, status: 'open', answered: false, priority: 'high', tier: 'answered', assignee: holger.id,
+      askedByUserId: writer.id, askedByWorkerId: 'worker-bea', answeredAt: null, deciders: [holger.id],
+    });
   });
 
   it('concurrent asks on one log never duplicate a code (two connections)', async () => {
@@ -333,7 +402,7 @@ describe('askQuestion (§4, §5, §7)', () => {
       ]);
       const locs = results.map((r) => r.row.loc).sort();
       expect(new Set(locs).size).toBe(8);
-      expect(locs).toEqual(['DA', 'DB', 'DC', 'DD', 'DE', 'DF', 'DG', 'DH'].map((c) => `questions:${c}`));
+      expect(locs).toEqual(['QA', 'QB', 'QC', 'QD', 'QE', 'QF', 'QG', 'QH'].map((c) => `questions:${c}`));
       expect((await rowOf(log.row.id)).data).toMatchObject({ lastCode: 8 });
     } finally {
       await second.$disconnect();
@@ -341,25 +410,57 @@ describe('askQuestion (§4, §5, §7)', () => {
   });
 });
 
-describe('amendQuestion (§6.2, §7)', () => {
-  it('before an answer any writer amends (OCC on revision); urgency is a decider\'s; parts keep their numbers', async () => {
+describe('amendQuestion (§6.2, §7; #4426)', () => {
+  it('before an answer any writer amends (OCC on revision); priority is a decider\'s; an omitted field is unchanged', async () => {
     const log = await createLog();
-    const d = await ask(log.row.id);
+    const d = await ask(log.row.id, simple({ background: 'Keep me', assignee: holger.id }));
     const amend = (input: Record<string, unknown>, rev: number, userId = writer.id) =>
       M.amendQuestion(null, { ref: d.row.id, input, expectedRevision: rev, reason: 'clarify' }, as(userId));
-    const a = await amend({ title: 'Ship the codec now?', addParts: [{ question: 'Also docs?', yesno: true, recommendation: { key: 'no' } }] }, 1);
+    const a = await amend({ title: 'Ship the codec now?', whyNow: 'Friday', specsTouched: [{ spec: 'cor:dmo:140' }] }, 1);
     expect(D.revSeq(a, {}, as())).toBe(2);
-    expect(D.parts(a, {}, as()).map((p: { citation: string }) => p.citation)).toEqual(['DA-1', 'DA-2']);
+    expect(D.title(a, {}, as())).toBe('Ship the codec now?');
+    expect(D.background(a, {}, as())).toBe('Keep me');
+    expect(D.assigneeId(a, {}, as())).toBe(holger.id);
     expect(await codeOf(amend({ title: 'x' }, 1))).toBe('NODE_WRITE_CONFLICT');
-    expect(await codeOf(amend({ parts: [{ n: 3, question: 'x' }] }, 2))).toBe('QUESTION_PART_RENUMBER');
-    expect(await codeOf(amend({ urgency: 'URGENT' }, 2))).toBe('QUESTION_NOT_DECIDER');
-    const urgent = await amend({ urgency: 'URGENT' }, 2, holger.id);
-    expect(D.urgency(urgent, {}, as())).toBe('URGENT');
+    expect(await codeOf(amend({ priority: 'URGENT' }, 2))).toBe('QUESTION_NOT_DECIDER');
+    const urgent = await amend({ priority: 'URGENT' }, 2, holger.id);
+    expect(D.priority(urgent, {}, as())).toBe('URGENT');
     // The revision history records the reason.
     const revs = await db.nodeRevision.findMany({ where: { nodeId: d.row.id }, orderBy: { revNo: 'asc' } });
     expect(revs.map((r) => r.revLabel)).toEqual(['clarify', 'clarify']);
     // A no-op amendment writes no revision.
-    expect(D.revSeq(await amend({ urgency: 'URGENT' }, 3, holger.id), {}, as())).toBe(3);
+    expect(D.revSeq(await amend({ priority: 'URGENT' }, 3, holger.id), {}, as())).toBe(3);
+  });
+
+  it('acceptance 6: an explicit null clears background, whyNow, assignee, neededBy and defaultAction; omitting leaves them', async () => {
+    const log = await createLog();
+    const d = await ask(log.row.id, simple({
+      background: 'b', whyNow: 'w', assignee: holger.id, neededBy: new Date('2026-12-01T00:00:00.000Z'), defaultAction: 'go',
+    }));
+    const amend = (input: Record<string, unknown>, rev: number) =>
+      M.amendQuestion(null, { ref: d.row.id, input, expectedRevision: rev, reason: 'r' }, as(writer.id));
+    const same = await amend({ title: 'Ship the codec?' }, 1);
+    expect(D.revSeq(same, {}, as())).toBe(1);
+    expect(D.assigneeId(same, {}, as())).toBe(holger.id);
+    const cleared = await amend({ background: null, whyNow: null, assignee: null, defaultAction: null, neededBy: null }, 1);
+    expect(D.background(cleared, {}, as())).toBeNull();
+    expect(D.whyNow(cleared, {}, as())).toBeNull();
+    expect(D.assigneeId(cleared, {}, as())).toBeNull();
+    expect(D.neededBy(cleared, {}, as())).toBeNull();
+    expect(D.defaultAction(cleared, {}, as())).toBeNull();
+    expect(await codeOf(amend({ assignee: writer.id }, 2))).toBe('QUESTION_ASSIGNEE_NOT_DECIDER');
+  });
+
+  it('the tier is raised by any writer; lowered only by a decider, before an answer, never for an authorizing question', async () => {
+    const log = await createLog();
+    const d = await ask(log.row.id);
+    const amend = (input: Record<string, unknown>, rev: number, userId = writer.id) =>
+      M.amendQuestion(null, { ref: d.row.id, input, expectedRevision: rev, reason: 'r' }, as(userId));
+    expect(D.tier(await amend({ tier: 'APPROVED' }, 1), {}, as())).toBe('APPROVED');
+    expect(await codeOf(amend({ tier: 'ANSWERED' }, 2))).toBe('QUESTION_NOT_DECIDER');
+    expect(D.tier(await amend({ tier: 'ANSWERED' }, 2, holger.id), {}, as())).toBe('ANSWERED');
+    const auth = await ask(log.row.id, simple({ authorizes: true }));
+    expect(await codeOf(M.amendQuestion(null, { ref: auth.row.id, input: { tier: 'APPROVED' }, expectedRevision: 1, reason: 'r' }, as(holger.id)))).toBe('QUESTION_TIER_TOO_LOW');
   });
 
   it('after an answer, only a decider amends; answered options stay; the tier is never lowered', async () => {
@@ -371,7 +472,7 @@ describe('amendQuestion (§6.2, §7)', () => {
     const amend = (input: Record<string, unknown>, userId = writer.id) =>
       M.amendQuestion(null, { ref: d.row.id, input, expectedRevision: 1, reason: 'clarify' }, as(userId));
     expect(await codeOf(amend({ title: 'x' }))).toBe('QUESTION_NOT_DECIDER');
-    expect(await codeOf(amend({ parts: [{ n: 1, options: [{ key: 'no', label: 'No' }], recommendation: { key: 'no' } }] }, holger.id))).toBe('QUESTION_ANSWER_IMMUTABLE');
+    expect(await codeOf(amend({ options: [{ key: 'no', label: 'No' }], recommendation: { key: 'no', reason: 'r' } }, holger.id))).toBe('QUESTION_ANSWER_IMMUTABLE');
     expect(await codeOf(amend({ tier: 'APPROVED' }, holger.id))).toBe('QUESTION_TIER_TOO_LOW');
     expect(await codeOf(amend({ title: 'Clarified' }, holger.id))).toBe('NO_ERROR');
   });
@@ -406,17 +507,28 @@ describe('withdrawQuestion (§7)', () => {
     expect(await D.withdrawn(w, {}, as())).toMatchObject({ reason: 'moot', by: { userId: writer.id } });
     expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'again', expectedRevision: 2 }, as(holger.id)))).toBe('QUESTION_WITHDRAWN');
     expect(await codeOf(M.amendQuestion(null, { ref: d.row.id, input: { title: 'x' }, expectedRevision: 2, reason: 'r' }, as(holger.id)))).toBe('QUESTION_WITHDRAWN');
-    expect((await ask(log.row.id)).row.loc).toBe('questions:DB');
+    expect((await ask(log.row.id)).row.loc).toBe('questions:QB');
     const d2 = await ask(log.row.id);
     expect(D.state(await M.withdrawQuestion(null, { ref: d2.row.id, reason: 'mine', expectedRevision: 1 }, as(holger.id)), {}, as())).toBe('WITHDRAWN');
   });
 
-  it('once answered, a decider only', async () => {
+  it('acceptance 7: once ever answered, a decider only; a decider withdraws a DECIDED question (no supersession)', async () => {
     const log = await createLog();
     const d = await ask(log.row.id);
     await answerAsS2(d.row.id, 'yes', holger.id);
+    expect(D.state(await Q.question(null, { ref: d.row.id }, as()), {}, as())).toBe('DECIDED');
     expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: 1 }, as(writer.id)))).toBe('QUESTION_NOT_DECIDER');
-    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: 1 }, as(holger.id)))).toBe('NO_ERROR');
+    const w = await M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: 1 }, as(holger.id));
+    expect(D.state(w, {}, as())).toBe('WITHDRAWN');
+  });
+
+  it('a retraction does not undo "ever answered": the asker still cannot withdraw', async () => {
+    const log = await createLog();
+    const d = await ask(log.row.id);
+    await answerAsS2(d.row.id, 'yes', holger.id);
+    await writeAnswerForTest(d.row.id, { kind: 'retraction', by: holger.id, at: '2026-10-06T22:00:00.000Z' });
+    expect(D.state(await Q.question(null, { ref: d.row.id }, as()), {}, as())).toBe('OPEN');
+    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: 1 }, as(writer.id)))).toBe('QUESTION_NOT_DECIDER');
   });
 });
 
@@ -447,8 +559,8 @@ describe('setQuestionLogDeciders (Q6) and purgeUnansweredQuestion (Q8)', () => {
     expect(await db.node.findUnique({ where: { id: d.row.id } })).toBeNull();
     const logView = await Q.questionLog(null, { ref: log.row.id }, as());
     const purges = await L.purges(logView, {}, as());
-    expect(purges).toEqual([expect.objectContaining({ code: 'DA', byUserId: platformAdmin.id, reason: 'spam', contentHash: expect.stringMatching(/^[0-9a-f]{64}$/) })]);
-    expect((await ask(log.row.id)).row.loc).toBe('questions:DC');
+    expect(purges).toEqual([expect.objectContaining({ code: 'QA', byUserId: platformAdmin.id, reason: 'spam', contentHash: expect.stringMatching(/^[0-9a-f]{64}$/) })]);
+    expect((await ask(log.row.id)).row.loc).toBe('questions:QC');
   });
 });
 
@@ -456,23 +568,24 @@ describe('reads (§8.1)', () => {
   it('question by code or citation, questions sorted and filtered after evaluation, awaitingMe; unreadable is null', async () => {
     const log = await createLog();
     const a = await ask(log.row.id);
-    const b = await ask(log.row.id, simple({ urgency: 'URGENT' }));
+    const b = await ask(log.row.id, simple({ priority: 'URGENT' }));
     await M.withdrawQuestion(null, { ref: a.row.id, reason: 'moot', expectedRevision: 1 }, as(writer.id));
-    expect((await Q.question(null, { code: 'DB-1', logRef: log.row.id }, as(reader.id))).row.id).toBe(b.row.id);
-    expect(await Q.question(null, { code: 'DZ', logRef: log.row.id }, as(reader.id))).toBeNull();
+    expect((await Q.question(null, { code: 'QB', logRef: log.row.id }, as(reader.id))).row.id).toBe(b.row.id);
+    expect(await Q.question(null, { code: 'QZ', logRef: log.row.id }, as(reader.id))).toBeNull();
+    expect(await Q.question(null, { code: 'QB-1', logRef: log.row.id }, as(reader.id))).toBeNull(); // no part suffix any more (#4426)
     expect(await Q.question(null, { ref: a.row.id }, as(outsider.id))).toBeNull();
     expect(await Q.questionLog(null, { ref: log.row.id }, as(outsider.id))).toBeNull();
 
     const page = await Q.questions(null, { logRef: log.row.id, sort: 'PORTAL_DEFAULT' }, as(reader.id));
     expect(page.total).toBe(2);
-    expect(page.items.map((v: any) => v.row.loc)).toEqual(['questions:DB', 'questions:DA']);
+    expect(page.items.map((v: any) => v.row.loc)).toEqual(['questions:QB', 'questions:QA']);
     const open = await Q.questions(null, { logRef: log.row.id, state: ['OPEN'] }, as(reader.id));
-    expect(open.items.map((v: any) => v.row.loc)).toEqual(['questions:DB']);
+    expect(open.items.map((v: any) => v.row.loc)).toEqual(['questions:QB']);
     // The hint in properties is never the filter: a forged status changes nothing.
     await db.$executeRaw`UPDATE nodes SET properties = jsonb_set(properties, '{status}', '"open"') WHERE id = ${a.row.id}`;
     expect((await Q.questions(null, { logRef: log.row.id, state: ['OPEN'] }, as(reader.id))).total).toBe(1);
 
-    expect((await Q.questions(null, { awaitingMe: true }, as(holger.id))).items.map((v: any) => v.row.loc)).toEqual(['questions:DB']);
+    expect((await Q.questions(null, { awaitingMe: true }, as(holger.id))).items.map((v: any) => v.row.loc)).toEqual(['questions:QB']);
     expect((await Q.questions(null, { awaitingMe: true }, as(writer.id))).total).toBe(0);
     expect(await D.viewerIsDecider(b, {}, as(holger.id))).toBe(true);
     expect(await D.viewerIsDecider(b, {}, as(writer.id))).toBe(false);
@@ -499,9 +612,9 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
 
   it('nothing is created in a log\'s code space except by askQuestion', async () => {
     const log = await createLog();
-    expect(await codeOf(M.createNode(null, { input: { memoryId: memory.id, loc: 'questions:DA', name: 'squat' } }, as()))).toBe('QUESTION_CONTAINED');
+    expect(await codeOf(M.createNode(null, { input: { memoryId: memory.id, loc: 'questions:QA', name: 'squat' } }, as()))).toBe('QUESTION_CONTAINED');
     const other = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'loose', name: 'Loose' } });
-    expect(await codeOf(M.moveNode(null, { sourceRef: other.id, targetUrn: `${memory.urn}:questions:DA` }, as()))).toBe('QUESTION_CONTAINED');
+    expect(await codeOf(M.moveNode(null, { sourceRef: other.id, targetUrn: `${memory.urn}:questions:QA` }, as()))).toBe('QUESTION_CONTAINED');
     // Deeper descendants are ordinary.
     const d = await ask(log.row.id);
     expect(await codeOf(M.createNode(null, { input: { memoryId: memory.id, loc: `${d.row.loc}:note`, name: 'note' } }, as()))).toBe('NO_ERROR');
@@ -565,7 +678,7 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
     expect(await codeOf(M.approveNode(null, { nodeRef: log.row.id }, as(holger.id)))).toBe('QUESTION_LOG_NOT_APPROVABLE');
     expect(await codeOf(M.approveNode(null, { nodeRef: d.row.id }, as(holger.id)))).toBe('QUESTION_NOT_APPROVABLE');
     const bulk = await M.approveMemoryNodes(null, { memoryRef: memory.id }, as());
-    expect(bulk).toMatchObject({ skippedQuestionCount: 2, skippedQuestions: ['questions', 'questions:DA'] });
+    expect(bulk).toMatchObject({ skippedQuestionCount: 2, skippedQuestions: ['questions', 'questions:QA'] });
     expect(bulk.approved.map((r: { loc: string }) => r.loc)).toContain('ordinary');
     expect((await rowOf(d.row.id)).approvedRevNo).toBeNull();
   });
@@ -820,4 +933,88 @@ it('old decision-role rows are not questions and a memory writer can edit them',
   expect(await Q.questions(null, { logRef: log.id }, as(writer.id))).toEqual({ items: [], total: 0 });
   await M.updateNode(null, { input: { id: node.id, name: 'Ordinary editable node' } }, as(writer.id));
   expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).name).toBe('Ordinary editable node');
+});
+
+describe('#4426 — nodes and logs in the old format', () => {
+  /** A literal pre-#4426 payload (`hadron.dev/decision/v1`), written as the old doors wrote it. */
+  async function legacyNode(code: string, n: number, over: Record<string, unknown> = {}) {
+    const data = {
+      codec: 'hadron.dev/decision/v1', renderer: 'decision-md/1', kind: 'decision', logId: 'x', code, n,
+      title: 'Old one', urgency: 'normal', tier: 'approved', authorizes: false, grant: null, archival: false,
+      deciders: [holger.id], askedBy: { userId: writer.id, workerId: null, appId: null }, askedAt: '2026-11-18T10:00:00.000Z',
+      context: null, blocks: [], sources: [], followUps: [],
+      parts: [{ n: 1, question: 'Old?', options: [], recommendation: null, noRecommendation: { reason: 'r' }, answer: null, answerHistory: [] }],
+      status: 'open', withdrawn: null, supersedes: null, supersededBy: null,
+      ...over,
+    };
+    const content = `# ${code}: Old one\n\nold text\n\n---\n\n\`\`\`hadron-decision\n${canonicalQuestionJson(data)}\n\`\`\`\n`;
+    return db.node.create({
+      data: {
+        id: generateId(), memoryId: memory.id, loc: `questions:${code}`, role: 'question', seq: n, name: `${code}: Old one`,
+        abstract: 'old', content, data: data as never,
+      },
+    });
+  }
+  const platform = () => as(platformAdmin.id, { roles: ['ADMIN'] });
+
+  it('acceptance 8: a legacy node reads UNVERIFIABLE, no door writes it, and only a platform admin purges it', async () => {
+    const log = await createLog();
+    const old = await legacyNode('QA', 1);
+    const view = await Q.question(null, { ref: old.id }, as());
+    expect(D.state(view, {}, as())).toBe('UNVERIFIABLE');
+    expect(await Q.verifyQuestion(null, { ref: old.id }, as())).toMatchObject({ state: 'UNVERIFIABLE', findings: ['UNKNOWN_CODEC'], codec: 'hadron.dev/decision/v1' });
+    expect(await codeOf(M.amendQuestion(null, { ref: old.id, input: { title: 'x' }, expectedRevision: 1, reason: 'r' }, as(writer.id)))).toBe('QUESTION_INVALID');
+    expect(await codeOf(M.withdrawQuestion(null, { ref: old.id, reason: 'r', expectedRevision: 1 }, as(writer.id)))).toBe('QUESTION_INVALID');
+    expect(await codeOf(M.purgeUnansweredQuestion(null, { ref: old.id, reason: 'stranded' }, as(admin.id)))).toBe('QUESTION_FORBIDDEN');
+    expect(await db.node.findUnique({ where: { id: old.id } })).not.toBeNull();
+    expect(await M.purgeUnansweredQuestion(null, { ref: old.id, reason: 'stranded' }, platform())).toBe(true);
+    expect(await db.node.findUnique({ where: { id: old.id } })).toBeNull();
+    const purges = await L.purges(await Q.questionLog(null, { ref: log.row.id }, as()), {}, as());
+    expect(purges).toEqual([expect.objectContaining({ code: 'QA', byUserId: platformAdmin.id, reason: 'stranded' })]);
+    // The code stays consumed.
+    expect((await ask(log.row.id)).row.loc).toBe('questions:QB');
+  });
+
+  it('acceptance 8: nothing else unparsed is purgeable: a corrupt new-codec node, an unknown codec, a node with no block', async () => {
+    const log = await createLog();
+    const corrupt = await ask(log.row.id);
+    // The payload no longer parses (answers is not a list) in the block and the cache alike.
+    await db.$executeRaw`UPDATE nodes SET data = jsonb_set(data, '{answers}', '"x"'), content = replace(content, '"answers":[]', '"answers":"x"') WHERE id = ${corrupt.row.id}`;
+    expect(await Q.verifyQuestion(null, { ref: corrupt.row.id }, as())).toMatchObject({ state: 'TAMPERED', findings: ['BLOCK_INVALID'] });
+    const unknown = await legacyNode('QX', 40, { codec: 'hadron.dev/decision/v9' });
+    const noBlock = await db.node.create({
+      data: { id: generateId(), memoryId: memory.id, loc: 'questions:QY', role: 'question', seq: 41, name: 'QY: x', abstract: 'x', content: 'no block', data: {} },
+    });
+    for (const id of [corrupt.row.id, unknown.id, noBlock.id]) {
+      expect(await codeOf(M.purgeUnansweredQuestion(null, { ref: id, reason: 'x' }, platform()))).toBe('QUESTION_INVALID');
+      expect(await db.node.findUnique({ where: { id } })).not.toBeNull();
+    }
+  });
+
+  it('acceptance 9: a log with the legacy codec and kind still accepts askQuestion and setQuestionLogDeciders, and keeps them', async () => {
+    const log = await createLog({ prefix: 'D' });
+    await db.$executeRaw`UPDATE nodes SET data = jsonb_set(jsonb_set(data, '{codec}', '"hadron.dev/decision-log/v1"'), '{kind}', '"decision.log"'), revision_content_hash = 'refresh' WHERE id = ${log.row.id}`;
+    const q = await ask(log.row.id);
+    expect(D.code(q, {}, as())).toBe('DA');
+    expect((await rowOf(log.row.id)).data).toMatchObject({ codec: 'hadron.dev/decision-log/v1', kind: 'decision.log', lastCode: 1 });
+    const next = await M.setQuestionLogDeciders(null, { logRef: log.row.id, defaultDeciders: [admin.id], expectedRevision: (await rowOf(log.row.id)).revSeq, reason: 'r' }, as());
+    expect(L.defaultDeciderIds(next, {}, as())).toEqual([admin.id]);
+    expect((await rowOf(log.row.id)).data).toMatchObject({ codec: 'hadron.dev/decision-log/v1', kind: 'decision.log' });
+  });
+});
+
+describe('#4426 — the list orders and filters by priority', () => {
+  it('PORTAL_DEFAULT is urgent, high, normal, low, then open before the rest, then newest; the priority filter narrows', async () => {
+    const log = await createLog();
+    const low = await ask(log.row.id, simple({ priority: 'LOW' }));
+    const normal = await ask(log.row.id, simple({ priority: 'NORMAL' }));
+    const high = await ask(log.row.id, simple({ priority: 'HIGH' }));
+    const urgent = await ask(log.row.id, simple({ priority: 'URGENT' }));
+    const answeredHigh = await ask(log.row.id, simple({ priority: 'HIGH' }));
+    await answerAsS2(answeredHigh.row.id, 'yes', holger.id);
+    const page = await Q.questions(null, { logRef: log.row.id, sort: 'PORTAL_DEFAULT' }, as(reader.id));
+    expect(page.items.map((v: any) => v.row.id)).toEqual([urgent, high, answeredHigh, normal, low].map((v) => v.row.id));
+    const only = await Q.questions(null, { logRef: log.row.id, priority: ['HIGH', 'LOW'] }, as(reader.id));
+    expect(only.items.map((v: any) => v.row.id).sort()).toEqual([high, answeredHigh, low].map((v) => v.row.id).sort());
+  });
 });

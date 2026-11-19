@@ -895,6 +895,20 @@
       "resolver": "src/api/graphql/schema/resolvers.dashboard.ts::dashboardWidgetPresetsPage",
       "target": "DashboardWidgetPreset"
     },
+    "Question.answer": {
+      "class": "parent-implies-child",
+      "audience": "a Question is produced only after the question log's memory read gate (resolveGovernedNode); the standing answer is part of the question node's data",
+      "resolver": "src/api/graphql/schema/resolvers.questions.ts::questionFieldResolvers",
+      "maskingTest": "src/api/graphql/schema/resolvers.questions1641.test.ts::question by code or citation, questions sorted and filtered after evaluation, awaitingMe; unreadable is null",
+      "target": "QuestionAnswer"
+    },
+    "Question.answers": {
+      "class": "parent-implies-child",
+      "audience": "a Question is produced only after the question log's memory read gate (resolveGovernedNode); every answer-list entry is part of the question node's data",
+      "resolver": "src/api/graphql/schema/resolvers.questions.ts::questionFieldResolvers",
+      "maskingTest": "src/api/graphql/schema/resolvers.questions1641.test.ts::question by code or citation, questions sorted and filtered after evaluation, awaitingMe; unreadable is null",
+      "target": "QuestionAnswer"
+    },
     "Question.askedBy": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
@@ -919,12 +933,6 @@
       "maskingTest": "src/api/graphql/schema/resolvers.questions1641.test.ts::question by code or citation, questions sorted and filtered after evaluation, awaitingMe; unreadable is null",
       "target": "QuestionEvidence"
     },
-    "Question.followUps": {
-      "class": "closed-projection",
-      "projection": "QuestionRef",
-      "why": "QuestionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
-      "target": "QuestionRef"
-    },
     "Question.identityMerges": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
@@ -936,12 +944,17 @@
       "audience": "A Question is a view of its backing node; question and questions are gated on that node's memory.",
       "resolver": "src/api/graphql/schema/resolvers.questions.ts::questionFieldResolvers"
     },
-    "Question.parts": {
-      "class": "parent-implies-child",
-      "audience": "parts are the question node's own data; every path that yields a Question first passes the log memory's read or write gate",
-      "resolver": "src/api/graphql/schema/resolvers.questions.ts::questionFieldResolvers",
-      "maskingTest": "src/api/graphql/schema/resolvers.questions1641.test.ts::question by code or citation, questions sorted and filtered after evaluation, awaitingMe; unreadable is null",
-      "target": "QuestionPart"
+    "Question.specsMustChange": {
+      "class": "closed-projection",
+      "projection": "QuestionRef",
+      "why": "QuestionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
+      "target": "QuestionRef"
+    },
+    "Question.specsTouched": {
+      "class": "closed-projection",
+      "projection": "QuestionRef",
+      "why": "QuestionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
+      "target": "QuestionRef"
     },
     "Question.sources": {
       "class": "closed-projection",
@@ -964,11 +977,10 @@
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "QuestionAnswer.source": {
-      "class": "closed-projection",
-      "projection": "QuestionRef",
-      "why": "QuestionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
-      "target": "QuestionRef"
+    "QuestionAnswer.by": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
     },
     "QuestionApprovalEvidence.by": {
       "class": "open",
@@ -1012,20 +1024,6 @@
       "audience": "callers who can read the log's memory (resolveGovernedNode requires isMemoryReadableCached); questions are nodes of that memory",
       "resolver": "src/api/graphql/schema/resolvers.questions.ts::resolveGovernedNode",
       "target": "Question"
-    },
-    "QuestionPart.answer": {
-      "class": "parent-implies-child",
-      "audience": "a Question is produced only after the question log's memory read gate (resolveGovernedNode); answers are part of that node's data",
-      "resolver": "src/api/graphql/schema/resolvers.questions.ts::answerOut",
-      "maskingTest": "src/api/graphql/schema/resolvers.questions1641.test.ts::question by code or citation, questions sorted and filtered after evaluation, awaitingMe; unreadable is null",
-      "target": "QuestionAnswer"
-    },
-    "QuestionPart.answerHistory": {
-      "class": "parent-implies-child",
-      "audience": "same as QuestionPart.answer: the history is part of the question node's data, reachable only through a Question that passed the log memory's read gate",
-      "resolver": "src/api/graphql/schema/resolvers.questions.ts::answerOut",
-      "maskingTest": "src/api/graphql/schema/resolvers.questions1641.test.ts::question by code or citation, questions sorted and filtered after evaluation, awaitingMe; unreadable is null",
-      "target": "QuestionAnswer"
     },
     "QuestionPurge.by": {
       "class": "open",

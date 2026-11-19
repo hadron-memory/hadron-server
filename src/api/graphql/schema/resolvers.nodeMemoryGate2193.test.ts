@@ -397,7 +397,7 @@ describe('#2193 — Question.node, with the parent admitting the node', () => {
       { memoryRef: mem.know, loc: 'decisions', defaultDeciders: [user.owner] }, owner);
     const asked = await (resolvers as any).Mutation.askQuestion(null, {
       logRef: log.row.id,
-      input: { title: 'Ship it?', parts: [{ question: 'Ship it now?', yesno: true, recommendation: { key: 'yes', reason: 'ready' } }] },
+      input: { title: 'Ship it?', yesno: true, recommendation: { key: 'yes', reason: 'ready' } },
     }, owner);
     for (const who of ['owner', 'admin', 'reader', 'stranger']) {
       const bearer = await keyFor(who);

@@ -41,14 +41,12 @@ export type QuestionRefusalCode =
   | 'QUESTION_TIER_TOO_LOW'
   | 'QUESTION_DECIDER_NOT_ELIGIBLE'
   | 'QUESTION_RECOMMENDATION_MISSING'
-  | 'QUESTION_PART_RENUMBER'
+  | 'QUESTION_ASSIGNEE_NOT_DECIDER'
   | 'QUESTION_ANSWER_IMMUTABLE'
   | 'QUESTION_NOT_DECIDER'
   | 'QUESTION_NOT_ASKER'
   | 'QUESTION_IMPERSONATION_REFUSED'
   | 'QUESTION_WITHDRAWN'
-  | 'QUESTION_SUPERSEDED'
-  | 'QUESTION_ANSWERED_DECIDED'
   | 'QUESTION_ANSWERED'
   | 'QUESTION_NOT_APPROVABLE'
   | 'QUESTION_CONTAINED'
@@ -73,7 +71,7 @@ export function questionContainedError(what: string, codes: string[] = []): Grap
   return questionError(
     'QUESTION_CONTAINED',
     `${what} is refused: it would delete, move or merge a question or a question log. ` +
-      'Questions are never deleted or moved; a question is withdrawn or superseded through its own operations.',
+      'Questions are never deleted or moved; a question is withdrawn through its own operation.',
     codes.length > 0 ? { questionLocs: codes.slice(0, 50) } : {},
   );
 }

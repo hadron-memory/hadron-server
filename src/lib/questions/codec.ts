@@ -2,7 +2,7 @@
  * #1641 §5.1 — the question codec. A question's authoritative payload is the
  * semantic block rendered into its `content` (§5.5); `Node.data` is a parsed
  * cache of that block. This module validates both the stored payload
- * (`hadron.dev/decision/v1`) and the client's ask / amend input, and maps a
+ * (`hadron.dev/question/v1`) and the client's ask / amend input, and maps a
  * validation failure to `QUESTION_INVALID` with JSON pointers.
  *
  * Every authenticated actor (`askedBy`, `recommendation.by`, `answer.by`) is
@@ -12,15 +12,18 @@
 import { z } from 'zod';
 import { questionError } from './index.js';
 
-export const QUESTION_CODEC = 'hadron.dev/decision/v1';
-export const QUESTION_LOG_CODEC = 'hadron.dev/decision-log/v1';
+export const QUESTION_CODEC = 'hadron.dev/question/v1';
+/** The pre-#4426 stored codec: never written again; read only to purge a stranded node. */
+export const LEGACY_DECISION_CODEC = 'hadron.dev/decision/v1';
+export const QUESTION_LOG_CODEC = 'hadron.dev/question-log/v1';
+export const LEGACY_DECISION_LOG_CODEC = 'hadron.dev/decision-log/v1';
+export const MAX_ANSWERS = 50;
 
 export const TITLE_MAX = 300;
 export const LONG_TEXT_MAX = 20_000;
 export const QUESTION_MAX = 4_000;
 export const SHORT_TEXT_MAX = 2_000;
 export const REF_MAX = 300;
-export const MAX_PARTS = 20;
 export const MAX_OPTIONS = 26;
 export const MAX_REFS = 50;
 export const MAX_DECIDERS = 20;
@@ -56,88 +59,94 @@ export type QuestionActor = z.infer<typeof actorSchema>;
 export const optionSchema = z.strictObject({
   key: optionKey,
   label: oneLine(TITLE_MAX),
-  meaning: text(SHORT_TEXT_MAX).nullable(),
-  cost: text(SHORT_TEXT_MAX).nullable(),
+  whyChoose: text(SHORT_TEXT_MAX).nullable(),
+  whyNot: text(SHORT_TEXT_MAX).nullable(),
+  risks: text(SHORT_TEXT_MAX).nullable(),
 });
 export type QuestionOption = z.infer<typeof optionSchema>;
 
 export const recommendationSchema = z.strictObject({
   key: optionKey,
+  /** Taken from the caller, never from input. */
   by: actorSchema,
-  reason: text(SHORT_TEXT_MAX).nullable(),
-  /** A relayed recommendation's original author, as a CLAIM beside the authenticated `by`. */
-  attributedTo: oneLine(REF_MAX).nullable(),
+  /** Required: "one recommendation with a reason". */
+  reason: nonBlank(SHORT_TEXT_MAX),
 });
 
-/**
- * One recorded answer to a part. Written by `answerQuestion` (S2); reserved
- * in v1 so the codec needs no change when answers land. `claimedBy` /
- * `recordedBy` carry an imported answer's provenance (§10).
- */
-export const answerSchema = z.strictObject({
+/** One entry of the answer list. Entries are appended, never edited or removed. */
+export const answerEntrySchema = z.strictObject({
+  kind: z.enum(['answer', 'retraction']),
+  /** The chosen option; null for text only, and for a retraction. */
   key: optionKey.nullable(),
+  /** Free text; null for a retraction. */
   text: text(LONG_TEXT_MAX).nullable(),
-  freeform: z.boolean(),
-  by: z.string(),
-  at: z.string(),
-  via: z.enum(['portal', 'cli', 'mcp', 'chat-recorded', 'import']),
-  source: refSchema.nullable(),
   reason: text(SHORT_TEXT_MAX).nullable(),
-  claimedBy: oneLine(REF_MAX).nullable(),
-  recordedBy: z.string().nullable(),
+  /** The answering user's id. */
+  by: z.string(),
+  /** ISO 8601, server clock. */
+  at: z.string(),
+  via: z.enum(['portal', 'cli', 'mcp', 'api']),
 });
-export type QuestionAnswer = z.infer<typeof answerSchema>;
-
-export const partSchema = z.strictObject({
-  n: z.number().int().min(1).max(MAX_PARTS),
-  question: nonBlank(QUESTION_MAX),
-  options: z.array(optionSchema).max(MAX_OPTIONS),
-  recommendation: recommendationSchema.nullable(),
-  noRecommendation: z.strictObject({ reason: nonBlank(SHORT_TEXT_MAX) }).nullable(),
-  answer: answerSchema.nullable(),
-  answerHistory: z.array(answerSchema),
-});
-export type QuestionPart = z.infer<typeof partSchema>;
+export type AnswerEntry = z.infer<typeof answerEntrySchema>;
 
 const lifecycleMark = z.strictObject({ by: actorSchema, at: z.string(), reason: nonBlank(SHORT_TEXT_MAX) });
-const questionLink = z.strictObject({ nodeId: z.string(), code: z.string() });
 
-/** The stored, authenticated payload of a question (the semantic block, §5.5). */
+/** The stored, authenticated payload of a question (the semantic block, §5.5). One question per node (#4426). */
 export const questionDataSchema = z.strictObject({
   codec: z.literal(QUESTION_CODEC),
   renderer: z.string(),
-  kind: z.literal('decision'),
+  kind: z.literal('question'),
   logId: z.string(),
   code: z.string(),
   n: z.number().int().min(1),
+  /** The question itself, one line. */
   title: oneLine(TITLE_MAX),
-  urgency: z.enum(['normal', 'urgent']),
-  tier: z.enum(['approved', 'signed']),
+  background: text(LONG_TEXT_MAX).nullable(),
+  whyNow: text(SHORT_TEXT_MAX).nullable(),
+  priority: z.enum(['low', 'normal', 'high', 'urgent']),
+  tier: z.enum(['answered', 'approved', 'signed']),
   authorizes: z.boolean(),
   /** The authorization a grant question carries (§11): reserved, structured by the register epic. */
   grant: z.record(z.string(), z.unknown()).nullable(),
-  /** Migrated authorization-bearing history (§10): never usable as an authorization. */
-  archival: z.boolean(),
   deciders: z.array(z.string()).min(1).max(MAX_DECIDERS),
+  /** Explicit only; routing, not authority. The default is computed at read (S4). */
+  assignee: z.string().nullable(),
   askedBy: actorSchema,
   askedAt: z.string(),
-  context: text(LONG_TEXT_MAX).nullable(),
+  /** ISO 8601. */
+  neededBy: z.string().nullable(),
+  defaultAction: text(SHORT_TEXT_MAX).nullable(),
+  /** The asker's agent task this question blocks. Reserved: always null until slice S7 sets it. */
+  taskId: z.string().nullable(),
   blocks: z.array(refSchema).max(MAX_REFS),
   sources: z.array(refSchema).max(MAX_REFS),
-  followUps: z.array(refSchema).max(MAX_REFS),
-  parts: z.array(partSchema).min(1).max(MAX_PARTS),
-  /** A hint for the card only (§6.3); every relying consumer uses the derived state. */
-  status: z.enum(['open', 'answered', 'withdrawn', 'superseded']),
+  specsTouched: z.array(refSchema).max(MAX_REFS),
+  specsMustChange: z.array(refSchema).max(MAX_REFS),
+  options: z.array(optionSchema).max(MAX_OPTIONS),
+  recommendation: recommendationSchema.nullable(),
+  noRecommendation: z.strictObject({ reason: nonBlank(SHORT_TEXT_MAX) }).nullable(),
+  answers: z.array(answerEntrySchema).max(MAX_ANSWERS),
+  /** A hint for display; never read for the state. */
+  status: z.enum(['open', 'answered', 'withdrawn']),
   withdrawn: lifecycleMark.nullable(),
-  supersedes: questionLink.nullable(),
-  supersededBy: questionLink.nullable(),
 });
 export type QuestionData = z.infer<typeof questionDataSchema>;
 
+/** The answer that stands: the last entry when it is an answer; null when there is none or the last entry is a retraction. */
+export function currentAnswer(d: Pick<QuestionData, 'answers'>): AnswerEntry | null {
+  const last = d.answers[d.answers.length - 1];
+  return last && last.kind === 'answer' ? last : null;
+}
+
+/** Whether the question ever had an answer (a later retraction does not undo this). */
+export function everAnswered(d: Pick<QuestionData, 'answers'>): boolean {
+  return d.answers.some((a) => a.kind === 'answer');
+}
+
 /** The settings a question log holds (§3.3, §6.1a). Not a question: never approved. */
 export const questionLogDataSchema = z.strictObject({
-  codec: z.literal(QUESTION_LOG_CODEC),
-  kind: z.literal('decision.log'),
+  codec: z.enum([QUESTION_LOG_CODEC, LEGACY_DECISION_LOG_CODEC]),
+  kind: z.enum(['question.log', 'decision.log']),
   prefix: z.string().regex(/^[A-Z]{1,3}$/),
   lastCode: z.number().int().min(0),
   defaultDeciders: z.array(z.string()).min(1).max(MAX_DECIDERS),
@@ -166,62 +175,64 @@ export type QuestionLogData = z.infer<typeof questionLogDataSchema>;
 const optionInput = z.strictObject({
   key: optionKey,
   label: oneLine(TITLE_MAX),
-  meaning: text(SHORT_TEXT_MAX).nullish(),
-  cost: text(SHORT_TEXT_MAX).nullish(),
+  whyChoose: text(SHORT_TEXT_MAX).nullish(),
+  whyNot: text(SHORT_TEXT_MAX).nullish(),
+  risks: text(SHORT_TEXT_MAX).nullish(),
 });
 
 const recommendationInput = z.strictObject({
   key: optionKey,
-  reason: text(SHORT_TEXT_MAX).nullish(),
-  attributedTo: oneLine(REF_MAX).nullish(),
+  reason: nonBlank(SHORT_TEXT_MAX),
 });
 
-export const partInputSchema = z.strictObject({
-  question: nonBlank(QUESTION_MAX),
-  options: z.array(optionInput).max(MAX_OPTIONS).nullish(),
-  /** Shorthand for options `[yes, no]`. */
-  yesno: z.boolean().nullish(),
-  recommendation: recommendationInput.nullish(),
-  noRecommendation: z.strictObject({ reason: nonBlank(SHORT_TEXT_MAX) }).nullish(),
-});
-export type QuestionPartInput = z.infer<typeof partInputSchema>;
+const noRecommendationInput = z.strictObject({ reason: nonBlank(SHORT_TEXT_MAX) });
+const priorityEnum = z.enum(['low', 'normal', 'high', 'urgent']);
+const tierEnum = z.enum(['answered', 'approved', 'signed']);
+const isoInstant = z.string().max(40);
 
 export const askInputSchema = z.strictObject({
   title: oneLine(TITLE_MAX),
-  urgency: z.enum(['normal', 'urgent']).nullish(),
-  tier: z.enum(['approved', 'signed']).nullish(),
+  background: text(LONG_TEXT_MAX).nullish(),
+  whyNow: text(SHORT_TEXT_MAX).nullish(),
+  priority: priorityEnum.nullish(),
+  tier: tierEnum.nullish(),
   authorizes: z.boolean().nullish(),
   grant: z.record(z.string(), z.unknown()).nullish(),
   /** Narrows the log's default deciders; never widens past its eligible set (Q6). */
   deciders: z.array(z.string()).min(1).max(MAX_DECIDERS).nullish(),
-  context: text(LONG_TEXT_MAX).nullish(),
+  assignee: z.string().nullish(),
+  neededBy: isoInstant.nullish(),
+  defaultAction: text(SHORT_TEXT_MAX).nullish(),
   blocks: z.array(refSchema).max(MAX_REFS).nullish(),
   sources: z.array(refSchema).max(MAX_REFS).nullish(),
-  followUps: z.array(refSchema).max(MAX_REFS).nullish(),
-  parts: z.array(partInputSchema).min(1).max(MAX_PARTS),
+  specsTouched: z.array(refSchema).max(MAX_REFS).nullish(),
+  specsMustChange: z.array(refSchema).max(MAX_REFS).nullish(),
+  options: z.array(optionInput).max(MAX_OPTIONS).nullish(),
+  /** Shorthand for options `[yes, no]`. Not together with options. */
+  yesno: z.boolean().nullish(),
+  recommendation: recommendationInput.nullish(),
+  noRecommendation: noRecommendationInput.nullish(),
 });
 export type AskQuestionInput = z.infer<typeof askInputSchema>;
 
-/** A change to one existing part. Omitted fields are unchanged; an answer is never patched (§7). */
-export const partPatchSchema = z.strictObject({
-  n: z.number().int().min(1),
-  question: nonBlank(QUESTION_MAX).nullish(),
+/** A change to the question. Omitted fields are unchanged; an answer is never patched (§7). */
+export const amendInputSchema = z.strictObject({
+  title: oneLine(TITLE_MAX).nullish(),
+  background: text(LONG_TEXT_MAX).nullish(),
+  whyNow: text(SHORT_TEXT_MAX).nullish(),
+  priority: priorityEnum.nullish(),
+  tier: tierEnum.nullish(),
+  assignee: z.string().nullish(),
+  neededBy: isoInstant.nullish(),
+  defaultAction: text(SHORT_TEXT_MAX).nullish(),
+  blocks: z.array(refSchema).max(MAX_REFS).nullish(),
+  sources: z.array(refSchema).max(MAX_REFS).nullish(),
+  specsTouched: z.array(refSchema).max(MAX_REFS).nullish(),
+  specsMustChange: z.array(refSchema).max(MAX_REFS).nullish(),
   options: z.array(optionInput).max(MAX_OPTIONS).nullish(),
   yesno: z.boolean().nullish(),
   recommendation: recommendationInput.nullish(),
-  noRecommendation: z.strictObject({ reason: nonBlank(SHORT_TEXT_MAX) }).nullish(),
-});
-
-export const amendInputSchema = z.strictObject({
-  title: oneLine(TITLE_MAX).nullish(),
-  urgency: z.enum(['normal', 'urgent']).nullish(),
-  tier: z.enum(['approved', 'signed']).nullish(),
-  context: text(LONG_TEXT_MAX).nullish(),
-  blocks: z.array(refSchema).max(MAX_REFS).nullish(),
-  sources: z.array(refSchema).max(MAX_REFS).nullish(),
-  followUps: z.array(refSchema).max(MAX_REFS).nullish(),
-  parts: z.array(partPatchSchema).max(MAX_PARTS).nullish(),
-  addParts: z.array(partInputSchema).max(MAX_PARTS).nullish(),
+  noRecommendation: noRecommendationInput.nullish(),
 });
 export type AmendQuestionInput = z.infer<typeof amendInputSchema>;
 
@@ -258,47 +269,91 @@ export function parseOrRefuse<T extends z.ZodType>(schema: T, input: unknown, wh
 }
 
 const YESNO: QuestionOption[] = [
-  { key: 'yes', label: 'Yes', meaning: null, cost: null },
-  { key: 'no', label: 'No', meaning: null, cost: null },
+  { key: 'yes', label: 'Yes', whyChoose: null, whyNot: null, risks: null },
+  { key: 'no', label: 'No', whyChoose: null, whyNot: null, risks: null },
 ];
 
-/** The options a part input names: explicit, or the `yesno` shorthand (never both). */
+/** The options an input names: explicit, or the `yesno` shorthand (never both). */
 export function optionsOf(
-  part: { options?: Array<z.infer<typeof optionInput>> | null; yesno?: boolean | null },
+  input: { options?: Array<z.infer<typeof optionInput>> | null; yesno?: boolean | null },
   pointer: string,
 ): QuestionOption[] | null {
-  if (part.yesno && part.options != null) {
+  if (input.yesno && input.options != null) {
     invalidQuestion([{ pointer, message: 'give either options or yesno, not both' }]);
   }
-  if (part.yesno) return YESNO.map((o) => ({ ...o }));
-  if (part.options == null) return null;
-  return part.options.map((o) => ({ key: o.key, label: o.label, meaning: o.meaning ?? null, cost: o.cost ?? null }));
+  if (input.yesno) return YESNO.map((o) => ({ ...o }));
+  if (input.options == null) return null;
+  return input.options.map((o) => ({
+    key: o.key,
+    label: o.label,
+    whyChoose: o.whyChoose ?? null,
+    whyNot: o.whyNot ?? null,
+    risks: o.risks ?? null,
+  }));
 }
 
 /**
- * The cross-field rules zod does not express, on a stored part:
+ * The cross-field rules zod does not express, on a stored question (#4426 §1):
  *   - option keys are unique;
- *   - a recommendation names one of the options;
- *   - exactly one of `recommendation` and `noRecommendation` (§8.4: an
- *     absent recommendation is always deliberate and stated).
+ *   - with options: exactly one of `recommendation` and `noRecommendation`
+ *     (§8.4: an absent recommendation is always deliberate and stated), and
+ *     a recommendation names one of the options;
+ *   - with no options (a free-text question): neither;
+ *   - `defaultAction` only with `neededBy`;
+ *   - `assignee`, when set, is one of the deciders (`QUESTION_ASSIGNEE_NOT_DECIDER`);
+ *   - every answer entry is well formed and names an existing option;
+ *   - an authorizing question is of the signed tier, and only it carries a grant.
  */
-export function checkPart(part: QuestionPart, pointer: string): void {
+export function checkQuestion(d: QuestionData, pointer = ''): void {
   const keys = new Set<string>();
-  for (const [i, option] of part.options.entries()) {
+  for (const [i, option] of d.options.entries()) {
     if (keys.has(option.key)) invalidQuestion([{ pointer: `${pointer}/options/${i}/key`, message: `duplicate option key "${option.key}"` }]);
     keys.add(option.key);
   }
-  if (part.recommendation && part.noRecommendation) {
-    invalidQuestion([{ pointer, message: 'give either a recommendation or noRecommendation, not both' }]);
+  if (d.options.length > 0) {
+    if (d.recommendation && d.noRecommendation) {
+      invalidQuestion([{ pointer, message: 'give either a recommendation or noRecommendation, not both' }]);
+    }
+    if (!d.recommendation && !d.noRecommendation) {
+      throw questionError(
+        'QUESTION_RECOMMENDATION_MISSING',
+        `Question ${d.code} has no recommendation. Give one, or state why there is none with noRecommendation.`,
+        { pointer },
+      );
+    }
+    if (d.recommendation && !keys.has(d.recommendation.key)) {
+      invalidQuestion([{ pointer: `${pointer}/recommendation/key`, message: `"${d.recommendation.key}" is not one of the question's options` }]);
+    }
+  } else if (d.recommendation || d.noRecommendation) {
+    invalidQuestion([{ pointer: `${pointer}/${d.recommendation ? 'recommendation' : 'noRecommendation'}`, message: 'a question with no options holds no recommendation' }]);
   }
-  if (!part.recommendation && !part.noRecommendation) {
+  if (d.defaultAction != null && d.neededBy == null) {
+    invalidQuestion([{ pointer: `${pointer}/defaultAction`, message: 'defaultAction needs neededBy' }]);
+  }
+  if (d.assignee != null && !d.deciders.includes(d.assignee)) {
     throw questionError(
-      'QUESTION_RECOMMENDATION_MISSING',
-      `Part ${part.n} has no recommendation. Give one, or state why there is none with noRecommendation.`,
-      { pointer, part: part.n },
+      'QUESTION_ASSIGNEE_NOT_DECIDER',
+      `The assignee must be one of the question's deciders: only a decider can answer it.`,
+      { userId: d.assignee },
     );
   }
-  if (part.recommendation && !keys.has(part.recommendation.key)) {
-    invalidQuestion([{ pointer: `${pointer}/recommendation/key`, message: `"${part.recommendation.key}" is not one of the part's options` }]);
+  for (const [i, entry] of d.answers.entries()) {
+    const at = `${pointer}/answers/${i}`;
+    if (entry.kind === 'answer') {
+      if (entry.key == null && (entry.text == null || entry.text.trim() === '')) {
+        invalidQuestion([{ pointer: at, message: 'an answer needs a key or text' }]);
+      }
+      if (entry.key != null && !keys.has(entry.key)) {
+        invalidQuestion([{ pointer: `${at}/key`, message: `"${entry.key}" is not one of the question's options` }]);
+      }
+    } else if (entry.key != null || entry.text != null) {
+      invalidQuestion([{ pointer: at, message: 'a retraction carries no key or text' }]);
+    }
+  }
+  if (d.authorizes && d.tier !== 'signed') {
+    throw questionError('QUESTION_TIER_TOO_LOW', 'A question that authorizes something needs the signed tier.', { pointer: `${pointer}/tier` });
+  }
+  if (d.grant != null && !d.authorizes) {
+    invalidQuestion([{ pointer: `${pointer}/grant`, message: 'grant is only for a question that authorizes' }]);
   }
 }
