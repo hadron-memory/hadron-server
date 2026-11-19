@@ -32,6 +32,7 @@ import { AssetUploadError } from '../../controller/operations/beginAssetUpload.j
 import { SetAssetEnabledError } from '../../controller/operations/setAgentAssetUploadEnabled.js';
 import { QueryTooComplexError } from './admissionComplexity.js';
 import { TeamReadBusyError } from '../../lib/agentTasks/teamReadBudget.js';
+import { AuthStoreBusyError } from '../../lib/authStoreBusy.js';
 import { GitCommandError } from '../../integrations/github/execGit.js';
 import { SessionExpiredError } from '../../lib/nodeCrypto.js';
 
@@ -70,6 +71,16 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   // P2028 incident (#4380) was found by counting them, so the issue stream keeps them.
   mapping(
     (err): err is TeamReadBusyError => err instanceof TeamReadBusyError,
+    (err) => ({ ...err.extensions }),
+    { silenceInSentry: false },
+  ),
+  // #4471: a busy store during the API-key credential check, thrown from the auth middleware — so
+  // most often from the Apollo context builder (#1303's surface), where Apollo would otherwise wrap
+  // it as an untyped INTERNAL_SERVER_ERROR. Availability signal like TEAM_READ_BUSY — NOT silenced:
+  // pool exhaustion during auth is countable evidence, the shape the P2028 incident (#4380) was
+  // found by counting.
+  mapping(
+    (err): err is AuthStoreBusyError => err instanceof AuthStoreBusyError,
     (err) => ({ ...err.extensions }),
     { silenceInSentry: false },
   ),

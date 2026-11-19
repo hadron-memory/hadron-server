@@ -8,6 +8,7 @@
 import { randomUUID } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import { respondSessionSuperseded } from './sessionSuperseded.js';
+import { respondAuthStoreBusy } from './authStoreBusy.js';
 import { currentRequestId } from './requestContext.js';
 
 export const INTERNAL_ERROR_CODE = 'INTERNAL_SERVER_ERROR';
@@ -68,6 +69,10 @@ export function respondOAuthServerError(res: Response, description: string, erro
  */
 export function internalFaultErrorHandler(err: unknown, _req: Request, res: Response, next: NextFunction): void {
   if (respondSessionSuperseded(res, err)) return;
+  // #4471: a typed retryable store-busy fault from the auth middleware is not genericized — the
+  // caller must see AUTH_STORE_BUSY to back off and resend the same key, not read the generic
+  // envelope as "bad key". The same carve-out shape respondSessionSuperseded established.
+  if (respondAuthStoreBusy(res, err)) return;
   const e = err as { status?: unknown; statusCode?: unknown } | null;
   const status = e?.status ?? e?.statusCode;
   if (res.headersSent || (typeof status === 'number' && status >= 400 && status < 500)) {
