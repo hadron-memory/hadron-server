@@ -16,6 +16,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../lib/auth/publicKnowledgeRead.js';
 import type { RunToolContext } from '../lib/runner/tools/types.js';
+import { testRunAgentId } from '../test/runAgent.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const Q = resolvers.Query as any;
@@ -45,7 +46,7 @@ async function fixture() {
     data: { id: generateId(), organizationId: orgA.id, appId: app.id, name: 'S', cron: '* * * * *', entryNodeUrn: `hrn:node:${pub.urn}:${LOC}` },
   });
   const run = await db.appRun.create({
-    data: { id: generateId(), organizationId: orgA.id, appId: app.id, userId: null, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn },
+    data: { id: generateId(), organizationId: orgA.id, appId: app.id, agentId: await testRunAgentId(db, orgA.id, app.id), userId: null, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn },
   });
   const runPrincipal = { db, ...runAuthContext(run) } as Context;
   const keyPrincipal = { db, appId: app.id, appKeyId: appKey.id, roles: [] } as unknown as Context;

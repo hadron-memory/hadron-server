@@ -32,6 +32,7 @@ import {
 import { SessionExpiredError } from '../../lib/nodeCrypto.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
 import { SetAssetEnabledError } from '../../controller/operations/setAgentAssetUploadEnabled.js';
+import { AUTH_STORE_BUSY_MESSAGE, AuthStoreBusyError } from '../../lib/authStoreBusy.js';
 
 /** What Apollo hands `formatError` for a thrown (non-GraphQLError) error. */
 function wrap(original: Error): { formatted: GraphQLFormattedError; error: GraphQLError } {
@@ -91,6 +92,44 @@ describe('AssetUploadError → extensions.code (#918)', () => {
   it('replaces the default INTERNAL_SERVER_ERROR rather than sitting beside it', () => {
     const out = format(new AssetUploadError('SCAN_PENDING', 'nope'));
     expect(out.extensions?.code).not.toBe('INTERNAL_SERVER_ERROR');
+  });
+});
+
+describe('AuthStoreBusyError → AUTH_STORE_BUSY (#4471)', () => {
+  const p2024 = () =>
+    new Prisma.PrismaClientKnownRequestError('Timed out fetching a new connection from the pool.', {
+      code: 'P2024',
+      clientVersion: '6.19.2',
+    } as never);
+
+  it('thrown straight from the auth middleware: the typed extensions survive the boundary', () => {
+    const typed = new AuthStoreBusyError(p2024());
+    const out = formatGraphQLError({ message: typed.message, extensions: { code: 'AUTH_STORE_BUSY' } }, typed);
+    expect(out.extensions?.code).toBe('AUTH_STORE_BUSY');
+    expect(out.extensions?.retryable).toBe(true);
+    expect(out.extensions?.reason).toBe('POOL_WAIT');
+    expect(out.message).toBe(AUTH_STORE_BUSY_MESSAGE);
+  });
+
+  it('Apollo-genericized (the context-failure wrap): the mapping restores the typed code and strips the prefix', () => {
+    const typed = new AuthStoreBusyError(p2024());
+    // Apollo's actual wrapper for a context-builder throw: its own GraphQLError — the
+    // prefixed message, the default code, the thrown error on .originalError. Built with
+    // wrap()'s shape plus the real prefix (the live round trip is pinned in
+    // authStoreBusyContext4471.test.ts; this unit case isolates the mapping).
+    const error = new GraphQLError(`Context creation failed: ${typed.message}`, { originalError: typed });
+    const out = formatGraphQLError(
+      { message: error.message, extensions: { code: 'INTERNAL_SERVER_ERROR' } },
+      error,
+    );
+    expect(out.extensions?.code).toBe('AUTH_STORE_BUSY');
+    expect(out.extensions?.retryable).toBe(true);
+    expect(out.extensions?.reason).toBe('POOL_WAIT');
+    // The domain prose, not Apollo's decoration of it — the prefix never reaches the wire.
+    expect(out.message).toBe(AUTH_STORE_BUSY_MESSAGE);
+    expect(out.message).not.toMatch(/Context creation failed/i);
+    // The driver error never rides the wire — not the code, not the prose.
+    expect(JSON.stringify(out)).not.toMatch(/P2024|Timed out fetching/i);
   });
 });
 

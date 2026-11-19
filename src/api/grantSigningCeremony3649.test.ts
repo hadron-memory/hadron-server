@@ -91,7 +91,7 @@ async function insertGrant(): Promise<string> {
   return insertGrantFor(appId, { workerId });
 }
 /** #3730: the same pending grant shape, for an App and holder the default fixture does not cover (a user-owned App, a user holder). */
-async function insertGrantFor(aId: string, holder: { workerId?: string; userId?: string }): Promise<string> {
+async function insertGrantFor(aId: string, holder: { workerId: string; userId?: never } | { userId: string; workerId?: never }): Promise<string> {
   const id = generateId();
   await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, ${holder.userId !== undefined ? 'user_id' : 'worker_id'}, action, action_values, reason, max_uses, created_at, updated_at)
     VALUES ($1, $2, $3, 'schedule.create', $4::jsonb, $5, 3, (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
@@ -357,6 +357,24 @@ describe('#3730 item 2: the issuer follows the create gate for the Apps it refus
     expect(p.text).toBe(FORBIDDEN);
     expect(await unconsumedGrantSign(admin.id)).toBe(0);
   });
+
+  // #4463 F3: the completion and decline doors share the proof door's route catch, so a deleted App (APP_NOT_FOUND, not a
+  // GraphQLError) must also reach the wire as the one refusal there, with the request left open and the grant inactive.
+  for (const door of ['complete', 'decline'] as const) {
+    it(`a deleted App after the proof: the ${door} door answers the one refusal, and nothing is spent or activated`, async () => {
+      const g = await insertGrant();
+      const req = await openRequest(g);
+      const p = await prove(req.id, admin);
+      expect(p.json.canSign).toBe(true);
+      await db.app.update({ where: { id: appId }, data: { deletedAt: new Date() } });
+      const body = door === 'complete' ? signingBody(p, admin, 2) : { ceremonyId: p.json.signing.ceremonyId };
+      const r = await post(req.id, door, body, p.cookie);
+      expect(r.status).toBe(403);
+      expect(await r.text()).toBe(FORBIDDEN);
+      expect(await requestState(req.id)).toBe('open');
+      expect((await grantRow(g)).activated_at).toBeNull();
+    });
+  }
 
   it('a stranger with no membership row at all: the one refusal, no terms, no ceremony', async () => {
     const stranger = await person('gs-stranger', null);

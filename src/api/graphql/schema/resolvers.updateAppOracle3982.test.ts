@@ -10,6 +10,7 @@ import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -198,7 +199,7 @@ describe('#3982 updateApp reach versus act (Holger model A)', () => {
 
   it('a userless run needs its own live snapshot grant for reach, and a grant never confers update authority', async () => {
     const schedule = await db.agentSchedule.create({ data: { id: generateId(), appId: app.id, organizationId: org.id, name: 'Synthetic', cron: '* * * * *', entryNodeUrn: 'hrn:node:synthetic.example:flows:report' } });
-    const run = await db.appRun.create({ data: { id: generateId(), appId: app.id, organizationId: org.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn, status: 'RUNNING' } });
+    const run = await db.appRun.create({ data: { id: generateId(), appId: app.id, organizationId: org.id, agentId: await testRunAgentId(db, org.id, app.id), triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn, status: 'RUNNING' } });
     const c = runContext(db, run);
     expect(await refusal(update(app.id, c))).toEqual(unknown(app.id));
     const grant = await db.appAutomationTeamSnapshotGrant.create({ data: { appId: app.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, grantedBy: admin.id } });
