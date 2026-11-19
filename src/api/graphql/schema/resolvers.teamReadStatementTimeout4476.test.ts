@@ -36,7 +36,7 @@ const [gucProbe] = (await db.$queryRawUnsafe(
 const HAS_TX_TIMEOUT = gucProbe.present;
 // #4482 BLIND F (minimum): the PG17-only pins below skip where the GUC is absent, so on a PG16
 // runner their coverage silently vanishes. A lane that EXPECTS PG17 sets TEST_EXPECT_TX_TIMEOUT=1
-// (a future pgvector:pg17 lane; the full-lane ask is the gate owner's), and then the skip is a
+// (test.yml's PG17 shard lanes since #4487), and then the skip is a
 // FAILURE, not a pass — the coverage cannot be lost where it was promised.
 if (!HAS_TX_TIMEOUT && process.env.TEST_EXPECT_TX_TIMEOUT === '1') {
   throw new Error('TEST_EXPECT_TX_TIMEOUT=1 but this engine has no transaction_timeout GUC — the PG17 pins would silently skip here');
