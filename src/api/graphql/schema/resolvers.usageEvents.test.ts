@@ -119,9 +119,10 @@ describe('usageEvents memoryId filter', () => {
     expect(result).toHaveLength(4);
     const locs = new Set(result.map((e: { nodeLoc: string | null }) => e.nodeLoc));
     expect(locs).toEqual(new Set(['alpha', 'beta']));
-    // All belong to memory's nodes, not otherMemory's alpha.
-    const ids = new Set(result.map((e: { nodeId: string | null }) => e.nodeId));
-    expect(ids.has(otherAlphaNode.id)).toBe(false);
+    // All belong to memory, not otherMemory (read through the exposed memoryId: the projection drops the non-SDL
+    // nodeId from another principal's row, which made a nodeId check trivially true; #3694).
+    const memoryIds = new Set(result.map((e: { memoryId: string | null }) => e.memoryId));
+    expect(memoryIds).toEqual(new Set([memory.id]));
   });
 
   it('accepts a bare URN as memoryId — identical effect to ID', async () => {
@@ -165,10 +166,13 @@ describe('usageEvents memoryId filter', () => {
     expect(result[0].nodeLoc).toBe('beta');
   });
 
-  it('without memoryId, returns global results (unchanged behavior)', async () => {
-    const result = await resolvers.Query.usageEvents(null, {}, ctx());
-    // All 6 events across every memory (alpha×3, beta, gamma, otherMemory alpha).
-    expect(result).toHaveLength(6);
+  it('without any resource, returns the caller\'s own activity, not every memory\'s events (#2817)', async () => {
+    // cor:acl:090:01: naming no resource is own activity. Even an ADMIN gets no global feed;
+    // these fixture events carry no user, so they are nobody's own activity.
+    expect(await resolvers.Query.usageEvents(null, {}, ctx())).toEqual([]);
+    // All 6 events stay reachable through the resource scope of each memory.
+    const perMemory = await Promise.all([memory.id, otherMemory.id].map(memoryId => resolvers.Query.usageEvents(null, { memoryId }, ctx())));
+    expect(perMemory.flat()).toHaveLength(6);
   });
 
   it('rejects an unknown memoryId with MEMORY_NOT_FOUND', async () => {
@@ -225,8 +229,9 @@ describe('usageEvents nodeId filter', () => {
     // ONLY memory's alpha events (3), not otherMemory's alpha event.
     const result = await resolvers.Query.usageEvents(null, { nodeId: alphaNode.id }, ctx());
     expect(result).toHaveLength(3);
-    const ids = new Set(result.map((e: { nodeId: string | null }) => e.nodeId));
-    expect(ids).toEqual(new Set([alphaNode.id]));
+    // Read the exposed memoryId: nodeId is no SDL field, so another principal's row does not carry it (#3693).
+    const memories = new Set(result.map((e: { memoryId: string | null }) => e.memoryId));
+    expect(memories).toEqual(new Set([memory.id]));
   });
 
   it('bare loc spans memories where PK does not — same collision, different intent', async () => {
@@ -234,8 +239,8 @@ describe('usageEvents nodeId filter', () => {
     // BOTH memories (3 in memory + 1 in otherMemory = 4).
     const result = await resolvers.Query.usageEvents(null, { nodeId: 'alpha' }, ctx());
     expect(result).toHaveLength(4);
-    const ids = new Set(result.map((e: { nodeId: string | null }) => e.nodeId));
-    expect(ids).toEqual(new Set([alphaNode.id, otherAlphaNode.id]));
+    const memories = new Set(result.map((e: { memoryId: string | null }) => e.memoryId));
+    expect(memories).toEqual(new Set([memory.id, otherMemory.id]));
   });
 
   it('rejects an unknown PK/URN nodeId with NODE_NOT_FOUND', async () => {

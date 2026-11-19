@@ -71,7 +71,7 @@ const parent = async () => db.node.create({ data: { id: generateId(), memoryId, 
 const checkout = () => join(env.root, 'data3507-org', 'fixture');
 const legacyPath = () => join(checkout(), 'a', 'README.md');
 const incremental = (node: Awaited<ReturnType<typeof parent>>) => writeNodeToGit({ ...node, tags: [], outgoingEdges: [] }, 'synthetic/data3507', null, memoryId);
-const mirror = (node: Awaited<ReturnType<typeof parent>>) => writeNodeFile(checkout(), { ...node, tags: [], outgoingEdges: [] });
+const mirror = (node: Awaited<ReturnType<typeof parent>>) => writeNodeFile(checkout(), { ...node, tags: [], outgoingEdges: [] }, undefined, false);
 
 for (const route of ['incremental', 'bulk'] as const) {
   it(`${route}: preserves a live a:README file when writing a`, async () => {
@@ -173,3 +173,71 @@ for (const route of ['move', 'retry'] as const) {
   expect(rmSync).not.toHaveBeenCalledWith(legacyPath(), { force: true });
  });
 }
+
+// #3517: real destination checkout / due WRITE route, not a mocked child lookup.
+for (const route of ['move', 'retry'] as const) {
+ for (const childState of ['none', 'foreign', 'deleted'] as const) {
+  it(`3517 ${route} ${childState}: removes stale README only in the actual destination`, async () => {
+   const destination = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+   const source = await db.memory.create({ data: {
+    organizationId: destination.organizationId, name: 'Source', urn: 'data3507-org:source',
+    class: 'knowledge', source: SOURCE, readBranch: 'main', writeBranch: 'main',
+   } });
+   const a = await db.node.create({ data: { memoryId: route === 'move' ? source.id : memoryId, loc: route === 'move' ? 'old-a' : 'a', name: 'parent', content: 'before' } });
+   // Clone/export both real memories before seeding the stale destination file.
+   expect((await pushMemoryToGit(source.id)).error).toBeUndefined();
+   expect((await pushMemoryToGit(memoryId)).error).toBeUndefined();
+   expect(existsSync(join(env.root, 'data3507-org', 'source', '.git'))).toBe(true);
+   expect(existsSync(join(checkout(), '.git'))).toBe(true);
+   const other = childState === 'none' ? null : await db.node.create({ data: {
+    memoryId: childState === 'foreign' ? source.id : memoryId,
+    loc: 'a:README', name: 'other child', content: 'untouched child',
+    deletedAt: childState === 'deleted' ? new Date() : null,
+   } });
+   const otherBefore = other && await db.node.findUniqueOrThrow({ where: { id: other.id } });
+   const content = `3517 updated ${route} ${childState}`;
+   await db.node.update({ where: { id: a.id }, data: { memoryId, loc: 'a', content } });
+   mkdirSync(join(checkout(), 'a'), { recursive: true });
+   writeFileSync(legacyPath(), '---\nname: stale id-less\n---\nstale destination bytes\n');
+   expect(existsSync(legacyPath())).toBe(true);
+   if (route === 'move') {
+    expect(source.id).not.toBe(memoryId);
+    await mirrorNodeMoveToGit(db, { srcMemoryId: source.id, destMemoryId: memoryId, moved: [{ id: a.id, previousLoc: 'old-a' }] });
+   } else {
+    await db.gitMirrorObligation.create({ data: {
+     memoryId, nodeId: a.id, kind: 'WRITE', removeLoc: '', branch: 'main',
+     state: 'FAILED', errorClass: 'PUSH_FAILED', attempts: 1,
+     attemptSeq: await takeAttemptSeq(db), lastAttemptAt: new Date(Date.now() - 86400000),
+    } });
+    expect(await db.gitMirrorObligation.count({ where: { kind: 'REMOVE' } })).toBe(0);
+    expect(await gitMirrorSweepTick(db)).toBe(1);
+    expect(await db.gitMirrorObligation.count({ where: { memoryId, nodeId: a.id, kind: 'WRITE' } })).toBe(0);
+   }
+   expect(readFileSync(join(checkout(), 'a.md'), 'utf8')).toContain(content);
+   expect(readNodeFileId(join(checkout(), 'a.md'))).toBe(a.id);
+   expect(git(env.bare, 'show', 'refs/heads/main:a.md')).toContain(content);
+   expect(existsSync(legacyPath())).toBe(false);
+   expect(git(checkout(), 'ls-tree', '--name-only', 'HEAD', 'a/README.md')).toBe('');
+   if (other) expect(await db.node.findUniqueOrThrow({ where: { id: other.id } })).toEqual(otherBefore);
+  }, 30_000);
+ }
+}
+
+it('3517 writer requires a typed decision but preserves JavaScript omission and arity', async () => {
+ const a = await parent();
+ const payload = { ...a, tags: [], outgoingEdges: [] };
+ // Compile-only negative: this branch never executes.
+ if (false) {
+  // @ts-expect-error #3517: typed callers must explicitly decide live-child ownership.
+  writeNodeFile(checkout(), payload, undefined);
+ }
+ expect(writeNodeFile.length).toBe(3);
+ expect((await pushMemoryToGit(memoryId)).error).toBeUndefined();
+ mkdirSync(join(checkout(), 'a'), { recursive: true });
+ writeFileSync(legacyPath(), '---\nname: stale\n---\nlegacy\n');
+ // Simulate an untyped JS caller: no new runtime refusal is introduced.
+ const javascriptCall = writeNodeFile as unknown as (path: string, node: typeof payload) => boolean;
+ expect(javascriptCall(checkout(), payload)).toBe(true);
+ expect(existsSync(legacyPath())).toBe(false);
+ expect(readNodeFileId(join(checkout(), 'a.md'))).toBe(a.id);
+});

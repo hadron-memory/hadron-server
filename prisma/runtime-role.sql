@@ -96,6 +96,17 @@ BEGIN
   IF to_regclass('public._prisma_migrations') IS NOT NULL THEN
     EXECUTE format('REVOKE ALL ON TABLE public._prisma_migrations FROM %I', serve);
   END IF;
+  -- #3668: `actions` is written only by the deploy-time upsert, as the owner; the serve role reads it (a table created later
+  -- is revoked by scripts/db/revoke-runtime-migrations.ts after migrate).
+  IF to_regclass('public.actions') IS NOT NULL THEN
+    EXECUTE format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE public.actions FROM %I', serve);
+  END IF;
+  -- #3997 (R25): `secret_events` is append-only. The serve role may INSERT, SELECT and DELETE (the one-year purge S8 builds runs as
+  -- the serve role, and the guard trigger refuses every delete but that one); it may never UPDATE or TRUNCATE it. A table created later
+  -- is revoked by scripts/db/revoke-runtime-migrations.ts after migrate.
+  IF to_regclass('public.secret_events') IS NOT NULL THEN
+    EXECUTE format('REVOKE UPDATE, TRUNCATE ON TABLE public.secret_events FROM %I', serve);
+  END IF;
 END
 $grants$;
 

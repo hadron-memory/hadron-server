@@ -6,7 +6,6 @@
 import { ApolloServer } from '@apollo/server';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../../../server.js';
 import { mintUserApiKey } from '../../../middleware/auth.js';
 import { buildSchema, isObjectType } from 'graphql';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -22,18 +21,19 @@ import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { withCompileWrite } from '../../../lib/bootPrompt.js';
 import { sha256Hex } from '../../../lib/bootCompile/provenance.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../../test/startServerFixture.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const server = new ApolloServer<Context>({ typeDefs, resolvers });
 let httpServer: Server, mcpUrl: string;
 beforeAll(async () => {
-  httpServer = createHttpServer(await createServer());
+  httpServer = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>(resolve => httpServer.listen(0, '127.0.0.1', resolve));
   mcpUrl = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}/mcp`;
 });
 afterAll(async () => {
   await server.stop();
-  await new Promise<void>(resolve => httpServer.close(() => resolve()));
+  await closeServerIfStarted(httpServer);
 });
 let userId: string, foreignOrgId: string, memoryId: string, memoryUrn: string, foreignMemoryId: string, foreignMemoryUrn: string;
 const ctx = (): Context => ({ db, userId, roles: [] });

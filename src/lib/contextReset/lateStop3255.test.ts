@@ -1,3 +1,4 @@
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../test/teamEventHorizon.js';
 /** #3255 (cor:agt:050:27 part 10): a late stop is recorded once, never a new reset transition or alarm. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -5,6 +6,7 @@ import { code, ctx, M, NEW_PROC, PROC, setUpResetFixture, type ResetFixture } fr
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { reportContextResetAgentStopped } from './contextReset.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -44,7 +46,7 @@ describe('#3255 late-stop report', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ taskId: s.taskId, subjectWorkerId: f.kit.id, severity: null, payload: { resetId: s.resetId, lateStopMs: 30_000 } });
     expect(await db.agentTask.findUniqueOrThrow({ where: { id: s.taskId } })).toEqual(taskBefore);
-    const Q = resolvers.Query as any;
+    const Q = settledTeamEventQueries(resolvers.Query, db) as any;
     const visible = await f.asWorker<Array<{ id: string }>>(f.ada, () => Q.agentTeamEvents({}, { appRef: f.app.id, types: [EVENT] }, ctx(f.holder.id)));
     expect(visible.map((e: { id: string }) => e.id)).toEqual([rows[0]!.id]);
     expect(await db.agentTeamEvent.count({ where: { appId: f.app.id, severity: 'alarm' } })).toBe(0);

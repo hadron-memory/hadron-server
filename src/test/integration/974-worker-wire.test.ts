@@ -119,7 +119,7 @@ beforeAll(async () => {
   const ctx: Context = { db, userId: admin.id, roles: ['READER'] };
   // Team Agent: carries the cast-list register only. A one-name register so
   // exhaustion is reachable in one extra cast.
-  const team = await M.createAgent({}, { orgId: org.id, name: 'Wire Team Agent' }, ctx);
+  const team = await M.createAgent({}, { orgRef: org.id, name: 'Wire Team Agent' }, ctx);
   teamAgent = { id: team.id };
   await db.node.create({
     data: {
@@ -134,7 +134,7 @@ beforeAll(async () => {
   const role = await M.createAgent(
     {},
     {
-      orgId: org.id,
+      orgRef: org.id,
       name: 'Wire Backend Engineer',
       personaRole: 'backend-engineer',
     },

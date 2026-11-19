@@ -20,12 +20,13 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { formatGraphQLError } from '../formatError.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
 }));
 
-const server = new ApolloServer({ typeDefs, resolvers });
+const server = new ApolloServer({ typeDefs, resolvers, formatError: formatGraphQLError });
 afterAll(async () => { await server.stop(); });
 
 const ctx = (userId: string, roles: string[] = ['READER']): Context => ({ db, roles, userId }) as Context;
@@ -216,7 +217,8 @@ describe('#3428 updateApp(policy): variables, platform ADMIN, refusal order', ()
       await db.app.update({ where: { id: soloApp.id }, data: { policy: STORED } });
       const baseline = await run(UPDATE_NAME_ONLY, { ref: soloApp.id, name: 'x' }, platformAdmin.id, ['ADMIN']);
       expect(baseline.errors?.length).toBe(1);
-      expect(baseline.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
+      // #3982 model A: this caller has no reach to the user-owned App.
+      expect(baseline.errors?.[0]?.extensions?.code).toBe('APP_NOT_FOUND');
       for (const policy of [{ allow: ['*'] }, null]) {
         const out = await run(UPDATE, { ref: soloApp.id, policy }, platformAdmin.id, ['ADMIN']);
         expect(shape(out.errors)).toBe(shape(baseline.errors));
@@ -228,12 +230,13 @@ describe('#3428 updateApp(policy): variables, platform ADMIN, refusal order', ()
   describe('pin 3: refusal before shape validation (no shape oracle; the cor:dmo:050:20 pattern)', () => {
     const MALFORMED = [{ allow: 'oops' }, { deny: ['x'] }, ['run.execute'], 'run.execute', 7];
     for (const [who, app] of [['orgMember', 'org'], ['outsider', 'org'], ['outsider', 'solo'], ['orgAdmin', 'solo']] as const) {
-      it(`${who} sending a malformed link to the ${app}-owned App gets FORBIDDEN, never BAD_USER_INPUT, nothing stored`, async () => {
+      it(`${who} sending a malformed link to the ${app}-owned App gets its reach/act refusal, never BAD_USER_INPUT, nothing stored`, async () => {
         const caller = { orgMember, outsider, orgAdmin }[who].id;
         const target = app === 'org' ? orgApp : soloApp;
         await db.app.update({ where: { id: target.id }, data: { policy: STORED } });
         const baseline = await run(UPDATE_NAME_ONLY, { ref: target.id, name: 'x' }, caller);
-        expect(baseline.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
+        // #3982: only the org participant reaches this App; the other callers learn unknown-App.
+        expect(baseline.errors?.[0]?.extensions?.code).toBe(who === 'orgMember' ? 'FORBIDDEN' : 'APP_NOT_FOUND');
         for (const policy of MALFORMED) {
           const out = await run(UPDATE, { ref: target.id, policy }, caller);
           expect(shape(out.errors)).toBe(shape(baseline.errors));

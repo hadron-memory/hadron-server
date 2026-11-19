@@ -27,7 +27,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../../server.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 
 const sendMagicLinkMock = vi.hoisted(() => vi.fn());
 vi.mock('../../auth/email.js', async (importOriginal) => {
@@ -41,14 +41,14 @@ let server: Server;
 let baseUrl: string;
 
 beforeAll(async () => {
-  const app = await createServer();
+  const app = await createServerOnCleanDb();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 
 afterAll(async () => {
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await closeServerIfStarted(server);
 });
 
 beforeEach(() => {

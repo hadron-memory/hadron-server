@@ -34,6 +34,7 @@ import {
 } from '../services/embedding/vectors.js';
 import { chunkNode } from '../lib/chunking.js';
 import { recordLlmUsage } from '../lib/metering/index.js';
+import type { StepOutcome } from '../lib/shutdownSteps.js';
 
 export interface EmbedPlaintext {
   content?: string | null;
@@ -615,6 +616,14 @@ export function startEmbeddingWorkerLoop(
 }
 
 export async function stopEmbeddingWorker(db: PrismaClient, graceMs = 5_000): Promise<boolean> {
+  return (await stopEmbeddingWorkerOutcome(db, graceMs)) === 'ok';
+}
+
+/**
+ * #3845: the same stop, saying which part failed: `ok`, `jobs_unsettled` (in-flight jobs did not settle),
+ * `bus_stop_rejected` (the broker listener's stop rejected) or `grace_timeout` (neither finished inside the grace).
+ */
+export async function stopEmbeddingWorkerOutcome(db: PrismaClient, graceMs = 5_000): Promise<StepOutcome> {
   const timer = workerTimers.get(db);
   if (timer) clearTimeout(timer);
   workerTimers.delete(db);
@@ -626,8 +635,8 @@ export async function stopEmbeddingWorker(db: PrismaClient, graceMs = 5_000): Pr
   try {
     return await Promise.race([
       Promise.all([settled, stopBus ? stopBus().then(() => true, () => false) : true])
-        .then(([jobs, bus]) => jobs && bus),
-      new Promise<boolean>((resolve) => { deadline = setTimeout(() => resolve(false), Math.max(0, graceMs)); }),
+        .then(([jobs, bus]): StepOutcome => (!jobs ? 'jobs_unsettled' : !bus ? 'bus_stop_rejected' : 'ok')),
+      new Promise<StepOutcome>((resolve) => { deadline = setTimeout(() => resolve('grace_timeout'), Math.max(0, graceMs)); }),
     ]);
   } finally { if (deadline) clearTimeout(deadline); }
 }

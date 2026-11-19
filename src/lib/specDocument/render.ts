@@ -84,6 +84,25 @@ export interface DocInput {
 /** The anchor of a part: its citation with each `:` replaced by `-`. */
 export const anchorOf = (loc: string): string => loc.replace(/:/g, '-');
 
+/** Reserve every first producer's natural ID before assigning suffixes in display order (#3551). */
+function assignAnchors(parts: readonly DocPart[]): ReadonlyMap<string, string> {
+  const reserved = new Set(parts.map((part) => anchorOf(part.loc)));
+  const assigned = new Map<string, string>();
+  const used = new Set<string>();
+  for (const part of parts) {
+    const bare = anchorOf(part.loc);
+    let anchor = bare;
+    if (used.has(bare)) {
+      let suffix = 2;
+      while (reserved.has(`${bare}-${suffix}`) || used.has(`${bare}-${suffix}`)) suffix += 1;
+      anchor = `${bare}-${suffix}`;
+    }
+    assigned.set(part.loc, anchor);
+    used.add(anchor);
+  }
+  return assigned;
+}
+
 const WIKILINK = /\[\[([^[\]|]+?)(?:\|([^[\]]*))?\]\]/g;
 
 /** Every wikilink target in `text`, as written, outside fenced code. */
@@ -200,14 +219,17 @@ export function hasOpenQuestions(body: string): boolean {
   return found;
 }
 
-function renderLinks(text: string, links: ReadonlyMap<string, LinkResolution>): string {
+function renderLinks(text: string, links: ReadonlyMap<string, LinkResolution>, anchors: ReadonlyMap<string, string>): string {
   return eachOutsideFence(text, (line) => line.replace(WIKILINK, (_all, rawTarget: string, rawText: string | undefined) => {
     const target = rawTarget.trim();
     const shown = rawText?.trim() || undefined;
     const r = links.get(target);
     if (!r || r.kind === 'plain') return shown ?? target;
     if (r.kind === 'feature') return shown ?? r.loc;
-    if (r.kind === 'part') return `[${shown ?? r.name}](#${anchorOf(r.loc)})`;
+    if (r.kind === 'part') {
+      const anchor = anchors.get(r.loc);
+      return anchor ? `[${shown ?? r.name}](#${anchor})` : shown ?? r.name;
+    }
     return `[${shown ?? r.label}](${r.url})`;
   }));
 }
@@ -224,10 +246,10 @@ const stateLine = (p: DocPart): string => `Approval: ${approvalText(p.approval)}
 const heading = (p: DocPart): string => (p.name === p.loc || p.name.startsWith(`${p.loc} `) ? p.name : `${p.name} [${p.loc}]`);
 
 /** The part's body as shown, or null when it shows none (placeholder, superseded, empty). */
-function shownBody(p: DocPart, shift: boolean, links: ReadonlyMap<string, LinkResolution>): string | null {
+function shownBody(p: DocPart, shift: boolean, links: ReadonlyMap<string, LinkResolution>, anchors: ReadonlyMap<string, string>): string | null {
   if (p.isPlaceholder || p.superseded || p.body == null) return null;
   const { body } = splitAtClosingRule(p.body);
-  const cleaned = renderLinks(cleanBody(body, shift), links);
+  const cleaned = renderLinks(cleanBody(body, shift), links, anchors);
   return cleaned === '' ? null : cleaned;
 }
 
@@ -236,6 +258,7 @@ const renderedStamp = (d: Date): string => `${d.toISOString().slice(0, 16)}Z`;
 
 export function renderSpecDocument(input: DocInput): string {
   const { feature, parts, links } = input;
+  const anchors = assignAnchors(inDocumentOrder(parts));
   const all = [feature, ...parts];
   const openQuestions = all
     .filter((p) => !p.isPlaceholder && !p.superseded && p.body != null && hasOpenQuestions(splitAtClosingRule(p.body).body))
@@ -253,7 +276,7 @@ export function renderSpecDocument(input: DocInput): string {
   ];
   if (feature.isPlaceholder) blocks.push('Placeholder.');
   else {
-    const featureBody = shownBody({ ...feature, superseded: false }, false, links);
+    const featureBody = shownBody({ ...feature, superseded: false }, false, links, anchors);
     if (featureBody) blocks.push(featureBody);
   }
 
@@ -262,20 +285,20 @@ export function renderSpecDocument(input: DocInput): string {
     if (members.length === 0) continue;
     blocks.push(`# ${g.heading}`);
     for (const p of members) {
-      const head = `<a id="${anchorOf(p.loc)}"></a>\n\n## ${heading(p)}\n${stateLine(p)}`;
+      const head = `<a id="${anchors.get(p.loc)}"></a>\n\n## ${heading(p)}\n${stateLine(p)}`;
       if (p.superseded) {
         blocks.push(`${head}\n\n${p.supersededBy.length ? `Superseded by ${p.supersededBy.join(', ')}.` : 'Superseded.'}`);
       } else if (p.isPlaceholder) {
         blocks.push(`${head}\n\nPlaceholder.`);
       } else {
-        const body = shownBody(p, true, links);
+        const body = shownBody(p, true, links, anchors);
         blocks.push(body ? `${head}\n\n${body}` : head);
       }
     }
   }
 
   if (!feature.isPlaceholder && feature.body != null) {
-    const tail = renderLinks(trimNewlines(splitAtClosingRule(feature.body).tail), links);
+    const tail = renderLinks(trimNewlines(splitAtClosingRule(feature.body).tail), links, anchors);
     if (tail !== '') blocks.push(tail);
   }
   return `${blocks.join('\n\n')}\n`;

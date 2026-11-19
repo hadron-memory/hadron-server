@@ -78,7 +78,7 @@ beforeEach(async () => {
     ],
   });
 
-  const created = await M.createAgent({}, { orgId: org.id, name: 'TR Team Agent' }, ctx(admin.id));
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'TR Team Agent' }, ctx(admin.id));
   teamAgent = { id: created.id, urn: created.urn, systemMemoryId: created.systemMemoryId };
   await db.node.create({
     data: {
@@ -116,7 +116,7 @@ beforeEach(async () => {
   const role = await M.createAgent(
     {},
     {
-      orgId: org.id,
+      orgRef: org.id,
       name: 'TR Backend Engineer',
       personaRole: 'backend-engineer',
     },
@@ -192,7 +192,7 @@ describe('#960 — teamRoles read', () => {
   it('read gate: AppMember and the App\'s own key read; an outsider is refused', async () => {
     expect((await teamRoles(ctx(appMember.id))).total).toBe(2);
     expect((await teamRoles(ctx(undefined, app.id))).total).toBe(2);
-    await expectCode(teamRoles(ctx(outsider.id)), 'FORBIDDEN');
+    await expectCode(teamRoles(ctx(outsider.id)), 'APP_NOT_FOUND');
   });
 });
 
@@ -262,7 +262,7 @@ describe('#960 — createTeamRole', () => {
   });
 
   it('teamAgentRef naming an agent NOT installed here → TEAM_AGENT_NOT_INSTALLED', async () => {
-    const foreign = await M.createAgent({}, { orgId: org.id, name: 'TR Foreign Team' }, ctx(admin.id));
+    const foreign = await M.createAgent({}, { orgRef: org.id, name: 'TR Foreign Team' }, ctx(admin.id));
     await db.node.create({
       data: {
         id: generateId(),
@@ -294,7 +294,7 @@ describe('#960 — createTeamRole', () => {
   it('locator errors are held behind the read-audience gate — no topology probe (#984 review)', async () => {
     // A second installed agent with a roles: branch makes the locator
     // ambiguous — TEAM_AGENT_AMBIGUOUS discloses candidate names + URNs.
-    const second = await M.createAgent({}, { orgId: org.id, name: 'TR Second Team Agent' }, ctx(admin.id));
+    const second = await M.createAgent({}, { orgRef: org.id, name: 'TR Second Team Agent' }, ctx(admin.id));
     await db.node.create({
       data: {
         id: generateId(),
@@ -313,7 +313,7 @@ describe('#960 — createTeamRole', () => {
     // …an outsider gets FORBIDDEN, never the candidate list.
     await expectCode(
       M.createTeamRole({}, { appRef: app.id, role: 'ops' }, ctx(outsider.id)),
-      'FORBIDDEN',
+      'APP_NOT_FOUND',
     );
   });
 
@@ -803,7 +803,7 @@ describe('deleteTeamRole (#1002, simplified by #1050)', () => {
 });
 
 it('#2168 ruling0141 role index prefers physical matches over a distinct derived role Agent',async()=>{
- const derived=await M.createAgent({}, {orgId:org.id,name:'Imported backend',personaRole:'backend-engineer'},ctx(admin.id));
+ const derived=await M.createAgent({}, {orgRef:org.id,name:'Imported backend',personaRole:'backend-engineer'},ctx(admin.id));
  await db.agentOrgGrant.create({data:{orgId:org.id,agentId:derived.id,activatedAt:new Date()}});
  await db.agentImport.create({data:{parentAgentId:teamAgent.id,importedAgentId:derived.id,position:100,required:true,agentOrgGrantOrgId:org.id,agentOrgGrantAgentId:derived.id}});
  const page=await teamRoles(ctx(admin.id));

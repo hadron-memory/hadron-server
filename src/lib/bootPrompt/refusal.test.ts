@@ -10,6 +10,7 @@ describe('bootPromptRefusal', () => {
   it('has exactly the one agreed code list (#2045 / #2047), NOT_SET canonical', () => {
     expect([...BOOT_PROMPT_REFUSAL_CODES].sort()).toEqual(
       [
+        'BOOT_PROMPT_INSTALL_LICENSE_INACTIVE',
         'BOOT_PROMPT_NOT_SET',
         'BOOT_PROMPT_TARGET_DELETED',
         'BOOT_PROMPT_NOT_APPROVED',

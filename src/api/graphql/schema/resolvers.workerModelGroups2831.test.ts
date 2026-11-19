@@ -38,7 +38,7 @@ beforeEach(async () => {
   mia = await db.user.create({ data: { githubId: 620_000 + n, githubUsername: `ro-mia-${n}`, roles: ['READER'] } });
   outsider = await db.user.create({ data: { githubId: 630_000 + n, githubUsername: `ro-out-${n}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   agentId = agent.id;
   appUrn = `roster-${n}.example:team`;
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: appUrn }, select: { id: true } });
@@ -237,7 +237,7 @@ describe('#2831 S3 current model groups', () => {
 
   it('preserves the effective-group typed refusal for ambiguous Team Agents', async () => {
     for (const name of ['Team A', 'Team B']) {
-      const agent = await M.createAgent({}, { orgId: (await db.app.findUniqueOrThrow({ where: { id: app.id } })).organizationId, name }, ctx(admin.id));
+      const agent = await M.createAgent({}, { orgRef: (await db.app.findUniqueOrThrow({ where: { id: app.id } })).organizationId, name }, ctx(admin.id));
       await db.node.create({ data: { memoryId: agent.systemMemoryId, loc: 'roles:engineer', name: 'engineer', content: '' } });
       await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     }

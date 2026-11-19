@@ -40,7 +40,7 @@ beforeEach(async () => {
   org = await db.organization.create({ data: { id: generateId(), name: 'sc-org', urn: 'sc-org' } });
   user = await db.user.create({ data: { githubId: 92047100, githubUsername: 'sc-user', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'chat-agent', visibility: 'ORGANIZATION', description: 'LEGACY {{agent.name}}' }, { db, roles: ['ADMIN'], userId: user.id });
+  agent = await M.createAgent({}, { orgRef: org.id, name: 'chat-agent', visibility: 'ORGANIZATION', description: 'LEGACY {{agent.name}}' }, { db, roles: ['ADMIN'], userId: user.id });
   systemMemoryId = agent.systemMemoryId;
   app = await db.app.create({ data: { id: generateId(), name: 'chat-app', urn: `${org.urn}:chat-app`, organizationId: org.id, appAgents: { create: { agentId: agent.id } } } });
   const nodes = [
@@ -186,7 +186,7 @@ describe('#3096 client-reported chat model', () => {
     await compiled('Model={{session.llmModel}}.');
     const start = await M.startChat({}, { agentId: agent.id }, ctx());
     const chat = await chatNodeByLocOrThrow(db, start.chatId);
-    const base = await serveChatPrompt(db, agent, app.id);
+    const base = await serveChatPrompt(db, agent, app.id, null, {db,userId:user.id,roles:['ADMIN']});
     const one = { ...base, variables: { ...base.variables, 'session.llmModel': 'X', 'session.llmModel.source': 'client-reported' } };
     const two = { ...base, variables: { ...base.variables, 'session.llmModel': 'Y', 'session.llmModel.source': 'client-reported' } };
     await Promise.all([recordChatServedIfChanged(db, chat.id, agent.id, app.id, one), recordChatServedIfChanged(db, chat.id, agent.id, app.id, two)]);

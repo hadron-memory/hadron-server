@@ -33,7 +33,7 @@ describe('session end reason #1156', () => {
     const schema = buildSchema(typeDefs);
     const field = (schema.getType('Session') as GraphQLObjectType).getFields().endReason;
     expect(String(field.type)).toBe('SessionEndReason');
-    expect((schema.getType('SessionEndReason') as any).getValues().map((v: { name: string }) => v.name)).toEqual(['ended', 'superseded', 'expired', 'unknown']);
+    expect((schema.getType('SessionEndReason') as any).getValues().map((v: { name: string }) => v.name)).toEqual(['ended', 'superseded', 'expired', 'agent_absent', 'unknown']); // #4292 adds agent_absent
   });
   it('stamps an explicit end and preserves evidence on repeat calls', async () => {
     const s = await create();

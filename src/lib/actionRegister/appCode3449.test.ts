@@ -45,18 +45,41 @@ function codes(path: string, source: string): { found: string[]; raw: number } {
 }
 
 describe('reserved App event code namespace', () => {
-  it('walks every production source and keeps exactly the legacy App event types', () => {
-    const paths = execFileSync('git', ['ls-files', 'src'], { encoding: 'utf8' }).trim().split('\n').filter(p => p.endsWith('.ts') && !p.endsWith('.test.ts') && !p.includes('/generated/'));
+  /**
+   * #4458 — cheap necessary-condition pre-filter. Every shape `codes()` guards spells one
+   * of these markers contiguously in the raw source (identifiers and SQL table names
+   * cannot be split), so a file containing none of them cannot contribute. This keeps the
+   * census from TS-parsing ~2,600 files (1.4 s of CPU that timed out at vitest's 5 s
+   * default under a contended 4-vCPU shard); the differential test below proves the skip
+   * loses nothing by also running the unfiltered walk.
+   */
+  const MARKERS = ['_EVENT_TYPES', '_WARNING_CODES', 'TaskEventPayload', 'agentTeamEvent', 'agent_team_events'] as const;
+  const admits = (source: string) => MARKERS.some((m) => source.includes(m));
+  const productionPaths = () =>
+    execFileSync('git', ['ls-files', 'src'], { encoding: 'utf8' }).trim().split('\n').filter(p => p.endsWith('.ts') && !p.endsWith('.test.ts') && !p.includes('/generated/'));
+  const census = (filtered: boolean) => {
     const found = new Set<string>();
     const rawPaths: string[] = [];
-    for (const path of paths) {
-      const scan = codes(path, readFileSync(path, 'utf8'));
+    for (const path of productionPaths()) {
+      const source = readFileSync(path, 'utf8');
+      if (filtered && !admits(source)) continue;
+      const scan = codes(path, source);
       scan.found.forEach(s => found.add(s));
       if (scan.raw) rawPaths.push(path);
     }
-    expect([...found].sort()).toEqual(legacy);
-    expect(rawPaths.sort()).toEqual(['src/lib/agentTasks/coordinatorCadence.ts', 'src/lib/agentTasks/darkWorker.ts', 'src/lib/agentTasks/events.ts', 'src/lib/agentTasks/postLimit.ts'].sort());
+    return { found: [...found].sort(), rawPaths: rawPaths.sort() };
+  };
+
+  it('walks every production source and keeps exactly the legacy App event types', () => {
+    const { found, rawPaths } = census(true);
+    expect(found).toEqual(legacy);
+    expect(rawPaths).toEqual(['src/lib/agentTasks/coordinatorCadence.ts', 'src/lib/agentTasks/darkWorker.ts', 'src/lib/agentTasks/events.ts', 'src/lib/agentTasks/postLimit.ts', 'src/lib/agentTasks/sweepRuns.ts', 'src/lib/desiredState/desiredStart.ts'].sort());
     expect(TICK_CODE_PREFIX).toBe('tick.');
+  });
+  it('#4458 the pre-filter skips nothing the full walk would see (differential against the unfiltered census)', { timeout: 60_000 }, () => {
+    // The unfiltered walk is the expensive one by design (it parses every production
+    // source), so it carries its own generous budget instead of the 5 s default.
+    expect(census(true)).toEqual(census(false));
   });
   it('the census sees new entries in every guarded source shape and ignores payload/grant names', () => {
     const fake = `const TASK_EVENT_TYPES = ['app.team.bad', \`app.team.backtick\`];

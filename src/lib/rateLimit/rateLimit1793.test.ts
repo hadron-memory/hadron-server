@@ -2,10 +2,10 @@ import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
-import { withinOneRateWindow } from '../../test/rateWindow.js';
+import { FORCED_PHASE_HOOK_TIMEOUT_MS, RATE_WINDOW_TEST_TIMEOUT_MS, forceRateWindowSleepZone, withinOneRateWindow } from '../../test/rateWindow.js';
 import { admitRate, admitRateInTx, assertRateReadiness, cleanupRateBuckets, configFence, RateLimited } from './index.js';
 import { beginRateKeyOverlap, retireRateKey } from './lifecycle.js';
-import { readRateKeys } from './config.js';
+import { DEFAULTS, readRateKeys } from './config.js';
 import { transportRateIdentity, internalRateIdentity } from './identity.js';
 import { toolErrorResult } from '../../mcp/toolError.js';
 
@@ -17,6 +17,14 @@ async function policy(fieldClass = 'FAN_OUT_READS', data: Record<string,unknown>
   await db.rateLimitPolicy.update({where:{fieldClass},data:{principalLimit:2,keyLimit:100,ipLimit:100,enforcementMode:'ENFORCING',...data}});
 }
 const used = async () => (await db.rateLimitBucket.findMany({orderBy:{id:'asc'}})).map(r => ({...r,used:String(r.used)}));
+/** The #1793 config-fence site; shared with the #3480 forced-phase pin below. */
+async function configFenceSite() {
+  await policy('FAN_OUT_READS',{enforcementMode:'LOG_ONLY',principalLimit:1});await withinOneRateWindow(db,'FAN_OUT_READS');await admitRate(db,'FAN_OUT_READS',id);
+  let unlock!:()=>void;const gate=new Promise<void>(r=>unlock=r);let locked!:()=>void;const entered=new Promise<void>(r=>locked=r);
+  const writer=db.$transaction(async tx=>{await configFence(tx,true);await tx.rateLimitPolicy.update({where:{fieldClass:'FAN_OUT_READS'},data:{enforcementMode:'ENFORCING'}});locked();await gate;});
+  await entered;const attempt=admitRate(db,'FAN_OUT_READS',id);unlock();await writer;
+  await expect(attempt).rejects.toBeInstanceOf(RateLimited);
+}
 describe('#1793 atomic shared admission', () => {
   it.each(['principal','key','ip'] as const)('exhausts %s independently, refusal changes no bucket', async dimension => {
     await policy('FAN_OUT_READS',{principalLimit:100,keyLimit:100,ipLimit:100,[dimension+'Limit']:1});
@@ -27,7 +35,7 @@ describe('#1793 atomic shared admission', () => {
     expect(await used()).toEqual(before);
     expect(JSON.stringify(before)).not.toContain('192.0.2.1');
     expect(JSON.stringify(before)).not.toContain('USER:a');
-  });
+  }, RATE_WINDOW_TEST_TIMEOUT_MS);
   it('two connections at L-1 admit exactly one, counters never partially charge', async () => {
     await policy();await withinOneRateWindow(db,'FAN_OUT_READS');await admitRate(db,'FAN_OUT_READS',id);
     const other = new PrismaClient();
@@ -70,7 +78,7 @@ describe('#1793 atomic shared admission', () => {
       expect(results.filter(r=>r.status==='fulfilled')).toHaveLength(1);
       expect((await used()).every(r=>r.used==='2')).toBe(true);
     } finally {await other.$disconnect();}
-  });
+  }, RATE_WINDOW_TEST_TIMEOUT_MS);
   it('rolls counters back with a failed deciding transaction', async () => {
     await policy();
     await expect(db.$transaction(async tx=>{await admitRateInTx(tx,'FAN_OUT_READS',id);throw new Error('insert failed');})).rejects.toThrow('insert failed');
@@ -84,7 +92,7 @@ describe('#1793 atomic shared admission', () => {
     await policy('FAN_OUT_READS',{principalLimit:1});
     await expect(admitRate(db,'FAN_OUT_READS',id)).rejects.toBeInstanceOf(RateLimited);
     expect(await used()).toEqual(before);
-  });
+  }, RATE_WINDOW_TEST_TIMEOUT_MS);
   it('overlap carries old budget, dual-writes max rather than sum, and cannot retire early', async () => {
     await policy();await withinOneRateWindow(db,'FAN_OUT_READS');await admitRate(db,'FAN_OUT_READS',id);
     await beginRateKeyOverlap(db,'new');
@@ -96,7 +104,7 @@ describe('#1793 atomic shared admission', () => {
     await db.rateLimitManifest.update({where:{id:'global'},data:{overlapStartedAt:new Date(Date.now()-86401_000)}});
     await retireRateKey(db);
     await expect(admitRate(db,'FAN_OUT_READS',id)).rejects.toBeInstanceOf(RateLimited);
-  });
+  }, RATE_WINDOW_TEST_TIMEOUT_MS);
   it('missing/changed configured HMAC key refuses readiness, no secret in error', async () => {
     vi.stubEnv('RATE_LIMIT_KEYRING',JSON.stringify({current:'old',keys:{old:'3'.repeat(64)}}));
     await expect(assertRateReadiness(db)).rejects.toThrow('readiness');
@@ -126,13 +134,7 @@ describe('#1793 atomic shared admission', () => {
     const r=toolErrorResult(new RateLimited('FAN_OUT_READS',5),()=> 'not used');
     expect(r).toMatchObject({isError:true,structuredContent:{error:{code:'RATE_LIMITED',retryAfterSeconds:5,fieldClass:'FAN_OUT_READS',message:'Too many requests.'}}});
   });
-  it('waits on config before deciding; admin flip fences the attempt', async () => {
-    await policy('FAN_OUT_READS',{enforcementMode:'LOG_ONLY',principalLimit:1});await withinOneRateWindow(db,'FAN_OUT_READS');await admitRate(db,'FAN_OUT_READS',id);
-    let unlock!:()=>void;const gate=new Promise<void>(r=>unlock=r);let locked!:()=>void;const entered=new Promise<void>(r=>locked=r);
-    const writer=db.$transaction(async tx=>{await configFence(tx,true);await tx.rateLimitPolicy.update({where:{fieldClass:'FAN_OUT_READS'},data:{enforcementMode:'ENFORCING'}});locked();await gate;});
-    await entered;const attempt=admitRate(db,'FAN_OUT_READS',id);unlock();await writer;
-    await expect(attempt).rejects.toBeInstanceOf(RateLimited);
-  });
+  it('waits on config before deciding; admin flip fences the attempt', configFenceSite, RATE_WINDOW_TEST_TIMEOUT_MS);
 });
 
 it('#1793 class-row outage serves fail-open reads without any cached mode', async () => {
@@ -188,7 +190,7 @@ it('#1793 unequal overlap aliases count max not sum, on one common window', asyn
   await db.rateLimitBucket.updateMany({where:{subject:{startsWith:'new:'}},data:{used:1n}});
   await admitRate(db,'FAN_OUT_READS',id);
   expect((await used()).every(r=>r.used==='3')).toBe(true);
-});
+}, RATE_WINDOW_TEST_TIMEOUT_MS);
 
 it('#1793 two rotated key rows still share their authenticated principal allowance', async () => {
   await policy('FAN_OUT_READS',{principalLimit:1});
@@ -197,7 +199,7 @@ it('#1793 two rotated key rows still share their authenticated principal allowan
   const before=await used();
   await expect(admitRate(db,'FAN_OUT_READS',{...id,key:'USER_KEY:rotated'})).rejects.toBeInstanceOf(RateLimited);
   expect(await used()).toEqual(before);
-});
+}, RATE_WINDOW_TEST_TIMEOUT_MS);
 
 it('#1793 LOG_ONLY logs would-refusals with no raw subject or identity', async () => {
   const log=vi.spyOn(console,'info').mockImplementation(()=>{});
@@ -209,7 +211,7 @@ it('#1793 LOG_ONLY logs would-refusals with no raw subject or identity', async (
     expect(JSON.stringify(log.mock.calls)).not.toContain('USER:a');
     expect(JSON.stringify(log.mock.calls)).not.toContain('192.0.2.1');
   } finally {log.mockRestore();}
-});
+}, RATE_WINDOW_TEST_TIMEOUT_MS);
 
 it('#1793 fail-open rolls back an actually written partial dimension before continuing', async () => {
   await policy();
@@ -271,7 +273,7 @@ it('#1793 cleanup deletes expired windows in bounded batches and preserves the c
   expect(await db.rateLimitBucket.findMany({orderBy:{dimension:'asc'}})).toEqual(current);
   await admitRate(db,'FAN_OUT_READS',id);
   expect((await used()).every(r=>r.used==='2')).toBe(true);
-});
+}, RATE_WINDOW_TEST_TIMEOUT_MS);
 
 it('#1793 a concurrent maintenance owner prevents duplicate candidate selection without waiting',async()=>{
   await admitRate(db,'FAN_OUT_READS',id);
@@ -346,4 +348,15 @@ it.each(['CREDENTIALS','OUTBOUND'] as const)('#1793 ruled unknown-mode %s policy
       expect(await tx.rateLimitBucket.count()).toBe(0);
     });
   }
+});
+
+/**
+ * #3480 red-first: force the database clock to just under 5 s before a window boundary, then
+ * run a real call site under its own budget. `withinOneRateWindow` then sleeps about 5 s
+ * before the body starts, so a 5000 ms budget times out by construction.
+ */
+describe('#3480 forced phase: the boundary-forcing sleep fits the site budget', () => {
+  // The sites never change the class window, so the seeded default is the one in force.
+  beforeEach(() => forceRateWindowSleepZone(db, DEFAULTS.FAN_OUT_READS.windowSeconds), FORCED_PHASE_HOOK_TIMEOUT_MS);
+  it('the config-fence site passes with under 5 s left in the window', configFenceSite, RATE_WINDOW_TEST_TIMEOUT_MS);
 });

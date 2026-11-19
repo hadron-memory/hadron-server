@@ -1,3 +1,5 @@
+import { listPage, listPageArgs, type ListPageArgs } from '../../../lib/listPage.js';
+import type { Prisma } from '../../../generated/prisma/index.js';
 import { GraphQLError } from 'graphql';
 import type { PrismaClient } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
@@ -196,22 +198,47 @@ function loadSignatureStatus(ctx: Context, nodeId: string): Promise<NodeSignatur
   });
 }
 
+/** Parent Node gates/projections are unchanged; filter effective expiry in SQL before taking the page. */
+function signingRequestsWindow(n: { id: string }, args: ListPageArgs & { state?: string | null }) {
+  const state = args.state?.toLowerCase();
+  const scope = `signingRequests:${n.id}:${state ?? ''}`;
+  const window = listPageArgs(args, scope, 'createdAt-desc-id-desc');
+  const now = new Date();
+  const where: Prisma.SigningRequestWhereInput = { nodeId: n.id };
+  if (state === 'expired') where.OR = [{ state: 'expired' }, { state: 'open', expiresAt: { lte: now } }];
+  else if (state === 'open') Object.assign(where, { state, expiresAt: { gt: now } });
+  else if (state) where.state = state;
+  const boundary: Prisma.SigningRequestWhereInput = window.after ? { OR: [
+    { createdAt: { lt: new Date(window.after.createdAt!) } },
+    { createdAt: new Date(window.after.createdAt!), id: { lt: window.after.id } },
+  ] } : {};
+  return { window, where, boundary };
+}
+
+async function loadSigningRequestsPage(n: { id: string }, args: ListPageArgs & { state?: string | null }, ctx: Context) {
+  const { window, where, boundary } = signingRequestsWindow(n, args);
+  // The page and the unbounded-by-cursor total share one read snapshot and effective-state instant.
+  const { rows, total } = await ctx.db.$transaction(async tx => ({
+    rows: await tx.signingRequest.findMany({ where: { AND: [where, boundary] }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], skip: window.offset, take: window.take + 1 }),
+    total: await tx.signingRequest.count({ where }),
+  }), { isolationLevel: 'RepeatableRead' });
+  return { rows, window, total };
+}
+async function signingRequestsPage(n: { id: string }, args: ListPageArgs & { state?: string | null }, ctx: Context) {
+  const { rows, window, total } = await loadSigningRequestsPage(n, args, ctx);
+  return listPage(rows, window, total, row => ({ id: row.id, createdAt: row.createdAt.toISOString() }));
+}
+
 export const signingFieldResolvers = {
   Node: {
     /** #1632 / cor:dmo:130:06 — the node's signatures and their derived states. */
     signatureStatus: (n: { id: string }, _: unknown, ctx: Context) => loadSignatureStatus(ctx, n.id),
+    signingRequestsPage,
     /** #1632 — the node's signing requests, newest first; the same readers as its signatures (#10019). */
     signingRequests: async (n: { id: string }, { state, first }: { state?: string | null; first?: number | null }, ctx: Context) => {
-      const take = Math.min(Math.max(first ?? 20, 1), 100);
-      const rows = await ctx.db.signingRequest.findMany({
-        where: { nodeId: n.id },
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        // A state filter is applied to the EFFECTIVE state, so it reads past the stored page.
-        ...(state ? {} : { take }),
-      });
-      if (!state) return rows;
-      const now = new Date();
-      return rows.filter((r) => effectiveRequestState(r, now).toUpperCase() === state).slice(0, take);
+      const { where, window } = signingRequestsWindow(n, { state, first });
+      // The legacy array has no total: one bounded read, no transaction or discarded count per parent.
+      return ctx.db.signingRequest.findMany({ where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: window.take });
     },
   },
   SigningRequest: {

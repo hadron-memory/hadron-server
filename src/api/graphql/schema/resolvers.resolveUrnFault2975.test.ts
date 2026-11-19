@@ -98,7 +98,7 @@ beforeAll(async () => {
   await db.orgMember.create({ data: { organizationId: otherOrg.id, userId: outsider.id, role: 'OWNER' } });
 
   const ownerCtx: Context = { db, userId: owner.id, roles: ['READER'] };
-  const created = await (resolvers.Mutation as any).createAgent({}, { orgId: org.id, name: 'Fault Agent' }, ownerCtx);
+  const created = await (resolvers.Mutation as any).createAgent({}, { orgRef: org.id, name: 'Fault Agent' }, ownerCtx);
   const agent = await db.agent.findUniqueOrThrow({ where: { id: created.id } });
   const sysMem = await db.memory.findUniqueOrThrow({ where: { id: agent.systemMemoryId as string } });
   await db.node.create({ data: { id: generateId(), memoryId: sysMem.id, loc: `register:${CODE}`, name: CODE, content: 'entry' } });
@@ -115,7 +115,7 @@ beforeAll(async () => {
   urn.user = { mine: `hrn:user:${owner.handle}`, unknown: `hrn:user:no-such-user-${s}` };
   // Ambiguous legacy addresses: two live rows of the kind share one legacyUrn.
   const lookup = (u: string) => normalizeUrnForLookup(parseUrnInput(u).value);
-  const created2 = await (resolvers.Mutation as any).createAgent({}, { orgId: org.id, name: 'Fault Agent Two' }, ownerCtx);
+  const created2 = await (resolvers.Mutation as any).createAgent({}, { orgRef: org.id, name: 'Fault Agent Two' }, ownerCtx);
   const memory2 = await db.memory.create({
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:fault-mem-2`, name: 'fault-mem-2', class: 'knowledge', visibility: 'ORGANIZATION' },
   });

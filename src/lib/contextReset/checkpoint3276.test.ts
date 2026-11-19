@@ -187,7 +187,13 @@ it('the deploy migration widens only the audit CHECK and keeps append-only prote
   expect((await trigger()).rows).toEqual(before);
   await expect(db.hostKeyUse.update({where:{id:row.id},data:{action:'reset'}})).rejects.toThrow();
   await expect(db.hostKeyUse.delete({where:{id:row.id}})).rejects.toThrow();
- }finally{try{await client.query(migration);}finally{await client.end();}}
+ }finally{try{
+  await client.query(migration);
+  // #4233: the checkpoint migration's CHECK predates later actions (`sweep`); leave this worker's database with the CURRENT one, from
+  // the canonical invariants file, so a later test in the same worker (a host-key write of a newer action) is not refused.
+  const canonical=readFileSync(new URL('../../../prisma/host-operation-invariants.sql',import.meta.url),'utf8');
+  await client.query(canonical.slice(canonical.indexOf('ALTER TABLE host_key_uses DROP CONSTRAINT'),canonical.indexOf('CREATE OR REPLACE FUNCTION host_key_use_append_only')));
+ }finally{await client.end();}}
 });
 it('a claim that expires while waiting on the memory lock writes no checkpoint',async()=>{
  const {Client}=await import('pg');const holder=new Client({connectionString:process.env.DATABASE_URL});await holder.connect();

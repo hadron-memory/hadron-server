@@ -11,6 +11,7 @@ import {
   orphanedLegacyPaths,
   readNodeFileId,
 } from './nodeFrontmatter.js';
+import { removeLegacySidecar } from './legacySidecar.js';
 
 export interface NodeForGit {
   id: string;
@@ -96,6 +97,7 @@ export function nodePayloadHasCiphertext(node: Pick<NodeForGit, 'content' | 'abs
  */
 /** Async mirror callers supply the same-memory live-child decision under the checkout lock (#3507).
  * Pure file fixtures default to legacy cleanup; a disk id alone cannot distinguish a stale parent README. */
+export function writeNodeFile(localPath: string, node: NodeForGit, memoryUrn: string | undefined, hasLiveReadmeChild: boolean): boolean;
 export function writeNodeFile(localPath: string, node: NodeForGit, memoryUrn?: string, hasLiveReadmeChild = false): boolean {
   // #1273: inspect the actual payload, independently of raced memory flags
   // or key probes. Refuse before writes OR legacy-path cleanup.
@@ -150,7 +152,7 @@ export function writeNodeFile(localPath: string, node: NodeForGit, memoryUrn?: s
     const legacy = orphanedLegacyPaths(localPath, node.loc);
     // Xan #3507: only a live <loc>:README in THIS memory protects the path. A stale/id-less parent can overwrite on sync.
     if (!hasLiveReadmeChild) rmSync(legacy.readme, { force: true });
-    rmSync(legacy.sidecar, { recursive: true, force: true });
+    removeLegacySidecar(legacy.sidecar);
   }
   return true;
 }
@@ -189,7 +191,7 @@ export function removeNodeFile(localPath: string, loc: string, expectedNodeId: s
     removed = true;
   }
   // The sidecar belongs to whichever file we just took; it stays if we took none.
-  if (removed) rmSync(legacy.sidecar, { recursive: true, force: true });
+  if (removed) removeLegacySidecar(legacy.sidecar);
   return removed;
 }
 

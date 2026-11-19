@@ -7,10 +7,14 @@
  */
 import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
-import { mutateTask, mayDirectTask, isAssignee, refuseEnded, withReadableTask, resolveTaskRef, taskError, type TaskRow, type TaskActor, type TaskApp } from './resolvers.agentTask.js';
+import { mutateTask, mayDirectTask, isAssignee, notAssignee, refuseEnded, withReadableTask, resolveTaskRef, taskError, taskNotFound, actorManagesApp, recordInstructedManagerAct, type TaskRow, type TaskActor, type TaskApp } from './resolvers.agentTask.js';
+import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
+import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { workerHasRole } from '../../../lib/agentTasks/workerRole.js';
 import { appendTaskEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import { PR_EVENT_TYPES, REVIEW_VERDICTS, type ReviewVerdict, type PrProtocolEvent } from '../../../lib/agentTasks/prProtocol.js';
-import { storedTaskReferences } from '../../../lib/agentTasks/references.js';
+import { normalizeTaskReferences, storedTaskReferences, TaskReferenceError } from '../../../lib/agentTasks/references.js';
 import { checkAgainstTeamSchema, normalizeTaskProperties, propertiesFingerprint } from '../../../lib/agentTasks/properties.js';
 import { lockTaskGraph } from '../../../lib/agentTasks/blockers.js';
 import { currentActor } from '../../../lib/requestActor.js';
@@ -50,10 +54,14 @@ async function taskEvents(tx: Prisma.TransactionClient, ids: string[]): Promise<
   if (!ids.length) return [];
   // Collapse history in PostgreSQL, not Prisma's client-side distinct: repeated verdicts/freezes must
   // not hydrate the complete append-only stream. At most one row per task and protocol type escapes.
-  const rows = await tx.$queryRaw<Event[]>`SELECT DISTINCT ON (task_id, type)
-    id, task_id AS "taskId", type, payload, actor_worker_id AS "actorWorkerId", actor_user_id AS "actorUserId", created_at AS "createdAt"
-    FROM agent_team_events WHERE task_id IN (${Prisma.join(ids)}) AND type IN (${Prisma.join([...PR_EVENT_TYPES])})
-    ORDER BY task_id, type, created_at DESC, id DESC`;
+  // #4202 (cor:agt:050:01, :21): `agent_team_events.task_id` has no foreign key, so an event of another App can name
+  // one of these tasks. Only an event of the task's OWN App is one of its protocol facts (the join).
+  const rows = await tx.$queryRaw<Event[]>`SELECT DISTINCT ON (e.task_id, e.type)
+    e.id, e.task_id AS "taskId", e.type, e.payload, e.actor_worker_id AS "actorWorkerId", e.actor_user_id AS "actorUserId", e.created_at AS "createdAt"
+    FROM agent_team_events e
+    JOIN agent_tasks t ON t.id = e.task_id AND t.app_id = e.app_id
+    WHERE e.task_id IN (${Prisma.join(ids)}) AND e.type IN (${Prisma.join([...PR_EVENT_TYPES])})
+    ORDER BY e.task_id, e.type, e.created_at DESC, e.id DESC`;
   return rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || b.id.localeCompare(a.id));
 }
 function frozen(events: Event[], taskId: string, head: string, code = 'PR_HEAD_NOT_FROZEN'): string {
@@ -66,8 +74,11 @@ function scheduled(events: Event[], taskId: string): string[] {
   if (!Array.isArray(slots) || !slots.length || !slots.every(validSlot)) throw taskError('REVIEW_SCHEDULE_MISSING', 'The build task has no review schedule.');
   return slots as string[];
 }
-async function negativeAtHead(tx: Prisma.TransactionClient, taskId: string, head: string): Promise<boolean> {
-  const prior = await tx.agentTeamEvent.findFirst({ where: { taskId, type: 'review.verdict', payload: { path: ['head'], equals: head } }, orderBy: [...newest] });
+/** #4202: the task's latest verdict at `head`, among the events of the task's OWN App (`appId`); another App's row naming the task is not its verdict. */
+const verdictAtHead = (tx: Prisma.TransactionClient, appId: string, taskId: string, head: string) =>
+  tx.agentTeamEvent.findFirst({ where: { appId, taskId, type: 'review.verdict', payload: { path: ['head'], equals: head } }, orderBy: [...newest] });
+async function negativeAtHead(tx: Prisma.TransactionClient, appId: string, taskId: string, head: string): Promise<boolean> {
+  const prior = await verdictAtHead(tx, appId, taskId, head);
   return ['CHANGES_REQUESTED', 'FAIL', 'REFUSED'].includes(String(data(prior ?? undefined).verdict));
 }
 function sameEventActor(event: Pick<Event, 'actorWorkerId' | 'actorUserId'>, actor: { workerId: string | null; userId: string | null }): boolean {
@@ -113,7 +124,25 @@ async function ownerChain(tx: Prisma.TransactionClient, c: Context, app: TaskApp
   }
 }
 function assignee(actor: TaskActor, task: TaskRow) {
-  if (!isAssignee(actor, task)) throw taskError('TASK_NOT_ASSIGNEE', 'Only the task\'s assignee performs this command.');
+  if (!isAssignee(actor, task)) throw notAssignee(actor, 'Only the task\'s assignee performs this command.');
+}
+
+/**
+ * #4235 S12a (cor:agt:130:02): which model reviewed, copied from the session the reviewing WORKER records through. The
+ * request's own bound session when it is an open session of that worker, else the worker's binding (its newest open
+ * session, the matcher's ordering). The values are the session's self-report (`family`, `llmModel`,
+ * `modelReportedAt`), never an argument of the verdict call, and null wherever nothing is recorded: a person (no
+ * worker session), no open session, or a null column. Never derived, never 'unknown'. Readiness does not read them.
+ */
+async function reviewerModelSnapshot(tx: Prisma.TransactionClient, actor: TaskActor, sessionId: string | undefined) {
+  const none = { reviewerFamily: null, reviewerModel: null, modelReportedAt: null };
+  if (actor.kind !== 'worker') return none;
+  const where = { workerId: actor.workerId, endedAt: null, deletedAt: null };
+  const select = { family: true, llmModel: true, modelReportedAt: true } as const;
+  const session = (sessionId ? await tx.session.findFirst({ where: { ...where, id: sessionId }, select }) : null)
+    ?? await tx.session.findFirst({ where, orderBy: [{ startedAt: 'desc' }, { id: 'desc' }], select });
+  if (!session) return none;
+  return { reviewerFamily: session.family || null, reviewerModel: session.llmModel || null, modelReportedAt: session.modelReportedAt?.toISOString() ?? null };
 }
 
 /** Mirrors obey the ordinary size/schema constraints, but are never consulted as protocol facts. */
@@ -197,6 +226,27 @@ export const prProtocolQueries = {
   },
 };
 
+/** #4280 (Proposed cor:agt:130:05, Peter's ruling on the issue): the worker roles that may link a defect, by the CURRENT Worker.role. */
+export const DEFECT_LINK_ROLES = ['qa-engineer', 'coordinator'] as const;
+const defectLinkForbidden = () => taskError('DEFECT_LINK_FORBIDDEN',
+  'Only a QA engineer or coordinator worker, or whoever manages the App, may link a defect to a pull request. Nothing was written.');
+
+type DefectLinkEvent = Pick<Event, 'id' | 'taskId' | 'payload' | 'createdAt'>;
+const defectLink = (e: DefectLinkEvent, created: boolean) => {
+  const p = data(e as Event);
+  return { taskId: e.taskId, defect: p.defect, introducedAtHead: p.introducedAtHead ?? null, eventId: e.id, linkedAt: e.createdAt, created };
+};
+
+/** #4280: the issue URL, with exactly the rules a task reference of kind `issue` passes; stored as given. */
+function defectValue(raw: unknown): string {
+  try {
+    return normalizeTaskReferences([{ kind: 'issue', target: raw }])[0]!.target;
+  } catch (e) {
+    if (e instanceof TaskReferenceError) throw badInput(e.message.replace(/^Reference 1/, 'defectRef'));
+    throw e;
+  }
+}
+
 export const prProtocolMutations = {
   setReviewSchedule: async (_: unknown, { taskRef, slots }: { taskRef: string; slots: string[] }, ctx: Context) => {
     const task = await mutateTask(ctx, taskRef, async (tx, row, actor, app, c) => {
@@ -211,7 +261,7 @@ export const prProtocolMutations = {
         const oldSlots = latest(prior, 'review.scheduled', row.id) ? scheduled(prior, row.id) : [];
         for (const slot of oldSlots.filter(slot => !values.includes(slot))) {
           const current = currentAssignment(history, slot);
-          if (current?.taskId && await negativeAtHead(tx, current.taskId, head)) {
+          if (current?.taskId && await negativeAtHead(tx, row.appId, current.taskId, head)) {
             throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'A schedule cannot drop a slot with a negative verdict at the frozen head.');
           }
         }
@@ -219,6 +269,45 @@ export const prProtocolMutations = {
       await record(tx, c, row, { type: 'review.scheduled', slots: values }, { 'review.schedule': values });
     }, { taskGraph: 'exclusive' });
     return { task, action: await action(ctx, task.appId, 'review.scheduled') };
+  },
+  /**
+   * #4280 (S12b of #4229; Proposed cor:agt:130:05): record that a defect found after the PR merged traces back to it.
+   * One `review.defect-linked` event on the PR's build task, and nothing else: no property, verdict, seat, readiness or
+   * row field changes. One link per (defect, task): a second call returns the first link (`created: false`).
+   */
+  linkDefectToPullRequest: async (_: unknown, args: { defectRef: string; prTaskRef: string; introducedAtHead?: string | null; instruction?: ActInstruction | null }, ctx: Context) => {
+    const defect = defectValue(args.defectRef);
+    const head = args.introducedAtHead == null ? null : headValue(args.introducedAtHead);
+    // The App's key and a run never link (rule 1), even a run a manager started: one that may read the task is refused
+    // DEFECT_LINK_FORBIDDEN, one that may not is answered as for a task that does not exist (cor:agt:050:21).
+    if (isRunPrincipal(ctx) || appKeyCaller(ctx)) {
+      const readable = await withReadableTask(ctx, args.prTaskRef, async () => true, true);
+      throw readable ? defectLinkForbidden() : taskNotFound(args.prTaskRef);
+    }
+    let out: ReturnType<typeof defectLink> | undefined;
+    // mutateTask answers a caller who may not read the App's tasks as for a task that does not exist.
+    await mutateTask(ctx, args.prTaskRef, async (tx, row, actor, app, c) => {
+      const allowed = (actor.kind === 'worker' && await workerHasRole(tx, actor.workerId, app.id, DEFECT_LINK_ROLES))
+        || await actorManagesApp(c, app, actor, actor.instructed);
+      if (!allowed) throw defectLinkForbidden();
+      if (!storedTaskReferences(row.references).some((r) => r.kind === 'pull_request')) {
+        throw taskError('PR_REFERENCE_MISSING', 'A defect links to a build task with a pull_request reference.');
+      }
+      if (head !== null && !await tx.agentTeamEvent.count({ where: { appId: app.id, taskId: row.id, type: 'pr.frozen', payload: { path: ['head'], equals: head } } })) {
+        throw taskError('DEFECT_HEAD_NOT_FROZEN', 'introducedAtHead must be a head frozen on this pull request. Nothing was written.');
+      }
+      // Under the task's row lock (mutateTask), so two links of one pair cannot both write.
+      const linked = (where: Prisma.AgentTeamEventWhereInput) => tx.agentTeamEvent.findFirst({
+        where: { appId: app.id, taskId: row.id, type: 'review.defect-linked', payload: { path: ['defect'], equals: defect }, ...where },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true, taskId: true, payload: true, createdAt: true },
+      });
+      const existing = await linked({});
+      if (existing) { out = defectLink(existing, false); return; }
+      await appendTaskEvent(tx, { appId: app.id, taskId: row.id, actor: eventActor(c.userId), event: { type: 'review.defect-linked', defect, introducedAtHead: head } });
+      out = defectLink((await linked({}))!, true);
+      await recordInstructedManagerAct(tx, app.id, actor, 'review.defect-link', { taskId: row.id });
+    }, {}, args.instruction ?? null);
+    return out!;
   },
   freezePullRequestHead: async (_: unknown, { taskRef, head: raw }: { taskRef: string; head: string }, ctx: Context) => {
     const task = await mutateTask(ctx, taskRef, async (tx, row, actor, _app, c) => {
@@ -245,12 +334,12 @@ export const prProtocolMutations = {
       const history = await taskEvents(tx, siblings.map(s => s.id));
       const previous = data(latest(history, 'review.seat.assigned', row.id));
       // Xanthos #75789: moving the negative seat is the same replacement, not a way around it.
-      if (previous.head === head && previous.slot !== slot && await negativeAtHead(tx, row.id, head)) {
+      if (previous.head === head && previous.slot !== slot && await negativeAtHead(tx, app.id, row.id, head)) {
         throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'A negative seat cannot move slots at the same frozen head.');
       }
       const current = currentAssignment(history, slot);
       // An implicit replacement (no supersedes pointer) must obey the identical negative-seat gate.
-      if (current?.taskId && current.taskId !== row.id && data(current).head === head && await negativeAtHead(tx, current.taskId, head)) {
+      if (current?.taskId && current.taskId !== row.id && data(current).head === head && await negativeAtHead(tx, app.id, current.taskId, head)) {
         throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'A negative current seat cannot be replaced at the same frozen head.');
       }
       if (typeof previous.slot === 'string') throw taskError('REVIEW_SEAT_ALREADY_ASSIGNED', 'Each seat task is assigned once; use a new seat task.');
@@ -264,7 +353,7 @@ export const prProtocolMutations = {
         supersedes = await resolveTaskRef(c, args.supersedes, app.id);
         const sibling = supersedes ? await tx.agentTask.findFirst({ where: { id: supersedes, appId: app.id, parentTaskId: row.parentTaskId } }) : null;
         if (!sibling || sibling.id === row.id || data(latest(history, 'review.seat.assigned', sibling.id)).slot !== slot || current?.taskId !== sibling.id) throw taskError('REVIEW_SEAT_SUPERSEDE_INVALID', 'supersedes must name the current sibling seat for this slot.');
-        if (await negativeAtHead(tx, sibling.id, head)) throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'A negative verdict cannot be superseded at the same frozen head.');
+        if (await negativeAtHead(tx, app.id, sibling.id, head)) throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'A negative verdict cannot be superseded at the same frozen head.');
       }
       await record(tx, c, row, { type: 'review.seat.assigned', slot, head, supersedes }, { 'review.slot': slot, 'review.head': head, 'review.supersedes': supersedes });
     }, { taskGraph: 'exclusive' });
@@ -279,14 +368,15 @@ export const prProtocolMutations = {
       if (typeof assigned.slot !== 'string') throw taskError('REVIEW_SEAT_UNASSIGNED', 'The task has no assigned review seat.');
       const head = headValue(args.head);
       if (head !== assigned.head) throw taskError('REVIEW_HEAD_MISMATCH', 'The verdict head differs from the assigned head.');
-      const prior = await tx.agentTeamEvent.findFirst({ where: { taskId: row.id, type: 'review.verdict', payload: { path: ['head'], equals: head } }, orderBy: [...newest] });
+      const prior = await verdictAtHead(tx, row.appId, row.id, head);
       if (prior && ['CHANGES_REQUESTED', 'FAIL', 'REFUSED'].includes(String(data(prior).verdict))
         && !sameEventActor(prior, { workerId: currentActor().workerId, userId: c.userId ?? null })) {
         throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'Only the actor who recorded a negative verdict may re-rate it at the same head.');
       }
       if (!(REVIEW_VERDICTS as readonly string[]).includes(args.verdict)) throw badInput('Unknown review verdict.');
       const node = optionalMetadata(args.node, 'node'), receipt = optionalMetadata(args.receipt, 'receipt');
-      await record(tx, c, row, { type: 'review.verdict', slot: assigned.slot, head, verdict: args.verdict, node, receipt }, { 'review.verdict': args.verdict, 'review.node': node, 'review.receipt': receipt });
+      const reviewer = await reviewerModelSnapshot(tx, actor, c.sessionId);
+      await record(tx, c, row, { type: 'review.verdict', slot: assigned.slot, head, verdict: args.verdict, node, receipt, ...reviewer }, { 'review.verdict': args.verdict, 'review.node': node, 'review.receipt': receipt });
     }, { taskGraph: 'exclusive' });
     return { task, action: await action(ctx, task.appId, 'review.verdict') };
   },

@@ -186,15 +186,12 @@ describe('the status on the roster and on worker get (they agree)', () => {
     expect((await rosterStatus('Kit')).status).toBe('OVERDUE');
   });
 
-  it('the reason is the ticker\'s own (loadPendingReasons): isolation, and team pause over own pause over isolation', async () => {
+  it('the reason is the ticker\'s own (loadPendingReasons): team pause over own pause', async () => {
     await bind('Kit', 300);
     await assign('Kit', 200);
     const soon = new Date(Date.now() + 30 * MIN);
     const tickerSays = async () => (await loadPendingReasons(db, app.id, [w.Kit.id], new Date())).get(w.Kit.id);
-    await db.workerWakeSettings.create({ data: { workerId: w.Kit.id, isolatedUntil: soon } });
-    expect(await rosterStatus('Kit')).toMatchObject({ status: 'PENDING', pendingReason: 'ISOLATED' });
-    expect(await tickerSays()).toBe('ISOLATED');
-    await db.workerWakeSettings.update({ where: { workerId: w.Kit.id }, data: { pausedUntil: soon } });
+    await db.workerWakeSettings.create({ data: { workerId: w.Kit.id, pausedUntil: soon } });
     expect((await rosterStatus('Kit')).pendingReason).toBe('PAUSED');
     expect(await tickerSays()).toBe('PAUSED');
     await db.app.update({ where: { id: app.id }, data: { teamPausedAt: ago(10) } });

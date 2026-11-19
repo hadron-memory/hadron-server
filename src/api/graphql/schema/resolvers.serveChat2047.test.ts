@@ -49,7 +49,7 @@ beforeEach(async () => {
   org = await db.organization.create({ data: { id: generateId(), name: 'sc-org', urn: 'sc-org' } });
   user = await db.user.create({ data: { githubId: 92047100, githubUsername: 'sc-user', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'chat-agent', visibility: 'ORGANIZATION', description: 'LEGACY {{agent.name}}' }, { db, roles: ['ADMIN'], userId: user.id });
+  agent = await M.createAgent({}, { orgRef: org.id, name: 'chat-agent', visibility: 'ORGANIZATION', description: 'LEGACY {{agent.name}}' }, { db, roles: ['ADMIN'], userId: user.id });
   systemMemoryId = agent.systemMemoryId;
   app = await db.app.create({ data: { id: generateId(), name: 'chat-app', urn: `${org.urn}:chat-app`, organizationId: org.id, appAgents: { create: { agentId: agent.id } } } });
   const nodes = [
@@ -131,9 +131,9 @@ describe('#2047 chat', () => {
     const start = await M.startChat({}, { agentId: agent.id }, ctx());
     const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
     await recompileApproved(node, 'v2 {{agent.name}}');
-    const s2 = await serveChatPrompt(db, agent, app.id);
+    const s2 = await serveChatPrompt(db, agent, app.id, null, {db,userId:user.id,roles:['ADMIN']});
     await recompileApproved(node, 'v3 {{agent.name}}');
-    const s3 = await serveChatPrompt(db, agent, app.id);
+    const s3 = await serveChatPrompt(db, agent, app.id, null, {db,userId:user.id,roles:['ADMIN']});
     await Promise.all([recordChatServedIfChanged(db, chatNode.id, agent.id, app.id, s2), recordChatServedIfChanged(db, chatNode.id, agent.id, app.id, s3)]);
     const recs = await db.servedPrompt.findMany({ where: { chatId: chatNode.id }, orderBy: { ordinal: 'asc' } });
     expect(recs.map((r) => r.servedRevSeq).sort()).toEqual([1, 2, 3]);

@@ -1,13 +1,17 @@
-/** #3582: missing and concealed chat selectors have one typed HTTP refusal on every chat door. */
+/**
+ * #3582: missing and concealed chat selectors have one typed HTTP refusal on every chat door.
+ * #3598: each refusal's data envelope is null and writes nothing; an admitted read-only caller keeps each door's own
+ * write denial (FORBIDDEN), not concealment.
+ */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import { mintUserApiKey } from '../../middleware/auth.js';
 import { withChatRootLock } from '../../lib/chatRoot.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 let server: Server;
@@ -33,11 +37,11 @@ async function gql(key: string, query: string, id: string) {
   return await response.json() as { data?: unknown; errors?: Array<{ message: string; extensions: Record<string, unknown> }> };
 }
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
-afterAll(async () => { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); });
+afterAll(async () => { await closeServerIfStarted(server); });
 beforeEach(async () => {
   await cleanDb(db);
   owner = (await db.user.create({ data: { handle: 'owner3582', roles: ['READER'] } })).id;
@@ -58,13 +62,17 @@ beforeEach(async () => {
 for (const [name, query] of operations) describe(name, () => {
   for (const caller of ['missing', 'outsider', 'other-org owner'] as const) it('returns the same typed refusal for ' + caller, async () => {
     const before = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    const nodesBefore = await db.node.count({ where: { memoryId } });
     const user = caller === 'outsider' ? outsider : caller === 'other-org owner' ? otherOwner : owner;
     const id = caller === 'missing' ? absent : chatId;
     const result = await gql(keys[user], query, id);
     expect(result.errors).toHaveLength(1);
     expect(result.errors![0].extensions).toEqual({ code: 'CHAT_NOT_FOUND' });
     expect(result.errors![0].message).toBe(`Chat "${id}" not found`);
+    // #3598: the operation's whole envelope is null, and the refusal adds no message, summary or other child.
+    expect(result.data).toBeNull();
     expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toEqual(before);
+    expect(await db.node.count({ where: { memoryId } })).toBe(nodesBefore);
   });
 });
 it('the same fixture is a successful title write for its current owner', async () => {
@@ -87,4 +95,36 @@ it('a root that vanishes after selection has the same typed not-found at the act
   await expect(withChatRootLock(db, selected, { id: memoryId, isEncrypted: false }, callback))
     .rejects.toMatchObject({ message: `Chat "${chatId}" not found`, extensions: { code: 'CHAT_NOT_FOUND' } });
   expect(callback).not.toHaveBeenCalled();
+});
+
+describe('#3598 an admitted read-only caller keeps each mutation door\'s write denial', () => {
+  const readerChat = 'chats:202611070900-reader3598';
+  let readerKey: string;
+  let readerChatId: string;
+  beforeEach(async () => {
+    // An org READER who created a chat: chatLocFilter admits them by the creator arm, and the memory's write gate refuses.
+    const reader = (await db.user.create({ data: { handle: 'reader3598', roles: ['READER'] } })).id;
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    await db.orgMember.create({ data: { organizationId: memory.organizationId!, userId: reader, role: 'READER' } });
+    readerChatId = (await db.node.create({ data: { id: generateId(), memoryId, loc: readerChat, name: 'reader chat', nodeType: 'record', createdBy: reader, data: { conversationName: 'reader title', messageCount: 0 } } })).id;
+    readerKey = (await mintUserApiKey(db, { userId: reader, createdBy: reader, label: '3598', issuedVia: 'test', oauthScopes: ['account'] })).rawKey;
+  });
+
+  it('control: the same caller is admitted to read the chat', async () => {
+    const result = await gql(readerKey, operations[5][1], readerChat);
+    expect(result.errors).toBeUndefined();
+    expect(result.data).toEqual({ chatHistory: [] });
+  });
+
+  for (const [name, query] of operations.slice(0, 5)) it(`${name} refuses with FORBIDDEN, a null envelope and no write`, async () => {
+    const before = await db.node.findUniqueOrThrow({ where: { id: readerChatId } });
+    const nodesBefore = await db.node.count({ where: { memoryId } });
+    const result = await gql(readerKey, query, readerChat);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors![0].extensions).toEqual({ code: 'FORBIDDEN' });
+    expect(result.errors![0].message).toBe('Forbidden: no write access to this memory');
+    expect(result.data).toBeNull();
+    expect(await db.node.findUniqueOrThrow({ where: { id: readerChatId } })).toEqual(before);
+    expect(await db.node.count({ where: { memoryId } })).toBe(nodesBefore);
+  });
 });

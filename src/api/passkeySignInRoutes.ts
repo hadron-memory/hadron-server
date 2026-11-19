@@ -1,9 +1,17 @@
 /**
- * #1897 slice B1 (cor:aut:030:02): the server-hosted passkey step of an email sign-in.
+ * #1897 slice B1: the server-hosted passkey step of an email sign-in.
+ *
+ * #4339 (decision of 2026-11-17, recorded on the private tracker): SIGN-IN NO LONGER USES THIS. Sign-in never depends on a passkey and never prompts for
+ * one, which reverses the passkey-for-every-magic-link rule this module was built for (rule withdrawn 2026-11-18
+ * (Holger)). Nothing creates a pending flow from a sign-in path now; the routes and the pending-flow machinery stay,
+ * unreachable that way, for the add-a-passkey slice (gated separately): registering a passkey is an interactive step-up
+ * (hrn:node:hadronmemory.com:specs:cor:aut:040:02) that only the account's owner may take
+ * (hrn:node:hadronmemory.com:specs:cor:aut:040:08). Read the rest of this header as the design of the retained machinery,
+ * not as live sign-in behavior.
  *
  * Mounted only when `signingSurfacePolicy().registration` is on (#1895); while off nothing is mounted, so the
- * paths are ordinary 404s with no switch oracle. `/auth/email/verify` creates the pending row
- * ({@link beginPasskeySignIn}) and redirects here; nothing is published until `complete` succeeds.
+ * paths are ordinary 404s with no switch oracle. {@link beginPasskeySignIn} creates the pending row and redirects
+ * here; nothing is published until `complete` succeeds.
  *
  * - `GET  /auth/passkey/sign-in`          the page, or the one fixed invalid-flow page. Never completes anything.
  * - `GET  /auth/passkey/sign-in.js`       the page's script (same-origin, so the CSP needs no inline script).
@@ -27,6 +35,7 @@ import { verifiedLoginEvidence } from '../auth/loginEvidence.js';
 import { issueLoginCode } from '../auth/authHandoff.js';
 import { signJwt } from '../auth/jwt.js';
 import { createSignIn } from '../auth/signIn.js';
+import { ceremonyShell } from './ceremonyShell.js';
 import {
   completePending, createPendingEmailSignIn, loadLivePending, setPendingCeremony, sweepPendingEmailSignIns,
   PENDING_EMAIL_SIGN_IN_TTL_SECONDS, PENDING_ENROLLMENT_TTL_SECONDS, type PendingContinuation,
@@ -83,7 +92,7 @@ export async function userHasUnrevokedPasskey(userId: string): Promise<boolean> 
   return rows.length > 0;
 }
 
-/** The page's three states for a live pending flow (cor:aut:030:02). */
+/** The page's three states for a live pending flow (the retained machinery; see the header, #4339). */
 export type PendingPageState = 'assert' | 'enroll' | 'invalid';
 export async function pendingPageState(userId: string): Promise<PendingPageState> {
   if (await userHasUsablePasskey(userId)) return 'assert';
@@ -92,8 +101,11 @@ export async function pendingPageState(userId: string): Promise<PendingPageState
 }
 
 /**
- * Called by `/auth/email/verify` when the registration switch is on and the claimed address belongs to a user.
- * Creates the pending row, sets its cookie and redirects to the page. Publishes nothing.
+ * #4339: NOTHING on a sign-in path calls this any more. Sign-in never depends on a passkey and never prompts for
+ * one (decision of 2026-11-17, recorded on the private tracker); `/auth/email/verify` signs the person in as it does with the switches off. The machinery
+ * stays for the add-a-passkey slice, which is gated separately.
+ *
+ * It was called by `/auth/email/verify` when the registration switch was on. Creates the pending row, sets its cookie and redirects to the page. Publishes nothing.
  *
  * - A user with a usable passkey: a ten-minute flow that ends in an assertion (B1).
  * - A user with NO unrevoked passkey: a thirty-minute flow (B2). The page sends them to the registration page, which
@@ -125,12 +137,12 @@ const SECURITY_HEADERS: Record<string, string> = {
   // (measured on Chromium 145, #2242), but one policy across the family is the safer default. Still no Referer cross-origin.
   'Referrer-Policy': 'same-origin',
   'X-Content-Type-Options': 'nosniff',
-  'Content-Security-Policy': "default-src 'none'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
 };
 
-const PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in</title></head><body><main><h1>Confirm it's you</h1><p>Use your passkey to finish signing in.</p><button id="go" type="button">Use passkey</button><p id="msg" role="status"></p></main><script src="${PASSKEY_SIGN_IN_PATH}.js"></script></body></html>`;
-const ENROLL_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in</title></head><body><main><h1>Add a passkey to finish signing in</h1><p>This account has no passkey yet. Add one, then come back to this page to sign in with it. You will confirm who you are once more, with a second link we email you, in this browser.</p><p><a href="${PASSKEY_ENROLL_PATH}">Add a passkey</a></p></main></body></html>`;
-const INVALID_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in</title></head><body><main><h1>This sign-in link can't be used</h1><p>It may have expired or already been used. Start again from the sign-in page.</p></main></body></html>`;
+const PAGE = ceremonyShell({ title: 'Sign in', body: `<h1>Confirm it's you</h1><p>Use your passkey to finish signing in.</p><button id="go" type="button">Use passkey</button><p id="msg" role="status"></p>`, scriptSrc: `${PASSKEY_SIGN_IN_PATH}.js` });
+const ENROLL_PAGE = ceremonyShell({ title: 'Sign in', body: `<h1>Add a passkey to finish signing in</h1><p>This account has no passkey yet. Add one, then come back to this page to sign in with it. You will confirm who you are once more, with a second link we email you, in this browser.</p><p><a class="button" href="${PASSKEY_ENROLL_PATH}">Add a passkey</a></p>` });
+const INVALID_PAGE = ceremonyShell({ title: 'Sign in', body: `<h1>This sign-in link can't be used</h1><p>It may have expired or already been used. Start again from the sign-in page.</p>` });
 
 const SCRIPT = `(()=>{
 const b2u=(b)=>btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');

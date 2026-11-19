@@ -1,5 +1,6 @@
 import { encryptChatEngineStateWithKey } from '../../../lib/chatRootEngineState.js';
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../../../integrations/github/syncNotAttempted.js';
 import { applyOrgDefaultsAtCreation } from './resolvers.memoryConfigOrgDefault.js';
 import { endApprovalsOnEncryptedEntry } from '../../../lib/nodeApproval.js';
@@ -705,6 +706,7 @@ export const memoryMutations = {
       // after the gates and before ensureUserHandle, the tombstone reclaim or
       // any create.
       assertMemoryRootLoc(name);
+      assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
 
       // The URN root is the owner principal's bare namespace atom — an org
       // domain (`baragaun.com`) or, for the user-owned path, the caller's
@@ -849,10 +851,10 @@ export const memoryMutations = {
     updateMemory: async (
       _: unknown,
       {
-        id,
+        ref: id,
         name,
         urn,
-        organizationId: newOrgId,
+        orgRef,
         shortDescription,
         description,
         data,
@@ -878,7 +880,7 @@ export const memoryMutations = {
         maxRevCount,
         schema,
       }: {
-        id: string; name?: string; urn?: string; organizationId?: string;
+        ref: string; name?: string; urn?: string; orgRef?: string;
         shortDescription?: string; description?: string; data?: Record<string, unknown> | null; tags?: string[];
         license?: string; category0?: string; category1?: string; category2?: string;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
@@ -903,6 +905,11 @@ export const memoryMutations = {
       ({ id } = await resolveMemoryRef(ctx.db, ref));
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory));
+      // #4140 (cor:api:140:01): `orgRef` resolves only AFTER the memory's own gate (resource before
+      // counterparty), and the resolved id is what is compared (here and under the row lock below), so a
+      // URN of the memory's OWN org is a no-op. An unknown org is the resolver's typed
+      // ORGANIZATION_NOT_FOUND; an empty value is never resolved and stays the transfer refusal.
+      const newOrgId = orgRef == null ? undefined : orgRef === '' ? '' : (await resolveOrgRef(ctx.db, orgRef)).id;
       if (newOrgId != null && newOrgId !== memory.organizationId) {
         throw new GraphQLError('Use transferMemoryOwnership to change a memory owner.', {
           extensions: { code: 'USE_TRANSFER_MEMORY_OWNERSHIP' },

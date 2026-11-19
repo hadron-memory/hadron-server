@@ -149,13 +149,11 @@ describe('#2755 exceptions: no alarm, no time counted', () => {
     expect(await evaluateDarkWorkers(db, NOW)).toEqual([]);
   });
 
-  it('a team pause, the worker\'s own pause and isolation raise none', async () => {
+  it('a team pause, the worker\'s own pause raise none', async () => {
     await liamOverdue();
     await db.workerWakeSettings.create({ data: { workerId: w.Liam.id, pausedUntil: new Date(NOW.getTime() + 60 * MIN) } });
     expect(await evaluateDarkWorkers(db, NOW)).toEqual([]);
-    await db.workerWakeSettings.update({ where: { workerId: w.Liam.id }, data: { pausedUntil: null, isolatedUntil: new Date(NOW.getTime() + 60 * MIN) } });
-    expect(await evaluateDarkWorkers(db, NOW)).toEqual([]);
-    await db.workerWakeSettings.update({ where: { workerId: w.Liam.id }, data: { isolatedUntil: null } });
+    await db.workerWakeSettings.update({ where: { workerId: w.Liam.id }, data: { pausedUntil: null } });
     await db.app.update({ where: { id: app.id }, data: { teamPausedAt: at(10) } });
     expect(await evaluateDarkWorkers(db, NOW)).toEqual([]);
     expect(await alarms('Liam')).toHaveLength(0);
@@ -376,7 +374,9 @@ describe('#2755 one worker failing does not stop the App\'s pass', () => {
     const real = db.$transaction.bind(db);
     let calls = 0;
     const tx = vi.spyOn(db, '$transaction').mockImplementation(((...args: unknown[]) => {
-      if (calls++ === 0) throw new Error('fence refused');
+      // #4273: the liveness read runs in its own (JIT-off) transaction, so "the first raise" is the first SERIALIZABLE one.
+      const raising = (args[1] as { isolationLevel?: string } | undefined)?.isolationLevel === 'Serializable';
+      if (raising && calls++ === 0) throw new Error('fence refused');
       return (real as (...a: unknown[]) => unknown)(...args);
     }) as never);
     try {

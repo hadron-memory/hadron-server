@@ -225,6 +225,14 @@ describe('#1332 run tool hadron_record_content_validation', () => {
     expect(await reports()).toHaveLength(0);
   });
 
+  it('#3567 r11: the run tool\'s outcome enum is advisory, so the resolver refuses an outcome outside PASS, FAIL and ERROR as BAD_USER_INPUT, nothing written', async () => {
+    const error = await runTool(await mintRun(validationTask), args({ outcome: 'MAYBE' })).then(() => null, (e: unknown) => e);
+    expect(error).toBeInstanceOf(GraphQLError);
+    expect((error as GraphQLError).extensions?.code).toBe('BAD_USER_INPUT');
+    expect((error as GraphQLError).message).toBe('outcome must be PASS, FAIL or ERROR.');
+    expect(await reports()).toHaveLength(0);
+  });
+
   it('§10 P2-1: the flow guards hold: a user-owned, an encrypted or a foreign-org memory is refused before anything is written', async () => {
     /** A guide node under a validation rule in the given memory, its revision fingerprint current. */
     const docIn = async (data: Record<string, unknown>) => {

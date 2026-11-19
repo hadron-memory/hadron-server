@@ -1,3 +1,5 @@
+import { findUnstorableText, unstorableTextMessage } from '../lib/unstorableTextInput.js';
+import { isSessionSupersededError, sessionSupersededEnvelope } from '../lib/sessionSuperseded.js';
 import { RateLimited } from '../lib/rateLimit/index.js';
 import { isPrismaClientError } from '../lib/prismaErrors.js';
 import { isTrustedRefusal } from '../api/graphql/formatError.js';
@@ -42,6 +44,12 @@ export function refusalResult(text: string) {
   return { isError: true as const, ...textResult(text) };
 }
 
+/** #4096: the typed `[bad_user_input]` refusal for caller text that cannot be stored (a NUL or unpaired surrogate; field named, value never echoed), or null. */
+export function unstorableTextRefusal(fields: Record<string, unknown>): ReturnType<typeof refusalResult> | null {
+  const found = findUnstorableText(fields);
+  return found ? refusalResult(`[bad_user_input] ${unstorableTextMessage(found)}`) : null;
+}
+
 /**
  * The generic internal-fault result (#1789, cor:api:260:01): fixed code and message plus the request id, as structured
  * data a client reads and as text for one that cannot. The complete exception goes to the log under that id.
@@ -75,6 +83,10 @@ export function resolutionLimitResult(error: ContentResolutionLimitError) {
   } } };
 }
 
+function supersededResult(error: import('graphql').GraphQLError) {
+  return { ...refusalResult('Session superseded.'), structuredContent: { error: sessionSupersededEnvelope(error) } };
+}
+
 /**
  * The MCP fallback boundary (#1695, #1789). Classify before reading a message/code: a Prisma error may contain
  * arguments, paths and internal ids. A typed domain refusal keeps its wording (and is flagged isError); everything else,
@@ -86,6 +98,7 @@ export function toolErrorResult(
   site = 'mcp_tool',
 ): ReturnType<typeof refusalResult> | ReturnType<typeof toolFaultResult> | ReturnType<typeof rateLimitedResult>
   | ReturnType<typeof resolutionLimitResult> | NonNullable<ReturnType<typeof attestationRefusalResult>> {
+  if (isSessionSupersededError(error)) return supersededResult(error);
   if (error instanceof RateLimited) return rateLimitedResult(error);
   if (isContentResolutionLimitError(error)) return resolutionLimitResult(error);
   const attestation = attestationRefusalResult(error);
@@ -103,6 +116,7 @@ export function withToolErrorBoundary(
     try {
       return await callback(args, extra);
     } catch (error) {
+      if (isSessionSupersededError(error)) return supersededResult(error);
       if (error instanceof RateLimited) return rateLimitedResult(error);
       if (isContentResolutionLimitError(error)) return resolutionLimitResult(error);
       const attestation = attestationRefusalResult(error);

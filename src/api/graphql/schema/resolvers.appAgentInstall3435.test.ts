@@ -19,7 +19,7 @@ const server = new ApolloServer<Context>({ typeDefs, resolvers });
 const T = (n: number) => new Date(Date.UTC(2026, 0, n));
 let user: { id: string }, org: { id: string }, app: { id: string };
 const ctx = (): Context => ({ db, userId: user.id, roles: ['READER'] });
-const agent = (name: string) => M.createAgent({}, { orgId: org.id, name, personaRole: name.toLowerCase() }, ctx());
+const agent = (name: string) => M.createAgent({}, { orgRef: org.id, name, personaRole: name.toLowerCase() }, ctx());
 async function grant(agentId: string) {
   await db.agentOrgGrant.upsert({
     where: { orgId_agentId: { orgId: org.id, agentId } },

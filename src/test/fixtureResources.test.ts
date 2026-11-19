@@ -58,6 +58,16 @@ it('accounts for callback errors and retains failed resources for retry', async 
   await expect(closeFixtureResources({ server, client: { close: async () => { throw clientError; } } })).rejects.toBe(clientError);
 });
 
+it('rejects a non-ERR_SERVER_NOT_RUNNING callback code with identity and retains the server', async () => {
+  const failure = Object.assign(new Error('io'), { code: 'EIO' });
+  const server = { closeAllConnections() {}, close(callback: (error?: Error) => void) { callback(failure); } } as unknown as Server;
+  const resources = { server: server as Server | undefined };
+  await expect(closeFixtureResources(resources)).rejects.toBe(failure);
+  expect(resources.server).toBe(server);
+  await expect(closeFixtureResources(resources)).rejects.toBe(failure);
+  expect(resources.server).toBe(server);
+});
+
 it('does not clear replacements and closes resources created by a live tail', async () => {
   const first = await listen(), tail = await listen();
   const replacement = { close: async () => {} };

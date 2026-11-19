@@ -49,6 +49,8 @@ async function fixture() {
   await serveAgentBootPrompt(db, agent.id, 'Hi.');
   const user = await db.user.create({ data: { id: generateId(), handle: `u-${generateId()}`, githubUsername: `u-${generateId()}` } });
   await createDbAppMember(db, app.id, user.id, 'member');
+  // #4046: the ordinary cold user control chooses this licensed App, never an App-less non-manager route.
+  await db.orgMember.create({ data: { organizationId: orgId, userId: user.id, role: 'READER' } });
   return { agentId: agent.id, appId: app.id, systemId: sys.id, userId: user.id, agentUrn: agent.urn, appUrn: app.urn };
 }
 

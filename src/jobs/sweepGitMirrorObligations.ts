@@ -6,6 +6,7 @@ import { memoryLocalPath, withMirrorCheckout } from '../integrations/github/gitM
 import { writeNodeFile, removeNodeFile, nodePayloadHasCiphertext, type NodeForGit } from '../integrations/github/writeNodeToGit.js';
 import { loadNodeForGit } from '../integrations/github/nodeWrittenSubscriber.js';
 import { nodeFilePath, orphanedLegacyPaths } from '../integrations/github/nodeFrontmatter.js';
+import { legacySidecarEdgesFile } from '../integrations/github/legacySidecar.js';
 import { validateMemorySource } from '../lib/gitSource.js';
 import { mirrorFailureMetadata } from '../integrations/github/mirrorFailureMetadata.js';
 import { gitMirrorSweepRowBudget } from './gitMirrorSweepBudget.js';
@@ -123,7 +124,10 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
               // Root README must never snapshot/delete its entire checkout as a legacy path.
               if (!loc) return [file];
               const legacy = orphanedLegacyPaths(localPath, loc);
-              return [file, legacy.readme, legacy.sidecar];
+              // #3264: checkpoint only the exact file cleanup may remove, never the sidecar directory
+              // (loc `git` made it `.git`, which the checkpoint tried to copy into itself).
+              const edges = legacySidecarEdgesFile(legacy.sidecar);
+              return edges === null ? [file, legacy.readme] : [file, legacy.readme, edges];
             };
             const failedOperation = (err: unknown) => {
               console.error('[git-mirror-sweep] File mutation failed', mirrorFailureMetadata(err, 'tree', 'TREE_WRITE'));
