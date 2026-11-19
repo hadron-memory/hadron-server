@@ -118,7 +118,13 @@ it('keeps a parsed governance-refused parent present while reporting only the ch
   const f=await fixture();
   file('p.md',f.parent.id,'refused parent');
   const text=readFileSync(join(root(),'p.md'),'utf8').replace('name: p.md','name: p.md\nrole: question');writeFileSync(join(root(),'p.md'),text);
+  const warn=vi.spyOn(console,'warn').mockImplementation(()=>{});
   expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+  // #4445: the skip warning words the subject as a question, not a decision.
+  const skipped=warn.mock.calls.map(c=>String(c[0])).filter(m=>m.includes('skipped p'));
+  expect(skipped).toHaveLength(1);
+  expect(skipped[0]).toContain('questions are written only through the question operations');
+  expect(skipped[0]).not.toMatch(/\bdecisions?\b/i);
   expect(await db.node.findUniqueOrThrow({where:{id:f.parent.id}})).toEqual(f.parent);
   expect((await report()).entries).toEqual(expect.arrayContaining([collisionEntry,{kind:'protected',loc:'p',code:'PROTECTED_QUESTION'}]));
   expect(await db.edge.findUniqueOrThrow({where:{id:f.stored.id}})).toEqual(f.stored);

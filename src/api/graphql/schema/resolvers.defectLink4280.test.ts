@@ -1,6 +1,6 @@
 /**
  * #4280 (S12b of #4229) — QA links a post-merge defect to the PR it escaped from: `linkDefectToPullRequest` records one
- * `review.defect-linked` event on the PR's build task (Proposed cor:agt:130:05, Victor's draft on #4235).
+ * `review.defect-linked` event on the PR's build task (Proposed, Victor's draft on #4235).
  *
  * Who (Peter's ruling on the issue, team chat #110416): a person who manages the App; a worker through its bound
  * session whose CURRENT Worker.role is qa-engineer or coordinator (read at request time, never Session.role); or a

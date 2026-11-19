@@ -6425,6 +6425,46 @@ export const typeDefs = `#graphql
   secret keeps its values as versions: every store adds one
   (hrn:node:hadronmemory.com:specs:cor:sec:010:03).
   """
+  input IssueSecretReadClientInput {
+    "The App secret, by id or URN."
+    secretRef: ID!
+    "WORKER: a live worker of the App (holderRef is its id). USER: the issuer themself (holderRef omitted)."
+    holderKind: GrantHolderKind!
+    holderRef: ID
+    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refused (SECRET_AUTO_DELETE_NOT_AVAILABLE) until the deletion is built (#4001)."
+    autoDelete: Boolean! = false
+    startsAt: DateTime
+    expiresAt: DateTime
+    maxReads: Int
+    reason: String!
+  }
+
+  type SecretReadClientIssued {
+    clientId: ID!
+    grantId: ID!
+    secretName: String!
+    selfIssued: Boolean!
+  }
+
+  type SecretReadClient {
+    clientId: ID!
+    grantId: ID!
+    secretId: ID!
+    secretName: String!
+    selfIssued: Boolean!
+    "SECRET_DELETED | PROTECTED once the client has ended, else null."
+    endReason: String
+    createdAt: DateTime!
+  }
+
+  type SecretRevealed {
+    secretName: String!
+    "The current value as JSON text."
+    value: String!
+    "Reads left on the grant, or null when it has no budget."
+    readsLeft: Int
+  }
+
   type Secret {
     id: ID!
     "Owner scope: user | org | app."
@@ -9474,8 +9514,7 @@ export const typeDefs = `#graphql
     accountUsageProjection(appRef: ID!, account: String!, host: String, family: String, whatIf: AccountUsageWhatIfInput): AccountUsageProjection!
 
     """
-    #4281 — an App's review quality measures for one calendar month, one row per reviewer model family and model
-    (hrn:node:hadronmemory.com:specs:cor:agt:130:06). month is YYYY-MM, a UTC calendar month; anything else is
+    #4281 — an App's review quality measures for one calendar month, one row per reviewer model family and model. month is YYYY-MM, a UTC calendar month; anything else is
     BAD_USER_INPUT. A review is one finished review-seat task carrying at least one verdict; its latest verdict
     (hrn:node:hadronmemory.com:specs:cor:agt:130:02) decides its row and its month, and its findings are the seat task's
     result findings with their latest dispositions (hrn:node:hadronmemory.com:specs:cor:agt:050:30). Findings and
@@ -11638,6 +11677,11 @@ export const typeDefs = `#graphql
     """
     myGrants(limit: Int, offset: Int): GrantsPage!
     """
+    The read clients the caller issued or holds (hrn:node:hadronmemory.com:specs:cor:sec:060): a client id is shown only to its issuer and
+    its holder. Empty for an App key, a run and an impersonation. Revoke one with revokeGrant on its grantId.
+    """
+    mySecretReadClients(limit: Int, offset: Int): [SecretReadClient!]!
+    """
     #3711 (hrn:node:hadronmemory.com:specs:cor:acl:140:05, ruling 0253 item 4): every grant of one App, in every state (pending, active, expired, spent, revoked, holder departed), newest first, for whoever manages the App as a person. It shows the whole record, including who revoked a grant, when its holder went and each signature's signer and passkey label, never a credential id or public key. Anyone else (a member who does not manage, an outsider, a worker session, an App key, a run, an impersonated session) and an unknown App get an empty page, never an error. limit 0 returns the count only.
     """
     appGrants(appRef: String!, limit: Int, offset: Int): GrantsPage!
@@ -11741,7 +11785,7 @@ export const typeDefs = `#graphql
     "#3448 — build assignee records pr.ready only when every current scheduled seat is finished with APPROVE, PASS or CARRY at the frozen head. Its verdict actor must differ from both the build's current assignee and the newest pr.frozen actor; Worker/person identity stays distinct from holder credentials. PR_NOT_READY carries failing slots; event facts only, never opaque properties (hrn:node:hadronmemory.com:specs:cor:agt:050:28)."
     recordReadyCall(taskRef: ID!, head: String!): PrProtocolResult!
     """
-    #4280 (S12b; Proposed hrn:node:hadronmemory.com:specs:cor:agt:130:05) — record that a defect found after a pull request merged traces back to it: one review.defect-linked event on the PR's build task (prTaskRef, which needs a pull_request reference: PR_REFERENCE_MISSING). defectRef is the defect's issue URL, under the same rules as a task reference of kind issue, stored as given. introducedAtHead, when given, is a full 40-hex head frozen on that task (DEFECT_HEAD_NOT_FROZEN otherwise); the review-quality report counts the defect against approving reviews at that head or a later one. Who: a worker through its bound session whose current Worker.role is qa-engineer or coordinator, a person who manages the App, or a worker whose holder manages it, with an instruction. The App's key and a run may not. A caller who may not read the App is answered as for a task that does not exist (TASK_NOT_FOUND); one who may read it but not link gets DEFECT_LINK_FORBIDDEN, with nothing written. One link per (defect, task): linking the same pair again returns the existing link with created false and writes nothing. A retry is checked like a first call: an introducedAtHead that was never frozen is still refused DEFECT_HEAD_NOT_FROZEN, not answered with the existing link (#4286). A link never changes a verdict, a seat, readiness or the task.
+    #4280 (S12b) — record that a defect found after a pull request merged traces back to it: one review.defect-linked event on the PR's build task (prTaskRef, which needs a pull_request reference: PR_REFERENCE_MISSING). defectRef is the defect's issue URL, under the same rules as a task reference of kind issue, stored as given. introducedAtHead, when given, is a full 40-hex head frozen on that task (DEFECT_HEAD_NOT_FROZEN otherwise); the review-quality report counts the defect against approving reviews at that head or a later one. Who: a worker through its bound session whose current Worker.role is qa-engineer or coordinator, a person who manages the App, or a worker whose holder manages it, with an instruction. The App's key and a run may not. A caller who may not read the App is answered as for a task that does not exist (TASK_NOT_FOUND); one who may read it but not link gets DEFECT_LINK_FORBIDDEN, with nothing written. One link per (defect, task): linking the same pair again returns the existing link with created false and writes nothing. A retry is checked like a first call: an introducedAtHead that was never frozen is still refused DEFECT_HEAD_NOT_FROZEN, not answered with the existing link (#4286). A link never changes a verdict, a seat, readiness or the task.
     """
     linkDefectToPullRequest(defectRef: String!, prTaskRef: ID!, introducedAtHead: String, instruction: ActInstructionInput): DefectLink!
 
@@ -14065,6 +14109,23 @@ export const typeDefs = `#graphql
 
     "Hard-delete a secret, every version with it; referencing runs fail their resolution loud (or fall through the cascade) afterwards. An unprotected App secret is deleted by its creator or whoever manages the App, each as a person."
     deleteSecret(ref: ID!): Boolean!
+
+    """
+    Issue a read client for an App secret (hrn:node:hadronmemory.com:specs:cor:sec:060:01): one pending "secret.reveal" grant and
+    its client, made together. A person only (never a worker session, a run, an impersonated session or an App key), who manages the
+    App or wrote the secret's current version. The grant waits for the issuer's passkey signature; the holder is a live worker of the
+    App, or the issuer themself. The client id is returned here, to the issuer, and to the holder; it never reads on its own.
+    """
+    issueSecretReadClient(input: IssueSecretReadClientInput!): SecretReadClientIssued!
+
+    """
+    Reveal an App secret's value through a read client (hrn:node:hadronmemory.com:specs:cor:sec:060), spending exactly one use. Only the
+    worker session the client's grant names; a person, an App key, a run and an impersonation get SECRET_READ_CLIENT_NOT_FOUND, as does
+    an unknown client id or another holder's; a wrong holder's read of a real client is recorded on the secret, an unknown id's is not. The
+    use and the audit event commit before the value is returned. One operation may select this field once: two or more are all refused with
+    SECRET_REVEAL_ONE_PER_OPERATION before any reads (send each as its own operation).
+    """
+    revealSecret(clientId: ID!): SecretRevealed!
 
     """
     Register a Home Assistant instance (org ADMIN/OWNER). orgRef accepts
@@ -18332,7 +18393,7 @@ export const typeDefs = `#graphql
     adjusted: [AccountUsageWindowProjection!]!
   }
 
-  "#4281 — an App's review quality measures for one UTC calendar month (hrn:node:hadronmemory.com:specs:cor:agt:130:06)."
+  "#4281 — an App's review quality measures for one UTC calendar month."
   type ReviewQualityReport {
     "The month asked for, YYYY-MM."
     month: String!
@@ -18343,7 +18404,7 @@ export const typeDefs = `#graphql
   }
 
   """
-  #4281 — one reviewer row of the review quality measures (hrn:node:hadronmemory.com:specs:cor:agt:130:06). Every
+  #4281 — one reviewer row of the review quality measures. Every
   ratio comes with its numerator and denominator: findingsPerReview = findings / reviews; shareConfirmed =
   confirmedFindings / findings; defectsMissedPerApprovingReview = defectsMissed / approvingReviews.
   """
