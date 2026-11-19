@@ -88,14 +88,17 @@ export type TeamReadBusyReason = 'TRANSACTION_BUDGET' | 'POOL_WAIT';
  */
 export class TeamReadBusyError extends GraphQLError {
   constructor(original: unknown) {
+    const reason = busyReason(original);
     super(
       'The team read could not complete within its read budget or pool wait; the store is busy. The read held nothing; the same request is safe to retry.',
       {
         extensions: {
           code: 'TEAM_READ_BUSY',
           retryable: true,
-          budgetMs: TEAM_READ_TX_TIMEOUT_MS,
-          reason: busyReason(original),
+          // The bound that fired, per arm: the transaction budget for TRANSACTION_BUDGET, the
+          // pool wait for POOL_WAIT. Sending the 5 s budget on a 2 s pool wait misnamed the bound (#4467).
+          ...(reason === 'POOL_WAIT' ? { maxWaitMs: TEAM_READ_TX_MAX_WAIT_MS } : { budgetMs: TEAM_READ_TX_TIMEOUT_MS }),
+          reason,
         },
       },
     );
@@ -106,7 +109,10 @@ export class TeamReadBusyError extends GraphQLError {
 /**
  * Which arm of "the store was busy" fired: P2024 is always the pool; P2028
  * splits on Prisma's own message prefix ("Unable to start" is the `maxWait`
- * arm; "Transaction already closed" is the transaction budget). Anything
+ * arm — the query engine's real text is "Unable to start a transaction in the
+ * given time."; a Prisma upgrade that rewords it would silently reclassify pool
+ * waits, so resolvers.teamReadBudget4455.test.ts pins the installed engine's
+ * strings and fails the upgrade instead; "Transaction already closed" is the transaction budget). Anything
  * else converting here still names the budget arm — the safest reading, since
  * the transaction is the thing the caller asked to be bounded.
  */
@@ -128,7 +134,7 @@ export function busyReason(error: unknown): TeamReadBusyReason {
  * $transaction callback and by the $transaction call itself — including a
  * pool-wait a nested loader hit on the ambient `ctx.db` — so a P2028/P2024
  * surfacing here is a busy store, though not necessarily THIS read's own
- * budget; `originalError` keeps the true cause inspectable.
+ * budget; `.cause` keeps the true cause inspectable.
  */
 export function isPrismaBusyExhaustion(error: unknown): error is Prisma.PrismaClientKnownRequestError | Prisma.PrismaClientUnknownRequestError {
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
