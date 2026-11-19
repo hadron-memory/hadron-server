@@ -268,33 +268,35 @@ describe("#4472: the typed refusal is on every withRosterAppRead caller's path",
     await eachCallerConverts(() => Q.teamComposition({}, { appRef: app.id }, ctx(mia.id)), 'POOL_WAIT');
   });
 
-  it('teamUtilization surfaces the typed refusal for both arms (wiring pin: the mock throws before its input validation runs)', async () => {
+  it('teamUtilization surfaces the typed refusal for both arms (wiring pin: valid input, the mock throws inside the read)', async () => {
     await eachCallerConverts(() => Q.teamUtilization({}, { appRef: app.id }, ctx(mia.id)), 'TRANSACTION_BUDGET');
     await eachCallerConverts(() => Q.teamUtilization({}, { appRef: app.id }, ctx(mia.id)), 'POOL_WAIT');
   });
 
-  it('teamUtilization answers BAD_USER_INPUT for an invalid window on a healthy store (validation sits inside the read transaction)', async () => {
-    // windowHours is validated inside the projection — after app admission, inside the read
-    // transaction (resolvers.utilization.ts). On a healthy store an invalid window is a caller
-    // fault; what happens when the transaction cannot start is pinned by the next test.
+  it('teamUtilization answers BAD_USER_INPUT for an invalid window on a healthy store', async () => {
+    // windowHours is validated before the read wrapper (#4499 hoisted it above admission and
+    // above the transaction); on a healthy store an invalid window is a caller fault. The
+    // busy-store ordering is pinned by the next test.
     await expect(Q.teamUtilization({}, { appRef: app.id, windowHours: 0 }, ctx(mia.id))).rejects.toMatchObject({
       extensions: { code: 'BAD_USER_INPUT' },
     });
   });
 
-  it('a busy store surfaces an invalid window as TEAM_READ_BUSY, not BAD_USER_INPUT (current behavior: the validation never runs)', async () => {
-    // The transaction cannot start, so the projection — and its windowHours validation — never
-    // executes and the busy refusal wins. Pinned as-is: hoisting the validation above the wrapper
-    // is a client-visible behavior change, tracked as #4497; flipping this pin red is how that
-    // change announces itself.
+  it('an invalid window answers BAD_USER_INPUT even on a busy store — the validation runs before the wrapper (#4497)', async () => {
+    // #4499 hoisted the argument checks above withRosterAppRead: a caller fault is answered as
+    // itself, never dressed as a retryable TEAM_READ_BUSY, and it takes no transaction slot. The
+    // spy proves the ordering — validation first, so the busy transaction is never even attempted
+    // for invalid input. (Before #4499 this pin read TEAM_READ_BUSY/POOL_WAIT: the validation sat
+    // inside the transaction and the busy refusal won; the flip is the client-visible change
+    // #4497 intended.)
     const spy = vi.spyOn(db, '$transaction').mockImplementation((async () => {
       throw busy('Unable to start a transaction: the pool was full.', 'P2028');
     }) as unknown as never);
     try {
       await expect(Q.teamUtilization({}, { appRef: app.id, windowHours: 0 }, ctx(mia.id))).rejects.toMatchObject({
-        extensions: { code: 'TEAM_READ_BUSY', retryable: true, reason: 'POOL_WAIT' },
+        extensions: { code: 'BAD_USER_INPUT' },
       });
-      expect(spy).toHaveBeenCalled();
+      expect(spy).not.toHaveBeenCalled();
     } finally {
       spy.mockRestore();
     }
