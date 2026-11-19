@@ -4,8 +4,8 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
  * hadron-concept 2026-08-14-agent-persona-scoping).
  *
  * An Agent carries only the reusable persona dressing — `personaRole` (the
- * cast-list role its template answers) and `systemPrompt` (the identity
- * TEMPLATE with `{{name}}`/`{{role}}` placeholders). The NAMED identity
+ * cast-list role it answers); its boot prompt is a served node since #2712
+ * deleted the literal `systemPrompt` column. The NAMED identity
  * ("Iris") is a Worker row (cor:dmo:050:11), so `createAgent`/`updateAgent`
  * accept no `personaName` at all; name permanence lives on Worker rows,
  * which is why the tombstone URN reclaim refuses (`AGENT_URN_TAKEN`) exactly
@@ -80,35 +80,32 @@ beforeEach(async () => {
 });
 
 describe('createAgent — prompt template and persona role (#1241)', () => {
-  it('persists personaRole/systemPrompt without a named identity on agents', async () => {
+  it('persists personaRole without a named identity on agents', async () => {
     const agent = await M.createAgent(
       {},
       {
-        orgId: orgA.id,
+        orgRef: orgA.id,
         name: 'Backend Worker',
         personaRole: 'backend-engineer',
-        systemPrompt: 'You are {{name}}, a senior {{role}}.',
       },
       ctx(adminA.id),
     );
     expect(agent.personaRole).toBe('backend-engineer');
-    expect(agent.systemPrompt).toBe('You are {{name}}, a senior {{role}}.');
     // #974: the named identity lives on Worker rows — the Agent row carries
     // no personaName column at all.
     expect(agent.personaName).toBeUndefined();
   });
 
-  it('trims personaRole while preserving systemPrompt text', async () => {
+  it('trims personaRole', async () => {
     const blank = await M.createAgent(
       {},
-      { orgId: orgA.id, name: 'Blank One', personaRole: ' ', systemPrompt: '' },
+      { orgRef: orgA.id, name: 'Blank One', personaRole: ' ' },
       ctx(adminA.id),
     );
     expect(blank.personaRole).toBeNull();
-    expect(blank.systemPrompt).toBe('');
     const trimmed = await M.createAgent(
       {},
-      { orgId: orgA.id, name: 'Trimmed One', personaRole: '  backend-engineer  ' },
+      { orgRef: orgA.id, name: 'Trimmed One', personaRole: '  backend-engineer  ' },
       ctx(adminA.id),
     );
     expect(trimmed.personaRole).toBe('backend-engineer');
@@ -116,44 +113,41 @@ describe('createAgent — prompt template and persona role (#1241)', () => {
 });
 
 describe('updateAgent — prompt template and persona role (#1241)', () => {
-  it('updates the prompt while normalizing personaRole', async () => {
-    const agent = await M.createAgent({}, { orgId: orgA.id, name: 'Worker B' }, ctx(adminA.id));
+  it('normalizes personaRole', async () => {
+    const agent = await M.createAgent({}, { orgRef: orgA.id, name: 'Worker B' }, ctx(adminA.id));
 
     const set = await M.updateAgent(
       {},
-      { ref: agent.id, personaRole: ' backend-engineer ', systemPrompt: 'You are {{name}}.' },
+      { ref: agent.id, personaRole: ' backend-engineer ' },
       ctx(adminA.id),
     );
     expect(set.personaRole).toBe('backend-engineer');
-    expect(set.systemPrompt).toBe('You are {{name}}.');
 
     // Omitted preserves.
     const kept = await M.updateAgent(
       {},
-      { ref: agent.id, systemPrompt: 'You are {{name}}, a {{role}}.' },
+      { ref: agent.id, description: 'kept' },
       ctx(adminA.id),
     );
     expect(kept.personaRole).toBe('backend-engineer');
-    expect(kept.systemPrompt).toBe('You are {{name}}, a {{role}}.');
 
-    // Explicit null clears the role; omitted prompt keeps its text.
+    // Explicit null clears the role; omitted fields keep their values.
     const cleared = await M.updateAgent(
       {},
       { ref: agent.id, personaRole: null },
       ctx(adminA.id),
     );
     expect(cleared.personaRole).toBeNull();
-    expect(cleared.systemPrompt).toBe('You are {{name}}, a {{role}}.');
   });
 });
 
 describe('createAgent — tombstone URN reclaim (#974)', () => {
   it("reclaims a soft-deleted agent's URN by hard-deleting the tombstone", async () => {
-    const first = await M.createAgent({}, { orgId: orgA.id, name: 'Recast Agent' }, ctx(adminA.id));
+    const first = await M.createAgent({}, { orgRef: orgA.id, name: 'Recast Agent' }, ctx(adminA.id));
     // The REAL delete path (soft-deletes the agent AND its system memory —
     // the memory tombstone is reclaimed by the same create).
     await M.deleteAgent({}, { ref: first.id }, ctx(adminA.id));
-    const second = await M.createAgent({}, { orgId: orgA.id, name: 'Recast Agent' }, ctx(adminA.id));
+    const second = await M.createAgent({}, { orgRef: orgA.id, name: 'Recast Agent' }, ctx(adminA.id));
     expect(second.urn).toBe(first.urn);
     expect(second.id).not.toBe(first.id);
     // The tombstone is gone — reclaim hard-deletes it (name permanence lives
@@ -162,7 +156,7 @@ describe('createAgent — tombstone URN reclaim (#974)', () => {
   });
 
   it('refuses AGENT_URN_TAKEN when a Worker casting still references the tombstone', async () => {
-    const cast = await M.createAgent({}, { orgId: orgA.id, name: 'Cast Agent' }, ctx(adminA.id));
+    const cast = await M.createAgent({}, { orgRef: orgA.id, name: 'Cast Agent' }, ctx(adminA.id));
     const teamApp = await db.app.create({
       data: { id: generateId(), organizationId: orgA.id, name: 'Team App', urn: `${orgA.urn}:team` },
     });
@@ -173,7 +167,7 @@ describe('createAgent — tombstone URN reclaim (#974)', () => {
     await M.deleteAgent({}, { ref: cast.id }, ctx(adminA.id));
 
     await expectCode(
-      M.createAgent({}, { orgId: orgA.id, name: 'Cast Agent' }, ctx(adminA.id)),
+      M.createAgent({}, { orgRef: orgA.id, name: 'Cast Agent' }, ctx(adminA.id)),
       'AGENT_URN_TAKEN',
     );
     // The tombstone and its casting both survive the refused reclaim.
@@ -182,9 +176,9 @@ describe('createAgent — tombstone URN reclaim (#974)', () => {
   });
 
   it('a live agent at the URN still refuses AGENT_URN_TAKEN', async () => {
-    await M.createAgent({}, { orgId: orgA.id, name: 'Live Agent' }, ctx(adminA.id));
+    await M.createAgent({}, { orgRef: orgA.id, name: 'Live Agent' }, ctx(adminA.id));
     await expectCode(
-      M.createAgent({}, { orgId: orgA.id, name: 'Live Agent' }, ctx(adminA.id)),
+      M.createAgent({}, { orgRef: orgA.id, name: 'Live Agent' }, ctx(adminA.id)),
       'AGENT_URN_TAKEN',
     );
   });
@@ -216,7 +210,7 @@ describe('startSession — coding provenance + agentRef (#928)', () => {
   it('resolves agentRef (URN) to Session.agentId for an org member', async () => {
     const agent = await M.createAgent(
       {},
-      { orgId: orgA.id, name: 'Backend Worker' },
+      { orgRef: orgA.id, name: 'Backend Worker' },
       ctx(adminA.id),
     );
     const s = await M.startSession(
@@ -270,7 +264,7 @@ describe('startSession — coding provenance + agentRef (#928)', () => {
   it('refuses to attribute a session to a non-public agent the caller cannot read', async () => {
     const agent = await M.createAgent(
       {},
-      { orgId: orgA.id, name: 'Backend Worker' },
+      { orgRef: orgA.id, name: 'Backend Worker' },
       ctx(adminA.id),
     );
     await expect(

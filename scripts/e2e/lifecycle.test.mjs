@@ -119,3 +119,62 @@ test('failed ownership write terminates its detached forwarder', async t => {
   });
   assert.equal(listening, false, 'failed persistence left an untracked listener');
 });
+
+// #2858: the instance's /tmp is a systemd tmpfs that mounts a moment after
+// launch returns, hiding anything pushed there first. Staging must avoid it.
+test('Incus up stages the source archive outside the instance /tmp', t => {
+  const root = mkdtempSync(join(tmpdir(), 'hadron-e2e-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, 'bin'); mkdirSync(bin);
+  const log = join(root, 'calls');
+  writeFileSync(join(bin, 'docker'), '#!/bin/sh\nexit 99\n', { mode: 0o700 });
+  writeFileSync(join(bin, 'incus'), `#!/bin/sh
+printf '%s\\n' "$*" >> '${log}'
+case "$1" in
+info) exit 1 ;;
+launch|exec) exit 0 ;;
+file) exit 97 ;;
+*) exit 0 ;;
+esac
+`, { mode: 0o700 });
+  const up = spawnSync('bash', [script, 'up', 'stage-fixture'], {
+    encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, XDG_STATE_HOME: root, E2E_BACKEND: 'incus' },
+  });
+  assert.notEqual(up.status, 0);
+  const push = readFileSync(log, 'utf8').split('\n').find(line => line.startsWith('file push '));
+  assert(push, 'expected an incus file push');
+  const target = push.split(' ').at(-1);
+  assert.match(target, /^hadron-e2e-stage-fixture\//);
+  assert(!target.startsWith('hadron-e2e-stage-fixture/tmp/'), target);
+});
+
+// #3018: the Incus backend runs compose through `incus exec ... env`, an
+// allowlist. A keyring the QA host supplied must reach container-side compose,
+// or a keyring-negative stack silently boots green on a random valid keyring.
+for (const keyring of ['not-json', '{"current":"qa","keys":{"qa":"00"}}']) {
+  test(`Incus up relays E2E_RATE_LIMIT_KEYRING into container-side compose (${keyring === 'not-json' ? 'invalid' : 'valid'})`, t => {
+    const root = mkdtempSync(join(tmpdir(), 'hadron-e2e-test-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const bin = join(root, 'bin'); mkdirSync(bin);
+    const log = join(root, 'calls');
+    writeFileSync(join(bin, 'docker'), '#!/bin/sh\nexit 99\n', { mode: 0o700 });
+    writeFileSync(join(bin, 'incus'), `#!/bin/sh
+printf '%s\\n' "$*" >> '${log}'
+case "$1" in
+info) exit 1 ;;
+esac
+case "$*" in
+*"compose "*" up "*) exit 1 ;;
+esac
+exit 0
+`, { mode: 0o700 });
+    const up = spawnSync('bash', [script, 'up', 'keyring-fixture'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, XDG_STATE_HOME: root, E2E_BACKEND: 'incus', E2E_RATE_LIMIT_KEYRING: keyring },
+    });
+    assert.notEqual(up.status, 0);
+    const composeUp = readFileSync(log, 'utf8').split('\n').find(line => /docker compose .* up /.test(line));
+    assert(composeUp, 'expected the container-side compose up');
+    assert(composeUp.includes(`E2E_RATE_LIMIT_KEYRING=${keyring}`), composeUp);
+  });
+}

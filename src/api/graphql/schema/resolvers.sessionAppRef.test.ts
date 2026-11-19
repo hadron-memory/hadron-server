@@ -27,6 +27,7 @@ import type { Request } from 'express';
 import { db } from '../../../integrations/db/client.js';
 import { hashAppKey, resolveAuthContext } from '../../../middleware/auth.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
@@ -102,7 +103,7 @@ beforeEach(async () => {
 
   // The Team Agent — through the real mutation, with the roles: branch marker
   // the worker bootstraps locate it by (mirrors resolvers.teamChat.test.ts).
-  const created = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent', personaRole: 'test-worker' }, ctx(admin.id));
   teamAgent = { id: created.id, urn: created.urn, systemMemoryId: created.systemMemoryId };
   await db.node.create({
     data: {
@@ -110,7 +111,7 @@ beforeEach(async () => {
       memoryId: teamAgent.systemMemoryId,
       loc: 'roles:backend-engineer',
       name: 'backend-engineer',
-      content: 'You are {{name}}, a {{role}}.',
+      content: 'You are {{worker.name}}, a {{worker.role}}.',
       data: { names: ['Ada', 'Henry'] },
     },
   });
@@ -135,6 +136,7 @@ beforeEach(async () => {
       urn: `${outsider.handle}:solo`,
     },
   });
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 
 describe('#943 acceptance — a user-started session can author in the team chat', () => {
@@ -559,7 +561,7 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
   });
 
   it('refuses an agentRef that disagrees with the casting → BAD_USER_INPUT; a matching one is fine', async () => {
-    const otherAgent = await M.createAgent({}, { orgId: org.id, name: 'Some Other Agent' }, ctx(admin.id));
+    const otherAgent = await M.createAgent({}, { orgRef: org.id, name: 'Some Other Agent' }, ctx(admin.id));
     await expectCode(
       startSession(ctx(contrib.id), { agentRef: otherAgent.id, workerRef: worker.id }),
       'BAD_USER_INPUT',

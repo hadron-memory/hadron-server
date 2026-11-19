@@ -1,0 +1,394 @@
+/** #2063 R1: structural capture only; no production retention caller is enabled. */
+import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { Client } from 'pg';
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
+import { db } from '../../integrations/db/client.js';
+import { cleanDb } from '../../test/helpers.js';
+import { PARALLEL_DBS, workerDbName } from '../../test/dbWorkers.js';
+import * as nodeApproval from '../nodeApproval.js';
+import { computeApprovalHash } from '../approvalHash.js';
+import { generateDataKey } from '../crypto.js';
+import { encryptNodeFields } from '../nodeCrypto.js';
+import { sessionKeyCache } from '../sessionKeyCache.js';
+import { recordUrnRename } from '../urnAlias.js';
+import { withIncludeHistoryTransaction, includeHistoryClient } from './includeHistoryFence.js';
+import * as includeParser from './parseIncludeTags.js';
+import { replaceStructuralReferences } from './structuralReferences.js';
+import { reliedRevisionsOf } from './reliedRevisions.js';
+import { verifyIncludeCoverage } from './verifyIncludeCoverage.js';
+
+let memory: { id: string; urn: string };
+let source: { id: string };
+let target: { id: string };
+const fenced = <T>(work: (tx: Parameters<typeof replaceStructuralReferences>[0]) => Promise<T>) =>
+  withIncludeHistoryTransaction(db, context => work(includeHistoryClient(context)));
+const capture = (id: string, text: string | null) => fenced(tx => replaceStructuralReferences(tx, id, text));
+const relied = (id = target.id, memoryId = memory.id) => fenced(tx => reliedRevisionsOf(tx, id, memoryId));
+
+/** #3900: the worker's private test DB, a unique schema, and rollback on success or failure. */
+async function migrationProbe(sql: string, inspect: (client: Client, schema: string) => Promise<void>) {
+  expect(PARALLEL_DBS, 'migration probe requires a run-owned parallel worker clone').toBe(true);
+  const expectedDb = workerDbName(process.env.VITEST_POOL_ID ?? '1');
+  expect(new URL(process.env.DATABASE_URL!).pathname).toBe(`/${expectedDb}`);
+  const schema = `include_probe_${randomUUID().replaceAll('-', '')}`;
+  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  await client.connect();
+  try {
+    expect((await client.query('SELECT current_database() AS name')).rows[0].name).toBe(expectedDb);
+    await client.query('BEGIN');
+    await client.query(`CREATE SCHEMA "${schema}"`);
+    await client.query(`SET LOCAL search_path TO "${schema}"`);
+    await client.query('CREATE TABLE nodes (id TEXT PRIMARY KEY)');
+    // node-postgres simple-query mode accepts the complete SQL script; PostgreSQL,
+    // not a client-side delimiter guess, parses quoted strings and procedural bodies.
+    // Precedent: src/test/migrations/taskNumber2666.test.ts uses multi-statement Client.query.
+    await client.query(sql);
+    await inspect(client, schema);
+  } finally {
+    try {
+      await client.query('ROLLBACK');
+      expect((await client.query('SELECT 1 FROM pg_namespace WHERE nspname = $1', [schema])).rows).toEqual([]);
+    } finally { await client.end(); }
+  }
+}
+
+async function activate() {
+  // Test-only activation. R1 deliberately provides NO production activator.
+  for (const n of await db.node.findMany({ select: { id: true, content: true } })) await capture(n.id, n.content);
+  await db.includeRetentionGeneration.update({ where: { id: 'singleton' }, data: { state: 'ACTIVE', verifiedBindingGeneration: 0 } });
+}
+beforeEach(async () => {
+  await cleanDb(db);
+  await db.includeRetentionGeneration.deleteMany();
+  const org = await db.organization.create({ data: { name: 'Retention', urn: 'retention2063.example' } });
+  memory = await db.memory.create({ data: { organizationId: org.id, name: 'Sources', urn: `${org.urn}:sources`, class: 'knowledge' } });
+  source = await db.node.create({ data: { memoryId: memory.id, loc: 'source', name: 'Source' } });
+  target = await db.node.create({ data: { memoryId: memory.id, loc: 'target', name: 'Target', content: 'draft', revSeq: 5 } });
+  await db.includeRetentionGeneration.create({ data: { id: 'singleton' } });
+});
+
+describe('structural references (#2063 R1)', () => {
+  it('A: stores every active tag, duplicate settings and unresolved loc/URN addresses', async () => {
+    await capture(source.id, '{{> target rev=3}} {{> target approved signed}} {{> missing rev=2}} {{> hrn:node:absent.example:missing:part rev=4}} `{{> literal}}`');
+    const rows = await db.includeReference.findMany({ where: { includerId: source.id }, orderBy: { ordinal: 'asc' } });
+    expect(rows).toHaveLength(4);
+    expect(rows.map(r => [r.ordinal, r.kind, r.reference, r.targetMemoryId, r.targetLoc, r.pinnedRevNo, r.requiresApproved, r.requiresSigned])).toEqual([
+      [0, 'loc', 'target', memory.id, 'target', 3, false, false],
+      [1, 'loc', 'target', memory.id, 'target', null, true, true],
+      [2, 'loc', 'missing', memory.id, 'missing', 2, false, false],
+      [3, 'urn', 'hrn:node:absent.example:missing:part', null, null, 4, false, false],
+    ]);
+    expect(await db.includeSourceCoverage.findUnique({ where: { includerId: source.id } })).toMatchObject({ state: 'COMPLETE_TAGS', referenceCount: 4, parserVersion: 1 });
+  });
+
+  it('B: replacement and explicit empty coverage are atomic, including rollback after capture', async () => {
+    await capture(source.id, '{{> target rev=3}}');
+    const old = await db.includeReference.findMany({ where: { includerId: source.id } });
+    const coverage = await db.includeSourceCoverage.findUnique({ where: { includerId: source.id } });
+    await expect(fenced(async tx => { await replaceStructuralReferences(tx, source.id, '{{> target rev=4}}'); throw new Error('abort page'); })).rejects.toThrow('abort page');
+    expect(await db.includeReference.findMany({ where: { includerId: source.id } })).toEqual(old);
+    expect(await db.includeSourceCoverage.findUnique({ where: { includerId: source.id } })).toEqual(coverage);
+    await capture(source.id, '{{> target rev=2}}');
+    expect(await db.includeReference.findMany({ where: { includerId: source.id }, select: { pinnedRevNo: true } })).toEqual([{ pinnedRevNo: 2 }]);
+    await capture(source.id, null);
+    expect(await db.includeReference.count({ where: { includerId: source.id } })).toBe(0);
+    expect(await db.includeSourceCoverage.findUnique({ where: { includerId: source.id } })).toMatchObject({ state: 'COMPLETE_EMPTY', referenceCount: 0 });
+  });
+
+  it('C/E: foreign restorable includers and parent tombstones still count; only numbers escape', async () => {
+    const org = await db.organization.create({ data: { name: 'Foreign', urn: 'foreign2063.example' } });
+    const foreign = await db.memory.create({ data: { organizationId: org.id, name: 'Hidden', urn: `${org.urn}:hidden`, class: 'knowledge', visibility: 'ORGANIZATION', deletedAt: new Date() } });
+    const hidden = await db.node.create({ data: { memoryId: foreign.id, loc: 'hidden', name: 'Hidden', deletedAt: new Date(), content: `{{> hrn:node:${memory.urn}:target rev=3}}` } });
+    await activate();
+    const result = await relied();
+    expectTypeOf(result).toEqualTypeOf<Set<number>>();
+    expect(result).toEqual(new Set([3]));
+    expect([...result].every(n => typeof n === 'number')).toBe(true);
+    await db.node.delete({ where: { id: hidden.id } });
+    expect(await relied()).toEqual(new Set());
+  });
+
+  it('D: target purge keeps source addresses; includer purge cascades refs and coverage', async () => {
+    await capture(source.id, '{{> target rev=3}}');
+    await db.node.delete({ where: { id: target.id } });
+    expect(await db.includeReference.count({ where: { includerId: source.id } })).toBe(1);
+    await db.node.delete({ where: { id: source.id } });
+    expect(await db.includeReference.count({ where: { includerId: source.id } })).toBe(0);
+    expect(await db.includeSourceCoverage.count({ where: { includerId: source.id } })).toBe(0);
+  });
+
+  it('F: pins retain exact numbers regardless of qualification; plain and signed-only add none', async () => {
+    await db.node.update({ where: { id: source.id }, data: { content: '{{> target rev=3 approved}} {{> target}} {{> target signed}}' } });
+    await activate();
+    expect(await relied()).toEqual(new Set([3]));
+    expect(await relied(target.id, 'other-capture-memory')).toEqual(new Set());
+    await capture(source.id, '{{> target}} {{> target signed}}');
+    expect(await relied()).toEqual(new Set());
+  });
+
+  it('F: unpinned approved selects the covered non-carrier sibling through the shared predicate', async () => {
+    const hash = computeApprovalHash({ title: 'Target', abstract: null, content: 'approved' });
+    for (const revNo of [1, 3]) await db.nodeRevision.create({ data: { nodeId: target.id, memoryId: memory.id, loc: 'target', name: 'Target', content: 'approved', tags: [], revNo, ...(revNo === 1 ? { approvedByInfo: 'test', approvedAt: new Date(), approvalHash: hash } : {}) } });
+    await db.node.update({ where: { id: source.id }, data: { content: '{{> target approved}} {{> target approved signed}}' } });
+    await activate();
+    expect(await relied()).toEqual(new Set([3]));
+    await db.nodeRevision.deleteMany({ where: { nodeId: target.id, revNo: 3 } });
+    expect(await relied()).toEqual(new Set([1]));
+  });
+
+  it('F/H: capture uses supplied plaintext even for sealed sources; retention never asks for a key', async () => {
+    await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
+    sessionKeyCache.set('retention2063-sealed', memory.id, generateDataKey());
+    const sealed = encryptNodeFields({ content: '{{> target rev=3}} {{> target approved}}' }, { id: memory.id, isEncrypted: true });
+    await db.node.update({ where: { id: source.id }, data: { content: sealed.content } });
+    sessionKeyCache.clear();
+    await activate();
+    await capture(source.id, '{{> target rev=3}} {{> target approved}}');
+    const key = vi.spyOn(sessionKeyCache, 'getByMemoryId').mockImplementation(() => { throw new Error('no key permitted'); });
+    try { expect(await relied()).toEqual(new Set([3])); expect(key).not.toHaveBeenCalled(); }
+    finally { key.mockRestore(); }
+  });
+
+  it('G: absent/non-ACTIVE/dirty/version-mismatched generations fail closed', async () => {
+    await activate();
+    for (const state of ['PREPARING', 'BACKFILLING', 'VERIFYING', 'BLOCKED'] as const) {
+      await db.includeRetentionGeneration.update({ where: { id: 'singleton' }, data: { state } });
+      await expect(relied()).rejects.toMatchObject({ code: 'INCLUDE_RETENTION_INACTIVE' });
+    }
+    await db.includeRetentionGeneration.update({ where: { id: 'singleton' }, data: { state: 'ACTIVE', bindingGeneration: 1 } });
+    await expect(relied()).rejects.toMatchObject({ code: 'INCLUDE_RETENTION_INACTIVE' });
+    await db.includeRetentionGeneration.update({ where: { id: 'singleton' }, data: { bindingGeneration: 0, parserVersion: 99 } });
+    await expect(relied()).rejects.toMatchObject({ code: 'INCLUDE_RETENTION_INACTIVE' });
+    await db.includeRetentionGeneration.update({ where: { id: 'singleton' }, data: { parserVersion: 1, schemaVersion: 99 } });
+    await expect(relied()).rejects.toMatchObject({ code: 'INCLUDE_RETENTION_INACTIVE' });
+    await db.includeRetentionGeneration.deleteMany();
+    await expect(relied()).rejects.toMatchObject({ code: 'INCLUDE_RETENTION_INACTIVE' });
+  });
+
+  it('G: global verifier rejects missing/needs-rewrite/stale coverage', async () => {
+    await activate();
+    expect(await fenced(verifyIncludeCoverage)).toBe(true);
+    await db.includeSourceCoverage.delete({ where: { includerId: source.id } });
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+    await capture(source.id, null);
+    await db.includeSourceCoverage.update({ where: { includerId: source.id }, data: { state: 'NEEDS_AUTHORIZED_REWRITE' } });
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+    await capture(source.id, null);
+    await db.node.update({ where: { id: source.id }, data: { content: '{{> target rev=2}}' } });
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+  });
+
+  it('URN bindings follow the shared alias resolver, retaining the original reference', async () => {
+    const ref = `hrn:node:${memory.urn}:target`;
+    await db.$transaction(async tx => {
+      await recordUrnRename(tx, { entityType: 'NODE', entityId: target.id, oldUrn: ref.slice(9), newUrn: `${memory.urn}:moved` });
+      await tx.node.update({ where: { id: target.id }, data: { loc: 'moved' } });
+    });
+    await capture(source.id, `{{> ${ref} rev=3}}`);
+    expect(await db.includeReference.findFirst({ where: { includerId: source.id } })).toMatchObject({ reference: ref, targetMemoryId: memory.id, targetLoc: 'moved' });
+  });
+
+  it('P2: verifier rejects a dangling URN becoming live even after its source coverage is captured', async () => {
+    await db.node.update({ where: { id: source.id }, data: { content: `{{> hrn:node:${memory.urn}:later rev=4}}` } });
+    await activate();
+    const later = await db.node.create({ data: { memoryId: memory.id, loc: 'later', name: 'Later' } });
+    await capture(later.id, null);
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+  });
+
+  it('P2: verifier rejects a post-capture target rename despite refreshed target coverage', async () => {
+    const ref = `hrn:node:${memory.urn}:target`;
+    await db.node.update({ where: { id: source.id }, data: { content: `{{> ${ref} rev=3}}` } });
+    await activate();
+    await fenced(async tx => {
+      await recordUrnRename(tx, { entityType: 'NODE', entityId: target.id, oldUrn: ref.slice(9), newUrn: `${memory.urn}:moved` });
+      await tx.node.update({ where: { id: target.id }, data: { loc: 'moved' } });
+    });
+    await capture(target.id, 'draft');
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+  });
+
+  it('P2: verifier rejects alias appearance and removal, and accepts unchanged resolution', async () => {
+    const ref = `hrn:node:${memory.urn}:historical`;
+    const text = `{{> ${ref} rev=3}}`;
+    await db.node.update({ where: { id: source.id }, data: { content: text } });
+    await activate();
+    expect(await fenced(verifyIncludeCoverage)).toBe(true);
+    await db.$transaction(tx => recordUrnRename(tx, { entityType: 'NODE', entityId: target.id, oldUrn: ref.slice(9), newUrn: `${memory.urn}:target` }));
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+    await capture(source.id, text);
+    expect(await fenced(verifyIncludeCoverage)).toBe(true);
+    await db.urnAlias.deleteMany({ where: { entityType: 'NODE', entityId: target.id } });
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+  });
+
+  it('P2: verifier rejects memory-address changes that remove a binding', async () => {
+    await db.node.update({ where: { id: source.id }, data: { content: `{{> hrn:node:${memory.urn}:target rev=3}}` } });
+    await activate();
+    expect(await fenced(verifyIncludeCoverage)).toBe(true);
+    await db.memory.update({ where: { id: memory.id }, data: { urn: 'retention2063.example:renamed' } });
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+  });
+
+  it('P2: verifier notices resolved-to-deleted and unresolved-to-restored targets', async () => {
+    const text = `{{> hrn:node:${memory.urn}:target rev=3}}`;
+    await db.node.update({ where: { id: source.id }, data: { content: text } });
+    await activate();
+    await db.node.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+    await capture(source.id, text);
+    expect(await fenced(verifyIncludeCoverage)).toBe(true);
+    await db.node.update({ where: { id: target.id }, data: { deletedAt: null } });
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+  });
+
+  it('P2: verifier follows live-address precedence after an alias-bound address is reused', async () => {
+    const ref = `hrn:node:${memory.urn}:historical`;
+    await db.$transaction(tx => recordUrnRename(tx, { entityType: 'NODE', entityId: target.id, oldUrn: ref.slice(9), newUrn: `${memory.urn}:target` }));
+    await db.node.update({ where: { id: source.id }, data: { content: `{{> ${ref} rev=3}}` } });
+    await activate();
+    expect(await fenced(verifyIncludeCoverage)).toBe(true);
+    const occupant = await db.node.create({ data: { memoryId: memory.id, loc: 'historical', name: 'New occupant' } });
+    await capture(occupant.id, null);
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+  });
+
+  it('binding verification exhausts bounded pages, including a mismatch beyond page one', async () => {
+    const text = Array.from({ length: 130 }, (_, i) => `{{> part:${i} rev=1}}`).join(' ');
+    await db.node.update({ where: { id: source.id }, data: { content: text } });
+    await activate();
+    expect(await fenced(verifyIncludeCoverage)).toBe(true);
+    const last = await db.includeReference.findFirstOrThrow({ orderBy: { id: 'desc' } });
+    await db.includeReference.update({ where: { id: last.id }, data: { targetLoc: 'stale' } });
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+  });
+
+  it('P2: capture rejects unrepresentable pins with an input error and preserves prior rows', async () => {
+    await capture(source.id, '{{> target rev=1}}');
+    for (const rev of ['2147483648', '9007199254740992', '9'.repeat(400)]) {
+      await expect(capture(source.id, `{{> target rev=${rev}}}`)).rejects.toMatchObject({ code: 'INCLUDE_REVISION_INVALID' });
+      expect(await db.includeReference.findMany({ where: { includerId: source.id }, select: { pinnedRevNo: true } })).toEqual([{ pinnedRevNo: 1 }]);
+    }
+    await capture(source.id, '{{> target rev=2147483647}}');
+    expect(await db.includeReference.findFirst({ where: { includerId: source.id } })).toMatchObject({ pinnedRevNo: 2147483647 });
+  });
+
+  it('P2: storage independently rejects nonpositive and fractional parser values', async () => {
+    for (const rev of [-3, 0, 1.5]) {
+      const parser = vi.spyOn(includeParser, 'parseIncludeTags').mockReturnValueOnce([
+        { kind: 'loc', target: 'target', settings: { rev }, raw: '{{> target}}' },
+      ]);
+      try { await expect(capture(source.id, '{{> target}}')).rejects.toMatchObject({ code: 'INCLUDE_REVISION_INVALID' }); }
+      finally { parser.mockRestore(); }
+    }
+  });
+
+  it('capture fails closed for unavailable/incompatible inventory and absent stored bytes', async () => {
+    for (const delta of [{ schemaVersion: 99 }, { schemaVersion: 1, parserVersion: 99 }]) {
+      await db.includeRetentionGeneration.update({ where: { id: 'singleton' }, data: delta });
+      await expect(capture(source.id, null)).rejects.toMatchObject({ code: 'INCLUDE_RETENTION_INACTIVE' });
+    }
+    await db.includeRetentionGeneration.update({ where: { id: 'singleton' }, data: { parserVersion: 1 } });
+    await expect(fenced(async tx => {
+      const stored = vi.spyOn(tx, '$queryRaw').mockResolvedValueOnce([]);
+      try { await replaceStructuralReferences(tx, source.id, null); }
+      finally { stored.mockRestore(); }
+    })).rejects.toMatchObject({ code: 'INCLUDE_RETENTION_INACTIVE' });
+    await db.includeRetentionGeneration.deleteMany();
+    await expect(capture(source.id, null)).rejects.toMatchObject({ code: 'INCLUDE_RETENTION_INACTIVE' });
+  });
+
+  it('refuses a truncated approval search rather than releasing unknown reliance', async () => {
+    await db.node.update({ where: { id: source.id }, data: { content: '{{> target approved}}' } });
+    await activate();
+    const selection = vi.spyOn(nodeApproval, 'newestApprovedRevisionOf').mockResolvedValueOnce({ found: null, truncated: true });
+    try { await expect(relied()).rejects.toMatchObject({ code: 'INCLUDE_RETENTION_INACTIVE' }); }
+    finally { selection.mockRestore(); }
+  });
+
+  it('the shared parser rejects nonpositive or fractional authored pins', async () => {
+    for (const rev of ['-3', '0', '1.5']) {
+      await expect(capture(source.id, `{{> target rev=${rev}}}`)).rejects.toBeInstanceOf(includeParser.IncludeSyntaxError);
+    }
+  });
+
+  it('reverse lookup exhausts high fan-in rather than limiting away pins', async () => {
+    const text = Array.from({ length: 1001 }, (_, i) => `{{> target rev=${i + 1}}}`).join(' ');
+    await db.node.update({ where: { id: source.id }, data: { content: text } });
+    await activate();
+    expect(await relied()).toEqual(new Set(Array.from({ length: 1001 }, (_, i) => i + 1)));
+  });
+
+  it('coverage verifier checks versions, generations, empty proofs and reference counts', async () => {
+    await activate();
+    for (const delta of [
+      { parserVersion: 99 }, { metadataGeneration: 99 }, { sourceRevision: 99 },
+      { sourceMemoryId: 'stale' }, { sourceLoc: 'stale' }, { sourceEncrypted: true },
+      { referenceCount: 1 }, { state: 'COMPLETE_TAGS' as const },
+    ]) {
+      await capture(source.id, null);
+      await db.includeSourceCoverage.update({ where: { includerId: source.id }, data: delta });
+      expect(await fenced(verifyIncludeCoverage)).toBe(false);
+    }
+    await capture(source.id, '{{> target rev=3}}');
+    await db.includeReference.updateMany({ where: { includerId: source.id }, data: { metadataGeneration: 99 } });
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+  });
+
+  it('capture rolls back when a write between reference deletion and coverage fails', async () => {
+    await capture(source.id, '{{> target rev=3}}');
+    await expect(fenced(async tx => {
+      const write = vi.spyOn(tx.includeSourceCoverage, 'upsert').mockRejectedValueOnce(new Error('coverage write failed'));
+      try { await replaceStructuralReferences(tx, source.id, '{{> target rev=4}}'); }
+      finally { write.mockRestore(); }
+    })).rejects.toThrow('coverage write failed');
+    expect(await db.includeReference.findMany({ where: { includerId: source.id }, select: { pinnedRevNo: true } })).toEqual([{ pinnedRevNo: 3 }]);
+  });
+
+  it('migration applies from a nodes-only schema and rolls back cleanly', async () => {
+    const sql = await readFile(new URL('../../../prisma/migrations/20261026040000_include_structural_references/migration.sql', import.meta.url), 'utf8');
+    await migrationProbe(sql, async (client, schema) => {
+      const tables = await client.query('SELECT table_name AS name FROM information_schema.tables WHERE table_schema = $1', [schema]);
+      expect(tables.rows.map(t => t.name)).toEqual(expect.arrayContaining(['include_references', 'include_source_coverage', 'include_retention_generation']));
+      const indexes = await client.query('SELECT indexname FROM pg_indexes WHERE schemaname = $1', [schema]);
+      expect(indexes.rows.map(i => i.indexname)).toContain('include_references_target_memory_id_target_loc_idx');
+      const foreignKeys = await client.query("SELECT conname FROM pg_constraint WHERE connamespace = $1::regnamespace AND contype = 'f'", [schema]);
+      expect(foreignKeys.rows.map(f => f.conname).sort()).toEqual(['include_references_includer_id_fkey', 'include_source_coverage_includer_id_fkey']);
+    });
+  });
+
+  it.each([
+    ['string literal', "INSERT INTO quoted3900 VALUES ('literal;value');", ['literal;value']],
+    ['dollar-quoted bodies', `DO $probe3900$ BEGIN
+      INSERT INTO quoted3900 VALUES ('procedure');
+      INSERT INTO quoted3900 VALUES ('second');
+    END $probe3900$;
+    CREATE FUNCTION body3900() RETURNS text LANGUAGE sql AS $fn3900$ SELECT 'function;value' $fn3900$;
+    INSERT INTO quoted3900 SELECT body3900();`, ['function;value', 'procedure', 'second']],
+  ] as const)('migration probe preserves semicolons in %s and rolls back every object (#3900)', async (_name, sql, expected) => {
+    await migrationProbe(`CREATE TABLE quoted3900 (value TEXT); ${sql}`, async client => {
+      expect((await client.query('SELECT value FROM quoted3900 ORDER BY value')).rows.map(r => r.value)).toEqual(expected);
+    });
+  });
+
+  it('migration probe rolls back partial DDL when execution fails (#3900)', async () => {
+    await expect(migrationProbe('CREATE TABLE partial3900 (id INT); SELECT missing3900;', async () => {
+      throw new Error('failed migration must not reach inspection');
+    })).rejects.toMatchObject({ code: '42703' });
+  });
+
+  it('I: 10k-reference reverse lookup uses the address index', async () => {
+    // #3900: planner observation, not a deterministic index-use guarantee. CI pins
+    // pgvector/pgvector:pg16 (.github/workflows/test.yml), e2e pins pgvector/pgvector:pg17
+    // (scripts/e2e/compose.yaml); neither pins a minor release. This assertion is
+    // bounded to this synthetic 10k-row fixture after ANALYZE and its statistics.
+    // Other versions, distributions or planner costs can legitimately pick another
+    // plan; an index-name mismatch alone does not establish a product defect.
+    // A deterministic replacement/control needs its own gate; do not force a plan.
+    await db.includeReference.createMany({ data: Array.from({ length: 10_000 }, (_, ordinal) => ({ includerId: source.id, ordinal, kind: 'loc' as const, reference: `part:${ordinal}`, targetMemoryId: memory.id, targetLoc: `part:${ordinal}`, metadataGeneration: 1 })) });
+    await db.$executeRaw`ANALYZE include_references`;
+    const plan = await db.$queryRaw<Array<{ 'QUERY PLAN': unknown }>>`EXPLAIN (FORMAT JSON) SELECT pinned_rev_no, requires_approved FROM include_references WHERE target_memory_id = ${memory.id} AND target_loc = 'part:5321'`;
+    expect(JSON.stringify(plan)).toContain('include_references_target_memory_id_target_loc_idx');
+  });
+});

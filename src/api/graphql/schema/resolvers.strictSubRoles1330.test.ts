@@ -4,6 +4,7 @@
  * parent is refused; unrelated roles stay free, runnable and platform writes
  * are exempt, and an existing node is never refused for an unrelated edit.
  */
+import { attestedAuthoring } from '../../../lib/authoringAttestation.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
@@ -39,10 +40,10 @@ async function rules(...rs: Array<{ role: string; strictSubRoles?: boolean; enab
   return config;
 }
 
-const create = (loc: string, extra: Record<string, unknown> = {}, opts?: Parameters<typeof writeNodeCore>[3]) =>
-  writeNodeCore({ memoryId, loc, name: loc, content: 'x', ...extra } as never, ctx(), 'create', opts);
+const create = (loc: string, extra: Record<string, unknown> = {}, opts: Partial<Parameters<typeof writeNodeCore>[3]> = {}) =>
+  writeNodeCore({ memoryId, loc, name: loc, content: 'x', ...extra } as never, ctx(), 'create', { authoring: attestedAuthoring(null), ...opts });
 const update = (loc: string, extra: Record<string, unknown>) =>
-  writeNodeCore({ memoryId, loc, ...extra } as never, ctx(), 'update');
+  writeNodeCore({ memoryId, loc, ...extra } as never, ctx(), 'update', { authoring: attestedAuthoring(null) });
 
 async function refusal(p: Promise<unknown>) {
   const e = await p.then(() => null, (err: unknown) => err);

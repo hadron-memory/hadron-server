@@ -78,7 +78,7 @@ beforeEach(async () => {
     ],
   });
 
-  const created = await M.createAgent({}, { orgId: org.id, name: 'TR Team Agent' }, ctx(admin.id));
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'TR Team Agent' }, ctx(admin.id));
   teamAgent = { id: created.id, urn: created.urn, systemMemoryId: created.systemMemoryId };
   await db.node.create({
     data: {
@@ -116,10 +116,9 @@ beforeEach(async () => {
   const role = await M.createAgent(
     {},
     {
-      orgId: org.id,
+      orgRef: org.id,
       name: 'TR Backend Engineer',
       personaRole: 'backend-engineer',
-      systemPrompt: 'You are {{name}}, a {{role}}.',
     },
     ctx(admin.id),
   );
@@ -171,37 +170,15 @@ describe('#960 — teamRoles read', () => {
     expect(be.nameRange).toBeUndefined();
   });
 
-  it('resolves the role-agent (the casting default) and hasNamePlaceholder', async () => {
+  it('resolves the role-agent (the casting default); hasNamePlaceholder is retired and always null (#2049)', async () => {
     const page = await teamRoles(ctx(contrib.id));
     const be = page.items.find((r: any) => r.role === 'backend-engineer');
     expect(be.roleAgent?.id).toBe(roleAgent.id);
-    expect(be.hasNamePlaceholder).toBe(true);
-    // No installed agent carries frontend-engineer dressing → null, null.
+    // No installed agent carries frontend-engineer dressing → no role-agent.
     const fe = page.items.find((r: any) => r.role === 'frontend-engineer');
     expect(fe.roleAgent).toBeNull();
-    expect(fe.hasNamePlaceholder).toBeNull();
-  });
-
-  it('flags a nameless template — the pre-guard corpus check', async () => {
-    await db.agent.update({
-      where: { id: roleAgent.id },
-      data: { systemPrompt: 'You are a {{role}} with no name.' },
-    });
-    const page = await teamRoles(ctx(contrib.id));
-    const be = page.items.find((r: any) => r.role === 'backend-engineer');
-    expect(be.hasNamePlaceholder).toBe(false);
-  });
-
-  it('detection shares the composer\'s exact token: "{{ name }}" is NOT bound (#985 review)', async () => {
-    await db.agent.update({
-      where: { id: roleAgent.id },
-      data: { systemPrompt: 'You are {{ name }}, a {{role}}.' },
-    });
-    const page = await teamRoles(ctx(contrib.id));
-    const be = page.items.find((r: any) => r.role === 'backend-engineer');
-    // applyPersonaTemplate leaves "{{ name }}" literal, so this template
-    // produces nameless workers — the flag must say so.
-    expect(be.hasNamePlaceholder).toBe(false);
+    // Deprecated field: it resolves null.
+    for (const item of page.items) expect(item.hasNamePlaceholder).toBeNull();
   });
 
   it('excludes role SUB-nodes and paginates deterministically', async () => {
@@ -215,7 +192,7 @@ describe('#960 — teamRoles read', () => {
   it('read gate: AppMember and the App\'s own key read; an outsider is refused', async () => {
     expect((await teamRoles(ctx(appMember.id))).total).toBe(2);
     expect((await teamRoles(ctx(undefined, app.id))).total).toBe(2);
-    await expectCode(teamRoles(ctx(outsider.id)), 'FORBIDDEN');
+    await expectCode(teamRoles(ctx(outsider.id)), 'APP_NOT_FOUND');
   });
 });
 
@@ -285,7 +262,7 @@ describe('#960 — createTeamRole', () => {
   });
 
   it('teamAgentRef naming an agent NOT installed here → TEAM_AGENT_NOT_INSTALLED', async () => {
-    const foreign = await M.createAgent({}, { orgId: org.id, name: 'TR Foreign Team' }, ctx(admin.id));
+    const foreign = await M.createAgent({}, { orgRef: org.id, name: 'TR Foreign Team' }, ctx(admin.id));
     await db.node.create({
       data: {
         id: generateId(),
@@ -317,7 +294,7 @@ describe('#960 — createTeamRole', () => {
   it('locator errors are held behind the read-audience gate — no topology probe (#984 review)', async () => {
     // A second installed agent with a roles: branch makes the locator
     // ambiguous — TEAM_AGENT_AMBIGUOUS discloses candidate names + URNs.
-    const second = await M.createAgent({}, { orgId: org.id, name: 'TR Second Team Agent' }, ctx(admin.id));
+    const second = await M.createAgent({}, { orgRef: org.id, name: 'TR Second Team Agent' }, ctx(admin.id));
     await db.node.create({
       data: {
         id: generateId(),
@@ -336,7 +313,7 @@ describe('#960 — createTeamRole', () => {
     // …an outsider gets FORBIDDEN, never the candidate list.
     await expectCode(
       M.createTeamRole({}, { appRef: app.id, role: 'ops' }, ctx(outsider.id)),
-      'FORBIDDEN',
+      'APP_NOT_FOUND',
     );
   });
 
@@ -823,4 +800,15 @@ describe('deleteTeamRole (#1002, simplified by #1050)', () => {
     await expect(del(ctx(outsider.id), { role: 'frontend-engineer' })).rejects.toThrow(/Forbidden/);
     expect(await roleLocs()).toContain('roles:frontend-engineer');
   });
+});
+
+it('#2168 ruling0141 role index prefers physical matches over a distinct derived role Agent',async()=>{
+ const derived=await M.createAgent({}, {orgRef:org.id,name:'Imported backend',personaRole:'backend-engineer'},ctx(admin.id));
+ await db.agentOrgGrant.create({data:{orgId:org.id,agentId:derived.id,activatedAt:new Date()}});
+ await db.agentImport.create({data:{parentAgentId:teamAgent.id,importedAgentId:derived.id,position:100,required:true,agentOrgGrantOrgId:org.id,agentOrgGrantAgentId:derived.id}});
+ const page=await teamRoles(ctx(admin.id));
+ expect(page.items.find((r:any)=>r.role==='backend-engineer').roleAgent?.id).toBe(roleAgent.id);
+ // A role offered only by derivation still resolves; the tier rule is not a blanket exclusion.
+ await db.agent.update({where:{id:derived.id},data:{personaRole:'frontend-engineer'}});
+ expect((await teamRoles(ctx(admin.id))).items.find((r:any)=>r.role==='frontend-engineer').roleAgent?.id).toBe(derived.id);
 });

@@ -31,8 +31,10 @@
  *     `generateCsrfToken` call in the GET handler's email branch.
  */
 
+import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js';
+
 /** Shared <style> block for both pages — the consent screen's palette. */
-const SHARED_STYLE = `  <style>
+export const SHARED_STYLE = `  <style>
     /* Matched light/dark pairs via custom properties (issue #318): a
        background and its foreground can never resolve to different
        schemes, even under a forced/auto dark transformation. */
@@ -64,7 +66,10 @@ const SHARED_STYLE = `  <style>
       display: flex; justify-content: center;
     }
     main {
-      max-width: 480px; width: 100%;
+      /* Keep the original 480px content + padding/border desktop width,
+         while containing the padding on narrow screens. Layout belongs here. */
+      box-sizing: border-box;
+      max-width: calc(480px + 4rem + 2px); width: 100%;
       background: var(--card-bg); color: var(--text);
       border: 1px solid var(--card-border); border-radius: 8px;
       padding: 1.5rem 2rem;
@@ -87,6 +92,14 @@ const SHARED_STYLE = `  <style>
       background: #0a66ff; color: #fff;
     }
     button[type="submit"]:hover { background: #0855d0; }
+    a.button {
+      display: inline-block; margin-top: 1.5rem;
+      padding: 0.6rem 1rem;
+      font: inherit; font-weight: 500; text-decoration: none;
+      border-radius: 6px;
+      background: #0a66ff; color: #fff;
+    }
+    a.button:hover { background: #0855d0; }
   </style>`;
 
 export const EMAIL_ENTRY_TEMPLATE = `<!doctype html>
@@ -97,9 +110,11 @@ export const EMAIL_ENTRY_TEMPLATE = `<!doctype html>
   <meta name="robots" content="noindex">
   <title>Sign in to Hadron</title>
 ${SHARED_STYLE}
+${HADRON_HEADER_STYLE}
 </head>
 <body>
   <main>
+    ${HADRON_HEADER}
     <h1>Sign in to Hadron</h1>
     <p>Enter your email address and we&#39;ll send you a sign-in link, so you can continue authorizing <strong>{{clientName}}</strong>.</p>
     <form method="post" action="/oauth/authorize/email">
@@ -123,9 +138,11 @@ export const EMAIL_SENT_TEMPLATE = `<!doctype html>
   <meta name="robots" content="noindex">
   <title>Check your email</title>
 ${SHARED_STYLE}
+${HADRON_HEADER_STYLE}
 </head>
 <body>
   <main>
+    ${HADRON_HEADER}
     <h1>Check your email</h1>
     <p>We sent a sign-in link to <strong>{{email}}</strong>.</p>
     <p>Open the link on this device to continue — after signing in you&#39;ll be asked to finish authorizing the application.</p>
@@ -151,9 +168,11 @@ export const REVIEW_CODE_TEMPLATE = `<!doctype html>
   <meta name="robots" content="noindex">
   <title>Enter access code</title>
 ${SHARED_STYLE}
+${HADRON_HEADER_STYLE}
 </head>
 <body>
   <main>
+    ${HADRON_HEADER}
     <h1>Enter access code</h1>
     <p>This account uses a pre-shared access code instead of an emailed link.</p>
     <form method="post" action="/oauth/authorize/email/code">

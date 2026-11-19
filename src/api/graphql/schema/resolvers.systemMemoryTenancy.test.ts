@@ -51,8 +51,9 @@ async function expectCode(p: Promise<unknown>, code: string) {
     await p;
     expect.fail(`expected rejection with extensions.code=${code}`);
   } catch (e) {
-    expect(e).toBeInstanceOf(GraphQLError);
-    expect((e as GraphQLError).extensions?.code).toBe(code);
+    // #4140: a promotion not-found is the entity-ref MemoryNotFoundError (carries `code`, formatted at the wire).
+    expect(e).toBeInstanceOf(Error);
+    expect((e as GraphQLError).extensions?.code ?? (e as unknown as { code?: string }).code).toBe(code);
   }
 }
 
@@ -106,6 +107,14 @@ describe('sameOwner', () => {
 
 describe('#949 — createAgent cannot promote a foreign-owned memory', () => {
   it('refuses a memory owned by another org', async () => {
+    // Readable and writable to the caller (a CONTRIBUTOR of org B), so the
+    // refusal is the owner check's, not the promotion target gate's: an
+    // unreadable target answers MEMORY_NOT_FOUND and an unwritable one the
+    // write gate's refusal, before any owner comparison
+    // (resolvers.systemMemoryPromotionGate.test.ts).
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: orgB.id, userId: adminA.id, role: 'CONTRIBUTOR' },
+    });
     const foreign = await db.memory.create({
       data: {
         id: generateId(),
@@ -119,7 +128,7 @@ describe('#949 — createAgent cannot promote a foreign-owned memory', () => {
     await expectCode(
       M.createAgent(
         null,
-        { orgId: orgA.id, name: 'Cross Org', systemMemoryId: foreign.id },
+        { orgRef: orgA.id, name: 'Cross Org', systemMemoryRef: foreign.id },
         ctx(adminA.id),
       ),
       'SYSTEM_MEMORY_OWNER_MISMATCH',
@@ -142,13 +151,15 @@ describe('#949 — createAgent cannot promote a foreign-owned memory', () => {
       },
     });
     await expectCode(
-      M.createAgent(null, { name: 'Mine', systemMemoryId: theirs.id }, ctx(userA.id)),
-      'SYSTEM_MEMORY_OWNER_MISMATCH',
+      M.createAgent(null, { name: 'Mine', systemMemoryRef: theirs.id }, ctx(userA.id)),
+      // Another user's memory is unreadable to the caller, so the promotion
+      // target gate answers first, as for a missing id (no owner disclosed).
+      'MEMORY_NOT_FOUND',
     );
   });
 
   it('auto-provisions a system memory with the agent\'s own owner', async () => {
-    const agent = await M.createAgent(null, { orgId: orgA.id, name: 'Owned' }, ctx(adminA.id));
+    const agent = await M.createAgent(null, { orgRef: orgA.id, name: 'Owned' }, ctx(adminA.id));
     const sys = await db.memory.findUniqueOrThrow({ where: { id: agent.systemMemoryId } });
     expect(sys.organizationId).toBe(orgA.id);
     expect(sys.ownerUserId).toBeNull();
@@ -179,8 +190,8 @@ describe('#949 — updateAgent first-attach cannot attach a foreign-owned memory
       },
     });
     await expectCode(
-      M.updateAgent(null, { ref: agent.id, systemMemoryId: theirs.id }, ctx(userA.id)),
-      'SYSTEM_MEMORY_OWNER_MISMATCH',
+      M.updateAgent(null, { ref: agent.id, systemMemoryRef: theirs.id }, ctx(userA.id)),
+      'MEMORY_NOT_FOUND', // unreadable: the target gate answers before the owner check
     );
     const untouched = await db.memory.findUniqueOrThrow({ where: { id: theirs.id } });
     expect(untouched.class).toBe('knowledge');
@@ -208,7 +219,7 @@ describe('#949 — updateAgent first-attach cannot attach a foreign-owned memory
         visibility: 'ORGANIZATION',
       },
     });
-    await M.updateAgent(null, { ref: agent.id, systemMemoryId: mine.id }, ctx(userA.id));
+    await M.updateAgent(null, { ref: agent.id, systemMemoryRef: mine.id }, ctx(userA.id));
     const promoted = await db.memory.findUniqueOrThrow({ where: { id: mine.id } });
     expect(promoted.class).toBe('system');
   });

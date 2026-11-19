@@ -40,7 +40,7 @@ beforeEach(async () => {
   mia = await db.user.create({ data: { githubId: 710_000 + n, githubUsername: `lp-mia-${n}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   const ctx: Context = { db, userId: admin.id, roles: ['READER'] };
-  agentId = (await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx)).id;
+  agentId = (await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx)).id;
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `lapse-${n}.example:team` }, select: { id: true } });
   await db.appMember.create({ data: { appId: app.id, userId: mia.id, role: 'member' } });
   const worker = (name: string) =>
@@ -208,7 +208,7 @@ describe('the lapse feeds matching in the same pass (cor:agt:060:06)', () => {
     });
     await outOfTokens(baloo, at('18:00'));
     const t = await db.agentTask.create({ data: { appId: app.id, title: 'Review', ownerUserId: mia.id, createdAt: at('11:00') }, select: { id: true } });
-    expect(await taskMatcherTick(db, at('18:01'))).toEqual({ lost: 0, lapsed: 1, expired: 0, matched: 1 });
+    expect(await taskMatcherTick(db, at('18:01'))).toEqual({ lost: 0, lapsed: 1, expired: 0, recovered: 0, matched: 1, desiredStarts: 0 });
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).assigneeWorkerId).toBe(baloo.id);
   });
 });

@@ -80,6 +80,14 @@ export function sessionKeyReleasedHint(): string {
   );
 }
 
+/** A different key is already live for the memory: a fixed-text, retryable refusal (#1789), not a fault. */
+export class SessionKeyConflictError extends Error {
+  constructor() {
+    super('Session key conflict: different key provided for an active memory');
+    this.name = 'SessionKeyConflictError';
+  }
+}
+
 export class SessionKeyCache {
   private byMemory = new Map<string, MemoryKeyEntry>();
   // One session may hold keys for SEVERAL memories (spec 041: a request
@@ -97,7 +105,7 @@ export class SessionKeyCache {
     const existing = this.byMemory.get(memoryId);
     if (existing) {
       if (!existing.key.raw.equals(key.raw)) {
-        throw new Error('Session key conflict: different key provided for an active memory');
+        throw new SessionKeyConflictError();
       }
       existing.sessionIds.add(sessionId);
       existing.lastUsedAt = Date.now();
@@ -142,6 +150,16 @@ export class SessionKeyCache {
     // being actively decrypted must never expire under its own session.
     entry.lastUsedAt = Date.now();
     return entry.key;
+  }
+
+  /** #3496: a read preserving locked-session semantics must not borrow another session's resident key.
+   * Request-staged keys are local to this call; a session key must belong to this exact session.
+   * Uses the normal TTL check, so an expired entry cannot authorize shape values either.
+   */
+  hasForSession(memoryId: string, sessionId?: string): boolean {
+    if (getRequestKey(memoryId)) return true;
+    if (!sessionId || !this.byMemory.get(memoryId)?.sessionIds.has(sessionId)) return false;
+    return this.getByMemoryId(memoryId) !== null;
   }
 
   /**

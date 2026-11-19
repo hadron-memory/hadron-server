@@ -6,7 +6,7 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { FULL, READ, WRITE, type GrantWithCaps } from '@hadron-memory/access-control';
 import { resolveUserApps } from '../../auth/user-app-resolution.js';
-import { getAppMemoryAccess, participantSystemMemoryFolds } from '../../mcp/access-control.js';
+import { getAppMemoryCandidates, participantSystemMemoryFolds } from '../../mcp/access-control.js';
 import { getManagedSystemMemoryIds } from './managedSystemMemory.js';
 import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 import { installMemoryAudience, isInstallMemoryRow } from './installMemory.js';
@@ -115,7 +115,7 @@ export async function systemMemoryReadGrants(
   for (const app of apps) {
     // This is the same licensed, lifecycle-checked fold used by the read gates.
     if (principal.impersonation && app.organizationId !== principal.impersonation.orgId) continue;
-    const access = await memo(batch?.appAccess, app.id, () => getAppMemoryAccess(db, app.id, { callerUserId: userId, includeTeamSpace: false }));
+    const access = await memo(batch?.appAccess, app.id, () => getAppMemoryCandidates(db, app.id, { callerUserId: userId, includeTeamSpace: false }));
     if (!access.has(memoryId)) continue;
     const { urn, role } = await memo(batch?.appAttribution, app.id, async () => {
       const [row, member] = await Promise.all([

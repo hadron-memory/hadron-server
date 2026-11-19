@@ -1,3 +1,4 @@
+import { resolveAppInstallation } from '../../../lib/appInstallations.js';
 /**
  * #2045 (S8 step 8b, cor:agt:040:07, R23/R24) — the three direct pointer
  * setters: `setAgentBootPrompt`, `setAppAgentBootPrompt`, `setWorkerBootPrompt`.
@@ -67,12 +68,13 @@ class OwnerTenantChanged extends Error {}
  * discarded and retried with the new ones (the withAuthorizedMemoryTx shape),
  * never decided against an unanchored owner.
  */
-async function writePointer(
+async function writePointer<T = void>(
   ctx: Context,
   target: BootPromptPointerTarget,
   nodeRef: string | null,
   notFound: () => Error,
-): Promise<void> {
+  snapshot?: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
   const base: AuthorityAnchor = target.field === 'AGENT'
     ? { kind: 'agent', id: target.agentId }
     : { kind: 'app', id: target.field === 'APP_AGENT' ? target.appId : (await workerAppId(ctx, target.workerId)) };
@@ -82,18 +84,21 @@ async function writePointer(
     if (!before) throw notFound();
     const expected = ownerTenant(before);
     try {
-      await withAuthorizedTx(
+      const written = await withAuthorizedTx(
         ctx,
         [base, ...ownerAnchors(expected)],
         async () => {},
         async (tx: Prisma.TransactionClient, txCtx: Context) => {
-          const owner = await loadBootPromptPointerOwner(tx, target);
+          const owner = await loadBootPromptPointerOwner(tx, target, { lockForWrite: true });
           if (!owner) throw notFound();
           const tenant = ownerTenant(owner);
           if (tenant.organizationId !== expected.organizationId || tenant.ownerUserId !== expected.ownerUserId) {
             throw new OwnerTenantChanged();
           }
           await setBootPromptPointer(tx, txCtx, owner, nodeRef, (memoryId) => isMemoryReadableFresh(txCtx, memoryId, tx));
+          // Capture a non-null mutation answer while the write's locks are held;
+          // a post-commit revocation must not turn a committed success into null.
+          return snapshot ? snapshot(tx) : undefined as T;
         },
         {
           // Gene's #2219 BLIND P2: the AGENT pointer UPDATEs its own anchor row, so two saves holding it shared would
@@ -107,7 +112,7 @@ async function writePointer(
           },
         },
       );
-      return;
+      return written;
     } catch (e) {
       if (e instanceof OwnerTenantChanged) continue;
       throw e;
@@ -145,8 +150,14 @@ export const bootPromptPointerMutations = {
     });
     const notInstalled = () => new AgentNotFoundError(args.agentRef);
     if (!agentId) throw notInstalled();
-    await writePointer(ctx, { field: 'APP_AGENT', appId: app.id, agentId }, nodeRef, notInstalled);
-    return ctx.db.appAgent.findUniqueOrThrow({ where: { appId_agentId: { appId: app.id, agentId } } });
+    return writePointer(ctx, { field: 'APP_AGENT', appId: app.id, agentId }, nodeRef, notInstalled, async tx => {
+      const installation = await resolveAppInstallation(tx, app.id, agentId);
+      if (!installation) throw notInstalled(); // Refuse before commit; the pointer write rolls back.
+      // Membership's Agent projection is incomplete. Keep nested field loading
+      // behind its existing caller-specific gate, exactly as before.
+      const { agent: _membershipAgent, ...payload } = installation;
+      return payload;
+    });
   },
 
   /** Set or clear `Worker.bootPromptRef`: the worker's App's manager, as themselves (R23). */

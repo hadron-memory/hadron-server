@@ -33,6 +33,10 @@ on:
       - 'pnpm-lock.yaml'
       - '.github/workflows/tsc.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   tsc:
     runs-on: ubuntu-latest
@@ -61,6 +65,8 @@ jobs:
 
       - name: tsc --noEmit
         env:
-          # The full source + test graph exceeds Node's default 2 GiB heap.
-          NODE_OPTIONS: --max-old-space-size=4096
+          # The full source + test graph exceeds Node's default 2 GiB heap. 4 GiB stopped being enough
+          # on 2026-11-03: main itself measured 4.56 GB peak (`tsc --extendedDiagnostics`, Memory used),
+          # so any PR adding a model tipped it over (#3298). 6 GiB fits the 16 GB public-repo runner.
+          NODE_OPTIONS: --max-old-space-size=6144
         run: pnpm tsc --noEmit -p .

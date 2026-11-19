@@ -42,6 +42,26 @@ that choice consistent for teardown; auto teardown uses the recorded choice. Doc
 the Incus publication binds the disposable instance's interfaces, reachable
 only through the private QA bridge and the host-loopback forwarder.
 
+### Private env file for mocked capability tools (Incus only)
+
+A stack whose Compose interpolates private variables (for example a mocked
+capability tool's token) is booted with an explicit opt-in:
+
+```sh
+E2E_PRIVATE_ENV_FILE=/path/to/mock.env scripts/e2e/stack.sh up NAME 18400 18500
+```
+
+The file is copied mode 600 (owner root) into `/opt/hadron-private/env` inside
+the owned instance and passed as `--env-file` to every inner Compose call
+(`up`, `exec`, `logs`, validation). `compose config --quiet` runs before `up`;
+its output and errors are discarded, so a failure prints only a generic line
+and neither the file's values nor the resolved configuration reach harness
+output. The copy dies with the instance on `down`, which also removes the
+stack's `private-env` state marker; other stacks are untouched. Nothing else
+from the host environment is forwarded. Use synthetic values only. The Docker
+backend refuses the option with a message (Compose there already reads the
+host environment). Without the option nothing changes.
+
 On Incus, `dns-guard.sh` probes name resolution inside the fresh instance before
 anything needs the network (`E2E_DNS_POLL_SECONDS`, `E2E_DNS_SEED_AFTER`,
 `E2E_DNS_WAIT_PROBES`). A resolver that comes up by itself is left alone. Only
@@ -94,6 +114,8 @@ In **each org**:
 - `team` App with its admin, coordinator and QA role agents, two cast workers
   (`Test Coordinator`, `Test Reviewer`), worker memories, an App key and a
   default team Channel in the `app` memory; runnable `tasks:check-stack`.
+  The role agents' shared `system` memory holds one conversation, `welcome` (one stage,
+  `greet`), so an unnamed `startChat` on the coordinator opens it (#3160).
 - `specs` memory with `rule:001` and `rule:002`: current approvals, mint
   hashes and revision fingerprints. Its `spec.rule` role has a locked
   ADMIN-writer rule, so member-authored edits are protected.
@@ -216,3 +238,38 @@ Run `down`/`up`/`check` on a fresh stack. Lifecycle/forwarder regressions run wi
 `node --test scripts/e2e/*.test.mjs`. Keep epic-specific fixtures (passkeys,
 virtual authenticators, comments) in their later slices; do not change the
 canonical dev seed or shared `hadron_test` database for an E2E fixture.
+
+## Synthetic scale fixture (#2899)
+
+`scale-fixture.mjs` emits a bounded bulk-SQL program, not a million-row host file.
+It accepts a node count (1..1,000,000) and an optional deterministic seed. Pipe it
+only to the **named disposable stack's** `e2e` database, after the normal seed:
+
+```sh
+node scripts/e2e/scale-fixture.mjs 10000 | \
+  incus exec hadron-e2e-YOUR-NAME -- \
+  docker exec -i hadron-e2e-YOUR-NAME-db-1 psql -X -U e2e -d e2e
+```
+
+Use `set -o pipefail` in the invoking shell. The SQL refuses a non-`e2e`
+database/role, missing synthetic catalog, an existing scale memory, or a
+colliding control identity. It inserts one count-specific knowledge memory and
+one shared one-node control per seed. Repeating a count refuses rather than
+replacing anything. The same seed/count produces identical ids and counts.
+`stack.sh down YOUR-NAME` removes all calibration and final fixture data.
+
+The data is synthetic: about 900 bytes of body per node, deterministic tags,
+1000 top-level folders, wide groups of up to 5000 children, and a final chain
+(maximum loc depth 11). Small calibration counts have correspondingly smaller
+shapes. The generated `nodes.tsv` and revision-fingerprint triggers stay on;
+approval-hash v1 and abstract lineage are populated. Each node has one pre-edit
+history snapshot at revision 1 and live revision 2 with identical curated
+content. This models a metadata-only edit without inventing a history row for
+the live revision. No embeddings are generated; vector indexing is disabled
+for these memories, leaving the shared vector index without fixture entries.
+
+Before a million-node pass, measure 10k and 100k first and record their build
+cost and storage slope. Set the stack's CPU/memory limits **before** bulk
+seeding; use private disk-backed TMPDIR, monitor the host owner's stated
+load/free-space limits, and stop on a threshold. Do not infer permission to
+load-test, retain a staging server, or seed any host database from this script.

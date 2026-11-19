@@ -99,6 +99,9 @@ beforeEach(async () => {
     },
   });
 
+  // #1376: an item never admits a userless key's session; the session memory is the App's own (tied to it).
+  await db.memory.update({ where: { id: sessionMemory.id }, data: { appId: app.id } });
+
   const session = await db.session.create({
     data: {
       id: generateId(),

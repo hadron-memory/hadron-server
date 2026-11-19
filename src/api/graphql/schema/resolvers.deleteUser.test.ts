@@ -22,6 +22,7 @@ import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { mintUserApiKey, resolveAuthContext } from '../../../middleware/auth.js';
 import { signJwt } from '../../../auth/jwt.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -166,6 +167,58 @@ describe('Mutation.deleteUser — self-delete happy path (org-less user)', () =>
     await resolvers.Mutation.deleteUser({}, {}, userCtx(user));
 
     expect(await resolveAuthContext(bearerReq(jwt), db)).toEqual({});
+  });
+});
+
+describe('Mutation.deleteUser — app-scoped personal memory erasure (#422)', () => {
+  it.each([
+    { label: 'without an install or casting', cast: false },
+    { label: 'with an install and Worker casting', cast: true },
+  ])('erases the Agent-linked memory before its Agent ($label)', async ({ cast }) => {
+    const user = await makeUser();
+    const agent = await db.agent.create({
+      data: { id: generateId(), ownerUserId: user.id, urn: `${user.handle}:assistant`, name: 'Assistant', visibility: 'PERSONAL' },
+    });
+    const app = await db.app.create({
+      data: { id: generateId(), ownerUserId: user.id, urn: `${user.handle}:workspace`, name: 'Workspace' },
+    });
+    const personal = await db.memory.create({
+      data: {
+        id: generateId(), ownerUserId: user.id, userId: user.id,
+        appId: app.id, userMemoryOfAgentId: agent.id,
+        urn: `${user.handle}:assistant-notes`, name: 'Assistant Notes', class: 'personal',
+      },
+    });
+    const node = await db.node.create({
+      data: { id: generateId(), memoryId: personal.id, loc: 'private-note', name: 'Private note', content: 'Owner data' },
+    });
+    if (cast) await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    const worker = cast ? await db.worker.create({
+      data: {
+        ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id,
+        name: 'Assistant', slug: 'assistant',
+      },
+    }) : null;
+
+    // Prove the SQL-only CHECK is enforced, not merely that the row has the
+    // right shape: this single failed statement rolls back its own update.
+    await expect(db.memory.update({
+      where: { id: personal.id }, data: { userMemoryOfAgentId: null },
+    })).rejects.toThrow('chk_memory_personal_agent_id');
+    // Deleting the Agent first would attempt that same SET NULL; the valid
+    // shape must survive the negative control before supported erasure.
+    expect(await db.memory.findUniqueOrThrow({ where: { id: personal.id } })).toMatchObject({
+      class: 'personal', appId: app.id, userId: user.id, userMemoryOfAgentId: agent.id,
+    });
+    await expect(resolvers.Mutation.deleteUser({}, {}, userCtx(user))).resolves.toBe(true);
+
+    expect(await db.memory.findUnique({ where: { id: personal.id } })).toBeNull();
+    expect(await db.node.findUnique({ where: { id: node.id } })).toBeNull();
+    expect(await db.agent.findUnique({ where: { id: agent.id } })).toBeNull();
+    expect(await db.app.findUnique({ where: { id: app.id } })).toBeNull();
+    expect(await db.appAgent.count({ where: { appId: app.id, agentId: agent.id } })).toBe(0);
+    if (worker) expect(await db.worker.findUnique({ where: { id: worker.id } })).toBeNull();
+    expect((await db.user.findUniqueOrThrow({ where: { id: user.id } })).deletedAt).not.toBeNull();
   });
 });
 

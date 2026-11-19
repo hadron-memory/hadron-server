@@ -26,7 +26,7 @@ import express from 'express';
 import rateLimit from 'express-rate-limit';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../../server.js';
+import { createServerOnCleanDb } from '../startServerFixture.js';
 import { buildOAuthRouter, handleClientRegistration } from '../../auth/oauth.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
@@ -58,7 +58,7 @@ describe('POST /oauth/register — happy path + validation', () => {
   }
 
   beforeAll(async () => {
-    const app = await createServer();
+    const app = await createServerOnCleanDb();
     server = createHttpServer(app);
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as AddressInfo).port;
@@ -96,6 +96,18 @@ describe('POST /oauth/register — happy path + validation', () => {
     });
     expect(row.clientName).toBe('Some MCP Client');
     expect(row.redirectUris).toEqual(['https://example.com/callback']);
+  });
+
+  it('#155: a registered client expires 30 days from registration unless it is used', async () => {
+    const before = Date.now();
+    const res = await postRegister({ client_name: 'Expiring Client', redirect_uris: ['https://example.com/cb'] });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { client_id: string };
+    const row = await db.oAuthClient.findUniqueOrThrow({ where: { clientId: body.client_id } });
+    const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+    expect(row.expiresAt).not.toBeNull();
+    expect(row.expiresAt!.getTime()).toBeGreaterThanOrEqual(before + thirtyDays);
+    expect(row.expiresAt!.getTime()).toBeLessThanOrEqual(Date.now() + thirtyDays);
   });
 
   it('falls back to "Unnamed MCP Client" when client_name is absent', async () => {
@@ -200,7 +212,7 @@ describe('POST /oauth/register — DB failure returns 500 (not a crash)', () => 
   let baseUrl: string;
 
   beforeAll(async () => {
-    const app = await createServer();
+    const app = await createServerOnCleanDb();
     server = createHttpServer(app);
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as AddressInfo).port;
@@ -266,7 +278,7 @@ describe('POST /oauth/register — #156 dcr_registered log line', () => {
     spy.mock.calls.filter((call) => call[0] === '[oauth] dcr_registered');
 
   beforeAll(async () => {
-    const app = await createServer();
+    const app = await createServerOnCleanDb();
     server = createHttpServer(app);
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

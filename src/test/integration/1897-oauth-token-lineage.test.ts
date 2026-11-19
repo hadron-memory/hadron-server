@@ -7,13 +7,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import { createSignIn, endSignInsCompletedBy } from '../../auth/signIn.js';
 import { lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
 import { waitForLockWaitersOfType } from '../lockWait.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 
 let server: Server;
 let baseUrl: string;
@@ -24,11 +24,11 @@ let userId: string;
 let passkeyId: string;
 
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
-afterAll(async () => { await new Promise<void>((r, j) => server.close((e) => (e ? j(e) : r()))); });
+afterAll(async () => { await closeServerIfStarted(server); });
 
 async function newPasskey(): Promise<string> {
   const id = generateId();

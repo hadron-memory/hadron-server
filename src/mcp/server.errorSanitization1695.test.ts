@@ -1,7 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../server.js';
 import { mintUserApiKey } from '../middleware/auth.js';
 import { Prisma } from '../generated/prisma/index.js';
 import { GraphQLError } from 'graphql';
@@ -12,6 +11,7 @@ import { createTestableMcpServer } from './server.js';
 import { resolvers } from '../api/graphql/schema/resolvers.js';
 import * as locValidation from '../lib/validateLoc.js';
 import * as urnValidation from '../lib/urn.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../test/startServerFixture.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 
@@ -30,11 +30,11 @@ const mutations = resolvers.Mutation as unknown as Record<string, (...args: unkn
 const queries = resolvers.Query as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
 
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
-afterAll(async () => { await new Promise<void>((resolve) => server.close(() => resolve())); });
+afterAll(async () => { await closeServerIfStarted(server); });
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -48,7 +48,13 @@ beforeEach(async () => {
 afterEach(() => vi.restoreAllMocks());
 
 function assertSanitized(result: unknown) {
-  expect(result).toEqual({ isError: true, content: [{ type: 'text', text: '[internal_server_error] Unable to complete this request. Please try again.' }] });
+  // #1789: the generic envelope, with the request id as structured data and as text.
+  const requestId = (result as { structuredContent: { error: { requestId: string } } }).structuredContent.error.requestId;
+  expect(result).toEqual({
+    isError: true,
+    content: [{ type: 'text', text: `[INTERNAL_SERVER_ERROR] Internal server error. Request id: ${requestId}` }],
+    structuredContent: { error: { code: 'INTERNAL_SERVER_ERROR', requestId, message: 'Internal server error.' } },
+  });
   expect(JSON.stringify(result)).not.toMatch(/prisma|private-memory|\/srv\/|Unknown argument/i);
 }
 
@@ -68,7 +74,7 @@ describe('#1695 MCP raw-fallback sites', () => {
     vi.spyOn(mutations, resolver).mockRejectedValueOnce(error);
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     assertSanitized(await mcp.callTool(tool, args));
-    expect(log).toHaveBeenCalledWith('[mcp] tool_database_error', expect.objectContaining({ error }));
+    expect(log).toHaveBeenCalledWith('[mcp] internal_fault', expect.objectContaining({ error }));
   });
 
   it.each([
@@ -90,14 +96,14 @@ describe('#1695 MCP raw-fallback sites', () => {
     vi.spyOn(urnValidation, 'assertFullyQualifiedUrn').mockImplementationOnce(() => { throw failure(); });
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     assertSanitized(await mcp.callTool('hadron_create_task', { urn, name: 'Test' }));
-    expect(log).toHaveBeenCalledWith('[mcp] tool_database_error', expect.objectContaining({ site: 'hadron_create_task:parseUrn' }));
+    expect(log).toHaveBeenCalledWith('[mcp] internal_fault', expect.objectContaining({ site: 'hadron_create_task:parseUrn' }));
   });
 
   it('the governed door guards its validateLoc catch', async () => {
     vi.spyOn(locValidation, 'validateLoc').mockImplementationOnce(() => { throw failure(); });
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     assertSanitized(await mcp.callTool('hadron_create_task', { urn, name: 'Test' }));
-    expect(log).toHaveBeenCalledWith('[mcp] tool_database_error', expect.objectContaining({ site: 'hadron_create_task:validateLoc' }));
+    expect(log).toHaveBeenCalledWith('[mcp] internal_fault', expect.objectContaining({ site: 'hadron_create_task:validateLoc' }));
   });
 
   it('redacts a wrapper that retained only the Prisma message', async () => {
@@ -110,7 +116,7 @@ describe('#1695 MCP raw-fallback sites', () => {
     vi.spyOn(db.memory, 'findMany').mockRejectedValueOnce(failure());
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     assertSanitized(await mcp.callTool('hadron_list_memories', {}));
-    expect(log).toHaveBeenCalledWith('[mcp] tool_database_error', expect.objectContaining({ site: 'hadron_list_memories:handler' }));
+    expect(log).toHaveBeenCalledWith('[mcp] internal_fault', expect.objectContaining({ site: 'hadron_list_memories:handler' }));
   });
 
   it('a GraphQL wrapper and its code cannot launder Prisma details', async () => {
@@ -151,7 +157,7 @@ describe('#1695 MCP raw-fallback sites', () => {
     const wire = await response.text();
     const data = wire.split('\n').find((line) => line.startsWith('data: '));
     assertSanitized(JSON.parse(data ? data.slice(6) : wire).result);
-    expect(log).toHaveBeenCalledWith('[mcp] tool_database_error', expect.objectContaining({ error: expect.any(Prisma.PrismaClientValidationError) }));
+    expect(log).toHaveBeenCalledWith('[mcp] internal_fault', expect.objectContaining({ error: expect.any(Prisma.PrismaClientValidationError) }));
     expect(await db.node.count({ where: { memoryId, loc: 'test' } })).toBe(0);
     await fetch(`${baseUrl}/mcp`, { method: 'DELETE', headers: { ...headers, 'mcp-session-id': sid } });
   });
@@ -190,7 +196,7 @@ describe('#1788 five main write doors over real HTTP', () => {
       const result = JSON.parse(data ? data.slice(6) : wire).result;
       assertSanitized(result);
       expect(JSON.stringify(result)).not.toMatch(/LEAKMARK|private-detail|ConnectorError|PostgresError|P0001/);
-      expect(log).toHaveBeenCalledWith('[mcp] tool_database_error', expect.objectContaining({
+      expect(log).toHaveBeenCalledWith('[mcp] internal_fault', expect.objectContaining({
         error: expect.any(Prisma.PrismaClientUnknownRequestError),
         site: `${tool}:handler`,
       }));

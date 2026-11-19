@@ -198,7 +198,8 @@ describe('database invariants', () => {
     const dir = readdirSync('prisma/migrations').find((d) => d.endsWith('_sign_in_lineage'))!;
     expect(readFileSync(`prisma/migrations/${dir}/migration.sql`, 'utf8').endsWith(guard)).toBe(true);
     expect(readFileSync('prisma/post-push.sql', 'utf8')).toContain('\\ir signin-invariants.sql');
-    expect(readFileSync('src/test/globalSetup.ts', 'utf8')).toContain('../../prisma/signin-invariants.sql');
+    // #434: post-push.sql (above) is the test template's only path; the vitest global setup no longer re-applies it.
+    expect(readFileSync('src/test/globalSetup.ts', 'utf8')).not.toContain('signin-invariants.sql');
   });
 });
 
@@ -229,7 +230,7 @@ describe('MCP delegation keeps the sign-in root (Rodolfo, #2116)', () => {
     const { createTestableMcpServer } = await import('../mcp/server.js');
     const org = await db.organization.create({ data: { urn: `review-${generateId()}.example`, name: 'Synthetic' } });
     await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
-    const agent = await (resolvers.Mutation as any).createAgent({}, { orgId: org.id, name: 'Review' }, { db, userId, roles: [] });
+    const agent = await (resolvers.Mutation as any).createAgent({}, { orgRef: org.id, name: 'Review' }, { db, userId, roles: [] });
     const node = await db.node.create({ data: { memoryId: agent.systemMemoryId, loc: 'tasks:index', name: 'Index', content: 'Synthetic' } });
     const si = await signIn();
     const auth = await resolveAuthContext(bearer(await jwtFor(userId, si.id)), db);

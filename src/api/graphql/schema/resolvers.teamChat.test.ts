@@ -17,6 +17,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import {
@@ -108,7 +109,7 @@ beforeEach(async () => {
 
   // The Team Agent — through the real mutation so it owns a real system
   // memory; the roles: branch is what marks it as the Team Agent.
-  const created = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   teamAgent = { id: created.id, urn: created.urn, systemMemoryId: created.systemMemoryId };
   await db.node.create({
     data: {
@@ -116,7 +117,7 @@ beforeEach(async () => {
       memoryId: teamAgent.systemMemoryId,
       loc: 'roles:backend-engineer',
       name: 'backend-engineer',
-      content: 'You are {{name}}, a {{role}}.',
+      content: 'You are {{worker.name}}, a {{worker.role}}.',
       data: { names: ['Iris', 'Henry'] },
     },
   });
@@ -127,6 +128,7 @@ beforeEach(async () => {
   await db.appAgent.create({ data: { appId: app.id, agentId: teamAgent.id } });
   await db.appMember.create({ data: { appId: app.id, userId: appMember.id, role: 'member' } });
   await db.appMember.create({ data: { appId: app.id, userId: appReader.id, role: 'reader' } });
+  await serveEveryAgent(db); // #2712: binds need a served prompt
 });
 
 /** Cast a Worker of the installed team agent and bind an active session
@@ -182,7 +184,8 @@ describe('createTeamChatMessage — happy path + bootstrap', () => {
     // Bootstrap delegates to the same Channel creation core as createChannel;
     // the retired shared/private marker must not reappear on this path.
     expect(rootData.scope).toBeUndefined();
-    expect(rootData.messageCount).toBe(1);
+    expect(rootData).not.toHaveProperty('messageCount');
+    expect((await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:root!.id}})).messageCount).toBe(1);
 
     const row = await db.node.findUnique({ where: { id: msg.nodeId } });
     expect(row!.nodeType).toBe('chat-message');
@@ -220,11 +223,11 @@ describe('createTeamChatMessage — happy path + bootstrap', () => {
       // loc-scope-ok: scoped to the fixture App via the memory relation
       where: { loc: TEAM_CHAT_LOC, memory: { appId: app.id, class: 'app' } },
     });
-    expect((root!.data as Record<string, unknown>).messageCount).toBe(4);
+    expect((await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:root!.id}})).messageCount).toBe(4);
   });
 
   it('falls back to the single installed Agent when no roles: branch marks a Team Agent', async () => {
-    const plain = await M.createAgent({}, { orgId: org.id, name: 'Solo Agent' }, ctx(admin.id));
+    const plain = await M.createAgent({}, { orgRef: org.id, name: 'Solo Agent' }, ctx(admin.id));
     const app2 = await db.app.create({
       data: { id: generateId(), organizationId: org.id, name: 'Solo App', urn: `${org.urn}:solo` },
     });
@@ -349,7 +352,7 @@ describe('createTeamChatMessage — replyToSeq', () => {
       where: { loc: TEAM_CHAT_LOC, memory: { appId: app.id, class: 'app' } },
     });
     // The failed reply consumed no seq and left no row.
-    expect((root!.data as Record<string, unknown>).messageCount).toBe(1);
+    expect((await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:root!.id}})).messageCount).toBe(1);
     const messages = await db.node.count({
       where: { memoryId: root!.memoryId, loc: { startsWith: `${TEAM_CHAT_MESSAGES_LOC}:` } },
     });
@@ -814,8 +817,8 @@ describe('auth matrix — one case per principal shape', () => {
   });
 
   it('a non-member is refused for both post and read', async () => {
-    await expectCode(post(ctx(outsider.id), {}), 'FORBIDDEN');
-    await expectCode(read(ctx(outsider.id)), 'FORBIDDEN');
+    await expectCode(post(ctx(outsider.id), {}), 'APP_NOT_FOUND');
+    await expectCode(read(ctx(outsider.id)), 'APP_NOT_FOUND');
   });
 
   it('an unauthenticated caller is refused as UNAUTHENTICATED, not FORBIDDEN (#1509)', async () => {
@@ -836,13 +839,13 @@ describe('auth matrix — one case per principal shape', () => {
     const app2 = await db.app.create({
       data: { id: generateId(), organizationId: org.id, name: 'Other App', urn: `${org.urn}:other` },
     });
-    await expectCode(read(ctx(undefined, app2.id)), 'FORBIDDEN');
+    await expectCode(read(ctx(undefined, app2.id)), 'APP_NOT_FOUND');
   });
 
   it('a hybrid user+selection principal is judged on the USER, not the selection', async () => {
     // outsider with an active-App selection of this very App — the selection
     // is not a credential (findings:auth-appid-credential-vs-selection).
-    await expectCode(post(ctx(outsider.id, app.id), {}), 'FORBIDDEN');
+    await expectCode(post(ctx(outsider.id, app.id), {}), 'APP_NOT_FOUND');
   });
 
   it('an impersonation session may read but never post', async () => {
@@ -871,7 +874,7 @@ describe('auth matrix — one case per principal shape', () => {
       roles: ['READER'],
       impersonation: { orgId: otherOrg.id } as any,
     } as Context;
-    await expectCode(Q.teamChatMessages({}, { appRef: app.id }, crossOrgImp), 'FORBIDDEN');
+    await expectCode(Q.teamChatMessages({}, { appRef: app.id }, crossOrgImp), 'APP_NOT_FOUND');
     // And a user-owned App is never readable under impersonation at all.
     const owner = await db.user.create({
       data: { id: generateId(), githubId: 93907, githubUsername: `tc-imp-owner-${Date.now()}`, roles: ['READER'] },
@@ -885,7 +888,7 @@ describe('auth matrix — one case per principal shape', () => {
       roles: ['READER'],
       impersonation: { orgId: org.id } as any,
     } as Context;
-    await expectCode(Q.teamChatMessages({}, { appRef: userApp.id }, ownerImp), 'FORBIDDEN');
+    await expectCode(Q.teamChatMessages({}, { appRef: userApp.id }, ownerImp), 'APP_NOT_FOUND');
   });
 
   it('a user-owned App is strictly owner-gated (spec 047)', async () => {
@@ -899,7 +902,7 @@ describe('auth matrix — one case per principal shape', () => {
     // anyone else — even a platform org admin — is refused.
     const page = await Q.teamChatMessages({}, { appRef: userApp.id }, ctx(owner.id));
     expect(page).toEqual({ items: [], total: 0 });
-    await expectCode(Q.teamChatMessages({}, { appRef: userApp.id }, ctx(admin.id)), 'FORBIDDEN');
+    await expectCode(Q.teamChatMessages({}, { appRef: userApp.id }, ctx(admin.id)), 'APP_NOT_FOUND');
   });
 });
 
@@ -1587,4 +1590,24 @@ describe('#1874 — the reply fold on an ENCRYPTED team chat (cor:agt:020:04 has
     const env = decryptNodeFieldsWithKey({ data: sealed!.data as unknown }, key).data as Record<string, unknown>;
     expect(env.mentions).toBeUndefined();
   });
+});
+
+it('#3496: fingerprinted team posts do not revision counters, and canonical delete/revive keeps the counter', async () => {
+  const session = await workerSession(admin.id, 'Counter');
+  await post(ctx(admin.id), {sessionRef:session.sessionId,body:'counter 1'});
+  const root = await db.node.findFirstOrThrow({where:{loc:TEAM_CHAT_LOC,memory:{appId:app.id,class:'app'}}}); // loc-scope-ok: this App's canonical team root
+  await db.node.update({where:{id:root.id},data:{authorshipKind:'TASK',authoredByTask:'tasks:author',authoredByRevision:1,authoredAt:new Date(),revisionContentHash:'refresh'}});
+  const before = await db.node.findUniqueOrThrow({where:{id:root.id}});
+  await post(ctx(admin.id), {sessionRef:session.sessionId,body:'counter 2'});
+  await post(ctx(admin.id), {sessionRef:session.sessionId,body:'counter 3'});
+  const {ensureCurrentNodeRevisionInTransaction}=await import('../../../lib/nodeRevisionSnapshot.js');
+  await db.$transaction(tx=>ensureCurrentNodeRevisionInTransaction(tx,root.id,{expectedMemoryId:root.memoryId}));
+  const after=await db.node.findUniqueOrThrow({where:{id:root.id}});
+  expect(after.revSeq).toBe(before.revSeq);expect(after.authoredByTask).toBe(before.authoredByTask);
+  const count=(await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:root.id}})).messageCount;
+  await db.node.update({where:{id:root.id},data:{deletedAt:new Date()}});
+  const revived=await post(ctx(admin.id),{sessionRef:session.sessionId,body:'counter 4'});
+  expect(revived.seq).toBe(count+1);
+  expect((await db.node.findUniqueOrThrow({where:{id:root.id}})).deletedAt).toBeNull();
+  expect((await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:root.id}})).messageCount).toBe(count+1);
 });

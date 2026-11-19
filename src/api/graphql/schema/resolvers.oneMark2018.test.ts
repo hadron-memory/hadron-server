@@ -86,7 +86,7 @@ beforeEach(async () => {
   org = await db.organization.create({ data: { name: 'Batches', urn: `batches-${n}.example` }, select: { id: true, urn: true } });
   manager = await db.user.create({ data: { githubId: 81_000_000 + n, githubUsername: `bt-m-${n}`, roles: ['READER'] }, select: { id: true } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: manager.id, role: 'ADMIN' } });
-  agentId = (await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(manager.id))).id;
+  agentId = (await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(manager.id))).id;
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true, urn: true } });
   otherApp = await db.app.create({ data: { organizationId: org.id, name: 'Other', urn: `${org.urn}:other` }, select: { id: true } });
   kit = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Kit', slug: 'kit' }, select: { id: true, name: true } });
@@ -236,7 +236,7 @@ describe('#2018 S2: an own mentions read', () => {
 
   it('an ALL-relevance ticker covering a full attendance makes a mentions read move nothing', async () => {
     const s = await ownSession();
-    const t = await db.ticker.create({ data: { id: generateId(), appId: app.id, ownerUserId: manager.id, name: 'Eng', slug: 'eng', cadenceSeconds: 600, anchorAt: new Date(Date.now() - 3600_000) } });
+    const t = await db.ticker.create({ data: { tickCode: 'tick.fixture', id: generateId(), appId: app.id, ownerUserId: manager.id, name: 'Eng', slug: 'eng', cadenceSeconds: 600, anchorAt: new Date(Date.now() - 3600_000) } });
     await db.tickerSubscription.create({ data: { id: generateId(), tickerId: t.id, workerId: kit.id, createdBy: manager.id } });
     await say('chatter');
     await say('@kit a', { mentions: ['kit'] });
@@ -374,7 +374,7 @@ const parkAtMarkWrite = () => hookedDb((sql) => sql.includes('INSERT INTO worker
 
 /** An enabled ALL-relevance ticker covering every channel, with Kit subscribed (Dara's probe fixture). */
 async function allTicker(opts: { enabled?: boolean; subscribe?: boolean } = {}) {
-  const t = await db.ticker.create({ data: { id: generateId(), appId: app.id, ownerUserId: manager.id, name: 'All', slug: 'all', cadenceSeconds: 600, anchorAt: new Date(Date.now() - 3600_000), enabled: opts.enabled ?? true } });
+  const t = await db.ticker.create({ data: { tickCode: 'tick.fixture', id: generateId(), appId: app.id, ownerUserId: manager.id, name: 'All', slug: 'all', cadenceSeconds: 600, anchorAt: new Date(Date.now() - 3600_000), enabled: opts.enabled ?? true } });
   if (opts.subscribe ?? true) await db.tickerSubscription.create({ data: { id: generateId(), tickerId: t.id, workerId: kit.id, createdBy: manager.id } });
   return t;
 }

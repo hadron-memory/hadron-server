@@ -17,6 +17,7 @@ import {
   getAccessibleMemoryIds,
   requireMemoryWriteAccess,
   concealUnreadableDenial,
+  loadReadableMemoryRecord,
   resolveOrgScope,
 } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -25,8 +26,9 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
-import { validateLoc } from '../../../lib/validateLoc.js';
+import { InvalidLocError, validateLoc } from '../../../lib/validateLoc.js';
 import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
+import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
 /**
  * A Channel row as a field resolver may receive it: the `channels` page
@@ -34,10 +36,10 @@ import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js'
  */
 type ChannelWithHostUrn = Channel & { memory?: { urn: string } | null };
 
-/** The caller's readable-memory clause, or null for the unrestricted principal. */
-async function readableMemoryWhere(ctx: Context): Promise<Prisma.MemoryWhereInput | null> {
+/** The caller's readable-memory clause: always a list-backed filter, never an unrestricted principal (#3921). */
+async function readableMemoryWhere(ctx: Context): Promise<Prisma.MemoryWhereInput> {
   const accessible = await getAccessibleMemoryIds(ctx);
-  return accessible === null ? null : { id: { in: accessible } };
+  return { id: { in: accessible } };
 }
 
 async function readableChannel(ctx: Context, ref: string): Promise<Channel | null> {
@@ -49,7 +51,7 @@ async function readableChannel(ctx: Context, ref: string): Promise<Channel | nul
   const row = await ctx.db.channel.findFirst({ where: { id, deletedAt: null } });
   if (!row) return null;
   const accessible = await getAccessibleMemoryIds(ctx);
-  if (accessible !== null && !accessible.includes(row.memoryId)) return null;
+  if (!accessible.includes(row.memoryId)) return null;
   return row;
 }
 
@@ -71,9 +73,7 @@ export const channelQueries = {
     const empty = { items: [] as Channel[], total: 0 };
     const scope = await resolveOrgScope(ctx, orgId);
     if (!scope) return empty;
-    const memoryWhere: Prisma.MemoryWhereInput[] = [{ deletedAt: null }];
-    const readable = await readableMemoryWhere(ctx);
-    if (readable) memoryWhere.push(readable);
+    const memoryWhere: Prisma.MemoryWhereInput[] = [{ deletedAt: null }, await readableMemoryWhere(ctx)];
     if (scope.scopedOrgId) memoryWhere.push({ organizationId: scope.scopedOrgId });
     if (filter?.memoryRef) {
       try {
@@ -121,14 +121,26 @@ export const channelMutations = {
     { input }: { input: { memoryRef: string; loc: string; name: string; description?: string | null } },
     ctx: Context,
   ): Promise<Channel> => {
-    if (ctx.impersonation) throw new Error('Forbidden');
-    if (!ctx.userId) throw new Error('Unauthenticated');
+    if (ctx.impersonation) throw forbiddenError();
+    if (!ctx.userId) throw unauthenticatedError();
     const memoryRef = input.memoryRef.trim();
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     // #1316: a memory the caller cannot open answers as resolveMemoryRef's miss.
     await concealUnreadableDenial(ctx, memoryId, memoryRef, () => requireMemoryWriteAccess(ctx, memoryId));
     const loc = input.loc.trim();
-    validateLoc(loc);
+    // #3136: the one GraphQL validateLoc site that still threw raw — every
+    // sibling (upsertNode and friends) wraps typed, so a bad loc here surfaced
+    // INTERNAL_SERVER_ERROR instead of the code the other nine sites deliver.
+    try {
+      validateLoc(loc);
+    } catch (e) {
+      if (e instanceof InvalidLocError) {
+        throw new GraphQLError(e.message, {
+          extensions: { code: e.name, loc: e.loc, segment: e.segment },
+        });
+      }
+      throw e;
+    }
     const name = input.name.trim();
     if (!name) throw new GraphQLError('name is required.', { extensions: { code: 'BAD_USER_INPUT' } });
     // The overlap check (LOC_OVERLAPS_CHANNEL) and the live-occupant check
@@ -153,7 +165,7 @@ export const channelMutations = {
     { ref, input }: { ref: string; input: { name?: string | null; description?: string | null } },
     ctx: Context,
   ): Promise<Channel> => {
-    if (ctx.impersonation) throw new Error('Forbidden');
+    if (ctx.impersonation) throw forbiddenError();
     const row = await writableChannel(ctx, ref);
     const name = input.name != null ? input.name.trim() : undefined;
     if (name !== undefined && !name) throw new GraphQLError('name must be non-empty.', { extensions: { code: 'BAD_USER_INPUT' } });
@@ -168,7 +180,7 @@ export const channelMutations = {
   },
 
   deleteChannel: async (_: unknown, { ref }: { ref: string }, ctx: Context): Promise<boolean> => {
-    if (ctx.impersonation) throw new Error('Forbidden');
+    if (ctx.impersonation) throw forbiddenError();
     const row = await writableChannel(ctx, ref);
     const now = new Date();
     await ctx.db.$transaction(async (tx) => {
@@ -210,7 +222,9 @@ export const channelMutations = {
 
 export const channelFieldResolvers = {
   Channel: {
-    memory: (c: Channel, _: unknown, ctx: Context) => ctx.db.memory.findUnique({ where: { id: c.memoryId } }),
+    // #2509 (cor:acl:110, cor:api:140:03): the record as Query.memory answers it to this caller, else null. The
+    // channel list that handed this row out authorized the CHANNEL; a preloaded host memory authorizes nothing.
+    memory: (c: Channel, _: unknown, ctx: Context) => loadReadableMemoryRecord(ctx, c.memoryId),
 
     /**
      * #1171 — the Channel's address as ONE string every `channelRef` accepts:

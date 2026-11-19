@@ -93,7 +93,7 @@
  *        tsx ticker-wake.ts loop [--interval <seconds>=120] [--budget <seconds>=interval]
  */
 import { spawn } from 'node:child_process';
-import { linkSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -101,6 +101,7 @@ import {
   readScreen, promptIsEmptyFromTerm, screenAgentFamily, isIdle, idleProofAbovePrompt,
   CALL_TIMEOUT_MS, type Config, type RosterEntry, type Runner, type RunResult,
 } from '../orca-attention-router/router.js';
+import { openTaskLine } from '../lib/openTaskLine.js';
 
 /** A runner that does not block: the sends of different workers overlap. */
 export type AsyncRunner = (argv: string[]) => Promise<RunResult>;
@@ -124,7 +125,7 @@ export const runCommandAsync: AsyncRunner = (argv) => new Promise((resolveRun) =
     : { code, stdout, stderr }));
 });
 
-export const QUERY = `query($a:String!,$p:String){dueWakes(appRef:$a,first:100,after:$p){wakes{worker{id name} reasons{kind ticker{id name} task{id eventId chainIndex event}} proof anchorAt deliverAfter busyDeadline} pageInfo{hasNextPage endCursor}}}`;
+export const QUERY = `query($a:String!,$p:String){dueWakes(appRef:$a,first:100,after:$p){wakes{tickText worker{id name} reasons{kind ticker{id name} action{state} task{id eventId chainIndex event}} proof anchorAt deliverAfter busyDeadline} pageInfo{hasNextPage endCursor}}}`;
 export const ACK = `mutation($p:[String!]!){acknowledgeWakes(proofs:$p){acknowledged unchanged}}`;
 /** The worker's own last team-channel check (#2138 §3.4; stamped only through its own session). */
 export const WORKER_CHECK = `query($w:ID!,$a:ID){worker(ref:$w,appRef:$a){id checkStatus{lastCheckedAt}}}`;
@@ -185,6 +186,19 @@ const STALL_RULE = /^[a-z][a-z0-9.-]{0,63}$/;
 /** A task id is typed into a terminal, so only a plain id shape is accepted; anything else holds the wake. */
 const TASK_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
+/** The longest tick line this script types (about 20 tickers at 200 characters). */
+const TICK_TEXT_MAX = 4000;
+/** C0, DEL and C1 controls (a tab and a line break included), U+2028 and U+2029: nothing that can submit or reshape a typed line. */
+const TICK_TEXT_UNTYPEABLE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+/**
+ * #2754: the server's tick line, or null when it can't be typed as one line. The server writes it and no reader
+ * rebuilds, wraps or re-renders it (hrn:node:hadronmemory.com:specs:cor:agt:080:26), so it is typed unchanged or not at
+ * all, never "fixed".
+ */
+export function typeableTickText(v: unknown): string | null {
+  return typeof v === 'string' && v.length >= 1 && v.length <= TICK_TEXT_MAX && !TICK_TEXT_UNTYPEABLE.test(v) ? v : null;
+}
+
 type Log = (line: string) => void;
 /**
  * `budgetMs`: no new delivery starts once this long has passed since the pass began (default DEFAULT_ONCE_BUDGET_S).
@@ -208,6 +222,68 @@ type Receipts = Record<string, Receipt>; // by worker id
 /** Old requests displaced by NEW tick work, retained for a person; never treated as delivered evidence. */
 type NeedsPerson = Record<string, Ambiguous & { workerId: string }>;
 const NEEDS_PERSON_FILE = 'needs-person.json';
+
+/**
+ * #2746: the per-pass hold reasons, readable by the host's non-privileged user (stdout goes to a journal it cannot read).
+ * One line per held worker per pass: `<iso time> <worker name> <worker id> <code>`. The code comes from this closed
+ * list and nothing else is written: no wake text, tick line, proof, request detail or server message ever reaches it.
+ */
+const HOLDS_FILE = 'holds.log';
+const HOLDS_MAX_LINES = 200;
+const HOLD_CODES = [
+  'carries-other-reasons', 'no-receiver-on-host', 'proof-coverage-unreadable', 'no-server-timing', 'terminal-unresolved',
+  'terminal-send-in-flight', 'unreconciled-earlier-send', 'unreconciled-other-receiver', 'stranded-draft', 'uncovered-work-unidentified',
+  'alarm-unreadable', 'alarm-rule-unestablished', 'alarm-acknowledged', 'not-safe-to-type', 'check-status-unreadable', 'terminal-changed',
+  'state-write-failed', 'send-failed-will-retry', 'send-unconfirmed', 'ack-failed', 'pass-budget-spent', 'other',
+] as const;
+type HoldCode = (typeof HOLD_CODES)[number];
+/** A name or id is written only in its plain shape, so a hostile one cannot forge a second field or line. */
+const PLAIN_NAME = /^[A-Za-z0-9_.-]{1,40}$/;
+const PLAIN_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** What a per-worker log body means for the hold file: a closed code, 'ok' (delivered, clears an earlier hold) or 'info' (not a hold). */
+export function holdOf(body: string): HoldCode | 'ok' | 'info' {
+  const rules: Array<[RegExp, HoldCode | 'ok' | 'info']> = [
+    [/^left alone \(/, 'carries-other-reasons'],
+    [/^held \(.* on this host\)$/, 'no-receiver-on-host'],
+    [/^held \(the proof's tick coverage/, 'proof-coverage-unreadable'],
+    [/^held \(the wake carries no server timing/, 'no-server-timing'],
+    [/^held \(another send to this terminal/, 'terminal-send-in-flight'],
+    [/^an earlier send is unreconciled for another receiver/, 'unreconciled-other-receiver'],
+    [/^an earlier send is unreconciled/, 'unreconciled-earlier-send'],
+    [/^(unreconciled request not reissued|earlier request still unreconciled)/, 'unreconciled-earlier-send'],
+    [/^our nudge is in the composer/, 'stranded-draft'],
+    [/^held \(the uncovered tick work/, 'uncovered-work-unidentified'],
+    [/^held \(the alarm cannot be read/, 'alarm-unreadable'],
+    [/^held \(the alarm's rule/, 'alarm-rule-unestablished'],
+    [/^held \(the alarm was acknowledged/, 'alarm-acknowledged'],
+    [/^held \(the worker's check status/, 'check-status-unreadable'],
+    [/^held \((the terminal incarnation changed|receiver replacement)/, 'terminal-changed'],
+    [/^held \((the old request could not be retained|the send intent could not be recorded)/, 'state-write-failed'],
+    [/^(could not withdraw the send intent|could not update the send record)/, 'state-write-failed'],
+    [/^nudged .* but the receipt could not be written/, 'state-write-failed'],
+    [/^send not confirmed/, 'send-unconfirmed'],
+    [/; will retry$/, 'send-failed-will-retry'],
+    [/^nudged .*ack FAILED/, 'ack-failed'],
+    [/^ack-only recovery FAILED/, 'ack-failed'],
+    [/^(nudged .*; acked|ack-only recovery acked|WOULD )/, 'ok'],
+    [/^(earlier request needs a person .*newer ticks are a fresh request|earlier request (reconciled|resolved)|open-task count unknown|tick line not typeable|retired ambiguity)/, 'info'],
+    [/^held \(/, 'other'],
+  ];
+  for (const [re, code] of rules) if (re.test(body)) return code;
+  return 'other';
+}
+
+/** Append this pass's hold lines and keep only the newest HOLDS_MAX_LINES; the file is mode 0644 and replaced atomically. */
+function writeHolds(dir: string, lines: string[]): void {
+  const path = join(dir, HOLDS_FILE);
+  let old: string[] = [];
+  try { old = readFileSync(path, 'utf8').split('\n').filter((l) => l !== ''); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, [...old, ...lines].slice(-HOLDS_MAX_LINES).join('\n') + '\n', { mode: 0o644 });
+  chmodSync(tmp, 0o644);
+  renameSync(tmp, path);
+}
 
 /** A strictly newer tick is new work; an old tick or task in an unresolved request is never named again. */
 function tickParts(key: string): { ticker: string; k: number } | null {
@@ -729,10 +805,21 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
     .sort(([a], [b]) => a.localeCompare(b));
   if (unreachable.length) log(`${ts} unreachable on this host (${unreachable.length}): ${unreachable.map(([n, r]) => `${n} (${r})`).join(', ')}`);
   const inFlight = new Set<string>(); // terminal handles with a send in flight
+  const baseLog = log;
+  /** #2746: each held worker's closed reason this pass (the last hold line of its delivery wins; a delivery clears it). */
+  const holds = new Map<string, { name: string; code: HoldCode }>();
   /** Deliver one due wake. Only a submit awaits; everything else is synchronous, so a receipt update never interleaves. */
   const deliver = async (w: any): Promise<void> => {
       const name = w.worker.name;
       const id: string = w.worker.id;
+      // #2746: every per-worker line also feeds the hold file, as a closed code (an explicit code wins over the line's text).
+      const log = (m: string, code?: HoldCode): void => {
+        baseLog(m);
+        const prefix = `${ts} ${name}: `;
+        const c = code ?? (m.startsWith(prefix) ? holdOf(m.slice(prefix.length)) : 'info');
+        if (c === 'ok') holds.delete(id);
+        else if (c !== 'info') holds.set(id, { name, code: c });
+      };
       const other = [...kinds(w)].filter((x) => x !== 'TICK' && x !== 'MENTION' && x !== 'TASK');
       // A task reason is delivered only for an event this script names (DELIVERED_EVENTS) and the caller can see; its id
       // is typed, and so is an alarm's event id (the ack command), so both must be plain ids.
@@ -758,7 +845,7 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
       if (!Number.isFinite(deliverAfter) || !Number.isFinite(busyDeadline) || !Number.isFinite(at(w.anchorAt))) { log(`${ts} ${name}: held (the wake carries no server timing)`); return; }
 
       const [handle, detail] = resolveTerminal(entry, terminals, cfg, run);
-      if (!handle) { log(`${ts} ${name}: held (${detail})`); return; }
+      if (!handle) { log(`${ts} ${name}: held (${detail})`, 'terminal-unresolved'); return; }
       const term0 = terminals.find((t) => t.handle === handle) as any;
       const receiver = `${handle}#${term0?.incarnationId ?? ''}`;
       const unresolved = Object.values(needsPerson).filter((p) => p.workerId === id && p.receiver === receiver).flatMap((p) => p.coverage);
@@ -818,10 +905,10 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
         };
 
         // An unreconciled earlier request is reconciled with ITS OWN identity. Reissuing it can still perform input, so it
-        // needs the same receiver and composer safety. An id-less accepted request may only be displaced by NEW ticks
+        // needs the same receiver and composer safety. An unresolved request may only be displaced by NEW ticks
         // after two cadences; the old request is never replayed without its id.
         const allowFreshTick = (p: Ambiguous): boolean => {
-          if (dry || now - p.at < NEEDS_PERSON_AFTER_MS || !wasAccepted(p.detail)
+          if (dry || now - p.at < NEEDS_PERSON_AFTER_MS
             || p.receiver !== receiver || typeof term0?.incarnationId !== 'string' || !term0.incarnationId) return false;
           const old = [...unresolved, ...p.coverage];
           if (!work.some((t) => tickParts(t) && !unresolvedCovers(t, old))) return false;
@@ -858,7 +945,7 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
             if (why === null) resolved = 'resolved as delivered on evidence (accepted, composer empty, channel checked after the send)';
             else {
               const s = why === 'composer not provably empty' ? strandedDraft(prior) : null;
-              if (s) { log(`${ts} ${name}: ${s}`); return; }
+              if (s) { log(`${ts} ${name}: ${s}`, 'stranded-draft'); return; } // every wording (first, later, not recorded) is the one reason
               const held = unsafe ? `unreconciled request not reissued (held: ${unsafe})` : `earlier request still unreconciled (${safeDetail(r?.detail ?? prior.detail)})`;
               const person = now - prior.at >= NEEDS_PERSON_AFTER_MS ? 'needs a person' : 'not retyped, not acked';
               log(`${ts} ${name}: ${held}; no delivery evidence yet (${why}); ${person}`);
@@ -915,9 +1002,20 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
           t.rule = alarm.type;
         }
 
+        // The count is a network read, so it comes BEFORE the final gates: nothing slow sits between the last idle and
+        // composer proof and the send (#2613 LOCAL P2-1). Unknown or zero is no line.
+        const openLine = dry ? '' : openTaskLine(run, cfg.hadronCli, cfg.app, id, undefined, clock, deadline, (why) => log(`${ts} ${name}: open-task count unknown (${why}); the wake goes without the line`));
         const unsafe = safeToType();
-        if (unsafe) { log(`${ts} ${name}: held (${unsafe})`); return; }
-        const text = (displaced ? `Fresh tick request at ${ts}: ` : '') + nudgeText([...newTickers], newTasks);
+        if (unsafe) { log(`${ts} ${name}: held (${unsafe})`, 'not-safe-to-type'); return; }
+        // #2754: the server's tick line leads, unchanged (hrn:node:hadronmemory.com:specs:cor:agt:080:23, :26); one that
+        // can't be typed as a line is dropped and today's nudge goes out, logging the worker and a closed reason, never the text.
+        const tickLine = typeableTickText(w.tickText);
+        if (typeof w.tickText === 'string' && w.tickText !== '' && !tickLine) log(`${ts} ${name}: tick line not typeable; the wake goes without it`);
+        // The coordinator's base-tick sentence stays unless that ticker's OWN action is MAPPED AND the server's line that names the
+        // task is actually typed: a null, absent or dropped line leaves the task named nowhere, so the base tick stays (BLIND P2).
+        const mappedBase = new Set<string>();
+        if (tickLine) for (const r of w.reasons) if (r.kind === 'TICK' && r.ticker?.name && BASE_TICK_TICKERS.has(r.ticker.name) && r.action?.state === 'MAPPED') mappedBase.add(r.ticker.name);
+        const text = (tickLine ? `${tickLine} ` : '') + (displaced ? `Fresh tick request at ${ts}: ` : '') + nudgeText([...newTickers], newTasks, openLine, mappedBase);
         if (dry) { log(`${ts} ${name}: WOULD nudge ${handle}`); return; }
         const coverage = [...new Set([...covered, ...newWork])].sort();
         // The ASSIGNED task identities this send names, kept on the receipt: the assignment wake is gone once the task
@@ -1025,11 +1123,16 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
   const lane = async (): Promise<void> => {
     while (next < due.length && !failed) {
       const w = due[next++];
-      if (clock() >= deadline) { left++; continue; }
+      if (clock() >= deadline) { left++; holds.set(w.worker.id, { name: w.worker.name, code: 'pass-budget-spent' }); continue; }
       try { await deliver(w); } catch (e) { failed ??= { e }; }
     }
   };
   await Promise.all(Array.from({ length: Math.min(DELIVERY_POOL, due.length) }, lane));
+  if (!dry && holds.size) {
+    const plain = (v: unknown, re: RegExp): string => (typeof v === 'string' && re.test(v) ? v : '-');
+    const out = [...holds].map(([wid, h]) => `${ts} ${plain(h.name, PLAIN_NAME)} ${plain(wid, PLAIN_ID)} ${h.code}`);
+    try { writeHolds(stateDir, out); } catch (e) { if (!(e instanceof Error)) throw e; log(`${ts} hold reasons not written (${errno(e)})`); }
+  }
   if (failed) throw (failed as { e: unknown }).e;
   if (left) log(`${ts} pass budget spent; ${left} due wake(s) left for the next pass`);
   if (!due.length) log(`${ts} no ticker wakes due (${wakes.length} other wakes ignored)`);
@@ -1046,26 +1149,26 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
  * posted after it, and still stamps the check on an empty read. On a failed read nothing is marked, and a read whose
  * output the worker's tool truncated or saved counts only once the worker has read the rest (George's #2156 residual).
  */
-export function nudgeText(tickers: string[], tasks: Array<string | NudgeTask>): string {
+export function nudgeText(tickers: string[], tasks: Array<string | NudgeTask>, openTasks = '', mappedBase: ReadonlySet<string> = new Set()): string {
   const tagged = 'run `hadron team chat read --mentions-me --limit 1` (it prints `cursor #C; channel head #H`), '
     + 'then `hadron team chat read --mentions-me --since C --all` and act on the tagged messages it returns; '
     + 'only if that read succeeded and you saw all of its output (if your tool truncated or saved it, read the rest first; '
     + 'if you can\'t, don\'t mark), run `hadron team chat mark-read --through H` with the H that read printed';
   // #2138 (Marco #26709): a coordinator's ticker asks for its base tick, the tagged check FIRST and then the sweep, so
   // the nudge never tells a coordinator to skip the sweep. A wake that carries both tickers is the coordinator's.
-  const check = tickers.some((t) => BASE_TICK_TICKERS.has(t))
+  const check = tickers.some((t) => BASE_TICK_TICKERS.has(t) && !mappedBase.has(t))
     ? `run your base tick (${BASE_TICK_TASK}): first the tagged check: ${tagged}; then the sweep of your owned tasks, alarms and ready heads`
     : tagged;
   const rule = 'No unfiltered chat catch-up.';
   // #2138 (Diego #28498): a tick lands mid-build too, so it never tells the worker to stop; it resumes what was running.
-  if (!tasks.length) return `Hadron ticker wake (${tickers.join(', ')}): ${check}; then continue your in-progress work; end your turn only if you have none. ${rule}`;
+  if (!tasks.length) return `Hadron ticker wake (${tickers.join(', ')}): ${check}; then continue your in-progress work; end your turn only if you have none. ${rule}${openTasks}`;
   const all = tasks.map((t): NudgeTask => (typeof t === 'string' ? { id: t, event: 'ASSIGNED' } : t));
   const assigned = [...new Set(all.filter((t) => t.event === 'ASSIGNED').map((t) => t.id))];
   const alarms = all.filter((t) => t.event === 'ALARM');
   const children = all.filter((t) => t.event === 'CHILD_FINISHED');
   const ticker = tickers.length ? `; ticker ${tickers.join(', ')}` : '';
   const which = assigned.length === 1 ? `hadron team task get ${assigned[0]}` : 'hadron team task list';
-  if (!alarms.length && !children.length) return `Hadron task assigned (${assigned.join(', ')}${ticker}): ${check}; then start the task (\`${which}\`). ${rule}`;
+  if (!alarms.length && !children.length) return `Hadron task assigned (${assigned.join(', ')}${ticker}): ${check}; then start the task (\`${which}\`). ${rule}${openTasks}`;
   // #1704: an alarm names its task and rule and how to acknowledge it, since delivery is never an acknowledgement
   // (cor:agt:050:20); a finished child names the child.
   const items = [
@@ -1078,7 +1181,7 @@ export function nudgeText(tickers: string[], tasks: Array<string | NudgeTask>): 
     ...alarms.map((a) => `act on task ${a.id} (\`hadron team task get ${a.id}\`), then acknowledge its alarm with \`hadron team alarm ack ${a.eventId}\` (this message is not an acknowledgement)`),
     ...children.map((c) => `review the finished child task (\`hadron team task get ${c.id}\`)`),
   ];
-  return `Hadron task wake (${items.join('; ')}${ticker}): ${check}; then ${actions.join('; ')}. ${rule}`;
+  return `Hadron task wake (${items.join('; ')}${ticker}): ${check}; then ${actions.join('; ')}. ${rule}${openTasks}`;
 }
 
 /**

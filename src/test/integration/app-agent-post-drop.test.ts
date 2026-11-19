@@ -12,7 +12,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb, createDbAppWithKey, createDbAppAgent } from '../helpers.js';
+import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import type { AuthContext } from '../../middleware/auth.js';
 import { canWriteToMemory } from '../../mcp/access-control.js';
@@ -40,8 +40,17 @@ describe('AppAgent post-subscription_type-drop parity (SC-005)', () => {
     for (const role of ['OPERATE', 'DEVELOP'] as const) {
       const { app } = await createDbAppWithKey(db, `pd-app-${role}`, org.id);
       await createDbAppAgent(db, app.id, agent.id, { role });
+      // #1376: the item caps a write for a request with a user behind it; a bare App key never writes through it.
       const ctx: AuthContext = { appId: app.id, organizationId: org.id };
-      expect(await canWriteToMemory(db, ctx, memory.id)).toBe(true);
+      expect(await canWriteToMemory(db, ctx, memory.id)).toBe(false);
+      const user = await db.user.create({ data: { id: generateId(), handle: `pd-${generateId()}`, githubUsername: `pd-${generateId()}` } });
+      await createDbAppMember(db, app.id, user.id, 'member');
+      // #3305: without independent authority, neither legacy AppAgent role admits.
+      expect(await canWriteToMemory(db, { ...ctx, userId: user.id }, memory.id)).toBe(false);
+      const subscriber = await db.organization.create({ data: { name: `subscriber-${role}`, urn: `subscriber-${role}` } });
+      await db.orgMember.create({ data: { organizationId: subscriber.id, userId: user.id, role: 'CONTRIBUTOR' } });
+      await db.memorySubscription.create({ data: { organizationId: subscriber.id, memoryId: memory.id, role: 'CONTRIBUTOR' } });
+      expect(await canWriteToMemory(db, { ...ctx, userId: user.id }, memory.id)).toBe(true);
     }
   });
 
@@ -64,6 +73,13 @@ describe('AppAgent post-subscription_type-drop parity (SC-005)', () => {
       await createDbAppAgent(db, app.id, agent.id, { role });
       const ctx: AuthContext = { appId: app.id, organizationId: org.id };
       expect(await canWriteToMemory(db, ctx, memory.id)).toBe(false);
+      // A real independent writer still cannot upgrade a read-only item.
+      const user = await db.user.create({ data: { id: generateId(), handle: `pd-read-${generateId()}` } });
+      await createDbAppMember(db, app.id, user.id, 'member');
+      const subscriber = await db.organization.create({ data: { name: `reader-sub-${role}`, urn: `reader-sub-${role}` } });
+      await db.orgMember.create({ data: { organizationId: subscriber.id, userId: user.id, role: 'CONTRIBUTOR' } });
+      await db.memorySubscription.create({ data: { organizationId: subscriber.id, memoryId: memory.id, role: 'CONTRIBUTOR' } });
+      expect(await canWriteToMemory(db, { ...ctx, userId: user.id }, memory.id)).toBe(false);
     }
   });
 

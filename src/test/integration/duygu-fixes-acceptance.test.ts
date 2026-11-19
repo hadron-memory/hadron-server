@@ -246,7 +246,7 @@ describe('#1300/#1307 — edges for a global-READER org OWNER, over HTTP', () =>
         expect(r.status).toBe(200);
         expect(r.data).toBeNull();
         expect(r.errors).toHaveLength(1);
-        expect(r.errors![0]!.extensions).toEqual({ code: 'INTERNAL_SERVER_ERROR' });
+        expect(r.errors![0]!.extensions).toEqual({ code: 'INTERNAL_SERVER_ERROR', requestId: expect.any(String) });
         expect(r.errors![0]!.extensions).not.toHaveProperty('reason');
         expect(await db.edge.count({ where: { sourceId: src, name: 'fault' } })).toBe(0);
       } finally {

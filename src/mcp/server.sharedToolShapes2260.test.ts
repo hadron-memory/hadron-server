@@ -12,7 +12,8 @@
  *   pnpm vitest run src/mcp/server.sharedToolShapes2260.test.ts
  * Regenerate the golden (only when a tool's wire surface is meant to change) with UPDATE_TOOL_GOLDEN=1.
  * Pinned from 92ff99df; #2249 amended exactly three entries (hadron_task_create / _assign / _reassign), whose text states the
- * closeSessionWhenDone default.
+ * closeSessionWhenDone default. #863 amended exactly two (hadron_run_action / hadron_run_task), whose text states what
+ * the render returns since it is the prompt runTask executes.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -83,12 +84,12 @@ describe('#2260 wire surface is unchanged', () => {
     }
   });
 
-  it('keeps the userId-gated team-attention tools present for a user and absent for an App-key principal', async () => {
+  it('#3082: the userId-gated team-attention tools are absent for a user and for an App-key principal alike (the team cut)', async () => {
     const names = async (auth: Record<string, unknown>) => (await surface(auth)).map((t) => t.name);
     const user = await names(VARIANTS.user.auth);
     const app = await names(VARIANTS.appKeyOnly.auth);
     for (const t of ['hadron_team_attention', 'hadron_team_attention_page', 'hadron_team_attention_switchover', 'hadron_team_chat_mark_read']) {
-      expect(user).toContain(t);
+      expect(user).not.toContain(t);
       expect(app).not.toContain(t);
     }
   });
@@ -135,7 +136,7 @@ describe('#2260 per-session state stays per-session', () => {
     const regA = (a as unknown as { _registeredTools: Registered })._registeredTools;
     const regB = (b as unknown as { _registeredTools: Registered })._registeredTools;
     const names = Object.keys(regA).filter((n) => Object.keys(regA[n].inputSchema?.shape ?? {}).length > 0);
-    expect(names.length).toBeGreaterThan(100);
+    expect(names.length).toBeGreaterThan(40); // #3082: the team cut left 68 tools (was 139); keep a floor so an empty list cannot pass
 
     // Every field schema is the same object in both instances: the hoist actually happened.
     const unshared: string[] = [];

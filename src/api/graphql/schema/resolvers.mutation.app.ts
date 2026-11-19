@@ -1,5 +1,13 @@
+import { endHeldGrants } from '../../../lib/grants/departure.js';
+import { markNewInstallPayload } from './installationPayload.js';
+import { requireInstructedAct, sameActPrincipal, type StaffActAdmission, type ActInstruction, type ActAdmission } from '../../../lib/auth/instructedAct.js';
+import { readActInstruction } from './resolvers.instruction.js';
+import { lockStaffingAct } from '../../../lib/auth/staffingAct.js';
+import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
+import { appendMemberRemovedEvent, appendMemberSetEvent, appendStaffingInstructionClaim, staffingActActor, staffingInstruction, eventActor } from '../../../lib/agentTasks/events.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
-import { requireAppKeyManager, lockAppKeyManagerMemberships } from './appKeyManagement.js';
+import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
+import { requireAppKeyIssuer, lockAppKeyManagerMemberships } from './appKeyManagement.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
 // appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import {
@@ -7,6 +15,7 @@ import {
   randomBytes,
 } from 'crypto';
 import { generateId } from '../../../lib/id.js';
+import { recordSecretEvent, secretActorOf } from '../../../lib/secrets/appSecrets.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import {
   DEFAULT_AI_CONFIG_NAME,
@@ -39,7 +48,7 @@ import {
   SelfJoinNotAllowedError,
   AppUninstalledError,
 } from '../../../controller/operations/joinApp.js';
-import { AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AgentNotFoundError, AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { leaveApp } from '../../../controller/operations/leaveApp.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -47,6 +56,8 @@ import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
 import { parsePolicyLink } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
+import { uninstallApp, reinstallApp, locateForDelete } from './appInstallState.js';
+import { requireUpdateAppTarget } from './appUpdateAccess.js';
 import {
   type AppType,
   type AppMembershipRole,
@@ -62,6 +73,8 @@ import {
   installAgentIntoAppCore,
   uninstallAgentFromAppCore,
   requireReadableAgent,
+  requirePersonalAppAgentInstall,
+  assertAppNotUninstalled,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 // Spec 049 Phase 4 — the App's default Channel, created with the App.
@@ -70,7 +83,58 @@ import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { assertNoMintedCorpusCascade } from '../../../lib/mintedSpecPermanence.js';
 import { requireEndpointFor, requireKeyFor } from '../../../lib/aiEndpoint.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
+import { isRefusedPrincipal } from './resolvers.appViewerManages.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { admitAppManagement, lockInstructedActRows, callerIsWorkerSession } from './resolvers.instruction.js';
+import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
+import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
+import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
+import { forbiddenError } from '../../../lib/refusals.js';
+import { ensureProjectZero } from '../../../lib/agentTasks/projectZero.js';
+import { isId as isEntityId } from '../../../lib/entityRef/shape.js';
+
+/**
+ * #3474 (cor:acl:040:07 S7): an App's policy link is exactly `{ allow: string[] }`, or null, or left out. `parsePolicyLink`
+ * reads `allow` and ignores the rest, and the mutations store what the caller sent, so this also takes the own keys. It
+ * counts own keys, so a name `Object.prototype` has isn't mistaken for an allowed one, and JSON's own `__proto__` is seen
+ * (Prisma would drop that key without saying so). A null prototype is what the JSON scalar builds from an inline literal.
+ * The refusal is fixed text: it names no key and no value. Callers run this after their own gate and before any write.
+ */
+function assertAppPolicyShape(policy: unknown): void {
+  if (policy === undefined || policy === null) return;
+  const prototype = typeof policy === 'object' ? Object.getPrototypeOf(policy) : undefined;
+  const plain = prototype === Object.prototype || prototype === null;
+  // One own key on a plain object, and the parser found `allow` on it: that key is `allow`.
+  if (parsePolicyLink(policy) == null || !plain || Reflect.ownKeys(policy as object).length !== 1) {
+    throw new GraphQLError('policy must be { allow: string[] } or null.', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+}
+
+/**
+ * cor:aut:010:02 rule 9: revoke one of `userId`'s keys and every recorded descendant, returning the ids it revoked
+ * (sorted). Run under the user's exclusive authority anchor, which serializes the traversal with every mint: a mint
+ * that wins is in this subtree, one that waits rechecks its now-revoked credential. Each existing revokedAt is kept.
+ * UNION (not UNION ALL) also ends on a corrupt cycle. Unknown legacy ancestry stays unknown; nothing is inferred.
+ * Shared by revokeUserApiKey and (#2659) deleteUserApiKey.
+ */
+async function revokeUserKeySubtree(tx: Prisma.TransactionClient, userId: string, id: string): Promise<string[]> {
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    WITH RECURSIVE subtree AS (
+      SELECT id FROM user_api_keys WHERE id = ${id} AND user_id = ${userId}
+      UNION
+      SELECT child.id FROM user_api_keys child
+      JOIN subtree parent ON child.minted_by_key_id = parent.id
+      WHERE child.user_id = ${userId}
+    )
+    UPDATE user_api_keys SET revoked_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+    WHERE id IN (SELECT id FROM subtree) AND revoked_at IS NULL
+    RETURNING id`;
+  return rows.map((r) => r.id).sort();
+}
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -120,41 +184,41 @@ async function assertNoInstallMemories(
 }
 
 /**
- * Can the caller manage this App's members by ROLE alone — independent of any
- * target user? Platform ADMIN/OWNER for an ORG-owned App, the user-owner of a
- * user-owned App, an org ADMIN/OWNER of the App's org, or an owner-role
- * AppMember. spec 047 (blocker 3): the platform-admin bypass applies ONLY to an
- * org-owned App (a user-owned App is strictly owner-only). Shared by
- * ensureAppMember + removeAppMember so the role gate is evaluated BEFORE the
- * target user is resolved — a non-authorized caller can't turn user-ref
- * resolution into an existence oracle (#816 review).
+ * Can the caller manage this App's members? The role logic is `managesApp`'s
+ * (user-owner, org ADMIN/OWNER, platform ADMIN/OWNER for an ORG-owned App only,
+ * an owner-role AppMember; spec 047 blocker 3), so it has one source. On top of
+ * it, a principal that is not the direct user is refused whatever its role: an
+ * impersonation, a run principal, an ambiguous actor, a refused session binding
+ * (#2448). The worker mechanism is decided separately by admitMemberAct (#3308); this predicate still decides the holder's right. Shared by ensureAppMember + removeAppMember
+ * and evaluated BEFORE the target user is resolved, so a non-authorized caller
+ * can't turn user-ref resolution into an existence oracle (#816 review).
  */
 export async function callerManagesAppMembers(
   ctx: Context,
   app: { ownerUserId: string | null; organizationId: string | null },
   resolvedAppId: string,
 ): Promise<boolean> {
-  const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-  if (isPlatformAdmin && app.ownerUserId === null) return true;
-  const isAppOwnerUser = app.ownerUserId !== null && !!ctx.userId && ctx.userId === app.ownerUserId;
-  if (isAppOwnerUser) return true;
-  if (app.organizationId) {
-    const orgMember = await ctx.db.orgMember.findFirst({
-      where: {
-        organizationId: app.organizationId,
-        userId: ctx.userId ?? '',
-        ...LIVE_ORG_MEMBERSHIP,
-        role: { in: ['ADMIN', 'OWNER'] },
-      },
-    });
-    if (orgMember) return true;
+  if (isRefusedPrincipal(ctx)) return false;
+  return managesApp(ctx, { id: resolvedAppId, organizationId: app.organizationId, ownerUserId: app.ownerUserId });
+}
+
+/** #3308: mechanism before user lookup; the original manager/self-leave predicate remains separate. */
+async function admitMemberAct(
+  ctx: Context,
+  scope: { id: string; organizationId: string | null; ownerUserId: string | null },
+  instruction: ActInstruction | null | undefined,
+  refuse: () => Error,
+  expected?: StaffActAdmission,
+  lock = false,
+): Promise<StaffActAdmission> {
+  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: scope.id } });
+  if (app.organizationId !== scope.organizationId || app.ownerUserId !== scope.ownerUserId) {
+    throw new Error('App ownership changed; retry member management');
   }
-  const ownerMember = ctx.userId
-    ? await ctx.db.appMember.findUnique({
-        where: { appId_userId: { appId: resolvedAppId, userId: ctx.userId } },
-      })
-    : null;
-  return ownerMember?.role === 'owner';
+  const admission = await requireInstructedAct(ctx, app.id, instruction, async () => true, readActInstruction, refuse,
+    { name: 'app.members', lock });
+  if (expected && !sameActPrincipal(expected, admission)) throw refuse();
+  return admission;
 }
 
 /**
@@ -208,13 +272,108 @@ async function provisionAppSharedMemory(
   }
 }
 
+
+
+async function removeAppMemberWithAdmission(
+  _: unknown,
+  {
+    appRef,
+    appId,
+    userRef,
+    userId,
+    instruction,
+  }: {
+    appRef?: string | null;
+    appId?: string | null;
+    userRef?: string | null;
+    userId?: string | null;
+    instruction?: ActInstruction | null;
+  },
+  ctx: Context,
+  expectedAdmission?: StaffActAdmission,
+): Promise<boolean> {
+  // #764 + #816 review: appRef/userRef accept id / URN / (user) handle /
+  // email. Evaluate the ROLE gate BEFORE resolving the target user, so an
+  // unauthorized caller can't turn user resolution into an existence
+  // oracle. A role-authorized caller may remove anyone; everyone else may
+  // remove ONLY themselves — and a self-only caller's target resolution
+  // maps any miss to the same Forbidden, with the resolved id required to
+  // be the caller, so an unknown handle/email is indistinguishable from a
+  // real user they can't remove.
+  const resolvedAppId = await resolveAppRefArg(ctx.db, { ref: appRef, id: appId });
+  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+  const forbidRemove = () =>
+    forbiddenError('Forbidden: only org admins, App owners, or the user themselves can remove members');
+
+  // #2448: a principal that is not the direct user is refused outright, the
+  // self-leave arm included, and before the target is resolved.
+  if (isRefusedPrincipal(ctx)) throw forbidRemove();
+  const initial = await admitMemberAct(ctx, app, instruction, forbidRemove, expectedAdmission);
+  let admission = initial;
+  const authorizedByRole = await callerManagesAppMembers(ctx, app, resolvedAppId);
+  let resolvedUserId: string;
+  if (authorizedByRole) {
+    resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+  } else {
+    resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId }).catch(
+      (e: unknown) => {
+        if (e instanceof GraphQLError && e.extensions?.code === 'NOT_FOUND') throw forbidRemove();
+        throw e;
+      },
+    );
+    if (resolvedUserId !== ctx.userId) throw forbidRemove();
+  }
+
+  await withAuthorizedTx(
+    ctx,
+    [
+      { kind: 'app', id: resolvedAppId }, { kind: 'user', id: resolvedUserId },
+      ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+      ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+    ],
+    async (txCtx) => {
+      const current = await txCtx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+      if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
+        throw new Error('App ownership changed; retry member management');
+      }
+      if (isRefusedPrincipal(txCtx)) throw forbidRemove();
+      admission = await admitMemberAct(txCtx, app, instruction, forbidRemove, initial, true);
+      if (!(await callerManagesAppMembers(txCtx, current, resolvedAppId)) && resolvedUserId !== txCtx.userId) {
+        throw forbidRemove();
+      }
+    },
+    async (tx) => {
+      // The row is held FOR UPDATE by afterLock, so the role read here is the one deleted.
+      const existing = await tx.appMember.findUnique({
+        where: { appId_userId: { appId: resolvedAppId, userId: resolvedUserId } },
+        select: { role: true },
+      });
+      const { count } = await tx.appMember.deleteMany({ where: { appId: resolvedAppId, userId: resolvedUserId } });
+      // #2766: an idempotent no-op (no row) records nothing.
+      if (count > 0 && existing) {
+        await appendMemberRemovedEvent(tx, { appId: resolvedAppId, actor: staffingActActor(admission), userId: resolvedUserId, role: existing.role, instruction: staffingInstruction(admission) });
+      } else {
+        await appendStaffingInstructionClaim(tx, { appId: resolvedAppId, admission, operation: 'member.remove', userId: resolvedUserId });
+      }
+    },
+    { lockMode: 'exclusive', afterLock: async (tx) => {
+      await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
+      await lockStaffingAct(tx, app, initial, ctx.sessionId);
+      await tx.$queryRaw`
+        SELECT user_id FROM app_members
+        WHERE app_id = ${resolvedAppId} AND user_id = ${resolvedUserId} FOR UPDATE`;
+    } },
+  );
+  return true;
+}
+
 export const appMutations = {
     regenerateAppKey: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveAppRef(ctx.db, appRef);
       const existing = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
-      // #1744 / cor:dmo:050:05: rotation is one revoke plus mint, with the same audience.
-      await requireAppKeyManager(ctx, existing);
+      // #1744 / cor:dmo:050:05: rotation is one revoke plus mint. #3277: person-only (cor:dmo:050:12, ruling 0098 A).
+      await requireAppKeyIssuer(ctx, existing, 'app-key.rotate');
       const rawKey = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
       const keyHash = createHash('sha256').update(rawKey).digest('hex');
       return withAuthorizedTx(
@@ -227,7 +386,7 @@ export const appMutations = {
           if (current.organizationId !== existing.organizationId || current.ownerUserId !== existing.ownerUserId) {
             throw new Error('App ownership changed; retry key regeneration');
           }
-          await requireAppKeyManager(txCtx, current);
+          await requireAppKeyIssuer(txCtx, current, 'app-key.rotate');
         },
         async (tx) => {
           // Revocation and replacement are one atomic authority change.
@@ -266,7 +425,6 @@ export const appMutations = {
         appType,
         role,
         description,
-        systemPrompt,
         agentTools,
         aiProvider,
         aiModel,
@@ -280,6 +438,7 @@ export const appMutations = {
         identifyUserMethod,
         sessionTimeoutSeconds,
         anonymousTtlDays,
+        policy,
       }: {
         orgRef?: string | null;
         agentRef: string;
@@ -288,7 +447,6 @@ export const appMutations = {
         appType?: AppType;
         role?: AppMembershipRole;
         description?: string;
-        systemPrompt?: string;
         agentTools?: string[];
         aiProvider?: string;
         aiModel?: string;
@@ -301,6 +459,8 @@ export const appMutations = {
         identifyUserMethod?: 'USER_ID' | 'SECRET';
         sessionTimeoutSeconds?: number;
         anonymousTtlDays?: number;
+        // App-layer action-policy link (cor:acl:040:02). Null or omitted = no restriction.
+        policy?: unknown;
       },
       ctx: Context,
     ) => {
@@ -350,6 +510,10 @@ export const appMutations = {
         // `@handle:slug` couldn't be resolved from the emitted bare URN.
         namespace = handle;
       }
+      // #2403: after the org ADMIN / authenticated-user gate, before any write or agent lookup.
+      assertPositiveSessionTimeout(sessionTimeoutSeconds);
+      // The same shape check as updateApp, under this mutation's own gate above.
+      assertAppPolicyShape(policy);
       // URN format matches memories and agents: "{namespace}:{slug}" — the
       // namespace is an org domain OR the bare user handle for a user-owned App.
       // #574: shared slugify.
@@ -364,6 +528,7 @@ export const appMutations = {
       // #1573: the personal path licenses the install with the owner's
       // subscription, written inside the anchored App-creation transaction.
       let personalSubscription = false;
+      let personalAgentOrgId: string | null = null;
       let txAutoGrantIds: string[] = [];
       if (resolvedOrgId) {
         // Conceal an unlicensed foreign parent before resolving caller-supplied
@@ -406,23 +571,16 @@ export const appMutations = {
       } else {
         // spec 047 personal path: no org ⇒ no AgentOrgGrant. The install is
         // licensed by the OWNER's AgentSubscription instead. A user may install
-        // ONLY a PUBLIC (marketplace) agent or their OWN user-owned agent into a
-        // personal App — never another tenant's private agent (which would fold
-        // that tenant's memories into this App). Mirror installAgentIntoAppCore's
-        // accessibility gate for the org-less case.
+        // a PUBLIC Agent, their own Agent, or an ORGANIZATION-visible Agent
+        // whose organization they currently belong to (#1148). Both install
+        // doors use the same canonical read gate and eligibility predicate.
         const installAgent = await ctx.db.agent.findUniqueOrThrow({
           where: { id: resolvedAgentId },
           select: { visibility: true, ownerUserId: true, organizationId: true, deletedAt: true },
         });
+        personalAgentOrgId = installAgent.organizationId;
         const isOwnAgent = installAgent.ownerUserId !== null && installAgent.ownerUserId === ctx.userId;
-        if (installAgent.visibility !== 'PUBLIC' && !isOwnAgent) {
-          // #1946: ORGANIZATION_MISMATCH (and its agentId) only for an Agent
-          // the caller can read; one they can't answers as an absent one.
-          await requireReadableAgent(ctx, installAgent, agentRef);
-          throw new GraphQLError('A personal App may only install a PUBLIC agent or your own personal agent.', {
-            extensions: { code: 'ORGANIZATION_MISMATCH', agentId: resolvedAgentId },
-          });
-        }
+        await requirePersonalAppAgentInstall(ctx,installAgent,agentRef,ctx.userId ?? null);
         // spec 047: cascade-install provisions each dependency as its own
         // ORG-scoped App — unsupported for a personal App in v1. Reject BEFORE
         // any write (subscription / App create) so a rejected call never leaves
@@ -479,7 +637,12 @@ export const appMutations = {
             await tx.app.delete({ where: { id: existing.id } });
           });
         } else {
-          throw new Error(`An app with URN "${appUrn}" already exists`);
+          // #2785: typed, like the memory collision (#2819); a plain Error is
+          // masked as INTERNAL_SERVER_ERROR (cor:api:260:01). Names only the
+          // URN the caller sent, never a holder field.
+          throw new GraphQLError(`An app with URN "${appUrn}" already exists`, {
+            extensions: { code: 'CONFLICT' },
+          });
         }
       }
       // 023-app-shape Phase 2b: App↔Agent moved from `App.agentId` to the
@@ -491,12 +654,13 @@ export const appMutations = {
       // exclusively: the owning org (or the owning user, added by the helper as
       // the actor) and every Agent being licensed. After the anchor wait the
       // gate re-runs on txCtx: org ADMIN and the #1584 license plan, or the
-      // personal PUBLIC-or-own rule.
+      // personal owner eligibility rule, including current org membership.
       const licensedAgentIds = [resolvedAgentId, ...selectedImports.map((imp) => imp.importedAgentId)];
       const createdApp = await withAuthorizedTx(
         ctx,
         [
           ...(resolvedOrgId ? [{ kind: 'org' as const, id: resolvedOrgId }] : []),
+          ...(personalAgentOrgId ? [{kind: 'org' as const,id:personalAgentOrgId}] : []),
           ...[...new Set(licensedAgentIds)].map((id) => ({ kind: 'agent' as const, id })),
         ],
         async (txCtx) => {
@@ -514,14 +678,9 @@ export const appMutations = {
           } else {
             const current = await txCtx.db.agent.findUnique({
               where: { id: resolvedAgentId },
-              select: { visibility: true, ownerUserId: true, deletedAt: true },
+              select: { visibility: true, ownerUserId: true, organizationId:true, deletedAt: true },
             });
-            const own = current?.ownerUserId != null && current.ownerUserId === ctx.userId;
-            if (!current || current.deletedAt || (current.visibility !== 'PUBLIC' && !own)) {
-              throw new GraphQLError('A personal App may only install a PUBLIC agent or your own personal agent.', {
-                extensions: { code: 'ORGANIZATION_MISMATCH', agentId: resolvedAgentId },
-              });
-            }
+            await requirePersonalAppAgentInstall(txCtx,current,agentRef,ctx.userId ?? null);
           }
         },
         async (tx) => {
@@ -537,10 +696,10 @@ export const appMutations = {
             urn: appUrn,
             surfaces: surfaces ?? undefined, // undefined → use the schema default ['chat']
             trainingMode: trainingMode ?? false,
+            ...(policy !== undefined && policy !== null ? { policy: policy as never } : {}),
             appType: appType ?? 'WORKSTATION',
             role: role ?? 'READER',
             description: description ?? null,
-            systemPrompt: systemPrompt ?? null,
             agentTools: agentTools ?? [],
             expiresAt: expiresAt ? new Date(expiresAt) : undefined,
             createUserPermission: createUserPermission ?? 'EXPLICIT',
@@ -552,6 +711,8 @@ export const appMutations = {
           },
           include: APP_INCLUDE,
         });
+          // #2553: the App's reserved project AT0, in the transaction that creates the App.
+          await ensureProjectZero(tx, app.id, { userId: app.ownerUserId ?? ctx.userId ?? null });
           // 009-install-agent-flow T015: the installer is auto-added as an
           // AppMember with role 'owner' when the Agent's installationPolicy
           // permits it, routed through ensureAppMember so the memberRoles +
@@ -560,13 +721,10 @@ export const appMutations = {
           // deleteApp / removeAppMember can act on the App between its
           // creation and this membership grant. ctx.userId may be absent for a
           // platform-admin caller; there is then no user to grant it to.
-          const installerAgent = await tx.agent.findUniqueOrThrow({
-            where: { id: resolvedAgentId },
-            select: { installationPolicy: true },
-          });
-          const allowedRoles = (installerAgent.installationPolicy as { memberRoles?: string[] })
-            ?.memberRoles ?? ['owner'];
-          if (allowedRoles.includes('owner') && ctx.userId) {
+          // #2171 (R211): the App offers the union of its Agents' roles
+          // (a union of one here); ensureAppMember re-decides under the fences.
+          const offered = await loadOfferedMemberRoles(tx, app.id);
+          if (offered.roles.includes('owner') && ctx.userId) {
             await ensureAppMember(tx, app.id, ctx.userId, 'owner', { actorId: ctx.userId });
           }
           return app;
@@ -700,7 +858,7 @@ export const appMutations = {
             },
             async (tx) => {
               if (depAutoGrant) await ensureAgentOrgGrant(tx, resolvedOrgId, imp.importedAgentId);
-              return tx.app.create({
+              const cascaded = await tx.app.create({
                 data: {
                   organizationId: resolvedOrgId,
                   name: `${depAgent.name} (cascaded from ${name})`,
@@ -713,6 +871,9 @@ export const appMutations = {
                   },
                 },
               });
+              // #2553: the cascaded App's reserved project AT0, in the same transaction.
+              await ensureProjectZero(tx, cascaded.id, { userId: ctx.userId ?? null });
+              return cascaded;
             },
           );
           // #951: a cascaded dependency App is an App like any other — it gets
@@ -733,7 +894,6 @@ export const appMutations = {
         appType,
         role,
         description,
-        systemPrompt,
         agentTools,
         aiProvider,
         aiModel,
@@ -754,7 +914,6 @@ export const appMutations = {
         appType?: AppType;
         role?: AppMembershipRole;
         description?: string;
-        systemPrompt?: string;
         agentTools?: string[];
         // GraphQL nullable args: explicit null is meaningful here
         // (aiProvider: null clears the App's 'default' AI config).
@@ -777,16 +936,19 @@ export const appMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
-      const { id: resolvedId } = await resolveAppRef(ctx.db, ref);
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
-      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      const app = await requireUpdateAppTarget(ctx, ref);
+      const resolvedId = app.id;
+      // #3982: only an admitted caller learns the retained row's deleted state.
+      if (app.deletedAt) {
+        throw new GraphQLError('This App is deleted.', { extensions: { code: 'APP_DELETED', appId: app.id } });
+      }
+      // #3976 (cor:dmo:050:21): an uninstalled App is kept read-only, its own
+      // fields included. Refused AFTER the gate, so only a caller the gate admits
+      // learns the install state; re-judged under the row lock below.
+      assertAppNotUninstalled(app);
       // #510: the app-layer action-policy link (cor:acl:040:02) — validate
       // shape before storing; explicit null clears (= no restriction).
-      if (policy !== undefined && policy !== null && parsePolicyLink(policy) == null) {
-        throw new GraphQLError('policy must be { allow: string[] } or null.', {
-          extensions: { code: 'BAD_USER_INPUT' },
-        });
-      }
+      assertAppPolicyShape(policy);
       // Ruling DY-5: a dormancy threshold is a positive whole number of days.
       // Loud rather than clamped: a 0 would make every lapsed session dormant.
       if (sessionDormancyDays != null && (!Number.isInteger(sessionDormancyDays) || sessionDormancyDays < 1)) {
@@ -794,6 +956,8 @@ export const appMutations = {
           extensions: { code: 'BAD_USER_INPUT' },
         });
       }
+      // #2403: after the access gate, before any write.
+      assertPositiveSessionTimeout(sessionTimeoutSeconds);
       // URN updates: accept a new slug and rebuild the full URN against the
       // app's current org.
       let newUrn: string | undefined;
@@ -811,12 +975,13 @@ export const appMutations = {
       // maintain the App's 'default' registry config. Explicit null
       // aiProvider clears the whole config (legacy column-null semantics);
       // aiApiKey '' clears just the key.
+      const applyAiConfig = async (db: Prisma.TransactionClient): Promise<void> => {
       if (aiProvider !== undefined || aiModel !== undefined || aiApiKey !== undefined) {
-        const existing = await ctx.db.aiServiceConfig.findFirst({
+        const existing = await db.aiServiceConfig.findFirst({
           where: { appId: resolvedId, name: DEFAULT_AI_CONFIG_NAME },
         });
         if (aiProvider === null) {
-          if (existing) await ctx.db.aiServiceConfig.delete({ where: { id: existing.id } });
+          if (existing) await db.aiServiceConfig.delete({ where: { id: existing.id } });
         } else {
           const provider = aiProvider ?? existing?.provider;
           const model = aiModel ?? existing?.model;
@@ -852,7 +1017,8 @@ export const appMutations = {
               // Re-judged on the LOCKED row (#1380 / #1389 review): a concurrent edit
               // after the read above must not let this write keep a provider
               // whose endpoint or key was cleared in between.
-              await ctx.db.$transaction(async (tx) => {
+              {
+                const tx = db;
                 const cur = await lockAiServiceConfig(tx, existing.id);
                 if (!cur) throw new AiServiceConfigNotFoundError(existing.id);
                 // Omitted args keep what the row holds NOW, not what the read
@@ -883,9 +1049,9 @@ export const appMutations = {
                     updatedBy: ctx.userId ?? null,
                   },
                 });
-              });
+              }
             } else {
-              await ctx.db.aiServiceConfig.create({
+              await db.aiServiceConfig.create({
                 data: {
                   appId: resolvedId,
                   name: DEFAULT_AI_CONFIG_NAME,
@@ -899,6 +1065,8 @@ export const appMutations = {
           }
         }
       }
+      };
+
       // #1079 — a rename and its alias record commit TOGETHER. Separately, the
       // window between them is exactly the failure the alias map exists to
       // prevent: the old URN has stopped resolving and nothing remembers it.
@@ -917,9 +1085,24 @@ export const appMutations = {
         // FOR UPDATE serializes the renames and makes each one record the urn it
         // actually superseded. `updateOrganization` already did this; the three
         // single-entity paths did not.
-        const [lockedRow] = await tx.$queryRaw<{ urn: string }[]>`
-          SELECT urn FROM apps WHERE id = ${resolvedId} FOR UPDATE
+        const [lockedRow] = await tx.$queryRaw<{ urn: string; uninstalled_at: Date | null; deleted_at: Date | null }[]>`
+          SELECT urn, uninstalled_at, deleted_at FROM apps WHERE id = ${resolvedId} FOR UPDATE
         `;
+        // #4006 (cor:dmo:050:21): a deleted App is no longer a target for writes. A delete that
+        // committed after admission must refuse before applyAiConfig and recordUrnRename, rolling
+        // the transaction back. The caller is admitted, so an id ref gets APP_DELETED (#3982); a URN
+        // ref gets the answer admission gives a URN naming a deleted App (it reaches no row).
+        if (lockedRow?.deleted_at) {
+          if (isEntityId(ref)) {
+            throw new GraphQLError('This App is deleted.', { extensions: { code: 'APP_DELETED', appId: resolvedId } });
+          }
+          throw new AppNotFoundError(ref);
+        }
+        // #3976: re-judged on the LOCKED row — an uninstall that committed after the
+        // read above must not let any write through. Throwing rolls the transaction
+        // back, including the AI-config change applied below.
+        assertAppNotUninstalled({ id: resolvedId, uninstalledAt: lockedRow?.uninstalled_at ?? null });
+        await applyAiConfig(tx);
         if (newUrn !== undefined) {
           await recordUrnRename(tx, {
             entityType: 'APP',
@@ -940,7 +1123,6 @@ export const appMutations = {
           ...(appType !== undefined ? { appType } : {}),
           ...(role !== undefined ? { role } : {}),
           ...(description !== undefined ? { description } : {}),
-          ...(systemPrompt !== undefined ? { systemPrompt } : {}),
           ...(agentTools !== undefined ? { agentTools } : {}),
           ...(expiresAt !== undefined ? { expiresAt: expiresAt ? new Date(expiresAt) : null } : {}),
           ...(surfaces !== undefined ? { surfaces } : {}),
@@ -961,12 +1143,24 @@ export const appMutations = {
 
     deleteApp: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
-      const { id: resolvedId } = await resolveAppRef(ctx.db, ref);
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
+      // #3975 (cor:dmo:050:21, cor:api:140:02): a missing App and a refused caller get the one `authorizationDenied()`, by id and URN;
+      // the state refusals (deleted, ambiguous URN) come only after the gate. See locateForDelete.
+      const target = await locateForDelete(ctx, ref);
+      if (target.kind === 'none') throw authorizationDenied();
+      if (target.kind === 'ambiguous') {
+        // The ambiguity is shown only to a caller the gate admits on every claimant; anyone else gets the uniform refusal.
+        if (target.candidates.length === 0) throw authorizationDenied();
+        for (const c of target.candidates) await requireOwnerOrOrgRole(ctx, c, 'ADMIN');
+        throw new AmbiguousLegacyUrnError(target.ref);
+      }
+      const app = target.app;
+      const resolvedId = app.id;
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
-      // Soft-delete the App. Secrets are org/user-owned only (#696), so there
-      // are no app-owned secrets to sweep here anymore. The deletedAt-null guard
-      // keeps the original deletedAt under a concurrent double-delete.
+      if (app.deletedAt) throw new GraphQLError('This App is deleted.', { extensions: { code: 'APP_DELETED', appId: resolvedId } });
+      // Soft-delete the App. The deletedAt-null guard keeps the original deletedAt under a concurrent double-delete.
+      // #3997 (cor:sec:010:01 "a secret never outlives its owner"): its App-owned secrets go in the SAME transaction, each
+      // with a DELETE event, and the owner's tombstone (the durable start of the one-year event retention, R25) is written
+      // when the App has events. The BEFORE DELETE trigger on `apps` covers the hard-delete paths (account erasure, URN reclaim).
       await withAuthorizedTx(
         ctx,
         [
@@ -981,16 +1175,35 @@ export const appMutations = {
           }
           await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
         },
-        (tx) => tx.app.updateMany({
-          where: { id: resolvedId, deletedAt: null },
-          data: { deletedAt: new Date() },
-        }).then(() => undefined),
-        { lockMode: 'exclusive', afterLock: async (tx) => {
+        async (tx) => {
+          const deleted = await tx.app.updateMany({
+            where: { id: resolvedId, deletedAt: null },
+            data: { deletedAt: new Date() },
+          });
+          // #3690: an App that HOLDS a grant (another App's grantee) is a holder that went: those grants end here, after the apps FOR
+          // UPDATE lock. Its OWN grants allow nothing already (the live check reads `apps.deleted_at`) and cascade at the reclaim.
+          if (deleted.count > 0) await endHeldGrants(tx, 'app', resolvedId);
+          if (deleted.count > 0) {
+            const actor = secretActorOf(ctx);
+            const secrets = await tx.secret.findMany({ where: { ownerType: 'app', ownerId: resolvedId }, select: { id: true, name: true } });
+            for (const secret of secrets) await recordSecretEvent(tx, { ownerId: resolvedId, secretId: secret.id, secretName: secret.name, kind: 'DELETE', actor });
+            await tx.secret.deleteMany({ where: { ownerType: 'app', ownerId: resolvedId } });
+            await tx.$executeRaw`INSERT INTO secret_owner_tombstones (owner_type, owner_id)
+              SELECT 'app', ${resolvedId} WHERE EXISTS (SELECT 1 FROM secret_events WHERE owner_type = 'app' AND owner_id = ${resolvedId})
+              ON CONFLICT DO NOTHING`;
+          }
+        },
+        // #3974: Uninstalled → Deleted while uninstalled (cor:dmo:050:21), by id only. resolveAppRef never reaches an uninstalled row by URN, but one uninstalled between the resolve and the lock must not be admitted for a URN either (§10 F1).
+        { lockMode: 'exclusive', allowUninstalledApp: isEntityId(ref), afterLock: async (tx) => {
           await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedId} FOR UPDATE`;
         } },
       );
       return true;
     },
+
+    // #3774 — App-level uninstall / reinstall (cor:dmo:050:21). deleteApp's gate and lock; see appInstallState.ts.
+    uninstallApp: async (_: unknown, { ref }: { ref: string }, ctx: Context) => uninstallApp(ctx, ref),
+    reinstallApp: async (_: unknown, { ref }: { ref: string }, ctx: Context) => reinstallApp(ctx, ref),
 
     installAgentIntoApp: async (
       _: unknown,
@@ -1006,7 +1219,7 @@ export const appMutations = {
         agentRef,
         trainingMode,
       });
-      return { appAgent };
+      return { appAgent: markNewInstallPayload(appAgent,ctx) };
     },
 
     uninstallAgentFromApp: async (
@@ -1064,12 +1277,14 @@ export const appMutations = {
         userRef,
         userId,
         role,
+        instruction,
       }: {
         appRef?: string | null;
         appId?: string | null;
         userRef?: string | null;
         userId?: string | null;
         role: string;
+        instruction?: ActInstruction | null;
       },
       ctx: Context,
     ) => {
@@ -1083,8 +1298,11 @@ export const appMutations = {
       // replacing the strict one): an owner-role AppMember has the user-owner's
       // rights, and platform admins manage org Apps. That is safe only because
       // joinApp never self-grants `owner` (#1714).
+      const refuse = () => forbiddenError('Forbidden: only org admins or App owners can manage members');
+      const initial = await admitMemberAct(ctx, app, instruction, refuse);
+      let admission = initial;
       if (!(await callerManagesAppMembers(ctx, app, resolvedAppId))) {
-        throw new Error('Forbidden: only org admins or App owners can manage members');
+        throw forbiddenError('Forbidden: only org admins or App owners can manage members');
       }
 
       // Target user resolved AFTER the authorization gate above (which keys off
@@ -1104,15 +1322,22 @@ export const appMutations = {
             if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
               throw new Error('App ownership changed; retry member management');
             }
+            admission = await admitMemberAct(txCtx, app, instruction, refuse, initial, true);
             if (!(await callerManagesAppMembers(txCtx, current, resolvedAppId))) {
-              throw new Error('Forbidden: only org admins or App owners can manage members');
+              throw forbiddenError('Forbidden: only org admins or App owners can manage members');
             }
           },
-          (tx) => ensureAppMember(tx, resolvedAppId, resolvedUserId, role, {
-            actorId: ctx.userId ?? null,
-          }),
+          async (tx) => {
+            const { priorRole } = await ensureAppMember(tx, resolvedAppId, resolvedUserId, role, {
+              actorId: ctx.userId ?? null,
+            });
+            // #2766: the act is recorded in its own transaction, after every refusal above.
+            if (priorRole === role) await appendStaffingInstructionClaim(tx, { appId: resolvedAppId, admission, operation: 'member.ensure', userId: resolvedUserId });
+            await appendMemberSetEvent(tx, { appId: resolvedAppId, actor: staffingActActor(admission), userId: resolvedUserId, priorRole, role, instruction: staffingInstruction(admission) });
+          },
           { afterLock: async (tx) => {
             await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
+            await lockStaffingAct(tx, app, initial, ctx.sessionId);
             await tx.$queryRaw`
               SELECT user_id FROM app_members
               WHERE app_id = ${resolvedAppId} AND user_id = ${ctx.userId} FOR SHARE`;
@@ -1141,76 +1366,8 @@ export const appMutations = {
     // 008-agent-installation: removeAppMember. Idempotent — a missing row
     // returns true (no-op). Personal-class Memory at (appId, userId) is
     // retained as an orphan per FR-015.
-    removeAppMember: async (
-      _: unknown,
-      {
-        appRef,
-        appId,
-        userRef,
-        userId,
-      }: {
-        appRef?: string | null;
-        appId?: string | null;
-        userRef?: string | null;
-        userId?: string | null;
-      },
-      ctx: Context,
-    ) => {
-      // #764 + #816 review: appRef/userRef accept id / URN / (user) handle /
-      // email. Evaluate the ROLE gate BEFORE resolving the target user, so an
-      // unauthorized caller can't turn user resolution into an existence
-      // oracle. A role-authorized caller may remove anyone; everyone else may
-      // remove ONLY themselves — and a self-only caller's target resolution
-      // maps any miss to the same Forbidden, with the resolved id required to
-      // be the caller, so an unknown handle/email is indistinguishable from a
-      // real user they can't remove.
-      const resolvedAppId = await resolveAppRefArg(ctx.db, { ref: appRef, id: appId });
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      const forbidRemove = () =>
-        new Error('Forbidden: only org admins, App owners, or the user themselves can remove members');
-
-      const authorizedByRole = await callerManagesAppMembers(ctx, app, resolvedAppId);
-      let resolvedUserId: string;
-      if (authorizedByRole) {
-        resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
-      } else {
-        resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId }).catch(
-          (e: unknown) => {
-            if (e instanceof GraphQLError && e.extensions?.code === 'NOT_FOUND') throw forbidRemove();
-            throw e;
-          },
-        );
-        if (resolvedUserId !== ctx.userId) throw forbidRemove();
-      }
-
-      await withAuthorizedTx(
-        ctx,
-        [
-          { kind: 'app', id: resolvedAppId }, { kind: 'user', id: resolvedUserId },
-          ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
-          ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
-        ],
-        async (txCtx) => {
-          const current = await txCtx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-          if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
-            throw new Error('App ownership changed; retry member management');
-          }
-          if (!(await callerManagesAppMembers(txCtx, current, resolvedAppId)) && resolvedUserId !== txCtx.userId) {
-            throw forbidRemove();
-          }
-        },
-        (tx) => tx.appMember.deleteMany({
-          where: { appId: resolvedAppId, userId: resolvedUserId },
-        }).then(() => undefined),
-        { lockMode: 'exclusive', afterLock: async (tx) => {
-          await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
-          await tx.$queryRaw`
-            SELECT user_id FROM app_members
-            WHERE app_id = ${resolvedAppId} AND user_id = ${resolvedUserId} FOR UPDATE`;
-        } },
-      );
-      return true;
-    },
+    removeAppMember: async (_: unknown, args: Parameters<typeof removeAppMemberWithAdmission>[1], ctx: Context) =>
+      removeAppMemberWithAdmission(_, args, ctx),
 
     // 023-app-shape US2: self-service user-level install. The
     // currently-logged-in user joins the App as an AppMember.
@@ -1297,16 +1454,27 @@ export const appMutations = {
     // currently-logged-in user leaves an App. Idempotent.
     leaveApp: async (
       _: unknown,
-      { appId }: { appId: string },
+      { appId, instruction }: { appId: string; instruction?: ActInstruction | null },
       ctx: Context,
-    ) => {
+    ): Promise<{ appId: string; userId: string }> => {
       if (!ctx.userId) {
         throw new GraphQLError('leaveApp requires an authenticated user', {
           extensions: { code: 'UNAUTHENTICATED' },
         });
       }
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
-      await leaveApp(ctx.db, { appId: resolvedAppId, userId: ctx.userId });
+      // Preserve legacy person cleanup: reference resolution already identified the App; no second existence probe.
+      // Worker admission is carried into the locked member-removal implementation below.
+      const admission = await requireInstructedAct(ctx, resolvedAppId, instruction, async () => true,
+        readActInstruction, () => forbiddenError('Forbidden: self-leave requires an instruction or own app.members grant'),
+        { name: 'app.members' });
+      if (admission.kind === 'person') {
+        // Keep legacy person cleanup, including idempotency and the existing App reference resolution.
+        await leaveApp(ctx.db, { appId: resolvedAppId, userId: ctx.userId });
+      } else {
+        // Reuse the locked member gate and canonical removal/no-op records for a worker's self-leave.
+        await removeAppMemberWithAdmission(_, { appId: resolvedAppId, userId: ctx.userId, instruction }, ctx, admission);
+      }
       return { appId: resolvedAppId, userId: ctx.userId };
     },
 
@@ -1321,7 +1489,8 @@ export const appMutations = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      await requireAppKeyManager(ctx, app);
+      // #3277: minting is person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, ruling 0098 A).
+      await requireAppKeyIssuer(ctx, app, 'app-key.mint');
       // Raw key format: hdr_app_<64 hex chars> (256 bits of entropy)
       const rawKey = APP_KEY_PREFIX + randomBytes(32).toString('hex');
       const keyHash = hashAppKey(rawKey);
@@ -1336,7 +1505,7 @@ export const appMutations = {
           if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
             throw new Error('App ownership changed; retry key creation');
           }
-          await requireAppKeyManager(txCtx, current);
+          await requireAppKeyIssuer(txCtx, current, 'app-key.mint');
         },
         (tx) => tx.appKey.create({
           data: {
@@ -1354,28 +1523,50 @@ export const appMutations = {
       return { key: appKey, rawKey };
     },
 
-    revokeAppKey: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const key = await ctx.db.appKey.findUniqueOrThrow({
-        where: { id },
-        include: { app: true },
-      });
-      await requireAppKeyManager(ctx, key.app);
+    /**
+     * #3311 / cor:dmo:050:12 S6: revoking a key is allowed on a holder's instruction, through #3307's one shared
+     * check, judged on the holder under the App's anchors. A worker session that is refused (no instruction, not
+     * held, host-launched, holder does not manage the App) cannot tell a missing key from an existing one: both
+     * answer the one refusal. The record is one team event in the revoke's transaction, none for a key that was
+     * already revoked, and it names no key id.
+     */
+    revokeAppKey: async (_: unknown, { id, instruction }: { id: string; instruction?: ActInstruction | null }, ctx: Context) => {
+      const key = await ctx.db.appKey.findUnique({ where: { id }, include: { app: true } });
+      if (!key) {
+        // A worker session never learns whether the key exists; a person keeps the not-found answer of before.
+        if (await callerIsWorkerSession(ctx)) throw authorizationDenied();
+        await ctx.db.appKey.findUniqueOrThrow({ where: { id }, include: { app: true } });
+        throw authorizationDenied();
+      }
+      const target = key;
+      let admission: ActAdmission = await admitAppManagement(ctx, target.app, authorizationDenied, instruction, undefined, true);
       await withAuthorizedTx(
         ctx,
         [
-          { kind: 'app', id: key.app.id },
-          ...(key.app.organizationId ? [{ kind: 'org' as const, id: key.app.organizationId }] : []),
-          ...(key.app.ownerUserId ? [{ kind: 'user' as const, id: key.app.ownerUserId }] : []),
+          { kind: 'app', id: target.app.id },
+          ...(target.app.organizationId ? [{ kind: 'org' as const, id: target.app.organizationId }] : []),
+          ...(target.app.ownerUserId ? [{ kind: 'user' as const, id: target.app.ownerUserId }] : []),
         ],
         async (txCtx) => {
-          const current = await txCtx.db.app.findUniqueOrThrow({ where: { id: key.app.id } });
-          if (current.organizationId !== key.app.organizationId || current.ownerUserId !== key.app.ownerUserId) {
-            throw new Error('App ownership changed; retry key revocation');
-          }
-          await requireAppKeyManager(txCtx, current);
+          admission = await admitAppManagement(txCtx, target.app, authorizationDenied, instruction, admission, true);
         },
-        (tx) => tx.appKey.update({ where: { id }, data: { revokedAt: new Date() } }),
-        { lockMode: 'exclusive', afterLock: (tx) => lockAppKeyManagerMemberships(tx, ctx, key.app) },
+        async (tx, txCtx) => {
+          if (admission.kind === 'instructed-worker') {
+            // Last lock the act takes: the holder's worker and session rows, then the final judgement on them.
+            await lockInstructedActRows(tx, [admission.workerId], ctx.sessionId);
+            admission = await admitAppManagement(txCtx, target.app, authorizationDenied, instruction, admission, true);
+          }
+          // A key already revoked keeps its first revocation time and records nothing.
+          const ended = await tx.appKey.updateMany({ where: { id, revokedAt: null }, data: { revokedAt: new Date() } });
+          if (ended.count === 1) await appendCredentialInstructionEvent(tx, { appId: target.app.id, admission, act: 'app-key.revoke' });
+        },
+        {
+          lockMode: 'exclusive',
+          afterLock: async (tx) => {
+            if (admission.kind === 'instructed-worker') await lockWorkersForAssignment(tx, [admission.workerId]);
+            await lockAppKeyManagerMemberships(tx, ctx, target.app);
+          },
+        },
       );
       return true;
     },
@@ -1493,16 +1684,7 @@ export const appMutations = {
           // with every mint. A mint that wins is in this subtree; one that
           // waits rechecks its now-revoked credential before inserting.
           // UNION (rather than UNION ALL) also terminates on corrupt cycles.
-          await tx.$executeRaw`
-            WITH RECURSIVE subtree AS (
-              SELECT id FROM user_api_keys WHERE id = ${id} AND user_id = ${ctx.userId}
-              UNION
-              SELECT child.id FROM user_api_keys child
-              JOIN subtree parent ON child.minted_by_key_id = parent.id
-              WHERE child.user_id = ${ctx.userId}
-            )
-            UPDATE user_api_keys SET revoked_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
-            WHERE id IN (SELECT id FROM subtree) AND revoked_at IS NULL`;
+          await revokeUserKeySubtree(tx, ctx.userId!, id);
           return tx.userApiKey.findFirst({ where: { id, userId: ctx.userId } });
         },
         { lockMode: 'exclusive' },
@@ -1569,6 +1751,67 @@ export const appMutations = {
         });
       }
       return row;
+    },
+
+    /**
+     * #2659 (hrn:node:hadronmemory.com:specs:cor:dmo:070:03; rulings 0004 A, 0005 B, 0006 A, 0007 A): delete one of the
+     * caller's own API keys, live or revoked.
+     *  - Who (0006): the key's own user as themselves, on the one person gate: never an App key, impersonation, a
+     *    worker session in any shape, or a run principal. Unknown and foreign ids are NOT_FOUND, byte-identical, as
+     *    revokeUserApiKey answers.
+     *  - A live key is revoked first, with its live subtree (cor:aut:010:02 rule 9), in the same transaction, so a
+     *    delete never leaves a working credential behind (0004).
+     *  - The keys it minted are not deleted and do not refuse it: their link to it is cleared, so they stay, revoked,
+     *    with no parent (0005 B). The break is recorded once, in the deletion's record.
+     *  - The one append-only UserApiKeyDeletion row (0007): who, which key (id, masked preview), when; no secret, no hash.
+     * Serialized with mint, revoke and hide on the user's exclusive authority anchor, so no half state is observable.
+     */
+    deleteUserApiKey: async (
+      _: unknown,
+      { id }: { id: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) {
+        throw new GraphQLError(
+          'deleteUserApiKey requires a user-scoped credential; AppKey callers cannot delete user keys.',
+          { extensions: { code: 'UNAUTHENTICATED' } },
+        );
+      }
+      const forbidden = () => new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+      await requirePersonAsThemselves(ctx, forbidden);
+      if (ctx.appKeyId) throw forbidden();
+      const userId = ctx.userId;
+      const record = await withAuthorizedTx(
+        ctx,
+        [{ kind: 'user', id: userId }],
+        async (txCtx) => {
+          if (txCtx.userId !== userId || txCtx.impersonation) throw forbidden();
+        },
+        async (tx) => {
+          const key = await tx.userApiKey.findFirst({ where: { id, userId }, select: { id: true, keyPreview: true } });
+          if (!key) return null;
+          const revokedKeyIds = await revokeUserKeySubtree(tx, userId, id);
+          // Every key it minted, whoever's row: the FK (NoAction) refuses the delete while any link remains.
+          const minted = await tx.$queryRaw<Array<{ id: string }>>`
+            UPDATE user_api_keys SET minted_by_key_id = NULL WHERE minted_by_key_id = ${id} RETURNING id`;
+          const row = await tx.userApiKeyDeletion.create({
+            data: {
+              userId,
+              keyId: key.id,
+              keyPreview: key.keyPreview,
+              revokedKeyIds,
+              mintedKeyIds: minted.map((m) => m.id).sort(),
+            },
+          });
+          await tx.userApiKey.delete({ where: { id: key.id } });
+          return row;
+        },
+        { lockMode: 'exclusive' },
+      );
+      if (!record) {
+        throw new GraphQLError(`UserApiKey ${id} not found.`, { extensions: { code: 'NOT_FOUND' } });
+      }
+      return record;
     },
 
     // 005-agent-subscription FR-023 + FR-028 + FR-029: revoke a user's

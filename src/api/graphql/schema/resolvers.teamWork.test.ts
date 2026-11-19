@@ -22,6 +22,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import {
@@ -125,7 +126,7 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: org.id, userId: contrib.id, role: 'CONTRIBUTOR' },
   });
 
-  const created = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   teamAgent = { id: created.id, urn: created.urn, systemMemoryId: created.systemMemoryId };
   await db.node.create({
     data: {
@@ -133,7 +134,7 @@ beforeEach(async () => {
       memoryId: teamAgent.systemMemoryId,
       loc: 'roles:backend-engineer',
       name: 'backend-engineer',
-      content: 'You are {{name}}, a {{role}}.',
+      content: 'You are {{worker.name}}, a {{worker.role}}.',
       data: { names: ['Iris', 'Henry'] },
     },
   });
@@ -153,6 +154,7 @@ beforeEach(async () => {
     { input: { id: generateId(), appRef: app.id, transcriptPath: '/tmp/tw-transcript.jsonl', host: 'devbox', tool: 'claude-code' } },
     ctx(contrib.id),
   );
+  await serveEveryAgent(db); // #2712: binds need a served prompt
 });
 
 describe('recordTeamWork — auth matrix (one case per principal shape)', () => {

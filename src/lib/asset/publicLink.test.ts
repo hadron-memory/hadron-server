@@ -362,7 +362,7 @@ describe('review findings on #2287', () => {
     }
   });
 
-  it('P2 (R113): a bound worker session of the App manager is refused on the team space', async () => {
+  it('P2 (cor:dmo:050:12): a bound worker session of the App manager, with no instruction, is refused on the team space', async () => {
     const team = await db.memory.create({ data: { id: generateId(), class: 'app', appId: app.id, organizationId: org.id, urn: `${org.urn}:team2`, name: 'team2' } });
     const id = await mkAsset(team.id);
     await requestActorStorage.run({ workerId: generateId(), agentId: null }, async () => {

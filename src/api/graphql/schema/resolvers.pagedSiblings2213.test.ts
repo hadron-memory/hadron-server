@@ -69,7 +69,7 @@ describe('tickersPage', () => {
     for (let i = 0; i < n; i++) {
       rows.push({
         id: generateId(), appId, name: `T${String(i).padStart(3, '0')}`, slug: `t${String(i).padStart(3, '0')}`,
-        cadenceSeconds: 600, ownerUserId: member.id, createdAt, ...over,
+        tickCode: 'tick.fixture', cadenceSeconds: 600, ownerUserId: member.id, createdAt, ...over,
       });
     }
     await db.ticker.createMany({ data: rows });
@@ -144,7 +144,7 @@ describe('tickersPage', () => {
     await seedTickers(app.id, 3);
     await seedTickers(otherApp.id, 4);
     await db.ticker.createMany({
-      data: ['D0', 'D1'].map((n) => ({ id: generateId(), appId: app.id, name: n, slug: n.toLowerCase(), cadenceSeconds: 600, ownerUserId: member.id, deletedAt: new Date() })),
+      data: ['D0', 'D1'].map((n) => ({ tickCode: 'tick.fixture', id: generateId(), appId: app.id, name: n, slug: n.toLowerCase(), cadenceSeconds: 600, ownerUserId: member.id, deletedAt: new Date() })),
     });
     const p = await Q.tickersPage({}, { appRef: app.id, limit: 100 }, ctx(member.id));
     expect(p.total).toBe(3);

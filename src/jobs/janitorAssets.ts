@@ -22,6 +22,7 @@ import { logAssetEvent } from '../lib/asset/audit.js';
 import { decryptStorageKey } from '../lib/asset/encryption.js';
 import { sessionKeyCache } from '../lib/sessionKeyCache.js';
 import { ASSET_RETENTION_WINDOW_MS } from '../lib/asset/retention.js';
+import { withSweepLock, type SweepLockResult } from '../lib/sweepLock.js';
 
 export interface JanitorOutcome {
   scanned: number;
@@ -86,15 +87,22 @@ export async function runAssetJanitor(
       }
 
       await deleteObject(plainStorageKey);
-      await db.asset.delete({ where: { id: asset.id } });
-      logAssetEvent({
-        operation: 'purged',
-        assetId: asset.id,
-        memoryId: asset.memoryId,
-        userId: asset.uploadedBy,
-        bytes: asset.sizeBytes,
-      });
-      purged += 1;
+      // deleteMany, not delete: an overlapping run (a lost sweep lock, or two
+      // processes) can have removed the row after our findMany. Count 0 means
+      // "already purged" and is neither an error nor a second audit event.
+      // The object delete above is idempotent, and its order before the row
+      // delete is kept so a failed object delete leaves the row to retry.
+      const { count } = await db.asset.deleteMany({ where: { id: asset.id } });
+      if (count > 0) {
+        logAssetEvent({
+          operation: 'purged',
+          assetId: asset.id,
+          memoryId: asset.memoryId,
+          userId: asset.uploadedBy,
+          bytes: asset.sizeBytes,
+        });
+        purged += 1;
+      }
     } catch (e) {
       errors += 1;
       logAssetEvent({
@@ -107,6 +115,18 @@ export async function runAssetJanitor(
   }
 
   return { scanned, purged, errors };
+}
+
+/**
+ * One scheduled tick: skip when another process holds the janitor lock (#445).
+ * The lock only suppresses duplicate work. It is not what makes overlap safe:
+ * the body above is (idempotent object delete + guarded row delete), so a lock
+ * lost mid-sweep costs at most a redundant object delete.
+ */
+export function runAssetJanitorTick(
+  db: PrismaClient = defaultDb,
+): Promise<SweepLockResult<JanitorOutcome>> {
+  return withSweepLock('asset-janitor', () => runAssetJanitor(db));
 }
 
 /**
@@ -129,7 +149,9 @@ export function startAssetJanitorLoop(
 ): NodeJS.Timeout {
   const run = async () => {
     try {
-      const outcome = await runAssetJanitor(db);
+      const result = await runAssetJanitorTick(db);
+      if (!result.ran) return;
+      const outcome = result.value;
       if (outcome.purged > 0 || outcome.errors > 0) {
         // eslint-disable-next-line no-console
         console.log(

@@ -2,9 +2,15 @@ import { includeUrnTarget } from './includeUrnTarget.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { decryptNodeFields } from '../nodeCrypto.js';
 import { sessionKeyCache } from '../sessionKeyCache.js';
-import { revisionApprovalOf, newestApprovedRevisionOf } from '../nodeApproval.js';
-import { locateIncludeTags, locateLiteralIncludeTags, IncludeSyntaxError, type IncludeTag } from './parseIncludeTags.js';
+import { revisionApprovalOf, newestApprovedRevisionOf, newestApprovedAndSignedRevisionOf, servableRevisionNumbers,
+  NEWEST_APPROVED_REVISION_SCAN_CAP, NEWEST_APPROVED_REVISION_SCAN_BATCHES } from '../nodeApproval.js';
+import { lazyRevisionSignatureCounts, revisionSignatureCounts, type SignatureDb } from '../signing/revisionSignatureCounts.js';
+import { signingSurfacePolicy } from '../signing/surface.js';
+import {
+  locateIncludeTags, locateLiteralIncludeTags, maskCode, IncludeSyntaxError, TooManyIncludeTags, type IncludeTag,
+} from './parseIncludeTags.js';
 import { LiteralGuardCollision } from './literalGuard.js';
+import { ContentResolutionLimitError, ResolutionBudget } from './resolutionBudget.js';
 
 /** Deepest include chain a read follows; past it a reader sees the notice (cor:dmo:150:06). Writes don't enforce it (#2134). */
 export const MAX_RESOLVE_DEPTH = 10;
@@ -48,9 +54,21 @@ export interface SpliceOptions {
    * source text is judged on its own, before assembly. Unset leaves literal tags as written.
    */
   literalGuard?: string;
+  /**
+   * Incremented once for each include that resolved to the notice (missing, unreadable, cyclic, too deep, no
+   * qualifying revision). The resolver's own verdict, so a caller never has to infer failure by searching the
+   * spliced text for the notice, which a successful target may legitimately contain.
+   */
+  broken?: { count: number };
+  /**
+   * hadron-internal#40 — this resolution's budget, shared across the whole traversal (and, in
+   * `compileTemplate`, with the render that follows). Omitted, `spliceIncludes` makes a fresh
+   * one with the default limits, so no caller resolves unbounded.
+   */
+  budget?: ResolutionBudget;
 }
 
-export type IncludeDb = Pick<PrismaClient, 'node' | 'memory' | 'nodeRevision' | 'urnAlias'>;
+export type IncludeDb = SignatureDb & Pick<PrismaClient, 'urnAlias'>;
 type Db = IncludeDb;
 
 
@@ -70,10 +88,16 @@ function openSealed(content: string | null, memory: { id: string; isEncrypted: b
 /** The stored text of a node the reader may read, or null for missing, deleted, unreadable and keyless-encrypted alike. */
 async function lookupTarget(
   db: Db, access: Record<string, unknown>, memo: IncludeReadMemo, memoryId: string, loc: string, targetId?: string,
+  budget?: ResolutionBudget,
+  /** The caller already charged this lookup (a URN tag pays for its identity query and its target together). */
+  prepaid = false,
 ): Promise<Target | null> {
   const key = targetId ?? `${memoryId}\u0000${loc}`;
   let hit = memo.targetByAddress.get(key);
+  // A miss costs one lookup whatever it finds: missing, unreadable and readable alike (no oracle).
+  const miss = !hit;
   if (!hit) {
+    if (!prepaid) budget?.chargeLookup();
     hit = (async () => {
       const node = await db.node.findFirst({
         where: { ...(targetId ? { id: targetId } : { loc }), memoryId, deletedAt: null, AND: [access, { memory: { deletedAt: null } }] },
@@ -89,14 +113,21 @@ async function lookupTarget(
     })();
     memo.targetByAddress.set(key, hit);
   }
-  return hit;
+  const target = await hit;
+  // Loaded text is charged only for a row the reader may read (the access filter loaded nothing else).
+  if (miss && target) budget?.chargeLoaded(target.content);
+  return target;
 }
 
 /** The stored text of one past revision of `target`, or null. History is never resolved against today's targets. */
-async function lookupRevision(db: Db, memo: IncludeReadMemo, target: Target, revNo: number): Promise<string | null> {
+async function lookupRevision(
+  db: Db, memo: IncludeReadMemo, target: Target, revNo: number, budget?: ResolutionBudget,
+): Promise<string | null> {
   const key = `${target.id}\u0000${revNo}`;
   let hit = memo.revisionByKey.get(key);
+  const miss = !hit;
   if (!hit) {
+    budget?.chargeLookup();
     hit = (async () => {
       const rev = await db.nodeRevision.findFirst({
         where: { nodeId: target.id, revNo },
@@ -117,7 +148,9 @@ async function lookupRevision(db: Db, memo: IncludeReadMemo, target: Target, rev
     })();
     memo.revisionByKey.set(key, hit);
   }
-  return hit;
+  const text = await hit;
+  if (miss) budget?.chargeLoaded(text);
+  return text;
 }
 
 /**
@@ -129,61 +162,138 @@ async function lookupRevision(db: Db, memo: IncludeReadMemo, target: Target, rev
  * null; neither is evidence about approval. A snapshot captured in another memory is not this target's to serve, and
  * an encrypted memory is NOT_APPLICABLE.
  */
-async function approvedText(db: Db, target: Target, pinned: number | undefined): Promise<{ revNo: number; text: string } | null> {
-  const revNo = pinned ?? (await newestApprovedRevisionOf(db, target.id)).found?.revNo;
+async function approvedText(
+  db: Db, target: Target, pinned: number | undefined, budget?: ResolutionBudget,
+): Promise<{ revNo: number; text: string } | null> {
+  // Not memoized, so every approved tag pays for its work. The approval helpers charge each query they run
+  // and each text they load (the search's verdicts and the chosen revision's alike), so a long approval
+  // history is bounded by the read's budget rather than a flat charge (#40).
+  const revNo = pinned ?? (await newestApprovedRevisionOf(db, target.id, undefined, budget)).found?.revNo;
   if (revNo === undefined) return null;
-  const verdict = await revisionApprovalOf(db, target.id, revNo);
+  const verdict = await revisionApprovalOf(db, target.id, revNo, budget, target.memoryId);
   if (verdict.state !== 'APPROVED' || !verdict.served) return null;
   if (verdict.served.memoryId !== target.memoryId) return null;
   return { revNo, text: verdict.served.content ?? '' };
 }
 
 /**
+ * #4033 — the settings a tag EFFECTIVELY carries: while the deployment does not check signatures, `signed` is
+ * accepted and stored but ignored (cor:dmo:150:02), so every decision made from a tag's settings (the selector, the
+ * compile's existence pre-check and refusal class, the null-body fast path) reads this, never `tag.settings`, and
+ * answers exactly as it would for the same tag without `signed`. The policy is read per call (G2: live, never cached
+ * at boot, and not snapshotted per operation: no spec asks for a snapshot, and the flag is a deployment constant that
+ * only a restart changes). Provenance and lint keep the tag's own `signed`: it is what the author wrote.
+ */
+export function effectiveIncludeSettings(settings: IncludeTag['settings']): IncludeTag['settings'] {
+  return settings.signed && !signingSurfacePolicy().signing ? { ...settings, signed: false } : settings;
+}
+
+/** The one warning text for a `signed` include while signing is not checked, shared by the source and compiled lints. */
+export const SIGNING_NOT_CHECKED_TEXT =
+  'The "signed" setting is not checked: this deployment does not check signatures, so this include is served as if it were not signed.';
+
+/**
  * #2046 — THE include selector (cor:dmo:150:02), shared by every read and by the
  * boot-prompt compile so the two cannot disagree about which revision a tag
  * serves. `approved` (pinned or not) serves the revision the shared approval
  * predicate qualifies; `rev=N` alone serves stored revision N; no settings
- * serves the latest. `signed` is ignored until signing ships (D7), as before.
+ * serves the latest. While the deployment's signing policy is on, `signed`
+ * requires the included memory's at-signing writer stamp (cor:dmo:130:09).
  * Null when no revision qualifies: a reader shows the notice, a compile refuses.
+ *
+ * The signed search without a pin is bounded: it examines at most `NEWEST_APPROVED_REVISION_SCAN_CAP` candidates
+ * per batch and `NEWEST_APPROVED_REVISION_SCAN_BATCHES` batches (1,000 newest servable revisions). A signed revision
+ * older than that is not reached and the include does not resolve (fail closed); a pin (`rev=N`) is not searched.
+ * An encrypted target is never selected by `signed`.
  */
 export async function selectIncludeRevision(
   db: IncludeDb, memo: IncludeReadMemo, target: IncludeTarget, settings: IncludeTag['settings'],
+  /** A read's budget. The boot-prompt compile passes none: it has its own limits (cor:agt:040:12). */
+  budget?: ResolutionBudget,
 ): Promise<{ revNo: number; text: string } | null> {
-  if (settings.approved) return approvedText(db, target, settings.rev);
+  if (settings.signed && signingSurfacePolicy().signing) {
+    if (target.memory.isEncrypted) return null;
+    const counts = lazyRevisionSignatureCounts(db, target.id, 'include', budget);
+    let revNo = settings.rev;
+    if (revNo === undefined) {
+      let below: number | undefined;
+      // A batch boundary is not evidence that no revision qualifies. Continue within the same hard ceiling
+      // as the serve walk; metered reads also stop loudly when their resolution budget runs out.
+      for (let batch = 0; batch < NEWEST_APPROVED_REVISION_SCAN_BATCHES; batch++) {
+        if (settings.approved) {
+          const result = await newestApprovedAndSignedRevisionOf(db, target.id, counts, undefined, budget, below);
+          revNo = result.found?.revNo;
+          if (revNo !== undefined || !result.truncated || result.resumeBelow == null) break;
+          below = result.resumeBelow;
+        } else {
+          const { candidates } = await servableRevisionNumbers(db, target.id, NEWEST_APPROVED_REVISION_SCAN_CAP, budget, below);
+          const examined = candidates.slice(0, NEWEST_APPROVED_REVISION_SCAN_CAP);
+          for (const candidate of examined) {
+            if (await counts(candidate)) { revNo = candidate; break; }
+          }
+          if (revNo !== undefined || candidates.length <= NEWEST_APPROVED_REVISION_SCAN_CAP) break;
+          below = examined[examined.length - 1];
+        }
+      }
+    }
+    if (revNo === undefined) return null;
+    const selected = settings.approved
+      ? await approvedText(db, target, revNo, budget)
+      : await lookupRevision(db, memo, target, revNo, budget).then(text => text == null ? null : { revNo: revNo!, text });
+    if (!selected) return null;
+    // Revalidate against captured served bytes, so a selector/retrieval race cannot substitute unsigned text.
+    return await revisionSignatureCounts(db, target.id, revNo, 'include', { content: selected.text, meter: budget }) ? selected : null;
+  }
+  if (settings.approved) return approvedText(db, target, settings.rev, budget);
   if (settings.rev !== undefined) {
-    const text = await lookupRevision(db, memo, target, settings.rev);
+    const text = await lookupRevision(db, memo, target, settings.rev, budget);
     return text == null ? null : { revNo: settings.rev, text };
   }
   return { revNo: target.revSeq, text: target.content ?? '' };
+}
+
+function unresolved(opts: SpliceOptions): string {
+  if (opts.broken) opts.broken.count += 1;
+  // The notice is served text: the same bytes for every cause, so it reveals nothing about the target.
+  opts.budget?.chargeSpliced(BROKEN_INCLUDE_NOTICE);
+  return BROKEN_INCLUDE_NOTICE;
 }
 
 async function expandTag(
   db: Db, access: Record<string, unknown>, memo: IncludeReadMemo, opts: SpliceOptions,
   tag: IncludeTag, includerMemoryId: string, trail: ReadonlySet<string>, level: number,
 ): Promise<string> {
-  // `signed` is stored and ignored until the signing ceremony ships (cor:dmo:150:02,
-  // Vera's D7): it serves as if absent, and `approved signed` as `approved`.
-  if (level > MAX_RESOLVE_DEPTH) return BROKEN_INCLUDE_NOTICE;
+  // #40: every expansion is charged first, before depth, cycle or any lookup, so an
+  // empty-leaf fan-out (which serves no bytes) is still bounded.
+  opts.budget?.chargeExpansion();
+  if (level > MAX_RESOLVE_DEPTH) return unresolved(opts);
   let memoryId = includerMemoryId;
   let loc = tag.target;
   let targetId: string | undefined;
+  let prepaid = false;
   if (tag.kind === 'urn') {
     let identity = memo.targetIdentityByUrn.get(tag.target);
     if (!identity) {
+      // #40: the identity query AND the target lookup are charged here, before
+      // anything depends on what the identity finds. A missing node, a foreign one this read may not follow, an
+      // unreadable one and a readable one then cost the same, so the lookup bound is no existence oracle.
+      opts.budget?.chargeLookup(2);
+      prepaid = true;
       identity = includeUrnTarget(db, tag.target);
       memo.targetIdentityByUrn.set(tag.target, identity);
     }
     const resolved = await identity;
-    if (!resolved || (resolved.memoryId !== includerMemoryId && !opts.foreign)) return BROKEN_INCLUDE_NOTICE;
+    if (!resolved || (resolved.memoryId !== includerMemoryId && !opts.foreign)) return unresolved(opts);
     memoryId = resolved.memoryId;
     loc = resolved.loc;
     targetId = resolved.id;
   }
-  const target = await lookupTarget(db, access, memo, memoryId, loc, targetId);
-  if (!target || trail.has(target.id)) return BROKEN_INCLUDE_NOTICE;
-  const selected = await selectIncludeRevision(db, memo, target, tag.settings);
-  if (!selected) return BROKEN_INCLUDE_NOTICE;
-  if (!tag.settings.approved && tag.settings.rev === undefined && target.content == null) return '';
+  const target = await lookupTarget(db, access, memo, memoryId, loc, targetId, opts.budget, prepaid);
+  if (!target || trail.has(target.id)) return unresolved(opts);
+  const settings = effectiveIncludeSettings(tag.settings);
+  const selected = await selectIncludeRevision(db, memo, target, settings, opts.budget);
+  if (!selected) return unresolved(opts);
+  if (!settings.approved && !settings.signed && settings.rev === undefined && target.content == null) return '';
   // Rendered per traversal: this node's ancestors and depth travel with it.
   return spliceWithin(db, access, memo, opts, selected.text, target.memoryId, new Set([...trail, target.id]), level + 1);
 }
@@ -195,8 +305,17 @@ async function spliceWithin(
   const guard = opts.literalGuard;
   // The guard must be absent from every text it will be restored out of, whether or not that text has a tag.
   if (guard && content.includes(guard)) throw new LiteralGuardCollision();
-  if (!content.includes('{{>')) return content;
-  const literal = guard ? locateLiteralIncludeTags(content) : [];
+  // #40: every piece of text that reaches the output is charged where it is appended, as UTF-8 and
+  // before anything is assembled or parsed. A nested result is made of its own charged pieces, so
+  // it is not charged again; each repetition of a target (a diamond) is charged once per tag.
+  if (!content.includes('{{>')) {
+    opts.budget?.chargeSpliced(content);
+    return content;
+  }
+  // #40: the text is masked once, and the bounded parse runs first, so a text with more tags than the
+  // expansions left refuses before anything else walks its tags. Literal tags are found after the parse.
+  const masked = maskCode(content);
+  let literal: Array<{ index: number; raw: string }> = [];
   // Copy `content[from, to)`, guarding the opener of each literal tag inside it.
   const copy = (from: number, to: number): string => {
     let text = '';
@@ -210,19 +329,33 @@ async function spliceWithin(
   };
   let tags: Array<IncludeTag & { index: number }>;
   try {
-    tags = locateIncludeTags(content);
+    // #40: every tag located here is expanded, and each expansion is charged, so the
+    // parse builds no more tags than the expansions still allowed. One more refuses before it is built.
+    tags = locateIncludeTags(content, opts.budget?.remainingExpansions(), masked);
   } catch (e) {
-    if (e instanceof IncludeSyntaxError) return copy(0, content.length); // a stored malformed tag renders as it always did
+    if (e instanceof TooManyIncludeTags) throw new ContentResolutionLimitError('expansions');
+    if (e instanceof IncludeSyntaxError) { // a stored malformed tag renders as it always did
+      if (guard) literal = locateLiteralIncludeTags(content, masked);
+      const text = copy(0, content.length);
+      opts.budget?.chargeSpliced(text);
+      return text;
+    }
     throw e;
   }
+  if (guard) literal = locateLiteralIncludeTags(content, masked);
+  const literalText = (from: number, to: number): string => {
+    const text = copy(from, to);
+    opts.budget?.chargeSpliced(text);
+    return text;
+  };
   let out = '';
   let cursor = 0;
   for (const tag of tags) {
-    out += copy(cursor, tag.index);
+    out += literalText(cursor, tag.index);
     out += await expandTag(db, access, memo, opts, tag, memoryId, trail, level);
     cursor = tag.index + tag.raw.length;
   }
-  return out + copy(cursor, content.length);
+  return out + literalText(cursor, content.length);
 }
 
 /**
@@ -237,8 +370,9 @@ export function spliceIncludes(
   db: Db, access: Record<string, unknown>, content: string, includer: { id?: string; memoryId: string },
   opts: SpliceOptions = {},
 ): Promise<string> {
+  const bounded = opts.budget ? opts : { ...opts, budget: new ResolutionBudget() };
   return spliceWithin(
-    db, access, opts.memo ?? new IncludeReadMemo(), opts, content, includer.memoryId,
+    db, access, opts.memo ?? new IncludeReadMemo(), bounded, content, includer.memoryId,
     new Set(includer.id ? [includer.id] : []), 1,
   );
 }

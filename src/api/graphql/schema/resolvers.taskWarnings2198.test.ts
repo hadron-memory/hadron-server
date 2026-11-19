@@ -11,6 +11,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
+import { RegisterLookup } from '../../../lib/actionRegister/lookup.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { taskWarningsPlugin } from '../taskWarningsPlugin.js';
@@ -66,7 +67,7 @@ beforeEach(async () => {
   member = await db.user.create({ data: { githubId: 218002, githubUsername: 'tw-member', handle: 'tw-member', roles: ['READER'] } });
   outsider = await db.user.create({ data: { githubId: 218003, githubUsername: 'tw-out', handle: 'tw-out', roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   teamAgentId = agent.id;
   const row = await db.agent.findUniqueOrThrow({ where: { id: teamAgentId } });
   teamMemoryId = row.systemMemoryId as string;
@@ -213,7 +214,7 @@ describe('the register: code → role task, through the right chains', () => {
   it('an extended Agent\'s own task wins by depth; the register itself still comes from the Team Agent', async () => {
     await registerEntry(teamMemoryId, 'task.finish.open-children', 'tasks:finish');
     await node(teamMemoryId, 'tasks:finish', { isRunnable: true });
-    const child = await M.createAgent({}, { orgId: org.id, name: 'Child Role' }, ctx(admin.id));
+    const child = await M.createAgent({}, { orgRef: org.id, name: 'Child Role' }, ctx(admin.id));
     const childRow = await db.agent.findUniqueOrThrow({ where: { id: child.id } });
     const childMemUrn = (await db.memory.findUniqueOrThrow({ where: { id: childRow.systemMemoryId as string } })).urn;
     await db.agent.update({ where: { id: child.id }, data: { extendsAgentId: teamAgentId } });
@@ -241,7 +242,7 @@ describe('the register: code → role task, through the right chains', () => {
       await db.orgMember.create({ data: { organizationId: childOrg, userId: foreignAdmin.id, role: 'ADMIN' } });
       creator = foreignAdmin.id;
     }
-    const child = await M.createAgent({}, { orgId: childOrg, name: opts.name ?? 'Child Role' }, ctx(creator));
+    const child = await M.createAgent({}, { orgRef: childOrg, name: opts.name ?? 'Child Role' }, ctx(creator));
     const childRow = await db.agent.findUniqueOrThrow({ where: { id: child.id } });
     await db.agent.update({ where: { id: child.id }, data: { extendsAgentId: teamAgentId } });
     if (opts.install ?? true) await db.appAgent.create({ data: { appId: app.id, agentId: child.id } });
@@ -257,19 +258,20 @@ describe('the register: code → role task, through the right chains', () => {
     const second = await asWorker(anne, child.id, () => resolveRegisters(ctx(contributor.id), app.id, finishWarning()));
     expect(primary.get('task.finish.open-children')?.state).toBe('mapped');
     expect(second.get('task.finish.open-children')?.state).toBe('mapped');
-    // An org READER who is not an App member does not participate: the Team Agent's entry is not readable.
+    // An org READER who is not an App member does not participate: the Team Agent's chain is not readable, so the
+    // register is withheld (#3491, ruling 0176), not unmapped: the answer must not reveal whether an entry exists.
     const reader = await db.user.create({ data: { githubId: 218005, githubUsername: 'tw-reader', handle: 'tw-reader', roles: ['READER'] } });
     await db.orgMember.create({ data: { organizationId: org.id, userId: reader.id, role: 'READER' } });
-    expect((await asWorker(anne, child.id, () => resolveRegisters(ctx(reader.id), app.id, finishWarning()))).get('task.finish.open-children')).toEqual({ state: 'unmapped' });
+    expect((await asWorker(anne, child.id, () => resolveRegisters(ctx(reader.id), app.id, finishWarning()))).get('task.finish.open-children')).toEqual({ state: 'withheld' });
   });
 
-  it('#2206 case 3: no license, no install, or an uninstalled App: the second Agent stays unresolved (fixed text, no loc)', async () => {
+  it('#2206 case 3: no license, no install, or an uninstalled App: the second Agent\'s chain is unreadable, so the register is withheld (#3491)', async () => {
     const other = await db.organization.create({ data: { id: generateId(), name: 'tw-other', urn: `two-${generateId().toLowerCase()}.example` } });
     const foreign = await nonPrimaryChild({ orgId: other.id }); // installed, but a foreign Agent with no org grant: unlicensed
-    expect((await asWorker(anne, foreign.id, () => resolveRegisters(ctx(member.id), app.id, finishWarning()))).get('task.finish.open-children')).toEqual({ state: 'unresolved' });
+    expect((await asWorker(anne, foreign.id, () => resolveRegisters(ctx(member.id), app.id, finishWarning()))).get('task.finish.open-children')).toEqual({ state: 'withheld' });
     await db.appAgent.deleteMany({ where: { agentId: foreign.id } });
     const notInstalled = await nonPrimaryChild({ install: false, name: 'Loose Role' });
-    expect((await asWorker(anne, notInstalled.id, () => resolveRegisters(ctx(member.id), app.id, finishWarning()))).get('task.finish.open-children')).toEqual({ state: 'unresolved' });
+    expect((await asWorker(anne, notInstalled.id, () => resolveRegisters(ctx(member.id), app.id, finishWarning()))).get('task.finish.open-children')).toEqual({ state: 'withheld' });
   });
 
   it('unmapped: no entry, a malformed entry, or an entry for another code', async () => {
@@ -292,12 +294,12 @@ describe('the register: code → role task, through the right chains', () => {
     expect((await run()).get('task.finish.open-children')).toEqual({ state: 'unresolved' });
   });
 
-  it('the caller must be able to READ both the register entry and the role task: an unreadable one is withheld', async () => {
+  it('the caller must be able to READ every system memory on both chains: an unreadable one is withheld (#3491, not unmapped)', async () => {
     await registerEntry(teamMemoryId, 'task.finish.open-children', 'tasks:finish');
     await node(teamMemoryId, 'tasks:finish', { isRunnable: true });
     // outsider has no standing in the org or App: neither node is readable by them
     const out = await asWorker(anne, teamAgentId, () => resolveRegisters(ctx(outsider.id), app.id, finishWarning()));
-    expect(out.get('task.finish.open-children')).toEqual({ state: 'unmapped' });
+    expect(out.get('task.finish.open-children')).toEqual({ state: 'withheld' });
     // positive control: an App participant reads the same
     const ok = await asWorker(anne, teamAgentId, () => resolveRegisters(ctx(member.id), app.id, finishWarning()));
     expect(ok.get('task.finish.open-children')?.state).toBe('mapped');
@@ -315,7 +317,7 @@ describe('the register: code → role task, through the right chains', () => {
   });
 
   it('no Team Agent, or two, ⇒ unmapped (never a guess, never a failure)', async () => {
-    const other = await M.createAgent({}, { orgId: org.id, name: 'Other Team' }, ctx(admin.id));
+    const other = await M.createAgent({}, { orgRef: org.id, name: 'Other Team' }, ctx(admin.id));
     const otherRow = await db.agent.findUniqueOrThrow({ where: { id: other.id } });
     await db.appAgent.create({ data: { appId: app.id, agentId: other.id } });
     await node(otherRow.systemMemoryId as string, 'roles');
@@ -329,13 +331,13 @@ describe('the register: code → role task, through the right chains', () => {
     expect(out.get('task.finish.open-children')).toEqual({ state: 'unmapped' });
   });
 
-  it('a lookup failure degrades to code + text: the warning is still filed, with no register', async () => {
+  it('a lookup failure still files the warning, with register withheld (#3491, ruling 0176), never an error', async () => {
     const spy = vi.spyOn(db, '$transaction').mockRejectedValueOnce(new Error('boom'));
     const c = ctx(member.id);
     await asWorker(anne, teamAgentId, () => emitTaskWarnings(c, undefined, app.id, { codes: ['task.create.no-source'] }));
     spy.mockRestore();
     expect(c.taskWarnings).toHaveLength(1);
-    expect(c.taskWarnings![0].warning.register).toBeUndefined();
+    expect(c.taskWarnings![0].warning.register).toEqual({ state: 'withheld' });
   });
 
   it('the lookup runs under a statement timeout (Postgres cancels it, nothing dangles)', async () => {
@@ -412,7 +414,7 @@ describe('decided in the write transaction, bounded after it', () => {
     expect(await db.$queryRaw`SELECT 1 AS one`).toEqual([{ one: 1 }]);
   });
 
-  it('21 aliased creates in one worker request: all succeed, 20 warnings, ONE bounded read (shared lookup, no per-alias work)', async () => {
+  it('21 aliased creates in one worker request: all succeed, 20 warnings, one enrichment read plus one history write (no per-alias work)', async () => {
     await registerEntry(teamMemoryId, 'task.create.no-source', 'tasks:a');
     await node(teamMemoryId, 'tasks:a', { isRunnable: true });
     const server = new ApolloServer<Context>({ typeDefs, resolvers, plugins: [taskWarningsPlugin] });
@@ -428,7 +430,7 @@ describe('decided in the write transaction, bounded after it', () => {
     const warnings = res.body.singleResult.extensions?.warnings as { path: string; register?: { state: string } }[];
     expect(warnings).toHaveLength(MAX_WARNINGS_PER_RESPONSE);
     expect(warnings[0].register?.state).toBe('mapped');
-    expect(bounded).toHaveLength(1);
+    expect(bounded).toHaveLength(2); // one shared enrichment transaction plus one bounded history transaction
   });
 });
 
@@ -439,19 +441,27 @@ describe('order and the aggregate lookup bound', () => {
     expect(codes(c)).toEqual(['task.create.no-source', 'task.finish.open-children']);
   });
 
-  it('past the total budget the remaining codes carry no register (the aggregate is bounded)', async () => {
+  it('past the total budget the remaining codes are withheld (the aggregate is bounded; #3491)', async () => {
     await registerEntry(teamMemoryId, 'task.create.no-source', 'tasks:a');
     await node(teamMemoryId, 'tasks:a', { isRunnable: true });
     await registerEntry(teamMemoryId, 'task.finish.open-children', 'tasks:b');
     await node(teamMemoryId, 'tasks:b', { isRunnable: true });
+    // The clock jumps past the aggregate deadline once the FIRST code's task lookup has returned (not after a count of
+    // Date.now calls: the shared lookup checks the deadline at every step).
     const real = Date.now.bind(Date);
-    let calls = 0;
-    const clock = vi.spyOn(Date, 'now').mockImplementation(() => (++calls <= 2 ? real() : real() + 60_000));
+    let late = false;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => (late ? real() + 60_000 : real()));
+    const task = RegisterLookup.prototype.task;
+    const taskSpy = vi.spyOn(RegisterLookup.prototype, 'task').mockImplementation(async function (this: RegisterLookup, ...args: Parameters<RegisterLookup['task']>) {
+      const hit = await task.apply(this, args);
+      late = true;
+      return hit;
+    });
     const out = await asWorker(anne, teamAgentId, () =>
       resolveRegisters(ctx(member.id), app.id, ['task.create.no-source', 'task.finish.open-children']));
-    clock.mockRestore();
+    clock.mockRestore(); taskSpy.mockRestore();
     expect(out.get('task.create.no-source')?.state).toBe('mapped');
-    expect(out.has('task.finish.open-children')).toBe(false);
+    expect(out.get('task.finish.open-children')).toEqual({ state: 'withheld' });
   });
 });
 

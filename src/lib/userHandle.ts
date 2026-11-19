@@ -1,3 +1,5 @@
+import { GraphQLError } from 'graphql';
+import { reservedTeamPrefix } from './teamTagSnapshot.js';
 /**
  * User-handle normalization (issue #325).
  *
@@ -37,6 +39,7 @@ export function userUrn(handle: string | null | undefined): string | null {
  */
 export function normalizeHandle(input: string): string {
   const handle = input.trim().toLowerCase();
+  if (reservedTeamPrefix(handle)) throw new GraphQLError('Handle mention tokens starting with team. are reserved.', { extensions: { code: 'USER_HANDLE_RESERVED_TEAM_PREFIX' } });
   // #692: a NEW/changed handle must be dot-free (validateUserHandle) so it stays
   // charset-disjoint from a dotted org root in the shared principal pool.
   validateUserHandle(handle); // throws on charset / reserved-word / dot violation

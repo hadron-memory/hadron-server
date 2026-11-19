@@ -32,10 +32,13 @@
  */
 
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
+import { teamPlacement } from '../workerTeamChoice.js';
 import { tierOf, type ModelTier } from './family.js';
-import type { AvailabilityRecord } from './availability.js';
+import type { AvailabilityRecord, WorkerAvailabilityView } from './availability.js';
 import { loadWorkerWorkStates, type WorkerWorkState } from './matcher.js';
 import { alarmEpisodeKey, endedAlarmEpisodes, loadStallInputs, unreactedChildren } from './stall.js';
+import type { EffortLevel, WorkerRunRecord } from './runSettings.js';
+import { withSharedWorkerActivity } from '../../api/graphql/schema/resolvers.worker.js';
 
 export const ROSTER_STATES = [
   'YOUR_MOVE', 'UNAVAILABLE', 'WAITING', 'WORKING', 'ASSIGNED_NOT_STARTED', 'AVAILABLE', 'NO_FAMILY', 'NOT_LAUNCHABLE',
@@ -47,6 +50,7 @@ const OPEN_STATUSES = ['pending', 'started'];
 
 export type RosterEntry = {
   workerId: string;
+  teamPlacement: ReturnType<typeof teamPlacement>;
   name: string;
   slug: string;
   role: string | null;
@@ -61,12 +65,25 @@ export type RosterEntry = {
   model: string | null;
   modelReportedAt: Date | null;
   tier: ModelTier | null;
+  /**
+   * #4291 (cor:agt:060:04, Proposed): the worker's record of what its session last reported, kept when it unbinds. An
+   * unbound worker is matched and started on it. `effort` is the record's effort (the session's applied effort follows
+   * into it on every report), null when none was ever reported.
+   */
+  lastUsed: WorkerRunRecord;
+  effort: EffortLevel | null;
   launchableFamilies: string[];
   /** The families it is free for work as now; empty when not free. */
   freeFamilies: string[];
   free: boolean;
   /** Its own availability record, when it makes the worker unavailable now. */
   unavailable: { reason: string | null; until: Date | null } | null;
+  /**
+   * #3865 — the worker's stored availability record, whether or not it is in effect, with the verdict
+   * (cor:agt:060:02). Null when it has none. The roster's `availability` field projects it, so "stale or
+   * deliberate" is answerable from the roster: the reason, who set it and when.
+   */
+  availabilityRecord: { row: NonNullable<WorkerAvailabilityView['own']>; inEffect: boolean } | null;
   /** Families it could run as that are unavailable in the App now. */
   unavailableFamilies: string[];
   startedTaskIds: string[];
@@ -106,13 +123,15 @@ export function rosterState(f: {
 
 /** The woken wakes on unacknowledged alarms in an App, per worker owner, nearest first. */
 async function loadWokenAlarms(db: Db, appId: string, now: Date): Promise<Map<string, string[]>> {
-  const rows = await db.$queryRaw<{ eventId: string; workerId: string | null; taskId: string | null; type: string; episodeStart: Date | null }[]>`
-    SELECT e.id AS "eventId", e.chain -> s.chain_index ->> 'workerId' AS "workerId",
+  const rows = await db.$queryRaw<{ eventId: string; appId: string; workerId: string | null; taskId: string | null; type: string; episodeStart: Date | null }[]>`
+    SELECT e.id AS "eventId", e.app_id AS "appId", e.chain -> s.chain_index ->> 'workerId' AS "workerId",
            e.task_id AS "taskId", e.type, e.episode_start AS "episodeStart"
     FROM agent_team_events e
     JOIN agent_team_alarm_schedule s ON s.event_id = e.id
     WHERE e.app_id = ${appId} AND e.severity = 'alarm' AND e.acknowledged_at IS NULL
       AND s.woken_at IS NOT NULL
+      -- #4202: an alarm naming a task of another App is nobody's move here (a missing task is left as it was).
+      AND NOT EXISTS (SELECT 1 FROM agent_tasks ft WHERE ft.id = e.task_id AND ft.app_id <> e.app_id)
     ORDER BY e.created_at, e.id`;
   // #2200 (R196): an alarm whose own episode has ended is no longer anyone's move, from that instant: classified
   // live here, never from the escalation's `ended_at`, which waits for a pass.
@@ -136,6 +155,11 @@ function ownUnavailable(w: WorkerWorkState): { reason: string | null; until: Dat
 
 /** The roster of one App's workers that are not retired, by name, at `now`. */
 export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<RosterEntry[]> {
+  // #4271: inside the roster's read transaction every liveness read shares one App-wide fold at `now`.
+  return withSharedWorkerActivity(db as Prisma.TransactionClient, appId, now, () => readTeamRoster(db, appId, now));
+}
+
+async function readTeamRoster(db: Db, appId: string, now: Date): Promise<RosterEntry[]> {
   const states = await loadWorkerWorkStates(db, appId, now);
   if (states.length === 0) return [];
   const [inputs, woken, structure] = await Promise.all([
@@ -144,7 +168,7 @@ export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<
     loadStallInputs(db, { appId, OR: [{ assigneeWorkerId: { not: null } }, { assigneeUserId: { not: null } }] }, now),
     loadWokenAlarms(db, appId, now),
     // #1726: every worker of the App, retired too, so a claim on a retired one resolves.
-    db.worker.findMany({ where: { appId }, select: { id: true, name: true, slug: true, retiredAt: true, reportsToWorkerId: true } }),
+    db.worker.findMany({ where: { appId }, select: { id: true, name: true, slug: true, retiredAt: true, reportsToWorkerId: true, explicitNoTeam: true } }),
   ]);
   const byId = new Map(structure.map((w) => [w.id, w]));
   const reportsToOf = (workerId: string): RosterEntry['reportsTo'] => {
@@ -206,10 +230,13 @@ export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<
         model: w.bindingModel,
         modelReportedAt: w.modelReportedAt,
         tier: tierOf(w.bindingModel),
+        lastUsed: w.lastUsed,
+        effort: w.lastUsed.effort,
         launchableFamilies: w.launchableFamilies,
         freeFamilies: w.freeFamilies,
         free: w.free,
         unavailable,
+        availabilityRecord: w.availability.own ? { row: w.availability.own, inEffect: w.availability.ownInEffect } : null,
         unavailableFamilies,
         startedTaskIds: startedIds,
         pendingTaskIds: pendingIds,
@@ -220,6 +247,7 @@ export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<
         lastActiveAt: w.lastActiveAt,
         lastAssignedAt: w.lastAssignedAt,
         reportsTo: reportsToOf(w.id),
+        teamPlacement: teamPlacement(byId.get(w.id)!),
       };
     })
     .sort((a, b) => {

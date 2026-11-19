@@ -11,6 +11,7 @@ import { GraphQLError } from 'graphql';
 import { randomBytes } from 'node:crypto';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
+import { serveEveryAgent } from '../../test/servedBootPrompt.js';
 import { generateId } from '../id.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../middleware/auth.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
@@ -81,7 +82,7 @@ beforeEach(async () => {
   holder = await u(62, 'holder');
   member = await u(63, 'member');
   await db.orgMember.create({ data: { organizationId: org.id, userId: manager.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(manager.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(manager.id));
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true } });
   for (const id of [holder.id, member.id]) await db.appMember.create({ data: { appId: app.id, userId: id, role: 'member' } });
   kit = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
@@ -91,6 +92,7 @@ beforeEach(async () => {
   await M.registerHost({}, {
     input: { appRef: app.id, label: 'Orca', pollIntervalSeconds: 600, workers: [{ worker: kit.id, family: 'claude', worktrees: ['hadron-server/kit'] }] },
   }, keyCtx(orca1));
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 
 describe('a collected operation with no report fails after the App\'s timeout (070:02)', () => {

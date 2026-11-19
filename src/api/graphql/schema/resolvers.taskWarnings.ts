@@ -1,5 +1,6 @@
 /**
- * #2198 (action register S1) — typed WARNINGS on task create / assign / reassign / finish.
+ * #2198 (action register S1) — typed WARNINGS on task create / assign / reassign / finish; #2607 adds task cancel
+ * and alarm acknowledgement.
  *
  * A warning is advice at the point of action: the call still succeeds (R125), and the response says what the team
  * has learned is usually wrong, with a stable `code`, a fixed `text`, and — for a caller that has an Agent — where
@@ -17,7 +18,9 @@
  * gate for that fact (`maySeeWorkerInternals`, the gate `Worker.checkStatus` masks on); to anyone else they are
  * simply absent.
  *
- * Register. The code→role-task mapping lives in the App's Team Agent's system memory as `register:<code>` nodes
+ * Register. Shared lookup primitives live in lib/actionRegister/lookup.ts, also used by tick wakes (#2733).
+ * The ticker.code.unmapped warning uses this same carrier and never records a task event.
+ * The code→role-task mapping lives in the App's Team Agent's system memory as `register:<code>` nodes
  * (`data.registerEntry = { code, taskLoc }`, R137). The effective Team Agent is found the way team roles find it
  * (`locateTeamAgent`); `register:<code>` resolves through ITS chain; the entry's `taskLoc` then resolves through the
  * CALLER's own Agent chain (nearest wins). A caller with no Agent (a person, an ambiguous or refused session) gets no
@@ -25,20 +28,31 @@
  */
 import type { GraphQLResolveInfo } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
-import type { Context } from './resolvers.helpers.js';
+import { withoutRequestCaches, type Context } from './resolvers.helpers.js';
+import { appendTaskEvent, eventActor, RECORDED_TASK_WARNING_CODES, type EventActor, type RecordedTaskWarningCode } from '../../../lib/agentTasks/events.js';
 import { currentActor } from '../../../lib/requestActor.js';
-import { findEffectiveNodeIdByLoc } from '../../../lib/effectiveSystemMemory.js';
 import { loadAvailabilityByFamily } from '../../../lib/agentTasks/availability.js';
 import { loadWorkerCheckStatuses } from '../../../lib/workerCheckStatus.js';
-import { canReadMemory } from '../../../mcp/access-control.js';
-import { locateTeamAgent, maySeeWorkerInternals } from './resolvers.worker.js';
+import { maySeeWorkerInternals } from './resolvers.worker.js';
+import { RegisterLookup } from '../../../lib/actionRegister/lookup.js';
+import { answerWithLookup } from '../../../lib/actionRegister/answerCore.js';
+export { registerTaskLoc } from '../../../lib/actionRegister/lookup.js';
 
 export const TASK_WARNING_CODES = [
   'task.create.no-source',
   'task.assign.assignee-unavailable',
   'task.assign.assignee-busy',
   'task.assign.assignee-paused',
+  // #3267 (action register phase 3, S1): advice on start and progress. The first and last describe worker or
+  // other-task state, so they sit behind the roster gate (GATED_CODES); parent-ended is about the task's own parent.
+  'task.start.other-started',
+  'task.start.parent-ended',
+  'task.progress.children-ended',
   'task.finish.open-children',
+  // #2607 (action register phase 3): ungated, fixed text, about the caller's own act.
+  'task.cancel.open-children',
+  'alarm.ack.outside-chain',
+  'ticker.code.unmapped',
 ] as const;
 export type TaskWarningCode = (typeof TASK_WARNING_CODES)[number];
 
@@ -48,13 +62,23 @@ export const TASK_WARNING_TEXT: Record<TaskWarningCode, string> = {
   'task.assign.assignee-unavailable': 'The assignee is marked unavailable for work, so the task may wait.',
   'task.assign.assignee-busy': 'The assignee already has an open task.',
   'task.assign.assignee-paused': 'The assignee has paused itself, so the task may wait.',
+  'task.start.other-started': 'You already have another task started; starting this one does not end it.',
+  'task.start.parent-ended': "This task's parent has already ended.",
+  'task.progress.children-ended': 'Every child of this task has ended, so it may be ready to finish.',
   'task.finish.open-children': 'This task still has open child tasks.',
+  'task.cancel.open-children': 'This task still has open child tasks; cancelling it does not end them.',
+  'alarm.ack.outside-chain': 'You acknowledged an alarm outside its chain, as a manager of the App.',
+  'ticker.code.unmapped': "No register entry you can read maps this ticker's code to a task, so its wakes will say no task is mapped.",
 };
 
 export type TaskWarningRegister =
   | { state: 'mapped'; taskLoc: string; taskUrn: string }
   | { state: 'unmapped' }
-  | { state: 'unresolved' };
+  | { state: 'unresolved' }
+  /** #3491, ruling 0176: an unreadable system memory on a chain, or a failed lookup. Says nothing about what the chain holds. */
+  | { state: 'withheld' };
+
+const WITHHELD_REGISTER: TaskWarningRegister = Object.freeze({ state: 'withheld' as const });
 
 export type TaskWarning = { code: TaskWarningCode; text: string; register?: TaskWarningRegister };
 
@@ -71,14 +95,28 @@ export const MAX_WARNINGS_PER_RESPONSE = 20;
 export const REGISTER_STATEMENT_TIMEOUT_MS = 300;
 export const REGISTER_TOTAL_BUDGET_MS = 1000;
 
-const ASSIGNEE_FACT_CODES: readonly TaskWarningCode[] = [
+/**
+ * The codes that describe a worker's or another task's state: filed only to a caller who passes the roster's own read
+ * gate (`maySeeWorkerInternals`), and dropped, never degraded, for anyone else. #3267 adds the start/progress pair.
+ */
+const GATED_CODES: readonly TaskWarningCode[] = [
   'task.assign.assignee-unavailable', 'task.assign.assignee-busy', 'task.assign.assignee-paused',
+  'task.start.other-started', 'task.progress.children-ended',
 ];
 
 /** The key a mutation's warnings are filed under: its response key (alias or name); MCP calls have no `info`. */
 export function warningPath(info?: Pick<GraphQLResolveInfo, 'path'> | null): string {
   const key = info?.path?.key;
   return typeof key === 'string' ? key : 'mcp';
+}
+
+/**
+ * Whether a warning's path belongs to a mutation that errored. #2653: a createAgentTasks call files each task's
+ * warnings under `<response key>.<position>`, and an error names the response key alone, so the key before the first
+ * dot decides (a GraphQL response key never contains one).
+ */
+function erroredPath(path: string, erroredPaths: ReadonlySet<string>): boolean {
+  return erroredPaths.has(path) || erroredPaths.has(path.split('.')[0]!);
 }
 
 /** Order by the fixed code order and cap; drops duplicates. */
@@ -115,6 +153,8 @@ export async function readAssigneeFacts(
 export type PendingWarnings = {
   /** Codes decided inside the write transaction (the assignee facts included: unavailable, busy, paused). */
   codes: TaskWarningCode[];
+  /** Internal association from the committed row, never an input field. */
+  taskId?: string;
 };
 
 /**
@@ -131,12 +171,12 @@ export type TaskWarningState = {
 /** All the enrichment a request may spend, summed over its operations; past it, only fixed code + text is filed. */
 export const REQUEST_READ_BUDGET_MS = 2000;
 
-const isFactCode = (c: TaskWarningCode): boolean => ASSIGNEE_FACT_CODES.includes(c);
+const isFactCode = (c: TaskWarningCode): boolean => GATED_CODES.includes(c);
 
 /**
- * Run `fn` in ONE short read transaction: Postgres cancels any statement after {@link REGISTER_STATEMENT_TIMEOUT_MS}
+ * Run `fn` in ONE short transaction: Postgres cancels any statement after {@link REGISTER_STATEMENT_TIMEOUT_MS}
  * (`SET LOCAL`, so nothing runs on after we stop waiting and the connection returns to the pool), the transaction
- * itself is cut after `timeout`, and `deadline` (a wall-clock ms) lets `fn` stop between steps. Every database read
+ * itself is cut after `timeout`, and `deadline` (a wall-clock ms) lets `fn` stop between steps. All bounded database work
  * the warnings add after a commit goes through here: the privacy gate and the register alike.
  */
 export async function boundedRead<T>(
@@ -152,8 +192,8 @@ export async function boundedRead<T>(
 /**
  * After the write committed: file the warnings the transaction decided. The fixed-text codes (no-source,
  * open-children) are filed whatever happens to the optional enrichment; the three assignee facts also need the
- * roster's privacy gate and fail CLOSED (dropped) if it cannot be answered; the register is optional guidance and
- * fails open to code + text. Never throws, and does no work once the response is full or the request has spent its
+ * roster's privacy gate and fail CLOSED (dropped) if it cannot be answered; the register is optional guidance whose
+ * lookup failing or timing out is `withheld` (#3491, ruling 0176). Never throws, and does no work once the response is full or the request has spent its
  * read budget.
  */
 export async function emitTaskWarnings(
@@ -163,6 +203,17 @@ export async function emitTaskWarnings(
   pending: PendingWarnings,
 ): Promise<void> {
   try {
+    // History is the fired population, BEFORE response caps and optional register/gate enrichment.
+    if (pending.taskId) {
+      const history = (ctx.taskWarningHistory ??= []);
+      const path = warningPath(info);
+      const actor = { ...eventActor(ctx.userId) };
+      for (const code of RECORDED_TASK_WARNING_CODES) {
+        if (pending.codes.includes(code) && !history.some(h => h.path === path && h.code === code)) {
+          history.push({ appId, taskId: pending.taskId, path, code, actor });
+        }
+      }
+    }
     const filed = (ctx.taskWarnings ??= []);
     // Cap BEFORE work: a warning that cannot be sent costs nothing.
     if (filed.length >= MAX_WARNINGS_PER_RESPONSE) return;
@@ -179,13 +230,15 @@ export async function emitTaskWarnings(
         await boundedRead(ctx, async (tx, deadline) => {
           const txCtx = { ...ctx, db: tx, workerInternalsCache: new Map() } as unknown as Context;
           if (needsGate) state.gate.set(appId, await maySeeWorkerInternals(txCtx, appId));
-          if (agentId && Date.now() < deadline) {
+          if (agentId) {
+            // A deadline already spent by the gate read withholds the codes (resolveRegistersIn breaks before any read).
             const wanted = decided.filter((c) => (!isFactCode(c) || state.gate.get(appId) === true) && !state.registers.has(keyOf(c)));
             await resolveRegistersIn(tx, txCtx, state, appId, agentId, wanted, deadline);
           }
         });
       } catch {
-        // The gate stays unanswered ⇒ the three facts are dropped below; the register stays code + text.
+        // The gate stays unanswered ⇒ the three facts are dropped below. A register that was to be read is withheld (#3491).
+        if (agentId) for (const c of decided) if (!state.registers.has(keyOf(c)) && (!isFactCode(c) || state.gate.get(appId) === true)) state.registers.set(keyOf(c), WITHHELD_REGISTER);
       } finally {
         state.spentMs += Date.now() - started;
       }
@@ -202,11 +255,54 @@ export async function emitTaskWarnings(
   }
 }
 
+/** Unenriched, closed history record, captured before a response cap or actor-scope exit. */
+export type TaskWarningHistory = { appId: string; taskId: string; path: string; code: RecordedTaskWarningCode; actor: EventActor };
+
+/**
+ * Consume once after field errors are known (GraphQL), or after the MCP result has been built. One bounded
+ * post-commit transaction. No retries, no detached write, and no response mutation. Partial history is allowed; a
+ * missing event is never proof that no warning fired. This independent write budget cannot truncate the fired
+ * population merely because optional response enrichment or its size cap was exhausted.
+ *
+ * Where each limit is enforced: all of them come from {@link boundedRead}, the one helper the privacy gate and the
+ * register use too, so history adds no tunable option of its own.
+ * - 300 ms statement timeout: {@link REGISTER_STATEMENT_TIMEOUT_MS}, applied as `SET LOCAL statement_timeout`
+ *   inside the transaction, per statement.
+ * - 1000 ms cooperative deadline: {@link REGISTER_TOTAL_BUDGET_MS}; `boundedRead` hands `Date.now() + total` to its
+ *   callback, and the loop below checks it between events (it cannot interrupt a statement already running).
+ * - 1500 ms transaction timeout: `REGISTER_TOTAL_BUDGET_MS + 500`, the literal `timeout` option of the
+ *   `$transaction` call in `boundedRead` (no named constant).
+ * - 500 ms pool wait: the literal `maxWait` option of that same call, the time allowed to get a connection before
+ *   the transaction starts.
+ * These are per-limit bounds, not a wall-clock service SLA, and their sum is not a promised total.
+ *
+ * Its read budget is not shared with optional enrichment: `TaskWarningState.spentMs` and
+ * {@link REQUEST_READ_BUDGET_MS} meter the gate and register reads, whereas this flush neither reads nor charges
+ * them: it runs its own `boundedRead` invocation whatever those have spent.
+ */
+export async function flushTaskWarningHistory(ctx: Context, erroredPaths: ReadonlySet<string> = new Set()): Promise<void> {
+  const pending = ctx.taskWarningHistory?.splice(0) ?? [];
+  const successful = pending.filter(h => !erroredPath(h.path, erroredPaths));
+  if (successful.length === 0) return;
+  try {
+    // Budgets (statement, deadline, transaction, pool wait) all come from boundedRead; see the JSDoc above.
+    await boundedRead(ctx, async (tx, deadline) => {
+      for (const h of successful) {
+        if (Date.now() >= deadline) break;
+        await appendTaskEvent(tx, { appId: h.appId, taskId: h.taskId, actor: h.actor, event: { type: 'task.warning', code: h.code } });
+      }
+    });
+  } catch {
+    // The operation committed already. Neither recording failure nor timeout changes its result; never retry.
+  }
+}
+
 /**
  * Resolve each code through the register inside an open bounded read, storing the outcomes in the request state. The
- * deadline is checked between codes (the aggregate bound); a code not reached keeps no outcome ⇒ code + text only.
- * Both chosen nodes (the register entry and the role task) must be readable by the CALLER under the canonical memory
- * read gate, else the code degrades to unmapped / unresolved with nothing disclosed.
+ * deadline is checked between codes (the aggregate bound); a code not reached, or any failure, is `withheld`.
+ * #3491 (ruling 0176): every system memory on the chains looked up (the Team Agent's and the caller Agent's) must be
+ * readable by the CALLER under the canonical memory read gate, else `withheld`; the shared {@link answerWithLookup}
+ * is the one gate, the same as for every action answer.
  */
 async function resolveRegistersIn(
   tx: Prisma.TransactionClient,
@@ -218,46 +314,35 @@ async function resolveRegistersIn(
   deadline: number,
 ): Promise<void> {
   if (codes.length === 0) return;
-  const caller = await tx.agent.findUnique({ where: { id: agentId }, select: { systemMemoryId: true, deletedAt: true } });
-  if (!state.team.has(appId)) {
-    let team: Awaited<ReturnType<typeof locateTeamAgent>> | null = null;
-    try {
-      team = await locateTeamAgent(txCtx, appId, undefined);
-    } catch {
-      team = null; // zero or several Team Agents: nothing to map through, never a guess
+  const keyOf = (code: TaskWarningCode) => `${appId}\u0000${agentId}\u0000${code}`;
+  const c = withoutRequestCaches(txCtx, tx);
+  // The ONE gate (#3491, ruling 0176): the shared lookup, whole chains, the same answer as every action answer.
+  const lookup = new RegisterLookup(tx, c, appId, deadline, false, state.team.has(appId) ? state.team.get(appId) : undefined);
+  let reached = 0;
+  try {
+    for (const code of codes) {
+      if (Date.now() >= deadline) break; // aggregate bound: the rest are withheld below
+      const answer = await answerWithLookup(lookup, c, code, agentId);
+      state.registers.set(keyOf(code), answer.state === 'MAPPED' ? { state: 'mapped', taskLoc: answer.taskLoc!, taskUrn: answer.taskUrn! }
+        : answer.state === 'UNMAPPED' ? { state: 'unmapped' } : answer.state === 'UNRESOLVED' ? { state: 'unresolved' } : WITHHELD_REGISTER);
+      reached += 1;
     }
-    state.team.set(appId, team?.systemMemoryId ?? null);
+    // Only while budget remains: a spent deadline is routine (the codes are withheld below), not a failed lookup, and does no further read.
+    if (!state.team.has(appId) && Date.now() < deadline) state.team.set(appId, await lookup.teamMemory());
+  } catch {
+    // Fixed category only: never log the caller, the code or the failure.
+    // A throw once the budget is spent is routine exhaustion (the codes not reached are withheld below), not a failed lookup.
+    if (Date.now() < deadline) console.warn('task_warning.register_failed');
   }
-  const teamMemoryId = state.team.get(appId) ?? null;
-  const readable = async (memoryId: string): Promise<boolean> => canReadMemory(tx as never, txCtx as never, memoryId);
-  for (const code of codes) {
-    if (Date.now() >= deadline) return; // aggregate bound: the rest stay code + text only
-    const key = `${appId}\u0000${agentId}\u0000${code}`;
-    if (!teamMemoryId) { state.registers.set(key, { state: 'unmapped' }); continue; }
-    const entry = await findEffectiveNodeIdByLoc(tx, teamMemoryId, `register:${code}`);
-    const node = entry && (await readable(entry.memoryId))
-      ? await tx.node.findUnique({ where: { id: entry.id }, select: { data: true, deletedAt: true } })
-      : null;
-    const taskLoc = registerTaskLoc(node?.deletedAt ? null : node?.data, code);
-    if (!taskLoc) { state.registers.set(key, { state: 'unmapped' }); continue; }
-    if (!caller || caller.deletedAt || !caller.systemMemoryId) { state.registers.set(key, { state: 'unresolved' }); continue; }
-    const hit = await findEffectiveNodeIdByLoc(tx, caller.systemMemoryId, taskLoc);
-    const task = hit && (await readable(hit.memoryId))
-      ? await tx.node.findUnique({
-          where: { id: hit.id },
-          select: { loc: true, isRunnable: true, deletedAt: true, memory: { select: { urn: true, deletedAt: true } } },
-        })
-      : null;
-    if (!task || task.deletedAt || task.memory.deletedAt || !task.isRunnable) { state.registers.set(key, { state: 'unresolved' }); continue; }
-    state.registers.set(key, { state: 'mapped', taskLoc: task.loc, taskUrn: `hrn:node:${task.memory.urn}:${task.loc}` });
-  }
+  // A failed or timed-out lookup is withheld, never a guess and never an error to the call.
+  for (const code of codes.slice(reached)) state.registers.set(keyOf(code), WITHHELD_REGISTER);
 }
 
 type RegisterOutcome = Map<TaskWarningCode, TaskWarningRegister>;
 
 /**
  * Resolve the register for `codes` for the current actor's Agent, standalone (its own request state): the map holds
- * an outcome per code reached. No Agent ⇒ empty and no lookup; any error ⇒ empty.
+ * an outcome per code. No Agent ⇒ empty and no lookup; a failed read ⇒ `withheld` for every code.
  */
 export async function resolveRegisters(ctx: Context, appId: string, codes: readonly TaskWarningCode[]): Promise<RegisterOutcome> {
   const out: RegisterOutcome = new Map();
@@ -270,21 +355,14 @@ export async function resolveRegisters(ctx: Context, appId: string, codes: reado
       await resolveRegistersIn(tx, txCtx, state, appId, agentId, codes, deadline);
     });
   } catch {
-    state.registers.clear();
+    // The read transaction itself failed: nothing was answered, so every code is withheld.
+    for (const code of codes) state.registers.set(`${appId}\u0000${agentId}\u0000${code}`, WITHHELD_REGISTER);
   }
   for (const code of codes) {
     const r = state.registers.get(`${appId}\u0000${agentId}\u0000${code}`);
     if (r) out.set(code, r);
   }
   return out;
-}
-
-/** The `taskLoc` of a well-formed register entry for `code`, else null (a malformed entry reads as unmapped). */
-export function registerTaskLoc(data: unknown, code: string): string | null {
-  const entry = (data as { registerEntry?: { code?: unknown; taskLoc?: unknown } } | null | undefined)?.registerEntry;
-  if (!entry || entry.code !== code) return null;
-  const loc = entry.taskLoc;
-  return typeof loc === 'string' && loc.trim() !== '' && loc.length <= 512 ? loc : null;
 }
 
 /**
@@ -298,7 +376,7 @@ export function shapeResponseWarnings(
   const perPath = new Map<string, number>();
   const out: { path: string; code: TaskWarningCode; text: string; register?: TaskWarningRegister }[] = [];
   for (const { path, warning } of collected) {
-    if (erroredPaths.has(path)) continue;
+    if (erroredPath(path, erroredPaths)) continue;
     const n = perPath.get(path) ?? 0;
     if (n >= MAX_WARNINGS_PER_OPERATION || out.length >= MAX_WARNINGS_PER_RESPONSE) continue;
     perPath.set(path, n + 1);

@@ -13,6 +13,7 @@ import {
   isPlatformAdmin,
   requireOrgRole,
 } from './resolvers.helpers.js';
+import { forbiddenError } from '../../../lib/refusals.js';
 
 type TransferClass = 'knowledge' | 'group' | 'personal' | 'private';
 type TransferDb = Prisma.TransactionClient;
@@ -40,23 +41,23 @@ function refusal(code: string, message: string): GraphQLError {
 /** The source gate runs before any dependency or destination detail is returned. */
 async function authorizeSource(ctx: Context, memory: Memory, ref: string): Promise<void> {
   await concealUnreadableDenial(ctx, memory.id, ref, async () => {
-    if (!ctx.userId || ctx.impersonation) throw new Error('Forbidden');
+    if (!ctx.userId || ctx.impersonation) throw forbiddenError();
     // personal/private's strict owner is separate from the tenant owner. An
     // org ADMIN cannot read, edit, or transfer someone else's private content.
     if (memory.userId !== null) {
-      if (memory.userId !== ctx.userId) throw new Error('Forbidden');
+      if (memory.userId !== ctx.userId) throw forbiddenError();
       return;
     }
     if (isPlatformAdmin(ctx)) return;
     if (memory.ownerUserId !== null) {
-      if (memory.ownerUserId !== ctx.userId) throw new Error('Forbidden');
+      if (memory.ownerUserId !== ctx.userId) throw forbiddenError();
       return;
     }
     if (memory.organizationId !== null) {
       await requireOrgAction(ctx, memory.organizationId, 'memory.delete');
       return;
     }
-    throw new Error('Forbidden');
+    throw forbiddenError();
   });
 }
 

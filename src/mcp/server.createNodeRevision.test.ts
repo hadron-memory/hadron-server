@@ -342,9 +342,11 @@ describe('hadron_create_node over an existing loc — revision history (#976/#11
         urn: `hrn:node:${fx.memory.urn}:${node.loc}`,
         content: 'must not land',
     });
+    const requestId = (result as unknown as { structuredContent: { error: { requestId: string } } }).structuredContent.error.requestId;
     expect(result).toEqual({
       isError: true,
-      content: [{ type: 'text', text: '[internal_server_error] Unable to complete this request. Please try again.' }],
+      content: [{ type: 'text', text: `[INTERNAL_SERVER_ERROR] Internal server error. Request id: ${requestId}` }],
+      structuredContent: { error: { code: 'INTERNAL_SERVER_ERROR', requestId, message: 'Internal server error.' } },
     });
 
     const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });

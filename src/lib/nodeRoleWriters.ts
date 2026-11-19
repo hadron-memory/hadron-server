@@ -69,7 +69,7 @@ export type RoleWriterChange = {
 const RUNNABLE_RULE_KEY = 'task';
 
 /** The rule keys a node state is judged under. */
-function ruleKeysOf(role: string | null | undefined, runnable: boolean | null | undefined): string[] {
+export function ruleKeysOf(role: string | null | undefined, runnable: boolean | null | undefined): string[] {
   const keys: string[] = [];
   if (role) keys.push(role);
   if (runnable === true && role !== RUNNABLE_RULE_KEY) keys.push(RUNNABLE_RULE_KEY);
@@ -180,7 +180,7 @@ export async function assertRoleWritersForNodes(
   principal: RoleWriterPrincipal,
   nodes: ReadonlyArray<{ role: string | null | undefined; isRunnable?: boolean | null }>,
   memoryIds: { from: string; to?: string },
-  opts: { platformWrite?: boolean } = {},
+  opts: { platformWrite?: boolean; preview?: boolean } = {},
 ): Promise<void> {
   if (opts.platformWrite === true) return;
   // Judged as distinct (role, runnable) states so one rulebook read serves the batch.
@@ -191,13 +191,21 @@ export async function assertRoleWritersForNodes(
     if (!role && !runnable) continue;
     states.set(`${role ?? ''}\u0000${runnable}`, { role, runnable });
   }
+  const check = async (memoryId: string, change: RoleWriterChange) => {
+    if (opts.preview) {
+      const refusal = await roleWritersRefusal(tx, principal, memoryId, change);
+      if (refusal) throw refusal;
+    } else {
+      await assertRoleWritersForWrite(tx, principal, memoryId, change);
+    }
+  };
   for (const key of [...states.keys()].sort()) {
     const { role, runnable } = states.get(key)!;
-    await assertRoleWritersForWrite(tx, principal, memoryIds.from, {
+    await check(memoryIds.from, {
       priorRole: role, nextRole: role, priorRunnable: runnable, nextRunnable: runnable,
     });
     if (memoryIds.to && memoryIds.to !== memoryIds.from) {
-      await assertRoleWritersForWrite(tx, principal, memoryIds.to, {
+      await check(memoryIds.to, {
         priorRole: null, nextRole: role, priorRunnable: false, nextRunnable: runnable,
       });
     }

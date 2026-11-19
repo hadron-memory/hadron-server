@@ -142,7 +142,10 @@ describe('#1507 persisted sync outcome', () => {
     }
     expect(JSON.parse((await storedReport())!)).toMatchObject({ outcome: 'partial', entries: [{ kind: 'invalid_include', loc: 'bad' }] });
     expect(await db.node.count({ where: { memoryId: graph.id, loc: 'good' } })).toBe(1);
-  });
+    // #3265: the first door pays the cold import of the whole resolvers chain inside the timed body, which on a loaded
+    // host exceeds vitest's default 5s. Sibling sync tests give the same shape 20-30s (syncGraphFromGithub.test.ts,
+    // mirrorBranchMigration3042.test.ts); no assertion is relaxed.
+  }, 30_000);
 
   it('persists fixed failed metadata when preflight fails without claiming committed files', async () => {
     const result = await syncGraphFromGithub({ ...graph, source: 'https://not-a-github-host.test/repo' });

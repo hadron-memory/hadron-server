@@ -55,13 +55,20 @@ import {
   sendMagicLink,
   TOKEN_EXPIRY_MINUTES,
 } from './email.js';
+import { requireSignupBotCheck } from './turnstile.js';
 import { isServerLocalPath } from './server-local-path.js';
+import { SIGNIN_PROMPT_TEMPLATE } from './signin-prompt.template.js';
+import { isGoogleConfigured } from './google.js';
+import { isAppleConfigured } from './apple.js';
+import { redirectAnchor } from './redirectAnchor.js';
+import { isLiveOAuthClient, oauthClientExpiresAt } from '../lib/oauthClientLifetime.js';
 import {
   SUPPORTED_OAUTH_SCOPES,
   USER_API_KEY_LABEL_MAX_LEN,
   mintUserApiKeyInTx,
   type OAuthScope,
 } from '../middleware/auth.js';
+import { respondInternalFault, respondOAuthServerError } from '../lib/internalFault.js';
 
 /**
  * Validate a `BASE_URL` env-var value for OAuth-metadata use. Exported
@@ -442,16 +449,15 @@ export async function handleClientRegistration(
         clientId,
         clientName,
         redirectUris: validation.uris,
+        // #155: an unused client becomes collectable; redemptions extend it.
+        expiresAt: oauthClientExpiresAt(),
       },
     });
   } catch (err) {
     // Don't echo the DB error message back — it may name internal
     // identifiers or constraints. `server_error` is RFC 7591 §3.2.2's
     // catch-all error code.
-    res.status(500).json({
-      error: 'server_error',
-      error_description: 'Failed to persist registration',
-    });
+    respondOAuthServerError(res, 'Failed to persist registration', err);
     return;
   }
 
@@ -572,6 +578,7 @@ export function renderConsent(params: ConsentParams): string {
     resource: params.resource,
     clientId: params.clientId,
     redirectUri: params.redirectUri,
+    redirectAnchor: redirectAnchor(params.redirectUri),
     codeChallenge: params.codeChallenge,
     codeChallengeMethod: params.codeChallengeMethod,
     state: params.state,
@@ -820,7 +827,7 @@ async function validateClientAndRedirectUri(
   const client = await db.oAuthClient.findUnique({
     where: { clientId: rawClientId },
   });
-  if (!client || client.deletedAt) {
+  if (!isLiveOAuthClient(client)) {
     res.status(400).json({
       error: 'invalid_client',
       error_description: 'client_id is unknown',
@@ -841,8 +848,18 @@ async function validateClientAndRedirectUri(
   };
 }
 
-/** v1 caps on the variable-size /authorize params. */
-const STATE_MAX_LENGTH = 512;
+/**
+ * v1 caps on the variable-size /authorize params.
+ *
+ * #3764: `state` is the client's opaque value and RFC 6749 §4.1.2 requires it returned unchanged, so a long one is
+ * ACCEPTED and echoed byte for byte, never dropped. The bound is only a request-size limit: 4096 characters, eight
+ * times the old 512 and far above any state a real client sends (a CSRF nonce or a signed blob), small enough that the
+ * value still rides the consent form, the sign-in `return_to` and the redirect without nearing a header limit (for a
+ * typical base64url state; a state made only of reserved characters percent-encodes to about 3x). Above
+ * it the request is refused with `invalid_request`, NO code, and the error redirect echoes the supplied state exactly
+ * (§4.1.2.1). The corpus fixes no number (cor:aut:030:01 states the round-trip guarantee only).
+ */
+export const STATE_MAX_LENGTH = 4096;
 /**
  * PKCE S256 challenges are base64url-encoded SHA-256 outputs:
  * exactly 43 chars without padding. RFC 7636 §4.2 mandates a
@@ -945,13 +962,14 @@ function buildHandleAuthorizeGet(
       return;
     }
 
-    // Pre-redirect: capture state for echo. If state is malformed
-    // (not a string, or oversized) we drop it rather than try to
-    // echo garbage back.
-    const state =
-      typeof q.state === 'string' && q.state.length > 0 && q.state.length <= STATE_MAX_LENGTH
-        ? q.state
-        : '';
+    // Pre-redirect: capture state for echo (#3764). A supplied state is returned unchanged; one over the bound
+    // is refused below with the supplied value echoed, never dropped with a code still issued. A non-string
+    // (repeated parameter) or empty one counts as absent, as before.
+    const state = typeof q.state === 'string' ? q.state : '';
+    if (state.length > STATE_MAX_LENGTH) {
+      redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
+      return;
+    }
 
     // The CLI can select which first-party identity provider performs the
     // browser sign-in. Omission remains GitHub for compatibility with older
@@ -985,6 +1003,40 @@ function buildHandleAuthorizeGet(
           }),
         );
         return;
+      }
+      // #168 (Holger's scoped (b) ruling): an MCP connector flow that did not
+      // pick a provider gets an explanatory page instead of a silent bounce.
+      // EXACT string equality on both conditions: `login_provider` omitted
+      // (so the CLI's explicit/default flows stay one-click) and `resource`
+      // === `${origin}/mcp` (no normalizing, case-folding or prefix match).
+      // `getServerOrigin` null means no trustworthy origin: never prompt.
+      if (q.login_provider === undefined && typeof q.resource === 'string') {
+        const origin = getServerOrigin(req);
+        if (origin !== null && q.resource === `${origin}/mcp`) {
+          const returnTo = encodeURIComponent(req.originalUrl);
+          // #2844: the other first-party providers, offered only when the
+          // deployment can actually serve them (`/auth/google` and `/auth/apple`
+          // answer 503 otherwise). Same `return_to` as the GitHub link; the href
+          // is a fixed local path plus the encoded original URL, escaped here
+          // because `providerLinks` is the one pre-rendered fragment.
+          const providerLinks = [
+            ...(isGoogleConfigured() ? [['google', 'Google']] : []),
+            ...(isAppleConfigured() ? [['apple', 'Apple']] : []),
+          ]
+            .map(([id, label]) => `<a class="button" href="${escapeHtml(`/auth/${id}?return_to=${returnTo}`)}">Continue with ${label}</a>`)
+            .join('\n    ');
+          res.type('html').send(
+            renderTemplate(SIGNIN_PROMPT_TEMPLATE.replace('{{providerLinks}}', providerLinks), {
+              clientName,
+              redirectAnchor: redirectAnchor(redirectUri),
+              signInUrl: `/auth/${loginProvider}?return_to=${returnTo}`,
+              // Fixed local path + the original query: never derived from the
+              // request target's origin (an absolute-form request line).
+              emailUrl: `/oauth/authorize${req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '?'}&login_provider=email`,
+            }),
+          );
+          return;
+        }
       }
       // req.originalUrl is the path + query that hit Express
       // (e.g., `/oauth/authorize?client_id=…&state=…`). The
@@ -1091,10 +1143,14 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  const state =
-    typeof body.state === 'string' && body.state.length > 0 && body.state.length <= STATE_MAX_LENGTH
-      ? body.state
-      : '';
+  // #3764: a supplied state is never dropped on this leg either. The same bound as the authorize GET applies BEFORE
+  // any echo (the deny branch below echoes without a proof check), so a forged form cannot push an unbounded value
+  // into a Location header. An in-bound state that differs from the GET's fails the grant proof below.
+  const state = typeof body.state === 'string' ? body.state : '';
+  if (state.length > STATE_MAX_LENGTH) {
+    redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
+    return;
+  }
 
   // 4. Fail-closed decision check. ONLY literal 'approve' mints.
   if (body.decision !== 'approve') {
@@ -1184,10 +1240,7 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
     // Same posture as /oauth/register: a thrown Prisma error must
     // not become an unhandled rejection. 500 is the catch-all per
     // RFC 7591 §3.2.2.
-    res.status(500).json({
-      error: 'server_error',
-      error_description: 'Failed to issue authorization code',
-    });
+    respondOAuthServerError(res, 'Failed to issue authorization code', error);
     return;
   }
 
@@ -1369,8 +1422,7 @@ function buildHandleAuthorizeEmailPost(_csrf: DoubleCsrfUtilities) {
     // Option-C legs).
     await sendMagicLink(email, db, undefined, undefined, returnTo);
   } catch (err) {
-    console.error('OAuth email-entry send error:', err);
-    res.status(500).json({ error: 'Failed to send verification email' });
+    respondInternalFault(res, 'oauth/email-entry', err);
     return;
   }
 
@@ -1442,8 +1494,7 @@ async function handleAuthorizeEmailCodePost(req: Request, res: Response): Promis
     });
     res.redirect(returnTo as string);
   } catch (err) {
-    console.error('OAuth demo-code sign-in error:', err);
-    res.status(500).json({ error: 'Sign-in failed' });
+    respondInternalFault(res, 'oauth/demo-code', err);
   }
 }
 
@@ -1724,9 +1775,21 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
       const live = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT id FROM users WHERE id = ${authCode.userId} AND deleted_at IS NULL FOR SHARE`;
       if (!live[0]) throw new Error('User not found');
+      // #155: the client row last, FOR UPDATE, after the anchor, the code and the user. A
+      // soft-deleted (collected) client mints nothing; the transaction still commits, so the claim
+      // stands and the answer is the lost-race one (no client-state oracle, Xabat's CHECKED Q2).
+      // Holding the row is what makes that deterministic against the GC: a collection that commits
+      // first is seen here, and one that comes later waits and re-checks the extended expiry below.
+      await tx.$queryRaw`SELECT client_id FROM oauth_clients WHERE client_id = ${authCode.clientId} FOR UPDATE`;
       const client = await tx.oAuthClient.findUnique({ where: { clientId: authCode.clientId } });
+      if (!isLiveOAuthClient(client)) return { kind: 'lost' };
+      // A NULL expiry (seeded clients) never expires and stays NULL.
+      await tx.oAuthClient.updateMany({
+        where: { clientId: authCode.clientId, expiresAt: { not: null }, deletedAt: null },
+        data: { expiresAt: oauthClientExpiresAt() },
+      });
       const clientNameForLabel =
-        client?.clientName && client.clientName.length > 0 ? client.clientName : authCode.clientId;
+        client.clientName.length > 0 ? client.clientName : authCode.clientId;
       // Cap the label at the same length as the GraphQL resolver's user-supplied label (DCR's
       // 200-char client_name cap is only implicit); one shared constant bounds it regardless.
       const label = `OAuth: ${clientNameForLabel}`.slice(0, USER_API_KEY_LABEL_MAX_LEN);
@@ -1744,10 +1807,7 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
     if (error instanceof SignInNotLive) {
       outcome = { kind: 'ended' };
     } else {
-      res.status(500).json({
-        error: 'server_error',
-        error_description: 'failed to issue access token',
-      });
+      respondOAuthServerError(res, 'failed to issue access token', error);
       return;
     }
   }
@@ -1845,6 +1905,7 @@ export function buildOAuthRouter(opts: OAuthRouteOptions = {}): Router {
     csrf.doubleCsrfProtection,
     buildValidateAuthorizeEmailSend(csrf),
     opts.emailSendPerIpRateLimit ?? buildEmailSendPerIpRateLimit(),
+    requireSignupBotCheck, // #2257: same placement as POST /auth/email
     opts.emailRecipientRateLimit ?? buildEmailRecipientRateLimit(),
     buildHandleAuthorizeEmailPost(csrf),
   );

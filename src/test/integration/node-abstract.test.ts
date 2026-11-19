@@ -35,6 +35,7 @@
  * against the real `hadron_test` DB (pinned by vitest.config.ts).
  */
 
+import { attestedAuthoring } from '../../lib/authoringAttestation.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { ApolloServer } from '@apollo/server';
@@ -99,7 +100,7 @@ async function upsertNode(input: Record<string, unknown>) {
   return writeNodeCore(
     { memoryId: fx.memory.id, ...input } as never,
     fx.ctx,
-    'upsert',
+    'upsert', { authoring: attestedAuthoring(null) },
   );
 }
 
@@ -446,7 +447,7 @@ describe('spec 032 — upsertNode maintains abstractOriginHash', () => {
         return result;
       }) as never);
       try {
-        await writeNodeCore({ memoryId: fx.memory.id, loc, name: loc, abstract: 'A' }, fx.ctx, mode);
+        await writeNodeCore({ memoryId: fx.memory.id, loc, name: loc, abstract: 'A' }, fx.ctx, mode, { authoring: attestedAuthoring(null) });
       } finally {
         probe.mockRestore();
       }
@@ -478,7 +479,7 @@ describe('spec 032 — upsertNode maintains abstractOriginHash', () => {
     }) as never);
     try {
       await expect(writeNodeCore(
-        { memoryId: fx.memory.id, loc, abstract: 'A' }, fx.ctx, 'update', { guardRevSeq: 1 },
+        { memoryId: fx.memory.id, loc, abstract: 'A' }, fx.ctx, 'update', { authoring: attestedAuthoring(null), guardRevSeq: 1 },
       )).rejects.toSatisfy(
         (error: unknown) => error instanceof GraphQLError && error.extensions.code === 'NODE_WRITE_CONFLICT',
       );
@@ -499,7 +500,7 @@ describe('spec 032 — upsertNode maintains abstractOriginHash', () => {
     expect(history[0]!.revLabel).toMatch(/Reconciled state changed outside a revisioned writer/);
 
     const affirmed = await writeNodeCore(
-      { memoryId: fx.memory.id, loc, abstract: 'A' }, fx.ctx, 'update', { guardRevSeq: stored.revSeq },
+      { memoryId: fx.memory.id, loc, abstract: 'A' }, fx.ctx, 'update', { authoring: attestedAuthoring(null), guardRevSeq: stored.revSeq },
     );
     expect(affirmed.revSeq).toBe(3);
     expect(affirmed.content).toBe("B'");

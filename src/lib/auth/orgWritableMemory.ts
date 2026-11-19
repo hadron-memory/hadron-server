@@ -53,3 +53,26 @@ export async function getOrgWritableMemoryIds(
   ]);
   return [...knowledge, ...groups].map((m: { id: string }) => m.id);
 }
+
+/** #3280: independent subscription WRITE on live item-eligible rows, matching the GraphQL user gate's role rule. */
+export async function getSubscribedWritableMemoryIds(
+  db: PrismaClient, userId: string, onlyMemoryId?: string,
+): Promise<string[]> {
+  if (!userId) return [];
+  const memberships = await db.orgMember.findMany({
+    where: { userId, ...LIVE_ORG_MEMBERSHIP, role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] } },
+    select: { organizationId: true },
+  });
+  const rows = await db.memory.findMany({
+    where: {
+      ...(onlyMemoryId ? { id: onlyMemoryId } : {}),
+      deletedAt: null, class: 'knowledge', appId: null, ownerUserId: null, userMemoryOfAgentId: null,
+      subscriptions: { some: {
+        organizationId: { in: memberships.map(m => m.organizationId) }, deletedAt: null,
+        role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] },
+      } },
+    },
+    select: { id: true },
+  });
+  return rows.map(row => row.id);
+}

@@ -77,18 +77,19 @@ describe('US1 Step (a): Bea creates Mealplan agent (FR-001 / FR-008 / FR-009)', 
     const agent = await resolvers.Mutation.createAgent(
       {},
       {
-        orgId: beaOrg.id,
+        orgRef: beaOrg.id,
         name: 'Mealplan',
         description: 'Family meal planner',
         visibility: 'PUBLIC',
       },
       adminCtx(bea.id),
     );
-    // Default knobs (set by the schema column defaults).
+    // Default knobs: memoryProvisioning from the column default; #2171 (R211)
+    // a new Agent offers owner and member.
     expect(agent.memoryProvisioning).toEqual({ appMemory: 'shared' });
     expect(agent.installationPolicy).toEqual({
       maxMembers: 'unlimited',
-      memberRoles: ['owner'],
+      memberRoles: ['owner', 'member'],
     });
 
     // Bea then refines the policy. createAgent doesn't take these knobs in
@@ -122,7 +123,7 @@ describe('US1 Step (b): Org-X installs Mealplan via createApp (T032)', () => {
   it('requires an explicit AgentOrgGrant(orgX.id, mealplan.id) before createApp', async () => {
     const mealplan = await resolvers.Mutation.createAgent(
       {},
-      { orgId: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
+      { orgRef: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
       adminCtx(bea.id),
     );
 
@@ -169,7 +170,7 @@ describe('US1 Step (c): ensureAppMember adds Mike as a cook (FR-004)', () => {
   it('creates an AppMember with the requested role; AppMember.role validated against installationPolicy.memberRoles', async () => {
     const mealplan = await resolvers.Mutation.createAgent(
       {},
-      { orgId: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
+      { orgRef: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
       adminCtx(bea.id),
     );
     await db.agent.update({
@@ -216,7 +217,7 @@ describe('US1 Step (d): App.aiProvider overrides Agent default for that App\'s s
   it('createApp accepts ai* args and stores them on the App row', async () => {
     const mealplan = await resolvers.Mutation.createAgent(
       {},
-      { orgId: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
+      { orgRef: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
       adminCtx(bea.id),
     );
     // Bea sets a default AI config on the Agent (the platform-recommended one).
@@ -264,7 +265,7 @@ describe('US1 Step (d): App.aiProvider overrides Agent default for that App\'s s
   });
 
   it('an unusable legacy AI provider is refused BEFORE the App exists (#1389 review)', async () => {
-    const agent = await resolvers.Mutation.createAgent({}, { orgId: beaOrg.id, name: 'Compat', visibility: 'PUBLIC' }, adminCtx(bea.id));
+    const agent = await resolvers.Mutation.createAgent({}, { orgRef: beaOrg.id, name: 'Compat', visibility: 'PUBLIC' }, adminCtx(bea.id));
     const before = await db.app.count();
     const err = await resolvers.Mutation.createApp(
       {},
@@ -293,7 +294,7 @@ describe('US1 Step (e): installationPolicy.maxMembers=2 rejects the third member
   it('Know-Yourself-shaped agent (maxMembers=2) lets 2 members join, blocks the 3rd', async () => {
     const knowYourself = await resolvers.Mutation.createAgent(
       {},
-      { orgId: beaOrg.id, name: 'Know Yourself', visibility: 'PUBLIC' },
+      { orgRef: beaOrg.id, name: 'Know Yourself', visibility: 'PUBLIC' },
       adminCtx(bea.id),
     );
     await db.agent.update({

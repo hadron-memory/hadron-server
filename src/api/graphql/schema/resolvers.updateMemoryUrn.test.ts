@@ -49,7 +49,7 @@ describe('updateMemory — rejects a non-bare URN slug (no corruption persisted)
     await expect(
       resolvers.Mutation.updateMemory(
         {},
-        { id: mem.id, urn: 'memory:org-a::experiments' },
+        { ref: mem.id, urn: 'memory:org-a::experiments' },
         adminCtx(),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
@@ -67,7 +67,7 @@ describe('updateMemory — rejects a non-bare URN slug (no corruption persisted)
     );
     for (const bad of ['hrn:memory:org-a::exp2', 'foo::bar', 'agent:org-a::x']) {
       await expect(
-        resolvers.Mutation.updateMemory({}, { id: mem.id, urn: bad }, adminCtx()),
+        resolvers.Mutation.updateMemory({}, { ref: mem.id, urn: bad }, adminCtx()),
       ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     }
   });
@@ -80,7 +80,7 @@ describe('updateMemory — rejects a non-bare URN slug (no corruption persisted)
     );
     await resolvers.Mutation.updateMemory(
       {},
-      { id: mem.id, urn: 'new-slug' },
+      { ref: mem.id, urn: 'new-slug' },
       adminCtx(),
     );
     const row = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
@@ -96,7 +96,7 @@ describe('updateMemory — rejects a non-bare URN slug (no corruption persisted)
     const before = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
     await resolvers.Mutation.updateMemory(
       {},
-      { id: mem.id, description: 'just a description change' },
+      { ref: mem.id, description: 'just a description change' },
       adminCtx(),
     );
     const after = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });

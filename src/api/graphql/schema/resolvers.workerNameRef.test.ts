@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -67,10 +68,9 @@ beforeEach(async () => {
   const role = await M.createAgent(
     {},
     {
-      orgId: org.id,
+      orgRef: org.id,
       name: 'WNR Backend Engineer',
       personaRole: 'backend-engineer',
-      systemPrompt: 'You are {{name}}, a {{role}}.',
     },
     ctx(admin.id),
   );
@@ -85,6 +85,7 @@ beforeEach(async () => {
     },
   });
   await db.appAgent.create({ data: { appId: app.id, agentId: roleAgent.id } });
+  await serveEveryAgent(db); // #2712: binds need a served prompt
 });
 
 const cast = (name: string) =>

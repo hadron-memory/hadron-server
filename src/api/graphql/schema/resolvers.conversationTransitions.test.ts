@@ -7,6 +7,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLoc } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -43,7 +44,7 @@ beforeEach(async () => {
 
   const created = await resolvers.Mutation.createAgent(
     {},
-    { orgId: orgA.id, name: 'sage', visibility: 'PERSONAL' },
+    { orgRef: orgA.id, name: 'sage', visibility: 'PERSONAL' },
     adminCtx(),
   );
   agent = created;
@@ -52,6 +53,8 @@ beforeEach(async () => {
   systemMemory = await db.memory.findUniqueOrThrow({
     where: { id: created.systemMemoryId! },
   });
+  // #2712: chats are served the Agent's boot prompt; an Agent without one is refused.
+  await serveEveryAgent(db);
 });
 
 // ---------------------------------------------------------------------------
@@ -260,7 +263,8 @@ describe('onTrack in processChatResponse', () => {
 
     // Verify it's stored on the chat node
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
     expect(chatData.lastOffTrackReason).toBe('User asking about billing, not onboarding');
   });
 });
@@ -292,7 +296,8 @@ describe('Goal stack and route history', () => {
     );
 
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
 
     // Goal stack should have one ACTIVE entry
     const goalStack = chatData.goalStack as Array<Record<string, unknown>>;
@@ -338,7 +343,8 @@ describe('Goal stack and route history', () => {
     );
 
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
     const history = chatData.routeHistory as Array<Record<string, unknown>>;
 
     // Should have 2 entries: initial ENTER + step2 ENTER
@@ -399,7 +405,7 @@ describe('Edge evaluation in processChatResponse', () => {
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Welcome done', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Welcome done', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );
@@ -410,7 +416,8 @@ describe('Edge evaluation in processChatResponse', () => {
 
     // Verify the chat node was updated
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
     expect(chatData.conversationName).toBe('strategy');
     expect(chatData.stageName).toBe('diagnose');
   });
@@ -466,7 +473,7 @@ describe('Edge evaluation in processChatResponse', () => {
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Checking', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Checking', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );
@@ -476,7 +483,8 @@ describe('Edge evaluation in processChatResponse', () => {
 
     // Should have pushed a goal (detour behavior)
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
     const goalStack = chatData.goalStack as Array<Record<string, unknown>>;
     // Original goal + detour goal
     expect(goalStack.filter((g) => g.status === 'ACTIVE')).toHaveLength(2);
@@ -511,7 +519,11 @@ describe('Edge evaluation in processChatResponse', () => {
         sourceId: nodeIds['conversations:main:check'],
         targetId: nodeIds['conversations:profile'],
         name: 'Fill profile if missing',
-        condition: { missing: ['memory.business_type'] },
+        // Use a Boolean-valued condition so this test does not rest on `missing`'s array-valued result: that array's
+        // final coercion was its own bug, fixed by #4059 (merge c2ec377713, closing #4056) — historical context, not
+        // an outstanding evaluator bug — and pinned separately in evaluator.test.ts, selectNextEdge.test.ts and the
+        // #4056 V85 test below (#4102).
+        condition: { '!': { var: 'memory.business_type' } },
         data: {
           timing: 'on_complete',
           behavior: 'detour',
@@ -539,18 +551,71 @@ describe('Edge evaluation in processChatResponse', () => {
       userCtx(adminUser.id),
     );
 
+    const afterExtraction = await chatNodeByLoc(db, chat.chatId);
+    expect((await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: afterExtraction!.id } })).state).toMatchObject({ conversationName: 'main' });
+
     // Now complete the stage — business_type exists, so the condition is NOT met
     const result = await resolvers.Mutation.processChatResponse(
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Done', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Done', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );
 
     // Edge should NOT have fired
     expect(result.conversationHandoff).toBeNull();
+  });
+
+  it('a bare `missing` on_complete condition with every field present does NOT hand off or advance; absent does (#4056, V85)', async () => {
+    // `missing` returns [] when nothing is missing, JSONLogic's empty array is falsy: the edge must not fire.
+    // The existing "NOT met" test above does not discriminate (it passes on Boolean(result) too), so this one reads the
+    // condition off `message.data.*`, which the turn's own data does populate, with an absent-field reachability control.
+    const nodeIds = await seedNodes([
+      { loc: 'conversations', name: 'conversations' },
+      { loc: 'conversations:main', name: 'main', data: { stageOrder: ['check'], isSetup: false } },
+      { loc: 'conversations:main:check', name: 'check', data: {} },
+      { loc: 'conversations:profile', name: 'profile', data: { stageOrder: ['fill'], isSetup: false } },
+      { loc: 'conversations:profile:fill', name: 'fill', data: {} },
+    ]);
+    await db.edge.create({
+      data: {
+        id: generateId(),
+        memoryId: systemMemory.id,
+        loc: deriveEdgeLoc('conversations:main:check', 'Fill profile if missing', 'conversations:profile'),
+        sourceId: nodeIds['conversations:main:check'],
+        targetId: nodeIds['conversations:profile'],
+        name: 'Fill profile if missing',
+        condition: { missing: ['message.data.confidence'] },
+        data: { timing: 'on_complete', behavior: 'detour' },
+      },
+    });
+    const engineState = async (chatId: string) => {
+      const node = await chatNodeByLoc(db, chatId, { includeDeleted: true });
+      return (await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: node!.id } }))?.state as Record<string, unknown>;
+    };
+
+    // present: nothing missing -> [] -> falsy -> no handoff, still on main:check
+    const present = await resolvers.Mutation.startChat({}, { agentId: agent.id, conversationName: 'main' }, userCtx(adminUser.id));
+    const stayed = await resolvers.Mutation.processChatResponse(
+      {},
+      { chatId: present.chatId, toolResponse: { message: 'done', next_stage: null, goal_reached: true, onTrack: true, data: { confidence: 0.9 } } },
+      userCtx(adminUser.id),
+    );
+    expect(stayed.conversationHandoff).toBeNull();
+    expect(stayed.stageTransitioned).toBe(false);
+    expect(await engineState(present.chatId)).toMatchObject({ conversationName: 'main', stageName: 'check' });
+
+    // absent: ["confidence"] -> truthy -> hands off to profile (reachability control: the edge IS routable)
+    const absent = await resolvers.Mutation.startChat({}, { agentId: agent.id, conversationName: 'main' }, userCtx(adminUser.id));
+    const moved = await resolvers.Mutation.processChatResponse(
+      {},
+      { chatId: absent.chatId, toolResponse: { message: 'done', next_stage: null, goal_reached: true, onTrack: true } },
+      userCtx(adminUser.id),
+    );
+    expect(moved.conversationHandoff).toBe('profile');
+    expect(moved.stageTransitioned).toBe(true);
   });
 
   it('JSONLogic condition mixing message.data and chat scopes (Pong-shaped)', async () => {
@@ -613,7 +678,7 @@ describe('Edge evaluation in processChatResponse', () => {
         chatId: chat.chatId,
         toolResponse: {
           message: 'Caller flagged this as urgent',
-          next_stage: null,
+          next_stage: null, goal_reached: true,
           data: { urgency: 'high' },
           onTrack: true,
         },
@@ -669,7 +734,7 @@ describe('Edge evaluation in processChatResponse', () => {
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Routine check-in', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Routine check-in', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );
@@ -747,7 +812,7 @@ describe('Edge evaluation in processChatResponse', () => {
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Routing', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Routing', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );
@@ -805,7 +870,7 @@ describe('Edge evaluation in processChatResponse', () => {
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Routing', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Routing', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );
@@ -896,7 +961,8 @@ describe('Goal descriptions on conversations', () => {
     );
 
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
     const goalStack = chatData.goalStack as Array<Record<string, unknown>>;
 
     expect(goalStack[0].description).toBe('Help the user find a mentor');
@@ -920,7 +986,8 @@ describe('Goal descriptions on conversations', () => {
     );
 
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
     const goalStack = chatData.goalStack as Array<Record<string, unknown>>;
 
     expect(goalStack[0].description).toBe('simple conversation');
@@ -980,7 +1047,8 @@ describe('Fallback re-routing', () => {
 
     // The chat node should have been updated to mentoring
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
     expect(chatData.conversationName).toBe('mentoring');
     expect(chatData.stageName).toBe('start');
 
@@ -1016,7 +1084,8 @@ describe('Fallback re-routing', () => {
 
     // Should still be in fallback
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
     expect(chatData.conversationName).toBe('fallback');
   });
 });

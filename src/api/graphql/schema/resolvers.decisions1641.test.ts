@@ -543,7 +543,7 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a decision'
     await createLog().then((log) => ask(log.row.id));
     await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'ordinary', name: 'Ordinary' } });
     expect(await codeOf(M.deleteMemory(null, { id: memory.id }, as()))).toBe('DECISION_CONTAINED');
-    expect(await codeOf(M.updateMemory(null, { id: memory.id, source: 'https://github.com/x/y' }, as()))).toBe('DECISION_LOG_MIRRORED');
+    expect(await codeOf(M.updateMemory(null, { ref: memory.id, source: 'https://github.com/x/y' }, as()))).toBe('DECISION_LOG_MIRRORED');
     const clone = await M.cloneMemory(null, { ref: memory.id, targetUrn: 'hrn:mem:decision.example:copy' }, as());
     const cloned = await db.node.findMany({ where: { memoryId: clone.id } });
     expect(cloned.filter((n) => n.role?.startsWith('decision'))).toEqual([]);
@@ -620,11 +620,11 @@ describe('Rook §10 on #1690 — the chat-by-loc operations never reach the deci
     for (const [chatId, userId] of attempts) {
       const c = as(userId, { roles: userId === platformAdmin.id ? ['ADMIN'] : ['READER'] });
       expect({ chatId, userId, op: 'send', r: await codeOf(M.sendChatMessage(null, { chatId, userMessage: 'hi' }, c)) })
-        .toEqual({ chatId, userId, op: 'send', r: `Chat "${chatId}" not found` });
+        .toEqual({ chatId, userId, op: 'send', r: 'CHAT_NOT_FOUND' });
       expect({ chatId, userId, op: 'title', r: await codeOf(M.updateChatTitle(null, { chatId, title: 'x' }, c)) })
-        .toMatchObject({ chatId, userId, op: 'title', r: expect.stringMatching(/not found/) });
+        .toMatchObject({ chatId, userId, op: 'title', r: 'CHAT_NOT_FOUND' });
       expect({ chatId, userId, op: 'delete', r: await codeOf(M.deleteChat(null, { chatId }, c)) })
-        .toEqual({ chatId, userId, op: 'delete', r: `Chat "${chatId}" not found` });
+        .toEqual({ chatId, userId, op: 'delete', r: 'CHAT_NOT_FOUND' });
     }
     expect(await snapshot(d.row.id, log.row.id, 'chats')).toEqual(before);
   });
@@ -646,7 +646,7 @@ describe('Rook §10 on #1690 — where a decision log may not live', () => {
     await db.memory.update({ where: { id: memory.id }, data: { class: 'system' as never, visibility: null } });
     expect(await codeOf(createLog())).toBe('DECISION_LOG_SYSTEM_MEMORY');
     const app = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Anon', urn: `${orgId.toLowerCase()}:anon` } });
-    const agent = await M.createAgent(null, { orgId, name: 'Anon Agent' }, as(admin.id, { roles: ['READER'] }));
+    const agent = await M.createAgent(null, { orgRef: orgId, name: 'Anon Agent' }, as(admin.id, { roles: ['READER'] }));
     await db.memory.update({ where: { id: memory.id }, data: { class: 'app' as never, appId: app.id, userMemoryOfAgentId: agent.id, userId: null } });
     expect(await codeOf(createLog())).toBe('DECISION_LOG_ANONYMOUS_MEMORY');
     expect(await db.node.count({ where: { memoryId: memory.id, role: 'decision.log' } })).toBe(0);

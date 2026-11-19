@@ -51,15 +51,16 @@ beforeEach(async () => {
 });
 
 describe('reserveSpecCitation (#1450)', () => {
-  it('exports the committed marker through the direct encrypted mirror path', async () => {
+  it('commits the marker in an encrypted memory and never mirrors it to Git (R206)', async () => {
     await db.memory.update({ where: { id: draft.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });
     sessionKeyCache.set('placeholder-encrypted-mirror', draft.id, generateDataKey());
     const mirror = vi.mocked(writeNodeToGit);
     mirror.mockClear();
     try {
       const reserved = await reserve(draft.id, 'pas:010:09');
-      await vi.waitFor(() => expect(mirror).toHaveBeenCalled());
-      expect(mirror.mock.calls.at(-1)?.[0]).toMatchObject({ id: reserved.id, isPlaceholder: true });
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(mirror).not.toHaveBeenCalled();
+      expect(reserved).toMatchObject({ isPlaceholder: true });
       expect(await row(draft.id, 'pas:010:09')).toMatchObject({ isPlaceholder: true });
     } finally {
       sessionKeyCache.clear();

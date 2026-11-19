@@ -27,9 +27,10 @@ describe('#2331 — deleteAgent documents the DECISION_CONTAINED refusal', () =>
     expect(block).toMatch(/system memory holds a decision or a decision log/);
   });
 
-  it('distinguishes the live guard from enforcement-gated minted-corpus permanence', () => {
+  it('distinguishes unconditional decision protection from conditional minted-content retention', () => {
     const block = deleteAgentDescription();
-    expect(block).toMatch(/whether or not minted-corpus permanence is enforced/);
+    expect(block).toContain('decision protection always applies');
+    expect(block).toMatch(/if this server requires minted content to be retained, its separate deletion restrictions also apply/);
   });
 
   it('keeps the existing reference refusals', () => {

@@ -1,0 +1,17 @@
+--- a/scripts/e2e/stack.sh
++++ b/scripts/e2e/stack.sh
+@@ -60,12 +60,13 @@
+     fi
+     mkdir -p "$state_root"; chmod 700 "$state_root"
+     mkdir -m 700 "$state_dir"
++    printf '%s\n' "${DIAG_RUN_TOKEN:?diagnosis ownership token required}" > "$state_dir/diagnose-owner"
+     printf '%s\n' "$backend" > "$state_dir/backend"
+     printf '%s\n' "$E2E_PORT" > "$state_dir/api-port"
+     printf '%s\n' "$E2E_PORTAL_PORT" > "$state_dir/portal-port"
+     if [[ "$backend" == incus ]]; then
+       # Ownership metadata exists even if creation succeeds but boot fails.
+-      incus launch qa-docker "$project" -c security.nesting=true -c "user.hadron-e2e=$project"
++      incus launch qa-docker "$project" -c security.nesting=true -c "user.hadron-e2e=$project" -c "user.hadron-diagnose=$DIAG_RUN_TOKEN"
+       # DNS guard (#12129/#12157; boot race, hadron-server#2051): see dns-guard.sh.
+       e2e_dns_guard "$project" || exit 1
+       archive=$(mktemp)

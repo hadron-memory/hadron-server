@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 
 vi.mock('../lib/bus/index.js', () => ({
   getBusClient: vi.fn(async () => null),
@@ -29,6 +30,7 @@ import type { AppRun } from '../generated/prisma/index.js';
 
 let orgId: string;
 let appId: string;
+let agentId: string;
 
 const ENTRY = 'spawn-org::spawnmem::flow:digest';
 const CHILD_ENTRY = 'spawn-org::spawnmem::flow:process-item';
@@ -52,7 +54,7 @@ function deps(overrides: Partial<RunExecutionDeps> = {}): RunExecutionDeps {
 
 async function mintParent(eventData: Record<string, unknown> = { topic: 'digest' }): Promise<AppRun> {
   return mintAppRun(db, {
-    organizationId: orgId, appId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData,
+    organizationId: orgId, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData,
   });
 }
 
@@ -89,6 +91,10 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: orgId, name: 'spawn-app', urn: 'spawn-org::spawn-app' },
   });
   appId = app.id;
+  // #2712: a run needs an installed Agent with a served boot prompt (R74); children inherit it.
+  agentId = (await db.agent.create({ data: { id: generateId(), organizationId: orgId, name: 'spawn-agent', urn: 'spawn-org:spawn-agent' } })).id;
+  await db.appAgent.create({ data: { appId, agentId } });
+  await serveAgentBootPrompt(db, agentId, 'Test boot prompt.');
 });
 
 describe('hadron_spawn — dispatch (D-SP-1/-3/-5)', () => {
@@ -123,7 +129,7 @@ describe('hadron_spawn — dispatch (D-SP-1/-3/-5)', () => {
     // Nothing fits at all → malfunction → throw (→ TOOL_FAILED in the loop).
     const parent2 = await db.appRun.create({
       data: {
-        id: generateId(), organizationId: orgId, appId, triggerKind: 'MANUAL',
+        id: generateId(), organizationId: orgId, appId, agentId, triggerKind: 'MANUAL',
         entryNodeUrn: ENTRY, status: 'RUNNING',
       },
     });
@@ -143,7 +149,7 @@ describe('hadron_spawn — dispatch (D-SP-1/-3/-5)', () => {
   it('the depth cap stops fork bombs (D-SP-7): a grandchild-lineage run cannot spawn', async () => {
     const grandparent = await mintParent();
     const parent = await mintAppRun(db, {
-      organizationId: orgId, appId, triggerKind: 'SPAWN', triggerId: grandparent.id,
+      organizationId: orgId, appId, agentId, triggerKind: 'SPAWN', triggerId: grandparent.id,
       parentRunId: grandparent.id, entryNodeUrn: CHILD_ENTRY,
     });
     // Lineage depth 1 → allowed.
@@ -279,8 +285,9 @@ describe('hadron_child_runs (D-SP-6)', () => {
     const otherApp = await db.app.create({
       data: { id: generateId(), organizationId: orgId, name: 'other', urn: 'spawn-org::other-app' },
     });
+    await db.appAgent.create({ data: { appId: otherApp.id, agentId } });
     const foreign = await mintAppRun(db, {
-      organizationId: orgId, appId: otherApp.id, triggerKind: 'MANUAL', entryNodeUrn: ENTRY,
+      organizationId: orgId, appId: otherApp.id, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY,
     });
     await expect(
       hadronChildRuns.execute(toolCtx(foreign as AppRun), { parentRunId: parent.id }),

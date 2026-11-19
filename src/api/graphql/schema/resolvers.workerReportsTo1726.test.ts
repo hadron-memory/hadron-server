@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { reportsToChain, writeReportsTo } from '../../../lib/workerReportsTo.js';
@@ -71,7 +72,7 @@ beforeEach(async () => {
   member = await user(2);
   appOwnerMember = await user(3);
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  teamAgent = { id: (await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id))).id };
+  teamAgent = { id: (await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id))).id };
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   otherApp = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
@@ -82,6 +83,7 @@ beforeEach(async () => {
   liam = await worker(app.id, 'Liam');
   zed = await worker(otherApp.id, 'Zed');
   old = await worker(app.id, 'Old', { retiredAt: new Date() });
+  await serveEveryAgent(db); // #2712: binds need a served prompt
 });
 
 describe('the value: same App, not itself, not retired, no cycle', () => {
@@ -94,7 +96,7 @@ describe('the value: same App, not itself, not retired, no cycle', () => {
     expect(await reportsToOf(dan)).toBeNull();
     expect((await events(dan)).map((e) => e.payload)).toEqual([
       { from: null, to: ada.id, setBy: 'app-manager' },
-      { from: ada.id, to: null, setBy: 'app-manager' },
+      { from: ada.id, to: null, setBy: 'app-manager', oldExplicitNoTeam: false, newExplicitNoTeam: true },
     ]);
   });
 

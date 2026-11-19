@@ -150,7 +150,7 @@ describe('#2288 Session.state', () => {
     const row = await session(DEFAULT_SESSION_IDLE_WINDOW_MS);
     const c = ctx();
     const read = vi.spyOn(db.session, 'findUnique');
-    const events = vi.spyOn(db.usageEvent, 'groupBy');
+    const events = vi.spyOn(db, '$transaction');
     try {
       expect(await S.isLive({ id: row.id }, {}, c)).toBe(true);
       vi.setSystemTime(NOW.getTime() + 1);
@@ -176,7 +176,7 @@ describe('#2288 Session.state', () => {
 
   it('batches list activity and own-App policy and performs no state-read writes', async () => {
     const rows = await Promise.all(Array.from({ length: 6 }, () => session(8 * D)));
-    const events = vi.spyOn(db.usageEvent, 'groupBy');
+    const events = vi.spyOn(db, '$transaction');
     const policies = vi.spyOn(db.app, 'findMany');
     try {
       const out = await server.executeOperation({ query: '{sessions{ id state isLive lapsesAt }}' }, { contextValue: ctx() });

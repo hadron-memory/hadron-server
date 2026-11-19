@@ -37,7 +37,12 @@ export type LexicalSort = 'relevance' | 'loc' | 'seq' | 'updatedAt';
 export interface NodeSqlFilter {
   /** #2175: caller-scoped recovery audience. When set, other memories' tombstones never reach ranking/paging. */
   tombstoneMemoryIds?: string[];
+  /** #3494: open-root existence; synthetic inherited summaries are zero. */
+  hasOpenThreads?: boolean | null;
+  syntheticCommentMemoryIds?: string[];
   nodeType?: string | null;
+  /** #3113 — an explicit, already validated list (`checkNodeTypesFilter`): `node_type = ANY(list)`. Never set together with `nodeType`. */
+  nodeTypes?: string[] | null;
   /** #725 — collection discriminator facet (which domain object; e.g. "competitor"). */
   objectType?: string | null;
   isRunnable?: boolean | null;
@@ -45,6 +50,11 @@ export interface NodeSqlFilter {
   role?: string | null;
   tags?: string[] | null;
   locPrefix?: string | null;
+  /**
+   * #2832 — direct children only (cor:api:090:02): locs that are exactly `<childrenOf>:<one segment>`;
+   * "" means the top-level locs. Null/undefined means no filter, so "" is a value, never "absent".
+   */
+  childrenOf?: string | null;
   createdBy?: string | null;
   updatedAfter?: string | null;
   updatedBefore?: string | null;
@@ -81,6 +91,16 @@ export interface FilterSearchOpts {
   limit: number;
 }
 
+/** Exact no-query match count; deliberately has no paging or sorting arguments. */
+export interface FilterCountOpts {
+  db: PrismaClient;
+  memoryIds: string[];
+  filter?: NodeSqlFilter;
+  includeDeleted?: boolean;
+  /** Effective-memory overrides/boot prompts already excluded by the read scope. */
+  excludeNodeIds?: string[];
+}
+
 export interface FilterWhereOpts {
   /** #2175: same recovery subset as the ranked candidate selector. */
   tombstoneMemoryIds?: string[];
@@ -95,6 +115,9 @@ export interface FilterWhereOpts {
 
 export interface LexicalSearchOpts {
   db: PrismaClient;
+  /** #2421: opt-in role-task candidate set and abstract-only matching; ordinary search unchanged. */
+  candidateNodeIds?: string[];
+  abstractOnly?: boolean;
   /** Boolean surface grammar (see tsquery.ts). */
   query: string;
   memoryIds: string[];
@@ -130,6 +153,11 @@ export interface RegexSearchOpts {
 
 export interface VectorSearchOpts {
   db: PrismaClient;
+  hasOpenThreads?: boolean | null;
+  syntheticCommentMemoryIds?: string[];
+  /** #2421: filter before the vector window, not after its cap. */
+  candidateNodeIds?: string[];
+  abstractOnly?: boolean;
   queryEmbedding: number[];
   memoryIds: string[];
   limit: number;
@@ -162,6 +190,8 @@ export interface NodeRetrievalProvider {
    * can't express the JSONB predicate); the plain no-filter browse stays Prisma.
    */
   filterSearch(opts: FilterSearchOpts): Promise<string[]>;
+  /** Object-store paging uses the same structured filters without LIMIT/OFFSET. */
+  filterCount(opts: FilterCountOpts): Promise<number>;
   /**
    * Narrow a bounded candidate id set to those satisfying a JSONB `where`
    * predicate (and re-assert the memory scope). Used to compose `where` with

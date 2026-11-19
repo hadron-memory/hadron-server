@@ -26,6 +26,10 @@ import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { discoverableOrgWhere, publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
 import { orgRowToRef, agentRowToRef, memoryRowToRef } from './publicRefs.js';
 import { GraphQLError } from 'graphql';
+import { currentActor } from '../../../lib/requestActor.js';
+import { mayReadAppTasks } from './resolvers.agentTask.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
 import { searchContains } from '../../../integrations/db/provider.js';
 import {
   type Context,
@@ -36,9 +40,10 @@ import {
   canOpenMemoryRecordById,
   isMemoryReadableCached,
   isAuthorizationDenial,
-  requireOwnerOrOrgRole,
+  requireAppRead,
 } from './resolvers.helpers.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { unauthenticatedError } from '../../../lib/refusals.js';
 
 /**
  * May this caller OPEN the resolved resource? (`cor:acl:060:01`, amended
@@ -66,7 +71,7 @@ async function callerCanOpenResource(ctx: Context, resolved: ResolvedResource): 
         // — not the query itself, whose resolution step swallows EVERY error
         // into null and would turn an outage into "not found" (@codex /
         // @copilot, PR #1383).
-        await requireOwnerOrOrgRole(ctx, resolved.app, 'READER');
+        await requireAppRead(ctx, resolved.app);
         return resolved.app;
       case 'agent':
         return agentQueries.agent(null as never, { ref: resolved.agent.id }, ctx);
@@ -84,6 +89,59 @@ async function callerCanOpenResource(ctx: Context, resolved: ResolvedResource): 
     if (isAuthorizationDenial(error)) return false;
     throw error;
   }
+}
+
+/**
+ * #3945: the Apps a caller's task read could ever admit, as an App `where` (a superset that tracks `isAppParticipant`
+ * closely; `mayReadAppTasks` still decides): live Apps it owns, is an AppMember of (any role), or whose org it holds
+ * CONTRIBUTOR+ in (a READER is a member but not a task actor); a bound worker session instead gets only the App it drives (the gate judges it nowhere else). Under
+ * impersonation only the shared org's Apps. A platform admin may read any ORG App through the org gate, so its scope is every org App plus the
+ * user-owned Apps it owns or is a member of (a user-owned App has no admin arm); a caller with no user gets nothing.
+ */
+export async function taskAppScopeFor(ctx: Context, isPlatformAdmin: boolean): Promise<Record<string, unknown> | undefined> {
+  // A bound worker is judged by `resolveTaskActor` for its OWN App only, before any person or platform-admin arm, so
+  // its candidate set is that one App however much the holding person could otherwise read.
+  const workerId = currentActor().workerId;
+  if (workerId) {
+    if (!ctx.userId) return { id: { in: [] } };
+    const w = await ctx.db.worker.findUnique({ where: { id: workerId }, select: { appId: true } });
+    if (!w) return { id: { in: [] } };
+    const and: Record<string, unknown>[] = [{ deletedAt: null }, { id: w.appId }];
+    if (ctx.impersonation) and.push({ organizationId: ctx.impersonation.orgId });
+    return { AND: and };
+  }
+  if (!ctx.userId) return { id: { in: [] } };
+  // A platform admin may read every ORG-owned App through the org gate, but a user-owned App admits only its owner
+  // and AppMembers (no platform-admin arm; `isAppParticipant`), so the admin's scope is every org App plus its own.
+  const actorOrgs = isPlatformAdmin
+    ? []
+    : await ctx.db.orgMember.findMany({
+        where: { userId: ctx.userId, role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] }, ...LIVE_ORG_MEMBERSHIP },
+        select: { organizationId: true },
+      });
+  const or: Record<string, unknown>[] = [
+    { ownerUserId: ctx.userId },
+    { members: { some: { userId: ctx.userId } } },
+    isPlatformAdmin ? { organizationId: { not: null } } : { organizationId: { in: actorOrgs.map((m) => m.organizationId) } },
+  ];
+  // `isAppParticipant` refuses an org App whose org is soft-deleted (the Apps keep `deletedAt` NULL), so those never
+  // enter the walk either.
+  const and: Record<string, unknown>[] = [
+    { deletedAt: null },
+    { OR: [{ organizationId: null }, { organization: { deletedAt: null } }] },
+    { OR: or },
+  ];
+  if (ctx.impersonation) and.push({ organizationId: ctx.impersonation.orgId });
+  return { AND: and };
+}
+
+/**
+ * #3945 / #3972: the per-kind task read gate as the search's per-App closure: `mayReadAppTasks` on the FULL request context
+ * (so an impersonated session is confined to its shared org by `isAppParticipant`, cor:acl:100:03 / cor:acl:040:07), minus
+ * the ruled userless carve-out (an App key or a userless run gets no task hits even where the direct read admits it).
+ */
+export function taskReadGateFor(ctx: Context): (appId: string) => Promise<boolean> {
+  return async (appId) => ((isRunPrincipal(ctx) && !ctx.userId) || appKeyCaller(ctx) ? false : mayReadAppTasks(ctx, appId));
 }
 
 export const orgQueries = {
@@ -284,7 +342,7 @@ export const orgQueries = {
       if (isPlatformAdmin && q === '') {
         return page({ deletedAt: null });
       }
-      if (!ctx.userId && !isPlatformAdmin) throw new Error('Unauthenticated');
+      if (!ctx.userId && !isPlatformAdmin) throw unauthenticatedError();
       // A blank query would make `contains: ''` match every row, re-opening
       // the enumeration path #384 closes — return an empty page instead.
       if (q === '') return { items: [], total: 0 };
@@ -399,6 +457,10 @@ export const orgQueries = {
         viewerOrgIds: callerOrgIds,
         orgScopeId,
         impersonationOrgId: ctx.impersonation?.orgId ?? null,
+        // #3945: the per-kind task read gate, reused as-is, minus the ruled userless carve-out: an App key or a userless run
+        // gets no task hits even where the direct read would admit it (every admitting arm of resolveTaskActor needs a user).
+        taskAppScope: await taskAppScopeFor(ctx, isPlatformAdmin),
+        taskReadGate: taskReadGateFor(ctx),
       };
       const res = await runGlobalSearch(ctx.db, { query, entityTypes, fields, limit, offset }, principal);
       if (!scopeRes) return res;
@@ -412,6 +474,25 @@ export const orgQueries = {
     me: async (_: unknown, __: unknown, ctx: Context) => {
       if (!ctx.userId) return null;
       return ctx.db.user.findUnique({ where: { id: ctx.userId } });
+    },
+
+    /**
+     * #3532 (cor:aut:010:05, rulings 0171-0174, 0192-0194): the answer for THIS request's own credential. Reads the
+     * context only: no database access, no argument, so it is no token oracle and adds no per-cause branch. A check
+     * that could not complete is the ordinary internal error (cor:api:260:01), never REFUSED.
+     */
+    // `async` only to match the resolver map's type. Only the /graphql context builder (the single ApolloServer) sets
+    // `credentialStatus`; MCP calls resolver functions directly and never executes this field, so a context without
+    // a status can only be a plumbing fault, which this field answers as the internal error rather than guess (#3537
+    // BLIND P2-3, decided).
+    authenticationStatus: async (_: unknown, __: unknown, ctx: Context) => {
+      switch (ctx.credentialStatus) {
+        case 'authenticated': return 'AUTHENTICATED';
+        case 'refused': return 'REFUSED';
+        case 'anonymous': return 'ANONYMOUS';
+        // 'unavailable', and a context nothing resolved a status for: the credential check is incomplete.
+        default: throw new Error('authenticationStatus: the credential check did not complete');
+      }
     },
 
     // #562: expose the request's already-resolved AuthContext (cor:aut:020:02)

@@ -8,10 +8,12 @@
  *
  * The feature is open to every ordinary user principal; what bounds it is
  * the caller's own live Worker session and current App participation. This
- * matters for `maybeAdvanceOwnChannelRead`: without a matching session an
- * ordinary transcript read is byte-for-byte the old read-only act.
+ * matters for `maybeAdvanceOwnChannelRead`: without a presented execution
+ * session, an ordinary transcript read remains the old read-only act. #3818
+ * deliberately refuses an accepted principal presenting a superseded session.
  */
 
+import { refuseSupersededSession } from './sessionSuperseded.js';
 import { sessionKeyReleasedHint } from './sessionKeyCache.js';
 import { createHmac } from 'node:crypto';
 import { GraphQLError } from 'graphql';
@@ -762,7 +764,7 @@ export async function aggregatePlaintextWindow(
     ),
     j AS (
       SELECT t.idx, t.mention_only, m.seq,
-        ${mentionReachSql(Prisma.sql`m.data`, Prisma.sql`t.tokens`)} AS mentioned
+        ${mentionReachSql(Prisma.sql`m.data`, Prisma.sql`t.tokens`, Prisma.sql`ARRAY[t.worker_id]::text[]`)} AS mentioned
       FROM m
       JOIN t ON m.seq > t.seen AND m.seq <= t.head
         AND COALESCE(m.data ->> 'authorWorkerId', '') <> t.worker_id
@@ -989,7 +991,7 @@ async function pagedScanStep(
         anyCounted = true;
         state.aUnread[ti]++;
         state.aFirst[ti] = state.aFirst[ti] === 0 ? row.seq : Math.min(state.aFirst[ti], row.seq);
-        const mentioned = mentionReach(reach, mentionTokensByTarget[ti]) !== null;
+        const mentioned = mentionReach(reach, mentionTokensByTarget[ti], [target.workerId]) !== null;
         if (mentioned) state.aMent[ti]++;
         if (!target.mentionOnly || mentioned) {
           state.aLast[ti] = Math.max(state.aLast[ti], row.seq);
@@ -1647,6 +1649,7 @@ async function ownLiveSessionWorker(
   expectedAppId?: string,
   opts: { readOnly?: boolean } = {},
 ): Promise<{ workerId: string; appId: string; sessionId: string; lapsed: boolean } | null> {
+  await refuseSupersededSession(ctx, sessionRef.trim());
   if (!ctx.userId || ctx.impersonation) return null;
   const session = await ctx.db.session.findFirst({
     where: {
@@ -1716,6 +1719,10 @@ export async function maybeAdvanceOwnChannelRead(
     sinceSeq?: number | null;
     beforeSeq?: number | null;
     mentionsRef?: string | null;
+    replyToSeq?: number | null;
+    teamHeadRef?: string | null;
+    teamHeadRefs?: string[] | null;
+    untagged?: boolean | null;
     limit?: number | null;
     offset?: number | null;
     /** #2181: the incarnation the page was pinned to; when set, every effect below runs in ONE fenced transaction. */
@@ -1755,6 +1762,8 @@ export async function maybeAdvanceOwnChannelRead(
   // #1628: attribution is activity even when the caller will acknowledge only
   // after validating and delivering the page. Never skip the heartbeat above.
   if (args.advanceReadState === false) return null;
+  // Team-tag and reply-filtered reads are partial windows, never a contiguous tail acknowledgement.
+  if (args.replyToSeq != null || args.teamHeadRef != null || (args.teamHeadRefs?.length ?? 0) > 0 || args.untagged != null) return null;
   if (args.mentionsRef) return advanceOwnMentionsRead(ctx, session, args);
   if (args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0) return null;
   // #1536: no cursor and no offset now selects the newest page. Even when
@@ -1815,13 +1824,13 @@ async function advanceOwnChannelReadFenced(
   args: Parameters<typeof maybeAdvanceOwnChannelRead>[1],
   expected: number,
 ): Promise<number | null> {
-  if (args.advanceReadState !== false && args.mentionsRef) {
+  if (args.advanceReadState !== false && args.replyToSeq == null && args.mentionsRef) {
     return advanceOwnMentionsRead(ctx, session, args, { expected });
   }
   const out = await ctx.db.$transaction(async (tx) => {
     const effects = await fencedCheckEffects(ctx, tx, session, args.channelId, expected);
     if (effects.refused || args.advanceReadState === false) return { effects, advanced: null as number | null };
-    const advanced = args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0 || (args.sinceSeq == null && args.offset == null)
+    const advanced = args.replyToSeq != null || args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0 || (args.sinceSeq == null && args.offset == null)
       ? null
       : await advanceUnfilteredRead(ctx, tx as never, session.workerId, args);
     return { effects, advanced };

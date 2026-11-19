@@ -1,3 +1,4 @@
+import { listAppInstallations } from './appInstallations.js';
 /**
  * cor:acl:080:03 — the Agent-PUBLIC congruence invariant.
  *
@@ -272,10 +273,7 @@ export async function revokeLinksForeignToTenant(
       (app.organizationId !== memory.organizationId || app.ownerUserId !== memory.ownerUserId);
     if (app && !appTenantMismatch && app.deletedAt == null && app.uninstalledAt == null) {
       const readerIds = links.filter((link) => link.role === 'read').map((link) => link.agentId);
-      const installs = readerIds.length === 0 ? [] : await db.appAgent.findMany({
-        where: { appId: memory.appId, agentId: { in: readerIds }, agent: { deletedAt: null } },
-        select: { agent: { select: { id: true, organizationId: true, ownerUserId: true } } },
-      });
+      const installs = readerIds.length === 0 ? [] : (await listAppInstallations(db,memory.appId)).filter(row=>readerIds.includes(row.agentId));
       licensedAppReaders = await activeAgentInstallLicenseIds(db, app, installs.map((row) => row.agent));
     }
   }
