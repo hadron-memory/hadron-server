@@ -527,13 +527,14 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
   const startsAt = asTime(input.startsAt);
   const expiresAt = asTime(input.expiresAt);
   const maxUses = input.maxReads ?? null;
-  if (input.autoDelete && !expiresAt && maxUses === null) {
-    throw readClientRefusal('SECRET_AUTO_DELETE_NEEDS_LIMIT', 'An auto-delete mark needs a window or a read budget.');
-  }
   // The "delete" mark is signed but nothing consumes it until S6 (#4001): a person must not sign a retention term the server does not
-  // keep. S6's first act is to remove this guard; the "keep" wording stays.
+  // keep. Judged FIRST, so a caller is not walked through adding a limit only to be refused after it (#4443 item 6). S6's first act is
+  // to remove this guard; the "keep" wording stays, and the limit rule below then applies.
   if (input.autoDelete) {
     throw readClientRefusal('SECRET_AUTO_DELETE_NOT_AVAILABLE', 'Auto-delete on a read client is not available yet.');
+  }
+  if (input.autoDelete && !expiresAt && maxUses === null) {
+    throw readClientRefusal('SECRET_AUTO_DELETE_NEEDS_LIMIT', 'An auto-delete mark needs a window or a read budget.');
   }
   const found = await findSecretByRef(ctx, input.secretRef);
   if (!found || found.ownerType !== 'app') throw authorizationDenied();

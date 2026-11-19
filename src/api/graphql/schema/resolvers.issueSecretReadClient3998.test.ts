@@ -52,9 +52,10 @@ describe('#3998 issueSecretReadClient', () => {
     expect(await db.grant.count()).toBe(0);
   });
 
-  it('an auto-delete mark needs a window or a budget, and is then refused until S6 consumes it (#4001)', async () => {
-    expect(await code(issue(ownerId, { autoDelete: true }))).toBe('SECRET_AUTO_DELETE_NEEDS_LIMIT');
-    // Signed but not consumed: refused with a typed code, nothing written. S6 removes this guard (and this expectation).
+  it('an auto-delete mark is refused until S6 consumes it (#4001), with or without a limit, and nothing is written', async () => {
+    // NOT_AVAILABLE is judged first (#4443 item 6): a caller is not told to add a limit only to be refused after adding one. Signed but
+    // not consumed: refused with a typed code, nothing written. S6 removes this guard and restores the NEEDS_LIMIT expectation.
+    expect(await code(issue(ownerId, { autoDelete: true }))).toBe('SECRET_AUTO_DELETE_NOT_AVAILABLE');
     expect(await code(issue(ownerId, { autoDelete: true, maxReads: 1 }))).toBe('SECRET_AUTO_DELETE_NOT_AVAILABLE');
     expect(await db.grant.count()).toBe(0);
     expect(await db.secretReadClient.count()).toBe(0);
@@ -85,18 +86,23 @@ describe('#3998 issueSecretReadClient', () => {
     const as = (userId: string, ref: string, over: Record<string, unknown>) => code(resolvers.Mutation.issueSecretReadClient({}, {
       input: { secretRef: ref, holderKind: 'USER', autoDelete: false, reason: 'r', ...over },
     }, ctxOf(userId)));
-    const cases: Array<[string, Record<string, unknown>]> = [
-      ['agent holder', { holderKind: 'AGENT', holderRef: generateId() }],
-      ['app holder', { holderKind: 'APP' }],
-      ['auto-delete without a limit', { autoDelete: true }],
-      ['auto-delete with a limit', { autoDelete: true, maxReads: 1 }],
-      ['bad time', { expiresAt: 'not-a-date' }],
-      ['plain', {}],
+    // Each row also names the SPECIFIC code it must get (#4443 item 5): removing one guard changes that row's code, so it cannot pass
+    // vacuously as two equal FORBIDDENs. The 'bad time' row is refused by `asTime` (BAD_USER_INPUT) because the test calls the resolver
+    // directly, so GraphQL DateTime coercion is not in play (item 9). The cases make 12 calls under one identity, well inside the
+    // WRITES class limit of 600 a minute (item 8).
+    const cases: Array<[string, Record<string, unknown>, string]> = [
+      ['agent holder', { holderKind: 'AGENT', holderRef: generateId() }, 'GRANT_HOLDER_NOT_ALLOWED'],
+      ['app holder', { holderKind: 'APP' }, 'GRANT_HOLDER_NOT_ALLOWED'],
+      ['auto-delete without a limit', { autoDelete: true }, 'SECRET_AUTO_DELETE_NOT_AVAILABLE'],
+      ['auto-delete with a limit', { autoDelete: true, maxReads: 1 }, 'SECRET_AUTO_DELETE_NOT_AVAILABLE'],
+      ['bad time', { expiresAt: 'not-a-date' }, 'BAD_USER_INPUT'],
+      ['plain', {}, 'FORBIDDEN'],
     ];
-    for (const [label, over] of cases) {
+    for (const [label, over, expected] of cases) {
       const existing = await as(outsiderId, secretId, over);
       const missing = await as(outsiderId, generateId(), over);
       expect(existing, label).toBe(missing);
+      expect(existing, `${label} code`).toBe(expected);
     }
   });
 });
