@@ -1,13 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import { parse } from 'graphql';
+import type { ObjectTypeDefinitionNode } from 'graphql';
 import { typeDefs } from './typeDefs.js';
 
 function description(type: string, field: string): string {
-  const definition = parse(typeDefs).definitions.find(n => 'name' in n && n.name?.value === type);
-  if (!definition || !('fields' in definition)) throw new Error(`Missing ${type}`);
+  // Object types only (Definition + Extension): this guard reads fields of
+  // Query/Mutation, and a same-named input must not satisfy the lookup.
+  const definition = parse(typeDefs).definitions.find(
+    (n): n is ObjectTypeDefinitionNode =>
+      (n.kind === 'ObjectTypeDefinition' || n.kind === 'ObjectTypeExtension') && n.name.value === type,
+  );
+  if (!definition) throw new Error(`Missing object type ${type}`);
+  // A missing field must refuse rather than resolve to '': with `?? ''` a
+  // renamed field would pass every `not.toContain` assertion vacuously (#4479 F3).
+  const target = definition.fields?.find(n => n.name.value === field);
+  if (!target) throw new Error(`Missing field ${type}.${field}`);
   // Normalize whitespace: block descriptions keep their source wrapping, and the
   // guard pins the wording, not the line breaks.
-  return (definition.fields!.find(n => n.name.value === field)?.description?.value ?? '').replace(/\s+/g, ' ');
+  return (target.description?.value ?? '').replace(/\s+/g, ' ');
 }
 
 /** The #3340 ruling, pinned behavior-first in resolvers.instructedCredentialActs3311.test.ts. */
@@ -25,8 +35,18 @@ describe('#3348 SDL wording: a user-backed run is admitted at the revoke doors a
   it('appKeysPage inherits the corrected gate and refusals from appKeys', () => {
     const text = description('Query', 'appKeysPage');
     expect(text).toContain('the same manager-only gate and refusals');
-    // No independent refusal enumeration that could drift from the corrected appKeys text.
-    expect(text).not.toContain('impersonat');
+    // No independent refusal enumeration that could drift from the corrected appKeys
+    // text — deliberately loose on purpose (any refusal roster word trips it).
+    expect(
+      text,
+      'appKeysPage must carry no refusal roster of its own; finding "impersonat" here is an independent enumeration drifting from the corrected appKeys wording',
+    ).not.toContain('impersonat');
+  });
+  it('the helper refuses a missing field or a non-object definition instead of matching nothing', () => {
+    expect(() => description('Query', 'noSuchField')).toThrow('Missing field Query.noSuchField');
+    expect(() => description('NotAnObjectType', 'appKeys')).toThrow('Missing object type NotAnObjectType');
+    // A same-named input has fields too — the lookup is about Query/Mutation.
+    expect(() => description('ActInstructionInput', 'ref')).toThrow('Missing object type ActInstructionInput');
   });
   it('revokeAppKey names exactly who is refused instead of lumping in the run', () => {
     const text = description('Mutation', 'revokeAppKey');
