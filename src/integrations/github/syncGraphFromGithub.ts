@@ -1154,7 +1154,7 @@ const syncGraphFromGithubAsSystem = async (
           // declares the role, or lands on a question's loc, is skipped.
           if (isQuestionFamilyRole(signals.role) || isQuestionFamilyRole(prior?.role)) {
             reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_QUESTION' });
-            console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — decisions are written only through the decision operations`);
+            console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — questions are written only through the question operations`);
             if (prior) protectedRowIds.add(prior.id);
             refusedRoleLocs.add(loc);
             return true;
