@@ -242,11 +242,13 @@ describe("#4472: the typed refusal is on every withRosterAppRead caller's path",
     }) as unknown as never);
     try {
       // Only code/retryable/reason here: this pins WHICH caller surfaces the refusal, not the
-      // per-arm envelope (budgetMs vs maxWaitMs), which the wrapper-level pins above own and
-      // #4467 is refining — asserting the scalar here would couple this PR to that one's order.
+      // per-arm envelope (budgetMs vs maxWaitMs), which the wrapper-level pins above own
+      // (#4474 landed that split) — asserting the scalar here would couple this PR to that one's order.
       await expect(call()).rejects.toMatchObject({
         extensions: { code: 'TEAM_READ_BUSY', retryable: true, reason },
       });
+      // The refusal must come from the spied transaction, not an earlier guard failing closed.
+      expect(spy).toHaveBeenCalled();
     } finally {
       spy.mockRestore();
     }
@@ -257,21 +259,40 @@ describe("#4472: the typed refusal is on every withRosterAppRead caller's path",
     await eachCallerConverts(() => Q.teamRoster({}, { appRef: app.id }, ctx(mia.id)), 'POOL_WAIT');
   });
 
-  it('teamComposition surfaces the typed refusal for both arms (its lane grouping sits outside the wrapper and must not reshape it)', async () => {
+  it('teamComposition surfaces the typed refusal for both arms (wiring pin: the mock throws before its lane grouping runs)', async () => {
     await eachCallerConverts(() => Q.teamComposition({}, { appRef: app.id }, ctx(mia.id)), 'TRANSACTION_BUDGET');
     await eachCallerConverts(() => Q.teamComposition({}, { appRef: app.id }, ctx(mia.id)), 'POOL_WAIT');
   });
 
-  it('teamUtilization surfaces the typed refusal for both arms (its input validation runs inside the wrapper and must not mask it)', async () => {
+  it('teamUtilization surfaces the typed refusal for both arms (wiring pin: the mock throws before its input validation runs)', async () => {
     await eachCallerConverts(() => Q.teamUtilization({}, { appRef: app.id }, ctx(mia.id)), 'TRANSACTION_BUDGET');
-    await eachCallerConverts(() => Q.teamUtilization({}, { appRef: app.id, windowHours: 24 }, ctx(mia.id)), 'POOL_WAIT');
+    await eachCallerConverts(() => Q.teamUtilization({}, { appRef: app.id }, ctx(mia.id)), 'POOL_WAIT');
   });
 
-  it('teamUtilization still answers BAD_USER_INPUT for an invalid window BEFORE any store read is blamed as busy', async () => {
-    // The validation throws inside the projection; a busy store must not turn a caller fault into
-    // TEAM_READ_BUSY, and (differentially) an invalid filter must not surface as a store problem.
+  it('teamUtilization answers BAD_USER_INPUT for an invalid window on a healthy store (validation sits inside the read transaction)', async () => {
+    // windowHours is validated inside the projection — after app admission, inside the read
+    // transaction (resolvers.utilization.ts). On a healthy store an invalid window is a caller
+    // fault; what happens when the transaction cannot start is pinned by the next test.
     await expect(Q.teamUtilization({}, { appRef: app.id, windowHours: 0 }, ctx(mia.id))).rejects.toMatchObject({
       extensions: { code: 'BAD_USER_INPUT' },
     });
+  });
+
+  it('a busy store surfaces an invalid window as TEAM_READ_BUSY, not BAD_USER_INPUT (current behavior: the validation never runs)', async () => {
+    // The transaction cannot start, so the projection — and its windowHours validation — never
+    // executes and the busy refusal wins. Pinned as-is: hoisting the validation above the wrapper
+    // is a client-visible behavior change, tracked as #4497; flipping this pin red is how that
+    // change announces itself.
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async () => {
+      throw busy('Unable to start a transaction: the pool was full.', 'P2028');
+    }) as unknown as never);
+    try {
+      await expect(Q.teamUtilization({}, { appRef: app.id, windowHours: 0 }, ctx(mia.id))).rejects.toMatchObject({
+        extensions: { code: 'TEAM_READ_BUSY', retryable: true, reason: 'POOL_WAIT' },
+      });
+      expect(spy).toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
