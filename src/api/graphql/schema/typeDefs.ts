@@ -2644,6 +2644,14 @@ export const typeDefs = `#graphql
   enum QuestionSort {
     PORTAL_DEFAULT
     CODE
+    "#4428 — newest ask first."
+    ASKED_AT_DESC
+    "#4428 — oldest ask first."
+    ASKED_AT_ASC
+    "#4428 — urgent, high, normal, low; within a priority, newest ask first."
+    PRIORITY_DESC
+    "#4428 — most recently answered first; unanswered last."
+    ANSWERED_AT_DESC
   }
 
   "#4426 — one entry of a question\'s answer list."
@@ -2789,6 +2797,11 @@ export const typeDefs = `#graphql
     specsMustChange: [QuestionRef!]!
     "The user the asker directed this question to, when it named one. Routing only: any decider may answer."
     assigneeId: ID
+    "#4428 — the explicit assignee, by name and handle."
+    assignee: CommentActorRef
+    "#4428 — who this question is routed to: the explicit assignee, else the holder of the worker that asked, else null. Worked out at read, never stored. Routing only: any decider may answer."
+    effectiveAssigneeId: ID
+    effectiveAssignee: CommentActorRef
     "The asker\'s agent task this question blocks. Always null until slice S7."
     taskId: ID
     deciderIds: [ID!]!
@@ -2827,6 +2840,8 @@ export const typeDefs = `#graphql
     id: ID!
     urn: String!
     portalUrl: String
+    "#4428 — the memory this log is in."
+    memoryId: ID!
     loc: String!
     name: String!
     "Codes are this prefix plus letters: Q → QA, QB, …"
@@ -9993,14 +10008,30 @@ export const typeDefs = `#graphql
     questions(
       logRef: ID
       awaitingMe: Boolean
+      "#4428 — every question in the memories of this App that the caller can read. Not with logRef."
+      appRef: ID
       state: [QuestionState!]
       tier: QuestionTier
       priority: [QuestionPriority!]
       authorizes: Boolean
+      "#4428 — true: answered (ANSWERED_UNCONFIRMED, DECIDED or STALE); false: OPEN."
+      answered: Boolean
+      "#4428 — the question\'s effective assignee is this user (an account merged into theirs matches)."
+      assigneeId: ID
+      "#4428 — true: no effective assignee. With assigneeId, either match is kept; false alone: has one."
+      unassigned: Boolean
+      "#4428 — the caller asked it (same worker with a person behind it, same user, or same bare App key)."
+      askedByMe: Boolean
+      askedByWorkerId: ID
+      askedByAppId: ID
+      "#4428 — has a standing answer given at or after this instant."
+      answeredSince: DateTime
       sort: QuestionSort = PORTAL_DEFAULT
       limit: Int = 20
       offset: Int = 0
     ): QuestionPage!
+    "#4428 — the question logs in the memories of this App the caller can read, or in this memory. Give exactly one of appRef and memoryRef; an unknown or unreadable one is an empty list."
+    questionLogs(appRef: ID, memoryRef: ID): [QuestionLog!]!
     "#1641 — re-render a question from its payload and check it against its content, data and approval: the findings behind its state."
     verifyQuestion(ref: ID!): QuestionVerification!
 
