@@ -8,14 +8,14 @@ import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;
-const refusal = { extensions: { code: 'DECISION_DECIDER_NOT_ELIGIBLE' } };
+const refusal = { extensions: { code: 'QUESTION_DECIDER_NOT_ELIGIBLE' } };
 const input = { title: 'Proceed?', parts: [{ question: 'Proceed?', yesno: true, recommendation: { key: 'yes', reason: 'ready' } }] };
 let admin: string, candidate: string, orgId: string, memoryId: string;
 const ctx = (client = db): Context => ({ db: client, userId: admin, roles: ['ADMIN'] });
 const membership = () => ({ organizationId_userId: { organizationId: orgId, userId: candidate } });
 const role = (next: 'READER' | 'CONTRIBUTOR') => db.orgMember.update({ where: membership(), data: { role: next } });
 const createLog = (defaultDeciders = [admin], eligibleDeciders: string[] = []) =>
-  M.createDecisionLog(null, { memoryRef: memoryId, loc: 'decisions', defaultDeciders, eligibleDeciders }, ctx());
+  M.createQuestionLog(null, { memoryRef: memoryId, loc: 'questions', defaultDeciders, eligibleDeciders }, ctx());
 const snapshot = () => db.node.findMany({
   where: { memoryId }, select: { id: true, data: true, revSeq: true, content: true }, orderBy: { id: 'asc' },
 });
@@ -32,15 +32,15 @@ beforeEach(async () => {
   memoryId = (await M.createMemory(null, { orgRef: orgId, name: 'Decider follow-ups' }, ctx())).id;
 });
 
-describe('#3173 decision-log eligibility follow-ups', () => {
+describe('#3173 question-log eligibility follow-ups', () => {
   it('pin 1: defaults-only replacement revalidates the kept eligible list; explicit clear succeeds', async () => {
     const log = await createLog([admin], [candidate]);
     await role('READER');
     const before = await snapshot();
     const args = { logRef: log.row.id, defaultDeciders: [admin], expectedRevision: log.row.revSeq, reason: 'defaults only' };
-    await expect(M.setDecisionLogDeciders(null, args, ctx())).rejects.toMatchObject(refusal);
+    await expect(M.setQuestionLogDeciders(null, args, ctx())).rejects.toMatchObject(refusal);
     expect(await snapshot()).toEqual(before);
-    const cleared = await M.setDecisionLogDeciders(null, { ...args, eligibleDeciders: [] }, ctx());
+    const cleared = await M.setQuestionLogDeciders(null, { ...args, eligibleDeciders: [] }, ctx());
     expect(cleared.data.defaultDeciders).toEqual([admin]);
     expect(cleared.data.eligibleDeciders).toEqual([]);
     expect(cleared.row.revSeq).toBe(log.row.revSeq + 1);
@@ -50,9 +50,9 @@ describe('#3173 decision-log eligibility follow-ups', () => {
     const log = await createLog([candidate], [admin]);
     await role('READER');
     const before = await snapshot();
-    await expect(M.askDecision(null, { logRef: log.row.id, input }, ctx())).rejects.toMatchObject(refusal);
+    await expect(M.askQuestion(null, { logRef: log.row.id, input }, ctx())).rejects.toMatchObject(refusal);
     expect(await snapshot()).toEqual(before);
-    const asked = await M.askDecision(null, { logRef: log.row.id, input: { ...input, deciders: [admin] } }, ctx());
+    const asked = await M.askQuestion(null, { logRef: log.row.id, input: { ...input, deciders: [admin] } }, ctx());
     expect(asked.shown.deciders).toEqual([admin]);
     expect(asked.shown.n).toBe(1);
   });
@@ -64,7 +64,7 @@ describe('#3173 decision-log eligibility follow-ups', () => {
       const before = await snapshot();
       const act = () => door === 'create'
         ? createLog([admin], [candidate])
-        : M.setDecisionLogDeciders(null, {
+        : M.setQuestionLogDeciders(null, {
           logRef: log.row.id, defaultDeciders: [admin], eligibleDeciders: [candidate],
           expectedRevision: log.row.revSeq, reason: 'add eligible candidate',
         }, ctx());
@@ -97,12 +97,12 @@ describe('#3173 decision-log eligibility follow-ups', () => {
         },
       });
       const act = (context = ctx(client)) => door === 'create'
-        ? M.createDecisionLog(null, { memoryRef: memoryId, loc: 'decisions', defaultDeciders: [candidate] }, context)
+        ? M.createQuestionLog(null, { memoryRef: memoryId, loc: 'questions', defaultDeciders: [candidate] }, context)
         : door === 'replace'
-          ? M.setDecisionLogDeciders(null, {
+          ? M.setQuestionLogDeciders(null, {
             logRef: log.row.id, defaultDeciders: [candidate], expectedRevision: log.row.revSeq, reason: 'transaction-local check',
           }, context)
-          : M.askDecision(null, { logRef: log.row.id, input }, context);
+          : M.askQuestion(null, { logRef: log.row.id, input }, context);
       await expect(act()).rejects.toMatchObject(refusal);
       expect(injected).toBe(1);
       expect(await snapshot()).toEqual(before);

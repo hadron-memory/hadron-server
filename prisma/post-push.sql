@@ -388,7 +388,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS users_handle_lower_uniq
 
 -- ─── #692: unified principal pool — backfill for db-push setups ──────────
 -- `principals.name` is a plain @unique (created by `db push` from the schema;
--- names are always written lowercased, so it is effectively case-insensitive).
+-- names are stored lowercased, which chk_principals_name_lower below enforces, so it is case-insensitive).
 -- The MIGRATION backfills a principal per existing user/org; but `db:dev-setup`
 -- runs `db push` + this file, NOT the migration, so populate principals here too
 -- or existing local rows stay invisible to the pool probe. Idempotent
@@ -420,6 +420,16 @@ SELECT md5(random()::text || clock_timestamp()::text), r.w, 'platform', 'reserve
        (now() AT TIME ZONE 'utc'), (now() AT TIME ZONE 'utc')
 FROM (VALUES ('hadron'), ('hadronmemory'), ('hadron-memory'), ('platform'), ('host'), ('server')) AS r(w)
 ON CONFLICT (name) DO NOTHING;
+
+-- #4400 (hrn:node:hadronmemory.com:specs:cor:urn:010:01): a root name is stored lower case, in every status, so
+-- the plain unique index on `name` is uniqueness across case. Until #4400 only the writers' lower-casing kept
+-- `Example` out beside `example`. Placed after the backfills above, which write lower(...) names.
+-- Synced with the 20261117900000_principals_name_lower_check migration.
+ALTER TABLE principals
+  DROP CONSTRAINT IF EXISTS chk_principals_name_lower;
+ALTER TABLE principals
+  ADD CONSTRAINT chk_principals_name_lower
+  CHECK (name = lower(name));
 
 -- ─── cor:api:090 (findNodes) + cor:rag:010:02: lexical FTS substrate ─────
 -- STORED generated tsvector (weighted A/B/C/D = name/alias > loc/tags >
@@ -944,3 +954,13 @@ CREATE INDEX IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"
 -- #3649 slice B: grant signing requests, append-only grant signature records, the grant stale trigger. One source, shared
 -- verbatim with migration 20261109200000_grant_signing (after grant-invariants.sql: the tables it guards reference grants).
 \ir grant-signing-invariants.sql
+
+-- #3689 (#3910 F1): app_runs.agent_id is NOT NULL in the database but optional in schema.prisma, so a build serving the
+-- old nullable column after an HDPRF-refused migration (#3770) can still read the retained agentless runs. `db push`
+-- therefore leaves it nullable; this restores the guarantee the 20261117500000_app_run_agent_required migration states.
+-- app-run-agent-pre-push.sql has already filled or deleted every agentless run before the push.
+ALTER TABLE app_runs ALTER COLUMN agent_id SET NOT NULL;
+
+-- #3998 (S3 of #3991): secret read clients (after grants and secrets exist). Verbatim with migration 20261118100100_secret_read_clients.
+\ir secret-read-clients-invariants.sql
+

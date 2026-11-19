@@ -22,7 +22,10 @@ import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { withRosterAppRead } from './resolvers.agentTaskMatching.js';
-import { TeamReadBusyError, isPrismaBusyExhaustion } from '../../../lib/agentTasks/teamReadBudget.js';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { TeamReadBusyError, busyReason, isPrismaBusyExhaustion } from '../../../lib/agentTasks/teamReadBudget.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { formatGraphQLError, isExpectedClientError, isTrustedRefusal } from '../formatError.js';
 import { INTERNAL_ERROR_CODE } from '../../../lib/internalFault.js';
@@ -107,7 +110,9 @@ describe('#4455: which driver errors convert, and what the refusal carries', () 
   const known = (message: string, code: string) =>
     new Prisma.PrismaClientKnownRequestError(message, { code, clientVersion: 'test' });
 
-  it('isPrismaBusyExhaustion converts exactly P2028 and P2024 — dropping either arm fails this pin', () => {
+  // #4476 added the 57014 cancel arms (P2010/meta.code for raw statements, the engine's rendered
+  // PostgresError code for model ones) — pinned in resolvers.teamReadStatementTimeout4476.test.ts.
+  it('isPrismaBusyExhaustion keeps its #4455 arms (P2028, P2024) — dropping either arm fails this pin', () => {
     expect(isPrismaBusyExhaustion(known('Transaction already closed during query execution.', 'P2028'))).toBe(true);
     expect(isPrismaBusyExhaustion(known('Timed out fetching a new connection from the connection pool.', 'P2024'))).toBe(true);
     // Not busy: another known code, a plain Error wearing the busy prose, a GraphQLError.
@@ -119,12 +124,34 @@ describe('#4455: which driver errors convert, and what the refusal carries', () 
   it('the refusal preserves the original driver error and names its arm (tx budget vs pool wait)', () => {
     const budget = new TeamReadBusyError(known('Transaction already closed during query execution.', 'P2028'));
     expect(budget.extensions).toMatchObject({ code: 'TEAM_READ_BUSY', retryable: true, budgetMs: 5_000, reason: 'TRANSACTION_BUDGET' });
+    expect(budget.extensions).not.toHaveProperty('maxWaitMs');
     expect(budget.cause).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
     // Prisma reuses P2028 for the expired maxWait; its message prefix is the only discriminator.
     const poolMaxWait = new TeamReadBusyError(known('Unable to start a transaction: the pool was full.', 'P2028'));
     expect(poolMaxWait.extensions.reason).toBe('POOL_WAIT');
+    // #4467: the pool arm names the bound that fired (maxWait, 2 s), not the transaction budget.
+    expect(poolMaxWait.extensions).toMatchObject({ code: 'TEAM_READ_BUSY', retryable: true, maxWaitMs: 2_000, reason: 'POOL_WAIT' });
+    expect(poolMaxWait.extensions).not.toHaveProperty('budgetMs');
     const poolTimeout = new TeamReadBusyError(known('Timed out fetching a new connection from the connection pool.', 'P2024'));
     expect(poolTimeout.extensions.reason).toBe('POOL_WAIT');
+    expect(poolTimeout.extensions).toMatchObject({ maxWaitMs: 2_000 });
+    expect(poolTimeout.extensions).not.toHaveProperty('budgetMs');
+  });
+
+  it('#4467: busyReason splits on the INSTALLED query engine\'s real P2028 texts, not hand-written ones', () => {
+    // The engine raises both arms as P2028; the texts live in the native binary. Pin that the
+    // installed engine still carries exactly the strings busyReason relies on, so a Prisma
+    // upgrade that rewords either fails here instead of silently reclassifying pool waits.
+    const dir = fileURLToPath(new URL('../../../generated/prisma/', import.meta.url));
+    const engines = readdirSync(dir).filter((f) => /^libquery_engine-.*\.node$/.test(f));
+    expect(engines.length).toBeGreaterThan(0);
+    const binary = readFileSync(join(dir, engines[0]!)).toString('latin1');
+    const poolText = 'Unable to start a transaction in the given time.';
+    const budgetText = 'Transaction already closed: ';
+    expect(binary).toContain(poolText);
+    expect(binary).toContain(budgetText);
+    expect(busyReason(known(poolText, 'P2028'))).toBe('POOL_WAIT');
+    expect(busyReason(known(`${budgetText}A query cannot be executed on an expired transaction.`, 'P2028'))).toBe('TRANSACTION_BUDGET');
   });
 
   it('a NON-busy driver error from the read rethrows unconverted (the typed refusal is only for busy exhaustion)', async () => {
@@ -196,5 +223,82 @@ describe('#4455: differential — roster, composition and utilization answer the
     const byFamily = new Map(combos.map((c) => [c.family, c.eligibleWorkers]));
     expect(byFamily.get('glm')).toBe(1);
     expect(byFamily.get('codex')).toBe(1);
+  });
+});
+
+describe("#4472: the typed refusal is on every withRosterAppRead caller's path", () => {
+  // The wrapper-level pins above prove withRosterAppRead converts a busy store; these prove each
+  // RESOLVER still routes through it — #4460's QA measured teamRoster under load, composition and
+  // utilization only through this shared wrapper, so a resolver refactor that drops the wrapper (or
+  // swallows the refusal into its own shape) must turn one of these red. The mocked $transaction
+  // throws before the projection runs, so the app need not exist; what is pinned is the wiring.
+  const busy = (message: string, code: string) =>
+    new Prisma.PrismaClientKnownRequestError(message, { code, clientVersion: 'test' });
+
+  const eachCallerConverts = async (call: () => Promise<unknown>, reason: 'TRANSACTION_BUDGET' | 'POOL_WAIT') => {
+    // The spy patches the module-level db handle the resolvers read through; a resolver that
+    // opened its own client would bypass it and the pin fails closed (red), not silently green.
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async () => {
+      throw busy(
+        reason === 'POOL_WAIT' ? 'Unable to start a transaction: the pool was full.' : 'Transaction already closed during query execution.',
+        'P2028',
+      );
+    }) as unknown as never);
+    try {
+      // Only code/retryable/reason here: this pins WHICH caller surfaces the refusal, not the
+      // per-arm envelope (budgetMs vs maxWaitMs), which the wrapper-level pins above own
+      // (#4474 landed that split) — asserting the scalar here would couple this PR to that one's order.
+      await expect(call()).rejects.toMatchObject({
+        extensions: { code: 'TEAM_READ_BUSY', retryable: true, reason },
+      });
+      // The refusal must come from the spied transaction, not an earlier guard failing closed.
+      expect(spy).toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  };
+
+  it('teamRoster surfaces the typed refusal for both arms (tx budget and pool wait)', async () => {
+    await eachCallerConverts(() => Q.teamRoster({}, { appRef: app.id }, ctx(mia.id)), 'TRANSACTION_BUDGET');
+    await eachCallerConverts(() => Q.teamRoster({}, { appRef: app.id }, ctx(mia.id)), 'POOL_WAIT');
+  });
+
+  it('teamComposition surfaces the typed refusal for both arms (wiring pin: the mock throws before its lane grouping runs)', async () => {
+    await eachCallerConverts(() => Q.teamComposition({}, { appRef: app.id }, ctx(mia.id)), 'TRANSACTION_BUDGET');
+    await eachCallerConverts(() => Q.teamComposition({}, { appRef: app.id }, ctx(mia.id)), 'POOL_WAIT');
+  });
+
+  it('teamUtilization surfaces the typed refusal for both arms (wiring pin: valid input, the mock throws inside the read)', async () => {
+    await eachCallerConverts(() => Q.teamUtilization({}, { appRef: app.id }, ctx(mia.id)), 'TRANSACTION_BUDGET');
+    await eachCallerConverts(() => Q.teamUtilization({}, { appRef: app.id }, ctx(mia.id)), 'POOL_WAIT');
+  });
+
+  it('teamUtilization answers BAD_USER_INPUT for an invalid window on a healthy store', async () => {
+    // windowHours is validated before the read wrapper (#4499 hoisted it above admission and
+    // above the transaction); on a healthy store an invalid window is a caller fault. The
+    // busy-store ordering is pinned by the next test.
+    await expect(Q.teamUtilization({}, { appRef: app.id, windowHours: 0 }, ctx(mia.id))).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  });
+
+  it('an invalid window answers BAD_USER_INPUT even on a busy store — the validation runs before the wrapper (#4497)', async () => {
+    // #4499 hoisted the argument checks above withRosterAppRead: a caller fault is answered as
+    // itself, never dressed as a retryable TEAM_READ_BUSY, and it takes no transaction slot. The
+    // spy proves the ordering — validation first, so the busy transaction is never even attempted
+    // for invalid input. (Before #4499 this pin read TEAM_READ_BUSY/POOL_WAIT: the validation sat
+    // inside the transaction and the busy refusal won; the flip is the client-visible change
+    // #4497 intended.)
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async () => {
+      throw busy('Unable to start a transaction: the pool was full.', 'P2028');
+    }) as unknown as never);
+    try {
+      await expect(Q.teamUtilization({}, { appRef: app.id, windowHours: 0 }, ctx(mia.id))).rejects.toMatchObject({
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

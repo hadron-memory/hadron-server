@@ -17,6 +17,7 @@ import { runContext } from '../../../jobs/appRunDeps.js';
 import { resolveRunTools } from './index.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
 import type { RunToolContext, RunToolDef } from './types.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 const ORG_URN = 'gh-snap-org';
 const FLOW_MEM_URN = `${ORG_URN}:flows`;
@@ -121,7 +122,7 @@ const raw = (body: string) => () => new Response(body, { status: 200 });
 async function mintRun(): Promise<AppRun> {
   return db.appRun.create({
     data: {
-      id: generateId(), organizationId: orgId, appId, triggerKind: 'MANUAL',
+      id: generateId(), organizationId: orgId, appId, agentId: await testRunAgentId(db, orgId, appId), triggerKind: 'MANUAL',
       entryNodeUrn: NODE_URN, status: 'RUNNING',
     },
   });

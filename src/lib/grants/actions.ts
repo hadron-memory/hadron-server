@@ -33,7 +33,7 @@ export type GrantReach = 'WORKER' | 'WORKER_OR_ROLE_AGENT' | 'NO_WORKER';
  * definition that names a key the registry does not provide is a compile error, and re-checked at validation because the
  * registry is code and definitions may arrive from anywhere a list can.
  */
-export const ISSUER_RULE_KEYS = ['APP_SCHEDULE_ADMIN', 'APP_WEBHOOK_ADMIN', 'APP_MANAGER'] as const;
+export const ISSUER_RULE_KEYS = ['APP_SCHEDULE_ADMIN', 'APP_WEBHOOK_ADMIN', 'APP_MANAGER', 'SECRET_READ_CLIENT'] as const;
 export type IssuerRuleKey = (typeof ISSUER_RULE_KEYS)[number];
 
 export interface ActionDefinition {
@@ -97,6 +97,23 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
     enforcement: 'SERVER', issuerRule: 'APP_MANAGER', summaryTemplate: 'Compile and approve the boot prompts {compiledNode} in {app}, any number of times within an hour',
     lifetimeSeconds: BOOT_PROMPT_GRANT_LIFETIME_SECONDS,
     reach: 'WORKER', listParameters: ['compiledNode'],
+  },
+  // #3998 (S3 of #3991, cor:acl:140:09 secret forms, byte review passed at checkpoint 1): reveal the value of ONE App secret. Seeded once,
+  // complete: the secret as its stored id (a single value, never a name, a list or the wildcard) and the mark, exactly "keep" or "delete"
+  // (the secret is deleted by the read that spends the last use). The window and the budget are the grant's own starts, expires and
+  // max uses, so nothing about them is a parameter. The mark is named in the sentence ({auto-delete}), which the signing page
+  // shows whole: a term the signer is not shown is not a term the signature may cover. `secret.use` is S5's and is not seeded here.
+  {
+    name: 'secret.reveal', source: 'PLATFORM', tool: null, enforcement: 'SERVER', issuerRule: 'SECRET_READ_CLIENT',
+    parameters: [
+      { name: 'secret', type: 'secret-ref', refusesWildcard: true },
+      { name: 'auto-delete', type: 'secret-mark', refusesWildcard: true },
+    ],
+    summaryTemplate: 'Read the value of the secret {secret} of {app}, and {auto-delete}',
+    // #4162: the read is the holder's own session presenting its own client (readClientReveal.ts judges grant.workerId === the bound worker);
+    // an agent holder is refused when the client is requested (S3 does not build it; hadron-server#4434 will, as WORKER_OR_ROLE_AGENT), so the
+    // narrowest reach is the true one. A person holder reads on the passkey page, not as a worker.
+    reach: 'WORKER',
   },
 ];
 

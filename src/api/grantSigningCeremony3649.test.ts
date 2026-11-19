@@ -91,7 +91,7 @@ async function insertGrant(): Promise<string> {
   return insertGrantFor(appId, { workerId });
 }
 /** #3730: the same pending grant shape, for an App and holder the default fixture does not cover (a user-owned App, a user holder). */
-async function insertGrantFor(aId: string, holder: { workerId?: string; userId?: string }): Promise<string> {
+async function insertGrantFor(aId: string, holder: { workerId: string; userId?: never } | { userId: string; workerId?: never }): Promise<string> {
   const id = generateId();
   await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, ${holder.userId !== undefined ? 'user_id' : 'worker_id'}, action, action_values, reason, max_uses, created_at, updated_at)
     VALUES ($1, $2, $3, 'schedule.create', $4::jsonb, $5, 3, (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
@@ -358,6 +358,24 @@ describe('#3730 item 2: the issuer follows the create gate for the Apps it refus
     expect(await unconsumedGrantSign(admin.id)).toBe(0);
   });
 
+  // #4463 F3: the completion and decline doors share the proof door's route catch, so a deleted App (APP_NOT_FOUND, not a
+  // GraphQLError) must also reach the wire as the one refusal there, with the request left open and the grant inactive.
+  for (const door of ['complete', 'decline'] as const) {
+    it(`a deleted App after the proof: the ${door} door answers the one refusal, and nothing is spent or activated`, async () => {
+      const g = await insertGrant();
+      const req = await openRequest(g);
+      const p = await prove(req.id, admin);
+      expect(p.json.canSign).toBe(true);
+      await db.app.update({ where: { id: appId }, data: { deletedAt: new Date() } });
+      const body = door === 'complete' ? signingBody(p, admin, 2) : { ceremonyId: p.json.signing.ceremonyId };
+      const r = await post(req.id, door, body, p.cookie);
+      expect(r.status).toBe(403);
+      expect(await r.text()).toBe(FORBIDDEN);
+      expect(await requestState(req.id)).toBe('open');
+      expect((await grantRow(g)).activated_at).toBeNull();
+    });
+  }
+
   it('a stranger with no membership row at all: the one refusal, no terms, no ceremony', async () => {
     const stranger = await person('gs-stranger', null);
     const g = await insertGrant();
@@ -392,6 +410,38 @@ describe('C1: one assertion activates the grant, in one transaction', () => {
     const again = await post(req.id, 'complete', signingBody(p, admin, 3), p.cookie);
     expect(again.status).toBe(403);
     expect(await records(g)).toBe(1);
+  });
+});
+
+describe('#3998: signing a secret.reveal grant creates its read client', () => {
+  it('the signer becomes the client issuer; a self-held grant is self-issued; no second row is made', async () => {
+    const secret = await db.secret.create({ data: { ownerType: 'app', ownerId: appId, name: 'api-token', kind: 'revealable' } as never });
+    const id = generateId();
+    await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, max_uses, created_at, updated_at)
+      VALUES ($1, $2, $3, 'secret.reveal', $4::jsonb, 'read it', 3, (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
+    id, appId, workerId, JSON.stringify({ secret: secret.id, 'auto-delete': 'keep' }));
+    expect(await db.secretReadClient.count({ where: { grantId: id } })).toBe(0);
+    const req = await openRequest(id);
+    const p = await prove(req.id, admin);
+    const r = await post(req.id, 'complete', signingBody(p, admin), p.cookie);
+    expect(r.status).toBe(200);
+    const rows = await db.secretReadClient.findMany({ where: { grantId: id } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ issuerUserId: admin.id, selfIssued: false, secretId: secret.id, secretName: 'api-token', appId });
+  });
+
+  it.each([['keep', 'keep the secret'], ['delete', 'delete the secret at the last read or when the grant ends, whichever comes first']] as const)('the signing page shows the mark %s in the summary sentence the signer reads (F3/F1; the preview only: the signed bytes carry the mark on the :09 values line, cor:acl:140:09)', async (mark, words) => {
+    const secret = await db.secret.create({ data: { ownerType: 'app', ownerId: appId, name: 'mark-token', kind: 'revealable' } as never });
+    {
+      const id = generateId();
+      await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, max_uses, created_at, updated_at)
+        VALUES ($1, $2, $3, 'secret.reveal', $4::jsonb, 'read it', 3, (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
+      id, appId, workerId, JSON.stringify({ secret: secret.id, 'auto-delete': mark }));
+      const req = await openRequest(id);
+      const p = await prove(req.id, admin);
+      expect(p.json.canSign).toBe(true);
+      expect(p.json.view.summary).toMatch(new RegExp(`^Read the value of the secret hrn:secret:\\S+ of ${appUrn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, and ${words}$`));
+    }
   });
 });
 

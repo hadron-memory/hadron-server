@@ -14,6 +14,7 @@ import { typeDefs } from './typeDefs.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { withReadableApp } from './resolvers.agentTask.js';
 import { listUsageAccounts, MAX_LISTED_ACCOUNTS } from '../../../lib/accountUsage/list.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -249,7 +250,7 @@ describe('the read gate is the projection\'s (A4, V27, V36, V58)', () => {
     await snapshot({ label: 'team-a', minutesAgo: 5 });
     const schedule = await db.agentSchedule.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, name: 'Snap', cron: '* * * * *', entryNodeUrn: 'hrn:node:al.example:flows:report' } });
     await db.appAutomationTeamSnapshotGrant.create({ data: { id: generateId(), appId: app.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, grantedBy: member.id } });
-    const run = await db.appRun.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, userId: null, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: 'hrn:node:al.example:flows:report', status: 'RUNNING' } });
+    const run = await db.appRun.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, agentId: await testRunAgentId(db, org.id, app.id), userId: null, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: 'hrn:node:al.example:flows:report', status: 'RUNNING' } });
     const runCtx = runContext(db, run);
     // the fixture is real: a read that opts in to run principals answers this run
     expect(await withReadableApp(runCtx, app.id, async () => 'ok', true)).toBe('ok');

@@ -147,7 +147,7 @@ export interface Context {
    * its caller sent, so it answers; a refusal that cannot be replayed on MCP
    * names no MCP door (@codex, PR #1305).
    */
-  governedCanReplay?: (kind: 'task' | 'review' | 'spec' | 'decision') => boolean;
+  governedCanReplay?: (kind: 'task' | 'review' | 'spec' | 'question') => boolean;
   /**
    * #1329 — set by every MCP context that can reach an authoring write: the gate
    * `hadron_get_node` applies, so a refusal on MCP calls a task READABLE only if

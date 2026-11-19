@@ -56,6 +56,12 @@
       "line": "ALTER COLUMN \"handle\" DROP NOT NULL;"
     },
     {
+      "name": "app_runs.agent_id",
+      "kind": "not-null-invariant",
+      "why": "#3689 (#3910 F1): agent_id is NOT NULL in the DB (the migration; post-push.sql for push-synced DBs) but optional in schema.prisma, so a build serving the old nullable column after an HDPRF-refused migration can still read retained agentless runs. The diff wants to DROP NOT NULL; whitelisted so the invariant stays.",
+      "line": "ALTER TABLE \"app_runs\" ALTER COLUMN \"agent_id\" DROP NOT NULL;"
+    },
+    {
       "name": "served_prompts_chat_fkey",
       "kind": "foreign-key-constraint",
       "why": "#2047: served_prompts owner-consistency foreign keys (chat, run and session owner) are database facts (prisma/served-prompt-invariants.sql) — composite keys against a polymorphic owner Prisma cannot model — so the diff wants to DROP them; prod needs them.",
@@ -718,6 +724,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_principals_name_lower",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_read_state_agent_app",
       "kind": "check-constraint",
       "file": "post-push.sql",
@@ -775,6 +787,12 @@
       "name": "chk_secret_protected_app_only",
       "kind": "check-constraint",
       "file": "secret-versions-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_secret_read_client_end",
+      "kind": "check-constraint",
+      "file": "secret-read-clients-invariants.sql",
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
@@ -1384,9 +1402,27 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_secret_deleted_ends_clients",
+      "kind": "function",
+      "file": "secret-read-clients-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_secret_event_guard",
       "kind": "function",
       "file": "secret-versions-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_secret_read_client_guard",
+      "kind": "function",
+      "file": "secret-read-clients-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_secret_read_client_secret",
+      "kind": "function",
+      "file": "secret-read-clients-invariants.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
@@ -2416,6 +2452,18 @@
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
+      "name": "secret_read_clients.secret_read_client_guard",
+      "kind": "trigger",
+      "file": "secret-read-clients-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secret_read_clients.secret_read_client_secret",
+      "kind": "trigger",
+      "file": "secret-read-clients-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "secret_versions.secret_version_owner",
       "kind": "trigger",
       "file": "secret-versions-invariants.sql",
@@ -2425,6 +2473,12 @@
       "name": "secret_versions.worker_reference_fence_1162",
       "kind": "trigger",
       "file": "secret-versions-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secrets.secret_deleted_ends_clients",
+      "kind": "trigger",
+      "file": "secret-read-clients-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {

@@ -46,6 +46,7 @@ import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { resolvers, type Context } from './resolvers.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<Record<string, unknown>>>;
 const ORG = 'seams-3437';
@@ -173,7 +174,7 @@ describe('#3437 item 4: the seams a `carry` context would silently open', () => 
     await db.appAgent.create({ data: { appId, agentId } });
     await db.agentMemoryItem.create({ data: { agentId, memoryId, role: 'read-write' } });
     const run = await db.appRun.create({
-      data: { id: generateId(), organizationId: orgId, appId, userId, triggerKind: 'MANUAL', entryNodeUrn: `${ORG}::mem::flow`, status: 'RUNNING' },
+      data: { id: generateId(), organizationId: orgId, appId, agentId: await testRunAgentId(db, orgId, appId), userId, triggerKind: 'MANUAL', entryNodeUrn: `${ORG}::mem::flow`, status: 'RUNNING' },
     });
     return { log: vi.fn(), db, run, principal: runContext(db, run) };
   };

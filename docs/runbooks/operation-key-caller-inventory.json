@@ -30,7 +30,7 @@
         "prisma/migrations/20261005020000_app_agent_sessions_expire/migration.sql": 1,
         "prisma/schema.prisma": 3,
         "scripts/check-urn-rename-aliased.mjs": 1,
-        "src/api/graphql/schema/resolvers.decisions.ts": 1,
+        "src/api/graphql/schema/resolvers.questions.ts": 1,
         "src/api/graphql/schema/resolvers.encryption.test.ts": 40,
         "src/api/graphql/schema/resolvers.encryptionOwner1644.test.ts": 11,
         "src/api/graphql/schema/resolvers.findNodes.test.ts": 1,

@@ -109,6 +109,10 @@ describe('#4037 detour and return', () => {
     expect(e.goalStack.filter((g: any) => g.detourTo && g.status === 'COMPLETED')).toHaveLength(1);
     expect(e.goalStack.filter((g: any) => g.detourTo && g.status === 'ACTIVE')).toHaveLength(1);
   });
+  // #4446: the barrier guard must fire BEFORE Vitest's own test timeout (default 5000 ms), or a stuck barrier reads as a bare
+  // timeout instead of naming itself. The test timeout is derived from the guard, so the guard always wins.
+  const BARRIER_GUARD_MS = 5000;
+  const D6_TEST_TIMEOUT_MS = BARRIER_GUARD_MS * 3;
   it('D6: overlapping completions on separate connections return the detour once', async () => {
     await edge('conversations:recent:s1', 'conversations:anger', { timing: 'always', behavior: 'detour' });
     const chat = await start(); await respond(chat.chatId);
@@ -117,7 +121,7 @@ describe('#4037 detour and return', () => {
     let release!: () => void;
     let rejectBarrier!: (error: Error) => void;
     const bothSnapshots = new Promise<void>((resolve, reject) => { release = resolve; rejectBarrier = reject; });
-    const timer = setTimeout(() => rejectBarrier(new Error('Both completion snapshots did not reach the barrier')), 5000);
+    const timer = setTimeout(() => rejectBarrier(new Error('Both completion snapshots did not reach the barrier')), BARRIER_GUARD_MS);
     // Real message inserts commit on both connections before either caller can
     // route. This forces the same pre-return origin without mocking DB state.
     const spy = vi.spyOn(chatRoot, 'appendChatMessage').mockImplementation(async (...args) => {
@@ -147,5 +151,5 @@ describe('#4037 detour and return', () => {
       await Promise.allSettled(turns);
       spy.mockRestore();
     }
-  });
+  }, D6_TEST_TIMEOUT_MS);
 });

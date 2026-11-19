@@ -8,7 +8,7 @@
  * canonical URN, never by a name or any other free text. A name can be text the requester wrote, and the server's own
  * sentence must never carry it. Built as written ("built as", not ruled) on the Proposed lines of cor:acl:140:02/:07.
  */
-import { parseUrnV2 } from '@hadron-memory/urn-lib-js';
+import { parseSecretUrnV2, parseUrnV2 } from '@hadron-memory/urn-lib-js';
 import type { ActionParameter } from './actions.js';
 
 export type GrantSummaryReason =
@@ -34,7 +34,9 @@ export interface SummaryInput {
   refs: Readonly<Record<string, { urn: string }>>;
 }
 
-const TOKEN = /\{([A-Za-z][A-Za-z0-9_]*)\}/g;
+// A name may carry hyphens: an action's parameter names are its spec's own words (`auto-delete`, cor:acl:140:09), and a parameter the
+// template cannot name is a term the signer is never shown (#3998).
+const TOKEN = /\{([A-Za-z][A-Za-z0-9_-]*)\}/g;
 
 /**
  * The placeholder names of a template, in order. Throws when any brace is left once the valid `{name}` tokens are removed
@@ -62,12 +64,32 @@ function canonical(kind: keyof typeof URN_KIND, placeholder: string, urn: unknow
   if (!ok) throw new GrantSummaryError('NOT_CANONICAL', `summary placeholder {${placeholder}} needs a canonical ${URN_KIND[kind]} URN`);
   return urn as string;
 }
+/** An App secret's canonical URN (urn-lib-js 0.0.22, cor:urn:010:01): the typed parse must say it is an App secret, and nothing may trail it. */
+function canonicalSecret(placeholder: string, urn: unknown): string {
+  let ok = false;
+  if (typeof urn === 'string') {
+    try { ok = parseSecretUrnV2(urn).ownerKind === 'app' && !urn.includes('#'); } catch { ok = false; }
+  }
+  if (!ok) throw new GrantSummaryError('NOT_CANONICAL', `summary placeholder {${placeholder}} needs a canonical App secret URN`);
+  return urn as string;
+}
+/**
+ * The secret mark (cor:acl:140:09), written as the plain consequence the signer reads: exactly `keep` or `delete`, nothing else.
+ * `delete` ends the secret at its last read or at the end of the grant's window, whichever comes first (cor:sec:060:03), so the sentence says both (Victor, #116292).
+ */
+function secretMark(placeholder: string, mark: unknown): string {
+  if (mark === 'keep') return 'keep the secret';
+  if (mark === 'delete') return 'delete the secret at the last read or when the grant ends, whichever comes first';
+  throw new GrantSummaryError('NOT_CANONICAL', `summary placeholder {${placeholder}} needs the mark "keep" or "delete"`);
+}
 export const SUMMARY_FORMATTERS = {
   app: (urn: string) => canonical('app', 'app', urn),
   'node-ref': (urn: string, placeholder: string) => canonical('node-ref', placeholder, urn),
+  'secret-ref': (urn: string, placeholder: string) => canonicalSecret(placeholder, urn),
+  'secret-mark': (mark: string, placeholder: string) => secretMark(placeholder, mark),
 } as const;
 
-export type SummaryFormatters = { app: (urn: string) => string; 'node-ref': (urn: string, placeholder: string) => string };
+export type SummaryFormatters = { app: (urn: string) => string; 'node-ref': (urn: string, placeholder: string) => string; 'secret-ref': (urn: string, placeholder: string) => string; 'secret-mark': (mark: string, placeholder: string) => string };
 
 export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters = SUMMARY_FORMATTERS): string {
   const { action, app, values, refs } = input;
@@ -91,11 +113,17 @@ export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters =
     for (const entry of entries) {
       if (entry === undefined || entry === null || entry === '') throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no value`);
       if (entry === '*' || typeof entry === 'object') throw new GrantSummaryError('WILDCARD', `summary placeholder {${name}} has a wildcard or structured value`);
-      if (param.type !== 'node-ref') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a parameter type the summary cannot write`);
+      if (param.type === 'secret-mark') {
+        // A mark is its own words, not a reference: there is nothing to resolve, and a list of marks names nothing.
+        if (Array.isArray(value)) throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a list value`);
+        written.push(fmt['secret-mark'](entry as string, name));
+        continue;
+      }
+      if (param.type !== 'node-ref' && param.type !== 'secret-ref') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a parameter type the summary cannot write`);
       if (typeof entry !== 'string') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a value of a type the summary cannot write`);
       const ref = Object.prototype.hasOwnProperty.call(refs, entry) ? refs[entry] : undefined;
       if (!ref) throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no resolved node`);
-      written.push(fmt['node-ref'](ref.urn, name));
+      written.push(param.type === 'secret-ref' ? fmt['secret-ref'](ref.urn, name) : fmt['node-ref'](ref.urn, name));
     }
     resolved.set(name, written.join(', '));
   }
