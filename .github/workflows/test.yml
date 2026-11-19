@@ -67,6 +67,9 @@ jobs:
     env:
       # The shard TOTAL is fixed: the extra pg16 lane makes strategy.job-total 5, which would re-split the files.
       SHARD_TOTAL: '4'
+      # #4487 (LOCAL P2): the PG17 lanes EXPECT the transaction_timeout GUC, so a PG17-only pin that would skip there
+      # (an engine without the GUC) fails resolvers.teamReadStatementTimeout4476.test.ts's top-level check instead.
+      TEST_EXPECT_TX_TIMEOUT: ${{ matrix.pg == 17 && '1' || '' }}
       # Used by `prisma db push` below. The vitest config reads
       # `TEST_DATABASE_URL` (also set below) for the test runner's
       # own connection.
