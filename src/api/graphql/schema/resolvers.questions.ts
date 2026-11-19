@@ -752,9 +752,9 @@ export const questionMutations = {
 
   /**
    * §7 — amend a question: title, background, options, recommendation and
-   * references; add parts; raise the tier. Before any answer, any memory
-   * writer; after one, a decider only (and the evidence goes stale). Urgency
-   * is changed by a decider (Q14); the tier is lowered only by a decider,
+   * references; raise the tier. Before any answer, any memory writer; after
+   * one, a decider only (and the evidence goes stale). Priority is changed by
+   * a decider (Q14); the tier is lowered only by a decider,
    * before an answer, never for an authorizing question (§6.2). Answers never
    * change here.
    */
@@ -845,8 +845,8 @@ export const questionMutations = {
 
   /**
    * §7 — withdraw a question (terminal; its code stays consumed). The asker
-   * or a decider; once a part is answered, a decider only. Refused for a
-   * DECIDED question (supersede it instead) and for a terminal one.
+   * or a decider; once the question has ever been answered, a decider only. A
+   * DECIDED question may be withdrawn (no supersession); a terminal one may not.
    */
   withdrawQuestion: async (
     _: unknown,
