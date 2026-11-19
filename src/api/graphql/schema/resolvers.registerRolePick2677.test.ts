@@ -40,7 +40,7 @@ const lastAssigned = (w: { id: string }, m: number) =>
 const node = (memoryId: string, loc: string, extra: Record<string, unknown> = {}) =>
   db.node.create({ data: { id: generateId(), memoryId, loc, name: loc, content: '# x', ...extra } });
 async function roleAgent(name: string, parent?: string) {
-  const a = await M.createAgent({}, { orgId: org.id, name }, ctx(admin.id));
+  const a = await M.createAgent({}, { orgRef: org.id, name }, ctx(admin.id));
   if (parent) await db.agent.update({ where: { id: a.id }, data: { extendsAgentId: parent } });
   const row = await db.agent.findUniqueOrThrow({ where: { id: a.id } });
   return { id: a.id, memoryId: row.systemMemoryId as string };
@@ -54,7 +54,7 @@ beforeEach(async () => {
   member = await db.user.create({ data: { githubId: 219002, githubUsername: 'rp-member', handle: 'rp-member', roles: ['READER'] } });
   outsider = await db.user.create({ data: { githubId: 219003, githubUsername: 'rp-out', handle: 'rp-out', roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   teamAgentId = agent.id;
   teamMemoryId = (await db.agent.findUniqueOrThrow({ where: { id: teamAgentId } })).systemMemoryId as string;
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
@@ -143,7 +143,7 @@ describe('#2677 routing order: named, role holder, coordinator, managers, empty'
     const o = await db.organization.create({ data: { id: generateId(), name: 'F', urn: `f-${generateId().toLowerCase()}.example` } });
     const owner = await db.user.create({ data: { handle: `o-${generateId()}` } });
     await db.orgMember.create({ data: { organizationId: o.id, userId: owner.id, role: 'ADMIN' } });
-    const a = await M.createAgent({}, { orgId: o.id, name: 'Foreign' }, ctx(owner.id));
+    const a = await M.createAgent({}, { orgRef: o.id, name: 'Foreign' }, ctx(owner.id));
     return a.id as string;
   }
 
@@ -210,7 +210,7 @@ describe('#2677 two-tenant pins', () => {
     const foreignOrg = await db.organization.create({ data: { id: generateId(), name: 'Foreign', urn: `foreign-${generateId().toLowerCase()}.example` } });
     const owner = await db.user.create({ data: { handle: `owner-${generateId()}` } });
     await db.orgMember.create({ data: { organizationId: foreignOrg.id, userId: owner.id, role: 'ADMIN' } });
-    const fa = await M.createAgent({}, { orgId: foreignOrg.id, name: 'Foreign role' }, ctx(owner.id));
+    const fa = await M.createAgent({}, { orgRef: foreignOrg.id, name: 'Foreign role' }, ctx(owner.id));
     await db.agent.update({ where: { id: fa.id }, data: { extendsAgentId: teamAgentId } });
     const foreign = await worker('Foreign', fa.id, 'coordinator'); await bind(foreign, fa.id);
     const unnamed = await pick(member.id);

@@ -44,18 +44,18 @@ beforeEach(async () => {
 
 describe('createAgent default roles', () => {
   it('a new Agent offers owner and member; omitted memberRoles is the default', async () => {
-    const a = await M.createAgent({}, { orgId: org.id, name: 'Fresh' }, ctxFor(admin.id));
+    const a = await M.createAgent({}, { orgRef: org.id, name: 'Fresh' }, ctxFor(admin.id));
     expect(await policyOf(a.id)).toEqual({ maxMembers: 'unlimited', memberRoles: ['owner', 'member'] });
   });
 
   it('honors an explicit list, and keeps maxMembers unlimited', async () => {
-    const a = await M.createAgent({}, { orgId: org.id, name: 'Cook', memberRoles: ['owner', 'cook', 'eater'] }, ctxFor(admin.id));
+    const a = await M.createAgent({}, { orgRef: org.id, name: 'Cook', memberRoles: ['owner', 'cook', 'eater'] }, ctxFor(admin.id));
     expect(await policyOf(a.id)).toEqual({ maxMembers: 'unlimited', memberRoles: ['owner', 'cook', 'eater'] });
   });
 
   it('does not backfill: an Agent stored with the old default keeps ["owner"]', async () => {
     const old = await db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: 'o2171g.example:old', name: 'old' } });
-    await M.createAgent({}, { orgId: org.id, name: 'Another' }, ctxFor(admin.id));
+    await M.createAgent({}, { orgRef: org.id, name: 'Another' }, ctxFor(admin.id));
     expect((await policyOf(old.id)).memberRoles).toEqual(['owner']);
   });
 });
@@ -168,8 +168,8 @@ describe('App.availableMemberRoles', () => {
 
 describe('createApp installer grant uses the union reader', () => {
   it('auto-adds the installer as owner only when owner is offered', async () => {
-    const withOwner = await M.createAgent({}, { orgId: org.id, name: 'WithOwner' }, ctxFor(admin.id));
-    const noOwner = await M.createAgent({}, { orgId: org.id, name: 'NoOwner', memberRoles: ['member'] }, ctxFor(admin.id));
+    const withOwner = await M.createAgent({}, { orgRef: org.id, name: 'WithOwner' }, ctxFor(admin.id));
+    const noOwner = await M.createAgent({}, { orgRef: org.id, name: 'NoOwner', memberRoles: ['member'] }, ctxFor(admin.id));
     const a1 = await M.createApp({}, { orgRef: org.id, name: 'app-one', agentRef: withOwner.id }, ctxFor(admin.id));
     const a2 = await M.createApp({}, { orgRef: org.id, name: 'app-two', agentRef: noOwner.id }, ctxFor(admin.id));
     expect(await db.appMember.count({ where: { appId: a1.id, userId: admin.id, role: 'owner' } })).toBe(1);

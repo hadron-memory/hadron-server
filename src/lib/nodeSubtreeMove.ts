@@ -58,7 +58,7 @@ import { assertBootPromptWriteAllowed } from './bootPrompt.js';
 import { resyncDerivedIncludesForNodes } from './includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from './nodeRoleWriters.js';
 import { COMMENT_NODE_TYPE, COMMENTABLE_CLASSES, commentError, commentGovernedError } from './comments/index.js';
-import { decisionContainedError, isDecisionFamilyRole, refuseUnderDecisionLog } from './decisions/index.js';
+import { questionContainedError, isQuestionFamilyRole, refuseUnderQuestionLog } from './questions/index.js';
 import { deriveEdgeLoc } from './edgeLoc.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockNodeForDelete } from './nodeSubtreeLock.js';
 import type { Prisma } from '../generated/prisma/index.js';
@@ -468,11 +468,11 @@ export async function moveNodeSubtree(
   // #2043 — a compiled boot prompt is placed by its compile, never moved.
   // and (cor:agt:040:11) a worker session never moves a boot-prompt source either.
   for (const n of subtree) assertBootPromptWriteAllowed(n, {}, 'move');
-  // #1641 §3.2 — a decision's loc IS its code, so neither a decision nor a log
+  // #1641 §3.2 — a question's loc IS its code, so neither a question nor a log
   // (nor an ancestor of one) moves; and nothing moves into a log's code space.
-  const decisionsMoved = subtree.filter((n) => isDecisionFamilyRole(n.role));
-  if (decisionsMoved.length > 0) throw decisionContainedError('Moving this node', decisionsMoved.map((n) => n.loc));
-  await refuseUnderDecisionLog(tx, destMemoryId, destLoc, 'Moving this node');
+  const questionsMoved = subtree.filter((n) => isQuestionFamilyRole(n.role));
+  if (questionsMoved.length > 0) throw questionContainedError('Moving this node', questionsMoved.map((n) => n.loc));
+  await refuseUnderQuestionLog(tx, destMemoryId, destLoc, 'Moving this node');
   const carriedComments = crossMemory
     ? await tx.commentMeta.findMany({
       where: { targetNodeId: { in: [...movedIds] } },

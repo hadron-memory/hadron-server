@@ -181,7 +181,7 @@ describe('#2302 coordinate-scoped ordinary-word sets', () => {
   it('detects the omitted decision family in Node.role using the live governed-role list', () => {
     const doc = 'type Node { "Governed families: review, spec." role: String }';
     expect(findPartialEnumerations(doc).filter(v => v.set === 'GOVERNED_ROLES')).toMatchObject([
-      { coord: 'Node.role', missing: ['decision'] },
+      { coord: 'Node.role', missing: ['question'] },
     ]);
   });
 

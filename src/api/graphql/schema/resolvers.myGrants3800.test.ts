@@ -54,7 +54,7 @@ async function post(key: string | null, session: string | null, query: string, v
   });
   return res.json();
 }
-const LIST = 'query($l:Int,$o:Int){myGrants(limit:$l,offset:$o){total items{id allows holderKind holderId reason values}}}';
+const LIST = 'query($l:Int,$o:Int){myGrants(limit:$l,offset:$o){total items{id urn allows holderKind holderId reason values}}}';
 const asMe = (v: Record<string, unknown> = {}) => post(personKey, null, LIST, v);
 const ids = (r: any): string[] => (r.data.myGrants.items as Array<{ id: string }>).map((i) => i.id).sort();
 const activated = { activated_at: raw(DB_NOW), verification_kind: 'TEST', verified_by: 'test' };
@@ -102,6 +102,10 @@ describe('which rows a person lists', () => {
     const id = await mine({ reason: 'the terms', action_values: { to: ['a'] } });
     const before = (await asMe()).data.myGrants.items[0];
     expect(before).toMatchObject({ id, allows: true, reason: 'the terms', values: { to: ['a'] } });
+    // #3709: the PERSON audience's page composes Grant.urn too — every COLUMNS
+    // query joins the App (a.urn AS app_urn), so the computed field resolves on
+    // this audience as on the worker's, and stays identical across the leave.
+    expect(before.urn).toMatch(/^hrn:grant:[a-z0-9.-]+:app:[0-9a-f]{32}$/);
     await db.orgMember.updateMany({ where: { organizationId: w.orgId, userId: w.userId }, data: { deletedAt: new Date() } });
     const after = (await asMe()).data.myGrants.items[0];
     expect(after).toEqual(before);

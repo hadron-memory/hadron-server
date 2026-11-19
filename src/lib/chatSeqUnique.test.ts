@@ -144,7 +144,7 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: org.id, userId: admin.id, role: 'ADMIN' },
   });
   // The Team Agent through the real mutation so it owns a real system memory.
-  const created = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   teamAgent = { id: created.id, urn: created.urn, systemMemoryId: created.systemMemoryId };
   app = await db.app.create({
     data: { id: generateId(), organizationId: org.id, name: 'Team App', urn: `${org.urn}:team` },

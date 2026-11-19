@@ -361,7 +361,7 @@ const PROBES: Probe[] = [
   })),
   {
     name: 'updateMemory(id:)',
-    query: `mutation($r: ID!) { updateMemory(id: $r, name: "renamed") { id } }`,
+    query: `mutation($r: ID!) { updateMemory(ref: $r, name: "renamed") { id } }`,
     on: 'memId', vars: (r) => ({ r }), missingCode: 'MEMORY_NOT_FOUND',
   },
   {
@@ -543,9 +543,9 @@ describe('#1381 — controls: what concealment must not change', () => {
 
   // Last: it succeeds, so it moves the side-effect baseline.
   it('the owner still administers the memory, by id and by URN', async () => {
-    const byId = await gql('owner', `mutation($r: ID!) { updateMemory(id: $r, name: "by id") { name } }`, { r: ids.victim });
+    const byId = await gql('owner', `mutation($r: ID!) { updateMemory(ref: $r, name: "by id") { name } }`, { r: ids.victim });
     expect(byId.errors, JSON.stringify(byId.errors)).toBeUndefined();
-    const byUrn = await gql('owner', `mutation($r: ID!) { updateMemory(id: $r, name: "by urn") { name } }`, {
+    const byUrn = await gql('owner', `mutation($r: ID!) { updateMemory(ref: $r, name: "by urn") { name } }`, {
       r: target.memUrn!.existing,
     });
     expect(byUrn.errors, JSON.stringify(byUrn.errors)).toBeUndefined();

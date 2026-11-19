@@ -96,12 +96,16 @@ describe('one request, one grant, two audiences', () => {
   it('the manager\'s list shows the signer and the device; myGrants withholds them; in either order, aliased', async () => {
     const g = await signedPersonGrant();
     for (const query of [
-      `query($a:String!){ m: appGrants(appRef:$a){ items{ id signatureStatus{ ${FULL} } } } mine: myGrants{ items{ id signatureStatus{ ${FULL} } } } }`,
-      `query($a:String!){ mine: myGrants{ items{ id signatureStatus{ ${FULL} } } } m: appGrants(appRef:$a){ items{ id signatureStatus{ ${FULL} } } } }`,
+      `query($a:String!){ m: appGrants(appRef:$a){ items{ id urn signatureStatus{ ${FULL} } } } mine: myGrants{ items{ id signatureStatus{ ${FULL} } } } }`,
+      `query($a:String!){ mine: myGrants{ items{ id signatureStatus{ ${FULL} } } } m: appGrants(appRef:$a){ items{ id urn signatureStatus{ ${FULL} } } } }`,
     ]) {
       const r = await gql(query, { a: w.appId });
       expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
-      const m = r.data.m.items.find((i: any) => i.id === g).signatureStatus;
+      const mg = r.data.m.items.find((i: any) => i.id === g);
+      // #3709: the MANAGER audience's page composes Grant.urn too (every COLUMNS
+      // query joins the App), addressed under the App the manager named.
+      expect(mg.urn).toMatch(/^hrn:grant:[a-z0-9.-]+:app:[0-9a-f]{32}$/);
+      const m = mg.signatureStatus;
       const mine = r.data.mine.items.find((i: any) => i.id === g).signatureStatus;
       expect(m.state).toBe('CURRENT');
       expect(m.signatures).toHaveLength(1);
