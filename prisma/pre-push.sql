@@ -133,3 +133,4 @@ END $$;
 -- empty or current database (its guard returns early).
 \ir delivery-settings-pre-push.sql
 \ir ticker-tick-code-pre-push.sql
+\ir app-run-agent-pre-push.sql

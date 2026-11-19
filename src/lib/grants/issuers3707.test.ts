@@ -91,12 +91,13 @@ describe('#3730 item 1: a rule key that only looks like one has no issuer — th
     name: 'test.3730.poison', source: 'PLATFORM', parameters: [{ name: 'entryNode', type: 'node-ref', refusesWildcard: true }],
     tool: null, enforcement: 'SERVER', issuerRule: issuerRule as never, summaryTemplate: 'Poison {app} at {entryNode}',
   });
-  /** Run `fn` with `entry` visible to the helper, then restore the shipped list whatever happened. */
+  /** Run `fn` with `entry` visible to the helper, then put the shipped list back exactly as it was, whatever happened. */
   async function withAction<T>(entry: ActionDefinition, fn: () => Promise<T>): Promise<T> {
-    (PLATFORM_ACTIONS as unknown as ActionDefinition[]).push(entry);
+    const shared = PLATFORM_ACTIONS as unknown as ActionDefinition[];
+    const shipped = [...shared];
+    shared.push(entry);
     try { return await fn(); } finally {
-      const i = (PLATFORM_ACTIONS as unknown as ActionDefinition[]).lastIndexOf(entry);
-      if (i >= 0) (PLATFORM_ACTIONS as unknown as ActionDefinition[]).splice(i, 1);
+      shared.splice(0, shared.length, ...shipped);
     }
   }
 
@@ -125,7 +126,7 @@ describe('#3730 item 2: the issuer follows the schedule gates for the Apps they 
       // #3730 item 4: the code is the contract. resolveAppRef refuses the deleted App before requireScheduleAdmin's own
       // NOT_FOUND branch, with EntityNotFoundError's wire code — at the ceremony door the route's uniform catch turns it
       // into the one refusal, so this shape never reaches a client as anything but "no" (pinned over real HTTP below).
-      await expect(requireActionIssuer(ctx(u.admin), action, app.id), action).rejects.toMatchObject({ code: 'APP_NOT_FOUND' });
+      await expect(requireActionIssuer(ctx(u.admin), action, app.id), action).rejects.toMatchObject({ code: 'APP_NOT_FOUND', message: `APP_NOT_FOUND: ${app.id}` });
     }
   });
 });
@@ -164,10 +165,10 @@ describe("#3707 (LOCAL P2-1) / #3730 item 3: the issuer is a person acting as th
       const impSession = await db.impersonationSession.create({
         data: { adminUserId: u.admin, targetUserId: u.owner, organizationId: org.id, reason: 'issuer pin', expiresAt: new Date(Date.now() + 3600_000) },
       });
-      const impersonated = {
+      const impersonated: Context = {
         ...ctx(u.owner),
         impersonation: { sessionId: impSession.id, actorUserId: u.admin, orgId: org.id, expiresAt: impSession.expiresAt },
-      } as unknown as Context;
+      };
       await refused(requireActionIssuer(impersonated, action, app.id), 'FORBIDDEN', 'Forbidden');
     });
 

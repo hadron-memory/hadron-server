@@ -6,6 +6,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { rootTriggerOfRun } from './automationReadGrant.js';
+import { testRunAgentId } from '../test/runAgent.js';
 
 let org: { id: string };
 let app: { id: string };
@@ -21,8 +22,8 @@ beforeEach(async () => {
 
 const schedule = (appId = app.id) => db.agentSchedule.create({ data: { id: generateId(), organizationId: org.id, appId, name: 'S', cron: '* * * * *', entryNodeUrn: ENTRY } });
 const webhook = (appId = app.id) => db.agentWebhook.create({ data: { id: generateId(), organizationId: org.id, appId, name: 'W', secret: generateId(), entryNodeUrn: ENTRY } });
-const run = (triggerKind: 'SCHEDULE' | 'WEBHOOK' | 'MANUAL' | 'SPAWN' | 'INTEGRATION', triggerId: string | null, parentRunId: string | null = null, appId = app.id) =>
-  db.appRun.create({ data: { id: generateId(), organizationId: org.id, appId, triggerKind, triggerId, parentRunId, entryNodeUrn: ENTRY } });
+const run = async (triggerKind: 'SCHEDULE' | 'WEBHOOK' | 'MANUAL' | 'SPAWN' | 'INTEGRATION', triggerId: string | null, parentRunId: string | null = null, appId = app.id) =>
+  db.appRun.create({ data: { id: generateId(), organizationId: org.id, appId, agentId: await testRunAgentId(db, org.id, appId), triggerKind, triggerId, parentRunId, entryNodeUrn: ENTRY } });
 
 describe('#2883 rootTriggerOfRun', () => {
   it('a schedule run and a webhook run resolve to their own live trigger', async () => {
