@@ -50,7 +50,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   orgId = org.id;
   ctx = { db, userId: admin.id, roles: ['READER'] };
-  agentId = (await M.createAgent({}, { orgId: org.id, name: 'Coordinator role' }, ctx)).id;
+  agentId = (await M.createAgent({}, { orgRef: org.id, name: 'Coordinator role' }, ctx)).id;
   const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Ws team', urn: `${org.urn}:team` } });
   await db.appAgent.create({ data: { appId: app.id, agentId } });
   workerId = (await db.worker.create({
@@ -224,7 +224,7 @@ describe('#3030 what a refusal reveals is bounded by the holder read access', ()
     const otherAdmin = await db.user.create({ data: { id: generateId(), githubId: 303002, githubUsername: 'ws3030-foreign', roles: [] } });
     await db.orgMember.create({ data: { organizationId: other.id, userId: otherAdmin.id, role: 'ADMIN' } });
     const otherCtx: Context = { db, userId: otherAdmin.id, roles: ['READER'] };
-    const foreignAgent = (await M.createAgent({}, { orgId: other.id, name: 'Foreign role' }, otherCtx)).id;
+    const foreignAgent = (await M.createAgent({}, { orgRef: other.id, name: 'Foreign role' }, otherCtx)).id;
     const foreign = await M.createAgentTickerTemplate({}, { agentRef: foreignAgent, input: { name: 'f', cadenceSeconds: 600 } }, otherCtx);
 
     expect(await codeOf(asWorker(() => updateTemplate(foreign.id, 1)))).toBe(REFUSED);

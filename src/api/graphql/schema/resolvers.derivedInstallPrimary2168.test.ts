@@ -12,7 +12,7 @@ it('licensed derived definitions join all-Agent folds but do not replace a live 
   const user=await db.user.create({data:{handle:`primary-${generateId()}`,roles:['READER']}});
   await db.orgMember.create({data:{organizationId:org.id,userId:user.id,role:'ADMIN'}});
   const ctx={db,userId:user.id,roles:['READER']} as Context;
-  const make=(name:string)=>(resolvers.Mutation as any).createAgent({}, {orgId:org.id,name,personaRole:name},ctx);
+  const make=(name:string)=>(resolvers.Mutation as any).createAgent({}, {orgRef:org.id,name,personaRole:name},ctx);
   const first=await make('First'),derived=await make('Derived'),second=await make('Second');
   const app=await db.app.create({data:{name:'Primary',urn:`primary-${generateId().toLowerCase()}.example:app`,organizationId:org.id}});
   await db.appAgent.create({data:{appId:app.id,agentId:first.id,createdAt:new Date('2026-01-01')}});

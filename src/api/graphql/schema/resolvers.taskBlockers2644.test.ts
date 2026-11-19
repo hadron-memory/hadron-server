@@ -173,7 +173,10 @@ describe('#2644 blockers and priority', () => {
   it('the real stall loader and final raise recheck suppress a newly blocked candidate and floor release', async () => {
     const b = await create({ status: 'BACKLOG' });
     const t = await create({ assignee: { user: ownerId }, startBy: new Date(Date.now() - 120_000).toISOString() });
-    await db.agentTask.update({ where: { id: t.id }, data: { assignedAt: new Date(Date.now() - 3_600_000) } });
+    // #3775 B: a person-assigned task raises no stall alarm, so these tests move the assignment to a worker first. 
+    const agent = await db.agent.findFirstOrThrow();
+    const w = await db.worker.create({ data: { appId, agentId: agent.id, name: 'Stall', slug: 'stall', signature: '', trailer: '' } });
+    await db.agentTask.update({ where: { id: t.id }, data: { assignedAt: new Date(Date.now() - 3_600_000), assigneeUserId: null, assigneeWorkerId: w.id } });
     const now = new Date();
     const [before] = await loadStallInputs(db, { id: t.id }, now);
     const candidate = stallCandidates(before, STALL_WINDOW_DEFAULTS, now)[0];

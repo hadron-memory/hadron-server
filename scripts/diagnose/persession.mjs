@@ -25,8 +25,9 @@ const maxOf = (xs) => (xs.length ? xs.reduce((a, b) => (b > a ? b : a), -Infinit
 export function perSessionLine({ samples, load }) {
   const cap = Number.isSafeInteger(load?.cap) && load.cap > 0 ? load.cap : null;
   const okOpens = Number.isSafeInteger(load?.ok) && load.ok >= 0 ? load.ok : null;
-  const heldCount = load?.workload === 'held' && (okOpens !== null || cap !== null)
-    ? Math.min(okOpens ?? cap, cap ?? okOpens) : null;
+  // Both bounds must be observed: with either unknown, the other is not a stand-in (#4453 N1) — the
+  // per-session figure reads not sampled instead of dividing by a guess.
+  const heldCount = load?.workload === 'held' && okOpens !== null && cap !== null ? Math.min(okOpens, cap) : null;
   const held = heldCount !== null && heldCount > 0 ? heldCount : null;
   // A missing or corrupt load line must degrade to empty windows, never throw: every output then
   // reads as not sampled / null, which is the truth (no load window is known).
@@ -48,9 +49,9 @@ export function perSessionLine({ samples, load }) {
   const delta = (from, to) => (Number.isFinite(from) && Number.isFinite(to) ? to - from : null);
   return {
     kind: 'perSession',
-    workload: load?.workload ?? null,
+    workload: load?.workload ?? NOT_SAMPLED,   // no load line (or no field): unobservable, not null (#4453 N5)
     held,
-    okOpens,
+    okOpens: okOpens ?? NOT_SAMPLED,
     baselineBasis: usedSettled ? 'settled-last-60s' : 'fallback-all-pre-load',
     baselineSamples: pre.length,
     baselineRssBytes: baselineRss,

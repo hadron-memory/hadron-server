@@ -87,21 +87,34 @@ describe('spendTriggerGrant', () => {
 
   // Blind finding on 8f098618 (P2): the UPDATE's live predicate and the guard read the clock separately (and the guard rounds it
   // to timestamp(3)), so a grant can pass the predicate and be expired when the guard judges it. A trigger that fires before the
-  // guard (triggers fire in name order) sleeps past the expiry, which makes that window deterministic.
+  // guard (triggers fire in name order) sleeps until THIS row's expiry has passed, which makes that window deterministic.
+  // #3931: nothing here depends on how fast the runner is. The trigger sleeps to the row's own expires_at (not a fixed time) and
+  // bumps a sequence (it survives the rollback); a BEFORE UPDATE trigger fires only for a row the UPDATE's predicate matched, so the marker proves the
+  // predicate admitted the row and the refusal came from the guard's 23514 translation. A stall that lets the expiry pass before the
+  // UPDATE runs (the predicate refuses first) fails the marker assertion loudly instead of passing without the guard.
   it('a grant that expires between the predicate and the guard gets the one refusal, not the guard\'s 23514, and spends nothing', async () => {
-    const g = await triggerGrant(w, { over: { expires_at: dbNowPlus('1 second') } });
-    await exec(`CREATE FUNCTION aaa_sleep_3483() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(1.5); RETURN NEW; END $$`);
+    const g = await triggerGrant(w, { over: { expires_at: dbNowPlus('3 seconds') } });
+    await exec('CREATE SEQUENCE aaa_marker_3483'); // a sequence survives the spend's rollback; a marker row would not
+    await exec(`CREATE FUNCTION aaa_sleep_3483() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      PERFORM nextval('aaa_marker_3483');
+      PERFORM pg_sleep(GREATEST(0, EXTRACT(EPOCH FROM ((OLD.expires_at AT TIME ZONE 'UTC') - clock_timestamp()))) + 0.2);
+      RETURN NEW; END $$`);
     await exec('CREATE TRIGGER aaa_sleep_3483 BEFORE UPDATE OF use_count ON grants FOR EACH ROW EXECUTE FUNCTION aaa_sleep_3483()');
+    let fired = 0;
     try {
       await expect(db.$transaction((tx) => spendTriggerGrant(tx, g, { appId: w.appId, workerId: w.workerId, sessionId: null })))
         .rejects.toMatchObject({ extensions: { code: 'TRIGGER_GRANT_REQUIRED' } });
+      const [m] = await db.$queryRawUnsafe<Array<{ is_called: boolean }>>('SELECT is_called FROM aaa_marker_3483');
+      fired = m?.is_called ? 1 : 0;
     } finally {
       await exec('DROP TRIGGER aaa_sleep_3483 ON grants');
       await exec('DROP FUNCTION aaa_sleep_3483()');
+      await exec('DROP SEQUENCE aaa_marker_3483');
     }
+    expect(fired).toBe(1); // the predicate admitted the row, so the guard is what refused
     expect(await useCount(g)).toBe(0);
     expect(await useEvents(g)).toHaveLength(0);
-  });
+  }, 20_000);
 
   it('any other database failure of the spend is not dressed as the refusal', async () => {
     const g = await triggerGrant(w, { over: { max_uses: null } });

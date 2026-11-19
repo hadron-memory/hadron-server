@@ -52,7 +52,13 @@ compose() {
   if [[ "$backend" == docker ]]; then
     E2E_BIND=127.0.0.1 docker compose --project-name "$project" --file "$ROOT/scripts/e2e/compose.yaml" "$@"
   else
-    incus exec "$project" -- env E2E_PORT="$E2E_PORT" E2E_PORTAL_PORT="$E2E_PORTAL_PORT" E2E_BIND=0.0.0.0 \
+    # #3018: `incus exec ... env` is an allowlist, so a QA-supplied keyring must be
+    # relayed explicitly, or the container seeds a random valid one and a
+    # keyring-negative stack boots green. Relayed only when set on the host
+    # (quoted array: a keyring is JSON and may contain spaces).
+    local relay=()
+    [[ -z "${E2E_RATE_LIMIT_KEYRING+x}" ]] || relay=("E2E_RATE_LIMIT_KEYRING=$E2E_RATE_LIMIT_KEYRING")
+    incus exec "$project" -- env E2E_PORT="$E2E_PORT" E2E_PORTAL_PORT="$E2E_PORTAL_PORT" E2E_BIND=0.0.0.0 "${relay[@]}" \
       E2E_PASSKEY_SIGNING_ENABLED="${E2E_PASSKEY_SIGNING_ENABLED:-}" \
       E2E_SIGNING_CEREMONY_ORIGINS="${E2E_SIGNING_CEREMONY_ORIGINS:-}" \
       E2E_PASSKEY_RP_ID="${E2E_PASSKEY_RP_ID:-}" \

@@ -131,7 +131,7 @@ it.each(['id loc name', 'id content'])('keeps child-effective inherited endpoint
 
 it.each(['urn', 'actionUrn'])('preserves a non-null computed %s through identity and body aliases', async field => {
   const home = await db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { organizationId: true } });
-  const agent = await (resolvers.Mutation as any).createAgent({}, { orgId: home.organizationId, name: 'Address2793' }, context());
+  const agent = await (resolvers.Mutation as any).createAgent({}, { orgRef: home.organizationId, name: 'Address2793' }, context());
   const stored = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
   const memory = await db.memory.findUniqueOrThrow({ where: { id: stored.systemMemoryId! } });
   const parent = await createDbNode(db, { memoryId: memory.id, loc: 'parent' });

@@ -53,7 +53,7 @@ beforeEach(async () => {
   await db.orgMember.create({
     data: { id: generateId(), organizationId: org.id, userId: admin.id, role: 'ADMIN' },
   });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'Sysmem Agent' }, ctx(admin.id));
+  agent = await M.createAgent({}, { orgRef: org.id, name: 'Sysmem Agent' }, ctx(admin.id));
   otherMemory = await db.memory.create({
     data: { id: generateId(), name: 'other', urn: `other-2856-${suffix}`, organizationId: org.id, class: 'knowledge' },
   });
@@ -62,7 +62,7 @@ beforeEach(async () => {
 describe('updateAgent systemMemoryId on an Agent that has one (#2856)', () => {
   it('refuses a different memory with BAD_USER_INPUT, not a plain Error', async () => {
     const err = await refusal(
-      M.updateAgent({}, { ref: agent.id, systemMemoryId: otherMemory.id }, ctx(admin.id)),
+      M.updateAgent({}, { ref: agent.id, systemMemoryRef: otherMemory.id }, ctx(admin.id)),
     );
     expect(err).toBeInstanceOf(GraphQLError);
     expect(err.extensions?.code).toBe('BAD_USER_INPUT');
@@ -71,7 +71,7 @@ describe('updateAgent systemMemoryId on an Agent that has one (#2856)', () => {
 
   it('refuses unsetting (empty string) with BAD_USER_INPUT', async () => {
     const err = await refusal(
-      M.updateAgent({}, { ref: agent.id, systemMemoryId: '' }, ctx(admin.id)),
+      M.updateAgent({}, { ref: agent.id, systemMemoryRef: '' }, ctx(admin.id)),
     );
     expect(err).toBeInstanceOf(GraphQLError);
     expect(err.extensions?.code).toBe('BAD_USER_INPUT');
@@ -79,7 +79,7 @@ describe('updateAgent systemMemoryId on an Agent that has one (#2856)', () => {
 
   it('writes nothing when it refuses', async () => {
     await refusal(
-      M.updateAgent({}, { ref: agent.id, name: 'Renamed', systemMemoryId: otherMemory.id }, ctx(admin.id)),
+      M.updateAgent({}, { ref: agent.id, name: 'Renamed', systemMemoryRef: otherMemory.id }, ctx(admin.id)),
     );
     const after = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
     expect(after.systemMemoryId).toBe(agent.systemMemoryId);
@@ -89,7 +89,7 @@ describe('updateAgent systemMemoryId on an Agent that has one (#2856)', () => {
   it('still accepts the unchanged id', async () => {
     const updated = await M.updateAgent(
       {},
-      { ref: agent.id, name: 'Renamed', systemMemoryId: agent.systemMemoryId },
+      { ref: agent.id, name: 'Renamed', systemMemoryRef: agent.systemMemoryId },
       ctx(admin.id),
     );
     expect(updated.name).toBe('Renamed');

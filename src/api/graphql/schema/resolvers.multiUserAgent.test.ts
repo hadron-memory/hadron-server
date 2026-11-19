@@ -838,7 +838,7 @@ describe('Agent type + surfaces', () => {
   it('creates an ASSISTANT with mcp surface by default', async () => {
     const created = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'assistant-1' },
+      { orgRef: orgA.id, name: 'assistant-1' },
       adminCtx(),
     );
     expect(created.type).toBe('ASSISTANT');
@@ -857,7 +857,7 @@ describe('Agent type + surfaces', () => {
     });
     const created = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'bot-1', systemMemoryId: sysMem.id },
+      { orgRef: orgA.id, name: 'bot-1', systemMemoryRef: sysMem.id },
       adminCtx(),
     );
     expect(created.type).toBe('CHATBOT');
@@ -868,7 +868,7 @@ describe('Agent type + surfaces', () => {
     const created = await resolvers.Mutation.createAgent(
       {},
       {
-        orgId: orgA.id,
+        orgRef: orgA.id,
         name: 'custom-1',
         type: 'CHATBOT',
         surfaces: ['portal-chat', 'api'],

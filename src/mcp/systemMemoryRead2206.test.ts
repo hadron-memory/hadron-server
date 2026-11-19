@@ -37,8 +37,8 @@ beforeEach(async () => {
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
   const ctx = { db, userId: admin.id, roles: ['READER'] } as unknown as Context;
-  const a = await M.createAgent({}, { orgId: org.id, name: 'Primary' }, ctx);
-  const b = await M.createAgent({}, { orgId: org.id, name: 'Second' }, ctx);
+  const a = await M.createAgent({}, { orgRef: org.id, name: 'Primary' }, ctx);
+  const b = await M.createAgent({}, { orgRef: org.id, name: 'Second' }, ctx);
   primary = { id: a.id, systemMemoryId: a.systemMemoryId };
   second = { id: b.id, systemMemoryId: b.systemMemoryId };
   ({ app } = await createDbAppWithKey(db, 'sr-app', org.id));
@@ -83,7 +83,7 @@ describe('#2206 case 3: the App participant read fold', () => {
     const other = await db.organization.create({ data: { id: generateId(), name: 'SR Other', urn: `sro-${generateId().toLowerCase()}.example` } });
     const otherAdmin = await user('other-admin');
     await db.orgMember.create({ data: { organizationId: other.id, userId: otherAdmin.id, role: 'ADMIN' } });
-    const foreign = await M.createAgent({}, { orgId: other.id, name: 'Foreign' }, { db, userId: otherAdmin.id, roles: ['READER'] } as unknown as Context);
+    const foreign = await M.createAgent({}, { orgRef: other.id, name: 'Foreign' }, { db, userId: otherAdmin.id, roles: ['READER'] } as unknown as Context);
     await createDbAppAgent(db, app.id, foreign.id); // installed, but no AgentOrgGrant: unlicensed
     expect(await canReadMemory(db, authOf(member.id), foreign.systemMemoryId)).toBe(false);
     await db.appAgent.deleteMany({ where: { appId: app.id, agentId: second.id } });

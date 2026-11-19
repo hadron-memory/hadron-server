@@ -31,7 +31,7 @@ test('probe times tools/list round trips and counts non-200s as errors', async (
   const fetchImpl = async (_u, init) => {
     const body = JSON.parse(init.body);
     seen.push(body.method);
-    return body.method === 'tools/list' && body.id === 4 ? res(500) : res(200);
+    return body.method === 'tools/list' && body.id === 4 ? res(500) : res(200, '{"jsonrpc":"2.0","result":{}}');
   };
   const clock = { t: 100, now: () => (clock.t += 10) }; // each round trip measures exactly 10
   const probe = await probeHeldSession({ base: 'http://x', key: 'synthetic-key', sid, n: 4, fetchImpl, now: clock.now });
@@ -70,7 +70,7 @@ test('a JSON-RPC error inside a 200 counts as an error, never as a latency', asy
 test('run() probes only the held workload and only when asked', async () => {
   const fetchImpl = async (_u, init) => (JSON.parse(init.body).method === 'initialize'
     ? { status: 200, headers: { get: () => sid }, text: async () => '' }
-    : res(200));
+    : res(200, '{"jsonrpc":"2.0","result":{}}'));
   // A fake monotonic clock: a wall-clock step (NTP) on the shared host must not be able to fail this.
   const clock = { t: 1_000, now: () => (clock.t += 1) };
   const held = await run({ base: 'http://x', key: 'k', workload: 'held', durationMs: 5, cap: 2, probeN: 3, fetchImpl, now: clock.now });
@@ -115,4 +115,19 @@ test('held CLI emits a secret-free load line with the probe and window fields', 
   } finally {
     await new Promise((r) => server.close(r));
   }
+});
+
+// #4453 N2/N7: ok counts opened sessions only, and a 200 with neither result nor error is not a sample.
+test('a 200 without a session id is not an opened session', async () => {
+  const fetchImpl = async () => ({ status: 200, headers: { get: () => null }, text: async () => '' });
+  const clock = { t: 1_000, now: () => (clock.t += 1) };
+  const r = await run({ base: 'http://x', key: 'k', workload: 'held', durationMs: 5, cap: 2, fetchImpl, now: clock.now });
+  expect(r.counts.ok).toBe(0);
+  expect(r.counts.missingSession).toBeGreaterThan(0);
+});
+
+test('a result-less, error-less 200 counts as an error, not a latency', async () => {
+  const fetchImpl = async (_u, init) => (JSON.parse(init.body).method === 'tools/list' ? res(200, '{"jsonrpc":"2.0","id":2}') : res(202));
+  const probe = await probeHeldSession({ base: 'http://x', key: 'k', sid, n: 2, fetchImpl, now: Date.now });
+  expect(probe).toEqual({ method: 'tools/list', requests: 0, errors: 2 });
 });
