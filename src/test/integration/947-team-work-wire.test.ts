@@ -95,7 +95,7 @@ beforeAll(async () => {
   jwt = await signJwt({ sub: admin.id, roles: ['READER'] });
 
   const ctx: Context = { db, userId: admin.id, roles: ['READER'] };
-  const teamAgent = await M.createAgent({}, { orgId: org.id, name: 'Wire Team Agent 947' }, ctx);
+  const teamAgent = await M.createAgent({}, { orgRef: org.id, name: 'Wire Team Agent 947' }, ctx);
   await db.node.create({
     data: {
       id: generateId(),

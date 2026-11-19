@@ -80,7 +80,7 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { id: generateId(), githubId: 2718101, githubUsername: 'run-au-admin', handle: 'run-au-admin', roles: ['READER'] } });
   outsider = await db.user.create({ data: { id: generateId(), githubId: 2718102, githubUsername: 'run-au-out', handle: 'run-au-out', roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  const created = await M.createAgent({}, { orgId: org.id, name: 'Run Agent' }, gqlCtx(admin.id));
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'Run Agent' }, gqlCtx(admin.id));
   const row = await db.agent.findUniqueOrThrow({ where: { id: created.id } });
   agent = { id: row.id, urn: row.urn };
   memoryId = row.systemMemoryId as string;
@@ -148,7 +148,7 @@ describe('#2718 — hadron_run_action by action URN', () => {
 
   it('refuses a code that exists only under a base Agent (no chain fallthrough)', async () => {
     await registerEntry(memoryId, CODE);
-    const createdChild = await M.createAgent({}, { orgId: org.id, name: 'Child Run Agent' }, gqlCtx(admin.id));
+    const createdChild = await M.createAgent({}, { orgRef: org.id, name: 'Child Run Agent' }, gqlCtx(admin.id));
     await db.agent.update({ where: { id: createdChild.id }, data: { extendsAgentId: agent.id } });
     const child = await db.agent.findUniqueOrThrow({ where: { id: createdChild.id } });
     expect(await run(admin.id, actionUrn(child.urn, CODE))).toBe(notFound(actionUrn(child.urn, CODE)));

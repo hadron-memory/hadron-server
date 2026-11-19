@@ -1,4 +1,4 @@
-import { settledTeamEventQueries, settleTeamEventHorizon } from '../../../test/teamEventHorizon.js';
+import { settledTeamEventQueries, settleTeamEventHorizon, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 /**
  * #4153 — App-boundary and batching pins on `AgentTeamEvent.taskHandle`, the surface #4146 added.
  * Tests only: production is already correct at the reviewed head; the red for each pin is the mutant
@@ -15,6 +15,7 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { deploymentSchema } from './deploymentSchema.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 const schema = buildSchema(typeDefs);
 const settledQueries = settledTeamEventQueries(resolvers.Query, db);

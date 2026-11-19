@@ -30,7 +30,7 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { handle: `role-${generateId()}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'Role pin', urn: `role-${generateId().toLowerCase()}.example:team` } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'Role pin', personaRole: 'security-engineer' }, ctx());
+  agent = await M.createAgent({}, { orgRef: org.id, name: 'Role pin', personaRole: 'security-engineer' }, ctx());
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await serveAgentBootPrompt(db, agent.id, 'ROLE {{worker.role}}');
   await M.createAgentTickerTemplate({}, { agentRef: agent.id, input: { name: 'role tick', cadenceSeconds: 600 } }, ctx());
@@ -92,7 +92,7 @@ describe('#3256 roleless cast', () => {
     });
 
     it(`${surface} refuses an ambiguous canonical role rather than ignoring its padded twin`, async () => {
-      const twin = await M.createAgent({}, { orgId: org.id, name: 'Padded twin', personaRole: 'security-engineer' }, ctx());
+      const twin = await M.createAgent({}, { orgRef: org.id, name: 'Padded twin', personaRole: 'security-engineer' }, ctx());
       await db.appAgent.create({ data: { appId: app.id, agentId: twin.id } });
       await db.agent.update({ where: { id: twin.id }, data: { personaRole: ' SECURITY-ENGINEER ' } });
       const before = await snapshot();
@@ -187,7 +187,7 @@ describe('#3256 roleless cast', () => {
 
   it.each([null, '', '   '])('change keeps the same role %j refusal, workerId and no-write behavior', async personaRole => {
     const worker = await cast();
-    const target = await M.createAgent({}, { orgId: org.id, name: 'Change target', personaRole: 'target-role' }, ctx());
+    const target = await M.createAgent({}, { orgRef: org.id, name: 'Change target', personaRole: 'target-role' }, ctx());
     await db.appAgent.create({ data: { appId: app.id, agentId: target.id } });
     await serveAgentBootPrompt(db, target.id, 'TARGET {{worker.role}}');
     await db.agent.update({ where: { id: target.id }, data: { personaRole } });

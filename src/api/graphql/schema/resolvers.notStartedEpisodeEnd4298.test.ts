@@ -18,8 +18,9 @@ import { recordEndedEscalations } from '../../../lib/agentTasks/stall.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { appendTaskEvent, type TaskEventPayload } from '../../../lib/agentTasks/events.js';
 import { resolvers, type Context } from './resolvers.js';
-import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 import { typeDefs } from './typeDefs.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 const M = resolvers.Mutation as any;
 const DAY = '2026-10-09';
@@ -43,7 +44,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { name: 'EpisodeEnd', urn: `episode-end-${n}.example` } });
   admin = await db.user.create({ data: { githubId: 600_000 + n, githubUsername: `ee-admin-${n}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `episode-end-${n}.example:team` }, select: { id: true } });
   const worker = (name: string) =>
     db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name, slug: name.toLowerCase() }, select: { id: true } });

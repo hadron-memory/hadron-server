@@ -22,9 +22,9 @@ beforeEach(async () => {
 
 describe('Agent.usesTasks', () => {
   it('defaults to true; create can set false; update flips it both ways and omission preserves it', async () => {
-    const plain = await M.createAgent({}, { orgId, name: 'Builder' }, ctx(admin.id));
+    const plain = await M.createAgent({}, { orgRef: orgId, name: 'Builder' }, ctx(admin.id));
     expect(plain.usesTasks).toBe(true);
-    const coord = await M.createAgent({}, { orgId, name: 'Coordinator', usesTasks: false }, ctx(admin.id));
+    const coord = await M.createAgent({}, { orgRef: orgId, name: 'Coordinator', usesTasks: false }, ctx(admin.id));
     expect(coord.usesTasks).toBe(false);
     expect((await M.updateAgent({}, { ref: coord.id, description: 'x' }, ctx(admin.id))).usesTasks).toBe(false);
     expect((await M.updateAgent({}, { ref: coord.id, usesTasks: true }, ctx(admin.id))).usesTasks).toBe(true);
@@ -33,7 +33,7 @@ describe('Agent.usesTasks', () => {
   });
 
   it('is changed only by whoever may administer the Agent (a plain org member is refused, nothing changes)', async () => {
-    const a = await M.createAgent({}, { orgId, name: 'Builder' }, ctx(admin.id));
+    const a = await M.createAgent({}, { orgRef: orgId, name: 'Builder' }, ctx(admin.id));
     await expect(M.updateAgent({}, { ref: a.id, usesTasks: false }, ctx(member.id))).rejects.toThrow();
     expect((await db.agent.findUniqueOrThrow({ where: { id: a.id } })).usesTasks).toBe(true);
   });

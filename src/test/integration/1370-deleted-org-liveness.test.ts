@@ -78,7 +78,7 @@ describe('#1370 — org liveness at the shared membership gates', () => {
   it('after a soft delete, the resolver door is closed: updateMemory on the dead org memory is refused', async () => {
     await softDeleteOrganizationCore(db, dead.id);
     await expect(
-      resolvers.Mutation.updateMemory({}, { id: deadMem.id, name: 'renamed-after-death' } as never, ctx()),
+      resolvers.Mutation.updateMemory({}, { ref: deadMem.id, name: 'renamed-after-death' } as never, ctx()),
     ).rejects.toThrow();
     expect((await db.memory.findUniqueOrThrow({ where: { id: deadMem.id } })).name).toBe('km');
   });
@@ -91,7 +91,7 @@ describe('#1370 — org liveness at the shared membership gates', () => {
     expect(await getMemberOrgIds(db, admin.id)).toEqual([live.id]);
     expect(await getOrgReadableMemoryIds(db, admin.id)).toContain(liveMem.id);
     expect(await canReadMemory(db, { userId: admin.id, roles: [] }, liveMem.id)).toBe(true);
-    const updated = await resolvers.Mutation.updateMemory({}, { id: liveMem.id, name: 'still-mine' } as never, ctx());
+    const updated = await resolvers.Mutation.updateMemory({}, { ref: liveMem.id, name: 'still-mine' } as never, ctx());
     expect(updated.name).toBe('still-mine');
   });
 });

@@ -236,15 +236,31 @@ describe('#4210 interleaves: a move racing an org leave that is in flight', () =
     expect(await row(g)).toMatchObject({ departed: true });
   }, 30_000);
 
-  it('REJOIN: a rejoin racing the in-flight leave revives nothing: the grant ends either way', async () => {
+  it('REJOIN: a rejoin racing the in-flight leave waits for it, then completes: the membership is live again and the grant keeps its first departure (#4317 F2)', async () => {
     const g = await active({ user_id: w.user2Id, app_id: w.appId });
     const { done } = await leaveHeldAtGrantLocks(g);
-    // The real rejoin door, while the leave is in flight: it lands before or after the leave commits, never in between.
+    // The racing call's outcome is ASSERTED, never discarded (#4317). From its soft delete onwards the leave holds the
+    // exclusive authority anchors and the membership-row lock, so the rejoin can only land AFTER the leave commits
+    // (never beside it) and then reactivates the tombstone. A deadlock, an auth regression or a timeout in the racing
+    // call answers anything but 'rejoined' and fails here; no sleep — the promise itself is the barrier.
     const rejoin = M.addOrgMember({}, { orgId: w.orgId, userId: w.user2Id, role: 'CONTRIBUTOR' }, ctx(admin.id))
       .then(() => 'rejoined', (e: Error) => e.message);
-    await new Promise((r) => setTimeout(r, 200));
     await done();
-    await rejoin;
-    expect(await row(g)).toMatchObject({ departed: true });
+    const stamp = (await row(g)).stamp; // the leave's first end
+    expect(stamp).not.toBeNull();
+    expect(await rejoin).toBe('rejoined');
+    expect(await db.orgMember.count({ where: { organizationId: w.orgId, userId: w.user2Id, deletedAt: null } })).toBe(1);
+    expect(await row(g)).toMatchObject({ departed: true, stamp }); // the rejoin revived nothing, first end stands
   }, 30_000);
+
+  it('REJOIN after the departure commits (#4317): the rejoin completes through the real door and revives nothing', async () => {
+    const g = await active({ user_id: w.user2Id, app_id: w.appId });
+    await remove();
+    const stamp = (await row(g)).stamp;
+    expect(stamp).not.toBeNull();
+    const member = await M.addOrgMember({}, { orgId: w.orgId, userId: w.user2Id, role: 'CONTRIBUTOR' }, ctx(admin.id));
+    expect(member).toMatchObject({ deletedAt: null, role: 'CONTRIBUTOR' }); // the completed rejoin's own returned row
+    expect(await db.orgMember.count({ where: { organizationId: w.orgId, userId: w.user2Id, deletedAt: null } })).toBe(1);
+    expect(await row(g)).toMatchObject({ departed: true, stamp }); // first end stands (cor:acl:140:03)
+  });
 });

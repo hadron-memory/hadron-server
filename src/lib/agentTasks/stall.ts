@@ -433,6 +433,10 @@ export function stallCandidates(
   // #2648: a blocked task RAISES nothing, but a finish-by episode is not ended by blocking (cor:agt:050:14: it ends
   // only when the task ends or its finish-by time is edited), so the running question still names it.
   if (task.blocked && !(running && task.finishBy)) return [];
+  // #3775 B (cor:agt:050:14, :15 exception; Holger R5): a task assigned to a PERSON raises no stall alarm of any kind
+  // (not-started, no-progress, owner-unreactive, finish-by), and so has no episode to keep running either. A worker
+  // assignee wins when both are somehow set, as `assigneeOf` does. Worker-assigned and queued tasks are untouched.
+  if (task.assigneeUserId && !task.assigneeWorkerId) return [];
   // #2648: clearing a finish-by time brings the ordinary windows back from the edit, so it floors them like a release.
   const floor = (d: Date) => latest(d, task.releasedAt, inputs.finishByEditedAt) as Date;
   const assignee = assigneeOf(task);
@@ -745,6 +749,13 @@ export async function evaluateStalls(db: PrismaClient, now = new Date(), anchor:
  * #4273 — the keys (`alarmEpisodeKey`) of these candidates' episodes whose alarm event already exists. Asks for exactly the
  * candidates' own (task, type, episode start) tuples, served by that unique key, so a task with a long alarm history
  * (every earlier episode) costs one row per candidate, never one per past episode (Diego P2 on 34689907).
+ *
+ * #4285 (Arianna New-3): the join predicate IS the unique key `agent_team_events_episode_uniq` (task_id, type,
+ * episode_start) (schema.prisma `@@unique([taskId, type, episodeStart])`), the same key `appendAlarmEvent` (events.ts) inserts
+ * under `ON CONFLICT (task_id, type, episode_start) DO NOTHING`. A row this read finds is therefore exactly a row that
+ * insert would refuse, so skipping it changes no outcome. Change the three together. No resolution state lives outside
+ * the key: an acknowledged or escalation-ended alarm keeps its row and so still takes the key (pinned in
+ * stallPassCost4273.test.ts, the "what the skip replaces" block).
  */
 async function loadRaisedEpisodeKeys(db: Db, candidates: StallCandidate[]): Promise<Set<string>> {
   const out = new Set<string>();

@@ -63,7 +63,7 @@ describe('009 createApp install path (same-org)', () => {
   it('succeeds: App.agentId set, AgentOrgGrant auto-provisioned, AppMember(owner) created', async () => {
     const mealplan = await resolvers.Mutation.createAgent(
       {},
-      { orgId: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
+      { orgRef: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
       adminCtx(bea.id),
     );
 
@@ -100,7 +100,7 @@ describe('009 createApp install path (same-org)', () => {
   it('multi-install: two Apps, one grant (idempotent), two member rows', async () => {
     const mealplan = await resolvers.Mutation.createAgent(
       {},
-      { orgId: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
+      { orgRef: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
       adminCtx(bea.id),
     );
 
@@ -136,7 +136,7 @@ describe('009 createApp install path (rejection cases)', () => {
   it('rejects soft-deleted Agent with AgentNotFoundError', async () => {
     const mealplan = await resolvers.Mutation.createAgent(
       {},
-      { orgId: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
+      { orgRef: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
       adminCtx(bea.id),
     );
     await db.agent.update({
@@ -160,7 +160,7 @@ describe('009 createApp install path (rejection cases)', () => {
   it('rejects non-ADMIN/OWNER caller with Forbidden (existing requireOrgRole)', async () => {
     const mealplan = await resolvers.Mutation.createAgent(
       {},
-      { orgId: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
+      { orgRef: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
       adminCtx(bea.id),
     );
 

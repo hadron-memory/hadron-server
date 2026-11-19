@@ -6,12 +6,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import { mintUserApiKey } from '../../middleware/auth.js';
 import { withChatRootLock } from '../../lib/chatRoot.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 let server: Server;
@@ -37,11 +37,11 @@ async function gql(key: string, query: string, id: string) {
   return await response.json() as { data?: unknown; errors?: Array<{ message: string; extensions: Record<string, unknown> }> };
 }
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
-afterAll(async () => { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); });
+afterAll(async () => { await closeServerIfStarted(server); });
 beforeEach(async () => {
   await cleanDb(db);
   owner = (await db.user.create({ data: { handle: 'owner3582', roles: ['READER'] } })).id;

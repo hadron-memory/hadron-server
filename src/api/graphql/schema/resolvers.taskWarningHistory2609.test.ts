@@ -1,4 +1,4 @@
-import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 /** #2609 — warning history records successful fields, independently of response advice, and stays passive. */
 import { ApolloServer } from '@apollo/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -15,6 +15,7 @@ import { loadStallInputs } from '../../../lib/agentTasks/stall.js';
 import * as warnings from './resolvers.taskWarnings.js';
 import * as workerGate from './resolvers.worker.js';
 import { appendTaskEvent } from '../../../lib/agentTasks/events.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 const M = resolvers.Mutation as any;
@@ -42,7 +43,7 @@ beforeEach(async () => {
   user = await db.user.create({ data: { githubId: 2609001, githubUsername: 'history-member', roles: [] } });
   outsider = await db.user.create({ data: { githubId: 2609002, githubUsername: 'history-outsider', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'History agent' }, ctx());
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'History agent' }, ctx());
   agentId = agent.id;
   app = await db.app.create({ data: { organizationId: org.id, name: 'History', urn: `${org.urn}:team` } });
   await db.appAgent.create({ data: { appId: app.id, agentId } });

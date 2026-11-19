@@ -12,7 +12,7 @@ import { Prisma } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { DB_NOW, dropTestActions, insertGrantUnguarded, raw, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
+import { DB_NOW, dropTestActions, insertGrantUnguarded, raw, seedWorld, TEST_ACTION, type World } from '../../../lib/grants/grantFixtures3668.js';
 import { resolveAppInstallation } from '../../../lib/appInstallations.js';
 import { chargeGrantUse, readGrantForUpdate } from '../../../lib/grants/live.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
@@ -386,19 +386,46 @@ describe('#4210 interleaves: a move racing an uninstall that is in flight', () =
     expect(await row(g)).toMatchObject({ departed: true });
   }, 30_000);
 
-  it('REINSTALL: a reinstall racing the in-flight uninstall revives nothing: the old grant ends either way', async () => {
+  it('REINSTALL: while the uninstall is in flight the reinstall is refused *already installed*; the old grant ends anyway (#4317 F2/F1)', async () => {
     await install(w.appId, w.agentId);
     const g = await held(w.agentId, w.appId);
     const { done } = await uninstallHeldAtGrantLocks(g);
-    const again = M.installAgentIntoApp({}, { appRef: w.appId, agentRef: w.agentId }, ctx()).then(() => 'installed', (e: Error) => e.message);
-    // Whichever way the reinstall lands (before the door commits, or after it), the old grant ends and stays ended.
-    await new Promise((r) => setTimeout(r, 200));
-    await done();
-    await again;
+    // The racing call's outcome is ASSERTED, never discarded (#4317). While the door is in flight its install-row delete is
+    // uncommitted, so the reinstall's pre-check still sees the row and refuses the documented DUPLICATE_APP_AGENT (Dara, #4210
+    // LOCAL F1). A deadlock, an auth regression or a lock timeout in the racing call answers anything else and fails here; no
+    // sleep is needed — the refusal settles while the door is still held, so the promise itself is the barrier.
+    const again = M.installAgentIntoApp({}, { appRef: w.appId, agentRef: w.agentId }, ctx())
+      .then(() => 'installed', (e: { extensions?: { code?: string } }) => e.extensions?.code ?? String(e));
+    let outcome: string;
+    try {
+      outcome = await again;
+    } finally {
+      await done(); // release the blocker and settle the door even when the assertion below will fail
+    }
+    expect(outcome).toBe('DUPLICATE_APP_AGENT');
     expect(await row(g)).toMatchObject({ departed: true }); // reinstall revives nothing
+    expect(await db.appAgent.count({ where: { appId: w.appId, agentId: w.agentId } })).toBe(0); // the door's delete committed
   }, 30_000);
 
-  it('OVERLAPPING Apps: the agent is uninstalled from two Apps at once; each ends only its own App\'s grants', async () => {
+  it('REINSTALL after the departure commits (#4317, Victor\'s FIT): the reinstall completes, the agent\'s new request is a NEW pending grant, and the old row keeps its first end', async () => {
+    await install(w.appId, w.agentId);
+    const g = await held(w.agentId, w.appId);
+    await uninstall(w.appId, w.agentId);
+    const stamp = (await row(g)).stamp;
+    expect(stamp).not.toBeNull();
+    await M.installAgentIntoApp({}, { appRef: w.appId, agentRef: w.agentId }, ctx()); // the reinstall completes
+    expect(await db.appAgent.count({ where: { appId: w.appId, agentId: w.agentId } })).toBe(1);
+    // cor:acl:140:01: a reinstall writes its grant requests as new pending grants. The shipped request door (createGrant,
+    // born pending, #3690/#3711) succeeds for the reinstalled agent; the departed row is never revived or re-stamped.
+    await M.createGrant({}, { input: { appRef: w.appId, action: TEST_ACTION, values: {}, holderKind: 'AGENT', holderRef: w.agentId, reason: 'request after reinstall' } }, ctx());
+    const fresh = await db.$queryRaw<Array<{ activated_at: string | null; holder_departed_at: string | null }>>(Prisma.sql`
+      SELECT activated_at, holder_departed_at FROM grants WHERE app_id = ${w.appId} AND agent_id = ${w.agentId} AND id <> ${g}`);
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0]).toMatchObject({ activated_at: null, holder_departed_at: null }); // a NEW pending grant, not a revival
+    expect(await row(g)).toMatchObject({ departed: true, stamp }); // first end stands (cor:acl:140:03)
+  }, 30_000);
+
+  it('OVERLAPPING Apps: the agent is uninstalled from two Apps at once; each ends only its own App\'s grants; the retry of the emptied App succeeds and never touches App 2\'s fresh grant (#4317 F3)', async () => {
     await install(w.appId, w.agentId);
     await install(w.app2Id, w.agentId);
     const a = await held(w.agentId, w.appId);
@@ -408,7 +435,12 @@ describe('#4210 interleaves: a move racing an uninstall that is in flight', () =
     expect([(await row(a)).departed, (await row(b)).departed, (await row(keep)).departed]).toEqual([true, true, true]);
     await install(w.app2Id, w.agentId);
     const fresh = await held(w.agentId, w.app2Id);
-    await uninstall(w.appId, w.agentId).catch(() => undefined); // already gone from App 1: no departure in App 2
-    expect((await row(fresh)).departed).toBe(false);
+    // No .catch (#4317 F3): the retry on the App the agent already left is the idempotent SUCCESS (the door's delete is
+    // count-keyed and a grant already departed keeps its first end, cor:acl:140:03), so it must resolve — an error, a
+    // deadlock or a timeout in the retry fails the pin — and App 2's fresh grant and install row stay untouched.
+    const retry = await uninstall(w.appId, w.agentId);
+    expect(retry).toMatchObject({ appId: w.appId, agentId: w.agentId });
+    expect(await row(fresh)).toMatchObject({ departed: false, stamp: null });
+    expect(await db.appAgent.count({ where: { appId: w.app2Id, agentId: w.agentId } })).toBe(1);
   }, 30_000);
 });

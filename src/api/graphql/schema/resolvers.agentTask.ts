@@ -3307,7 +3307,7 @@ export const agentTaskQueries = {
    * since stays a coarse time filter, not a continuation. newestFirst/before keep their history order.
    */
   agentTeamEvents: async (_: unknown, args: TeamEventsArgs, ctx: Context) =>
-    withReadableApp(ctx, args.appRef, (c, app) => readTeamEvents(c, app, args, clampListTake(args.limit))),
+    withReadableApp(ctx, args.appRef, (c, app) => readTeamEvents(c, app, args, clampListTake(args.limit), ctx.db)),
 
   /**
    * #3933 (cor:api:120:04, cor:agt:050:11 FIT condition (c)): the same read as agentTeamEvents, the `<field>Page` sibling, so a
@@ -3322,7 +3322,7 @@ export const agentTaskQueries = {
   agentTeamEventsPage: async (_: unknown, args: TeamEventsArgs, ctx: Context) =>
     withReadableApp(ctx, args.appRef, async (c, app) => {
       const take = Math.max(1, clampListTake(args.limit));
-      const rows = await readTeamEvents(c, app, args, take + 1);
+      const rows = await readTeamEvents(c, app, args, take + 1, ctx.db);
       const events = rows.slice(0, take);
       const hasMore = rows.length > take;
       return { events, hasMore, nextCursor: hasMore ? events[events.length - 1]!.id : null };
@@ -3420,15 +3420,164 @@ export const agentTaskQueries = {
     }),
 };
 
-type TeamEventsArgs = { appRef: string; since?: unknown; after?: string | null; before?: string | null; newestFirst?: boolean | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; alarmsInEffect?: boolean | null; taskId?: string | null; limit?: number | null };
+/** #4316 item 4: exported so the parity pin (resolvers.teamEventCursor4098.test.ts) can tie its filter cases to these keys. */
+export type TeamEventsArgs = { appRef: string; since?: unknown; after?: string | null; before?: string | null; newestFirst?: boolean | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; alarmsInEffect?: boolean | null; taskId?: string | null; limit?: number | null };
 
-async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsArgs, take: number) {
+/** #4316: how long a held-back horizon stays quiet before `team_events.horizon_lag` says something. */
+const HORIZON_LAG_MIN_AGE_MS = 30_000;
+/** #4316: at most one horizon check (and so at most one line) per App per this window, per process. */
+const HORIZON_LAG_LOG_INTERVAL_MS = 60_000;
+/**
+ * #4316 (keyed by App id): when the horizon was last CHECKED for that App in this process. Stamped when the
+ * check runs, not when a line is emitted (#4372 fold): a healthy App runs the probe query at most once per
+ * window instead of on every caught-up poll, and the line cadence — at most one per window — is unchanged,
+ * because a line can only come from a check.
+ */
+const horizonLagLastCheckedAt = new Map<string, number>();
+/**
+ * #4316: one operator line when a forward read came back short while committed events of the App are held back
+ * at or above the snapshot horizon (cor:agt:050:11 records the horizon as built; a log line changes no
+ * contract). The check is ONE indexed read (`app_id, tx_id`), made only for a short forward read; only rows
+ * visible to the check's own snapshot count, so events of still-open transactions are not "held back" yet.
+ * `created_at` is a UTC-labeled naive column, so the DB clock is read as UTC too — a session TimeZone would
+ * skew the age by its offset. Best-effort by design: a failed or slow check must never change, delay or fail
+ * the page it explains — the caller does not await it (#4372 fold).
+ *
+ * #4372 fold 2 (Peter, #114870): the check takes the ROOT POOLED CLIENT, never the read's own `c.db`. Under
+ * `withReadableApp`'s App-key arm the whole read runs inside `inKeyReadTx`'s transaction and `c.db` there is
+ * the TRANSACTION client; an un-awaited query on it outlives the resolver's return, dies P2028 ("Transaction
+ * already closed") inside the catch below and is swallowed — the probe silently no-ops in exactly the
+ * incident's error class. Pinned in resolvers.teamEventHorizon4316.test.ts: the direct-seam test drives
+ * `readTeamEvents` through a REAL transaction and asserts the check ran on the root client (not a key read —
+ * through the resolver the seam is un-pinnable at runtime: the transaction client is created inside
+ * `withReadableApp`, hooking the shared client infects it, and an un-awaited probe on the transaction client
+ * races the commit, so a key-arm behavioral pin cannot be deterministic). The resolver CALL SITES are
+ * source-pinned in the same file (#4372 fold 3).
+ *
+ * #4372 fold 3: the check itself is bounded and observable. The statement races a timeout, so a wedged or
+ * pool-starved probe releases its bookkeeping instead of holding it forever (Baylor F2), and a fault is no
+ * longer silent: the catch emits its own `team_events.horizon_probe_error` line (Baylor F3 — "ran and found
+ * nothing" stays silent, "errored" is now visible). The once-per-window map is capped (Baylor F5).
+ *
+ * #4408 (the #4372 review follow-ups): the cap EVICTS the least-recently-checked App instead of clearing
+ * every throttle at once; the race timer is cleared on every path, not only success; and the fault line
+ * carries the error's class and code, never its message.
+ */
+/** Exported for the #4408 direct pins (resolvers.teamEventHorizon4316.test.ts): the throttle bookkeeping, the race timer and the fault line, driven on a stand-in root client. */
+export async function logStalledHorizon(db: Context['db'], appId: string): Promise<void> {
+  const now = Date.now();
+  const last = horizonLagLastCheckedAt.get(appId);
+  if (last != null && now - last < HORIZON_LAG_LOG_INTERVAL_MS) return;
+  // Baylor F5: a long-lived server would otherwise accumulate one entry per App forever. #4408 item 1:
+  // past the cap, evict the least-recently-checked App — NOT the whole map. Clear-all reset every App's
+  // settle-throttle at once, so a hot fleet re-probed in a burst the moment any 1_001st App arrived;
+  // eviction loses one window for one App. The scan is O(cap) and runs only when a NEW App arrives at the
+  // cap (a re-check updates a stamp in place); ties evict the earliest-inserted (Map iteration order),
+  // which is deterministic. Caller-visible behaviour is unchanged (FIT, #4408): the throttle only paces
+  // probes, so what a caller is served — which events, and the more-remain answer — is the same.
+  if (horizonLagLastCheckedAt.size >= 1_000) {
+    let oldestApp: string | undefined;
+    let oldestStamp = Infinity;
+    for (const [app, stamp] of horizonLagLastCheckedAt) {
+      if (stamp < oldestStamp) { oldestStamp = stamp; oldestApp = app; }
+    }
+    horizonLagLastCheckedAt.delete(oldestApp!);
+  }
+  horizonLagLastCheckedAt.set(appId, now);
+  const startedAt = now;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const [row] = await Promise.race([
+      db.$queryRaw<{ heldBack: number; oldestAgeMs: number | null }[]>`
+        SELECT count(*)::int AS "heldBack",
+               CASE WHEN min(created_at) IS NULL THEN NULL
+                    ELSE round(extract(epoch FROM ((clock_timestamp() AT TIME ZONE 'UTC') - min(created_at))) * 1000)::int END AS "oldestAgeMs"
+        FROM agent_team_events
+        WHERE app_id = ${appId} AND tx_id >= pg_snapshot_xmin(pg_current_snapshot())`,
+      // Baylor F2: bounded — the probe's promise settles at 5 s even if its statement never returns (the
+      // pool connection heals when the statement eventually does; the bookkeeping does not wait for it).
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          // #4408 item 3: the bound's own fault is identified by its class on the log line below, never
+          // by message text (a plain Error's name says nothing; this one says "the bound fired").
+          const timedOut = new Error('horizon probe timeout');
+          timedOut.name = 'HorizonProbeTimeoutError';
+          reject(timedOut);
+        }, 5_000);
+        (timeout as unknown as { unref?: () => void }).unref?.();
+      }),
+    ]);
+    if (!row?.oldestAgeMs || row.oldestAgeMs < HORIZON_LAG_MIN_AGE_MS) return;
+    console.log(JSON.stringify({
+      event: 'team_events.horizon_lag', appId, heldBack: row.heldBack, oldestAgeMs: row.oldestAgeMs,
+      at: new Date().toISOString(),
+    }));
+  } catch (error) {
+    // Observability only: the served page is byte-identical whatever happens here. F3: visible, not silent.
+    // #4408 item 3 (Bob P3.3): the line carries the error's class and code, never its message — a Prisma
+    // connection error's message names the DB host and port, and internal logs are no reason to repeat
+    // them. The two Prisma carriers spell the code differently: `code` on PrismaClientKnownRequestError
+    // (P2028 …), `errorCode` on PrismaClientInitializationError (P1001, the usual DB-unreachable fault —
+    // Jonas's BLIND P2 on #4433 caught the first cut reading only `code`). Either way a string or the key
+    // is omitted rather than nulled; other errors carry neither. A non-Error throw names its kind; there
+    // is no message to leak and none invented.
+    const fault = typeof error === 'object' && error !== null ? (error as { code?: unknown; errorCode?: unknown }) : undefined;
+    const code = typeof fault?.code === 'string' ? fault.code
+      : typeof fault?.errorCode === 'string' ? fault.errorCode : undefined;
+    console.log(JSON.stringify({
+      event: 'team_events.horizon_probe_error', appId, ms: Date.now() - startedAt,
+      errorName: error instanceof Error ? error.name : typeof error,
+      ...(code ? { errorCode: code } : {}),
+      at: new Date().toISOString(),
+    }));
+  } finally {
+    // #4408 item 2 (Bob P3.2): cleared on EVERY path. The clear used to sit on the success path only, so
+    // a faulted probe left the unref'd 5 s timer armed to fire harmlessly later — harmless, and still one
+    // armed timer per fault. clearTimeout on an already-fired timer is a no-op, so this one clear point
+    // serves the success, fault and bound-fired paths alike.
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * #4372 fold: the probes the fire-and-forget call sites below have started and not yet finished. The page is
+ * served without awaiting its probe, so a test that asserts on (the absence of) a `team_events.horizon_lag`
+ * line needs a positive signal the probe has RUN; awaiting this settles every in-flight probe. Production
+ * never awaits it — the probes complete on their own and a rejection is impossible (every await sits inside
+ * the try above; the fold-3 timeout race rejects into the SAME catch, which only logs).
+ *
+ * #4372 fold 3 (Peter #114929/#115033): BOUNDED. A probe that cannot settle (a wedged statement, pool
+ * exhaustion) FAILS the awaiting test after `timeoutMs` instead of hanging the run — the two host wedges
+ * both hung here, freezing every horizon test on the shared host. The bound mirrors settleTeamEventHorizon's
+ * own 10 s (src/test/teamEventHorizon.ts).
+ */
+const horizonProbes = new Set<Promise<void>>();
+export async function teamEventHorizonSettled(timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (horizonProbes.size) {
+    if (Date.now() >= deadline) {
+      throw new Error(`team events horizon: ${horizonProbes.size} probe(s) unsettled after ${timeoutMs} ms`);
+    }
+    await Promise.race([
+      Promise.all([...horizonProbes]),
+      new Promise<void>((resolve) => {
+        const tick = setTimeout(resolve, 100);
+        (tick as unknown as { unref?: () => void }).unref?.();
+      }),
+    ]);
+  }
+}
+
+/** Exported for the #4372 fold-2 pin: the probe's root-client seam is pinned from inside a REAL transaction (resolvers.teamEventHorizon4316.test.ts). */
+export async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsArgs, take: number, probeDb: Context['db']) {
   const since = args.since == null ? null : parseStartBy(args.since);
   // #3933 (cor:agt:050:11 FIT): the newest-end read. `after` continues forward and `before` backward, so each belongs to one
   // direction; a cursor in the wrong one is refused rather than read as something else.
   const newestFirst = args.newestFirst === true;
   if (newestFirst && args.after) throw badInput('after continues the oldest-first read; with newestFirst pass before.');
   if (!newestFirst && args.before) throw badInput('before continues the newestFirst read; pass newestFirst: true with it.');
+  /** #4316: the validated `after` cursor's serving key, read once up front and passed into the forward statement. */
+  let afterKey: { id: string; txId: string; createdAt: string } | null = null;
   let beforeWhere: Prisma.AgentTeamEventWhereInput = {};
   if (args.before) {
     // Scoped to this App, like after: another App's event id is just an unknown cursor.
@@ -3439,10 +3588,18 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
     beforeWhere = { OR: [{ createdAt: { lt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { lt: cursor.id } }] };
   }
   if (args.after) {
-    const cursor = isId(args.after)
-      ? await c.db.agentTeamEvent.findFirst({ where: { id: args.after, appId: app.id }, select: { id: true } })
-      : null;
+    // #4316 (cor:api:120:05): the cursor's key is read HERE, once, and passed into the forward statement, so a
+    // cursor row deleted between the two statements still continues from its key instead of silently emptying
+    // the page. The key round-trips as TEXT: a JS Date truncates to milliseconds and would re-serve rows of the
+    // cursor's own transaction whose created_at carries microseconds. Scoped to this App: another App's event
+    // id, or anything else, is just an unknown cursor (the refusal is unchanged).
+    const [cursor] = isId(args.after)
+      ? await c.db.$queryRaw<{ id: string; txId: string; createdAt: string }[]>`
+          SELECT id, tx_id::text AS "txId", created_at::text AS "createdAt"
+          FROM agent_team_events WHERE id = ${args.after} AND app_id = ${app.id} LIMIT 1`
+      : [];
     if (!cursor) throw badInput('after is not an event of this App. Pass the id of the last event you read.');
+    afterKey = cursor;
   }
   const taskId = args.taskId ? (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId : null;
   const where: Prisma.AgentTeamEventWhereInput = {
@@ -3477,7 +3634,7 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
     FROM agent_team_events e
     WHERE e.app_id = ${app.id}
       AND e.tx_id < pg_snapshot_xmin(pg_current_snapshot())
-      ${args.after ? Prisma.sql`AND (e.tx_id,e.created_at,e.id) > (SELECT tx_id,created_at,id FROM agent_team_events WHERE id=${args.after} AND app_id=${app.id})` : Prisma.empty}
+      ${afterKey ? Prisma.sql`AND (e.tx_id,e.created_at,e.id) > (${afterKey.txId}::xid8, ${afterKey.createdAt}::timestamp, ${afterKey.id})` : Prisma.empty}
       ${since ? Prisma.sql`AND e.created_at > ${since.toISOString()}::timestamp` : Prisma.empty}
       ${args.types?.length ? Prisma.sql`AND e.type IN (${Prisma.join(args.types)})` : Prisma.empty}
       ${args.codePrefix != null ? Prisma.sql`AND starts_with(e.type,${args.codePrefix})` : Prisma.empty}
@@ -3486,6 +3643,18 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
       ${taskId ? Prisma.sql`AND e.task_id=${taskId}` : Prisma.empty}
     ORDER BY e.tx_id,e.created_at,e.id
     LIMIT ${take}`;
+  // #4316: a short forward read is the only read that can mean "the horizon is holding events of this App
+  // back"; one best-effort check, never a change to what is served. #4372 fold: not awaited — a slow probe
+  // must not delay the page it explains (the function's own contract); tests observe it via
+  // teamEventHorizonSettled(). #4372 fold 2: the probe runs on `probeDb` (the request's root pooled client,
+  // passed by the resolver) — never on `c.db`, which is the App-key transaction's client under `withReadableApp`'s
+  // key arm and would close under the un-awaited query (see logStalledHorizon).
+  if (!newestFirst && events.length < take) {
+    // F1 (Baylor's #4372 delta): the .catch makes the chain self-absorbing — the promise parked in
+    // horizonProbes can never reject, whatever the function's own catch body does or stops doing.
+    const probe = logStalledHorizon(probeDb, app.id).catch(() => {}).finally(() => { horizonProbes.delete(probe); });
+    horizonProbes.add(probe);
+  }
   // #4135: use the stored AgentTask.handle (cor:agt:050:01, Proposed), once per page.
   // Event task ids are retained after deletion; an absent row must never invent a handle.
   const taskIds = [...new Set(events.flatMap(e => e.taskId ? [e.taskId] : []))];

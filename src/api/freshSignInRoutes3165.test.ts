@@ -8,6 +8,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { closeServerIfStarted, createServerOnCleanDb } from '../test/startServerFixture.js';
 
 const RECIPIENT = 'throw.target@example.test';
 const sendMock = vi.hoisted(() => vi.fn());
@@ -21,8 +22,6 @@ class NetworkFault extends Error {
     this.name = 'NetworkFault';
   }
 }
-
-const { createServer } = await import('../server.js');
 const { db } = await import('../integrations/db/client.js');
 const { cleanDb } = await import('../test/helpers.js');
 
@@ -37,12 +36,12 @@ beforeAll(async () => {
   vi.stubEnv('PASSKEY_RP_ID', 'example.test');
   vi.stubEnv('SIGNING_CEREMONY_ORIGINS', ORIGIN);
   vi.stubEnv('BASE_URL', 'https://api.example.test');
-  server = httpServer(await createServer());
+  server = httpServer(await createServerOnCleanDb());
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 afterAll(async () => {
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await closeServerIfStarted(server);
   vi.unstubAllEnvs();
 });
 beforeEach(async () => {

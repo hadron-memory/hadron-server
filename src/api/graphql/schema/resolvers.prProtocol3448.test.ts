@@ -1,4 +1,4 @@
-import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 /** #3448: PR protocol facts are typed events, never opaque properties (cor:agt:050:28). */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -13,6 +13,7 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import * as taskGraphLocks from '../../../lib/agentTasks/blockers.js';
 import { RegisterLookup } from '../../../lib/actionRegister/lookup.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 
 const M = resolvers.Mutation as Record<string, (...args: any[]) => Promise<any>>;
