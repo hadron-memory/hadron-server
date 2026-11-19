@@ -14,7 +14,8 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { USER_API_KEY_PREFIX, hashUserApiKey } from '../../../middleware/auth.js';
 import { runAsActor } from '../../../lib/requestActor.js';
-import { DB_NOW, dbNowPlus, dropTestActions, insertGrant, insertGrantUnguarded, raw, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
+import { composeGrantUrnV2 } from '../../../lib/urn.js';
+import { APP_SLUG, DB_NOW, dbNowPlus, dropTestActions, insertGrant, insertGrantUnguarded, raw, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
 import { isGrantLive } from '../../../lib/grants/live.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
@@ -105,7 +106,7 @@ describe('which rows a person lists', () => {
     // #3709: the PERSON audience's page composes Grant.urn too — every COLUMNS
     // query joins the App (a.urn AS app_urn), so the computed field resolves on
     // this audience as on the worker's, and stays identical across the leave.
-    expect(before.urn).toMatch(/^hrn:grant:[a-z0-9.-]+:app:[0-9a-f]{32}$/);
+    expect(before.urn).toBe(composeGrantUrnV2(w.orgUrn, APP_SLUG, id));
     await db.orgMember.updateMany({ where: { organizationId: w.orgId, userId: w.userId }, data: { deletedAt: new Date() } });
     const after = (await asMe()).data.myGrants.items[0];
     expect(after).toEqual(before);
