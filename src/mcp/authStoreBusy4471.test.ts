@@ -48,6 +48,10 @@ describe('a busy store during MCP session authentication (#4471)', () => {
   ])('%s answers the same fixed 503 — the catch-all is untyped, the surface unchanged', async (_name, reject) => {
     vi.mocked(resolveCredentialContextWithStatus).mockRejectedValueOnce(reject());
     const { res, state } = fakeRes();
+    // The transport arg is never read on this path (the mocked credential
+    // resolver rejects before any access); ActiveMcpTransport is a server.ts-local
+    // structural type wanting a full transport+auth graph, so this is the one
+    // "#4519: typed fixtures where cheap" cast that is deliberately not cheap.
     const ctx = await authenticateBoundMcpSession(fakeReq(), res, 'sess-1', {} as never);
     // No session is bound on a fault — a transport check that cannot run is never a verdict.
     expect(ctx).toBeNull();
