@@ -24,6 +24,16 @@ import { Prisma } from '../../../generated/prisma/index.js';
 
 // No mocks: these pins run the real transaction, the real SET LOCALs and the real Postgres cancel.
 
+// transaction_timeout is PG17+; CI's test/migration lanes run pgvector:pg16 (LOCAL review P2 on
+// #4482), where the GUC does not exist. Probe the engine once: the PG17-only pins below skip where
+// the GUC is absent, and the scoping pin asserts the transaction_timeout leg only where it exists.
+// current_setting(name, true) is NULL on engines without the parameter instead of erroring — the
+// same feature-detect the wrapper's CASE uses.
+const [gucProbe] = (await db.$queryRawUnsafe(
+  "SELECT current_setting('transaction_timeout', true) IS NOT NULL AS present",
+)) as { present: boolean }[];
+const HAS_TX_TIMEOUT = gucProbe.present;
+
 const M = resolvers.Mutation as any;
 const ctx = (userId?: string): Context => ({ db, userId, roles: ['READER'] });
 
@@ -141,7 +151,7 @@ describe('#4476 red — the budget bites on the statement, per statement kind (b
     }
   }, 25_000);
 
-  it('BLIND P2-1: a FAST statement near the expiry followed by a blocked one still refuses AT the budget (transaction_timeout closes the 2x window)', async () => {
+  it.skipIf(!HAS_TX_TIMEOUT)('BLIND P2-1: a FAST statement near the expiry followed by a blocked one still refuses AT the budget (transaction_timeout closes the 2x window; PG17-only — skips on engines without the GUC)', async () => {
     // statement_timeout alone bounds each statement SEPARATELY: a statement starting at ~the
     // expiry could run a full budget of its own (worst case ~2x). transaction_timeout cancels the
     // whole read at BUDGET_MS from the transaction's start — this pin refuses that mutant: with
@@ -169,23 +179,25 @@ describe('#4476 red — the budget bites on the statement, per statement kind (b
 describe('#4476 — SET LOCAL scoping (acceptance 2)', () => {
   it('neither GUC reaches the pooled connections: after a cancelled read the pool still answers the defaults', async () => {
     const before = (await db.$queryRawUnsafe('SHOW statement_timeout')) as { statement_timeout: string }[];
-    const beforeTx = (await db.$queryRawUnsafe('SHOW transaction_timeout')) as { transaction_timeout: string }[];
+    const beforeTx = HAS_TX_TIMEOUT
+      ? ((await db.$queryRawUnsafe('SHOW transaction_timeout')) as { transaction_timeout: string }[])[0]!.transaction_timeout
+      : null; // SHOW itself errors on engines without the GUC (pg16 CI lanes)
     // A read that hits the cancel — both GUCs must leave the pool's defaults alone afterwards.
     await withRosterAppRead(ctx(mia.id), app.id, async (readCtx) => {
       await readCtx.db.$executeRaw`SELECT pg_sleep(${SLEEP_S})`;
     }).catch(() => { /* the refusal itself is pinned above */ });
     const after = (await db.$queryRawUnsafe('SHOW statement_timeout')) as { statement_timeout: string }[];
-    const afterTx = (await db.$queryRawUnsafe('SHOW transaction_timeout')) as { transaction_timeout: string }[];
     expect(after[0]!.statement_timeout).toBe(before[0]!.statement_timeout);
-    expect(afterTx[0]!.transaction_timeout).toBe(beforeTx[0]!.transaction_timeout);
     // The pool serves many connections; sample it so a session-level leak on ANY connection is
     // likely to surface (set_config with is_local is transaction-scoped by construction — this
     // pin catches an implementation that accidentally used the session-scoped form).
     for (let i = 0; i < 4; i++) {
       const s = (await db.$queryRawUnsafe('SHOW statement_timeout')) as { statement_timeout: string }[];
-      const t = (await db.$queryRawUnsafe('SHOW transaction_timeout')) as { transaction_timeout: string }[];
       expect(s[0]!.statement_timeout).toBe(before[0]!.statement_timeout);
-      expect(t[0]!.transaction_timeout).toBe(beforeTx[0]!.transaction_timeout);
+      if (HAS_TX_TIMEOUT) {
+        const t = (await db.$queryRawUnsafe('SHOW transaction_timeout')) as { transaction_timeout: string }[];
+        expect(t[0]!.transaction_timeout).toBe(beforeTx);
+      }
     }
   }, 25_000);
 });

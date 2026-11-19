@@ -41,15 +41,21 @@ export async function withRosterAppRead<T>(ctx: Context, appRef: string, project
         // only lands once the running statement returns — prod's roster statements ran 20–175 s
         // (p50 66 s, the prod journal at #118308) inside the 5 s budget, holding a pooled
         // connection long after every client had given up. Two server-side bounds from the same
-        // constant (PG17+, the platform image): statement_timeout cancels any ONE statement that
-        // outruns the budget, and transaction_timeout cancels the whole read — statement included —
-        // at the budget from the transaction's start, closing the window where a statement that
-        // STARTS near the expiry would otherwise run a full budget of its own (worst case 2×; BLIND
-        // review P2-1 on #4482). Both cancels raise SQLSTATE 57014, which the catch below
-        // classifies as the same typed retryable refusal. Both are transaction-local (set_config
-        // with is_local), so neither reaches the pooled session.
+        // constant: statement_timeout cancels any ONE statement that outruns the budget, and
+        // transaction_timeout cancels the whole read — statement included — at the budget from the
+        // transaction's start, closing the window where a statement that STARTS near the expiry
+        // would otherwise run a full budget of its own (worst case 2×; BLIND review P2-1 on #4482).
+        // Both cancels raise SQLSTATE 57014 (raw) or 25P04 (transaction_timeout's FATAL), which the
+        // catch below classifies as the same typed retryable refusal. Both are transaction-local
+        // (set_config with is_local), so neither reaches the pooled session.
+        // transaction_timeout exists only on PG17+ (the platform image). CI's test and migration
+        // lanes run pgvector:pg16, where set_config on it errors (42704) on EVERY roster read
+        // (LOCAL review P2 on #4482) — so the CASE sets it only when the engine has the GUC at all
+        // (current_setting with missing_ok is NULL on engines without it). On PG16 the statement
+        // bound plus Prisma's own interactive timeout still hold: exactly #4455's shipped behavior.
         await tx.$queryRaw`SELECT set_config('statement_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS)}, true) AS statement_timeout,
-                           set_config('transaction_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS)}, true) AS transaction_timeout`;
+                           CASE WHEN current_setting('transaction_timeout', true) IS NOT NULL
+                                THEN set_config('transaction_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS)}, true) END AS transaction_timeout`;
         const readCtx = withoutRequestCaches(ctx, tx);
         const { app } = await resolveParticipatedApp(readCtx, appRef);
         return project(readCtx, app);

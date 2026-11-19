@@ -23,7 +23,8 @@
  * REPORTED in Sentry — the incident was found by counting these.
  *
  * #4476: the budget now bites ON the statement. The wrapper sets
- * transaction-local `statement_timeout` AND `transaction_timeout` (PG17+)
+ * transaction-local `statement_timeout` AND `transaction_timeout` (PG17+;
+ * guarded on the GUC existing, so PG16 CI lanes keep the statement bound only)
  * from the same constant, so Postgres itself cancels a runaway statement —
  * and the whole read at the budget from its start — instead of letting it
  * run to completion inside an already-expired transaction (prod's roster
