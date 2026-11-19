@@ -20,6 +20,7 @@
  * read after the last lock. Every other writer that ends a request (revocation, a holder's departure, withdrawal) takes
  * the grant row before the request, so the two orders cannot cycle.
  */
+import { composeAppSecretUrnV2, parseUrnV2 } from '@hadron-memory/urn-lib-js';
 import { createHash, randomBytes } from 'node:crypto';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
@@ -37,6 +38,7 @@ import type { AssertionParts } from './verify.js';
 import { verifySigningAssertion } from './verify.js';
 import { grantSignaturePayloadBytes } from './grantPayload.js';
 import { signatureChallenge } from './payload.js';
+import { generateId } from '../id.js';
 import { passkeyRpId, signingCeremonyOrigins, SigningNotConfiguredError } from './config.js';
 import { effectiveRequestState } from './requests.js';
 import { GrantSigningRefusal } from './grantRequests.js';
@@ -101,9 +103,11 @@ async function personContext(tx: Prisma.TransactionClient, userId: string): Prom
  * GraphQLError, and any of them is "no". Anything else (a database failure) is not an answer about eligibility and propagates
  * (Gloria P3-2, #3805): it must not read as SIGNER_NOT_ELIGIBLE.
  */
-async function mayIssue(ctx: Context, action: string, appId: string): Promise<boolean> {
+async function mayIssue(ctx: Context, action: string, appId: string, grantId: string): Promise<boolean> {
   try {
-    await issuers.requireActionIssuer(ctx, action, appId);
+    // #3998: an issuer rule may depend on what the grant names (one secret), so the gate reads the stored values.
+    const grant = await ctx.db.grant.findUnique({ where: { id: grantId }, select: { values: true } });
+    await issuers.requireActionIssuer(ctx, action, appId, grant?.values);
     return true;
   } catch (e) {
     if (e instanceof GraphQLError) return false;
@@ -219,6 +223,18 @@ async function summaryFor(ctx: Context, tx: Prisma.TransactionClient, g: GrantRo
   const values = g.action_values as Record<string, unknown>;
   const refs: Record<string, { urn: string }> = {};
   for (const p of action.parameters) {
+    if (p.type === 'secret-ref') {
+      // #3998: the secret shows as its canonical App secret URN (urn-lib-js 0.0.22). A gone or foreign secret is unsignable.
+      const id = values[p.name];
+      if (typeof id !== 'string') continue;
+      const secret = await tx.secret.findFirst({ where: { id, ownerType: 'app', ownerId: g.app_id }, select: { name: true } });
+      if (!secret) return null;
+      try {
+        const app = parseUrnV2(appUrn);
+        refs[id] = { urn: composeAppSecretUrnV2(app.root, app.segments[0], secret.name) };
+      } catch { return null; }
+      continue;
+    }
     if (p.type !== 'node-ref') continue;
     // A single value or a list of them (a batch grant names several nodes): every entry is resolved behind the prover's read gate,
     // and one the prover cannot read withholds the whole sentence. Anything that is not an id is left for the renderer to refuse.
@@ -273,7 +289,7 @@ export async function proveForGrantSigning(db: PrismaClient, a: {
     const grantApp = await tx.grant.findUnique({ where: { id: row.grantId }, select: { appId: true, action: true } });
     if (!grantApp) throw new CeremonyRefused();
     // The issuer gate before anything about the grant: someone who may not issue it learns nothing, not even that it exists.
-    if (!(await mayIssue(ctx, grantApp.action, grantApp.appId))) throw new CeremonyRefused();
+    if (!(await mayIssue(ctx, grantApp.action, grantApp.appId, row.grantId))) throw new CeremonyRefused();
 
     const [{ now }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT hadron_signing_now() AS now`;
     const state = effectiveRequestState(row, now);
@@ -408,7 +424,7 @@ async function lockAndJudge(tx: Prisma.TransactionClient, txCtx: Context, loc: L
   const ended = grantEnded(g, pins, now);
   if (ended) throw new GrantSigningRefusal('SIGNING_REQUEST_ENDED', 'This grant can no longer be signed.', { state: ended });
   // The signer must still be able to ISSUE the grant (cor:acl:140:04), judged under the locks on the transaction's context.
-  if (!(await mayIssue(txCtx, g.action, g.app_id))) throw new GrantSigningRefusal('SIGNER_NOT_ELIGIBLE', 'You can no longer issue this grant.');
+  if (!(await mayIssue(txCtx, g.action, g.app_id, g.id))) throw new GrantSigningRefusal('SIGNER_NOT_ELIGIBLE', 'You can no longer issue this grant.');
   // The credential: the signer's own, unrevoked, enrolled under this RP ID.
   const rpId = passkeyRpId();
   if (!credential || credential.revoked_at !== null || credential.enrollment_rp_id !== rpId) {
@@ -472,7 +488,26 @@ export async function completeGrantSigning(db: PrismaClient, a: {
            signature_id = ${signature.id}, updated_at = (clock_timestamp() AT TIME ZONE 'UTC')
      WHERE id = ${g.id}`;
     await tx.grantEvent.create({ data: { grantId: g.id, appId: g.app_id, action: 'ACTIVATE', actorUserId: loc.signerId } });
+    await ensureSecretReadClient(tx, g, loc.signerId);
   }, { lockMode: 'shared' });
+}
+
+/**
+ * #3998: a `secret.reveal` grant requested through the grant path (not `issueSecretReadClient`) has no client row yet. Signing
+ * creates it: the signer is the issuer, fixed here and never changed; the client is self-issued when the holder is that person.
+ * Idempotent for a grant `issueSecretReadClient` already gave a row.
+ */
+async function ensureSecretReadClient(tx: Prisma.TransactionClient, g: GrantRow, signerId: string): Promise<void> {
+  if (g.action !== 'secret.reveal') return;
+  const values = (g.action_values ?? {}) as Record<string, unknown>;
+  const secretId = typeof values.secret === 'string' ? values.secret : null;
+  if (!secretId) return;
+  if (await tx.secretReadClient.findUnique({ where: { grantId: g.id }, select: { id: true } })) return;
+  const secret = await tx.secret.findFirst({ where: { id: secretId, ownerType: 'app', ownerId: g.app_id }, select: { name: true } });
+  if (!secret) return;
+  await tx.secretReadClient.create({
+    data: { id: generateId(), grantId: g.id, appId: g.app_id, secretId, secretName: secret.name, issuerUserId: signerId, selfIssued: g.user_id === signerId },
+  });
 }
 
 /** Decline: the proven issuer's own signing ceremony turns the request down. The grant stays pending. */
@@ -496,7 +531,7 @@ export async function declineGrantSigning(db: PrismaClient, a: { requestId: stri
     } catch { throw new CeremonyRefused(); }
     if (cer.challenge_hash !== sha256Hex(challenge)) throw new CeremonyRefused();
     if (!(await consumeCeremony(tx, { id: a.ceremonyId, browserNonceHash: a.browserNonceHash, purpose: 'GRANT_SIGN' }))) throw new CeremonyRefused();
-    if (!(await mayIssue(txCtx, loc.action, loc.appId))) throw new GrantSigningRefusal('SIGNER_NOT_ELIGIBLE', 'You can no longer issue this grant.');
+    if (!(await mayIssue(txCtx, loc.action, loc.appId, loc.request.grantId))) throw new GrantSigningRefusal('SIGNER_NOT_ELIGIBLE', 'You can no longer issue this grant.');
     const [{ now }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT hadron_signing_now() AS now`;
     const state = effectiveRequestState({ state: request.state, expiresAt: request.expires_at }, now);
     if (state !== 'open') throw new GrantSigningRefusal('SIGNING_REQUEST_ENDED', 'This signing request has ended.', { state: state.toUpperCase() });
