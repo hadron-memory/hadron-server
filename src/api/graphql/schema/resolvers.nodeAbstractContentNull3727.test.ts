@@ -453,13 +453,13 @@ describe('#3727 generated kind doors — controls (acceptance 2: doors inherit t
     const doorMemory = (await M.createMemory(null, { orgId: org.id, name: 'Door memory' }, { db, userId: admin, roles: ['ADMIN'] } as Context)).id;
     const adminCtx = { db, userId: admin, roles: ['ADMIN'] } as Context;
 
-    const log = await M.createDecisionLog(null, { memoryRef: doorMemory, loc: 'decisions', defaultDeciders: [admin] }, adminCtx);
+    const log = await M.createQuestionLog(null, { memoryRef: doorMemory, loc: 'decisions', defaultDeciders: [admin] }, adminCtx);
     const row = await db.node.findUniqueOrThrow({ where: { id: log.row.id } });
     expect(row.abstract).toMatch(/^Decision log: codes /);
 
     // An update-mode door write re-supplies the string: preserved verbatim,
     // never an accidental clear.
-    await M.setDecisionLogDeciders(
+    await M.setQuestionLogDeciders(
       null,
       { logRef: log.row.id, defaultDeciders: [admin], expectedRevision: 1, reason: 'n3727 door control' },
       adminCtx,
@@ -471,7 +471,7 @@ describe('#3727 generated kind doors — controls (acceptance 2: doors inherit t
     const reader = (await db.user.create({ data: { handle: `n3727-rd-${generateId()}`, roles: ['READER'] } })).id;
     await db.orgMember.create({ data: { organizationId: org.id, userId: reader, role: 'READER' } });
     const before = await db.node.findFirst({ where: { memoryId: doorMemory } });
-    const refused = await M.createDecisionLog(
+    const refused = await M.createQuestionLog(
       null,
       { memoryRef: doorMemory, loc: 'elsewhere', defaultDeciders: [admin] },
       { db, userId: reader, roles: ['READER'] } as Context,
@@ -479,7 +479,7 @@ describe('#3727 generated kind doors — controls (acceptance 2: doors inherit t
       () => 'NONE',
       (error: { extensions?: { code?: string } }) => error.extensions?.code ?? 'UNKNOWN',
     );
-    expect(refused).toBe('DECISION_FORBIDDEN');
+    expect(refused).toBe('QUESTION_FORBIDDEN');
     expect(await db.node.findFirst({ where: { memoryId: doorMemory } })).toEqual(before);
   });
 

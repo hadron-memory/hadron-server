@@ -56,7 +56,7 @@ export interface AuthoredWith {
 }
 
 /** The server-generated records a rule cannot require a task for. A closed list, by design. */
-export type PlatformAuthoring = 'decision' | 'boot-prompt-compile' | 'session-handoff' | 'spec-reservation' | 'spec-renumber';
+export type PlatformAuthoring = 'question' | 'boot-prompt-compile' | 'session-handoff' | 'spec-reservation' | 'spec-renumber';
 
 /**
  * The read decision of a surface whose read is not the shared memory gate (a

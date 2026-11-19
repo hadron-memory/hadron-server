@@ -117,10 +117,10 @@ it('rolls back graph and partial report when completion fails after classificati
 it('keeps a parsed governance-refused parent present while reporting only the child collision separately',async()=>{
   const f=await fixture();
   file('p.md',f.parent.id,'refused parent');
-  const text=readFileSync(join(root(),'p.md'),'utf8').replace('name: p.md','name: p.md\nrole: decision');writeFileSync(join(root(),'p.md'),text);
+  const text=readFileSync(join(root(),'p.md'),'utf8').replace('name: p.md','name: p.md\nrole: question');writeFileSync(join(root(),'p.md'),text);
   expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
   expect(await db.node.findUniqueOrThrow({where:{id:f.parent.id}})).toEqual(f.parent);
-  expect((await report()).entries).toEqual(expect.arrayContaining([collisionEntry,{kind:'protected',loc:'p',code:'PROTECTED_DECISION'}]));
+  expect((await report()).entries).toEqual(expect.arrayContaining([collisionEntry,{kind:'protected',loc:'p',code:'PROTECTED_QUESTION'}]));
   expect(await db.edge.findUniqueOrThrow({where:{id:f.stored.id}})).toEqual(f.stored);
 });
 it.each(['absent-parent','idless-child','foreign-child','deleted-child','deleted-parent','wrong-child-loc','duplicate-child','duplicate-parent','duplicate-invalid-child','ordinary-source','ambiguous-parent-source','wrong-parent-resolution'].flatMap(shape=>[false,true].map(reverse=>({shape,reverse}))))('keeps baseline for $shape (reverse=$reverse, no guessed pair)',async({shape,reverse})=>{
@@ -248,7 +248,7 @@ it.each(['p','p:README'])('waits on exact candidate key %s independently',async 
 it('rebuilds prelocks for a candidate arriving after the governed-row scan',async()=>{
   const f=await fixture();await db.node.delete({where:{id:f.child.id}});
   file('p.md',f.parent.id,'refused parent');
-  writeFileSync(join(root(),'p.md'),readFileSync(join(root(),'p.md'),'utf8').replace('name: p.md','name: p.md\nrole: decision'));
+  writeFileSync(join(root(),'p.md'),readFileSync(join(root(),'p.md'),'utf8').replace('name: p.md','name: p.md\nrole: question'));
   const transaction=db.$transaction.bind(db);let inserted=false;const retried:string[]=[];
   vi.spyOn(db,'$transaction').mockImplementation(((body:any,options:any)=>transaction(async(tx:any)=>{
     const query=tx.$queryRaw.bind(tx);
@@ -309,7 +309,7 @@ it.each(['idless','foreign','unknown'].flatMap(parentKind=>[false,true].map(reve
 });
 it('does not let a refused child role suppress its independently admitted parent edges',async()=>{
   const f=await fixture();
-  writeFileSync(join(root(),'p/README.md'),readFileSync(join(root(),'p/README.md'),'utf8').replace('name: p/README.md','name: p/README.md\nrole: decision'));
+  writeFileSync(join(root(),'p/README.md'),readFileSync(join(root(),'p/README.md'),'utf8').replace('name: p/README.md','name: p/README.md\nrole: question'));
   expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
   expect(await db.edge.count({where:{memoryId:graph.id,name:'E1',sourceId:f.parent.id,targetId:f.a.id}})).toBe(1);
   expect(await db.edge.count({where:{memoryId:graph.id,name:'E2'}})).toBe(0);

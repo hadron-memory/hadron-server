@@ -109,7 +109,7 @@ beforeEach(async () => {
   // REACHABILITY LEG — the real gate path an org OWNER uses to put a source on
   // the anonymous scratch memory. If a future rule closes this, this line goes
   // red and the whole premise must be re-derived, not worked around.
-  await memoryMutations.updateMemory({}, { id: memoryId, source: 'https://github.com/synthetic/promotion3178' }, userCtx());
+  await memoryMutations.updateMemory({}, { ref: memoryId, source: 'https://github.com/synthetic/promotion3178' }, userCtx());
   expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).source).toBe('https://github.com/synthetic/promotion3178');
   localPath = join(fixture.root, org.urn, 'anon3178');
   mkdirSync(join(localPath, '.git'), { recursive: true });
