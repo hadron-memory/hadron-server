@@ -7,9 +7,10 @@
  * #4455's transaction `timeout` does not cancel a statement already running in Postgres — the
  * expiry only lands when the statement returns. Prod's roster statements ran 20–175 s (p50 66 s,
  * the prod journal at #118308) inside a 5 s budget, holding a pool connection after every client
- * had given up. With both GUCs set from the same budget constant, Postgres cancels the running
- * statement (SQLSTATE 57014, query_canceled) and the wrapper classifies it as the same typed
- * retryable TEAM_READ_BUSY refusal, reason TRANSACTION_BUDGET.
+ * had given up. With the statement cap at the budget and the transaction backstop (PG17+) a
+ * margin past it, Postgres cancels the running statement (SQLSTATE 57014, query_canceled) and the
+ * wrapper classifies it as the same typed retryable TEAM_READ_BUSY refusal, reason
+ * TRANSACTION_BUDGET.
  *
  * Red on main (3810250e1): every cancel pin below got its refusal only when the blocked
  * statement finally returned (~9–14 s in), not at the budget.
@@ -19,7 +20,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { withRosterAppRead } from './resolvers.agentTaskMatching.js';
-import { TEAM_READ_TX_TIMEOUT_MS, TeamReadBusyError, isPrismaBusyExhaustion, busyReason } from '../../../lib/agentTasks/teamReadBudget.js';
+import { TEAM_READ_TX_BACKSTOP_MARGIN_MS, TEAM_READ_TX_MAX_WAIT_MS, TEAM_READ_TX_TIMEOUT_MS, TeamReadBusyError, isPrismaBusyExhaustion, busyReason } from '../../../lib/agentTasks/teamReadBudget.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 
 // No mocks: these pins run the real transaction, the real SET LOCALs and the real Postgres cancel.
@@ -257,6 +258,76 @@ describe('#4476 unit — the 57014 classifier (binding condition 1: structured c
     // A generic unknown error whose prose merely mentions 57014 in the wrong shape.
     expect(isPrismaBusyExhaustion(unknown('something failed with 57014 somewhere'))).toBe(false);
     expect(isPrismaBusyExhaustion(unknown('Totally unrelated engine fault'))).toBe(false);
+  });
+
+  it.skipIf(!HAS_TX_TIMEOUT)('BLIND P2 A, real engine: the backstop firing mid-statement raises the REAL P2010/25P04 shape and the classifier converts it (PG17-only; P2028 must not be the pass)', { timeout: 30_000 }, async () => {
+    // Reproduces the backstop as the wrapper can produce it: a statement still running when the
+    // transaction_timeout expiry lands (the statement cap sits ABOVE the backstop here, so only the
+    // backstop can cancel — exactly the ordering inside the wrapper for a statement that starts
+    // near the budget). Prisma's interactive timeout is deliberately far longer, so its P2028
+    // rollback CANNOT supersede the FATAL: what escapes is the engine's own rendering, asserted
+    // below as the real P2010+meta.code 25P04 — probed live, never a hand-built message, and never
+    // P2028 (a classifier mutant that only maps P2028 reddens this pin).
+    const BACKSTOP_MS = TEAM_READ_TX_TIMEOUT_MS + TEAM_READ_TX_BACKSTOP_MARGIN_MS;
+    let caught: unknown;
+    await db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT set_config('statement_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS * 2)}, true) AS statement_timeout,
+                           CASE WHEN current_setting('transaction_timeout', true) IS NOT NULL
+                                THEN set_config('transaction_timeout', ${String(BACKSTOP_MS)}, true) END AS transaction_timeout`;
+        // Still running when the backstop expires (statement cap would only bite at 2x budget).
+        await tx.$executeRawUnsafe(`SELECT pg_sleep(${Math.ceil((TEAM_READ_TX_TIMEOUT_MS * 2) / 1000 * 0.9)})`);
+        return 'the sleep completed — the backstop never fired';
+      },
+      { timeout: BACKSTOP_MS * 4, maxWait: TEAM_READ_TX_MAX_WAIT_MS },
+    ).then(
+      (v) => { throw new Error(`resolved instead: ${String(v)}`); },
+      (e) => { caught = e; },
+    );
+    const diag = `real error: name=${(caught as object)?.constructor?.name} ${String((caught as Error)?.message).slice(0, 300)}`;
+    expect(caught, 'the statement must have been terminated by the backstop').toBeDefined();
+    expect(isPrismaBusyExhaustion(caught), `classifier must convert the real backstop shape — ${diag}`).toBe(true);
+    expect(busyReason(caught), diag).toBe('TRANSACTION_BUDGET');
+    // And the cause is the real cancel shape, not Prisma's own P2028 rollback.
+    expect(caught).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    const cause = caught as Prisma.PrismaClientKnownRequestError;
+    expect(cause.code, `P2028 is not the backstop firing — ${diag}`).toBe('P2010');
+    expect(String((cause.meta as { code?: unknown }).code), `the real engine carries the 25P04 SQLSTATE on meta — ${diag}`).toBe('25P04');
+  });
+
+  it.skipIf(!HAS_TX_TIMEOUT)('BLIND P2 A boundary, real engine: the backstop firing while NO statement is in flight renders "Server has closed the connection." with no structured code — and stays untyped ON PURPOSE', { timeout: 30_000 }, async () => {
+    // Probed live (PG17): a transaction that IDLES past transaction_timeout is FATAL-killed with no
+    // statement in flight, and the next operation surfaces Prisma's generic connection-closed
+    // rendering — no SQLSTATE anywhere (cause undefined). Mapping that prose to the typed refusal
+    // is forbidden by this file's own doctrine (structured codes, not prose): the text is
+    // indistinguishable from an unrelated connection death, so this pin freezes the boundary —
+    // the shape must NOT convert. Inside the wrapper this path is unreachable in practice: idle
+    // time is bounded by Prisma's own interactive timeout at the same budget (P2028, #4455-pinned)
+    // before the backstop's margin expires; the backstop's classified coverage is the
+    // mid-statement kill pinned above.
+    const BACKSTOP_MS = TEAM_READ_TX_TIMEOUT_MS + TEAM_READ_TX_BACKSTOP_MARGIN_MS;
+    let caught: unknown;
+    await db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT set_config('statement_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS)}, true) AS statement_timeout,
+                           CASE WHEN current_setting('transaction_timeout', true) IS NOT NULL
+                                THEN set_config('transaction_timeout', ${String(BACKSTOP_MS)}, true) END AS transaction_timeout`;
+        // Idle past the backstop with no statement in flight.
+        await new Promise((r) => setTimeout(r, BACKSTOP_MS + 1_500));
+        await tx.$queryRaw`SELECT 1`; // meets the FATAL-terminated session
+        return 'the idle survived — the backstop never fired';
+      },
+      { timeout: BACKSTOP_MS * 4, maxWait: TEAM_READ_TX_MAX_WAIT_MS },
+    ).then(
+      (v) => { throw new Error(`resolved instead: ${String(v)}`); },
+      (e) => { caught = e; },
+    );
+    expect(caught, 'the idle must have been terminated by the backstop').toBeDefined();
+    // The boundary: no structured code reaches the classifier, so it MUST NOT convert.
+    expect(
+      isPrismaBusyExhaustion(caught),
+      `prose-only connection-closed must never convert — got ${String((caught as Error)?.message).slice(0, 200)}`,
+    ).toBe(false);
   });
 
   it('P2-2, real engine: a live-cancelled findMany (statement_timeout under a longer tx budget) is classified by the real error object', { timeout: 20_000 }, async () => {

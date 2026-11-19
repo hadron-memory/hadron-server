@@ -40,6 +40,15 @@ import { Prisma } from '../../generated/prisma/index.js';
 
 /** The interactive team-read transaction's total budget (ms). #4455: 5 s; every client's own timeout is longer. */
 export const TEAM_READ_TX_TIMEOUT_MS = 5_000;
+/**
+ * How far past the budget the PG17+ `transaction_timeout` backstop sits (ms). The backstop is
+ * deliberately AFTER the statement cancel: a statement_timeout cancel (57014) keeps the pooled
+ * connection, while the backstop's cancel is FATAL (25P04) and kills it — on a small pool that is
+ * churn worth avoiding when the non-fatal cap already covers the runaway case (#4482 BLIND P2 A /
+ * Peter's fold). The backstop only bites what the statement cap cannot: a read that idles between
+ * statements or strings many under-budget statements past the budget as a whole.
+ */
+export const TEAM_READ_TX_BACKSTOP_MARGIN_MS = 1_000;
 /** The explicit pool wait before the transaction even starts (ms). Prisma's own default, pinned so it cannot drift. */
 export const TEAM_READ_TX_MAX_WAIT_MS = 2_000;
 
