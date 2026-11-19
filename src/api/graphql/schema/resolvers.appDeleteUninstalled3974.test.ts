@@ -96,7 +96,7 @@ describe('#3974 deleteApp on an uninstalled App, by id', () => {
   });
 
   it('installAgentIntoApp stays refused APP_UNINSTALLED (one door; the shared anchor check for the others is pinned by createAppMemory2729/2843)', async () => {
-    const agentId = (await M.createAgent({}, { orgId: org.id, name: 'Du Agent' }, ctx(admin.id))).id;
+    const agentId = (await M.createAgent({}, { orgRef: org.id, name: 'Du Agent' }, ctx(admin.id))).id;
     expect((await code(M.installAgentIntoApp({}, { appRef: app.id, agentRef: agentId }, ctx(admin.id)))).code).toBe('APP_UNINSTALLED');
   });
 

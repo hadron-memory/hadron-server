@@ -10,12 +10,24 @@ export interface ListWindow { take: number; offset: number; after: ListPosition 
 const MAX_CURSOR_LENGTH = 16_384;
 const invalid = () => new GraphQLError('Invalid page cursor or size.', { extensions: { code: 'BAD_USER_INPUT' } });
 
+/**
+ * The cap and default of a `listPageArgs` list (cor:api:120:04): a stated `first` over the cap is served as the cap, never
+ * refused. One definition, shared by the resolvers' clamp below and by complexity admission, so the rows admission charges
+ * for are the rows the resolver reads and the two cannot drift (#4390).
+ */
+export const LIST_PAGE_DEFAULT = 20;
+export const LIST_PAGE_CAP = 100;
+/** How many rows a stated `first` reads, for a value `validateListPageInput` admits (a non-integer or unsafe one is refused there before any read; admission passes only safe integers here). */
+export function listPageTake(first: number | null | undefined): number {
+  return Math.min(LIST_PAGE_CAP, Math.max(1, first ?? LIST_PAGE_DEFAULT));
+}
+
 /** Validate the mutually exclusive selectors before any authorization/list lookup (rule point 4). */
 export function validateListPageInput(args: ListPageArgs): { take: number; offset: number } {
   if (args.after != null && args.offset != null) throw invalid();
-  const first = args.first ?? 20, offset = args.offset ?? 0;
+  const first = args.first ?? LIST_PAGE_DEFAULT, offset = args.offset ?? 0;
   if (!Number.isSafeInteger(first) || !Number.isInteger(offset) || offset < 0 || offset > 2_147_483_647) throw invalid();
-  return { take: Math.min(100, Math.max(1, first)), offset };
+  return { take: listPageTake(first), offset };
 }
 const aad = (scope: string, order: ListOrder) => `hadron:list-page:v1:${JSON.stringify([scope, order])}`;
 

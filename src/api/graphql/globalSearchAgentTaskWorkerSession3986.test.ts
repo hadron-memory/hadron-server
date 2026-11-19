@@ -8,12 +8,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { randomBytes } from 'node:crypto';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../lib/workerSignature.js';
 import { USER_API_KEY_PREFIX, hashUserApiKey } from '../../middleware/auth.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../test/startServerFixture.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -30,11 +30,11 @@ let memberId: string;
 let appXId: string;
 
 beforeAll(async () => {
-  http = httpServer(await createServer());
+  http = httpServer(await createServerOnCleanDb());
   await new Promise<void>((r) => http.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
 });
-afterAll(async () => { await new Promise<void>((r) => http.close(() => r())); });
+afterAll(async () => { await closeServerIfStarted(http); });
 
 async function mkKey(userId: string): Promise<string> {
   const raw = `${USER_API_KEY_PREFIX}${randomBytes(32).toString('hex')}`;

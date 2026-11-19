@@ -1,7 +1,6 @@
 /** #3818 V24/V25: supersession evidence is explicit; successor disclosure uses the current read gate. */
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../../../server.js';
 import { randomBytes } from 'node:crypto';
 import { USER_API_KEY_PREFIX, hashUserApiKey } from '../../../middleware/auth.js';
 import { ApolloServer, HeaderMap } from '@apollo/server';
@@ -22,6 +21,7 @@ import { refuseSupersededSession } from '../../../lib/sessionSuperseded.js';
 import { resolveAuthContext, validateSessionBinding } from '../../../middleware/auth.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../../test/startServerFixture.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn() }));
@@ -205,11 +205,11 @@ it.each([true, false])('returns a typed MCP header refusal before initializing a
 
 let httpServer: Server, baseUrl: string;
 beforeAll(async () => {
-  httpServer = createHttpServer(await createServer());
+  httpServer = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>(resolve => httpServer.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
 });
-afterAll(async () => { await new Promise<void>(resolve => httpServer.close(() => resolve())); });
+afterAll(async () => { await closeServerIfStarted(httpServer); });
 async function wire(path: string, token: string | undefined, body?: unknown, headers = {}, method = 'POST') {
   return fetch(baseUrl + path, { method, headers: {
     accept: 'application/json, text/event-stream', ...(token ? { authorization: `Bearer ${token}` } : {}),

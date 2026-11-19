@@ -165,7 +165,7 @@ describe('US2 — InvalidChunkConfigError + CHECK backstop', () => {
     await expect(
       resolvers.Mutation.updateMemory(
         {},
-        { id: memId, chunkTokens: -5 },
+        { ref: memId, chunkTokens: -5 },
         adminCtx(),
       ),
     ).rejects.toBeInstanceOf(InvalidChunkConfigError);
@@ -176,7 +176,7 @@ describe('US2 — InvalidChunkConfigError + CHECK backstop', () => {
     await expect(
       resolvers.Mutation.updateMemory(
         {},
-        { id: memId, chunkOverlap: 150 },
+        { ref: memId, chunkOverlap: 150 },
         adminCtx(),
       ),
     ).rejects.toBeInstanceOf(InvalidChunkConfigError);
@@ -187,7 +187,7 @@ describe('US2 — InvalidChunkConfigError + CHECK backstop', () => {
     await expect(
       resolvers.Mutation.updateMemory(
         {},
-        { id: memId, chunkOverlap: -1 },
+        { ref: memId, chunkOverlap: -1 },
         adminCtx(),
       ),
     ).rejects.toBeInstanceOf(InvalidChunkConfigError);
@@ -197,7 +197,7 @@ describe('US2 — InvalidChunkConfigError + CHECK backstop', () => {
     const memId = await makeChunkMemory({ chunkTokens: 512, chunkOverlap: 64 });
     const updated = await resolvers.Mutation.updateMemory(
       {},
-      { id: memId, chunkTokens: 256 },
+      { ref: memId, chunkTokens: 256 },
       adminCtx(),
     );
     expect(updated.chunkTokens).toBe(256);
@@ -217,7 +217,7 @@ describe('US2 — validation against effective post-update state (PR-225 review)
     await expect(
       resolvers.Mutation.updateMemory(
         {},
-        { id: memId, chunkOverlap: 600 },
+        { ref: memId, chunkOverlap: 600 },
         adminCtx(),
       ),
     ).rejects.toBeInstanceOf(InvalidChunkConfigError);
@@ -228,7 +228,7 @@ describe('US2 — validation against effective post-update state (PR-225 review)
     await expect(
       resolvers.Mutation.updateMemory(
         {},
-        { id: memId, chunkTokens: 100, chunkOverlap: 100 },
+        { ref: memId, chunkTokens: 100, chunkOverlap: 100 },
         adminCtx(),
       ),
     ).rejects.toBeInstanceOf(InvalidChunkConfigError);
@@ -262,7 +262,7 @@ describe('US2 — re-index trigger gated on effective source (PR-225 review)', (
     // Change ONLY chunk dials. Source stays abstract — dials are inert.
     await resolvers.Mutation.updateMemory(
       {},
-      { id: memId, chunkTokens: 256, chunkOverlap: 32 },
+      { ref: memId, chunkTokens: 256, chunkOverlap: 32 },
       adminCtx(),
     );
 
@@ -292,7 +292,7 @@ describe('US2 — re-index trigger gated on effective source (PR-225 review)', (
 
     await resolvers.Mutation.updateMemory(
       {},
-      { id: memId, chunkTokens: 256, chunkOverlap: 32 },
+      { ref: memId, chunkTokens: 256, chunkOverlap: 32 },
       adminCtx(),
     );
 
@@ -319,7 +319,7 @@ describe('US2 — chunk-dial change triggers re-index (FR-004)', () => {
     // overlap (50) would violate `overlap < tokens`.
     await resolvers.Mutation.updateMemory(
       {},
-      { id: memId, chunkTokens: 50, chunkOverlap: 5 },
+      { ref: memId, chunkTokens: 50, chunkOverlap: 5 },
       adminCtx(),
     );
 
