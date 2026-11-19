@@ -961,3 +961,7 @@ CREATE INDEX IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"
 -- therefore leaves it nullable; this restores the guarantee the 20261117500000_app_run_agent_required migration states.
 -- app-run-agent-pre-push.sql has already filled or deleted every agentless run before the push.
 ALTER TABLE app_runs ALTER COLUMN agent_id SET NOT NULL;
+
+-- #3998 (S3 of #3991): secret read clients (after grants and secrets exist). Verbatim with migration 20261118100100_secret_read_clients.
+\ir secret-read-clients-invariants.sql
+
