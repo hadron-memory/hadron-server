@@ -388,7 +388,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS users_handle_lower_uniq
 
 -- ─── #692: unified principal pool — backfill for db-push setups ──────────
 -- `principals.name` is a plain @unique (created by `db push` from the schema;
--- names are always written lowercased, so it is effectively case-insensitive).
+-- names are stored lowercased, which chk_principals_name_lower below enforces, so it is case-insensitive).
 -- The MIGRATION backfills a principal per existing user/org; but `db:dev-setup`
 -- runs `db push` + this file, NOT the migration, so populate principals here too
 -- or existing local rows stay invisible to the pool probe. Idempotent
@@ -420,6 +420,16 @@ SELECT md5(random()::text || clock_timestamp()::text), r.w, 'platform', 'reserve
        (now() AT TIME ZONE 'utc'), (now() AT TIME ZONE 'utc')
 FROM (VALUES ('hadron'), ('hadronmemory'), ('hadron-memory'), ('platform'), ('host'), ('server')) AS r(w)
 ON CONFLICT (name) DO NOTHING;
+
+-- #4400 (hrn:node:hadronmemory.com:specs:cor:urn:010:01): a root name is stored lower case, in every status, so
+-- the plain unique index on `name` is uniqueness across case. Until #4400 only the writers' lower-casing kept
+-- `Example` out beside `example`. Placed after the backfills above, which write lower(...) names.
+-- Synced with the 20261117900000_principals_name_lower_check migration.
+ALTER TABLE principals
+  DROP CONSTRAINT IF EXISTS chk_principals_name_lower;
+ALTER TABLE principals
+  ADD CONSTRAINT chk_principals_name_lower
+  CHECK (name = lower(name));
 
 -- ─── cor:api:090 (findNodes) + cor:rag:010:02: lexical FTS substrate ─────
 -- STORED generated tsvector (weighted A/B/C/D = name/alias > loc/tags >
