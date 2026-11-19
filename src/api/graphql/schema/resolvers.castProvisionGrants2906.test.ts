@@ -63,9 +63,9 @@ beforeEach(async () => {
   [admin, outsider] = await Promise.all([0, 1].map(user));
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
-  main = await M.createAgent({}, { orgId: org.id, name: 'Main', personaRole: 'main-role' }, ctx());
-  libA = await M.createAgent({}, { orgId: org.id, name: 'LibA', personaRole: 'lib-a' }, ctx());
-  libB = await M.createAgent({}, { orgId: org.id, name: 'LibB', personaRole: 'lib-b' }, ctx());
+  main = await M.createAgent({}, { orgRef: org.id, name: 'Main', personaRole: 'main-role' }, ctx());
+  libA = await M.createAgent({}, { orgRef: org.id, name: 'LibA', personaRole: 'lib-a' }, ctx());
+  libB = await M.createAgent({}, { orgRef: org.id, name: 'LibB', personaRole: 'lib-b' }, ctx());
   await db.appAgent.create({ data: { appId: app.id, agentId: main.id } });
   await includeFrom(main, [libA, libB]);
   await db.agentOrgGrant.deleteMany({ where: { orgId: org.id } });
@@ -137,7 +137,7 @@ describe('#2906 what a cast still refuses', () => {
   it('a missing grant for a foreign PUBLIC Agent still refuses, and no foreign grant is made', async () => {
     const other = await db.organization.create({ data: { name: 'Vendor', urn: `vendor-${generateId().toLowerCase()}.example` } });
     await db.orgMember.create({ data: { organizationId: other.id, userId: outsider.id, role: 'ADMIN' } });
-    const foreign = await M.createAgent({}, { orgId: other.id, name: 'Vendor', personaRole: 'vendor', visibility: 'PUBLIC' }, ctx(outsider));
+    const foreign = await M.createAgent({}, { orgRef: other.id, name: 'Vendor', personaRole: 'vendor', visibility: 'PUBLIC' }, ctx(outsider));
     await db.appAgent.create({ data: { appId: app.id, agentId: foreign.id } });
     const before = await side();
     expect(await code(cast('Ada', foreign))).toBe('AGENT_ORG_GRANT_REQUIRED');
@@ -147,7 +147,7 @@ describe('#2906 what a cast still refuses', () => {
   it('an include from a concealed foreign Agent refuses without naming it, and provisions nothing', async () => {
     const other = await db.organization.create({ data: { name: 'Secret', urn: `secret-${generateId().toLowerCase()}.example` } });
     await db.orgMember.create({ data: { organizationId: other.id, userId: outsider.id, role: 'ADMIN' } });
-    const hidden = await M.createAgent({}, { orgId: other.id, name: 'Hidden', personaRole: 'hidden' }, ctx(outsider));
+    const hidden = await M.createAgent({}, { orgRef: other.id, name: 'Hidden', personaRole: 'hidden' }, ctx(outsider));
     await db.compiledPromptRevision.deleteMany({});
     await includeFrom(main, [libA, hidden]);
     const before = await side();

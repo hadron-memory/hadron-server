@@ -105,6 +105,10 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // so a lagging build silently records the session fallback — a healthy-looking
 // receipt with the wrong attribution. Clients gate on the `worklog-model`
 // capability token rather than the version.
+// 0.22.0: #4140 — BREAKING (GraphQL): six argument renames on four mutations, no aliases. updateMemory(id →
+// ref, organizationId → orgRef), updateOrganization(id → ref), createAgent(orgId → orgRef, systemMemoryId →
+// systemMemoryRef), updateAgent(systemMemoryId → systemMemoryRef); the system-memory refs retype String → ID
+// and accept a URN. A client sending the old names gets "Unknown argument" until it upgrades.
 // 0.22.0 — #2027 S11: the attention API is RETIRED. The GraphQL fields
 // `teamAttention` / `teamAttentionPage` / `teamAttentionPreviewPage` /
 // `teamAttentionSwitchoverPreview` and the `confirmTeamAttentionSwitchover`

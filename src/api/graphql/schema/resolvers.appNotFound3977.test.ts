@@ -47,7 +47,7 @@ beforeEach(async () => {
   admin = await user(1); outsider = await user(2); member = await user(3); reader = await user(4); foreigner = await user(5);
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: otherOrg.id, userId: foreigner.id, role: 'CONTRIBUTOR' } });
-  teamAgent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  teamAgent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   foreignApp = await db.app.create({ data: { id: generateId(), organizationId: otherOrg.id, name: 'Else', urn: `${otherOrg.urn}:else` } });
   await db.agent.update({ where: { id: teamAgent.id }, data: { personaRole: 'server-engineer' } });

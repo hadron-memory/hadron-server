@@ -1,3 +1,14 @@
+/**
+ * The #3340 run-refusal sentence shared by the app-key surfaces (appKeys,
+ * revokeAppKey, revokeAppGrant, revokeAppKeyScope). One interpolated constant
+ * instead of four pasted copies kept in sync only by the guard (#4479, F5).
+ * The wording is pinned — normalized, line breaks and all — by
+ * typeDefs.sdlAudit3348.test.ts; interpolating it here leaves every site with
+ * the same rendered sentence instead of four differently-wrapped copies.
+ */
+const RUN_REFUSAL_3340 =
+  'Never an App key, a host-launched or uninstructed worker session, an impersonation, or a run that carries a worker session; a plain user-backed run is admitted, as before, when the user it carries manages the App (#3340).';
+
 export const typeDefs = `#graphql
   "#1156 — hrn:node:hadronmemory.com:specs:cor:dmo:070:05: closed end causes; unknown is reserved for legacy rows."
   enum SessionEndReason {
@@ -7471,6 +7482,8 @@ export const typeDefs = `#graphql
   type Grant {
     id: ID!
     appId: ID!
+    "#3709 — the grant's computed address hrn:grant:<root>:<app-slug>:<grant-id> (never stored: composed from the App's current urn plus the row id, so after an App rename only the new spelling is emitted while both spellings keep resolving through the alias map, hrn:node:hadronmemory.com:specs:cor:urn:030). Null only when the stored App urn cannot compose."
+    urn: String
     "The registered action this grant allows."
     action: String!
     "The values it allows (a single value, a list or a wildcard); never a secret."
@@ -8413,10 +8426,13 @@ export const typeDefs = `#graphql
   \`kind\` is the URN's type segment: memory | node | agent | org | app | user |
   apprun | worker | noderev | aiconf (#3857: an AI service config, behind the same
   gate as aiServiceConfig(ref:); an unreadable config answers null, as a missing
-  one does, hrn:node:hadronmemory.com:specs:cor:urn:010:01).
+  one does, hrn:node:hadronmemory.com:specs:cor:urn:010:01) | grant (#3709: behind
+  the same gate as grant(ref:); an unreadable grant answers null, as a missing
+  one does).
   \`id\` is the resolved entity's primary id. \`memoryId\` is set only for
-  nodes (their owning memory), \`organizationId\` for apps, app runs, and
-  workers (their owning org), and for an aiconf (#3857) the org that owns it or
+  nodes (their owning memory), \`organizationId\` for apps, app runs,
+  workers (their owning org), grants (#3709, their App's org), and for an
+  aiconf (#3857) the org that owns it or
   its App or Agent (null for a server-owned config or a user-owned App or
   Agent) — both are the extra ids those resources' canonical routes require.
   """
@@ -10576,7 +10592,7 @@ export const typeDefs = `#graphql
     (hrn:node:hadronmemory.com:specs:cor:dmo:050:12; hrn:node:hadronmemory.com:specs:cor:acl:010:01),
     as themselves, or through their held worker on a validated \`instruction\` (S6, ruling 0098). An admitted
     instructed call records one team event (ruling 0111): the worker, the holder, the App and the instruction,
-    never a key. Never an App key, a host-launched or uninstructed worker session, a run or an impersonated request.
+    never a key. ${RUN_REFUSAL_3340}
 
     Accepts the entity's ID or URN.
     """
@@ -11462,8 +11478,8 @@ export const typeDefs = `#graphql
     "The caller's own connection grants; connectionRef narrows to one connection."
     connectionGrants(connectionRef: String, limit: Int, offset: Int): ConnectionGrantsPage!
     """
-    One grant by id (#3789). Read only by a BOUND WORKER SESSION, in its own App, for a grant naming that worker directly, a pending one it requested itself, or (#3711) one held by its role agent in this App while the agent is installed and licensed here.
-    Every other caller, a soft-deleted App and a missing id all answer null: no error and no existence oracle.
+    One grant by id or hrn:grant URN (#3789; URN per #3709). Read only by a BOUND WORKER SESSION, in its own App, for a grant naming that worker directly, a pending one it requested itself, or (#3711) one held by its role agent in this App while the agent is installed and licensed here.
+    Every other caller, a soft-deleted App and a missing id all answer null: no error and no existence oracle. A well-formed URN naming nothing answers the same null; a malformed or wrong-type URN is the typed input refusal URN_NOT_QUALIFIED (hrn:node:hadronmemory.com:specs:cor:api:140:01) — and so is a ref that is neither an id nor a URN, which the entity-ref convention treats as a URN attempt.
     """
     grant(ref: ID!): Grant
     "The bound worker's own grants (#3789): the rows naming it directly as holder, the pending ones it requested, and (#3711) every row, in every state, held by its role agent in this App while that agent is installed and licensed here (never another App's, never a base agent's). Any other caller gets an empty page, never an error. limit 0 returns the count only."
@@ -12016,7 +12032,7 @@ export const typeDefs = `#graphql
     "#1747 — give a worker a named App grant (hrn:node:hadronmemory.com:specs:cor:agt:080:24). Whoever manages the App only. Idempotent. Person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, #3277): never a worker session (a worker never gives a grant to itself) in any shape, a run principal, an impersonation or an App key, even when the worker's holder manages the App."
     grantApp(appRef: String!, workerRef: String!, name: AppGrantName!): AppGrant!
 
-    "#1747 — revoke a grant. Whoever manages the App, as themselves, or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0109 A); an admitted instructed revoke records one team event (never the grant id). Takes effect at the grantee next call."
+    "#1747 — revoke a grant. Whoever manages the App, as themselves, or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0109 A); an admitted instructed revoke records one team event (never the grant id). ${RUN_REFUSAL_3340} Takes effect at the grantee next call."
     revokeAppGrant(appRef: String!, workerRef: String!, name: AppGrantName!, instruction: ActInstructionInput): AppGrant!
 
     """
@@ -13193,7 +13209,7 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     updateOrganization(
-      id: ID!
+      ref: ID!
       name: String
       urn: String
       listedOnMarketplace: Boolean
@@ -13446,7 +13462,7 @@ export const typeDefs = `#graphql
     truth in \`FR_026_DISCLOSURE\` — see \`src/lib/entityRef/errors.ts\`). On a
     non-encrypted memory the flag is a no-op.
     """
-    updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, data: JSON, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, listedOnMarketplace: Boolean, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource, acknowledgeVectorInversionRisk: Boolean, chunkTokens: Int, chunkOverlap: Int, forceFixedSize: Boolean, maxRevCount: Int, schema: JSON): Memory!
+    updateMemory(ref: ID!, name: String, urn: String, orgRef: ID, shortDescription: String, description: String, data: JSON, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, listedOnMarketplace: Boolean, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource, acknowledgeVectorInversionRisk: Boolean, chunkTokens: Int, chunkOverlap: Int, forceFixedSize: Boolean, maxRevCount: Int, schema: JSON): Memory!
 
     """
     Transfer a free-standing Memory to exactly one new owner. dryRun previews
@@ -13579,8 +13595,8 @@ export const typeDefs = `#graphql
 
     # Agent management
     """
-    Create an agent. Provide orgId to create an ORG-owned agent (requires org
-    ADMIN); OMIT orgId to create a USER-OWNED agent owned by the caller — its
+    Create an agent. Provide orgRef to create an ORG-owned agent (requires org
+    ADMIN); OMIT orgRef to create a USER-OWNED agent owned by the caller — its
     URN is rooted on the caller's bare handle (hrn:agent:<handle>:<slug>, grammar
     v2 — no @ sigil) and its system memory is user-owned too. Exactly one owner
     (org XOR user).
@@ -13591,9 +13607,10 @@ export const typeDefs = `#graphql
     hrn:node:hadronmemory.com:specs:cor:agt:040:12). The NAMED identity is a
     Worker, cast with castWorker; names never live on agents.
 
-    orgId accepts the org's ID or URN.
+    orgRef accepts the org's ID or URN; an empty orgRef is BAD_USER_INPUT. An empty
+    systemMemoryRef means none (a system memory is provisioned).
     """
-    createAgent(orgId: ID, name: String!, description: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null is LONG_LIVED." lifecycle: AgentLifecycle, "#4225: the context cap in tokens, a whole number from 1; omitted or null is no cap." contextCap: Int, "#2171 (R211): the member roles the Agent offers. Omitted: owner and member. Empty or malformed: BAD_USER_INPUT." memberRoles: [String!]): Agent!
+    createAgent(orgRef: ID, name: String!, description: String, systemMemoryRef: ID, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null is LONG_LIVED." lifecycle: AgentLifecycle, "#4225: the context cap in tokens, a whole number from 1; omitted or null is no cap." contextCap: Int, "#2171 (R211): the member roles the Agent offers. Omitted: owner and member. Empty or malformed: BAD_USER_INPUT." memberRoles: [String!]): Agent!
     """
     Clone an Agent into an organization you administer: a new PERSONAL-draft Agent
     with its own copy of the source's system memory, its links and imports, and a recorded origin. Needs a
@@ -13624,7 +13641,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null leaves it unchanged." lifecycle: AgentLifecycle, "#4225: the context cap in tokens, a whole number from 1; omitted leaves it, null clears it (no cap)." contextCap: Int, registerDefaults: RegisterDefaultsInput, "#2171 (R211): replaces the member roles the Agent offers (and nothing else in its installation policy). Omitted or null: unchanged. Empty or malformed: BAD_USER_INPUT. Existing members keep their role." memberRoles: [String!]): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemMemoryRef: ID, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null leaves it unchanged." lifecycle: AgentLifecycle, "#4225: the context cap in tokens, a whole number from 1; omitted leaves it, null clears it (no cap)." contextCap: Int, registerDefaults: RegisterDefaultsInput, "#2171 (R211): replaces the member roles the Agent offers (and nothing else in its installation policy). Omitted or null: unchanged. Empty or malformed: BAD_USER_INPUT. Existing members keep their role." memberRoles: [String!]): Agent!
 
     """
     Soft-delete an Agent and its owned system memory. Requires management
@@ -15539,8 +15556,7 @@ export const typeDefs = `#graphql
     """
     Revoke an AppKey. Only whoever manages the App, as themselves, or through their held worker on a validated
     \`instruction\` (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0098; hrn:node:hadronmemory.com:specs:cor:dmo:050:05;
-    hrn:node:hadronmemory.com:specs:cor:acl:010:01). Never an App key, a host-launched or uninstructed worker session,
-    a run or an impersonated request. A worker session that is refused cannot tell a missing key from an existing one.
+    hrn:node:hadronmemory.com:specs:cor:acl:010:01). ${RUN_REFUSAL_3340} A worker session that is refused cannot tell a missing key from an existing one.
     An admitted instructed revoke records one team event (never the key id); a key already revoked records none.
     AppKey has no URN; the id is raw ID-only.
     """
@@ -15555,7 +15571,7 @@ export const typeDefs = `#graphql
     APP_KEY_SCOPE_HOST_CONFLICT: revoke host:operate first.
     """
     grantAppKeyScope(id: ID!, scope: String!, hostId: String): AppKey!
-    "#1749 — take a scope back. The key's next call is refused. Revoking a scope it does not hold changes nothing. Whoever manages the App, as themselves, or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0109 A); an admitted instructed revoke that ended a scope records one team event (never the key or scope id)."
+    "#1749 — take a scope back. The key's next call is refused. Revoking a scope it does not hold changes nothing. Whoever manages the App, as themselves, or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0109 A); an admitted instructed revoke that ended a scope records one team event (never the key or scope id). ${RUN_REFUSAL_3340}"
     revokeAppKeyScope(id: ID!, scope: String!, instruction: ActInstructionInput): AppKey!
 
     """

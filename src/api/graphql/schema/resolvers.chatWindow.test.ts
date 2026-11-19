@@ -298,7 +298,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
     });
     const created = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'research-agent', visibility: 'ORGANIZATION' },
+      { orgRef: orgA.id, name: 'research-agent', visibility: 'ORGANIZATION' },
       adminCtx(),
     );
     agent = created;
