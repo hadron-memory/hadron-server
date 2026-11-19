@@ -43,7 +43,7 @@ beforeEach(async () => {
   const target = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Target', slug: 'target' } });
   const sibling = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Sibling', slug: 'sibling' } });
   f = { holder, admin, org, app, app2, agent, target, sibling };
-  w = { orgId: org.id, appId: app.id, app2Id: app2.id, userId: holder.id, user2Id: admin.id, agentId: agent.id, workerId: target.id, sessionId: '' };
+  w = { orgUrn: org.urn, orgId: org.id, appId: app.id, app2Id: app2.id, userId: holder.id, user2Id: admin.id, agentId: agent.id, workerId: target.id, sessionId: '' };
 });
 afterAll(async () => { await cleanDb(db); await dropTestActions(); });
 

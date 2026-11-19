@@ -756,9 +756,10 @@ model Organization {
 /// `Organization.principalId`). Their own `handle` and `urn` columns remain what reads use; the principal row is
 /// written in the same transaction that sets them, so the two stay equal.
 ///
-/// Behaviour: `name` is unique across every status. The unique index is a plain, case-sensitive one, and no
-/// database constraint forces lower case: two names that differ only in case never arise because every
-/// writer (`mintPrincipal` and the backfills) lower-cases the name before it writes (#4400 asks for a constraint).
+/// Behaviour: `name` is unique across every status, and across case. The unique index is a plain, case-sensitive
+/// one; the CHECK `chk_principals_name_lower` (`name = lower(name)`) refuses any name that is not lower case, so
+/// two names that differ only in case can never both be stored. The writers (`mintPrincipal` and the backfills)
+/// lower-case the name before they write.
 /// A name that is given up is kept as a tombstone (`status = 'released'`, owner
 /// detached) and is never handed out again, so an old URN can never come to mean a different owner. Words the
 /// platform keeps for itself (for example `hadron`, `platform`) are rows with `status = 'reserved'`.
@@ -767,8 +768,9 @@ model Organization {
 model Principal {
   id         String    @id @default(cuid())
   /// The canonical root name, stored lowercase. `@unique` is a plain (case-
-  /// sensitive) index, which is sufficient because every write lowercases the
-  /// name (mintPrincipal + the migration backfill) — so it is effectively
+  /// sensitive) index, which is sufficient because the database refuses a name
+  /// that is not lower case (CHECK `chk_principals_name_lower`, #4400; in the
+  /// migration and prisma/post-push.sql, since Prisma models no CHECK) — so it is
   /// case-insensitive AND index-backed for the `findUnique` availability probe.
   /// Spans ALL statuses (no status filter), so a `released` tombstone reserves
   /// its name forever (indefinite, no recycling).
@@ -2508,6 +2510,7 @@ model Agent {
   /// #2044 — the per-App install memories that customise this Agent.
   installMemories    Memory[]            @relation("InstallMemoriesOfAgent")
   sessions           Session[]           @relation("SessionAgent")
+  appRuns            AppRun[]            @relation("AppRunAgent")
   userSubscriptions  AgentSubscription[] @relation("AgentUserSubscriptions")
   // 023-app-shape Phase 2b: App↔Agent goes through `AppAgent` (N:M).
   // The direct `App[]` back-relation is gone (dropped with App.agentId).
@@ -4056,6 +4059,7 @@ model App {
   automationTeamSnapshotGrantEvents AppAutomationTeamSnapshotGrantEvent[]
   /// #3668 — grants issued in this App, the grants THIS App holds, and the grant events.
   grants                  Grant[]      @relation("GrantApp")
+  secretReadClients       SecretReadClient[]
   grantEvents             GrantEvent[]
   /// #1706 — model-family availability (hrn:node:hadronmemory.com:specs:cor:agt:060:03) and the stall schedule.
   modelFamilyAvailability ModelFamilyAvailability[]
@@ -5833,10 +5837,11 @@ enum AppRunTriggerKind {
 /// webhook, a manual request, an integration event or another run. The row is the run's durable record, and it is
 /// also what allows the run to go on: every action inside the run checks the row again.
 ///
-/// Relationships: no foreign keys to its owners. `organizationId`, `appId`, `agentId`, `userId`, `triggerId` and
-/// `parentRunId` are plain ids, so the database deletes nothing with them. ManualAutomationPin, WebFetchPollBinding
-/// and WebFetchEventReceipt rows point at a run, and so does the record of the prompt a run was served (a foreign key
-/// in prisma/served-prompt-invariants.sql).
+/// Relationships: one foreign key to an owner, `agentId` to Agent (#3689): every run names an existing Agent, and
+/// deleting an Agent row deletes its runs. `organizationId`, `appId`, `userId`, `triggerId` and `parentRunId` are plain
+/// ids, so the database deletes nothing with them. ManualAutomationPin, WebFetchPollBinding and WebFetchEventReceipt
+/// rows point at a run, and so does the record of the prompt a run was served (a foreign key in
+/// prisma/served-prompt-invariants.sql).
 ///
 /// Behaviour:
 /// - Created only after the launch gate has passed (`mintAppRun`, src/jobs/appRuns.ts). No separate credential is
@@ -5865,7 +5870,14 @@ model AppRun {
   id                   String               @id
   organizationId       String               @map("organization_id")
   appId                String               @map("app_id")
+  /// #3689 (hrn:node:hadronmemory.com:specs:cor:agt:010:01 rev 45): every run names an existing Agent. The DATABASE
+  /// guarantees it: NOT NULL with a foreign key; an Agent hard delete removes its runs (gate R4). Mint refuses an
+  /// agentless launch first, as BOOT_PROMPT_NOT_SET (hrn:node:hadronmemory.com:specs:cor:agt:040:07). The Prisma field
+  /// stays OPTIONAL on purpose: a migration refused with HDPRF (#3770) is rolled back and this build then serves the old
+  /// nullable column, whose retained agentless runs a required field cannot read (P2032). Tighten it only once the
+  /// migration has applied everywhere (#3910 F1).
   agentId              String?              @map("agent_id")
+  agent                Agent?               @relation("AppRunAgent", fields: [agentId], references: [id], onDelete: Cascade)
   /// On-behalf-of user (hrn:node:hadronmemory.com:specs:cor:agt:010:01, D-2026-07-04-C). NULL ⇒ pure App
   /// service identity — no personal/private reach.
   userId               String?              @map("user_id")
@@ -5972,6 +5984,7 @@ model AppRun {
   @@index([status, publishedAt])
   @@index([appId, createdAt])
   @@index([triggerId, status])
+  @@index([agentId])
   @@index([parentRunId]) // spawn completion checks + child listings (plan-spawn)
   @@index([organizationId, createdAt])
   @@map("app_runs")
@@ -7316,7 +7329,7 @@ model AutomationVersion {
 /// - The foreign key to the parent is NO ACTION: the database refuses to delete a task row that still has
 ///   child rows.
 /// - `requirements` say which workers the matcher may choose for a task with no assignee.
-/// - The result (`resultOutcome`, `resultSummary`, `resultEvidence`, `resultFindings`) is set only when the
+/// - The result (`resultOutcome`, `resultSummary`, `resultEvidence`, `resultFindings`, `resultWorkedFromRoleTaskRefs`) is set only when the
 ///   task is finished.
 /// - Tasks are created through `createAgentTask`, `createAgentTasks` and `cloneAgentTask`
 ///   (src/api/graphql/schema/resolvers.agentTask.ts) and assigned by hand or by the matcher
@@ -7391,6 +7404,9 @@ model AgentTask {
   resultEvidence       String?   @map("result_evidence")
   /// #2662: immutable ordered findings, set only with the finish result; null is legacy/omitted.
   resultFindings       Json?     @map("result_findings")
+  /// #4414 (hrn:node:hadronmemory.com:specs:cor:agt:050:30): the role tasks the assignee followed, [{nodeId, urn, revision}] in the order given, set only with the
+  /// finish result and immutable after it; null is legacy/omitted.
+  resultWorkedFromRoleTaskRefs Json? @map("result_worked_from_role_task_refs")
   /// #2663: latest disposition for each finding, stored beside the immutable result (at most100).
   findingDispositions  Json      @default("[]") @map("finding_dispositions")
   /// Derived by the database trigger from resultFindings + findingDispositions; filter before SQL paging.
@@ -10121,6 +10137,7 @@ model Grant {
   signature   GrantSignature? @relation("GrantActivation", fields: [signatureId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   signingRequests GrantSigningRequest[]
   signatures      GrantSignature[] @relation("GrantSignatures")
+  secretReadClient SecretReadClient?
 
   @@index([appId, createdAt])
   @@index([userId])
@@ -10129,6 +10146,36 @@ model Grant {
   @@index([granteeAppId])
   @@index([action])
   @@map("grants")
+}
+
+/// #3998 (S3 of #3991) — the ASSOCIATION between one grant and one App secret: which secret a `secret.reveal` grant reads.
+/// It carries NO window, budget, mark or counter (plan R1): the grant row is the counter and the judge, and every one of
+/// those is read from it. The id is 128 bits of randomness (base64url), the handle the holder presents. `secretId` is
+/// sealed, with no foreign key, so a deleted secret's id never reaches a new secret of the same name (R2); the only end
+/// this row stores is one the grant cannot express (`SECRET_DELETED`, and `PROTECTED` from S4), set once by a trigger or
+/// the protection ceremony (prisma/secret-read-clients-invariants.sql). Cascades only with its grant.
+model SecretReadClient {
+  id           String    @id
+  grantId      String    @unique @map("grant_id")
+  appId        String    @map("app_id")
+  secretId     String    @map("secret_id")
+  /// The secret's name when the client was issued: display only, never a lookup key.
+  secretName   String    @map("secret_name")
+  /// The issuing person, sealed (no FK; erasure keeps the history). The grant's own issuer link is nulled on erasure.
+  issuerUserId String?   @map("issuer_user_id")
+  /// The grant's issuer is its person holder. Stored once so S4's protection change and read check can query it.
+  selfIssued   Boolean   @map("self_issued")
+  /// SECRET_DELETED | PROTECTED, set together with `endedAt`, once.
+  endReason    String?   @map("end_reason")
+  endedAt      DateTime? @map("ended_at")
+  createdAt    DateTime  @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("created_at")
+
+  grant Grant @relation(fields: [grantId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  app   App   @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId, secretId])
+  @@index([issuerUserId])
+  @@map("secret_read_clients")
 }
 
 /// A request for a person to sign one pending Grant. It is what the signing page opens: it fixes exactly which

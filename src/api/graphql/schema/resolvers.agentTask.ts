@@ -7,6 +7,7 @@ import { runMayReadTeam } from '../../../lib/auth/runTeamRead.js';
 import { retryOnSerializationFailure } from '../../../lib/serializableRetry.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { finishFindings, countFindings, type TaskFinding } from '../../../lib/agentTasks/findings.js';
+import { finishRoleTaskRefs } from '../../../lib/agentTasks/roleTaskRefs.js';
 import { isDeepStrictEqual } from 'node:util';
 import { lockTaskGraph, taskPriority, addTaskBlocker, removeTaskBlocker } from '../../../lib/agentTasks/blockers.js';
 import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
@@ -2777,7 +2778,7 @@ export const agentTaskMutations = {
    */
   finishAgentTask: async (
     _: unknown,
-    { taskId, result }: { taskId: string; result: { outcome: string; summary?: string | null; evidence?: string | null; findings?: unknown } },
+    { taskId, result }: { taskId: string; result: { outcome: string; summary?: string | null; evidence?: string | null; findings?: unknown; workedFromRoleTaskRefs?: unknown } },
     ctx: Context,
     info?: GraphQLResolveInfo,
   ) => {
@@ -2799,6 +2800,8 @@ export const agentTaskMutations = {
       }
       // #2652 (cor:agt:050:30): the team's closed outcome set, read now, before any write; no set keeps any one word.
       await checkOutcomeInTeamSet(tx, txCtx, app.id, outcome, (w) => TASK_OUTCOME_PATTERN.test(w));
+      // #4414 (cor:agt:050:30): the role tasks followed, judged here, before any write, through the node read gate.
+      const roleTaskRefs = await finishRoleTaskRefs(txCtx, result?.workedFromRoleTaskRefs);
       // #2198: finishing with open children still succeeds (as it always has); the response says so.
       if ((await tx.agentTask.count({ where: { parentTaskId: task.id, status: { in: OPEN } } })) > 0) warn.push('task.finish.open-children');
       await tx.agentTask.update({
@@ -2807,6 +2810,7 @@ export const agentTaskMutations = {
           status: 'finished', finishedAt: new Date(),
           resultOutcome: outcome, resultSummary: summary, resultEvidence: evidence,
           ...(findings !== undefined ? { resultFindings: findings } : {}),
+          ...(roleTaskRefs !== undefined ? { resultWorkedFromRoleTaskRefs: roleTaskRefs } : {}),
           ...updatedStamp(ctx),
         },
       });
@@ -3995,7 +3999,7 @@ export const agentTaskFieldResolvers = {
     assignee: (t: TaskRow, _: unknown, ctx: Context) => partyView(ctx, t.assigneeWorkerId, t.assigneeUserId),
     result: (t: TaskRow, _: unknown, ctx: Context) => {
       const view = (row: TaskRow) => row.status === 'finished' && row.resultOutcome
-        ? { outcome: row.resultOutcome, summary: row.resultSummary, evidence: row.resultEvidence, ...(row.resultFindings != null ? { findings: row.resultFindings } : {}) }
+        ? { outcome: row.resultOutcome, summary: row.resultSummary, evidence: row.resultEvidence, ...(row.resultFindings != null ? { findings: row.resultFindings } : {}), ...(row.resultWorkedFromRoleTaskRefs != null ? { workedFromRoleTaskRefs: row.resultWorkedFromRoleTaskRefs } : {}) }
         : null;
       if (t.status !== 'finished' || !t.resultOutcome || Object.hasOwn(t, 'resultFindings')) return view(t);
       // #2662: wide list/tree/relation rows omit the large payload. Only a selected result loads it, under the

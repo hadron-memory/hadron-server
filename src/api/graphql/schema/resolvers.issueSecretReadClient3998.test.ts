@@ -1,0 +1,102 @@
+/** #3998 S3: issueSecretReadClient makes the pending secret.reveal grant and its client together, for a person who may issue. */
+import { beforeEach, describe, expect, it } from 'vitest';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
+import { upsertPlatformActions } from '../../../lib/grants/actions.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { resolvers, type Context } from './resolvers.js';
+
+let ownerId: string; let memberId: string; let outsiderId: string; let appId: string; let secretId: string; let workerId: string;
+const ctxOf = (userId: string): Context => ({ db, userId, roles: [] } as unknown as Context);
+const issue = (userId: string, over: Record<string, unknown> = {}) => resolvers.Mutation.issueSecretReadClient({}, {
+  input: { secretRef: secretId, holderKind: 'USER', autoDelete: false, reason: 'need it', ...over },
+}, ctxOf(userId));
+const code = (p: Promise<unknown>) => p.then(() => 'OK', (e: { extensions?: { code?: string } }) => e.extensions?.code ?? String(e));
+
+beforeEach(async () => {
+  process.env.HADRON_ENCRYPTION_KEY = '11'.repeat(32);
+  process.env.SECRET_ROOT_KEY = '22'.repeat(32);
+  await cleanDb(db); await upsertPlatformActions(db);
+  ownerId = (await db.user.create({ data: { email: `${generateId()}@s3.test` } })).id;
+  memberId = (await db.user.create({ data: { email: `${generateId()}@s3.test` } })).id;
+  outsiderId = (await db.user.create({ data: { email: `${generateId()}@s3.test` } })).id;
+  appId = (await db.app.create({ data: { name: 'S3', ownerUserId: ownerId, urn: `${generateId().toLowerCase()}:rc` } })).id;
+  await db.appMember.create({ data: { appId, userId: memberId, role: 'reader' } });
+  const s = await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'tok', kind: 'generic', value: 'v1' }, ctxOf(memberId));
+  secretId = s.id;
+});
+
+describe('#3998 issueSecretReadClient', () => {
+  it('a manager issues to themself: one pending grant and one client, marked self-issued', async () => {
+    const r: any = await issue(ownerId);
+    expect(r).toMatchObject({ secretName: 'tok', selfIssued: true });
+    const g = await db.grant.findUniqueOrThrow({ where: { id: r.grantId } });
+    expect(g).toMatchObject({ action: 'secret.reveal', userId: ownerId, activatedAt: null, appId });
+    expect(g.values).toEqual({ secret: secretId, 'auto-delete': 'keep' });
+    expect(await db.secretReadClient.count({ where: { grantId: r.grantId, secretId, issuerUserId: ownerId } })).toBe(1);
+  });
+
+  it('the writer of the current version issues; a member who wrote nothing and an outsider are refused alike', async () => {
+    await expect(issue(memberId)).resolves.toMatchObject({ selfIssued: true });
+    const other = (await db.user.create({ data: { email: `${generateId()}@s3.test` } })).id;
+    await db.appMember.create({ data: { appId, userId: other, role: 'reader' } });
+    const a = await code(issue(other)); const b = await code(issue(outsiderId));
+    expect(a).toBe(b);
+    expect(await db.grant.count()).toBe(1);
+  });
+
+  it('a superseded writer is refused SECRET_READ_CLIENT_SUPERSEDED and stores nothing', async () => {
+    await resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'v2' }, ctxOf(ownerId));
+    expect(await code(issue(memberId))).toBe('SECRET_READ_CLIENT_SUPERSEDED');
+    expect(await db.grant.count()).toBe(0);
+  });
+
+  it('an auto-delete mark needs a window or a budget, and is then refused until S6 consumes it (#4001)', async () => {
+    expect(await code(issue(ownerId, { autoDelete: true }))).toBe('SECRET_AUTO_DELETE_NEEDS_LIMIT');
+    // Signed but not consumed: refused with a typed code, nothing written. S6 removes this guard (and this expectation).
+    expect(await code(issue(ownerId, { autoDelete: true, maxReads: 1 }))).toBe('SECRET_AUTO_DELETE_NOT_AVAILABLE');
+    expect(await db.grant.count()).toBe(0);
+    expect(await db.secretReadClient.count()).toBe(0);
+  });
+
+  it('a person holder is only the issuer themself', async () => {
+    expect(await code(issue(ownerId, { holderRef: memberId }))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+  });
+
+  it.each(['AGENT', 'APP'])('refuses a %s holder before any write (#4434: agent-held reads are not built)', async (holderKind) => {
+    // A REAL worker of the App: without the early refusal the holder would be read as a worker and the client would be made.
+    const org = await db.organization.create({ data: { id: generateId(), name: 'o', urn: `${generateId().toLowerCase()}.test` } });
+    const agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'A', urn: `${org.urn}:a`, visibility: 'ORGANIZATION' } });
+    await db.appAgent.create({ data: { appId, agentId: agent.id } });
+    workerId = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: agent.id, name: 'Liam', slug: 'liam', heldByUserId: ownerId, heldAt: new Date() }, select: { id: true } })).id;
+    const before = await db.grant.count();
+    expect(await code(issue(ownerId, { holderKind, holderRef: workerId }))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    expect(await db.grant.count()).toBe(before);
+    expect(await db.secretReadClient.count()).toBe(0);
+  });
+
+  it('refuses a missing secret exactly as it refuses someone who may not issue', async () => {
+    const missing = await code(resolvers.Mutation.issueSecretReadClient({}, { input: { secretRef: generateId(), holderKind: 'USER', autoDelete: false, reason: 'r' } }, ctxOf(ownerId)));
+    expect(missing).toBe(await code(issue(outsiderId)));
+  });
+
+  it('input refusals do not tell an outsider whether a secret exists (existence oracle)', async () => {
+    const as = (userId: string, ref: string, over: Record<string, unknown>) => code(resolvers.Mutation.issueSecretReadClient({}, {
+      input: { secretRef: ref, holderKind: 'USER', autoDelete: false, reason: 'r', ...over },
+    }, ctxOf(userId)));
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['agent holder', { holderKind: 'AGENT', holderRef: generateId() }],
+      ['app holder', { holderKind: 'APP' }],
+      ['auto-delete without a limit', { autoDelete: true }],
+      ['auto-delete with a limit', { autoDelete: true, maxReads: 1 }],
+      ['bad time', { expiresAt: 'not-a-date' }],
+      ['plain', {}],
+    ];
+    for (const [label, over] of cases) {
+      const existing = await as(outsiderId, secretId, over);
+      const missing = await as(outsiderId, generateId(), over);
+      expect(existing, label).toBe(missing);
+    }
+  });
+});

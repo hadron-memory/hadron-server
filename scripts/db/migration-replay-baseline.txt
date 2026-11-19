@@ -32,14 +32,6 @@ added con:post_limit_episodes.post_limit_episodes_event_id_key 6582efad72dad492
 added con:rate_limit_buckets.rate_limit_buckets_field_class_dimension_subject_window_sta_key b92480459f6f50b9
 added con:start_failing_episodes.start_failing_episodes_event_id_key 6582efad72dad492
 
-# Partial indexes created by migrations are missing after push + post-push: #4334
-added idx:agents_urn_migration_pending_idx 767667bdb2740a47
-added idx:apps_urn_active_uniq 7c69e9536a43ff66
-added idx:apps_urn_migration_pending_idx e30a43ce1d1fd2da
-added idx:assets_staged_uploaded_at_idx ea68a6557acf9c81
-added idx:assets_uploaded_by_staged_idx 2aff9cb3f17f6379
-added idx:memories_urn_migration_pending_idx edc26daa4f3e2176
-
 # Partial on the migration path, full after db push: #4335
 changed idx:memories_user_id_idx 5ede391a85cd1b48
 changed idx:users_external_app_id_external_id_key 11f2d98b55a8792c

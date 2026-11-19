@@ -1,10 +1,9 @@
 /** Types for the #2163 part 2 reminder hook, so its decision logic is unit-tested from TypeScript without a build. */
 export const FLOOR_TOKENS: number;
-export const THRESHOLDS: ReadonlyArray<readonly [string, number]>;
+export const THRESHOLDS: ReadonlyArray<readonly [string, number] | readonly [string, number, number]>;
 export const ESCALATION_TOKENS: number;
 export const HYSTERESIS_TOKENS: number;
 export const MAX_FIRES: number;
-export const FRESHNESS_MS: number;
 export const FUTURE_SKEW_MS: number;
 export const TAIL_BYTES: number;
 export const STDIN_MAX_BYTES: number;
@@ -13,8 +12,10 @@ export const STATE_MAX_FILES: number;
 export const LOG_MAX_BYTES: number;
 export const LOCK_WAIT_MS: number;
 export const LOCK_STALE_MS: number;
+export const STOP_REMINDER_TEXT: (reclaimableK: number, thresholdK: number) => string;
 export const REMINDER_TEXT: (reclaimableK: number, thresholdK: number) => string;
 export function thresholdFor(model: unknown): number | null;
+export function escalationFor(model: unknown): number;
 export interface Arm {
   fires: number;
   atReclaimable: number | null;

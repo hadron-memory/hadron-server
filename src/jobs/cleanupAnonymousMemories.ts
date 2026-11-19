@@ -1,5 +1,5 @@
 import type { PrismaClient } from '../generated/prisma/index.js';
-import { DECISION_FAMILY_WHERE } from '../lib/decisions/index.js';
+import { QUESTION_FAMILY_WHERE } from '../lib/questions/index.js';
 import { withSweepLock, type SweepLockResult } from '../lib/sweepLock.js';
 
 /**
@@ -18,8 +18,8 @@ export async function cleanupAnonymousMemories(db: PrismaClient): Promise<number
       // memories are not created as draft corpora, so none should ever be
       // stamped; the exclusion keeps this bulk delete safe if one is.
       corpusMintedAt: null,
-      // #1641 §3.2 — nor one holding a decision or a decision log (Q17).
-      nodes: { none: DECISION_FAMILY_WHERE },
+      // #1641 §3.2 — nor one holding a question or a question log (Q17).
+      nodes: { none: QUESTION_FAMILY_WHERE },
     },
   });
   return result.count;

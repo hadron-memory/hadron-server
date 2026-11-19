@@ -26,6 +26,7 @@ import {
   mintPrincipal,
   releasePrincipal,
   ensureUserPrincipal,
+  RootNameInvalidError,
   RootNameTakenError,
 } from '../../../lib/principal/mintPrincipal.js';
 import {
@@ -62,10 +63,25 @@ const invitationRevoked = () =>
   new GraphQLError('Invitation has been revoked', { extensions: { code: 'BAD_USER_INPUT' } });
 
 /**
- * Map a `RootNameTakenError` from the #692 principal pool to a user-facing
- * conflict; re-throw anything else. Use as a `.catch()` on a mint transaction.
+ * Map the #692 principal pool's typed errors to user-facing refusals;
+ * re-throw anything else. Use as a `.catch()` on a mint transaction.
+ *
+ * `RootNameTakenError` → the existing conflict refusal. `RootNameInvalidError`
+ * (#4481, the #4415 root-name rule) → `ROOT_NAME_INVALID`, its own code so a
+ * client can tell an unrepeatable name from a taken one. Both are backstops:
+ * every mint caller here validates the name first (`normalizeHandle` /
+ * `validateOrgRoot`), so neither is reachable through this surface today —
+ * the mapping exists so a future caller that skips validation still surfaces
+ * a typed refusal, not an internal error.
  */
-function rethrowRootNameTaken(err: unknown): never {
+export function rethrowRootNameErrors(err: unknown): never {
+  if (err instanceof RootNameInvalidError) {
+    throw new GraphQLError(
+      `The name "${err.rootName}" is not a legal root name: a root name is 1–64 ` +
+        `lower-case ASCII letters, digits, ".", "_" or "-", beginning and ending with a letter or digit.`,
+      { extensions: { code: 'ROOT_NAME_INVALID' } },
+    );
+  }
   if (err instanceof RootNameTakenError) {
     throw new GraphQLError(`The name "${err.rootName}" is already taken.`, {
       extensions: { code: 'BAD_USER_INPUT' },
@@ -159,7 +175,7 @@ export const orgMutations = {
           }
           return updated;
         })
-        .catch(rethrowRootNameTaken);
+        .catch(rethrowRootNameErrors);
     },
 
     updateUserRoles: async (
@@ -339,7 +355,7 @@ export const orgMutations = {
           }
           return created;
         })
-        .catch(rethrowRootNameTaken);
+        .catch(rethrowRootNameErrors);
       return ctx.db.organization.findUniqueOrThrow({ where: { id: org.id }, include: ORG_INCLUDE });
     },
 
@@ -443,7 +459,7 @@ export const orgMutations = {
           }
           return updated;
         })
-        .catch(rethrowRootNameTaken);
+        .catch(rethrowRootNameErrors);
     },
 
     deleteOrganization: async (_: unknown, { id }: { id: string }, ctx: Context) => {
@@ -1028,7 +1044,7 @@ export const orgMutations = {
           await ensureUserPrincipal(tx, user);
           return user;
         })
-        .catch(rethrowRootNameTaken);
+        .catch(rethrowRootNameErrors);
     },
 
 };
