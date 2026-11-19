@@ -105,7 +105,7 @@ describe('#3136 — swept refusals are typed on the wire', () => {
     // overlap of 600 violates 0 <= overlap < tokens — the exact partial-update
     // arm the resolver's own comment describes.
     const err = await graphqlError(
-      `mutation($id: ID!) { updateMemory(id: $id, chunkOverlap: 600) { id } }`,
+      `mutation($id: ID!) { updateMemory(ref: $id, chunkOverlap: 600) { id } }`,
       { id: memoryId },
     );
     expect(err.extensions?.code).toBe('INVALID_CHUNK_CONFIG');
