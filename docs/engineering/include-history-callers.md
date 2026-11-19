@@ -90,7 +90,7 @@ one parent, one MCP); its single slow-path call to
 records the remaining base sites; the JSON census is the current exact map.
 
 ```text
-src/api/graphql/schema/resolvers.decisions.ts :: ensureCurrentNodeRevisionInTransaction (2 call sites)
+src/api/graphql/schema/resolvers.questions.ts :: ensureCurrentNodeRevisionInTransaction (2 call sites)
 src/api/graphql/schema/resolvers.mutation.memory.ts :: ensureCurrentNodeRevisionInTransaction (1 call sites)
 src/api/graphql/schema/resolvers.mutation.node.ts :: createNodeRevision (5 call sites)
 src/api/graphql/schema/resolvers.mutation.node.ts :: ctx.db.nodeRevision.delete (1 call sites)

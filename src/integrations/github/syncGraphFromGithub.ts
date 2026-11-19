@@ -8,7 +8,7 @@ import { assertIncludesWritable, prospectiveNodeId, includeRefusalCode, storedIn
 import { runAsSystem } from '../../lib/requestActor.js';
 import { createDecipheriv } from 'crypto';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
-import { isDecisionFamilyRole } from '../../lib/decisions/index.js';
+import { isQuestionFamilyRole } from '../../lib/questions/index.js';
 import { hardDeleteThreadsOfTargets } from '../../lib/comments/lifecycle.js';
 import { GraphQLError } from 'graphql';
 import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../lib/specCorpus.js';
@@ -1149,11 +1149,11 @@ const syncGraphFromGithubAsSystem = async (
           }
           assertNoWorkerSessionBootPromptWrite(prior?.role, governedSignalsFromMirror(node).role ?? undefined, 'import');
           const signals = governedSignalsFromMirror(node);
-          // #1641 §3.2 — no mirror ever writes a decision or a decision log:
+          // #1641 §3.2 — no mirror ever writes a question or a question log:
           // anyone with push access could otherwise forge one. A file that
-          // declares the role, or lands on a decision's loc, is skipped.
-          if (isDecisionFamilyRole(signals.role) || isDecisionFamilyRole(prior?.role)) {
-            reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_DECISION' });
+          // declares the role, or lands on a question's loc, is skipped.
+          if (isQuestionFamilyRole(signals.role) || isQuestionFamilyRole(prior?.role)) {
+            reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_QUESTION' });
             console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — decisions are written only through the decision operations`);
             if (prior) protectedRowIds.add(prior.id);
             refusedRoleLocs.add(loc);

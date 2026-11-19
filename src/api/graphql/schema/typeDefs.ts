@@ -1764,7 +1764,7 @@ export const typeDefs = `#graphql
 
     A GOVERNED family routes the write to that kind's own authoring door, and
     the generic node surface is refused: 'review' / 'review.*' and 'spec' /
-    'spec.*' and 'decision' / 'decision.*', alongside the task kind, which is
+    'spec.*' and 'question' / 'question.*', alongside the task kind, which is
     gated on 'isRunnable'
     rather than on any label because a label can be omitted and a capability
     cannot. Other roles do not invoke a governed door, but can still be
@@ -2588,10 +2588,10 @@ export const typeDefs = `#graphql
     alreadyApprovedCount: Int!
     "Locs of reserved placeholders, which have no spec to approve yet."
     skippedPlaceholders: [String!]!
-    "#1641 — decisions and decision logs in this memory, which bulk approval never approves: a decision is approved individually by one of its deciders."
-    skippedDecisionCount: Int!
+    "#1641 — questions and question logs in this memory, which bulk approval never approves: a question is approved individually by one of its deciders."
+    skippedQuestionCount: Int!
     "#1641 — the first 50 of those, by loc."
-    skippedDecisions: [String!]!
+    skippedQuestions: [String!]!
     "#2043 — boot prompts in this Agent system or App install memory that this caller may not approve: only the Agent's or App's manager approves them, as themselves, never through a worker session."
     skippedBootPromptCount: Int!
     "#2043 — the first 50 of those, by loc."
@@ -2608,17 +2608,17 @@ export const typeDefs = `#graphql
     urn: String
   }
 
-  "#1641 — a decision's derived state (hrn:node:hadronmemory.com:hadron-server:design:decision-nodes §6.3). Computed by the one evaluation on every read, never stored. Precedence: TAMPERED, UNVERIFIABLE, WITHDRAWN, SUPERSEDED, STALE, DECIDED, ANSWERED_UNCONFIRMED, OPEN."
-  enum DecisionState {
+  "#1641 — a question's derived state (hrn:node:hadronmemory.com:hadron-server:design:decision-nodes §6.3). Computed by the one evaluation on every read, never stored. Precedence: TAMPERED, UNVERIFIABLE, WITHDRAWN, SUPERSEDED, STALE, DECIDED, ANSWERED_UNCONFIRMED, OPEN."
+  enum QuestionState {
     "Not every part is answered."
     OPEN
     "Every part is answered; the tier's evidence (a decider's approval, or later a signature) is missing at the current revision."
     ANSWERED_UNCONFIRMED
     "Answered, and the tier's evidence by a decider is intact at the current revision. The only state a ruling may be relied on in."
     DECIDED
-    "Evidence exists, but for an earlier revision: the decision changed after it was approved."
+    "Evidence exists, but for an earlier revision: the question changed after it was approved."
     STALE
-    "The rendered content, the structured payload and the approval hash disagree: changed outside the decision operations."
+    "The rendered content, the structured payload and the approval hash disagree: changed outside the question operations."
     TAMPERED
     "Written by a codec or renderer this server does not know, so it cannot be verified (fail closed)."
     UNVERIFIABLE
@@ -2626,25 +2626,25 @@ export const typeDefs = `#graphql
     SUPERSEDED
   }
 
-  "#1641 — the assurance a decision's answer needs. APPROVED: a decider's approval. SIGNED: a decider's passkey signature (#1614; not available yet, so a SIGNED decision stays ANSWERED_UNCONFIRMED)."
-  enum DecisionTier {
+  "#1641 — the assurance a question's answer needs. APPROVED: a decider's approval. SIGNED: a decider's passkey signature (#1614; not available yet, so a SIGNED question stays ANSWERED_UNCONFIRMED)."
+  enum QuestionTier {
     APPROVED
     SIGNED
   }
 
-  enum DecisionUrgency {
+  enum QuestionUrgency {
     NORMAL
     URGENT
   }
 
   "#1641 — list order. PORTAL_DEFAULT: urgent first, then open before answered, then newest ask. CODE: code order."
-  enum DecisionSort {
+  enum QuestionSort {
     PORTAL_DEFAULT
     CODE
   }
 
   "#1641 — where an answer was given, as the answering caller states it (a claim)."
-  enum DecisionAnswerVia {
+  enum QuestionAnswerVia {
     PORTAL
     CLI
     MCP
@@ -2653,20 +2653,20 @@ export const typeDefs = `#graphql
   }
 
   "#1641 — a reference: exactly one of an external ref (hadron-server#1640, team:6783), a node id or URN, or a spec citation."
-  type DecisionRef {
+  type QuestionRef {
     ref: String
     node: String
     spec: String
   }
 
-  input DecisionRefInput {
+  input QuestionRefInput {
     ref: String
     node: String
     spec: String
   }
 
   "#1641 — an authenticated actor: taken from the principal, never supplied by a client. Public projections only (#552)."
-  type DecisionActor {
+  type QuestionActor {
     userId: ID
     workerId: ID
     appId: ID
@@ -2675,7 +2675,7 @@ export const typeDefs = `#graphql
     app: CommentActorRef
   }
 
-  type DecisionOption {
+  type QuestionOption {
     "The option id an answer names."
     key: String!
     label: String!
@@ -2683,16 +2683,16 @@ export const typeDefs = `#graphql
     cost: String
   }
 
-  type DecisionRecommendation {
+  type QuestionRecommendation {
     key: String!
     "Who recorded the recommendation (authenticated)."
-    by: DecisionActor!
+    by: QuestionActor!
     reason: String
     "A relayed recommendation's original author, as a claim."
     attributedTo: String
   }
 
-  type DecisionAnswer {
+  type QuestionAnswer {
     "The chosen option; null for a free-text answer."
     key: String
     text: String
@@ -2700,31 +2700,31 @@ export const typeDefs = `#graphql
     "The decider whose credential recorded it."
     byUserId: ID!
     at: DateTime!
-    via: DecisionAnswerVia!
+    via: QuestionAnswerVia!
     "Where the answer was given (a claim)."
-    source: DecisionRef
+    source: QuestionRef
     reason: String
     "An imported answer's recorded speaker (a claim, never rendered as the authenticated answerer)."
     claimedBy: String
     recordedByUserId: ID
   }
 
-  type DecisionPart {
-    "Permanent within the decision; amendments add parts, never renumber."
+  type QuestionPart {
+    "Permanent within the question; amendments add parts, never renumber."
     n: Int!
     "The citation of this part, e.g. DU-1."
     citation: String!
     question: String!
-    options: [DecisionOption!]!
+    options: [QuestionOption!]!
     "Null when the asker deliberately gave none (see noRecommendationReason). Never pre-selected."
-    recommendation: DecisionRecommendation
+    recommendation: QuestionRecommendation
     noRecommendationReason: String
-    answer: DecisionAnswer
+    answer: QuestionAnswer
     "Earlier answers to this part, oldest first: a re-answer appends, never replaces quietly."
-    answerHistory: [DecisionAnswer!]!
+    answerHistory: [QuestionAnswer!]!
   }
 
-  type DecisionApprovalEvidence {
+  type QuestionApprovalEvidence {
     byUserId: ID
     by: CommentActorRef
     "The revision approved."
@@ -2732,85 +2732,85 @@ export const typeDefs = `#graphql
     approvedAt: DateTime!
     "INTACT, TAMPERED, SUPERSEDED or NOT_APPROVED: the approval hash checked against the live text."
     integrity: String!
-    "Whether the approver is one of the decision's deciders (only then does it count)."
+    "Whether the approver is one of the question's deciders (only then does it count)."
     byDecider: Boolean!
   }
 
-  type DecisionEvidence {
+  type QuestionEvidence {
     "The latest approval on record, whoever gave it."
-    approval: DecisionApprovalEvidence
+    approval: QuestionApprovalEvidence
   }
 
-  type DecisionWithdrawal {
-    by: DecisionActor!
+  type QuestionWithdrawal {
+    by: QuestionActor!
     at: DateTime!
     reason: String!
   }
 
   """
-  #1641 — a human decision: a governed node (role decision) under a decision log, written only by the
-  decision operations. Its content is rendered from this structured payload, so an approval covers
+  #1641 — a human question: a governed node (role question) under a question log, written only by the
+  question operations. Its content is rendered from this structured payload, so an approval covers
   exactly what was asked and answered. Plan: hrn:node:hadronmemory.com:hadron-server:design:decision-nodes.
   """
-  type Decision {
+  type Question {
     id: ID!
     urn: String!
-    "The decision's own page, where its card renders. Copy it; never build it."
+    "The question's own page, where its card renders. Copy it; never build it."
     portalUrl: String
     "Permanent: DA, DB, … issued in sequence by its log, never reused."
     code: String!
     n: Int!
     logId: ID
     title: String!
-    urgency: DecisionUrgency!
-    tier: DecisionTier!
+    urgency: QuestionUrgency!
+    tier: QuestionTier!
     authorizes: Boolean!
     "Migrated history that is never usable as an authorization."
     archival: Boolean!
     "DERIVED on every read. Rely on a ruling only while it is DECIDED."
-    state: DecisionState!
+    state: QuestionState!
     context: String
-    parts: [DecisionPart!]!
-    "What is waiting on this decision."
-    blocks: [DecisionRef!]!
-    sources: [DecisionRef!]!
+    parts: [QuestionPart!]!
+    "What is waiting on this question."
+    blocks: [QuestionRef!]!
+    sources: [QuestionRef!]!
     "Spec citations the ruling must reach."
-    followUps: [DecisionRef!]!
+    followUps: [QuestionRef!]!
     deciderIds: [ID!]!
     deciders: [CommentActorRef!]!
     "True when the caller is a decider, including through an account merged into theirs (#1715)."
     viewerIsDecider: Boolean!
     "Account merges the stored user ids follow: the record keeps the merged-away id (#1715)."
-    identityMerges: [DecisionIdentityMerge!]!
-    askedBy: DecisionActor!
+    identityMerges: [QuestionIdentityMerge!]!
+    askedBy: QuestionActor!
     askedAt: DateTime
     "When the last part was answered; null while any part is open."
     answeredAt: DateTime
-    withdrawn: DecisionWithdrawal
-    evidence: DecisionEvidence!
+    withdrawn: QuestionWithdrawal
+    evidence: QuestionEvidence!
     "The node's current revision: the expectedRevision of the next change."
     revSeq: Int!
     node: Node
   }
 
-  type DecisionPage {
-    items: [Decision!]!
-    "Matching decisions before paging."
+  type QuestionPage {
+    items: [Question!]!
+    "Matching questions before paging."
     total: Int!
   }
 
-  type DecisionPurge {
+  type QuestionPurge {
     code: String!
     byUserId: ID!
     by: CommentActorRef
     at: DateTime!
     reason: String!
-    "sha256 of the purged decision's rendered content."
+    "sha256 of the purged question's rendered content."
     contentHash: String!
   }
 
-  "#1641 — a decision log's settings (never a decision, never approved)."
-  type DecisionLog {
+  "#1641 — a question log's settings (never a question, never approved)."
+  type QuestionLog {
     id: ID!
     urn: String!
     portalUrl: String
@@ -2822,23 +2822,23 @@ export const typeDefs = `#graphql
     lastCode: Int!
     defaultDeciderIds: [ID!]!
     eligibleDeciderIds: [ID!]!
-    "Who decides a decision asked without naming deciders."
+    "Who decides a question asked without naming deciders."
     defaultDeciders: [CommentActorRef!]!
-    "Who else a decision may name as a decider. A decision's deciders are narrowed from these, never widened."
+    "Who else a question may name as a decider. A question's deciders are narrowed from these, never widened."
     eligibleDeciders: [CommentActorRef!]!
-    purges: [DecisionPurge!]!
+    purges: [QuestionPurge!]!
     "Account merges the stored user ids follow: the record keeps the merged-away id (#1715)."
-    identityMerges: [DecisionIdentityMerge!]!
+    identityMerges: [QuestionIdentityMerge!]!
     revSeq: Int!
   }
 
   """
-  #1715 — an account merge that a user id stored in a decision or a log follows.
+  #1715 — an account merge that a user id stored in a question or a log follows.
   Stored ids are never rewritten by mergeUsers, because they are part of the
   authenticated record: the record still names fromUserId, and that account now
   acts as toUserId. A chain of merges is listed link by link, oldest first.
   """
-  type DecisionIdentityMerge {
+  type QuestionIdentityMerge {
     fromUserId: ID!
     from: CommentActorRef
     toUserId: ID!
@@ -2846,9 +2846,9 @@ export const typeDefs = `#graphql
     mergedAt: DateTime!
   }
 
-  "#1641 — verifyDecision: the one evaluation's findings."
-  type DecisionVerification {
-    state: DecisionState!
+  "#1641 — verifyQuestion: the one evaluation's findings."
+  type QuestionVerification {
+    state: QuestionState!
     "NO_BLOCK, BLOCK_INVALID, UNKNOWN_CODEC, UNKNOWN_RENDERER, RENDER_MISMATCH, DATA_MISMATCH, APPROVAL_HASH_MISMATCH."
     findings: [String!]!
     codec: String
@@ -2859,70 +2859,70 @@ export const typeDefs = `#graphql
     approvalByDecider: Boolean!
   }
 
-  input DecisionOptionInput {
+  input QuestionOptionInput {
     key: String!
     label: String!
     meaning: String
     cost: String
   }
 
-  input DecisionRecommendationInput {
+  input QuestionRecommendationInput {
     key: String!
     reason: String
     "Relaying someone else's recommendation: who (recorded as a claim)."
     attributedTo: String
   }
 
-  input DecisionNoRecommendationInput {
+  input QuestionNoRecommendationInput {
     reason: String!
   }
 
-  "#1641 — one part of a decision. Give options or yesno, and a recommendation or noRecommendation."
-  input DecisionPartInput {
+  "#1641 — one part of a question. Give options or yesno, and a recommendation or noRecommendation."
+  input QuestionPartInput {
     question: String!
-    options: [DecisionOptionInput!]
+    options: [QuestionOptionInput!]
     yesno: Boolean
-    recommendation: DecisionRecommendationInput
-    noRecommendation: DecisionNoRecommendationInput
+    recommendation: QuestionRecommendationInput
+    noRecommendation: QuestionNoRecommendationInput
   }
 
-  input AskDecisionInput {
+  input AskQuestionInput {
     title: String!
-    urgency: DecisionUrgency
-    "Default APPROVED; SIGNED when authorizes is true (APPROVED is then refused: DECISION_TIER_TOO_LOW)."
-    tier: DecisionTier
+    urgency: QuestionUrgency
+    "Default APPROVED; SIGNED when authorizes is true (APPROVED is then refused: QUESTION_TIER_TOO_LOW)."
+    tier: QuestionTier
     authorizes: Boolean
-    "The authorization a grant decision carries (authorizes: true only)."
+    "The authorization a grant question carries (authorizes: true only)."
     grant: JSON
     "Narrows the log's default deciders; never widens past its eligible set."
     deciders: [ID!]
     context: String
-    blocks: [DecisionRefInput!]
-    sources: [DecisionRefInput!]
-    followUps: [DecisionRefInput!]
-    parts: [DecisionPartInput!]!
+    blocks: [QuestionRefInput!]
+    sources: [QuestionRefInput!]
+    followUps: [QuestionRefInput!]
+    parts: [QuestionPartInput!]!
   }
 
   "#1641 — a change to an existing part (by its permanent number). Omitted fields are unchanged; answers never change here."
-  input DecisionPartPatchInput {
+  input QuestionPartPatchInput {
     n: Int!
     question: String
-    options: [DecisionOptionInput!]
+    options: [QuestionOptionInput!]
     yesno: Boolean
-    recommendation: DecisionRecommendationInput
-    noRecommendation: DecisionNoRecommendationInput
+    recommendation: QuestionRecommendationInput
+    noRecommendation: QuestionNoRecommendationInput
   }
 
-  input AmendDecisionInput {
+  input AmendQuestionInput {
     title: String
-    urgency: DecisionUrgency
-    tier: DecisionTier
+    urgency: QuestionUrgency
+    tier: QuestionTier
     context: String
-    blocks: [DecisionRefInput!]
-    sources: [DecisionRefInput!]
-    followUps: [DecisionRefInput!]
-    parts: [DecisionPartPatchInput!]
-    addParts: [DecisionPartInput!]
+    blocks: [QuestionRefInput!]
+    sources: [QuestionRefInput!]
+    followUps: [QuestionRefInput!]
+    parts: [QuestionPartPatchInput!]
+    addParts: [QuestionPartInput!]
   }
 
   "#1606 — a comment thread's state (hrn:node:hadronmemory.com:specs:cor:dmo:110:05). Top-level comments only."
@@ -6958,7 +6958,7 @@ export const typeDefs = `#graphql
     """
     #1201 — what this node is FOR (open string). NOT 'nodeType' (the
     platform-kind axis) and NOT 'objectType' (the collection discriminator).
-    A GOVERNED family ('review', 'spec', 'decision', including dotted descendants)
+    A GOVERNED family ('review', 'spec', 'question', including dotted descendants)
     requires that kind's own door; generic createNode refuses it.
     """
     role: String
@@ -9928,28 +9928,28 @@ export const typeDefs = `#graphql
     "#1606 — one comment by ID or URN; null when missing or unreadable."
     comment(ref: ID!): Comment
 
-    "#1641 — a decision log's settings by ID or URN; null when missing or unreadable."
-    decisionLog(ref: ID!): DecisionLog
-    "#1641 — one decision by ref (ID or URN), or by code (DU, or a citation DU-1) within logRef. Null when missing or unreadable."
-    decision(ref: ID, code: String, logRef: ID): Decision
+    "#1641 — a question log's settings by ID or URN; null when missing or unreadable."
+    questionLog(ref: ID!): QuestionLog
+    "#1641 — one question by ref (ID or URN), or by code (DU, or a citation DU-1) within logRef. Null when missing or unreadable."
+    question(ref: ID, code: String, logRef: ID): Question
     """
-    #1641 — the decisions of one log (logRef), or with awaitingMe the OPEN decisions the caller
+    #1641 — the questions of one log (logRef), or with awaitingMe the OPEN questions the caller
     decides across every memory they can read. State is derived for every candidate BEFORE the
-    filters, sort and paging; a list above 5000 candidates refuses (DECISION_LOG_TOO_LARGE_FOR_FILTER).
+    filters, sort and paging; a list above 5000 candidates refuses (QUESTION_LOG_TOO_LARGE_FOR_FILTER).
     """
-    decisions(
+    questions(
       logRef: ID
       awaitingMe: Boolean
-      state: [DecisionState!]
-      tier: DecisionTier
-      urgency: [DecisionUrgency!]
+      state: [QuestionState!]
+      tier: QuestionTier
+      urgency: [QuestionUrgency!]
       authorizes: Boolean
-      sort: DecisionSort = PORTAL_DEFAULT
+      sort: QuestionSort = PORTAL_DEFAULT
       limit: Int = 20
       offset: Int = 0
-    ): DecisionPage!
-    "#1641 — re-render a decision from its payload and check it against its content, data and approval: the findings behind its state."
-    verifyDecision(ref: ID!): DecisionVerification!
+    ): QuestionPage!
+    "#1641 — re-render a question from its payload and check it against its content, data and approval: the findings behind its state."
+    verifyQuestion(ref: ID!): QuestionVerification!
 
     """
     A single node-revision snapshot by its id (#617 Display).
@@ -12520,7 +12520,7 @@ export const typeDefs = `#graphql
     renumberSpec(memoryRef: ID!, fromLoc: String!, toLoc: String!, dryRun: Boolean): SpecRenumberResult!
     """
     #1591 — mint the live nodes of a memory in the mint scope, at once,
-    excluding comment nodes and the decision role family. The scope is the
+    excluding comment nodes and the question role family. The scope is the
     unminted nodes plus (#1612) minted nodes whose content changed since their
     minted revision or that have no recorded minted revision; a re-mint keeps
     the first mint's time and minter. Each node is
@@ -12799,7 +12799,7 @@ export const typeDefs = `#graphql
     if it is still the one you read (REVISION_MISMATCH otherwise). A memory
     writer may approve ordinary nodes, the author included; placed boot prompts
     also require their dedicated manager-as-self gate. Comments and
-    decision-family nodes are refused. Idempotent: an approved
+    question-family nodes are refused. Idempotent: an approved
     revision keeps its existing approval. Refuses NODE_IS_PLACEHOLDER, and
     ENCRYPTED_MEMORY_NOT_APPLICABLE on any encrypted memory, even with a
     cached session key.
@@ -12877,31 +12877,31 @@ export const typeDefs = `#graphql
     deleteCommentThread(commentRef: ID!, reason: String!): Boolean!
 
     """
-    #1641 — create a decision log at loc in a memory: needs management rights on the memory, or the
+    #1641 — create a question log at loc in a memory: needs management rights on the memory, or the
     owner role in its live, installed App for non-personal/non-private memories. Impersonation is refused. Refused
-    in an encrypted memory (DECISION_LOG_ENCRYPTED), a git-mirrored one (DECISION_LOG_MIRRORED), a
-    system memory (DECISION_LOG_SYSTEM_MEMORY), an anonymous one (DECISION_LOG_ANONYMOUS_MEMORY), at a loc occupied by a live or deleted node at or beneath it (DECISION_LOG_EXISTS), or inside a decision's subtree. Deciders are user ids, each able
-    to write the memory (DECISION_DECIDER_NOT_ELIGIBLE; hrn:node:hadronmemory.com:specs:cor:dmo:130:09).
+    in an encrypted memory (QUESTION_LOG_ENCRYPTED), a git-mirrored one (QUESTION_LOG_MIRRORED), a
+    system memory (QUESTION_LOG_SYSTEM_MEMORY), an anonymous one (QUESTION_LOG_ANONYMOUS_MEMORY), at a loc occupied by a live or deleted node at or beneath it (QUESTION_LOG_EXISTS), or inside a question's subtree. Deciders are user ids, each able
+    to write the memory (QUESTION_DECIDER_NOT_ELIGIBLE; hrn:node:hadronmemory.com:specs:cor:dmo:130:09).
     """
-    createDecisionLog(memoryRef: ID!, loc: String!, name: String, prefix: String, defaultDeciders: [ID!]!, eligibleDeciders: [ID!]): DecisionLog!
-    "#1641 — replace a log's default (and, when given, other eligible) deciders, as an audited revision of the log. Existing decisions keep theirs. Needs management rights on the memory, or the owner role in its App."
-    setDecisionLogDeciders(logRef: ID!, defaultDeciders: [ID!]!, eligibleDeciders: [ID!], expectedRevision: Int!, reason: String!): DecisionLog!
+    createQuestionLog(memoryRef: ID!, loc: String!, name: String, prefix: String, defaultDeciders: [ID!]!, eligibleDeciders: [ID!]): QuestionLog!
+    "#1641 — replace a log's default (and, when given, other eligible) deciders, as an audited revision of the log. Existing questions keep theirs. Needs management rights on the memory, or the owner role in its App."
+    setQuestionLogDeciders(logRef: ID!, defaultDeciders: [ID!]!, eligibleDeciders: [ID!], expectedRevision: Int!, reason: String!): QuestionLog!
     """
-    #1641 — ask a decision in a log: the server issues the next code using the log prefix (DA, DB, … with default D) and renders the
-    content. Any writer of the log's memory, agents included, outside impersonation. Refusals: DECISION_INVALID (with JSON
-    pointers), DECISION_RECOMMENDATION_MISSING, DECISION_TIER_TOO_LOW, DECISION_DECIDER_NOT_ELIGIBLE.
+    #1641 — ask a question in a log: the server issues the next code using the log prefix (DA, DB, … with default D) and renders the
+    content. Any writer of the log's memory, agents included, outside impersonation. Refusals: QUESTION_INVALID (with JSON
+    pointers), QUESTION_RECOMMENDATION_MISSING, QUESTION_TIER_TOO_LOW, QUESTION_DECIDER_NOT_ELIGIBLE.
     """
-    askDecision(logRef: ID!, input: AskDecisionInput!): Decision!
+    askQuestion(logRef: ID!, input: AskQuestionInput!): Question!
     """
-    #1641 — amend a writable decision. Memory write access is always required; before any answer, any writer; after one, a decider only. Urgency is a
+    #1641 — amend a writable question. Memory write access is always required; before any answer, any writer; after one, a decider only. Urgency is a
     decider's to change; lowering the tier is a decider's, before an answer, never when it authorizes.
-    Refusals: NODE_WRITE_CONFLICT, DECISION_PART_RENUMBER, DECISION_ANSWER_IMMUTABLE, DECISION_NOT_DECIDER.
+    Refusals: NODE_WRITE_CONFLICT, QUESTION_PART_RENUMBER, QUESTION_ANSWER_IMMUTABLE, QUESTION_NOT_DECIDER.
     """
-    amendDecision(ref: ID!, input: AmendDecisionInput!, expectedRevision: Int!, reason: String!): Decision!
-    "#1641 — withdraw a decision (terminal; the code stays consumed): the asker or a decider, a decider once answered. DECIDED ones are superseded instead (DECISION_ANSWERED_DECIDED)."
-    withdrawDecision(ref: ID!, reason: String!, expectedRevision: Int!): Decision!
-    "#1641 — a platform admin hard-deletes a decision that was never answered, recorded on its log (DECISION_ANSWERED otherwise). The code stays consumed."
-    purgeUnansweredDecision(ref: ID!, reason: String!): Boolean!
+    amendQuestion(ref: ID!, input: AmendQuestionInput!, expectedRevision: Int!, reason: String!): Question!
+    "#1641 — withdraw a question (terminal; the code stays consumed): the asker or a decider, a decider once answered. DECIDED ones are superseded instead (QUESTION_ANSWERED_DECIDED)."
+    withdrawQuestion(ref: ID!, reason: String!, expectedRevision: Int!): Question!
+    "#1641 — a platform admin hard-deletes a question that was never answered, recorded on its log (QUESTION_ANSWERED otherwise). The code stays consumed."
+    purgeUnansweredQuestion(ref: ID!, reason: String!): Boolean!
 
     """
     Delete ALL NodeRevision rows for a node, returning the count deleted (#617).
@@ -13651,7 +13651,7 @@ export const typeDefs = `#graphql
     display name is derived from the target slug.
 
     Copies the Memory row and its eligible live graph. Comment nodes,
-    compiled boot-prompt nodes and decision-family nodes are excluded;
+    compiled boot-prompt nodes and question-family nodes are excluded;
     derived INCLUDE edges are re-derived rather than copied. References to
     the source memory's URN inside node content/abstract
     (canonical and legacy spellings) are rewritten to the clone's URN.
@@ -13796,8 +13796,8 @@ export const typeDefs = `#graphql
     App install or live parent Agent import references it, or a live Agent
     extends it as its base. AgentMemoryItem attachments do not block deletion.
 
-    Also refused with DECISION_CONTAINED (#1641) while the Agent's system memory holds a decision or a
-    decision log: removing the memory would remove them, so the Agent is kept. Decision protection always applies.
+    Also refused with QUESTION_CONTAINED (#1641) while the Agent's system memory holds a question or a
+    question log: removing the memory would remove them, so the Agent is kept. Question protection always applies.
     If this server requires minted content to be retained, its separate deletion restrictions also apply.
 
     See hrn:node:hadronmemory.com:specs:cor:dmo:050:14.
