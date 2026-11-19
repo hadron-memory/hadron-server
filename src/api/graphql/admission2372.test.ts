@@ -3,8 +3,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../../server.js';
 import { resolvers } from './schema/resolvers.js';
+import { createServerOnCleanDb } from '../../test/startServerFixture.js';
 type Body = { errors?: Array<{ extensions: { code: string; limit: string; max: number } }> };
 const readBody = async (response: Response): Promise<Body> => await response.json() as Body;
 const query = readFileSync(new URL('./nodeFind2372.graphql', import.meta.url), 'utf8');
@@ -16,7 +16,7 @@ let find: ReturnType<typeof vi.spyOn>;
 beforeAll(async () => {
   node = vi.spyOn(resolvers.Query, 'node').mockResolvedValue(null as never);
   find = vi.spyOn(resolvers.Query, 'findNodes').mockResolvedValue({ hits: [], passages: [], total: 0, reason: null, degraded: false } as never);
-  server = httpServer(await createServer());
+  server = httpServer(await createServerOnCleanDb());
   servers.push(server);
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -46,7 +46,7 @@ describe('#2372 portal NodeFind admission', () => {
   it('honors an explicit operator cap of 25000 rather than overriding it', async () => {
     const saved = process.env.GRAPHQL_MAX_COST;
     let app;
-    try { process.env.GRAPHQL_MAX_COST = '25000'; app = await createServer(); }
+    try { process.env.GRAPHQL_MAX_COST = '25000'; app = await createServerOnCleanDb(); }
     finally { if (saved === undefined) delete process.env.GRAPHQL_MAX_COST; else process.env.GRAPHQL_MAX_COST = saved; }
     const tight = httpServer(app);
     servers.push(tight);

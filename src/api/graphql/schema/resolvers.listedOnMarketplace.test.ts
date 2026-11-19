@@ -42,13 +42,13 @@ beforeEach(async () => {
 describe('listedOnMarketplace — Organization (cor:acl:080:04)', () => {
   it('defaults false; set/read-back; omit and null both preserve', async () => {
     expect((await db.organization.findUnique({ where: { id: org.id } }))?.listedOnMarketplace).toBe(false);
-    const updated = await M.updateOrganization({}, { id: org.id, listedOnMarketplace: true }, ctx());
+    const updated = await M.updateOrganization({}, { ref: org.id, listedOnMarketplace: true }, ctx());
     expect(updated.listedOnMarketplace).toBe(true);
     // omit → unchanged
-    await M.updateOrganization({}, { id: org.id, name: 'mkt-renamed' }, ctx());
+    await M.updateOrganization({}, { ref: org.id, name: 'mkt-renamed' }, ctx());
     expect((await db.organization.findUnique({ where: { id: org.id } }))?.listedOnMarketplace).toBe(true);
     // explicit null → treated as omit (no NULL write on a NOT NULL column)
-    await M.updateOrganization({}, { id: org.id, listedOnMarketplace: null }, ctx());
+    await M.updateOrganization({}, { ref: org.id, listedOnMarketplace: null }, ctx());
     expect((await db.organization.findUnique({ where: { id: org.id } }))?.listedOnMarketplace).toBe(true);
   });
 });
@@ -56,11 +56,11 @@ describe('listedOnMarketplace — Organization (cor:acl:080:04)', () => {
 describe('listedOnMarketplace — Memory (cor:acl:080:04)', () => {
   it('defaults false; set/read-back; omit and null both preserve', async () => {
     expect((await db.memory.findUnique({ where: { id: memory.id } }))?.listedOnMarketplace).toBe(false);
-    const updated = await M.updateMemory({}, { id: memory.id, listedOnMarketplace: true }, ctx());
+    const updated = await M.updateMemory({}, { ref: memory.id, listedOnMarketplace: true }, ctx());
     expect(updated.listedOnMarketplace).toBe(true);
-    await M.updateMemory({}, { id: memory.id, shortDescription: 'unchanged-flag' }, ctx());
+    await M.updateMemory({}, { ref: memory.id, shortDescription: 'unchanged-flag' }, ctx());
     expect((await db.memory.findUnique({ where: { id: memory.id } }))?.listedOnMarketplace).toBe(true);
-    await M.updateMemory({}, { id: memory.id, listedOnMarketplace: null }, ctx());
+    await M.updateMemory({}, { ref: memory.id, listedOnMarketplace: null }, ctx());
     expect((await db.memory.findUnique({ where: { id: memory.id } }))?.listedOnMarketplace).toBe(true);
   });
 });

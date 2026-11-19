@@ -9,7 +9,7 @@ import { assertBootPromptWriteAllowedOrGranted, spendEditGrantFor, graphqlEditFa
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, assertNoBootPromptRows, inCompileScope, isBootPromptRole } from '../../../lib/bootPrompt.js';
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
-import { decisionContainedError, isDecisionFamilyRole, refuseDecisionFamily, refuseUnderDecisionLog } from '../../../lib/decisions/index.js';
+import { questionContainedError, isQuestionFamilyRole, refuseQuestionFamily, refuseUnderQuestionLog } from '../../../lib/questions/index.js';
 import { refuseLiveThreadsOnFold } from '../../../lib/comments/merge.js';
 import { generateId } from '../../../lib/id.js';
 // Spec 049 S4 — the protected-loc gate on the in-place update paths and the bulk skip.
@@ -666,10 +666,10 @@ async function writeNodeCoreRaw(
       // #2043 — the compiled-node and worker-session boot-prompt guards (cor:agt:040:11).
       // #3823 — the one lift: a worker session's in-place text edit of its own source, under an edit grant (a read here; spent below).
       await assertBootPromptWriteAllowedOrGranted(ctx.db as unknown as Prisma.TransactionClient, existing, { nodeType: input.nodeType, role: normalizeRole(input.role), ...graphqlEditFacts(input) }, mode === 'update' ? 'update' : 'create');
-      // #1641 — a log's child locs are its decision codes: only the decision
+      // #1641 — a log's child locs are its question codes: only the question
       // doors write there, so a squatter can never block a code.
-      if (!existing && opts?.ownsKind !== 'decision') {
-        await refuseUnderDecisionLog(ctx.db, input.memoryId, input.loc, 'Creating this node');
+      if (!existing && opts?.ownsKind !== 'question') {
+        await refuseUnderQuestionLog(ctx.db, input.memoryId, input.loc, 'Creating this node');
       }
       assertGovernedWrite(
         existing,
@@ -2308,7 +2308,7 @@ async function withNodeHistoryWrite<T>(ctx: Context, nodeId: string, memoryId: s
     await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${nodeId} FOR UPDATE`;
     const current = await tx.node.findUnique({ where: { id: nodeId }, select: { memoryId: true, role: true, loc: true } });
     if (!current || current.memoryId !== memoryId) throw nodeNotFoundError(nodeId);
-    if (isDecisionFamilyRole(current.role)) throw decisionContainedError("Editing a decision's history", [current.loc]);
+    if (isQuestionFamilyRole(current.role)) throw questionContainedError("Editing a question's history", [current.loc]);
     return work(tx, txCtx);
   });
 }
@@ -2605,8 +2605,8 @@ export const nodeMutations = {
     // hadron_update_review, …) that delegate here; specs have none, by design.
     // That no mutation is an MCP tool is pinned per door by a test that
     // iterates this same register.
-    // #1641: an operations-only kind (decision) gets NO generic-shaped door
-    // here; its own operations live in resolvers.decisions.ts.
+    // #1641: an operations-only kind (question) gets NO generic-shaped door
+    // here; its own operations live in resolvers.questions.ts.
     ...Object.fromEntries(
       GOVERNED_KINDS.filter((entry) => !entry.operationsOnly).flatMap((entry) => [
         [
@@ -3146,7 +3146,10 @@ export const nodeMutations = {
       };
       // #4096: `newText` is caller text written through `tx.node.update`, outside the node writer. Refused typed after
       // selection and write authorization, before any write (a dry run is refused too, so its preview never promises a write that fails).
-      assertStorableText({ newText });
+      assertStorableText({ newText, oldText }); // #4106: a lone-surrogate oldText splits a stored pair into unstorable derived text
+      // #4106: a regex `oldText` (an escape such as \ud83d) can match half of a stored pair; the guard above sees only the raw
+      // input, so the DERIVED text of every planned change is checked too, naming `oldText`, before any write.
+      assertStorableText({ oldText: plans.map((p) => p.changed) });
       // A dry run writes nothing, but still makes the manager's deciding
       // gate under the same authority as the write branch.
       if (dryRun) {
@@ -3532,9 +3535,9 @@ export const nodeMutations = {
           // path's thread delete; a target takes its threads with it.
           if ((await commentIdsAmong(tx, affectedIds)).length > 0) throw commentGovernedError('delete', 'removes');
           await assertNoBootPromptRows(tx, affectedIds, 'delete');
-          // #1641 §3.2 — a decision is withdrawn, never deleted, and deleting a
-          // log or an ancestor of one would erase decision history.
-          await refuseDecisionFamily(tx, affectedIds, 'Deleting this node');
+          // #1641 §3.2 — a question is withdrawn, never deleted, and deleting a
+          // log or an ancestor of one would erase question history.
+          await refuseQuestionFamily(tx, affectedIds, 'Deleting this node');
           // A governed node is removed only after its marker is cleared through
           // the kind's door: the whole affected set is judged here, on locked
           // rows, before any write.
@@ -3745,6 +3748,10 @@ export const nodeMutations = {
       if (!tgt || !(await isMemoryReadableCached(ctx, tgt.memoryId))) {
         throw new GraphQLError(`Target node not found: "${targetRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
       }
+      // #4106: caller text a NUL or lone surrogate would make Postgres reject (22021 / 22P05 in jsonb) is refused typed,
+      // after the gates above and before the loc derives from `name` or anything is written. `loc` and `condition`
+      // already refuse with their own typed codes.
+      assertStorableText({ name, loc, description, data, condition });
       const edgeLoc = loc != null && loc !== '' ? loc : deriveEdgeLoc(src.loc, name ?? null, tgt.loc);
       try {
         validateLoc(edgeLoc);
@@ -3866,6 +3873,7 @@ export const nodeMutations = {
         throwOnInvalidCondition(condition);
       }
       if (loc != null && loc !== '') {
+        assertStorableText({ loc }); // #4106: typed, and the value is never echoed (InvalidLocError's message would)
         try {
           validateLoc(loc);
         } catch (e) {
@@ -3929,6 +3937,7 @@ export const nodeMutations = {
         });
       }
       await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, edgeMem.memoryId);
+      assertStorableText({ name, description, data, condition }); // #4106: after the gates, before any write
       const updatedEdge = await ctx.db.$transaction(async (tx) => {
         await lockInstallAuthoritiesFirst(tx, ctx, [edgeMem.memoryId]);
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${edgeMem.memoryId} FOR SHARE`;
@@ -4549,10 +4558,10 @@ export const nodeMutations = {
         // (cor:dmo:110:06), so revisionStateMatches can't see one that landed in
         // between, and the delete below would destroy it.
         if (deleteSource) await refuseLiveThreadsOnFold(tx, [source.id]);
-        // #1641 §3.2 — a decision is never merged, as source or target: its
+        // #1641 §3.2 — a question is never merged, as source or target: its
         // content is rendered from its payload, and a fold would rewrite it.
-        const mergedDecisions = [lockedSource, lockedTarget].filter((n) => isDecisionFamilyRole(n.role));
-        if (mergedDecisions.length > 0) throw decisionContainedError('Merging these nodes', mergedDecisions.map((n) => n.loc));
+        const mergedQuestions = [lockedSource, lockedTarget].filter((n) => isQuestionFamilyRole(n.role));
+        if (mergedQuestions.length > 0) throw questionContainedError('Merging these nodes', mergedQuestions.map((n) => n.loc));
         // A hard-deleted source is a removal. The source row was locked FOR
         // UPDATE and re-read above, so this judges its current state: a governed
         // node is removed only after its marker is cleared through the kind's door.
@@ -5152,9 +5161,9 @@ export const nodeMutations = {
       }
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: revision.nodeId } });
       await nodeDoorWritePreflight(ctx, node.memoryId, () => new GraphQLError('Node revision not found', { extensions: { code: 'NOT_FOUND', revisionId } }));
-      // #1641 §3.2 — a decision's history is its audit trail. Unlocked: no
-      // write ever turns an existing node into a decision or back.
-      if (isDecisionFamilyRole(node.role)) throw decisionContainedError("Deleting a decision's revision", [node.loc]);
+      // #1641 §3.2 — a question's history is its audit trail. Unlocked: no
+      // write ever turns an existing node into a question or back.
+      if (isQuestionFamilyRole(node.role)) throw questionContainedError("Deleting a question's revision", [node.loc]);
       // No protected-loc gate: a revision row is history, not the address.
       return withNodeHistoryWrite(ctx, node.id, node.memoryId, async tx => {
         await tx.nodeRevision.delete({ where: { id: revisionId } });
@@ -5233,8 +5242,8 @@ export const nodeMutations = {
         select: { memoryId: true, role: true, loc: true },
       });
       await nodeDoorWritePreflight(ctx, node.memoryId, () => nodeNotFoundError(nodeRef));
-      // #1641 §3.2 — a decision's history is its audit trail (as deleteNodeRevision).
-      if (isDecisionFamilyRole(node.role)) throw decisionContainedError("Clearing a decision's history", [node.loc]);
+      // #1641 §3.2 — a question's history is its audit trail (as deleteNodeRevision).
+      if (isQuestionFamilyRole(node.role)) throw questionContainedError("Clearing a question's history", [node.loc]);
       return withNodeHistoryWrite(ctx, nodeId, node.memoryId, async tx => {
         const { count } = await tx.nodeRevision.deleteMany({ where: { nodeId } });
         return count;

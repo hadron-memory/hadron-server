@@ -105,6 +105,14 @@ export const AGENT_TASK_READ_TOOLS = [
   'hadron_stall_schedule_get',
 ] as const;
 
+/** The `hadron_team_roster` description (#4413: exported so its text pin imports it rather than scraping the source). */
+export const HADRON_TEAM_ROSTER_DESCRIPTION =
+  'Read a team App\'s roster: each worker that is not retired, with one derived state ' +
+  '(YOUR_MOVE, UNAVAILABLE, WAITING, WORKING, ASSIGNED_NOT_STARTED, AVAILABLE, NO_FAMILY, NOT_LAUNCHABLE) and the ' +
+  'facts behind it: model family, free for work, availability, its tasks and alarms. The states are defined by ' +
+  'hrn:node:hadronmemory.com:specs:cor:agt:050:22 (Proposed). ' +
+  'Readers: the App\'s participants.';
+
 function textResult(text: string, isError = false) {
   return { ...(isError ? { isError: true as const } : {}), content: [{ type: 'text' as const, text }] };
 }
@@ -609,10 +617,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
 
   off(
     'hadron_team_roster',
-    'Read a team App\'s roster (plan design:agent-tasks §7.4): each worker that is not retired, with one derived state ' +
-      '(YOUR_MOVE, UNAVAILABLE, WAITING, WORKING, ASSIGNED_NOT_STARTED, AVAILABLE, NO_FAMILY, NOT_LAUNCHABLE) and the ' +
-      'facts behind it: model family, free for work, availability, its tasks and alarms. Plan-derived, not a spec. ' +
-      'Readers: the App\'s participants.',
+    HADRON_TEAM_ROSTER_DESCRIPTION,
     SHAPE_HADRON_TEAM_ROSTER,
     async ({ session, appRef }) =>
       read(session, async (ctx) => {
@@ -726,7 +731,7 @@ const SHAPE_HADRON_TASK_LIST = {
   tagsAll: z.array(z.string()).optional().describe('Match every tag; empty does not narrow.'),
   source: z.string().optional().describe('Exact opaque source, not a prefix.'),
   text: z.string().optional().describe('Case-insensitive substring of the title or description, 1 to 200 characters after trimming. ANDed with the other filters.'),
-  overdue: z.boolean().optional().describe('True: start-by passed on the database clock, not started, not ended, not backlog. False: all other tasks; not an alarm.'),
+  overdue: z.boolean().optional().describe('True: overdue on the database clock: pending, not started, start-by passed; or pending or started, finish-by passed. Never an ended or backlog task. False: all other tasks; not an alarm.'),
   createdAfter: taskListDateTime.optional().describe('Inclusive creation-time lower bound (ISO date-time).'),
   createdBefore: taskListDateTime.optional().describe('Inclusive creation-time upper bound (ISO date-time).'),
   startedAfter: taskListDateTime.optional().describe('Inclusive start-time lower bound; null dates excluded.'),

@@ -496,7 +496,7 @@ describe('#1468 — address reclaims that erase a deleted minted corpus (Codex P
 
   it('createAgent refuses to reclaim its -system address from a deleted minted corpus', async () => {
     const corpus = await deletedCorpusAt(`${org.urn}:spec-bot-system`);
-    await expect(resolvers.Mutation.createAgent({}, { orgId: org.id, name: 'Spec Bot' } as never, ctx()))
+    await expect(resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Spec Bot' } as never, ctx()))
       .rejects.toSatisfy(refusedPermanent);
     expect(await db.memory.findUnique({ where: { id: corpus.id } })).not.toBeNull();
     expect(await db.agent.findFirst({ where: { urn: `${org.urn}:spec-bot` } })).toBeNull();
@@ -504,7 +504,7 @@ describe('#1468 — address reclaims that erase a deleted minted corpus (Codex P
 
   it('control: createAgent still reclaims a deleted draft memory at its -system address', async () => {
     await memory('draft-bot-system', { corpusDraft: true, deletedAt: new Date() });
-    const agent = await resolvers.Mutation.createAgent({}, { orgId: org.id, name: 'Draft Bot' } as never, ctx());
+    const agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Draft Bot' } as never, ctx());
     expect(agent).toMatchObject({ urn: `${org.urn}:draft-bot` });
   });
 

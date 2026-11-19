@@ -74,7 +74,7 @@ beforeEach(async () => {
   for (const u of [admin, alice, bob]) {
     await db.orgMember.create({ data: { organizationId: org.id, userId: u.id, role: u === admin ? 'ADMIN' : 'CONTRIBUTOR' } });
   }
-  const created = await M.createAgent({}, { orgId: org.id, name: 'intake-agent', visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId: admin.id });
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'intake-agent', visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId: admin.id });
   agentId = created.id;
   systemMemoryId = created.systemMemoryId!;
   const app = await db.app.create({ data: {

@@ -21,19 +21,17 @@ import type { WebFetchAuth } from './webfetchClient.js';
  * Both share this store and the same cascade resolver.
  */
 
-// Owners are ORG/USER ONLY (#696, decision D-2026-07-15-006): the flat v2
-// secret URN `hrn:secret:<root>:<name>` has a single root principal and can't
-// express the v1 `app:`/`memory:` owner markers. The #679 app- and
-// memory-owned shapes are superseded; the #702 prod audit confirmed 0 such
-// rows, so this is code + a CHECK constraint, no data migration.
-export const SECRET_OWNER_TYPES = ['user', 'org'] as const;
+// Owners are user, org or APP. #696 (D-2026-07-15-006) narrowed them to org/user; #3997 (S2 of #3991,
+// D-2026-11-12-001) made an App an owner again. The memory-owned shape stays superseded. An App row has NO value of its
+// own (its value is its newest `secret_versions` row) and is NEVER in the run cascade below.
+export const SECRET_OWNER_TYPES = ['user', 'org', 'app'] as const;
 export type SecretOwnerType = (typeof SECRET_OWNER_TYPES)[number];
 
 export function isSecretOwnerType(value: unknown): value is SecretOwnerType {
   return typeof value === 'string' && (SECRET_OWNER_TYPES as readonly string[]).includes(value);
 }
 
-/** CSS-cascade resolution order, most specific first (user overrides org). */
+/** CSS-cascade resolution order, most specific first (user overrides org). `app` is deliberately NOT in it (cor:sec:020:01). */
 export const SECRET_SCOPE_ORDER: readonly SecretOwnerType[] = ['user', 'org'];
 
 /** Cascade-resolution key: lowercase, dash-separated, unique per owner. */
@@ -66,7 +64,11 @@ export function isModelReadableKind(kind: string): boolean {
   return (MODEL_READABLE_SECRET_KINDS as readonly string[]).includes(kind);
 }
 
-const MAX_VALUE_JSON_LENGTH = 32 * 1024;
+/**
+ * Q4 (cap): one named constant, in BYTES of the stored plaintext JSON (not characters: `'é'.repeat(16_400)` is 16,400
+ * characters and 32,802 bytes). Another number from Holger is a change to this line.
+ */
+export const SECRET_VALUE_MAX_BYTES = 32 * 1024;
 const MAX_METADATA_JSON_LENGTH = 4 * 1024;
 
 function badInput(message: string): GraphQLError {
@@ -129,6 +131,14 @@ export interface ValidatedSecretInput {
   valueEncrypted: string;
 }
 
+/** The validated half of a secret write, before any encryption: the owner chooses the key (platform or App). */
+export interface ValidatedSecretPayload {
+  metadata: Record<string, unknown>;
+  /** The plaintext JSON that gets encrypted; `sizeBytes` is its byte length. */
+  valueJson: string;
+  sizeBytes: number;
+}
+
 /**
  * Per-kind validation hook + the ONLY write path for `valueEncrypted`.
  * Returns the normalized inspectable metadata and the ciphertext; there is
@@ -140,7 +150,28 @@ export function validateAndEncryptSecret(
   kind: string,
   metadata: unknown,
   value: unknown,
+  opts?: SecretPayloadOptions,
 ): ValidatedSecretInput {
+  const { metadata: normalized, valueJson } = validateSecretPayload(kind, metadata, value, opts);
+  return { metadata: normalized, valueEncrypted: encryptToken(valueJson) };
+}
+
+export interface SecretPayloadOptions {
+  /**
+   * Apply the value-size cap (default true). A metadata-only edit re-validates the STORED value for kind and shape
+   * but passes false: the cap binds a value when it is written, so a value stored under an older, looser rule (an
+   * org or user value of at most 32,768 characters but more than 32,768 bytes) never freezes its own metadata (#4157).
+   */
+  enforceValueSize?: boolean;
+}
+
+/** Per-kind validation, shared by every owner type; encryption is the caller's (platform key, or the App key). */
+export function validateSecretPayload(
+  kind: string,
+  metadata: unknown,
+  value: unknown,
+  opts: SecretPayloadOptions = {},
+): ValidatedSecretPayload {
   if (!(SECRET_KINDS as readonly string[]).includes(kind)) {
     throw badInput(`Unknown secret kind "${kind}". v1 kinds: ${SECRET_KINDS.join(', ')}.`);
   }
@@ -176,14 +207,17 @@ export function validateAndEncryptSecret(
     throw badInput(`metadata is too large (max ${MAX_METADATA_JSON_LENGTH} JSON chars).`);
   }
   const valueJson = JSON.stringify(value);
-  if (valueJson.length > MAX_VALUE_JSON_LENGTH) {
-    throw badInput(`value is too large (max ${MAX_VALUE_JSON_LENGTH} JSON chars).`);
+  const sizeBytes = Buffer.byteLength(valueJson, 'utf8');
+  if (opts.enforceValueSize !== false && sizeBytes > SECRET_VALUE_MAX_BYTES) {
+    throw badInput(`value is too large (max ${SECRET_VALUE_MAX_BYTES} bytes).`);
   }
-  return { metadata: normalized, valueEncrypted: encryptToken(valueJson) };
+  return { metadata: normalized, valueJson, sizeBytes };
 }
 
 /** Decrypt a row's payload for RESOLUTION (run tool / server-side inject). */
-export function decryptSecretValue(row: { valueEncrypted: string }): unknown {
+export function decryptSecretValue(row: { valueEncrypted: string | null }): unknown {
+  // An App row has no value of its own (its value is its newest version); this path is org/user only.
+  if (row.valueEncrypted === null) throw new Error('A secret without a value of its own is not resolved here.');
   return JSON.parse(decryptToken(row.valueEncrypted));
 }
 

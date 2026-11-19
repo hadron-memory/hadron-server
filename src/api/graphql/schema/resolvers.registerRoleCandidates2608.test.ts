@@ -41,7 +41,7 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { githubId: 218001, githubUsername: 'tw-admin', handle: 'tw-admin', roles: ['READER'] } });
   outsider = await db.user.create({ data: { githubId: 218003, githubUsername: 'tw-out', handle: 'tw-out', roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   teamAgentId = agent.id;
   const row = await db.agent.findUniqueOrThrow({ where: { id: teamAgentId } });
   teamMemoryId = row.systemMemoryId as string;
@@ -54,7 +54,7 @@ beforeEach(async () => {
 });
 
 async function roleAgent(name: string, parent?: string) {
-  const a = await M.createAgent({}, { orgId: org.id, name }, ctx(admin.id));
+  const a = await M.createAgent({}, { orgRef: org.id, name }, ctx(admin.id));
   if (parent) await db.agent.update({ where: { id: a.id }, data: { extendsAgentId: parent } });
   const row = await db.agent.findUniqueOrThrow({ where: { id: a.id } });
   return { id: a.id, memoryId: row.systemMemoryId as string };
@@ -65,7 +65,7 @@ async function foreignAgent(visibility?: 'PUBLIC') {
   const o = await db.organization.create({ data: { id: generateId(), name: 'Foreign', urn: `foreign-${generateId().toLowerCase()}.example` } });
   const owner = await db.user.create({ data: { handle: `owner-${generateId()}` } });
   await db.orgMember.create({ data: { organizationId: o.id, userId: owner.id, role: 'ADMIN' } });
-  const a = await M.createAgent({}, { orgId: o.id, name: 'Foreign role' }, ctx(owner.id));
+  const a = await M.createAgent({}, { orgRef: o.id, name: 'Foreign role' }, ctx(owner.id));
   if (visibility) await db.agent.update({ where: { id: a.id }, data: { visibility } });
   const row = await db.agent.findUniqueOrThrow({ where: { id: a.id } });
   return { id: a.id, memoryId: row.systemMemoryId as string };
@@ -95,7 +95,7 @@ describe('#2608 register role candidates', () => {
     await mapTask(); const foreignOrg = await db.organization.create({ data: { id: generateId(), name: 'Foreign', urn: `foreign-${generateId().toLowerCase()}.example` } });
     const owner = await db.user.create({ data: { handle: `owner-${generateId()}` } });
     await db.orgMember.create({ data: { organizationId: foreignOrg.id, userId: owner.id, role: 'ADMIN' } });
-    const a = await M.createAgent({}, { orgId: foreignOrg.id, name: 'Foreign role' }, ctx(owner.id));
+    const a = await M.createAgent({}, { orgRef: foreignOrg.id, name: 'Foreign role' }, ctx(owner.id));
     // The foreign Agent inherits a task readable by this caller. The Agent gate must still omit it;
     // gating only the resolved task memory would disclose the foreign role holder.
     await node(teamMemoryId, 'tasks:finish', { isRunnable: true });

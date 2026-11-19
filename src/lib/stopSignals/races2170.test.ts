@@ -62,7 +62,7 @@ beforeEach(async () => {
   max = await u(81, 'max');
   mia = await u(82, 'mia');
   await db.orgMember.create({ data: { organizationId: org.id, userId: max.id, role: 'ADMIN' } });
-  agentId = (await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(max.id))).id;
+  agentId = (await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(max.id))).id;
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true } });
   await db.appMember.create({ data: { appId: app.id, userId: mia.id, role: 'member' } });
   const w = (name: string, extra: Record<string, unknown> = {}) =>

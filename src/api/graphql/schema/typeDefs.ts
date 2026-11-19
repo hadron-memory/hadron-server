@@ -1,9 +1,22 @@
+/**
+ * The #3340 run-refusal sentence shared by the app-key surfaces (appKeys,
+ * revokeAppKey, revokeAppGrant, revokeAppKeyScope). One interpolated constant
+ * instead of four pasted copies kept in sync only by the guard (#4479, F5).
+ * The wording is pinned — normalized, line breaks and all — by
+ * typeDefs.sdlAudit3348.test.ts; interpolating it here leaves every site with
+ * the same rendered sentence instead of four differently-wrapped copies.
+ */
+const RUN_REFUSAL_3340 =
+  'Never an App key, a host-launched or uninstructed worker session, an impersonation, or a run that carries a worker session; a plain user-backed run is admitted, as before, when the user it carries manages the App (#3340).';
+
 export const typeDefs = `#graphql
   "#1156 — hrn:node:hadronmemory.com:specs:cor:dmo:070:05: closed end causes; unknown is reserved for legacy rows."
   enum SessionEndReason {
     ended
     superseded
     expired
+    "#4292: the host running a SHORT_LIVED worker ended the session on its proof that no agent runs; no handoff was written."
+    agent_absent
     unknown
   }
 
@@ -1580,7 +1593,9 @@ export const typeDefs = `#graphql
     "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:06) — the node's signatures and their derived states, current signers first. Batch-loaded on list and search reads. An encrypted node reads NOT_APPLICABLE and lists none."
     signatureStatus: NodeSignatureStatus!
     "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — the node's signing requests, newest first, including ended ones (#10019). state filters on the effective state (an open request past its deadline is EXPIRED). first: 1–100, default 20."
-    signingRequests(state: SigningRequestState, first: Int = 20): [SigningRequest!]!
+    signingRequests(state: SigningRequestState, first: Int = 20): [SigningRequest!]! @deprecated(reason: "Use signingRequestsPage for hasMore and nextCursor.")
+    "The node's signing requests with the same reader gate; effective-state filtering precedes paging. Newest first (createdAt, id descending). Default 20, clamp 1–100; after is an authenticated filter-scoped keyset (createdAt, id), valid after deletion of the boundary row. offset is an alternative, never combined with after. total counts the full current filtered set. hrn:node:hadronmemory.com:specs:cor:api:120:04; hrn:node:hadronmemory.com:specs:cor:api:120:05."
+    signingRequestsPage(state: SigningRequestState, first: Int = 20, after: String, offset: Int): SigningRequestsPage!
     "#1610 — the Worker that created this node, when it was written in a worker session. The user is createdBy. Null for a write with no worker behind it, and for nodes written before #1610."
     createdByWorker: ActorRef
     "#1610 — the Agent behind this node's creation: a worker's role agent, an agent session, or a headless App run. Null when no agent was behind it."
@@ -1749,7 +1764,7 @@ export const typeDefs = `#graphql
 
     A GOVERNED family routes the write to that kind's own authoring door, and
     the generic node surface is refused: 'review' / 'review.*' and 'spec' /
-    'spec.*' and 'decision' / 'decision.*', alongside the task kind, which is
+    'spec.*' and 'question' / 'question.*', alongside the task kind, which is
     gated on 'isRunnable'
     rather than on any label because a label can be omitted and a capability
     cannot. Other roles do not invoke a governed door, but can still be
@@ -1938,6 +1953,12 @@ export const typeDefs = `#graphql
     input only, never an authorization input: it is self-declared.
     """
     family: String
+    """
+    #4291 — the effort this session runs at (hrn:node:hadronmemory.com:specs:cor:agt:060:04), as the launcher applied it and the session
+    reported it at start, on a resume or through updateSession. Null until reported; NOT_APPLICABLE for a family with no
+    effort control. A report, never a control: nothing makes a running session adopt a value.
+    """
+    effort: EffortLevel
     "#1709 — a host-launched session (hrn:node:hadronmemory.com:specs:cor:agt:070:08): the host that started it. Null for a session started by hand."
     launchHostId: String
     "#1709 — the worker.start operation that launched it."
@@ -2069,6 +2090,8 @@ export const typeDefs = `#graphql
     llmModel: String
     "Recorded on a session the redemption starts, and refreshed on an open session it resumes (#2086). Wins over the family a model implies; an invalid token is refused before any claim is spent."
     family: String
+    "#4291: recorded on a session the redemption starts, and refreshed on an open session it resumes. Omitted or null never clears."
+    effort: EffortLevel
     "Recorded on a session the redemption starts only."
     transcriptPath: String
     """
@@ -2565,10 +2588,10 @@ export const typeDefs = `#graphql
     alreadyApprovedCount: Int!
     "Locs of reserved placeholders, which have no spec to approve yet."
     skippedPlaceholders: [String!]!
-    "#1641 — decisions and decision logs in this memory, which bulk approval never approves: a decision is approved individually by one of its deciders."
-    skippedDecisionCount: Int!
+    "#1641 — questions and question logs in this memory, which bulk approval never approves: a question is approved individually by one of its deciders."
+    skippedQuestionCount: Int!
     "#1641 — the first 50 of those, by loc."
-    skippedDecisions: [String!]!
+    skippedQuestions: [String!]!
     "#2043 — boot prompts in this Agent system or App install memory that this caller may not approve: only the Agent's or App's manager approves them, as themselves, never through a worker session."
     skippedBootPromptCount: Int!
     "#2043 — the first 50 of those, by loc."
@@ -2585,17 +2608,17 @@ export const typeDefs = `#graphql
     urn: String
   }
 
-  "#1641 — a decision's derived state (hrn:node:hadronmemory.com:hadron-server:design:decision-nodes §6.3). Computed by the one evaluation on every read, never stored. Precedence: TAMPERED, UNVERIFIABLE, WITHDRAWN, SUPERSEDED, STALE, DECIDED, ANSWERED_UNCONFIRMED, OPEN."
-  enum DecisionState {
+  "#1641 — a question's derived state (hrn:node:hadronmemory.com:hadron-server:design:decision-nodes §6.3). Computed by the one evaluation on every read, never stored. Precedence: TAMPERED, UNVERIFIABLE, WITHDRAWN, SUPERSEDED, STALE, DECIDED, ANSWERED_UNCONFIRMED, OPEN."
+  enum QuestionState {
     "Not every part is answered."
     OPEN
     "Every part is answered; the tier's evidence (a decider's approval, or later a signature) is missing at the current revision."
     ANSWERED_UNCONFIRMED
     "Answered, and the tier's evidence by a decider is intact at the current revision. The only state a ruling may be relied on in."
     DECIDED
-    "Evidence exists, but for an earlier revision: the decision changed after it was approved."
+    "Evidence exists, but for an earlier revision: the question changed after it was approved."
     STALE
-    "The rendered content, the structured payload and the approval hash disagree: changed outside the decision operations."
+    "The rendered content, the structured payload and the approval hash disagree: changed outside the question operations."
     TAMPERED
     "Written by a codec or renderer this server does not know, so it cannot be verified (fail closed)."
     UNVERIFIABLE
@@ -2603,25 +2626,25 @@ export const typeDefs = `#graphql
     SUPERSEDED
   }
 
-  "#1641 — the assurance a decision's answer needs. APPROVED: a decider's approval. SIGNED: a decider's passkey signature (#1614; not available yet, so a SIGNED decision stays ANSWERED_UNCONFIRMED)."
-  enum DecisionTier {
+  "#1641 — the assurance a question's answer needs. APPROVED: a decider's approval. SIGNED: a decider's passkey signature (#1614; not available yet, so a SIGNED question stays ANSWERED_UNCONFIRMED)."
+  enum QuestionTier {
     APPROVED
     SIGNED
   }
 
-  enum DecisionUrgency {
+  enum QuestionUrgency {
     NORMAL
     URGENT
   }
 
   "#1641 — list order. PORTAL_DEFAULT: urgent first, then open before answered, then newest ask. CODE: code order."
-  enum DecisionSort {
+  enum QuestionSort {
     PORTAL_DEFAULT
     CODE
   }
 
   "#1641 — where an answer was given, as the answering caller states it (a claim)."
-  enum DecisionAnswerVia {
+  enum QuestionAnswerVia {
     PORTAL
     CLI
     MCP
@@ -2630,20 +2653,20 @@ export const typeDefs = `#graphql
   }
 
   "#1641 — a reference: exactly one of an external ref (hadron-server#1640, team:6783), a node id or URN, or a spec citation."
-  type DecisionRef {
+  type QuestionRef {
     ref: String
     node: String
     spec: String
   }
 
-  input DecisionRefInput {
+  input QuestionRefInput {
     ref: String
     node: String
     spec: String
   }
 
   "#1641 — an authenticated actor: taken from the principal, never supplied by a client. Public projections only (#552)."
-  type DecisionActor {
+  type QuestionActor {
     userId: ID
     workerId: ID
     appId: ID
@@ -2652,7 +2675,7 @@ export const typeDefs = `#graphql
     app: CommentActorRef
   }
 
-  type DecisionOption {
+  type QuestionOption {
     "The option id an answer names."
     key: String!
     label: String!
@@ -2660,16 +2683,16 @@ export const typeDefs = `#graphql
     cost: String
   }
 
-  type DecisionRecommendation {
+  type QuestionRecommendation {
     key: String!
     "Who recorded the recommendation (authenticated)."
-    by: DecisionActor!
+    by: QuestionActor!
     reason: String
     "A relayed recommendation's original author, as a claim."
     attributedTo: String
   }
 
-  type DecisionAnswer {
+  type QuestionAnswer {
     "The chosen option; null for a free-text answer."
     key: String
     text: String
@@ -2677,31 +2700,31 @@ export const typeDefs = `#graphql
     "The decider whose credential recorded it."
     byUserId: ID!
     at: DateTime!
-    via: DecisionAnswerVia!
+    via: QuestionAnswerVia!
     "Where the answer was given (a claim)."
-    source: DecisionRef
+    source: QuestionRef
     reason: String
     "An imported answer's recorded speaker (a claim, never rendered as the authenticated answerer)."
     claimedBy: String
     recordedByUserId: ID
   }
 
-  type DecisionPart {
-    "Permanent within the decision; amendments add parts, never renumber."
+  type QuestionPart {
+    "Permanent within the question; amendments add parts, never renumber."
     n: Int!
     "The citation of this part, e.g. DU-1."
     citation: String!
     question: String!
-    options: [DecisionOption!]!
+    options: [QuestionOption!]!
     "Null when the asker deliberately gave none (see noRecommendationReason). Never pre-selected."
-    recommendation: DecisionRecommendation
+    recommendation: QuestionRecommendation
     noRecommendationReason: String
-    answer: DecisionAnswer
+    answer: QuestionAnswer
     "Earlier answers to this part, oldest first: a re-answer appends, never replaces quietly."
-    answerHistory: [DecisionAnswer!]!
+    answerHistory: [QuestionAnswer!]!
   }
 
-  type DecisionApprovalEvidence {
+  type QuestionApprovalEvidence {
     byUserId: ID
     by: CommentActorRef
     "The revision approved."
@@ -2709,85 +2732,85 @@ export const typeDefs = `#graphql
     approvedAt: DateTime!
     "INTACT, TAMPERED, SUPERSEDED or NOT_APPROVED: the approval hash checked against the live text."
     integrity: String!
-    "Whether the approver is one of the decision's deciders (only then does it count)."
+    "Whether the approver is one of the question's deciders (only then does it count)."
     byDecider: Boolean!
   }
 
-  type DecisionEvidence {
+  type QuestionEvidence {
     "The latest approval on record, whoever gave it."
-    approval: DecisionApprovalEvidence
+    approval: QuestionApprovalEvidence
   }
 
-  type DecisionWithdrawal {
-    by: DecisionActor!
+  type QuestionWithdrawal {
+    by: QuestionActor!
     at: DateTime!
     reason: String!
   }
 
   """
-  #1641 — a human decision: a governed node (role decision) under a decision log, written only by the
-  decision operations. Its content is rendered from this structured payload, so an approval covers
+  #1641 — a human question: a governed node (role question) under a question log, written only by the
+  question operations. Its content is rendered from this structured payload, so an approval covers
   exactly what was asked and answered. Plan: hrn:node:hadronmemory.com:hadron-server:design:decision-nodes.
   """
-  type Decision {
+  type Question {
     id: ID!
     urn: String!
-    "The decision's own page, where its card renders. Copy it; never build it."
+    "The question's own page, where its card renders. Copy it; never build it."
     portalUrl: String
     "Permanent: DA, DB, … issued in sequence by its log, never reused."
     code: String!
     n: Int!
     logId: ID
     title: String!
-    urgency: DecisionUrgency!
-    tier: DecisionTier!
+    urgency: QuestionUrgency!
+    tier: QuestionTier!
     authorizes: Boolean!
     "Migrated history that is never usable as an authorization."
     archival: Boolean!
     "DERIVED on every read. Rely on a ruling only while it is DECIDED."
-    state: DecisionState!
+    state: QuestionState!
     context: String
-    parts: [DecisionPart!]!
-    "What is waiting on this decision."
-    blocks: [DecisionRef!]!
-    sources: [DecisionRef!]!
+    parts: [QuestionPart!]!
+    "What is waiting on this question."
+    blocks: [QuestionRef!]!
+    sources: [QuestionRef!]!
     "Spec citations the ruling must reach."
-    followUps: [DecisionRef!]!
+    followUps: [QuestionRef!]!
     deciderIds: [ID!]!
     deciders: [CommentActorRef!]!
     "True when the caller is a decider, including through an account merged into theirs (#1715)."
     viewerIsDecider: Boolean!
     "Account merges the stored user ids follow: the record keeps the merged-away id (#1715)."
-    identityMerges: [DecisionIdentityMerge!]!
-    askedBy: DecisionActor!
+    identityMerges: [QuestionIdentityMerge!]!
+    askedBy: QuestionActor!
     askedAt: DateTime
     "When the last part was answered; null while any part is open."
     answeredAt: DateTime
-    withdrawn: DecisionWithdrawal
-    evidence: DecisionEvidence!
+    withdrawn: QuestionWithdrawal
+    evidence: QuestionEvidence!
     "The node's current revision: the expectedRevision of the next change."
     revSeq: Int!
     node: Node
   }
 
-  type DecisionPage {
-    items: [Decision!]!
-    "Matching decisions before paging."
+  type QuestionPage {
+    items: [Question!]!
+    "Matching questions before paging."
     total: Int!
   }
 
-  type DecisionPurge {
+  type QuestionPurge {
     code: String!
     byUserId: ID!
     by: CommentActorRef
     at: DateTime!
     reason: String!
-    "sha256 of the purged decision's rendered content."
+    "sha256 of the purged question's rendered content."
     contentHash: String!
   }
 
-  "#1641 — a decision log's settings (never a decision, never approved)."
-  type DecisionLog {
+  "#1641 — a question log's settings (never a question, never approved)."
+  type QuestionLog {
     id: ID!
     urn: String!
     portalUrl: String
@@ -2799,23 +2822,23 @@ export const typeDefs = `#graphql
     lastCode: Int!
     defaultDeciderIds: [ID!]!
     eligibleDeciderIds: [ID!]!
-    "Who decides a decision asked without naming deciders."
+    "Who decides a question asked without naming deciders."
     defaultDeciders: [CommentActorRef!]!
-    "Who else a decision may name as a decider. A decision's deciders are narrowed from these, never widened."
+    "Who else a question may name as a decider. A question's deciders are narrowed from these, never widened."
     eligibleDeciders: [CommentActorRef!]!
-    purges: [DecisionPurge!]!
+    purges: [QuestionPurge!]!
     "Account merges the stored user ids follow: the record keeps the merged-away id (#1715)."
-    identityMerges: [DecisionIdentityMerge!]!
+    identityMerges: [QuestionIdentityMerge!]!
     revSeq: Int!
   }
 
   """
-  #1715 — an account merge that a user id stored in a decision or a log follows.
+  #1715 — an account merge that a user id stored in a question or a log follows.
   Stored ids are never rewritten by mergeUsers, because they are part of the
   authenticated record: the record still names fromUserId, and that account now
   acts as toUserId. A chain of merges is listed link by link, oldest first.
   """
-  type DecisionIdentityMerge {
+  type QuestionIdentityMerge {
     fromUserId: ID!
     from: CommentActorRef
     toUserId: ID!
@@ -2823,9 +2846,9 @@ export const typeDefs = `#graphql
     mergedAt: DateTime!
   }
 
-  "#1641 — verifyDecision: the one evaluation's findings."
-  type DecisionVerification {
-    state: DecisionState!
+  "#1641 — verifyQuestion: the one evaluation's findings."
+  type QuestionVerification {
+    state: QuestionState!
     "NO_BLOCK, BLOCK_INVALID, UNKNOWN_CODEC, UNKNOWN_RENDERER, RENDER_MISMATCH, DATA_MISMATCH, APPROVAL_HASH_MISMATCH."
     findings: [String!]!
     codec: String
@@ -2836,70 +2859,70 @@ export const typeDefs = `#graphql
     approvalByDecider: Boolean!
   }
 
-  input DecisionOptionInput {
+  input QuestionOptionInput {
     key: String!
     label: String!
     meaning: String
     cost: String
   }
 
-  input DecisionRecommendationInput {
+  input QuestionRecommendationInput {
     key: String!
     reason: String
     "Relaying someone else's recommendation: who (recorded as a claim)."
     attributedTo: String
   }
 
-  input DecisionNoRecommendationInput {
+  input QuestionNoRecommendationInput {
     reason: String!
   }
 
-  "#1641 — one part of a decision. Give options or yesno, and a recommendation or noRecommendation."
-  input DecisionPartInput {
+  "#1641 — one part of a question. Give options or yesno, and a recommendation or noRecommendation."
+  input QuestionPartInput {
     question: String!
-    options: [DecisionOptionInput!]
+    options: [QuestionOptionInput!]
     yesno: Boolean
-    recommendation: DecisionRecommendationInput
-    noRecommendation: DecisionNoRecommendationInput
+    recommendation: QuestionRecommendationInput
+    noRecommendation: QuestionNoRecommendationInput
   }
 
-  input AskDecisionInput {
+  input AskQuestionInput {
     title: String!
-    urgency: DecisionUrgency
-    "Default APPROVED; SIGNED when authorizes is true (APPROVED is then refused: DECISION_TIER_TOO_LOW)."
-    tier: DecisionTier
+    urgency: QuestionUrgency
+    "Default APPROVED; SIGNED when authorizes is true (APPROVED is then refused: QUESTION_TIER_TOO_LOW)."
+    tier: QuestionTier
     authorizes: Boolean
-    "The authorization a grant decision carries (authorizes: true only)."
+    "The authorization a grant question carries (authorizes: true only)."
     grant: JSON
     "Narrows the log's default deciders; never widens past its eligible set."
     deciders: [ID!]
     context: String
-    blocks: [DecisionRefInput!]
-    sources: [DecisionRefInput!]
-    followUps: [DecisionRefInput!]
-    parts: [DecisionPartInput!]!
+    blocks: [QuestionRefInput!]
+    sources: [QuestionRefInput!]
+    followUps: [QuestionRefInput!]
+    parts: [QuestionPartInput!]!
   }
 
   "#1641 — a change to an existing part (by its permanent number). Omitted fields are unchanged; answers never change here."
-  input DecisionPartPatchInput {
+  input QuestionPartPatchInput {
     n: Int!
     question: String
-    options: [DecisionOptionInput!]
+    options: [QuestionOptionInput!]
     yesno: Boolean
-    recommendation: DecisionRecommendationInput
-    noRecommendation: DecisionNoRecommendationInput
+    recommendation: QuestionRecommendationInput
+    noRecommendation: QuestionNoRecommendationInput
   }
 
-  input AmendDecisionInput {
+  input AmendQuestionInput {
     title: String
-    urgency: DecisionUrgency
-    tier: DecisionTier
+    urgency: QuestionUrgency
+    tier: QuestionTier
     context: String
-    blocks: [DecisionRefInput!]
-    sources: [DecisionRefInput!]
-    followUps: [DecisionRefInput!]
-    parts: [DecisionPartPatchInput!]
-    addParts: [DecisionPartInput!]
+    blocks: [QuestionRefInput!]
+    sources: [QuestionRefInput!]
+    followUps: [QuestionRefInput!]
+    parts: [QuestionPartPatchInput!]
+    addParts: [QuestionPartInput!]
   }
 
   "#1606 — a comment thread's state (hrn:node:hadronmemory.com:specs:cor:dmo:110:05). Top-level comments only."
@@ -3223,6 +3246,8 @@ export const typeDefs = `#graphql
     availableMemberRoles: [String!]!
     "#2138: when the whole team was paused (setTeamPause), or null. Separate from every worker's own pause."
     teamPausedAt: DateTime
+    "#4224 (S3 of #4229): the App's sweep switch (setAppSweepMode). OFF by default."
+    sweepMode: SweepMode!
     """
     #2109 — whether the current caller manages this App: its owner, an owner-role
     member, a live ADMIN or OWNER of its organization, or a platform admin for an
@@ -3868,7 +3893,7 @@ export const typeDefs = `#graphql
   type HostKeyUse {
     id: ID!
     hostId: String!
-    "register, collect, report, availability, read, (#1969) session: a refused session write (updateSession, endSession), or (#1981) issue: a refused issueHostOperation; checkpoint: registerContextResetRecovery with checkpoint input (including replay/refusal)."
+    "register, collect, report, availability, read, (#1969) session: a refused session write (updateSession, endSession), or (#4292) an endAgentlessSession, accepted or refused, or (#1981) issue: a refused issueHostOperation; checkpoint: registerContextResetRecovery with checkpoint input (including replay/refusal)."
     action: String!
     "The operation a report was about."
     operationId: ID
@@ -4212,7 +4237,7 @@ export const typeDefs = `#graphql
     publicAgentsPage(limit: Int, offset: Int): PublicResourceRefsPage!
   }
 
-  "A page of sanitized public resource refs that says whether more rows follow (#3873, hrn:node:hadronmemory.com:specs:cor:api:120:04). The marketplace catalogue keeps PublicResourceRefPage."
+  "A page of sanitized public resource refs that says whether more rows follow (#3873, hrn:node:hadronmemory.com:specs:cor:api:120:04). The marketplace catalogue keeps MarketplaceResourcePage."
   type PublicResourceRefsPage {
     items: [PublicResourceRef!]!
     total: Int!
@@ -4228,7 +4253,7 @@ export const typeDefs = `#graphql
   }
 
   "A paginated page of sanitized public resource refs (marketplace catalogue)."
-  type PublicResourceRefPage {
+  type MarketplaceResourcePage {
     items: [PublicResourceRef!]!
     total: Int!
   }
@@ -4907,6 +4932,15 @@ export const typeDefs = `#graphql
     usesTasks: Boolean!
     "#2162 (hrn:node:hadronmemory.com:specs:cor:agt:050:27): when a task one of this Agent's workers had started finishes or is cancelled, and it holds no other started task, its host resets the worker's context (a shed: the binding and session stay). Default false. Set by whoever manages the Agent."
     resetContextAfterTask: Boolean!
+    "#4224 (S3 of #4229): how long this Agent's workers run. LONG_LIVED (default): a worker's process should always run. SHORT_LIVED: only while the worker is the assignee of a pending or started task, one waiting on its child tasks included. Read by hostDesiredState at each call; changing it moves no session or process by itself. #4223 (hrn:node:hadronmemory.com:specs:cor:agt:050:10, Proposed there): for a SHORT_LIVED Agent's worker a task's closeSessionWhenDone is not read; the worker is asked to end its session when the last pending or started task assigned to it finishes or is cancelled, never while another is open, and no context reset is requested (resetContextAfterTask is not read). A worker marked leave-alone keeps the ordinary rule. Set by whoever manages the Agent, like usesTasks."
+    lifecycle: AgentLifecycle!
+    """
+    #4225 (S4b of #4229; hrn:node:hadronmemory.com:specs:cor:agt:050:27 part 12, Proposed; G4): the context size, in tokens,
+    above which a worker of this LONG_LIVED Agent whose host reports it idle at an empty prompt is reset (one
+    worker.reset-context, at most one an hour per worker). Null (the default) is no cap. A busy worker is never reset
+    for it, and a SHORT_LIVED Agent's workers ignore it. Set by whoever manages the Agent.
+    """
+    contextCap: Int
     type: AgentType!
     surfaces: [String!]!
     # #928/#974 persona dressing (cor:agt:020:01): universal metadata that
@@ -5060,7 +5094,7 @@ export const typeDefs = `#graphql
     ownerType: AiConfigOwnerType!
     "ID of the owning HadronServer / Organization / App / Agent."
     ownerId: ID!
-    "Provider identifier; known: 'anthropic' | 'openai' | 'glm' | 'bedrock' | 'openai-compatible' (any OpenAI-wire host; endpoint required)."
+    "Provider identifier; known: 'anthropic' | 'openai' | 'glm' | 'kimi' | 'bedrock' | 'openai-compatible' (any OpenAI-wire host; endpoint required)."
     provider: String!
     "Model identifier, passed verbatim to the provider."
     model: String!
@@ -5445,7 +5479,7 @@ export const typeDefs = `#graphql
     title: String!
     conversationName: String
     stageName: String
-    "Names of conversations this chat has completed, in first-completion order; empty for encrypted rows. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
+    "Names of conversations this chat has completed, in first-completion order; an empty list for encrypted rows means the state is unreadable, not proof that none completed. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
     completedConversations: [String!]!
     messageCount: Int!
     createdAt: DateTime!
@@ -5858,6 +5892,15 @@ export const typeDefs = `#graphql
     """
     tier: String
     """
+    #4291 (hrn:node:hadronmemory.com:specs:cor:agt:060:04) — the worker's record of the family, model and effort its
+    session last reported: one value each, no history. It follows the session on every bind and report (whoever made
+    the change), is never cleared by a null, and is kept when the worker unbinds, when family and model above are null:
+    an unbound worker is matched on it, and a start launches it with these unless the task names its own. A report,
+    not a control: no edit makes a running session adopt a value. Null on the same read gate as hasLiveSession.
+    Self-declared: advisory, never authorization.
+    """
+    lastUsed: WorkerRunSettings
+    """
     hadron-cli#487 — when this worker was last DRIVEN, over every session it has
     ever had. Null for a worker nobody has ever bound, and that null is the
     point: a casting nobody picked up renders identically to one worked
@@ -5922,6 +5965,14 @@ export const typeDefs = `#graphql
     retiredAt: DateTime
     "Who retired this worker. WORKING-STATE field (#1149), masked like createdBy."
     retiredBy: String
+    "#4224 (S3 of #4229): the leave-alone marker (setWorkerLeaveAlone). A host's sweep observes and reports a marked worker and never starts, stops or repairs it. WORKING-STATE field (#1149, hrn:node:hadronmemory.com:specs:cor:dmo:050:11): null for a caller who may see only the worker's profile."
+    leaveAlone: Boolean
+    "Why the worker is marked leave-alone, when a reason was given. WORKING-STATE field (#1149), masked like createdBy."
+    leaveAloneReason: String
+    "The user who marked the worker leave-alone. WORKING-STATE field (#1149), masked like createdBy."
+    leaveAloneBy: String
+    "When the worker was marked leave-alone; null when it is not marked. WORKING-STATE field (#1149), masked like createdBy."
+    leaveAloneAt: DateTime
     """
     #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt served to this worker's open session. Readable by whoever may read the worker's
     internals; null for anyone else, and when no session is open.
@@ -6301,6 +6352,22 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  "One page of org-bound watches in jobId order. Default 20, clamp 1–100. Authenticated jobId keyset cursors survive deletion of the boundary row. Offset is a separate option. total counts current org-bound watches. hrn:node:hadronmemory.com:specs:cor:api:120:04."
+  type WebPollsPage {
+    items: [WebPoll!]!
+    total: Int!
+    hasMore: Boolean!
+    nextCursor: String
+  }
+
+  "One page of a node's signing requests, including ended requests. hrn:node:hadronmemory.com:specs:cor:api:120:04."
+  type SigningRequestsPage {
+    items: [SigningRequest!]!
+    total: Int!
+    hasMore: Boolean!
+    nextCursor: String
+  }
+
   """
   A page-monitor watch (#1562): the hadrontool-webfetch job behind a run's
   web_poll_start, as the org's admins see it outside a run. \`url\` is the
@@ -6309,7 +6376,7 @@ export const typeDefs = `#graphql
   """
   type WebPoll {
     jobId: ID!
-    "The sidecar's job state, such as active or cancelled."
+    "An open string supplied by hadrontool-webfetch. Values seen include active and cancelled; these examples are not exhaustive, and clients must tolerate other states."
     status: String!
     url: String!
     appId: ID!
@@ -6348,16 +6415,59 @@ export const typeDefs = `#graphql
 
   """
   One named, owner-scoped secret — the general secret store (#677).
-  Polymorphic owner (user | org | app | memory). The value is encrypted
-  at rest and WRITE-ONLY: no field here ever returns it — kind + metadata
-  are the inspectable half (you can see THAT a secret exists and, for
+  Polymorphic owner (user | org | app). The value is encrypted at rest and
+  WRITE-ONLY: no field here ever returns it — kind + metadata are the
+  inspectable half (you can see THAT a secret exists and, for
   webfetch-auth, WHERE it applies, without decrypting). A bare name
   resolves at run time via the CSS cascade, most-specific-first:
-  memory -> app -> user -> org.
+  user -> org. An App-owned secret is NEVER in that cascade: no run
+  resolves it (hrn:node:hadronmemory.com:specs:cor:sec:020:01). An App
+  secret keeps its values as versions: every store adds one
+  (hrn:node:hadronmemory.com:specs:cor:sec:010:03).
   """
+  input IssueSecretReadClientInput {
+    "The App secret, by id or URN."
+    secretRef: ID!
+    "WORKER: a live worker of the App (holderRef is its id). USER: the issuer themself (holderRef omitted)."
+    holderKind: GrantHolderKind!
+    holderRef: ID
+    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refused (SECRET_AUTO_DELETE_NOT_AVAILABLE) until the deletion is built (#4001)."
+    autoDelete: Boolean! = false
+    startsAt: DateTime
+    expiresAt: DateTime
+    maxReads: Int
+    reason: String!
+  }
+
+  type SecretReadClientIssued {
+    clientId: ID!
+    grantId: ID!
+    secretName: String!
+    selfIssued: Boolean!
+  }
+
+  type SecretReadClient {
+    clientId: ID!
+    grantId: ID!
+    secretId: ID!
+    secretName: String!
+    selfIssued: Boolean!
+    "SECRET_DELETED | PROTECTED once the client has ended, else null."
+    endReason: String
+    createdAt: DateTime!
+  }
+
+  type SecretRevealed {
+    secretName: String!
+    "The current value as JSON text."
+    value: String!
+    "Reads left on the grant, or null when it has no budget."
+    readsLeft: Int
+  }
+
   type Secret {
     id: ID!
-    "Owner scope: user | org | app | memory."
+    "Owner scope: user | org | app."
     ownerType: String!
     ownerId: ID!
     "Cascade-resolution key; unique per owner; lowercase [a-z0-9-], max 64."
@@ -6370,6 +6480,58 @@ export const typeDefs = `#graphql
     createdBy: String
     updatedAt: DateTime!
     updatedBy: String
+    "Whether changes need a person's change request. App secrets only; always false for org and user secrets."
+    protected: Boolean!
+    "The newest version's number. App secrets only; null for org and user secrets (they have no versions)."
+    currentVersion: Int
+    "An App secret's kept versions, newest first: numbers, sizes and authorship, never a value. Paged (hrn:node:hadronmemory.com:specs:cor:api:120:04): default 20, cap 200, limit 0 counts only. Empty for org and user secrets."
+    versions(limit: Int, offset: Int): SecretVersionsPage!
+  }
+
+  """
+  One stored value of an App-owned secret, as metadata only: there is no field that returns the value or its ciphertext.
+  """
+  type SecretVersion {
+    id: ID!
+    versionNo: Int!
+    "Bytes of the stored value."
+    sizeBytes: Int!
+    writtenAt: DateTime!
+    writtenByUserId: String
+    writtenByWorkerId: String
+    "Set when a newer version was stored; null on the current version."
+    supersededAt: DateTime
+  }
+
+  """
+  One audit event of an App secret: who did what, when, with what outcome. Never a value.
+  """
+  type SecretEvent {
+    id: ID!
+    ownerType: String!
+    ownerId: ID!
+    secretId: ID!
+    secretName: String!
+    versionNo: Int
+    "STORE | VERSION | METADATA | DELETE."
+    kind: String!
+    outcome: String!
+    actorUserId: String
+    workerId: String
+    sessionId: String
+    at: DateTime!
+  }
+
+  type SecretVersionsPage {
+    items: [SecretVersion!]!
+    total: Int!
+    "Whether versions remain past this page."
+    hasMore: Boolean!
+  }
+
+  type SecretEventsPage {
+    items: [SecretEvent!]!
+    total: Int!
   }
 
   """
@@ -6836,7 +6998,7 @@ export const typeDefs = `#graphql
     """
     #1201 — what this node is FOR (open string). NOT 'nodeType' (the
     platform-kind axis) and NOT 'objectType' (the collection discriminator).
-    A GOVERNED family ('review', 'spec', 'decision', including dotted descendants)
+    A GOVERNED family ('review', 'spec', 'question', including dotted descendants)
     requires that kind's own door; generic createNode refuses it.
     """
     role: String
@@ -7322,6 +7484,8 @@ export const typeDefs = `#graphql
     ADOPTABLE
     "Create would store this schedule UNADOPTED: summary and hash are null and reason says which kind."
     CANNOT_BE_ADOPTED
+    "#3483: the caller is a worker-bound session and create would be refused with TRIGGER_GRANT_REQUIRED: it holds no live, signed schedule.create grant for this entry node in this App (hrn:node:hadronmemory.com:specs:cor:agt:010:01). Summary, hash and reason are null. Only while the grant check is on."
+    GRANT_REQUIRED
   }
 
   enum AgentSchedulePreviewReason {
@@ -7430,13 +7594,36 @@ export const typeDefs = `#graphql
   enum GrantHolderKind { USER AGENT WORKER APP }
 
   """
+  #4173 (hrn:node:hadronmemory.com:specs:cor:acl:140:03): where a grant stands, worked out from its record on every read and never stored. An
+  ended grant keeps its first end. A grant withdrawn before #4173 shipped reads REVOKED (its withdrawal was not recorded separately). No
+  name exists yet for an end from a deleted secret or from protection being turned on.
+  """
+  enum GrantState {
+    "Asked for and not yet signed. Allows nothing."
+    PENDING
+    "Signed and not ended. Allows its action once its start has come (allows says whether that is now)."
+    ACTIVE
+    "Its use limit was reached."
+    SPENT
+    "Its expiry came first (a pending grant past its expiry too)."
+    EXPIRED
+    "Ended by a person's revoke."
+    REVOKED
+    "Its pending request was withdrawn."
+    WITHDRAWN
+    "The holder went (a person erased, a worker retired, an agent or App deleted)."
+    HOLDER_GONE
+  }
+
+  """
   A grant (#3789, hrn:node:hadronmemory.com:specs:cor:acl:140:05): ids and scalars only, so no other entity's field resolvers are reachable
-  through it. Its stored facts as stored, and allows, which is computed. There is deliberately NO state label: nothing names the
-  cases hrn:node:hadronmemory.com:specs:cor:acl:140:03 leaves open (withdrawn, past expiry while pending, signed before its start, a departed holder).
+  through it. Its stored facts as stored, and allows and state, which are computed (#4173).
   """
   type Grant {
     id: ID!
     appId: ID!
+    "#3709 — the grant's computed address hrn:grant:<root>:<app-slug>:<grant-id> (never stored: composed from the App's current urn plus the row id, so after an App rename only the new spelling is emitted while both spellings keep resolving through the alias map, hrn:node:hadronmemory.com:specs:cor:urn:030). Null only when the stored App urn cannot compose."
+    urn: String
     "The registered action this grant allows."
     action: String!
     "The values it allows (a single value, a list or a wildcard); never a secret."
@@ -7468,6 +7655,8 @@ export const typeDefs = `#graphql
     holderDepartedAt: DateTime
     "Whether the grant allows its action right now, judged on the database clock by the one live function (activated, not revoked, holder not gone, App not deleted, started, not expired, not spent). A fact about this instant, never a lifecycle name."
     allows: Boolean!
+    "#4173: the lifecycle state (hrn:node:hadronmemory.com:specs:cor:acl:140:03), the same on every surface that returns the grant."
+    state: GrantState!
     "#3649 slice D (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — its signatures, each re-verified on this read from the stored assertion. Readable by exactly those who may read the grant; it adds no reach."
     signatureStatus: GrantSignatureStatus!
   }
@@ -7515,6 +7704,41 @@ export const typeDefs = `#graphql
 
   type GrantsPage {
     items: [Grant!]!
+    total: Int!
+  }
+
+  """
+  #3708 (hrn:node:hadronmemory.com:specs:cor:acl:140:02, ruling 0255 item 2): one parameter an action declares.
+  """
+  type GrantActionParameter {
+    "The parameter's name, as a grant's values name it."
+    name: String!
+    "The kind of value it takes, e.g. node-ref."
+    type: String!
+    "True when a wildcard value is refused for this parameter."
+    refusesWildcard: Boolean!
+  }
+
+  """
+  #3708 (hrn:node:hadronmemory.com:specs:cor:acl:140:02): one registered action a grant can allow. The registry is written only by a deploy; no call creates, changes or deletes an action. There is no plain-language summary here (its own slice).
+  """
+  type GrantAction {
+    "The dotted code, unique, e.g. schedule.create."
+    name: String!
+    "Where the action comes from: PLATFORM today."
+    source: String!
+    "The tool that performs it, if any."
+    tool: String
+    "The parameters a grant of this action must supply."
+    parameters: [GrantActionParameter!]!
+    "The enforcement level the action DECLARES: what the platform promises, not an active guarantee. It says nothing about whether a gate enforces it today (schedule.create and webhook.create are not enforced until hadron-server#3483; the boot-prompt actions are checked where the grant is spent)."
+    enforcement: String!
+    "A closed key naming who may issue a grant of this action."
+    issuerRule: String!
+  }
+
+  type GrantActionsPage {
+    items: [GrantAction!]!
     total: Int!
   }
 
@@ -7927,6 +8151,13 @@ export const typeDefs = `#graphql
     """
     family: String
     """
+    #4291 (hrn:node:hadronmemory.com:specs:cor:agt:060:04): the effort this session runs at, as the launcher applied it; NOT_APPLICABLE for a
+    family with no effort control (never a refusal). Omitted on a host-started bind: the start's own effort is recorded
+    when it names one of the scale, as its family and model are when the bind reports none. A worker-bound session's
+    family, model and effort are also written to the worker's last-used record (Worker.lastUsed).
+    """
+    effort: EffortLevel
+    """
     #928 / cor:api:140: the role-Agent driving this session, as a PK or URN.
     Resolves to Session.agentId. The caller must be able to READ the agent
     (PUBLIC, or owner / org member) - a session is never attributed to an
@@ -8007,6 +8238,17 @@ export const typeDefs = `#graphql
     may learn that this one worker was retired (#1945). Any other workerRef sent with a grant is gated first.
     """
     launchGrant: String
+    """
+    #4306 — with launchGrant only: whether the host applied the run settings (family, model, effort) its start named
+    (hrn:node:hadronmemory.com:specs:cor:agt:070:08). false: the start's settings were NOT applied (an exec-path worker
+    runs its own fixed command), so this bind inherits none of them from its start: the session holds only the family,
+    model and effort this bind itself reports (a family derived from its own llmModel or tool included), and the
+    worker's last-used record and the task's applied settings follow the session, so a record the worker already had
+    stays as it was (a null never clears it). true, null or omitted: a bind that reports none runs as its start said, as before,
+    so a client that never sends this is unaffected. false without a launchGrant is refused BAD_USER_INPUT before
+    anything is written, because there is no start to qualify.
+    """
+    startSettingsApplied: Boolean
     "The session's stated intent (Session.plan) - what this session is about. MCP's hadron_start_session description lands here."
     plan: String
     """
@@ -8324,10 +8566,13 @@ export const typeDefs = `#graphql
   \`kind\` is the URN's type segment: memory | node | agent | org | app | user |
   apprun | worker | noderev | aiconf (#3857: an AI service config, behind the same
   gate as aiServiceConfig(ref:); an unreadable config answers null, as a missing
-  one does, hrn:node:hadronmemory.com:specs:cor:urn:010:01).
+  one does, hrn:node:hadronmemory.com:specs:cor:urn:010:01) | grant (#3709: behind
+  the same gate as grant(ref:); an unreadable grant answers null, as a missing
+  one does).
   \`id\` is the resolved entity's primary id. \`memoryId\` is set only for
-  nodes (their owning memory), \`organizationId\` for apps, app runs, and
-  workers (their owning org), and for an aiconf (#3857) the org that owns it or
+  nodes (their owning memory), \`organizationId\` for apps, app runs,
+  workers (their owning org), grants (#3709, their App's org), and for an
+  aiconf (#3857) the org that owns it or
   its App or Agent (null for a server-owned config or a user-owned App or
   Agent) — both are the extra ids those resources' canonical routes require.
   """
@@ -9010,6 +9255,35 @@ export const typeDefs = `#graphql
     "#1709 — the App's host registrations, liveness derived now (hrn:node:hadronmemory.com:specs:cor:agt:070:01). Whoever reads the App's tasks and events, the App's own key included."
     hostRegistrations(appRef: String!): [HostRegistration!]!
     """
+    #4224 (S3 of #4229) — for each worker one host runs: whether its agent process should be running, and why. A
+    host's sweep reads this once per pass and compares it with what it sees. While the App's hostSetupSource is HOST
+    (the default), a host's workers are the ones its registration lists (hrn:node:hadronmemory.com:specs:cor:agt:070:01),
+    live or lapsed, with the family and worktrees it registered. While it is SERVER (#4248), they are the platform's
+    assignments to that host (hostSetup, #4222), a retired worker's excluded, each with the assignment's family and its
+    one workdir; a host with an assignment but no registration is found. Rows are ordered by worker name.
+    Readers: whoever reads the App's tasks and events (hrn:node:hadronmemory.com:specs:cor:agt:050:21), the App's own key included. A key
+    that holds or ever held host:operate reads its own live host only (hrn:node:hadronmemory.com:specs:cor:agt:070:04); any other hostId
+    answers HOST_NOT_FOUND, exactly as a host the App does not have. A host key's read is a recorded use
+    (hrn:node:hadronmemory.com:specs:cor:agt:070:07). Reads only: nothing is started, stopped or changed.
+    """
+    hostDesiredState(appRef: String!, hostId: String!): HostDesiredState!
+    """
+    #4233 (S10 of #4229) — the recorded runs of one host's sweep, newest first: when each ran, its mode, the counts
+    planned, applied, skipped and failed, and up to 50 per-worker lines with reason codes. Read by whoever reads the
+    App's tasks and events (a participant, the App's own key) and by a host key for ITS OWN host only: another host
+    answers HOST_NOT_FOUND, exactly as a host the App does not have. limit is 1 to 100 (default 20). Reads only.
+    """
+    hostSweepRuns(appRef: String!, hostId: String!, limit: Int): [HostSweepRun!]!
+    """
+    #4222 — what the platform says the App's hosts run (hrn:node:hadronmemory.com:specs:cor:agt:070:01, the change Proposed):
+    the hostSetupSource switch and the assignments in effect, of one host when hostId is given. Whoever reads the
+    App's tasks and events, the App's own key included. A host key (an App key holding host:operate) reads only its
+    own host's rows: without hostId it gets them, and a hostId naming another host answers exactly like a host with
+    no assignments (hrn:node:hadronmemory.com:specs:cor:agt:070:04). A key whose host:operate was revoked is refused
+    FORBIDDEN whatever it passes. Each host-key read is recorded (hrn:node:hadronmemory.com:specs:cor:agt:070:07).
+    """
+    hostSetup(appRef: String!, hostId: String): HostSetup!
+    """
     #3273 (hrn:node:hadronmemory.com:specs:cor:agt:050:27, hrn:node:hadronmemory.com:specs:cor:agt:070:04):
     the current state of one context reset whose operation this App key's host collected, ended resets included.
     The host-key gate runs first, as for the protocol steps: HOST_KEY_REQUIRED (not an App key), APP_NOT_FOUND
@@ -9070,14 +9344,16 @@ export const typeDefs = `#graphql
       tagsAll: [String!]
       "Exact opaque source value, without interpretation or prefix matching."
       source: String
-      "#3125 S2: the task with exactly this externalId (compared as written, 1 to 512 characters, else BAD_USER_INPUT). Runs inside the App read gate, so it only finds this App's task."
+      "#3125 S2, #4217: the tasks with exactly this externalId (compared as written, 1 to 512 characters, else BAD_USER_INPUT): at most one ACTIVE task (backlog, pending or started) holds it, and any number of finished or cancelled tasks that held it before it. Newest first, so a caller that wants the live one picks the active one. Runs inside the App read gate, so it only finds this App's tasks."
       externalId: String
       """
       #4084 (hrn:node:hadronmemory.com:specs:cor:agt:120:02): the tasks holding any of these external ids, each compared
       exactly as written. 1 to 100 ids; each entry passes the externalId check (1 to 512 characters, no unpaired
       surrogate), and ONE bad entry refuses the whole list with BAD_USER_INPUT naming its position (externalIds[i]), never
-      its text; an empty list is BAD_USER_INPUT, never "no narrowing". At most one task holds an id, so with limit omitted
-      the page is as long as the list and answers every id; an id no task of this App holds matches nothing. Runs inside
+      its text; an empty list is BAD_USER_INPUT, never "no narrowing". At most one ACTIVE task holds an id, but finished
+      and cancelled tasks keep it (#4217, hrn:node:hadronmemory.com:specs:cor:agt:120:02, 2026-11-14), so an id can match several tasks: with limit
+      omitted — and offset omitted or 0 — the page is every task holding any of the ids, up to the list cap (200); an
+      explicit limit or offset windows the batch like any list. An id no task of this App holds matches nothing. Runs inside
       the App read gate (hrn:node:hadronmemory.com:specs:cor:agt:050:21), so another App's task with the same id never
       appears. ANDed with every other filter, externalId included.
       """
@@ -9088,7 +9364,7 @@ export const typeDefs = `#graphql
       unresolvedFindings: Boolean
       "Case-insensitive substring of the title or description, 1 to 200 characters after trimming (else BAD_USER_INPUT). Percent, underscore and backslash match literally. ANDed with every other filter."
       text: String
-      "True: start-by passed on the database clock, not started, not ended, not backlog. False: all other tasks. Not an alarm."
+      "True: overdue on the server clock (the database clock). Two arms: a pending task, not started, whose start-by has passed; or a pending or started task whose finish-by has passed and which has not ended. An ended (finished or cancelled) task and a backlog task are never overdue, and neither is a task with neither time. Blocking is ignored. False: all other tasks. Not an alarm: listing raises nothing."
       overdue: Boolean
       "Inclusive creation-time lower bound."
       createdAfter: DateTime
@@ -9118,13 +9394,13 @@ export const typeDefs = `#graphql
     agentTaskTree(root: ID!): [AgentTask!]
 
     """
-    #1705 — a team App's event stream (hrn:node:hadronmemory.com:specs:cor:agt:050:11), in (createdAt, id)
-    order. To read the next page pass after: the id of the last event you
-    read; the cursor is the (createdAt, id) pair, so events sharing a
-    timestamp are never skipped. since is a coarse time filter (strictly
-    after), not a continuation. limit defaults to 20 (cap 200).
-    #3933 (hrn:node:hadronmemory.com:specs:cor:agt:050:11): newestFirst reads from the newest end instead, the exact mirror
-    order with the same gate, filters and paging, continued with before (the id of the oldest event read).
+    #1705 — a team App's event stream (hrn:node:hadronmemory.com:specs:cor:agt:050:11).
+    #4098: oldest-first follows the writing transaction, then (createdAt, id) within it. Only transactions below
+    the snapshot xmin are served: a poll can lag while an older transaction is open, but late commits and later
+    writes with older caller timestamps cannot fall behind a served forward cursor. after remains the id of the
+    last event read, not an opaque token. since is a coarse time filter (strictly after), not a continuation.
+    limit defaults to 20 (cap 200). newestFirst/before retain descending (createdAt, id) history order with the
+    same gate, filters and paging; they are not a forward continuation.
     task.warning, task.edited and task.properties-changed are passive history (never wake, suppress a wake or count as activity); payload is {code}, changed field names only, or (task.properties-changed) the size and SHA-256 of the canonical JSON of the old and new properties, never their content.
     """
     agentTeamEvents(
@@ -9134,7 +9410,7 @@ export const typeDefs = `#graphql
       after: ID
       "#3933: with newestFirst, the id of the last (oldest) event read; the page continues strictly older than it, by the same (createdAt, id) pair. An id that is not an event of this App is refused BAD_USER_INPUT. Refused without newestFirst."
       before: ID
-      "#3933: true reads from the NEWEST end, the exact mirror of the default order, with the same gate, filters and paging (default 20, cap 200); continue with before, not after (refused with after). Omitted or false: the oldest-first read, unchanged."
+      "#3933: true reads history from the NEWEST timestamp by (createdAt, id) descending, with the same gate, filters and paging (default 20, cap 200); continue with before, not after (refused with after). Omitted or false: the commit-safe forward stream."
       newestFirst: Boolean
       types: [String!]
       "#3449: literal prefix, intersects nonempty types; app. includes legacy platform events. An empty prefix matches all types; omitted or empty types adds no type filter."
@@ -9153,7 +9429,8 @@ export const typeDefs = `#graphql
     """
     #3933 (hrn:node:hadronmemory.com:specs:cor:api:120:04) — agentTeamEvents with the page's end told: the same arguments, gate,
     filters, order and paging (except the page-size floor below), returning hasMore and nextCursor so a reader knows whether older (or newer) events remain without
-    another read. nextCursor is the id of the last event served when more remain, to pass as after (oldest-first) or, with
+    another read. For the forward stream, hasMore describes the eligible prefix below the snapshot horizon; keep the
+    cursor and poll again while older transactions remain open. nextCursor is the id of the last event served when more remain, to pass as after (oldest-first) or, with
     newestFirst, as before; null on the last page, and non-null whenever hasMore is true. The page size has a floor of 1:
     limit is at least 1 (0 or less reads one event, never an empty page), default 20, cap 200 served and never refused
     (hrn:node:hadronmemory.com:specs:cor:api:120:04). The legacy agentTeamEvents keeps limit 0 as an empty list.
@@ -9178,8 +9455,9 @@ export const typeDefs = `#graphql
     external id, for a team's reconcile pass: an assignment (by hand or by the platform), a reassignment, a hand-back, a
     cancel, a finish and a release of the id. Each change is one team event, read inside the same gate as agentTeamEvents
     (hrn:node:hadronmemory.com:specs:cor:agt:050:21); anyone else is refused APP_NOT_FOUND. A RELEASED change carries the id
-    the release cleared (its task no longer holds it); a change before the release carries that id too, and a change after
-    it (the task then holds none) is left out; every other change carries the id its task holds. Order is commit-safe,
+    the release cleared (its task no longer holds it); a change before the release in this read's own order — the
+    (tx_id, created_at, id) key the page is served by, not wall-clock time — carries that id too, and a change after it in
+    that order (the task then holds none) is left out; every other change carries the id its task holds. Order is commit-safe,
     oldest first: a change is served only once the transaction that wrote it, and every older one, has ended, so it may
     appear a moment late but never behind a cursor already served. Pass nextCursor (or the last change's cursor) as after
     to continue; with after omitted the read starts at the oldest change. after is opaque: a value that is not a cursor of
@@ -9234,6 +9512,19 @@ export const typeDefs = `#graphql
     UNKNOWN; under 5% used, or fewer than 3 snapshots spanning an hour, is INSUFFICIENT_DATA and gives no run-out time.
     """
     accountUsageProjection(appRef: ID!, account: String!, host: String, family: String, whatIf: AccountUsageWhatIfInput): AccountUsageProjection!
+
+    """
+    #4281 — an App's review quality measures for one calendar month, one row per reviewer model family and model. month is YYYY-MM, a UTC calendar month; anything else is
+    BAD_USER_INPUT. A review is one finished review-seat task carrying at least one verdict; its latest verdict
+    (hrn:node:hadronmemory.com:specs:cor:agt:130:02) decides its row and its month, and its findings are the seat task's
+    result findings with their latest dispositions (hrn:node:hadronmemory.com:specs:cor:agt:050:30). Findings and
+    dispositions recorded after the month still count in it, so the answer for a past month can change: asOf says when it
+    was worked out. Readers: as the App's tasks and events are read (hrn:node:hadronmemory.com:specs:cor:agt:050:21 and
+    hrn:node:hadronmemory.com:specs:cor:agt:050:23): the App's participants and its own key; anyone else is refused
+    APP_NOT_FOUND. Descriptive only: never an input to readiness or matching
+    (hrn:node:hadronmemory.com:specs:cor:agt:130:03).
+    """
+    reviewQualityReport(appRef: ID!, month: String!): ReviewQualityReport!
     """
     #2061 — direct-report lanes from the same roster projection and read gate as teamRoster.
     One bounded RepeatableRead snapshot per call; no hierarchy rollups or role exclusions.
@@ -9676,28 +9967,28 @@ export const typeDefs = `#graphql
     "#1606 — one comment by ID or URN; null when missing or unreadable."
     comment(ref: ID!): Comment
 
-    "#1641 — a decision log's settings by ID or URN; null when missing or unreadable."
-    decisionLog(ref: ID!): DecisionLog
-    "#1641 — one decision by ref (ID or URN), or by code (DU, or a citation DU-1) within logRef. Null when missing or unreadable."
-    decision(ref: ID, code: String, logRef: ID): Decision
+    "#1641 — a question log's settings by ID or URN; null when missing or unreadable."
+    questionLog(ref: ID!): QuestionLog
+    "#1641 — one question by ref (ID or URN), or by code (DU, or a citation DU-1) within logRef. Null when missing or unreadable."
+    question(ref: ID, code: String, logRef: ID): Question
     """
-    #1641 — the decisions of one log (logRef), or with awaitingMe the OPEN decisions the caller
+    #1641 — the questions of one log (logRef), or with awaitingMe the OPEN questions the caller
     decides across every memory they can read. State is derived for every candidate BEFORE the
-    filters, sort and paging; a list above 5000 candidates refuses (DECISION_LOG_TOO_LARGE_FOR_FILTER).
+    filters, sort and paging; a list above 5000 candidates refuses (QUESTION_LOG_TOO_LARGE_FOR_FILTER).
     """
-    decisions(
+    questions(
       logRef: ID
       awaitingMe: Boolean
-      state: [DecisionState!]
-      tier: DecisionTier
-      urgency: [DecisionUrgency!]
+      state: [QuestionState!]
+      tier: QuestionTier
+      urgency: [QuestionUrgency!]
       authorizes: Boolean
-      sort: DecisionSort = PORTAL_DEFAULT
+      sort: QuestionSort = PORTAL_DEFAULT
       limit: Int = 20
       offset: Int = 0
-    ): DecisionPage!
-    "#1641 — re-render a decision from its payload and check it against its content, data and approval: the findings behind its state."
-    verifyDecision(ref: ID!): DecisionVerification!
+    ): QuestionPage!
+    "#1641 — re-render a question from its payload and check it against its content, data and approval: the findings behind its state."
+    verifyQuestion(ref: ID!): QuestionVerification!
 
     """
     A single node-revision snapshot by its id (#617 Display).
@@ -9881,9 +10172,9 @@ export const typeDefs = `#graphql
     - marketplaceMemories: listed + public-readable memories.
     Drill into an org's public footprint via publicOrganization(ref:).
     """
-    marketplaceOrganizations(limit: Int, offset: Int): PublicResourceRefPage!
-    marketplaceAgents(limit: Int, offset: Int): PublicResourceRefPage!
-    marketplaceMemories(limit: Int, offset: Int): PublicResourceRefPage!
+    marketplaceOrganizations(limit: Int, offset: Int): MarketplaceResourcePage!
+    marketplaceAgents(limit: Int, offset: Int): MarketplaceResourcePage!
+    marketplaceMemories(limit: Int, offset: Int): MarketplaceResourcePage!
 
     """
     Invitation lookup (public to the slug holder). Returns only invite-page
@@ -10019,10 +10310,12 @@ export const typeDefs = `#graphql
     """
     The organization's active page-monitor watches (#1562): what web_poll_list
     returns inside a run, for org ADMIN/OWNER outside one. Refused with
-    POLICY_DENIED when the org, user or App policy omits tool.web_poll. Jobs
-    with no routing binding in this org are not listed.
+    POLICY_DENIED when the org, caller user or App-in-context policy omits tool.web_poll (no App layer when the context has no App). Jobs
+    with no routing binding in this org are not listed. One page only: default 20, clamp 1–100, use webPollsPage for hasMore and nextCursor.
     """
-    webPolls(orgRef: ID!): [WebPoll!]!
+    webPolls(orgRef: ID!, first: Int = 20): [WebPoll!]! @deprecated(reason: "One bounded page only; use webPollsPage for hasMore and nextCursor.")
+    "The same org ADMIN/OWNER and tool.web_poll policy gates as webPolls, before fetching jobs; App policy is read only for the App in the caller context. Jobs without a routing binding in this org are omitted. Default 20, clamp 1–100; authenticated jobId keyset cursor scoped to org. offset is an alternative, never combined with after. total counts all currently admitted watches. hrn:node:hadronmemory.com:specs:cor:api:120:04; hrn:node:hadronmemory.com:specs:cor:api:120:05."
+    webPollsPage(orgRef: ID!, first: Int = 20, after: String, offset: Int): WebPollsPage!
 
     """
     Live tools/list passthrough for one registered server (org member) —
@@ -10040,15 +10333,23 @@ export const typeDefs = `#graphql
     Fetch one secret's inspectable half (never the value). Null when the
     row does not exist OR the caller is not entitled to its owner scope —
     no existence disclosure. Entitlement: user -> that user; org -> org
-    member; app -> app owner or org member; memory -> memory READ.
+    member; app -> a member of the App (a person acting as themselves;
+    an App key and an impersonated session get null).
     """
     secret(ref: ID!): Secret
+
+    """
+    The audit events of ONE App secret, newest first, for any member of the App (hrn:node:hadronmemory.com:specs:cor:sec:010:05).
+    A non-member, an App key, a run and an impersonated session get an empty page, the same as a missing secret. Never a value.
+    """
+    secretEvents(ref: ID!, limit: Int, offset: Int): SecretEventsPage!
 
     """
     Paginated secret list for ONE owner scope (the hadron secret ls
     surface). ownerRef accepts ID or URN (cor:api:140) and defaults to the
     caller for ownerType user. An unresolvable ref or a non-entitled owner
-    yields an empty page — no disclosure. Name-ascending order (id
+    (for an App: anyone who is neither a member nor a manager of it, an App
+    key and an impersonated session) yields an empty page — no disclosure. Name-ascending order (id
     tiebreak); limit default 20 / cap 200; limit: 0 -> count only.
     """
     secrets(ownerType: String!, ownerRef: ID, limit: Int, offset: Int): SecretsPage!
@@ -10430,7 +10731,7 @@ export const typeDefs = `#graphql
     (hrn:node:hadronmemory.com:specs:cor:dmo:050:12; hrn:node:hadronmemory.com:specs:cor:acl:010:01),
     as themselves, or through their held worker on a validated \`instruction\` (S6, ruling 0098). An admitted
     instructed call records one team event (ruling 0111): the worker, the holder, the App and the instruction,
-    never a key. Never an App key, a host-launched or uninstructed worker session, a run or an impersonated request.
+    never a key. ${RUN_REFUSAL_3340}
 
     Accepts the entity's ID or URN.
     """
@@ -10737,6 +11038,23 @@ export const typeDefs = `#graphql
     the same APP_NOT_FOUND answer.
     """
     chatAiConfigChoices(appRef: ID!): [ChatAiConfigChoice!]!
+
+    """
+    #4042 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10, hrn:node:hadronmemory.com:specs:cor:acl:030:01): the tool-choice decision the chat turn will use for this chat's
+    effective config: same predicate, same resolve order as the turn (the chat's stored choice, else the App's chatbot
+    config, else the \`default\` walk). Null when no level matches, and for a user-owned App whose walk lands on the platform's config (which that App may not use); otherwise non-null.
+    Authorized through the single-chat read gate chatHistory uses: a chat has no access layer of its own, so read is
+    decided by the host memory. A chat the caller may not read answers exactly as a chat that does not exist.
+    The decision only: no key, id, name, provider or model.
+    """
+    chatEffectiveToolChoice(chatId: String!): ChatToolChoice
+
+    """
+    #4042 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): the chat turn's tool-choice decision for an UNSAVED (provider, model) pair, by the same one
+    predicate, judged verbatim. Pure: reads no config rows, decrypts nothing, calls no provider and meters no usage.
+    Any signed-in caller; no owner context is consulted. An unknown or unlisted provider or model answers FORCED, never a refusal.
+    """
+    chatToolChoiceFor(provider: String!, model: String!): ChatToolChoice!
 
     """
     #2862 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: a chatbot chat's served-prompt records, by chat id, and nothing
@@ -11346,8 +11664,8 @@ export const typeDefs = `#graphql
     "The caller's own connection grants; connectionRef narrows to one connection."
     connectionGrants(connectionRef: String, limit: Int, offset: Int): ConnectionGrantsPage!
     """
-    One grant by id (#3789). Read only by a BOUND WORKER SESSION, in its own App, for a grant naming that worker directly, a pending one it requested itself, or (#3711) one held by its role agent in this App while the agent is installed and licensed here.
-    Every other caller, a soft-deleted App and a missing id all answer null: no error and no existence oracle.
+    One grant by id or hrn:grant URN (#3789; URN per #3709). Read only by a BOUND WORKER SESSION, in its own App, for a grant naming that worker directly, a pending one it requested itself, or (#3711) one held by its role agent in this App while the agent is installed and licensed here.
+    Every other caller, a soft-deleted App and a missing id all answer null: no error and no existence oracle. A well-formed URN naming nothing answers the same null; a malformed or wrong-type URN is the typed input refusal URN_NOT_QUALIFIED (hrn:node:hadronmemory.com:specs:cor:api:140:01) — and so is a ref that is neither an id nor a URN, which the entity-ref convention treats as a URN attempt.
     """
     grant(ref: ID!): Grant
     "The bound worker's own grants (#3789): the rows naming it directly as holder, the pending ones it requested, and (#3711) every row, in every state, held by its role agent in this App while that agent is installed and licensed here (never another App's, never a base agent's). Any other caller gets an empty page, never an error. limit 0 returns the count only."
@@ -11359,9 +11677,20 @@ export const typeDefs = `#graphql
     """
     myGrants(limit: Int, offset: Int): GrantsPage!
     """
+    The read clients the caller issued or holds (hrn:node:hadronmemory.com:specs:cor:sec:060): a client id is shown only to its issuer and
+    its holder. Empty for an App key, a run and an impersonation. Revoke one with revokeGrant on its grantId.
+    """
+    mySecretReadClients(limit: Int, offset: Int): [SecretReadClient!]!
+    """
     #3711 (hrn:node:hadronmemory.com:specs:cor:acl:140:05, ruling 0253 item 4): every grant of one App, in every state (pending, active, expired, spent, revoked, holder departed), newest first, for whoever manages the App as a person. It shows the whole record, including who revoked a grant, when its holder went and each signature's signer and passkey label, never a credential id or public key. Anyone else (a member who does not manage, an outsider, a worker session, an App key, a run, an impersonated session) and an unknown App get an empty page, never an error. limit 0 returns the count only.
     """
     appGrants(appRef: String!, limit: Int, offset: Int): GrantsPage!
+    """
+    #3708 (hrn:node:hadronmemory.com:specs:cor:acl:140:02, ruling 0255 item 2): the registered actions, by name, for anyone in the named App: a participating person, or a bound worker session of that App. The App is named, never inferred. Every other caller (no credential, a non-participant, an unknown, malformed or deleted App, another App's or a retired worker, an App key, a headless run, an impersonated session even of a participant) gets an empty page, never an error. Read only; limit 0 returns the count only.
+    """
+    grantActions(appRef: String!, limit: Int, offset: Int): GrantActionsPage!
+    "#3708: one registered action by its exact name, read under the same gate as grantActions. An unknown name and every refused caller answer null."
+    action(appRef: String!, ref: ID!): GrantAction
     "One action grant by ID - visible to the grantee or an admin of its org; null otherwise (no existence oracle)."
     principalGrant(ref: ID!): PrincipalGrant
     "Action grants. Default: the caller's own (self-audit is never gated). An org admin passing orgRef sees that org's grants, optionally narrowed by userRef."
@@ -11429,6 +11758,21 @@ export const typeDefs = `#graphql
     revokedBy: ID
   }
 
+  "#4280 — a defect linked to the pull request it escaped from (the review.defect-linked event on the PR's build task)."
+  type DefectLink {
+    "The PR's build task."
+    taskId: ID!
+    "The defect's issue URL, as given."
+    defect: String!
+    "The head that introduced the defect, or null when the link names none."
+    introducedAtHead: String
+    "The review.defect-linked event that records the link."
+    eventId: ID!
+    linkedAt: DateTime!
+    "False when the pair was already linked: this is the existing link, and nothing was written."
+    created: Boolean!
+  }
+
   type Mutation {
     "#3448 — owner-chain only, never the assignee (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Non-empty unique colon-separated atom slots, at most 64 characters each; latest event replaces the schedule. Dropping a current negative slot at the frozen head refuses REVIEW_SEAT_NOT_SUPERSEDABLE. All five protocol commands refuse finished/cancelled written tasks with TASK_ENDED after checking authority."
     setReviewSchedule(taskRef: ID!, slots: [String!]!): PrProtocolResult!
@@ -11436,10 +11780,14 @@ export const typeDefs = `#graphql
     freezePullRequestHead(taskRef: ID!, head: String!): PrProtocolResult!
     "#3448 — seat owner-chain binds a direct child to a scheduled slot at the frozen head. A current seat's CHANGES_REQUESTED, FAIL or REFUSED at this head prevents replacement, with or without supersedes, and a negative seat cannot move slots (REVIEW_SEAT_NOT_SUPERSEDABLE). A seat task is assigned once (REVIEW_SEAT_ALREADY_ASSIGNED); a replacement must name the current sibling in supersedes (REVIEW_SEAT_SUPERSEDES_REQUIRED). Checks and write hold the build row FOR UPDATE."
     assignReviewSeat(taskRef: ID!, slot: String!, head: String!, supersedes: ID): PrProtocolResult!
-    "#3448 — STARTED seat's assignee records a verdict at its assigned head, without finishing it (hrn:node:hadronmemory.com:specs:cor:agt:050:08). REVIEW_SEAT_UNASSIGNED or REVIEW_HEAD_MISMATCH writes nothing. A different actor cannot overwrite a same-head negative verdict (REVIEW_SEAT_NOT_SUPERSEDABLE); its original actor may re-rate."
+    "#3448 — STARTED seat's assignee records a verdict at its assigned head, without finishing it (hrn:node:hadronmemory.com:specs:cor:agt:050:08). REVIEW_SEAT_UNASSIGNED or REVIEW_HEAD_MISMATCH writes nothing. A different actor cannot overwrite a same-head negative verdict (REVIEW_SEAT_NOT_SUPERSEDABLE); its original actor may re-rate. #4235: the review.verdict event also carries reviewerFamily, reviewerModel and modelReportedAt, copied from the recording worker's session (its self-report, not verified), null where none is recorded or a person records it; no argument sets them and readiness never reads them (hrn:node:hadronmemory.com:specs:cor:agt:130:02)."
     recordReviewVerdict(taskRef: ID!, head: String!, verdict: ReviewVerdict!, node: String, receipt: String): PrProtocolResult!
     "#3448 — build assignee records pr.ready only when every current scheduled seat is finished with APPROVE, PASS or CARRY at the frozen head. Its verdict actor must differ from both the build's current assignee and the newest pr.frozen actor; Worker/person identity stays distinct from holder credentials. PR_NOT_READY carries failing slots; event facts only, never opaque properties (hrn:node:hadronmemory.com:specs:cor:agt:050:28)."
     recordReadyCall(taskRef: ID!, head: String!): PrProtocolResult!
+    """
+    #4280 (S12b) — record that a defect found after a pull request merged traces back to it: one review.defect-linked event on the PR's build task (prTaskRef, which needs a pull_request reference: PR_REFERENCE_MISSING). defectRef is the defect's issue URL, under the same rules as a task reference of kind issue, stored as given. introducedAtHead, when given, is a full 40-hex head frozen on that task (DEFECT_HEAD_NOT_FROZEN otherwise); the review-quality report counts the defect against approving reviews at that head or a later one. Who: a worker through its bound session whose current Worker.role is qa-engineer or coordinator, a person who manages the App, or a worker whose holder manages it, with an instruction. The App's key and a run may not. A caller who may not read the App is answered as for a task that does not exist (TASK_NOT_FOUND); one who may read it but not link gets DEFECT_LINK_FORBIDDEN, with nothing written. One link per (defect, task): linking the same pair again returns the existing link with created false and writes nothing. A retry is checked like a first call: an introducedAtHead that was never frozen is still refused DEFECT_HEAD_NOT_FROZEN, not answered with the existing link (#4286). A link never changes a verdict, a seat, readiness or the task.
+    """
+    linkDefectToPullRequest(defectRef: String!, prTaskRef: ID!, introducedAtHead: String, instruction: ActInstructionInput): DefectLink!
 
     "Platform ADMIN/OWNER human only. Version-checked limits/mode edit, audit recorded; no counter reset (#1793)."
     setRateLimitPolicy(input: SetRateLimitPolicyInput!): RateLimitPolicy!
@@ -11622,10 +11970,31 @@ export const typeDefs = `#graphql
     #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
     setAppTickerSettings(appRef: String!, input: AppTickerSettingsInput!, instruction: ActInstructionInput): AppTickerSettings!
-    "App managers only; omitted preserves, null refuses. Standby activation is unavailable until S7 (hrn:node:hadronmemory.com:specs:cor:agt:080:19). #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
+    "App managers only; omitted preserves, null refuses. #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
     setAppDeliverySettings(appRef: String!, input: AppDeliverySettingsInput!, instruction: ActInstructionInput): AppDeliverySettings!
-    "#2138: pause or resume the whole team, as whoever manages the App. Separate from each worker's own pause: a worker cannot lift it, and ending it clears no self-pause. While paused, no worker is nudged and every worker's check status is PENDING (TEAM_PAUSED). #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
+    "#2138: pause or resume the whole team, as whoever manages the App. Separate from each worker's own pause: a worker cannot lift it, and ending it clears no self-pause. While paused, no worker is nudged and every worker's check status is PENDING (TEAM_PAUSED). #4223: while paused, the platform issues no worker.start for an assignment; lifting the pause starts the held workers with no open session whose tasks were assigned during it, and no others. #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
     setTeamPause(appRef: String!, paused: Boolean!, instruction: ActInstructionInput): TeamPause!
+    """
+    #4224 (S3 of #4229) — set the App's sweep mode, as whoever manages the App. OFF (the default) restores today's
+    behaviour in one write: every hostDesiredState row then says SWEEP_OFF and a sweep acts on nothing. A change is
+    one team.sweep-mode-changed team event (from, to); setting the mode it already has changes and records nothing.
+    Refusals: FORBIDDEN (not a manager; an App key never is). The App-manager arm also admits the manager's held
+    worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
+    """
+    setAppSweepMode(appRef: String!, mode: SweepMode!, instruction: ActInstructionInput): AppSweepMode!
+    """
+    #4224 (S3 of #4229) — mark a worker leave-alone, or clear the marker, as whoever manages the App. A marked
+    worker's hostDesiredState row says LEAVE_ALONE: a sweep observes and reports it and never starts, stops or repairs
+    it. A change of the marker is one worker.leave-alone-changed team event (the new value only, never the reason); a
+    call that changes nothing records nothing. Marking an already marked worker with another reason replaces the
+    reason, who set it and when.
+    Refusals: WORKER_NOT_FOUND (also for a caller who is not a participant of the worker's App),
+    WORKER_LEAVE_ALONE_NOT_PERMITTED (a participant who does not manage the App; a worker's session without an
+    instruction), WORKER_RETIRED, BAD_USER_INPUT (a reason on a clear, or one over 500 characters). The App-manager
+    arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12),
+    recorded as one app.manager-act event, ids only.
+    """
+    setWorkerLeaveAlone(input: SetWorkerLeaveAloneInput!, instruction: ActInstructionInput): WorkerLeaveAlone!
     """
     #3125 S1 (hrn:node:hadronmemory.com:specs:cor:dmo:050:20) — replace the App's properties with this JSON object; null
     or an empty object clears them. Whoever manages the App only: as themselves, or through their held worker's
@@ -11674,6 +12043,10 @@ export const typeDefs = `#graphql
     behind the call, for OTHER workers only. Idempotent for a live subscription. A grant use is announced
     to the team chat, best-effort: announcement says POSTED or FAILED, and the subscription stands either way.
     #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
+    #4234: a worker of a SHORT_LIVED Agent is refused TICKER_ON_SHORT_LIVED, after authorization and before anything is
+    written (it runs only while it holds a task, so a ticker could not wake it). The refusal comes before the idempotent
+    answer: re-subscribing such a worker that already has a live subscription is refused too, not answered changed false.
+    Unsubscribing it stays allowed.
     """
     subscribeWorker(tickerRef: String!, workerRef: String!, instruction: ActInstructionInput): SubscribeResult!
 
@@ -11698,16 +12071,6 @@ export const typeDefs = `#graphql
     #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
     setWorkerWakeSettings(workerRef: String!, input: WorkerWakeSettingsInput!, instruction: ActInstructionInput): WorkerWakeSettings!
-    """
-    Deprecated compatibility door: isolation is removed; this call retains its existing audience and refuses without writing.
-    #3606 phase-1 compatibility door. Isolation is removed. Refusals retain the source-exact order:
-    an unknown worker, or one the caller cannot read (a pure App key among them), is WORKER_NOT_FOUND;
-    a worker session with no instruction is WORKER_ISOLATION_FORBIDDEN; everyone else receives
-    WORKER_ISOLATION_UNAVAILABLE before the manager/holder check. The until input is not parsed and nothing is written.
-    """
-    isolateWorker(workerRef: String!, until: DateTime, instruction: ActInstructionInput): WorkerWakeSettings! @deprecated(reason: "Isolation was removed; compatibility door will be removed after client migration (#3606).")
-    "Deprecated no-op: retains the original locked target and manager-or-holder audience (hrn:node:hadronmemory.com:specs:cor:agt:080:29, ruling 0118). Impersonation remains FORBIDDEN; an uninstalled App remains APP_UNINSTALLED. Authorized callers receive current wake settings with no isolation, exemption, or manager-act write."
-    clearWorkerIsolation(workerRef: String!, instruction: ActInstructionInput): WorkerWakeSettings! @deprecated(reason: "Isolation was removed; compatibility door will be removed after client migration (#3606).")
     "#1748 — record that wakes were delivered (hrn:node:hadronmemory.com:specs:cor:agt:080:16). Never moves a read position."
     acknowledgeWakes(proofs: [String!]!): AcknowledgeWakesResult!
     """
@@ -11723,8 +12086,33 @@ export const typeDefs = `#graphql
     host:operate, which names the host; the request names none (hrn:node:hadronmemory.com:specs:cor:agt:070:04). Refreshing within the App's lapse count
     of poll intervals keeps it live. Refused HOST_KEY_REQUIRED for anyone else, APP_KEY_SCOPE_REQUIRED without the
     scope, APP_KEY_SESSION_BOUND with a session, BAD_HOST_REGISTRATION for a bad shape or a worker not of the App.
+    #4222: while the App's hostSetupSource is SERVER, a listed worker the platform did not assign to this host is
+    left out and reported in refusedWorkers (HOST_WORKER_NOT_ASSIGNED) instead; the registration still succeeds.
     """
     registerHost(input: RegisterHostInput!): HostRegistration!
+    """
+    #4222 — assign a worker to a host of its App: the workdir it runs in there, and its launcher profile (#4230: family,
+    and optionally model, effort and accountProfile; hrn:node:hadronmemory.com:specs:cor:agt:070:01, the change
+    Proposed). Whoever manages the App
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), or a held worker on its holder's instruction; never an App key.
+    A worker may be assigned to several hosts. The assignment is a record until the App's hostSetupSource is SERVER.
+    Refused BAD_HOST_ASSIGNMENT_ARGS (a workdir or host id that is not its token shape: a path, an option, a command),
+    BAD_LAUNCHER_PROFILE (a family no host has a launcher for, or a model, effort or accountProfile that is not a
+    profile token), HOST_ASSIGNMENT_NOT_PERMITTED, WORKER_NOT_FOUND, WORKER_RETIRED, and HOST_ASSIGNMENT_EXISTS when this worker is
+    already assigned to that host and replace is not set. A refusal writes nothing.
+    """
+    assignHostWorker(input: AssignHostWorkerInput!, instruction: ActInstructionInput): HostWorkerAssignment!
+    "#4222 — remove a worker's assignment to a host. Whoever manages the App, as for assignHostWorker (HOST_ASSIGNMENT_NOT_PERMITTED otherwise). True when one was removed, false when there was none; a retired worker's assignment is removable."
+    unassignHostWorker(input: UnassignHostWorkerInput!, instruction: ActInstructionInput): Boolean!
+    """
+    #4222 — set who states which workers the App's hosts run: HOST (the default) or SERVER. Whoever manages the App
+    (HOST_ASSIGNMENT_NOT_PERMITTED otherwise). Under SERVER, registerHost accepts only the workers assigned to that
+    host and reports the rest per row as HOST_WORKER_NOT_ASSIGNED in refusedWorkers, never failing the registration;
+    a worker is started only on a host it is assigned to whose registration lists the assigned workdir, in that
+    workdir and as the assigned family; with none, nothing is issued and the task waits
+    (hrn:node:hadronmemory.com:specs:cor:agt:070:08). Takes effect at the next registration and start decision.
+    """
+    setHostSetupSource(appRef: String!, source: HostSetupSource!, instruction: ActInstructionInput): HostSetupSource!
     """
     #1709 — a host collects its own operations, oldest first: those still ISSUED (now marked COLLECTED) and those it
     collected and has not reported, except a worker.start whose launch grant is still live (#1928: a re-collection never
@@ -11742,8 +12130,23 @@ export const typeDefs = `#graphql
     #3309 (hrn:node:hadronmemory.com:specs:cor:agt:050:27 part 11): a worker.reset-context failure may name
     HOST_UNSUPPORTED, optionally followed by ": " and detail, only before its claim (phase requested).
     After the claim this reason is BAD_CONTEXT_RESET_INPUT; its message lists the reasons accepted at that phase.
+    #4292: an end-session operation FAILED with a reason whose leading code is AGENT_ABSENT ends the session when
+    endAgentlessSession's conditions hold, and reads SUCCEEDED, writing no handoff; otherwise it stays FAILED, the session open.
     """
     reportHostOperation(input: ReportHostOperationInput!): HostOperation!
+    """
+    #4292 — a host ends an open session of a SHORT_LIVED worker it runs, after proving that no agent runs in the
+    worker's worktree (reason AGENT_ABSENT); the backstop when the platform's worker.end never came or already failed
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:10, Proposed). A worker.end reported FAILED with a failureReason whose
+    leading code is AGENT_ABSENT runs the same check and, when it holds, ends the session and reads SUCCEEDED.
+    Refusals: HOST_DOES_NOT_RUN_WORKER (this host's registration does not list the worker, or under a server-held setup
+    it is not assigned there, or the session runs on another host: a host-launched session is ended only by its launch
+    host, a hand-started one only by the worker's sole live registration), SESSION_NOT_WORKERS, WORKER_NOT_SHORT_LIVED, WORKER_HAS_OPEN_TASK (the worker is the
+    assignee of a PENDING or STARTED task; extensions.taskId names it). A session that already ended answers
+    ended: false and writes nothing. The end is recorded with endReason agent_absent; it writes no handoff, and
+    handoff in the result is true only when one the worker wrote before it exited names the session.
+    """
+    endAgentlessSession(input: EndAgentlessSessionInput!): AgentlessSessionEnd!
     """
     #1709 — a host marks a worker it registers UNAVAILABLE, only as OUT_OF_TOKENS or HOST_DOWN, or clears a mark it set
     itself (hrn:node:hadronmemory.com:specs:cor:agt:060:08). It never replaces or clears anyone else's mark, a stall
@@ -11760,6 +12163,15 @@ export const typeDefs = `#graphql
     The report decides nothing: it feeds no check status, availability, matcher, stall rule or alarm.
     """
     setHostWorkerTerminals(input: SetHostWorkerTerminalsInput!): SetHostWorkerTerminalsResult!
+    """
+    #4233 (S10 of #4229) — a host records one run of its sweep. The host key only (HOST_KEY_REQUIRED otherwise); the
+    host is the key's own. The whole report is validated first and a malformed one stores nothing (BAD_USER_INPUT): a
+    mode of OBSERVE or APPLY, counts from 0, at most 50 lines of worker token, outcome and reason code, and no free
+    text. The same runId for the same host is the same run: a replay returns it and changes nothing. A run that applied
+    or failed something produces ONE summary post in the App's team chat, from the platform, and a run that changed
+    nothing posts nothing. Recording a run ends the host's stale-sweep alarm episode.
+    """
+    recordHostSweepRun(input: RecordHostSweepRunInput!): HostSweepRun!
     """
     #1709 — issue an operation to one of the App's registered hosts (hrn:node:hadronmemory.com:specs:cor:agt:070:05).
     A type outside the closed set is HOST_OPERATION_TYPE_UNKNOWN (hrn:node:hadronmemory.com:specs:cor:agt:070:03), a
@@ -11811,7 +12223,7 @@ export const typeDefs = `#graphql
     "#1747 — give a worker a named App grant (hrn:node:hadronmemory.com:specs:cor:agt:080:24). Whoever manages the App only. Idempotent. Person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, #3277): never a worker session (a worker never gives a grant to itself) in any shape, a run principal, an impersonation or an App key, even when the worker's holder manages the App."
     grantApp(appRef: String!, workerRef: String!, name: AppGrantName!): AppGrant!
 
-    "#1747 — revoke a grant. Whoever manages the App, as themselves, or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0109 A); an admitted instructed revoke records one team event (never the grant id). Takes effect at the grantee next call."
+    "#1747 — revoke a grant. Whoever manages the App, as themselves, or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0109 A); an admitted instructed revoke records one team event (never the grant id). ${RUN_REFUSAL_3340} Takes effect at the grantee next call."
     revokeAppGrant(appRef: String!, workerRef: String!, name: AppGrantName!, instruction: ActInstructionInput): AppGrant!
 
     """
@@ -12152,7 +12564,7 @@ export const typeDefs = `#graphql
     renumberSpec(memoryRef: ID!, fromLoc: String!, toLoc: String!, dryRun: Boolean): SpecRenumberResult!
     """
     #1591 — mint the live nodes of a memory in the mint scope, at once,
-    excluding comment nodes and the decision role family. The scope is the
+    excluding comment nodes and the question role family. The scope is the
     unminted nodes plus (#1612) minted nodes whose content changed since their
     minted revision or that have no recorded minted revision; a re-mint keeps
     the first mint's time and minter. Each node is
@@ -12431,7 +12843,7 @@ export const typeDefs = `#graphql
     if it is still the one you read (REVISION_MISMATCH otherwise). A memory
     writer may approve ordinary nodes, the author included; placed boot prompts
     also require their dedicated manager-as-self gate. Comments and
-    decision-family nodes are refused. Idempotent: an approved
+    question-family nodes are refused. Idempotent: an approved
     revision keeps its existing approval. Refuses NODE_IS_PLACEHOLDER, and
     ENCRYPTED_MEMORY_NOT_APPLICABLE on any encrypted memory, even with a
     cached session key.
@@ -12509,31 +12921,31 @@ export const typeDefs = `#graphql
     deleteCommentThread(commentRef: ID!, reason: String!): Boolean!
 
     """
-    #1641 — create a decision log at loc in a memory: needs management rights on the memory, or the
+    #1641 — create a question log at loc in a memory: needs management rights on the memory, or the
     owner role in its live, installed App for non-personal/non-private memories. Impersonation is refused. Refused
-    in an encrypted memory (DECISION_LOG_ENCRYPTED), a git-mirrored one (DECISION_LOG_MIRRORED), a
-    system memory (DECISION_LOG_SYSTEM_MEMORY), an anonymous one (DECISION_LOG_ANONYMOUS_MEMORY), at a loc occupied by a live or deleted node at or beneath it (DECISION_LOG_EXISTS), or inside a decision's subtree. Deciders are user ids, each able
-    to write the memory (DECISION_DECIDER_NOT_ELIGIBLE; hrn:node:hadronmemory.com:specs:cor:dmo:130:09).
+    in an encrypted memory (QUESTION_LOG_ENCRYPTED), a git-mirrored one (QUESTION_LOG_MIRRORED), a
+    system memory (QUESTION_LOG_SYSTEM_MEMORY), an anonymous one (QUESTION_LOG_ANONYMOUS_MEMORY), at a loc occupied by a live or deleted node at or beneath it (QUESTION_LOG_EXISTS), or inside a question's subtree. Deciders are user ids, each able
+    to write the memory (QUESTION_DECIDER_NOT_ELIGIBLE; hrn:node:hadronmemory.com:specs:cor:dmo:130:09).
     """
-    createDecisionLog(memoryRef: ID!, loc: String!, name: String, prefix: String, defaultDeciders: [ID!]!, eligibleDeciders: [ID!]): DecisionLog!
-    "#1641 — replace a log's default (and, when given, other eligible) deciders, as an audited revision of the log. Existing decisions keep theirs. Needs management rights on the memory, or the owner role in its App."
-    setDecisionLogDeciders(logRef: ID!, defaultDeciders: [ID!]!, eligibleDeciders: [ID!], expectedRevision: Int!, reason: String!): DecisionLog!
+    createQuestionLog(memoryRef: ID!, loc: String!, name: String, prefix: String, defaultDeciders: [ID!]!, eligibleDeciders: [ID!]): QuestionLog!
+    "#1641 — replace a log's default (and, when given, other eligible) deciders, as an audited revision of the log. Existing questions keep theirs. Needs management rights on the memory, or the owner role in its App."
+    setQuestionLogDeciders(logRef: ID!, defaultDeciders: [ID!]!, eligibleDeciders: [ID!], expectedRevision: Int!, reason: String!): QuestionLog!
     """
-    #1641 — ask a decision in a log: the server issues the next code using the log prefix (DA, DB, … with default D) and renders the
-    content. Any writer of the log's memory, agents included, outside impersonation. Refusals: DECISION_INVALID (with JSON
-    pointers), DECISION_RECOMMENDATION_MISSING, DECISION_TIER_TOO_LOW, DECISION_DECIDER_NOT_ELIGIBLE.
+    #1641 — ask a question in a log: the server issues the next code using the log prefix (DA, DB, … with default D) and renders the
+    content. Any writer of the log's memory, agents included, outside impersonation. Refusals: QUESTION_INVALID (with JSON
+    pointers), QUESTION_RECOMMENDATION_MISSING, QUESTION_TIER_TOO_LOW, QUESTION_DECIDER_NOT_ELIGIBLE.
     """
-    askDecision(logRef: ID!, input: AskDecisionInput!): Decision!
+    askQuestion(logRef: ID!, input: AskQuestionInput!): Question!
     """
-    #1641 — amend a writable decision. Memory write access is always required; before any answer, any writer; after one, a decider only. Urgency is a
+    #1641 — amend a writable question. Memory write access is always required; before any answer, any writer; after one, a decider only. Urgency is a
     decider's to change; lowering the tier is a decider's, before an answer, never when it authorizes.
-    Refusals: NODE_WRITE_CONFLICT, DECISION_PART_RENUMBER, DECISION_ANSWER_IMMUTABLE, DECISION_NOT_DECIDER.
+    Refusals: NODE_WRITE_CONFLICT, QUESTION_PART_RENUMBER, QUESTION_ANSWER_IMMUTABLE, QUESTION_NOT_DECIDER.
     """
-    amendDecision(ref: ID!, input: AmendDecisionInput!, expectedRevision: Int!, reason: String!): Decision!
-    "#1641 — withdraw a decision (terminal; the code stays consumed): the asker or a decider, a decider once answered. DECIDED ones are superseded instead (DECISION_ANSWERED_DECIDED)."
-    withdrawDecision(ref: ID!, reason: String!, expectedRevision: Int!): Decision!
-    "#1641 — a platform admin hard-deletes a decision that was never answered, recorded on its log (DECISION_ANSWERED otherwise). The code stays consumed."
-    purgeUnansweredDecision(ref: ID!, reason: String!): Boolean!
+    amendQuestion(ref: ID!, input: AmendQuestionInput!, expectedRevision: Int!, reason: String!): Question!
+    "#1641 — withdraw a question (terminal; the code stays consumed): the asker or a decider, a decider once answered. DECIDED ones are superseded instead (QUESTION_ANSWERED_DECIDED)."
+    withdrawQuestion(ref: ID!, reason: String!, expectedRevision: Int!): Question!
+    "#1641 — a platform admin hard-deletes a question that was never answered, recorded on its log (QUESTION_ANSWERED otherwise). The code stays consumed."
+    purgeUnansweredQuestion(ref: ID!, reason: String!): Boolean!
 
     """
     Delete ALL NodeRevision rows for a node, returning the count deleted (#617).
@@ -12555,7 +12967,7 @@ export const typeDefs = `#graphql
     raw relative content links that now miss or resolve to another node.
     """
     moveNode(sourceRef: ID!, targetUrn: String, targetMemoryRef: ID): Node!
-    "Plan with the real move's gates and raised refusals, without locks, reconciliation, writes or mirror effects. Nodes in loc order; limit clamps to 1–1000 (default 100), with total and truncation disclosed. No edges. A point-in-time answer, not a reservation. hrn:node:hadronmemory.com:specs:cor:api:190:03."
+    "Plan with the real move's gates and raised refusals, without locks, reconciliation, writes or mirror effects. Nodes in loc order; limit clamps to 1–1000 (default 100), with total and truncation disclosed. No edges. A point-in-time answer, not a reservation. This plan-only call is on the mutation root by rulings 0210/0211, so impersonation sessions are refused even though planning writes nothing. hrn:node:hadronmemory.com:specs:cor:api:190:03."
     planNodeMove(sourceRef: ID!, targetUrn: String, targetMemoryRef: ID, limit: Int = 100): NodeMovePlan!
 
 
@@ -12777,8 +13189,11 @@ export const typeDefs = `#graphql
     Updates on an ended session stay allowed (late PR-merge attribution).
     #1931 — llmModel refreshes the model-family derivation; an explicit family wins.
     Null or omitted family metadata preserves the existing family. Unclassified models do not clear it.
+    #4291 — effort reports the effort the session now runs at; null or omitted leaves it as last recorded. A report
+    (model, family or effort) on a worker's OPEN session is also written to that worker's last-used record
+    (Worker.lastUsed, hrn:node:hadronmemory.com:specs:cor:agt:060:04); a report on an ended session moves no record.
     """
-    updateSession(id: ID!, prNumber: Int, branch: String, llmModel: String, family: String): Session!
+    updateSession(id: ID!, prNumber: Int, branch: String, llmModel: String, family: String, effort: EffortLevel): Session!
 
     """
     #2896 — report a session's outcome: outcome is a number from 0 to 1, outcomeRef an opaque reference of the
@@ -12985,7 +13400,7 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     updateOrganization(
-      id: ID!
+      ref: ID!
       name: String
       urn: String
       listedOnMarketplace: Boolean
@@ -13238,7 +13653,7 @@ export const typeDefs = `#graphql
     truth in \`FR_026_DISCLOSURE\` — see \`src/lib/entityRef/errors.ts\`). On a
     non-encrypted memory the flag is a no-op.
     """
-    updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, data: JSON, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, listedOnMarketplace: Boolean, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource, acknowledgeVectorInversionRisk: Boolean, chunkTokens: Int, chunkOverlap: Int, forceFixedSize: Boolean, maxRevCount: Int, schema: JSON): Memory!
+    updateMemory(ref: ID!, name: String, urn: String, orgRef: ID, shortDescription: String, description: String, data: JSON, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, listedOnMarketplace: Boolean, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource, acknowledgeVectorInversionRisk: Boolean, chunkTokens: Int, chunkOverlap: Int, forceFixedSize: Boolean, maxRevCount: Int, schema: JSON): Memory!
 
     """
     Transfer a free-standing Memory to exactly one new owner. dryRun previews
@@ -13280,7 +13695,7 @@ export const typeDefs = `#graphql
     display name is derived from the target slug.
 
     Copies the Memory row and its eligible live graph. Comment nodes,
-    compiled boot-prompt nodes and decision-family nodes are excluded;
+    compiled boot-prompt nodes and question-family nodes are excluded;
     derived INCLUDE edges are re-derived rather than copied. References to
     the source memory's URN inside node content/abstract
     (canonical and legacy spellings) are rewritten to the clone's URN.
@@ -13371,8 +13786,8 @@ export const typeDefs = `#graphql
 
     # Agent management
     """
-    Create an agent. Provide orgId to create an ORG-owned agent (requires org
-    ADMIN); OMIT orgId to create a USER-OWNED agent owned by the caller — its
+    Create an agent. Provide orgRef to create an ORG-owned agent (requires org
+    ADMIN); OMIT orgRef to create a USER-OWNED agent owned by the caller — its
     URN is rooted on the caller's bare handle (hrn:agent:<handle>:<slug>, grammar
     v2 — no @ sigil) and its system memory is user-owned too. Exactly one owner
     (org XOR user).
@@ -13383,9 +13798,10 @@ export const typeDefs = `#graphql
     hrn:node:hadronmemory.com:specs:cor:agt:040:12). The NAMED identity is a
     Worker, cast with castWorker; names never live on agents.
 
-    orgId accepts the org's ID or URN.
+    orgRef accepts the org's ID or URN; an empty orgRef is BAD_USER_INPUT. An empty
+    systemMemoryRef means none (a system memory is provisioned).
     """
-    createAgent(orgId: ID, name: String!, description: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#2171 (R211): the member roles the Agent offers. Omitted: owner and member. Empty or malformed: BAD_USER_INPUT." memberRoles: [String!]): Agent!
+    createAgent(orgRef: ID, name: String!, description: String, systemMemoryRef: ID, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null is LONG_LIVED." lifecycle: AgentLifecycle, "#4225: the context cap in tokens, a whole number from 1; omitted or null is no cap." contextCap: Int, "#2171 (R211): the member roles the Agent offers. Omitted: owner and member. Empty or malformed: BAD_USER_INPUT." memberRoles: [String!]): Agent!
     """
     Clone an Agent into an organization you administer: a new PERSONAL-draft Agent
     with its own copy of the source's system memory, its links and imports, and a recorded origin. Needs a
@@ -13416,7 +13832,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, registerDefaults: RegisterDefaultsInput, "#2171 (R211): replaces the member roles the Agent offers (and nothing else in its installation policy). Omitted or null: unchanged. Empty or malformed: BAD_USER_INPUT. Existing members keep their role." memberRoles: [String!]): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemMemoryRef: ID, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null leaves it unchanged." lifecycle: AgentLifecycle, "#4225: the context cap in tokens, a whole number from 1; omitted leaves it, null clears it (no cap)." contextCap: Int, registerDefaults: RegisterDefaultsInput, "#2171 (R211): replaces the member roles the Agent offers (and nothing else in its installation policy). Omitted or null: unchanged. Empty or malformed: BAD_USER_INPUT. Existing members keep their role." memberRoles: [String!]): Agent!
 
     """
     Soft-delete an Agent and its owned system memory. Requires management
@@ -13424,8 +13840,8 @@ export const typeDefs = `#graphql
     App install or live parent Agent import references it, or a live Agent
     extends it as its base. AgentMemoryItem attachments do not block deletion.
 
-    Also refused with DECISION_CONTAINED (#1641) while the Agent's system memory holds a decision or a
-    decision log: removing the memory would remove them, so the Agent is kept. Decision protection always applies.
+    Also refused with QUESTION_CONTAINED (#1641) while the Agent's system memory holds a question or a
+    question log: removing the memory would remove them, so the Agent is kept. Question protection always applies.
     If this server requires minted content to be retained, its separate deletion restrictions also apply.
 
     See hrn:node:hadronmemory.com:specs:cor:dmo:050:14.
@@ -13662,12 +14078,15 @@ export const typeDefs = `#graphql
     """
     Create a named, owner-scoped secret (#677). Gate per owner scope:
     user -> that user (ownerRef optional, defaults to the caller); org ->
-    org ADMIN; app -> app owner / org ADMIN; memory -> memory WRITE.
-    value is the secret payload — encrypted at rest, write-only, never
-    returned. kind selects validation: generic (opaque JSON) or
+    org ADMIN; app -> any member of the App, as a person (an App key, an
+    impersonated session and a run are refused; the value is stored as
+    version 1). value is the secret payload — encrypted at rest,
+    write-only, never returned; at most 32 KiB of stored JSON, counted in
+    bytes. kind selects validation: generic (opaque JSON) or
     webfetch-auth ({type: bearer|basic|header, ...} + metadata.urlPrefix
     origin binding). A run resolves the name via the CSS cascade
-    (memory -> app -> user -> org) at entitled scopes only.
+    (user -> org) at entitled scopes only; an App secret is never resolved
+    by a run (hrn:node:hadronmemory.com:specs:cor:sec:020:02).
     """
     createSecret(
       ownerType: String!
@@ -13679,15 +14098,34 @@ export const typeDefs = `#graphql
     ): Secret!
 
     """
-    Overwrite a secret's value and/or metadata (v1 rotation — no
-    versioning). Name, kind, and owner are immutable — the cascade and
-    flow config reference the name; create a new name instead. The
-    effective (metadata, value) pair is re-validated per kind.
+    Change a secret's value and/or metadata. For an org or user secret a
+    value OVERWRITES (no versions). For an App secret a value ADDS the next
+    version and never overwrites (hrn:node:hadronmemory.com:specs:cor:sec:010:03);
+    any member of the App may store. Name, kind, and owner are immutable —
+    the cascade and flow config reference the name; create a new name
+    instead. The effective (metadata, value) pair is re-validated per kind.
     """
     updateSecret(ref: ID!, metadata: JSON, value: JSON): Secret!
 
-    "Hard-delete a secret; referencing runs fail their resolution loud (or fall through the cascade) afterwards."
+    "Hard-delete a secret, every version with it; referencing runs fail their resolution loud (or fall through the cascade) afterwards. An unprotected App secret is deleted by its creator or whoever manages the App, each as a person."
     deleteSecret(ref: ID!): Boolean!
+
+    """
+    Issue a read client for an App secret (hrn:node:hadronmemory.com:specs:cor:sec:060:01): one pending "secret.reveal" grant and
+    its client, made together. A person only (never a worker session, a run, an impersonated session or an App key), who manages the
+    App or wrote the secret's current version. The grant waits for the issuer's passkey signature; the holder is a live worker of the
+    App, or the issuer themself. The client id is returned here, to the issuer, and to the holder; it never reads on its own.
+    """
+    issueSecretReadClient(input: IssueSecretReadClientInput!): SecretReadClientIssued!
+
+    """
+    Reveal an App secret's value through a read client (hrn:node:hadronmemory.com:specs:cor:sec:060), spending exactly one use. Only the
+    worker session the client's grant names; a person, an App key, a run and an impersonation get SECRET_READ_CLIENT_NOT_FOUND, as does
+    an unknown client id or another holder's; a wrong holder's read of a real client is recorded on the secret, an unknown id's is not. The
+    use and the audit event commit before the value is returned. One operation may select this field once: two or more are all refused with
+    SECRET_REVEAL_ONE_PER_OPERATION before any reads (send each as its own operation).
+    """
+    revealSecret(clientId: ID!): SecretRevealed!
 
     """
     Register a Home Assistant instance (org ADMIN/OWNER). orgRef accepts
@@ -15334,8 +15772,7 @@ export const typeDefs = `#graphql
     """
     Revoke an AppKey. Only whoever manages the App, as themselves, or through their held worker on a validated
     \`instruction\` (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0098; hrn:node:hadronmemory.com:specs:cor:dmo:050:05;
-    hrn:node:hadronmemory.com:specs:cor:acl:010:01). Never an App key, a host-launched or uninstructed worker session,
-    a run or an impersonated request. A worker session that is refused cannot tell a missing key from an existing one.
+    hrn:node:hadronmemory.com:specs:cor:acl:010:01). ${RUN_REFUSAL_3340} A worker session that is refused cannot tell a missing key from an existing one.
     An admitted instructed revoke records one team event (never the key id); a key already revoked records none.
     AppKey has no URN; the id is raw ID-only.
     """
@@ -15350,7 +15787,7 @@ export const typeDefs = `#graphql
     APP_KEY_SCOPE_HOST_CONFLICT: revoke host:operate first.
     """
     grantAppKeyScope(id: ID!, scope: String!, hostId: String): AppKey!
-    "#1749 — take a scope back. The key's next call is refused. Revoking a scope it does not hold changes nothing. Whoever manages the App, as themselves, or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0109 A); an admitted instructed revoke that ended a scope records one team event (never the key or scope id)."
+    "#1749 — take a scope back. The key's next call is refused. Revoking a scope it does not hold changes nothing. Whoever manages the App, as themselves, or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0109 A); an admitted instructed revoke that ended a scope records one team event (never the key or scope id). ${RUN_REFUSAL_3340}"
     revokeAppKeyScope(id: ID!, scope: String!, instruction: ActInstructionInput): AppKey!
 
     """
@@ -15525,7 +15962,7 @@ export const typeDefs = `#graphql
     chatEnded: Boolean!
     "Conversation completed by this turn's explicit goal_reached flag, or null. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
     conversationCompleted: String
-    "Whether this turn returned from a detour; false until the detour-return slice ships. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
+    "Whether this turn returned the chat from a detour to the conversation and stage the most recent active detour left. False when a completion rule fired instead, or routing was skipped. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
     detourReturned: Boolean!
     "Routing edits were skipped because a concurrent turn moved the chat from the decision's origin. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
     routingSkipped: Boolean!
@@ -15673,6 +16110,50 @@ export const typeDefs = `#graphql
     modelGroupNotIn: [String!]
   }
 
+  """
+  #4291 (hrn:node:hadronmemory.com:specs:cor:agt:050:01; decision record run-settings-are-not-worker-identity) — a task's own run
+  settings: what a start for it launches. Anything left out falls back to the worker's last used (Worker.lastUsed), so
+  a missing value is never a refusal. They are run settings, not requirements: a worker that is already running takes
+  the task under its session's settings (AgentTask.appliedRunSettings shows them), and a task that must run on a
+  family says so with requirements.familyIn. For a short-lived worker with no open session the launch applies them, so
+  the matcher judges familyIn, familyNotIn and minTier against them (hrn:node:hadronmemory.com:specs:cor:agt:060:06).
+
+  Refused TASK_RUN_SETTINGS_INVALID, with extensions.reason: BAD_VALUE (a field that is not its token),
+  EFFORT_NOT_A_REQUEST (NOT_APPLICABLE), MODEL_AND_TIER (both named), MODEL_OUTSIDE_FAMILY (an exact model of another
+  family than the one named), FAMILY_EXCLUDED (the family, named or implied by the model, is outside
+  requirements.familyIn or inside familyNotIn), TIER_BELOW_MINIMUM (the tier, or the exact model's tier, is below
+  requirements.minTier).
+  """
+  input AgentTaskRunSettingsInput {
+    "A model family token, e.g. claude, codex or glm."
+    family: String
+    "An exact model name (letters, digits, '.', '_' or '-'; at most 128 characters). Give this or tier, not both."
+    model: String
+    "A generic tier instead of a model: high, mid or low. The host's launcher maps it to the family's model."
+    tier: String
+    "A generic effort; the launcher maps it to the family's own value. NOT_APPLICABLE is a report, not a request, and is refused."
+    effort: EffortLevel
+  }
+
+  "#4291 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): a task's own run settings as stored. Each field is null when the task names none."
+  type AgentTaskRunSettings {
+    family: String
+    model: String
+    "high, mid or low; null when the task names an exact model or neither."
+    tier: String
+    effort: EffortLevel
+  }
+
+  """
+  #4291 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): the settings a task's run actually used: its worker assignee's newest open
+  session's family, model and effort, read when the task was started. Each is null when that session had not reported it.
+  """
+  type AgentTaskAppliedRunSettings {
+    family: String
+    model: String
+    effort: EffortLevel
+  }
+
   "#2662: severity is shape only, never matcher, authorization or alarm input (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
   enum AgentTaskFindingSeverity { P1 P2 P3 note }
   "#2662: immutable finding set at finish; text never enters the event stream."
@@ -15743,7 +16224,7 @@ export const typeDefs = `#graphql
     READ_TEAM_CHANNEL
     "Fires on every tick, with or without unread. The floor, budget, pause and dormancy still apply."
     EVERY_TICK
-    "#2138: fires when the subscriber has not checked its team channel within the ticker's cadence, whatever is unread, and never for a worker not expected to check (no task, isolated, paused, or a team pause)."
+    "#2138: fires when the subscriber has not checked its team channel within the ticker's cadence, whatever is unread, and never for a worker not expected to check (no task, paused, or a team pause)."
     LIVE_CHECK
   }
 
@@ -15790,8 +16271,10 @@ export const typeDefs = `#graphql
     REASSIGNED
     "The platform's matcher assigned it (hrn:node:hadronmemory.com:specs:cor:agt:060:06)."
     MATCHED
-    "A child task finished; the reason names the child (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
+    "A child task finished; the reason names the child. Due to the child's owner (hrn:node:hadronmemory.com:specs:cor:agt:050:16) and, #4234, to the parent's current assignee."
     CHILD_FINISHED
+    "#4234 — a child task was cancelled; the reason names the child. Due to the same two as CHILD_FINISHED (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
+    CHILD_CANCELLED
     "An unacknowledged alarm's currently-woken chain position (hrn:node:hadronmemory.com:specs:cor:agt:050:19). Delivering it never acknowledges the alarm."
     ALARM
     "#1709 — the task was cancelled and asks its assignee to end its session (hrn:node:hadronmemory.com:specs:cor:agt:050:10). Due while that session is open and the platform has not yet ended it through a host."
@@ -15800,7 +16283,7 @@ export const typeDefs = `#graphql
 
   "#1708 — the task a TASK reason is for: shown only to a caller who may read the App's tasks (hrn:node:hadronmemory.com:specs:cor:agt:050:21)."
   type DueTaskReason {
-    "The task's id (for CHILD_FINISHED, the child's)."
+    "The task's id (for CHILD_FINISHED and CHILD_CANCELLED, the child's)."
     id: ID!
     "The event delivered; acknowledging the wake records delivery on it."
     eventId: ID!
@@ -15813,8 +16296,6 @@ export const typeDefs = `#graphql
     handle: String!
     "A stable label for the reason, e.g. TASK:<id>:assigned."
     ref: String!
-    "Always null: standby has been removed."
-    standbyHeld: Int @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
   }
 
   "#1748 — one page of due wakes. Counts and ranges only (hrn:node:hadronmemory.com:specs:cor:agt:080:23)."
@@ -16277,8 +16758,6 @@ export const typeDefs = `#graphql
   "#1747 — a worker wake settings (hrn:node:hadronmemory.com:specs:cor:agt:080:03)."
   type WorkerWakeSettings {
     worker: Worker!
-    "Always false: isolation has been removed. Compatibility only; the deprecated clear door retains its original audience. hrn:node:hadronmemory.com:specs:cor:agt:080:29"
-    canManageIsolation: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
     mentions: MentionWake!
     "A pause belongs to the worker, not to a session."
     pausedUntil: DateTime
@@ -16288,13 +16767,177 @@ export const typeDefs = `#graphql
     effectiveCadenceSeconds: Int
     "None of the worker's sessions has had activity within the App's dormancy period (hrn:node:hadronmemory.com:specs:cor:agt:080:07). A dormant worker is never woken."
     dormant: Boolean!
-    "Always null: isolation storage and execution have been removed."
-    isolatedUntil: DateTime @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
-    isolatedAt: DateTime @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
-    "Always null: isolation has been removed."
-    isolatedByHandle: String @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
-    "Always false: isolation has been removed."
-    isolated: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
+  }
+
+  """
+  #4291 (hrn:node:hadronmemory.com:specs:cor:agt:060:04) — the generic effort scale of a run. LOW to MAX are levels the launcher maps to the
+  family's own values; UNSET is the family's default. NOT_APPLICABLE is report-only: a session whose family has no effort
+  control reports it, and a worker's last-used record may hold it; a task never carries it. Self-declared, like the family
+  and model: a reporting input, never authorization.
+  """
+  enum EffortLevel { LOW MEDIUM HIGH XHIGH MAX UNSET NOT_APPLICABLE }
+
+  "#4224 (S3 of #4229): how long an Agent's workers run."
+  enum AgentLifecycle {
+    "The worker's process should always run (the default, and the behaviour before this field existed)."
+    LONG_LIVED
+    "The worker's process should run only while it is the assignee of a pending or started task (one waiting on its child tasks included)."
+    SHORT_LIVED
+  }
+
+  "#4224 (S3 of #4229): the App's sweep switch."
+  enum SweepMode {
+    "The sweep acts on no worker: every hostDesiredState row says SWEEP_OFF. The default."
+    OFF
+    "The sweep compares desired state with what it sees and reports; it repairs nothing."
+    OBSERVE
+    "The sweep also repairs what it can."
+    APPLY
+  }
+
+  "#4224: whether a worker's agent process should be running."
+  enum DesiredRunState {
+    RUNNING
+    STOPPED
+  }
+
+  """
+  #4224 (S3 of #4229): why a worker's desired state is what it is. A closed set. The first three come from the
+  Agent's lifecycle. RETIRED, HALTED, PAUSED, TEAM_PAUSED and RESETTING always win over the lifecycle, in that order,
+  and always read STOPPED. LEAVE_ALONE wins over all of those, and SWEEP_OFF over everything: with either, nothing
+  is desired (desired is null) and wouldBe says what the state would otherwise be.
+  """
+  enum DesiredStateReason {
+    "A worker of a LONG_LIVED Agent: RUNNING."
+    LONG_LIVED
+    "A worker of a SHORT_LIVED Agent that is the assignee of a pending or started task, including one waiting on its child tasks (the worker stays up and is woken by their events): RUNNING."
+    HOLDS_TASK
+    "A worker of a SHORT_LIVED Agent that is the assignee of no pending or started task: STOPPED."
+    NO_OPEN_TASK
+    "The worker is retired."
+    RETIRED
+    "A live halt stop signal covers the worker (hrn:node:hadronmemory.com:specs:cor:agt:090:01)."
+    HALTED
+    "A live pause stop signal covers the worker (hrn:node:hadronmemory.com:specs:cor:agt:090:01). A pause-dispatch signal stops assignment only and is not a reason here."
+    PAUSED
+    "The App is under a team pause (App.teamPausedAt)."
+    TEAM_PAUSED
+    "A context reset holds the worker (hrn:node:hadronmemory.com:specs:cor:agt:050:27): its host is relaunching it."
+    RESETTING
+    "The worker is marked leave-alone (Worker.leaveAlone)."
+    LEAVE_ALONE
+    "The App's sweep mode is OFF."
+    SWEEP_OFF
+  }
+
+  "#4224: one worker's desired state on one host, with the setup the host needs to start it."
+  type WorkerDesiredState {
+    workerId: ID!
+    name: String!
+    "The lifecycle of the worker's Agent."
+    lifecycle: AgentLifecycle!
+    "RUNNING or STOPPED; null exactly when reason is LEAVE_ALONE or SWEEP_OFF, where nothing is desired and a reader acts on nothing."
+    desired: DesiredRunState
+    reason: DesiredStateReason!
+    "Set exactly when desired is null: the state the worker would have without the marker, or with the sweep on."
+    wouldBe: DesiredRunState
+    "The reason for wouldBe; never LEAVE_ALONE or SWEEP_OFF. Null when wouldBe is."
+    wouldBeReason: DesiredStateReason
+    "The worker's open session (not ended), or null. Open, not live: a quiet session is still open."
+    openSessionId: ID
+    "The model family the host registered the worker to run as."
+    family: String!
+    "The worker's existing worktrees on this host, as the host names them; empty when it has none."
+    worktrees: [String!]!
+  }
+
+  "#4233: what a sweep did to one worker in one run."
+  enum SweepRunOutcome {
+    APPLIED
+    SKIPPED
+    FAILED
+  }
+
+  "#4233: one worker's line in a sweep run: the worker as the host named it, what became of it, and a reason code."
+  type HostSweepRunLine {
+    worker: String!
+    outcome: SweepRunOutcome!
+    "A code (capital letters, digits, underscores), never text."
+    reason: String!
+  }
+
+  "#4233 (S10 of #4229): one run of a host's sweep, as the host reported it."
+  type HostSweepRun {
+    id: ID!
+    hostId: String!
+    "The host's own token for the run."
+    runId: String!
+    startedAt: DateTime!
+    endedAt: DateTime!
+    "OBSERVE or APPLY; a sweep in mode OFF records nothing."
+    mode: SweepMode!
+    planned: Int!
+    applied: Int!
+    skipped: Int!
+    failed: Int!
+    "At most 50 lines."
+    lines: [HostSweepRunLine!]!
+    "When the server stored the run."
+    recordedAt: DateTime!
+  }
+
+  input HostSweepRunLineInput {
+    worker: String!
+    outcome: SweepRunOutcome!
+    reason: String!
+  }
+
+  input RecordHostSweepRunInput {
+    appRef: String!
+    "A token of 1 to 64 letters, digits and . _ : - that names this run for this host; a replay is the same run."
+    runId: String!
+    startedAt: DateTime!
+    "Not before startedAt, not more than two minutes ahead of the server, and within an hour of startedAt."
+    endedAt: DateTime!
+    "OBSERVE or APPLY."
+    mode: SweepMode!
+    planned: Int!
+    applied: Int!
+    skipped: Int!
+    failed: Int!
+    "At most 50."
+    lines: [HostSweepRunLineInput!]
+  }
+
+  "#4224: the desired state of every worker one host runs, and the App's sweep mode."
+  type HostDesiredState {
+    hostId: String!
+    sweepMode: SweepMode!
+    workers: [WorkerDesiredState!]!
+  }
+
+  "#4224: the App's sweep mode after setAppSweepMode."
+  type AppSweepMode {
+    sweepMode: SweepMode!
+  }
+
+  "#4224: a worker's leave-alone marker after setWorkerLeaveAlone. reason, by and at are null when the worker is not marked."
+  type WorkerLeaveAlone {
+    workerId: ID!
+    leaveAlone: Boolean!
+    reason: String
+    "The user who set the marker."
+    by: String
+    at: DateTime
+  }
+
+  input SetWorkerLeaveAloneInput {
+    "The worker: its id or URN, or its name together with appRef."
+    worker: String!
+    appRef: ID
+    leaveAlone: Boolean!
+    "Optional, only when marking: why the sweep leaves this worker alone. At most 500 characters."
+    reason: String
   }
 
   "#2138: the App's team pause. teamPausedAt is null when the team is not paused."
@@ -16316,10 +16959,6 @@ export const typeDefs = `#graphql
     failedChecksToOverdue: Int!
     "#2755: a worker's due wake left unacknowledged this long raises the dark-worker alarm. Whole seconds, 300..86400; default 1800. Independent of stuckWindowSeconds."
     darkAlarmWindowSeconds: Int!
-    "Always false: standby storage and execution have been removed."
-    standbyEnabled: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
-    "Always false: standby has been removed."
-    standbyEffective: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
   }
 
   "Atomic patch: omit to preserve, explicit null refuses. Empty patch returns the current authorized settings."
@@ -16328,7 +16967,6 @@ export const typeDefs = `#graphql
     batchWindowSeconds: Int
     busyDelaySeconds: Int
     stuckWindowSeconds: Int
-    standbyEnabled: Boolean @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
     "#2138: whole seconds, 60..86400."
     checkPeriodSeconds: Int
     "#2138: whole number, 1..100."
@@ -16454,10 +17092,21 @@ export const typeDefs = `#graphql
     matchSkipped: [AgentTaskSkippedCandidate!]
     "Null unless an opt-in single-shot match failed. No assignment-unassignable alarm is raised for it."
     matchFailure: AgentTaskMatchFailure
+    "#4291 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): the task's own run settings (what a start for it launches); null when it names none."
+    runSettings: AgentTaskRunSettings
+    """
+    #4291 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): the settings the run actually used, from the assignee's open session when the
+    task was started. Null until then, for a task a person runs, and when that session had reported none. Read it beside
+    runSettings: a worker that was already running keeps its session's settings, so the two can differ. A hand-back
+    clears it; a reassignment of a started task does not restamp it.
+    """
+    appliedRunSettings: AgentTaskAppliedRunSettings
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:01) — priority1 is highest; range1..5, default1. Matching only, never authority."
     priority: Int!
     "Whether at least one blocker remains open. Never a status; manual assignment is preserved."
     blocked: Boolean!
+    "#2654: true exactly when the overdue filter of the task list would list this task at the moment of the read (same rule, judged on the server clock). A client shows this field and computes no overdue predicate of its own."
+    overdue: Boolean!
     "Same-App tasks this task waits for, including ended blockers."
     blockedBy(limit: Int = 20, offset: Int = 0): AgentTaskDependencyPage!
     "Same-App tasks that name this task as a blocker."
@@ -16537,12 +17186,16 @@ export const typeDefs = `#graphql
     """
     Whether finishing or cancelling asks the assignee to end its worker session
     (hrn:node:hadronmemory.com:specs:cor:agt:050:10). Set by whoever assigns. #1709: carried out; see sessionEndRequest.
+    #4223: not read for a worker of a SHORT_LIVED Agent (Agent.lifecycle), whose session ends with its last open task.
     """
     closeSessionWhenDone: Boolean!
     """
     #1709 — the request this task's finish or cancellation made that its worker assignee end its session
     (hrn:node:hadronmemory.com:specs:cor:agt:050:10); null when none was made (closeSessionWhenDone false, a person
-    assignee, or no open session). A worker that finishes its own task reads it here: end the session, with a handoff,
+    assignee, or no open session; #4223: for a worker of a SHORT_LIVED Agent, another pending or started task is still
+    assigned to it). Reassigning such a worker's last pending or started task away asks that former assignee too, by a
+    wake and never here: this field shows only the latest request made of the task's current worker assignee, is
+    null for a task assigned to a person or to nobody, and is null for a reader that is another worker. A worker that finishes its own task reads it here: end the session, with a handoff,
     before dueAt, or the platform ends it through a live host.
     """
     sessionEndRequest: AgentTaskSessionEndRequest
@@ -16557,6 +17210,8 @@ export const typeDefs = `#graphql
 
   "#1709 — a task's request that its assignee end its session (hrn:node:hadronmemory.com:specs:cor:agt:050:10)."
   type AgentTaskSessionEndRequest {
+    "#4223: the worker asked to end its session. On AgentTask.sessionEndRequest it is always the task's current worker assignee."
+    workerId: ID!
     "The session asked to end: only this one is ever ended, never a later replacement."
     sessionId: ID!
     requestedAt: DateTime!
@@ -16625,9 +17280,11 @@ export const typeDefs = `#graphql
   type AgentTeamEvent {
     id: ID!
     appId: ID!
-    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.coordinator-cadence (#2763: task-less, subjectWorker is the coordinator that stopped assigning); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02)."
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.coordinator-cadence (#2763: task-less, subjectWorker is the coordinator that stopped assigning); alarm.stale-sweep (#4233: task-less and workerless: a host of an App in sweep mode OBSERVE or APPLY whose last run the server recorded more than five minutes ago (the server's clock, not the host's; a switch-on of the mode restarts the clock); payload.hostId names the host, the alarm goes to the App's managers and ends when the host records its next run); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02)."
     type: String!
     taskId: ID
+    "The task's stored handle (hrn:node:hadronmemory.com:specs:cor:agt:050:01, Proposed). Null when taskId is null or the task no longer exists; never invented."
+    taskHandle: String
     "Who acted: the Worker when the request was bound to a worker session, else the person."
     actor: AgentTaskParty
     "#1833 — the headless run that acted, when a run made this event (actor is then null: a run is never a person or a worker). Null otherwise. Matches AgentTask.createdByRunId for the task a run created."
@@ -16801,6 +17458,78 @@ export const typeDefs = `#graphql
     "#2162 — the capability-gated operation types this host declared it performs (hrn:node:hadronmemory.com:specs:cor:agt:070:01, Proposed): worker.reset-context. A host is never issued one it did not declare."
     capabilities: [String!]!
     workers: [HostRegistrationWorker!]!
+    "#4222 — on registerHost's own answer only (empty on every read): the workers the host listed that were left out because the App's hostSetupSource is SERVER and the platform did not assign them to this host. The registration itself succeeded with the rest."
+    refusedWorkers: [HostRegistrationRefusal!]!
+  }
+
+  "#4222 — one worker a checked registration left out. code is HOST_WORKER_NOT_ASSIGNED, whatever the reason (unassigned, assigned to another host, retired, of another App, or naming nothing)."
+  type HostRegistrationRefusal {
+    "The worker as the host named it."
+    worker: String!
+    code: String!
+  }
+
+  "#4222 — who states which workers a host runs (hrn:node:hadronmemory.com:specs:cor:agt:070:01, the change Proposed). HOST: the host, at registration (the default, as before). SERVER: the platform's assignments; a registration is checked against them and a start uses them."
+  enum HostSetupSource {
+    HOST
+    SERVER
+  }
+
+  """
+  #4222 — one worker the platform says a host runs (hrn:node:hadronmemory.com:specs:cor:agt:070:01, the change Proposed).
+  workdir is the name the host knows the worker's working directory by (an Orca worktree name, or a plain directory
+  name for a worker without Git); like every argument a host acts on it is a name token, never a path, a command or a
+  credential (hrn:node:hadronmemory.com:specs:cor:agt:070:03). #4230: family, model, effort and accountProfile are its
+  typed launcher profile, never a command (decision G1); while the App's hostSetupSource is SERVER a worker.start
+  carries the set ones, and the host builds the command from a fixed template for the family.
+  """
+  type HostWorkerAssignment {
+    id: ID!
+    hostId: String!
+    workerId: ID!
+    worker: Worker
+    workdir: String!
+    family: String!
+    model: String
+    "#4230 — the effort the launcher runs the model at, a profile token. Null when unset."
+    effort: String
+    "#4230 — the host-local account the launcher runs under, a profile token the host maps to its launcher; never a path or a credential. Null when unset."
+    accountProfile: String
+    createdByUserId: ID!
+    createdAt: DateTime!
+    updatedAt: DateTime!
+  }
+
+  "#4222 — what the platform says an App's hosts run: the switch, and the assignments in effect (a retired worker's are left out), by host then worker."
+  type HostSetup {
+    source: HostSetupSource!
+    assignments: [HostWorkerAssignment!]!
+  }
+
+  input AssignHostWorkerInput {
+    appRef: String!
+    "The host's id within the App: the one its key's host:operate scope names. It need not have registered yet."
+    hostId: String!
+    "The worker: its id, URN or name within the App."
+    worker: String!
+    "The name the host knows the working directory by: a name token (letters, digits and . _ / @ + -, starting with a letter or digit, no .., // or trailing /), at most 256 characters."
+    workdir: String!
+    "The model family it runs as there: one a host has a launcher for (claude, codex, glm or kimi)."
+    family: String!
+    "The model, a profile token: letters, digits, . _ or -, starting with a letter or digit, at most 128 characters. Optional."
+    model: String
+    "#4230 — the effort, a profile token. Optional."
+    effort: String
+    "#4230 — the host-local account profile the launcher runs under, a profile token. Optional."
+    accountProfile: String
+    "Change an existing assignment of this worker to this host instead of refusing HOST_ASSIGNMENT_EXISTS."
+    replace: Boolean
+  }
+
+  input UnassignHostWorkerInput {
+    appRef: String!
+    hostId: String!
+    worker: String!
   }
 
   "#1709 — a worker a host can launch: the family it would run as, and its existing worktrees there."
@@ -16855,10 +17584,20 @@ export const typeDefs = `#graphql
     issuedAt: DateTime!
     collectedAt: DateTime
     finishedAt: DateTime
-    "A success's typed result: {worktree} for worktree.create."
+    """
+    A success's typed result, by type: {worktree} for worktree.create, {sessionId} (the worker session the start's grant
+    bound) for worker.start, {handoff} (a boolean: whether a handoff was written) for worker.end. Null for worker.deliver,
+    worktree.remove and worker.reset-context, for a failure, and until the operation finishes.
+    """
     result: JSON
     "Why it failed, as the host said it."
     failureReason: String
+    """
+    #4231 — why the platform issued it when no task did: DESIRED_RUNNING for the start of a long-lived worker that
+    should run and has no session (hrn:node:hadronmemory.com:specs:cor:agt:070:05, Proposed). Null for every other
+    operation.
+    """
+    issuedReason: String
     """
     #1709 — worker.start only, and only in collectHostOperations' answer: the single-use launch grant to pass to the
     agent the host starts (it redeems it at startSession with its holder's own token). Short-lived; never stored in clear
@@ -16937,7 +17676,8 @@ export const typeDefs = `#graphql
     checkpoint: ContextResetCheckpointInput
     "The reset's own session and task."
     sessionId: ID!
-    taskId: ID!
+    "The task the reset belongs to; omitted (or empty) for a reset with no task, one asked for by the Agent's context cap (cause context-cap)."
+    taskId: ID
   }
 
   input AuthorizeContextResetStopInput {
@@ -16975,7 +17715,10 @@ export const typeDefs = `#graphql
     appId: ID!
     workerId: ID!
     sessionId: ID!
-    taskId: ID!
+    "Null for a reset with no task: one asked for by the Agent's context cap (#4225)."
+    taskId: ID
+    "#4225: what asked for the reset: task-end (a task's finish or cancel) or context-cap (the Agent's context cap, S4b)."
+    cause: String!
     hostId: String
     hostOperationId: ID
     phase: String!
@@ -17015,6 +17758,30 @@ export const typeDefs = `#graphql
     failureReason: String
   }
 
+  "#4292: the closed proofs a host gives for ending a session itself."
+  enum AgentlessEndReason {
+    "No agent process runs in the worker's worktree."
+    AGENT_ABSENT
+  }
+
+  input EndAgentlessSessionInput {
+    appRef: String!
+    "The worker: its id, URN or name within the App."
+    workerRef: String!
+    "The worker's open session to end."
+    sessionId: ID!
+    reason: AgentlessEndReason!
+  }
+
+  "#4292: the outcome of endAgentlessSession."
+  type AgentlessSessionEnd {
+    sessionId: ID!
+    "True when this call ended the session; false when it had already ended."
+    ended: Boolean!
+    "Whether a handoff names this session. False means no handoff was recorded."
+    handoff: Boolean!
+  }
+
   input SetHostWorkerAvailabilityInput {
     appRef: String!
     "A worker this host registers: its id, URN or name within the App."
@@ -17046,6 +17813,45 @@ export const typeDefs = `#graphql
     NO_SNAPSHOT
     "The host's relaunch attempt cap was reached."
     CAP_REACHED
+    """
+    #4247 — the host did not relaunch the worker because a safety check declined it. Carries repairReason from the
+    refusal set (IDENTITY_MISMATCH, DUPLICATE_AGENT, PAUSED, HALTED, LEAVE_ALONE, NO_LAUNCHER_PROFILE) and attempt.
+    """
+    RELAUNCH_REFUSED
+    """
+    #4247 — the host tried to relaunch the worker and it did not come up. Carries repairReason from the failure set
+    (LAUNCH_EXIT_NONZERO, TERMINAL_CREATE_REFUSED, TIMEOUT, SETUP_FAILED, VERIFY_FAILED) and attempt.
+    """
+    RELAUNCH_FAILED
+  }
+
+  """
+  #4247 — why a relaunch was refused or failed. A closed set, never free text. The first six go with RELAUNCH_REFUSED,
+  the last five with RELAUNCH_FAILED; a reason from the other set is refused (REPAIR_REASON_INVALID).
+  """
+  enum WorkerTerminalRepairReason {
+    "The worker's identity does not match its launch snapshot."
+    IDENTITY_MISMATCH
+    "Another agent is already running in the worker's place."
+    DUPLICATE_AGENT
+    "The worker is paused."
+    PAUSED
+    "The worker is halted."
+    HALTED
+    "The worker is marked leave-alone."
+    LEAVE_ALONE
+    "The worker has no launcher profile."
+    NO_LAUNCHER_PROFILE
+    "The launcher exited non-zero."
+    LAUNCH_EXIT_NONZERO
+    "Orca refused to create the terminal."
+    TERMINAL_CREATE_REFUSED
+    "The relaunch timed out."
+    TIMEOUT
+    "#4259 — the host could not prepare the launch (a setup or disk error); the launcher never ran."
+    SETUP_FAILED
+    "#4259 — the launcher ran, but the host could not prove the agent came up."
+    VERIFY_FAILED
   }
 
   "#2771 — what the terminal's input prompt looked like."
@@ -17093,6 +17899,22 @@ export const typeDefs = `#graphql
     checkedAt: DateTime!
     "When the server stored the report."
     reportedAt: DateTime!
+    """
+    #4225 — the size of the worker's context in tokens, as its host measured it. Null when the host could not measure
+    it (never 0), and on a report stored before hosts sent it. Shown only: it decides nothing.
+    """
+    contextTokens: Int
+    "#4225 — when the host measured contextTokens; judge its age from this. Null exactly when contextTokens is."
+    contextMeasuredAt: DateTime
+    """
+    #4247 — what the host did about this dark worker, stored for RELAUNCH_REFUSED and RELAUNCH_FAILED only. Null for the
+    other outcomes (they are not stored) and when the report carried none; the next report replaces it.
+    """
+    repair: WorkerTerminalRepair
+    "#4247 — why the relaunch was refused or failed. Null exactly when repair is."
+    repairReason: WorkerTerminalRepairReason
+    "#4247 — the relaunch's attempt number, at least 1. Null exactly when repair is."
+    repairAttempt: Int
   }
 
   "#2771 — one worker's terminal report. There is no free-text field."
@@ -17112,8 +17934,20 @@ export const typeDefs = `#graphql
     locked report that worker's report is refused (REPAIR_NOT_DARK) and the rest of the batch is stored.
     """
     repair: WorkerTerminalRepair
-    "The relaunch's attempt number, at least 1: required with RELAUNCHED, refused (REPAIR_ATTEMPT_INVALID) otherwise."
+    """
+    #4247 — why the relaunch was refused or failed: required with RELAUNCH_REFUSED and RELAUNCH_FAILED (from that
+    outcome's own set), refused (REPAIR_REASON_INVALID) with any other outcome or none. Stored on the report with the outcome.
+    """
+    repairReason: WorkerTerminalRepairReason
+    "The relaunch's attempt number, at least 1: required with RELAUNCHED, RELAUNCH_REFUSED and RELAUNCH_FAILED, refused (REPAIR_ATTEMPT_INVALID) otherwise."
     attempt: Int
+    """
+    #4225 — the size of the worker's context in tokens, measured on the host: a whole number from 1. Null or omitted
+    when the host cannot measure this worker, never 0. A number only: no transcript text is sent.
+    """
+    contextTokens: Int
+    "#4225 — when the host measured contextTokens, not more than two minutes ahead of the server. Sent exactly when contextTokens is."
+    contextMeasuredAt: DateTime
   }
 
   input SetHostWorkerTerminalsInput {
@@ -17128,7 +17962,7 @@ export const typeDefs = `#graphql
     urn: String!
   }
 
-  "#2771 — a report not stored for one worker: WORKER_NOT_FOUND, TERMINAL_REPORT_STALE, REPAIR_NOT_DARK or REPAIR_ATTEMPT_INVALID."
+  "#2771 — a report not stored for one worker: WORKER_NOT_FOUND, TERMINAL_REPORT_STALE, REPAIR_NOT_DARK, REPAIR_ATTEMPT_INVALID or REPAIR_REASON_INVALID."
   type WorkerTerminalRefusal {
     "The worker as the host named it."
     worker: String!
@@ -17192,9 +18026,10 @@ export const typeDefs = `#graphql
   }
 
   """
-  #1707 — a worker's derived state on the team roster (plan
-  design:agent-tasks §7.4). Plan-derived, not a spec. A worker can be in
-  several at once; it is shown in the first that holds, in this order.
+  #1707 — a worker's derived state on the team roster, as defined by
+  hrn:node:hadronmemory.com:specs:cor:agt:050:22 (Definition: A worker's roster state;
+  the states are Proposed). A worker can be in several at once; it is shown in the
+  first that holds, in this order.
   """
   enum TeamRosterState {
     "Woken on an unacknowledged alarm (hrn:node:hadronmemory.com:specs:cor:agt:050:19), or a child task it owns finished or was cancelled after it last acted (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
@@ -17227,7 +18062,7 @@ export const typeDefs = `#graphql
     OVERDUE
   }
 
-  "#2138 §3.4 — why a worker is PENDING. Precedence: TEAM_PAUSED, STOPPED, PAUSED, NO_TASK. ISOLATED and STANDBY are compatibility-only values never returned."
+  "#2138 §3.4 — why a worker is PENDING. Precedence: TEAM_PAUSED, STOPPED, PAUSED, NO_TASK."
   enum WorkerPendingReason {
     "A team pause is in force (App.teamPausedAt); the worker can't lift it."
     TEAM_PAUSED
@@ -17235,10 +18070,6 @@ export const typeDefs = `#graphql
     STOPPED
     "Its own pause (pausedUntil) is in force."
     PAUSED
-    "Deprecated compatibility value; isolation is removed and this value is never returned."
-    ISOLATED @deprecated(reason: "Removed; never returned (#3606).")
-    "Compatibility-only value: standby has been removed; never returned."
-    STANDBY @deprecated(reason: "Removed; never returned (#3606).")
     "No open task assigned, and its Agent uses tasks."
     NO_TASK
   }
@@ -17401,6 +18232,18 @@ export const typeDefs = `#graphql
 
     "Coarse tier from the server model mapping: high, mid or low. Null when unbound, unreported or unmapped; advisory, never authorization."
     tier: String
+    """
+    #4291 (hrn:node:hadronmemory.com:specs:cor:agt:060:04): the effort the worker last ran at, from its record (lastUsed.effort): a level, UNSET
+    for the family's default, or NOT_APPLICABLE for a family with no effort control. Null when no session ever reported one.
+    """
+    effort: EffortLevel
+    """
+    #4291 (hrn:node:hadronmemory.com:specs:cor:agt:060:04): the worker's record of the family, model and effort its session last reported,
+    one value each and no history. It follows the session on every bind and report, is never cleared by a null, and is
+    kept when the worker unbinds: an unbound worker is matched and started on it (family and model above stay the
+    binding's, null when unbound). A report, not a control. Self-declared: advisory, never authorization.
+    """
+    lastUsed: WorkerRunSettings!
     "Families a live host registration can launch it as (hrn:node:hadronmemory.com:specs:cor:agt:070:01)."
     launchableFamilies: [String!]!
     "Free for work (hrn:node:hadronmemory.com:specs:cor:agt:060:05)."
@@ -17475,6 +18318,13 @@ export const typeDefs = `#graphql
     name: String
   }
 
+  "#4291 (hrn:node:hadronmemory.com:specs:cor:agt:060:04): a worker's last-used run settings. Each is null until a session of the worker reported it."
+  type WorkerRunSettings {
+    family: String
+    model: String
+    effort: EffortLevel
+  }
+
   "#1707 — the team roster of one App."
   type TeamRoster {
     appId: ID!
@@ -17541,6 +18391,52 @@ export const typeDefs = `#graphql
     account: String!
     baseline: [AccountUsageWindowProjection!]!
     adjusted: [AccountUsageWindowProjection!]!
+  }
+
+  "#4281 — an App's review quality measures for one UTC calendar month."
+  type ReviewQualityReport {
+    "The month asked for, YYYY-MM."
+    month: String!
+    "When the numbers were worked out (the database clock). A past month's numbers can still change after this."
+    asOf: DateTime!
+    "One row per family and model, a reported model apart from an unreported one, ordered by family, model, then reported first; the not-recorded row, when there is one, is last. Empty when the month has no reviews."
+    rows: [ReviewQualityRow!]!
+  }
+
+  """
+  #4281 — one reviewer row of the review quality measures. Every
+  ratio comes with its numerator and denominator: findingsPerReview = findings / reviews; shareConfirmed =
+  confirmedFindings / findings; defectsMissedPerApprovingReview = defectsMissed / approvingReviews.
+  """
+  type ReviewQualityRow {
+    "False for the one not-recorded row: the reviews whose verdict carries no model family or no model (a person's verdict, a worker with no open session, a session that recorded none, or a verdict from before the snapshot existed). They are never counted under a family."
+    recorded: Boolean!
+    "The reviewer's model family as the verdict recorded it (a self-report); null on the not-recorded row."
+    family: String
+    "The reviewer's model as the verdict recorded it (a self-report); null on the not-recorded row."
+    model: String
+    "Whether the session had reported its model when the verdict was recorded (the verdict's modelReportedAt is set); null on the not-recorded row."
+    modelReported: Boolean
+    "Finished review seats whose latest verdict falls in the month."
+    reviews: Int!
+    "All findings on those seats' tasks."
+    findings: Int!
+    "findings / reviews."
+    findingsPerReview: Float!
+    "Findings whose latest disposition is fixed, accepted or deferred."
+    confirmedFindings: Int!
+    "Findings whose latest disposition is rejected: not confirmed."
+    rejectedFindings: Int!
+    "Findings with no disposition yet: their own count, in neither of the two above."
+    undisposedFindings: Int!
+    "confirmedFindings / findings; null when there are no findings."
+    shareConfirmed: Float
+    "Reviews whose latest verdict is APPROVE, PASS or CARRY."
+    approvingReviews: Int!
+    "#4287 — defects missed by the approving reviews, from the defect links (linkDefectToPullRequest, #4280): an approving review misses each defect linked to its PR whose introducedAtHead is the head it approved or an earlier one, in the order the PR's heads were first frozen, and every defect linked with no introducedAtHead. A head approved before the defect was introduced never contained it. 0 when nothing is linked."
+    defectsMissed: Int!
+    "defectsMissed / approvingReviews; null only when there is no approving review."
+    defectsMissedPerApprovingReview: Float
   }
 
   "#3820 — the what-if: the asked account's windows after the change, and, for a move, the target account's."
@@ -17761,6 +18657,12 @@ export const typeDefs = `#graphql
     "Omit to leave the task queued."
     assignee: AgentTaskPartyInput
     requirements: AgentTaskRequirementsInput
+    """
+    #4291 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): the task's own run settings, each optional. What a start for this task
+    launches, before the worker's last used; never a matching requirement. Checked here, at creation, and refused
+    TASK_RUN_SETTINGS_INVALID with a reason. Set only here: no edit takes them, and a clone copies none.
+    """
+    runSettings: AgentTaskRunSettingsInput
     """
     #2420 (hrn:node:hadronmemory.com:specs:cor:agt:050:28): the task's own properties, a JSON object with the same limits
     and refusal codes as on update. Only set when the creator is one of the task's writers (its owner, someone above the

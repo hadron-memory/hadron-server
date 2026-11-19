@@ -68,7 +68,7 @@ import { GraphQLError } from 'graphql';
 import type { NodeRoleRule, Prisma, PrismaClient } from '../generated/prisma/index.js';
 
 /** The closed governed subset of `Node.role` plus the capability-gated kind. */
-export type GovernedKind = 'task' | 'review' | 'spec' | 'decision';
+export type GovernedKind = 'task' | 'review' | 'spec' | 'question';
 
 /** How strong a kind's gate actually is — carried so nobody has to infer it. */
 export type GateStrength = 'capability' | 'security' | 'diligence' | 'authority';
@@ -177,17 +177,17 @@ export const GOVERNED_KINDS: readonly GovernedKindEntry[] = [
     cliNote: '`hadron spec new` and `hadron spec edit` are the spec commands',
   },
   {
-    // #1641 — a human decision (`decision`) and its log (`decision.log`), one
-    // family. AUTHORITY: a decision can carry an authorization, which is
+    // #1641 — a human question (`question`) and its log (`question.log`), one
+    // family. AUTHORITY: a question can carry an authorization, which is
     // stronger than a review. Its content is server-rendered from structured
     // data, so the approval hash covers exactly what the decider answered; the
     // generic surface would let content and data drift apart.
-    kind: 'decision',
-    signal: { field: 'role', value: 'decision' },
+    kind: 'question',
+    signal: { field: 'role', value: 'question' },
     strength: 'authority',
-    doors: { create: 'askDecision', update: 'amendDecision' },
+    doors: { create: 'askQuestion', update: 'amendQuestion' },
     mcpDoors: null,
-    cliNote: 'decisions are written only through the decision operations (askDecision, amendDecision, withdrawDecision, …)',
+    cliNote: 'questions are written only through the question operations (askQuestion, amendQuestion, withdrawQuestion, …)',
     operationsOnly: true,
   },
 ] as const;

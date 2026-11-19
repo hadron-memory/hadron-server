@@ -69,7 +69,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: contrib.id, role: 'CONTRIBUTOR' } });
 
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   await db.node.create({
     data: {
       id: generateId(), memoryId: agent.systemMemoryId, loc: 'roles:backend-engineer',

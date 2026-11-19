@@ -61,7 +61,7 @@ import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent, chatAuthorityAnchors, chatCarrierApps } from './agentChatAccess.js';
 import { withAuthorizedMemoryTx, withAuthorizedTx } from './authorizedTx.js';
 import { activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
-import { chatHomeAgentIfLicensed, refuseUnreachableChatHomeAgent, resolveChatHomeAgent } from '../../../lib/chatHomeAgent.js';
+import { chatHomeAgentIfReachable, refuseUnreachableChatHomeAgent, resolveChatHomeAgent } from '../../../lib/chatHomeAgent.js';
 import { canManageAgentSystemMemory } from '../../../lib/auth/managedSystemMemory.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
 import { GraphQLError } from 'graphql';
@@ -78,7 +78,7 @@ import {
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
 import { decideChatRouting, applyChatRoutingDecision, getGoalStack } from '../../../lib/chatRouting.js';
 import { reportPartialTurn, routingRefusedReport } from '../../../lib/chatPartialTurn.js';
-import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
+import { recordNodeUsage, recordNodeWrite, type UsageNodeRef } from '../../../lib/usageRecorder.js';
 import {
   type Context,
   requireRole,
@@ -91,7 +91,7 @@ import {
 } from './resolvers.helpers.js';
 import { normalizeChatAiConfigChoice } from '../../../lib/chatbotAiConfig.js';
 import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
-import { refuseDecisionFamily } from '../../../lib/decisions/index.js';
+import { refuseQuestionFamily } from '../../../lib/questions/index.js';
 import { assertBatchMutable } from '../../../lib/bulkMutationGate.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
@@ -578,7 +578,7 @@ export const chatMutations = {
       }
       if (!target.targetMemoryId && !target.ensureTarget) throw new Error('No target memory available for this chat');
       if (target.appId) {
-        if (!await chatHomeAgentIfLicensed(ctx.db, { appId: target.appId }, agent)) {
+        if (!await chatHomeAgentIfReachable(ctx.db, { appId: target.appId }, agent)) {
           throw new AgentNotFoundError(agentId);
         }
       } else if (!await canManageAgentSystemMemory(ctx.db, ctx, systemMemoryId)) {
@@ -666,7 +666,7 @@ export const chatMutations = {
             }
             // Re-judge the start route after waiting for authority anchors (#4046).
             if (target.appId
-              ? !await chatHomeAgentIfLicensed(txCtx.db, { appId: target.appId }, current)
+              ? !await chatHomeAgentIfReachable(txCtx.db, { appId: target.appId }, current)
               : !await canManageAgentSystemMemory(txCtx.db, txCtx, systemMemoryId)) {
               throw new AgentNotFoundError(agentId);
             }
@@ -1630,7 +1630,15 @@ export const chatMutations = {
           ? mergeTurnExtraction(stored, extracted, declaredMemoryWide, ctx.userId ?? null)
           : { ...(stored ?? {}), ...extracted };
       let extractionPersisted = false;
-      if (data && hasExtraction) recordNodeWrite(ctx.db, await inTx(async (tx) => {
+      // #4102 F3 — the extraction transaction's report contract: it resolves to a UsageNodeRef only
+      // after its write committed in this transaction (the update path or the create path below), or
+      // to null exactly when the fold changed nothing authored — nothing is written then, so an
+      // encrypted row is not re-encrypted and a stamp is not cleared. A refusal never resolves to
+      // null: it throws (AuthoringAttestationError → reportPartialTurn's #3514 partial-turn error),
+      // so `extractionPersisted` (ref !== null) means "a write committed", never "refused" — the
+      // distinction routingRefusedReport reports on a later refused leg, whose wire shape rides the
+      // Proposed partial-turn rule in cor:cht:020:01 (R1 on #4036) and is unchanged here.
+      if (data && hasExtraction) recordNodeWrite(ctx.db, await inTx(async (tx): Promise<UsageNodeRef | null> => {
         // #910: two members extract into the same memory from different chats,
         // under different chat locks. Serialize the read-modify-write on the
         // `data` loc so neither turn loses the other's bucket.
@@ -1699,6 +1707,7 @@ export const chatMutations = {
         }
       // #3514: the assistant message and counter are already committed above; a refused extraction says so.
       }).catch(reportPartialTurn).then(ref => {
+        // null is "no authored change, nothing written", never a refusal — a refusal throws above (#4102 F3).
         extractionPersisted = ref !== null;
         return ref;
       }), ctx);
@@ -1956,11 +1965,11 @@ export const chatMutations = {
           select: { id: true, loc: true, role: true, isRunnable: true },
         })).filter((n) => n.id === chatNode.id || n.loc === messages || n.loc.startsWith(`${messages}:`));
         const scope = rows.map((n) => n.id);
-        // #1641 — a chat root is never a decision or a log (chatLocFilter), but
+        // #1641 — a chat root is never a question or a log (chatLocFilter), but
         // the subtree it takes may hold a log beneath it; withdrawn, never
         // deleted. Checked before the general governed-kind gate below, which
         // also refuses it, so the caller gets the specific reason.
-        await refuseDecisionFamily(tx, scope, 'deleteChat');
+        await refuseQuestionFamily(tx, scope, 'deleteChat');
         await assertBatchMutable(tx, [chatNode.memoryId], rows, 'delete the chat holding');
         await assertNoMintedSpecRemoval(tx, chatNode.memoryId, scope, 'delete the chat holding');
         await tx.node.updateMany({

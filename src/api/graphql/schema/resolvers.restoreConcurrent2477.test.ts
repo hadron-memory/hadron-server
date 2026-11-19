@@ -21,7 +21,7 @@ beforeEach(async () => {
   const user = await db.user.create({ data: { githubId: 2477001, githubUsername: 'restore-admin', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
   context = { db, userId: user.id, roles: ['ADMIN'] };
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Restore concurrency', visibility: 'PERSONAL' }, context);
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Restore concurrency', visibility: 'PERSONAL' }, context);
   agentId = agent.id;
   memoryId = agent.systemMemoryId!;
   // #3833: createAgent now seeds skeleton parents. This fixture models a two-node graph (alpha, beta), and the seeded rows

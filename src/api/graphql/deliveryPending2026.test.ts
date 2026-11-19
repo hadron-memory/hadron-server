@@ -6,7 +6,6 @@ import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { createServer } from '../../server.js';
 import { createMcpServerInstance, createTestableMcpServer } from '../../mcp/server.js';
 import { resolvers } from './schema/resolvers.js';
 import { currentActor, publishActor, publishAmbiguousActor, runAsActor } from '../../lib/requestActor.js';
@@ -22,6 +21,7 @@ import { deliveryPending, appendDeliveryPending } from '../../lib/tickers/delive
 import { FOOTER_MAX_CONCURRENT } from '../../lib/tickers/deliveryPendingSlots.js';
 import { loadDeliveryBatches } from '../../lib/tickers/deliveryBatch.js';
 import { generateId } from '../../lib/id.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../test/startServerFixture.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -55,10 +55,10 @@ async function expectFooterOf(call: () => Promise<unknown>, expected: unknown): 
 let http: Server; let base: string;
 let user: any; let app: any; let worker: any; let session: any; let key: any; let raw: string; let channel: any;
 beforeAll(async () => {
- http=httpServer(await createServer()); await new Promise<void>(r=>http.listen(0,'127.0.0.1',r));
+ http=httpServer(await createServerOnCleanDb()); await new Promise<void>(r=>http.listen(0,'127.0.0.1',r));
  base=`http://127.0.0.1:${(http.address() as AddressInfo).port}`;
 });
-afterAll(async()=>{await new Promise<void>(r=>http.close(()=>r()));});
+afterAll(async()=>{await closeServerIfStarted(http);});
 beforeEach(async()=>{
  await cleanDb(db);
  const org=await db.organization.create({data:{name:'Footer',urn:'footer2026'}});

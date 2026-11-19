@@ -3,7 +3,7 @@ import { resolveNodeRef } from './entityRef/nodeRef.js';
 import { AmbiguousLegacyUrnError, NodeNotFoundError } from './entityRef/errors.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, isBootPromptRole } from './bootPrompt.js';
 import { IncludeSyntaxError, locateIncludeTags, type IncludeTag } from './includes/parseIncludeTags.js';
-import { IncludeReadMemo, selectIncludeRevision, type IncludeTarget } from './includes/spliceIncludes.js';
+import { IncludeReadMemo, selectIncludeRevision, SIGNING_NOT_CHECKED_TEXT, type IncludeTarget } from './includes/spliceIncludes.js';
 import { decryptNodeFields } from './nodeCrypto.js';
 import { newestApprovedRevisionOf } from './nodeApproval.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
@@ -218,7 +218,7 @@ export async function lintSourceWarnings(ctx: Context, subject: LintSubject): Pr
     if (tag.settings.signed && !signingSurfacePolicy().signing) {
       warnings.push(warning(
         'SIGNING_NOT_CHECKED', tag.index,
-        'The "signed" setting is not checked yet: signing has not shipped, so this include is served as if it were not signed.',
+        SIGNING_NOT_CHECKED_TEXT,
         target && !target.deletedAt ? { targetUrn: target.urn } : {},
       ));
     }

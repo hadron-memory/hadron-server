@@ -17,6 +17,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { formatGraphQLError } from '../formatError.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn(async () => {}) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -51,7 +52,7 @@ async function enable(appRef = appId) {
   expect(out.data.setAutomationTeamSnapshotGrant.revokedAt).toBeNull();
 }
 async function mintRun(userId: string | null = null, forApp = appId): Promise<AppRun> {
-  return db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId: forApp, userId, triggerKind: 'SCHEDULE', triggerId: await schedule(forApp),
+  return db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId: forApp, agentId: await testRunAgentId(db, orgId, forApp), userId, triggerKind: 'SCHEDULE', triggerId: await schedule(forApp),
     entryNodeUrn: 'hrn:node:snapshot2925.example:flows:report', status: 'RUNNING' } });
 }
 const toolCtx = (run: AppRun) => ({ db, run, principal: runContext(db, run), log: vi.fn() });

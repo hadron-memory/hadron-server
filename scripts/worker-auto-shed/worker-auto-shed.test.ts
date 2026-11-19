@@ -39,7 +39,7 @@ function sandbox(): { root: string; home: string; bin: string; calls: string } {
   writeFileSync(join(bin, 'hadron'), `#!/bin/sh
 echo "$@" >> "${calls}"
 case "$*" in
-  "team session whoami"*) echo "Demo (server-engineer)" ;;
+  "team session whoami"*) echo "Demo-wt (server-engineer)" ;;
   "team worker get"*)
     t="${root}/terminal.json"
     if [ -f "$t" ] && [ "$(cat "$t")" = FAIL ]; then exit 1; fi

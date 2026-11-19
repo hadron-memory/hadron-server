@@ -3,7 +3,7 @@ import { GraphQLError } from 'graphql';
 import { memoryAccessFilter, type Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { assertMayWriteBootPromptPointer, loadBootPromptPointerOwner } from './bootPromptPointer.js';
 import { readCompiledRevision, type CompiledTarget } from './bootCompile/provenance.js';
-import { IncludeReadMemo, selectIncludeRevision } from './includes/spliceIncludes.js';
+import { IncludeReadMemo, selectIncludeRevision, SIGNING_NOT_CHECKED_TEXT } from './includes/spliceIncludes.js';
 import { newestApprovedRevisionOf } from './nodeApproval.js';
 import { safeNodeUrnV2 } from './urnEmit.js';
 import { pageLintWarnings, type LintWarning, type LintWarningPage } from './bootPromptLint.js';
@@ -97,7 +97,7 @@ export async function lintCompiledRevision(
           { targetUrn: urn, overriddenNodeLoc: replaced?.loc ?? null }));
       }
       if (readable && shown && settings.signed && !signingSurfacePolicy().signing) warnings.push(warning('SIGNING_NOT_CHECKED', position,
-        'The "signed" setting is not checked yet: signing has not shipped, so this include is served as if it were not signed.', { targetUrn: urn }));
+        SIGNING_NOT_CHECKED_TEXT, { targetUrn: urn }));
     }
     if (recompile) warnings.push(warning('RECOMPILE_AVAILABLE', 0, 'A source part has a newer revision; recompile available.'));
     warnings.sort((a, b) => a.position - b.position || a.kind.localeCompare(b.kind));

@@ -130,7 +130,7 @@ describe('covered-set exclusions — app-scoped memories (#610 review / cor:acl:
     });
     await expect(M.addMemoryToAgent({}, { agentRef: agent.id, memoryRef: appMem2.id }, ctx())).resolves.toBeTruthy();
     // changing the app-scoped memory's visibility while linked to the PUBLIC agent → not blocked
-    expect((await M.updateMemory({}, { id: appMem.id, visibility: 'ORGANIZATION' }, ctx())).visibility).toBe('ORGANIZATION');
+    expect((await M.updateMemory({}, { ref: appMem.id, visibility: 'ORGANIZATION' }, ctx())).visibility).toBe('ORGANIZATION');
   });
 });
 
@@ -138,10 +138,10 @@ describe('updateMemory un-PUBLIC-ing knowledge of a PUBLIC agent', () => {
   it('is rejected while the agent stays PUBLIC', async () => {
     await M.addMemoryToAgent({}, { agentRef: agent.id, memoryRef: pubMem.id }, ctx());
     await M.updateAgent({}, { ref: agent.id, visibility: 'PUBLIC' }, ctx());
-    await expect(M.updateMemory({}, { id: pubMem.id, visibility: 'ORGANIZATION' }, ctx())).rejects.toThrow(/non-public|PUBLIC/i);
+    await expect(M.updateMemory({}, { ref: pubMem.id, visibility: 'ORGANIZATION' }, ctx())).rejects.toThrow(/non-public|PUBLIC/i);
     // once the agent is no longer PUBLIC, the memory can change freely
     await M.updateAgent({}, { ref: agent.id, visibility: 'ORGANIZATION' }, ctx());
-    expect((await M.updateMemory({}, { id: pubMem.id, visibility: 'ORGANIZATION' }, ctx())).visibility).toBe('ORGANIZATION');
+    expect((await M.updateMemory({}, { ref: pubMem.id, visibility: 'ORGANIZATION' }, ctx())).visibility).toBe('ORGANIZATION');
   });
 
   it('ignores a stored link whose role grants no read when narrowing the Memory', async () => {
@@ -149,7 +149,7 @@ describe('updateMemory un-PUBLIC-ing knowledge of a PUBLIC agent', () => {
     await db.agentMemoryItem.create({
       data: { id: generateId(), agentId: agent.id, memoryId: pubMem.id, role: 'bogus' },
     });
-    expect((await M.updateMemory({}, { id: pubMem.id, visibility: 'ORGANIZATION' }, ctx())).visibility)
+    expect((await M.updateMemory({}, { ref: pubMem.id, visibility: 'ORGANIZATION' }, ctx())).visibility)
       .toBe('ORGANIZATION');
   });
 });

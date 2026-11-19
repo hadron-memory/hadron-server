@@ -244,7 +244,7 @@ describe('#2831 S2 groups inherited from the Team Agent reach the matcher', () =
     const org = await db.organization.findFirstOrThrow({ where: { urn: { startsWith: 'grp-' } } });
     const admin = await db.user.create({ data: { githubId: 700_000 + Math.floor(Math.random() * 100_000), githubUsername: `grp-admin-${generateId()}`, roles: ['READER'] } });
     await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-    const team = await (resolvers.Mutation as any).createAgent({}, { orgId: org.id, name: 'Group Team Agent' }, { db, userId: admin.id, roles: ['READER'] });
+    const team = await (resolvers.Mutation as any).createAgent({}, { orgRef: org.id, name: 'Group Team Agent' }, { db, userId: admin.id, roles: ['READER'] });
     await db.node.create({ data: { id: generateId(), memoryId: team.systemMemoryId, loc: 'roles:engineer', name: 'engineer', content: '', data: { names: ['Iris'] } } });
     await db.appAgent.create({ data: { appId: app.id, agentId: team.id } });
     await db.modelGroup.create({ data: { agentId: team.id, name: 'big', patterns: ['*opus*'] } });

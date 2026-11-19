@@ -20,6 +20,8 @@ import { generateId } from '../id.js';
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const ORIGIN = 'https://sign.example.test', RP = 'example.test';
 let orgId: string, memoryId: string, agentId: string, adminId: string, writerId: string, partId: string, sourceId: string;
+interface NodeResolvers { content(node: unknown, args: object, ctx: Context, info: object): Promise<string> }
+const nodeResolvers = (resolvers as unknown as { Node: NodeResolvers }).Node;
 const context = (): Context => ({ db, userId: adminId, roles: [] });
 
 beforeEach(async () => {
@@ -43,6 +45,9 @@ afterEach(() => { vi.unstubAllEnvs(); setResolutionLimits(null); });
 async function signPart(pending = false) {
   const key = softPasskey();
   const passkeyId = pending ? generateId() : await insertSoftPasskey(db, writerId, key, { rpId: RP });
+  // A pending first-key credential needs `window_ends_at` in the future while `registered_at` is 71 hours old. The offset
+  // function is replaced INSIDE this transaction (Postgres DDL is transactional), so it is visible only to this
+  // transaction's inserts and is put back to 0 before the commit: no other connection or test ever sees the offset.
   if (pending) await db.$transaction(async tx => {
     await tx.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION public.hadron_passkey_clock_offset() RETURNS interval LANGUAGE sql STABLE AS $$ SELECT interval '-71 hours' $$`);
     await tx.$executeRaw`INSERT INTO passkey_credentials
@@ -81,7 +86,7 @@ async function source(settings = 'signed') {
 }
 async function read() {
   const n = await resolvers.Query.node(null, { ref: sourceId } as never, context());
-  return (resolvers as any).Node.content(n, {}, context(), {});
+  return nodeResolvers.content(n, {}, context(), {});
 }
 const input = (): AssembleInput => ({ target: { kind: 'AGENT', agentId }, source: { nodeId: sourceId, memoryId }, installMemoryId: null,
   recipient: { kind: 'org', orgId }, callerCanRead: async () => true });
@@ -145,7 +150,7 @@ describe('#2973 PR3 selection on reads and compile', () => {
     } } } });
     const c = { ...context(), db: wrapped as never };
     const n = await resolvers.Query.node(null, { ref: sourceId } as never, c);
-    expect(await (resolvers as any).Node.content(n, {}, c, {})).toBe(`before ${BROKEN_INCLUDE_NOTICE} after`);
+    expect(await nodeResolvers.content(n, {}, c, {})).toBe(`before ${BROKEN_INCLUDE_NOTICE} after`);
     expect(intercepted).toBe(true);
     await expect(assembleBootPrompt(wrapped as never, input())).rejects.toMatchObject({ code: 'BOOT_PROMPT_INCLUDE_REVISION_UNAVAILABLE' });
   });
