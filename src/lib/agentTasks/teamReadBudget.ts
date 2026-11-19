@@ -21,12 +21,43 @@
  * without parsing prose (conventions:the-error-code-is-the-contract-the-prose-is-not).
  * The refusal is an availability signal, not a caller fault, so it stays
  * REPORTED in Sentry — the incident was found by counting these.
+ *
+ * #4476: the budget now bites ON the statement. The wrapper sets
+ * transaction-local `statement_timeout` (the per-statement cap, at the
+ * budget) AND `transaction_timeout` (PG17+, the whole-read backstop at the
+ * budget plus TEAM_READ_TX_BACKSTOP_MARGIN_MS; guarded on the GUC existing,
+ * so PG16 CI lanes keep the statement bound only), so Postgres itself cancels
+ * a runaway statement instead of letting it run to completion inside an
+ * already-expired transaction (prod's roster statements ran 20–175 s inside
+ * the 5 s budget). A cancel raises SQLSTATE 57014 (statement_timeout's
+ * query_canceled) or 25P04 (transaction_timeout's FATAL termination) in two
+ * Prisma shapes — P2010 with the SQLSTATE on `meta.code` for a raw statement,
+ * or an UnknownRequestError whose only discriminator is the engine's rendered
+ * `PostgresError { code: … }` for a model statement — and all of them convert
+ * through the classifier below.
  */
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../generated/prisma/index.js';
 
 /** The interactive team-read transaction's total budget (ms). #4455: 5 s; every client's own timeout is longer. */
 export const TEAM_READ_TX_TIMEOUT_MS = 5_000;
+/**
+ * How far past the budget the PG17+ `transaction_timeout` backstop sits (ms). The real split,
+ * top to bottom (#4482 BLIND delta review item H):
+ *   - a runaway statement that STARTED early enough (within the margin of the read's start)
+ *     is cancelled by its own statement cap first — 57014, non-fatal, the pooled connection
+ *     survives;
+ *   - a statement that started later would outrun the backstop under its own cap, so the
+ *     backstop ends the read — 25P04, FATAL, the connection is killed. That kill is the churn
+ *     the margin exists to make rare: every read whose runaway statement starts past the
+ *     margin still pays it;
+ *   - time idled BETWEEN statements is bounded by Prisma's own interactive timer at the same
+ *     budget (P2028, #4455) before the backstop's margin expires.
+ * The margin buys no safety (the statement cap alone already bounds every statement); it buys
+ * kept connections for the reads whose runaway statement starts early enough that the
+ * non-fatal cancel can win the race.
+ */
+export const TEAM_READ_TX_BACKSTOP_MARGIN_MS = 1_000;
 /** The explicit pool wait before the transaction even starts (ms). Prisma's own default, pinned so it cannot drift. */
 export const TEAM_READ_TX_MAX_WAIT_MS = 2_000;
 
@@ -105,6 +136,37 @@ export function busyReason(error: unknown): TeamReadBusyReason {
  * surfacing here is a busy store, though not necessarily THIS read's own
  * budget; `.cause` keeps the true cause inspectable.
  */
-export function isPrismaBusyExhaustion(error: unknown): error is Prisma.PrismaClientKnownRequestError {
-  return error instanceof Prisma.PrismaClientKnownRequestError && (error.code === 'P2028' || error.code === 'P2024');
+export function isPrismaBusyExhaustion(error: unknown): error is Prisma.PrismaClientKnownRequestError | Prisma.PrismaClientUnknownRequestError {
+  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    return error.code === 'P2028' || error.code === 'P2024' || isRawStatementCancel(error);
+  }
+  // A cancelled MODEL statement (findMany and friends) is the other cancel shape: Prisma 6.x
+  // surfaces it as an UnknownRequestError with NO structured fields — the SQLSTATE exists only in
+  // the engine's machine-rendered Debug of the Postgres error (probed live, #4482 BLIND P2-2).
+  return error instanceof Prisma.PrismaClientUnknownRequestError && isModelStatementCancel(error);
+}
+
+/** #4476: the driver's own SQLSTATEs for a cancel at the read's budget: 57014 is
+ *  statement_timeout's query_canceled; 25P04 is transaction_timeout's FATAL connection
+ *  termination (it does not just cancel the statement — it ends the connection), as Prisma
+ *  carries them. */
+const CANCEL_SQLSTATES = ['57014', '25P04'];
+
+/** #4476: a cancelled RAW statement is P2010 carrying the SQLSTATE structured on `meta.code`.
+ *  Matched on that structured code only — a P2010 wrapping any other database code is a real
+ *  failure and stays untyped, and driver message prose is never read. */
+function isRawStatementCancel(error: Prisma.PrismaClientKnownRequestError): boolean {
+  return error.code === 'P2010' && CANCEL_SQLSTATES.includes(String((error.meta as { code?: unknown } | undefined)?.code));
+}
+
+/** #4476: a cancelled MODEL statement's only discriminator in Prisma 6.x is the engine's
+ *  Rust-Debug rendering of the Postgres error (`PostgresError { code: "57014", … }`) — a
+ *  machine-rendered field, not natural-language prose, and there is no structured alternative
+ *  (the error carries only clientVersion and name). The match is pinned to those exact rendered
+ *  codes; any other rendered code stays untyped, and the rendered shape itself is re-proved
+ *  against the real engine by the pin in resolvers.teamReadStatementTimeout4476.test.ts. */
+const CANCELLED_MODEL_STATEMENT_RENDER = /PostgresError \{ code: "(57014|25P04)"/;
+
+function isModelStatementCancel(error: Prisma.PrismaClientUnknownRequestError): boolean {
+  return CANCELLED_MODEL_STATEMENT_RENDER.test(error.message);
 }
