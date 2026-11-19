@@ -6,6 +6,7 @@ import { generateId } from '../../../lib/id.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
+import { autoDeleteLimitRefusal } from './resolvers.secret.js';
 
 let ownerId: string; let memberId: string; let outsiderId: string; let appId: string; let secretId: string; let workerId: string;
 const ctxOf = (userId: string): Context => ({ db, userId, roles: [] } as unknown as Context);
@@ -54,11 +55,20 @@ describe('#3998 issueSecretReadClient', () => {
 
   it('an auto-delete mark is refused until S6 consumes it (#4001), with or without a limit, and nothing is written', async () => {
     // NOT_AVAILABLE is judged first (#4443 item 6): a caller is not told to add a limit only to be refused after adding one. Signed but
-    // not consumed: refused with a typed code, nothing written. S6 removes this guard and restores the NEEDS_LIMIT expectation.
+    // not consumed: refused with a typed code, nothing written. S6 removes this guard; the NEEDS_LIMIT rule is pinned by the pure-function test below.
     expect(await code(issue(ownerId, { autoDelete: true }))).toBe('SECRET_AUTO_DELETE_NOT_AVAILABLE');
     expect(await code(issue(ownerId, { autoDelete: true, maxReads: 1 }))).toBe('SECRET_AUTO_DELETE_NOT_AVAILABLE');
     expect(await db.grant.count()).toBe(0);
     expect(await db.secretReadClient.count()).toBe(0);
+  });
+
+  it('the limit rule is pinned now, while NOT_AVAILABLE shadows it: S6 turns it on with a test already in place', () => {
+    const NEEDS = { code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT' };
+    expect(autoDeleteLimitRefusal(true, null, null)).toMatchObject(NEEDS);
+    expect(autoDeleteLimitRefusal(true, new Date(), null)).toBeNull();
+    expect(autoDeleteLimitRefusal(true, null, 0)).toBeNull();
+    expect(autoDeleteLimitRefusal(true, null, 1)).toBeNull();
+    expect(autoDeleteLimitRefusal(false, null, null)).toBeNull();
   });
 
   it('a person holder is only the issuer themself', async () => {

@@ -510,6 +510,16 @@ function asTime(v: Date | string | null | undefined): Date | null {
   return d;
 }
 
+/** The auto-delete limit rule, as a pure function so it is tested while the NOT_AVAILABLE guard shadows it (#4443, Bridget P2 1). */
+export function autoDeleteLimitRefusal(
+  autoDelete: boolean, expiresAt: Date | null, maxUses: number | null,
+): { code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT'; message: string } | null {
+  if (autoDelete && !expiresAt && maxUses === null) {
+    return { code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT', message: 'An auto-delete mark needs a window or a read budget.' };
+  }
+  return null;
+}
+
 /**
  * Issue a read client (cor:sec:060:01): the pending `secret.reveal` grant and its client row, in ONE transaction. Only a person
  * acting as themselves, who manages the App or wrote the current version (`requireSecretReadClientIssuer`, judged under the
@@ -529,13 +539,12 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
   const maxUses = input.maxReads ?? null;
   // The "delete" mark is signed but nothing consumes it until S6 (#4001): a person must not sign a retention term the server does not
   // keep. Judged FIRST, so a caller is not walked through adding a limit only to be refused after it (#4443 item 6). S6's first act is
-  // to remove this guard; the "keep" wording stays, and the limit rule below then applies.
+  // to remove this guard; the limit rule (`autoDeleteLimitRefusal`, pinned by its own test now) then applies unchanged.
   if (input.autoDelete) {
     throw readClientRefusal('SECRET_AUTO_DELETE_NOT_AVAILABLE', 'Auto-delete on a read client is not available yet.');
   }
-  if (input.autoDelete && !expiresAt && maxUses === null) {
-    throw readClientRefusal('SECRET_AUTO_DELETE_NEEDS_LIMIT', 'An auto-delete mark needs a window or a read budget.');
-  }
+  const limitRefusal = autoDeleteLimitRefusal(input.autoDelete, expiresAt, maxUses);
+  if (limitRefusal) throw readClientRefusal(limitRefusal.code, limitRefusal.message);
   const found = await findSecretByRef(ctx, input.secretRef);
   if (!found || found.ownerType !== 'app') throw authorizationDenied();
   const app = await loadLiveApp(ctx, found.ownerId);
