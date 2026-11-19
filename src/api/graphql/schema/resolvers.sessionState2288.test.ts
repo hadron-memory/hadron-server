@@ -232,9 +232,9 @@ describe('#2317 own-App policy queries for Session lists', () => {
   }
   async function listSessions(gql: string, root: 'sessions' | 'sessionsPage') {
     let policy = 0;
-    let total = 0;
+    let appReads = 0;
     const traced = db.$extends({ query: { $allOperations: async ({ model, operation, args, query }) => {
-      total++;
+      if (model === 'App') appReads++;
       if (model === 'App' && operation === 'findMany' && (args as { select?: { sessionDormancyDays?: boolean } }).select?.sessionDormancyDays) policy++;
       return query(args);
     } } });
@@ -242,9 +242,12 @@ describe('#2317 own-App policy queries for Session lists', () => {
     if (out.body.kind !== 'single') throw new Error('incremental response');
     expect(out.body.singleResult.errors).toBeUndefined();
     const data = out.body.singleResult.data?.[root] as Row[] | { items: Row[] };
-    return { rows: Array.isArray(data) ? data : data.items, policy, total };
+    return { rows: Array.isArray(data) ? data : data.items, policy, appReads };
   }
   const expectedState = (idle: number, days: number) => (idle > days * D ? 'DORMANT' : 'LAPSED');
+  // Measured on main: exactly one App read besides the policy batches (the list gate), flat from 6 to 200 rows. A per-row
+  // findUnique/include would raise appReads with the row count and break this pin, which the policy counter alone would miss.
+  const OTHER_APP_READS = 1;
   const LIST = '{sessions(limit:200){ id state isLive lapsesAt }}';
 
   it('scenario 1: open sessions in one App cost one policy query', async () => {
@@ -252,6 +255,7 @@ describe('#2317 own-App policy queries for Session lists', () => {
     const r = await listSessions(LIST, 'sessions');
     expect(r.rows).toHaveLength(6);
     expect(r.policy).toBe(1);
+    expect(r.appReads).toBe(r.policy + OTHER_APP_READS);
   });
 
   it.each([
@@ -275,6 +279,7 @@ describe('#2317 own-App policy queries for Session lists', () => {
     for (const row of r.rows) expect(row.state).toBe(expected.get(row.id));
     // Measured on main: one batch holds every App, ended rows included (#2317).
     expect(r.policy).toBe(1);
+    expect(r.appReads).toBe(r.policy + OTHER_APP_READS);
   });
 
   it('scenario 3b: ended rows in only one App, open rows in two others (the earlier-turn path)', async () => {
@@ -294,6 +299,7 @@ describe('#2317 own-App policy queries for Session lists', () => {
     // await), so a terminal-only App opens its own batch: 2 policy queries here, never more than one per turn class.
     // Accepted in #2317 (one extra primary-key IN query); a coalescing change would tighten this to 1.
     expect(r.policy).toBe(2);
+    expect(r.appReads).toBe(r.policy + OTHER_APP_READS);
   });
 
   it('scenario 5b: sessionsPage over 10 Apps uses full-row parents and its own-App policies', async () => {
@@ -308,5 +314,6 @@ describe('#2317 own-App policy queries for Session lists', () => {
     expect(r.rows).toHaveLength(50);
     for (const row of r.rows) expect(row.state).toBe(expected.get(row.id));
     expect(r.policy).toBe(1);
+    expect(r.appReads).toBe(r.policy + OTHER_APP_READS);
   });
 });
