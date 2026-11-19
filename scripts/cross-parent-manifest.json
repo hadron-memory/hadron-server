@@ -245,6 +245,7 @@
     "AgentTaskRequirements": "value",
     "AgentTaskResult": "envelope",
     "AgentTaskFinding": "value",
+    "AgentTaskRoleTaskRef": "value",
     "AgentTaskFindingDisposition": "value",
     "AgentTaskFindingDispositionPage": "envelope",
     "AgentTaskFindingPage": "envelope",
@@ -1663,7 +1664,7 @@
     },
     "ReviewQualityReport.rows": {
       "class": "parent-implies-child",
-      "audience": "the readers of the team's tasks and events (cor:agt:130:06, :050:21, :23; #4281): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A row holds a model family and model name as the App's own verdict events recorded them, and counts of the App's own reviews and findings: nothing another tenant owns is reachable",
+      "audience": "the readers of the team's tasks and events (cor:agt:050:21, :23; #4281): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A row holds a model family and model name as the App's own verdict events recorded them, and counts of the App's own reviews and findings: nothing another tenant owns is reachable",
       "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
       "target": "ReviewQualityRow"
     },
