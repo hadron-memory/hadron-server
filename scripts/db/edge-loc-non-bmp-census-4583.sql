@@ -6,10 +6,12 @@
 -- the runtime replaces TWO per non-BMP code point (one per UTF-16 unit). They differ only when a non-BMP code point
 -- sits between alphanumerics, so only such names are counted ("divergent" names).
 --
---   migrated_spelling  edge loc is the BACKFILL's spelling (written by the migration, or by anything that copied it):
+-- The buckets are SPELLING MATCHES on the current loc, not write provenance (an authored loc can equal either string),
+-- and they include soft-deleted edges, which still occupy their loc (the (loc, memory) unique is unfiltered).
+--   migrated_spelling  edge loc equals the BACKFILL's spelling of its name and endpoints:
 --                      the runtime derivation does not find it, a re-sync would have created a twin. #4583 makes the
 --                      lookups accept it.
---   runtime_spelling   edge loc is the RUNTIME's spelling (created since the migration): found by the runtime, as before.
+--   runtime_spelling   edge loc equals the RUNTIME's spelling (what runtime creation derives): found by the runtime, as before.
 --   neither            authored locs, `:2`-style disambiguated locs, moved edges: not derived from this name.
 --   twin_pairs         a migrated-spelling edge and a runtime-spelling edge with the same source, target and name:
 --                      the twins the divergence has already produced. #4583 does not merge them.

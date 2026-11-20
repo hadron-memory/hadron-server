@@ -14,6 +14,12 @@ import { deriveEdgeLoc, deriveEdgeLocAlternates } from './edgeLoc.js';
  * caller's existing occupant checks must reach them.
  *
  * Never writes, never rewrites a loc, and reads nothing for a name with a single spelling.
+ *
+ * The selection is made BEFORE the caller's upsert and may go stale (another writer between the two). That is safe
+ * because every caller's upsert is `update: {}` followed by the occupant check on the returned row (live, same
+ * source, same target, same name) inside the same transaction, which refuses an occupant that is not this edge: a
+ * stale selection degrades to the refusal each caller already had for an occupied loc, never to a wrong write. Both
+ * spellings stay distinct locs, so it cannot create a (loc, memory) collision.
  */
 export async function derivedEdgeLocForUpsert(
   db: Pick<PrismaClient, 'edge'>,

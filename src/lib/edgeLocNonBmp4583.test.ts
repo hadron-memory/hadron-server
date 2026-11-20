@@ -20,7 +20,7 @@ import { generateId } from './id.js';
 import {
   deriveEdgeLoc,
   deriveEdgeLocAlternates,
-  isDerivedEdgeLoc,
+  rekeyDerivedEdgeLoc,
   sanitizeLocAtom,
   sanitizeLocAtomCodePoint,
 } from './edgeLoc.js';
@@ -90,7 +90,7 @@ describe('SQL parity: the migration function against sanitizeLocAtomCodePoint (#
   });
 });
 
-describe('deriveEdgeLocAlternates / isDerivedEdgeLoc', () => {
+describe("deriveEdgeLocAlternates / rekeyDerivedEdgeLoc", () => {
   it('a name whose two spellings agree has NO alternate, so nothing changes for it', () => {
     for (const name of [...BMP_VECTORS, ...ASTRAL_BUT_EQUAL_VECTORS, null, undefined]) {
       expect(deriveEdgeLocAlternates('s', name, 't'), JSON.stringify(name)).toEqual([]);
@@ -109,14 +109,15 @@ describe('deriveEdgeLocAlternates / isDerivedEdgeLoc', () => {
     expect(deriveEdgeLocAlternates('root', 'a😀b', 'leaf')[0]).not.toBe(deriveEdgeLoc('root', 'a😀b', 'leaf'));
   });
 
-  it('isDerivedEdgeLoc accepts the runtime spelling and the migrated one, and nothing else', () => {
-    expect(isDerivedEdgeLoc('root:a--b:leaf', 'root', 'a😀b', 'leaf')).toBe(true);
-    expect(isDerivedEdgeLoc('root:a-b:leaf', 'root', 'a😀b', 'leaf')).toBe(true);
-    expect(isDerivedEdgeLoc('root:a---b:leaf', 'root', 'a😀b', 'leaf')).toBe(false);
-    expect(isDerivedEdgeLoc('root:a-b:leaf', 'root', 'a-b', 'leaf')).toBe(true);
-    expect(isDerivedEdgeLoc('root:a-b:leaf', 'root', 'xyz', 'leaf')).toBe(false);
-    // A BMP name has one spelling only.
-    expect(isDerivedEdgeLoc('root:has-space:leaf', 'root', 'has space', 'leaf')).toBe(true);
+  it('rekeyDerivedEdgeLoc keeps the spelling the loc carries, and leaves an authored loc alone', () => {
+    const rekey = (loc: string) => rekeyDerivedEdgeLoc(loc, 'old', 'a😀b', 'leaf', 'new', 'leaf');
+    expect(rekey('old:a--b:leaf')).toBe('new:a--b:leaf'); // the runtime spelling stays the runtime spelling
+    expect(rekey('old:a-b:leaf')).toBe('new:a-b:leaf'); // the migrated one stays the migrated one
+    expect(rekey('old:authored:leaf')).toBeNull();
+    expect(rekey('old:a---b:leaf')).toBeNull();
+    // A name with one spelling: as before.
+    expect(rekeyDerivedEdgeLoc('old:has-space:leaf', 'old', 'has space', 'leaf', 'new', 'leaf')).toBe('new:has-space:leaf');
+    expect(rekeyDerivedEdgeLoc('old:other:leaf', 'old', 'has space', 'leaf', 'new', 'leaf')).toBeNull();
   });
 });
 
@@ -217,11 +218,32 @@ describe('the wired sites reach the migrated edge (#4583)', () => {
     expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toBeNull();
   });
 
+  it('tombstone archive: BOTH twins of one relationship are re-keyed, each in its own spelling, so they do not collide', async () => {
+    const { graph, source } = await pair();
+    const old = await db.node.create({
+      data: { id: generateId(), memoryId: graph.id, loc: 'old', name: 'old', deletedAt: new Date() },
+    });
+    const migrated = await db.edge.create({
+      data: { id: generateId(), memoryId: graph.id, sourceId: source.id, targetId: old.id, loc: 'root:a-b:old', name: 'a😀b' },
+    });
+    const runtime = await db.edge.create({
+      data: { id: generateId(), memoryId: graph.id, sourceId: source.id, targetId: old.id, loc: 'root:a--b:old', name: 'a😀b' },
+    });
+    const archived = archivedTombstoneLoc('old', old.id);
+    const plan = await db.$transaction((tx) => discoverArchivePlan(tx, graph.id, 'old'));
+    await db.$transaction((tx) => archiveTombstone(tx, { id: old.id, loc: 'old', memoryId: graph.id }, plan));
+    expect((await db.edge.findUniqueOrThrow({ where: { id: migrated.id } })).loc).toBe(`root:a-b:${archived}`);
+    expect((await db.edge.findUniqueOrThrow({ where: { id: runtime.id } })).loc).toBe(`root:a--b:${archived}`);
+  });
+
   it('tombstone archive: an edge into an archived node is re-keyed whichever spelling its loc carries', async () => {
     // The migrated edge `root:a-b:old` (name `a😀b`) must follow its target to the archived address. Before #4583 the
     // "is this loc the derived one" test compared against the runtime spelling only, so the migrated loc was left
     // pointing at an address that no longer exists.
-    for (const [spelling, edgeLoc] of [['migrated', 'root:a-b:old'], ['runtime', 'root:a--b:old']] as const) {
+    for (const [spelling, edgeLoc, expected] of [
+      ['migrated', 'root:a-b:old', 'a-b'], // stays in the migrated spelling at the new address
+      ['runtime', 'root:a--b:old', 'a--b'],
+    ] as const) {
       await cleanDb(db);
       const { graph, source } = await pair();
       const old = await db.node.create({
@@ -234,22 +256,8 @@ describe('the wired sites reach the migrated edge (#4583)', () => {
       const plan = await db.$transaction((tx) => discoverArchivePlan(tx, graph.id, 'old'));
       await db.$transaction((tx) => archiveTombstone(tx, { id: old.id, loc: 'old', memoryId: graph.id }, plan));
       const after = await db.edge.findUniqueOrThrow({ where: { id: edge.id } });
-      expect(after.loc, spelling).toBe(`root:a--b:${archived}`);
+      expect(after.loc, spelling).toBe(`root:${expected}:${archived}`);
     }
-  });
-});
-
-describe('source pins for the sites a behavior test does not drive (#4583)', () => {
-  const read = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf8');
-
-  it('the Git sync edge upsert addresses the edge through the seam, not a bare deriveEdgeLoc', () => {
-    // The sync's direct edge write needs a whole mocked checkout to drive; the pending-promotion leg of the same file
-    // is driven for real in syncGraphFromGithub.test.ts. Pin that the direct write goes through the same seam.
-    const sync = read('src/integrations/github/syncGraphFromGithub.ts');
-    expect(sync).toMatch(/const edgeLoc = await derivedEdgeLocForUpsert\(tx, \{/);
-    expect(sync).not.toMatch(/const edgeLoc = deriveEdgeLoc\(/);
-    expect(sync).not.toMatch(/=== deriveEdgeLoc\(/);
-    expect(read('src/lib/tombstoneArchive.ts')).not.toMatch(/=== deriveEdgeLoc\(/);
   });
 });
 
@@ -278,6 +286,11 @@ describe('the census script (#4583, read only)', () => {
     await edge(s4, t4, 's4:authored:t4', 'a😀b'); // neither: an authored loc
     await edge(s5, t5, 's5:a-b:t5', 'a😀b'); // migrated spelling whose runtime loc is taken by another edge ...
     await edge(s5, t5, 's5:a--b:t5', 'a-then--b'); // ... (a different edge, name with no astral char)
+    // A soft-deleted divergent edge is counted like a live one: occupancy is what matters (the unique is unfiltered).
+    await db.edge.create({ data: { id: generateId(), memoryId: graph.id, sourceId: s2.id, targetId: t1.id, loc: 's2:a-b:t1', name: 'a😀b', deletedAt: new Date() } });
+    const [s6, t6] = await Promise.all(['s6', 't6'].map(node));
+    await edge(s6, t6, 's6:a--b:t6', 'a😀b'); // runtime spelling whose migrated loc is taken by another edge ...
+    await edge(s6, t6, 's6:a-b:t6', 'a-b'); // ... (named `a-b`, so not its twin)
     await edge(s1, t2, 's1:plain:t2', 'plain'); // not divergent: ignored
     const before = await db.edge.count();
     const rows = await db.$transaction(async (tx) => {
@@ -286,13 +299,13 @@ describe('the census script (#4583, read only)', () => {
     });
     const r = Object.fromEntries(Object.entries(rows[0]).map(([k, v]) => [k, Number(v)]));
     expect(r).toEqual({
-      divergent_edges: 6,
-      migrated_spelling: 3, // s1, s3 (migrated half), s5
-      runtime_spelling: 2, // s2, s3 (runtime half)
+      divergent_edges: 8,
+      migrated_spelling: 4, // s1, s3 (migrated half), s5, and the soft-deleted s2 edge
+      runtime_spelling: 3, // s2, s3 (runtime half), s6
       neither: 1, // s4
       twin_pairs: 1, // s3
       runtime_loc_taken_by_another: 1, // s5
-      migrated_loc_taken_by_another: 0,
+      migrated_loc_taken_by_another: 1, // s6 (the positive case: a broken predicate that always answered 0 fails here)
     });
     expect(await db.edge.count()).toBe(before);
   });

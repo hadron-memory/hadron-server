@@ -1168,6 +1168,31 @@ describe('syncGraphFromGithub', () => {
     expect((await db.memory.findUniqueOrThrow({ where: { id: sourceMemory.id } })).pendingEdgeCount).toBe(0);
   });
 
+  it('#4583: a re-sync of a declared relationship reaches the edge the historical migration wrote, not a twin', async () => {
+    const sourceId = generateId();
+    const targetId = generateId();
+    const root = join(mockSources, 'test-org', 'test/repo');
+    mkdirSync(root, { recursive: true });
+    const write = () => {
+      const source = buildNodeFrontmatter({ id: sourceId, name: 'Source', tags: [] }, [
+        { target: { id: targetId, loc: 'target' }, name: 'a😀b', description: '' },
+      ]);
+      writeFileSync(join(root, 'source.md'), `---\n${stringify(source, { lineWidth: 0 }).trim()}\n---\n`, 'utf-8');
+      const target = buildNodeFrontmatter({ id: targetId, name: 'Target', tags: [] });
+      writeFileSync(join(root, 'target.md'), `---\n${stringify(target, { lineWidth: 0 }).trim()}\n---\n`, 'utf-8');
+    };
+    write();
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    const created = await db.edge.findFirstOrThrow({ where: { sourceId, targetId } });
+    expect(created.loc).toBe('source:a--b:target'); // what the runtime derives
+
+    // The same relationship as the migration backfilled it: one `-` for the emoji.
+    await db.edge.update({ where: { id: created.id }, data: { loc: 'source:a-b:target' } });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    const edges = await db.edge.findMany({ where: { sourceId, targetId } });
+    expect(edges.map((e) => [e.id, e.loc])).toEqual([[created.id, 'source:a-b:target']]); // same edge, no twin, loc untouched
+  });
+
   it('#4583: promoting a PendingEdge reaches the edge the historical migration wrote under the code-point spelling, not a twin', async () => {
     const { graph: sourceMemory } = await createDbOrgAndGraph(db, {
       orgName: 'foreign-nonbmp-org',

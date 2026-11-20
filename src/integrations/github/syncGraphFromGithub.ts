@@ -30,7 +30,7 @@ import { join, dirname } from 'path';
 import { GRAPHS_PATH } from '../../config.js';
 import { pathUnderGraphsRoot } from '../localFs/pathUnderGraphsRoot.js';
 import { InvalidNodeNameError, loadGraphFromFs, type UnreadableFile } from '../localFs/loadGraphFromFs.js';
-import { deriveEdgeLoc, isDerivedEdgeLoc } from '../../lib/edgeLoc.js';
+import { deriveEdgeLoc, rekeyDerivedEdgeLoc } from '../../lib/edgeLoc.js';
 import { derivedEdgeLocForUpsert } from '../../lib/edgeLocLookup.js';
 import { validateEdgeCondition } from '../../lib/edge-conditions/validator.js';
 import { entryConditionOf, validateEntryCondition } from '../../lib/edge-conditions/entryCondition.js';
@@ -1576,10 +1576,10 @@ const syncGraphFromGithubAsSystem = async (
           for (const edge of incident) {
             const beforeSource = edge.sourceId === movedRoot.id ? oldLoc : edge.source.loc;
             const beforeTarget = edge.targetId === movedRoot.id ? oldLoc : edge.target.loc;
-            if (isDerivedEdgeLoc(edge.loc, beforeSource, edge.name, beforeTarget)) {
-              await tx.edge.update({ where: { id: edge.id }, data: {
-                loc: deriveEdgeLoc(edge.source.loc, edge.name, edge.target.loc),
-              } });
+            // #4583: each edge keeps the spelling its loc carries, so twins do not land on one loc.
+            const rekeyed = rekeyDerivedEdgeLoc(edge.loc, beforeSource, edge.name, beforeTarget, edge.source.loc, edge.target.loc);
+            if (rekeyed !== null) {
+              await tx.edge.update({ where: { id: edge.id }, data: { loc: rekeyed } });
             }
           }
         }

@@ -20,7 +20,7 @@
  * carry {@link sanitizeLocAtomCodePoint}'s, edges created at runtime since carry
  * {@link sanitizeLocAtom}'s. Runtime derivation keeps its spelling; code that
  * LOOKS UP an existing derived edge also accepts the other one
- * ({@link deriveEdgeLocAlternates}, {@link isDerivedEdgeLoc}, and
+ * ({@link deriveEdgeLocAlternates}, {@link rekeyDerivedEdgeLoc}, and
  * `derivedEdgeLocForUpsert` in `edgeLocLookup.ts`). Keep this pure ASCII (no
  * Unicode normalization) so plain Postgres `regexp_replace` can reproduce it.
  */
@@ -93,17 +93,24 @@ export function deriveEdgeLocAlternates(
 }
 
 /**
- * True when `loc` is the loc derived from these endpoints and this name, in either spelling (#4583). The comparison
- * the move and re-key paths use to tell a derived loc (re-derive it when an endpoint moves) from an authored one.
+ * Re-derive a DERIVED edge's loc for new endpoints, in the spelling it already carries (#4583), or null when `loc` is
+ * not the loc derived from the old endpoints and this name (an authored loc, which a move leaves alone).
+ *
+ * Keeping the spelling is what stops a pair of twins (the migrated and the runtime loc of one relationship, which
+ * the lookups deliberately tolerate) from landing on ONE loc and violating the (loc, memory) unique: each keeps its
+ * own. The runtime spelling goes to the runtime spelling, as before; the migrated one to the migrated one.
  */
-export function isDerivedEdgeLoc(
+export function rekeyDerivedEdgeLoc(
   loc: string,
-  sourceLoc: string,
+  oldSourceLoc: string,
   name: string | null | undefined,
-  targetLoc: string,
-): boolean {
-  return (
-    loc === deriveEdgeLoc(sourceLoc, name, targetLoc) ||
-    deriveEdgeLocAlternates(sourceLoc, name, targetLoc).includes(loc)
-  );
+  oldTargetLoc: string,
+  newSourceLoc: string,
+  newTargetLoc: string,
+): string | null {
+  if (loc === deriveEdgeLoc(oldSourceLoc, name, oldTargetLoc)) return deriveEdgeLoc(newSourceLoc, name, newTargetLoc);
+  if (deriveEdgeLocAlternates(oldSourceLoc, name, oldTargetLoc).includes(loc)) {
+    return `${newSourceLoc}:${sanitizeLocAtomCodePoint(name)}:${newTargetLoc}`;
+  }
+  return null;
 }

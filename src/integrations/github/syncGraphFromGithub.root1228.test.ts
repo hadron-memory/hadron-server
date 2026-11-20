@@ -71,6 +71,18 @@ describe('#1228 root README', () => {
     expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
     expect(await db.node.count({ where: { memoryId: graph.id, loc: 'root-memory' } })).toBe(1);
   });
+  it('#4583: a migrated edge and its runtime twin (both spellings of a non-BMP name) each keep their own spelling when the root moves', async () => {
+    // The root's loc changes from '' to the memory slug, so both derived locs are re-derived. If both went to the SAME
+    // spelling they would land on one (loc, memory) and abort the sync; each must stay in the spelling it carries.
+    const root = await legacyRoot();
+    const child = await db.node.create({ data: { memoryId: graph.id, loc: 'child', name: 'Child' } });
+    const migrated = await db.edge.create({ data: { memoryId: graph.id, sourceId: child.id, targetId: root.id, loc: 'child:a-b:', name: 'a😀b' } });
+    const runtime = await db.edge.create({ data: { memoryId: graph.id, sourceId: child.id, targetId: root.id, loc: 'child:a--b:', name: 'a😀b' } });
+    readme();
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect((await db.edge.findUniqueOrThrow({ where: { id: migrated.id } })).loc).toBe('child:a-b:root-memory');
+    expect((await db.edge.findUniqueOrThrow({ where: { id: runtime.id } })).loc).toBe('child:a--b:root-memory');
+  });
   it.each(['', 'unknown1228'])('refuses a missing or mismatched live root id (%s) before replacement', async (fileId) => {
     const root = await legacyRoot();
     readme(fileId);
