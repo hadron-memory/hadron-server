@@ -60,6 +60,15 @@ async function seedEntries(id: string, entries: AnswerEntry[]): Promise<void> {
   } });
 }
 
+/** Stands in for the approval door, which questions do not have yet (approveNode answers QUESTION_NOT_APPROVABLE): holger approved the standing revision. */
+async function approveAsHolger(id: string): Promise<void> {
+  const r = await rowOf(id);
+  await db.node.update({ where: { id }, data: {
+    approvedBy: holger.id, approvedRevNo: r.revSeq, approvedAt: new Date(),
+    approvalHash: computeApprovalHash({ title: r.name, abstract: r.abstract, content: r.content }),
+  } });
+}
+
 beforeEach(async () => {
   await cleanDb(db);
   const org = await db.organization.create({ data: { id: generateId(), name: 'Answer Org', urn: 'answer.example' } });
@@ -197,7 +206,8 @@ describe('answerQuestion: a decider answers, again, and takes it back', () => {
   });
 
   it('a withdrawn question is not answered or taken back: QUESTION_WITHDRAWN; an unknown ref is QUESTION_NOT_FOUND', async () => {
-    const q = await ask((await createLog()).row.id);
+    const log = await createLog();
+    const q = await ask(log.row.id);
     await M.withdrawQuestion(null, { ref: q.row.id, reason: 'moot', expectedRevision: q.row.revSeq }, as(writer.id));
     const r = (await rowOf(q.row.id)).revSeq;
     expect(await codeOf(answer(q.row.id, { optionKey: 'yes' }, r))).toBe('QUESTION_WITHDRAWN');
@@ -360,10 +370,7 @@ describe('#4532 blind review: approved re-answer, merged decider, a missing log'
     await answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq);
     const r = await rowOf(q.row.id);
     // Stands in for the approval door: holger approved the standing revision.
-    await db.node.update({ where: { id: q.row.id }, data: {
-      approvedBy: holger.id, approvedRevNo: r.revSeq, approvedAt: new Date(),
-      approvalHash: computeApprovalHash({ title: r.name, abstract: r.abstract, content: r.content }),
-    } });
+    await approveAsHolger(q.row.id);
     await answer(q.row.id, { optionKey: 'no', reason: 'after approval' }, r.revSeq);
     expect((await rowOf(q.row.id)).revSeq).toBeGreaterThan(r.revSeq);
     const d = await dataOf(q.row.id);
@@ -429,15 +436,15 @@ describe('#4532 blind delta: a SIGNED-tier question, and the on-log arm after a 
     const q = await ask((await createLog()).row.id, { title: 'Sign off?', yesno: true, recommendation: { key: 'yes', reason: 'ready' }, tier: 'SIGNED' });
     await answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq);
     const r = await rowOf(q.row.id);
-    await db.node.update({ where: { id: q.row.id }, data: {
-      approvedBy: holger.id, approvedRevNo: r.revSeq, approvedAt: new Date(),
-      approvalHash: computeApprovalHash({ title: r.name, abstract: r.abstract, content: r.content }),
-    } });
+    await approveAsHolger(q.row.id);
     await answer(q.row.id, { optionKey: 'no', reason: 'second thoughts' }, r.revSeq);
     expect((await rowOf(q.row.id)).revSeq).toBeGreaterThan(r.revSeq);
     expect((await dataOf(q.row.id)).answers.map((a) => a.key)).toEqual(['yes', 'no']);
   });
 
+  // Both arms are merge-aware by design (callerIdentities for the named check, survivors for the log), so this pins the log
+  // arm working; the controls that each arm is REQUIRED are 'a log decider the asker did not name on this question cannot
+  // answer it' and 'a stored decider the log no longer names is refused', in the gate describe above.
   it('after a merge the survivor answers when the LOG names the survivor and the question still names the merged account', async () => {
     const log = await createLog();
     const q = await ask(log.row.id);
@@ -448,5 +455,26 @@ describe('#4532 blind delta: a SIGNED-tier question, and the on-log arm after a 
     await answer(q.row.id, { optionKey: 'yes' }, (await rowOf(q.row.id)).revSeq, as(survivor.id));
     expect((await dataOf(q.row.id)).deciders).toEqual([holger.id]);
     expect((await dataOf(q.row.id)).answers).toHaveLength(1);
+  });
+});
+
+describe('#4532 review pins: the via pointer, and each blocked-state guard alone', () => {
+  it('an invalid via is QUESTION_INVALID at /input/via on the answer door and /via on the take-back door', async () => {
+    const q = await ask((await createLog()).row.id);
+    const e1 = await errorOf(answer(q.row.id, { optionKey: 'yes', via: 'FAX' }, q.row.revSeq));
+    expect(JSON.stringify(e1.extensions)).toContain('/input/via');
+    await answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq);
+    const e2 = await errorOf(retract(q.row.id, (await rowOf(q.row.id)).revSeq, { via: 'FAX' }));
+    expect(JSON.stringify(e2.extensions)).toContain('"/via"');
+  });
+
+  it('a withdrawn question is QUESTION_WITHDRAWN and an unverifiable one QUESTION_INVALID, each on its own', async () => {
+    const log = await createLog();
+    const q = await ask(log.row.id);
+    await M.withdrawQuestion(null, { ref: q.row.id, reason: 'moot', expectedRevision: q.row.revSeq }, as(writer.id));
+    expect(await codeOf(answer(q.row.id, { optionKey: 'yes' }, (await rowOf(q.row.id)).revSeq))).toBe('QUESTION_WITHDRAWN');
+    const q2 = await ask(log.row.id);
+    await db.node.update({ where: { id: q2.row.id }, data: { data: { ...(q2.row.data as object), codec: 'question@0' } as never } });
+    expect(await codeOf(answer(q2.row.id, { optionKey: 'yes' }, (await rowOf(q2.row.id)).revSeq))).toBe('QUESTION_INVALID');
   });
 });
