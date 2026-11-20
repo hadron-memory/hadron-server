@@ -24,7 +24,7 @@ const ctx = (): Context => ({ db, userId: user.id, roles: ['READER'] });
 async function agent(name: string, personaRole: string) {
   const a = await M.createAgent(
     {},
-    { orgId: org.id, name, personaRole },
+    { orgRef: org.id, name, personaRole },
     ctx(),
   );
   await serveAgentBootPrompt(db, a.id, 'DERIVED {{worker.role}}');
@@ -305,7 +305,7 @@ it.each(['ROW', 'DERIVED'])(
       data: { role: 'READER' },
     });
     await expect(cast()).rejects.toMatchObject({
-      extensions: { code: 'FORBIDDEN' },
+      extensions: { code: 'APP_NOT_FOUND' },
     });
     expect(await db.worker.count()).toBe(0);
   },

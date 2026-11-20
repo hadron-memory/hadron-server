@@ -7,18 +7,23 @@
  * inspectable half. The row grants nothing by itself — run-time use walks
  * the cascade resolver under the run principal (src/lib/runner/secrets.ts).
  *
- * Authorization matrix (issue #677; owners narrowed to org/user in #696):
- *   owner    | create/update/delete            | see-it-exists (read surface)
- *   user     | that user (strict, no admin)    | that user
- *   org      | org ADMIN                        | org member
+ * Authorization matrix (issue #677; #3997 added the App owner, cor:sec:020:02):
+ *   owner    | create/update/delete                                  | see-it-exists (read surface)
+ *   user     | that user (strict, no admin)                          | that user
+ *   org      | org ADMIN                                              | org member
+ *   app      | store/version: any App member; delete: creator or      | any App member (a person acting as
+ *            | whoever manages the App, each as a person              | themselves; never an App key or an
+ *            |                                                         | impersonated session)
  *
- * The #679 app- and memory-owned scopes are superseded (#696,
- * D-2026-07-15-006): the flat v2 secret URN carries a single root principal.
+ * An App secret keeps NO value on its row: every store adds a version (src/lib/secrets/appSecrets.ts). The
+ * memory-owned scope stays superseded (#696, D-2026-07-15-006).
  */
 import { GraphQLError } from 'graphql';
-import type { Context } from './resolvers.helpers.js';
+import { assertOneRevealPerOperation, type RevealOperationInfo } from '../../../lib/secrets/revealOperationGuard.js';
+import { pageArgs, pageEnvelope, type Context } from './resolvers.helpers.js';
 import {
   clampListTake,
+  isAppParticipant,
   isOrgMemberOrAdmin,
   requireOrgRole,
 } from './resolvers.helpers.js';
@@ -33,9 +38,33 @@ import {
   SECRET_NAME_RE,
   SECRET_OWNER_TYPES,
   validateAndEncryptSecret,
+  validateSecretPayload,
   type SecretOwnerType,
 } from '../../../lib/secrets.js';
 import { forbiddenError } from '../../../lib/refusals.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
+import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { boundWorkerId } from '../../../lib/bootPrompt.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
+import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { admitOperationRate } from '../../../lib/rateLimit/index.js';
+import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
+import {
+  addAppSecretVersion,
+  assertAppSecretRoom,
+  currentAppSecretValue,
+  lockSecretRow,
+  recordSecretEvent,
+  secretActorOf,
+} from '../../../lib/secrets/appSecrets.js';
+import { withAuthorizedTx } from './authorizedTx.js';
+import { createPendingGrant, GrantCreateRefusal } from '../../../lib/grants/create.js';
+import { requireSecretReadClientIssuer } from '../../../lib/secrets/readClientIssuer.js';
+import { generateId } from '../../../lib/id.js';
+import { revealWithReadClient } from '../../../lib/secrets/readClientReveal.js';
+import { tickBatch } from './tickBatch.js';
 
 function badInput(message: string): GraphQLError {
   return new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
@@ -92,7 +121,74 @@ async function resolveSecretOwnerRef(
       if (ownerRef == null) throw badInput('ownerRef is required for org-scoped secrets.');
       return (await resolveOrgRef(ctx.db, ownerRef)).id;
     }
+    case 'app': {
+      if (ownerRef == null) throw badInput('ownerRef is required for App-scoped secrets.');
+      try {
+        return (await resolveAppRef(ctx.db, ownerRef)).id;
+      } catch (err) {
+        // A missing App and one the caller may not use answer the same, so the ref is no existence oracle.
+        if (err instanceof AppNotFoundError || err instanceof AmbiguousLegacyUrnError) throw authorizationDenied();
+        throw err;
+      }
+    }
+    default:
+      return unknownOwnerType(ownerType);
   }
+}
+
+/** Every switch over the owner type ends here: a type none of its cases names is refused, never let through (#3997). */
+function unknownOwnerType(_ownerType: never): never {
+  throw forbiddenError();
+}
+
+type AppSecretRow = { id: string; organizationId: string | null; ownerUserId: string | null };
+
+/** The App when it is live (not deleted, not uninstalled); null otherwise. */
+async function loadLiveApp(ctx: Context, appId: string): Promise<AppSecretRow | null> {
+  const app = await ctx.db.app.findUnique({
+    where: { id: appId },
+    select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
+  });
+  if (!app || app.deletedAt || app.uninstalledAt) return null;
+  return app;
+}
+
+/**
+ * The caller as a MEMBER of a live App (cor:sec:020:02): a person acting as themselves who participates in the App. An
+ * App key (no user), an impersonated session and a run are not members and see and change nothing. Returns the App row,
+ * or null. A bound worker session is its driving person's session, so it passes when that person is a member.
+ */
+async function appMember(ctx: Context, appId: string): Promise<AppSecretRow | null> {
+  if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return null;
+  const app = await loadLiveApp(ctx, appId);
+  if (!app) return null;
+  return (await isAppParticipant(ctx, app)) ? app : null;
+}
+
+async function requireAppMember(ctx: Context, appId: string): Promise<AppSecretRow> {
+  const app = await appMember(ctx, appId);
+  if (!app) throw authorizationDenied();
+  return app;
+}
+
+/** Whoever manages the live App, as a person acting as themselves (cor:dmo:050:12). */
+async function appManager(ctx: Context, appId: string): Promise<AppSecretRow | null> {
+  if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return null;
+  const app = await loadLiveApp(ctx, appId);
+  if (!app) return null;
+  return (await managesApp(ctx, app)) ? app : null;
+}
+
+/** The authority anchors an App secret write depends on: the App, and its organization when it has one. */
+function appAnchors(app: AppSecretRow) {
+  return [
+    { kind: 'app' as const, id: app.id },
+    ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+  ];
+}
+
+function appRateIdentity(ctx: Context) {
+  return ctx.limiterIdentity ?? transportRateIdentity(ctx as never);
 }
 
 /**
@@ -114,6 +210,12 @@ async function requireSecretOwnerWrite(
       await requireOrgRole(ctx, ownerId, 'ADMIN');
       return;
     }
+    case 'app':
+      // Any member stores or adds a version (cor:sec:020:02). Delete is narrower and decides for itself.
+      await requireAppMember(ctx, ownerId);
+      return;
+    default:
+      return unknownOwnerType(ownerType);
   }
 }
 
@@ -135,6 +237,12 @@ async function canSeeSecretOwner(
       return !!ctx.userId && ctx.userId === ownerId && !ctx.impersonation;
     case 'org':
       return isOrgMemberOrAdmin(ctx, ownerId);
+    case 'app':
+      // A member sees that it exists; whoever manages the App does too (delete and listing). Never an App key,
+      // an impersonated session or a run.
+      return (await appMember(ctx, ownerId)) !== null || (await appManager(ctx, ownerId)) !== null;
+    default:
+      return unknownOwnerType(ownerType);
   }
 }
 
@@ -154,13 +262,19 @@ export interface UpdateSecretArgs {
 }
 
 export const secretMutations = {
-  /** Create a named, owner-scoped secret (gate per the #677 matrix). */
+  /** Issue a read client for an App secret: a pending reveal grant and its client, made together (cor:sec:060:01). */
+  revealSecret: (_: unknown, { clientId }: { clientId: string }, ctx: Context, info?: RevealOperationInfo) => revealSecretMutation(ctx, clientId, info),
+  issueSecretReadClient: (_: unknown, { input }: { input: IssueReadClientInput }, ctx: Context) => issueSecretReadClient(ctx, input),
+
+  /** Create a named, owner-scoped secret (gate per the matrix above). */
   createSecret: async (_: unknown, args: CreateSecretArgs, ctx: Context) => {
     const ownerType = assertOwnerType(args.ownerType);
     const ownerId = await resolveSecretOwnerRef(ctx, ownerType, args.ownerRef);
-    await requireSecretOwnerWrite(ctx, ownerType, ownerId);
-
     const name = args.name.trim().toLowerCase();
+
+    if (ownerType === 'app') return createAppSecret(ctx, ownerId, name, args);
+
+    await requireSecretOwnerWrite(ctx, ownerType, ownerId);
     if (!SECRET_NAME_RE.test(name)) {
       throw badInput('name must be lowercase [a-z0-9-], start alphanumeric, max 64 chars.');
     }
@@ -187,12 +301,11 @@ export const secretMutations = {
   },
 
   /**
-   * Overwrite a secret's value and/or metadata (v1 rotation — no
-   * versioning). Name, kind, and owner are immutable: flow config and the
-   * cascade reference the name, so renaming would silently orphan them —
-   * create a new name instead. The effective (metadata, value) pair is
-   * re-validated per kind, decrypting the stored value server-side when
-   * only metadata changes, so the two halves can never drift apart.
+   * Change a secret's value and/or metadata. An org or user secret OVERWRITES (v1 rotation, no versions). An App
+   * secret's value ADDS the next version and never overwrites (cor:sec:010:03). Name, kind, and owner are immutable:
+   * flow config and the cascade reference the name, so renaming would silently orphan them. The effective
+   * (metadata, value) pair is re-validated per kind, decrypting the stored value server-side when only metadata
+   * changes, so the two halves can never drift apart.
    */
   updateSecret: async (_: unknown, args: UpdateSecretArgs, ctx: Context) => {
     const secret = await findSecretByRef(ctx, args.ref);
@@ -201,6 +314,7 @@ export const secretMutations = {
     if (!secret || !(await canSeeSecretOwner(ctx, secret.ownerType as SecretOwnerType, secret.ownerId))) {
       throw new GraphQLError('Secret not found.', { extensions: { code: 'NOT_FOUND' } });
     }
+    if (secret.ownerType === 'app') return updateAppSecret(ctx, secret, args);
     await requireSecretOwnerWrite(ctx, secret.ownerType as SecretOwnerType, secret.ownerId);
 
     if (args.metadata === undefined && args.value === undefined) {
@@ -212,6 +326,7 @@ export const secretMutations = {
       secret.kind,
       effectiveMetadata,
       effectiveValue,
+      { enforceValueSize: args.value !== undefined },
     );
 
     return ctx.db.secret.update({
@@ -225,7 +340,7 @@ export const secretMutations = {
   },
 
   /**
-   * Hard-delete a secret. Runs referencing the name fail their resolution
+   * Hard-delete a secret (every version with it). Runs referencing the name fail their resolution
    * loud afterwards (or fall through to a less-specific scope of the same
    * name — the cascade contract).
    */
@@ -234,13 +349,262 @@ export const secretMutations = {
     if (!secret || !(await canSeeSecretOwner(ctx, secret.ownerType as SecretOwnerType, secret.ownerId))) {
       throw new GraphQLError('Secret not found.', { extensions: { code: 'NOT_FOUND' } });
     }
+    if (secret.ownerType === 'app') return deleteAppSecret(ctx, secret);
     await requireSecretOwnerWrite(ctx, secret.ownerType as SecretOwnerType, secret.ownerId);
     await ctx.db.secret.delete({ where: { id: secret.id } });
     return true;
   },
 };
 
+type SecretRow = NonNullable<Awaited<ReturnType<typeof findSecretByRef>>>;
+
+function notFound(): GraphQLError {
+  return new GraphQLError('Secret not found.', { extensions: { code: 'NOT_FOUND' } });
+}
+
+/** A protected secret changes only through a person's change request (cor:sec:070:02, S4); until S4 every change refuses. */
+function protectedRefusal(): GraphQLError {
+  return new GraphQLError('This secret is protected: it changes only through a change request.', { extensions: { code: 'SECRET_PROTECTED' } });
+}
+
+async function createAppSecret(ctx: Context, appId: string, name: string, args: CreateSecretArgs) {
+  await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
+  const app = await loadLiveApp(ctx, appId);
+  if (!app) throw authorizationDenied();
+  const actor = secretActorOf(ctx);
+  try {
+    return await withAuthorizedTx(
+      ctx,
+      appAnchors(app),
+      async (txCtx) => { await requireAppMember(txCtx, appId); },
+      async (tx) => {
+        if (!SECRET_NAME_RE.test(name)) {
+          throw badInput('name must be lowercase [a-z0-9-], start alphanumeric, max 64 chars.');
+        }
+        const { metadata, valueJson, sizeBytes } = validateSecretPayload(args.kind, args.metadata, args.value);
+        await assertAppSecretRoom(tx, appId);
+        const secret = await tx.secret.create({
+          data: {
+            ownerType: 'app', ownerId: appId, name, kind: args.kind, metadata: metadata as never,
+            valueEncrypted: null, createdBy: ctx.userId ?? null,
+            createdByWorkerId: actor.workerId, createdBySessionId: actor.sessionId,
+          },
+        });
+        const versionNo = await addAppSecretVersion(tx, secret, valueJson, sizeBytes, actor);
+        await recordSecretEvent(tx, { ownerId: appId, secretId: secret.id, secretName: name, kind: 'STORE', versionNo, actor });
+        return secret;
+      },
+    );
+  } catch (err) {
+    if (isSecretNameConflict(err)) {
+      throw badInput(`A secret named "${name}" already exists at this scope.`);
+    }
+    throw err;
+  }
+}
+
+/** A unique violation on the NAME. Any other one (the App key's own primary key under a race) is not a name clash and passes through. */
+function isSecretNameConflict(err: unknown): boolean {
+  const e = err as { code?: string; meta?: { target?: unknown } } | null;
+  if (e?.code !== 'P2002') return false;
+  const target = e.meta?.target;
+  const text = Array.isArray(target) ? target.join(',') : typeof target === 'string' ? target : '';
+  return /name/i.test(text);
+}
+
+async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecretArgs) {
+  await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
+  const app = await loadLiveApp(ctx, found.ownerId);
+  if (!app) throw notFound();
+  if (args.metadata === undefined && args.value === undefined) {
+    throw badInput('Pass metadata and/or value.');
+  }
+  const actor = secretActorOf(ctx);
+  return withAuthorizedTx(
+    ctx,
+    appAnchors(app),
+    async (txCtx) => { await requireAppMember(txCtx, found.ownerId); },
+    async (tx) => {
+      // The secret row's lock serializes stores: two racing value changes end at n+1 and n+2, never a duplicate or a gap.
+      if (!(await lockSecretRow(tx, found.id))) throw notFound();
+      const secret = await tx.secret.findUnique({ where: { id: found.id } });
+      if (!secret) throw notFound();
+      if (secret.protected) throw protectedRefusal();
+      const effectiveValue = args.value !== undefined ? args.value : await currentAppSecretValue(tx, secret);
+      const effectiveMetadata = args.metadata !== undefined ? args.metadata : secret.metadata;
+      const { metadata, valueJson, sizeBytes } = validateSecretPayload(secret.kind, effectiveMetadata, effectiveValue, {
+        enforceValueSize: args.value !== undefined,
+      });
+      let versionNo: number | null = null;
+      if (args.value !== undefined) versionNo = await addAppSecretVersion(tx, secret, valueJson, sizeBytes, actor);
+      const updated = await tx.secret.update({
+        where: { id: secret.id },
+        data: { metadata: metadata as never, updatedBy: ctx.userId ?? null },
+      });
+      await recordSecretEvent(tx, {
+        ownerId: secret.ownerId, secretId: secret.id, secretName: secret.name,
+        kind: versionNo === null ? 'METADATA' : 'VERSION', versionNo, actor,
+      });
+      return updated;
+    },
+  );
+}
+
+/**
+ * Delete an unprotected App secret (Holger's ruling R1 on open question 6, 2026-11-12): its CREATOR or whoever manages
+ * the App, each as a PERSON (`requirePersonOnlyAct`: a worker session and a run are refused). A creator who has left the
+ * App no longer qualifies (a revoked membership never authorizes). Every version goes with it, in the same transaction.
+ */
+async function deleteAppSecret(ctx: Context, found: SecretRow) {
+  await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
+  const app = await loadLiveApp(ctx, found.ownerId);
+  if (!app) throw notFound();
+  const actor = secretActorOf(ctx);
+  return withAuthorizedTx(
+    ctx,
+    appAnchors(app),
+    async (txCtx) => {
+      const userId = await requirePersonOnlyAct(txCtx, 'secret.delete', () => forbiddenError());
+      const manager = (await appManager(txCtx, found.ownerId)) !== null;
+      const creator = found.createdBy === userId && (await appMember(txCtx, found.ownerId)) !== null;
+      if (!manager && !creator) throw forbiddenError();
+    },
+    async (tx) => {
+      if (!(await lockSecretRow(tx, found.id))) throw notFound();
+      const secret = await tx.secret.findUnique({ where: { id: found.id } });
+      if (!secret) throw notFound();
+      if (secret.protected) throw protectedRefusal();
+      const newest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
+      await recordSecretEvent(tx, { ownerId: secret.ownerId, secretId: secret.id, secretName: secret.name, kind: 'DELETE', versionNo: newest?.versionNo ?? null, actor });
+      await tx.$executeRaw`UPDATE secret_read_clients SET end_reason = 'SECRET_DELETED', ended_at = (clock_timestamp() AT TIME ZONE 'UTC')
+         WHERE secret_id = ${secret.id} AND ended_at IS NULL`;
+      await tx.secret.delete({ where: { id: secret.id } });
+      return true;
+    },
+  );
+}
+
+async function revealSecretMutation(ctx: Context, clientId: string, info?: RevealOperationInfo) {
+  // R8: judged whole, before the rate limit or any read, so two fields in one operation are both refused and neither reads.
+  assertOneRevealPerOperation(info);
+  await admitOperationRate(ctx, ctx.db, 'CREDENTIALS', appRateIdentity(ctx));
+  return revealWithReadClient(ctx, clientId);
+}
+
+/** The most live read clients one secret carries (#3998 plan R4): a bound on the list a manager reads and the grants a secret answers to. */
+const MAX_LIVE_READ_CLIENTS = 100;
+
+interface IssueReadClientInput {
+  secretRef: string; holderKind: 'USER' | 'WORKER' | 'AGENT' | 'APP'; holderRef?: string | null; autoDelete: boolean;
+  startsAt?: Date | string | null; expiresAt?: Date | string | null; maxReads?: number | null; reason: string;
+}
+
+function readClientRefusal(code: string, message: string): GraphQLError {
+  return new GraphQLError(message, { extensions: { code } });
+}
+
+function asTime(v: Date | string | null | undefined): Date | null {
+  if (v === null || v === undefined) return null;
+  const d = v instanceof Date ? v : new Date(v);
+  if (Number.isNaN(d.getTime())) throw badInput('A time is not a valid date.');
+  return d;
+}
+
+/** The auto-delete limit rule, as a pure function so it is tested while the NOT_AVAILABLE guard shadows it (#4443, Bridget P2 1). */
+export function autoDeleteLimitRefusal(
+  autoDelete: boolean, expiresAt: Date | null, maxUses: number | null,
+): { code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT'; message: string } | null {
+  if (autoDelete && !expiresAt && maxUses === null) {
+    return { code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT', message: 'An auto-delete mark needs a window or a read budget.' };
+  }
+  return null;
+}
+
+/**
+ * Issue a read client (cor:sec:060:01): the pending `secret.reveal` grant and its client row, in ONE transaction. Only a person
+ * acting as themselves, who manages the App or wrote the current version (`requireSecretReadClientIssuer`, judged under the
+ * secret row's lock so a newer version cannot slip in). The grant still needs the issuer's passkey signature, which judges the
+ * issuer rule again. A client with an auto-delete mark needs a window or a read budget.
+ */
+async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) {
+  await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
+  // The refusals that depend only on the INPUT come first, before the secret is looked up: judged after it, a stranger could tell an
+  // existing secret from a missing one by which refusal came back (existence oracle, Rook's partial §10 at f610b2e5).
+  // #4434: an agent holder (or an App) is not built here, and a read client nothing can read must never exist: refuse before any write.
+  if (input.holderKind === 'AGENT' || input.holderKind === 'APP') {
+    throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A read client is held by a person or a worker.');
+  }
+  const startsAt = asTime(input.startsAt);
+  const expiresAt = asTime(input.expiresAt);
+  const maxUses = input.maxReads ?? null;
+  // The "delete" mark is signed but nothing consumes it until S6 (#4001): a person must not sign a retention term the server does not
+  // keep. Judged FIRST, so a caller is not walked through adding a limit only to be refused after it (#4443 item 6). S6's first act is
+  // to remove this guard; the limit rule (`autoDeleteLimitRefusal`, pinned by its own test now) then applies unchanged.
+  if (input.autoDelete) {
+    throw readClientRefusal('SECRET_AUTO_DELETE_NOT_AVAILABLE', 'Auto-delete on a read client is not available yet.');
+  }
+  const limitRefusal = autoDeleteLimitRefusal(input.autoDelete, expiresAt, maxUses);
+  if (limitRefusal) throw readClientRefusal(limitRefusal.code, limitRefusal.message);
+  const found = await findSecretByRef(ctx, input.secretRef);
+  if (!found || found.ownerType !== 'app') throw authorizationDenied();
+  const app = await loadLiveApp(ctx, found.ownerId);
+  if (!app) throw authorizationDenied();
+  try {
+    return await withAuthorizedTx(
+      ctx,
+      appAnchors(app),
+      async (txCtx) => {
+        if (!(await lockSecretRow(txCtx.db as never, found.id))) throw authorizationDenied();
+        await requireSecretReadClientIssuer(txCtx, found.id);
+      },
+      async (tx, txCtx) => {
+        const userId = txCtx.userId as string;
+        const issuance = await requireSecretReadClientIssuer({ ...txCtx, db: tx } as Context, found.id);
+        const holder = input.holderKind === 'USER'
+          ? { kind: 'user' as const, id: userId }
+          : { kind: 'worker' as const, id: input.holderRef ?? '' };
+        if (input.holderKind === 'USER' && input.holderRef && input.holderRef !== userId) {
+          throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A person holds a read client only for themself.');
+        }
+        const live = await tx.$queryRaw<Array<{ n: bigint }>>`
+          SELECT count(*) AS n FROM secret_read_clients c JOIN grants g ON g.id = c.grant_id
+           WHERE c.secret_id = ${found.id} AND c.ended_at IS NULL AND g.revoked_at IS NULL AND g.holder_departed_at IS NULL`;
+        if (Number(live[0]?.n ?? 0) >= MAX_LIVE_READ_CLIENTS) {
+          throw readClientRefusal('SECRET_READ_CLIENT_LIMIT', 'This secret already has the most read clients it may have.');
+        }
+        const grantId = await createPendingGrant(tx, {
+          appId: app.id, requester: { userId, workerId: null, sessionId: null }, holder,
+          action: 'secret.reveal', values: { secret: found.id, 'auto-delete': input.autoDelete ? 'delete' : 'keep' },
+          startsAt, expiresAt, maxUses, reason: input.reason, canReadMemory: async () => false,
+        });
+        const clientId = generateId();
+        const selfIssued = holder.kind === 'user' && holder.id === userId;
+        await tx.secretReadClient.create({
+          data: { id: clientId, grantId, appId: app.id, secretId: found.id, secretName: issuance.secretName, issuerUserId: userId, selfIssued },
+        });
+        return { clientId, grantId, secretName: issuance.secretName, selfIssued };
+      },
+    );
+  } catch (error) {
+    if (error instanceof GrantCreateRefusal) throw readClientRefusal(error.code, error.message);
+    throw error;
+  }
+}
+
 export const secretQueries = {
+  mySecretReadClients: async (_: unknown, args: { limit?: number | null; offset?: number | null }, ctx: Context) => {
+    const workerId = boundWorkerId();
+    if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return [];
+    await admitOperationRate(ctx, ctx.db, 'OTHER_READS', appRateIdentity(ctx));
+    const take = clampListTake(args.limit);
+    if (take === 0) return [];
+    const rows = await ctx.db.secretReadClient.findMany({
+      where: { OR: [{ issuerUserId: ctx.userId }, { grant: { userId: ctx.userId } }, ...(workerId ? [{ grant: { workerId } }] : [])] },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take, skip: Math.max(0, args.offset ?? 0),
+    });
+    return rows.map((r) => ({ clientId: r.id, grantId: r.grantId, secretId: r.secretId, secretName: r.secretName, selfIssued: r.selfIssued, endReason: r.endReason, createdAt: r.createdAt }));
+  },
+
   /**
    * Fetch one secret (inspectable half only). Null for missing AND for
    * not-entitled — indistinguishable by design.
@@ -249,6 +613,7 @@ export const secretQueries = {
     const secret = await findSecretByRef(ctx, ref);
     if (!secret) return null;
     if (!(await canSeeSecretOwner(ctx, secret.ownerType as SecretOwnerType, secret.ownerId))) return null;
+    if (secret.ownerType === 'app') await admitOperationRate(ctx, ctx.db, 'OTHER_READS', appRateIdentity(ctx));
     return secret;
   },
 
@@ -275,6 +640,7 @@ export const secretQueries = {
       return { items: [], total: 0 };
     }
     if (!(await canSeeSecretOwner(ctx, ownerType, ownerId))) return { items: [], total: 0 };
+    if (ownerType === 'app') await admitOperationRate(ctx, ctx.db, 'OTHER_READS', appRateIdentity(ctx));
 
     const where = { ownerType, ownerId };
     const take = clampListTake(args.limit);
@@ -290,5 +656,99 @@ export const secretQueries = {
       ctx.db.secret.count({ where }),
     ]);
     return { items, total };
+  },
+
+  /**
+   * The audit events of ONE App secret, newest first, for any MEMBER of the App (cor:sec:010:05, ruled 2026-11-14 by
+   * Victor under 0265: a person acting as themselves, or a bound worker session in its own App). A non-member, an App
+   * key, a run and an impersonated session get an EMPTY page, the same as a missing secret. Never a value.
+   */
+  secretEvents: async (
+    _: unknown,
+    args: { ref: string; limit?: number | null; offset?: number | null },
+    ctx: Context,
+  ) => {
+    const empty = { items: [], total: 0 };
+    const secret = await findSecretByRef(ctx, args.ref);
+    if (!secret || secret.ownerType !== 'app') return empty;
+    if (!(await appMember(ctx, secret.ownerId))) return empty;
+    await admitOperationRate(ctx, ctx.db, 'OTHER_READS', appRateIdentity(ctx));
+    const where = { ownerType: 'app', ownerId: secret.ownerId, secretId: secret.id };
+    const take = clampListTake(args.limit);
+    const [items, total] = await Promise.all([
+      take === 0
+        ? Promise.resolve([])
+        : ctx.db.secretEvent.findMany({ where, orderBy: [{ at: 'desc' }, { id: 'desc' }], take, skip: Math.max(0, args.offset ?? 0) }),
+      ctx.db.secretEvent.count({ where }),
+    ]);
+    return { items, total };
+  },
+};
+
+type VersionRow = { id: string; versionNo: number; sizeBytes: number; writtenAt: Date; writtenByUserId: string | null; writtenByWorkerId: string | null; supersededAt: Date | null };
+type VersionsPageResult = { items: VersionRow[]; total: number };
+
+/**
+ * #4157: `Secret.currentVersion` of every App secret raised in the same tick shares ONE grouped query, not one
+ * `findFirst` per parent. Keyed by the request Context (see `tickBatch`), so nothing outlives the tick. The newest
+ * version is the max over ALL of a secret's versions, never derived from a paged subset.
+ */
+const currentVersionBatch = tickBatch<string, number | null>(async (ctx, ids) => {
+  const rows = await ctx.db.secretVersion.groupBy({ by: ['secretId'], where: { secretId: { in: ids } }, _max: { versionNo: true } });
+  return new Map(rows.map((r) => [r.secretId, r._max.versionNo ?? null]));
+}, null);
+
+/**
+ * #4157: `Secret.versions` pages raised in the same tick share one grouped count and one lateral read (an index-bounded `LIMIT` per secret, via the unique `(secret_id, version_no)`) per distinct
+ * (take, skip), so each parent keeps its own page and `hasMore`. The key is `<secretId>|<take>|<skip>`; a secret id
+ * is a cuid, which cannot contain the separator.
+ */
+const versionsPageBatch = tickBatch<string, VersionsPageResult>(async (ctx, keys) => {
+  const wanted = keys.map((k) => { const [id, take, skip] = k.split('|'); return { key: k, id, take: Number(take), skip: Number(skip) }; });
+  const ids = [...new Set(wanted.map((w) => w.id))];
+  const counts = await ctx.db.secretVersion.groupBy({ by: ['secretId'], where: { secretId: { in: ids } }, _count: { _all: true } });
+  const total = new Map(counts.map((c) => [c.secretId, c._count._all]));
+  const out = new Map<string, VersionsPageResult>();
+  const windows = new Map<string, { take: number; skip: number; ids: string[] }>();
+  for (const w of wanted) {
+    out.set(w.key, { items: [], total: total.get(w.id) ?? 0 });
+    if (w.take === 0) continue;
+    const g = windows.get(`${w.take}|${w.skip}`) ?? { take: w.take, skip: w.skip, ids: [] };
+    g.ids.push(w.id);
+    windows.set(`${w.take}|${w.skip}`, g);
+  }
+  for (const g of windows.values()) {
+    const rows = await ctx.db.$queryRaw<(VersionRow & { secretId: string })[]>`
+      SELECT v.id, v.secret_id AS "secretId", v.version_no AS "versionNo", v.size_bytes AS "sizeBytes", v.written_at AS "writtenAt",
+             v.written_by_user_id AS "writtenByUserId", v.written_by_worker_id AS "writtenByWorkerId", v.superseded_at AS "supersededAt"
+        FROM unnest(${g.ids}::text[]) AS s(id)
+        CROSS JOIN LATERAL (
+          SELECT * FROM secret_versions x WHERE x.secret_id = s.id ORDER BY x.version_no DESC OFFSET ${g.skip} LIMIT ${g.take}
+        ) v
+       ORDER BY v.secret_id, v.version_no DESC`;
+    for (const r of rows) {
+      const { secretId, ...item } = r;
+      out.get(`${secretId}|${g.take}|${g.skip}`)?.items.push(item);
+    }
+  }
+  return out;
+}, { items: [], total: 0 });
+
+/** `Secret` field resolvers for the App half: versions are metadata only, newest first. Org and user secrets have none. */
+export const secretFields = {
+  currentVersion: async (s: { id: string; ownerType: string }, _: unknown, ctx: Context) => {
+    if (s.ownerType !== 'app') return null;
+    return currentVersionBatch(ctx, s.id);
+  },
+  /** Paged (cor:api:120:04): default 20, cap 200, limit 0 counts only; `hasMore` says whether rows remain. */
+  versions: async (
+    s: { id: string; ownerType: string },
+    args: { limit?: number | null; offset?: number | null },
+    ctx: Context,
+  ) => {
+    if (s.ownerType !== 'app') return pageEnvelope([], 0, 0);
+    const { take, skip } = pageArgs(args ?? {});
+    const page = await versionsPageBatch(ctx, `${s.id}|${take}|${skip}`);
+    return pageEnvelope(page.items, page.total, skip);
   },
 };

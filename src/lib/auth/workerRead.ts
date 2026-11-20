@@ -4,7 +4,8 @@ import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { isAppParticipant } from './appParticipantRead.js';
 import { listAppInstallations, resolveAppInstallation } from '../appInstallations.js';
 import { resolveAgentRef } from '../entityRef/agentRef.js';
-import { AgentNotFoundError } from '../entityRef/errors.js';
+import { resolveAppRef } from '../entityRef/appRef.js';
+import { AgentNotFoundError, AmbiguousLegacyUrnError, AppNotFoundError } from '../entityRef/errors.js';
 import { isRunPrincipal } from './runPrincipal.js';
 import { runMayReadTeam } from './runTeamRead.js';
 
@@ -21,6 +22,39 @@ export type AppRow = {
   /** Honoured by requireWorkerReadAccess whenever the row carries it (#1347 review). */
   deletedAt?: Date | null;
 };
+
+/**
+ * #3977 (ruling V58, cor:agt:020:04 / cor:dmo:050:11): the one answer for an App the caller cannot REACH. A
+ * non-participant gets exactly what an absent App gets, so the refusal is no existence oracle: same code, same
+ * message, no extensions beyond the code (an absent ref's `ref` extension and `APP_NOT_FOUND: <ref>` message
+ * are replaced by this on the surfaces that use `resolveAppRefConcealed`). A caller who CAN reach the App but
+ * lacks the role for the act keeps `forbidden()`.
+ */
+export const appNotFound = (): GraphQLError =>
+  new GraphQLError('App not found.', { extensions: { code: 'APP_NOT_FOUND' } });
+
+/**
+ * `resolveAppRef` for the App-scoped team surfaces: an absent ref answers `appNotFound()`, the same bytes a
+ * non-participant gets from the gates. Narrow: only the not-found and ambiguous-legacy-URN errors convert (an
+ * ambiguous reference would otherwise tell an outsider that SOME App matches it, before any participation check);
+ * a database failure propagates. A caller with an ambiguous legacy URN names the App by id instead.
+ */
+export async function resolveAppRefConcealed(db: Context['db'], appRef: string): Promise<{ id: string }> {
+  try {
+    return await resolveAppRef(db, appRef);
+  } catch (e) {
+    if (e instanceof AppNotFoundError || e instanceof AmbiguousLegacyUrnError) throw appNotFound();
+    throw e;
+  }
+}
+
+/**
+ * Is `e` one of the refusals the App read gates (`requireWorkerReadAccess`, `requireTeamChatAccess`, the profile
+ * gate) throw: the not-found answer for a non-participant, or FORBIDDEN from the profile gate's own arms? Callers
+ * that collapse a gate refusal into their own "no match" catch exactly these and rethrow everything else.
+ */
+export const isAppGateRefusal = (e: unknown): boolean =>
+  e instanceof GraphQLError && (e.extensions?.code === 'FORBIDDEN' || e.extensions?.code === 'APP_NOT_FOUND');
 
 export const forbidden = (): GraphQLError =>
   new GraphQLError('You are not authorized to manage workers in this App.', {
@@ -48,22 +82,22 @@ export const forbidden = (): GraphQLError =>
  * refused it. Found by the #1347 differential test; checked here, once.
  */
 export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promise<void> {
-  if (app.deletedAt) throw forbidden();
+  if (app.deletedAt) throw appNotFound();
   if (ctx.impersonation) {
     if (app.organizationId === null || app.organizationId !== ctx.impersonation.orgId) {
-      throw forbidden();
+      throw appNotFound();
     }
   }
   if (!ctx.userId) {
     if (isRunPrincipal(ctx)) {
       if (await runMayReadTeam(ctx, app)) return;
-      throw forbidden();
+      throw appNotFound();
     }
     if (ctx.appId && ctx.appId === app.id) return;
-    throw forbidden();
+    throw appNotFound();
   }
   if (await isAppParticipant(ctx, app)) return;
-  throw forbidden();
+  throw appNotFound();
 }
 
 type TeamAgentRow = {

@@ -10,6 +10,7 @@ import { updateChatRootData, withChatRootLock } from './chatRoot.js';
 import { ensureCurrentNodeRevisionInTransaction } from './nodeRevisionSnapshot.js';
 import { chatMutations } from '../api/graphql/schema/resolvers.mutation.chat.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
+import { testRunAgentId } from '../test/runAgent.js';
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 let root: { id: string; loc: string; memoryId: string }, userId: string, ctx: Context;
 beforeEach(async () => {
@@ -27,21 +28,25 @@ const raw = () => db.node.findUniqueOrThrow({ where: { id: root.id } });
 const enc = () => ({ id: root.memoryId, isEncrypted: false });
 async function fingerprint() { await db.node.update({ where: { id: root.id }, data: { revisionContentHash: 'refresh', authorshipKind: 'HUMAN', authoredByHuman: userId, authoredAt: new Date() } }); }
 const reconcile = () => db.$transaction(tx => ensureCurrentNodeRevisionInTransaction(tx, root.id, { expectedMemoryId: root.memoryId }));
-it('1a: an off-track edit with unchanged mirror preserves revision and stamp through exposed reconcile', async () => {
-  await fingerprint(); const before = await raw(); const revisions = await db.nodeRevision.count({ where: { nodeId: root.id } });
+it('1a: an off-track edit preserves revision and stamp once the legacy mirror is scrubbed (#3557: the first locked write is the one honest scrub revision)', async () => {
+  await fingerprint(); const before = await raw();
+  await updateChatRootData(db, root, enc(), d => d);
+  await reconcile(); const scrubbed = await raw();
+  expect(scrubbed.revSeq).toBe(before.revSeq + 1);
+  await fingerprint(); const stable = await raw(); const revisions = await db.nodeRevision.count({ where: { nodeId: root.id } });
   await updateChatRootData(db, root, enc(), data => ({ ...data, lastOffTrackReason: 'synthetic reason', lastOffTrackAt: '2026-11-06T00:00:00.000Z' }));
   await reconcile(); const after = await raw();
-  expect(after.revSeq).toBe(before.revSeq);
+  expect(after.revSeq).toBe(stable.revSeq);
   expect(after.authoredByHuman).toBe(userId);
   expect(await db.nodeRevision.count({ where: { nodeId: root.id } })).toBe(revisions);
   expect(after.data).not.toHaveProperty('lastOffTrackReason');
 });
-it('1b control: changed stage mirror gets exactly one honest reconcile and clears stamp', async () => {
+it('1b: a changed stage no longer touches the root after the first scrub (#3557: the mirror is gone)', async () => {
+  await updateChatRootData(db, root, enc(), d => d);
   await fingerprint(); const before = await raw();
   await updateChatRootData(db, root, enc(), data => ({ ...data, stageName: 'second' }));
-  await reconcile(); expect((await raw()).revSeq).toBe(before.revSeq + 1);
-  expect((await raw()).authoredByHuman).toBeNull();
-  await reconcile(); expect((await raw()).revSeq).toBe(before.revSeq + 1);
+  await reconcile(); expect((await raw()).revSeq).toBe(before.revSeq);
+  expect((await raw()).authoredByHuman).toBe(userId);
 });
 it('5: changed portal title is one revision with HUMAN, without waiting for a reconcile', async () => {
   await fingerprint(); const before = await raw();
@@ -66,13 +71,13 @@ it('12: stale pre-transaction plaintext encryption metadata refuses before any r
   expect(await raw()).toEqual(before);
 });
 
-it('7a: row wins after a legacy restore and every locked write resyncs the mirror', async () => {
+it('7a: row wins after a legacy restore and every locked write scrubs the restored mirror (#3557)', async () => {
   await updateChatRootData(db, root, enc(), d => ({ ...d, stageName: 'live-stage', routeHistory: [{ action: 'ENTER', timestamp: '2026-11-06T00:00:00Z' }] }));
   const engine = await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } });
   await db.node.update({ where: { id: root.id }, data: { data: { scope: 'private', title: 'Restored', stageName: 'snapshot-stage', conversationName: 'intake', routeHistory: [{ action: 'ENTER', timestamp: '2025-01-01T00:00:00Z' }] }, revisionContentHash: 'refresh' } });
   const before = await raw();
   await updateChatRootData(db, root, enc(), d => d);
-  expect((await raw()).data).toEqual({ scope: 'private', title: 'Restored', stageName: 'live-stage', conversationName: 'intake' });
+  expect((await raw()).data).toEqual({ scope: 'private', title: 'Restored' });
   expect((await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).state).toEqual(engine.state);
   await reconcile(); expect((await raw()).revSeq).toBe(before.revSeq + 1);
   await reconcile(); expect((await raw()).revSeq).toBe(before.revSeq + 1);
@@ -160,7 +165,7 @@ it('11: encryptMemory converts state on live AND tombstoned roots in its real co
   await db.chatRootEngineState.create({ data: { chatRootNodeId: dead.id, state: { conversationName: 'tombstone-private-name', stageName: 'old-stage' } } });
   await db.memory.update({ where: { id: root.memoryId }, data: { class: 'private' } });
   const key = generateDataKey();
-  await memoryMutations.encryptMemory(null, { memoryId: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
+  await memoryMutations.encryptMemory(null, { memoryRef: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
   const rows = await db.chatRootEngineState.findMany({ where: { chatRootNodeId: { in: [root.id, dead.id] } } });
   expect(rows).toHaveLength(2);
   for (const row of rows) { expect(row.state).toHaveProperty('__enc'); expect(JSON.stringify(row.state)).not.toContain('stage'); }
@@ -192,13 +197,13 @@ it.each(['encrypt', 'promote'])('12/11: real %s commits on a second connection b
   let flip: () => Promise<unknown>;
   if (method === 'encrypt') {
     await db.memory.update({ where: { id: root.memoryId }, data: { class: 'private' } });
-    flip = () => memoryMutations.encryptMemory(null, { memoryId: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
+    flip = () => memoryMutations.encryptMemory(null, { memoryRef: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
   } else {
     const memory = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
     const app = await db.app.create({ data: { id: generateId(), name: 'promotion3501', urn: `promotion3501:${generateId()}`, organizationId: memory.organizationId!, identifyUserMethod: 'SECRET', createUserPermission: 'IMPLICIT' } });
     await db.appAgent.create({ data: { appId: app.id, agentId: memory.userMemoryOfAgentId! } });
     await db.memory.update({ where: { id: memory.id }, data: { class: 'app', appId: app.id, userId: null, createdBy: null, anonymousExpiresAt: new Date(Date.now() + 86400000) } });
-    flip = () => withTestOperationKey(key.raw.toString('base64'), app.id, () => memoryMutations.linkMemoryToUser(null, { memoryId: memory.id, externalUserId: '3501-synthetic' }, { db, appId: app.id, roles: [] } as Context));
+    flip = () => withTestOperationKey(key.raw.toString('base64'), app.id, () => memoryMutations.linkMemoryToUser(null, { memoryRef: memory.id, externalUserId: '3501-synthetic' }, { db, appId: app.id, roles: [] } as Context));
   }
   let observedAtPromotionCommit = false;
   const originalCompletion = memoryMutations.encryptMemory;
@@ -236,12 +241,13 @@ it('7: actual revision restore rewinds title, but myChats and the next turn reta
   await updateChatRootData(db, root, enc(), d => ({ ...d, stageName: 'live-stage' }));
   await reconcile();
   await nodeMutations.restoreNodeRevision(null, { revisionId: revision.id }, ctx);
-  expect((await raw()).data).toMatchObject({ title: 'Before', stageName: 'first' });
+  expect((await raw()).data).toMatchObject({ title: 'Before' });
   const memory = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
   const list = await chatQueries.myChats(null, { agentRef: memory.userMemoryOfAgentId! }, ctx);
   expect(list.find((chat: {loc:string}) => chat.loc === root.loc)).toMatchObject({ title: 'Before', stageName: 'live-stage', conversationName: 'intake' });
   await updateChatRootData(db, root, enc(), d => d);
-  expect((await raw()).data).toMatchObject({ title: 'Before', stageName: 'live-stage' });
+  expect((await raw()).data).toMatchObject({ title: 'Before' });
+  expect((await raw()).data).not.toHaveProperty('stageName');
 });
 
 it('15: shared root lock serializes state edits; every held turn is drained even on assertion failure', async () => {
@@ -275,7 +281,7 @@ it('5: a real on-behalf-of run rename records a revision without HUMAN', async (
   const app = await db.app.create({ data: { id: generateId(), organizationId: memory.organizationId!, name: 'run3501', urn: `run3501:${generateId()}` } });
   await db.appAgent.create({ data: { appId: app.id, agentId: memory.userMemoryOfAgentId! } });
   await db.agentSubscription.create({ data: { userId, agentId: memory.userMemoryOfAgentId!, activatedAt: new Date() } });
-  const run = await db.appRun.create({ data: { id: generateId(), organizationId: memory.organizationId!, appId: app.id, userId, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:example.com:synthetic:entry' } });
+  const run = await db.appRun.create({ data: { id: generateId(), organizationId: memory.organizationId!, appId: app.id, agentId: await testRunAgentId(db, memory.organizationId!, app.id), userId, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:example.com:synthetic:entry' } });
   await db.memory.update({ where: { id: memory.id }, data: { appId: app.id } });
   await fingerprint(); const before = await raw();
   await chatMutations.updateChatTitle(null, { chatId: root.loc, title: 'Run title' }, { ...ctx, appId: app.id, clientId: `run:${run.id}`, portalHumanUserId: undefined });
@@ -290,8 +296,11 @@ it('1a encrypted FIRST unchanged-mirror turn strips legacy state without ciphert
   const data = { conversationName: 'intake', title: 'Before', stageName: 'first', scope: 'private', userId, goalStack: [], routeHistory: [] };
   await db.node.update({ where: { id: root.id }, data: { data: encryptNodeFields({ data }, info).data } });
   await fingerprint(); const before = await raw();
+  await updateChatRootData(db, root, info, d => d);
+  await reconcile(); expect((await raw()).revSeq).toBe(before.revSeq + 1);
+  await fingerprint(); const stable = await raw();
   await updateChatRootData(db, root, info, d => ({ ...d, lastOffTrackReason: 'off track' }));
-  await reconcile(); expect(await raw()).toMatchObject({ revSeq: before.revSeq, authoredByHuman: userId });
+  await reconcile(); expect(await raw()).toMatchObject({ revSeq: stable.revSeq, authoredByHuman: userId });
 });
 it('11/13: conversion never nests an undecryptable existing envelope as fresh plaintext', async () => {
   const { encryptChatEngineStateWithKey } = await import('./chatRootEngineState.js');
@@ -414,7 +423,7 @@ it('security: real encryptMemory completes past malformed engine state and encry
   await db.memory.update({ where: { id: root.memoryId }, data: { class: 'private' } });
   await db.chatRootEngineState.create({ data: { chatRootNodeId: root.id, state: { stageName: '\t' } } });
   const later = await db.node.create({ data: { id: generateId(), memoryId: root.memoryId, loc: 'zz:later', name: 'later', nodeType: 'note', content: 'SYNTHETIC-LATER-CONTENT' } });
-  await memoryMutations.encryptMemory(null, { memoryId: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
+  await memoryMutations.encryptMemory(null, { memoryRef: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
   const state = (await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).state;
   const after = await db.node.findUniqueOrThrow({ where: { id: later.id } });
   expect(state).toHaveProperty('__enc');

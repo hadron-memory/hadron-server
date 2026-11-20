@@ -2669,8 +2669,8 @@ describe('#1641 — git sync never writes a decision', () => {
     db.node.findFirst({ where: { loc, memoryId: dbGraphId }, select: { id: true, role: true, content: true } });
 
   it('a file declaring a decision or decision-log role is skipped; the rest of the memory syncs', async () => {
-    frontmatter('forged', { name: 'DA: forged', role: 'decision' });
-    frontmatter('log', { name: 'Decisions', role: 'decision.log' });
+    frontmatter('forged', { name: 'DA: forged', role: 'question' });
+    frontmatter('log', { name: 'Decisions', role: 'question.log' });
     frontmatter('plain', { name: 'Plain' });
     const result = await syncGraphFromGithub(makeGraph());
     expect(result.error).toBeUndefined();
@@ -2681,11 +2681,11 @@ describe('#1641 — git sync never writes a decision', () => {
 
   it('a file landing on a decision row leaves the row exactly as it was, and the cleanup keeps it', async () => {
     const id = generateId();
-    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'd', name: 'DA: x', content: 'kept', role: 'decision', ownerRepo: 'test/repo' } });
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'd', name: 'DA: x', content: 'kept', role: 'question', ownerRepo: 'test/repo' } });
     frontmatter('d', { id, name: 'DA: x' }, 'overwritten');
     const result = await syncGraphFromGithub(makeGraph());
     expect(result.error).toBeUndefined();
-    expect(await stored('d')).toEqual({ id, role: 'decision', content: 'kept' });
+    expect(await stored('d')).toEqual({ id, role: 'question', content: 'kept' });
   });
 });
 

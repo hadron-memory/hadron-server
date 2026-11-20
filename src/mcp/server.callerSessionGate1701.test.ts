@@ -15,12 +15,15 @@ const ACTOR_NEUTRAL = new Set([
   'hadron_list_recovery_nodes', 'hadron_list_recovery_edges', 'hadron_get_recovery_node',
   'hadron_search', 'hadron_list_memories', 'hadron_server_info', 'hadron_list_apps', 'hadron_list_scopes',
   'hadron_scope_explain', 'hadron_find_nodes', 'hadron_get_node',
-  'hadron_get_nodes', 'hadron_get_next_node', 'hadron_list_nodes', 'hadron_get_object', 'hadron_find_objects',
+  // #3843 — the served boot-prompt read: a pure read, no record written.
+  'hadron_get_nodes', 'hadron_get_next_node', 'hadron_agent_boot_prompt', 'hadron_list_nodes', 'hadron_get_object', 'hadron_find_objects',
   'hadron_get_run', 'hadron_whoami',
   'hadron_list_comments', 'hadron_get_comment',
   'hadron_set_active_memory', 'hadron_set_active_app', 'hadron_set_active_org', 'hadron_set_active_scope',
   'hadron_unlock_memory', 'hadron_lock_memory',
   'hadron_start_session',
+  // #1562 — the watch list acts as the connection's user and writes nothing.
+  'hadron_web_poll_list',
 ]);
 
 /** Neutral tools that define their own `session` parameter (it is not the gate's). */

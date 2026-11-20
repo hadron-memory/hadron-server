@@ -37,7 +37,7 @@ const CASES: Case[] = [
   { name: 'no cap: use_count is irrelevant', live: true, row: { activatedAt: active, maxUses: null, useCount: 99 } },
   { name: 'pending AND expired AND revoked', live: false, row: { activatedAt: null, expiresAt: at(-1), revokedAt: at(-1) } },
 ];
-const full = (row: Partial<GrantLiveFields>): GrantLiveFields => ({ activatedAt: null, revokedAt: null, startsAt: null, expiresAt: null, maxUses: null, useCount: 0, ...row });
+const full = (row: Partial<GrantLiveFields>): GrantLiveFields => ({ activatedAt: null, revokedAt: null, holderDepartedAt: null, appDeletedAt: null, startsAt: null, expiresAt: null, maxUses: null, useCount: 0, actionMaxUses: null, actionLifetimeSeconds: null, ...row });
 
 describe('isGrantLive (the function)', () => {
   for (const c of CASES) it(c.name, () => expect(isGrantLive(full(c.row), NOW), c.name).toBe(c.live));
@@ -46,7 +46,9 @@ describe('isGrantLive (the function)', () => {
 describe('grantLiveSql (the fragment) agrees with the function on every row, at the same instant', () => {
   it('differential over real rows', async () => {
     const ids = new Map<string, Case>();
-    for (const c of CASES) {
+    // #3998: chk_grants_shape now makes use_count > max_uses unreachable in a row; the function-level case above still pins it.
+    const cases = CASES.filter((c) => !(c.row.maxUses != null && (c.row.useCount ?? 0) > c.row.maxUses));
+    for (const c of cases) {
       const r = full(c.row);
       const id = await insertGrantUnguarded(w, {
         activated_at: r.activatedAt ? raw(`'${iso(r.activatedAt)}'::timestamp`) : null,
@@ -60,7 +62,7 @@ describe('grantLiveSql (the fragment) agrees with the function on every row, at 
     }
     const rows = await db.$queryRaw<Array<{ id: string; live: boolean }>>(
       Prisma.sql`SELECT g.id, (${grantLiveSql('g', Prisma.sql`${iso(NOW)}::timestamp`)}) AS live FROM grants g`);
-    expect(rows).toHaveLength(CASES.length);
+    expect(rows).toHaveLength(cases.length);
     for (const r of rows) expect(r.live, ids.get(r.id)!.name).toBe(ids.get(r.id)!.live);
   });
 

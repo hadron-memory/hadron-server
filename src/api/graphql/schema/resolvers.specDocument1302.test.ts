@@ -73,8 +73,8 @@ beforeEach(async () => {
   outsider = await db.user.create({ data: { githubId: 130202, githubUsername: 'doc-outsider', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   await db.orgMember.create({ data: { organizationId: other.id, userId: outsider.id, role: 'ADMIN' } });
-  draft = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs', draftCorpus: true }, as());
-  foreign = await resolvers.Mutation.createMemory(null, { orgId: other.id, name: 'secret' }, as(outsider.id));
+  draft = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs', draftCorpus: true }, as());
+  foreign = await resolvers.Mutation.createMemory(null, { orgRef: other.id, name: 'secret' }, as(outsider.id));
 });
 afterEach(() => {
   if (savedOrigin === undefined) delete process.env.FRONTEND_URL; else process.env.FRONTEND_URL = savedOrigin;

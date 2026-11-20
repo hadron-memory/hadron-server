@@ -45,7 +45,7 @@ async function refusedWithoutResidue(create: () => Promise<unknown>, interleave:
 
 type Door = { label: string; create: (name: string, who?: string) => Promise<any> };
 const doors = (): Door[] => [
-  { label: 'createMemory', create: (name, who = admin.id) => M.createMemory({}, { orgId: org.id, name }, ctx(who)) },
+  { label: 'createMemory', create: (name, who = admin.id) => M.createMemory({}, { orgRef: org.id, name }, ctx(who)) },
   { label: 'createAppMemory', create: (name, who = admin.id) => M.createAppMemory({}, { appRef: app.id, name }, ctx(who)) },
   { label: 'createMemoryInApp', create: (name, who = admin.id) => M.createMemoryInApp(
     {}, { appRef: app.id, agentRef: agent.id, memoryClass: 'app', name }, ctx(who)) },

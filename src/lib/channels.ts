@@ -40,7 +40,7 @@ import { randomUUID } from 'node:crypto';
  * its own (#1194 is this change's draft ancestor).
  */
 
-import { refuseUnderDecisionLog } from './decisions/index.js';
+import { refuseUnderQuestionLog } from './questions/index.js';
 import { sessionKeyReleasedHint } from './sessionKeyCache.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
@@ -143,6 +143,34 @@ export async function assertNoChannelOverlap(
 }
 
 /**
+ * #2622 (Riana §10 P2): a chat's transcript lives at `<root>:messages:`, and
+ * every transcript reader + the seq allocator address a chat by that prefix —
+ * so a chat ROOT whose own loc contains a `messages` SEGMENT is ambiguous:
+ * the #992 index derives identity from the loc before the FIRST `:messages:`,
+ * which folds such a root's posts into an ANCESTOR's identity while the
+ * allocator scans the root's own prefix. The index then refuses posts the
+ * allocator cannot see colliding — permanently (soft-deleted rows count by
+ * design). Reserving the segment at the address boundary is what keeps the
+ * index's identity and the allocator's prefix the SAME chat. `messages` stays
+ * a legal segment for ordinary nodes (the message container is literally
+ * named `messages`) — only a Channel ADDRESS may not carry one.
+ *
+ * Runs on EVERY ensure, not only creation: an address with a `messages`
+ * segment is invalid for posting regardless of when the row came to exist
+ * (pre-guard data would otherwise post into the folded identity — the
+ * ambiguity this guard exists to prevent; the repair for such a row is a
+ * rename, surfaced by the migration preflight's reserved-segment census).
+ */
+export function refuseReservedChatAddressSegment(loc: string): void {
+  if (loc.split(':').includes('messages')) {
+    throw new GraphQLError(
+      `"${loc}" cannot host a Channel: "messages" is a reserved loc segment for chat addresses (a chat's transcript lives at "<loc>:messages:"), so an address containing it would be merged into another chat's message sequence (#992). Choose an address without a "messages" segment.`,
+      { extensions: { code: 'LOC_RESERVED_SEGMENT', segment: 'messages', loc } },
+    );
+  }
+}
+
+/**
  * Give an EXISTING chat root its Channel row (create-or-restore, idempotent),
  * and make it the App's default when the App has none. Used by the creation
  * core (inside its transaction, under the lock) and by the one-shot backfill;
@@ -171,6 +199,7 @@ export async function ensureChannelRow(
     resetForReuse?: boolean;
   },
 ): Promise<ChannelRow> {
+  refuseReservedChatAddressSegment(args.loc);
   let row = await db.channel.findUnique({ where: { chatRootNodeId: args.rootId } });
   if (!row) {
     try {
@@ -426,6 +455,7 @@ export async function ensureChannelWithRoot(
     authorizeLockedHost?: (tx: Prisma.TransactionClient) => Promise<void>;
   },
 ): Promise<{ channel: ChannelRow; rootId: string }> {
+  refuseReservedChatAddressSegment(args.loc);
   const memory = await db.memory.findFirst({
     where: { id: args.memoryId, deletedAt: null },
     select: { id: true, class: true },
@@ -465,9 +495,9 @@ export async function ensureChannelWithRoot(
     await args.authorizeLockedHost?.(tx);
     await lockAncestorsForCreateMany(tx, args.memoryId, [args.loc, messagesLoc], { owns: 'channel' });
     await assertNoChannelOverlap(tx, args.memoryId, args.loc);
-    // #1728: raw Channel roots share the decision-log code-space guard.
+    // #1728: raw Channel roots share the question-log code-space guard.
     // Check under the path locks before any root/structural/Channel writes.
-    await refuseUnderDecisionLog(tx, args.memoryId, args.loc, 'Channel creation');
+    await refuseUnderQuestionLog(tx, args.memoryId, args.loc, 'Channel creation');
     const indexNode = (nodeType: string, loc: string) => memoryIsVectorIndexed(live) && !isRawChatNode({ nodeType, loc });
     const restoreOrCreate = async (
       loc: string,

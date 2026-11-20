@@ -459,7 +459,7 @@ describe('authority is decided at issuance, not before it (Riana P2-1 on #1859)'
     const spy = vi.spyOn(db, '$transaction').mockImplementation(((arg: unknown, opts?: unknown) => {
       if (!fired && typeof arg === 'function') {
         fired = true;
-        return M.removeAppMember({}, { appId: app.id, userId: holder.id }, ctx(manager.id)).then(() => original(arg as never, opts as never));
+        return M.removeAppMember({}, { appRef: app.id, userRef: holder.id }, ctx(manager.id)).then(() => original(arg as never, opts as never));
       }
       return original(arg as never, opts as never);
     }) as never);

@@ -99,7 +99,7 @@ beforeEach(async () => {
   const localGqlCtx: Context = { db, roles: ['ADMIN'], userId: admin.id };
   const memory = await resolvers.Mutation.createMemory(
     {},
-    { orgId: org.id, name: 'trees' },
+    { orgRef: org.id, name: 'trees' },
     localGqlCtx,
   );
 
@@ -871,8 +871,8 @@ describe('#498 — hadron_find_nodes multi-memory scope', () => {
   async function twoMemoriesWithKeyword() {
     const org = await db.organization.findFirstOrThrow({ where: { urn: 'truth-org' } });
     const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
-    const a = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'alpha' }, ctx);
-    const b = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'beta' }, ctx);
+    const a = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'alpha' }, ctx);
+    const b = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'beta' }, ctx);
     await db.node.create({
       data: { id: generateId(), memoryId: a.id, loc: 'zeb:a', name: 'Zebraxyz in alpha', tags: [] },
     });

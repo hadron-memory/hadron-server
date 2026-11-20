@@ -8,7 +8,7 @@ import { assertIncludesWritable, prospectiveNodeId, includeRefusalCode, storedIn
 import { runAsSystem } from '../../lib/requestActor.js';
 import { createDecipheriv } from 'crypto';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
-import { isDecisionFamilyRole } from '../../lib/decisions/index.js';
+import { isQuestionFamilyRole } from '../../lib/questions/index.js';
 import { hardDeleteThreadsOfTargets } from '../../lib/comments/lifecycle.js';
 import { GraphQLError } from 'graphql';
 import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../lib/specCorpus.js';
@@ -32,6 +32,7 @@ import { pathUnderGraphsRoot } from '../localFs/pathUnderGraphsRoot.js';
 import { InvalidNodeNameError, loadGraphFromFs, type UnreadableFile } from '../localFs/loadGraphFromFs.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import { validateEdgeCondition } from '../../lib/edge-conditions/validator.js';
+import { entryConditionOf, validateEntryCondition } from '../../lib/edge-conditions/entryCondition.js';
 import { countCrossMemoryEdgesForNodeDelete } from '../../lib/crossMemoryEdgeDelete.js';
 import { db } from '../db/client.js';
 import { serializeTags } from '../db/provider.js';
@@ -570,6 +571,17 @@ const syncGraphFromGithubAsSystem = async (
     correctionCheckCompleted = false;
     try {
       await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
+      // #4039 (B4): a conversation node whose entry condition is invalid, or reads a variable with no value at chat start,
+      // refuses the whole sync the way an invalid edge condition does, before the first write of this attempt.
+      for (const n of fsGraph.nodes) {
+        if (typeof n.loc !== 'string') continue;
+        const condition = entryConditionOf(n.loc, 'data' in n ? n.data : undefined);
+        if (condition === undefined) continue;
+        const validation = validateEntryCondition(condition);
+        if (!validation.ok) {
+          throw new Error(`Git sync node loc "${n.loc}" has an invalid entry condition (${validation.error.code}): ${validation.error.message}`);
+        }
+      }
       // Hold every endpoint memory key in one stable order for the ENTIRE
       // snapshot-to-cleanup/edge-write interval. This includes graph.id, so it
       // preserves the cleanup-vs-resurrection serialization added earlier.
@@ -1137,12 +1149,12 @@ const syncGraphFromGithubAsSystem = async (
           }
           assertNoWorkerSessionBootPromptWrite(prior?.role, governedSignalsFromMirror(node).role ?? undefined, 'import');
           const signals = governedSignalsFromMirror(node);
-          // #1641 §3.2 — no mirror ever writes a decision or a decision log:
+          // #1641 §3.2 — no mirror ever writes a question or a question log:
           // anyone with push access could otherwise forge one. A file that
-          // declares the role, or lands on a decision's loc, is skipped.
-          if (isDecisionFamilyRole(signals.role) || isDecisionFamilyRole(prior?.role)) {
-            reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_DECISION' });
-            console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — decisions are written only through the decision operations`);
+          // declares the role, or lands on a question's loc, is skipped.
+          if (isQuestionFamilyRole(signals.role) || isQuestionFamilyRole(prior?.role)) {
+            reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_QUESTION' });
+            console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — questions are written only through the question operations`);
             if (prior) protectedRowIds.add(prior.id);
             refusedRoleLocs.add(loc);
             return true;

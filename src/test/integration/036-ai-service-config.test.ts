@@ -194,9 +194,9 @@ describe('resolveAIConfig precedence (US1)', () => {
     expect(viaOrg.apiKey).toBe('sk-org');
 
     await db.aiServiceConfig.deleteMany({ where: { organizationId: org.id } });
-    await expect(resolvers.Query.resolveAIConfig(
+    expect(await resolvers.Query.resolveAIConfig(
       {}, { appRef: app.id, agentRef: agent.id }, ctxFor(admin.id),
-    )).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    )).toMatchObject({ ownerType: 'HADRON_SERVER', apiKey: null });
     const viaHost = await resolvers.Query.resolveAIConfig(
       {},
       { appRef: app.id, agentRef: agent.id },
@@ -239,6 +239,7 @@ describe('resolveAIConfig precedence (US1)', () => {
     // #1946 (ruling A): not installed in the named App answers as absent.
     )).rejects.toThrow(/AGENT_NOT_FOUND/);
     await db.appAgent.create({ data: { appId: app.id, agentId: foreignAgent.id } });
+    await db.agentOrgGrant.create({ data: { agentId: foreignAgent.id, orgId: org.id, activatedAt: new Date() } });
     const resolved = await resolvers.Query.resolveAIConfig(
       {},
       { appRef: app.id, agentRef: foreignAgent.id },
@@ -348,6 +349,7 @@ describe('resolveAIConfig user-owned App decrypt gate (#1487)', () => {
   });
 
   it('does not expose an installed org Agent’s organization key through a user-owned App', async () => {
+    await db.agent.update({ where: { id: agent.id }, data: { visibility: 'ORGANIZATION' } });
     const owner = await db.user.create({
       data: { id: generateId(), handle: 'cfg-no-org-owner', githubId: 36008, name: 'Owner' },
     });
@@ -355,20 +357,22 @@ describe('resolveAIConfig user-owned App decrypt gate (#1487)', () => {
       data: { id: generateId(), name: 'User App', urn: 'cfg-no-org-owner:app', ownerUserId: owner.id },
     });
     await db.appAgent.create({ data: { appId: ownApp.id, agentId: agent.id } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: owner.id, role: 'READER' } });
+    await db.agentSubscription.create({ data: { agentId: agent.id, userId: owner.id, activatedAt: new Date() } });
     await createConfig({ organizationId: org.id }, 'default', { apiKey: 'sk-org-private' });
 
-    await expect(resolvers.Query.resolveAIConfig(
+    expect(await resolvers.Query.resolveAIConfig(
       {}, { appRef: ownApp.id, agentRef: agent.id }, ctxFor(owner.id),
-    )).rejects.toThrow(/Forbidden/);
+    )).toMatchObject({ apiKey: null });
     await expect(resolvers.Query.resolveAIConfig(
       {}, { appRef: ownApp.id, agentRef: agent.id }, ctxFor(admin.id),
     )).rejects.toThrow(/Forbidden/);
 
     await db.aiServiceConfig.deleteMany({ where: { organizationId: org.id } });
     await createConfig({ agentId: agent.id }, 'default', { apiKey: 'sk-agent-private' });
-    await expect(resolvers.Query.resolveAIConfig(
+    expect(await resolvers.Query.resolveAIConfig(
       {}, { appRef: ownApp.id, agentRef: agent.id }, ctxFor(owner.id),
-    )).rejects.toThrow(/Forbidden/);
+    )).toMatchObject({ apiKey: null });
 
     await db.aiServiceConfig.deleteMany({ where: { agentId: agent.id } });
     await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host-private' });
@@ -387,23 +391,16 @@ describe('resolveAIConfig platform key boundary (#4645)', () => {
       { appRef: app.id, agentRef: agent.id },
     ];
     for (const refs of contexts) {
-      let denied: unknown;
-      try {
-        await resolvers.Query.resolveAIConfig({}, refs, ctxFor(admin.id));
-      } catch (error) {
-        denied = error;
-      }
-      expect(denied, JSON.stringify(refs)).toMatchObject({ extensions: { code: 'FORBIDDEN' } });
-      expect(String(denied)).toContain("'default'");
-      expect(String(denied)).toContain('HADRON_SERVER');
-      expect(JSON.stringify(denied)).not.toContain('sk-platform-private');
+      const identity = await resolvers.Query.resolveAIConfig({}, refs, ctxFor(admin.id));
+      expect(identity).toMatchObject({ name: 'default', ownerType: 'HADRON_SERVER', apiKey: null });
+      expect(JSON.stringify(identity)).not.toContain('sk-platform-private');
 
       const platform = await resolvers.Query.resolveAIConfig({}, refs, platformAdminCtx());
       expect(platform).toMatchObject({ name: 'default', ownerType: 'HADRON_SERVER', apiKey: 'sk-platform-private' });
     }
   });
 
-  it('refuses a READER-created org OWNER while server-side fallback remains available', async () => {
+  it('withholds the credential from a READER-created org OWNER while server-side fallback remains available', async () => {
     const reader = await db.user.create({
       data: { id: generateId(), handle: 'host-key-reader', githubId: 36009, name: 'Reader' },
     });
@@ -423,9 +420,9 @@ describe('resolveAIConfig platform key boundary (#4645)', () => {
     await db.appAgent.create({ data: { appId: ownApp.id, agentId: ownAgent.id } });
     await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-platform-only' });
 
-    await expect(resolvers.Query.resolveAIConfig(
+    expect(await resolvers.Query.resolveAIConfig(
       {}, { appRef: ownApp.id, agentRef: ownAgent.id }, readerCtx,
-    )).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    )).toMatchObject({ ownerType: 'HADRON_SERVER', apiKey: null });
     const serverSide = await resolveAiConfigWithFallback(db, null, {
       appId: ownApp.id, agentId: ownAgent.id, organizationId: createdOrg.id,
     });
@@ -515,6 +512,7 @@ describe('resolveAIConfig for a user-owned Agent (#1363)', () => {
     // ...and once it IS installed there, strict ownership still refuses the
     // org admin: the App context never bypasses the owner gate.
     await db.appAgent.create({ data: { appId: app.id, agentId: personalAgent.id } });
+    await db.agentOrgGrant.create({ data: { agentId: personalAgent.id, orgId: org.id, activatedAt: new Date() } });
     await expect(resolvers.Query.resolveAIConfig(
       {}, { appRef: app.id, agentRef: personalAgent.id }, ctxFor(admin.id),
     )).rejects.toThrow(/Forbidden/);
@@ -582,12 +580,19 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
     expect(byName.frontier.ownerType).toBe('ORGANIZATION');
     expect(byName.cheap.ownerType).toBe('HADRON_SERVER');
 
-    // Masked: hasApiKey + preview only; raw key material never present (SC-003).
+    // Non-managers retain identity and key existence, never preview cargo.
     for (const c of list) {
       expect(c.hasApiKey).toBe(true);
-      expect(c.apiKeyPreview).toBe('…test');
+      expect(c.apiKeyPreview).toBeNull();
       expect('apiKey' in c).toBe(false);
       expect('apiKeyEncrypted' in c).toBe(false);
+    }
+    await db.appMember.create({ data: { appId: app.id, userId: admin.id, role: 'member' } });
+    const managed = await resolvers.Query.resolveAiServiceConfigs(
+      {}, { appRef: app.id, agentRef: agent.id }, ctxFor(admin.id),
+    );
+    for (const c of managed) {
+      expect(c.apiKeyPreview).toBe(c.ownerType === 'HADRON_SERVER' ? null : '…test');
     }
   });
 
@@ -968,7 +973,7 @@ describe('legacy surface shims (US3)', () => {
   it('updateAgentAIConfig upserts the default registry row; agentAIConfig returns it decrypted', async () => {
     await resolvers.Mutation.updateAgentAIConfig(
       {},
-      { agentId: agent.id, provider: 'anthropic', model: 'claude-opus-4-6', apiKey: 'sk-legacy' },
+      { agentRef: agent.id, provider: 'anthropic', model: 'claude-opus-4-6', apiKey: 'sk-legacy' },
       ctxFor(admin.id),
     );
     const row = await db.aiServiceConfig.findFirstOrThrow({
@@ -979,7 +984,7 @@ describe('legacy surface shims (US3)', () => {
     // Update without key keeps the stored key (legacy semantics).
     await resolvers.Mutation.updateAgentAIConfig(
       {},
-      { agentId: agent.id, provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+      { agentRef: agent.id, provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
       ctxFor(admin.id),
     );
     const cfg = await resolvers.Query.agentAIConfig({}, { agentRef: agent.id }, ctxFor(admin.id));
@@ -995,10 +1000,10 @@ describe('legacy surface shims (US3)', () => {
   it('clearAgentAIConfig deletes the default registry row', async () => {
     await resolvers.Mutation.updateAgentAIConfig(
       {},
-      { agentId: agent.id, provider: 'anthropic', model: 'm', apiKey: 'sk' },
+      { agentRef: agent.id, provider: 'anthropic', model: 'm', apiKey: 'sk' },
       ctxFor(admin.id),
     );
-    await resolvers.Mutation.clearAgentAIConfig({}, { agentId: agent.id }, ctxFor(admin.id));
+    await resolvers.Mutation.clearAgentAIConfig({}, { agentRef: agent.id }, ctxFor(admin.id));
     expect(
       await db.aiServiceConfig.findFirst({ where: { agentId: agent.id, name: 'default' } }),
     ).toBeNull();
@@ -1024,7 +1029,7 @@ describe('legacy surface shims (US3)', () => {
   it('App-overrides-Agent precedence holds end-to-end through resolveAIConfig', async () => {
     await resolvers.Mutation.updateAgentAIConfig(
       {},
-      { agentId: agent.id, provider: 'openai', model: 'gpt-4o', apiKey: 'sk-agent-default' },
+      { agentRef: agent.id, provider: 'openai', model: 'gpt-4o', apiKey: 'sk-agent-default' },
       ctxFor(admin.id),
     );
     await resolvers.Mutation.createAiServiceConfig(
@@ -1165,10 +1170,10 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     const legacy = await createConfig({ agentId: agent.id }, 'default', { provider: 'openai' });
     await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { apiStyle: 'CHAT_COMPLETIONS' } });
     // Same provider: the style survives the legacy write.
-    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai', model: 'gpt-x' }, ctxFor(admin.id));
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentRef: agent.id, provider: 'openai', model: 'gpt-x' }, ctxFor(admin.id));
     expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } })).apiStyle).toBe('CHAT_COMPLETIONS');
     // A provider with one protocol: the stranded style is cleared.
-    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'anthropic', model: 'claude-x' }, ctxFor(admin.id));
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentRef: agent.id, provider: 'anthropic', model: 'claude-x' }, ctxFor(admin.id));
     const row = await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } });
     expect([row.provider, row.apiStyle]).toEqual(['anthropic', null]);
     // …and the modern surface can edit it again without tripping the pair check.
@@ -1178,9 +1183,9 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
   it('a legacy provider change clears the endpoint too: the new key never goes to the old host (#1380 review)', async () => {
     const legacy = await createConfig({ agentId: agent.id }, 'default', { provider: 'openai' });
     await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { endpoint: 'https://api.openai.com/v1' } });
-    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai', model: 'gpt-y' }, ctxFor(admin.id));
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentRef: agent.id, provider: 'openai', model: 'gpt-y' }, ctxFor(admin.id));
     expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } })).endpoint).toBe('https://api.openai.com/v1');
-    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'anthropic', model: 'claude-x', apiKey: 'sk-new' }, ctxFor(admin.id));
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentRef: agent.id, provider: 'anthropic', model: 'claude-x', apiKey: 'sk-new' }, ctxFor(admin.id));
     expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } })).endpoint).toBeNull();
 
     const appCfg = await createConfig({ appId: app.id }, 'default', { provider: 'openai' });
@@ -1193,7 +1198,7 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     const legacy = await createConfig({ agentId: agent.id }, 'default', { provider: 'openai' });
     await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { apiStyle: 'RESPONSES' } });
     // glm supports apiStyle, but RESPONSES was chosen for OpenAI; Z.ai serves chat.
-    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'glm', model: 'GLM-5.3', apiKey: 'k' }, ctxFor(admin.id));
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentRef: agent.id, provider: 'glm', model: 'GLM-5.3', apiKey: 'k' }, ctxFor(admin.id));
     const row = await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } });
     expect([row.provider, row.apiStyle]).toEqual(['glm', null]);
   });
@@ -1205,8 +1210,12 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { params: { baseUrl: 'http://10.9.9.9/v4', maxTokens: 50 } } });
     const listed = await resolvers.Query.resolveAiServiceConfigs({}, { appRef: app.id }, ctxFor(member.id));
     const row = listed.find((c) => c.name === 'legacy-url')!;
-    expect(row.params).toEqual({ maxTokens: 50 });
+    expect(row.params).toBeNull();
     expect(JSON.stringify(listed)).not.toContain('10.9.9.9');
+    await db.appMember.create({ data: { appId: app.id, userId: admin.id, role: 'member' } });
+    const managed = await resolvers.Query.resolveAiServiceConfigs({}, { appRef: app.id }, ctxFor(admin.id));
+    expect(managed.find((c) => c.id === legacy.id)!.params).toEqual({ maxTokens: 50 });
+    expect(JSON.stringify(managed)).not.toContain('10.9.9.9');
   });
 
   it('the legacy App AI arguments drop a stranded style too (#1380 review)', async () => {
@@ -1243,7 +1252,7 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     const other = await mk({ name: 'switch' });
     expect(await code(resolvers.Mutation.updateAiServiceConfig({}, { id: other.id, provider: 'openai-compatible' }, ctxFor(admin.id)))).toBe('AiConfigValidationError');
     // The legacy surfaces cannot set an endpoint, so they cannot create one.
-    expect(await code(resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai-compatible', model: 'x', apiKey: 'k' }, ctxFor(admin.id)))).toBe('AiConfigValidationError');
+    expect(await code(resolvers.Mutation.updateAgentAIConfig({}, { agentRef: agent.id, provider: 'openai-compatible', model: 'x', apiKey: 'k' }, ctxFor(admin.id)))).toBe('AiConfigValidationError');
     expect(await code(resolvers.Mutation.updateApp({}, { ref: app.id, aiProvider: 'openai-compatible', aiModel: 'x', aiApiKey: 'k' } as never, ctxFor(admin.id)))).toBe('AiConfigValidationError');
     expect(await db.aiServiceConfig.count({ where: { provider: 'openai-compatible', endpoint: null } })).toBe(0);
     // A key is required too: with none stored, an SDK would reach for the
@@ -1328,7 +1337,7 @@ describe('write-time invariants hold against a concurrent edit (#1389 review)', 
       ctxFor(admin.id),
     );
     const err = await race(c.id, { provider: 'openai', endpoint: null }, () =>
-      resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai-compatible', model: 'm2', apiKey: 'k-2' }, ctxFor(admin.id)),
+      resolvers.Mutation.updateAgentAIConfig({}, { agentRef: agent.id, provider: 'openai-compatible', model: 'm2', apiKey: 'k-2' }, ctxFor(admin.id)),
     );
     expect(codeOf(err)).toBe('AiConfigValidationError');
     expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ provider: 'openai', endpoint: null });
@@ -1429,7 +1438,7 @@ describe('the legacy writers clear a stale endpoint/style against the LOCKED row
       ctxFor(admin.id),
     );
     await holdAndSwitch(c.id, () =>
-      resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai', model: 'gpt-2', apiKey: 'k-2' }, ctxFor(admin.id)),
+      resolvers.Mutation.updateAgentAIConfig({}, { agentRef: agent.id, provider: 'openai', model: 'gpt-2', apiKey: 'k-2' }, ctxFor(admin.id)),
     );
     expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ provider: 'openai', endpoint: null, apiStyle: null });
   });

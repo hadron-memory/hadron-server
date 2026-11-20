@@ -15,7 +15,7 @@ import { encryptToken } from '../../tokenCrypto.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { cancelPoll, createPoll, listPolls } from '../../webfetchClient.js';
 import { resolveRunTools, webPollCancel, webPollList, webPollStart } from './index.js';
-import { SECRET_OWNER_TYPES } from '../../secrets.js';
+import { SECRET_SCOPE_ORDER } from '../../secrets.js';
 import type { RunToolContext } from './types.js';
 
 async function seedContext(): Promise<{ ctx: RunToolContext; credentialName: string; secretId: string }> {
@@ -249,9 +249,9 @@ describe('web poll run tools', () => {
 });
 
 describe('#1564 — web_poll_start advertises only the secret scopes the store accepts', () => {
-  it('the registered credentialScope enum is exactly the secret owner types (no app or memory)', () => {
+  it('the registered credentialScope enum is exactly the run cascade (user, org: no app or memory; #3997 made app an owner, never a cascade scope)', () => {
     const props = (webPollStart.inputSchema as { properties: Record<string, { enum?: string[]; description?: string }> }).properties;
-    expect(props.credentialScope.enum).toEqual([...SECRET_OWNER_TYPES]);
+    expect(props.credentialScope.enum).toEqual([...SECRET_SCOPE_ORDER]);
     expect(props.credentialScope.enum).not.toContain('app');
     expect(props.credentialScope.enum).not.toContain('memory');
     expect(props.credentialScope.description).not.toMatch(/\b(app|memory)\b/);
@@ -272,6 +272,16 @@ describe('#1564 — web_poll_start advertises only the secret scopes the store a
       ttlSeconds: 3600,
       credentialName: 'watch-auth',
       credentialScope: 'app',
-    })).rejects.toThrow(`"credentialScope" must be one of ${SECRET_OWNER_TYPES.join(', ')}.`);
+    })).rejects.toThrow(`"credentialScope" must be one of ${SECRET_SCOPE_ORDER.join(', ')}.`);
   });
+});
+
+it('#4123 run list is bounded and exposes continuation with the existing jobs key', async () => {
+  const { ctx } = await seedContext();
+  const jobs = Array.from({ length: 25 }, (_, i) => ({ jobId: `poll-${String(i).padStart(2, '0')}`, status: 'active', expiresAt: '2030-01-01T00:00:00Z', triggerCount: 0, consecutiveFailures: 0 }));
+  vi.mocked(listPolls).mockResolvedValue({ jobs: [...jobs].reverse() });
+  const first = await webPollList.execute(ctx, {}) as { jobs: typeof jobs; total: number; hasMore: boolean; nextCursor: string };
+  expect(first.jobs).toEqual(jobs.slice(0, 20)); expect(first.total).toBe(25); expect(first.hasMore).toBe(true);
+  const next = await webPollList.execute(ctx, { after: first.nextCursor }) as typeof first;
+  expect(next.jobs).toEqual(jobs.slice(20)); expect(next.total).toBe(25); expect(next.hasMore).toBe(false); expect(next.nextCursor).toBeNull();
 });

@@ -15,6 +15,7 @@ import { makeProdRunDeps, runContext } from '../jobs/appRunDeps.js';
 import { hadronStoreFile } from '../lib/runner/tools/storeTools.js';
 import { putObject } from '../integrations/r2/client.js';
 import { hadronReadNode, hadronUpdateNode, hadronCreateNode } from '../lib/runner/tools/nodeTools.js';
+import { testRunAgentId } from '../test/runAgent.js';
 
 vi.mock('../integrations/r2/client.js', () => ({ putObject: vi.fn(), deleteObject: vi.fn() }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
@@ -68,7 +69,7 @@ for (const scoped of [false, true]) {
     });
     it.each(['MANUAL', 'SCHEDULE', 'WEBHOOK', 'INTEGRATION', 'SPAWN'] as const)('%s run tools refuse private data and preserve the node', async triggerKind => {
       const f = await fixture('private', scoped);
-      const run = await db.appRun.create({ data: { id: generateId(), appId: f.app.id, organizationId: f.org.id,
+      const run = await db.appRun.create({ data: { id: generateId(), appId: f.app.id, agentId: await testRunAgentId(db, f.org.id, f.app.id), organizationId: f.org.id,
         userId: f.owner.id, triggerKind, entryNodeUrn: 'hrn:node:r5.test:private:secret',
         eventData: { grants: [f.memory.id], userId: f.owner.id } } });
       const ctx = { db, run, principal: runContext(db, run), log: vi.fn() };
@@ -125,7 +126,7 @@ async function assemblyFixture(orgless = false, cls: 'private' | 'personal' = 'p
 for (const orgless of [false, true]) {
   it.each(['SCHEDULE', 'MANUAL'] as const)(`real %s assembly refuses private dependency (orgless=${orgless}) before LLM/output`, async triggerKind => {
     const f = await assemblyFixture(orgless);
-    const run = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.owner.id, triggerKind, entryNodeUrn: 'hrn:node:r5.test:flow:entry' } });
+    const run = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, agentId: await testRunAgentId(db, f.org.id, f.app.id), userId: f.owner.id, triggerKind, entryNodeUrn: 'hrn:node:r5.test:flow:entry' } });
     const llm = vi.fn(async () => ({ text: 'output', tokensIn: 1, tokensOut: 1, provider: 'test', model: 'test' }));
     const writeOutput = vi.fn(async () => null);
     const deps = { ...makeProdRunDeps(db), resolveConfig: vi.fn(async () => ({ config: {} }) as never), llm, writeOutput };
@@ -143,7 +144,7 @@ it('personal dependencies remain in a run prompt, while own user/worker-session 
   for (const cls of ['personal', 'private'] as const) {
     await cleanDb(db);
     const f = await assemblyFixture(false, cls);
-    const run = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.owner.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:r5.test:flow:entry' } });
+    const run = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, agentId: await testRunAgentId(db, f.org.id, f.app.id), userId: f.owner.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:r5.test:flow:entry' } });
     if (cls === 'personal') expect(await makeProdRunDeps(db).assemble(run, run.entryNodeUrn, {})).toContain('unchanged');
     const sessionMem = await db.memory.create({ data: { name: 'Work', urn: 'r5.test:work', class: 'app', appId: f.app.id, organizationId: f.org.id } });
     const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: f.app.id, agentId: f.agent.id, name: 'W', slug: 'w', heldByUserId: f.owner.id } });
@@ -166,7 +167,7 @@ it('render-mode runTask omits another user’s private dependency (#1730)', asyn
 it('private hop metadata is gated before its tool names can reach the AppRun log', async () => {
   const f = await fixture('private', false);
   await db.node.update({ where: { id: f.node.id }, data: { data: { tools: ['secret-tool-name'] } } });
-  const run = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.owner.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:r5.test:private:secret' } });
+  const run = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, agentId: await testRunAgentId(db, f.org.id, f.app.id), userId: f.owner.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:r5.test:private:secret' } });
   await expect(makeProdRunDeps(db).loadNodeSpec(run, run.entryNodeUrn)).rejects.toThrow('not readable');
 });
 it('the GraphQL accessible set refuses private to a run but retains personal', async () => {
@@ -179,7 +180,7 @@ it('the GraphQL accessible set refuses private to a run but retains personal', a
 it('create/store/output into private are refused before any persisted or storage effect', async () => {
   const f = await assemblyFixture();
   await db.node.update({ where: { id: f.entry.id }, data: { data: { output: { writeTo: 'hrn:node:r5.test:private:secret' } } } });
-  const run = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.owner.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:r5.test:flow:entry' } });
+  const run = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, agentId: await testRunAgentId(db, f.org.id, f.app.id), userId: f.owner.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:r5.test:flow:entry' } });
   const ctx = { db, run, principal: runContext(db, run), log: vi.fn() };
   vi.mocked(putObject).mockClear();
   await expect(hadronCreateNode.execute(ctx, { urn: 'hrn:node:r5.test:private:new', name: 'New', content: 'written' })).rejects.toThrow();
@@ -192,7 +193,7 @@ it('create/store/output into private are refused before any persisted or storage
 
 it('inventory includes org-less private dependencies and live webfetch poll bindings', async () => {
   const f = await assemblyFixture(true);
-  const source = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.owner.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:r5.test:flow:entry' } });
+  const source = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, agentId: await testRunAgentId(db, f.org.id, f.app.id), userId: f.owner.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:r5.test:flow:entry' } });
   const schedule = await db.agentSchedule.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.owner.id, name: 'Orgless reference', cron: '* * * * *', entryNodeUrn: source.entryNodeUrn } });
   const binding = await db.webFetchPollBinding.create({ data: { jobId: 'private-inventory-job', sourceRunId: source.id, organizationId: f.org.id, appId: f.app.id, userId: f.owner.id, entryNodeUrn: source.entryNodeUrn, url: 'https://example.com/poll' } });
   const sql = readFileSync(new URL('../../scripts/audits/private-run-triggers-1719.sql', import.meta.url), 'utf8')

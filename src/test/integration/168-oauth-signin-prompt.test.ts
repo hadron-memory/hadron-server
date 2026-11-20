@@ -9,12 +9,12 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
-import { createServer } from '../../server.js';
 import { isServerLocalPath } from '../../auth/server-local-path.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { signJwt } from '../../auth/jwt.js';
 import { generateId } from '../../lib/id.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 
 // Only the identity-provider boundary is synthetic. Login state, callback,
 // JWT cookie and the authorize/consent handlers run locally for real (#2625).
@@ -78,7 +78,7 @@ const clientId = `dcr_${'b'.repeat(32)}`;
 let mcpResource: string;
 
 beforeAll(async () => {
-  const app = await createServer();
+  const app = await createServerOnCleanDb();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   port = (server.address() as AddressInfo).port;
@@ -86,7 +86,7 @@ beforeAll(async () => {
   mcpResource = `${baseUrl}/mcp`;
 });
 afterAll(async () => {
-  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  await closeServerIfStarted(server);
 });
 beforeEach(async () => {
   vi.clearAllMocks();

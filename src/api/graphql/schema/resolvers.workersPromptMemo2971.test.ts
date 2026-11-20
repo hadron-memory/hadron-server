@@ -61,7 +61,7 @@ beforeEach(async () => {
   outsider = await db.user.create({ data: { githubId: 96_000_000 + Math.floor(Math.random() * 1_000_000), githubUsername: `out-${n}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'Eng', personaRole: 'engineer' }, adminCtx());
+  agent = await M.createAgent({}, { orgRef: org.id, name: 'Eng', personaRole: 'engineer' }, adminCtx());
   await serveAgentBootPrompt(db, agent.id, 'SHARED {{worker.name}} {{worker.role}} {{agent.name}}');
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   memory = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:team-shared`, name: 'shared', class: 'app', appId: app.id, sharedMemoryOfAgentId: agent.id } });
@@ -145,7 +145,7 @@ describe('#2971 parity: every item of the page equals its single read', () => {
   it('(d) a customised worker (its own pointer) sits beside an uncustomised worker of the same Agent', async () => {
     const ada = await cast('Ada');
     await cast('Bea');
-    const other = await M.createAgent({}, { orgId: org.id, name: 'Other', personaRole: 'other' }, adminCtx());
+    const other = await M.createAgent({}, { orgRef: org.id, name: 'Other', personaRole: 'other' }, adminCtx());
     const custom = await serveAgentBootPrompt(db, other.id, 'CUSTOM {{worker.name}}');
     await db.worker.update({ where: { id: ada.id }, data: { bootPromptNodeId: custom, bootPromptUrn: `test:${custom}` } });
     const got = await expectParity(adminCtx());
@@ -157,7 +157,7 @@ describe('#2971 parity: every item of the page equals its single read', () => {
     const ada = await cast('Ada');
     await cast('Bea');
     await cast('Cy');
-    const other = await M.createAgent({}, { orgId: org.id, name: 'Other', personaRole: 'other' }, adminCtx());
+    const other = await M.createAgent({}, { orgRef: org.id, name: 'Other', personaRole: 'other' }, adminCtx());
     const custom = await serveAgentBootPrompt(db, other.id, 'CUSTOM {{worker.name}}');
     const installNode = await serveAgentBootPrompt(db, other.id, 'INSTALL {{worker.name}}');
     await db.appAgent.update({ where: { appId_agentId: { appId: app.id, agentId: agent.id } }, data: { bootPromptNodeId: installNode, bootPromptUrn: `test:${installNode}` } });

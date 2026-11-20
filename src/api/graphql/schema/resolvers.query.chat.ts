@@ -197,11 +197,14 @@ async function toChatRows(ctx: Context, tops: ChatRootRow[]) {
       title,
       conversationName: (engine.get(node.id)?.conversationName as string) ?? null,
       stageName: (engine.get(node.id)?.stageName as string) ?? null,
+      completedConversations: ((engine.get(node.id)?.completedConversations as Array<{ conversation: string }> | undefined) ?? []).map(entry => entry.conversation),
       messageCount: counters.get(node.id)?.messageCount ?? 0,
       createdAt: node.createdAt,
       lastMessageAt: counters.get(node.id)?.lastMessageAt ?? null,
       scope,
       createdBy: node.createdBy ?? null,
+      // #3957: the AI config choice stored with the chat, or null.
+      aiConfigChoice: typeof data.aiConfigChoice === 'string' ? data.aiConfigChoice : null,
     };
   });
 }

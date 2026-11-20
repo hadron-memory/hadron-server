@@ -40,7 +40,7 @@ beforeEach(async () => {
   org = await db.organization.create({ data: { id: generateId(), name: 'sc-org', urn: 'sc-org' } });
   user = await db.user.create({ data: { githubId: 92047100, githubUsername: 'sc-user', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'chat-agent', visibility: 'ORGANIZATION', description: 'LEGACY {{agent.name}}' }, { db, roles: ['ADMIN'], userId: user.id });
+  agent = await M.createAgent({}, { orgRef: org.id, name: 'chat-agent', visibility: 'ORGANIZATION', description: 'LEGACY {{agent.name}}' }, { db, roles: ['ADMIN'], userId: user.id });
   systemMemoryId = agent.systemMemoryId;
   app = await db.app.create({ data: { id: generateId(), name: 'chat-app', urn: `${org.urn}:chat-app`, organizationId: org.id, appAgents: { create: { agentId: agent.id } } } });
   const nodes = [
@@ -60,7 +60,9 @@ beforeEach(async () => {
 async function setStage(chat: { id: string; data: unknown }, conversationName: string, stageName: string) {
   await db.node.update({ where: { id: chat.id }, data: { data: { ...(chat.data as object), conversationName, stageName } } });
   const row = await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: chat.id } });
-  await db.chatRootEngineState.update({ where: { chatRootNodeId: chat.id }, data: { state: { ...(row.state as object), conversationName, stageName } } });
+  // #3557: an empty stage must be CLEARED from the row (the spread would otherwise keep the old stageName, so a "stage-less" fixture was not).
+  const { stageName: _old, ...rest } = row.state as Record<string, unknown>;
+  await db.chatRootEngineState.update({ where: { chatRootNodeId: chat.id }, data: { state: { ...rest, conversationName, ...(stageName ? { stageName } : {}) } } });
 }
 // loc-scope-ok: counts the messages of the one chat under test, by its own prefix
 const messageNodes = (chatId: string) => db.node.count({ where: { loc: { startsWith: `${chatId}:messages:` } } });
@@ -73,7 +75,7 @@ const snapshot = async (chatId: string) => {
 describe('#3654 a refused sendChatMessage turn persists nothing', () => {
   it('an unserveable boot prompt refuses and leaves no message, count bump or record', async () => {
     const node = await compiled('v1');
-    const start = await M.startChat({}, { agentId: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
     await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'first' }, ctx());
     const before = await snapshot(start.chatId);
     await db.node.update({ where: { id: node }, data: { deletedAt: new Date() } });
@@ -83,7 +85,7 @@ describe('#3654 a refused sendChatMessage turn persists nothing', () => {
 
   it('a soft-deleted Agent refuses AGENT_NOT_FOUND and leaves no message behind', async () => {
     await compiled('v1');
-    const start = await M.startChat({}, { agentId: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
     await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'first' }, ctx());
     const before = await snapshot(start.chatId);
     await db.agent.update({ where: { id: agent.id }, data: { deletedAt: new Date() } });
@@ -95,7 +97,7 @@ describe('#3654 a refused sendChatMessage turn persists nothing', () => {
     const node = await compiled('v1');
     await db.node.create({ data: { id: generateId(), memoryId: systemMemoryId, loc: 'conversations:fallback', name: 'fallback', nodeType: 'system', data: { isFallback: true, stageOrder: ['hold'] } } });
     await db.node.updateMany({ where: { memoryId: systemMemoryId, loc: 'conversations:research' }, data: { data: { stageOrder: ['scope'], isSetup: false, goalSignals: ['research'] } } });
-    const start = await M.startChat({}, { agentId: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
     const chat = await chatNodeByLocOrThrow(db, start.chatId);
     // A chat parked in the fallback conversation with no stage: only the re-route would give this turn one.
     await setStage(chat, 'fallback', '');
@@ -107,16 +109,18 @@ describe('#3654 a refused sendChatMessage turn persists nothing', () => {
 
   it('a stage that appears between the early read and the chat lock is gated inside the write transaction (nothing persists)', async () => {
     const node = await compiled('v1');
-    const start = await M.startChat({}, { agentId: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
     const chat = await chatNodeByLocOrThrow(db, start.chatId);
     // Parked with no stage: the early gate does not apply to this turn.
     await setStage(chat, 'research', '');
     const before = await snapshot(start.chatId);
     await db.node.update({ where: { id: node }, data: { deletedAt: new Date() } });
     // A concurrent turn gives the chat its stage after this turn read the root, before it takes the chat lock.
-    const original = db.memory.findUniqueOrThrow.bind(db.memory);
-    const spy = vi.spyOn(db.memory, 'findUniqueOrThrow').mockImplementationOnce(((args: any) => {
-      return setStage(chat, 'research', 'scope').then(() => original(args));
+    // #3557: injected AFTER the early R1 read of the state row (readTurnNames, on db) and BEFORE the locked read (on the tx), so
+    // the early read sees no stage and only the in-transaction gate can refuse.
+    const original = db.chatRootEngineState.findUnique.bind(db.chatRootEngineState);
+    const spy = vi.spyOn(db.chatRootEngineState, 'findUnique').mockImplementationOnce(((args: any) => {
+      return (original(args) as Promise<unknown>).then(async (row) => { await setStage(chat, 'research', 'scope'); return row; });
     }) as any);
     try {
       expect(await code(M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'racing turn' }, ctx()))).toBe('BOOT_PROMPT_TARGET_DELETED');
@@ -128,7 +132,7 @@ describe('#3654 a refused sendChatMessage turn persists nothing', () => {
 
   it('the happy path still writes the turn', async () => {
     await compiled('v1');
-    const start = await M.startChat({}, { agentId: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
     const before = await snapshot(start.chatId);
     await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'ok' }, ctx());
     const after = await snapshot(start.chatId);

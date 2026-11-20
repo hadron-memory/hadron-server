@@ -36,8 +36,8 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { githubId: 93_000_000 + Math.floor(Math.random() * 1_000_000), githubUsername: `open-${n}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
-  agentA = await M.createAgent({}, { orgId: org.id, name: 'Security', personaRole: 'security-engineer' }, ctx());
-  agentB = await M.createAgent({}, { orgId: org.id, name: 'Specs', personaRole: 'specs-engineer' }, ctx());
+  agentA = await M.createAgent({}, { orgRef: org.id, name: 'Security', personaRole: 'security-engineer' }, ctx());
+  agentB = await M.createAgent({}, { orgRef: org.id, name: 'Specs', personaRole: 'specs-engineer' }, ctx());
   await serveAgentBootPrompt(db, agentA.id, 'A-PROMPT {{worker.name}} {{worker.role}} {{agent.name}}');
   await serveAgentBootPrompt(db, agentB.id, 'B-PROMPT {{worker.name}} {{worker.role}} {{agent.name}}');
   for (const a of [agentA, agentB]) await db.appAgent.create({ data: { appId: app.id, agentId: a.id } });
@@ -132,7 +132,7 @@ describe('#2493 an open session finishes under its own agent and role', () => {
 describe('#2493 context reset reads the open session\'s agent (c)', () => {
   it.each([[true, false, 'requested'], [false, true, null]] as const)('session agent on=%s, live agent on=%s: reset %s', async (sessionOn, liveOn, phase) => {
     const f = await setUpResetFixture();
-    const other = await ResetM.createAgent({}, { orgId: f.orgId, name: 'Other', personaRole: 'other' }, resetCtx(f.manager.id));
+    const other = await ResetM.createAgent({}, { orgRef: f.orgId, name: 'Other', personaRole: 'other' }, resetCtx(f.manager.id));
     await db.appAgent.create({ data: { appId: f.app.id, agentId: other.id } });
     await db.agent.update({ where: { id: f.agentId }, data: { resetContextAfterTask: sessionOn } });
     await db.agent.update({ where: { id: other.id }, data: { resetContextAfterTask: liveOn } });

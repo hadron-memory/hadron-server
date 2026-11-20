@@ -21,6 +21,7 @@ import { resolveRunTools } from './index.js';
 import { teamChatRead, TEAM_CHAT_READ_DEFAULT_LIMIT, TEAM_CHAT_READ_MAX_LIMIT, TEAM_CHAT_READ_MAX_BODY_CHARS } from './teamChatTools.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
 import type { RunToolContext } from './types.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -61,7 +62,7 @@ async function mkChannel(memoryId: string, loc: string): Promise<Chan> {
 
 async function mintRun(extra: Record<string, unknown> = {}, forApp = app.id): Promise<AppRun> {
   return db.appRun.create({
-    data: { id: generateId(), organizationId: org.id, appId: forApp, triggerKind: 'MANUAL', entryNodeUrn: 'tc-org::mem::flow:entry', status: 'RUNNING', ...extra },
+    data: { id: generateId(), organizationId: org.id, appId: forApp, agentId: await testRunAgentId(db, org.id, forApp), triggerKind: 'MANUAL', entryNodeUrn: 'tc-org::mem::flow:entry', status: 'RUNNING', ...extra },
   });
 }
 const toolCtx = (run: AppRun, principalExtra: Partial<Context> = {}): RunToolContext =>
@@ -80,7 +81,7 @@ beforeEach(async () => {
   member = await db.user.create({ data: { githubId: 83_000_000 + n, githubUsername: `tcr-u-${n}`, handle: `bob-${n}`, roles: ['READER'] }, select: { id: true, handle: true } }) as never;
   outsider = await db.user.create({ data: { githubId: 84_000_000 + n, githubUsername: `tcr-o-${n}`, roles: ['READER'] }, select: { id: true } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: manager.id, role: 'ADMIN' } });
-  agentId = (await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, adminCtx(manager.id))).id;
+  agentId = (await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, adminCtx(manager.id))).id;
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true } });
   otherApp = await db.app.create({ data: { organizationId: org.id, name: 'Other', urn: `${org.urn}:other` }, select: { id: true } });
   await db.appAgent.create({ data: { appId: app.id, agentId } });
@@ -121,7 +122,7 @@ describe('the read gate (#2520 criterion 1, matrix)', () => {
   it('(c) a userId principal who is not an App participant gets the same FORBIDDEN teamChatMessages gives; a Channel ref gets CHANNEL_NOT_FOUND', async () => {
     const c = toolCtx(await mintRun({ userId: outsider.id }));
     const direct = await code(Q.teamChatMessages({}, { appRef: app.id }, c.principal));
-    expect(direct).toBe('FORBIDDEN');
+    expect(direct).toBe('APP_NOT_FOUND');
     expect(await code(teamChatRead.execute(c, {}))).toBe(direct);
     expect(await code(teamChatRead.execute(c, { channelRef: channel.id }))).toBe('CHANNEL_NOT_FOUND');
   });

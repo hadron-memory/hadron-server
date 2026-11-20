@@ -13,7 +13,6 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { buildSchema, parse } from 'graphql';
 import { getComplexity, simpleEstimator } from 'graphql-query-complexity';
-import { createServer } from '../../server.js';
 import { mintUserApiKey } from '../../middleware/auth.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -22,6 +21,7 @@ import { typeDefs } from './schema/typeDefs.js';
 import { pageArgs } from './schema/resolvers.helpers.js';
 import { hadronListEstimator } from './admissionComplexity.js';
 import { resolvers } from './schema/resolvers.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../test/startServerFixture.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -33,11 +33,11 @@ let server: Server;
 let baseUrl: string;
 
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
-afterAll(async () => { await new Promise<void>((resolve) => server.close(() => resolve())); });
+afterAll(async () => { await closeServerIfStarted(server); });
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -45,7 +45,7 @@ beforeEach(async () => {
   const user = await db.user.create({ data: { githubId: 322211, githubUsername: 'adm3222', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
   const ctx = { db, userId: user.id, roles: [] };
-  const draft = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft', draftCorpus: true }, ctx);
+  const draft = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs-draft', draftCorpus: true }, ctx);
   draftId = draft.id;
   const cite = (loc: string) => Array.from({ length: 241 }, () => `hrn:node:${draft.urn}:${loc}`).join(' ');
   for (const loc of ['pas:010', 'pas:020']) {

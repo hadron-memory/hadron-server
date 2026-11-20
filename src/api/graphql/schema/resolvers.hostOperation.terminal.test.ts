@@ -81,7 +81,7 @@ beforeEach(async () => {
   manager = await u(81, 'manager');
   outsider = await u(82, 'outsider');
   await db.orgMember.create({ data: { organizationId: org.id, userId: manager.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(manager.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(manager.id));
   agentId = agent.id;
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true, urn: true } });
   otherApp = await db.app.create({ data: { organizationId: org.id, name: 'Other', urn: `${org.urn}:other` }, select: { id: true } });
@@ -110,7 +110,7 @@ describe('a host stores a registered worker\'s report, and the server builds the
     expect(r.refused).toEqual([]);
     const t = await stored(kit.id);
     expect(t).toMatchObject({ host: { id: 'orca1', label: 'Orca One' }, status: 'busy', prompt: 'not_empty', reason: null });
-    expect(Object.keys(t).sort()).toEqual(['checkedAt', 'host', 'lastTurnAt', 'prompt', 'reason', 'reportedAt', 'status']);
+    expect(Object.keys(t).sort()).toEqual(['checkedAt', 'contextMeasuredAt', 'contextTokens', 'host', 'lastTurnAt', 'prompt', 'reason', 'reportedAt', 'status']);
     expect(new Date(t.reportedAt).getTime()).toBeGreaterThanOrEqual(before.getTime());
     expect(await db.hostKeyUse.count({ where: { action: 'terminal', appKeyId: orca1.id, refusedCode: null, count: 1 } })).toBe(1);
   });
@@ -343,7 +343,7 @@ describe('#2924 reports set status without an alarm or team-shape verdict', () =
     resultOnly(r);
     expect(r.stored).toEqual([{ id: kit.id, urn: expect.stringContaining('kit') }]);
     expect(r.refused).toEqual([]);
-    expect(Object.keys(await stored(kit.id)).sort()).toEqual(['checkedAt', 'host', 'lastTurnAt', 'prompt', 'reason', 'reportedAt', 'status']);
+    expect(Object.keys(await stored(kit.id)).sort()).toEqual(['checkedAt', 'contextMeasuredAt', 'contextTokens', 'host', 'lastTurnAt', 'prompt', 'reason', 'reportedAt', 'status']);
   });
 });
 
@@ -470,8 +470,14 @@ describe('the SDL: results are references, not Worker objects (G1)', () => {
   });
   it('the report input has no free-text field', () => {
     const input = (schema.getType('WorkerTerminalReportInput') as any).getFields();
-    expect(Object.keys(input).sort()).toEqual(['checkedAt', 'lastTurnAt', 'prompt', 'reason', 'status', 'worker']);
+    // #4041: `repair` (a closed enum) and `attempt` (an Int) join; still no String field other than the worker ref.
+    // #4225: `contextTokens` (an Int) and `contextMeasuredAt` (a DateTime) join; still no String field other than the worker ref.
+    expect(Object.keys(input).sort()).toEqual(['attempt', 'checkedAt', 'contextMeasuredAt', 'contextTokens', 'lastTurnAt', 'prompt', 'reason', 'repair', 'repairReason', 'status', 'worker']);
     expect(String(input.reason.type)).toBe('WorkerTerminalReason');
+    expect(String(input.repair.type)).toBe('WorkerTerminalRepair');
+    // #4247: `repairReason` is a closed enum too.
+    expect(String(input.repairReason.type)).toBe('WorkerTerminalRepairReason');
+    expect(String(input.attempt.type)).toBe('Int');
   });
   it('Worker and TeamRosterEntry carry terminal; the mutation is declared', () => {
     expect(fields('Worker')).toContain('terminal');

@@ -98,6 +98,10 @@ export async function miscastHasReferences(db: Reader, worker: { id: string; mem
   const pristine = await pristineGeneratedTickerIds(db, worker.id);
   for (const ref of workerReferenceInventory) {
     if (ref.model === 'Session') continue; // empty ended bindings are disposable
+    // #3690 (cor:acl:140:03, ruling 0255 item 3): HOLDING a grant is not use of the worker; a holder that goes ends its grant, so the
+    // delete is not refused for it (the AFTER DELETE trigger stamps the departure). ONLY the holder column: the requester
+    // (`requested_by_worker_id`) and the events' worker still count, and a worker that asked for or used a grant is retired instead.
+    if (ref.model === 'Grant' && ref.column === 'worker_id') continue;
     // #2736 (Holger R2, cor:agt:040:03): a bind's served-prompt record of one of THESE disposable sessions is the stint's
     // own audit record, not use of the worker; it goes with the session. Any row that is not exactly that still counts.
     const ownBind = ref.model === 'ServedPrompt' && sessionIds.length

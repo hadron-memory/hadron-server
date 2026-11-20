@@ -131,7 +131,7 @@ describe('Mutation.updateOrganization (007-entity-id-or-urn)', () => {
   it('accepts an ID', async () => {
     const updated = await resolvers.Mutation.updateOrganization(
       {},
-      { id: org.id, name: 'renamed-by-id' },
+      { ref: org.id, name: 'renamed-by-id' },
       adminCtx(),
     );
     expect(updated.name).toBe('renamed-by-id');
@@ -140,7 +140,7 @@ describe('Mutation.updateOrganization (007-entity-id-or-urn)', () => {
   it('accepts a URN', async () => {
     const updated = await resolvers.Mutation.updateOrganization(
       {},
-      { id: org.urn, name: 'renamed-by-urn' },
+      { ref: org.urn, name: 'renamed-by-urn' },
       adminCtx(),
     );
     expect(updated.id).toBe(org.id);
@@ -171,7 +171,7 @@ describe('Mutation.updateOrganization — URN rename propagation (#337)', () => 
 
     const updated = await resolvers.Mutation.updateOrganization(
       {},
-      { id: org.id, urn: newUrn },
+      { ref: org.id, urn: newUrn },
       adminCtx(),
     );
     expect(updated.urn).toBe(newUrn);
@@ -197,7 +197,7 @@ describe('Mutation.updateOrganization — URN rename propagation (#337)', () => 
       data: { id: generateId(), organizationId: org.id, urn: `${oldUrn}:juno`, name: 'juno' },
     });
 
-    await resolvers.Mutation.updateOrganization({}, { id: org.id, urn: newUrn }, adminCtx());
+    await resolvers.Mutation.updateOrganization({}, { ref: org.id, urn: newUrn }, adminCtx());
 
     expect((await db.memory.findUnique({ where: { id: mem.id } }))?.urn).toBe(`${newUrn}:gear`);
     expect((await db.agent.findUnique({ where: { id: agent.id } }))?.urn).toBe(`${newUrn}:juno`);
@@ -217,7 +217,7 @@ describe('Mutation.updateOrganization — URN rename propagation (#337)', () => 
       },
     });
 
-    await resolvers.Mutation.updateOrganization({}, { id: org.id, urn: newUrn }, adminCtx());
+    await resolvers.Mutation.updateOrganization({}, { ref: org.id, urn: newUrn }, adminCtx());
 
     expect((await db.memory.findUnique({ where: { id: otherMem.id } }))?.urn).toBe(`${other.urn}::keep`);
   });
@@ -232,7 +232,7 @@ describe('Mutation.updateOrganization — URN rename propagation (#337)', () => 
         class: 'knowledge',
       },
     });
-    await resolvers.Mutation.updateOrganization({}, { id: org.id, name: 'just-a-name' }, adminCtx());
+    await resolvers.Mutation.updateOrganization({}, { ref: org.id, name: 'just-a-name' }, adminCtx());
     expect((await db.memory.findUnique({ where: { id: mem.id } }))?.urn).toBe(`${org.urn}::gear`);
   });
 
@@ -246,7 +246,7 @@ describe('Mutation.updateOrganization — URN rename propagation (#337)', () => 
         class: 'knowledge',
       },
     });
-    await resolvers.Mutation.updateOrganization({}, { id: org.id, urn: org.urn }, adminCtx());
+    await resolvers.Mutation.updateOrganization({}, { ref: org.id, urn: org.urn }, adminCtx());
     expect((await db.memory.findUnique({ where: { id: mem.id } }))?.urn).toBe(`${org.urn}::gear`);
   });
 });
@@ -272,7 +272,7 @@ describe('Mutation.updateOrganization — rejects a malformed org URN (#376)', (
       });
 
       await expect(
-        resolvers.Mutation.updateOrganization({}, { id: org.id, urn: bad }, adminCtx()),
+        resolvers.Mutation.updateOrganization({}, { ref: org.id, urn: bad }, adminCtx()),
       ).rejects.toThrow();
 
       // Org urn unchanged, and no child URN was rewritten.
@@ -284,7 +284,7 @@ describe('Mutation.updateOrganization — rejects a malformed org URN (#376)', (
   it('still allows a valid bare-slug rename', async () => {
     const updated = await resolvers.Mutation.updateOrganization(
       {},
-      { id: org.id, urn: 'acme.com' },
+      { ref: org.id, urn: 'acme.com' },
       adminCtx(),
     );
     expect(updated.urn).toBe('acme.com');
@@ -314,7 +314,7 @@ describe('Mutation.createOrganization — rejects a malformed org URN (#376)', (
 
 describe('Mutation.deleteOrganization (007-entity-id-or-urn)', () => {
   it('accepts a URN', async () => {
-    const ok = await resolvers.Mutation.deleteOrganization({}, { id: org.urn }, adminCtx());
+    const ok = await resolvers.Mutation.deleteOrganization({}, { ref: org.urn }, adminCtx());
     expect(ok).toBe(true);
     const after = await db.organization.findUnique({ where: { id: org.id } });
     expect(after?.deletedAt).not.toBeNull();
@@ -329,7 +329,7 @@ describe('Mutation.linkGithubApp (007-entity-id-or-urn)', () => {
   it('accepts a URN', async () => {
     const updated = await resolvers.Mutation.linkGithubApp(
       {},
-      { orgId: org.urn, installationId: 12345 },
+      { orgRef: org.urn, installationId: 12345 },
       adminCtx(),
     );
     expect(updated.id).toBe(org.id);
@@ -348,7 +348,7 @@ describe('Mutation.unlinkGithubApp (007-entity-id-or-urn)', () => {
   it('accepts a URN', async () => {
     const updated = await resolvers.Mutation.unlinkGithubApp(
       {},
-      { orgId: org.urn },
+      { orgRef: org.urn },
       adminCtx(),
     );
     expect(updated.githubInstallationId).toBeNull();
@@ -359,7 +359,7 @@ describe('Mutation.updateOrgGithubApp (007-entity-id-or-urn)', () => {
   it('accepts a URN', async () => {
     const updated = await resolvers.Mutation.updateOrgGithubApp(
       {},
-      { orgId: org.urn, appId: 'app-id-007', privateKey: 'pk-007' },
+      { orgRef: org.urn, appId: 'app-id-007', privateKey: 'pk-007' },
       adminCtx(),
     );
     expect(updated.githubAppId).toBe('app-id-007');
@@ -370,7 +370,7 @@ describe('Mutation.createUserInvitation (007-entity-id-or-urn)', () => {
   it('accepts a URN', async () => {
     const invite = await resolvers.Mutation.createUserInvitation(
       {},
-      { orgId: org.urn, memberRole: 'READER', name: 'urn-invite' },
+      { orgRef: org.urn, memberRole: 'READER', name: 'urn-invite' },
       adminCtx(),
     );
     expect(invite.organizationId).toBe(org.id);
@@ -390,7 +390,7 @@ describe('Mutation.addOrgMember / updateOrgMember / removeOrgMember (007-entity-
   it('addOrgMember accepts a URN as orgId', async () => {
     const member = await resolvers.Mutation.addOrgMember(
       {},
-      { orgId: org.urn, userId: target.id, role: 'CONTRIBUTOR' },
+      { orgRef: org.urn, userRef: target.id, role: 'CONTRIBUTOR' },
       adminCtx(),
     );
     expect(member.organizationId).toBe(org.id);
@@ -404,7 +404,7 @@ describe('Mutation.addOrgMember / updateOrgMember / removeOrgMember (007-entity-
     });
     const updated = await resolvers.Mutation.updateOrgMember(
       {},
-      { orgId: org.urn, userId: target.id, role: 'CONTRIBUTOR' },
+      { orgRef: org.urn, userRef: target.id, role: 'CONTRIBUTOR' },
       adminCtx(),
     );
     expect(updated.role).toBe('CONTRIBUTOR');
@@ -416,7 +416,7 @@ describe('Mutation.addOrgMember / updateOrgMember / removeOrgMember (007-entity-
     });
     const ok = await resolvers.Mutation.removeOrgMember(
       {},
-      { orgId: org.urn, userId: target.id },
+      { orgRef: org.urn, userRef: target.id },
       adminCtx(),
     );
     expect(ok).toBe(true);
@@ -433,7 +433,7 @@ describe('Mutation.createMemory / createAgent / createApp (007-entity-id-or-urn)
   it('createMemory accepts a URN as orgId', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: org.urn, name: 'urn-mem' },
+      { orgRef: org.urn, name: 'urn-mem' },
       adminCtx(),
     );
     expect(mem.organizationId).toBe(org.id);
@@ -443,7 +443,7 @@ describe('Mutation.createMemory / createAgent / createApp (007-entity-id-or-urn)
   it('createAgent accepts a URN as orgId', async () => {
     const agent = await resolvers.Mutation.createAgent(
       {},
-      { orgId: org.urn, name: 'urn-agent' },
+      { orgRef: org.urn, name: 'urn-agent' },
       adminCtx(),
     );
     expect(agent.organizationId).toBe(org.id);
@@ -455,7 +455,7 @@ describe('Mutation.createMemory / createAgent / createApp (007-entity-id-or-urn)
     // minimal Agent in the same org so the install path is satisfied.
     const agent = await resolvers.Mutation.createAgent(
       {},
-      { orgId: org.id, name: 'urn-app-host-agent' },
+      { orgRef: org.id, name: 'urn-app-host-agent' },
       adminCtx(),
     );
     const app = await resolvers.Mutation.createApp(

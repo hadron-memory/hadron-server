@@ -387,7 +387,7 @@ describe('#1468 — tombstones: only post-mint ones are protected', () => {
 });
 
 describe('#1468 — whole-corpus removal', () => {
-  const deleteMemory = (id: string) => resolvers.Mutation.deleteMemory({}, { id }, ctx());
+  const deleteMemory = (id: string) => resolvers.Mutation.deleteMemory({}, { ref: id }, ctx());
 
   it('deleteMemory refuses a minted corpus holding a spec; the memory stays live', async () => {
     await node(minted.id, 'pas:010', { tags: ['spec'] });
@@ -411,7 +411,7 @@ describe('#1468 — whole-corpus removal', () => {
   it('createMemory refuses to reclaim the URN of a deleted minted corpus that still holds a spec', async () => {
     const dead = await memory('reuse', { corpusMintedAt: new Date(), deletedAt: new Date() });
     await node(dead.id, 'pas:010', { tags: ['spec'] });
-    await expect(resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'reuse' } as never, ctx()))
+    await expect(resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'reuse' } as never, ctx()))
       .rejects.toSatisfy(refusedPermanent);
     expect(await db.memory.findUnique({ where: { id: dead.id } })).not.toBeNull();
   });
@@ -419,7 +419,7 @@ describe('#1468 — whole-corpus removal', () => {
   it('control: createMemory still reclaims a deleted draft corpus', async () => {
     const dead = await memory('reuse', { corpusDraft: true, deletedAt: new Date() });
     await node(dead.id, 'pas:010', { tags: ['spec'] });
-    await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'reuse' } as never, ctx());
+    await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'reuse' } as never, ctx());
     expect(await db.memory.findUnique({ where: { id: dead.id } })).toBeNull();
   });
 });
@@ -496,7 +496,7 @@ describe('#1468 — address reclaims that erase a deleted minted corpus (Codex P
 
   it('createAgent refuses to reclaim its -system address from a deleted minted corpus', async () => {
     const corpus = await deletedCorpusAt(`${org.urn}:spec-bot-system`);
-    await expect(resolvers.Mutation.createAgent({}, { orgId: org.id, name: 'Spec Bot' } as never, ctx()))
+    await expect(resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Spec Bot' } as never, ctx()))
       .rejects.toSatisfy(refusedPermanent);
     expect(await db.memory.findUnique({ where: { id: corpus.id } })).not.toBeNull();
     expect(await db.agent.findFirst({ where: { urn: `${org.urn}:spec-bot` } })).toBeNull();
@@ -504,7 +504,7 @@ describe('#1468 — address reclaims that erase a deleted minted corpus (Codex P
 
   it('control: createAgent still reclaims a deleted draft memory at its -system address', async () => {
     await memory('draft-bot-system', { corpusDraft: true, deletedAt: new Date() });
-    const agent = await resolvers.Mutation.createAgent({}, { orgId: org.id, name: 'Draft Bot' } as never, ctx());
+    const agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Draft Bot' } as never, ctx());
     expect(agent).toMatchObject({ urn: `${org.urn}:draft-bot` });
   });
 
@@ -600,7 +600,7 @@ describe('#1468 — a whole-corpus delete cannot race the first spec (Codex P1)'
       await assertNoMintedSpecUnmark(tx, minted.id, [{ id: n.id, tags: ['spec'] }], 'update');
       await tx.node.update({ where: { id: n.id }, data: { tags: ['spec'] } });
     });
-    const deleting = resolvers.Mutation.deleteMemory({}, { id: minted.id }, ctx());
+    const deleting = resolvers.Mutation.deleteMemory({}, { ref: minted.id }, ctx());
     try { await deleteWaits(); } finally { release(); }
     await done;
     await expect(deleting).rejects.toSatisfy(refusedPermanent);
@@ -634,7 +634,7 @@ describe('#1468 — a whole-corpus delete cannot race the first spec (Codex P1)'
     const { release, done } = await holdOpen(async (tx) => {
       await tx.node.create({ data: { id: generateId(), memoryId: minted.id, loc: 'pas:020', name: 'pas:020', tags: ['spec'] } });
     });
-    const deleting = resolvers.Mutation.deleteMemory({}, { id: minted.id }, ctx());
+    const deleting = resolvers.Mutation.deleteMemory({}, { ref: minted.id }, ctx());
     try { await deleteWaits(); } finally { release(); }
     await done;
     await expect(deleting).rejects.toSatisfy(refusedPermanent);

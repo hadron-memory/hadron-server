@@ -1,4 +1,4 @@
-import { signingSurfacePolicy } from '../lib/signing/surface.js';
+import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 
 /**
  * Server-identity / deployment-info surface — answers "which hadron-server
@@ -105,7 +105,38 @@ import { signingSurfacePolicy } from '../lib/signing/surface.js';
 // so a lagging build silently records the session fallback — a healthy-looking
 // receipt with the wrong attribution. Clients gate on the `worklog-model`
 // capability token rather than the version.
-export const HADRON_SERVER_VERSION = '0.21.0';
+// 0.22.0: #4140 — BREAKING (GraphQL): six argument renames on four mutations, no aliases. updateMemory(id →
+// ref, organizationId → orgRef), updateOrganization(id → ref), createAgent(orgId → orgRef, systemMemoryId →
+// systemMemoryRef), updateAgent(systemMemoryId → systemMemoryRef); the system-memory refs retype String → ID
+// and accept a URN. A client sending the old names gets "Unknown argument" until it upgrades.
+// 0.23.0 — BREAKING, entity refs S6 (#4142, slices B–F): the GraphQL mutation
+// args that name entities renamed to `<entity>Ref` and (where the deprecated
+// `…Id` alias dropped) became REQUIRED — `createMemory.orgRef`,
+// `deleteMemory.ref`, `setMemorySourceToken.ref`, `syncMemory.ref`,
+// `pushMemoryToGit.ref`, `linkMemoryToUser.memoryRef`,
+// `encryptMemory.memoryRef`, `deleteOrganization.ref`, `linkGithubApp.orgRef`,
+// `updateOrgGithubApp.orgRef`, `unlinkGithubApp.orgRef`,
+// `createUserInvitation.orgRef`, `startChat.agentRef`,
+// `updateAgentAIConfig.agentRef`, `clearAgentAIConfig.agentRef`,
+// `createRevision.agentRef`, `publishRevision.agentRef`,
+// `restoreRevision.agentRef`, `acquireEditorLock.agentRef`,
+// `releaseEditorLock.agentRef`, `joinApp.appRef`, `leaveApp.appRef`, and the
+// nine alias-drop mutations (`*MemorySubscription`,
+// `ensureAppMember`/`removeAppMember`, `revokeAgentSubscription`,
+// `add`/`update`/`removeOrgMember`). TWO breaks, not one:
+//  (a) a lagging build's `…Id` argument is now an UNKNOWN argument — GraphQL
+//      refuses the whole operation, unlike MCP's silent drop;
+//  (b) the nine alias-drop survivors' ref args changed BOTH type and
+//      nullability — optional `String` → required `ID!` (`memoryRef`/`orgRef`/
+//      `appRef`/`userRef`/`agentRef` on the mutations above). An
+//      already-migrated client whose variables declare `$o: String` or
+//      `String!` now fails VARIABLE VALIDATION on those nine — retyping the
+//      variables to `ID!` is part of the migration, not optional.
+// `replaceSubtree.memoryId` is DELIBERATELY unchanged (legacy `String!`): the
+// field exists only so legacy callers reach REPLACE_SUBTREE_RETIRED instead
+// of an unknown-argument error (#4219 blind P2-A).
+// (Chunk A, the memory reads, follows #4136.)
+export const HADRON_SERVER_VERSION = '0.23.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
@@ -205,10 +236,10 @@ export function getDeploymentInfo(): DeploymentInfo {
     raw && raw !== '/'
       ? raw
       : `http://localhost:${process.env.PORT || 4000}`;
-  const policy = signingSurfacePolicy();
+  const present = serverInfoFieldPresence();
   return {
     baseUrl, version: HADRON_SERVER_VERSION,
-    ...(policy.signing ? { signing: true as const } : {}),
-    ...(policy.registration ? { passkeyRegistration: true as const } : {}),
+    ...(present.signing ? { signing: true as const } : {}),
+    ...(present.passkeyRegistration ? { passkeyRegistration: true as const } : {}),
   };
 }

@@ -61,7 +61,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'Ap Org', urn: 'ap.example' } });
   reader = await db.user.create({ data: { githubId: 204201, githubUsername: 'ap-reader', handle: 'ap-reader', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: reader.id, role: 'ADMIN' } });
-  const m = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'ap' }, ctx());
+  const m = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'ap' }, ctx());
   memoryId = m.id;
 });
 
@@ -96,10 +96,13 @@ describe('`approved` includes (cor:dmo:150:02)', () => {
     expect(await read('inc')).toBe(N);
   });
 
-  it('approved signed serves as approved (signed is ignored until signing ships)', async () => {
-    await target('t', ['v1', 'v2 draft'], [1]);
-    await includer('{{> t approved signed}}');
-    expect(await read('inc')).toBe('v1');
+  it.each(['false', 'true'])('approved signed is checked only while signing ships (flag=%s)', async flag => {
+    vi.stubEnv('PASSKEY_SIGNING_ENABLED', flag);
+    try {
+      await target('t', ['v1', 'v2 draft'], [1]);
+      await includer('{{> t approved signed}}');
+      expect(await read('inc')).toBe(flag === 'false' ? 'v1' : N);
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it('an approved include of an approved-but-edited-hash target is the notice (altered snapshot is not an approval)', async () => {

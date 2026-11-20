@@ -27,7 +27,7 @@ let memoryId: string, adminId: string, orgUrn: string;
 const ctx = (): Context => ({ db, roles: ['ADMIN'], userId: adminId, clientId: `user:${adminId}` });
 
 async function mkMemory(name: string, ordered: boolean) {
-  const memory = await resolvers.Mutation.createMemory(null, { orgId: (await db.organization.findFirstOrThrow()).id, name }, ctx());
+  const memory = await resolvers.Mutation.createMemory(null, { orgRef: (await db.organization.findFirstOrThrow()).id, name }, ctx());
   if (ordered) await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'r1', name: 'r1', seq: 1 } });
   return memory.id as string;
 }
@@ -316,7 +316,7 @@ describe('worker_reference_fences counterparty schedule #443', () => {
   it('a K-holder waiting on a held fence tuple and a K-waiter behind it both complete, distinct seqs, no deadlock', async () => {
     const M = resolvers.Mutation as any;
     const org = await db.organization.findFirstOrThrow();
-    const agent = await M.createAgent({}, { orgId: org.id, name: 'Fence role', personaRole: 'test-worker' }, ctx());
+    const agent = await M.createAgent({}, { orgRef: org.id, name: 'Fence role', personaRole: 'test-worker' }, ctx());
     const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Fence team', urn: `${org.urn}:team` } });
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     const worker = await M.castWorker({}, { appRef: app.id, agentRef: agent.id, name: 'Fence worker' }, ctx());

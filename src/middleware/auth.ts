@@ -1,3 +1,5 @@
+import { refuseSupersededSession } from '../lib/sessionSuperseded.js';
+import { AuthStoreBusyError, authStoreBusyReason } from '../lib/authStoreBusy.js';
 import { transportRateIdentity, type RateIdentity } from '../lib/rateLimit/identity.js';
 import { ownsSession } from '../lib/sessionOwnership.js';
 import { createHash, randomBytes } from 'crypto';
@@ -31,7 +33,7 @@ export interface AuthContext {
   /**
    * #1705 — the request NAMED a session (X-Hadron-Session) that did not
    * validate, so `sessionId` is unset and the request proceeds unbound (the
-   * pre-existing silent-drop behaviour, unchanged). A surface whose actor is
+   * silent-drop behaviour except supersession, which refuses typed (#3818)). A surface whose actor is
    * the session's worker reads this to refuse rather than act as the bare
    * credential: a worker whose session ended must not silently become its
    * human driver (agent tasks, cor:agt:050:08).
@@ -206,6 +208,13 @@ export async function resolveAuthContextWithStatus(
   req: Request,
   db: PrismaClient,
 ): Promise<{ auth: AuthContext; credentialStatus: CredentialStatus }> {
+  const result = await resolveCredentialContextWithStatus(req, db);
+  await bindPresentedSession(req, db, result.auth);
+  return result;
+}
+
+/** Resolve identity before transport-specific scope/ownership checks; no execution binding yet. */
+export async function resolveCredentialContextWithStatus(req: Request, db: PrismaClient) {
   const { auth, credentialStatus } = await resolveAuthContextInner(req, db);
   const identity = transportRateIdentity(auth, req.ip);
   return { auth: identity.principal || identity.ip ? { ...auth, limiterIdentity: identity } : auth, credentialStatus };
@@ -216,6 +225,29 @@ export async function resolveAuthContextWithStatus(
  * as opposed to a verdict. A WeakSet, so the AuthContext itself carries no new key (#3532).
  */
 const incompleteChecks = new WeakSet<AuthContext>();
+
+/**
+ * #4471: the API-key paths' hash lookup can be refused by a busy store (P2024, or P2028's
+ * "Unable to start" arm) — and #4504: by an unreachable one (P1001, a new connection that
+ * cannot establish) — an operational fault, not a verdict on the key. Converted to the typed
+ * retryable AUTH_STORE_BUSY at this ONE shared point (lib/authStoreBusy.ts), so every surface
+ * (the Apollo context builder, the plain HTTP routes, MCP's catch) sees the same typed error
+ * and no caller reads a store blip as a bad key (cor:aut:010:05 S5: never refused).
+ *
+ * The JWT path is deliberately NOT wrapped: its own catch already rules these faults
+ * 'unavailable' and lets the request proceed (#3532, rulings 0192–0194); changing that is a
+ * behavior change beyond this issue. Every fault authStoreBusyReason does not name keeps
+ * today's raw propagation.
+ */
+async function resolveKeyCredentialLookup(lookup: () => Promise<AuthContext>): Promise<AuthContext> {
+  try {
+    return await lookup();
+  } catch (error) {
+    const reason = authStoreBusyReason(error);
+    if (reason) throw new AuthStoreBusyError(error, reason);
+    throw error;
+  }
+}
 
 async function resolveAuthContextInner(
   req: Request,
@@ -228,14 +260,12 @@ async function resolveAuthContextInner(
   if (!authHeader?.startsWith('Bearer ')) return { auth: {}, credentialStatus: 'anonymous' };
 
   const token = authHeader.slice(7);
-  const sessionIdHeader = req.headers['x-hadron-session'];
-  const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
 
   let ctx: AuthContext;
   if (token.startsWith(APP_KEY_PREFIX)) {
-    ctx = await resolveAppKey(token, db);
+    ctx = await resolveKeyCredentialLookup(() => resolveAppKey(token, db));
   } else if (token.startsWith(USER_API_KEY_PREFIX)) {
-    ctx = await resolveUserApiKey(token, db);
+    ctx = await resolveKeyCredentialLookup(() => resolveUserApiKey(token, db));
   } else if (/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) {
     // JWTs have the form header.payload.signature — three base64url segments.
     ctx = await resolveJwt(token, db);
@@ -247,11 +277,17 @@ async function resolveAuthContextInner(
   const credentialStatus: CredentialStatus = ctx.userId || ctx.appId
     ? 'authenticated'
     : incompleteChecks.has(ctx) ? 'unavailable' : 'refused';
+  return { auth: ctx, credentialStatus };
+}
+
+/** Apply the execution header only after a transport has accepted the credential. */
+export async function bindPresentedSession(req: Request, db: PrismaClient, ctx: AuthContext): Promise<void> {
+  const header = req.headers['x-hadron-session'];
+  const sessionId = Array.isArray(header) ? header[0] : header;
   if (sessionId) await bindSession(db, ctx, sessionId);
   // #2176: the validated user behind this request's writes, from the SAME resolved context
   // `editorFromAuth` reads for the revision, never from anything the client asserts.
   publishUser(ctx.userId ?? null);
-  return { auth: ctx, credentialStatus };
 }
 
 /**
@@ -279,8 +315,8 @@ async function resolveAuthContextInner(
  * memory reach exactly their user reach (the #967 narrow-never-grant posture,
  * mirrored for user principals).
  *
- * An invalid binding is silently dropped (the request proceeds unbound) —
- * the pre-existing App-key behavior, kept identical for both shapes.
+ * A superseded execution binding is refused typed (#3818 V24). Other invalid
+ * bindings retain the existing silent-drop behavior for both principal shapes.
  */
 async function bindSession(
   db: PrismaClient,
@@ -322,6 +358,9 @@ export async function validateSessionBinding(
       app: { select: { sessionDormancyDays: true } },
     },
   });
+  if (session?.endedAt) {
+    await refuseSupersededSession({ ...principal, db }, sessionId);
+  }
   if (!session || session.endedAt) return null;
   const now = new Date();
   if (session.expiresAt && session.expiresAt <= now) return null;

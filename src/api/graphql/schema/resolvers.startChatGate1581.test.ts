@@ -76,7 +76,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: orgA.id, userId: admin.id, role: 'ADMIN' } });
   await db.orgMember.create({ data: { organizationId: orgA.id, userId: member.id, role: 'READER' } });
 
-  const created = await M.createAgent({}, { orgId: orgA.id, name: 'secret-agent', visibility: 'ORGANIZATION' },
+  const created = await M.createAgent({}, { orgRef: orgA.id, name: 'secret-agent', visibility: 'ORGANIZATION' },
     { db, roles: ['ADMIN'], userId: admin.id } as Context);
   agent = await db.agent.findUniqueOrThrow({
     where: { id: created.id },
@@ -99,52 +99,52 @@ beforeEach(async () => {
 
 describe('#1581: startChat gates the Agent before reading or licensing anything', () => {
   it('a stranger is refused as "not found": no prompt, and no license minted', async () => {
-    await expect(M.startChat(null, { agentId: agent.id }, userCtx(stranger.id)))
+    await expect(M.startChat(null, { agentRef: agent.id }, userCtx(stranger.id)))
       .rejects.toMatchObject({ name: 'AgentNotFoundError' });
     expect(await subsFor(agent.id)).toEqual([]);
   });
 
   it('a stranger naming a victim is refused, and the victim gets no license (the reproduced exploit)', async () => {
-    await expect(M.startChat(null, { agentId: agent.id, userId: victim.id }, userCtx(stranger.id)))
+    await expect(M.startChat(null, { agentRef: agent.id, userId: victim.id }, userCtx(stranger.id)))
       .rejects.toMatchObject({ name: 'AgentNotFoundError' });
     expect(await subsFor(agent.id)).toEqual([]);
   });
 
   it('even a user who CAN reach the Agent may not start a chat on behalf of someone else', async () => {
-    await expect(M.startChat(null, { agentId: agent.id, userId: victim.id }, userCtx(member.id)))
+    await expect(M.startChat(null, { agentRef: agent.id, userId: victim.id }, userCtx(member.id)))
       .rejects.toThrow(/only an App key can start a chat on behalf of another user/);
     expect(await subsFor(agent.id)).toEqual([]);
   });
 
-  it('CONTROL: an org READER starts the chat and is licensed', async () => {
-    const out = await M.startChat(null, { agentId: agent.id }, userCtx(member.id));
-    expect(out.chatId).toMatch(/^chats:/);
-    expect(await subsFor(agent.id)).toEqual([member.id]);
+  it('#4046: an org READER without App participation cannot start', async () => {
+    await expect(M.startChat(null, { agentRef: agent.id }, userCtx(member.id)))
+      .rejects.toMatchObject({ name: 'AgentNotFoundError' });
+    expect(await subsFor(agent.id)).toEqual([]);
   });
 
   it('CONTROL: an App end user (AppMember, not an org member) reaches the Agent through the live install', async () => {
-    const out = await M.startChat(null, { agentId: agent.id }, userCtx(endUser.id));
+    const out = await M.startChat(null, { agentRef: agent.id }, userCtx(endUser.id));
     expect(out.chatId).toMatch(/^chats:/);
     expect(await subsFor(agent.id)).toEqual([endUser.id]);
   });
 
   it('the App end user loses the path when the App is uninstalled (the license must be live)', async () => {
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
-    await expect(M.startChat(null, { agentId: agent.id }, userCtx(endUser.id)))
+    await expect(M.startChat(null, { agentRef: agent.id }, userCtx(endUser.id)))
       .rejects.toMatchObject({ name: 'AgentNotFoundError' });
     expect(await subsFor(agent.id)).toEqual([]);
   });
 
-  it('CONTROL: a PUBLIC Agent is reachable by anyone signed in', async () => {
+  it('#4046: PUBLIC visibility does not admit an App-less non-manager start', async () => {
     await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
-    const out = await M.startChat(null, { agentId: agent.id }, userCtx(stranger.id));
-    expect(out.chatId).toMatch(/^chats:/);
-    expect(await subsFor(agent.id)).toEqual([stranger.id]);
+    await expect(M.startChat(null, { agentRef: agent.id }, userCtx(stranger.id)))
+      .rejects.toMatchObject({ name: 'AgentNotFoundError' });
+    expect(await subsFor(agent.id)).toEqual([]);
   });
 
   it('a chat that fails after the gate leaves no license (provisioned in the chat transaction)', async () => {
     // The Agent is reachable, but it has no conversation of this name.
-    await expect(M.startChat(null, { agentId: agent.id, conversationName: 'nope' }, userCtx(member.id)))
+    await expect(M.startChat(null, { agentRef: agent.id, conversationName: 'nope' }, userCtx(member.id)))
       .rejects.toThrow();
     expect(await subsFor(agent.id)).toEqual([]);
   });
@@ -168,14 +168,14 @@ describe('#1581: startChat through a pure App key (resolver level)', () => {
 
   it('an App key starts a chat for its session user, an AppMember, and licenses them', async () => {
     const ctx = await appKeySessionFor(endUser.id);
-    const out = await M.startChat(null, { agentId: agent.id, userId: endUser.id }, ctx);
+    const out = await M.startChat(null, { agentRef: agent.id, userId: endUser.id }, ctx);
     expect(out.chatId).toMatch(/^chats:/);
     expect(await subsFor(agent.id)).toEqual([endUser.id]);
   });
 
   it('an App key may NOT act for a user with no relationship to its App', async () => {
     const ctx = await appKeySessionFor(null);
-    await expect(M.startChat(null, { agentId: agent.id, userId: stranger.id }, ctx))
+    await expect(M.startChat(null, { agentRef: agent.id, userId: stranger.id }, ctx))
       .rejects.toMatchObject({ name: 'UserNotFoundError' });
     expect(await subsFor(agent.id)).toEqual([]);
   });
@@ -183,7 +183,7 @@ describe('#1581: startChat through a pure App key (resolver level)', () => {
   it('a session-bound App key may not license a DIFFERENT user than its session user, even an AppMember', async () => {
     await db.appMember.create({ data: { appId: app.id, userId: victim.id, role: 'member' } });
     const ctx = await appKeySessionFor(endUser.id);
-    await expect(M.startChat(null, { agentId: agent.id, userId: victim.id }, ctx))
+    await expect(M.startChat(null, { agentRef: agent.id, userId: victim.id }, ctx))
       .rejects.toMatchObject({ name: 'UserNotFoundError' });
     expect(await subsFor(agent.id)).toEqual([]);
   });
@@ -198,13 +198,13 @@ describe('#1581: startChat through a pure App key (resolver level)', () => {
     const subUser = await db.user.create({ data: { githubId: 158190, githubUsername: 'sub-1581', roles: ['READER'] } });
     await db.agentSubscription.create({ data: { userId: subUser.id, agentId: agent.id, activatedAt: new Date() } });
     const ctx = await appKeySessionFor(subUser.id, appY.id);
-    await expect(M.startChat(null, { agentId: agent.id, userId: subUser.id }, ctx))
+    await expect(M.startChat(null, { agentRef: agent.id, userId: subUser.id }, ctx))
       .rejects.toMatchObject({ name: 'UserNotFoundError' });
   });
 
   it('an anonymous session (no user) names nobody, not even an AppMember', async () => {
     const ctx = await appKeySessionFor(null);
-    await expect(M.startChat(null, { agentId: agent.id, userId: endUser.id }, ctx))
+    await expect(M.startChat(null, { agentRef: agent.id, userId: endUser.id }, ctx))
       .rejects.toMatchObject({ name: 'UserNotFoundError' });
     expect(await subsFor(agent.id)).toEqual([]);
   });
@@ -215,14 +215,14 @@ describe('#1581: startChat through a pure App key (resolver level)', () => {
     } as never });
     await db.appAgent.create({ data: { appId: app.id, agentId: otherAgent.id } });
     const ctx = await appKeySessionFor(endUser.id, app.id, otherAgent.id);
-    await expect(M.startChat(null, { agentId: agent.id, userId: endUser.id }, ctx))
+    await expect(M.startChat(null, { agentRef: agent.id, userId: endUser.id }, ctx))
       .rejects.toMatchObject({ name: 'AgentNotFoundError' });
     expect(await subsFor(agent.id)).toEqual([]);
   });
 
   it('an App key whose App does not install the Agent is refused as not found', async () => {
     const ctx = await appKeySessionFor(endUser.id, otherApp.id);
-    await expect(M.startChat(null, { agentId: agent.id, userId: endUser.id }, ctx))
+    await expect(M.startChat(null, { agentRef: agent.id, userId: endUser.id }, ctx))
       .rejects.toMatchObject({ name: 'AgentNotFoundError' });
   });
 });
@@ -255,21 +255,21 @@ describe('#1581: App-minted users through createAppUser + startAgentSession', ()
 
   it('a user THIS App minted chats with userId omitted; the chat and the license are theirs', async () => {
     const { user, sessionId } = await mintedSession(app.id, 'ext-own');
-    const out = await M.startChat(null, { agentId: agent.id }, appKey(app.id, sessionId));
+    const out = await M.startChat(null, { agentRef: agent.id }, appKey(app.id, sessionId));
     expect(out.chatId).toMatch(/^chats:/);
     expect(await subsFor(agent.id)).toEqual([user.id]);
   });
 
   it('a supplied userId must equal the session user', async () => {
     const { sessionId } = await mintedSession(app.id, 'ext-own-2');
-    await expect(M.startChat(null, { agentId: agent.id, userId: endUser.id }, appKey(app.id, sessionId)))
+    await expect(M.startChat(null, { agentRef: agent.id, userId: endUser.id }, appKey(app.id, sessionId)))
       .rejects.toMatchObject({ name: 'UserNotFoundError' });
   });
 
   it('a deleted minted user is refused, even with userId omitted (no anonymous bypass)', async () => {
     const { user, sessionId } = await mintedSession(app.id, 'ext-gone');
     await db.user.update({ where: { id: user.id }, data: { deletedAt: new Date() } });
-    await expect(M.startChat(null, { agentId: agent.id }, appKey(app.id, sessionId)))
+    await expect(M.startChat(null, { agentRef: agent.id }, appKey(app.id, sessionId)))
       .rejects.toMatchObject({ name: 'UserNotFoundError' });
     // startAgentSession may already have licensed the user; startChat wrote nothing.
     expect(await chatNodesIn(sessionId)).toBe(0);
@@ -287,7 +287,7 @@ describe('#1581: App-minted users through createAppUser + startAgentSession', ()
       id: generateId(), appId: app.id, userId: user.id, agentId: agent.id, type: 'CHATBOT', startedAt: new Date(),
     } as never });
     const before = await subsFor(agent.id);
-    await expect(M.startChat(null, { agentId: agent.id }, appKey(app.id, session.id)))
+    await expect(M.startChat(null, { agentRef: agent.id }, appKey(app.id, session.id)))
       .rejects.toMatchObject({ name: 'UserNotFoundError' });
     expect(await subsFor(agent.id)).toEqual(before);
   });
@@ -295,9 +295,11 @@ describe('#1581: App-minted users through createAppUser + startAgentSession', ()
 
 describe('#1581 review: two concurrent first chats for the same user both complete', () => {
   it('neither chat transaction is aborted, and exactly one subscription exists', async () => {
+    // #4046: this subscription-race control reaches the App as an org CONTRIBUTOR.
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgA.id, userId: member.id } }, data: { role: 'CONTRIBUTOR' } });
     const results = await Promise.allSettled([
-      M.startChat(null, { agentId: agent.id }, userCtx(member.id)),
-      M.startChat(null, { agentId: agent.id }, userCtx(member.id)),
+      M.startChat(null, { agentRef: agent.id }, userCtx(member.id)),
+      M.startChat(null, { agentRef: agent.id }, userCtx(member.id)),
     ]);
     expect(results.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled']);
     expect(await subsFor(agent.id)).toEqual([member.id]);
@@ -321,7 +323,7 @@ describe('#1581: canChatWithAgent for a pure App key', () => {
 // exclusively cannot return while the license is about to commit, and after
 // it commits the re-run gate refuses.
 describe('#1585 review: a stale membership in a dead tenant\'s App does not block a chat', () => {
-  it('a PUBLIC Agent stays reachable when the caller is also a member of an App whose org was soft-deleted', async () => {
+  it('#4046: a PUBLIC Agent refuses App-less starts even with stale dead-org membership', async () => {
     await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
     const deadOrg = await db.organization.create({ data: { id: generateId(), name: 'dead', urn: 'dead-1585.example' } });
     const deadApp = await db.app.create({ data: {
@@ -331,9 +333,9 @@ describe('#1585 review: a stale membership in a dead tenant\'s App does not bloc
     await db.appMember.create({ data: { appId: deadApp.id, userId: stranger.id, role: 'member' } });
     // Org deletion deliberately leaves the App row intact.
     await db.organization.update({ where: { id: deadOrg.id }, data: { deletedAt: new Date() } });
-    const out = await M.startChat(null, { agentId: agent.id }, userCtx(stranger.id));
-    expect(out.chatId).toMatch(/^chats:/);
-    expect(await subsFor(agent.id)).toEqual([stranger.id]);
+    await expect(M.startChat(null, { agentRef: agent.id }, userCtx(stranger.id)))
+      .rejects.toMatchObject({ name: 'AgentNotFoundError' });
+    expect(await subsFor(agent.id)).toEqual([]);
   });
 });
 
@@ -354,16 +356,16 @@ describe('#1585 review: the gate and the anchors agree on which Apps carry the r
 
   it("Atilla's case: a dead owner's personal App carries nothing, so its member is refused (no unanchored path)", async () => {
     await deadOwnerApp(stranger.id);
-    await expect(M.startChat(null, { agentId: agent.id }, userCtx(stranger.id)))
+    await expect(M.startChat(null, { agentRef: agent.id }, userCtx(stranger.id)))
       .rejects.toMatchObject({ name: 'AgentNotFoundError' });
     expect(await subsFor(agent.id)).not.toContain(stranger.id);
   });
 
-  it("CONTROL (Chip): a PUBLIC Agent stays reachable for a member of a dead owner's App", async () => {
+  it("#4046: PUBLIC visibility and a dead owner's App do not admit an App-less start", async () => {
     await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
     await deadOwnerApp(stranger.id);
-    const out = await M.startChat(null, { agentId: agent.id }, userCtx(stranger.id));
-    expect(out.chatId).toMatch(/^chats:/);
+    await expect(M.startChat(null, { agentRef: agent.id }, userCtx(stranger.id)))
+      .rejects.toMatchObject({ name: 'AgentNotFoundError' });
   });
 });
 
@@ -383,6 +385,8 @@ describe('#1585 review: a carrier App that appears after anchor selection is fen
   }
 
   it('a chat admitted only through a newly licensed App waits for that App\'s deletion and is refused', async () => {
+    // #4046: begin with lawful direct manager reach, then remove it as the new carrier appears.
+    await db.orgMember.create({ data: { organizationId: orgA.id, userId: stranger.id, role: 'ADMIN' } });
     await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
     const orgX = await db.organization.create({ data: { id: generateId(), name: 'org-x', urn: 'org-x-1585.example' } });
     const appX = await db.app.create({ data: {
@@ -410,10 +414,11 @@ describe('#1585 review: a carrier App that appears after anchor selection is fen
       // PUBLIC, so the chat can now be admitted ONLY through App X.
       await tx.agentOrgGrant.create({ data: { orgId: orgX.id, agentId: agent.id, activatedAt: new Date() } });
       await tx.agent.update({ where: { id: agent.id }, data: { visibility: 'ORGANIZATION' } });
+      await tx.orgMember.delete({ where: { organizationId_userId: { organizationId: orgA.id, userId: stranger.id } } });
     }, { timeout: 20_000 });
     await h1IsHeld;
 
-    const chat = M.startChat(null, { agentId: agent.id }, userCtx(stranger.id));
+    const chat = M.startChat(null, { agentRef: agent.id }, userCtx(stranger.id));
     try {
       await waitForLockWaitersOfType(db, 'advisory', 1); // the chat waits on H1
       releaseH1();
@@ -447,10 +452,11 @@ describe('#1573: startChat waits for an in-flight revocation of its read right',
     return { release, done };
   }
 
-  it('an org READER whose membership is being removed is refused after the removal commits', async () => {
+  it('an org CONTRIBUTOR whose membership is being removed is refused after the removal commits', async () => {
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgA.id, userId: member.id } }, data: { role: 'CONTRIBUTOR' } });
     const holder = await holdRevocation({ kind: 'org', id: orgA.id }, (tx) =>
       tx.orgMember.updateMany({ where: { organizationId: orgA.id, userId: member.id }, data: { deletedAt: new Date() } }));
-    const chat = M.startChat(null, { agentId: agent.id }, userCtx(member.id));
+    const chat = M.startChat(null, { agentRef: agent.id }, userCtx(member.id));
     try {
       await waitForLockWaitersOfType(db, 'advisory', 1);
     } finally {
@@ -464,7 +470,7 @@ describe('#1573: startChat waits for an in-flight revocation of its read right',
   it('an App end user whose App membership is being removed is refused after the removal commits', async () => {
     const holder = await holdRevocation({ kind: 'app', id: app.id }, (tx) =>
       tx.appMember.delete({ where: { appId_userId: { appId: app.id, userId: endUser.id } } }));
-    const chat = M.startChat(null, { agentId: agent.id }, userCtx(endUser.id));
+    const chat = M.startChat(null, { agentRef: agent.id }, userCtx(endUser.id));
     try {
       await waitForLockWaitersOfType(db, 'advisory', 1);
     } finally {

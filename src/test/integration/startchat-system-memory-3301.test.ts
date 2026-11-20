@@ -49,12 +49,14 @@ async function fixture() {
   await serveAgentBootPrompt(db, agent.id, 'Hi.');
   const user = await db.user.create({ data: { id: generateId(), handle: `u-${generateId()}`, githubUsername: `u-${generateId()}` } });
   await createDbAppMember(db, app.id, user.id, 'member');
+  // #4046: the ordinary cold user control chooses this licensed App, never an App-less non-manager route.
+  await db.orgMember.create({ data: { organizationId: orgId, userId: user.id, role: 'READER' } });
   return { agentId: agent.id, appId: app.id, systemId: sys.id, userId: user.id, agentUrn: agent.urn, appUrn: app.urn };
 }
 
 type Ctx = Record<string, unknown>;
 const start = (agentId: string, ctx: Ctx, args: Record<string, unknown> = {}) =>
-  resolvers.Mutation.startChat({}, { agentId, ...args }, { db, roles: ['READER'], ...ctx } as never)
+  resolvers.Mutation.startChat({}, { agentRef: agentId, ...args }, { db, roles: ['READER'], ...ctx } as never)
     .then(() => null as string | null, (e: Error) => e.message);
 
 /** Everything a refused call must leave alone. */

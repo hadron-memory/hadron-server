@@ -15,23 +15,27 @@ export const dbNowPlus = (interval: string): RawSql => raw(`${DB_NOW} + interval
 
 export const TEST_ACTION = 'test.s1a.act';
 
+/** The App slugs seedWorld gives its two Apps (the leaf of each App's urn), so a test derives a grant URN from the fixture rather than hardcoding the literal. */
+export const APP_SLUG = 'app';
+export const APP2_SLUG = 'app2';
+
 export interface World {
-  orgId: string; appId: string; app2Id: string; userId: string; user2Id: string; agentId: string; workerId: string; sessionId: string;
+  orgUrn: string; orgId: string; appId: string; app2Id: string; userId: string; user2Id: string; agentId: string; workerId: string; sessionId: string;
 }
 
 export async function seedWorld(): Promise<World> {
   const tag = generateId().slice(0, 8);
   const org = await db.organization.create({ data: { name: `g-${tag}`, urn: `g-${tag}.test` } });
   const [app, app2] = await Promise.all([
-    db.app.create({ data: { organizationId: org.id, name: 'g-app', urn: `${org.urn}:app` } }),
-    db.app.create({ data: { organizationId: org.id, name: 'g-app2', urn: `${org.urn}:app2` } }),
+    db.app.create({ data: { organizationId: org.id, name: 'g-app', urn: `${org.urn}:${APP_SLUG}` } }),
+    db.app.create({ data: { organizationId: org.id, name: 'g-app2', urn: `${org.urn}:${APP2_SLUG}` } }),
   ]);
   const [u1, u2] = await Promise.all([db.user.create({ data: { handle: `g1-${tag}` } }), db.user.create({ data: { handle: `g2-${tag}` } })]);
   const agent = await db.agent.create({ data: { organizationId: org.id, name: 'g-agent', urn: `${org.urn}:agent` } });
   const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'g-worker', slug: `g-worker-${tag}` } });
   const session = await db.session.create({ data: { id: generateId(), appId: app.id, workerId: worker.id, agentId: agent.id } as never });
   await ensureTestAction();
-  return { orgId: org.id, appId: app.id, app2Id: app2.id, userId: u1.id, user2Id: u2.id, agentId: agent.id, workerId: worker.id, sessionId: session.id };
+  return { orgUrn: org.urn, orgId: org.id, appId: app.id, app2Id: app2.id, userId: u1.id, user2Id: u2.id, agentId: agent.id, workerId: worker.id, sessionId: session.id };
 }
 
 /** A synthetic registered action (the registered-action FK needs a target). Removed by {@link dropTestActions}. */
@@ -93,4 +97,18 @@ export async function insertEvent(w: World, grantId: string, over: Record<string
   const { text, params } = build('grant_events', values);
   await db.$executeRawUnsafe(text, ...params);
   return values.id as string;
+}
+
+/**
+ * #4067 (V86): a PUBLIC knowledge memory in the org with `n` live nodes, readable by every test user, for grants whose node-typed
+ * value must name a node the requester can read. Returns the node ids.
+ */
+export async function seedReadableNodes(orgId: string, n = 1): Promise<string[]> {
+  const tag = generateId().slice(0, 8);
+  const memory = await db.memory.create({ data: { id: generateId(), organizationId: orgId, urn: `pub-${tag}.test:kb`, name: `pub-${tag}`, class: 'knowledge', visibility: 'PUBLIC' } });
+  const ids: string[] = [];
+  for (let i = 0; i < n; i++) {
+    ids.push((await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: `n${i}`, name: `n${i}`, nodeType: 'info', content: 'x' } as never })).id);
+  }
+  return ids;
 }

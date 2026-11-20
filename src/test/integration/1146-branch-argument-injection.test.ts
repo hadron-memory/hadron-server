@@ -46,7 +46,7 @@ async function graphql(query: string, variables: Record<string, unknown>) {
 
 const CREATE = `
   mutation Create($orgId: ID!, $name: String!, $readBranch: String, $writeBranch: String) {
-    createMemory(orgId: $orgId, name: $name, readBranch: $readBranch, writeBranch: $writeBranch) {
+    createMemory(orgRef: $orgId, name: $name, readBranch: $readBranch, writeBranch: $writeBranch) {
       id readBranch writeBranch
     }
   }
@@ -54,7 +54,7 @@ const CREATE = `
 
 const UPDATE = `
   mutation Update($id: ID!, $readBranch: String, $writeBranch: String) {
-    updateMemory(id: $id, readBranch: $readBranch, writeBranch: $writeBranch) {
+    updateMemory(ref: $id, readBranch: $readBranch, writeBranch: $writeBranch) {
       id readBranch writeBranch
     }
   }

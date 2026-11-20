@@ -34,7 +34,7 @@ beforeEach(async () => {
     await db.orgMember.create({ data: { organizationId: org.id, userId: u.id, role: u === admin ? 'ADMIN' : 'CONTRIBUTOR' } });
   }
   agent = await resolvers.Mutation.createAgent(
-    {}, { orgId: org.id, name: 'cl40-agent', visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId: admin.id },
+    {}, { orgRef: org.id, name: 'cl40-agent', visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId: admin.id },
   );
   systemMemoryId = (agent as unknown as { systemMemoryId: string }).systemMemoryId;
   const app = await db.app.create({
@@ -67,7 +67,7 @@ beforeEach(async () => {
 });
 afterEach(() => setResolutionLimits(null));
 
-const start = () => resolvers.Mutation.startChat({}, { agentId: agent.id, scope: 'shared' }, ctxFor(alice.id));
+const start = () => resolvers.Mutation.startChat({}, { agentRef: agent.id, scope: 'shared' }, ctxFor(alice.id));
 
 describe('#40 chat prompts', () => {
   it('control: under the limit the prompt compiles', async () => {
@@ -107,5 +107,35 @@ describe('#40 chat prompts', () => {
   it('control: an aggregate the prompt fits under serves it', async () => {
     setResolutionLimits({ requestMaxBytes: 1024 });
     expect((await start()).systemMessage).toContain('ask  ' + 'x'.repeat(20));
+  });
+});
+
+describe('#4046: transaction-local authorization keeps the original request resolution aggregate', () => {
+  it.each(['private', 'shared'] as const)('two %s starts in one request share the aggregate and the refused start writes no chat', async scope => {
+    setResolutionLimits({ requestMaxBytes: 40 });
+    const request = ctxFor(alice.id);
+    const first = await resolvers.Mutation.startChat({}, { agentRef: agent.id, scope }, request);
+    expect(first.systemMessage).toContain('ask  ' + 'x'.repeat(20));
+    const before = await chatRoots();
+    await expect(resolvers.Mutation.startChat({}, { agentRef: agent.id, scope }, request))
+      .rejects.toMatchObject({ extensions: { code: CONTENT_RESOLUTION_LIMIT_EXCEEDED, limit: 'requestBytes' } });
+    expect(await chatRoots()).toBe(before);
+  });
+
+  it('a start and a send in the same request share the aggregate', async () => {
+    setResolutionLimits({ requestMaxBytes: 40 });
+    const request = ctxFor(alice.id);
+    const chat = await resolvers.Mutation.startChat({}, { agentRef: agent.id, scope: 'shared' }, request);
+    await expect(resolvers.Mutation.sendChatMessage({}, { chatId: chat.chatId, userMessage: 'hi' }, request))
+      .rejects.toMatchObject({ extensions: { code: CONTENT_RESOLUTION_LIMIT_EXCEEDED, limit: 'requestBytes' } });
+  });
+
+  it('different requests retain independent aggregates', async () => {
+    setResolutionLimits({ requestMaxBytes: 40 });
+    const first = await start();
+    const second = await start();
+    expect(first.systemMessage).toContain('ask  ' + 'x'.repeat(20));
+    expect(second.systemMessage).toContain('ask  ' + 'x'.repeat(20));
+    expect(second.chatId).not.toBe(first.chatId);
   });
 });

@@ -15,6 +15,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { formatGraphQLError } from '../formatError.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn(async () => {}) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -35,7 +36,7 @@ async function schedule(forApp = appId) {
   return (await db.agentSchedule.create({ data: { id: generateId(), organizationId: orgId, appId: forApp, name: 'Roster automation', cron: '* * * * *', entryNodeUrn: ENTRY } })).id;
 }
 async function runOf(triggerId: string, forApp = appId): Promise<AppRun> {
-  return db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId: forApp, userId: null, triggerKind: 'SCHEDULE', triggerId, entryNodeUrn: ENTRY, status: 'RUNNING' } });
+  return db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId: forApp, agentId: await testRunAgentId(db, orgId, forApp), userId: null, triggerKind: 'SCHEDULE', triggerId, entryNodeUrn: ENTRY, status: 'RUNNING' } });
 }
 async function grant(triggerId: string, forApp = appId) {
   const out = await wire('mutation($a:ID!,$t:ID!){setAutomationTeamSnapshotGrant(appRef:$a,triggerKind:"SCHEDULE",triggerId:$t){id revokedAt}}',
@@ -58,7 +59,7 @@ async function reads(c: Context) {
   };
 }
 function refused(r: Awaited<ReturnType<typeof reads>>) {
-  expect(r.workers.errors?.[0]?.extensions?.code, 'workers(appRef) must refuse').toBe('FORBIDDEN');
+  expect(r.workers.errors?.[0]?.extensions?.code, 'workers(appRef) must refuse').toBe('APP_NOT_FOUND');
   // A denied worker(ref) collapses to the absent-worker answer (resolveProfileWorkerRef).
   expect(r.worker.errors?.[0]?.extensions?.code, 'worker(ref) must refuse').toBe('WORKER_NOT_FOUND');
   expect(r.held.errors, 'heldWorkers answers a page, never an error').toBeUndefined();
@@ -95,7 +96,7 @@ it('RED3360: an ungranted userless run of the App is refused the roster on every
 it('RED3360: workers(appRef) refuses an ungranted run', async () => {
   const out = await wire(WORKERS, { a: appId }, asRun(await runOf(await schedule())));
   expect(out.data?.workers ?? null, 'roster leaked').toBeNull();
-  expect(out.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
+  expect(out.errors?.[0]?.extensions?.code).toBe('APP_NOT_FOUND');
 });
 
 it('RED3360: worker(ref) refuses an ungranted run like an absent worker', async () => {

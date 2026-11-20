@@ -22,18 +22,18 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../server.js';
 import { __resetReconnectCorrelationForTests } from './server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../middleware/auth.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../test/startServerFixture.js';
 
 let server: Server;
 let baseUrl: string;
 
 beforeAll(async () => {
-  const app = await createServer();
+  const app = await createServerOnCleanDb();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
@@ -41,9 +41,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await new Promise<void>((resolve, reject) => {
-    server.close((err) => (err ? reject(err) : resolve()));
-  });
+  await closeServerIfStarted(server);
 });
 
 beforeEach(async () => {

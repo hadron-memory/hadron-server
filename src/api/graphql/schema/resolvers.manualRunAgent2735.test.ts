@@ -57,7 +57,7 @@ beforeEach(async () => {
   await db.node.create({ data: { id: generateId(), memoryId: taskMem.id, loc: 'tasks:go', isLink: false, name: 'go', nodeType: 'task', isRunnable: true, content: 'Go {{importedNodeUrn}}', tags: [] } });
   taskUrn = composeNodeUrn(taskMem.urn, 'tasks:go');
   entryUrn = emitNodeUrnV2(taskMem.urn, 'tasks:go');
-  targetMemoryId = (await M.createMemory({}, { orgId, name: 'mra-import' }, ctx())).id;
+  targetMemoryId = (await M.createMemory({}, { orgRef: orgId, name: 'mra-import' }, ctx())).id;
   agentA = await agent('alpha');
   agentB = await agent('bravo');
   const other = await db.organization.create({ data: { id: generateId(), name: 'mra-other', urn: 'mra-other' } });

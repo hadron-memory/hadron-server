@@ -81,7 +81,7 @@ beforeEach(async () => {
   outsider = await db.user.create({ data: { id: generateId(), handle: `mf2975-out-${s}`, githubUsername: `mf2975-out-${s}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: owner.id, role: 'OWNER' } });
   await db.orgMember.create({ data: { organizationId: otherOrg.id, userId: outsider.id, role: 'OWNER' } });
-  const created = await (resolvers.Mutation as any).createAgent({}, { orgId: org.id, name: 'Fault Agent' }, gqlCtx(owner.id));
+  const created = await (resolvers.Mutation as any).createAgent({}, { orgRef: org.id, name: 'Fault Agent' }, gqlCtx(owner.id));
   const row = await db.agent.findUniqueOrThrow({ where: { id: created.id } });
   agent = { id: row.id, urn: row.urn };
   await db.node.create({
@@ -158,7 +158,7 @@ describe('#2975 hadron_get_node by action URN: refusals stay byte-identical', ()
   // Gate ruling (a) on #2975 (Xanthos, team chat #63349): an ambiguous AGENT
   // alias keeps today's uniform not-found here; only faults change.
   it('an ambiguous legacy agent address stays the uniform not-found', async () => {
-    const created2 = await (resolvers.Mutation as any).createAgent({}, { orgId: org.id, name: 'Fault Agent Two' }, gqlCtx(owner.id));
+    const created2 = await (resolvers.Mutation as any).createAgent({}, { orgRef: org.id, name: 'Fault Agent Two' }, gqlCtx(owner.id));
     const old = `hrn:agent:${org.urn}:old-agent`;
     await db.agent.updateMany({
       where: { id: { in: [agent.id, created2.id] } },

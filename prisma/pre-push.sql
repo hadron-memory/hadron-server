@@ -83,6 +83,43 @@ BEGIN
   ALTER TABLE workers ALTER COLUMN slug SET NOT NULL;
 END $$;
 
+-- ─── #4524: workers.signature / workers.trailer ─────────────────────────────
+-- Required columns with no default (#1602). Migration-managed databases get them from
+-- 20261019090000_worker_signature; a db-push database with workers in it would abort here, so this block adds each
+-- column nullable, backfills the same template defaults that migration uses (keep the two in step: the test in
+-- 4524-worker-signature-pre-push.test.ts executes both and compares), then sets NOT NULL. Each column is guarded on its
+-- own absence, so a database that has either or both is left alone and a second run changes nothing: a value a person
+-- has since edited is never overwritten. No database default is left behind.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = current_schema() AND table_name = 'workers'
+  ) THEN
+    RETURN;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'workers' AND column_name = 'signature'
+  ) THEN
+    ALTER TABLE workers ADD COLUMN signature TEXT;
+    UPDATE workers SET signature = '— [{{worker.name}}, {{worker.role}}]({{worker.url}}) · {{session.llmModel}}' WHERE signature IS NULL;
+    ALTER TABLE workers ALTER COLUMN signature SET NOT NULL;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'workers' AND column_name = 'trailer'
+  ) THEN
+    ALTER TABLE workers ADD COLUMN trailer TEXT;
+    UPDATE workers SET trailer = 'Worker: {{worker.name}} ({{worker.role}}) <{{worker.url}}>' WHERE trailer IS NULL;
+    ALTER TABLE workers ALTER COLUMN trailer SET NOT NULL;
+  END IF;
+END $$;
+
 -- ─── #1261: OAuth scopes on user keys + authorization codes ────────────────
 -- Migration-managed databases receive the same shape and backfill from
 -- 20260923010000_oauth_user_key_scopes. Local dev/test databases have no
@@ -127,5 +164,11 @@ BEGIN
 END $$;
 
 -- #2025: App delivery settings/high-floor backfill before a non-wiping schema push.
+-- #3695 (R1a): the included file still adds apps.delivery_standby_enabled, which the schema no longer
+-- has. That is deliberate: it is byte-pinned against the historical #2025 migration, and it only acts on
+-- a pre-#2025 push-synced database, where the same run's `db push` drops the column again. Never on an
+-- empty or current database (its guard returns early).
 \ir delivery-settings-pre-push.sql
 \ir ticker-tick-code-pre-push.sql
+\ir app-run-agent-pre-push.sql
+\ir agent-team-event-tx-id-pre-push.sql

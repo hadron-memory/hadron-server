@@ -55,7 +55,7 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { githubId: 8901, githubUsername: 'unp-admin', roles: ['ADMIN'] } });
   member = await db.user.create({ data: { githubId: 8902, githubUsername: 'unp-member', roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  memory = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'unp-mem' }, ctx());
+  memory = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'unp-mem' }, ctx());
 });
 
 describe('updateNodeProperties — merge semantics', () => {
@@ -238,7 +238,7 @@ describe('updateNodeProperties — schema conformance (the one thing updateNodeD
   const schema = { objectTypes: { competitor: { fields: { name: { type: 'text', required: true }, stage: { type: 'text' } } } } };
 
   it('accepts a conforming merge on a schema-governed collection', async () => {
-    await updateMemory({ id: memory.id, schema });
+    await updateMemory({ ref: memory.id, schema });
     const node = await makeNode('c1', { name: 'Letta', stage: 'seed' }, 'competitor');
     // A field-update merge that still satisfies the schema succeeds; `name` (not
     // in the patch) is preserved, so the required field survives the merge.
@@ -247,7 +247,7 @@ describe('updateNodeProperties — schema conformance (the one thing updateNodeD
   });
 
   it('rejects a merge that violates the schema (wrong type on the merged result)', async () => {
-    await updateMemory({ id: memory.id, schema: { objectTypes: { competitor: { fields: { name: { type: 'number', required: true } } } } } });
+    await updateMemory({ ref: memory.id, schema: { objectTypes: { competitor: { fields: { name: { type: 'number', required: true } } } } } });
     const node = await makeNode('c2', { name: 42 }, 'competitor');
     // Merge a non-numeric name → violates the number type on the merged result.
     await expect(call(node.id, { name: 'not-a-number' })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });

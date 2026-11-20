@@ -49,7 +49,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
     { organizationId: org.id, userId: member.id, role: 'ADMIN' },
   ] });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'seq' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'seq' }, as());
   // A legacy chat: a root and ordered messages with no Channel row anywhere.
   await mk('chats:legacy', 'chat', null);
   await mk('chats:legacy:messages', 'record', null);
@@ -247,7 +247,9 @@ describe('SECURITY §10 P2s on 7b2276e1 (Rico)', () => {
 
   it('P3-1: cloneNode of a message with a seq still works (the copiesSeq exemption)', async () => {
     const src = await db.node.findFirstOrThrow({ where: { loc: 'chats:legacy:messages:001', memoryId: memory.id } });
-    const copy = await M.cloneNode(null, { sourceRef: src.id, targetUrn: urn('chats:legacy:messages:copy-of-001') }, as());
+    // Into ANOTHER chat: since #992 a clone landing on a taken (chat, seq) in the SAME chat is refused
+    // CHAT_MESSAGE_SEQ_CONFLICT (the original repro); the exemption still lets the seq travel.
+    const copy = await M.cloneNode(null, { sourceRef: src.id, targetUrn: urn('chats:legacy-copy:messages:copy-of-001') }, as());
     expect([copy.nodeType, copy.seq]).toEqual(['chat-message', 1]);
   });
 });

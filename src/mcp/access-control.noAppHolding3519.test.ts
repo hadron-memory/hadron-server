@@ -19,6 +19,7 @@ import { createTestableMcpServer } from './server.js';
 import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 import type { AuthContext } from '../middleware/auth.js';
 import type { RunToolContext } from '../lib/runner/tools/types.js';
+import { testRunAgentId } from '../test/runAgent.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const Q = resolvers.Query as any;
@@ -59,7 +60,18 @@ async function fixture() {
 
   // H: the REAL startChat, no App installs the Agent.
   const startAs = async (u: { id: string }) => {
-    await resolvers.Mutation.startChat({}, { agentId: agent.id }, { db, userId: u.id, roles: ['READER'] } as never);
+    // #4046: create the real standalone holding under lawful manager reach, then
+    // restore the original membership before any MCP/GraphQL holding-access assertion.
+    const key = { organizationId_userId: { organizationId: orgO.id, userId: u.id } };
+    const prior = await db.orgMember.findUnique({ where: key });
+    await db.orgMember.upsert({ where: key,
+      create: { organizationId: orgO.id, userId: u.id, role: 'ADMIN' }, update: { role: 'ADMIN' } });
+    try {
+      await resolvers.Mutation.startChat({}, { agentRef: agent.id }, { db, userId: u.id, roles: ['READER'] } as never);
+    } finally {
+      if (prior) await db.orgMember.update({ where: key, data: { role: prior.role } });
+      else await db.orgMember.delete({ where: key });
+    }
     const h = await db.memory.findFirstOrThrow({ where: { userMemoryOfAgentId: agent.id, createdBy: u.id } });
     await db.node.create({ data: { memoryId: h.id, loc: LOC, name: `needle3519 ${h.id}`, content: `secret ${h.id}`, nodeType: 'record' } });
     return h;
@@ -93,7 +105,7 @@ async function fixture() {
   const ctx = (u: { id: string }, extra: Partial<AuthContext> = {}): AuthContext =>
     ({ userId: u.id, roles: ['READER'], ...extra }) as AuthContext;
   const run = await db.appRun.create({ data: {
-    id: generateId(), organizationId: elsewhere.id, appId: app.id, userId: creatorOut.id, triggerKind: 'SCHEDULE',
+    id: generateId(), organizationId: elsewhere.id, appId: app.id, agentId: await testRunAgentId(db, elsewhere.id, app.id), userId: creatorOut.id, triggerKind: 'SCHEDULE',
     triggerId: (await db.agentSchedule.create({ data: { id: generateId(), organizationId: elsewhere.id, appId: app.id, name: 'S', cron: '* * * * *', entryNodeUrn: `hrn:node:${hOut.urn}:${LOC}` } })).id,
     entryNodeUrn: `hrn:node:${hOut.urn}:${LOC}`,
   } as never });

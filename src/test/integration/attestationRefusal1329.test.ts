@@ -12,12 +12,12 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import { signJwt } from '../../auth/jwt.js';
 import { mintUserApiKey } from '../../middleware/auth.js';
+import { createServerOnCleanDb } from '../startServerFixture.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const fault = vi.hoisted(() => ({
@@ -105,7 +105,7 @@ const fields = (e: Record<string, unknown> | undefined) => {
 };
 
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -412,7 +412,9 @@ describe('#1329 on MCP, readable means hadron_get_node can load it', () => {
     const concealed = [JSON.stringify(await viaMcp()), JSON.stringify(await viaMcp(claim)), JSON.stringify(await viaMcp({ task: holdingTaskId, revision: 1 }))];
     await repoint(null);
     expect(concealed).toEqual([JSON.stringify(await viaMcp()), JSON.stringify(await viaMcp()), JSON.stringify(await viaMcp())]);
-  });
+    // #4125: six MCP round trips plus a repoint. ~1.2 s on a quiet host, 5.3 s on a loaded CI shard (the 5 s default
+    // failed it once). 30 s declares what it costs; the suite-wide default is left alone on purpose.
+  }, 30_000);
 
   it('an exact claim is admitted on GraphQL and refused on MCP: the disclosed admission difference', async () => {
     const mcp = await viaMcp(claim);

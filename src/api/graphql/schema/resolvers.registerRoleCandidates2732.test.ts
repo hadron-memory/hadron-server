@@ -20,7 +20,7 @@ beforeEach(async () => {
   userId = (await db.user.create({ data: { handle: `batch-${generateId()}` } })).id;
   const org = await db.organization.create({ data: { name: 'Team', urn: `batch-${generateId().toLowerCase()}.example` } });
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
-  const a = await M.createAgent({}, { orgId: org.id, name: 'Team' }, context());
+  const a = await M.createAgent({}, { orgRef: org.id, name: 'Team' }, context());
   teamId = a.id; memoryId = (await db.agent.findUniqueOrThrow({ where: { id: teamId } })).systemMemoryId!;
   appId = (await db.app.create({ data: { organizationId: org.id, name: 'Batch', urn: `${org.urn}:batch` } })).id;
   await db.appAgent.create({ data: { appId, agentId: teamId } });
@@ -33,7 +33,7 @@ async function rosterOrg(label: string) {
   return org;
 }
 async function rosterAgent(orgId: string, name: string) {
-  const a = await M.createAgent({}, { orgId, name }, context());
+  const a = await M.createAgent({}, { orgRef: orgId, name }, context());
   // Memory gate admits the Team root; the private Agent gate alone distinguishes live membership.
   await db.agent.update({ where: { id: a.id }, data: { systemMemoryId: null, extendsAgentId: teamId } });
   const w = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId: a.id, name, slug: name.toLowerCase() } });

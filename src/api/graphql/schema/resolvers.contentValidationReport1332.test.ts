@@ -23,6 +23,7 @@ import {
   VALIDATION_TASK_SELECT,
   type ContentValidationReportInput,
 } from '../../../lib/contentValidationReport.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -55,7 +56,7 @@ const asWorker = <T>(workerId: string, userId: string, fn: () => Promise<T>) =>
 async function mintRun(entryNodeId: string | null, userId: string = leo) {
   return db.appRun.create({
     data: {
-      id: generateId(), organizationId: orgId, appId, userId,
+      id: generateId(), organizationId: orgId, appId, agentId: await testRunAgentId(db, orgId, appId), userId,
       triggerKind: 'MANUAL', entryNodeUrn: 'cv-org:mem:flow', entryNodeId, status: 'RUNNING',
     },
   });
@@ -219,6 +220,20 @@ describe('#1332 state and history', () => {
     const { typeResolvers } = await import('./resolvers.types.js');
     const cv = await (typeResolvers.Node.contentValidation as unknown as (n: unknown, a: unknown, c: Context) => Promise<{ state: string }>)(node, {}, person(mia));
     expect(cv.state).not.toBe('PASS');
+  });
+
+  it('#3762: an older FAIL is history after the current revision already has PASS', async () => {
+    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(leo));
+    const pass = await report(person(mia), { nodeRevision: 2, outcome: 'PASS' });
+    expect(pass.state).toBe('PASS');
+    const late = await report(person(mia), { nodeRevision: 1, outcome: 'FAIL' });
+    expect(late.report).toMatchObject({ nodeRevision: 1, outcome: 'FAIL' });
+    expect(late.state).toBe('PASS');
+    expect(await reportCount()).toBe(2);
+    const cur = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    const { resolveContentValidation } = await import('./resolvers.types.js');
+    expect((await resolveContentValidation(cur, person(mia))).state).toBe('PASS');
+    expect(cur.revSeq).toBe(2);
   });
 
   it('7. end to end: author, then a separate context, then PASS, FAIL and STALE are visible', async () => {

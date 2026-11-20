@@ -1,3 +1,4 @@
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #1755 — the App's own key may read its tasks and events (cor:agt:050:21).
@@ -12,12 +13,13 @@ import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { resolvers, type Context } from './resolvers.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 
 const M = resolvers.Mutation as any;
-const Q = resolvers.Query as any;
+const Q = settledTeamEventQueries(resolvers.Query, db) as any;
 
 async function expectCode(p: Promise<unknown>, code: string) {
   try {
@@ -49,7 +51,7 @@ beforeEach(async () => {
   appY = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Y', urn: `${org.urn}:y` } });
   await db.appMember.create({ data: { appId: appX.id, userId: member.id, role: 'member' } });
   await db.appMember.create({ data: { appId: appY.id, userId: member.id, role: 'member' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, userCtx());
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, userCtx());
   agentId = agent.id;
   anne = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: appX.id, agentId, name: 'Anne', slug: 'anne' }, select: { id: true } });
   keyX = await db.appKey.create({ data: { id: generateId(), appId: appX.id, keyHash: `h-${generateId()}`, keyPreview: 'abcd' }, select: { id: true } });
