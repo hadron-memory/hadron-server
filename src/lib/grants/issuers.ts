@@ -35,7 +35,7 @@ async function requireSecretReadIssuer(ctx: Context, appRef: string, values?: un
   const id = values && typeof values === 'object' && !Array.isArray(values) ? (values as Record<string, unknown>).secret : undefined;
   if (typeof id !== 'string') throw authorizationDenied();
   const { id: appId } = await resolveAppRef(ctx.db, appRef);
-  const issuance = await requireSecretReadClientIssuer(ctx, id);
+  const issuance = await requireSecretReadClientIssuer(ctx, id, (values as Record<string, unknown>)['auto-delete'] === 'delete');
   if (issuance.appId !== appId) throw authorizationDenied();
 }
 

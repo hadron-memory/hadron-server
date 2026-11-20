@@ -1039,3 +1039,6 @@ ALTER TABLE mcp_servers ALTER COLUMN tool_allowlist SET NOT NULL;
 ALTER TABLE rate_limit_manifests ALTER COLUMN key_ids SET NOT NULL;
 ALTER TABLE tickers ALTER COLUMN reasons SET NOT NULL;
 ALTER TABLE user_api_keys ALTER COLUMN oauth_scopes SET NOT NULL;
+
+-- #4001: finite auto-delete terms, after the grants and read-client invariants.
+\ir secret-auto-delete-invariants.sql

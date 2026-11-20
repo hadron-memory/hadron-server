@@ -35,6 +35,7 @@
 import type { Prisma } from '../../generated/prisma/index.js';
 import { isAgentInstalledAndLicensed } from '../appAgent.js';
 import { generateId } from '../id.js';
+import { autoDeleteLimitRefusal } from '../secrets/autoDelete.js';
 import { isModelReadableKind } from '../secrets.js';
 import { grantTermsBytes, GrantTermsError, type GrantHolderKind } from './terms.js';
 
@@ -43,9 +44,11 @@ export type GrantCreateCode =
   | 'GRANT_HOLDER_NOT_ALLOWED'
   | 'GRANT_ACTION_UNKNOWN'
   | 'GRANT_VALUES_INVALID'
-  | 'GRANT_TERMS_INVALID';
+  | 'GRANT_TERMS_INVALID'
+  | 'SECRET_AUTO_DELETE_NEEDS_LIMIT';
 
 const MESSAGES: Record<GrantCreateCode, string> = {
+  SECRET_AUTO_DELETE_NEEDS_LIMIT: 'An auto-delete mark needs a window or a read budget.',
   GRANT_REQUESTER_NOT_WORKER: 'A grant can be requested only from a bound worker session in its own App.',
   GRANT_HOLDER_NOT_ALLOWED: 'A grant can be asked for only for a worker of the App or an agent installed in it (a worker session: only itself or its role agent).',
   GRANT_ACTION_UNKNOWN: 'That action is not registered.',
@@ -220,6 +223,8 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   const startsAt = args.startsAt ?? null;
   const expiresAt = args.expiresAt ?? null;
   const maxUses = args.maxUses ?? null;
+  const limit = autoDeleteLimitRefusal(['secret.reveal', 'secret.use'].includes(args.action) && (values as Record<string, unknown>)['auto-delete'] === 'delete', expiresAt, maxUses);
+  if (limit) throw new GrantCreateRefusal(limit.code);
   try {
     grantTermsBytes({ appId, holder, action: action.name, values, startsAt, expiresAt, maxUses, reason: args.reason });
   } catch (e) {
