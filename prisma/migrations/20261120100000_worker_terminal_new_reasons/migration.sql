@@ -1,13 +1,24 @@
--- #4558 (hadron-cli#2677) — the terminal reason set gains no_screen (Orca gives no rendered screen for the
+-- #4558 (hadron-cli#2677) — WorkerTerminalReason gains no_screen (Orca gives no rendered screen for the
+-- terminal) and multiple_terminals (more than one agent terminal bound to the worker); both ride locked, as
+-- unrecognized does. A pure widening of the reason list in the terminal-shape CHECK: every row the old CHECK
+-- admitted this one admits too, so re-adding the constraint cannot refuse on existing data (this migration
+-- refuses nothing — and names no refusal SQLSTATE: scripts/db/refused-migration-boot.test.ts judges every
+-- migration whose body merely carries that token). The canonical copy test databases and CI read is
+-- prisma/host-operation-invariants.sql; the block below is byte-identical to that file's terminal block, as
+-- src/lib/hostOperations/invariants.test.ts pins.
+
+-- #2771 (proposed cor:agt:070:09) — a worker's stored terminal report holds exactly the server-built keys and nothing
+-- else (no screen text), with its closed value sets, so a write that bypasses the resolver cannot store more.
+-- #4225 — plus the context size: contextTokens (a whole number from 1 to 2147483647) with contextMeasuredAt, or both
+-- null. Both keys may be absent: a row stored before #4225 has neither.
+-- #4247 — plus the outcome of a refused or failed relaunch: repair (RELAUNCH_REFUSED or RELAUNCH_FAILED), repairReason (from
+-- that outcome's own set) and repairAttempt (a whole number from 1), all three or none, and only on a dark report. An
+-- ABSENT key makes its test SQL NULL, which a CHECK passes, so the three-key branch is wrapped in COALESCE(..., false).
+-- #4259 — the failure set gains SETUP_FAILED and VERIFY_FAILED.
+-- #4558 (hadron-cli#2677) — the reason set gains no_screen (Orca gives no rendered screen for the
 -- terminal) and multiple_terminals (more than one agent terminal bound to the worker). Both ride locked, as
 -- unrecognized does: the stored status is unchanged and no terminal-status event follows (that event is not
--- built, cor:agt:050:11 slice S1c). Only the reason list of the worker-terminal shape CHECK widens, admitting
--- every row the old one admitted, so re-adding it cannot refuse on existing data (this migration refuses
--- nothing, and must not name the refusal SQLSTATE in a comment: refused-migration-boot.test.ts scans every
--- migration whose body carries that token and then rejects its bare CASE ... END tokens as transaction enders).
--- Based on 20261115260000_relaunch_failure_codes's definition (the last migration that redefined it); the
--- canonical copy test databases and CI read is prisma/host-operation-invariants.sql.
-
+-- built, cor:agt:050:11 slice S1c). Mirrors migration 20261120100000_worker_terminal_new_reasons.
 ALTER TABLE workers DROP CONSTRAINT IF EXISTS chk_workers_terminal_shape;
 ALTER TABLE workers ADD CONSTRAINT chk_workers_terminal_shape CHECK (
   terminal IS NULL OR (
