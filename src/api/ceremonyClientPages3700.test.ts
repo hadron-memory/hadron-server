@@ -42,7 +42,11 @@ async function load(path: string, answers: Array<{ status?: number; body?: unkno
   const html = await get(path);
   const { document, window } = parseHTML(html);
   const queue = structuredClone(answers); // the script mutates the options it is given
-  const fetchFake = async () => { const a = queue.shift() ?? { status: 500 }; const status = a.status ?? 200; return { ok: status < 300, status, json: async () => a.body }; };
+  const calls: Array<{ path: string; body: unknown }> = [];
+  const fetchFake = async (path: string, init?: { body?: string }) => {
+    calls.push({ path, body: init?.body ? JSON.parse(init.body) : undefined });
+    const a = queue.shift() ?? { status: 500 }; const status = a.status ?? 200; return { ok: status < 300, status, json: async () => a.body };
+  };
   const assertion = { rawId: new Uint8Array([1]), response: { authenticatorData: new Uint8Array([1]), clientDataJSON: new Uint8Array([1]), signature: new Uint8Array([1]) } };
   const script = await get('/passkeys/assets/ceremony.js');
   runInNewContext(script, {
@@ -51,7 +55,7 @@ async function load(path: string, answers: Array<{ status?: number; body?: unkno
     btoa, atob, Uint8Array, JSON, Error, Date, Promise, Array,
   });
   const click = (id: string) => document.getElementById(id)!.dispatchEvent(new window.Event('click'));
-  return { html, document, click };
+  return { html, document, click, calls, unconsumed: () => queue.length };
 }
 
 const options = { account: { handle: 'ana' }, publicKey: { challenge: 'AA', user: { id: 'AA' }, excludeCredentials: [] } };
@@ -73,6 +77,27 @@ describe('R3: the account check follows the button that opened it', () => {
     expect(document.getElementById(id)!.nextElementSibling).toBe(box);
     expect(box.hasAttribute('hidden')).toBe(false);
     expect(document.getElementById('account')!.textContent).toContain('@ana');
+  });
+});
+
+describe('R3 (BLIND P2): a second attempt cannot move the pending account check', () => {
+  it('ignores the other opener while one confirmation is pending, and allows a new attempt after stop', async () => {
+    const { document, click, calls } = await load('/passkeys/register', [
+      { body: { ceremonyId: 'c', challenge: 'AA' } }, { body: options }, { body: {} }]);
+    click('add-first');
+    await flush();
+    const box = document.getElementById('account-check')!;
+    expect(document.getElementById('add-first')!.nextElementSibling).toBe(box);
+    const before = calls.length;
+    click('add-later');
+    await flush();
+    expect(calls.length).toBe(before); // no second request
+    expect(document.getElementById('add-first')!.nextElementSibling).toBe(box);
+    expect(document.getElementById('add-later')!.nextElementSibling).toBeNull();
+    // Stop ends the attempt; a later attempt is allowed again.
+    document.getElementById('stop-account')!.dispatchEvent(new (document.defaultView as any).Event('click'));
+    await flush();
+    expect(document.getElementById('status-first')!.textContent).toContain('Stopped');
   });
 });
 
@@ -99,6 +124,7 @@ describe('R4: one row per passkey', () => {
     expect(first.querySelectorAll('button').length).toBe(1);
     expect(first.textContent).toContain('Active');
     expect(second.textContent).toContain('Removed');
+    expect(second.textContent).toContain('In use');
     const details = box.querySelectorAll('details');
     expect(details.length).toBe(1);
     expect(details[0].hasAttribute('open')).toBe(false);
@@ -118,7 +144,9 @@ describe('R5: the end-window preview', () => {
     expect(text).toContain(`after confirming with ${shown}`);
     if (method !== 'email') expect(text).not.toContain(method);
     expect(text).toMatch(/^[A-Z]/);
-    expect((text.match(/\. [A-Z]/g) ?? []).length + 1).toBe(2);
+    // Two sentences, asserted as two fixed pieces so the host locale's date format cannot change the count.
+    expect(text).toContain('Ending its cooling-off window makes anything it signed count as signed by you, so continue only if you added it.');
+    expect(text).toMatch(/^The passkey "Laptop" was added on .+ after confirming with /);
   });
 });
 
@@ -143,7 +171,20 @@ describe('R6: success states say what happens next, in text', () => {
     document.getElementById('confirm-account')!.dispatchEvent(new (document.defaultView as any).Event('click'));
     await flush();
     expect(document.getElementById('status-first')!.textContent).toContain('Next: continue signing in.');
+    const cont = document.getElementById('continue-signin')!;
+    expect(cont.hasAttribute('hidden')).toBe(false);
+    expect(cont.querySelector('a')!.getAttribute('href')).toBe('/auth/passkey/sign-in');
     expect(document.querySelectorAll('a').length).toBe(anchors);
+  });
+
+  it('adding another passkey (vouched) says nothing more to do', async () => {
+    const { document, click } = await load('/passkeys/register', [
+      { body: { ceremonyId: 'c', challenge: 'AA' } }, { body: options }, { body: { kind: 'later' } }]);
+    click('add-later');
+    await flush();
+    document.getElementById('confirm-account')!.dispatchEvent(new (document.defaultView as any).Event('click'));
+    await flush();
+    expect(document.getElementById('status-later')!.textContent).toBe('Passkey added. We emailed you a notice. Next: nothing more to do here; you can close this page.');
   });
 
   it('ending the window', async () => {
@@ -164,6 +205,19 @@ describe('R6: success states say what happens next, in text', () => {
     (document.querySelector('#passkey-list button') as unknown as { dispatchEvent(e: unknown): void }).dispatchEvent(new (document.defaultView as any).Event('click'));
     await flush();
     expect(document.getElementById('status-revoke')!.textContent).toContain('Next: start again from step 1 to remove another passkey, or close this page.');
+  });
+
+  it('removing sends the clicked row\'s credential and ceremony, and a refused removal keeps the list', async () => {
+    const list = [{ label: 'Laptop', credentialId: 'cred-a', registeredAt: '2026-11-01T10:00:00Z', revokedAt: null, inWindow: false, prover: false, cancel: null }];
+    const { document, click, calls, unconsumed } = await load('/passkeys/revoke', [{ body: { ceremonyId: 'cer-1', challenge: 'AA' } }, { body: { passkeys: list } }, { status: 403 }]);
+    click('revoke-passkey');
+    await flush();
+    (document.querySelector('#passkey-list button') as unknown as { dispatchEvent(e: unknown): void }).dispatchEvent(new (document.defaultView as any).Event('click'));
+    await flush();
+    expect(calls.at(-1)).toEqual({ path: '/passkeys/revoke/finish', body: { ceremonyId: 'cer-1', credentialId: 'cred-a' } });
+    expect(unconsumed()).toBe(0);
+    expect(document.getElementById('status-revoke')!.textContent).toBe('Not removed. Start again.');
+    expect(document.querySelectorAll('#passkey-list li').length).toBe(1);
   });
 });
 

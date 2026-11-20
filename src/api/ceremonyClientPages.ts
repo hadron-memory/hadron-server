@@ -207,7 +207,11 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
       return post('/passkeys/register/finish', { ceremonyId: ceremonyId, response: response, label: label });
     });
   };
+  // #3700 (BLIND P2): one account check serves both openers, so a second attempt while one is pending is ignored.
+  var registering = false;
   var register = function (vouch) {
+    if (registering) return;
+    registering = true;
     var out = vouch ? 'status-later' : 'status-first';
     say('status-first', ''); say('status-later', '');
     var ceremonyId;
@@ -234,7 +238,8 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
         ? 'Passkey added. Anything it signs stays pending for its cooling-off window. We emailed you a link to remove it if this wasn\'t you.'
         : 'Passkey added. We emailed you a notice.') + nextStep);
       if (done.kind === 'first' && main.dataset.next === 'sign-in' && $('continue-signin')) $('continue-signin').hidden = false;
-    }).catch(function (e) { say(out, e && e.message && e.message !== 'refused' ? e.message : 'That didn\'t work. Start again.'); });
+      registering = false;
+    }).catch(function (e) { registering = false; say(out, e && e.message && e.message !== 'refused' ? e.message : 'That didn\'t work. Start again.'); });
   };
   // #1631 PR3: the revocation page.
   var revokeCeremony = null;
@@ -248,7 +253,7 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
     var head = el('div');
     head.appendChild(el('strong', p.label));
     head.appendChild(document.createTextNode(' '));
-    head.appendChild(el('span', removed ? 'Removed' : 'Active', 'badge'));
+    head.appendChild(el('span', removed ? 'Removed' : p.prover ? 'In use' : 'Active', 'badge'));
     li.appendChild(head);
     var when = 'Added ' + fmtDate(p.registeredAt);
     if (p.inWindow && !removed) when += ' (in its cooling-off window)';
@@ -276,11 +281,11 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
   };
   var renderList = function (passkeys) {
     var box = $('passkey-list'); box.textContent = '';
-    var active = passkeys.filter(function (p) { return !p.revokedAt && !p.prover; });
-    var other = passkeys.filter(function (p) { return p.revokedAt || p.prover; });
+    var removable = passkeys.filter(function (p) { return !p.revokedAt && !p.prover; });
+    var removedOrProver = passkeys.filter(function (p) { return p.revokedAt || p.prover; });
     var group = function (items) { var ul = el('ul'); items.forEach(function (p) { ul.appendChild(row(p)); }); return ul; };
-    if (active.length) box.appendChild(group(active));
-    if (other.length) { box.appendChild(el('h3', 'Removed, or used to prove it is you')); box.appendChild(group(other)); }
+    if (removable.length) box.appendChild(group(removable));
+    if (removedOrProver.length) { box.appendChild(el('h3', 'Removed, or used to prove it is you')); box.appendChild(group(removedOrProver)); }
   };
   // The identity-provider confirmation is spent (or was refused) at start: offer the providers again (Uma #2230 P2-1).
   var idpSpent = function () {
