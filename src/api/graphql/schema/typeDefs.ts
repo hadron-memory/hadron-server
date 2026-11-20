@@ -6496,13 +6496,26 @@ export const typeDefs = `#graphql
     selfIssued: Boolean!
   }
 
+  type SecretReadClientsPage {
+    items: [SecretReadClient!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
   type SecretReadClient {
-    clientId: ID!
+    "Full id only for the current issuer or holder; managers otherwise see a prefix."
+    clientId: ID
+    clientPrefix: String!
+    startsAt: DateTime
+    expiresAt: DateTime
+    maxReads: Int
+    readCount: Int!
+    destroyOnEnd: Boolean!
     grantId: ID!
     secretId: ID!
     secretName: String!
     selfIssued: Boolean!
-    "SECRET_DELETED | PROTECTED once the client has ended, else null."
+    "Null while live, else one of SECRET_DELETED, PROTECTED, REVOKED, PENDING, SPENT, EXPIRED, NOT_STARTED, ISSUER_GONE (nothing else ended it) or ENDED. A stored end wins; otherwise the grant's own state, in the order the reveal door answers."
     endReason: String
     createdAt: DateTime!
   }
@@ -6536,6 +6549,8 @@ export const typeDefs = `#graphql
     currentVersion: Int
     "An App secret's kept versions, newest first: numbers, sizes and authorship, never a value. Paged (hrn:node:hadronmemory.com:specs:cor:api:120:04): default 20, cap 200, limit 0 counts only. Empty for org and user secrets."
     versions(limit: Int, offset: Int): SecretVersionsPage!
+    "Client metadata for current issuers and App managers; never a secret value."
+    readClients(activeOnly: Boolean = false, limit: Int, offset: Int): SecretReadClientsPage!
   }
 
   """
