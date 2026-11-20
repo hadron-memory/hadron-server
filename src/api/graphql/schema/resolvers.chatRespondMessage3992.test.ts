@@ -49,7 +49,7 @@ beforeEach(async () => {
   await serveEveryAgent(db);
 });
 
-const startChat = () => resolvers.Mutation.startChat({}, { agentId: agent.id, scope: 'private' }, ctxFor(alice.id));
+const startChat = () => resolvers.Mutation.startChat({}, { agentRef: agent.id, scope: 'private' }, ctxFor(alice.id));
 const respond = (chatId: string, toolResponse: Record<string, unknown>) =>
   resolvers.Mutation.processChatResponse({}, { chatId, toolResponse }, ctxFor(alice.id));
 

@@ -89,7 +89,7 @@ describe('#2557 subscription parent paths', () => {
 
   for (const operation of ['createMemorySubscription', 'updateMemorySubscription'] as const) {
     it.each(principals)(`${operation} checks %s memory access before returning a nested memory`, async principal => {
-      const hidden = await query(principal, `mutation($memory: String!, $org: String!) { ${operation}(memoryRef: $memory, orgRef: $org, role: READER) { id memory { id } } }`, { memory, org: customer });
+      const hidden = await query(principal, `mutation($memory: ID!, $org: ID!) { ${operation}(memoryRef: $memory, orgRef: $org, role: READER) { id memory { id } } }`, { memory, org: customer });
       // A memory reader can still lack mutation authority. Hidden callers must
       // receive the same NOT_FOUND as a missing ref, before org authorization.
       if (principal === 'platformAdmin' && operation === 'updateMemorySubscription') {
@@ -107,7 +107,7 @@ describe('#2557 subscription parent paths', () => {
           expect(hidden.errors?.[0]?.message).toBe('Only public memories can be subscribed to by other organizations');
         }
         if (principal === 'orgReader' || principal === 'outsider') {
-          const missing = await query(principal, `mutation($org: String!) { ${operation}(memoryRef: "vendor-2557:missing", orgRef: $org, role: READER) { memory { id } } }`, { org: customer });
+          const missing = await query(principal, `mutation($org: ID!) { ${operation}(memoryRef: "vendor-2557:missing", orgRef: $org, role: READER) { memory { id } } }`, { org: customer });
           expect(missing.errors?.[0]?.extensions?.code).toBe(hidden.errors?.[0]?.extensions?.code);
         }
         expect(hidden.data).toBeNull();
@@ -118,7 +118,7 @@ describe('#2557 subscription parent paths', () => {
         if (operation === 'createMemorySubscription') {
           await db.memorySubscription.delete({ where: { id: publicSubscription } });
         }
-        const allowed = await query(principal, `mutation($memory: String!, $org: String!) { ${operation}(memoryRef: $memory, orgRef: $org, role: READER) { memory { id } } }`, { memory: publicMemory, org: customer });
+        const allowed = await query(principal, `mutation($memory: ID!, $org: ID!) { ${operation}(memoryRef: $memory, orgRef: $org, role: READER) { memory { id } } }`, { memory: publicMemory, org: customer });
         expect(allowed.errors).toBeUndefined();
         expect(allowed.data?.[operation]).toEqual({ memory: { id: publicMemory } });
       }

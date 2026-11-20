@@ -33,7 +33,7 @@ const row = async (id: string): Promise<Row> => (await db.$queryRaw<Row[]>(Prism
   SELECT id, holder_departed_at IS NOT NULL AS departed, (to_jsonb(g)->>'holder_departed_at') AS stamp, revoked_at IS NOT NULL AS revoked
   FROM grants g WHERE id = ${id}`))[0]!;
 const active = (over: Record<string, unknown>) => insertGrantUnguarded(w, { activated_at: HOUR_AGO, ...over } as never);
-const remove = (userId = w.user2Id) => M.removeOrgMember({}, { orgId: w.orgId, userId }, ctx(admin.id));
+const remove = (userId = w.user2Id) => M.removeOrgMember({}, { orgRef: w.orgId, userRef: userId }, ctx(admin.id));
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -83,7 +83,7 @@ describe('P: the removal ends the person\'s grants in that organization\'s Apps,
     const id = await active({ user_id: w.user2Id });
     await remove();
     const stamp = (await row(id)).stamp;
-    await M.addOrgMember({}, { orgId: w.orgId, userId: w.user2Id, role: 'CONTRIBUTOR' }, ctx(admin.id));
+    await M.addOrgMember({}, { orgRef: w.orgId, userRef: w.user2Id, role: 'CONTRIBUTOR' }, ctx(admin.id));
     expect(await db.orgMember.count({ where: { organizationId: w.orgId, userId: w.user2Id, deletedAt: null } })).toBe(1);
     expect(await row(id)).toMatchObject({ departed: true, stamp });
   });
@@ -91,7 +91,7 @@ describe('P: the removal ends the person\'s grants in that organization\'s Apps,
   it('P7: self-removal by an admin ends the admin\'s own grants the same way', async () => {
     await db.orgMember.update({ where: { organizationId_userId: { organizationId: w.orgId, userId: w.user2Id } }, data: { role: 'ADMIN' } });
     const id = await active({ user_id: w.user2Id });
-    await M.removeOrgMember({}, { orgId: w.orgId, userId: w.user2Id }, ctx(w.user2Id));
+    await M.removeOrgMember({}, { orgRef: w.orgId, userRef: w.user2Id }, ctx(w.user2Id));
     expect((await row(id)).departed).toBe(true);
   });
 
@@ -114,7 +114,7 @@ describe('N: refusals and rollback end nothing', () => {
 
   it('N2: a caller who may not remove ends nothing', async () => {
     const id = await active({ user_id: w.user2Id });
-    await expect(M.removeOrgMember({}, { orgId: w.orgId, userId: w.user2Id }, ctx(w.userId))).rejects.toThrow();
+    await expect(M.removeOrgMember({}, { orgRef: w.orgId, userRef: w.user2Id }, ctx(w.userId))).rejects.toThrow();
     expect((await row(id)).departed).toBe(false);
   });
 
@@ -243,7 +243,7 @@ describe('#4210 interleaves: a move racing an org leave that is in flight', () =
     // exclusive authority anchors and the membership-row lock, so the rejoin can only land AFTER the leave commits
     // (never beside it) and then reactivates the tombstone. A deadlock, an auth regression or a timeout in the racing
     // call answers anything but 'rejoined' and fails here; no sleep — the promise itself is the barrier.
-    const rejoin = M.addOrgMember({}, { orgId: w.orgId, userId: w.user2Id, role: 'CONTRIBUTOR' }, ctx(admin.id))
+    const rejoin = M.addOrgMember({}, { orgRef: w.orgId, userRef: w.user2Id, role: 'CONTRIBUTOR' }, ctx(admin.id))
       .then(() => 'rejoined', (e: Error) => e.message);
     await done();
     const stamp = (await row(g)).stamp; // the leave's first end
@@ -258,7 +258,7 @@ describe('#4210 interleaves: a move racing an org leave that is in flight', () =
     await remove();
     const stamp = (await row(g)).stamp;
     expect(stamp).not.toBeNull();
-    const member = await M.addOrgMember({}, { orgId: w.orgId, userId: w.user2Id, role: 'CONTRIBUTOR' }, ctx(admin.id));
+    const member = await M.addOrgMember({}, { orgRef: w.orgId, userRef: w.user2Id, role: 'CONTRIBUTOR' }, ctx(admin.id));
     expect(member).toMatchObject({ deletedAt: null, role: 'CONTRIBUTOR' }); // the completed rejoin's own returned row
     expect(await db.orgMember.count({ where: { organizationId: w.orgId, userId: w.user2Id, deletedAt: null } })).toBe(1);
     expect(await row(g)).toMatchObject({ departed: true, stamp }); // first end stands (cor:acl:140:03)

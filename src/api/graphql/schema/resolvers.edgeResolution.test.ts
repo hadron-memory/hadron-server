@@ -42,7 +42,7 @@ beforeEach(async () => {
   });
   memory = await resolvers.Mutation.createMemory(
     {},
-    { orgId: org.id, name: 'er-mem' },
+    { orgRef: org.id, name: 'er-mem' },
     ctx(),
   );
   // Seed the edge target. Use the `node` table directly so we don't

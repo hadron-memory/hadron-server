@@ -230,7 +230,7 @@ const incompleteChecks = new WeakSet<AuthContext>();
  * #4471: the API-key paths' hash lookup can be refused by a busy store (P2024, or P2028's
  * "Unable to start" arm) — and #4504: by an unreachable one (P1001, a new connection that
  * cannot establish) — an operational fault, not a verdict on the key. Converted to the typed
- * retryable AUTH_STORE_BUSY at this ONE shared point (cor:agt:040:12), so every surface
+ * retryable AUTH_STORE_BUSY at this ONE shared point (lib/authStoreBusy.ts), so every surface
  * (the Apollo context builder, the plain HTTP routes, MCP's catch) sees the same typed error
  * and no caller reads a store blip as a bad key (cor:aut:010:05 S5: never refused).
  *

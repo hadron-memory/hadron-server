@@ -95,7 +95,7 @@ beforeEach(async () => {
       { organizationId: orgId, userId: readerId, role: 'READER' },
     ],
   });
-  memoryId = (await resolvers.Mutation.createMemory({}, { orgId, name: 'corpus' }, ctx())).id;
+  memoryId = (await resolvers.Mutation.createMemory({}, { orgRef: orgId, name: 'corpus' }, ctx())).id;
 });
 
 const GOVERNED: Array<[string, Record<string, unknown>]> = [
