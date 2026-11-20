@@ -423,7 +423,7 @@ export const appMutations = {
         name,
         urn,
         appType,
-        role,
+        role, // accepted and ignored (#4464)
         description,
         agentTools,
         aiProvider,
@@ -891,7 +891,7 @@ export const appMutations = {
         name,
         urn,
         appType,
-        role,
+        role, // accepted and ignored (#4464)
         description,
         agentTools,
         aiProvider,

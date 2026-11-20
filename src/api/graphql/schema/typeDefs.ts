@@ -1,13 +1,13 @@
 /**
  * #4464 stage 1 — the deprecation notice for the App's own `role`, applied to
  * exactly three places: the `App.role` field and the `role` arg of
- * `createApp` and `updateApp`. ONE edit point by design: the notice period is
- * product policy (Holger's to rule; the issue's builder-proposal comment is on
- * #4464), so his answer changes this constant alone and all three annotations
- * move with it. No date ships in the SDL until the period is ruled.
+ * `createApp` and `updateApp`. ONE edit point by design: all three
+ * annotations move with this constant. The notice period is 30 days from merge
+ * (proposed on #4464 on 2026-11-18, confirmed by the LOCAL review per the
+ * issue's rule), so the removal date is fixed at 2026-12-21.
  */
 export const APP_ROLE_DEPRECATION_NOTICE =
-  'Deprecated (#4464): App.role is a constant READER — the stored value is ignored and the field will be removed; the notice period is ruled in that issue.';
+  'Deprecated (#4464): App.role is a constant READER and the role input is accepted and ignored; the field and the input will be removed no earlier than 2026-12-21.';
 
 /**
  * The #3340 run-refusal sentence shared by the app-key surfaces (appKeys,
