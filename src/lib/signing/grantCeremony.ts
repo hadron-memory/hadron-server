@@ -1,3 +1,5 @@
+import { requireProtectedSecretHolder } from '../secrets/protection.js';
+import { lockSecretRow } from '../secrets/appSecrets.js';
 /**
  * #3649 slice C (hrn:node:hadronmemory.com:specs:cor:acl:140:07, :04, :03; ruling 0257) — the grant signing ceremony's
  * logic, below the HTTP routes (`src/api/grantSigningCeremonyRoutes.ts`). It mirrors node signing's
@@ -385,6 +387,14 @@ async function locate(db: PrismaClient, a: { requestId: string; ceremonyId: stri
 async function lockAndJudge(tx: Prisma.TransactionClient, txCtx: Context, loc: Located, a: {
   requestId: string; ceremonyId: string; browserNonceHash: string; credentialId: Buffer;
 }) {
+  // S4: secret before ceremony/grant/request/credential, matching protection and reveal.
+  const pre=await readGrant(tx,loc.request.grantId,loc.appId);
+  if(pre?.action==='secret.reveal') {
+   const secretId=(pre.action_values as Record<string,unknown>).secret;
+   if(typeof secretId!=='string' || !(await lockSecretRow(tx,secretId))) throw new CeremonyRefused();
+
+  }
+  if(pre?.action==='secret.reveal' && pre.worker_id) await tx.$queryRaw`SELECT id FROM workers WHERE id=${pre.worker_id} FOR SHARE`;
   // The App's owner and org must still be the ones whose anchors we hold.
   const [app] = await tx.$queryRaw<Array<{ organization_id: string | null; owner_user_id: string | null }>>`
     SELECT organization_id, owner_user_id FROM apps WHERE id = ${loc.appId}`;
@@ -401,6 +411,11 @@ async function lockAndJudge(tx: Prisma.TransactionClient, txCtx: Context, loc: L
   if (!(await grantLocks.lockGrantForSigning(tx, loc.request.grantId, loc.appId))) throw new CeremonyRefused();
   const g = await readGrant(tx, loc.request.grantId, loc.appId);
   if (!g) throw new CeremonyRefused();
+  if(g.action==='secret.reveal') {
+   const secretId=(g.action_values as Record<string,unknown>).secret;
+   if(pre?.action!=='secret.reveal' || g.worker_id!==pre.worker_id || typeof secretId!=='string' || secretId!==(pre.action_values as Record<string,unknown>).secret) throw new CeremonyRefused();
+   await requireProtectedSecretHolder(tx,secretId,loc.signerId,g.user_id);
+  }
   const [request] = await tx.$queryRaw<Array<{ id: string; grant_id: string; version: number; terms_hash: string; payload_version: string; state: string; expires_at: Date }>>`
     SELECT id, grant_id, version, terms_hash, payload_version, state, expires_at FROM grant_signing_requests WHERE id = ${a.requestId} FOR UPDATE`;
   if (!request || request.grant_id !== g.id) throw new CeremonyRefused();
@@ -502,11 +517,17 @@ async function ensureSecretReadClient(tx: Prisma.TransactionClient, g: GrantRow,
   const values = (g.action_values ?? {}) as Record<string, unknown>;
   const secretId = typeof values.secret === 'string' ? values.secret : null;
   if (!secretId) return;
-  if (await tx.secretReadClient.findUnique({ where: { grantId: g.id }, select: { id: true } })) return;
+  const existing=await tx.secretReadClient.findUnique({where:{grantId:g.id},select:{id:true,issuedToOwnWorker:true}});
   const secret = await tx.secret.findFirst({ where: { id: secretId, ownerType: 'app', ownerId: g.app_id }, select: { name: true } });
   if (!secret) return;
+  const held=g.worker_id ? await tx.$queryRaw<Array<{held_by_user_id:string|null}>>`SELECT held_by_user_id FROM workers WHERE id=${g.worker_id}` : [];
+  const issuedToOwnWorker=g.worker_id!==null && held[0]?.held_by_user_id===signerId;
+  if(existing){
+   if(existing.issuedToOwnWorker===null) await tx.secretReadClient.update({where:{id:existing.id},data:{issuedToOwnWorker}});
+   return;
+  }
   await tx.secretReadClient.create({
-    data: { id: generateId(), grantId: g.id, appId: g.app_id, secretId, secretName: secret.name, issuerUserId: signerId, selfIssued: g.user_id === signerId },
+    data: { id: generateId(), grantId: g.id, appId: g.app_id, secretId, secretName: secret.name, issuerUserId: signerId, selfIssued: g.user_id === signerId, issuedToOwnWorker },
   });
 }
 

@@ -10193,6 +10193,8 @@ model SecretReadClient {
   issuerUserId String?   @map("issuer_user_id")
   /// The grant's issuer is its person holder. Stored once so S4's protection change and read check can query it.
   selfIssued   Boolean   @map("self_issued")
+  /// R22: worker held by the actual signer at issuance; sealed then. Null for pending and legacy clients.
+  issuedToOwnWorker Boolean? @map("issued_to_own_worker")
   /// SECRET_DELETED | PROTECTED, set together with `endedAt`, once.
   endReason    String?   @map("end_reason")
   endedAt      DateTime? @map("ended_at")

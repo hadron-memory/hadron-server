@@ -1,3 +1,5 @@
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { requireProtectedSecretHolder } from '../../../lib/secrets/protection.js';
 /**
  * General-secret-store GraphQL surface (#677) — the write path backing the
  * v1 CLI (`hadron secret create/ls/rm`) plus the inspectable read surface.
@@ -551,11 +553,12 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
         const userId = txCtx.userId as string;
         const issuance = await requireSecretReadClientIssuer({ ...txCtx, db: tx } as Context, found.id);
         const holder = input.holderKind === 'USER'
-          ? { kind: 'user' as const, id: userId }
+          ? { kind: 'user' as const, id: input.holderRef || userId }
           : { kind: 'worker' as const, id: input.holderRef ?? '' };
-        if (input.holderKind === 'USER' && input.holderRef && input.holderRef !== userId) {
-          throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A person holds a read client only for themself.');
+        if (holder.kind === 'user' && !(await appMember({...txCtx, userId:holder.id, roles:[]} as Context, app.id))) {
+          throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A person holder must participate in this App.');
         }
+        await requireProtectedSecretHolder(tx, found.id, userId, holder.kind === 'user' ? holder.id : null);
         const live = await tx.$queryRaw<Array<{ n: bigint }>>`
           SELECT count(*) AS n FROM secret_read_clients c JOIN grants g ON g.id = c.grant_id
            WHERE c.secret_id = ${found.id} AND c.ended_at IS NULL AND g.revoked_at IS NULL AND g.holder_departed_at IS NULL`;
@@ -572,7 +575,7 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
         await tx.secretReadClient.create({
           data: { id: clientId, grantId, appId: app.id, secretId: found.id, secretName: issuance.secretName, issuerUserId: userId, selfIssued },
         });
-        return { clientId, grantId, secretName: issuance.secretName, selfIssued };
+        return { clientId, grantId, secretName: issuance.secretName, selfIssued, issuedToOwnWorker:null };
       },
     );
   } catch (error) {

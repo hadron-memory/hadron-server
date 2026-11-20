@@ -784,6 +784,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_secret_change_shape",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_secret_owner_type",
       "kind": "check-constraint",
       "file": "secret-versions-invariants.sql",
@@ -1150,6 +1156,12 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_clear_deleted_app_changes",
+      "kind": "function",
+      "file": "post-push.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_comment_meta_immutable",
       "kind": "function",
       "file": "comment-invariants.sql",
@@ -1201,6 +1213,12 @@
       "name": "hadron_end_boot_prompt_revision_approvals",
       "kind": "function",
       "file": "boot-prompt-approval-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_end_deleted_secret_changes",
+      "kind": "function",
+      "file": "post-push.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
@@ -1312,6 +1330,12 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_guard_secret_change_request",
+      "kind": "function",
+      "file": "post-push.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_guard_sign_in",
       "kind": "function",
       "file": "signin-invariants.sql",
@@ -1417,6 +1441,18 @@
       "name": "hadron_safe_timestamptz",
       "kind": "function",
       "file": "post-push.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_secret_change_revision",
+      "kind": "function",
+      "file": "post-push.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_secret_client_own_worker_immutable",
+      "kind": "function",
+      "file": "secret-read-client-own-worker.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
@@ -1822,6 +1858,18 @@
       "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
+      "name": "secret_change_requests_expiry",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "secret_change_requests_secret_open",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
       "name": "sessions_agent_id_idx",
       "kind": "index",
       "file": "post-push.sql",
@@ -1909,6 +1957,12 @@
       "name": "post_limit_episodes",
       "kind": "table",
       "file": "post-limit-invariants.sql",
+      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+    },
+    {
+      "name": "secret_change_requests",
+      "kind": "table",
+      "file": "post-push.sql",
       "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
     },
     {
@@ -2101,6 +2155,12 @@
       "name": "apps.apps_secrets_gone",
       "kind": "trigger",
       "file": "secret-versions-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "apps.secret_changes_app_deleted",
+      "kind": "trigger",
+      "file": "post-push.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
@@ -2488,6 +2548,12 @@
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
+      "name": "secret_change_requests.secret_change_requests_guard",
+      "kind": "trigger",
+      "file": "post-push.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "secret_events.secret_event_append_only",
       "kind": "trigger",
       "file": "secret-versions-invariants.sql",
@@ -2503,6 +2569,12 @@
       "name": "secret_owner_tombstones.secret_owner_tombstone_guard",
       "kind": "trigger",
       "file": "secret-versions-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secret_read_clients.secret_client_own_worker_immutable",
+      "kind": "trigger",
+      "file": "secret-read-client-own-worker.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
@@ -2527,6 +2599,18 @@
       "name": "secret_versions.worker_reference_fence_1162",
       "kind": "trigger",
       "file": "secret-versions-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secrets.secret_change_revision",
+      "kind": "trigger",
+      "file": "post-push.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secrets.secret_changes_secret_deleted",
+      "kind": "trigger",
+      "file": "post-push.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {

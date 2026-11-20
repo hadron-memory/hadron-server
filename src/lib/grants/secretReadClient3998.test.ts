@@ -85,7 +85,7 @@ describe('#3998 secret_read_clients', () => {
     const cols = (await db.$queryRaw<Array<{ column_name: string }>>`
       SELECT column_name FROM information_schema.columns WHERE table_name = 'secret_read_clients'`).map((c) => c.column_name);
     expect(cols.sort()).toEqual(['app_id', 'created_at', 'end_reason', 'ended_at', 'grant_id', 'id', 'issuer_user_id',
-      'secret_id', 'secret_name', 'self_issued']);
+      'secret_id', 'secret_name', 'self_issued', 'issued_to_own_worker'].sort());
   });
 
   it('keeps the migration and post-push in step with the invariants file', () => {

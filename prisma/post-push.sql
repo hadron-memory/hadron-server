@@ -1082,3 +1082,6 @@ ALTER TABLE mcp_servers ALTER COLUMN tool_allowlist SET NOT NULL;
 ALTER TABLE rate_limit_manifests ALTER COLUMN key_ids SET NOT NULL;
 ALTER TABLE tickers ALTER COLUMN reasons SET NOT NULL;
 ALTER TABLE user_api_keys ALTER COLUMN oauth_scopes SET NOT NULL;
+
+-- S4 R22, after S3 client guards.
+\ir secret-read-client-own-worker.sql

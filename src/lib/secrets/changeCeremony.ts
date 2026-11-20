@@ -1,3 +1,4 @@
+import { lockProtectionClients, endProtectionClients } from './protection.js';
 /** #3999; cor:sec:070:02. Separate proof and change assertions; the requester, browser and immutable request bind both. */
 import { createHash, randomBytes } from 'node:crypto';
 import { GraphQLError } from 'graphql';
@@ -95,6 +96,7 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
  const located=await request(db,a.requestId);if(!located)throw refuse();
  const verified=await verify(db,a,secretChangeChallenge(located));
  const result=await authorized(db,located,verified.snapshot.ownerId,async(tx,ctx)=>{
+  const protectionGrants=located.secret_id ? await lockProtectionClients(tx,located.secret_id) : [];
   const [r]=await tx.$queryRaw<ChangeRequest[]>`SELECT * FROM secret_change_requests WHERE id=${located.id} FOR UPDATE`;
   if(!r || r.requester_id!==verified.snapshot.ownerId)throw refuse();
   // Lock the credential before the decision clock, so waiting cannot preserve an expired cooling-off or request judgment.
@@ -141,9 +143,9 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
    await tx.secret.update({where:{id:secret.id},data:{protected:r.operation==='SET_PROTECTED',updatedBy:r.requester_id}});
    await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:r.operation==='SET_PROTECTED'?'PROTECT':'UNPROTECT',actor});
   }
-  // S3 fold: BOTH SET_PROTECTED and STORE with protected_result=true must end person-self-issued clients atomically.
-  // Acquire affected grant/lifecycle locks in S3's canonical order BEFORE request/credential locks above, not at this late marker.
-  // This draft must not freeze until those locks, the transition and activation/read guards fold in after S3 merges.
+  if(secret && (r.operation==='SET_PROTECTED' || (r.operation==='STORE' && r.protected_result===true))) {
+   await endProtectionClients(tx,secret.id,protectionGrants,r.requester_id);
+  }
   await tx.$executeRaw`UPDATE secret_change_requests SET state='completed',ended_at=(${now.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE id=${r.id}`;
   return null;
  });
