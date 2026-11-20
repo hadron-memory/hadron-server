@@ -1354,6 +1354,12 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_guard_secret_auto_delete_limit",
+      "kind": "function",
+      "file": "secret-auto-delete-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_guard_sign_in",
       "kind": "function",
       "file": "signin-invariants.sql",
@@ -2323,6 +2329,12 @@
       "name": "grants.grants_guard",
       "kind": "trigger",
       "file": "grant-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "grants.secret_auto_delete_limit",
+      "kind": "trigger",
+      "file": "secret-auto-delete-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
