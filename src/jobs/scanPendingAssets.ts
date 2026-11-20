@@ -39,6 +39,7 @@ import { scanAssetRow, purgeBlockedObject } from '../lib/asset/scan.js';
 import { decryptStorageKey } from '../lib/asset/encryption.js';
 import { sessionKeyCache } from '../lib/sessionKeyCache.js';
 import { logAssetEvent } from '../lib/asset/audit.js';
+import { isProcessEntry } from './isProcessEntry.js';
 
 /** Recheck cadence for rows the sweep cannot decrypt (encrypted memory,
  * no cached session key). Short and constant: a session key can appear
@@ -190,7 +191,7 @@ export function startAssetScanSweepLoop(
 }
 
 // Allow `tsx src/jobs/scanPendingAssets.ts` to run one sweep directly.
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isProcessEntry(import.meta.url)) {
   runAssetScanSweep()
     .then((o) => {
       // eslint-disable-next-line no-console

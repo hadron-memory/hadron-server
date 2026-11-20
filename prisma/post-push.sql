@@ -976,3 +976,35 @@ CREATE INDEX IF NOT EXISTS "memories_urn_migration_pending_idx" ON "memories" US
 CREATE UNIQUE INDEX IF NOT EXISTS "apps_urn_active_uniq"        ON "apps"     USING btree (urn) WHERE (uninstalled_at IS NULL);
 CREATE INDEX IF NOT EXISTS "assets_staged_uploaded_at_idx"      ON "assets"   USING btree (uploaded_at) WHERE (memory_id IS NULL);
 CREATE INDEX IF NOT EXISTS "assets_uploaded_by_staged_idx"      ON "assets"   USING btree (uploaded_by, uploaded_at DESC) WHERE (memory_id IS NULL);
+
+-- #4336 (#434 Slice C): eleven text[] columns the migrations declare NOT NULL but `db push` renders nullable (Prisma's
+-- schema language models a list field as a plain array, which push emits without NOT NULL). Dev and test databases would
+-- otherwise accept a NULL that production refuses. The migrations stay the authority: no migration or production DDL change,
+-- and no default changes (an empty array stays an empty array, never NULL).
+--
+-- A NULL row can only exist in a long-lived dev database. The six columns below get the same default the migration gives
+-- the column, so the ALTER cannot fail on them (tickers and apps get theirs, not an empty array); no row is dropped and no column skipped.
+UPDATE agents SET surfaces = ARRAY[]::text[] WHERE surfaces IS NULL;
+UPDATE apps SET surfaces = ARRAY['chat']::text[] WHERE surfaces IS NULL;
+UPDATE agent_tasks SET unresolved_finding_ids = ARRAY[]::text[] WHERE unresolved_finding_ids IS NULL;
+UPDATE app_wake_reservations SET absorbed_keys = ARRAY[]::text[] WHERE absorbed_keys IS NULL;
+UPDATE host_registration_workers SET worktrees = ARRAY[]::text[] WHERE worktrees IS NULL;
+UPDATE tickers SET reasons = ARRAY['read-team-channel']::text[] WHERE reasons IS NULL;
+-- home_assistant_instances.op_allowlist and mcp_servers.tool_allowlist are NOT backfilled either: haOpAllowed and mcpToolAllowed read an
+-- empty list as "no restriction" (src/lib/homeAssistant.ts, src/lib/mcpServers.ts), so inventing '{}' for a NULL would silently widen an
+-- allowlist to allow-all. A NULL there makes the ALTER fail loudly instead.
+-- rate_limit_manifests.key_ids has no neutral default (a manifest without keys is not a manifest): a NULL row makes the ALTER fail.
+-- user_api_keys.oauth_scopes and auth_codes.oauth_scopes are deliberately NOT backfilled: cor:aut:010:02 rule 3 reads an empty
+-- set as "unscoped: the user's full authority", so inventing '{}' for a NULL would silently widen a credential. A NULL there
+-- makes the ALTER fail loudly instead, and the row is the developer's to inspect.
+ALTER TABLE agents ALTER COLUMN surfaces SET NOT NULL;
+ALTER TABLE apps ALTER COLUMN surfaces SET NOT NULL;
+ALTER TABLE agent_tasks ALTER COLUMN unresolved_finding_ids SET NOT NULL;
+ALTER TABLE app_wake_reservations ALTER COLUMN absorbed_keys SET NOT NULL;
+ALTER TABLE auth_codes ALTER COLUMN oauth_scopes SET NOT NULL;
+ALTER TABLE home_assistant_instances ALTER COLUMN op_allowlist SET NOT NULL;
+ALTER TABLE host_registration_workers ALTER COLUMN worktrees SET NOT NULL;
+ALTER TABLE mcp_servers ALTER COLUMN tool_allowlist SET NOT NULL;
+ALTER TABLE rate_limit_manifests ALTER COLUMN key_ids SET NOT NULL;
+ALTER TABLE tickers ALTER COLUMN reasons SET NOT NULL;
+ALTER TABLE user_api_keys ALTER COLUMN oauth_scopes SET NOT NULL;
