@@ -48,7 +48,7 @@ describe('#1507 persisted sync outcome', () => {
     expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
     const text = (await storedReport())!;
     const report = JSON.parse(text);
-    expect(report).toMatchObject({ version: 1, outcome: 'unknown' });
+    expect(report).toMatchObject({ version: 1, outcome: 'unknown', invalidSources: { count: 1, items: [{ ordinal: 1, code: 'INVALID_LOC' }], omitted: 0 } });
     expect(report.entries).toEqual(mixed ? [{ kind: 'invalid_include', loc: 'bad', code: 'INVALID_INCLUDE' }] : []);
     expect(text).not.toMatch(/private|untrusted-foreign-id|invalid source/);
     expect(await db.node.count({ where: { memoryId: graph.id, loc: 'good' } })).toBe(1);
@@ -60,6 +60,20 @@ describe('#1507 persisted sync outcome', () => {
     if (mixed) unlinkSync(join(root, 'bad.md'));
     expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
     expect(await storedReport()).toBeNull();
+  });
+
+  it('bounds invalid source diagnostics without disclosing paths or file IDs', async () => {
+    file('good', 'committed');
+    const root = join(graphsPath, 'report-org', 'report-memory');
+    for (let i = 0; i < 53; i++) {
+      writeFileSync(join(root, `private-->${String(i).padStart(2, '0')}.md`), `---\nname: hidden\nid: secret-id-${i}\n---\nignored`);
+    }
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    const text = (await storedReport())!;
+    const report = JSON.parse(text);
+    expect(report).toMatchObject({ version: 1, outcome: 'unknown', entries: [], invalidSources: { count: 53, omitted: 3 } });
+    expect(report.invalidSources.items).toEqual(Array.from({ length: 50 }, (_, i) => ({ ordinal: i + 1, code: 'INVALID_LOC' })));
+    expect(text).not.toMatch(/private|secret-id|hidden|report-org|report-memory/);
   });
 
   it('uses null only after a clean committed sync', async () => {
