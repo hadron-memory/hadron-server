@@ -14,6 +14,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { listAgentProcesses, listAgentTasks, reverifyServed, type ListedNode } from '../../../lib/agentDefinitionLists.js';
+import { listAgentRevisions } from '../../../lib/agentRevisions.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import {
@@ -122,6 +123,18 @@ export async function agentSubscriptionScope(ctx: Context, agentRef: string) {
 }
 
 export const agentQueries = {
+    /**
+     * #4488 — an Agent's revisions, newest first, with the slot facts. The gate is restoreRevision's: through the
+     * read gate (an unreadable Agent answers as absent, #1944), then ADMIN on the Agent.
+     */
+    agentRevisions: async (_: unknown, { agentId }: { agentId: string }, ctx: Context) => {
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      await requireAgentAccess(ctx, agent, 'ADMIN');
+      const sysMemId = (agent as any).systemMemoryId as string | null;
+      if (!sysMemId) throw new Error('Agent has no system memory');
+      return listAgentRevisions(ctx.db, sysMemId, (agent as any).publishedRevisionLoc ?? null);
+    },
+
     /**
      * #1892 (cor:dmo:050:15) — an Agent's tasks across its base chain: every
      * runnable node of its effective system memory and every task a chain
