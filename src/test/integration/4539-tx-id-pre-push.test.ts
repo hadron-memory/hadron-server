@@ -12,7 +12,7 @@
  */
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
@@ -63,6 +63,18 @@ beforeEach(async () => {
   await cleanDb(db);
   const org = await db.organization.create({ data: { id: generateId(), name: 'txp-org', urn: 'txp-org' } });
   appId = (await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'txp-app', urn: 'txp-org:txp-app' } })).id;
+});
+
+/**
+ * #4618: put the shared schema back after EVERY test. The tests drop NOT NULL on tx_id and disable the append-only
+ * trigger, and the worker's database clone is shared with every later file. The backfill needs the trigger off (it
+ * refuses an UPDATE), so: off, NULL keys to 0, trigger back on, then the column back to NOT NULL.
+ */
+afterEach(async () => {
+  await db.$executeRawUnsafe('ALTER TABLE agent_team_events DISABLE TRIGGER agent_team_event_append_only');
+  await db.$executeRawUnsafe(`UPDATE agent_team_events SET tx_id = '0'::xid8 WHERE tx_id IS NULL`);
+  await db.$executeRawUnsafe('ALTER TABLE agent_team_events ENABLE TRIGGER agent_team_event_append_only');
+  await db.$executeRawUnsafe('ALTER TABLE agent_team_events ALTER COLUMN tx_id SET NOT NULL');
 });
 
 describe('#4539 the pre-push counterpart of the tx_id NOT NULL backfill', () => {
