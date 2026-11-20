@@ -12983,7 +12983,8 @@ export const typeDefs = `#graphql
     entry; earlier entries stay, and an answered, approved or signed question can always be answered again on the same node.
     expectedRevision is required: the answer covers exactly the revision the decider saw (Question.revSeq). The identical
     answer again with no reason writes nothing. Refusals: QUESTION_NOT_DECIDER, QUESTION_IMPERSONATION_REFUSED,
-    QUESTION_UNKNOWN_OPTION, QUESTION_WITHDRAWN, QUESTION_INVALID, QUESTION_NOT_FOUND, NODE_WRITE_CONFLICT.
+    QUESTION_UNKNOWN_OPTION, QUESTION_WITHDRAWN, QUESTION_INVALID, QUESTION_NOT_FOUND, QUESTION_FORBIDDEN, QUESTION_LOG_NOT_FOUND,
+    NODE_WRITE_CONFLICT.
     """
     answerQuestion(ref: ID!, input: AnswerQuestionInput!, expectedRevision: Int!): Question!
     """

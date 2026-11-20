@@ -1233,9 +1233,9 @@ export const questionQueries = {
 const ANSWER_VIA = new Set(['portal', 'cli', 'mcp', 'api']);
 
 /** Where the answer was given, as the caller states it (a claim, never authority); the default is the API. */
-function answerVia(via: string | null | undefined): AnswerEntry['via'] {
+function answerVia(via: string | null | undefined, pointer = '/via'): AnswerEntry['via'] {
   const v = (via ?? 'API').toLowerCase();
-  if (!ANSWER_VIA.has(v)) invalidQuestion([{ pointer: '/via', message: 'must be one of PORTAL, CLI, MCP, API' }]);
+  if (!ANSWER_VIA.has(v)) invalidQuestion([{ pointer, message: 'must be one of PORTAL, CLI, MCP, API' }]);
   return v as AnswerEntry['via'];
 }
 
@@ -1263,7 +1263,7 @@ function parseAnswerInput(input: { optionKey?: string | null; text?: string | nu
     text = v.trim().length === 0 ? null : v;
   }
   if (optionKey == null && text == null) invalidQuestion([{ pointer: '/input', message: 'an answer names an option or gives text' }]);
-  return { optionKey, text, reason: shortOrNull(input.reason, '/input/reason'), via: answerVia(input.via) };
+  return { optionKey, text, reason: shortOrNull(input.reason, '/input/reason'), via: answerVia(input.via, '/input/via') };
 }
 
 /**
