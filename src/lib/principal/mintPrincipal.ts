@@ -90,10 +90,13 @@ type PrincipalDb = Pick<PrismaClient, 'principal'>;
 /**
  * The #4400 CHECK that keeps every stored root name lower case (`name = lower(name)`), matched by its quoted name
  * alone: the words around it ("violates check constraint") follow the server's `lc_messages` and are not matched, so
- * a translated message still maps (#4547 BLIND P2). The quotes are optionally backslash-escaped: the engine renders
+ * a translated message still maps (#4547 BLIND P2). The name must be the LAST quoted identifier of the primary
+ * message, where Postgres puts the constraint (`… violates check constraint "<name>"`); a different CHECK on a
+ * relation literally named like this one quotes it earlier, in the relation position, and must not match (#4617).
+ * The quotes are optionally backslash-escaped: the engine renders
  * a model write's Postgres error with inner quotes as `\"`, a raw statement's `meta.message` plainly.
  */
-const NAME_LOWER_CHECK_RE = /\\?"chk_principals_name_lower\\?"/;
+const NAME_LOWER_CHECK_RE = /\\?"chk_principals_name_lower\\?"\s*\.?\s*$/;
 
 /**
  * The PRIMARY fields of the Postgres error inside a model write's message, as the query engine renders it:
