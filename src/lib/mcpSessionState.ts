@@ -24,9 +24,11 @@
  * switch the others' active App mid-conversation — turning a LOST selection
  * into a SILENTLY WRONG one, which is a worse failure than the one being fixed.
  *
- * A client that sends no header is not persisted at all and keeps the pre-#1012
- * in-memory behaviour, so opting out costs nothing and nothing regresses for
- * clients that never opt in.
+ * A client that sends no header is keyed on the OAuth client its credential was
+ * issued to (#2605, `selectionClientKey`): no client application sends the
+ * header, and a connector user cannot add one. A caller with neither (a portal
+ * or legacy user key, a JWT) is not persisted at all and keeps the pre-#1012
+ * in-memory behaviour.
  *
  * ## Storage is not authorization
  *
@@ -68,6 +70,23 @@ export function normalizeClientKey(raw: unknown): string | null {
   const trimmed = raw.trim();
   if (trimmed.length === 0 || trimmed.length > MAX_CLIENT_KEY_LEN) return null;
   return trimmed;
+}
+
+/**
+ * #2605 (ruling 6) — the key a caller's selections are stored under.
+ *
+ * The caller's own `X-Hadron-Client-Id` when it sends a usable one: that is a client INSTANCE and the narrowest key
+ * there is. Otherwise the OAuth client its credential was issued to, as `oauth:<client_id>`: no client application
+ * sends the header, and a connector user cannot add one, so without this their selections were lost on every
+ * reconnect. Otherwise null, which means "do not persist", as before.
+ *
+ * A caller could send a header that spells another client's derived key. It reaches only rows of its OWN user (the
+ * store is keyed on (userId, clientKey) and the userId comes from the credential), so that is a user pointing one of
+ * their clients at another's selection, not a boundary. For the same reason an OAuth client shared by many users
+ * never carries a selection between them.
+ */
+export function selectionClientKey(header: unknown, auth: Pick<AuthContext, 'oauthClientId'>): string | null {
+  return normalizeClientKey(header) ?? (auth.oauthClientId ? normalizeClientKey(`oauth:${auth.oauthClientId}`) : null);
 }
 
 /** A re-authorized selection. Absent fields mean "nothing usable stored". */
