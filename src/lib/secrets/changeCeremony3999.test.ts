@@ -207,9 +207,18 @@ describe('#3999 update protection terms',()=>{
   await complete(id,await proof(id));expect((await db.secret.findUniqueOrThrow({where:{id:secretId}})).protected).toBe(true);
   expect(await db.secretVersion.count({where:{secretId}})).toBe(1);
  });
+ it('shows an explicit protection change when updateSecret stages no new value',async()=>{
+  const id=(await error(resolvers.Mutation.updateSecret({}, {ref:secretId,protected:false},ctx()))).extensions.requestId;
+  const r=await row(id);expect(r.staged_value_encrypted).toBeNull();expect(r.key_version).toBeNull();
+  const p=await proof(id);expect(p.outcome).toBe('change');if(p.outcome==='change')expect(p.summary.change).toContain('turn protection off');
+  await complete(id,p);expect((await db.secret.findUniqueOrThrow({where:{id:secretId}})).protected).toBe(false);expect(await db.secretVersion.count({where:{secretId}})).toBe(1);
+ });
  it('a protected metadata-only edit keeps the current version unchanged',async()=>{
   const id=(await error(resolvers.Mutation.updateSecret({}, {ref:secretId,metadata:{label:'chosen'}},ctx()))).extensions.requestId;
-  await complete(id,await proof(id));expect(await db.secretVersion.count({where:{secretId}})).toBe(1);
+  expect((await row(id)).staged_value_encrypted).toBeNull();
+  expect((await row(id)).key_version).toBeNull();
+  const p=await proof(id);expect(p.outcome).toBe('change');if(p.outcome==='change')expect(p.summary.change).toBe('Update secret metadata');
+  await complete(id,p);expect(await db.secretVersion.count({where:{secretId}})).toBe(1);
   expect((await db.secret.findUniqueOrThrow({where:{id:secretId}})).metadata).toEqual({label:'chosen'});
  });
 });

@@ -1,10 +1,11 @@
 /** #3999 HTTP shell: no link reveals metadata and all routes disappear with signing off. */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as ceremony from '../lib/secrets/changeCeremony.js';
 import express from 'express';
 import { type Server } from 'node:http';
 import { mountSecretChangeCeremonyRoutes } from './secretChangeCeremonyRoutes.js';
 let server:Server|undefined;
-afterEach(async()=>{if(server)await new Promise<void>(r=>server!.close(()=>r()));server=undefined;});
+afterEach(async()=>{vi.restoreAllMocks();vi.unstubAllEnvs();if(server)await new Promise<void>(r=>server!.close(()=>r()));server=undefined;});
 async function host(on:boolean){const app=express();process.env.PASSKEY_SIGNING_ENABLED=String(on);mountSecretChangeCeremonyRoutes(app);
  server=app.listen(0,'127.0.0.1');await new Promise<void>(r=>server!.once('listening',r));return `http://127.0.0.1:${(server.address() as any).port}`;}
 describe('#3999 server ceremony shell',()=>{
@@ -15,6 +16,15 @@ describe('#3999 server ceremony shell',()=>{
  it('has no page or proof route when signing is off',async()=>{
   const base=await host(false);expect((await fetch(base+'/secret-changes/missing')).status).toBe(404);
   expect((await fetch(base+'/secret-changes/missing/proof/challenge',{method:'POST'})).status).toBe(404);
+ });
+ it('returns a correlated internal fault for a database failure without logging staged data',async()=>{
+  vi.stubEnv('SIGNING_CEREMONY_ORIGINS','http://localhost:4000');
+  vi.spyOn(ceremony,'openSecretProof').mockRejectedValue(new Error('database-staged-ciphertext-canary'));
+  const log=vi.spyOn(console,'error').mockImplementation(()=>{});
+  const base=await host(true),r=await fetch(base+'/secret-changes/request/proof/challenge',{method:'POST',headers:{origin:'http://localhost:4000'}});
+  expect(r.status).toBe(500);const out=await r.json();expect(out).toMatchObject({code:'INTERNAL_SERVER_ERROR',error:'Internal server error.',requestId:expect.any(String)});
+  expect(log).toHaveBeenCalledTimes(1);expect(log.mock.calls[0][1]).toMatchObject({requestId:out.requestId,site:'secret-change-ceremony'});
+  expect(JSON.stringify(log.mock.calls)).not.toContain('database-staged-ciphertext-canary');expect(JSON.stringify(out)).not.toContain('canary');
  });
  it('refuses a missing Origin before opening any proof',async()=>{
   const base=await host(true),r=await fetch(base+'/secret-changes/missing/proof/challenge',{method:'POST'});
@@ -47,7 +57,7 @@ describe('#3999 readable approval model (Node VM; no browser)',()=>{
   const dl=elements.review.children[0];const labels=dl.children.filter((_,i)=>i%2===0).map(n=>n.textContent);
   expect(labels).toEqual(['Change','Secret','App','Value size','Request expires']);
   const values=dl.children.filter((_,i)=>i%2===1).map(n=>n.textContent);expect(values[0]).toBe('Turn protection on');
-  expect(values[3]).toContain('1,024');expect(values[4]).not.toBe(summary.expiresAt);expect(values[4]).toContain(Intl.DateTimeFormat().resolvedOptions().timeZone);
+  expect(values[3]).toBe(new Intl.NumberFormat().format(1024)+' bytes');expect(values[4]).not.toBe(summary.expiresAt);expect(values[4]).toContain(Intl.DateTimeFormat().resolvedOptions().timeZone);
   const text=JSON.stringify(dl);expect(text).not.toContain('opaque-user-id');expect(text).not.toContain('SET_PROTECTED');expect(text).not.toContain('never-render-canary');
  });
  it('a dismissed proof prompt is a retryable cancellation, not an unavailable request',async()=>{
