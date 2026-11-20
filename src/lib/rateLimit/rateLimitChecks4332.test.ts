@@ -2,28 +2,48 @@
  * #4332 (part of #434 Slice C): the seven rate-limit CHECK constraints that
  * migration 20261031220000_shared_rate_limiter creates must also exist on the
  * dev and test path (push + post-push.sql), under the migration's own names, so
- * tests run with the limits production enforces. Each case writes one row that
- * only its constraint refuses.
+ * tests run with the limits production enforces. Each refusal case writes one
+ * row that only its constraint refuses; the acceptance cases cover every value
+ * the migration admits at a boundary or in a list.
  */
+import { execFile } from 'node:child_process';
+import { resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 
-const POLICY_OK = { principal_limit: 1, key_limit: 1, ip_limit: 1, window_seconds: 60, retention_seconds: 86400, enforcement_mode: "'LOG_ONLY'" };
+type Policy = {
+  principalLimit: number;
+  keyLimit: number;
+  ipLimit: number;
+  windowSeconds: number;
+  retentionSeconds: number;
+  enforcementMode: string;
+};
 
-async function insertPolicy(over: Partial<Record<keyof typeof POLICY_OK, number | string>>): Promise<unknown> {
-  const row = { ...POLICY_OK, ...over };
-  return db.$executeRawUnsafe(
-    `INSERT INTO rate_limit_policies (field_class, principal_limit, key_limit, ip_limit, window_seconds, retention_seconds, enforcement_mode)
-     VALUES ('pin4332', ${row.principal_limit}, ${row.key_limit}, ${row.ip_limit}, ${row.window_seconds}, ${row.retention_seconds}, ${row.enforcement_mode})`,
-  );
+const POLICY_OK: Policy = { principalLimit: 1, keyLimit: 1, ipLimit: 1, windowSeconds: 60, retentionSeconds: 86400, enforcementMode: 'LOG_ONLY' };
+
+async function insertPolicy(overrides: Partial<Policy>, fieldClass = 'pin4332'): Promise<number> {
+  const p = { ...POLICY_OK, ...overrides };
+  return db.$executeRaw`
+    INSERT INTO rate_limit_policies (field_class, principal_limit, key_limit, ip_limit, window_seconds, retention_seconds, enforcement_mode)
+    VALUES (${fieldClass}, ${p.principalLimit}, ${p.keyLimit}, ${p.ipLimit}, ${p.windowSeconds}, ${p.retentionSeconds}, ${p.enforcementMode})`;
 }
 
-async function refusal(write: () => Promise<unknown>): Promise<string> {
+async function insertBucket(used: number): Promise<number> {
+  return db.$executeRaw`
+    INSERT INTO rate_limit_buckets (id, field_class, dimension, subject, window_start, used, expires_at)
+    VALUES (${`b4332_${used}`}, 'pin4332', 'principal', 's', now(), ${used}, now())`;
+}
+
+/** The refusal's text and SQLSTATE, or `accepted`. Prisma carries the Postgres code in `meta.code` for a raw query. */
+async function refusal(write: () => Promise<unknown>): Promise<{ message: string; sqlstate: string | undefined } | 'accepted'> {
   try {
     await write();
   } catch (e) {
-    return String((e as { message?: string }).message ?? e);
+    const err = e as { message?: string; meta?: { code?: string } };
+    return { message: String(err.message ?? e), sqlstate: err.meta?.code };
   }
   return 'accepted';
 }
@@ -34,25 +54,68 @@ beforeEach(async () => {
 
 describe('#4332 rate-limit CHECKs exist on push + post-push', () => {
   it.each([
-    ['rate_limit_policies_principal_limit_check', { principal_limit: 0 }],
-    ['rate_limit_policies_key_limit_check', { key_limit: 0 }],
-    ['rate_limit_policies_ip_limit_check', { ip_limit: 0 }],
-    ['rate_limit_policies_window_seconds_check', { window_seconds: 61 }],
-    ['rate_limit_policies_retention_seconds_check', { retention_seconds: 86401 }],
-    ['rate_limit_policies_enforcement_mode_check', { enforcement_mode: "'OFF'" }],
-  ] as const)('%s refuses its out-of-range value', async (name, over) => {
-    expect(await refusal(() => insertPolicy(over))).toContain(name);
+    ['rate_limit_policies_principal_limit_check', { principalLimit: 0 }],
+    ['rate_limit_policies_key_limit_check', { keyLimit: 0 }],
+    ['rate_limit_policies_ip_limit_check', { ipLimit: 0 }],
+    ['rate_limit_policies_window_seconds_check', { windowSeconds: 61 }],
+    ['rate_limit_policies_retention_seconds_check', { retentionSeconds: 86401 }],
+    ['rate_limit_policies_enforcement_mode_check', { enforcementMode: 'OFF' }],
+  ] as const)('%s refuses its out-of-range value with 23514', async (name, overrides) => {
+    const r = await refusal(() => insertPolicy(overrides));
+    expect(r).not.toBe('accepted');
+    if (r === 'accepted') return;
+    expect(r.message).toContain(name);
+    expect(r.sqlstate).toBe('23514');
   });
 
-  it('a policy row inside every range is accepted', async () => {
-    expect(await insertPolicy({})).toBe(1);
+  it('rate_limit_buckets_used_check refuses a negative count with 23514', async () => {
+    const r = await refusal(() => insertBucket(-1));
+    expect(r).not.toBe('accepted');
+    if (r === 'accepted') return;
+    expect(r.message).toContain('rate_limit_buckets_used_check');
+    expect(r.sqlstate).toBe('23514');
   });
 
-  it('rate_limit_buckets_used_check refuses a negative count', async () => {
-    const msg = await refusal(() => db.$executeRawUnsafe(
-      `INSERT INTO rate_limit_buckets (id, field_class, dimension, subject, window_start, used, expires_at)
-       VALUES ('b4332', 'pin4332', 'principal', 's', now(), -1, now())`,
-    ));
-    expect(msg).toContain('rate_limit_buckets_used_check');
+  it('every admitted window, both modes and the lowest limits are accepted', async () => {
+    let n = 0;
+    for (const windowSeconds of [60, 900, 3600]) {
+      for (const enforcementMode of ['LOG_ONLY', 'ENFORCING']) {
+        expect(await insertPolicy({ windowSeconds, enforcementMode }, `pin4332_${n++}`)).toBe(1);
+      }
+    }
+  });
+
+  it('a bucket count of 0 is accepted', async () => {
+    expect(await insertBucket(0)).toBe(1);
+  });
+});
+
+/**
+ * #4611 BLIND F1: post-push runs through psql statement by statement, so the file is one transaction. A failure part way
+ * through must leave every constraint as it was, not some replaced and the rest dropped.
+ */
+describe('#4332 prisma/rate-limit-invariants.sql applies atomically', () => {
+  const run = promisify(execFile);
+  const psqlUrl = () => { const u = new URL(process.env.DATABASE_URL!); u.search = ''; return u.toString(); };
+  const apply = () => run('psql', [psqlUrl(), '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-f', resolve('prisma/rate-limit-invariants.sql')], { timeout: 60_000 });
+  const def = async (name: string) =>
+    (await db.$queryRaw<Array<{ d: string }>>`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = ${name}`)[0]?.d ?? null;
+
+  it('a failing ADD late in the file leaves the earlier constraints unreplaced', async () => {
+    try {
+      // An earlier constraint with a different definition, and a row that the LAST constraint refuses.
+      await db.$executeRawUnsafe('ALTER TABLE rate_limit_policies DROP CONSTRAINT rate_limit_policies_principal_limit_check');
+      await db.$executeRawUnsafe('ALTER TABLE rate_limit_policies ADD CONSTRAINT rate_limit_policies_principal_limit_check CHECK (principal_limit > 5)');
+      await db.$executeRawUnsafe('ALTER TABLE rate_limit_buckets DROP CONSTRAINT rate_limit_buckets_used_check');
+      await insertBucket(-1);
+
+      await expect(apply()).rejects.toThrow(/rate_limit_buckets_used_check/);
+      expect(await def('rate_limit_policies_principal_limit_check')).toBe('CHECK ((principal_limit > 5))');
+    } finally {
+      await cleanDb(db);
+      await apply();
+    }
+    expect(await def('rate_limit_policies_principal_limit_check')).toBe('CHECK ((principal_limit > 0))');
+    expect(await def('rate_limit_buckets_used_check')).toBe('CHECK ((used >= 0))');
   });
 });
