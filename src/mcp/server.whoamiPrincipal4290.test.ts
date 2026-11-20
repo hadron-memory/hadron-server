@@ -107,6 +107,16 @@ describe('#4290 — hadron_whoami principal line', () => {
     expect(out).not.toContain('Mixed Org');
   });
 
+  it('a soft-deleted org drops out even while the membership is live (P3)', async () => {
+    const live = await org('liveorg', 'Live Org');
+    const gone = await org('goneorg', 'Gone Org');
+    await db.organization.update({ where: { id: gone.id }, data: { deletedAt: new Date() } });
+    for (const o of [live, gone]) await db.orgMember.create({ data: { id: generateId(), organizationId: o.id, userId: me.id, role: 'READER' } });
+    const out = await createTestableMcpServer(auth(me.id)).callToolText('hadron_whoami', {});
+    expect(out).toContain(live.urn);
+    expect(out).not.toContain(gone.urn);
+  });
+
   it('keeps the principal line with sessions listed and a no-match filter', async () => {
     const sess = await db.session.create({ data: { id: generateId(), userId: me.id, type: 'DEVELOPER' }, select: { id: true } });
     const s = createTestableMcpServer(auth(me.id));
