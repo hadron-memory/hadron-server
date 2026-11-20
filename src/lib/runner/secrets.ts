@@ -124,6 +124,30 @@ export function assertUrlWithinPrefix(rawUrl: string, rawPrefix: string): void {
   }
 }
 
+/**
+ * Enforce both scopes before an S5 credential can leave core: the signed HTTPS
+ * binding and the kind's current metadata prefix (hrn:node:hadronmemory.com:specs:cor:sec:030:01).
+ * The caller must send the returned parsed URL, not reparse a different string.
+ */
+export function assertSecretUseBinding(rawUrl: string, signedPrefix: string, metadataPrefix: string): string {
+  let target: URL;
+  let signed: URL;
+  try {
+    target = new URL(rawUrl);
+    signed = new URL(signedPrefix);
+  } catch {
+    throw new Error('Secret use requires absolute URLs.');
+  }
+  if (target.protocol !== 'https:' || target.username || target.password ||
+      signed.protocol !== 'https:' || signed.username || signed.password || signed.search || signed.hash ||
+      /%(?:2f|5c)/i.test(target.pathname) || /%(?:2f|5c)/i.test(signed.pathname)) {
+    throw new Error('Secret use requires an HTTPS origin and path binding without credentials.');
+  }
+  assertUrlWithinPrefix(target.href, signed.href);
+  assertUrlWithinPrefix(target.href, metadataPrefix);
+  return target.href;
+}
+
 export interface ResolvedWebFetchAuth {
   auth: WebFetchAuth;
   urlPrefix: string;
