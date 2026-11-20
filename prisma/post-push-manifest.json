@@ -970,6 +970,48 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "rate_limit_buckets_used_check",
+      "kind": "check-constraint",
+      "file": "rate-limit-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "rate_limit_policies_enforcement_mode_check",
+      "kind": "check-constraint",
+      "file": "rate-limit-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "rate_limit_policies_ip_limit_check",
+      "kind": "check-constraint",
+      "file": "rate-limit-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "rate_limit_policies_key_limit_check",
+      "kind": "check-constraint",
+      "file": "rate-limit-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "rate_limit_policies_principal_limit_check",
+      "kind": "check-constraint",
+      "file": "rate-limit-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "rate_limit_policies_retention_seconds_check",
+      "kind": "check-constraint",
+      "file": "rate-limit-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "rate_limit_policies_window_seconds_check",
+      "kind": "check-constraint",
+      "file": "rate-limit-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "tickers_tick_code_shape",
       "kind": "check-constraint",
       "file": "ticker-tick-code-invariants.sql",
@@ -1309,6 +1351,12 @@
       "name": "hadron_guard_pending_email_sign_in",
       "kind": "function",
       "file": "pending-email-sign-in-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_secret_auto_delete_limit",
+      "kind": "function",
+      "file": "secret-auto-delete-invariants.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
@@ -2281,6 +2329,12 @@
       "name": "grants.grants_guard",
       "kind": "trigger",
       "file": "grant-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "grants.secret_auto_delete_limit",
+      "kind": "trigger",
+      "file": "secret-auto-delete-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {

@@ -27,6 +27,7 @@ export class GrantSigningRefusal extends Error {
       | 'SIGNING_REQUEST_NOT_REQUESTER'
       | 'SIGNING_REQUEST_ENDED'
       // #3649 slice C: refused at the ceremony's completion (src/lib/signing/grantCeremony.ts).
+      | 'SECRET_AUTO_DELETE_NEEDS_LIMIT'
       | 'SIGNATURE_NOT_VERIFIED'
       | 'SIGNER_NOT_ELIGIBLE'
       | 'PASSKEY_COOLING_OFF',

@@ -39,7 +39,7 @@ describe('#3998 secret.reveal', () => {
 
   it('admits the secret id and a keep or delete mark, and stores the signed bytes the reviewer fixed', async () => {
     await expect(refusal(grant({ secret: secretId, 'auto-delete': 'keep' }))).resolves.toBe('OK');
-    await expect(refusal(grant({ secret: secretId, 'auto-delete': 'delete' }))).resolves.toBe('OK');
+    await expect(refusal(grant({ secret: secretId, 'auto-delete': 'delete' }))).resolves.toBe('SECRET_AUTO_DELETE_NEEDS_LIMIT');
     const bytes = grantTermsBytes({ appId: w.appId, holder: { kind: 'worker', id: w.workerId }, action: 'secret.reveal',
       values: { secret: 'cm3k9x2b00002ab12cd34ef57', 'auto-delete': 'keep' }, startsAt: null, expiresAt: null, maxUses: null, reason: 'r' });
     expect(Buffer.from(bytes as never).toString('utf8')).toContain('{"auto-delete":"keep","secret":"cm3k9x2b00002ab12cd34ef57"}');

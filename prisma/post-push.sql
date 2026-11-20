@@ -853,6 +853,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- 20261120090000_secret_root_check.
 \ir secret-rotation-invariants.sql
 
+-- #4332 (#434 Slice C): the rate-limit CHECKs migration 20261031220000_shared_rate_limiter declares inline (pinned by
+-- src/lib/rateLimit/rateLimitChecks4332.test.ts and scripts/db/migration-replay.ts).
+\ir rate-limit-invariants.sql
+
 -- #1885: an Agent extends at most one base Agent; no cycles, at most 4 in a
 -- chain. One source, shared verbatim with migration 20261014120000_agent_base
 -- (pinned by src/api/graphql/schema/resolvers.agentBase1885.test.ts).
@@ -1035,3 +1039,6 @@ ALTER TABLE mcp_servers ALTER COLUMN tool_allowlist SET NOT NULL;
 ALTER TABLE rate_limit_manifests ALTER COLUMN key_ids SET NOT NULL;
 ALTER TABLE tickers ALTER COLUMN reasons SET NOT NULL;
 ALTER TABLE user_api_keys ALTER COLUMN oauth_scopes SET NOT NULL;
+
+-- #4001: finite auto-delete terms, after the grants and read-client invariants.
+\ir secret-auto-delete-invariants.sql

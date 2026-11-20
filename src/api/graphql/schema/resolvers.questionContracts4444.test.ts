@@ -54,7 +54,7 @@ const CONTRACT: Record<QuestionRefusalCode, true> = {
   QUESTION_LOG_MIRRORED: true, QUESTION_LOG_SYSTEM_MEMORY: true, QUESTION_LOG_ANONYMOUS_MEMORY: true,
   QUESTION_LOG_NOT_APPROVABLE: true, QUESTION_LOG_TOO_LARGE_FOR_FILTER: true, QUESTION_INVALID: true,
   QUESTION_TIER_TOO_LOW: true, QUESTION_DECIDER_NOT_ELIGIBLE: true, QUESTION_RECOMMENDATION_MISSING: true,
-  QUESTION_ASSIGNEE_NOT_DECIDER: true, QUESTION_ANSWER_IMMUTABLE: true, QUESTION_NOT_DECIDER: true, QUESTION_NOT_ASKER: true,
+  QUESTION_ASSIGNEE_NOT_DECIDER: true, QUESTION_ANSWER_IMMUTABLE: true, QUESTION_UNKNOWN_OPTION: true, QUESTION_NOT_ANSWERED: true, QUESTION_NOT_DECIDER: true, QUESTION_NOT_ASKER: true,
   QUESTION_IMPERSONATION_REFUSED: true, QUESTION_WITHDRAWN: true,
   QUESTION_ANSWERED: true, QUESTION_NOT_APPROVABLE: true, QUESTION_CONTAINED: true, QUESTION_FORBIDDEN: true,
 };
@@ -70,9 +70,9 @@ function assertCodeContract(codes: readonly string[]): void {
 }
 
 describe('question refusal-code contract (#4444)', () => {
-  it('names 23 distinct codes, every one QUESTION_*-prefixed and carried verbatim on extensions.code', () => {
-    expect(CODES).toHaveLength(23);
-    expect(new Set(CODES).size).toBe(23);
+  it('names 25 distinct codes, every one QUESTION_*-prefixed and carried verbatim on extensions.code', () => {
+    expect(CODES).toHaveLength(25);
+    expect(new Set(CODES).size).toBe(25);
     expect(() => assertCodeContract(CODES)).not.toThrow();
     for (const code of CODES) expect(questionError(code as QuestionRefusalCode, 'm', { code: 'SHADOW' }).extensions.code).toBe(code);
   });
