@@ -83,6 +83,16 @@ describe('agentRevisions (list)', () => {
     expect(MAX_REVISION_SLOT).toBeGreaterThan(2 ** 31 - 1);
   });
 
+  // #4550 BLIND P2 (Baloo): the list and the delete result use ONE label rule (data.label first, then the node name).
+  it('labels a revision the same way in the list and in the delete result, even when data.label and name differ', async () => {
+    await save(); await save();
+    const row = await db.node.findFirstOrThrow({ where: { memoryId: agentA.systemMemoryId!, loc: 'revisions:rev-1', deletedAt: null } });
+    await db.node.update({ where: { id: row.id }, data: { name: 'renamed-node', data: { ...(row.data as object), label: 'data-label' } } });
+    const listed = (await list()).revisions.find((x: any) => x.revisionLoc === 'revisions:rev-1');
+    expect(listed.label).toBe('data-label');
+    expect((await del('revisions:rev-1')).label).toBe('data-label');
+  });
+
   it('is empty for an Agent with no revisions', async () => {
     const r = await list();
     expect(r.revisions).toEqual([]);

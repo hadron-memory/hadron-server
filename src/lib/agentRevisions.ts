@@ -40,7 +40,7 @@ export async function listAgentRevisions(
 ): Promise<AgentRevisionList> {
   const rows = await db.node.findMany({
     where: { memoryId: systemMemoryId, loc: { startsWith: 'revisions:rev-' } },
-    select: { loc: true, name: true, description: true, createdAt: true, deletedAt: true },
+    select: { loc: true, name: true, description: true, createdAt: true, deletedAt: true, data: true },
   });
   const highest = highestRevisionSlot(rows.map((r) => r.loc));
   const live: Array<AgentRevisionRow & { n: number }> = [];
@@ -51,7 +51,8 @@ export async function listAgentRevisions(
     live.push({
       n,
       revisionLoc: r.loc,
-      label: r.name,
+      // The same rule deleteAgentRevision uses (data.label first, then the name), so one revision reads one label.
+      label: ((r.data as Record<string, unknown> | null)?.label as string | undefined) ?? r.name,
       published: r.loc === publishedRevisionLoc,
       description: r.description ?? null,
       createdAt: r.createdAt,
