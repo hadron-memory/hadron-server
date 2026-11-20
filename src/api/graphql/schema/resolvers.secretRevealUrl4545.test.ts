@@ -94,6 +94,15 @@ describe('#4545 SecretReadClient.revealUrl', () => {
     for (const r of managed.items) expect(r).toHaveProperty('revealUrl', null);
   });
 
+  it('an agent-bound session gets no URL, in either list, even for the person\'s own client', async () => {
+    const asAgent = <T>(p: () => Promise<T>) => runAsActor({ workerId: null, agentId }, p);
+    const mine = await asAgent(() => resolvers.Query.mySecretReadClients({}, {}, ctxOf(ownerId)) as Promise<Row[]>);
+    expect(byId(mine, personClientId)).toHaveProperty('revealUrl', null);
+    const managed = await asAgent(() =>
+      (resolvers as any).Secret.readClients({ id: secretId, ownerType: 'app', ownerId: appId }, {}, ctxOf(ownerId)) as Promise<{ items: Row[] }>);
+    expect(byId(managed.items, personClientId)).toHaveProperty('revealUrl', null);
+  });
+
   it('an App key session gets no URL even if a user rides along', async () => {
     const rows = await list(ctxOf(ownerId, { appKeyId: 'k1', appId: 'a1' } as Partial<Context>));
     for (const r of rows) expect(r).toHaveProperty('revealUrl', null);

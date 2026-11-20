@@ -3,6 +3,7 @@ import { Prisma } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.js';
 import { pageArgs, pageEnvelope } from '../../api/graphql/schema/resolvers.helpers.js';
 import { boundWorkerId } from '../bootPrompt.js';
+import { currentActor } from '../requestActor.js';
 import { isRunPrincipal } from '../auth/runPrincipal.js';
 import { grantLiveSql, GRANT_DB_NOW } from '../grants/live.js';
 import { deadGrantState } from './readClientReveal.js';
@@ -30,7 +31,7 @@ function endStateOf(r: Parameters<typeof deadGrantState>[0] & { live: boolean; n
  * #4545 (hrn:node:hadronmemory.com:specs:cor:sec:060:02): the reveal page link goes only to the person holder, in their own
  * session. The holder test is the reveal page's own (`revealAs`): the grant's userId is that person, with no worker and no agent.
  * `viewerPersonUserId` is the id of the person viewing in their own session; null means there is no eligible person viewer (a
- * worker session). An App key, an impersonation, a run or an erased account never
+ * worker session, or an agent-bound session: the link is for the person in their own session, Rook's §10 note on #4580). An App key, an impersonation, a run or an erased account never
  * gets this far (`currentPerson`), and a viewer who does not hold the client (an issuer, a manager) gets null, so the field
  * reaches nobody who could not already see the row.
  */
@@ -73,13 +74,18 @@ async function list(ctx: Context, args: Args, audience: Prisma.Sql, fullId: Pris
   })), total, skip);
 }
 
+/** The person viewer the reveal link may go to: the caller in their own session, never a worker- or agent-bound one (#4545). */
+function personViewer(userId: string, workerId: string | null): string | null {
+  return workerId || currentActor().agentId ? null : userId;
+}
+
 /** A bound worker sees its own holder rows; an unbound person sees current issuer or person-holder rows. */
 export async function myReadClients(ctx: Context, args: Args) {
   const userId = await currentPerson(ctx);
   if (!userId) return [];
   const workerId = boundWorkerId();
   const audience = workerId ? Prisma.sql`g.worker_id = ${workerId}` : Prisma.sql`((CASE WHEN g.activated_at IS NULL THEN g.requested_by_user_id ELSE g.issuer_user_id END) = ${userId} OR g.user_id = ${userId})`;
-  return (await list(ctx, args, audience, Prisma.sql`true`, workerId ? null : userId)).items;
+  return (await list(ctx, args, audience, Prisma.sql`true`, personViewer(userId, workerId))).items;
 }
 
 /** Secret.readClients: issuers see their rows; managers see all, with full ids only for current issuer/holder. */
@@ -88,5 +94,5 @@ export async function readClientPage(ctx: Context, secretId: string, args: Args,
   if (!userId) return pageEnvelope([], 0, 0);
   const workerId = boundWorkerId();
   const fullId = workerId ? Prisma.sql`(g.worker_id = ${workerId})` : Prisma.sql`((CASE WHEN g.activated_at IS NULL THEN g.requested_by_user_id ELSE g.issuer_user_id END) = ${userId} OR g.user_id = ${userId})`;
-  return list(ctx, args, Prisma.sql`(c.secret_id = ${secretId} AND (${manager} OR (CASE WHEN g.activated_at IS NULL THEN g.requested_by_user_id ELSE g.issuer_user_id END) = ${userId}))`, fullId, workerId ? null : userId);
+  return list(ctx, args, Prisma.sql`(c.secret_id = ${secretId} AND (${manager} OR (CASE WHEN g.activated_at IS NULL THEN g.requested_by_user_id ELSE g.issuer_user_id END) = ${userId}))`, fullId, personViewer(userId, workerId));
 }
