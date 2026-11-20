@@ -1,5 +1,3 @@
-import {realpathSync} from 'node:fs';
-import {fileURLToPath} from 'node:url';
 import { assertSecretFree } from './sampler.mjs';
 // Load driver for #2589. One principal (HADRON_DIAG_KEY from the env, never printed).
 // Workloads: churn (W1/W2: initialize with no Mcp-Session-Id, never closed), closed (C1: DELETE after),
@@ -99,19 +97,14 @@ export function workloadValid(workload, c) {
 }
 
 /**
- * #2627: whether this module is the process's main script. Both sides are resolved to real paths, so a symlinked or
- * spaced path, and --preserve-symlinks-main (which leaves import.meta.url on the link), all compare equal. An import
- * whose argv[1] is missing, nonexistent or another file is not main, and never throws. A CLI run that this check
- * misses prints no record, and run.sh refuses a run without a positive load record (loadRecordOk), so it can never
- * pass silently.
+ * #2627: whether this module is the process's main script: exactly Node's own import.meta.main (Node 22.18+ and 24.2+;
+ * the e2e image is 22.22). It is true for a direct, symlinked, spaced or --preserve-symlinks-main launch, and false for
+ * any import, whatever argv[1] holds (#4608 BLIND F1). There is no argv[1] fallback: argv[1] cannot tell
+ * `node load.mjs` from `node -e 'import("load.mjs")' load.mjs` (#4608 BLIND delta). On a Node without import.meta.main
+ * the CLI does not run, prints no record, and run.sh refuses the run (no positive load record), so it never passes.
  */
-export function isMainModule(metaUrl, argv1, nodeMain = undefined) {
-  // #4608 BLIND F1: Node's own answer when it has one (import.meta.main, Node 22.18+ and 24.2+; the e2e image is 22.22).
-  // argv[1] alone cannot tell `node load.mjs` from `node -e 'import("load.mjs")' load.mjs`, where the trailing argument
-  // also lands in argv[1]. The realpath comparison below is only the fallback for a Node without import.meta.main.
-  if (typeof nodeMain === 'boolean') return nodeMain;
-  if (!argv1) return false;
-  try { return realpathSync(fileURLToPath(metaUrl)) === realpathSync(argv1); } catch { return false; }
+export function isMainModule(nodeMain) {
+  return nodeMain === true;
 }
 
 const COUNT_KEYS = ['ok', 'capRefused', 'other', 'closeOk', 'closeFailed', 'missingSession'];
@@ -132,7 +125,7 @@ export function loadRecordOk(text, workload) {
   return workloadValid(workload, r);
 }
 
-if (isMainModule(import.meta.url, process.argv[1], import.meta.main)) {
+if (isMainModule(import.meta.main)) {
   const [base, workload, durS] = process.argv.slice(2);
   const key = process.env.HADRON_DIAG_KEY;
   if (!key) { console.error('HADRON_DIAG_KEY is required'); process.exit(2); }
