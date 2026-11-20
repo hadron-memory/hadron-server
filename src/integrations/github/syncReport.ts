@@ -41,6 +41,9 @@ export interface SyncReportEntry {
   fromLoc?: string;
   code: SyncReportCode;
 }
+/** Maximum number of invalid-loc source ordinals in a committed report (#2365). */
+export const MAX_INVALID_SOURCE_ITEMS = 50;
+
 export interface SyncReport {
   version: SyncReportVersion;
   outcome: 'partial' | 'failed' | 'unknown';
@@ -63,7 +66,7 @@ export function committedSyncReport(entries: readonly SyncReportEntry[], now = n
   const version: SyncReportVersion = publicEntries.some(e => kindVersion[e.kind] === 2 || codeVersion[e.code] === 2) ? 2 : 1;
   // Ordinals are positions in byte-sorted skipped paths. All items have the same fixed code,
   // so only the count is needed to construct their projection; paths and IDs never enter it.
-  const shown = Math.min(invalidSourceCount, 50);
+  const shown = Math.min(invalidSourceCount, MAX_INVALID_SOURCE_ITEMS);
   const invalidSources = invalidSourceCount === 0 ? {} : { invalidSources: {
     count: invalidSourceCount, items: Array.from({ length: shown }, (_, i) => ({ ordinal: i + 1, code: 'INVALID_LOC' as const })),
     omitted: invalidSourceCount - shown,

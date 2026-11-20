@@ -27,14 +27,14 @@ describe('public sync report wire format', () => {
 });
 
 describe('#2365 invalid source projection', () => {
- it.each([1, 50, 51])('bounds %i skipped sources without paths or IDs', count => {
-  const wire = JSON.parse(committedSyncReport([], now, count)!);
-  const shown = Math.min(count, 50);
-  expect(wire).toEqual({
-   version: 1, outcome: 'unknown', recordedAt: now.toISOString(), entries: [],
-   invalidSources: { count, items: Array.from({ length: shown }, (_, i) => ({ ordinal: i + 1, code: 'INVALID_LOC' })), omitted: count - shown },
+  it.each([1, 50, 51])('bounds %i skipped sources without paths or IDs', count => {
+    const wire = JSON.parse(committedSyncReport([], now, count)!);
+    const shown = Math.min(count, 50);
+    expect(wire).toEqual({
+      version: 1, outcome: 'unknown', recordedAt: now.toISOString(), entries: [],
+      invalidSources: { count, items: Array.from({ length: shown }, (_, i) => ({ ordinal: i + 1, code: 'INVALID_LOC' })), omitted: count - shown },
+    });
   });
- });
 });
 
 describe('#3612 reviewed report versions', () => {
