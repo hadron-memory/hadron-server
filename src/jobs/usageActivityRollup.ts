@@ -31,6 +31,7 @@
 
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { ROLLUP_CELL_MS } from '../lib/usageActivity.js';
+import { isProcessEntry } from './isProcessEntry.js';
 
 const naive = (d: Date): string => d.toISOString().replace('Z', '');
 const floorCell = (ms: number): number => Math.floor(ms / ROLLUP_CELL_MS) * ROLLUP_CELL_MS;
@@ -39,7 +40,7 @@ const floorCell = (ms: number): number => Math.floor(ms / ROLLUP_CELL_MS) * ROLL
 const DEFAULT_CHUNK_CELLS = 96;
 
 export interface BackfillResult {
-  /** True when the state row was already complete, so nothing ran. */
+  /** True only when this run wrote nothing because the backfill was already complete; false once it wrote a chunk. */
   alreadyComplete: boolean;
   chunks: number;
   /** Cell rows written (scope rows, not events). */
@@ -102,7 +103,8 @@ export async function backfillUsageActivityRollup(
   if (done !== 1) {
     const [after] = await db.$queryRaw<Array<{ complete: boolean; same: boolean }>>`
       SELECT complete, applies_from = ${boundary}::timestamp AS same FROM usage_activity_rollup_state WHERE id = 1`;
-    if (after?.complete && after.same) return { alreadyComplete: true, chunks, cellsWritten }; // a concurrent run finished it
+    // A concurrent run finished it. `alreadyComplete` means THIS run wrote nothing (#4348): after a written chunk it is false.
+    if (after?.complete && after.same) return { alreadyComplete: chunks === 0, chunks, cellsWritten };
     throw new Error('usage_activity_rollup_state changed during the backfill; rerun it');
   }
   return { alreadyComplete: false, chunks, cellsWritten };
@@ -163,11 +165,14 @@ export async function findUsageActivityRollupDrift(
   };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isProcessEntry(import.meta.url)) {
   const { db } = await import('../integrations/db/client.js');
   const command = process.argv[2];
   if (command === 'backfill') console.log(JSON.stringify(await backfillUsageActivityRollup(db)));
   else if (command === 'drift') console.log(JSON.stringify(await findUsageActivityRollupDrift(db)));
-  else console.error('usage: tsx src/jobs/usageActivityRollup.ts backfill|drift');
+  else {
+    console.error('usage: tsx src/jobs/usageActivityRollup.ts backfill|drift');
+    process.exitCode = 1;
+  }
   await db.$disconnect();
 }

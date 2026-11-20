@@ -36,18 +36,5 @@ added con:start_failing_episodes.start_failing_episodes_event_id_key 6582efad72d
 changed idx:memories_user_id_idx 5ede391a85cd1b48
 changed idx:users_external_app_id_external_id_key 11f2d98b55a8792c
 
-# text[] NOT NULL on the migration path, nullable after db push: #4336
-changed col:agent_tasks.unresolved_finding_ids a403e0e69edf2252
-changed col:agents.surfaces a403e0e69edf2252
-changed col:app_wake_reservations.absorbed_keys a403e0e69edf2252
-changed col:apps.surfaces 8b695ecc1f409ae8
-changed col:auth_codes.oauth_scopes a29c04d6aa74a8ad
-changed col:home_assistant_instances.op_allowlist a403e0e69edf2252
-changed col:host_registration_workers.worktrees a403e0e69edf2252
-changed col:mcp_servers.tool_allowlist a403e0e69edf2252
-changed col:rate_limit_manifests.key_ids a29c04d6aa74a8ad
-changed col:tickers.reasons f0dfbd4c819236c1
-changed col:user_api_keys.oauth_scopes a29c04d6aa74a8ad
-
 # IDENTITY on the migration path, a sequence default after db push: #4337
 changed col:stamp_signing_keys.id e941ccdc021b547f
