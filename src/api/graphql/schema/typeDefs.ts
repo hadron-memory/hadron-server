@@ -10030,7 +10030,7 @@ export const typeDefs = `#graphql
       limit: Int = 20
       offset: Int = 0
     ): QuestionPage!
-    "#4428 — the question logs in the memories of this App the caller can read, or in this memory. Give exactly one of appRef and memoryRef; an unknown or unreadable one is an empty list."
+    "#4428 — the question logs in the memories of this App the caller can read, or in this memory. Give exactly one of appRef and memoryRef; an unknown or unreadable one is an empty list. At most 200 logs: more refuses with QUESTION_LOG_TOO_LARGE_FOR_FILTER, never truncates."
     questionLogs(appRef: ID, memoryRef: ID): [QuestionLog!]!
     "#1641 — re-render a question from its payload and check it against its content, data and approval: the findings behind its state."
     verifyQuestion(ref: ID!): QuestionVerification!

@@ -102,9 +102,11 @@ type Tx = Prisma.TransactionClient;
 
 /** A list above this many questions refuses rather than paging on unevaluated hints (§5.5). */
 export const QUESTION_LIST_EVALUATION_CAP = 5_000;
+/** #4428 — `questionLogs` answers at most this many logs and refuses beyond it rather than truncating. */
+export const QUESTION_LOGS_LIST_CAP = 200;
 
 /** The cap a list reads, behind one property so a test can lower it (#4428 acceptance 10). */
-export const questionListBounds = { cap: (): number => QUESTION_LIST_EVALUATION_CAP };
+export const questionListBounds = { cap: (): number => QUESTION_LIST_EVALUATION_CAP, logCap: (): number => QUESTION_LOGS_LIST_CAP };
 
 /** Reasons ride in `NodeRevision.revLabel`, so they share its cap. */
 const REASON_MAX = 500;
@@ -974,7 +976,6 @@ export const questionMutations = {
  */
 async function attachEffectiveAssignees(db: Pick<Tx, 'worker' | '$queryRaw'>, views: QuestionView[]): Promise<QuestionView[]> {
   const explicit = [...new Set(views.map((v) => v.shown?.assignee).filter((id): id is string => !!id))];
-  const links = explicit.length > 0 ? await mergeLinksFrom(db, explicit) : [];
   const workerIds = [...new Set(views.filter((v) => !v.shown?.assignee).map((v) => v.shown?.askedBy.workerId).filter((id): id is string => !!id))];
   const holders = new Map<string, string | null>();
   if (workerIds.length > 0) {
@@ -982,9 +983,12 @@ async function attachEffectiveAssignees(db: Pick<Tx, 'worker' | '$queryRaw'>, vi
       holders.set(w.id, w.heldByUserId);
     }
   }
+  // One merge lookup covers explicit assignees AND worker holders, so display and filter agree after a merge.
+  const mergeIds = [...new Set([...explicit, ...[...holders.values()].filter((id): id is string => !!id)])];
+  const links = mergeIds.length > 0 ? await mergeLinksFrom(db, mergeIds) : [];
   for (const v of views) {
     const stored = v.shown?.assignee;
-    v.effectiveAssigneeId = stored ? survivorOf(links, stored) : (v.shown?.askedBy.workerId ? holders.get(v.shown.askedBy.workerId) ?? null : null);
+    v.effectiveAssigneeId = stored ? survivorOf(links, stored) : (() => { const h = v.shown?.askedBy.workerId ? holders.get(v.shown.askedBy.workerId) ?? null : null; return h ? survivorOf(links, h) : null; })();
   }
   return views;
 }
@@ -1232,8 +1236,12 @@ export const questionQueries = {
       where: { role: QUESTION_LOG_ROLE, deletedAt: null, memoryId: { in: memoryIds } },
       select: LOG_ROW_SELECT,
       orderBy: [{ memoryId: 'asc' }, { loc: 'asc' }],
-      take: 200,
+      take: questionListBounds.logCap() + 1,
     });
+    const logCap = questionListBounds.logCap();
+    if (rows.length > logCap) {
+      throw questionError('QUESTION_LOG_TOO_LARGE_FOR_FILTER', `More than ${logCap} question logs; narrow the scope.`, { cap: logCap });
+    }
     return rows.map((row) => ({ row, data: parseLogData(row) }));
   },
 

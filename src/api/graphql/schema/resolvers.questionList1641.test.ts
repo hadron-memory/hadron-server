@@ -134,6 +134,17 @@ describe('#4428 acceptance 1: the effective assignee', () => {
     expect(D.effectiveAssigneeId(await read(byWorker.row.id), {}, as())).toBeNull();
   });
 
+  it('follows an account merge for the asking worker\'s holder too, so display and filter agree', async () => {
+    await createDbWorkerAttribution(db, writer.id, 'worker-merge');
+    await db.worker.update({ where: { id: 'worker-merge' }, data: { heldByUserId: holger.id } });
+    const q = await asWorker('worker-merge', () => ask(logA.row.id));
+    await M.mergeUsers(null, { input: { source: holger.id, target: kay.id, consentProof: await approvedMergeProof(db, holger.id, kay.id, platformAdmin.id) } },
+      as(platformAdmin.id, { roles: ['ADMIN'] }));
+    const view = await Q.question(null, { ref: q.row.id }, as(reader.id));
+    expect(D.effectiveAssigneeId(view, {}, as())).toBe(kay.id);
+    expect(ids(await Q.questions(null, { appRef: app.id, assigneeId: kay.id }, as(reader.id)))).toEqual([q.row.id]);
+  });
+
   it('shows the assignee by name and handle, and follows an account merge for the explicit assignee', async () => {
     const q = await ask(logA.row.id, simple({ assignee: holger.id }));
     const view = await Q.question(null, { ref: q.row.id }, as(reader.id));
@@ -337,9 +348,21 @@ describe('#4428 acceptance 11: questionLogs', () => {
     expect(await Q.questionLogs(null, { appRef: generateId() }, as(reader.id))).toEqual([]);
     expect((await Q.questionLogs(null, { memoryRef: memA.id }, as(reader.id))).map((v: any) => v.row.id)).toEqual([logA.row.id]);
     expect(await Q.questionLogs(null, { memoryRef: memB.id }, as(reader.id))).toEqual([]);
+    expect(await Q.questionLogs(null, { memoryRef: generateId() }, as(reader.id))).toEqual([]);
     expect(await Q.questionLogs(null, { memoryRef: memA.id }, as(outsider.id))).toEqual([]);
     expect(await codeOf(Q.questionLogs(null, { appRef: app.id, memoryRef: memA.id }, as(reader.id)))).toBe('BAD_USER_INPUT');
     expect(await codeOf(Q.questionLogs(null, {}, as(reader.id)))).toBe('BAD_USER_INPUT');
     void orgId; void org2Id;
+  });
+
+  it('refuses past the log cap instead of truncating, and answers at exactly the cap', async () => {
+    const spy = vi.spyOn(questionsModule.questionListBounds, 'logCap').mockReturnValue(2);
+    try {
+      expect((await Q.questionLogs(null, { appRef: app.id }, as(admin.id))).length).toBe(2);
+      const memC = await resolvers.Mutation.createMemory(null, { orgId, name: 'team-c' }, as());
+      await M.createQuestionLog(null, { memoryRef: memC.id, loc: 'questions', defaultDeciders: [admin.id] }, as());
+      await db.memory.update({ where: { id: memC.id }, data: { appId: app.id, class: 'app', visibility: null } });
+      expect(await codeOf(Q.questionLogs(null, { appRef: app.id }, as(admin.id)))).toBe('QUESTION_LOG_TOO_LARGE_FOR_FILTER');
+    } finally { spy.mockRestore(); }
   });
 });
