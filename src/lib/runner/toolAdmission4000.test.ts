@@ -12,5 +12,8 @@ describe('secret use admission (#4000)', () => {
     gate.mockClear();
     await admitAndExecuteTool(def, { url: 'https://example.test/' }, { toolCtx: ctx, onToolCall: gate });
     expect(gate).toHaveBeenCalledExactlyOnceWith('tool.web_request', 1);
+    gate.mockClear();
+    await admitAndExecuteTool(def, { secretClientId: null }, { toolCtx: ctx, onToolCall: gate });
+    expect(gate).toHaveBeenCalledExactlyOnceWith('tool.web_request', 0);
   });
 });

@@ -1,3 +1,5 @@
+import { evaluatePolicyChain } from '@hadron-memory/access-control';
+import { parseRunPolicySnapshot } from '../runner/runPolicy.js';
 /**
  * #3998 (S3 of #3991, cor:sec:060): the reveal. A WORKER bound to the request, holding an active, live `secret.reveal` grant,
  * reads the value of the App secret the grant names, once per call, spending exactly one use. A person holder reveals only on the
@@ -165,7 +167,8 @@ export async function prepareSecretUse(
   const { chargeGrantUse } = await import('../grants/live.js');
   const { lockAppManagerMemberships } = await import('../auth/appManagement.js');
   const run = tool.run;
-  if (tool.principal.clientId !== `run:${run.id}` || tool.principal.appId !== run.appId) throw notFound();
+  const agentId = run.agentId;
+  if (!agentId || tool.principal.clientId !== `run:${run.id}` || tool.principal.appId !== run.appId) throw notFound();
   const pre = await tool.db.secretReadClient.findUnique({ where: { id: clientId }, select: { appId: true, secretId: true, grantId: true } });
   if (!pre || pre.appId !== run.appId) throw notFound();
   const app = await tool.db.app.findUnique({ where: { id: run.appId }, select: { id: true, organizationId: true, ownerUserId: true } });
@@ -173,18 +176,24 @@ export async function prepareSecretUse(
   if (!app || app.organizationId !== run.organizationId || !initial?.issuerUserId) throw notFound();
   const issuer = initial.issuerUserId;
   const anchors = [{ kind: 'app' as const, id: app.id }, { kind: 'org' as const, id: run.organizationId },
-    { kind: 'user' as const, id: issuer }, { kind: 'agent' as const, id: run.agentId }];
+    { kind: 'user' as const, id: issuer }, { kind: 'agent' as const, id: agentId }];
   const internal = { ...tool.principal, userId: undefined, db: tool.db } as Context;
   return withAuthorizedTx(internal, anchors, async () => undefined, async (tx, txCtx) => {
-    const actual = await tx.appRun.findUnique({ where: { id: run.id }, select: { appId: true, agentId: true, organizationId: true, status: true } });
-    if (!actual || actual.appId !== run.appId || actual.agentId !== run.agentId || actual.organizationId !== run.organizationId || actual.status !== 'RUNNING') throw notFound();
+    // Lock the run before judging its policy and budget; cancellation and budget edits serialize with this spend.
+    await tx.$queryRaw`SELECT id FROM app_runs WHERE id = ${run.id} FOR UPDATE`;
+    const actual = await tx.appRun.findUnique({ where: { id: run.id }, select: { appId: true, agentId: true, organizationId: true, status: true, policy: true, budgetTokens: true, budgetActions: true } });
+    if (!actual || actual.appId !== run.appId || actual.agentId !== agentId || actual.organizationId !== run.organizationId || actual.status !== 'RUNNING') throw notFound();
+    if (!evaluatePolicyChain('tool.web_request', parseRunPolicySnapshot(actual.policy)) ||
+        (actual.budgetTokens !== null && actual.budgetTokens <= 0) || actual.budgetActions === null || actual.budgetActions < 1) {
+      throw refusal('TOOL_DENIED', 'The web request is denied.');
+    }
     if (!(await lockSecretRow(tx, pre.secretId))) throw notFound();
     const client = await tx.secretReadClient.findUnique({ where: { id: clientId } });
     if (!client || client.endedAt || client.appId !== run.appId || client.grantId !== pre.grantId || client.secretId !== pre.secretId) throw notFound();
     const locked = await readGrantForUpdate(tx, client.grantId);
     const grant = await tx.grant.findUnique({ where: { id: client.grantId } });
     if (!locked || !grant || grant.action !== 'secret.use' || grant.appId !== run.appId || grant.issuerUserId !== issuer ||
-        !((grant.granteeAppId === run.appId && grant.agentId === null) || (grant.agentId === run.agentId && grant.granteeAppId === null)) ||
+        !((grant.granteeAppId === run.appId && grant.agentId === null) || (grant.agentId === agentId && grant.granteeAppId === null)) ||
         grant.userId !== null || grant.workerId !== null) throw notFound();
     if (!locked.live) {
       const [{ now }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS now`;
@@ -210,6 +219,9 @@ export async function prepareSecretUse(
         AND (app_id = ${run.appId} OR app_id IS NULL) AND (expires_at IS NULL OR expires_at > (clock_timestamp() AT TIME ZONE 'UTC'))
       ORDER BY (app_id IS NOT NULL) DESC, created_at ASC, id ASC FOR UPDATE SKIP LOCKED LIMIT 1`;
     if (!tickets[0]) throw refusal('ACTION_TICKET_REQUIRED', 'No secret-use ticket is available.');
+    const budget = await tx.appRun.updateMany({ where: { id: run.id, status: 'RUNNING', budgetActions: { gte: 1 } },
+      data: { budgetActions: { decrement: 1 }, actionsSpent: { increment: 1 } } });
+    if (budget.count !== 1) throw refusal('TOOL_DENIED', 'The web request is denied.');
     await tx.actionTicket.update({ where: { id: tickets[0].id }, data: { consumedAt: new Date(), consumedByRunId: run.id } });
     if (!(await chargeGrantUse(tx, grant.id, run.appId))) throw refusal('SECRET_READ_CLIENT_SPENT', 'This read client is not live.');
     await tx.grantEvent.create({ data: { grantId: grant.id, appId: run.appId, action: 'USE', runId: run.id } });

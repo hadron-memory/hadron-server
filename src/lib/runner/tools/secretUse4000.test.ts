@@ -61,6 +61,14 @@ describe('S5 secret.use public run-tool boundary', () => {
     expect(ctx.log).not.toHaveBeenCalled();
   });
 
+  it('does not downgrade malformed client references to an anonymous request', async () => {
+    for (const secretClientId of [null, '', 17]) {
+      await expect(webRequest.execute(ctx, { method: 'GET', url: 'https://api.example.test/v1/orders', secretClientId }))
+        .rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
+    }
+    expect(httpRequest).not.toHaveBeenCalled();
+  });
+
   it('keeps ordinary requests without a client on the existing anonymous path', async () => {
     await expect(webRequest.execute(ctx, {
       method: 'GET', url: 'https://api.example.test/v1/orders',
