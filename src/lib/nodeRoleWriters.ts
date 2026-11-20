@@ -12,11 +12,26 @@
  *               user (who can always write). Decided by the ONE shared
  *               memory-management predicate, `requireMemoryManageAccess` at
  *               `ADMIN`, so this can never drift from the rest of the platform.
- *   - `OWNER` — NOT BUILT (#1333). It is never read as `ALL`: a write that
- *               touches a role whose rule says OWNER is refused for everyone
- *               with a typed `ROLE_WRITERS_UNSUPPORTED`, because degrading an
- *               unsupported mode to `ALL` would silently drop a restriction
- *               its author asked for (#1331 acceptance).
+ *   - `OWNER` — the owning party (#1333, Holger's option A, Vera's ruling): the
+ *               people the shared memory-management predicate admits at
+ *               `CONTRIBUTOR` (the owning user, the owning org's contributors,
+ *               ADMINs and OWNERs, a platform admin), plus an App PUBLISHED by
+ *               the owner ({@link publisherAppQualifies}). A share grantee, a
+ *               subscriber org and a vendor App merely installed by the owner
+ *               are not in it. It is never read as `ALL`: the level is a real
+ *               check, and a level this server does not know (anything but
+ *               ALL/ADMIN/OWNER) still refuses with `ROLE_WRITERS_UNSUPPORTED`.
+ *
+ * ## Identity (D23)
+ *
+ * A headless principal (a run, or an App key with no user) is the App service
+ * identity: only the App's qualification counts, never the triggering user's own
+ * standing, so an owner who triggers a vendor-only App does not lift it, and an
+ * external driver of an owner-published App writes at owner level through it (the
+ * recorded, accepted consequence). A principal with a user and no run client
+ * (interactive person-through-App, still an open ruling) keeps the person's own
+ * standing; the App adds nothing. Memory write access stays necessary and is
+ * checked by every door before this runs.
  *
  * ## Before AND after
  *
@@ -49,6 +64,7 @@ import type { Prisma } from '../generated/prisma/index.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { isAuthorizationDenial, requireMemoryManageAccess } from '../api/graphql/schema/resolvers.helpers.js';
 import { lockMemoryConfigShared, resolveNodeRoleRule } from './governedRole.js';
+import { isRunPrincipal } from './auth/runPrincipal.js';
 
 /** The caller facts the audience needs; a GraphQL `Context` and an MCP `AuthContext` both carry them. */
 export type RoleWriterPrincipal = Pick<Context,
@@ -78,22 +94,30 @@ export function ruleKeysOf(role: string | null | undefined, runnable: boolean | 
 
 /** The writer level needs an audience the caller is not in. */
 export class RoleWriterLevelError extends GraphQLError {
-  constructor(public readonly role: string, public readonly ruleRole: string, side: 'before' | 'after') {
+  constructor(
+    public readonly role: string,
+    public readonly ruleRole: string,
+    side: 'before' | 'after',
+    public readonly level: 'ADMIN' | 'OWNER' = 'ADMIN',
+  ) {
     super(
-      `Writing a node ${side === 'before' ? 'that carries' : 'that would carry'} the role "${role}" needs the ADMIN writer level` +
-        `${ruleRole === role ? '' : ` (rule "${ruleRole}")`}: the owning organization's ADMINs, its OWNERs, or the owning user. ` +
+      `Writing a node ${side === 'before' ? 'that carries' : 'that would carry'} the role "${role}" needs the ${level} writer level` +
+        `${ruleRole === role ? '' : ` (rule "${ruleRole}")`}: ` +
+        (level === 'ADMIN'
+          ? "the owning organization's ADMINs, its OWNERs, or the owning user. "
+          : 'the owning party (its people, or an App published by it). ') +
         'Memory write access alone is not enough for this role.',
-      { extensions: { code: 'ROLE_WRITER_LEVEL_REQUIRED', role, ruleRole, level: 'ADMIN', side } },
+      { extensions: { code: 'ROLE_WRITER_LEVEL_REQUIRED', role, ruleRole, level, side } },
     );
     this.name = 'RoleWriterLevelError';
   }
 }
 
-/** The rule names a writer level this server does not build yet (OWNER, #1333). */
+/** The rule names a writer level this server does not know. Never read as ALL. */
 export class RoleWritersUnsupportedError extends GraphQLError {
   constructor(public readonly role: string, public readonly ruleRole: string, public readonly level: string) {
     super(
-      `The rule for role "${ruleRole}" sets the writer level ${level}, which this server does not support yet (#1333), ` +
+      `The rule for role "${ruleRole}" sets the writer level ${level}, which this server does not support, ` +
         'so no write of that role is allowed. It is never read as ALL.',
       { extensions: { code: 'ROLE_WRITERS_UNSUPPORTED', role, ruleRole, level } },
     );
@@ -101,7 +125,7 @@ export class RoleWritersUnsupportedError extends GraphQLError {
   }
 }
 
-type Db = Pick<Prisma.TransactionClient, 'memory' | 'memoryConfig'>;
+type Db = Pick<Prisma.TransactionClient, 'memory' | 'memoryConfig' | 'app'>;
 
 /** Whether the principal is in the ADMIN writer audience of `memoryId`, judged on `db`. */
 async function inAdminAudience(db: Db, principal: RoleWriterPrincipal, memoryId: string): Promise<boolean> {
@@ -112,6 +136,47 @@ async function inAdminAudience(db: Db, principal: RoleWriterPrincipal, memoryId:
   if (!memory) return false;
   try {
     await requireMemoryManageAccess({ ...principal, db } as unknown as Context, memory, 'ADMIN');
+    return true;
+  } catch (e) {
+    if (isAuthorizationDenial(e)) return false;
+    throw e;
+  }
+}
+
+/**
+ * Whether an App is published by the memory's owner (#1333, option A, no schema change): the App is active
+ * (`uninstalledAt IS NULL`) and has an `AppAgent` row whose Agent is not deleted and belongs to the memory's owning
+ * org, or, for a user-owned memory, to the owning user. Any one match qualifies (a multi-Agent App is an accepted
+ * consequence). Read on live rows at write time, never cached on a session. An App the owner merely installed carries
+ * a vendor Agent, so it does not match.
+ */
+export async function publisherAppQualifies(
+  db: Pick<Prisma.TransactionClient, 'app'>,
+  appId: string,
+  owner: { organizationId: string | null; ownerUserId: string | null },
+): Promise<boolean> {
+  const agent: Prisma.AgentWhereInput | null = owner.organizationId
+    ? { organizationId: owner.organizationId }
+    : owner.ownerUserId ? { ownerUserId: owner.ownerUserId } : null;
+  if (!agent) return false;
+  return (await db.app.count({
+    where: { id: appId, uninstalledAt: null, appAgents: { some: { agent: { deletedAt: null, ...agent } } } },
+  })) > 0;
+}
+
+/** Whether the principal is in the OWNER writer audience of `memoryId` (see the file header), judged on `db`. */
+async function inOwnerAudience(db: Db, principal: RoleWriterPrincipal, memoryId: string): Promise<boolean> {
+  const memory = await db.memory.findUnique({
+    where: { id: memoryId },
+    select: { class: true, userId: true, organizationId: true, ownerUserId: true },
+  });
+  if (!memory) return false;
+  // D23: a headless principal is the App service identity; the triggering user's own standing never counts.
+  if (isRunPrincipal(principal) || (principal.appId && !principal.userId)) {
+    return principal.appId ? publisherAppQualifies(db, principal.appId, memory) : false;
+  }
+  try {
+    await requireMemoryManageAccess({ ...principal, db } as unknown as Context, memory, 'CONTRIBUTOR');
     return true;
   } catch (e) {
     if (isAuthorizationDenial(e)) return false;
@@ -143,6 +208,7 @@ export async function roleWritersRefusal(
   if (!config) return null;
 
   let admitted: boolean | undefined;
+  let ownerAdmitted: boolean | undefined;
   for (const [side, role] of sides) {
     const resolution = resolveNodeRoleRule(role, config.rules);
     // A role the nearest strict parent does not declare is still governed by
@@ -154,6 +220,11 @@ export async function roleWritersRefusal(
     if (rule.writers === 'ADMIN') {
       admitted ??= await inAdminAudience(db, principal, memoryId);
       if (!admitted) return new RoleWriterLevelError(role, rule.role, side);
+      continue;
+    }
+    if (rule.writers === 'OWNER') {
+      ownerAdmitted ??= await inOwnerAudience(db, principal, memoryId);
+      if (!ownerAdmitted) return new RoleWriterLevelError(role, rule.role, side, 'OWNER');
       continue;
     }
     return new RoleWritersUnsupportedError(role, rule.role, rule.writers);

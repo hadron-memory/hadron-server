@@ -230,11 +230,12 @@ describe('ALL, OWNER, and the user-owned audience', () => {
     expect(await code(create(contrib, { loc: 'a1', role: 'open' }))).toBe('OK');
   });
 
-  it('OWNER is not read as ALL: it fails closed with a typed refusal, for everyone', async () => {
+  it('OWNER is built (#1333) and not read as ALL: the owning party writes, a reader does not', async () => {
     await rule('vault', { writers: 'OWNER' });
-    expect(await code(create(contrib, { loc: 'v1', role: 'vault' }))).toBe('ROLE_WRITERS_UNSUPPORTED');
-    expect(await code(create(admin, { loc: 'v2', role: 'vault' }))).toBe('ROLE_WRITERS_UNSUPPORTED');
-    expect(await state('v1')).toBeNull();
+    expect(await code(create(contrib, { loc: 'v1', role: 'vault' }))).toBe('OK');
+    expect(await code(create(admin, { loc: 'v2', role: 'vault' }))).toBe('OK');
+    expect(await code(create(reader, { loc: 'v3', role: 'vault' }))).not.toBe('OK');
+    expect(await state('v3')).toBeNull();
   });
 
   it('a user-owned memory: the owning user is the ADMIN audience', async () => {
@@ -267,20 +268,20 @@ describe('bulk operations judge every node they carry or remove', () => {
 
   it('extractParentNodeToMemory with move removes the subtree from the source: each role is judged there (a copy is not)', async () => {
     // The move gate already limits the caller to people who manage the memory, so the
-    // ADMIN level adds nothing for them; what it adds is that an unsupported level
-    // (OWNER) is never read as ALL.
+    // ADMIN level adds nothing for them; an OWNER-level role (#1333) is judged as the owning party,
+    // which a managing org ADMIN is in. The ADMIN level is what a manager always meets.
     await rule('vault', { writers: 'OWNER' });
     await node('keep');
     await node('tree');
     await node('tree:leaf', { role: 'vault' });
     const parentRef = (await state('tree'))!.id;
     expect(await code(resolvers.Mutation.extractParentNodeToMemory(null, {
-      parentRef, targetUrn: 'rw-org::extracted-move', move: true,
-    }, as(admin)))).toBe('ROLE_WRITERS_UNSUPPORTED');
-    expect((await state('tree:leaf'))!.deletedAt).toBeNull();
-    expect(await code(resolvers.Mutation.extractParentNodeToMemory(null, {
       parentRef, targetUrn: 'rw-org::extracted-copy', move: false,
     }, as(admin)))).toBe('OK');
+    expect(await code(resolvers.Mutation.extractParentNodeToMemory(null, {
+      parentRef, targetUrn: 'rw-org::extracted-move', move: true,
+    }, as(admin)))).toBe('OK');
+    expect((await state('tree:leaf'))!.deletedAt).not.toBeNull();
   });
 });
 

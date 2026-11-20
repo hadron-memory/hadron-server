@@ -19,6 +19,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { roleWritersRefusal } from '../../../lib/nodeRoleWriters.js';
+import { createTestableMcpServer } from '../../../mcp/server.js';
 import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -224,5 +225,48 @@ describe('user-owned memory: Agent.ownerUserId is the owning user', () => {
 describe('the old fail-closed refusal is gone for OWNER, kept for an unknown level', () => {
   it('an OWNER rule no longer answers ROLE_WRITERS_UNSUPPORTED', async () => {
     expect(await code(create(as('contrib'), 'v9'))).not.toBe(UNSUPPORTED);
+  });
+});
+
+describe('the write doors: generic GraphQL, MCP and the run tool path share the one check', () => {
+  /**
+   * The driver is a platform admin, so memory write access (necessary, never widened) is not what decides: the run
+   * is judged as its App and the driver's own standing must not lift a vendor-only App (D23).
+   */
+  const appWithWriteAccess = (agentOrgId: string, appOrgId: string) => app({ orgId: appOrgId, agents: [] }).then(async (a) => {
+    await db.appAgent.create({ data: { appId: a, agentId: await agent(agentOrgId, null) } });
+    return a;
+  });
+  const driver = (a: string) => principalOf(a, { userId: user.platform!, roles: ['ADMIN'], db }) as Context;
+  const mcpCreate = (p: Record<string, unknown>, loc: string) =>
+    createTestableMcpServer(p as never).callToolText('hadron_create_node', {
+      urn: `hrn:node:${org.urn}:mem:${loc}`, name: loc, content: 'x', role: 'vault',
+    });
+
+  it('GraphQL createNode: a headless run of the publisher App writes, a run of an installed vendor App is refused', async () => {
+    const pub = await appWithWriteAccess(org.id, vendorOrg.id);
+    const ven = await appWithWriteAccess(vendorOrg.id, org.id);
+    expect(await code(create(driver(pub), 'run-ok'))).toBe('OK');
+    expect(await code(create(driver(ven), 'run-no'))).toBe(REFUSED);
+    expect(await exists('run-ok')).toBe(true);
+    expect(await exists('run-no')).toBe(false);
+  });
+
+  it('MCP hadron_create_node: the same split, and the refusal is the typed writer-level text', async () => {
+    const pub = await appWithWriteAccess(org.id, vendorOrg.id);
+    const ven = await appWithWriteAccess(vendorOrg.id, org.id);
+    expect(await mcpCreate(driver(ven) as never, 'm-no')).toContain('[role_writer_level_required]');
+    expect(await exists('m-no')).toBe(false);
+    expect(await mcpCreate(driver(pub) as never, 'm-ok')).not.toContain('role_writer');
+    expect(await exists('m-ok')).toBe(true);
+  });
+
+  it('MCP, a person: a contributor writes and a reader is refused (OWNER is not ALL)', async () => {
+    const mcpAs = (who: string) => createTestableMcpServer({ userId: user[who]!, roles: [] as never, clientId: `user:${user[who]}` });
+    expect(await mcpAs('contrib').callToolText('hadron_create_node', { urn: `hrn:node:${org.urn}:mem:mc`, name: 'mc', content: 'x', role: 'vault' }))
+      .not.toContain('role_writer');
+    expect(await mcpAs('reader').callToolText('hadron_create_node', { urn: `hrn:node:${org.urn}:mem:mr`, name: 'mr', content: 'x', role: 'vault' }))
+      .not.toContain('role_writers_unsupported');
+    expect(await exists('mr')).toBe(false);
   });
 });

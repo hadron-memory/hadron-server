@@ -9,8 +9,8 @@
  *
  * What must hold, one case each:
  *   1. GraphQL `deleteNode` (soft, hard, recursive) and `deleteObject`: a node of
- *      an ADMIN role is removed only by its ADMIN audience; an OWNER rule refuses
- *      everyone; ALL and unruled roles keep the memory-write audience.
+ *      an ADMIN role is removed only by its ADMIN audience; an OWNER role by the owning party,
+ *      never by a reader (#1333); ALL and unruled roles keep the memory-write audience.
  *   2. The same on MCP `hadron_delete_node`, an independent inline transaction.
  *   3. A refused removal writes nothing, however deep the restricted node sits.
  *   4. The governed refusal comes first; refusals reveal nothing new to a caller
@@ -45,7 +45,6 @@ let reader: U;
 let platform: U;
 
 const REFUSED = 'ROLE_WRITER_LEVEL_REQUIRED';
-const UNSUPPORTED = 'ROLE_WRITERS_UNSUPPORTED';
 
 const as = (u: U, roles: Context['roles'] = []): Context => ({ db, userId: u.id, roles, clientId: `user:${u.id}` });
 const M = resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
@@ -151,12 +150,15 @@ describe('GraphQL deleteNode follows the writer level of every node it removes',
         }
       });
 
-      it('OWNER rule: refused for everyone with the unsupported code, never read as ALL', async () => {
+      it('OWNER rule (#1333): a reader is refused and nothing is written; the owning party removes it', async () => {
         await seed('vault', deep);
         const before = await snapshot();
-        expect(await del(contrib, 't', opts)).toBe(UNSUPPORTED);
-        expect(await del(admin, 't', opts)).toBe(UNSUPPORTED);
+        expect(await del(reader, 't', opts)).not.toBe('OK');
         expect(await snapshot()).toEqual(before);
+        for (const u of [contrib, admin]) {
+          await cleanSeed('vault', deep);
+          expect(await del(u, 't', opts)).toBe('OK');
+        }
       });
 
       it('ALL rule and an unruled role: a contributor still removes it (positive controls)', async () => {
@@ -210,10 +212,12 @@ describe('MCP hadron_delete_node follows the writer level', () => {
     });
   }
 
-  it('an OWNER rule is refused with the unsupported text', async () => {
+  it('an OWNER rule (#1333): a reader is refused, the owning party removes it, and nothing says unsupported', async () => {
     await node('t', { role: 'vault' });
-    expect(await mcpDel(admin, 't')).toContain('[role_writers_unsupported]');
+    expect(await mcpDel(reader, 't')).not.toContain('[role_writers_unsupported]');
     expect((await at('t'))!.deletedAt).toBeNull();
+    expect(await mcpDel(admin, 't')).not.toContain('role_writers');
+    expect((await at('t'))!.deletedAt).not.toBeNull();
   });
 
   it('ALL and unruled roles: a contributor removes them (positive control)', async () => {
