@@ -16,7 +16,7 @@ import { generateId } from '../lib/id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { composeWorkerPrompt } from '../api/graphql/schema/resolvers.worker.js';
 import { resolveServedBootPrompt } from '../lib/bootPrompt/serve.js';
-import { E2E_BOOT_PROMPT, E2E_CONVERSATION, E2E_STOCK_ROLES, seedE2eStockAgents } from './e2eBootPrompt.js';
+import { E2E_BOOT_PROMPT, E2E_CONVERSATION, E2E_STOCK_ROLES, e2eRegisterGaps, seedE2eInstallRegister, seedE2eStockAgents } from './e2eBootPrompt.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;
@@ -80,5 +80,55 @@ describe('#3160 E2E seed: the coordinator can start a chat', () => {
     const coordinator = await db.agent.findFirstOrThrow({ where: { organizationId, name: 'coordinator' } });
     const chat = await M.startChat(null, { agentId: coordinator.id, scope: 'private' }, ctx({ roles: ['ADMIN'] }));
     expect(chat.conversationName).toBe(E2E_CONVERSATION);
+  });
+});
+
+/**
+ * #4506 — the seed wrote no register_entries, so register-gated paths (chat mark-read) refused CHANNEL_NOT_FOUND on a
+ * fresh stack. The seed now calls seedE2eInstallRegister after the Channel exists; its self-check (e2eRegisterGaps)
+ * names every installed Agent with no live App-owned row (cor:dmo:090:04), not merely an empty register.
+ */
+describe('#4506 E2E seed: install-default register rows', () => {
+  const channel = async () => {
+    const root = await db.node.create({ data: { id: id('chat-root'), memoryId: appMemoryId, loc: 'chats:team', name: 'chats:team', nodeType: 'chat', data: { lastSeq: 0 } } });
+    const c = await db.channel.create({ data: { id: id('channel'), memoryId: appMemoryId, loc: 'chats:team', name: 'Team', chatRootNodeId: root.id } });
+    await db.app.update({ where: { id: app.id }, data: { defaultChannelId: c.id } });
+    return c;
+  };
+
+  it('red on the unseeded register: the self-check names both installed stock Agents', async () => {
+    await seed();
+    await channel();
+    const agents = await db.agent.findMany({ where: { organizationId }, select: { id: true } });
+    expect((await e2eRegisterGaps(db, app.id)).sort()).toEqual(agents.map(a => a.id).sort());
+    expect(await db.registerEntry.count({ where: { appId: app.id } })).toBe(0);
+  });
+
+  it('seeding writes one App-owned install-default BOTH row per installed Agent, and the self-check is clean', async () => {
+    await seed();
+    const c = await channel();
+    await seedE2eInstallRegister(db, app.id);
+    expect(await e2eRegisterGaps(db, app.id)).toEqual([]);
+    const rows = await db.registerEntry.findMany({ where: { appId: app.id, deletedAt: null } });
+    expect(rows).toHaveLength(E2E_STOCK_ROLES.length);
+    for (const r of rows) expect(r).toMatchObject({ channelId: c.id, role: 'BOTH', installDefault: true });
+    expect(rows.map(r => r.attendeeAgentId).sort()).toEqual((await db.agent.findMany({ where: { organizationId } })).map(a => a.id).sort());
+  });
+
+  it('a row for only one Agent is still a gap: the other Agent is named (not merely a non-empty register)', async () => {
+    await seed();
+    await channel();
+    const coordinator = await db.agent.findFirstOrThrow({ where: { organizationId, name: 'coordinator' } });
+    const qa = await db.agent.findFirstOrThrow({ where: { organizationId, name: 'qa-engineer' } });
+    await seedE2eInstallRegister(db, app.id, { agentId: coordinator.id });
+    expect(await e2eRegisterGaps(db, app.id)).toEqual([qa.id]);
+  });
+
+  it('seeding twice inserts nothing new (idempotent)', async () => {
+    await seed();
+    await channel();
+    await seedE2eInstallRegister(db, app.id);
+    await seedE2eInstallRegister(db, app.id);
+    expect(await db.registerEntry.count({ where: { appId: app.id, deletedAt: null } })).toBe(E2E_STOCK_ROLES.length);
   });
 });
