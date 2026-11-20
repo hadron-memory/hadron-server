@@ -89,7 +89,7 @@ describe('agentRevisions (list)', () => {
     const row = await db.node.findFirstOrThrow({ where: { memoryId: agentA.systemMemoryId!, loc: 'revisions:rev-1', deletedAt: null } });
     await db.node.update({ where: { id: row.id }, data: { name: 'renamed-node', data: { ...(row.data as object), label: 'data-label' } } });
     const listed = (await list()).revisions.find((x: any) => x.revisionLoc === 'revisions:rev-1');
-    expect(listed.label).toBe('data-label');
+    expect(listed?.label).toBe('data-label');
     expect((await del('revisions:rev-1')).label).toBe('data-label');
   });
 
