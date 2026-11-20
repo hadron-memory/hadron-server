@@ -133,8 +133,8 @@ it('failure after decryption rolls back spend, reveal event, deletion and client
   expect(await db.secretEvent.count({ where: { secretId, kind: { in: ['REVEAL', 'DELETE'] } } })).toBe(0);
 });
 it('a signed mark deletes a protected secret without a change request and never reaches a replacement by name', async () => {
-  const a = await client();
   await db.secret.update({ where: { id: secretId }, data: { protected: true } });
+  const a = await client();
   await reveal(a.clientId); expect(await exists()).toBe(0);
   const replacement = await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'tok', kind: 'generic', value: 'replacement' }, ctx());
   expect(replacement.id).not.toBe(secretId);
