@@ -153,7 +153,7 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
     const asLoc = (properties: unknown) =>
       M.updateTaskNode({}, { input: { memoryId: memId, loc: 'tasks:t1', properties }, mergeExports: true }, outsider()).then(() => null, (e) => e);
     expect(plainId?.extensions?.code).toBe('NODE_NOT_FOUND');
-    expect(plainLoc).not.toBeNull();
+    expect(plainLoc?.message).toMatch(/^MEMORY_NOT_FOUND:/); // a loc selector on an unreadable memory is concealed as a missing memory
     for (const [call, plain] of [[asId, plainId], [asLoc, plainLoc]] as const) {
       for (const properties of [{ exports: {} }, null, [1], 'x']) {
         const got = await call(properties);
@@ -161,6 +161,7 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
         expect(got.extensions?.code).toBe(plain.extensions?.code);
         expect(got.extensions?.code).not.toBe('BAD_USER_INPUT');
         expect(got.message).toBe(plain.message);
+        if (call === asLoc) expect(got.message).toMatch(/^MEMORY_NOT_FOUND:/);
       }
     }
   });
@@ -222,7 +223,9 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
       await gotLock;
       const attempt = M.updateTaskNode({}, { input: { memoryId: memId, loc: 'tasks:t1', properties: { exports: { codexSkill: codex } } }, mergeExports: true }, admin())
         .then(() => 'wrote', (e) => `refused:${e.extensions?.code}`);
-      await lookedUp; // the merge now holds the original id and is queued on the lock
+      // The merge now holds the original id and is queued on the lock. Bounded and raced with the merge settling early,
+      // so a merge that never reaches the lookup fails the test instead of hanging it with the spy installed.
+      await Promise.race([lookedUp, attempt, new Promise((r) => setTimeout(r, 10_000))]);
       release();
       await holder;
       return await attempt;
@@ -237,6 +240,16 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
     const outcome = await mergeBehindLock(async (tx) => { await tx.node.update({ where: { id: taskId }, data: { loc: 'tasks:moved' } }); });
     expect(outcome).toBe('refused:NODE_NOT_FOUND');
     expect((await props()).exports.codexSkill).toBeUndefined();
+  });
+
+  it('a loc-selected merge lands on the replacement when the original row is physically deleted (BLIND delta P2)', async () => {
+    const repl = await M.createTaskNode({}, { input: { memoryId: memId, loc: 'tasks:repl', name: 'Repl', isRunnable: true, properties: { keep: 'repl' } } }, admin());
+    const outcome = await mergeBehindLock(async (tx) => {
+      await tx.node.delete({ where: { id: taskId } });
+      await tx.node.update({ where: { id: repl.id }, data: { loc: 'tasks:t1' } });
+    });
+    expect(outcome).toBe('wrote');
+    expect((await db.node.findUniqueOrThrow({ where: { id: repl.id } })).properties).toEqual({ keep: 'repl', exports: { codexSkill: codex } });
   });
 
   it('a loc-selected merge lands on the node that took the loc when the original moved away (BLIND delta P2)', async () => {

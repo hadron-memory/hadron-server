@@ -2194,7 +2194,8 @@ async function mergePropertiesAndWrite(a: {
         await lockInstallAuthorityFirst(lockTx, ctx, resolvedMemoryId);
         await lockTx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${nodeId}))`;
         const fresh = await lockTx.node.findUnique({ where: { id: nodeId }, select: { loc: true, memoryId: true, deletedAt: true, properties: true } });
-        if (!fresh) throw notFound();
+        // Physically deleted while this waited: an id selector is gone, a loc selector re-resolves (a replacement may sit there).
+        if (!fresh) throw a.hasId ? notFound() : STALE;
         if (!a.hasId && (fresh.deletedAt || fresh.loc !== a.targetLoc || fresh.memoryId !== resolvedMemoryId)) throw STALE;
         const merged = mergePropertiesPatch(fresh.properties, patch as Record<string, unknown>);
         return writeNodeCore(
