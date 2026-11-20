@@ -74,6 +74,7 @@ describe('#4339 email magic link, passkey switches ON', () => {
     expect(first.status).toBe(302);
     const u = await db.user.findFirstOrThrow({ where: { email } });
     expect(await codes(u.id)).toBe(1); // the account-creating verify issued exactly one code, bound to no sign-in
+    expect(await db.authHandoffCode.count({ where: { userId: u.id } })).toBe(1); // and no code at all beyond it, bound or not
     const r = await verify(await magicLink(email));
     expect(r.status).toBe(302);
     expect(r.headers.get('location')).toMatch(/\/auth\/callback\?code=/);
