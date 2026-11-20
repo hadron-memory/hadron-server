@@ -78,6 +78,30 @@ export function deriveEdgeLoc(
   return `${sourceLoc}:${sanitizeLocAtom(name)}:${targetLoc}`;
 }
 
+/** The backfill numbers collisions from 2, so a suffix is a canonical decimal >= 2: no sign, no leading zero. */
+const MIGRATED_SUFFIX = /^(?:[2-9]|[1-9][0-9]+)$/;
+
+/**
+ * The backfill's collision suffix on `loc` (#4583): when two names between the same endpoints sanitized to one atom,
+ * the migration gave the later edge `<base>:N` (N >= 2, `edge_first_class` lines 70-89). Returns `N` as written when
+ * `loc` is exactly `<base>:N`, else null. The ONE rule the lookup, the re-key and the census all use, so they cannot
+ * disagree about what a suffixed loc is.
+ */
+export function migratedLocSuffix(loc: string, base: string): string | null {
+  if (!loc.startsWith(`${base}:`)) return null;
+  const rest = loc.slice(base.length + 1);
+  return MIGRATED_SUFFIX.test(rest) ? rest : null;
+}
+
+/**
+ * Order two canonical suffixes ({@link migratedLocSuffix}) as decimal numbers WITHOUT converting them: the shorter digit
+ * string is smaller (no leading zeros), equal lengths compare lexicographically. Exact for any length, where a float
+ * rounds `9007199254740993` and `...992` to one value and a string compare puts `10` before `9`.
+ */
+export function compareMigratedSuffix(a: string, b: string): number {
+  return a.length - b.length || (a < b ? -1 : a > b ? 1 : 0);
+}
+
 /**
  * The OTHER spelling of the derived loc (#4583): what the historical migration wrote for the same endpoints and name,
  * when that differs from {@link deriveEdgeLoc}'s. Empty for every name whose two spellings agree, which is every name
@@ -98,7 +122,8 @@ export function deriveEdgeLocAlternates(
  *
  * Keeping the spelling is what stops a pair of twins (the migrated and the runtime loc of one relationship, which
  * the lookups deliberately tolerate) from landing on ONE loc and violating the (loc, memory) unique: each keeps its
- * own. The runtime spelling goes to the runtime spelling, as before; the migrated one to the migrated one.
+ * own. The runtime spelling goes to the runtime spelling, as before; the migrated one to the migrated one, and a
+ * migrated loc's `:N` collision suffix ({@link migratedLocSuffix}) is carried to the new base.
  */
 export function rekeyDerivedEdgeLoc(
   loc: string,
@@ -109,8 +134,11 @@ export function rekeyDerivedEdgeLoc(
   newTargetLoc: string,
 ): string | null {
   if (loc === deriveEdgeLoc(oldSourceLoc, name, oldTargetLoc)) return deriveEdgeLoc(newSourceLoc, name, newTargetLoc);
-  if (deriveEdgeLocAlternates(oldSourceLoc, name, oldTargetLoc).includes(loc)) {
-    return `${newSourceLoc}:${sanitizeLocAtomCodePoint(name)}:${newTargetLoc}`;
-  }
-  return null;
+  const [oldAlternate] = deriveEdgeLocAlternates(oldSourceLoc, name, oldTargetLoc);
+  if (oldAlternate === undefined) return null;
+  const newAlternate = `${newSourceLoc}:${sanitizeLocAtomCodePoint(name)}:${newTargetLoc}`;
+  if (loc === oldAlternate) return newAlternate;
+  // The backfill's collision suffix moves with the edge (a migrated `<alternate>:N`).
+  const suffix = migratedLocSuffix(loc, oldAlternate);
+  return suffix === null ? null : `${newAlternate}:${suffix}`;
 }

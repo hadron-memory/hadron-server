@@ -20,6 +20,8 @@ import { generateId } from './id.js';
 import {
   deriveEdgeLoc,
   deriveEdgeLocAlternates,
+  compareMigratedSuffix,
+  migratedLocSuffix,
   rekeyDerivedEdgeLoc,
   sanitizeLocAtom,
   sanitizeLocAtomCodePoint,
@@ -121,6 +123,40 @@ describe("deriveEdgeLocAlternates / rekeyDerivedEdgeLoc", () => {
   });
 });
 
+describe('the backfill collision suffix, one rule for lookup, re-key and census (#4583)', () => {
+  it('migratedLocSuffix accepts a canonical decimal >= 2 after the base, and nothing else', () => {
+    const base = 'root:a-b:leaf';
+    for (const n of ['2', '3', '9', '10', '99', '123456789012345678901234567890']) {
+      expect(migratedLocSuffix(`${base}:${n}`, base), n).toBe(n);
+    }
+    for (const bad of ['', '0', '1', '02', '+2', '-2', '2.0', 'x', '2:deeper', ' 2', '2 ']) {
+      expect(migratedLocSuffix(`${base}:${bad}`, base), JSON.stringify(bad)).toBeNull();
+    }
+    expect(migratedLocSuffix(base, base)).toBeNull();
+    expect(migratedLocSuffix('other:a-b:leaf:2', base)).toBeNull();
+  });
+
+  it('compareMigratedSuffix orders as exact decimals: 9 < 10, and two values a double cannot tell apart still differ', () => {
+    expect(compareMigratedSuffix('9', '10')).toBeLessThan(0);
+    expect(compareMigratedSuffix('10', '9')).toBeGreaterThan(0);
+    expect(compareMigratedSuffix('2', '2')).toBe(0);
+    expect(compareMigratedSuffix('9007199254740992', '9007199254740993')).toBeLessThan(0);
+    expect(compareMigratedSuffix('9007199254740993', '9007199254740992')).toBeGreaterThan(0);
+    expect(compareMigratedSuffix('', '2')).toBeLessThan(0); // the plain loc before any suffix
+  });
+
+  it('rekeyDerivedEdgeLoc carries the suffix to the new base (a moved endpoint keeps the same edge reachable)', () => {
+    const rekey = (loc: string) => rekeyDerivedEdgeLoc(loc, 'old', 'a😀b', 'leaf', 'new', 'leaf2');
+    expect(rekey('old:a-b:leaf:2')).toBe('new:a-b:leaf2:2');
+    expect(rekey('old:a-b:leaf:17')).toBe('new:a-b:leaf2:17');
+    expect(rekey('old:a-b:leaf:1')).toBeNull();
+    expect(rekey('old:a-b:leaf:02')).toBeNull();
+    expect(rekey('old:a-b:leaf:x')).toBeNull();
+    // A name with one spelling has no suffix handling (as on main).
+    expect(rekeyDerivedEdgeLoc('old:has-space:leaf:2', 'old', 'has space', 'leaf', 'new', 'leaf')).toBeNull();
+  });
+});
+
 describe('derivedEdgeLocForUpsert — the lookup seam (#4583)', () => {
   beforeEach(async () => {
     await cleanDb(db);
@@ -211,12 +247,25 @@ describe('derivedEdgeLocForUpsert — the lookup seam (#4583)', () => {
     expect(await derivedEdgeLocForUpsert(db, args('a😀b'))).toBe('root:a--b:leaf');
   });
 
+  it('suffixes order as decimals, not as strings or floats: `:9` before `:10`, and two huge ones stay distinct', async () => {
+    const { args, edge } = await fixture();
+    await edge('root:a-b:leaf:10', 'a😀b');
+    await edge('root:a-b:leaf:9', 'a😀b');
+    expect(await derivedEdgeLocForUpsert(db, args('a😀b'))).toBe('root:a-b:leaf:9');
+    await cleanDb(db);
+    const f = await fixture();
+    await f.edge('root:a-b:leaf:9007199254740993', 'a😀b'); // not representable as a double: rounds to ...992
+    await f.edge('root:a-b:leaf:9007199254740992', 'a😀b');
+    expect(await derivedEdgeLocForUpsert(db, f.args('a😀b'))).toBe('root:a-b:leaf:9007199254740992');
+  });
+
   it('a non-numeric, deeper, or below-2 continuation of the migrated loc is not a suffix', async () => {
     const { args, edge } = await fixture();
     await edge('root:a-b:leaf:x', 'a😀b');
     await edge('root:a-b:leaf:2:deeper', 'a😀b');
     await edge('root:a-b:leaf:1', 'a😀b'); // the backfill numbers from 2: the first edge keeps the plain loc
     await edge('root:a-b:leaf:0', 'a😀b');
+    await edge('root:a-b:leaf:02', 'a😀b'); // not the backfill's canonical form
     expect(await derivedEdgeLocForUpsert(db, args('a😀b'))).toBe('root:a--b:leaf');
   });
 
@@ -269,6 +318,20 @@ describe('the wired sites reach the migrated edge (#4583)', () => {
     await db.$transaction((tx) => archiveTombstone(tx, { id: old.id, loc: 'old', memoryId: graph.id }, plan));
     expect((await db.edge.findUniqueOrThrow({ where: { id: migrated.id } })).loc).toBe(`root:a-b:${archived}`);
     expect((await db.edge.findUniqueOrThrow({ where: { id: runtime.id } })).loc).toBe(`root:a--b:${archived}`);
+  });
+
+  it('tombstone archive: a migrated edge whose loc carries the backfill suffix keeps it at the new address', async () => {
+    const { graph, source } = await pair();
+    const old = await db.node.create({
+      data: { id: generateId(), memoryId: graph.id, loc: 'old', name: 'old', deletedAt: new Date() },
+    });
+    const edge = await db.edge.create({
+      data: { id: generateId(), memoryId: graph.id, sourceId: source.id, targetId: old.id, loc: 'root:a-b:old:2', name: 'a😀b' },
+    });
+    const archived = archivedTombstoneLoc('old', old.id);
+    const plan = await db.$transaction((tx) => discoverArchivePlan(tx, graph.id, 'old'));
+    await db.$transaction((tx) => archiveTombstone(tx, { id: old.id, loc: 'old', memoryId: graph.id }, plan));
+    expect((await db.edge.findUniqueOrThrow({ where: { id: edge.id } })).loc).toBe(`root:a-b:${archived}:2`);
   });
 
   it('tombstone archive: an edge into an archived node is re-keyed whichever spelling its loc carries', async () => {
@@ -329,6 +392,9 @@ describe('the census script (#4583, read only)', () => {
     const [s7, t7] = await Promise.all(['s7', 't7'].map(node));
     await edge(s7, t7, 's7:a-b:t7', 'a-b');
     await edge(s7, t7, 's7:a-b:t7:2', 'a😀b'); // the backfill's collision suffix
+    const [s8, t8, s9, t9] = await Promise.all(['s8', 't8', 's9', 't9'].map(node));
+    await edge(s8, t8, 's8:a-b:t8:1', 'a😀b'); // `:1` is not a backfill suffix: neither
+    await edge(s9, t9, 's9:a-b:t9:02', 'a😀b'); // nor is `:02`: neither
     await edge(s1, t2, 's1:plain:t2', 'plain'); // not divergent: ignored
     const before = await db.edge.count();
     const rows = await db.$transaction(async (tx) => {
@@ -337,11 +403,11 @@ describe('the census script (#4583, read only)', () => {
     });
     const r = Object.fromEntries(Object.entries(rows[0]).map(([k, v]) => [k, Number(v)]));
     expect(r).toEqual({
-      divergent_edges: 9,
+      divergent_edges: 11,
       migrated_spelling: 4, // s1, s3 (migrated half), s5, and the soft-deleted s2 edge
       runtime_spelling: 3, // s2, s3 (runtime half), s6
       migrated_suffixed: 1, // s7
-      neither: 1, // s4
+      neither: 3, // s4, and the rejected suffixes s8 (`:1`) and s9 (`:02`)
       twin_pairs: 1, // s3
       runtime_loc_taken_by_another: 1, // s5
       migrated_loc_taken_by_another: 1, // s6 (the positive case: a broken predicate that always answered 0 fails here)

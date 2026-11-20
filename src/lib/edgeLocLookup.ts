@@ -1,5 +1,5 @@
 import type { PrismaClient } from '../generated/prisma/index.js';
-import { deriveEdgeLoc, deriveEdgeLocAlternates } from './edgeLoc.js';
+import { deriveEdgeLoc, deriveEdgeLocAlternates, compareMigratedSuffix, migratedLocSuffix } from './edgeLoc.js';
 
 /**
  * The loc an upsert of a DERIVED edge should address (#4583). Normally {@link deriveEdgeLoc}'s. When the name has a
@@ -17,11 +17,13 @@ import { deriveEdgeLoc, deriveEdgeLocAlternates } from './edgeLoc.js';
  *
  * Never writes, never rewrites a loc, and reads nothing for a name with a single spelling.
  *
- * The selection is made BEFORE the caller's upsert and may go stale (another writer between the two). That is safe
- * because every caller's upsert is `update: {}` followed by the occupant check on the returned row (live, same
- * source, same target, same name) inside the same transaction, which refuses an occupant that is not this edge: a
- * stale selection degrades to the refusal each caller already had for an occupied loc, never to a wrong write. Both
- * spellings stay distinct locs, so it cannot create a (loc, memory) collision.
+ * The selection is made BEFORE the caller's upsert, and this module does not serialize the two. What is guaranteed:
+ * every caller's upsert is atomic on (loc, memory) and followed, in the same transaction, by the occupant check (live,
+ * same source, target, name), so a different edge that took the selected loc is refused rather than overwritten, and
+ * the two spellings are distinct locs, so nothing here can raise a unique violation. What is NOT: a writer that lands
+ * between the selection and the upsert can still leave a twin (a runtime-spelling row appearing after a migrated one
+ * was chosen, or the chosen row disappearing so the upsert creates one at the migrated loc). That is the window two
+ * concurrent syncs of one relationship always had for the runtime spelling; it loses no data and merges nothing.
  */
 export async function derivedEdgeLocForUpsert(
   db: Pick<PrismaClient, 'edge'>,
@@ -47,20 +49,21 @@ export async function derivedEdgeLocForUpsert(
     select: { loc: true, name: true, sourceId: true, targetId: true },
   });
   if (rows.some((r) => r.loc === primary)) return primary;
-  const rank = (loc: string): number | null => {
+  // Rank within one alternate: the plain loc first, then suffixes as DECIMALS (shorter digit string first, then
+  // lexicographic: the canonical form has no leading zeros, so this is numeric order without floating point).
+  const rank = (loc: string): string | null => {
     for (const a of alternates) {
-      if (loc === a) return 0;
-      const suffix = loc.startsWith(`${a}:`) ? loc.slice(a.length + 1) : '';
-      if (/^[0-9]+$/.test(suffix) && Number(suffix) >= 2) return Number(suffix);
+      if (loc === a) return ''; // the plain loc: the empty suffix sorts before every real one
+      const suffix = migratedLocSuffix(loc, a);
+      if (suffix !== null) return suffix;
     }
     return null;
   };
-  // The same edge only: same name, source and target. The unsuffixed loc wins over a suffixed one, a lower suffix over
-  // a higher one, so the choice is deterministic.
+  // The same edge only: same name, source and target.
   const same = rows
     .filter((r) => r.name === (edge.name ?? null) && r.sourceId === edge.sourceId && r.targetId === edge.targetId)
     .map((r) => ({ loc: r.loc, rank: rank(r.loc) }))
-    .filter((r): r is { loc: string; rank: number } => r.rank !== null)
-    .sort((x, y) => x.rank - y.rank)[0];
+    .filter((r): r is { loc: string; rank: string } => r.rank !== null)
+    .sort((x, y) => compareMigratedSuffix(x.rank, y.rank))[0];
   return same ? same.loc : primary;
 }

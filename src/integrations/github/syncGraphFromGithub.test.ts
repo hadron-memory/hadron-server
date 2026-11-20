@@ -1188,7 +1188,11 @@ describe('syncGraphFromGithub', () => {
 
     // The same relationship as the migration backfilled it: one `-` for the emoji.
     await db.edge.update({ where: { id: created.id }, data: { loc: 'source:a-b:target' } });
+    // A parked row for the same pair: processing the declared relationship consumes it, so a sync that silently skipped
+    // the relationship (and would still leave one edge) leaves this row behind and fails below.
+    const parked = await db.pendingEdge.create({ data: { id: generateId(), sourceId, targetId, name: 'a😀b', description: '' } });
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.pendingEdge.findUnique({ where: { id: parked.id } })).toBeNull();
     const edges = await db.edge.findMany({ where: { sourceId, targetId } });
     expect(edges.map((e) => [e.id, e.loc])).toEqual([[created.id, 'source:a-b:target']]); // same edge, no twin, loc untouched
   });
@@ -1214,7 +1218,9 @@ describe('syncGraphFromGithub', () => {
     await db.edge.create({
       data: { id: generateId(), memoryId: dbGraphId, sourceId, targetId, loc: 'source:a-b:target', name: 'a-b' },
     });
+    const parked = await db.pendingEdge.create({ data: { id: generateId(), sourceId, targetId, name: 'a😀b', description: '' } });
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.pendingEdge.findUnique({ where: { id: parked.id } })).toBeNull(); // the relationship was processed
     const emojiEdges = await db.edge.findMany({ where: { sourceId, targetId, name: 'a😀b' } });
     expect(emojiEdges.map((e) => [e.id, e.loc])).toEqual([[emoji.id, 'source:a-b:target:2']]); // the same edge, no twin
   });

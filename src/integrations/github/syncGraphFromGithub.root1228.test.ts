@@ -83,6 +83,16 @@ describe('#1228 root README', () => {
     expect((await db.edge.findUniqueOrThrow({ where: { id: migrated.id } })).loc).toBe('child:a-b:root-memory');
     expect((await db.edge.findUniqueOrThrow({ where: { id: runtime.id } })).loc).toBe('child:a--b:root-memory');
   });
+  it('#4583: a migrated edge whose loc carries the backfill suffix keeps it when the root moves', async () => {
+    const root = await legacyRoot();
+    const child = await db.node.create({ data: { memoryId: graph.id, loc: 'child', name: 'Child' } });
+    const literal = await db.edge.create({ data: { memoryId: graph.id, sourceId: child.id, targetId: root.id, loc: 'child:a-b:', name: 'a-b' } });
+    const suffixed = await db.edge.create({ data: { memoryId: graph.id, sourceId: child.id, targetId: root.id, loc: 'child:a-b::2', name: 'a😀b' } });
+    readme();
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect((await db.edge.findUniqueOrThrow({ where: { id: literal.id } })).loc).toBe('child:a-b:root-memory');
+    expect((await db.edge.findUniqueOrThrow({ where: { id: suffixed.id } })).loc).toBe('child:a-b:root-memory:2');
+  });
   it.each(['', 'unknown1228'])('refuses a missing or mismatched live root id (%s) before replacement', async (fileId) => {
     const root = await legacyRoot();
     readme(fileId);
