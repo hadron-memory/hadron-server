@@ -51,6 +51,10 @@ describe('#4411 item 1: mintPrincipal maps a chk_principals_name_lower violation
       INSERT INTO principals (id, name, kind, status, created_at, updated_at)
       VALUES (${generateId()}, 'Raw.Example', 'org', 'active', now(), now())`.catch((e: unknown) => e);
     expect(raw).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    // P2010's meta.message carries the primary message on its first line and the failing-row detail after it.
+    const text = String((raw as Prisma.PrismaClientKnownRequestError).meta?.message);
+    expect(text.split('\n', 1)[0]).toMatch(/"chk_principals_name_lower"/);
+    expect(text.split('\n', 1)[0]).not.toMatch(/Raw\.Example/);
     const err = await mintPrincipal(failingWith(raw), { kind: 'org', name: 'raw.example' }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(RootNameInvalidError);
   });
@@ -134,6 +138,10 @@ describe('#4411 item 1: mintPrincipal maps a chk_principals_name_lower violation
     expect(other.message).toMatch(/code: "23514"/);
     expect(other.message).toMatch(/\\?"chk_principals_name_lower\\?"/);
     expect(await mintWith(other)).toBe(other);
+    const otherRaw = rawWith('23514',
+      'ERROR: new row for relation "principals" violates check constraint "chk_principals_other"\n'
+      + 'DETAIL: Failing row contains (x, "chk_principals_name_lower", org).');
+    expect(await mintWith(otherRaw)).toBe(otherRaw);
   });
 
   it('leaves an error naming this constraint under another SQLSTATE untyped', async () => {

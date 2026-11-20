@@ -431,16 +431,19 @@ ON CONFLICT (name) DO NOTHING;
 -- #4411 preflight chk_principals_name_lower: begin
 DO $$
 DECLARE
-  n bigint;
-  bad text;
+  offending_count bigint;
+  offending_rows_summary text;
 BEGIN
-  SELECT count(*) INTO n FROM principals WHERE name <> lower(name);
-  IF n > 0 THEN
+  SELECT count(*) INTO offending_count FROM principals WHERE name <> lower(name);
+  IF offending_count > 0 THEN
+    -- A row "shares its root" when any OTHER row has the same lower(name): a lower-case twin, or another mixed-case
+    -- spelling (`Legacy.Example` beside `LEGACY.EXAMPLE`), so lower-casing it alone would collide.
     SELECT string_agg(format('%L (%s, %s%s)', p.name, p.kind, p.status,
-             CASE WHEN EXISTS (SELECT 1 FROM principals t WHERE t.name = lower(p.name))
-                  THEN ', lower-case twin exists' ELSE '' END), ', ' ORDER BY p.name)
-      INTO bad FROM (SELECT name, kind, status FROM principals WHERE name <> lower(name) ORDER BY name LIMIT 20) p;
-    RAISE EXCEPTION 'principals.name: % principal row(s) are not lower case, so chk_principals_name_lower cannot be added (hadron-server#4400; this guard: #4411). For a row with no lower-case twin, lower-case it and the owning users.handle / organizations.urn; for a row with a twin, decide which owner keeps the root and rename or delete the other. Then re-run pnpm db:dev-setup. Rows (first 20): %', n, bad
+             CASE WHEN EXISTS (SELECT 1 FROM principals t WHERE lower(t.name) = lower(p.name) AND t.id <> p.id)
+                  THEN ', shares its root with another row' ELSE '' END), ', ' ORDER BY p.name)
+      INTO offending_rows_summary
+      FROM (SELECT id, name, kind, status FROM principals WHERE name <> lower(name) ORDER BY name LIMIT 20) p;
+    RAISE EXCEPTION 'principals.name: % principal row(s) are not lower case, so chk_principals_name_lower cannot be added (hadron-server#4400; this guard: #4411). For a row that shares its root with no other row, lower-case it and the owning users.handle / organizations.urn; for rows that share a root, decide which owner keeps it and rename or delete the others. Then re-run pnpm db:dev-setup. Rows (first 20): %', offending_count, offending_rows_summary
       USING ERRCODE = 'HDPRF';
   END IF;
 END $$;

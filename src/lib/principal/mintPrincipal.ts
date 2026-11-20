@@ -90,29 +90,39 @@ type PrincipalDb = Pick<PrismaClient, 'principal'>;
 /**
  * The #4400 CHECK that keeps every stored root name lower case (`name = lower(name)`), matched by its quoted name
  * alone: the words around it ("violates check constraint") follow the server's `lc_messages` and are not matched, so
- * a translated message still maps (#4547 BLIND P2). The quotes are optionally backslash-escaped: a model write's
- * message carries the engine's debug rendering of the Postgres error (`\"chk_principals_name_lower\"`), a raw
- * statement's `meta.message` the plain one. The SQLSTATE, checked alongside, is locale-proof.
+ * a translated message still maps (#4547 BLIND P2). The quotes are optionally backslash-escaped: the engine renders
+ * a model write's Postgres error with inner quotes as `\"`, a raw statement's `meta.message` plainly.
  */
 const NAME_LOWER_CHECK_RE = /\\?"chk_principals_name_lower\\?"/;
-/** The SQLSTATE as the engine renders it in a model write's message (`code: "23514"`). */
-const CHECK_VIOLATION_IN_MESSAGE_RE = /\bcode: \\?"23514\\?"/;
+
+/**
+ * The PRIMARY fields of the Postgres error inside a model write's message, as the query engine renders it:
+ * `PostgresError { code: "23514", message: "…", severity: …, detail: Some("…"), … }`. Only these two fields are
+ * judged (#4547 BLIND re-rate P2): the detail echoes the failing row's values and the rest of the rendering is free
+ * text, so a name or a code found anywhere else proves nothing about which constraint refused.
+ */
+const ENGINE_PRIMARY_ERROR_RE = /PostgresError \{ code: "([0-9A-Z]{5})", message: "((?:[^"\\]|\\.)*)"/;
 
 /**
  * #4411: true iff `err` is Postgres refusing a principal row under `chk_principals_name_lower` (SQLSTATE 23514),
- * in either shape Prisma reports it: a model write raises `PrismaClientUnknownRequestError` whose message carries
- * the SQLSTATE and names the constraint (Prisma 6 has no known code for a CHECK); a raw statement raises P2010 with
- * both in `meta`. `mintPrincipal` writes through `principal.create`, so only the first shape reaches it today; the
- * P2010 arm covers a caller-supplied client whose create runs raw SQL. Narrow on purpose: it needs BOTH the
- * check-violation SQLSTATE and THIS constraint's name, so any other database error stays untyped.
+ * in either shape Prisma reports it: a model write raises `PrismaClientUnknownRequestError` carrying the engine's
+ * rendering of the Postgres error (Prisma 6 has no known code for a CHECK); a raw statement raises P2010 with the
+ * SQLSTATE and the server's text (primary message first) in `meta`. `mintPrincipal` writes through `principal.create`, so only the first
+ * shape reaches it today; the P2010 arm covers a caller-supplied client whose create runs raw SQL. Narrow on
+ * purpose: it needs the check-violation SQLSTATE AND this constraint's name, both from the primary error, so any
+ * other database error stays untyped. A rendering it cannot parse is not matched (fails closed to the raw error).
  */
 function isNameLowerCheckViolation(err: unknown): boolean {
   if (err instanceof Prisma.PrismaClientUnknownRequestError) {
-    return CHECK_VIOLATION_IN_MESSAGE_RE.test(err.message) && NAME_LOWER_CHECK_RE.test(err.message);
+    const primary = ENGINE_PRIMARY_ERROR_RE.exec(err.message);
+    return primary !== null && primary[1] === '23514' && NAME_LOWER_CHECK_RE.test(primary[2]);
   }
   if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2010') {
     const meta = err.meta as { code?: unknown; message?: unknown } | undefined;
-    return meta?.code === '23514' && typeof meta.message === 'string' && NAME_LOWER_CHECK_RE.test(meta.message);
+    // `meta.message` is the server's text: the primary message on its first line, then `DETAIL:` (the failing
+    // row's values) and any `HINT:` on later lines. Only the first line is judged, as above.
+    return meta?.code === '23514' && typeof meta.message === 'string'
+      && NAME_LOWER_CHECK_RE.test(meta.message.split('\n', 1)[0]);
   }
   return false;
 }
