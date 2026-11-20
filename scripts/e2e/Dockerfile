@@ -14,5 +14,7 @@ COPY prisma ./prisma
 COPY prisma.config.ts tsconfig.json ./
 COPY src ./src
 COPY scripts/e2e ./scripts/e2e
+# #4577: the entrypoint runs the one platform-action upsert the normal boot runs.
+COPY scripts/db/upsert-actions.ts ./scripts/db/upsert-actions.ts
 RUN DATABASE_URL=postgresql://e2e:e2e@db:5432/e2e pnpm prisma generate
 CMD ["sh", "scripts/e2e/entrypoint.sh"]

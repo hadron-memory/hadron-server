@@ -58,6 +58,7 @@ import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { type Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { toNaiveUtc } from '../sessionActivity.js';
+import { loadLastGapEnd } from './stallGap.js';
 import { ASSIGNED_EVENT_TYPES, ASSIGNEE_CLEARED_EVENT_TYPES, PASSIVE_EVENT_TYPES, appendAlarmEvent, type AlarmChain, type AlarmEventType, type TaskParty } from './events.js';
 import { markStalled } from './availability.js';
 import { appManagerUserIds } from '../auth/appManagement.js';
@@ -183,6 +184,12 @@ export type StallInputs = {
    * doesn't count. Absent ⇒ none.
    */
   stopIntervals?: Map<string, StopInterval[]>;
+  /**
+   * #3775 A (cor:agt:050:32): the end of the latest evaluator gap (platform downtime), or absent. It joins the floor of
+   * the not-started, no-progress, owner-unreactive and unassignable windows, so downtime is never counted as silence.
+   * Never floors finish-by.
+   */
+  gapEndedAt?: Date | null;
   /** #2022 (R68, Vera's receipt §5) — when stop signals were what kept this queued task unassigned. Absent ⇒ none. */
   stopHolds?: StopInterval[];
 };
@@ -294,6 +301,7 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
   const own = <T extends { taskId: string | null; appId: string }>(rows: T[]): T[] => rows.filter((r) => r.taskId !== null && appOf.get(r.taskId) === r.appId);
   const userCallAt = new Map(userCalls.map((r) => [`${r.appId}:${r.actorUserId}`, r.at]));
   const { intervals: stopIntervals, holds: stopHoldsBy } = await loadStopIntervals(db, workerIds, ids);
+  const gapEndedAt = await loadLastGapEnd(db);
   const progressBy = new Map(own(progress).map((p) => [p.taskId, p._max.createdAt]));
   const queuedBy = new Map(own(queued).map((q) => [q.taskId, q._max.createdAt]));
   const editedBy = new Map(own(startByEdits).map(e => [e.taskId, e._max.createdAt]));
@@ -334,6 +342,7 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
       finishByAlarmStart: task.finishBy ? currentFinishByAlarmStart(task.id, task.finishBy, ownFinishByAlarms) : null,
       stopIntervals,
       stopHolds: stopHoldsBy.get(task.id) ?? [],
+      gapEndedAt,
     };
   });
 }
@@ -426,10 +435,23 @@ export function stallCandidates(
   inputs: StallInputs,
   windows: StallWindows,
   now: Date,
-  options: { episodesRunning?: boolean } = {},
+  options: { episodesRunning?: boolean; keepPreGap?: boolean } = {},
 ): StallCandidate[] {
+  const floored = candidatesFor(inputs, windows, now, options.episodesRunning === true, true);
+  // #3775 A (cor:agt:050:32): "an alarm already raised keeps running, episode start unchanged". An alarm raised before a
+  // gap carries the episode start the gap floor has since moved, so the questions about RAISED alarms (is its episode
+  // still running / current) also name the unfloored episodes. The pass that RAISES never does: it uses the floored set only.
+  if ((options.episodesRunning || options.keepPreGap) && inputs.gapEndedAt) {
+    const seen = new Set(floored.map((c) => `${c.rule}|${c.episodeStart.getTime()}`));
+    for (const c of candidatesFor(inputs, windows, now, options.episodesRunning === true, false)) {
+      if (!seen.has(`${c.rule}|${c.episodeStart.getTime()}`)) floored.push(c);
+    }
+  }
+  return floored;
+}
+
+function candidatesFor(inputs: StallInputs, windows: StallWindows, now: Date, running: boolean, gapFloor: boolean): StallCandidate[] {
   const { task } = inputs;
-  const running = options.episodesRunning === true;
   // #2648: a blocked task RAISES nothing, but a finish-by episode is not ended by blocking (cor:agt:050:14: it ends
   // only when the task ends or its finish-by time is edited), so the running question still names it.
   if (task.blocked && !(running && task.finishBy)) return [];
@@ -438,7 +460,9 @@ export function stallCandidates(
   // assignee wins when both are somehow set, as `assigneeOf` does. Worker-assigned and queued tasks are untouched.
   if (task.assigneeUserId && !task.assigneeWorkerId) return [];
   // #2648: clearing a finish-by time brings the ordinary windows back from the edit, so it floors them like a release.
-  const floor = (d: Date) => latest(d, task.releasedAt, inputs.finishByEditedAt) as Date;
+  // #3775 A: the gap end floors the same way (the finish-by branch below never reads `floor`: a deadline is absolute).
+  const gapEnd = gapFloor ? inputs.gapEndedAt : null;
+  const floor = (d: Date) => latest(d, task.releasedAt, inputs.finishByEditedAt, gapEnd) as Date;
   const assignee = assigneeOf(task);
   const out: StallCandidate[] = [];
   const add = (rule: StallRule, episodeStart: Date, dueAt: Date, extra: Partial<StallCandidate> = {}, stopped: readonly StopInterval[] = []) => {
@@ -495,7 +519,7 @@ export function stallCandidates(
   if (task.status === 'started' && inputs.openChildCount === 0 && task.startedAt) {
     const since = latest(
       task.startedAt, task.assignedAt, inputs.lastChildEndedAt, inputs.lastProgressAt, inputs.assigneeActivityAt, task.releasedAt,
-      inputs.finishByEditedAt,
+      inputs.finishByEditedAt, gapEnd,
     ) as Date;
     const stopped = stopOf(inputs, task.assigneeWorkerId);
     add('no-progress', since, countedDueAt(since, windows.noProgressMinutes * MINUTE, stopped), {}, stopped);
@@ -791,7 +815,7 @@ export async function currentAlarmEpisodes(
   const inputs = await loadStallInputs(db, { id: { in: taskIds } }, now);
   const windows = await loadWindows(db, [...new Set(inputs.map((i) => i.task.appId))]);
   for (const i of inputs) {
-    for (const c of stallCandidates(i, windows.get(i.task.appId) as StallWindows, now)) {
+    for (const c of stallCandidates(i, windows.get(i.task.appId) as StallWindows, now, { keepPreGap: true })) {
       out.add(alarmEpisodeKey(c.taskId, STALL_EVENT_TYPE[c.rule], c.episodeStart));
     }
   }
@@ -991,8 +1015,15 @@ export async function endedAlarmEpisodeInstants(
         CROSS JOIN LATERAL (
           SELECT s.started_at AS t
           UNION ALL SELECT s.updated_at WHERE s.auto_expired_at IS NULL
-          UNION ALL SELECT e.created_at FROM usage_events e WHERE e.session_id = s.id AND e.counts_as_activity
-            AND e.created_at > p.lo AND e.created_at <= p.hi
+          -- #4492: only the EARLIEST qualifying event can be the answer, so one index probe per (window, session)
+          -- (usage_events_session_activity_idx), not every event of the window: a current holder's window runs to
+          -- FOREVER, and on a long, dense session the range scan read its whole history per window (30 s for 300
+          -- windows on the harness). The session's end bounds the probe too: an event past it is not activity, and
+          -- if the earliest in-window event is past it, so is every later one. A session with none yields NULL,
+          -- which the outer x.t test drops, as an absent row was.
+          UNION ALL SELECT (SELECT e.created_at FROM usage_events e WHERE e.session_id = s.id AND e.counts_as_activity
+            AND e.created_at > p.lo AND e.created_at <= p.hi AND (s.ended_at IS NULL OR e.created_at <= s.ended_at)
+            ORDER BY e.created_at LIMIT 1)
         ) x
         WHERE x.t > p.lo AND x.t <= p.hi AND (s.ended_at IS NULL OR x.t <= s.ended_at)
         GROUP BY p.k`

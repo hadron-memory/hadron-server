@@ -16,6 +16,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbNode } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 const R = resolvers.AppRun as any;
 
@@ -123,7 +124,7 @@ describe('AppRun relations are gated on their OWN entity, not the run (#831/#552
     });
     const r2 = await db.appRun.create({
       data: {
-        id: generateId(), organizationId: orgA.id, appId: appA.id, userId: outsiderUser.id,
+        id: generateId(), organizationId: orgA.id, appId: appA.id, agentId: await testRunAgentId(db, orgA.id, appA.id), userId: outsiderUser.id,
         triggerKind: 'MANUAL', entryNodeUrn: `${memA.urn}:${entryNode.loc}`, status: 'COMPLETED',
       },
     });
@@ -155,7 +156,7 @@ describe('AppRun relations are gated on their OWN entity, not the run (#831/#552
     });
     const personalRun = await db.appRun.create({
       data: {
-        id: generateId(), organizationId: orgA.id, appId: personalApp.id,
+        id: generateId(), organizationId: orgA.id, appId: personalApp.id, agentId: await testRunAgentId(db, orgA.id, personalApp.id),
         triggerKind: 'MANUAL', entryNodeUrn: `${memA.urn}:${entryNode.loc}`, status: 'COMPLETED',
       },
     });
@@ -177,7 +178,7 @@ describe('AppRun relations degrade to null rather than failing the page (#831)',
   it('entryNode is null for an unresolvable / legacy URN', async () => {
     const bad = await db.appRun.create({
       data: {
-        id: generateId(), organizationId: orgA.id, appId: appA.id,
+        id: generateId(), organizationId: orgA.id, appId: appA.id, agentId: await testRunAgentId(db, orgA.id, appA.id),
         triggerKind: 'MANUAL', entryNodeUrn: 'not-a-resolvable-urn', status: 'FAILED',
       },
     });
@@ -186,20 +187,21 @@ describe('AppRun relations degrade to null rather than failing the page (#831)',
 
   it('app is null when the App row was hard-deleted', async () => {
     const r = await row();
-    await db.appRun.update({ where: { id: run.id } , data: { agentId: null } });
     await db.appAgent.deleteMany({ where: { appId: appA.id } });
     await db.app.delete({ where: { id: appA.id } });
     expect(await R.app(r, {}, ctx(member.id))).toBeNull();
   });
 
-  it('agent and user are null when the run carries no agent / no user', async () => {
+  // #3689 (cor:agt:010:01 rev 45): a run always names an existing Agent (NOT NULL + FK), so `agent` is never null for a
+  // missing column any more; `user` still is for a run with no on-behalf-of user.
+  it('agent is the run\'s own Agent and user is null when the run carries no user', async () => {
     const bare = await db.appRun.create({
       data: {
-        id: generateId(), organizationId: orgA.id, appId: appA.id,
+        id: generateId(), organizationId: orgA.id, appId: appA.id, agentId: await testRunAgentId(db, orgA.id, appA.id),
         triggerKind: 'WEBHOOK', entryNodeUrn: `${memA.urn}:${entryNode.loc}`, status: 'PENDING',
       },
     });
-    expect(await R.agent(bare, {}, ctx(member.id))).toBeNull();
+    expect((await R.agent(bare, {}, ctx(member.id)))?.id).toBe(bare.agentId);
     expect(await R.user(bare, {}, ctx(member.id))).toBeNull();
   });
 });
@@ -232,7 +234,7 @@ describe('AppRun.app is request-memoized (#831 — no N+1 across a run page)', (
     for (let i = 0; i < 5; i++) {
       await db.appRun.create({
         data: {
-          id: generateId(), organizationId: orgA.id, appId: appA.id,
+          id: generateId(), organizationId: orgA.id, appId: appA.id, agentId: await testRunAgentId(db, orgA.id, appA.id),
           triggerKind: 'MANUAL', entryNodeUrn: `${memA.urn}:${entryNode.loc}`, status: 'COMPLETED',
         },
       });

@@ -93,7 +93,7 @@ import { untrackedTaskItemMutations, untrackedTaskItemQueries } from './resolver
 import { wakeMutations, wakeQueries } from './resolvers.wake.js';
 import { stopSignalMutations, stopSignalQueries } from './resolvers.stopSignal.js';
 import { deliveryBatchMutations, deliveryBatchQueries } from './resolvers.deliveryBatch.js';
-import { appKeyScopeMutations, appKeyScopeFieldResolvers } from './resolvers.appKeyScope.js';
+import { appKeyScopeMutations, appKeyScopeFieldResolvers, appKeyScopeQueries } from './resolvers.appKeyScope.js';
 import { hostOperationMutations, hostOperationQueries, hostOperationFieldResolvers } from './resolvers.hostOperation.js';
 import { hostSweepRunMutations, hostSweepRunQueries } from './resolvers.hostSweepRuns.js';
 import { desiredStateMutations, desiredStateQueries, desiredStateWorkerFields } from './resolvers.desiredState.js';
@@ -116,7 +116,7 @@ import { agentOfferReadinessFieldResolvers } from './resolvers.agentOfferReadine
 import { agentClonedFromFieldResolvers } from './resolvers.agentClonedFrom.js';
 import { signingFieldResolvers, signingMutations, signingQueries } from './resolvers.signing.js';
 import { commentFieldResolvers, commentMutations, commentQueries } from './resolvers.comments.js';
-import { decisionFieldResolvers, decisionMutations, decisionQueries } from './resolvers.decisions.js';
+import { questionFieldResolvers, questionMutations, questionQueries } from './resolvers.questions.js';
 import { specDocumentQueries } from './resolvers.specDocument.js';
 import {
   specCorpusMintMutations,
@@ -186,8 +186,8 @@ export const resolvers = {
   Grant: grantFieldResolvers.Grant,
   GrantSignature: grantFieldResolvers.GrantSignature,
   Comment: commentFieldResolvers.Comment,
-  Decision: decisionFieldResolvers.Decision,
-  DecisionLog: decisionFieldResolvers.DecisionLog,
+  Question: questionFieldResolvers.Question,
+  QuestionLog: questionFieldResolvers.QuestionLog,
   UnresolvedFeedback: commentFieldResolvers.UnresolvedFeedback,
   GraphNode: commentFieldResolvers.GraphNode,
   NodeRevision: { ...typeResolvers.NodeRevision, ...nodeAttributionFieldResolvers.NodeRevision },
@@ -210,7 +210,7 @@ export const resolvers = {
     ...nodeApprovalQueries,
     ...signingQueries,
     ...commentQueries,
-    ...decisionQueries,
+    ...questionQueries,
     ...skillQueries,
     ...objectQueries,
     ...edgeQueries,
@@ -221,6 +221,7 @@ export const resolvers = {
     ...agentServedBootPromptQueries,
     ...orgBootPromptSigningQueries,
     ...appQueries,
+    ...appKeyScopeQueries,
     ...chatQueries,
     ...teamChatQueries,
     ...teamWorkQueries,
@@ -339,7 +340,7 @@ export const resolvers = {
     ...grantCreateMutations,
     ...grantManageMutations,
     ...commentMutations,
-    ...decisionMutations,
+    ...questionMutations,
     ...scopeMutations,
     ...channelMutations,
     ...registerMutations,

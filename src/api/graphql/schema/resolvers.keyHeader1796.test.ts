@@ -55,7 +55,7 @@ async function request(query: string, variables: Record<string, unknown>, suppli
   } };
 }
 const startQuery = 'mutation($agent: ID!, $user: String) { startAgentSession(agentId: $agent, externalUserId: $user) { id memoryId } }';
-const linkQuery = 'mutation($memory: ID!, $user: String!) { linkMemoryToUser(memoryId: $memory, externalUserId: $user) { id isEncrypted class } }';
+const linkQuery = 'mutation($memory: ID!, $user: String!) { linkMemoryToUser(memoryRef: $memory, externalUserId: $user) { id isEncrypted class } }';
 
 describe('#1796 schema boundary', () => {
   it('removes provisioning key arguments and allow-lists encryptMemory by name', () => {
@@ -76,7 +76,7 @@ describe('#1796 schema boundary', () => {
         }
       }
     }
-    expect(encryptionArgs.sort()).toEqual(['dataKey', 'memoryId', 'passphrase']);
+    expect(encryptionArgs.sort()).toEqual(['dataKey', 'memoryRef', 'passphrase']);
     expect(found.sort()).toEqual(['Mutation.encryptMemory.dataKey', 'Mutation.encryptMemory.passphrase']);
   });
 
@@ -193,7 +193,7 @@ describe('#1796 real HTTP header operations', () => {
     for (const legacy of [undefined, null, '', key]) {
       const query = operation === 'session'
         ? 'mutation($id: ID!, $key: String) { startAgentSession(agentId: $id, externalUserId: "removed", dataKey: $key) { id } }'
-        : 'mutation($id: ID!, $key: String) { linkMemoryToUser(memoryId: $id, externalUserId: "removed", dataKey: $key) { id } }';
+        : 'mutation($id: ID!, $key: String) { linkMemoryToUser(memoryRef: $id, externalUserId: "removed", dataKey: $key) { id } }';
       const result = await request(query, { id: operation === 'session' ? agentId : memoryId, key: legacy });
       expect(result.body.errors?.[0]?.extensions?.code).toBe('GRAPHQL_VALIDATION_FAILED');
       expect(result.body.errors?.[0]?.message).toContain('Unknown argument "dataKey"');
@@ -221,11 +221,11 @@ describe('#1796 real HTTP header operations', () => {
     }
     const sessionsBefore = await db.session.count();
     const firstField = mode === 'promotion'
-      ? 'first: linkMemoryToUser(memoryId: $firstMemory, externalUserId: "single-first") { id }'
+      ? 'first: linkMemoryToUser(memoryRef: $firstMemory, externalUserId: "single-first") { id }'
       : 'first: startAgentSession(agentId: $agent, externalUserId: "single-first") { id }';
     const secondField = mode === 'session'
       ? 'second: startAgentSession(agentId: $agent, externalUserId: "single-second") { id }'
-      : 'second: linkMemoryToUser(memoryId: $secondMemory, externalUserId: "single-second") { id }';
+      : 'second: linkMemoryToUser(memoryRef: $secondMemory, externalUserId: "single-second") { id }';
     const declarations = mode === 'session' ? '$agent: ID!'
       : mode === 'promotion' ? '$firstMemory: ID!, $secondMemory: ID!'
       : '$agent: ID!, $secondMemory: ID!';

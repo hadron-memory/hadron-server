@@ -7,6 +7,7 @@ import { runMayReadTeam } from '../../../lib/auth/runTeamRead.js';
 import { retryOnSerializationFailure } from '../../../lib/serializableRetry.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { finishFindings, countFindings, type TaskFinding } from '../../../lib/agentTasks/findings.js';
+import { finishRoleTaskRefs } from '../../../lib/agentTasks/roleTaskRefs.js';
 import { isDeepStrictEqual } from 'node:util';
 import { lockTaskGraph, taskPriority, addTaskBlocker, removeTaskBlocker } from '../../../lib/agentTasks/blockers.js';
 import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
@@ -2777,7 +2778,7 @@ export const agentTaskMutations = {
    */
   finishAgentTask: async (
     _: unknown,
-    { taskId, result }: { taskId: string; result: { outcome: string; summary?: string | null; evidence?: string | null; findings?: unknown } },
+    { taskId, result }: { taskId: string; result: { outcome: string; summary?: string | null; evidence?: string | null; findings?: unknown; workedFromRoleTaskRefs?: unknown } },
     ctx: Context,
     info?: GraphQLResolveInfo,
   ) => {
@@ -2799,6 +2800,8 @@ export const agentTaskMutations = {
       }
       // #2652 (cor:agt:050:30): the team's closed outcome set, read now, before any write; no set keeps any one word.
       await checkOutcomeInTeamSet(tx, txCtx, app.id, outcome, (w) => TASK_OUTCOME_PATTERN.test(w));
+      // #4414 (cor:agt:050:30): the role tasks followed, judged here, before any write, through the node read gate.
+      const roleTaskRefs = await finishRoleTaskRefs(txCtx, result?.workedFromRoleTaskRefs);
       // #2198: finishing with open children still succeeds (as it always has); the response says so.
       if ((await tx.agentTask.count({ where: { parentTaskId: task.id, status: { in: OPEN } } })) > 0) warn.push('task.finish.open-children');
       await tx.agentTask.update({
@@ -2807,6 +2810,7 @@ export const agentTaskMutations = {
           status: 'finished', finishedAt: new Date(),
           resultOutcome: outcome, resultSummary: summary, resultEvidence: evidence,
           ...(findings !== undefined ? { resultFindings: findings } : {}),
+          ...(roleTaskRefs !== undefined ? { resultWorkedFromRoleTaskRefs: roleTaskRefs } : {}),
           ...updatedStamp(ctx),
         },
       });
@@ -3434,6 +3438,14 @@ const HORIZON_LAG_LOG_INTERVAL_MS = 60_000;
  * because a line can only come from a check.
  */
 const horizonLagLastCheckedAt = new Map<string, number>();
+/** #4436 item 5: what a logged `errorCode` may look like (P2028, P1001, ECONNREFUSED); anything else is not logged. */
+const HORIZON_ERROR_CODE_SHAPE = /^[A-Za-z0-9_.:-]{1,64}$/;
+/** #4436 item 2: the test seam over the module-level throttle map (resolvers.teamEventHorizon4316.test.ts): reset between tests and read the size and membership the eviction pins assert on. Never used by production code. */
+export const horizonThrottleForTest = {
+  clear: (): void => horizonLagLastCheckedAt.clear(),
+  size: (): number => horizonLagLastCheckedAt.size,
+  has: (appId: string): boolean => horizonLagLastCheckedAt.has(appId),
+};
 /**
  * #4316: one operator line when a forward read came back short while committed events of the App are held back
  * at or above the snapshot horizon (cor:agt:050:11 records the horizon as built; a log line changes no
@@ -3462,8 +3474,14 @@ const horizonLagLastCheckedAt = new Map<string, number>();
  * #4408 (the #4372 review follow-ups): the cap EVICTS the least-recently-checked App instead of clearing
  * every throttle at once; the race timer is cleared on every path, not only success; and the fault line
  * carries the error's class and code, never its message.
+ *
+ * #4436: the eviction runs only when a NEW App arrives at the cap, an expired re-check of a mapped App
+ * evicts nobody, and every check moves its App to the newest end of the map, so the oldest entry is
+ * always the first key (O(1)). A logged `errorCode` must have the identifier shape.
+ *
+ * Exported for the #4408 direct pins (resolvers.teamEventHorizon4316.test.ts): the throttle bookkeeping,
+ * the race timer and the fault line, driven on a stand-in root client.
  */
-/** Exported for the #4408 direct pins (resolvers.teamEventHorizon4316.test.ts): the throttle bookkeeping, the race timer and the fault line, driven on a stand-in root client. */
 export async function logStalledHorizon(db: Context['db'], appId: string): Promise<void> {
   const now = Date.now();
   const last = horizonLagLastCheckedAt.get(appId);
@@ -3471,18 +3489,17 @@ export async function logStalledHorizon(db: Context['db'], appId: string): Promi
   // Baylor F5: a long-lived server would otherwise accumulate one entry per App forever. #4408 item 1:
   // past the cap, evict the least-recently-checked App — NOT the whole map. Clear-all reset every App's
   // settle-throttle at once, so a hot fleet re-probed in a burst the moment any 1_001st App arrived;
-  // eviction loses one window for one App. The scan is O(cap) and runs only when a NEW App arrives at the
-  // cap (a re-check updates a stamp in place); ties evict the earliest-inserted (Map iteration order),
+  // eviction loses one window for one App. #4436 item 1: the guard names the case the comment always
+  // claimed — a NEW App at the cap. An App already in the map (its window expired) is simply re-stamped
+  // and makes no room, so it neither scans nor evicts a bystander. Every check does delete-then-set, which
+  // moves the App to the newest end of the Map's insertion order, so that order IS recency order and the
+  // least-recently-checked App is the first key: eviction is O(1), and ties go to the earliest-inserted,
   // which is deterministic. Caller-visible behaviour is unchanged (FIT, #4408): the throttle only paces
   // probes, so what a caller is served — which events, and the more-remain answer — is the same.
-  if (horizonLagLastCheckedAt.size >= 1_000) {
-    let oldestApp: string | undefined;
-    let oldestStamp = Infinity;
-    for (const [app, stamp] of horizonLagLastCheckedAt) {
-      if (stamp < oldestStamp) { oldestStamp = stamp; oldestApp = app; }
-    }
-    horizonLagLastCheckedAt.delete(oldestApp!);
+  if (!horizonLagLastCheckedAt.has(appId) && horizonLagLastCheckedAt.size >= 1_000) {
+    horizonLagLastCheckedAt.delete(horizonLagLastCheckedAt.keys().next().value!);
   }
+  horizonLagLastCheckedAt.delete(appId);
   horizonLagLastCheckedAt.set(appId, now);
   const startedAt = now;
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -3522,8 +3539,12 @@ export async function logStalledHorizon(db: Context['db'], appId: string): Promi
     // is omitted rather than nulled; other errors carry neither. A non-Error throw names its kind; there
     // is no message to leak and none invented.
     const fault = typeof error === 'object' && error !== null ? (error as { code?: unknown; errorCode?: unknown }) : undefined;
-    const code = typeof fault?.code === 'string' ? fault.code
+    const rawCode = typeof fault?.code === 'string' ? fault.code
       : typeof fault?.errorCode === 'string' ? fault.errorCode : undefined;
+    // #4436 item 5 (Baylor F2): the line's fixed-key, no-free-text claim must hold for ANY thrower, not just
+    // Prisma and Node. A code with the identifier shape is logged; any other string is dropped, never
+    // truncated or logged raw, so a thrower that puts a message (a host, a path) in `code` cannot leak it.
+    const code = rawCode !== undefined && HORIZON_ERROR_CODE_SHAPE.test(rawCode) ? rawCode : undefined;
     console.log(JSON.stringify({
       event: 'team_events.horizon_probe_error', appId, ms: Date.now() - startedAt,
       errorName: error instanceof Error ? error.name : typeof error,
@@ -3978,7 +3999,7 @@ export const agentTaskFieldResolvers = {
     assignee: (t: TaskRow, _: unknown, ctx: Context) => partyView(ctx, t.assigneeWorkerId, t.assigneeUserId),
     result: (t: TaskRow, _: unknown, ctx: Context) => {
       const view = (row: TaskRow) => row.status === 'finished' && row.resultOutcome
-        ? { outcome: row.resultOutcome, summary: row.resultSummary, evidence: row.resultEvidence, ...(row.resultFindings != null ? { findings: row.resultFindings } : {}) }
+        ? { outcome: row.resultOutcome, summary: row.resultSummary, evidence: row.resultEvidence, ...(row.resultFindings != null ? { findings: row.resultFindings } : {}), ...(row.resultWorkedFromRoleTaskRefs != null ? { workedFromRoleTaskRefs: row.resultWorkedFromRoleTaskRefs } : {}) }
         : null;
       if (t.status !== 'finished' || !t.resultOutcome || Object.hasOwn(t, 'resultFindings')) return view(t);
       // #2662: wide list/tree/relation rows omit the large payload. Only a selected result loads it, under the

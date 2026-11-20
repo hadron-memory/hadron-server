@@ -54,7 +54,7 @@ beforeEach(async () => {
 /** The owner's personal/private memory in App A (with an active subscription to its Agent), holding one node. */
 async function ownedAppAMemory(memoryClass: 'personal' | 'private') {
   const ownerCtx: Context = { db, userId: owner.id, roles: ['READER'] };
-  const mem = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: `${memoryClass}-1503`, memoryClass } as never, ownerCtx);
+  const mem = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: `${memoryClass}-1503`, memoryClass } as never, ownerCtx);
   const agent = await db.agent.create({ data: {
     id: generateId(), organizationId: org.id, urn: `org-1503.example:${memoryClass}-agent`, name: `${memoryClass} agent`,
     type: 'CHATBOT', surfaces: ['api'],
@@ -100,7 +100,7 @@ describe.each(['personal', 'private'] as const)('#1503 (c): own %s memory in App
     const { node: target, urn: targetUrn } = await ownedAppAMemory(memoryClass);
     // An org-readable runnable node whose edge points at the owner's App-A memory.
     const ownerCtx: Context = { db, userId: owner.id, roles: ['READER'] };
-    const open = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: `open-${memoryClass}-1503` } as never, ownerCtx);
+    const open = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: `open-${memoryClass}-1503` } as never, ownerCtx);
     const runner = await db.node.create({ data: {
       id: generateId(), memoryId: open.id, loc: 'tasks:run-me', name: 'Run me', nodeType: 'info',
       content: 'the runnable body', isRunnable: true, tags: [],
@@ -149,7 +149,7 @@ describe.each(['personal', 'private'] as const)('#1503 (c): own %s memory in App
     const { node: task } = await ownedAppAMemory(memoryClass);
     // A source node in the owner's App-B personal memory, authored by the App-A task.
     const ownerCtx: Context = { db, userId: owner.id, roles: ['READER'] };
-    const memB = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: `${memoryClass}-b-1503`, memoryClass } as never, ownerCtx);
+    const memB = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: `${memoryClass}-b-1503`, memoryClass } as never, ownerCtx);
     const agentB = await db.agent.create({ data: {
       id: generateId(), organizationId: org.id, urn: `org-1503.example:${memoryClass}-agent-b`, name: 'agent b',
       type: 'CHATBOT', surfaces: ['api'],

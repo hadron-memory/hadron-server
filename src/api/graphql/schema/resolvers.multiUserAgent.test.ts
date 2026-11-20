@@ -586,7 +586,7 @@ describe('linkMemoryToUser', () => {
     );
     const linked = await resolvers.Mutation.linkMemoryToUser(
       {},
-      { memoryId: session.memoryId!, externalUserId: 'mm-new' },
+      { memoryRef: session.memoryId!, externalUserId: 'mm-new' },
       appCtx(app.id),
     );
     expect(linked.anonymousExpiresAt).toBeNull();
@@ -619,7 +619,7 @@ describe('linkMemoryToUser', () => {
     await expect(
       resolvers.Mutation.linkMemoryToUser(
         {},
-        { memoryId: foreignMem.id, externalUserId: 'mm-42' },
+        { memoryRef: foreignMem.id, externalUserId: 'mm-42' },
         appCtx(app.id),
       ),
     ).rejects.toMatchObject({ code: 'MEMORY_NOT_FOUND' });
@@ -639,7 +639,7 @@ describe('linkMemoryToUser', () => {
     });
     const linked = await resolvers.Mutation.linkMemoryToUser(
       {},
-      { memoryId: memoryRow.urn, externalUserId: 'mm-urn-input' },
+      { memoryRef: memoryRow.urn, externalUserId: 'mm-urn-input' },
       appCtx(app.id),
     );
     expect(linked.id).toBe(session.memoryId);

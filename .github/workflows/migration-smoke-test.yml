@@ -42,9 +42,9 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hadron_smoke
     services:
       postgres:
-        # 033-rag-vector-retrieval: pgvector-bearing image (postgres:16 + pgvector)
-        # so `CREATE EXTENSION vector` works in CI. Same PG16, data-compatible.
-        image: pgvector/pgvector:pg16
+        # 033-rag-vector-retrieval: pgvector-bearing image so `CREATE EXTENSION vector` works in CI.
+        # #4487: PG17 like prod (the pg16 floor lane is test.yml's shard 1).
+        image: pgvector/pgvector:pg17
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: hadron_smoke
@@ -137,7 +137,7 @@ jobs:
       SERVE_ROLE: hadron_app
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: pgvector/pgvector:pg17
         env:
           POSTGRES_PASSWORD: postgres
         ports:

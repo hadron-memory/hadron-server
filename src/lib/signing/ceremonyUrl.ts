@@ -19,3 +19,6 @@ export const GRANT_SIGNING_CEREMONY_PATH = '/grant-signing';
 export function grantSigningCeremonyUrl(requestId: string): string {
   return `${getProjectBaseUrl()}${GRANT_SIGNING_CEREMONY_PATH}/${requestId}`;
 }
+
+/** #3998 (cor:sec:060): the person read-client reveal page's path prefix; its own cookie path. The client id is the only parameter. */
+export const SECRET_REVEAL_PATH = '/secret-reveal';

@@ -71,7 +71,7 @@ beforeEach(async () => {
     data: { id: generateId(), githubId: 66220, githubUsername: `gs-${t}`, roles: ['ADMIN'] },
   });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  srcMem = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `gs-src-${t}` }, ctx());
+  srcMem = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: `gs-src-${t}` }, ctx());
 });
 
 // ---------------------------------------------------------------------------

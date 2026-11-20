@@ -59,6 +59,7 @@ const EXEMPT_AUDIT_COLUMNS = new Set([
   // #3997 — who stored an App secret's version and who acted on it are sealed: the events are append-only, and a version is never edited in place.
   'secret_events.actor_user_id',
   'secret_versions.written_by_user_id',
+  'secret_read_clients.issuer_user_id', // Sealed issuance attribution; current identity is on grants.
 ]);
 
 function coveredPairs(registry: Readonly<Record<string, readonly string[]>>): Set<string> {
@@ -100,7 +101,8 @@ describe('mergeUsers audit actor registry', () => {
           OR (table_name = 'grant_signing_requests' AND column_name = 'requester_user_id')
           OR (table_name = 'grant_signatures' AND column_name = 'signer_id')
           OR (table_name = 'secret_events' AND column_name = 'actor_user_id')
-          OR (table_name = 'secret_versions' AND column_name = 'written_by_user_id'))
+          OR (table_name = 'secret_versions' AND column_name = 'written_by_user_id')
+          OR (table_name = 'secret_read_clients' AND column_name = 'issuer_user_id'))
     `;
     const schemaPairs = new Set(columns.map(({ table_name, column_name }) => `${table_name}.${column_name}`));
     const covered = coveredPairs(AUDIT_USER_COLUMNS);

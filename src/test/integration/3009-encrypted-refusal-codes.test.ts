@@ -39,7 +39,7 @@ beforeEach(async () => {
   memory = await db.memory.create({
     data: { name: 'Private', urn: `enc-${n}:private`, class: 'private', userId: user.id, ownerUserId: user.id, vectorIndexEnabled: false },
   });
-  await resolvers.Mutation.encryptMemory({}, { memoryId: memory.id, passphrase: 'synthetic-test-passphrase' }, {
+  await resolvers.Mutation.encryptMemory({}, { memoryRef: memory.id, passphrase: 'synthetic-test-passphrase' }, {
     db, userId: user.id, roles: ['READER'],
   });
   sessionKeyCache.clear(); // Neither HTTP request supplies x-hadron-memory-keys.

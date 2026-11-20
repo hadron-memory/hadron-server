@@ -113,6 +113,14 @@
    "3db72c050879a9f76722bb50920a98ae381d88fc4943eac02260251180041fe4"
   ],
   [
+   "hadron_list_secrets",
+   "eb656e5feb4dc502a7f168716f660f165000d78c75c135fabe4cda1addb4f405"
+  ],
+  [
+   "hadron_get_secret",
+   "b340a5e35da4dd543d4caba796cedd6e318f95cb6b9ddff26c2676d81cd5d8f8"
+  ],
+  [
    "hadron_preview_automation",
    "23706da4ebb3d62b5f4d97d6203d0c7bb0085180ccd2bac4d3875858169b02d8"
   ],
@@ -214,11 +222,11 @@
   ],
   [
    "hadron_create_node",
-   "718c0cdb6ad90723d5f848c6829651a7145049d3fb2882a04ce38ea5b0280736"
+   "64beeb71c042d4712f35546308642d7c3c8076431716494b0d1c17adef87dd78"
   ],
   [
    "hadron_update_node",
-   "7b37cfaefa0312c034b1d48e2dcc645fd0ad28500c13cdd4897104161774c428"
+   "b2e282bd01d801b5a9362250b228f661af165feb333fba6b853de7200f3c2c67"
   ],
   [
    "hadron_create_task",
@@ -306,7 +314,7 @@
   ],
   [
    "hadron_whoami",
-   "ed8855d944c7ca263b122b79433879b3223fcc8ee1cf19398f30d334e8a638ba"
+   "1b99d201fcb2311abaf356e718cb61f13811d9fa61703f89482a785b71b2d822"
   ],
   [
    "hadron_validate",
@@ -431,6 +439,14 @@
    "3db72c050879a9f76722bb50920a98ae381d88fc4943eac02260251180041fe4"
   ],
   [
+   "hadron_list_secrets",
+   "eb656e5feb4dc502a7f168716f660f165000d78c75c135fabe4cda1addb4f405"
+  ],
+  [
+   "hadron_get_secret",
+   "b340a5e35da4dd543d4caba796cedd6e318f95cb6b9ddff26c2676d81cd5d8f8"
+  ],
+  [
    "hadron_preview_automation",
    "23706da4ebb3d62b5f4d97d6203d0c7bb0085180ccd2bac4d3875858169b02d8"
   ],
@@ -532,11 +548,11 @@
   ],
   [
    "hadron_create_node",
-   "718c0cdb6ad90723d5f848c6829651a7145049d3fb2882a04ce38ea5b0280736"
+   "64beeb71c042d4712f35546308642d7c3c8076431716494b0d1c17adef87dd78"
   ],
   [
    "hadron_update_node",
-   "7b37cfaefa0312c034b1d48e2dcc645fd0ad28500c13cdd4897104161774c428"
+   "b2e282bd01d801b5a9362250b228f661af165feb333fba6b853de7200f3c2c67"
   ],
   [
    "hadron_create_task",
@@ -624,7 +640,7 @@
   ],
   [
    "hadron_whoami",
-   "ed8855d944c7ca263b122b79433879b3223fcc8ee1cf19398f30d334e8a638ba"
+   "1b99d201fcb2311abaf356e718cb61f13811d9fa61703f89482a785b71b2d822"
   ],
   [
    "hadron_validate",
@@ -749,6 +765,14 @@
    "3db72c050879a9f76722bb50920a98ae381d88fc4943eac02260251180041fe4"
   ],
   [
+   "hadron_list_secrets",
+   "eb656e5feb4dc502a7f168716f660f165000d78c75c135fabe4cda1addb4f405"
+  ],
+  [
+   "hadron_get_secret",
+   "b340a5e35da4dd543d4caba796cedd6e318f95cb6b9ddff26c2676d81cd5d8f8"
+  ],
+  [
    "hadron_preview_automation",
    "23706da4ebb3d62b5f4d97d6203d0c7bb0085180ccd2bac4d3875858169b02d8"
   ],
@@ -850,11 +874,11 @@
   ],
   [
    "hadron_create_node",
-   "718c0cdb6ad90723d5f848c6829651a7145049d3fb2882a04ce38ea5b0280736"
+   "64beeb71c042d4712f35546308642d7c3c8076431716494b0d1c17adef87dd78"
   ],
   [
    "hadron_update_node",
-   "7b37cfaefa0312c034b1d48e2dcc645fd0ad28500c13cdd4897104161774c428"
+   "b2e282bd01d801b5a9362250b228f661af165feb333fba6b853de7200f3c2c67"
   ],
   [
    "hadron_create_task",
@@ -942,7 +966,7 @@
   ],
   [
    "hadron_whoami",
-   "ed8855d944c7ca263b122b79433879b3223fcc8ee1cf19398f30d334e8a638ba"
+   "1b99d201fcb2311abaf356e718cb61f13811d9fa61703f89482a785b71b2d822"
   ],
   [
    "hadron_validate",
@@ -1067,6 +1091,14 @@
    "3db72c050879a9f76722bb50920a98ae381d88fc4943eac02260251180041fe4"
   ],
   [
+   "hadron_list_secrets",
+   "eb656e5feb4dc502a7f168716f660f165000d78c75c135fabe4cda1addb4f405"
+  ],
+  [
+   "hadron_get_secret",
+   "b340a5e35da4dd543d4caba796cedd6e318f95cb6b9ddff26c2676d81cd5d8f8"
+  ],
+  [
    "hadron_preview_automation",
    "23706da4ebb3d62b5f4d97d6203d0c7bb0085180ccd2bac4d3875858169b02d8"
   ],
@@ -1168,11 +1200,11 @@
   ],
   [
    "hadron_create_node",
-   "718c0cdb6ad90723d5f848c6829651a7145049d3fb2882a04ce38ea5b0280736"
+   "64beeb71c042d4712f35546308642d7c3c8076431716494b0d1c17adef87dd78"
   ],
   [
    "hadron_update_node",
-   "7b37cfaefa0312c034b1d48e2dcc645fd0ad28500c13cdd4897104161774c428"
+   "b2e282bd01d801b5a9362250b228f661af165feb333fba6b853de7200f3c2c67"
   ],
   [
    "hadron_create_task",
@@ -1260,7 +1292,7 @@
   ],
   [
    "hadron_whoami",
-   "ed8855d944c7ca263b122b79433879b3223fcc8ee1cf19398f30d334e8a638ba"
+   "1b99d201fcb2311abaf356e718cb61f13811d9fa61703f89482a785b71b2d822"
   ],
   [
    "hadron_validate",

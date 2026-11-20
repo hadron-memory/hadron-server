@@ -87,7 +87,7 @@ function adminCtx(): GqlContext {
 async function seedEncryptedIndexedMemory(): Promise<{ id: string; urn: string }> {
   const mem = await resolvers.Mutation.createMemory(
     {},
-    { orgId, name: `us5-${generateId().slice(0, 6)}` },
+    { orgRef: orgId, name: `us5-${generateId().slice(0, 6)}` },
     adminCtx(),
   );
   // The knowledge-class memory starts vector-indexed (class default).
@@ -169,7 +169,7 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
   it('non-encrypted memory: ack flag is a harmless no-op', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId, name: `us5-plain-${generateId().slice(0, 6)}` },
+      { orgRef: orgId, name: `us5-plain-${generateId().slice(0, 6)}` },
       adminCtx(),
     );
     // Knowledge → already vector-indexed. Toggle it off then back on with the
@@ -199,7 +199,7 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
     // queued and (after drain) stored.
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId, name: `us5-revoke-${generateId().slice(0, 6)}` },
+      { orgRef: orgId, name: `us5-revoke-${generateId().slice(0, 6)}` },
       adminCtx(),
     );
     const nodeId = generateId();
@@ -257,7 +257,7 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
     // DB state the sweep encounters.
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId, name: `us5-perma-${generateId().slice(0, 6)}` },
+      { orgRef: orgId, name: `us5-perma-${generateId().slice(0, 6)}` },
       adminCtx(),
     );
     // Flip to encrypted + ack via the standard path (index already on by

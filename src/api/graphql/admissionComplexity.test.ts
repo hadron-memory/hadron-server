@@ -72,7 +72,6 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.connectionGrants",
   "Query.creditLedgerEntries",
   "Query.dashboardWidgetPresetsPage",
-  "Query.decisions",
   "Query.deliveryBatches",
   "Query.driveFiles",
   "Query.dueWakes",
@@ -103,6 +102,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.myChats",
   "Query.myChatsPage", // #2212 A3: pageArgs, default 20, cap 200.
   "Query.myGrants", // #3800: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
+  "Query.mySecretReadClients", // #3998: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.myUserApiKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.nodeEdgeRemovals",
   "Query.nodeRevisions",
@@ -112,6 +112,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.organizations",
   "Query.principalGrants",
   "Query.publicAgents",
+  "Query.questions",
   "Query.recoveryEdges",
   "Query.recoveryNodes",
   "Query.registerEntries",
@@ -139,6 +140,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.webPolls", // #4123: bounded compatibility list.
   "Query.webPollsPage", // #4123: default20/cap100.
   "Query.workers",
+  "Secret.readClients", // #3998 B+C: pageArgs default 20, cap 200; common omitted bound 100 is conservative.
   "Secret.versions", // #3997: pageArgs default 20, cap 200; below the common 100, so omission overestimates.
   "ServedPrompt.currentLint", // #2048: default 50, cap 100; shared pageLintWarnings.
   "ServedPrompt.provenance",

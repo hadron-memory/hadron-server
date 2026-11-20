@@ -225,3 +225,80 @@ describe('#4455: differential — roster, composition and utilization answer the
     expect(byFamily.get('codex')).toBe(1);
   });
 });
+
+describe("#4472: the typed refusal is on every withRosterAppRead caller's path", () => {
+  // The wrapper-level pins above prove withRosterAppRead converts a busy store; these prove each
+  // RESOLVER still routes through it — #4460's QA measured teamRoster under load, composition and
+  // utilization only through this shared wrapper, so a resolver refactor that drops the wrapper (or
+  // swallows the refusal into its own shape) must turn one of these red. The mocked $transaction
+  // throws before the projection runs, so the app need not exist; what is pinned is the wiring.
+  const busy = (message: string, code: string) =>
+    new Prisma.PrismaClientKnownRequestError(message, { code, clientVersion: 'test' });
+
+  const eachCallerConverts = async (call: () => Promise<unknown>, reason: 'TRANSACTION_BUDGET' | 'POOL_WAIT') => {
+    // The spy patches the module-level db handle the resolvers read through; a resolver that
+    // opened its own client would bypass it and the pin fails closed (red), not silently green.
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async () => {
+      throw busy(
+        reason === 'POOL_WAIT' ? 'Unable to start a transaction: the pool was full.' : 'Transaction already closed during query execution.',
+        'P2028',
+      );
+    }) as unknown as never);
+    try {
+      // Only code/retryable/reason here: this pins WHICH caller surfaces the refusal, not the
+      // per-arm envelope (budgetMs vs maxWaitMs), which the wrapper-level pins above own
+      // (#4474 landed that split) — asserting the scalar here would couple this PR to that one's order.
+      await expect(call()).rejects.toMatchObject({
+        extensions: { code: 'TEAM_READ_BUSY', retryable: true, reason },
+      });
+      // The refusal must come from the spied transaction, not an earlier guard failing closed.
+      expect(spy).toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  };
+
+  it('teamRoster surfaces the typed refusal for both arms (tx budget and pool wait)', async () => {
+    await eachCallerConverts(() => Q.teamRoster({}, { appRef: app.id }, ctx(mia.id)), 'TRANSACTION_BUDGET');
+    await eachCallerConverts(() => Q.teamRoster({}, { appRef: app.id }, ctx(mia.id)), 'POOL_WAIT');
+  });
+
+  it('teamComposition surfaces the typed refusal for both arms (wiring pin: the mock throws before its lane grouping runs)', async () => {
+    await eachCallerConverts(() => Q.teamComposition({}, { appRef: app.id }, ctx(mia.id)), 'TRANSACTION_BUDGET');
+    await eachCallerConverts(() => Q.teamComposition({}, { appRef: app.id }, ctx(mia.id)), 'POOL_WAIT');
+  });
+
+  it('teamUtilization surfaces the typed refusal for both arms (wiring pin: valid input, the mock throws inside the read)', async () => {
+    await eachCallerConverts(() => Q.teamUtilization({}, { appRef: app.id }, ctx(mia.id)), 'TRANSACTION_BUDGET');
+    await eachCallerConverts(() => Q.teamUtilization({}, { appRef: app.id }, ctx(mia.id)), 'POOL_WAIT');
+  });
+
+  it('teamUtilization answers BAD_USER_INPUT for an invalid window on a healthy store', async () => {
+    // windowHours is validated before the read wrapper (#4499 hoisted it above admission and
+    // above the transaction); on a healthy store an invalid window is a caller fault. The
+    // busy-store ordering is pinned by the next test.
+    await expect(Q.teamUtilization({}, { appRef: app.id, windowHours: 0 }, ctx(mia.id))).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  });
+
+  it('an invalid window answers BAD_USER_INPUT even on a busy store — the validation runs before the wrapper (#4497)', async () => {
+    // #4499 hoisted the argument checks above withRosterAppRead: a caller fault is answered as
+    // itself, never dressed as a retryable TEAM_READ_BUSY, and it takes no transaction slot. The
+    // spy proves the ordering — validation first, so the busy transaction is never even attempted
+    // for invalid input. (Before #4499 this pin read TEAM_READ_BUSY/POOL_WAIT: the validation sat
+    // inside the transaction and the busy refusal won; the flip is the client-visible change
+    // #4497 intended.)
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async () => {
+      throw busy('Unable to start a transaction: the pool was full.', 'P2028');
+    }) as unknown as never);
+    try {
+      await expect(Q.teamUtilization({}, { appRef: app.id, windowHours: 0 }, ctx(mia.id))).rejects.toMatchObject({
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

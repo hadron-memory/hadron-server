@@ -17,6 +17,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { formatGraphQLError } from '../formatError.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn(async () => {}) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -51,7 +52,7 @@ async function enable(appRef = appId) {
   expect(out.data.setAutomationTeamSnapshotGrant.revokedAt).toBeNull();
 }
 async function mintRun(userId: string | null = null, forApp = appId): Promise<AppRun> {
-  return db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId: forApp, userId, triggerKind: 'SCHEDULE', triggerId: await schedule(forApp),
+  return db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId: forApp, agentId: await testRunAgentId(db, orgId, forApp), userId, triggerKind: 'SCHEDULE', triggerId: await schedule(forApp),
     entryNodeUrn: 'hrn:node:snapshot2925.example:flows:report', status: 'RUNNING' } });
 }
 const toolCtx = (run: AppRun) => ({ db, run, principal: runContext(db, run), log: vi.fn() });
@@ -107,7 +108,7 @@ async function legacyOn(){
 it('RED3350: an ungranted schedule cannot borrow the App setting',async()=>{
  await legacyOn();
  const trigger=await db.agentSchedule.create({data:{id:generateId(),organizationId:orgId,appId,name:'Ungranted B',cron:'* * * * *',entryNodeUrn:'hrn:node:snapshot2925.example:flows:report'}});
- const run=await db.appRun.create({data:{id:generateId(),appId,organizationId:orgId,userId:null,triggerKind:'SCHEDULE',triggerId:trigger.id,entryNodeUrn:trigger.entryNodeUrn,status:'RUNNING'}});
+ const run=await db.appRun.create({data:{id:generateId(),appId, agentId: await testRunAgentId(db, orgId, appId),organizationId:orgId,userId:null,triggerKind:'SCHEDULE',triggerId:trigger.id,entryNodeUrn:trigger.entryNodeUrn,status:'RUNNING'}});
  await denied(snapshotTool().execute(toolCtx(run),WINDOW),'APP_NOT_FOUND');
 });
 it('RED3350: MANUAL has no automation even when the old flag was on',async()=>{
@@ -118,32 +119,32 @@ it('automation A granted, B ungranted, later A runs and all descendant kinds sta
   await enable();
   const a = await mintRun();
   const bTrigger = await db.agentSchedule.create({ data: { id: generateId(), organizationId: orgId, appId, name: 'B', cron: '* * * * *', entryNodeUrn: a.entryNodeUrn } });
-  const b = await db.appRun.create({ data: { id: generateId(), appId, organizationId: orgId, userId: null, triggerKind: 'SCHEDULE', triggerId: bTrigger.id, entryNodeUrn: a.entryNodeUrn, status: 'RUNNING' } });
+  const b = await db.appRun.create({ data: { id: generateId(), appId, agentId: await testRunAgentId(db, orgId, appId), organizationId: orgId, userId: null, triggerKind: 'SCHEDULE', triggerId: bTrigger.id, entryNodeUrn: a.entryNodeUrn, status: 'RUNNING' } });
   const read = async (r: AppRun) => snapshotTool().execute(toolCtx(r), WINDOW);
   expect((await read(a) as any).app.id).toBe(appId);
   expect((await read(await mintRun()) as any).complete).toBe(true);
   await denied(read(b), 'APP_NOT_FOUND');
   for (const kind of ['SPAWN', 'INTEGRATION'] as const) {
     for (const [parent, admitted] of [[a, true], [b, false]] as const) {
-      const child = await db.appRun.create({ data: { id: generateId(), appId, organizationId: orgId, userId: null, parentRunId: parent.id,
+      const child = await db.appRun.create({ data: { id: generateId(), appId, agentId: await testRunAgentId(db, orgId, appId), organizationId: orgId, userId: null, parentRunId: parent.id,
         triggerKind: kind, entryNodeUrn: a.entryNodeUrn, status: 'RUNNING' } });
       if (admitted) expect((await read(child) as any).app.id).toBe(appId); else await denied(read(child), 'APP_NOT_FOUND');
     }
   }
   // A MANUAL origin stops ancestry, even if someone put a granted parent id on it.
-  const manual = await db.appRun.create({ data: { id: generateId(), appId, organizationId: orgId, userId: null, parentRunId: a.id,
+  const manual = await db.appRun.create({ data: { id: generateId(), appId, agentId: await testRunAgentId(db, orgId, appId), organizationId: orgId, userId: null, parentRunId: a.id,
     triggerKind: 'MANUAL', entryNodeUrn: a.entryNodeUrn, status: 'RUNNING' } });
   await denied(read(manual), 'APP_NOT_FOUND');
   await db.agentSchedule.update({ where: { id: a.triggerId! }, data: { deletedAt: new Date() } });
   await denied(read(a), 'APP_NOT_FOUND');
-  const child = await db.appRun.create({ data: { id: generateId(), appId, organizationId: orgId, userId: null, parentRunId: a.id,
+  const child = await db.appRun.create({ data: { id: generateId(), appId, agentId: await testRunAgentId(db, orgId, appId), organizationId: orgId, userId: null, parentRunId: a.id,
     triggerKind: 'SPAWN', entryNodeUrn: a.entryNodeUrn, status: 'RUNNING' } });
   await denied(read(child), 'APP_NOT_FOUND');
 });
 it('WEBHOOK root grant survives edit/re-adoption of that row and ends at revoke or soft-delete', async () => {
   const hook = await db.agentWebhook.create({ data: { id: generateId(), appId, organizationId: orgId, name: 'Hook', secret: generateId(), entryNodeUrn: 'hrn:node:snapshot2925.example:flows:report' } });
   const grant = await M.setAutomationTeamSnapshotGrant({}, { appRef: appId, triggerKind: 'WEBHOOK', triggerId: hook.id }, ctx(manager));
-  const run = await db.appRun.create({ data: { id: generateId(), appId, organizationId: orgId, userId: null, triggerKind: 'WEBHOOK', triggerId: hook.id, entryNodeUrn: hook.entryNodeUrn, status: 'RUNNING' } });
+  const run = await db.appRun.create({ data: { id: generateId(), appId, agentId: await testRunAgentId(db, orgId, appId), organizationId: orgId, userId: null, triggerKind: 'WEBHOOK', triggerId: hook.id, entryNodeUrn: hook.entryNodeUrn, status: 'RUNNING' } });
   const principal = runContext(db, run);
   expect(await mayReadAppTasks(principal, appId)).toBe(true);
   await db.agentWebhook.update({ where: { id: hook.id }, data: { name: 'Edited', automationPin: { hash: 'new-adoption-pin' } } });

@@ -16,6 +16,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { buildStatusFilter, buildAppRunOrderBy } from './resolvers.appRun.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 const Q = resolvers.Query as any;
 
@@ -44,6 +45,7 @@ async function seedRun(over: Record<string, unknown>) {
   return db.appRun.create({
     data: {
       id: generateId(), organizationId: org.id, appId,
+      agentId: await testRunAgentId(db, (over.organizationId as string | undefined) ?? org.id, (over.appId as string | undefined) ?? appId),
       triggerKind: 'MANUAL', entryNodeUrn: `${org.urn}::m::n`, status: 'COMPLETED',
       ...over,
     } as never,

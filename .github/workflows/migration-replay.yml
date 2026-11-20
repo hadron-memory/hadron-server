@@ -52,7 +52,7 @@ jobs:
     timeout-minutes: 10
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: pgvector/pgvector:pg17
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: postgres
@@ -175,9 +175,9 @@ jobs:
           expect_red 'a baselined object changed again' 'NEW DRIFT (not in the baseline): changed idx:memories_user_id_idx'
           rm -rf "$probe"
 
-          needs_line 'removed baseline line' 'changed col:tickers.reasons '
-          grep -v '^changed col:tickers.reasons ' baseline.bak > scripts/db/migration-replay-baseline.txt
-          expect_red 'removed baseline line' 'NEW DRIFT (not in the baseline): changed col:tickers.reasons'
+          needs_line 'removed baseline line' 'changed col:stamp_signing_keys.id '
+          grep -v '^changed col:stamp_signing_keys.id ' baseline.bak > scripts/db/migration-replay-baseline.txt
+          expect_red 'removed baseline line' 'NEW DRIFT (not in the baseline): changed col:stamp_signing_keys.id'
           cp baseline.bak scripts/db/migration-replay-baseline.txt
 
           { cat baseline.bak; echo 'added idx:no_such_index_anywhere 0000000000000000'; } > scripts/db/migration-replay-baseline.txt
@@ -194,7 +194,7 @@ jobs:
           cp baseline.bak "$RUNNER_TEMP/growth-base.txt"
           MIGRATION_REPLAY_BASE_BASELINE="$RUNNER_TEMP/growth-base.txt" MIGRATION_REPLAY_ALLOW_GROWTH=false \
             pnpm -s tsx scripts/db/migration-replay.ts > /dev/null 2>&1 || { echo "::error::the unaltered baseline is growth against itself"; exit 1; }
-          grep -v '^changed col:tickers.reasons ' baseline.bak > "$RUNNER_TEMP/growth-base.txt"
+          grep -v '^changed col:stamp_signing_keys.id ' baseline.bak > "$RUNNER_TEMP/growth-base.txt"
           export MIGRATION_REPLAY_BASE_BASELINE="$RUNNER_TEMP/growth-base.txt" MIGRATION_REPLAY_ALLOW_GROWTH=false
-          expect_red 'baseline growth over the base' 'BASELINE GROWTH (not on the base branch; needs the change manager'"'"'s baseline-growth-approved label): changed col:tickers.reasons'
+          expect_red 'baseline growth over the base' 'BASELINE GROWTH (not on the base branch; needs the change manager'"'"'s baseline-growth-approved label): changed col:stamp_signing_keys.id'
           unset MIGRATION_REPLAY_BASE_BASELINE MIGRATION_REPLAY_ALLOW_GROWTH
