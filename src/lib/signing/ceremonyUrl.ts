@@ -22,3 +22,12 @@ export function grantSigningCeremonyUrl(requestId: string): string {
 
 /** #3998 (cor:sec:060): the person read-client reveal page's path prefix; its own cookie path. The client id is the only parameter. */
 export const SECRET_REVEAL_PATH = '/secret-reveal';
+
+/**
+ * #4545 (hrn:node:hadronmemory.com:specs:cor:sec:060:02): the absolute link to a person holder's reveal page, the server origin
+ * plus the client id, beside the grant signing link. No token, query or fragment: the id alone never reads (the page needs the
+ * holder's own passkey), so the link discloses nothing beyond the id it carries.
+ */
+export function secretRevealUrl(clientId: string): string {
+  return `${getProjectBaseUrl()}${SECRET_REVEAL_PATH}/${clientId}`;
+}
