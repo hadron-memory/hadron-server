@@ -74,7 +74,8 @@ describe('#4339 email magic link, passkey switches ON', () => {
     expect(r.status).toBe(302);
     expect(r.headers.get('location')).toMatch(/\/auth\/callback\?code=/);
     await noPasskeyStep(r);
-    expect(await db.authHandoffCode.count({ where: { signInId: null } })).toBeGreaterThanOrEqual(1);
+    const u = await db.user.findFirstOrThrow({ where: { email } });
+    expect(await db.authHandoffCode.count({ where: { userId: u.id } })).toBe(2); // exactly one code per verify (account-creating link + this one): a second issuance on either would make it 3
   });
 
   it('RED: a brand-new address (no account yet) is signed in at once', async () => {
@@ -127,6 +128,10 @@ describe('#4339 email magic link, passkey switches ON', () => {
     expect((await verify(unbound)).status).toBe(400);
     const tampered = await magicLink(email, null);
     expect((await verify(tampered, '&return_to=https://evil.example')).status).toBe(400);
+    // The refusal spends nothing: the same link still signs in once it carries a valid return_to (pins current behaviour).
+    const afterTamper = await verify(tampered, `&return_to=${encodeURIComponent('/oauth/authorize?client_id=x&state=s')}`);
+    expect(afterTamper.status).toBe(302);
+    expect(cookieOf(afterTamper, 'hadron_token')).toBeTruthy();
     const ok = await magicLink(email);
     expect((await verify(ok)).status).toBe(302);
     const replay = await verify(ok);
@@ -150,6 +155,10 @@ describe('#4339 the other providers, switches ON', () => {
   it('RED on main, then structural for good: no sign-in route (email, GitHub, Google, Apple) can begin a passkey step', () => {
     // Google and Apple need a provider token exchange that this suite does not stub; the property is structural:
     // the only thing that creates a pending sign-in flow is beginPasskeySignIn, and nothing but its definition names it.
+    // LIMITS of this check (a textual grep, not an import graph): a comment or import that merely names a symbol would
+    // false-positive (fix: add the file to the expected list, or reword); a CALL inside src/api/passkeySignInRoutes.ts
+    // (the allowlisted file) is invisible to it; and paths are sliced POSIX-style (it assumes '/' separators). It
+    // guards against a new caller appearing, nothing more.
     const walk = (dir: string): string[] => readdirSync(dir).flatMap((f) => {
       const p = join(dir, f);
       if (p.endsWith('/src/test')) return []; // test helpers may start a flow directly (src/test/beginPendingSignIn.ts)

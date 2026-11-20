@@ -8,15 +8,22 @@ import type { Request, Response } from 'express';
 import { beginPasskeySignIn } from '../api/passkeySignInRoutes.js';
 import type { PendingContinuation } from '../auth/pendingEmailSignIn.js';
 
-export interface BegunPending { begun: boolean; cookie?: string; maxAgeMs?: number; location?: string }
+/** One res.cookie call, whole: the options Express would turn into the Set-Cookie flags (httpOnly, sameSite, secure, path, maxAge). */
+export interface RecordedCookie { name: string; value: string; opts: Record<string, unknown> }
+/** `cookie` / `maxAgeMs` stay as the first-cookie shortcuts the existing tests read; `cookies` is every call, in order. */
+export interface BegunPending { begun: boolean; cookie?: string; maxAgeMs?: number; location?: string; cookies: RecordedCookie[] }
 
-export async function beginPending(userId: string, continuation: PendingContinuation): Promise<BegunPending> {
-  const out: BegunPending = { begun: false };
+/** `secure` is the request's own flag (`req.secure`); the cookie's Secure flag follows it outside production. */
+export async function beginPending(userId: string, continuation: PendingContinuation, opts: { secure?: boolean } = {}): Promise<BegunPending> {
+  const out: BegunPending = { begun: false, cookies: [] };
   const res = {
-    cookie: (name: string, value: string, opts: { maxAge?: number }) => { out.cookie = `${name}=${value}`; out.maxAgeMs = opts.maxAge; return res; },
+    cookie: (name: string, value: string, o: { maxAge?: number }) => {
+      out.cookies.push({ name, value, opts: { ...o } });
+      out.cookie = `${name}=${value}`; out.maxAgeMs = o.maxAge; return res;
+    },
     redirect: (location: string) => { out.location = location; },
   } as unknown as Response;
-  out.begun = await beginPasskeySignIn({ secure: false } as unknown as Request, res, { userId, continuation });
+  out.begun = await beginPasskeySignIn({ secure: opts.secure ?? false } as unknown as Request, res, { userId, continuation });
   return out;
 }
 

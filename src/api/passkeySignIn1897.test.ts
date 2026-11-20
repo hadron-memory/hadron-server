@@ -108,14 +108,25 @@ describe('portal continuation, switch on', () => {
   beforeEach(async () => { await boot(ON); });
 
   it('a begun flow publishes nothing: no handoff code, no JWT cookie, only a pending row and its cookie (the machinery; email verify no longer begins one, #4339)', async () => {
-    const { r, cookie } = await begin();
-    expect(r.begun).toBe(true);
-    expect(r.location).toBe('/auth/passkey/sign-in');
+    const { r: begun, cookie } = await begin();
+    expect(begun.begun).toBe(true);
+    expect(begun.location).toBe('/auth/passkey/sign-in');
     expect(cookie).toBeTruthy();
     expect(await db.authHandoffCode.count()).toBe(0);
     expect(await db.signIn.count()).toBe(0);
     expect(await pendingCount()).toBe(1);
-    expect(r.location).not.toMatch(/token|code|@/);
+    expect(begun.location).not.toMatch(/token|code|@/);
+  });
+
+  it('the pending cookie is set once, with the flags the code sets today: HttpOnly, SameSite=Lax, path /auth/passkey, ten-minute life; Secure follows the request (a pin of current behaviour, not a rule)', async () => {
+    const { r: plain } = await begin();
+    expect(plain.cookies).toHaveLength(1);
+    const [c] = plain.cookies;
+    expect(c!.name).toBe('hadron_pending_signin');
+    expect(c!.opts).toMatchObject({ httpOnly: true, sameSite: 'lax', secure: false, path: '/auth/passkey', maxAge: 600_000 });
+    const tls = await beginPending(userId, portalContinuation(sha('portal-nonce')), { secure: true });
+    expect(tls.cookies).toHaveLength(1);
+    expect(tls.cookies[0]!.opts).toMatchObject({ httpOnly: true, sameSite: 'lax', secure: true });
   });
 
   it('the page renders only for the cookie holder, with the security headers, and never completes anything', async () => {
