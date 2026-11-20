@@ -8,7 +8,8 @@
  *      this App as grantee is not listed;
  *   3  a run without an agent has no branch: it is refused and reads nothing (mutant: an agentless fallback);
  *   4  the policy chain gates `tool.hadron_list_grants`, at cost 0;
- *   5  eligibility and the rows are read in ONE snapshot (RepeatableRead), so no concurrent change can split them (BLIND P2s on #4598).
+ *   5  eligibility and the rows are read in ONE snapshot (RepeatableRead), so no concurrent change can split them, and an existing
+ *      transaction below RepeatableRead is refused (BLIND P2s and delta on #4598).
  * Plus the principal guard, closed arguments, a deleted App's concealment and an uninstalled or unlicensed agent.
  */
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -20,6 +21,7 @@ import { runContext } from '../../../jobs/appRunDeps.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../workerSignature.js';
 import { DB_NOW, dbNowPlus, dropTestActions, insertGrant, insertGrantUnguarded, raw, seedWorld, type World } from '../../grants/grantFixtures3668.js';
 import { hadronListGrants, resolveRunTools } from './index.js';
+import { listGrantsForRunAgent } from '../../grants/read.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
 import type { RunToolContext } from './types.js';
 
@@ -136,7 +138,7 @@ describe('hadron_list_grants (#3710)', () => {
     expect(out.grants.find((g) => g.id === revoked)).toMatchObject({ holderKind: 'APP', allows: false });
   });
 
-  it('5: the eligibility check and the rows are read in ONE RepeatableRead transaction (no split between the two)', async () => {
+  it('5: the run tool opens ONE RepeatableRead transaction for the eligibility check and the rows (the options passed to $transaction)', async () => {
     await agentGrant(w.agentId, w.appId);
     const spy = vi.spyOn(db, '$transaction');
     try {
@@ -144,6 +146,28 @@ describe('hadron_list_grants (#3710)', () => {
       expect(spy).toHaveBeenCalledTimes(1);
       expect(spy.mock.calls[0]![1]).toMatchObject({ isolationLevel: 'RepeatableRead' });
     } finally { spy.mockRestore(); }
+  });
+
+  it('5 (DB-backed): inside a RepeatableRead transaction a committed insert between the count and the page is not seen: total and page agree', async () => {
+    await agentGrant(w.agentId, w.appId);
+    const reader = { appId: w.appId, agentId: w.agentId };
+    await db.$transaction(async (tx) => {
+      expect(await listGrantsForRunAgent(tx, reader, { take: 0 })).toMatchObject({ total: 1, items: [] });
+      await agentGrant(w.agentId, w.appId); // committed on another connection while the snapshot is open
+      const page = await listGrantsForRunAgent(tx, reader, { take: 20 });
+      expect(page.total).toBe(1);
+      expect(page.items).toHaveLength(1);
+    }, { isolationLevel: 'RepeatableRead' });
+    expect((await listGrantsForRunAgent(db, reader, { take: 20 })).total).toBe(2);
+  });
+
+  it('5 (guard; BLIND delta on #4598): an existing transaction below RepeatableRead is refused; RepeatableRead and Serializable are read', async () => {
+    await agentGrant(w.agentId, w.appId);
+    const reader = { appId: w.appId, agentId: w.agentId };
+    await expect(db.$transaction((tx) => listGrantsForRunAgent(tx, reader, {}), { isolationLevel: 'ReadCommitted' })).rejects.toThrow(/RepeatableRead/);
+    await expect(db.$transaction((tx) => listGrantsForRunAgent(tx, reader, {}))).rejects.toThrow(/RepeatableRead/); // the server default is read committed
+    await expect(db.$transaction((tx) => listGrantsForRunAgent(tx, reader, {}), { isolationLevel: 'RepeatableRead' })).resolves.toMatchObject({ total: 1 });
+    await expect(db.$transaction((tx) => listGrantsForRunAgent(tx, reader, {}), { isolationLevel: 'Serializable' })).resolves.toMatchObject({ total: 1 });
   });
 
   it('1: a spent grant is listed and allows nothing; the projection is exactly the Grant scalars', async () => {

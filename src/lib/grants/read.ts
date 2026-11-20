@@ -148,10 +148,19 @@ export interface GrantRunReader { appId: string; agentId: string }
  * no concurrent uninstall, licence change or insert can split them. A row out of scope is simply absent. `take` 0 is count-only. The caller clamps `take` and `skip`.
  */
 export async function listGrantsForRunAgent(db: Db, reader: GrantRunReader, page: { take?: number; skip?: number }): Promise<{ items: GrantView[]; total: number }> {
-  // ONE snapshot for the eligibility check, the rows and the total (BLIND P2s on #4598): a client opens a RepeatableRead transaction; a caller
-  // already inside one hands its own transaction client, which carries its isolation.
+  // ONE snapshot for the eligibility check, the rows and the total (BLIND P2s on #4598): a client opens a RepeatableRead transaction. A caller
+  // already inside one hands its own transaction client, and its isolation is whatever that caller chose: a ReadCommitted transaction would
+  // see the eligibility, the total and the page at three different moments, so it is REFUSED (BLIND delta on #4598, Peter #125292), never read.
   const read = (tx: Db) => readRunAgentGrants(tx, reader, page);
-  return '$transaction' in db ? db.$transaction(read, { isolationLevel: 'RepeatableRead' }) : read(db);
+  if ('$transaction' in db) return db.$transaction(read, { isolationLevel: 'RepeatableRead' });
+  await requireSnapshotIsolation(db);
+  return read(db);
+}
+
+/** The isolation in effect for the open transaction `db` belongs to must be RepeatableRead or stronger, so one read sees one snapshot. */
+async function requireSnapshotIsolation(db: Prisma.TransactionClient): Promise<void> {
+  const [{ level }] = await db.$queryRaw<Array<{ level: string }>>(Prisma.sql`SELECT current_setting('transaction_isolation') AS level`);
+  if (level !== 'repeatable read' && level !== 'serializable') throw new Error('listGrantsForRunAgent needs a RepeatableRead or Serializable transaction, or a client that opens its own');
 }
 
 async function readRunAgentGrants(db: Db, reader: GrantRunReader, page: { take?: number; skip?: number }): Promise<{ items: GrantView[]; total: number }> {
