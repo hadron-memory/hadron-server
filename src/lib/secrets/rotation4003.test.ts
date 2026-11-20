@@ -14,7 +14,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { decryptBytesAad, encryptBytesAad } from '../tokenCrypto.js';
-import { appKeyAad, appKeyCache, ensureAppKey, unwrapAppKey } from './appKeys.js';
+import { appKeyAad, appKeyCache, ensureAppKey, rootCheckValue, unwrapAppKey } from './appKeys.js';
 import { rewrapSecretRootKeys, rotateAppKey } from './rotation.js';
 
 const ROOT = 'a1'.repeat(32);
@@ -119,6 +119,63 @@ describe('an old-root instance fails closed (FIT delta 2)', () => {
     await ensure(appA);
     useRoot(ROOT);
     expect((await ensure(appB)).keyVersion).toBe(1);
+  });
+});
+
+const recorded = async () => (await db.secretRootCheck.findUnique({ where: { id: 1 } }))?.checkValue ?? null;
+
+describe('a store with keys but no recorded check (made before the check existed) (#4553 F2)', () => {
+  it('an instance on another root refuses, and records nothing and mints nothing', async () => {
+    await ensure(appA);
+    await db.secretRootCheck.deleteMany();
+    useRoot(STRANGER);
+    await refused(ensure(appB));
+    expect(await recorded()).toBeNull();
+    expect(await db.secretAppKey.count({ where: { appId: appB } })).toBe(0);
+  });
+
+  it('an instance on the root the keys are under records that root and mints', async () => {
+    await ensure(appA);
+    await db.secretRootCheck.deleteMany();
+    useRoot(ROOT);
+    expect((await ensure(appB)).keyVersion).toBe(1);
+    expect(await recorded()).toBe(rootCheckValue(Buffer.from(ROOT, 'hex')));
+  });
+
+  it('an empty store records the root of its first mint', async () => {
+    expect(await recorded()).toBeNull();
+    await ensure(appA);
+    expect(await recorded()).toBe(rootCheckValue(Buffer.from(ROOT, 'hex')));
+  });
+
+  it('two concurrent first mints under one root both succeed and leave one recorded row', async () => {
+    const [a, b] = await Promise.all([ensure(appA), ensure(appB)]);
+    expect([a.keyVersion, b.keyVersion]).toEqual([1, 1]);
+    expect(await db.secretRootCheck.count()).toBe(1);
+    expect(await recorded()).toBe(rootCheckValue(Buffer.from(ROOT, 'hex')));
+  });
+});
+
+describe('the re-wrap honours the recorded check (#4553 F3)', () => {
+  it('with no App keys, a --from that is not the recorded root refuses and the check stays', async () => {
+    await ensure(appA);
+    await db.secretAppKey.deleteMany();
+    await refused(rewrapSecretRootKeys(db, STRANGER, NEW_ROOT));
+    expect(await recorded()).toBe(rootCheckValue(Buffer.from(ROOT, 'hex')));
+  });
+
+  it('a re-run after the switch (the recorded root is --to) still succeeds', async () => {
+    await ensure(appA);
+    await db.secretAppKey.deleteMany();
+    await rewrapSecretRootKeys(db, ROOT, NEW_ROOT);
+    await expect(rewrapSecretRootKeys(db, ROOT, NEW_ROOT)).resolves.toMatchObject({ rows: 0, rewrapped: 0 });
+    expect(await recorded()).toBe(rootCheckValue(Buffer.from(NEW_ROOT, 'hex')));
+  });
+
+  it('refuses --from equal to --to, and changes nothing', async () => {
+    await ensure(appA);
+    await refused(rewrapSecretRootKeys(db, ROOT, ROOT));
+    expect(await recorded()).toBe(rootCheckValue(Buffer.from(ROOT, 'hex')));
   });
 });
 
