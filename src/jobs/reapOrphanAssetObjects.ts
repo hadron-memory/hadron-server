@@ -69,6 +69,7 @@ import {
 import { logAssetEvent } from '../lib/asset/audit.js';
 import { ORPHAN_MIN_AGE_MS } from '../lib/asset/retention.js';
 import { isStagingKey, parseObjectIdFromKey } from '../lib/asset/storageKey.js';
+import { isProcessEntry } from './isProcessEntry.js';
 
 /** Objects requested per ListObjectsV2 call (the S3 maximum). */
 const PAGE_SIZE = 1000;
@@ -369,7 +370,7 @@ export function startOrphanObjectReaperLoop(
 }
 
 // Allow `tsx src/jobs/reapOrphanAssetObjects.ts [--apply]` to run it directly.
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isProcessEntry(import.meta.url)) {
   // `--apply` forces a real run; without it the env flag decides (so a
   // hand-run on a host with reaping enabled behaves like the loop does).
   const apply = process.argv.includes('--apply') ? true : undefined;
