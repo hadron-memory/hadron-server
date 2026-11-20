@@ -24,12 +24,12 @@ vi.mock('../../lib/emailClient.js', async (importOriginal) => ({
   subscribeToolFolder: vi.fn(async () => ({})),
 }));
 
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { signJwt } from '../../auth/index.js';
 import { issueExchangeStartNonce } from '../../auth/authHandoff.js';
 import { confirmConnect } from '../connectInterstitial.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 
 const FRONTEND = 'https://portal.example';
 const ENV_KEYS = ['BASE_URL', 'FRONTEND_URL', 'GMAIL_CLIENT_ID'] as const;
@@ -42,7 +42,7 @@ let orgId: string;
 
 beforeAll(async () => {
   for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
-  const app = await createServer();
+  const app = await createServerOnCleanDb();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -53,7 +53,7 @@ afterAll(async () => {
     if (savedEnv[k] === undefined) delete process.env[k];
     else process.env[k] = savedEnv[k];
   }
-  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  await closeServerIfStarted(server);
 });
 
 beforeEach(async () => {

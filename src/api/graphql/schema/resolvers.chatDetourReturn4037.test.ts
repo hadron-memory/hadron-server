@@ -6,6 +6,7 @@ import { cleanDb, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
+import * as chatRoot from '../../../lib/chatRoot.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -13,7 +14,7 @@ const other = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL });
 afterAll(() => other.$disconnect());
 let userId: string, agentId: string, systemId: string, ids: Record<string, string>;
 const ctx = (client = db): Context => ({ db: client, roles: ['READER'], userId });
-const start = (conversationName = 'recent') => resolvers.Mutation.startChat({}, { agentId, conversationName }, ctx());
+const start = (conversationName = 'recent') => resolvers.Mutation.startChat({}, { agentRef: agentId, conversationName }, ctx());
 const respond = (chatId: string, fields: Record<string, unknown> = {}, client = db) => resolvers.Mutation.processChatResponse({}, { chatId, toolResponse: { message: 'reply', onTrack: true, ...fields } }, ctx(client));
 async function state(chatId: string) {
   const root = await chatNodeByLocOrThrow(db, chatId);
@@ -28,7 +29,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { name: 'Detour4037', urn: 'detour4037.example' } });
   const user = await db.user.create({ data: { githubId: 40371, githubUsername: 'detour4037', roles: ['ADMIN'] } }); userId = user.id;
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
-  const agent = await resolvers.Mutation.createAgent({}, { orgId: org.id, name: 'Detour fixture', visibility: 'ORGANIZATION' }, { ...ctx(), roles: ['ADMIN'] });
+  const agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Detour fixture', visibility: 'ORGANIZATION' }, { ...ctx(), roles: ['ADMIN'] });
   agentId = agent.id; systemId = agent.systemMemoryId!; ids = {};
   for (const [loc, data] of [
     ['config', {}], ['conversations', {}],
@@ -93,13 +94,62 @@ describe('#4037 detour and return', () => {
     expect(await respond(chat.chatId)).toMatchObject({ newStageName: 's2', conversationHandoff: null });
     expect(await state(chat.chatId)).toMatchObject({ conversationName: 'recent', stageName: 's2' });
   });
-  it('D6: two simultaneous completions on separate connections return the detour once', async () => {
+  it('#4256: a serialized second completion lawfully takes the still-active detour rule again', async () => {
     await edge('conversations:recent:s1', 'conversations:anger', { timing: 'always', behavior: 'detour' });
     const chat = await start(); await respond(chat.chatId);
-    await Promise.all([respond(chat.chatId, { goal_reached: true }), respond(chat.chatId, { goal_reached: true }, other as never)]);
+    const returned = await respond(chat.chatId, { goal_reached: true });
+    const repeated = await respond(chat.chatId, { goal_reached: true }, other as never);
+    expect(returned).toMatchObject({ detourReturned: true });
+    expect(repeated).toMatchObject({ detourReturned: false, conversationHandoff: 'anger' });
+    expect(repeated.routingSkipped).not.toBe(true);
     const e = await state(chat.chatId);
+    expect(e).toMatchObject({ conversationName: 'anger', stageName: 'hot' });
     expect(e.routeHistory.filter((r: any) => r.trigger?.type === 'DETOUR_RETURN')).toHaveLength(1);
+    expect(e.routeHistory.at(-1)).toMatchObject({ action: 'ENTER', trigger: { type: 'DETOUR_EDGE' } });
     expect(e.goalStack.filter((g: any) => g.detourTo && g.status === 'COMPLETED')).toHaveLength(1);
-    expect(e).toMatchObject({ conversationName: 'recent' });
+    expect(e.goalStack.filter((g: any) => g.detourTo && g.status === 'ACTIVE')).toHaveLength(1);
   });
+  // #4446: the barrier guard must fire BEFORE Vitest's own test timeout (default 5000 ms), or a stuck barrier reads as a bare
+  // timeout instead of naming itself. The test timeout is derived from the guard, so the guard always wins.
+  const BARRIER_GUARD_MS = 5000;
+  const D6_TEST_TIMEOUT_MS = BARRIER_GUARD_MS * 3;
+  it('D6: overlapping completions on separate connections return the detour once', async () => {
+    await edge('conversations:recent:s1', 'conversations:anger', { timing: 'always', behavior: 'detour' });
+    const chat = await start(); await respond(chat.chatId);
+    const append = chatRoot.appendChatMessage;
+    const snapshots: Array<{ client: unknown; conversationName: unknown; stageName: unknown }> = [];
+    let release!: () => void;
+    let rejectBarrier!: (error: Error) => void;
+    const bothSnapshots = new Promise<void>((resolve, reject) => { release = resolve; rejectBarrier = reject; });
+    const timer = setTimeout(() => rejectBarrier(new Error('Both completion snapshots did not reach the barrier')), BARRIER_GUARD_MS);
+    // Real message inserts commit on both connections before either caller can
+    // route. This forces the same pre-return origin without mocking DB state.
+    const spy = vi.spyOn(chatRoot, 'appendChatMessage').mockImplementation(async (...args) => {
+      const result = await append(...args);
+      snapshots.push({ client: args[0], conversationName: result.chatData.conversationName, stageName: result.chatData.stageName });
+      if (snapshots.length === 2) release();
+      await bothSnapshots;
+      return result;
+    });
+    const turns = [respond(chat.chatId, { goal_reached: true }), respond(chat.chatId, { goal_reached: true }, other as never)];
+    try {
+      const completions = await Promise.all(turns);
+      expect(snapshots.map(({ conversationName, stageName }) => ({ conversationName, stageName }))).toEqual([
+        { conversationName: 'anger', stageName: 'hot' }, { conversationName: 'anger', stageName: 'hot' },
+      ]);
+      expect(new Set(snapshots.map((snapshot) => snapshot.client)).size).toBe(2);
+      const e = await state(chat.chatId);
+      expect(e.routeHistory.filter((r: any) => r.trigger?.type === 'DETOUR_RETURN')).toHaveLength(1);
+      expect(e.goalStack.filter((g: any) => g.detourTo && g.status === 'COMPLETED')).toHaveLength(1);
+      expect(completions.filter((r) => r.detourReturned)).toHaveLength(1);
+      expect(completions.filter((r) => r.routingSkipped)).toHaveLength(1);
+      expect(e).toMatchObject({ conversationName: 'recent', stageName: 's1' });
+      expect(e.goalStack.filter((g: any) => g.detourTo && g.status === 'ACTIVE')).toHaveLength(0);
+    } finally {
+      clearTimeout(timer);
+      release();
+      await Promise.allSettled(turns);
+      spy.mockRestore();
+    }
+  }, D6_TEST_TIMEOUT_MS);
 });

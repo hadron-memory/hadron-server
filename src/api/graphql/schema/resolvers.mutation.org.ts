@@ -26,6 +26,7 @@ import {
   mintPrincipal,
   releasePrincipal,
   ensureUserPrincipal,
+  RootNameInvalidError,
   RootNameTakenError,
 } from '../../../lib/principal/mintPrincipal.js';
 import {
@@ -37,8 +38,8 @@ import {
   isPlatformAdmin,
   requireRole,
   requireOrgRole,
-  resolveUserRefArg,
-  resolveOrgRefArg,
+  resolveRequiredOrgRef,
+  resolveRequiredUserRef,
   ORG_INCLUDE,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
@@ -49,6 +50,7 @@ import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } fro
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { assertInviteLimits, inviteExpiresAt, inviteMaxActivations } from '../../../lib/invitationLimits.js';
+import { endHeldGrants } from '../../../lib/grants/departure.js';
 
 /** #2871: expected org-member refusals are typed so the boundary does not mask them. */
 const orgMemberRefusal = (code: 'CONFLICT' | 'NOT_FOUND', message: string) =>
@@ -61,10 +63,25 @@ const invitationRevoked = () =>
   new GraphQLError('Invitation has been revoked', { extensions: { code: 'BAD_USER_INPUT' } });
 
 /**
- * Map a `RootNameTakenError` from the #692 principal pool to a user-facing
- * conflict; re-throw anything else. Use as a `.catch()` on a mint transaction.
+ * Map the #692 principal pool's typed errors to user-facing refusals;
+ * re-throw anything else. Use as a `.catch()` on a mint transaction.
+ *
+ * `RootNameTakenError` → the existing conflict refusal. `RootNameInvalidError`
+ * (#4481, the #4415 root-name rule) → `ROOT_NAME_INVALID`, its own code so a
+ * client can tell an unrepeatable name from a taken one. Both are backstops:
+ * every mint caller here validates the name first (`normalizeHandle` /
+ * `validateOrgRoot`), so neither is reachable through this surface today —
+ * the mapping exists so a future caller that skips validation still surfaces
+ * a typed refusal, not an internal error.
  */
-function rethrowRootNameTaken(err: unknown): never {
+export function rethrowRootNameErrors(err: unknown): never {
+  if (err instanceof RootNameInvalidError) {
+    throw new GraphQLError(
+      `The name "${err.rootName}" is not a legal root name: a root name is 1–64 ` +
+        `lower-case ASCII letters, digits, ".", "_" or "-", beginning and ending with a letter or digit.`,
+      { extensions: { code: 'ROOT_NAME_INVALID' } },
+    );
+  }
   if (err instanceof RootNameTakenError) {
     throw new GraphQLError(`The name "${err.rootName}" is already taken.`, {
       extensions: { code: 'BAD_USER_INPUT' },
@@ -158,7 +175,7 @@ export const orgMutations = {
           }
           return updated;
         })
-        .catch(rethrowRootNameTaken);
+        .catch(rethrowRootNameErrors);
     },
 
     updateUserRoles: async (
@@ -338,19 +355,19 @@ export const orgMutations = {
           }
           return created;
         })
-        .catch(rethrowRootNameTaken);
+        .catch(rethrowRootNameErrors);
       return ctx.db.organization.findUniqueOrThrow({ where: { id: org.id }, include: ORG_INCLUDE });
     },
 
     updateOrganization: async (
       _: unknown,
       {
-        id,
+        ref: id,
         name,
         urn,
         listedOnMarketplace,
         policy,
-      }: { id: string; name?: string; urn?: string; listedOnMarketplace?: boolean; policy?: unknown },
+      }: { ref: string; name?: string; urn?: string; listedOnMarketplace?: boolean; policy?: unknown },
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
@@ -442,13 +459,13 @@ export const orgMutations = {
           }
           return updated;
         })
-        .catch(rethrowRootNameTaken);
+        .catch(rethrowRootNameErrors);
     },
 
-    deleteOrganization: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+    deleteOrganization: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       requireRole(ctx, 'ADMIN');
-      // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
-      const { id: resolvedId } = await resolveOrgRef(ctx.db, id);
+      // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
+      const { id: resolvedId } = await resolveOrgRef(ctx.db, ref);
       // Atomically soft-delete the org and hard-delete its org-scoped secrets
       // (#677) — the ONE org soft-delete cascade, shared with deleteUser's
       // sole-member-org branch (see softDeleteOrganizationCore for the
@@ -465,11 +482,11 @@ export const orgMutations = {
 
     linkGithubApp: async (
       _: unknown,
-      { orgId, installationId }: { orgId: string; installationId: number },
+      { orgRef, installationId }: { orgRef: string; installationId: number },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      // 007-entity-id-or-urn: orgRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgRef);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       return ctx.db.organization.update({
         where: { id: resolvedOrgId },
@@ -480,11 +497,11 @@ export const orgMutations = {
 
     updateOrgGithubApp: async (
       _: unknown,
-      { orgId, appId, privateKey }: { orgId: string; appId: string; privateKey: string },
+      { orgRef, appId, privateKey }: { orgRef: string; appId: string; privateKey: string },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      // 007-entity-id-or-urn: orgRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgRef);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       const encrypted = encryptToken(privateKey);
       return ctx.db.organization.update({
@@ -496,11 +513,11 @@ export const orgMutations = {
 
     unlinkGithubApp: async (
       _: unknown,
-      { orgId }: { orgId: string },
+      { orgRef }: { orgRef: string },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      // 007-entity-id-or-urn: orgRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgRef);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       return ctx.db.organization.update({
         where: { id: resolvedOrgId },
@@ -518,7 +535,7 @@ export const orgMutations = {
     createUserInvitation: async (
       _: unknown,
       {
-        orgId,
+        orgRef,
         memberRole,
         name,
         email,
@@ -526,14 +543,14 @@ export const orgMutations = {
         maxActivations,
         expiresInDays,
       }: {
-        orgId: string; memberRole: string;
+        orgRef: string; memberRole: string;
         name?: string; email?: string; githubUsername?: string;
         maxActivations?: number; expiresInDays?: number;
       },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      // 007-entity-id-or-urn: orgRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgRef);
       const slug = generateId().slice(0, 16);
       const invite = await withAuthorizedTx(
         ctx,
@@ -704,15 +721,11 @@ export const orgMutations = {
       _: unknown,
       {
         orgRef,
-        orgId,
         userRef,
-        userId,
         role,
       }: {
-        orgRef?: string | null;
-        orgId?: string | null;
-        userRef?: string | null;
-        userId?: string | null;
+        orgRef: string;
+        userRef: string;
         role: string;
       },
       ctx: Context,
@@ -720,9 +733,9 @@ export const orgMutations = {
       // #764 (was 007-entity-id-or-urn): orgRef/userRef accept id / URN / (org)
       // handle / (user) email. Resolve the org + admin-gate FIRST, then resolve
       // the user (auth before revealing user existence).
-      const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
+      const resolvedOrgId = await resolveRequiredOrgRef(ctx.db, orgRef);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
-      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+      const resolvedUserId = await resolveRequiredUserRef(ctx.db, userRef);
       return withAuthorizedTx(
         ctx,
         [{ kind: 'org', id: resolvedOrgId }, { kind: 'user', id: resolvedUserId }],
@@ -766,23 +779,19 @@ export const orgMutations = {
       _: unknown,
       {
         orgRef,
-        orgId,
         userRef,
-        userId,
         role,
       }: {
-        orgRef?: string | null;
-        orgId?: string | null;
-        userRef?: string | null;
-        userId?: string | null;
+        orgRef: string;
+        userRef: string;
         role: string;
       },
       ctx: Context,
     ) => {
       // #764: orgRef/userRef accept id / URN / (org) handle / (user) email.
-      const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
+      const resolvedOrgId = await resolveRequiredOrgRef(ctx.db, orgRef);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
-      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+      const resolvedUserId = await resolveRequiredUserRef(ctx.db, userRef);
       // #1544: the last-owner guard is count-then-act, so the read, the count
       // and the write share ONE SERIALIZABLE transaction. Two admins demoting
       // (or removing) the org's two owners at once would otherwise each count
@@ -856,21 +865,17 @@ export const orgMutations = {
       _: unknown,
       {
         orgRef,
-        orgId,
         userRef,
-        userId,
       }: {
-        orgRef?: string | null;
-        orgId?: string | null;
-        userRef?: string | null;
-        userId?: string | null;
+        orgRef: string;
+        userRef: string;
       },
       ctx: Context,
     ) => {
       // #764: orgRef/userRef accept id / URN / (org) handle / (user) email.
-      const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
+      const resolvedOrgId = await resolveRequiredOrgRef(ctx.db, orgRef);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
-      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+      const resolvedUserId = await resolveRequiredUserRef(ctx.db, userRef);
       // #1544: one SERIALIZABLE transaction for the read, the last-owner count
       // and the revocation, for the reason updateOrgMember gives above.
       await retryOnSerializationFailure(() => withAuthorizedTx(
@@ -912,6 +917,10 @@ export const orgMutations = {
         await revokeOrgInvitationsByIssuer(
           tx, resolvedOrgId, resolvedUserId, ctx.userId ?? ctx.clientId ?? null,
         );
+        // #4171 (Holger ruling A, epic #1975): leaving the organization ends the person's grants in this organization's Apps, in
+        // this transaction, AFTER the membership soft delete (the SQL guard admits the stamp only on proof the person is no longer
+        // a live member). Not in the already-removed early return above; a rejoin revives nothing.
+        await endHeldGrants(tx, 'user', resolvedUserId, { organizationId: resolvedOrgId });
         },
         {
           lockMode: 'exclusive',
@@ -1023,7 +1032,7 @@ export const orgMutations = {
           await ensureUserPrincipal(tx, user);
           return user;
         })
-        .catch(rethrowRootNameTaken);
+        .catch(rethrowRootNameErrors);
     },
 
 };

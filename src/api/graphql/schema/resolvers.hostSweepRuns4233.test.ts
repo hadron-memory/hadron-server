@@ -53,7 +53,7 @@ beforeEach(async () => {
   org = await db.organization.create({ data: { name: 'Sweep', urn: `sweep-${x}.example` }, select: { id: true, urn: true } });
   manager = await db.user.create({ data: { githubId: 92_000_000 + x, githubUsername: `sw-manager-${x}`, roles: ['READER'] }, select: { id: true } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: manager.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(manager.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(manager.id));
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true, urn: true } });
   const memory = await db.memory.create({
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:team-shared`, name: 'shared', class: 'app', appId: app.id, sharedMemoryOfAgentId: agent.id },
@@ -335,7 +335,7 @@ describe('the stale-sweep alarm', () => {
     await record({ runId: 'fresh' });
     const { alarmEpisodeEnds } = await import('../../../lib/agentTasks/stall.js');
     const a = (await alarms()).find((e) => (e.payload as any).hostId === 'orca1')!;
-    const ends = await alarmEpisodeEnds(db, [{ id: a.id, taskId: null, type: a.type, episodeStart: null, raisedAt: a.createdAt }], new Date());
+    const ends = await alarmEpisodeEnds(db, [{ id: a.id, appId: a.appId, taskId: null, type: a.type, episodeStart: null, raisedAt: a.createdAt }], new Date());
     expect(ends.get(a.id)).toBeInstanceOf(Date);
   });
 });

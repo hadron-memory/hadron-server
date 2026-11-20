@@ -191,9 +191,10 @@ export async function requestContextReset(
   const workerId = a.task.assigneeWorkerId;
   if (!workerId || !a.wasStarted || a.sessionEndRequested) return null;
   // R117: the worker itself started it. A start is the assignee's only (cor:agt:050:08), so a started task reassigned
-  // since then carries a `task.started` by someone else.
+  // since then carries a `task.started` by someone else. #4202: only an event of the task's own App is its start
+  // (`agent_team_events.task_id` has no foreign key).
   const started = await tx.agentTeamEvent.findFirst({
-    where: { taskId: a.task.id, type: 'task.started', actorWorkerId: workerId },
+    where: { appId: a.appId, taskId: a.task.id, type: 'task.started', actorWorkerId: workerId },
     select: { id: true },
   });
   if (!started) return null;

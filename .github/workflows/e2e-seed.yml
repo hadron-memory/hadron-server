@@ -1,7 +1,7 @@
 name: E2E Seed
 
-# #4074 (follow-up to #4058/#4060): nothing else in CI executes scripts/e2e/seed.ts, so the passkey branches of
-# scripts/e2e/provision-signins.ts (cor:aut:030:02 pin on registration ON, login-code redemption on OFF) were covered
+# #4074 (follow-up to #4058/#4060): nothing else in CI executes scripts/e2e/seed.ts, so the registration-switch rows of
+# scripts/e2e/provision-signins.ts (login-code redemption with the switch ON and OFF, #4339) were covered
 # only by hand-run stack QA. Each row runs the real seed, unmodified, against a real Postgres and the seed's own
 # loopback server; /capabilities is read live, never mocked. Controls expect the passkey-registration token ABSENT
 # (cor:api:020:01), which the seed's requested-vs-actual assert enforces. The last row is the red control: it mutates the
@@ -27,6 +27,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   seed-row:

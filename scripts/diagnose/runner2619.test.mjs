@@ -16,16 +16,14 @@ case "$1" in
  apply|add) :;;
  *) exit 8;;
 esac\n`);
- put('node',`if [[ "\${1:-}" = */load.mjs ]]; then
- if [ "$MODE" = held ]; then touch "$FIXTURE/ready"; for i in {1..200}; do [ -e "$FIXTURE/release" ] && exit 0; sleep .02; done; exit 9; fi
- exit 0
-fi
-exec '${process.execPath}' "$@"\n`);
+ put('node',`exec '${process.execPath}' "$@"\n`);
  put('incus',`case "$1" in
  list) [ "$MODE" != list-failure ] || exit 7; [ ! -e "$FIXTURE/instance" ] || echo hadron-e2e-fixture;;
  config) cat "$FIXTURE/instance";;
  exec)
   case "$*" in
+   *load.mjs*) printf '%s\\n' '{"kind":"load","workload":"idle","cap":25,"startAt":0,"endAt":0,"ok":0,"probe":"not exercised"}';
+    if [ "$MODE" = held ]; then touch "$FIXTURE/ready"; for i in {1..200}; do [ -e "$FIXTURE/release" ] && exit 0; sleep .02; done; exit 9; fi;;
    *memory.max*) echo 6442450944;;
    *diagnose-samples.jsonl*) printf '{"kind":"sample","at":%s}\\n' "$(date +%s%3N)"; if [ "$MODE" = abort ]; then echo '{"kind":"abort","why":"rss"}'; fi;;
    *credentials.json*) echo synthetic-private-key;;
@@ -45,7 +43,7 @@ case "$1" in
  logs) echo private-log;;
 esac\n`,{mode:0o755});
  writeFileSync(join(dir,'health.mjs'),"globalThis.fetch=async()=>{if(process.env.MODE==='dead')throw new Error('synthetic');return {ok:process.env.MODE!=='unhealthy'};};\n");
- const env={...process.env,FIXTURE:dir,MODE:mode,PATH:bin+':'+process.env.PATH,TMPDIR:dir,XDG_STATE_HOME:join(dir,'state'),DIAG_OUT:join(dir,'samples'),DIAG_IDLE_S:'0.01',E2E_BACKEND:'incus'};
+ const env={...process.env,FIXTURE:dir,MODE:mode,PATH:bin+':'+process.env.PATH,TMPDIR:dir,XDG_STATE_HOME:join(dir,'state'),DIAG_OUT:join(dir,'samples'),DIAG_IDLE_S:'0.01',DIAG_SETTLE_S:'0.01',E2E_BACKEND:'incus'};
  const args=[join(here,'run.sh'),'fixture','41001','41002','idle','1'];
  return {dir,env,args,run:()=>spawnSync('bash',args,{env,encoding:'utf8',timeout:10_000}),clean:()=>rmSync(dir,{recursive:true,force:true})};
 }

@@ -16,6 +16,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { hadronTaskCreate } from '../../../lib/runner/tools/index.js';
 import { taskMatcherTick } from '../../../jobs/taskMatcher.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -49,7 +50,7 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { id: generateId(), githubId: 810_000 + n, githubUsername: `cs-admin-${n}`, roles: ['READER'] } });
   member = await db.user.create({ data: { id: generateId(), githubId: 820_000 + n, githubUsername: `cs-mia-${n}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  teamAgent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  teamAgent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
   const worker = (name: string) =>
@@ -79,7 +80,7 @@ describe('#2249 every create path defaults the flag to false', () => {
 
   it('the run tool hadron_task_create', async () => {
     const run = await db.appRun.create({
-      data: { id: generateId(), organizationId: org.id, appId: app.id, triggerKind: 'MANUAL', entryNodeUrn: 'cs::mem::flow:entry', status: 'RUNNING', userId: member.id },
+      data: { id: generateId(), organizationId: org.id, appId: app.id, agentId: await testRunAgentId(db, org.id, app.id), triggerKind: 'MANUAL', entryNodeUrn: 'cs::mem::flow:entry', status: 'RUNNING', userId: member.id },
     });
     const out = (await hadronTaskCreate.execute({ log: vi.fn(), db, run, principal: runContext(db, run) }, { title: 'via run' })) as { id: string };
     expect(await stored(out.id)).toBe(false);

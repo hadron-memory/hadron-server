@@ -38,7 +38,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'rule-order-org', urn: 'rule-order-org' } });
   adminUser = await db.user.create({ data: { githubId: 84102, githubUsername: 'rule-order', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: adminUser.id, role: 'ADMIN' } });
-  const created = await resolvers.Mutation.createAgent({}, { orgId: org.id, name: 'orderly', visibility: 'PERSONAL' }, adminCtx());
+  const created = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'orderly', visibility: 'PERSONAL' }, adminCtx());
   agent = created;
   systemMemory = await db.memory.findUniqueOrThrow({ where: { id: created.systemMemoryId! } });
   await serveEveryAgent(db);
@@ -81,8 +81,8 @@ async function readOrder(revisionLoc: string | null) {
 }
 
 async function publish(): Promise<string> {
-  const rev = await resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx());
-  await resolvers.Mutation.publishRevision({}, { agentId: agent.id, revisionLoc: rev.revisionLoc }, adminCtx());
+  const rev = await resolvers.Mutation.createRevision({}, { agentRef: agent.id }, adminCtx());
+  await resolvers.Mutation.publishRevision({}, { agentRef: agent.id, revisionLoc: rev.revisionLoc }, adminCtx());
   return rev.revisionLoc as string;
 }
 

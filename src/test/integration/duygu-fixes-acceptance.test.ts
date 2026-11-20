@@ -102,7 +102,7 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
-  const m = await gql(key.ownerAccount, `mutation($o: ID, $n: String!) { createMemory(orgId: $o, name: $n) { id urn } }`, { o: org.id, n: `specs-${t}` });
+  const m = await gql(key.ownerAccount, `mutation($o: ID, $n: String!) { createMemory(orgRef: $o, name: $n) { id urn } }`, { o: org.id, n: `specs-${t}` });
   expect(m.errors, JSON.stringify(m.errors)).toBeUndefined();
   memoryId = m.data!.createMemory.id;
   memUrn = m.data!.createMemory.urn;

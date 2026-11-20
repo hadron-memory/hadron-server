@@ -63,7 +63,7 @@ describe('#887 partial indexing (fake client, real disposable DB)', () => {
     await truncated();
     expect(await db.nodeEmbedding.count({ where: { nodeId, kind: 'abstract' } })).toBe(1);
     expect(await row()).toMatchObject({ embeddingTruncatedChunks: 44 });
-    await (resolvers.Mutation as any).updateMemory(null, { id: memoryId, embeddingSource: 'abstract' }, ctx());
+    await (resolvers.Mutation as any).updateMemory(null, { ref: memoryId, embeddingSource: 'abstract' }, ctx());
     await embedNode(db, nodeId, undefined, client);
     expect(await chunks()).toHaveLength(0);
     expect(await db.nodeEmbedding.count({ where: { nodeId, kind: 'abstract' } })).toBe(1);
@@ -84,7 +84,7 @@ describe('#887 partial indexing (fake client, real disposable DB)', () => {
     await db.node.update({ where: { id: nodeId }, data: { abstract: 'summary' } });
     await queue(300);
     const paused = { ...client, embed: async (texts: string[]) => {
-      await (resolvers.Mutation as any).updateMemory(null, { id: memoryId, vectorIndexEnabled: false }, ctx());
+      await (resolvers.Mutation as any).updateMemory(null, { ref: memoryId, vectorIndexEnabled: false }, ctx());
       return texts.map(() => vector);
     } };
     expect(await embedNode(db, nodeId, undefined, paused)).toBe('skipped');
@@ -120,7 +120,7 @@ describe('#887 partial indexing (fake client, real disposable DB)', () => {
       expect(await embedNode(db, nodeId, { content: content(300) }, client)).toBe('embedded');
     } else await truncated();
     const args = mode === 'summary' ? { embeddingSource: 'abstract' } : { vectorIndexEnabled: false };
-    await (resolvers.Mutation as any).updateMemory(null, { id: memoryId, ...args }, ctx());
+    await (resolvers.Mutation as any).updateMemory(null, { ref: memoryId, ...args }, ctx());
     expect(await chunks()).toHaveLength(0);
     expect(await row()).toMatchObject({ embeddingTruncatedChunks: null });
     if (mode === 'summary') {

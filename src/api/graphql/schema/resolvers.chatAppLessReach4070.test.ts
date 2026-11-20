@@ -24,7 +24,7 @@ beforeEach(async () => {
   managerId = (await db.user.create({ data: { handle: 'reach4070-manager' } })).id;
   consumerId = (await db.user.create({ data: { handle: 'reach4070-consumer' } })).id;
   await db.orgMember.create({ data: { organizationId: agentOrg.id, userId: managerId, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: agentOrg.id, name: 'Reach agent', visibility: 'ORGANIZATION' }, managerCtx());
+  const agent = await M.createAgent({}, { orgRef: agentOrg.id, name: 'Reach agent', visibility: 'ORGANIZATION' }, managerCtx());
   agentId = agent.id; systemId = agent.systemMemoryId;
   // The licensed App L lives in an org neither user belongs to as a consumer; the consumer has NO org membership at all.
   const licOrg = await db.organization.create({ data: { name: 'Licensed org', urn: 'reach4070.lic' } });
@@ -59,7 +59,7 @@ beforeEach(async () => {
  *  - `'production'`: `detachAppOwnerMemories`, which clears BOTH `appId` and the pointer, as deleting or replacing an App does.
  * `{ keepApp: true }` leaves the home App-bearing, still attached to App L. */
 async function retainedHome(who: Context, { keepApp = false, detach = 'legacy' }: { keepApp?: boolean; detach?: 'legacy' | 'production' } = {}) {
-  const started = await M.startChat({}, { agentId, scope: 'private', conversationName: 'flow' }, who);
+  const started = await M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, who);
   const root = await chatNodeByLocOrThrow(db, started.chatId);
   if (!keepApp) {
     if (detach === 'production') await db.$transaction(tx => detachAppOwnerMemories(tx, [appId]));
@@ -178,7 +178,7 @@ describe('#4105 the knowledge-home shape', () => {
     const agentOrgId = (await db.agent.findUniqueOrThrow({ where: { id: agentId } })).organizationId!;
     await db.orgMember.create({ data: { organizationId: agentOrgId, userId: loneId, role: 'ADMIN' } });
     const loneCtx = (): Context => ({ db, userId: loneId, roles: ['READER'] });
-    const started = await M.startChat({}, { agentId, scope: 'private', conversationName: 'flow' }, loneCtx());
+    const started = await M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, loneCtx());
     const root = await chatNodeByLocOrThrow(db, started.chatId);
     const memory = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
     expect([memory.class, memory.appId], 'the knowledge-home shape').toEqual(['knowledge', null]);
@@ -246,8 +246,8 @@ describe('#4070 controls', () => {
 
 describe('#4070 review follow-ups', () => {
   it('S1: send on a lost-reach App-less home refuses AGENT_NOT_FOUND BEFORE it reads the pinned revision (Baloo P2_1)', async () => {
-    const rev = await M.createRevision({}, { agentId }, managerCtx());
-    await M.publishRevision({}, { agentId, revisionLoc: rev.revisionLoc }, managerCtx());
+    const rev = await M.createRevision({}, { agentRef: agentId }, managerCtx());
+    await M.publishRevision({}, { agentRef: agentId, revisionLoc: rev.revisionLoc }, managerCtx());
     const home = await retainedHome(consumerCtx());
     const root = await db.node.findUniqueOrThrow({ where: { id: home.rootId } });
     expect((root.data as any).startedWithRevision, 'the chat must be pinned for this pin to mean anything').toBe(rev.revisionLoc);
@@ -258,8 +258,8 @@ describe('#4070 review follow-ups', () => {
   });
 
   it('S1c: positive control for S1: with reach intact the same observer sees the pinned-revision read, so S1 cannot pass vacuously', async () => {
-    const rev = await M.createRevision({}, { agentId }, managerCtx());
-    await M.publishRevision({}, { agentId, revisionLoc: rev.revisionLoc }, managerCtx());
+    const rev = await M.createRevision({}, { agentRef: agentId }, managerCtx());
+    await M.publishRevision({}, { agentRef: agentId, revisionLoc: rev.revisionLoc }, managerCtx());
     const home = await retainedHome(managerCtx());
     const root = await db.node.findUniqueOrThrow({ where: { id: home.rootId } });
     expect((root.data as any).startedWithRevision).toBe(rev.revisionLoc);
@@ -276,12 +276,20 @@ describe('#4070 review follow-ups', () => {
     const hostileCaller = { ...managerCtx(), db: hostile as any }; // (a Context still satisfies the narrow caller type)
     const out = await chatHomeAgentIfReachable(db, memory, agentRow, hostileCaller);
     expect(out?.id).toBe(agentId);
-    await db.$transaction(async tx => {
+    // The demotion is observed THROUGH the supplied transaction (that is the pin), then rolled back so it never commits:
+    // later tests in this file, and the retained home, keep the manager's real role.
+    const rolledBack = new Error('roll back the in-transaction demotion');
+    const orgId = agentRow.organizationId;
+    if (!orgId) throw new Error('the Agent under test must belong to an organization');
+    await expect(db.$transaction(async tx => {
       const ctx = { ...managerCtx(), db: hostile as any };
       expect((await chatHomeAgentIfReachable(tx, memory, agentRow, ctx))?.id).toBe(agentId);
-      await tx.orgMember.update({where:{organizationId_userId:{organizationId:agentRow.organizationId!,userId:managerId}},data:{role:'READER'}});
+      await tx.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: managerId } }, data: { role: 'READER' } });
       expect(await chatHomeAgentIfReachable(tx, memory, agentRow, ctx)).toBeNull();
-    });
+      throw rolledBack;
+    })).rejects.toBe(rolledBack);
+    const member = await db.orgMember.findUniqueOrThrow({ where: { organizationId_userId: { organizationId: orgId, userId: managerId } } });
+    expect(member.role, 'the demotion rolled back, it did not commit').not.toBe('READER');
   });
 
   it('H2: the helper needs only the principal fields (no db, no Context): a caller with nothing but userId and roles judges the same', async () => {

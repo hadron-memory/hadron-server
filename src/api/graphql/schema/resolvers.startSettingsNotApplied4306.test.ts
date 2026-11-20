@@ -12,7 +12,8 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { GraphQLError } from 'graphql';
+import { GraphQLError, buildSchema, defaultFieldResolver, graphql } from 'graphql';
+import { typeDefs } from './typeDefs.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -82,8 +83,8 @@ beforeEach(async () => {
   admin = await u(1, 'admin');
   bo = await u(2, 'bo');
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  longAgent = (await M.createAgent({}, { orgId: org.id, name: 'Coordinator' }, ctx(admin.id))).id;
-  shortAgent = (await M.createAgent({}, { orgId: org.id, name: 'Builder', lifecycle: 'SHORT_LIVED' }, ctx(admin.id))).id;
+  longAgent = (await M.createAgent({}, { orgRef: org.id, name: 'Coordinator' }, ctx(admin.id))).id;
+  shortAgent = (await M.createAgent({}, { orgRef: org.id, name: 'Builder', lifecycle: 'SHORT_LIVED' }, ctx(admin.id))).id;
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true } });
   await db.appMember.create({ data: { appId: app.id, userId: bo.id, role: 'member' } });
   const w = (agentId: string, name: string, role: string) =>
@@ -187,6 +188,24 @@ describe('a grant bind with startSettingsApplied: false inherits no run settings
     const r = await refusal(M.startSession({}, { input: { id: generateId(), appRef: app.id, tool: 'claude-code', startSettingsApplied: false } }, ctx(bo.id)));
     expect(r.code).toBe('BAD_USER_INPUT');
     expect(await counts()).toEqual(before);
+  });
+});
+
+describe('the field reaches the resolver through the executable schema (#4310)', () => {
+  it('startSession with startSettingsApplied: false on a grant bind is accepted and the session inherits no settings', async () => {
+    await startedAsCodex();
+    const [op] = await starts(sam);
+    const got = (await M.collectHostOperations({}, { appRef: app.id }, keyCtx(orca1)) as Array<{ id: string; launchGrant: string | null }>).find((o) => o.id === op!.id);
+    const schema = buildSchema(typeDefs);
+    const fieldResolver = (p: any, a: any, c: any, i: any) =>
+      typeof (resolvers as any)[i.parentType.name]?.[i.fieldName] === 'function' ? (resolvers as any)[i.parentType.name][i.fieldName](p, a, c, i) : defaultFieldResolver(p, a, c, i);
+    const source = 'mutation($input: SessionInput!){ startSession(input: $input){ id } }';
+    const input = { id: generateId(), tool: 'exec-runner', launchGrant: got!.launchGrant, startSettingsApplied: false };
+    const out = await graphql({ schema, source, variableValues: { input }, contextValue: ctx(bo.id), fieldResolver });
+    expect(out.errors).toBeUndefined();
+    const id = (out.data!.startSession as { id: string }).id;
+    expect(await sessionOf(id)).toEqual({ family: null, model: null, effort: null });
+    expect((await db.session.findUniqueOrThrow({ where: { id } })).workerId).toBe(sam.id);
   });
 });
 

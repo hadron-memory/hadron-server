@@ -30,8 +30,8 @@ beforeEach(async () => {
   user = await db.user.create({ data: { id: generateId(), name: 'admin', handle: `tg-${generateId().slice(-6).toLowerCase()}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
   const ctx = { db, userId: user.id, roles: ['READER'] } as unknown as Context;
-  installed = await M.createAgent({}, { orgId: org.id, name: 'Installed' }, ctx);
-  notInstalled = await M.createAgent({}, { orgId: org.id, name: 'Not installed' }, ctx);
+  installed = await M.createAgent({}, { orgRef: org.id, name: 'Installed' }, ctx);
+  notInstalled = await M.createAgent({}, { orgRef: org.id, name: 'Not installed' }, ctx);
   const created = await createDbAppWithKey(db, 'tg-app', org.id);
   app = { id: created.app.id, organizationId: org.id, ownerUserId: null };
   ({ app: otherApp } = await createDbAppWithKey(db, 'tg-other-app', org.id));

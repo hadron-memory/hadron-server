@@ -34,6 +34,7 @@ import {
   generateWebhookSecret,
 } from './webhooks.js';
 import { consumeActionTicket } from '../jobs/appRuns.js';
+import { testRunAgentId } from '../test/runAgent.js';
 
 let server: Server;
 let base: string;
@@ -170,12 +171,12 @@ describe('POST args + callbackUrl acceptance', () => {
 });
 
 describe('dispatchRunCallback — the first ticketed action (cor:acl:050:04)', () => {
-  function terminalRun(callbackUrl: string) {
+  async function terminalRun(callbackUrl: string) {
     return db.appRun.create({
       data: {
         id: generateId(),
         organizationId: orgId,
-        appId,
+        appId, agentId: await testRunAgentId(db, orgId, appId),
         triggerKind: 'WEBHOOK',
         entryNodeUrn: 'wh-org::whmem::tasks:notify',
         status: 'COMPLETED',

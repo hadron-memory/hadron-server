@@ -86,7 +86,7 @@ beforeEach(async () => {
 
   const memory = await resolvers.Mutation.createMemory(
     {},
-    { orgId: org.id, name: 'mutations' },
+    { orgRef: org.id, name: 'mutations' },
     { db, roles: ['ADMIN'], userId: admin.id } as Context,
   );
 
@@ -664,7 +664,7 @@ describe('hadron_move_node — collision policy (#185 F2)', () => {
     });
     const owner = await db.memory.findUniqueOrThrow({ where: { id: fx.memory.id } });
     const foreignMemory = await resolvers.Mutation.createMemory(
-      {}, { orgId: owner.organizationId!, name: 'foreign-edge-source' },
+      {}, { orgRef: owner.organizationId!, name: 'foreign-edge-source' },
       { db, roles: ['ADMIN'], userId: fx.admin.id } as Context,
     );
     const foreignSource = await db.node.create({
@@ -936,7 +936,7 @@ describe('hadron_move_node — cross-memory move + permission denial', () => {
     // access to both.
     const otherMemory = await resolvers.Mutation.createMemory(
       {},
-      { orgId: (await db.organization.findFirst())!.id, name: 'sister' },
+      { orgRef: (await db.organization.findFirst())!.id, name: 'sister' },
       { db, roles: ['ADMIN'], userId: fx.admin.id } as Context,
     );
 
@@ -964,7 +964,7 @@ describe('hadron_move_node — cross-memory move + permission denial', () => {
   it('returns cross-memory link warnings in the move result (#1392)', async () => {
     const otherMemory = await resolvers.Mutation.createMemory(
       {},
-      { orgId: (await db.organization.findFirst())!.id, name: 'sister-links' },
+      { orgRef: (await db.organization.findFirst())!.id, name: 'sister-links' },
       { db, roles: ['ADMIN'], userId: fx.admin.id } as Context,
     );
     await db.node.update({
@@ -987,7 +987,7 @@ describe('hadron_move_node — cross-memory move + permission denial', () => {
   it('relocates a whole SUBTREE across memories (#781)', async () => {
     const otherMemory = await resolvers.Mutation.createMemory(
       {},
-      { orgId: (await db.organization.findFirst())!.id, name: 'sister-sub' },
+      { orgRef: (await db.organization.findFirst())!.id, name: 'sister-sub' },
       { db, roles: ['ADMIN'], userId: fx.admin.id } as Context,
     );
     // Give the move source a descendant so the move carries a subtree.
@@ -1117,7 +1117,7 @@ describe('hadron_delete_node — cross-memory edge gate (#4)', () => {
     // refuse with a count.
     const otherMemory = await resolvers.Mutation.createMemory(
       {},
-      { orgId: (await db.organization.findFirst())!.id, name: 'neighbor' },
+      { orgRef: (await db.organization.findFirst())!.id, name: 'neighbor' },
       { db, roles: ['ADMIN'], userId: fx.admin.id } as Context,
     );
     const neighborSrc = await db.node.create({
@@ -1159,7 +1159,7 @@ describe('hadron_delete_node — cross-memory edge gate (#4)', () => {
   it('proceeds with hard-delete when cascadeCrossMemoryEdges: true is passed', async () => {
     const otherMemory = await resolvers.Mutation.createMemory(
       {},
-      { orgId: (await db.organization.findFirst())!.id, name: 'neighbor2' },
+      { orgRef: (await db.organization.findFirst())!.id, name: 'neighbor2' },
       { db, roles: ['ADMIN'], userId: fx.admin.id } as Context,
     );
     const neighborSrc = await db.node.create({
@@ -1211,7 +1211,7 @@ describe('hadron_delete_node — cross-memory edge gate (#4)', () => {
     // include filters hide it from the agent surface on both sides.
     const otherMemory = await resolvers.Mutation.createMemory(
       {},
-      { orgId: (await db.organization.findFirst())!.id, name: 'neighbor3' },
+      { orgRef: (await db.organization.findFirst())!.id, name: 'neighbor3' },
       { db, roles: ['ADMIN'], userId: fx.admin.id } as Context,
     );
     const neighborSrc = await db.node.create({

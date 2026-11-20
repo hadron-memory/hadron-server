@@ -230,7 +230,7 @@ describe('MCP delegation keeps the sign-in root (Rodolfo, #2116)', () => {
     const { createTestableMcpServer } = await import('../mcp/server.js');
     const org = await db.organization.create({ data: { urn: `review-${generateId()}.example`, name: 'Synthetic' } });
     await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
-    const agent = await (resolvers.Mutation as any).createAgent({}, { orgId: org.id, name: 'Review' }, { db, userId, roles: [] });
+    const agent = await (resolvers.Mutation as any).createAgent({}, { orgRef: org.id, name: 'Review' }, { db, userId, roles: [] });
     const node = await db.node.create({ data: { memoryId: agent.systemMemoryId, loc: 'tasks:index', name: 'Index', content: 'Synthetic' } });
     const si = await signIn();
     const auth = await resolveAuthContext(bearer(await jwtFor(userId, si.id)), db);

@@ -241,7 +241,7 @@ describe('transferMemoryOwnership', () => {
         return Reflect.get(target, key);
       },
     });
-    await expect(resolvers.Mutation.deleteMemory(null, { id: memory.id }, {
+    await expect(resolvers.Mutation.deleteMemory(null, { ref: memory.id }, {
       db: raceDb, userId: owner.id, roles: ['READER'],
     })).rejects.toMatchObject({ name: 'MemoryNotFoundError' });
     expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({
@@ -658,12 +658,12 @@ describe('transferMemoryOwnership', () => {
     await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
     const otherOrg = await db.organization.create({ data: { id: generateId(), name: 'Other', urn: 'other-transfer-org' } });
     await db.orgMember.create({ data: { id: generateId(), organizationId: otherOrg.id, userId: owner.id, role: 'ADMIN' } });
-    await expect(resolvers.Mutation.updateMemory(null, { id: memory.id, organizationId: otherOrg.id }, ctx(owner.id))).rejects.toMatchObject({ extensions: { code: 'USE_TRANSFER_MEMORY_OWNERSHIP' } });
+    await expect(resolvers.Mutation.updateMemory(null, { ref: memory.id, orgRef: otherOrg.id }, ctx(owner.id))).rejects.toMatchObject({ extensions: { code: 'USE_TRANSFER_MEMORY_OWNERSHIP' } });
   });
 
   it('rejects owner change through updateMemory', async () => {
     const otherOrg = await db.organization.create({ data: { id: generateId(), name: 'Other', urn: 'other-transfer-org' } });
     await db.orgMember.create({ data: { id: generateId(), organizationId: otherOrg.id, userId: owner.id, role: 'ADMIN' } });
-    await expect(resolvers.Mutation.updateMemory(null, { id: memory.id, organizationId: otherOrg.id }, ctx(owner.id))).rejects.toMatchObject({ extensions: { code: 'USE_TRANSFER_MEMORY_OWNERSHIP' } });
+    await expect(resolvers.Mutation.updateMemory(null, { ref: memory.id, orgRef: otherOrg.id }, ctx(owner.id))).rejects.toMatchObject({ extensions: { code: 'USE_TRANSFER_MEMORY_OWNERSHIP' } });
   });
 });

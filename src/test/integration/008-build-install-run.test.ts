@@ -77,7 +77,7 @@ describe('US1 Step (a): Bea creates Mealplan agent (FR-001 / FR-008 / FR-009)', 
     const agent = await resolvers.Mutation.createAgent(
       {},
       {
-        orgId: beaOrg.id,
+        orgRef: beaOrg.id,
         name: 'Mealplan',
         description: 'Family meal planner',
         visibility: 'PUBLIC',
@@ -123,7 +123,7 @@ describe('US1 Step (b): Org-X installs Mealplan via createApp (T032)', () => {
   it('requires an explicit AgentOrgGrant(orgX.id, mealplan.id) before createApp', async () => {
     const mealplan = await resolvers.Mutation.createAgent(
       {},
-      { orgId: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
+      { orgRef: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
       adminCtx(bea.id),
     );
 
@@ -170,7 +170,7 @@ describe('US1 Step (c): ensureAppMember adds Mike as a cook (FR-004)', () => {
   it('creates an AppMember with the requested role; AppMember.role validated against installationPolicy.memberRoles', async () => {
     const mealplan = await resolvers.Mutation.createAgent(
       {},
-      { orgId: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
+      { orgRef: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
       adminCtx(bea.id),
     );
     await db.agent.update({
@@ -191,7 +191,7 @@ describe('US1 Step (c): ensureAppMember adds Mike as a cook (FR-004)', () => {
 
     const member = await resolvers.Mutation.ensureAppMember(
       {},
-      { appId: app.id, userId: mike.id, role: 'cook' },
+      { appRef: app.id, userRef: mike.id, role: 'cook' },
       adminCtx(mike.id),
     );
     expect(member.role).toBe('cook');
@@ -202,7 +202,7 @@ describe('US1 Step (c): ensureAppMember adds Mike as a cook (FR-004)', () => {
     await expect(
       resolvers.Mutation.ensureAppMember(
         {},
-        { appId: app.id, userId: dana.id, role: 'principal' },
+        { appRef: app.id, userRef: dana.id, role: 'principal' },
         adminCtx(mike.id),
       ),
     ).rejects.toThrow(/Role "principal"/);
@@ -217,14 +217,14 @@ describe('US1 Step (d): App.aiProvider overrides Agent default for that App\'s s
   it('createApp accepts ai* args and stores them on the App row', async () => {
     const mealplan = await resolvers.Mutation.createAgent(
       {},
-      { orgId: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
+      { orgRef: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
       adminCtx(bea.id),
     );
     // Bea sets a default AI config on the Agent (the platform-recommended one).
     await resolvers.Mutation.updateAgentAIConfig(
       {},
       {
-        agentId: mealplan.id,
+        agentRef: mealplan.id,
         provider: 'openai',
         model: 'gpt-4o',
         apiKey: 'sk-default',
@@ -265,7 +265,7 @@ describe('US1 Step (d): App.aiProvider overrides Agent default for that App\'s s
   });
 
   it('an unusable legacy AI provider is refused BEFORE the App exists (#1389 review)', async () => {
-    const agent = await resolvers.Mutation.createAgent({}, { orgId: beaOrg.id, name: 'Compat', visibility: 'PUBLIC' }, adminCtx(bea.id));
+    const agent = await resolvers.Mutation.createAgent({}, { orgRef: beaOrg.id, name: 'Compat', visibility: 'PUBLIC' }, adminCtx(bea.id));
     const before = await db.app.count();
     const err = await resolvers.Mutation.createApp(
       {},
@@ -294,7 +294,7 @@ describe('US1 Step (e): installationPolicy.maxMembers=2 rejects the third member
   it('Know-Yourself-shaped agent (maxMembers=2) lets 2 members join, blocks the 3rd', async () => {
     const knowYourself = await resolvers.Mutation.createAgent(
       {},
-      { orgId: beaOrg.id, name: 'Know Yourself', visibility: 'PUBLIC' },
+      { orgRef: beaOrg.id, name: 'Know Yourself', visibility: 'PUBLIC' },
       adminCtx(bea.id),
     );
     await db.agent.update({

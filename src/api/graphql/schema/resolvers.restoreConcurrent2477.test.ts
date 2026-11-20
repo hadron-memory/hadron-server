@@ -21,7 +21,7 @@ beforeEach(async () => {
   const user = await db.user.create({ data: { githubId: 2477001, githubUsername: 'restore-admin', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
   context = { db, userId: user.id, roles: ['ADMIN'] };
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Restore concurrency', visibility: 'PERSONAL' }, context);
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Restore concurrency', visibility: 'PERSONAL' }, context);
   agentId = agent.id;
   memoryId = agent.systemMemoryId!;
   // #3833: createAgent now seeds skeleton parents. This fixture models a two-node graph (alpha, beta), and the seeded rows
@@ -30,7 +30,7 @@ beforeEach(async () => {
   const source = await db.node.create({ data: { id: generateId(), memoryId, loc: 'alpha', name: 'Alpha', nodeType: 'system', content: 'snapshot alpha' } });
   const target = await db.node.create({ data: { id: generateId(), memoryId, loc: 'beta', name: 'Beta', nodeType: 'system', content: 'snapshot beta' } });
   await db.edge.create({ data: { id: generateId(), memoryId, loc: 'alpha:link:beta', name: 'link', sourceId: source.id, targetId: target.id } });
-  const revision = await M.createRevision({}, { agentId, description: 'two-node graph' }, context);
+  const revision = await M.createRevision({}, { agentRef: agentId, description: 'two-node graph' }, context);
   revisionLoc = revision.revisionLoc;
   await db.edge.deleteMany({ where: { memoryId } });
   await db.node.deleteMany({ where: { memoryId, loc: { in: ['alpha', 'beta'] } } });
@@ -124,7 +124,7 @@ describe('#2477 missing-loc concurrent restore', () => {
 
     try {
       const results = await Promise.allSettled(requestContexts.map(requestContext =>
-        M.restoreRevision({}, { agentId, revisionLoc }, requestContext)));
+        M.restoreRevision({}, { agentRef: agentId, revisionLoc }, requestContext)));
       // Assertions live outside resolver callbacks, so an error wrapper cannot
       // turn a failed fixture precondition into an accepted typed outcome.
       const fixtureFailures: Error[] = [];

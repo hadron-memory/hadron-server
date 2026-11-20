@@ -298,7 +298,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
     });
     const created = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'research-agent', visibility: 'ORGANIZATION' },
+      { orgRef: orgA.id, name: 'research-agent', visibility: 'ORGANIZATION' },
       adminCtx(),
     );
     agent = created;
@@ -368,7 +368,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
 
   /** Drive `turns` real turns; return the contents the last call handed the model. */
   async function driveTurns(turns: number): Promise<string[]> {
-    const start = await resolvers.Mutation.startChat({}, { agentId: agent.id }, adminCtx());
+    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, adminCtx());
     let last: { messageHistory: Array<{ role: string; content: string }> } | undefined;
     for (let n = 1; n <= turns; n++) {
       last = (await resolvers.Mutation.sendChatMessage(
@@ -384,7 +384,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
     await db.agent.update({ where: { id: agent.id }, data: { personaRole: 'researcher' } });
     await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}, a {{worker.role}}.');
 
-    const start = await resolvers.Mutation.startChat({}, { agentId: agent.id }, adminCtx());
+    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, adminCtx());
     expect(start.systemMessage).toBe('You are research-agent, a researcher.\n\nScope the research.');
 
     const turn = await resolvers.Mutation.sendChatMessage(
@@ -418,7 +418,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
   }, DRIVE_60_TIMEOUT_MS);
 
   it('#3496: a real chatbot turn leaves the counter keys outside record-root data', async () => {
-    const start = await resolvers.Mutation.startChat({}, { agentId: agent.id }, adminCtx());
+    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, adminCtx());
     const root = await chatNodeByLocOrThrow(db, start.chatId);
     expect(root.nodeType).toBe('record');
     expect(root.data).not.toHaveProperty('messageCount');
@@ -446,7 +446,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
    * pre-#919 shape this tiebreak exists for.
    */
   it('inverts the whole tiebreak for the model too (legacy colliding seq)', async () => {
-    const start = await resolvers.Mutation.startChat({}, { agentId: agent.id }, adminCtx());
+    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, adminCtx());
     const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
 
     const t = (ms: number) => new Date(Date.parse('2026-01-01T00:00:00.000Z') + ms);
@@ -490,7 +490,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
    * Seeds MODEL_HISTORY_LIMIT + 10 of them so the window cannot carry both.
    */
   it('null-seq legacy rows cannot crowd the current turn out of the model window', async () => {
-    const start = await resolvers.Mutation.startChat({}, { agentId: agent.id }, adminCtx());
+    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, adminCtx());
     const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
 
     for (let n = 1; n <= 60; n++) {

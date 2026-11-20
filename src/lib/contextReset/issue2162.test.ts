@@ -68,6 +68,19 @@ describe('a reset is requested when a started task ends (cor:agt:050:27 §1)', (
     expect(await resetOf(t.id)).toBeNull();
   });
 
+  it('#4202: a task.started event of ANOTHER App naming the task, with Kit as its actor, is not Kit\'s start: still nothing (R117)', async () => {
+    const t = await f.startedTask({ assignee: f.ada });
+    await M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id));
+    // agent_team_events.task_id has no foreign key, so a legacy or hand-made row of another App can name this task.
+    const { appId } = await db.agentTask.findUniqueOrThrow({ where: { id: t.id }, select: { appId: true } });
+    const { organizationId } = await db.app.findUniqueOrThrow({ where: { id: appId }, select: { organizationId: true } });
+    const foreign = await db.app.create({ data: { organizationId, name: 'Foreign', urn: `foreign-4202-${t.id}.test:app` }, select: { id: true } });
+    await db.agentTeamEvent.create({ data: { appId: foreign.id, taskId: t.id, type: 'task.started', actorWorkerId: f.kit.id, payload: {} } });
+    await f.finish(t.id);
+    expect(await resetOf(t.id)).toBeNull();
+    expect(await db.hostOperation.count()).toBe(0);
+  });
+
   it('Kit holds another started task: nothing', async () => {
     const t = await f.startedTask();
     await f.startedTask();
@@ -175,7 +188,7 @@ describe('the Agent field', () => {
     expect(off.resetContextAfterTask).toBe(false);
     const kept = await M.updateAgent({}, { ref: f.agentId, resetContextAfterTask: null }, ctx(f.manager.id));
     expect(kept.resetContextAfterTask).toBe(false);
-    const fresh = await M.createAgent({}, { orgId: f.orgId, name: 'Default Agent' }, ctx(f.manager.id));
+    const fresh = await M.createAgent({}, { orgRef: f.orgId, name: 'Default Agent' }, ctx(f.manager.id));
     expect(fresh.resetContextAfterTask).toBe(false);
     await expect(M.updateAgent({}, { ref: f.agentId, resetContextAfterTask: true }, ctx(f.holder.id))).rejects.toThrow();
     expect((await db.agent.findUniqueOrThrow({ where: { id: f.agentId } })).resetContextAfterTask).toBe(false);

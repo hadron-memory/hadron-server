@@ -14,6 +14,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { startSettingsFor } from '../../../lib/hostOperations/launch.js';
 import { matchQueuedTasks } from '../../../lib/agentTasks/matcher.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
@@ -78,8 +79,8 @@ beforeEach(async () => {
   admin = await u(1, 'admin');
   bo = await u(2, 'bo');
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  longAgent = (await M.createAgent({}, { orgId: org.id, name: 'Coordinator' }, ctx(admin.id))).id;
-  shortAgent = (await M.createAgent({}, { orgId: org.id, name: 'Builder', lifecycle: 'SHORT_LIVED' }, ctx(admin.id))).id;
+  longAgent = (await M.createAgent({}, { orgRef: org.id, name: 'Coordinator' }, ctx(admin.id))).id;
+  shortAgent = (await M.createAgent({}, { orgRef: org.id, name: 'Builder', lifecycle: 'SHORT_LIVED' }, ctx(admin.id))).id;
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true } });
   await db.appMember.create({ data: { appId: app.id, userId: bo.id, role: 'member' } });
   const w = (agentId: string, name: string, role: string) =>
@@ -167,5 +168,28 @@ describe('#4302: from the assignment through the emitted start args, for both li
     await db.agent.update({ where: { id: longAgent }, data: { lifecycle: 'SHORT_LIVED' } });
     await assignTo(kit, { family: 'claude' });
     expect((await startArgs(kit))[0]).toMatchObject({ family: 'claude' });
+  });
+  it('#4305: the start args are filled from the settings the host choice read, not from a second lifecycle read', async () => {
+    // The Agent is LONG_LIVED when this runs; a caller that read SHORT_LIVED earlier hands over the task's settings.
+    // On a second read the lifecycle would drop them (the record's family would win); given, they are used as is.
+    await setRecord(kit, CODEX);
+    const t = await assignTo(kit, null);
+    const reg = { family: 'claude', profile: null };
+    const given = { family: 'claude', model: 'claude-opus-5-5', tier: null, effort: 'MAX' } as never;
+    const withGiven = await db.$transaction((tx) => startSettingsFor(tx, kit.id, t.id, reg, given));
+    const reread = await db.$transaction((tx) => startSettingsFor(tx, kit.id, t.id, reg));
+    expect(withGiven).toMatchObject({ family: 'claude' });
+    expect(reread).toMatchObject({ family: 'codex' });
+    // An explicit null is also "already read": no task settings, and no read of the task or the lifecycle.
+    expect(await db.$transaction((tx) => startSettingsFor(tx, kit.id, t.id, reg, null))).toMatchObject({ family: 'codex' });
+  });
+
+  it('LONG_LIVED: the record\'s family is unavailable, the task\'s override is available: no assignment and no start (the match judges the record)', async () => {
+    await setRecord(kit, CODEX);
+    await M.setModelFamilyAvailability({}, { input: { appRef: app.id, family: 'codex', state: 'UNAVAILABLE', reason: 'OUT_OF_TOKENS' } }, ctx(admin.id));
+    const t = await queue({ family: 'claude' }, {}, 'coordinator');
+    await match();
+    expect(await assigneeOf(t.id)).toBeNull();
+    expect(await starts(kit)).toEqual([]);
   });
 });

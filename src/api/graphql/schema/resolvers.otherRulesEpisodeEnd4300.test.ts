@@ -24,7 +24,9 @@ import { recordEndedEscalations } from '../../../lib/agentTasks/stall.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { appendTaskEvent, type TaskEventPayload } from '../../../lib/agentTasks/events.js';
 import { resolvers, type Context } from './resolvers.js';
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 import { typeDefs } from './typeDefs.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 const M = resolvers.Mutation as any;
 const DAY = '2026-10-09';
@@ -33,7 +35,8 @@ const iso = (hhmm: string): string => at(hhmm).toISOString();
 /** The gap #4298 observed between a row stamp and its event. */
 const GAP_MS = 9;
 const ctx = (userId?: string): Context => ({ db, userId, roles: ['READER'] });
-const server = new ApolloServer<Context>({ typeDefs, resolvers });
+// #4098: the forward feed serves only sealed transactions, so a positive read waits for the horizon first.
+const server = new ApolloServer<Context>({ typeDefs, resolvers: { ...resolvers, Query: settledTeamEventQueries(resolvers.Query, db) } });
 
 let app: { id: string };
 let admin: { id: string };
@@ -47,7 +50,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { name: 'OtherRules', urn: `other-rules-${n}.example` } });
   admin = await db.user.create({ data: { githubId: 700_000 + n, githubUsername: `or-admin-${n}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `other-rules-${n}.example:team` }, select: { id: true } });
   const worker = (name: string) =>
     db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name, slug: name.toLowerCase() }, select: { id: true } });

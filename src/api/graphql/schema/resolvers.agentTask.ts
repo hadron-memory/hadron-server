@@ -7,6 +7,7 @@ import { runMayReadTeam } from '../../../lib/auth/runTeamRead.js';
 import { retryOnSerializationFailure } from '../../../lib/serializableRetry.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { finishFindings, countFindings, type TaskFinding } from '../../../lib/agentTasks/findings.js';
+import { finishRoleTaskRefs } from '../../../lib/agentTasks/roleTaskRefs.js';
 import { isDeepStrictEqual } from 'node:util';
 import { lockTaskGraph, taskPriority, addTaskBlocker, removeTaskBlocker } from '../../../lib/agentTasks/blockers.js';
 import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
@@ -91,7 +92,7 @@ import {
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
 import { tickBatch } from './tickBatch.js';
-import { type Context, isAppParticipant, clampListTake, withoutRequestCaches, pageArgs, pageEnvelope } from './resolvers.helpers.js';
+import { type Context, isAppParticipant, clampListTake, LIST_PAGE_MAX, withoutRequestCaches, pageArgs, pageEnvelope } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
@@ -1484,7 +1485,7 @@ async function insertTask(
     select: { id: true },
   }).catch((e: unknown) => {
     if (a.externalId != null && isUniqueViolationOn(e, EXTERNAL_ID_TARGETS)) {
-      throw taskError('TASK_EXTERNAL_ID_TAKEN', 'This App already has a task for that external id.');
+      throw taskError('TASK_EXTERNAL_ID_TAKEN', 'This App already has an active task for that external id.');
     }
     throw e;
   });
@@ -2777,7 +2778,7 @@ export const agentTaskMutations = {
    */
   finishAgentTask: async (
     _: unknown,
-    { taskId, result }: { taskId: string; result: { outcome: string; summary?: string | null; evidence?: string | null; findings?: unknown } },
+    { taskId, result }: { taskId: string; result: { outcome: string; summary?: string | null; evidence?: string | null; findings?: unknown; workedFromRoleTaskRefs?: unknown } },
     ctx: Context,
     info?: GraphQLResolveInfo,
   ) => {
@@ -2799,6 +2800,8 @@ export const agentTaskMutations = {
       }
       // #2652 (cor:agt:050:30): the team's closed outcome set, read now, before any write; no set keeps any one word.
       await checkOutcomeInTeamSet(tx, txCtx, app.id, outcome, (w) => TASK_OUTCOME_PATTERN.test(w));
+      // #4414 (cor:agt:050:30): the role tasks followed, judged here, before any write, through the node read gate.
+      const roleTaskRefs = await finishRoleTaskRefs(txCtx, result?.workedFromRoleTaskRefs);
       // #2198: finishing with open children still succeeds (as it always has); the response says so.
       if ((await tx.agentTask.count({ where: { parentTaskId: task.id, status: { in: OPEN } } })) > 0) warn.push('task.finish.open-children');
       await tx.agentTask.update({
@@ -2807,6 +2810,7 @@ export const agentTaskMutations = {
           status: 'finished', finishedAt: new Date(),
           resultOutcome: outcome, resultSummary: summary, resultEvidence: evidence,
           ...(findings !== undefined ? { resultFindings: findings } : {}),
+          ...(roleTaskRefs !== undefined ? { resultWorkedFromRoleTaskRefs: roleTaskRefs } : {}),
           ...updatedStamp(ctx),
         },
       });
@@ -3036,6 +3040,67 @@ const EXTERNAL_ID_CHANGE_KINDS = {
   [EXTERNAL_ID_RELEASED]: 'RELEASED',
 } as const satisfies Partial<Record<TaskEventPayload['type'], string>>;
 
+/**
+ * #2654 (ruling 0269, cor:agt:050:14 "Overdue, the list filter"): a task is overdue when EITHER arm holds, judged on
+ * the server's clock (`now`, the database clock at millisecond precision), and never for an ended or backlog task:
+ *  (a) pending, not started, start-by strictly earlier than `now`; or
+ *  (b) pending or started, finish-by strictly earlier than `now`, not finished or cancelled.
+ * Blocking is ignored (R3, Proposed). Listing raises nothing. `overdueWhere` (the filter) and `isTaskOverdue` (the
+ * `AgentTask.overdue` field) are two renderings of this one rule; the differential pin keeps them equal.
+ */
+export function overdueWhere(now: Date): Prisma.AgentTaskWhereInput {
+  const open = { finishedAt: null, cancelledAt: null } as const;
+  return {
+    OR: [
+      { status: 'pending', startBy: { lt: now }, startedAt: null, ...open },
+      { status: { in: ['pending', 'started'] }, finishBy: { lt: now }, ...open },
+    ],
+  };
+}
+
+/**
+ * The complement of {@link overdueWhere}, written out. SQL NOT over a nullable start-by or finish-by would also discard
+ * the tasks with no deadline (NOT NULL is NULL), so each arm's negation guards its nullable column explicitly.
+ */
+export function notOverdueWhere(now: Date): Prisma.AgentTaskWhereInput {
+  return {
+    OR: [
+      { finishedAt: { not: null } },
+      { cancelledAt: { not: null } },
+      {
+        AND: [
+          { OR: [{ status: { not: 'pending' } }, { startedAt: { not: null } }, { startBy: null }, { startBy: { gte: now } }] },
+          { OR: [{ status: { notIn: ['pending', 'started'] } }, { finishBy: null }, { finishBy: { gte: now } }] },
+        ],
+      },
+    ],
+  };
+}
+
+export function isTaskOverdue(
+  t: Pick<TaskRow, 'status' | 'startBy' | 'finishBy' | 'startedAt' | 'finishedAt' | 'cancelledAt'>,
+  now: Date,
+): boolean {
+  if (t.finishedAt || t.cancelledAt) return false;
+  const a = t.status === 'pending' && !t.startedAt && t.startBy != null && t.startBy < now;
+  const b = (t.status === 'pending' || t.status === 'started') && t.finishBy != null && t.finishBy < now;
+  return a || b;
+}
+
+/**
+ * The database clock at the DateTime precision the API exposes, read once per request (the GraphQL context object is
+ * per request) and shared by the `overdue` filter and the `overdue` field.
+ */
+const requestNow = new WeakMap<object, Promise<Date>>();
+async function dbNowFor(c: { db: { $queryRaw: (...a: any[]) => Promise<any> } }): Promise<Date> {
+  let p = requestNow.get(c);
+  if (!p) {
+    p = (c.db.$queryRaw`SELECT date_trunc('milliseconds', CURRENT_TIMESTAMP) AS now` as Promise<{ now: Date }[]>).then((r) => r[0].now);
+    requestNow.set(c, p);
+  }
+  return p;
+}
+
 type ListArgs = {
   matchFailed?: boolean | null;
   appRef: string;
@@ -3175,13 +3240,13 @@ export const agentTaskQueries = {
       if (range.gte || range.lte) filters.push({ [field]: range });
     }
     if (args.overdue != null) {
-      // Match the millisecond precision exposed by DateTime, using the database clock.
-      const [{ now }] = await c.db.$queryRaw<{ now: Date }[]>`SELECT date_trunc('milliseconds', CURRENT_TIMESTAMP) AS now`;
-      const late: Prisma.AgentTaskWhereInput = {
-        status: 'pending', startBy: { lt: now }, startedAt: null, finishedAt: null, cancelledAt: null,
-      };
-      // SQL NOT over a nullable startBy alone would also discard tasks with no deadline.
-      filters.push(args.overdue ? late : { OR: [{ startBy: null }, { NOT: late }] });
+      // One database-clock snapshot per request, shared with the `overdue` field, so a deadline crossing mid-request
+      // cannot make the filter and the field disagree.
+      const now = await dbNowFor(c);
+      const late = overdueWhere(now);
+      // SQL NOT over nullable startBy / finishBy alone would also discard tasks with no deadline: the negation is
+      // written out so a task with neither time is never overdue and always falls in `false`.
+      filters.push(args.overdue ? late : notOverdueWhere(now));
     }
     const statuses = args.status?.map((s) => STATUS_FROM_GQL[s] ?? s);
     const where: Prisma.AgentTaskWhereInput = {
@@ -3205,9 +3270,10 @@ export const agentTaskQueries = {
       omit: { resultFindings: true },
       where: { AND: [where, noZero, rootsWhere, ownerWhere, assigneeWhere, creatorWhere, ...filters] },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      // #4084: one task per id at most, so a batch read with no limit answers every id it names (the cap is the list
-      // cap), instead of cutting at the list default.
-      take: args.limit == null && args.externalIds?.length ? args.externalIds.length : clampListTake(args.limit),
+      // #4084, #4217: a batch read with no limit answers every task holding each id it names, up to the list cap, instead of
+      // cutting at the list default. An id may have a history (finished and cancelled tasks no longer hold it, cor:agt:120:02,
+      // 2026-11-14), so the page is NOT as long as the list: sizing it to the id count would drop tasks.
+      take: args.limit == null && args.externalIds?.length ? LIST_PAGE_MAX : clampListTake(args.limit),
       skip: Math.max(0, args.offset ?? 0),
     });
     }, true),
@@ -3239,15 +3305,13 @@ export const agentTaskQueries = {
     }, true),
 
   /**
-   * An App's team event stream (cor:agt:050:11, :21), in (createdAt, id)
-   * order. Continue a page with `after`: the id of the last event read. The
-   * cursor is the PAIR, so rows sharing a timestamp — the task.created and
-   * task.assigned one transaction writes, or a capped page cutting a larger
-   * equal-time group — are never skipped (#1713 review, Diego P2-B). `since`
-   * stays a coarse time filter, not a continuation.
+   * An App's team event stream (cor:agt:050:11, :21). #4098: oldest-first pages use the sealed
+   * (tx_id,created_at,id) order from #4089; after remains an event id. A poll may lag behind an older
+   * open transaction, but cannot skip its late commit or a later transaction's backdated stamp.
+   * since stays a coarse time filter, not a continuation. newestFirst/before keep their history order.
    */
   agentTeamEvents: async (_: unknown, args: TeamEventsArgs, ctx: Context) =>
-    withReadableApp(ctx, args.appRef, (c, app) => readTeamEvents(c, app, args, clampListTake(args.limit))),
+    withReadableApp(ctx, args.appRef, (c, app) => readTeamEvents(c, app, args, clampListTake(args.limit), ctx.db)),
 
   /**
    * #3933 (cor:api:120:04, cor:agt:050:11 FIT condition (c)): the same read as agentTeamEvents, the `<field>Page` sibling, so a
@@ -3262,7 +3326,7 @@ export const agentTaskQueries = {
   agentTeamEventsPage: async (_: unknown, args: TeamEventsArgs, ctx: Context) =>
     withReadableApp(ctx, args.appRef, async (c, app) => {
       const take = Math.max(1, clampListTake(args.limit));
-      const rows = await readTeamEvents(c, app, args, take + 1);
+      const rows = await readTeamEvents(c, app, args, take + 1, ctx.db);
       const events = rows.slice(0, take);
       const hasMore = rows.length > take;
       return { events, hasMore, nextCursor: hasMore ? events[events.length - 1]!.id : null };
@@ -3360,40 +3424,205 @@ export const agentTaskQueries = {
     }),
 };
 
-type TeamEventsArgs = { appRef: string; since?: unknown; after?: string | null; before?: string | null; newestFirst?: boolean | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; alarmsInEffect?: boolean | null; taskId?: string | null; limit?: number | null };
+/** #4316 item 4: exported so the parity pin (resolvers.teamEventCursor4098.test.ts) can tie its filter cases to these keys. */
+export type TeamEventsArgs = { appRef: string; since?: unknown; after?: string | null; before?: string | null; newestFirst?: boolean | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; alarmsInEffect?: boolean | null; taskId?: string | null; limit?: number | null };
 
-async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsArgs, take: number) {
+/** #4316: how long a held-back horizon stays quiet before `team_events.horizon_lag` says something. */
+const HORIZON_LAG_MIN_AGE_MS = 30_000;
+/** #4316: at most one horizon check (and so at most one line) per App per this window, per process. */
+const HORIZON_LAG_LOG_INTERVAL_MS = 60_000;
+/**
+ * #4316 (keyed by App id): when the horizon was last CHECKED for that App in this process. Stamped when the
+ * check runs, not when a line is emitted (#4372 fold): a healthy App runs the probe query at most once per
+ * window instead of on every caught-up poll, and the line cadence — at most one per window — is unchanged,
+ * because a line can only come from a check.
+ */
+const horizonLagLastCheckedAt = new Map<string, number>();
+/** #4436 item 5: what a logged `errorCode` may look like (P2028, P1001, ECONNREFUSED); anything else is not logged. */
+const HORIZON_ERROR_CODE_SHAPE = /^[A-Za-z0-9_.:-]{1,64}$/;
+/** #4436 item 2: the test seam over the module-level throttle map (resolvers.teamEventHorizon4316.test.ts): reset between tests and read the size and membership the eviction pins assert on. Never used by production code. */
+export const horizonThrottleForTest = {
+  clear: (): void => horizonLagLastCheckedAt.clear(),
+  size: (): number => horizonLagLastCheckedAt.size,
+  has: (appId: string): boolean => horizonLagLastCheckedAt.has(appId),
+};
+/**
+ * #4316: one operator line when a forward read came back short while committed events of the App are held back
+ * at or above the snapshot horizon (cor:agt:050:11 records the horizon as built; a log line changes no
+ * contract). The check is ONE indexed read (`app_id, tx_id`), made only for a short forward read; only rows
+ * visible to the check's own snapshot count, so events of still-open transactions are not "held back" yet.
+ * `created_at` is a UTC-labeled naive column, so the DB clock is read as UTC too — a session TimeZone would
+ * skew the age by its offset. Best-effort by design: a failed or slow check must never change, delay or fail
+ * the page it explains — the caller does not await it (#4372 fold).
+ *
+ * #4372 fold 2 (Peter, #114870): the check takes the ROOT POOLED CLIENT, never the read's own `c.db`. Under
+ * `withReadableApp`'s App-key arm the whole read runs inside `inKeyReadTx`'s transaction and `c.db` there is
+ * the TRANSACTION client; an un-awaited query on it outlives the resolver's return, dies P2028 ("Transaction
+ * already closed") inside the catch below and is swallowed — the probe silently no-ops in exactly the
+ * incident's error class. Pinned in resolvers.teamEventHorizon4316.test.ts: the direct-seam test drives
+ * `readTeamEvents` through a REAL transaction and asserts the check ran on the root client (not a key read —
+ * through the resolver the seam is un-pinnable at runtime: the transaction client is created inside
+ * `withReadableApp`, hooking the shared client infects it, and an un-awaited probe on the transaction client
+ * races the commit, so a key-arm behavioral pin cannot be deterministic). The resolver CALL SITES are
+ * source-pinned in the same file (#4372 fold 3).
+ *
+ * #4372 fold 3: the check itself is bounded and observable. The statement races a timeout, so a wedged or
+ * pool-starved probe releases its bookkeeping instead of holding it forever (Baylor F2), and a fault is no
+ * longer silent: the catch emits its own `team_events.horizon_probe_error` line (Baylor F3 — "ran and found
+ * nothing" stays silent, "errored" is now visible). The once-per-window map is capped (Baylor F5).
+ *
+ * #4408 (the #4372 review follow-ups): the cap EVICTS the least-recently-checked App instead of clearing
+ * every throttle at once; the race timer is cleared on every path, not only success; and the fault line
+ * carries the error's class and code, never its message.
+ *
+ * #4436: the eviction runs only when a NEW App arrives at the cap, an expired re-check of a mapped App
+ * evicts nobody, and every check moves its App to the newest end of the map, so the oldest entry is
+ * always the first key (O(1)). A logged `errorCode` must have the identifier shape.
+ *
+ * Exported for the #4408 direct pins (resolvers.teamEventHorizon4316.test.ts): the throttle bookkeeping,
+ * the race timer and the fault line, driven on a stand-in root client.
+ */
+export async function logStalledHorizon(db: Context['db'], appId: string): Promise<void> {
+  const now = Date.now();
+  const last = horizonLagLastCheckedAt.get(appId);
+  if (last != null && now - last < HORIZON_LAG_LOG_INTERVAL_MS) return;
+  // Baylor F5: a long-lived server would otherwise accumulate one entry per App forever. #4408 item 1:
+  // past the cap, evict the least-recently-checked App — NOT the whole map. Clear-all reset every App's
+  // settle-throttle at once, so a hot fleet re-probed in a burst the moment any 1_001st App arrived;
+  // eviction loses one window for one App. #4436 item 1: the guard names the case the comment always
+  // claimed — a NEW App at the cap. An App already in the map (its window expired) is simply re-stamped
+  // and makes no room, so it neither scans nor evicts a bystander. Every check does delete-then-set, which
+  // moves the App to the newest end of the Map's insertion order, so that order IS recency order and the
+  // least-recently-checked App is the first key: eviction is O(1), and ties go to the earliest-inserted,
+  // which is deterministic. Caller-visible behaviour is unchanged (FIT, #4408): the throttle only paces
+  // probes, so what a caller is served — which events, and the more-remain answer — is the same.
+  if (!horizonLagLastCheckedAt.has(appId) && horizonLagLastCheckedAt.size >= 1_000) {
+    horizonLagLastCheckedAt.delete(horizonLagLastCheckedAt.keys().next().value!);
+  }
+  horizonLagLastCheckedAt.delete(appId);
+  horizonLagLastCheckedAt.set(appId, now);
+  const startedAt = now;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const [row] = await Promise.race([
+      db.$queryRaw<{ heldBack: number; oldestAgeMs: number | null }[]>`
+        SELECT count(*)::int AS "heldBack",
+               CASE WHEN min(created_at) IS NULL THEN NULL
+                    ELSE round(extract(epoch FROM ((clock_timestamp() AT TIME ZONE 'UTC') - min(created_at))) * 1000)::int END AS "oldestAgeMs"
+        FROM agent_team_events
+        WHERE app_id = ${appId} AND tx_id >= pg_snapshot_xmin(pg_current_snapshot())`,
+      // Baylor F2: bounded — the probe's promise settles at 5 s even if its statement never returns (the
+      // pool connection heals when the statement eventually does; the bookkeeping does not wait for it).
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          // #4408 item 3: the bound's own fault is identified by its class on the log line below, never
+          // by message text (a plain Error's name says nothing; this one says "the bound fired").
+          const timedOut = new Error('horizon probe timeout');
+          timedOut.name = 'HorizonProbeTimeoutError';
+          reject(timedOut);
+        }, 5_000);
+        (timeout as unknown as { unref?: () => void }).unref?.();
+      }),
+    ]);
+    if (!row?.oldestAgeMs || row.oldestAgeMs < HORIZON_LAG_MIN_AGE_MS) return;
+    console.log(JSON.stringify({
+      event: 'team_events.horizon_lag', appId, heldBack: row.heldBack, oldestAgeMs: row.oldestAgeMs,
+      at: new Date().toISOString(),
+    }));
+  } catch (error) {
+    // Observability only: the served page is byte-identical whatever happens here. F3: visible, not silent.
+    // #4408 item 3 (Bob P3.3): the line carries the error's class and code, never its message — a Prisma
+    // connection error's message names the DB host and port, and internal logs are no reason to repeat
+    // them. The two Prisma carriers spell the code differently: `code` on PrismaClientKnownRequestError
+    // (P2028 …), `errorCode` on PrismaClientInitializationError (P1001, the usual DB-unreachable fault —
+    // Jonas's BLIND P2 on #4433 caught the first cut reading only `code`). Either way a string or the key
+    // is omitted rather than nulled; other errors carry neither. A non-Error throw names its kind; there
+    // is no message to leak and none invented.
+    const fault = typeof error === 'object' && error !== null ? (error as { code?: unknown; errorCode?: unknown }) : undefined;
+    const rawCode = typeof fault?.code === 'string' ? fault.code
+      : typeof fault?.errorCode === 'string' ? fault.errorCode : undefined;
+    // #4436 item 5 (Baylor F2): the line's fixed-key, no-free-text claim must hold for ANY thrower, not just
+    // Prisma and Node. A code with the identifier shape is logged; any other string is dropped, never
+    // truncated or logged raw, so a thrower that puts a message (a host, a path) in `code` cannot leak it.
+    const code = rawCode !== undefined && HORIZON_ERROR_CODE_SHAPE.test(rawCode) ? rawCode : undefined;
+    console.log(JSON.stringify({
+      event: 'team_events.horizon_probe_error', appId, ms: Date.now() - startedAt,
+      errorName: error instanceof Error ? error.name : typeof error,
+      ...(code ? { errorCode: code } : {}),
+      at: new Date().toISOString(),
+    }));
+  } finally {
+    // #4408 item 2 (Bob P3.2): cleared on EVERY path. The clear used to sit on the success path only, so
+    // a faulted probe left the unref'd 5 s timer armed to fire harmlessly later — harmless, and still one
+    // armed timer per fault. clearTimeout on an already-fired timer is a no-op, so this one clear point
+    // serves the success, fault and bound-fired paths alike.
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * #4372 fold: the probes the fire-and-forget call sites below have started and not yet finished. The page is
+ * served without awaiting its probe, so a test that asserts on (the absence of) a `team_events.horizon_lag`
+ * line needs a positive signal the probe has RUN; awaiting this settles every in-flight probe. Production
+ * never awaits it — the probes complete on their own and a rejection is impossible (every await sits inside
+ * the try above; the fold-3 timeout race rejects into the SAME catch, which only logs).
+ *
+ * #4372 fold 3 (Peter #114929/#115033): BOUNDED. A probe that cannot settle (a wedged statement, pool
+ * exhaustion) FAILS the awaiting test after `timeoutMs` instead of hanging the run — the two host wedges
+ * both hung here, freezing every horizon test on the shared host. The bound mirrors settleTeamEventHorizon's
+ * own 10 s (src/test/teamEventHorizon.ts).
+ */
+const horizonProbes = new Set<Promise<void>>();
+export async function teamEventHorizonSettled(timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (horizonProbes.size) {
+    if (Date.now() >= deadline) {
+      throw new Error(`team events horizon: ${horizonProbes.size} probe(s) unsettled after ${timeoutMs} ms`);
+    }
+    await Promise.race([
+      Promise.all([...horizonProbes]),
+      new Promise<void>((resolve) => {
+        const tick = setTimeout(resolve, 100);
+        (tick as unknown as { unref?: () => void }).unref?.();
+      }),
+    ]);
+  }
+}
+
+/** Exported for the #4372 fold-2 pin: the probe's root-client seam is pinned from inside a REAL transaction (resolvers.teamEventHorizon4316.test.ts). */
+export async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsArgs, take: number, probeDb: Context['db']) {
   const since = args.since == null ? null : parseStartBy(args.since);
   // #3933 (cor:agt:050:11 FIT): the newest-end read. `after` continues forward and `before` backward, so each belongs to one
   // direction; a cursor in the wrong one is refused rather than read as something else.
   const newestFirst = args.newestFirst === true;
   if (newestFirst && args.after) throw badInput('after continues the oldest-first read; with newestFirst pass before.');
   if (!newestFirst && args.before) throw badInput('before continues the newestFirst read; pass newestFirst: true with it.');
-  let afterWhere: Prisma.AgentTeamEventWhereInput = {};
+  /** #4316: the validated `after` cursor's serving key, read once up front and passed into the forward statement. */
+  let afterKey: { id: string; txId: string; createdAt: string } | null = null;
+  let beforeWhere: Prisma.AgentTeamEventWhereInput = {};
   if (args.before) {
     // Scoped to this App, like after: another App's event id is just an unknown cursor.
     const cursor = isId(args.before)
       ? await c.db.agentTeamEvent.findFirst({ where: { id: args.before, appId: app.id }, select: { id: true, createdAt: true } })
       : null;
     if (!cursor) throw badInput('before is not an event of this App. Pass the id of the last (oldest) event you read.');
-    afterWhere = { OR: [{ createdAt: { lt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { lt: cursor.id } }] };
+    beforeWhere = { OR: [{ createdAt: { lt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { lt: cursor.id } }] };
   }
   if (args.after) {
-    // Scoped to this App: another App's event id is just an unknown cursor.
-    const cursor = isId(args.after)
-      ? await c.db.agentTeamEvent.findFirst({
-          where: { id: args.after, appId: app.id },
-          select: { id: true, createdAt: true },
-        })
-      : null;
+    // #4316 (cor:api:120:05): the cursor's key is read HERE, once, and passed into the forward statement, so a
+    // cursor row deleted between the two statements still continues from its key instead of silently emptying
+    // the page. The key round-trips as TEXT: a JS Date truncates to milliseconds and would re-serve rows of the
+    // cursor's own transaction whose created_at carries microseconds. Scoped to this App: another App's event
+    // id, or anything else, is just an unknown cursor (the refusal is unchanged).
+    const [cursor] = isId(args.after)
+      ? await c.db.$queryRaw<{ id: string; txId: string; createdAt: string }[]>`
+          SELECT id, tx_id::text AS "txId", created_at::text AS "createdAt"
+          FROM agent_team_events WHERE id = ${args.after} AND app_id = ${app.id} LIMIT 1`
+      : [];
     if (!cursor) throw badInput('after is not an event of this App. Pass the id of the last event you read.');
-    afterWhere = {
-      OR: [
-        { createdAt: { gt: cursor.createdAt } },
-        { createdAt: cursor.createdAt, id: { gt: cursor.id } },
-      ],
-    };
+    afterKey = cursor;
   }
+  const taskId = args.taskId ? (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId : null;
   const where: Prisma.AgentTeamEventWhereInput = {
     appId: app.id,
     ...(since ? { createdAt: { gt: since } } : {}),
@@ -3401,20 +3630,52 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
     // #3934: alarms in effect are alarms, and an acknowledged alarm is out of effect by definition (cor:agt:050:20).
     ...(args.alarmsOnly || args.alarmsInEffect ? { severity: 'alarm' } : {}),
     ...(args.alarmsInEffect ? { acknowledgedAt: null } : {}),
-    ...(args.taskId ? { taskId: (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId } : {}),
+    ...(taskId ? { taskId } : {}),
   };
-  // newestFirst is the exact mirror of the default (createdAt, id) order, so a page boundary inside equal timestamps never repeats or skips.
-  const orderBy: Prisma.AgentTeamEventOrderByWithRelationInput[] = newestFirst ? [{ createdAt: 'desc' }, { id: 'desc' }] : [{ createdAt: 'asc' }, { id: 'asc' }];
-  // #3934 (V77; gate disposition on hadron-server#3939): in effect = unacknowledged and no recorded end. Both are columns
-  // of rows already written, so this is an ordinary filtered page: the read works nothing out and its cost follows
-  // `limit`, not the App's alarm history. The end is written once, by the evaluator pass or the acknowledgement.
+  // #3934: an alarm is in effect only while unacknowledged and without a stored escalation end.
   const inEffect: Prisma.AgentTeamEventWhereInput = args.alarmsInEffect ? { escalationEnd: { is: null } } : {};
-  const events = await c.db.agentTeamEvent.findMany({
-    where: { AND: [where, afterWhere, inEffect] },
-    // newestFirst is the exact mirror of the default (createdAt, id) order, so a page boundary inside equal timestamps never repeats or skips.
-    orderBy: newestFirst ? [{ createdAt: 'desc' }, { id: 'desc' }] : [{ createdAt: 'asc' }, { id: 'asc' }],
+  // #4098: every oldest-first page, including the first, advances in the same commit-safe key as #4089.
+  // tx_id below snapshot xmin is sealed: no transaction can later add a row behind a served cursor. A later
+  // transaction with a backdated caller stamp still sorts later by tx_id. Within a sealed transaction, every
+  // event is already visible, so (created_at,id) safely breaks ties. Historic tx_id=0 rows retain their old order.
+  // The forward statement applies every filter and projects the row in ONE snapshot, including the mutable alarm
+  // acknowledgements and ends. The cursor check and the task-ref lookup above are separate, earlier statements.
+  type EventRow = Prisma.AgentTeamEventGetPayload<Record<string, never>>;
+  const events = newestFirst ? await c.db.agentTeamEvent.findMany({
+    where: { AND: [where, beforeWhere, inEffect] },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take,
-  });
+  }) : await c.db.$queryRaw<EventRow[]>`
+    SELECT e.id, e.app_id AS "appId", e.type, e.task_id AS "taskId",
+      e.actor_user_id AS "actorUserId", e.actor_worker_id AS "actorWorkerId", e.actor_agent_id AS "actorAgentId",
+      e.actor_run_id AS "actorRunId", e.actor_app_key_id AS "actorAppKeyId",
+      e.subject_worker_id AS "subjectWorkerId", e.subject_user_id AS "subjectUserId", e.severity, e.chain,
+      e.acknowledged_by_user_id AS "acknowledgedByUserId", e.acknowledged_by_worker_id AS "acknowledgedByWorkerId",
+      e.acknowledged_at AS "acknowledgedAt", e.payload, e.created_at AS "createdAt", e.episode_start AS "episodeStart"
+    FROM agent_team_events e
+    WHERE e.app_id = ${app.id}
+      AND e.tx_id < pg_snapshot_xmin(pg_current_snapshot())
+      ${afterKey ? Prisma.sql`AND (e.tx_id,e.created_at,e.id) > (${afterKey.txId}::xid8, ${afterKey.createdAt}::timestamp, ${afterKey.id})` : Prisma.empty}
+      ${since ? Prisma.sql`AND e.created_at > ${since.toISOString()}::timestamp` : Prisma.empty}
+      ${args.types?.length ? Prisma.sql`AND e.type IN (${Prisma.join(args.types)})` : Prisma.empty}
+      ${args.codePrefix != null ? Prisma.sql`AND starts_with(e.type,${args.codePrefix})` : Prisma.empty}
+      ${args.alarmsOnly || args.alarmsInEffect ? Prisma.sql`AND e.severity='alarm'` : Prisma.empty}
+      ${args.alarmsInEffect ? Prisma.sql`AND e.acknowledged_at IS NULL AND NOT EXISTS (SELECT 1 FROM alarm_escalation_ends z WHERE z.event_id=e.id)` : Prisma.empty}
+      ${taskId ? Prisma.sql`AND e.task_id=${taskId}` : Prisma.empty}
+    ORDER BY e.tx_id,e.created_at,e.id
+    LIMIT ${take}`;
+  // #4316: a short forward read is the only read that can mean "the horizon is holding events of this App
+  // back"; one best-effort check, never a change to what is served. #4372 fold: not awaited — a slow probe
+  // must not delay the page it explains (the function's own contract); tests observe it via
+  // teamEventHorizonSettled(). #4372 fold 2: the probe runs on `probeDb` (the request's root pooled client,
+  // passed by the resolver) — never on `c.db`, which is the App-key transaction's client under `withReadableApp`'s
+  // key arm and would close under the un-awaited query (see logStalledHorizon).
+  if (!newestFirst && events.length < take) {
+    // F1 (Baylor's #4372 delta): the .catch makes the chain self-absorbing — the promise parked in
+    // horizonProbes can never reject, whatever the function's own catch body does or stops doing.
+    const probe = logStalledHorizon(probeDb, app.id).catch(() => {}).finally(() => { horizonProbes.delete(probe); });
+    horizonProbes.add(probe);
+  }
   // #4135: use the stored AgentTask.handle (cor:agt:050:01, Proposed), once per page.
   // Event task ids are retained after deletion; an absent row must never invent a handle.
   const taskIds = [...new Set(events.flatMap(e => e.taskId ? [e.taskId] : []))];
@@ -3694,6 +3955,8 @@ export const agentTaskFieldResolvers = {
       const base = getPortalBaseUrl();
       return base ? `${base}/app/apps/${encodeURIComponent(t.appId)}/tasks/${encodeURIComponent(t.id)}` : null;
     },
+    /** #2654: true exactly when the `overdue` filter would list this task now (same rule, same server clock). */
+    overdue: async (t: TaskRow, _a: unknown, c: any) => isTaskOverdue(t, await dbNowFor(c)),
     /** #3816 (V22): present only on the create answer that ran the match; a later read has none. */
     matchSkipped: (t: TaskRow & { matchSkipped?: unknown }) => t.matchSkipped ?? null,
     matchFailure: (t: TaskRow) => t.matchFailedAt && t.matchFailedReason ? { reason: t.matchFailedReason, failedAt: t.matchFailedAt } : null,
@@ -3736,7 +3999,7 @@ export const agentTaskFieldResolvers = {
     assignee: (t: TaskRow, _: unknown, ctx: Context) => partyView(ctx, t.assigneeWorkerId, t.assigneeUserId),
     result: (t: TaskRow, _: unknown, ctx: Context) => {
       const view = (row: TaskRow) => row.status === 'finished' && row.resultOutcome
-        ? { outcome: row.resultOutcome, summary: row.resultSummary, evidence: row.resultEvidence, ...(row.resultFindings != null ? { findings: row.resultFindings } : {}) }
+        ? { outcome: row.resultOutcome, summary: row.resultSummary, evidence: row.resultEvidence, ...(row.resultFindings != null ? { findings: row.resultFindings } : {}), ...(row.resultWorkedFromRoleTaskRefs != null ? { workedFromRoleTaskRefs: row.resultWorkedFromRoleTaskRefs } : {}) }
         : null;
       if (t.status !== 'finished' || !t.resultOutcome || Object.hasOwn(t, 'resultFindings')) return view(t);
       // #2662: wide list/tree/relation rows omit the large payload. Only a selected result loads it, under the

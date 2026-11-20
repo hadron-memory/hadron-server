@@ -34,7 +34,7 @@ beforeEach(async () => {
   const user = await db.user.create({ data: { handle: 'lookup4076-manager' } });
   userId = user.id;
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId, name: 'Agent A', visibility: 'ORGANIZATION' }, ctx());
+  const agent = await M.createAgent({}, { orgRef: orgId, name: 'Agent A', visibility: 'ORGANIZATION' }, ctx());
   agentId = agent.id; systemId = agent.systemMemoryId;
   const app = await db.app.create({ data: { name: 'Lookup app', urn: `${org.urn}:chat`, organizationId: org.id } });
   appId = app.id;
@@ -45,7 +45,7 @@ beforeEach(async () => {
 });
 
 async function start(scope: 'private' | 'shared' = 'private') {
-  return M.startChat({}, { agentId, scope, conversationName: 'flow' }, ctx());
+  return M.startChat({}, { agentRef: agentId, scope, conversationName: 'flow' }, ctx());
 }
 
 /** Turn the started chat's memory into a legacy one: no home pointers, agents linked by read-write items. */
@@ -61,7 +61,7 @@ async function makeLegacy(chatId: string, linked: string[]) {
 describe('#4076 legacy order parity', () => {
   it('two linked legacy Agents resolve the same one (oldest createdAt) on send and on response', async () => {
     // B is inserted after A but dated EARLIER: an unordered lookup returns A, the documented order returns B.
-    const b = await M.createAgent({}, { orgId, name: 'Agent B', visibility: 'ORGANIZATION' }, ctx());
+    const b = await M.createAgent({}, { orgRef: orgId, name: 'Agent B', visibility: 'ORGANIZATION' }, ctx());
     await seedScript(b.systemMemoryId, 'B', 'onlyB');
     await db.agent.update({ where: { id: b.id }, data: { createdAt: new Date('2000-01-01T00:00:00Z') } });
     await serveEveryAgent(db);
@@ -80,7 +80,7 @@ describe('#4076 legacy order parity', () => {
 
 describe('#4076 legacy link liveness', () => {
   it('a soft-deleted link does not make an older Agent the chosen one', async () => {
-    const b = await M.createAgent({}, { orgId, name: 'Agent B', visibility: 'ORGANIZATION' }, ctx());
+    const b = await M.createAgent({}, { orgRef: orgId, name: 'Agent B', visibility: 'ORGANIZATION' }, ctx());
     await seedScript(b.systemMemoryId, 'B', 'onlyB');
     await db.agent.update({ where: { id: b.id }, data: { createdAt: new Date('2000-01-01T00:00:00Z') } });
     await serveEveryAgent(db);

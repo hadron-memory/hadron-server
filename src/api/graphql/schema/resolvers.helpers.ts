@@ -1,5 +1,6 @@
 import { currentAgentOrgMember } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { requireOrgRole, isAppParticipant } from '../../../lib/auth/appParticipantRead.js';
+import { endGrantsOfAgentsNoLongerInstalled, importedPairsOfParent } from '../../../lib/grants/agentInstallDeparture.js';
 import { lockAppInstallation, readInstallBootPrompt, lockAppAgentCustomization, resolveAppInstallation } from '../../../lib/appInstallations.js';
 import type { AuthoredWith, TaskReadGate } from '../../../lib/authoringAttestation.js';
 import { cachedManagerOrgRole } from '../../../lib/auth/managerOrgRoles.js';
@@ -146,7 +147,7 @@ export interface Context {
    * its caller sent, so it answers; a refusal that cannot be replayed on MCP
    * names no MCP door (@codex, PR #1305).
    */
-  governedCanReplay?: (kind: 'task' | 'review' | 'spec' | 'decision') => boolean;
+  governedCanReplay?: (kind: 'task' | 'review' | 'spec' | 'question') => boolean;
   /**
    * #1329 — set by every MCP context that can reach an authoring write: the gate
    * `hadron_get_node` applies, so a refusal on MCP calls a task READABLE only if
@@ -295,14 +296,45 @@ export async function resolveRefArg(
       { extensions: { code: 'BAD_USER_INPUT' } },
     );
   }
+  return resolveChosenRefArg(db, resolve, args.label, chosen);
+}
+
+/**
+ * #4142 (S6 chunk F) — the collapsed single-ref form for surfaces whose
+ * deprecated `…Id` alias is GONE from the SDL. The "not both" arm is
+ * unconstructable there; a blank or whitespace-only ref still refuses
+ * `BAD_USER_INPUT` here, BEFORE any gate, with text that names only the ref
+ * arg — the alias the paired form would name no longer exists to pass.
+ */
+export async function resolveRequiredRefArg(
+  db: Context['db'],
+  resolve: (db: Context['db'], ref: string) => Promise<{ id: string }>,
+  args: { ref?: string | null; label: string },
+): Promise<string> {
+  const chosen = args.ref?.trim();
+  if (!chosen) {
+    throw new GraphQLError(`A ${args.label} is required: pass ${args.label}Ref.`, {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  return resolveChosenRefArg(db, resolve, args.label, chosen);
+}
+
+/** The resolve-and-typed-miss core shared by the paired and collapsed ref forms. */
+async function resolveChosenRefArg(
+  db: Context['db'],
+  resolve: (db: Context['db'], ref: string) => Promise<{ id: string }>,
+  label: string,
+  chosen: string,
+): Promise<string> {
   try {
     const { id: resolvedId } = await resolve(db, chosen);
     return resolvedId;
   } catch (e) {
-    if (isEntityNotFound(e)) throw refArgNotFoundError(args.label, chosen);
+    if (isEntityNotFound(e)) throw refArgNotFoundError(label, chosen);
     if (e instanceof AmbiguousUserRefError) {
       throw new GraphQLError(
-        `${args.label}Ref "${chosen}" matches more than one account (differing only by email case). Use the exact-case email, the handle, or the id.`,
+        `${label}Ref "${chosen}" matches more than one account (differing only by email case). Use the exact-case email, the handle, or the id.`,
         { extensions: { code: 'BAD_USER_INPUT' } },
       );
     }
@@ -345,11 +377,38 @@ export const resolveAppRefArg = (
   a: { ref?: string | null; id?: string | null },
 ): Promise<string> =>
   resolveRefArg(db, (d, ref) => resolveAppRef(d, ref), { ...a, label: 'app' });
-export const resolveAgentRefArg = (
+/**
+ * #4142 (S6 chunk F) — per-entity collapsed single-ref wrappers: the nine
+ * mutations whose deprecated `…Id` aliases dropped. Same resolution and same
+ * typed miss as the paired form; only the blank-ref refusal text differs
+ * (no alias left to name).
+ */
+export const resolveRequiredUserRef = (
   db: Context['db'],
-  a: { ref?: string | null; id?: string | null },
+  ref?: string | null,
 ): Promise<string> =>
-  resolveRefArg(db, (d, ref) => resolveAgentRef(d, ref), { ...a, label: 'agent' });
+  resolveRequiredRefArg(db, (d, r) => resolveUserRefOrEmail(d, r), { ref, label: 'user' });
+export const resolveRequiredOrgRef = (
+  db: Context['db'],
+  ref?: string | null,
+): Promise<string> =>
+  resolveRequiredRefArg(db, (d, r) => resolveOrgRef(d, r), { ref, label: 'org' });
+export const resolveRequiredMemoryRef = (
+  db: Context['db'],
+  ref?: string | null,
+): Promise<string> =>
+  resolveRequiredRefArg(db, (d, r) => resolveMemoryRef(d, r), { ref, label: 'memory' });
+export const resolveRequiredAppRef = (
+  db: Context['db'],
+  ref?: string | null,
+): Promise<string> =>
+  resolveRequiredRefArg(db, (d, r) => resolveAppRef(d, r), { ref, label: 'app' });
+/** #4142 (S6 chunk F) — the collapsed single-ref agent form (revokeAgentSubscription's pair is gone). */
+export const resolveRequiredAgentRef = (
+  db: Context['db'],
+  ref?: string | null,
+): Promise<string> =>
+  resolveRequiredRefArg(db, (d, r) => resolveAgentRef(d, r), { ref, label: 'agent' });
 
 /**
  * Fetch a memory's stored urn by id, memoized per request (#481). Backs the
@@ -1595,21 +1654,24 @@ export async function requireReadableAgentForAssetOp(ctx: Context, agentRef: str
 }
 
 /**
- * #1944 — {@link resolveReadableAgentRef} for the `agentRef`/`agentId` arg
- * pair `resolveRefArg` takes: an Agent the caller can't read answers with
- * that helper's own not-found envelope (`refArgNotFoundError`), exactly as an
- * absent one does there.
+ * #1944 — {@link resolveReadableAgentRef} for the `agentRef` argument: an
+ * Agent the caller can't read answers with that helper's own not-found
+ * envelope (`refArgNotFoundError`), exactly as an absent one does there.
+ * #4142 (S6 chunk F): the deprecated `agentId` alias dropped, so this takes
+ * the collapsed single-ref form (`resolveRequiredAgentRef`'s blank-ref
+ * refusal included).
  */
 export async function resolveReadableAgentRefArg(
   ctx: Context,
-  a: { ref?: string | null; id?: string | null },
+  ref?: string | null,
 ): Promise<Agent> {
-  const id = await resolveAgentRefArg(ctx.db, a);
+  const chosen = ref?.trim();
+  const id = await resolveRequiredAgentRef(ctx.db, chosen);
   try {
     return await resolveReadableAgentRef(ctx, id);
   } catch (e) {
     if (!(e instanceof AgentNotFoundError)) throw e;
-    throw refArgNotFoundError('agent', chosenRefArg(a)!);
+    throw refArgNotFoundError('agent', chosen!);
   }
 }
 
@@ -3049,7 +3111,10 @@ export const ORG_INCLUDE = {
     },
     orderBy: { name: 'asc' as const },
   },
-  subscriptions: { where: { deletedAt: null }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
+  // #2566: a memory soft-delete does not tombstone its subscriptions, and the platform-admin
+  // read shortcut leaves the memory tombstone to callers, so exclude deleted memories here
+  // (the lazy Organization.subscriptions path reuses this where).
+  subscriptions: { where: { deletedAt: null, memory: { deletedAt: null } }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
   // No exchangeConnections here: Organization.exchangeConnections resolves
   // through listOrgExchangeConnections, never from an eager row (hadron-internal#18).
 };
@@ -3538,7 +3603,7 @@ export async function uninstallAgentFromAppCore(
       await requireOwnerOrOrgRole(txCtx, current, 'CONTRIBUTOR');
     },
     async (tx) => {
-      await tx.appAgent.deleteMany({ where: { appId: resolvedAppId, agentId: resolvedAgentId } });
+      const removedRow = await tx.appAgent.deleteMany({ where: { appId: resolvedAppId, agentId: resolvedAgentId } });
       // #3435: the delete is row-keyed. An Agent that is STILL installed by derivation (a direct import of an installed
       // Agent, #2168) has not left the App, so the App's own register rows naming it stay.
       // Hold the raw witnesses, then judge whether the App still has a usable
@@ -3546,9 +3611,17 @@ export async function uninstallAgentFromAppCore(
       await lockAppInstallation(tx, resolvedAppId, resolvedAgentId);
       if (!(await resolveAppInstallation(tx, resolvedAppId, resolvedAgentId)))
         await removeRegisterRowsForUninstall(tx, resolvedAppId, resolvedAgentId, ctx.userId ?? null);
+      // #4172 (Holger ruling A, epic #1975): an agent left with no effective installation in this App has left it, so its grants
+      // here end (first end stands; other Apps untouched). Judged on every call, so a retry also ends a stranded row. The agent
+      // this one imports may have lost its only (derived) witness too: one level, derivation never recurses (D1).
+      const importedHere = removedRow.count > 0 ? await importedPairsOfParent(tx, resolvedAgentId, [resolvedAppId]) : [];
+      await endGrantsOfAgentsNoLongerInstalled(
+        tx, [{ appId: resolvedAppId, agentId: resolvedAgentId }, ...importedHere], ctx.userId ?? null);
     },
     { lockMode: 'exclusive', afterLock: async (tx) => {
-      await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
+      // NO KEY UPDATE, not SHARE (#4210 F1): two uninstalls of different agents in one App delete their own app_agents rows and then
+      // scan each other's FOR SHARE; the fence makes the second wait before it deletes anything.
+      await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR NO KEY UPDATE`;
     } },
   );
   return { appId: resolvedAppId, agentId: resolvedAgentId };

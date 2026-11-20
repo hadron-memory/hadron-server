@@ -34,7 +34,7 @@ beforeEach(async () => {
   const user = await db.user.create({ data: { handle: 'chat4102-manager' } });
   userId = user.id;
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Chat agent', visibility: 'ORGANIZATION' }, ctx());
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Chat agent', visibility: 'ORGANIZATION' }, ctx());
   agentId = agent.id; systemId = agent.systemMemoryId;
   const app = await db.app.create({ data: { name: 'Chat app', urn: `${org.urn}:chat`, organizationId: org.id } });
   appId = app.id;
@@ -81,10 +81,10 @@ async function loseLicence(loss: Loss) {
 
 async function start(pinned = false) {
   if (pinned) {
-    const rev = await M.createRevision({}, { agentId }, ctx());
-    await M.publishRevision({}, { agentId, revisionLoc: rev.revisionLoc }, ctx());
+    const rev = await M.createRevision({}, { agentRef: agentId }, ctx());
+    await M.publishRevision({}, { agentRef: agentId, revisionLoc: rev.revisionLoc }, ctx());
   }
-  return M.startChat({}, { agentId, scope: 'private', conversationName: 'flow' }, ctx());
+  return M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, ctx());
 }
 
 /** Observe memory-scoped Node/edge reads from the Agent's definition, without replacing results (as #4043's). */

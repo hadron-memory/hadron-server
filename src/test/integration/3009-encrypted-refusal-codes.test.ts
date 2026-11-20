@@ -3,7 +3,6 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import * as Sentry from '@sentry/node';
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { signJwt } from '../../auth/jwt.js';
@@ -11,6 +10,7 @@ import { generateId } from '../../lib/id.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
 import { FR_026_DISCLOSURE } from '../../lib/entityRef/errors.js';
 import { sessionKeyCache } from '../../lib/sessionKeyCache.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 
 vi.mock('@sentry/node', async (original) => ({
   ...await original<typeof import('@sentry/node')>(),
@@ -24,12 +24,12 @@ let jwt: string;
 let memory: { id: string; urn: string };
 
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 afterAll(async () => {
-  await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+  await closeServerIfStarted(server);
 });
 beforeEach(async () => {
   await cleanDb(db);
@@ -39,7 +39,7 @@ beforeEach(async () => {
   memory = await db.memory.create({
     data: { name: 'Private', urn: `enc-${n}:private`, class: 'private', userId: user.id, ownerUserId: user.id, vectorIndexEnabled: false },
   });
-  await resolvers.Mutation.encryptMemory({}, { memoryId: memory.id, passphrase: 'synthetic-test-passphrase' }, {
+  await resolvers.Mutation.encryptMemory({}, { memoryRef: memory.id, passphrase: 'synthetic-test-passphrase' }, {
     db, userId: user.id, roles: ['READER'],
   });
   sessionKeyCache.clear(); // Neither HTTP request supplies x-hadron-memory-keys.
@@ -63,7 +63,7 @@ async function refusal(query: string, variables: Record<string, unknown>) {
 describe('#3009 typed encrypted-memory refusals on the wire', () => {
   it('vector opt-in without acknowledgment returns its code, four disclosures and memoryRef, and is not reported', async () => {
     const extensions = await refusal(
-      'mutation($id: ID!){ updateMemory(id: $id, vectorIndexEnabled: true){ id } }', { id: memory.id },
+      'mutation($id: ID!){ updateMemory(ref: $id, vectorIndexEnabled: true){ id } }', { id: memory.id },
     );
     expect(extensions).toEqual({
       code: 'ENCRYPTED_VECTOR_INDEX_NOT_ACKNOWLEDGED', disclosure: [...FR_026_DISCLOSURE], memoryRef: memory.urn,

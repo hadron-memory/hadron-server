@@ -52,7 +52,7 @@ beforeEach(async () => {
   const other = await db.organization.create({ data: { id: generateId(), name: 'Df Other', urn: 'df-other.example' } });
   reader = await db.user.create({ data: { githubId: 404301, githubUsername: 'df-reader', handle: 'df-reader', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: reader.id, role: 'ADMIN' } });
-  const m = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'df' }, ctx());
+  const m = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'df' }, ctx());
   memoryId = m.id;
   const fm = await db.memory.create({
     data: { name: 'Foreign', urn: 'df-other.example:foreign', organizationId: other.id, class: 'knowledge', visibility: 'ORGANIZATION' },

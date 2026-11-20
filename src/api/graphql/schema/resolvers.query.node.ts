@@ -68,6 +68,9 @@ import { appMemoryScopePage, resolveAppNodeScope } from './resolvers.appMemorySc
 import { resolveNamedScopeForQuery, scopeInfoOf, mergeDegraded as mergeDegradedCodes, SCOPE_NARROWED } from '../../../lib/scopes.js';
 import { resolveAppRunRef } from '../../../lib/entityRef/appRunRef.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
+import { resolveGrantRef } from '../../../lib/entityRef/grantRef.js';
+import { getGrantForWorker } from '../../../lib/grants/read.js';
+import { resolveGrantReader } from './resolvers.grant.js';
 import { requireWorkerProfileAccess } from './resolvers.worker.js';
 import { resolveNodeRevRef } from '../../../lib/entityRef/nodeRevRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
@@ -608,10 +611,9 @@ export const nodeQueries = {
      * nothing about whether content was returned, and it was.
      *
      * Assembles with `assembleRunNodePrompt` — the SAME function `runTask`
-     * executes (Mustache via compileTemplate; flow-routing edges skipped) —
-     * NOT the legacy `renderRunNodeBundle` the MCP tools call, which does a
-     * literal replaceAll and inlines every edge. A preview that disagrees with
-     * the run is worse than none (#858 review, Codex P1).
+     * executes (Mustache via compileTemplate; flow-routing edges skipped),
+     * and since #863 the one the MCP run tools call too. A preview that
+     * disagrees with the run is worse than none (#858 review, Codex P1).
      */
     renderRunNode: async (
       _: unknown,
@@ -1070,6 +1072,34 @@ export const nodeQueries = {
           // slug (cor:agt:020:02), and history — PR trailers, chat archives —
           // must keep resolving.
           return { kind: 'worker', id, organizationId: app.organizationId };
+        }
+        case 'grant': {
+          // #3709 (cor:urn:010:01's Grant row, rulings:0255 item 9):
+          // hrn:grant:<root>:<app-slug>:<grant-id> — a computed URN (no stored column),
+          // with the App resolved BY REFERENCE (the rename alias map), so an App rename
+          // never breaks a published grant URN. Behind the SAME gate as `grant(ref:)`:
+          // a bound worker session in its own App, under the row scope of
+          // src/lib/grants/read.ts. An unreadable grant answers exactly as a missing
+          // one — null, never an error, no existence oracle (cor:api:140:02).
+          let resolved: { id: string; appId: string };
+          try {
+            resolved = await resolveGrantRef(ctx.db, baseUrn);
+          } catch (error) {
+            // Only a name-resolution outcome is the uniform null; a fault propagates
+            // (#2975, cor:api:260:01). A malformed or wrong-type URN names nothing
+            // here — resolveUrn conceals what grant(ref:) refuses.
+            if (!refNamesNothing(error)) throw error;
+            return null;
+          }
+          const reader = await resolveGrantReader(ctx);
+          if (!reader) return null;
+          const grant = await getGrantForWorker(ctx.db, reader, resolved.id);
+          if (!grant) return null;
+          const app = await ctx.db.app.findUnique({
+            where: { id: resolved.appId },
+            select: { organizationId: true },
+          });
+          return { kind: 'grant', id: resolved.id, organizationId: app?.organizationId ?? null };
         }
         case 'aiconf': {
           // #3857 (V63): hrn:aiconf:... behind the config's own read gate, the

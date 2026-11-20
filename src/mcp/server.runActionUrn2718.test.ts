@@ -21,6 +21,7 @@
  * without a transport, so this exercises the production closure.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setResolutionLimits } from '../lib/includes/resolutionBudget.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbAppAgent, createDbAppMember, createDbAppWithKey } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
@@ -79,7 +80,7 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { id: generateId(), githubId: 2718101, githubUsername: 'run-au-admin', handle: 'run-au-admin', roles: ['READER'] } });
   outsider = await db.user.create({ data: { id: generateId(), githubId: 2718102, githubUsername: 'run-au-out', handle: 'run-au-out', roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  const created = await M.createAgent({}, { orgId: org.id, name: 'Run Agent' }, gqlCtx(admin.id));
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'Run Agent' }, gqlCtx(admin.id));
   const row = await db.agent.findUniqueOrThrow({ where: { id: created.id } });
   agent = { id: row.id, urn: row.urn };
   memoryId = row.systemMemoryId as string;
@@ -95,6 +96,19 @@ describe('#2718 — hadron_run_action by action URN', () => {
     expect(byNode).toContain('RUN-BODY-2718 W');
     const byAction = await run(admin.id, actionUrn(agent.urn, CODE), { who: 'W' });
     expect(byAction).toBe(byNode);
+  });
+
+  it('#863: over a content resolution limit both spellings give the same named refusal, nothing partial', async () => {
+    await registerEntry(memoryId, CODE); // its body holds a placeholder, so it is compiled
+    setResolutionLimits({ limits: { maxBytes: 4 } });
+    try {
+      const viaAction = await run(admin.id, actionUrn(agent.urn, CODE), { who: 'W' });
+      expect(viaAction).toContain('CONTENT_RESOLUTION_LIMIT_EXCEEDED');
+      expect(viaAction).not.toContain('RUN-BODY-2718');
+      expect(viaAction).toBe(await run(admin.id, nodeUrn(), { who: 'W' }));
+    } finally {
+      setResolutionLimits(null);
+    }
   });
 
   it('admits an App participant who passes the MEMORY gate but not the Agent gate, on BOTH spellings', async () => {
@@ -134,7 +148,7 @@ describe('#2718 — hadron_run_action by action URN', () => {
 
   it('refuses a code that exists only under a base Agent (no chain fallthrough)', async () => {
     await registerEntry(memoryId, CODE);
-    const createdChild = await M.createAgent({}, { orgId: org.id, name: 'Child Run Agent' }, gqlCtx(admin.id));
+    const createdChild = await M.createAgent({}, { orgRef: org.id, name: 'Child Run Agent' }, gqlCtx(admin.id));
     await db.agent.update({ where: { id: createdChild.id }, data: { extendsAgentId: agent.id } });
     const child = await db.agent.findUniqueOrThrow({ where: { id: createdChild.id } });
     expect(await run(admin.id, actionUrn(child.urn, CODE))).toBe(notFound(actionUrn(child.urn, CODE)));

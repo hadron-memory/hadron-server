@@ -134,7 +134,8 @@ describe('#2693 clearing startBy after an unacknowledged not-started alarm',()=>
  const notStarted=async()=>stallCandidates((await loadStallInputs(db,{id:task.id},new Date()))[0],effectiveWindows(null),new Date()).find(c=>c.rule==='not-started');
  it('opens a new episode, and the first alarm stays unacknowledged',async()=>{
   const assignedAt=new Date(Date.now()-3600_000);
-  await db.agentTask.update({where:{id:task.id},data:{assignedAt}});
+  // #3775 B: a person-assigned task raises no stall alarm, so these tests move the assignment to a worker first. 
+  await db.agentTask.update({where:{id:task.id},data:{assignedAt,assigneeUserId:null,assigneeWorkerId:worker.id}});
   await edit({startBy:new Date(Date.now()-1000)});
   const first=(await notStarted())!;
   const alarmId=(await raiseStallAlarm(db,first,new Date()))!;

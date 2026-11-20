@@ -32,7 +32,7 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { githubId: 24760, githubUsername: 'admin-2476', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   const created = await resolvers.Mutation.createAgent(
-    {}, { orgId: org.id, name: 'agent-2476', visibility: 'PERSONAL' },
+    {}, { orgRef: org.id, name: 'agent-2476', visibility: 'PERSONAL' },
     { db, roles: ['ADMIN'], userId: admin.id },
   );
   agentId = created.id;
@@ -108,13 +108,13 @@ const sites = [
     name: 'startChat (chats parent)',
     parentLoc: 'chats',
     run: (ctxDb: Context['db']) =>
-      resolvers.Mutation.startChat({}, { agentId }, { db: ctxDb, roles: ['ADMIN'], userId: admin.id }),
+      resolvers.Mutation.startChat({}, { agentRef: agentId }, { db: ctxDb, roles: ['ADMIN'], userId: admin.id }),
   },
   {
     name: 'createRevision (revisions parent)',
     parentLoc: 'revisions',
     run: (ctxDb: Context['db']) =>
-      resolvers.Mutation.createRevision({}, { agentId }, { db: ctxDb, roles: ['ADMIN'], userId: admin.id }),
+      resolvers.Mutation.createRevision({}, { agentRef: agentId }, { db: ctxDb, roles: ['ADMIN'], userId: admin.id }),
   },
 ] as const;
 

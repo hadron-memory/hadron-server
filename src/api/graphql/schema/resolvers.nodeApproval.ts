@@ -19,7 +19,7 @@ import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import type { EncryptionKey } from '../../../lib/crypto.js';
 import { editorFromAuth } from '../../../lib/nodeRevisionSnapshot.js';
 import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
-import { DECISION_FAMILY_WHERE, DECISION_ROLE } from '../../../lib/decisions/index.js';
+import { QUESTION_FAMILY_WHERE, QUESTION_ROLE } from '../../../lib/questions/index.js';
 import { unresolvedFeedbackOf } from '../../../lib/comments/summary.js';
 import {
   approvalFieldsOf,
@@ -263,14 +263,14 @@ export const nodeApprovalMutations = {
         const ids = await tx.$queryRaw<Array<{ id: string }>>`
           SELECT id FROM nodes WHERE memory_id = ${memoryId} AND deleted_at IS NULL AND ${inMintScopeSql}
             AND node_type <> ${COMMENT_NODE_TYPE}
-            AND NOT (role IS NOT NULL AND (role = ${DECISION_ROLE} OR role LIKE ${`${DECISION_ROLE}.%`}))
+            AND NOT (role IS NOT NULL AND (role = ${QUESTION_ROLE} OR role LIKE ${`${QUESTION_ROLE}.%`}))
           ORDER BY id FOR UPDATE`;
-        // #1641 §6.1a — bulk approval never approves a decision or a log: each
-        // decision approval is an individual act by one of its deciders. They
+        // #1641 §6.1a — bulk approval never approves a question or a log: each
+        // question approval is an individual act by one of its deciders. They
         // are skipped and reported (bounded), and never locked here.
-        const skippedDecisionCount = await tx.node.count({ where: { memoryId, deletedAt: null, ...DECISION_FAMILY_WHERE } });
-        const skippedDecisions = skippedDecisionCount === 0 ? [] : (await tx.node.findMany({
-          where: { memoryId, deletedAt: null, ...DECISION_FAMILY_WHERE },
+        const skippedQuestionCount = await tx.node.count({ where: { memoryId, deletedAt: null, ...QUESTION_FAMILY_WHERE } });
+        const skippedQuestions = skippedQuestionCount === 0 ? [] : (await tx.node.findMany({
+          where: { memoryId, deletedAt: null, ...QUESTION_FAMILY_WHERE },
           select: { loc: true },
           orderBy: { loc: 'asc' },
           take: 50,
@@ -305,7 +305,7 @@ export const nodeApprovalMutations = {
         // as a warning. Read under the same lock as the approvals it annotates.
         const scoped = await tx.node.findMany({ where: { id: { in: ids.map((r) => r.id) } }, select: { id: true, loc: true } });
         const unresolvedFeedback = (await unresolvedFeedbackOf(tx, scoped)).map((f) => ({ ...f, memoryId }));
-        return { approved, skippedPlaceholders, skippedBootPrompts, alreadyApprovedCount, unresolvedFeedback, skippedDecisionCount, skippedDecisions };
+        return { approved, skippedPlaceholders, skippedBootPrompts, alreadyApprovedCount, unresolvedFeedback, skippedQuestionCount, skippedQuestions };
       },
       { timeout: 120_000 },
     );
@@ -315,8 +315,8 @@ export const nodeApprovalMutations = {
       approved: await Promise.all([...outcome.approved].sort(byLoc).map((n) => receiptOf(ctx, n))),
       alreadyApprovedCount: outcome.alreadyApprovedCount,
       skippedPlaceholders: outcome.skippedPlaceholders.sort(),
-      skippedDecisionCount: outcome.skippedDecisionCount,
-      skippedDecisions: outcome.skippedDecisions,
+      skippedQuestionCount: outcome.skippedQuestionCount,
+      skippedQuestions: outcome.skippedQuestions,
       skippedBootPromptCount: outcome.skippedBootPrompts.length,
       skippedBootPrompts: outcome.skippedBootPrompts.sort().slice(0, 50),
       unresolvedFeedback: outcome.unresolvedFeedback,

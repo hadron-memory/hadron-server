@@ -21,7 +21,7 @@ afterAll(() => other.$disconnect());
 afterEach(() => sessionKeyCache.clear());
 let userId: string, agentId: string, systemId: string, ids: Record<string, string>;
 const ctx = (client = db): Context => ({ db: client, roles: ['READER'], userId });
-const start = () => resolvers.Mutation.startChat({}, { agentId, conversationName: 'main' }, ctx());
+const start = () => resolvers.Mutation.startChat({}, { agentRef: agentId, conversationName: 'main' }, ctx());
 const respond = (chatId: string, fields: Record<string, unknown> = {}, client = db) => resolvers.Mutation.processChatResponse({}, { chatId, toolResponse: { message: 'reply', onTrack: true, ...fields } }, ctx(client));
 async function state(chatId: string) {
   const root = await chatNodeByLocOrThrow(db, chatId);
@@ -36,7 +36,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { name: 'Completion4036', urn: 'completion4036.example' } });
   const user = await db.user.create({ data: { githubId: 40361, githubUsername: 'completion4036', roles: ['ADMIN'] } }); userId = user.id;
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
-  const agent = await resolvers.Mutation.createAgent({}, { orgId: org.id, name: 'Completion fixture', visibility: 'ORGANIZATION' }, { ...ctx(), roles: ['ADMIN'] });
+  const agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Completion fixture', visibility: 'ORGANIZATION' }, { ...ctx(), roles: ['ADMIN'] });
   agentId = agent.id; systemId = agent.systemMemoryId!; ids = {};
   for (const [loc, data] of [
     ['config', {}], ['conversations', {}],

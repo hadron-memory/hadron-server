@@ -92,7 +92,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'qa2055', urn: 'qa2055' } });
   admin = await db.user.create({ data: { githubId: 20551, githubUsername: 'qa2055-admin', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  memory = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'qa2055m' }, ctx());
+  memory = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'qa2055m' }, ctx());
   h1 = await hash(memory.id);
   installHook();
 });

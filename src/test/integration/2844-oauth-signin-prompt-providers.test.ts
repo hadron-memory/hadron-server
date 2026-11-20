@@ -11,10 +11,10 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../../server.js';
 import { isServerLocalPath } from '../../auth/server-local-path.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
 
 const htmlValue = (v: string) => v.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 const anchors = (html: string) =>
@@ -30,12 +30,12 @@ const REDIRECT = 'com.hadronmemory.ios://oauth/callback';
 const clientId = `dcr_${'c'.repeat(32)}`;
 
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 afterAll(async () => {
-  await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
+  await closeServerIfStarted(server);
 });
 beforeEach(async () => {
   await cleanDb(db);

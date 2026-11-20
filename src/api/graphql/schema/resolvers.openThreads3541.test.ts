@@ -34,7 +34,7 @@ beforeEach(async () => {
   orgId = org.id;
   users = await Promise.all([0, 1, 2].map(async (i) => (await db.user.create({ data: { handle: `t3541-${i}-${generateId()}` } })).id));
   await db.orgMember.createMany({ data: users.map((userId) => ({ organizationId: org.id, userId, role: 'ADMIN' as const })) });
-  memoryId = (await M.createMemory(null, { orgId, name: 't3541' }, ctx(author()))).id;
+  memoryId = (await M.createMemory(null, { orgRef: orgId, name: 't3541' }, ctx(author()))).id;
 });
 afterEach(() => { resetEmbeddingClientForTests(); vi.unstubAllEnvs(); });
 

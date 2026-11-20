@@ -16,7 +16,7 @@ import { generateId } from '../lib/id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { composeWorkerPrompt } from '../api/graphql/schema/resolvers.worker.js';
 import { resolveServedBootPrompt } from '../lib/bootPrompt/serve.js';
-import { E2E_BOOT_PROMPT, E2E_STOCK_ROLES, seedE2eStockAgents } from './e2eBootPrompt.js';
+import { E2E_BOOT_PROMPT, E2E_CONVERSATION, E2E_STOCK_ROLES, seedE2eStockAgents } from './e2eBootPrompt.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;
@@ -71,5 +71,14 @@ describe('#2712 E2E seed: stock Agents serve an approved compiled boot prompt', 
     const [first] = await workers();
     await db.agent.create({ data: { id: generateId(), organizationId, urn: `${orgUrn}:late`, name: 'late', systemMemoryId } });
     expect(await code(resolveServedBootPrompt(db, { surface: 'bind', appId: app.id, agent: first!.agent, workerId: first!.id }))).toBe('BOOT_PROMPT_NOT_APPROVED');
+  });
+});
+
+describe('#3160 E2E seed: the coordinator can start a chat', () => {
+  it('an unnamed startChat on the seeded coordinator opens the seeded conversation (no AGENT_HAS_NO_CONVERSATIONS)', async () => {
+    await seed();
+    const coordinator = await db.agent.findFirstOrThrow({ where: { organizationId, name: 'coordinator' } });
+    const chat = await M.startChat(null, { agentRef: coordinator.id, scope: 'private' }, ctx({ roles: ['ADMIN'] }));
+    expect(chat.conversationName).toBe(E2E_CONVERSATION);
   });
 });

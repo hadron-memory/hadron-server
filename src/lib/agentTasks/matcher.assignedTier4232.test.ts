@@ -83,7 +83,7 @@ describe('#4232 matching an unbound worker by its assignment', () => {
     const admin = await db.user.create({ data: { githubId: 800_000 + n, githubUsername: `s9-admin-${n}`, roles: ['READER'] } });
     mia = await db.user.create({ data: { githubId: 900_000 + n, githubUsername: `s9-mia-${n}`, roles: ['READER'] } });
     await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-    agentId = (await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id))).id;
+    agentId = (await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id))).id;
     app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `s9-${n}.example:team`, hostSetupSource: 'server' }, select: { id: true } });
     await db.appMember.create({ data: { appId: app.id, userId: mia.id, role: 'member' } });
     for (const name of ['Una', 'Dov', 'Tre']) {

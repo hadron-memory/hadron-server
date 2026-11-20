@@ -133,3 +133,53 @@ export async function unpublishedCommitCount(
   if (!Number.isSafeInteger(count)) throw new Error('Unparsable unpublished commit count');
   return count;
 }
+
+/** Local-only namespace holding quarantined work. Never named by any push refspec (#3234). */
+export const QUARANTINE_REF_PREFIX = 'refs/hadron-quarantine/';
+
+/**
+ * #3234 (Holger's quarantine ruling, 2026-11-10): move the write branch's rejected-but-unpublished commits aside.
+ *
+ * Call it only after a push of `branch` was refused by the remote and BEFORE the remote URL is restored. It:
+ *   1. fetches, so the remote's current tip is known;
+ *   2. proves the refusal was the remote's judgement of the content, not a race: `origin/<branch>` (or the fork base when
+ *      the branch is new) must still be an ancestor of the local branch, i.e. the push would have been a fast-forward;
+ *   3. HOLDS the local tip under `refs/hadron-quarantine/<branch>/<sha>` (a local ref, never pushed, so the work stays
+ *      recoverable with `git log`/`git cherry-pick`), and verifies the ref reads back;
+ *   4. only then resets the branch to that published point, so the rejected commit stops being an ancestor of every later
+ *      push. Accepted history is never touched: only commits no remote ref contains are moved.
+ *
+ * Returns the number of commits quarantined, or 0 when nothing was (an unproven rejection, a transport problem, or no
+ * unpublished commit). It never throws and never logs git output: a refused push is typically push protection, so the held
+ * content must not reach any report.
+ */
+export async function quarantineUnpublishedCommits(
+  localPath: string,
+  branch: string,
+  baseBranch?: string,
+): Promise<number> {
+  try {
+    validateGitBranch(branch, 'writeBranch');
+    if (baseBranch !== undefined) validateGitBranch(baseBranch, 'baseBranch');
+    await execGit(['fetch', '--prune', 'origin'], { cwd: localPath });
+    const twin = `refs/remotes/origin/${branch}`;
+    const published = (await refExists(localPath, twin)) ? twin : await resolveBaseRef(localPath, baseBranch);
+    if (!published) return 0;
+    const local = `refs/heads/${branch}`;
+    try {
+      await execGit(['merge-base', '--is-ancestor', published, local], { cwd: localPath });
+    } catch { return 0; } // diverged: the remote moved, which is not a content rejection
+    const count = Number((await execGit(['rev-list', '--count', `${published}..${local}`], { cwd: localPath })).stdout.trim());
+    if (!Number.isSafeInteger(count) || count < 1) return 0;
+    const tip = (await execGit(['rev-parse', '--verify', local], { cwd: localPath })).stdout.trim();
+    if (!/^[0-9a-f]{40,64}$/.test(tip)) return 0;
+    const held = `${QUARANTINE_REF_PREFIX}${branch}/${tip}`;
+    await execGit(['update-ref', held, tip], { cwd: localPath });
+    const readBack = (await execGit(['rev-parse', '--verify', held], { cwd: localPath })).stdout.trim();
+    if (readBack !== tip) return 0;
+    await execGit(['reset', '--hard', published], { cwd: localPath });
+    return count;
+  } catch {
+    return 0; // soft: the unquarantined state is the pre-#3234 one, and nothing was reset without a held ref
+  }
+}

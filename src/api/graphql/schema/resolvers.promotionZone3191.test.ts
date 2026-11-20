@@ -66,7 +66,7 @@ async function promote(client: PrismaClient, encrypted: boolean, hooks: { atClai
     } })), options);
   }) as typeof client.$transaction);
   try {
-    const call = () => resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'zone-owner' }, { db: client, appId, roles: [] } as any);
+    const call = () => resolvers.Mutation.linkMemoryToUser({}, { memoryRef: memoryId, externalUserId: 'zone-owner' }, { db: client, appId, roles: [] } as any);
     return await (encrypted ? withTestOperationKey(dataKey, appId, call) : call());
   } finally { spy.mockRestore(); }
 }

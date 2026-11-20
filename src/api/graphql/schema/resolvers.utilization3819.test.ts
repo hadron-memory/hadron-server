@@ -25,7 +25,7 @@ beforeEach(async () => {
   memberId = (await db.user.create({ data: { handle: `um-${generateId()}` } })).id;
   outsiderId = (await db.user.create({ data: { handle: `uo-${generateId()}` } })).id;
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  agentId = (await M.createAgent({}, { orgId: org.id, name: 'Utilization Agent' }, ctx(admin.id))).id;
+  agentId = (await M.createAgent({}, { orgRef: org.id, name: 'Utilization Agent' }, ctx(admin.id))).id;
   appId = (await db.app.create({ data: { organizationId: org.id, name: 'Utilization', urn: `util-${generateId()}.test:team` } })).id;
   await db.appMember.create({ data: { appId, userId: memberId, role: 'member' } });
 });
@@ -104,7 +104,7 @@ describe('#3819 utilization count/ranked slice', () => {
     expect(filtered[0]).toMatchObject({tier:'mid',role:'qa-engineer',eligibleWorkers:2});
     expect((await read({family:'glm'})).combinations).toEqual([]);
   });
-  it.each([0,169])('refuses windowHours %s after roster admission',async windowHours=>{
+  it.each([0,169])('refuses windowHours %s (checked before admission, #4497)',async windowHours=>{
     await expect(read({windowHours})).rejects.toMatchObject({extensions:{code:'BAD_USER_INPUT'}});
   });
   it('an outsider and a foreign App receive exactly the roster refusal',async()=>{
@@ -147,9 +147,9 @@ describe('#3819 transport and window boundaries', () => {
     ]});
     expect((await read()).combinations[0]).toMatchObject({eligibleWorkers:2,busyWorkers:1,utilization:0.5});
   });
-  it('bad window input does not replace the roster refusal for an unauthorized caller', async () => {
+  it('valid input does not change the roster refusal for an unauthorized caller (#4497: bad input is refused before admission, see resolvers.utilizationValidation4497.test.ts)', async () => {
     const capture=async(f:()=>Promise<unknown>)=>f().then(()=>null,(e:any)=>({message:e.message,extensions:e.extensions}));
-    expect(await capture(()=>read({windowHours:0},ctx(outsiderId)))).toEqual(await capture(()=>Q.teamRoster({},{appRef:appId},ctx(outsiderId))));
+    expect(await capture(()=>read({},ctx(outsiderId)))).toEqual(await capture(()=>Q.teamRoster({},{appRef:appId},ctx(outsiderId))));
   });
 });
 
@@ -186,7 +186,7 @@ describe('#3819 LOCAL history discriminators', () => {
     ]});
     expect((await read()).combinations[0].busyWorkers).toBe(1);
   });
-  it.each([{family:'not a token'}, {tier:'ultra'}])('refuses invalid combination filters %j after admission', async args=>{
+  it.each([{family:'not a token'}, {tier:'ultra'}])('refuses invalid combination filters %j (checked before admission, #4497)', async args=>{
     await expect(read(args)).rejects.toMatchObject({extensions:{code:'BAD_USER_INPUT'}});
   });
   it('a cancelled task held inside the window counts, an earlier cancellation does not', async()=>{

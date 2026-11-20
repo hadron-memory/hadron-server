@@ -239,7 +239,7 @@ describe('the chat path', () => {
   let chatAgent: { id: string; systemMemoryId: string };
   const asMember = (extra: Partial<Context> = {}): Context => ({ db, userId: member.id, roles: ['READER'], ...extra } as Context);
   beforeEach(async () => {
-    const created = await M.createAgent({}, { orgId: org.id, name: 'chat-agent', visibility: 'ORGANIZATION' }, ctx(admin, ['ADMIN']));
+    const created = await M.createAgent({}, { orgRef: org.id, name: 'chat-agent', visibility: 'ORGANIZATION' }, ctx(admin, ['ADMIN']));
     chatAgent = { id: created.id, systemMemoryId: created.systemMemoryId! };
     for (const [loc, data, content] of [
       ['conversations', null, null],
@@ -251,7 +251,7 @@ describe('the chat path', () => {
     await db.appAgent.create({ data: { appId: app.id, agentId: chatAgent.id } });
     await serveEveryAgent(db);
   });
-  const start = (args: Record<string, unknown>, c: Context = asMember()) => M.startChat(null, { agentId: chatAgent.id, scope: 'shared', ...args }, c);
+  const start = (args: Record<string, unknown>, c: Context = asMember()) => M.startChat(null, { agentRef: chatAgent.id, scope: 'shared', ...args }, c);
 
   // loc-scope-ok: a count over every memory, to prove that a refused start left no chat anywhere.
   const chatCount = () => db.node.count({ where: { loc: { startsWith: 'chats:' }, nodeType: { not: 'message' }, name: { not: 'messages' } } });

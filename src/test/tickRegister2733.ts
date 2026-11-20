@@ -19,7 +19,7 @@ export async function tickFixture2733() {
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   const context = (userId = admin.id, extra: Partial<Context> = {}): Context => ({ db, userId, roles: ['READER'], ...extra });
   async function agent(name: string, orgId = org.id) {
-    const made = await M.createAgent({}, { orgId, name }, context());
+    const made = await M.createAgent({}, { orgRef: orgId, name }, context());
     const row = await db.agent.findUniqueOrThrow({ where: { id: made.id } });
     if (!row.systemMemoryId) throw new Error('Fixture agent has no system memory');
     const memory = await db.memory.findUniqueOrThrow({ where: { id: row.systemMemoryId } });

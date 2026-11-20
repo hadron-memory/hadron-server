@@ -40,7 +40,7 @@ beforeEach(async () => {
   org = await db.organization.create({ data: { id: generateId(), name: 'sc-org', urn: 'sc-org' } });
   user = await db.user.create({ data: { githubId: 92047100, githubUsername: 'sc-user', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'chat-agent', visibility: 'ORGANIZATION', description: 'LEGACY {{agent.name}}' }, { db, roles: ['ADMIN'], userId: user.id });
+  agent = await M.createAgent({}, { orgRef: org.id, name: 'chat-agent', visibility: 'ORGANIZATION', description: 'LEGACY {{agent.name}}' }, { db, roles: ['ADMIN'], userId: user.id });
   systemMemoryId = agent.systemMemoryId;
   app = await db.app.create({ data: { id: generateId(), name: 'chat-app', urn: `${org.urn}:chat-app`, organizationId: org.id, appAgents: { create: { agentId: agent.id } } } });
   const nodes = [
@@ -76,7 +76,7 @@ describe('#3096 client-reported chat model', () => {
 
   it('start serves and records X, a later send serves/records Y on the SAME revision, omission is empty, repeated empty is deduplicated', async () => {
     await compiled('Model={{session.llmModel}} Agent={{agent.name}}');
-    const start = await M.startChat({}, { agentId: agent.id, llmModel: 'provider/model-X' }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, llmModel: 'provider/model-X' }, ctx());
     expect(start.systemMessage).toContain('Model=provider/model-X Agent=chat-agent');
     const first = await records(start.chatId);
     expect(report(first[0]!)).toMatchObject({ 'session.llmModel': 'provider/model-X', 'session.llmModel.source': 'client-reported' });
@@ -94,7 +94,7 @@ describe('#3096 client-reported chat model', () => {
 
   it('an identical non-empty model sent again is deduplicated, a changed one is recorded', async () => {
     await compiled('Model={{session.llmModel}}.');
-    const start = await M.startChat({}, { agentId: agent.id, llmModel: 'provider/model-X' }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, llmModel: 'provider/model-X' }, ctx());
     await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'one', llmModel: 'provider/model-Y' }, ctx());
     await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'two', llmModel: 'provider/model-Y' }, ctx());
     await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'three', llmModel: 'provider/model-Y' }, ctx());
@@ -118,7 +118,7 @@ describe('#3096 client-reported chat model', () => {
   it('old omitted and null arguments keep an empty model, with no invented identity', async () => {
     await compiled('Model={{session.llmModel}}.');
     for (const llmModel of [undefined, null]) {
-      const start = await M.startChat({}, { agentId: agent.id, llmModel }, ctx());
+      const start = await M.startChat({}, { agentRef: agent.id, llmModel }, ctx());
       expect(start.systemMessage).toContain('Model=.');
       expect(report((await records(start.chatId))[0]!)).toMatchObject({ 'session.llmModel': '', 'session.llmModel.source': 'unspecified' });
     }
@@ -127,7 +127,7 @@ describe('#3096 client-reported chat model', () => {
   it('keeps template-looking text and dollar replacements literal in served text and records', async () => {
     await compiled('Model={{session.llmModel}} Agent={{agent.name}}');
     const llmModel = '{{agent.name}}$&<not-a-command>';
-    const start = await M.startChat({}, { agentId: agent.id, llmModel }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, llmModel }, ctx());
     expect(start.systemMessage).toContain(`Model=${llmModel} Agent=chat-agent`);
     expect(report((await records(start.chatId))[0]!)['session.llmModel']).toBe(llmModel);
   });
@@ -135,7 +135,7 @@ describe('#3096 client-reported chat model', () => {
   it('accepts exactly 256 characters and labels empty explicit reports as client-reported', async () => {
     await compiled('Model={{session.llmModel}}.');
     for (const llmModel of ['x'.repeat(256), '\u{1F600}'.repeat(128), '']) {
-      const start = await M.startChat({}, { agentId: agent.id, llmModel }, ctx());
+      const start = await M.startChat({}, { agentRef: agent.id, llmModel }, ctx());
       expect(start.systemMessage).toContain(`Model=${llmModel}.`);
       expect(report((await records(start.chatId))[0]!)['session.llmModel.source']).toBe('client-reported');
     }
@@ -146,12 +146,12 @@ describe('#3096 client-reported chat model', () => {
       await compiled('Model={{session.llmModel}}.');
       const before = await footprint();
       let error: any;
-      try { await M.startChat({}, { agentId: agent.id, llmModel }, ctx()); } catch (e) { error = e; }
+      try { await M.startChat({}, { agentRef: agent.id, llmModel }, ctx()); } catch (e) { error = e; }
       expect(error?.extensions?.code).toBe('BAD_USER_INPUT');
       expect(error?.message).toBe('Invalid client-reported chat model.');
       expect(JSON.stringify(error)).not.toContain(llmModel);
       expect(await footprint()).toEqual(before);
-      const start = await M.startChat({}, { agentId: agent.id }, ctx());
+      const start = await M.startChat({}, { agentRef: agent.id }, ctx());
       const count = await footprint();
       expect(await code(M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'must not persist', llmModel }, ctx()))).toBe('BAD_USER_INPUT');
       expect(await footprint()).toEqual(count);
@@ -162,7 +162,7 @@ describe('#3096 client-reported chat model', () => {
   it.each([123, true, {}, []])('refuses non-string reports even for a direct resolver caller (%#)', async llmModel => {
     await compiled('Model={{session.llmModel}}.');
     const before = await footprint();
-    expect(await code(M.startChat({}, { agentId: agent.id, llmModel }, ctx()))).toBe('BAD_USER_INPUT');
+    expect(await code(M.startChat({}, { agentRef: agent.id, llmModel }, ctx()))).toBe('BAD_USER_INPUT');
     expect(await footprint()).toEqual(before);
   });
 
@@ -170,21 +170,21 @@ describe('#3096 client-reported chat model', () => {
     await compiled('Model={{session.llmModel}}.');
     const beforeQuota = await db.quotaCounter.findMany();
     const beforeCredit = await db.creditLedgerEntry.findMany();
-    const start = await M.startChat({}, { agentId: agent.id, llmModel: 'ADMIN/unmetered' }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, llmModel: 'ADMIN/unmetered' }, ctx());
     const turn = await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'hello', llmModel: 'OWNER/free' }, ctx());
     expect(turn.systemMessage).toContain('OWNER/free');
     expect(await db.quotaCounter.findMany()).toEqual(beforeQuota);
     expect(await db.creditLedgerEntry.findMany()).toEqual(beforeCredit);
     const outsider = await db.user.create({ data: { githubId: 93096001, githubUsername: 'model-outsider', roles: ['READER'] } });
     const outsiderCtx: Context = { db, userId: outsider.id, roles: ['READER'] };
-    const denied = await code(M.startChat({}, { agentId: agent.id, llmModel: 'ADMIN' }, outsiderCtx));
-    expect(denied).toBe(await code(M.startChat({}, { agentId: agent.id }, outsiderCtx)));
+    const denied = await code(M.startChat({}, { agentRef: agent.id, llmModel: 'ADMIN' }, outsiderCtx));
+    expect(denied).toBe(await code(M.startChat({}, { agentRef: agent.id }, outsiderCtx)));
     expect(denied).not.toBe('RESOLVED');
   });
 
   it('different reported values on overlapping turns both reach the immutable audit history', async () => {
     await compiled('Model={{session.llmModel}}.');
-    const start = await M.startChat({}, { agentId: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
     const chat = await chatNodeByLocOrThrow(db, start.chatId);
     const base = await serveChatPrompt(db, agent, app.id, null, {db,userId:user.id,roles:['ADMIN']});
     const one = { ...base, variables: { ...base.variables, 'session.llmModel': 'X', 'session.llmModel.source': 'client-reported' } };
