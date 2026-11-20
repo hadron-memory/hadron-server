@@ -2153,7 +2153,13 @@ async function mergePropertiesAndWrite(a: {
   const { fields, ctx } = a;
   const patch = fields.properties;
   const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, a.targetMemoryId);
-  const gate = () => requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, resolvedMemoryId);
+  // The destination a userless App run's write grant is judged against: the same one writeNodeCore names for this
+  // update (none when the write carries inline edges or an include tag, which reach beyond a prefix, #2484). Without it
+  // an App writer the plain door admits would be refused here (#4599 LOCAL P2).
+  const carriesIncludeTag = typeof fields.content === 'string' && fields.content.includes('{{>');
+  const grantDestination: WriteDestination | undefined =
+    fields.edges === undefined && !carriesIncludeTag ? { loc: a.targetLoc, verb: 'update' } : undefined;
+  const gate = () => requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, resolvedMemoryId, grantDestination);
   if (a.hasId) await concealUnreadableNodeDenial(ctx, resolvedMemoryId, () => nodeNotFoundError(a.ref), gate);
   else await concealUnreadableDenial(ctx, resolvedMemoryId, a.ref, gate);
   // Judged AFTER access, so a caller who may not write cannot tell a malformed patch from a well-formed one.

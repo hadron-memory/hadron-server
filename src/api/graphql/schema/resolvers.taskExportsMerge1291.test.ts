@@ -246,6 +246,40 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
   });
 });
 
+describe('a userless App run under a prefix-scoped write grant (#4599 LOCAL P2)', () => {
+  const PREFIX = 'reports:team-progress';
+  async function setup() {
+    const org = await db.organization.findFirstOrThrow({ where: { urn: 'tm-org' } });
+    const app = await db.app.create({ data: { id: generateId(), name: 'Run App', urn: 'tm-org:app', organizationId: org.id } as never });
+    const mem = await db.memory.create({ data: { id: generateId(), name: 'rep', urn: 'tm-org:rep', class: 'knowledge', visibility: 'ORGANIZATION', organizationId: org.id } as never });
+    const grant = await db.appMemoryWriteGrant.create({ data: { appId: app.id, memoryId: mem.id, prefix: PREFIX, grantedBy: adminId } });
+    const mk = (loc: string) => M.createTaskNode({}, { input: { memoryId: mem.id, loc, name: loc, isRunnable: true, properties: { keep: 1 } } }, admin());
+    const inside = await mk(`${PREFIX}:t1`);
+    const outside = await mk('other:t2');
+    const run = { db, clientId: 'run:r1', appId: app.id, roles: [] } as unknown as Context;
+    const upd = (id: string, mergeExports: boolean) =>
+      M.updateTaskNode({}, { input: { id, properties: { exports: { codexSkill: codex } } }, mergeExports }, run).then(() => 'wrote', (e) => `refused:${e.extensions?.code}`);
+    return { grant, inside, outside, upd };
+  }
+
+  it('a task under the granted prefix takes the merge exactly as it takes the plain update', async () => {
+    const { inside, upd } = await setup();
+    expect(await upd(inside.id, false)).toBe('wrote');
+    expect(await upd(inside.id, true)).toBe('wrote');
+  });
+
+  it('outside the prefix, and after the grant is revoked, the merge is refused exactly as the plain update is', async () => {
+    const { grant, inside, outside, upd } = await setup();
+    const plainOutside = await upd(outside.id, false);
+    expect(plainOutside).toMatch(/^refused:/);
+    expect(await upd(outside.id, true)).toBe(plainOutside);
+    await db.appMemoryWriteGrant.update({ where: { id: grant.id }, data: { revokedAt: new Date(), revokedBy: adminId } });
+    const plainRevoked = await upd(inside.id, false);
+    expect(plainRevoked).toMatch(/^refused:/);
+    expect(await upd(inside.id, true)).toBe(plainRevoked);
+  });
+});
+
 describe('the option lives on updateTaskNode only (#1291)', () => {
   const server = new ApolloServer<Context>({ typeDefs, resolvers });
   it('is a documented Boolean argument of updateTaskNode', async () => {
