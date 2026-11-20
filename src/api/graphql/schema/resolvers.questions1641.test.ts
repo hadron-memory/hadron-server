@@ -61,28 +61,12 @@ const ask = (logRef: string, input: Record<string, unknown> = simple(), userId =
 /** The question's stored row. */
 const rowOf = (id: string) => db.node.findUniqueOrThrow({ where: { id } });
 
-/**
- * Append an answer-list entry CONSISTENTLY (data, rendered content, name and
- * abstract together, with a fingerprint refresh), standing in for the answer
- * door until S3 ships it (S3 deletes this helper). A real door write, minus
- * the door.
- */
-async function writeAnswerForTest(id: string, entry: Partial<AnswerEntry> & Pick<AnswerEntry, 'by'>): Promise<void> {
-  const row = await rowOf(id);
-  const d = questionDataSchema.parse(row.data);
-  const full: AnswerEntry = { kind: 'answer', key: null, text: null, reason: null, at: '2026-10-06T21:00:00.000Z', via: 'portal', ...entry };
-  const answers = [...d.answers, full];
-  const next: QuestionData = { ...d, answers, status: full.kind === 'answer' ? 'answered' : 'open' };
-  await db.node.update({
-    where: { id },
-    data: {
-      name: questionName(next), abstract: renderQuestionAbstract(next), content: renderQuestion(next),
-      data: next as never, revisionContentHash: 'refresh',
-    },
-  });
-}
-/** Answer the question with option `key` as `by`. */
-const answerAsS2 = (id: string, key: string, by: string) => writeAnswerForTest(id, { kind: 'answer', key, by });
+/** Answer the question with option `key` as `by`, through the real answer door (#4427). */
+const answerAsS2 = async (id: string, key: string, by: string) =>
+  M.answerQuestion(null, { ref: id, input: { optionKey: key }, expectedRevision: (await rowOf(id)).revSeq }, as(by));
+/** Take the standing answer back as `by`, through the real take-back door (#4427). */
+const retractAsS3 = async (id: string, by: string) =>
+  M.retractQuestionAnswer(null, { ref: id, expectedRevision: (await rowOf(id)).revSeq }, as(by));
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -470,7 +454,7 @@ describe('amendQuestion (§6.2, §7; #4426)', () => {
     const view = await Q.question(null, { ref: d.row.id }, as());
     expect(D.state(view, {}, as())).toBe('ANSWERED_UNCONFIRMED');
     const amend = (input: Record<string, unknown>, userId = writer.id) =>
-      M.amendQuestion(null, { ref: d.row.id, input, expectedRevision: 1, reason: 'clarify' }, as(userId));
+      (async () => M.amendQuestion(null, { ref: d.row.id, input, expectedRevision: (await rowOf(d.row.id)).revSeq, reason: 'clarify' }, as(userId)))();
     expect(await codeOf(amend({ title: 'x' }))).toBe('QUESTION_NOT_DECIDER');
     expect(await codeOf(amend({ options: [{ key: 'no', label: 'No' }], recommendation: { key: 'no', reason: 'r' } }, holger.id))).toBe('QUESTION_ANSWER_IMMUTABLE');
     expect(await codeOf(amend({ tier: 'APPROVED' }, holger.id))).toBe('QUESTION_TIER_TOO_LOW');
@@ -517,8 +501,8 @@ describe('withdrawQuestion (§7)', () => {
     const d = await ask(log.row.id);
     await answerAsS2(d.row.id, 'yes', holger.id);
     expect(D.state(await Q.question(null, { ref: d.row.id }, as()), {}, as())).toBe('DECIDED');
-    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: 1 }, as(writer.id)))).toBe('QUESTION_NOT_DECIDER');
-    const w = await M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: 1 }, as(holger.id));
+    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: (await rowOf(d.row.id)).revSeq }, as(writer.id)))).toBe('QUESTION_NOT_DECIDER');
+    const w = await M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: (await rowOf(d.row.id)).revSeq }, as(holger.id));
     expect(D.state(w, {}, as())).toBe('WITHDRAWN');
   });
 
@@ -526,11 +510,11 @@ describe('withdrawQuestion (§7)', () => {
     const log = await createLog();
     const d = await ask(log.row.id);
     await answerAsS2(d.row.id, 'yes', holger.id);
-    await writeAnswerForTest(d.row.id, { kind: 'retraction', by: holger.id, at: '2026-10-06T22:00:00.000Z' });
+    await retractAsS3(d.row.id, holger.id);
     expect(D.state(await Q.question(null, { ref: d.row.id }, as()), {}, as())).toBe('OPEN');
-    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: 1 }, as(writer.id)))).toBe('QUESTION_NOT_DECIDER');
+    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: (await rowOf(d.row.id)).revSeq }, as(writer.id)))).toBe('QUESTION_NOT_DECIDER');
     // The amend gate reads the same rule: after a retraction the asker still cannot amend.
-    expect(await codeOf(M.amendQuestion(null, { ref: d.row.id, input: { title: 'Ship it?' }, expectedRevision: 1, reason: 'r' }, as(writer.id)))).toBe('QUESTION_NOT_DECIDER');
+    expect(await codeOf(M.amendQuestion(null, { ref: d.row.id, input: { title: 'Ship it?' }, expectedRevision: (await rowOf(d.row.id)).revSeq, reason: 'r' }, as(writer.id)))).toBe('QUESTION_NOT_DECIDER');
   });
 });
 
@@ -869,11 +853,11 @@ describe('#1715 — merge-aware identity: stored ids follow mergeUsers, and no r
     const d = await ask((await createLog()).row.id);
     await answerAsS2(d.row.id, 'yes', holger.id);
     const survivor = await fresh(2);
-    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: 1 }, as(survivor.id)))).toMatch(/^QUESTION_NOT_FOUND|^QUESTION_NOT_DECIDER/);
+    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: (await rowOf(d.row.id)).revSeq }, as(survivor.id)))).toMatch(/^QUESTION_NOT_FOUND|^QUESTION_NOT_DECIDER/);
     await merge(holger.id, survivor.id);
     const view = await Q.question(null, { ref: d.row.id }, as(survivor.id));
     expect(await D.viewerIsDecider(view, {}, as(survivor.id))).toBe(true);
-    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'merged', expectedRevision: 1 }, as(survivor.id)))).toBe('NO_ERROR');
+    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'merged', expectedRevision: (await rowOf(d.row.id)).revSeq }, as(survivor.id)))).toBe('NO_ERROR');
   });
 
   it("an approval the merge moved to the survivor is still a decider's: the question stays DECIDED", async () => {

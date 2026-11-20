@@ -392,3 +392,33 @@ describe('#4532 blind review: approved re-answer, merged decider, a missing log'
     expect(await D.viewerMayAnswer({ row, shown: await dataOf(q.row.id), evaluation: { state: 'OPEN', question: await dataOf(q.row.id) } }, {}, as(holger.id))).toBe(false);
   });
 });
+
+describe('#4427 acceptance 14: the log FOR SHARE fence, with two real connections', () => {
+  it('an answer waits behind a concurrent change of the log deciders, then sees the new list and refuses', async () => {
+    const log = await createLog();
+    const q = await ask(log.row.id);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockedIn = new Promise<void>((r) => { locked = r; });
+    // Connection 1: holds the log FOR NO KEY UPDATE (what setQuestionLogDeciders takes) and removes the decider.
+    const changer = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${log.row.id} FOR NO KEY UPDATE`;
+      const row = await tx.node.findUniqueOrThrow({ where: { id: log.row.id } });
+      const data = { ...(row.data as Record<string, unknown>), defaultDeciders: [admin.id], eligibleDeciders: [] };
+      await tx.node.update({ where: { id: log.row.id }, data: { data: data as never } });
+      locked();
+      await held;
+    }, { timeout: 30_000 });
+    await lockedIn;
+    // Connection 2: the answer. It must block on the log row, not read the old list.
+    let settled = false;
+    const attempt = codeOf(answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq)).then((c) => { settled = true; return c; });
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(settled).toBe(false);
+    release();
+    await changer;
+    expect(await attempt).toBe('QUESTION_NOT_DECIDER');
+    expect((await dataOf(q.row.id)).answers).toHaveLength(0);
+  });
+});
