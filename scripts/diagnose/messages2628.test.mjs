@@ -142,7 +142,7 @@ test('a reservation that cannot be created (no lock exists) is not reported as a
   const state = join(dir, 's'.repeat(250));
   const r = sh(`incus() { return 0; }; acquire_stack_reservation '${state}' hadron-e2e-x`, dir);
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /mkdir: cannot create directory/);   // mkdir's own reason is kept
+  assert.match(r.stderr, /^mkdir: /m);   // mkdir's own line is kept (its wording differs between builds)
   assert.match(r.stderr, /could not create the diagnosis reservation \S+\.diagnose-lock \(see the error above\); refusing/);
   assert.doesNotMatch(r.stderr, /already reserved/);
   assert.equal(existsSync(`${state}.diagnose-lock`), false);
