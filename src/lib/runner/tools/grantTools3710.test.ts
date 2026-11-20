@@ -112,6 +112,13 @@ describe('hadron_list_grants (#3710)', () => {
     expect(a.grants.map((g) => g.id)).not.toContain(namesOther);
     expect(a.grants.map((g) => g.id).sort()).toEqual([appHeld, mine].sort());
     expect(a.grants.find((g) => g.id === appHeld)).toMatchObject({ holderKind: 'APP', holderId: w.appId });
+    // Vera's condition 2 on #4598: an App-held row carries the narrow holder projection, never the manager's audit facts.
+    const revokedAppHeld = await insertGrantUnguarded(w, { user_id: null, grantee_app_id: w.appId, activated_at: raw(DB_NOW), verification_kind: 'TEST', verified_by: 't', revoked_at: raw(DB_NOW), revoked_by: w.userId, holder_departed_at: raw(DB_NOW) });
+    const withRevoked = await call(await mintRun(w.appId, w.agentId));
+    const rv = withRevoked.grants.find((g) => g.id === revokedAppHeld)!;
+    expect(rv).toBeDefined();
+    expect(rv).not.toHaveProperty('revokedBy');
+    expect(rv).not.toHaveProperty('holderDepartedAt');
     const b = await call(await mintRun(w.app2Id, w.agentId));
     expect(b.grants.map((g) => g.id)).toEqual([app2Held]);
     expect([...a.grants, ...b.grants].map((g) => g.id)).not.toContain(crossNaming);
