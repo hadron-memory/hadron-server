@@ -296,14 +296,45 @@ export async function resolveRefArg(
       { extensions: { code: 'BAD_USER_INPUT' } },
     );
   }
+  return resolveChosenRefArg(db, resolve, args.label, chosen);
+}
+
+/**
+ * #4142 (S6 chunk F) — the collapsed single-ref form for surfaces whose
+ * deprecated `…Id` alias is GONE from the SDL. The "not both" arm is
+ * unconstructable there; a blank or whitespace-only ref still refuses
+ * `BAD_USER_INPUT` here, BEFORE any gate, with text that names only the ref
+ * arg — the alias the paired form would name no longer exists to pass.
+ */
+export async function resolveRequiredRefArg(
+  db: Context['db'],
+  resolve: (db: Context['db'], ref: string) => Promise<{ id: string }>,
+  args: { ref?: string | null; label: string },
+): Promise<string> {
+  const chosen = args.ref?.trim();
+  if (!chosen) {
+    throw new GraphQLError(`A ${args.label} is required: pass ${args.label}Ref.`, {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  return resolveChosenRefArg(db, resolve, args.label, chosen);
+}
+
+/** The resolve-and-typed-miss core shared by the paired and collapsed ref forms. */
+async function resolveChosenRefArg(
+  db: Context['db'],
+  resolve: (db: Context['db'], ref: string) => Promise<{ id: string }>,
+  label: string,
+  chosen: string,
+): Promise<string> {
   try {
     const { id: resolvedId } = await resolve(db, chosen);
     return resolvedId;
   } catch (e) {
-    if (isEntityNotFound(e)) throw refArgNotFoundError(args.label, chosen);
+    if (isEntityNotFound(e)) throw refArgNotFoundError(label, chosen);
     if (e instanceof AmbiguousUserRefError) {
       throw new GraphQLError(
-        `${args.label}Ref "${chosen}" matches more than one account (differing only by email case). Use the exact-case email, the handle, or the id.`,
+        `${label}Ref "${chosen}" matches more than one account (differing only by email case). Use the exact-case email, the handle, or the id.`,
         { extensions: { code: 'BAD_USER_INPUT' } },
       );
     }
@@ -346,11 +377,38 @@ export const resolveAppRefArg = (
   a: { ref?: string | null; id?: string | null },
 ): Promise<string> =>
   resolveRefArg(db, (d, ref) => resolveAppRef(d, ref), { ...a, label: 'app' });
-export const resolveAgentRefArg = (
+/**
+ * #4142 (S6 chunk F) — per-entity collapsed single-ref wrappers: the nine
+ * mutations whose deprecated `…Id` aliases dropped. Same resolution and same
+ * typed miss as the paired form; only the blank-ref refusal text differs
+ * (no alias left to name).
+ */
+export const resolveRequiredUserRef = (
   db: Context['db'],
-  a: { ref?: string | null; id?: string | null },
+  ref?: string | null,
 ): Promise<string> =>
-  resolveRefArg(db, (d, ref) => resolveAgentRef(d, ref), { ...a, label: 'agent' });
+  resolveRequiredRefArg(db, (d, r) => resolveUserRefOrEmail(d, r), { ref, label: 'user' });
+export const resolveRequiredOrgRef = (
+  db: Context['db'],
+  ref?: string | null,
+): Promise<string> =>
+  resolveRequiredRefArg(db, (d, r) => resolveOrgRef(d, r), { ref, label: 'org' });
+export const resolveRequiredMemoryRef = (
+  db: Context['db'],
+  ref?: string | null,
+): Promise<string> =>
+  resolveRequiredRefArg(db, (d, r) => resolveMemoryRef(d, r), { ref, label: 'memory' });
+export const resolveRequiredAppRef = (
+  db: Context['db'],
+  ref?: string | null,
+): Promise<string> =>
+  resolveRequiredRefArg(db, (d, r) => resolveAppRef(d, r), { ref, label: 'app' });
+/** #4142 (S6 chunk F) — the collapsed single-ref agent form (revokeAgentSubscription's pair is gone). */
+export const resolveRequiredAgentRef = (
+  db: Context['db'],
+  ref?: string | null,
+): Promise<string> =>
+  resolveRequiredRefArg(db, (d, r) => resolveAgentRef(d, r), { ref, label: 'agent' });
 
 /**
  * Fetch a memory's stored urn by id, memoized per request (#481). Backs the
@@ -1596,21 +1654,24 @@ export async function requireReadableAgentForAssetOp(ctx: Context, agentRef: str
 }
 
 /**
- * #1944 — {@link resolveReadableAgentRef} for the `agentRef`/`agentId` arg
- * pair `resolveRefArg` takes: an Agent the caller can't read answers with
- * that helper's own not-found envelope (`refArgNotFoundError`), exactly as an
- * absent one does there.
+ * #1944 — {@link resolveReadableAgentRef} for the `agentRef` argument: an
+ * Agent the caller can't read answers with that helper's own not-found
+ * envelope (`refArgNotFoundError`), exactly as an absent one does there.
+ * #4142 (S6 chunk F): the deprecated `agentId` alias dropped, so this takes
+ * the collapsed single-ref form (`resolveRequiredAgentRef`'s blank-ref
+ * refusal included).
  */
 export async function resolveReadableAgentRefArg(
   ctx: Context,
-  a: { ref?: string | null; id?: string | null },
+  ref?: string | null,
 ): Promise<Agent> {
-  const id = await resolveAgentRefArg(ctx.db, a);
+  const chosen = ref?.trim();
+  const id = await resolveRequiredAgentRef(ctx.db, chosen);
   try {
     return await resolveReadableAgentRef(ctx, id);
   } catch (e) {
     if (!(e instanceof AgentNotFoundError)) throw e;
-    throw refArgNotFoundError('agent', chosenRefArg(a)!);
+    throw refArgNotFoundError('agent', chosen!);
   }
 }
 

@@ -45,7 +45,7 @@ describe('Memory.data JSON field', () => {
   it('defaults to null when createMemory omits it', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'no-data' },
+      { orgRef: orgA.id, name: 'no-data' },
       adminCtx(),
     );
     expect(mem.data).toBeNull();
@@ -57,7 +57,7 @@ describe('Memory.data JSON field', () => {
     const payload = { color: 'blue', counts: [1, 2, 3], nested: { ok: true } };
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'with-data', data: payload },
+      { orgRef: orgA.id, name: 'with-data', data: payload },
       adminCtx(),
     );
     expect(mem.data).toEqual(payload);
@@ -68,7 +68,7 @@ describe('Memory.data JSON field', () => {
   it('updateMemory sets data on a memory created without it', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'set-later' },
+      { orgRef: orgA.id, name: 'set-later' },
       adminCtx(),
     );
     const updated = await resolvers.Mutation.updateMemory(
@@ -84,7 +84,7 @@ describe('Memory.data JSON field', () => {
   it('updateMemory replaces an existing data value wholesale', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'replace-data', data: { a: 1, b: 2 } },
+      { orgRef: orgA.id, name: 'replace-data', data: { a: 1, b: 2 } },
       adminCtx(),
     );
     const updated = await resolvers.Mutation.updateMemory(
@@ -99,7 +99,7 @@ describe('Memory.data JSON field', () => {
   it('updateMemory with data: null CLEARS the stored value', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'clear-data', data: { keep: false } },
+      { orgRef: orgA.id, name: 'clear-data', data: { keep: false } },
       adminCtx(),
     );
     const updated = await resolvers.Mutation.updateMemory(
@@ -115,7 +115,7 @@ describe('Memory.data JSON field', () => {
   it('updateMemory leaves data untouched when the arg is omitted', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'untouched-data', data: { stable: 'yes' } },
+      { orgRef: orgA.id, name: 'untouched-data', data: { stable: 'yes' } },
       adminCtx(),
     );
     // An unrelated update (no `data` key) must not disturb the stored bag.

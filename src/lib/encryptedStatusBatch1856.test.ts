@@ -84,8 +84,8 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'Enc Batch', urn: `encbatch-${Date.now()}.example` } });
   admin = await db.user.create({ data: { githubId: 185601 + Math.floor(Math.random() * 1000), githubUsername: `encbatch-${Date.now()}`, roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  plain = await M.createMemory(null, { orgId: org.id, name: 'plain' }, as());
-  secret = await M.createMemory(null, { orgId: org.id, name: 'secret' }, as());
+  plain = await M.createMemory(null, { orgRef: org.id, name: 'plain' }, as());
+  secret = await M.createMemory(null, { orgRef: org.id, name: 'secret' }, as());
 });
 
 describe('behaviour comparison: the mixed page reads as it did before #1856', () => {

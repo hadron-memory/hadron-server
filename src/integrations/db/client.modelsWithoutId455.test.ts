@@ -62,7 +62,7 @@ describe('#455 createMany through the extension', () => {
     user = await db.user.create({ data: { githubId: 455001, githubUsername: 'ids-user', handle: 'ids-user', roles: [] } });
     await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
     const ctx: Context = { db, userId: user.id, roles: [] };
-    memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'ids' }, ctx);
+    memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'ids' }, ctx);
     agent = await db.agent.create({ data: { id: generateId(), urn: 'ids.example:server-engineer', name: 'server-engineer', organizationId: org.id } });
     app = await db.app.create({ data: { id: generateId(), name: 'Team', urn: 'ids.example:team', organizationId: org.id } });
     worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Ida', slug: 'ida' } });

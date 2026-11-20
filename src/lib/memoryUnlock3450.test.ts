@@ -183,7 +183,7 @@ describe('#3450 request isolation under overlap', () => {
 
 describe('#3450 a supplied variable that is not a string never takes the default', () => {
   const body = (variables?: unknown) => ({
-    query: 'mutation($id: ID = "default-memory") { encryptMemory(memoryId: $id) { id } }',
+    query: 'mutation($id: ID = "default-memory") { encryptMemory(memoryRef: $id) { id } }',
     ...(variables === undefined ? {} : { variables }),
   });
 

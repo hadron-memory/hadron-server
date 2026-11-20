@@ -48,8 +48,8 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'F3541', urn: `f3541-${generateId()}.test` } });
   userId = (await db.user.create({ data: { handle: `f3541-${generateId()}` } })).id;
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
-  memoryId = (await M.createMemory(null, { orgId: org.id, name: 'f3541' }, ctx())).id;
-  foreignId = (await M.createMemory(null, { orgId: org.id, name: 'f3541-foreign' }, ctx())).id;
+  memoryId = (await M.createMemory(null, { orgRef: org.id, name: 'f3541' }, ctx())).id;
+  foreignId = (await M.createMemory(null, { orgRef: org.id, name: 'f3541-foreign' }, ctx())).id;
   // Ranks (nearest first): w1 < w2 < e1 < dead < e2, interleaved so an unfiltered top-N never equals the expected set. e1/e2 carry a live open thread; w1/w2 none; `dead` has only a
   // soft-deleted root whose metadata still says OPEN (legal setup via deleteCommentThread); the foreign node is open.
   const ids = { e1: await node(memoryId, 'e1', 3), e2: await node(memoryId, 'e2', 5), w1: await node(memoryId, 'w1', 1), w2: await node(memoryId, 'w2', 2), dead: await node(memoryId, 'dead', 4), foreign: await node(foreignId, 'foreign', 0) };

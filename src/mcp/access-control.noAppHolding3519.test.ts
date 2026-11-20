@@ -67,7 +67,7 @@ async function fixture() {
     await db.orgMember.upsert({ where: key,
       create: { organizationId: orgO.id, userId: u.id, role: 'ADMIN' }, update: { role: 'ADMIN' } });
     try {
-      await resolvers.Mutation.startChat({}, { agentId: agent.id }, { db, userId: u.id, roles: ['READER'] } as never);
+      await resolvers.Mutation.startChat({}, { agentRef: agent.id }, { db, userId: u.id, roles: ['READER'] } as never);
     } finally {
       if (prior) await db.orgMember.update({ where: key, data: { role: prior.role } });
       else await db.orgMember.delete({ where: key });

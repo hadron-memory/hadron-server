@@ -184,7 +184,7 @@ describe('#4106 memory-level text', () => {
     });
     it(`createMemory refuses it in ${field} typed, writing nothing`, async () => {
       const before = await base();
-      await refused(M.createMemory({}, { orgId: org.id, memoryClass: 'knowledge', name: 'Notes', ...patch }, ctx(admin.id)), field);
+      await refused(M.createMemory({}, { orgRef: org.id, memoryClass: 'knowledge', name: 'Notes', ...patch }, ctx(admin.id)), field);
       expect(await memories()).toBe(before);
     });
   }

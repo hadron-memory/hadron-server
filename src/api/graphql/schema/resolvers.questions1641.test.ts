@@ -84,7 +84,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: holger.id, role: 'CONTRIBUTOR' },
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'team-shared' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'team-shared' }, as());
 });
 
 describe('#1728 Channel roots cannot squat question-code space', () => {
@@ -641,7 +641,7 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
   it('the memory holding a log: never deleted, encrypted or git-mirrored; a clone leaves questions behind', async () => {
     await createLog().then((log) => ask(log.row.id));
     await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'ordinary', name: 'Ordinary' } });
-    expect(await codeOf(M.deleteMemory(null, { id: memory.id }, as()))).toBe('QUESTION_CONTAINED');
+    expect(await codeOf(M.deleteMemory(null, { ref: memory.id }, as()))).toBe('QUESTION_CONTAINED');
     expect(await codeOf(M.updateMemory(null, { ref: memory.id, source: 'https://github.com/x/y' }, as()))).toBe('QUESTION_LOG_MIRRORED');
     const clone = await M.cloneMemory(null, { ref: memory.id, targetUrn: 'hrn:mem:decision.example:copy' }, as());
     const cloned = await db.node.findMany({ where: { memoryId: clone.id } });
@@ -651,10 +651,10 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
   });
 
   it('encryptMemory refuses a memory holding a log (reciprocal to createQuestionLog)', async () => {
-    const priv = await resolvers.Mutation.createMemory(null, { orgId, name: 'assistant', memoryClass: 'private' }, as(holger.id));
+    const priv = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'assistant', memoryClass: 'private' }, as(holger.id));
     await M.createQuestionLog(null, { memoryRef: priv.id, loc: 'questions', defaultDeciders: [holger.id] }, as(holger.id));
     const dataKey = Buffer.alloc(32, 7).toString('base64');
-    expect(await codeOf(M.encryptMemory(null, { memoryId: priv.id, dataKey }, as(holger.id)))).toBe('QUESTION_LOG_ENCRYPTED');
+    expect(await codeOf(M.encryptMemory(null, { memoryRef: priv.id, dataKey }, as(holger.id)))).toBe('QUESTION_LOG_ENCRYPTED');
   });
 
   it('approval: a log is never approvable, a question not yet (S2), and bulk approval skips both with a receipt', async () => {
@@ -704,7 +704,7 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
 describe('a personal assistant outside any team (§3.4, r4 use case)', () => {
   it('an agent in another org\'s App asks in its human\'s log; the human sees it awaiting them', async () => {
     // Holger's own unencrypted personal memory; he creates the log and decides.
-    const personal = await resolvers.Mutation.createMemory(null, { orgId, name: 'pa', memoryClass: 'personal' }, as(holger.id));
+    const personal = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'pa', memoryClass: 'personal' }, as(holger.id));
     const log = await M.createQuestionLog(null, { memoryRef: personal.id, loc: 'questions', defaultDeciders: [holger.id] }, as(holger.id));
     // The agent writes on Holger's own token (the honest limit of §6.1: to the server it IS him).
     const d = await runAsActor({ workerId: null, agentId: 'pa-agent' }, () => ask(log.row.id, simple(), holger.id));
