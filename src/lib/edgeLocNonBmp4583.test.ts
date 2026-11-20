@@ -12,6 +12,7 @@
  * (2) the pure helpers, (3) the lookup seam, including the collision cases.
  */
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../test/helpers.js';
@@ -24,6 +25,8 @@ import {
   sanitizeLocAtomCodePoint,
 } from './edgeLoc.js';
 import { derivedEdgeLocForUpsert } from './edgeLocLookup.js';
+import { archiveTombstone, archivedTombstoneLoc, discoverArchivePlan } from './tombstoneArchive.js';
+import { promotePendingEdgeForTarget } from './pendingEdgePromotion.js';
 
 const MIGRATION = readFileSync(
   new URL('../../prisma/migrations/20260620120000_edge_first_class/migration.sql', import.meta.url),
@@ -102,7 +105,7 @@ describe('deriveEdgeLocAlternates / isDerivedEdgeLoc', () => {
       expect(alt, name).not.toBe(deriveEdgeLoc('root', name, 'leaf'));
     }
     expect(deriveEdgeLocAlternates('root', 'a😀b', 'leaf')).toEqual(['root:a-b:leaf']);
-    expect(deriveEdgeLocAlternates('root', 'a😀😀b', 'leaf')).toEqual(['root:a-b:leaf']);
+    expect(deriveEdgeLocAlternates('root', 'a😀😀b', 'leaf')).toEqual(['root:a--b:leaf']); // one `-` per code point
     expect(deriveEdgeLocAlternates('root', 'a😀b', 'leaf')[0]).not.toBe(deriveEdgeLoc('root', 'a😀b', 'leaf'));
   });
 
@@ -185,5 +188,112 @@ describe('derivedEdgeLocForUpsert — the lookup seam (#4583)', () => {
     const { args, edge } = await fixture();
     await edge('root:a-b:leaf', 'a😀b', undefined, new Date());
     expect(await derivedEdgeLocForUpsert(db, args('a😀b'))).toBe('root:a-b:leaf');
+  });
+});
+
+describe('the wired sites reach the migrated edge (#4583)', () => {
+  beforeEach(async () => {
+    await cleanDb(db);
+  });
+
+  async function pair() {
+    const { graph } = await createDbOrgAndGraph(db, { orgName: 'edge-loc-sites-org', graphName: 'edge/sites4583' });
+    const source = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'root', name: 'root' } });
+    const target = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'leaf', name: 'leaf' } });
+    return { graph, source, target };
+  }
+
+  it('promotePendingEdgeForTarget: a parked edge whose relationship the migration already wrote is consumed against it, no twin', async () => {
+    const { graph, source, target } = await pair();
+    const migrated = await db.edge.create({
+      data: { id: generateId(), memoryId: graph.id, sourceId: source.id, targetId: target.id, loc: 'root:a-b:leaf', name: 'a😀b' },
+    });
+    const pending = await db.pendingEdge.create({
+      data: { id: generateId(), sourceId: source.id, targetId: target.id, name: 'a😀b', description: '' },
+    });
+    await promotePendingEdgeForTarget(pending.id, target.id, { db, scheduleFastRetry: false });
+    const edges = await db.edge.findMany({ where: { memoryId: graph.id, sourceId: source.id, targetId: target.id } });
+    expect(edges.map((e) => e.loc)).toEqual([migrated.loc]);
+    expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toBeNull();
+  });
+
+  it('tombstone archive: an edge into an archived node is re-keyed whichever spelling its loc carries', async () => {
+    // The migrated edge `root:a-b:old` (name `a😀b`) must follow its target to the archived address. Before #4583 the
+    // "is this loc the derived one" test compared against the runtime spelling only, so the migrated loc was left
+    // pointing at an address that no longer exists.
+    for (const [spelling, edgeLoc] of [['migrated', 'root:a-b:old'], ['runtime', 'root:a--b:old']] as const) {
+      await cleanDb(db);
+      const { graph, source } = await pair();
+      const old = await db.node.create({
+        data: { id: generateId(), memoryId: graph.id, loc: 'old', name: 'old', deletedAt: new Date() },
+      });
+      const edge = await db.edge.create({
+        data: { id: generateId(), memoryId: graph.id, sourceId: source.id, targetId: old.id, loc: edgeLoc, name: 'a😀b' },
+      });
+      const archived = archivedTombstoneLoc('old', old.id);
+      const plan = await db.$transaction((tx) => discoverArchivePlan(tx, graph.id, 'old'));
+      await db.$transaction((tx) => archiveTombstone(tx, { id: old.id, loc: 'old', memoryId: graph.id }, plan));
+      const after = await db.edge.findUniqueOrThrow({ where: { id: edge.id } });
+      expect(after.loc, spelling).toBe(`root:a--b:${archived}`);
+    }
+  });
+});
+
+describe('source pins for the sites a behavior test does not drive (#4583)', () => {
+  const read = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf8');
+
+  it('the Git sync edge upsert addresses the edge through the seam, not a bare deriveEdgeLoc', () => {
+    // The sync's direct edge write needs a whole mocked checkout to drive; the pending-promotion leg of the same file
+    // is driven for real in syncGraphFromGithub.test.ts. Pin that the direct write goes through the same seam.
+    const sync = read('src/integrations/github/syncGraphFromGithub.ts');
+    expect(sync).toMatch(/const edgeLoc = await derivedEdgeLocForUpsert\(tx, \{/);
+    expect(sync).not.toMatch(/const edgeLoc = deriveEdgeLoc\(/);
+    expect(sync).not.toMatch(/=== deriveEdgeLoc\(/);
+    expect(read('src/lib/tombstoneArchive.ts')).not.toMatch(/=== deriveEdgeLoc\(/);
+  });
+});
+
+describe('the census script (#4583, read only)', () => {
+  const sql = readFileSync(join(process.cwd(), 'scripts/db/edge-loc-non-bmp-census-4583.sql'), 'utf8');
+  const fnEndMarker = 'LANGUAGE plpgsql IMMUTABLE;';
+  const fn = sql.slice(sql.indexOf('CREATE OR REPLACE FUNCTION'), sql.indexOf(fnEndMarker) + fnEndMarker.length);
+  const query = sql.slice(sql.indexOf(fnEndMarker) + fnEndMarker.length).trim().replace(/;\s*$/, '');
+
+  beforeEach(async () => {
+    await cleanDb(db);
+  });
+
+  it('counts each population, the twins and the loc collisions, and writes nothing', async () => {
+    const { graph } = await createDbOrgAndGraph(db, { orgName: 'census-org', graphName: 'edge/census4583' });
+    const node = (loc: string) => db.node.create({ data: { id: generateId(), memoryId: graph.id, loc, name: loc } });
+    const [s1, t1, s2, t2, s3, t3, s4, t4, s5, t5] = await Promise.all(
+      ['s1', 't1', 's2', 't2', 's3', 't3', 's4', 't4', 's5', 't5'].map(node),
+    );
+    const edge = (s: { id: string }, t: { id: string }, loc: string, name: string) =>
+      db.edge.create({ data: { id: generateId(), memoryId: graph.id, sourceId: s.id, targetId: t.id, loc, name } });
+    await edge(s1, t1, 's1:a-b:t1', 'a😀b'); // migrated spelling
+    await edge(s2, t2, 's2:a--b:t2', 'a😀b'); // runtime spelling
+    await edge(s3, t3, 's3:a-b:t3', 'a😀b'); // a twin pair: migrated ...
+    await edge(s3, t3, 's3:a--b:t3', 'a😀b'); // ... and runtime, same name and endpoints
+    await edge(s4, t4, 's4:authored:t4', 'a😀b'); // neither: an authored loc
+    await edge(s5, t5, 's5:a-b:t5', 'a😀b'); // migrated spelling whose runtime loc is taken by another edge ...
+    await edge(s5, t5, 's5:a--b:t5', 'a-then--b'); // ... (a different edge, name with no astral char)
+    await edge(s1, t2, 's1:plain:t2', 'plain'); // not divergent: ignored
+    const before = await db.edge.count();
+    const rows = await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(fn);
+      return tx.$queryRawUnsafe<Record<string, bigint>[]>(query);
+    });
+    const r = Object.fromEntries(Object.entries(rows[0]).map(([k, v]) => [k, Number(v)]));
+    expect(r).toEqual({
+      divergent_edges: 6,
+      migrated_spelling: 3, // s1, s3 (migrated half), s5
+      runtime_spelling: 2, // s2, s3 (runtime half)
+      neither: 1, // s4
+      twin_pairs: 1, // s3
+      runtime_loc_taken_by_another: 1, // s5
+      migrated_loc_taken_by_another: 0,
+    });
+    expect(await db.edge.count()).toBe(before);
   });
 });

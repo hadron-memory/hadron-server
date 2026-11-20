@@ -30,7 +30,8 @@ import { join, dirname } from 'path';
 import { GRAPHS_PATH } from '../../config.js';
 import { pathUnderGraphsRoot } from '../localFs/pathUnderGraphsRoot.js';
 import { InvalidNodeNameError, loadGraphFromFs, type UnreadableFile } from '../localFs/loadGraphFromFs.js';
-import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
+import { deriveEdgeLoc, isDerivedEdgeLoc } from '../../lib/edgeLoc.js';
+import { derivedEdgeLocForUpsert } from '../../lib/edgeLocLookup.js';
 import { validateEdgeCondition } from '../../lib/edge-conditions/validator.js';
 import { entryConditionOf, validateEntryCondition } from '../../lib/edge-conditions/entryCondition.js';
 import { countCrossMemoryEdgesForNodeDelete } from '../../lib/crossMemoryEdgeDelete.js';
@@ -1575,7 +1576,7 @@ const syncGraphFromGithubAsSystem = async (
           for (const edge of incident) {
             const beforeSource = edge.sourceId === movedRoot.id ? oldLoc : edge.source.loc;
             const beforeTarget = edge.targetId === movedRoot.id ? oldLoc : edge.target.loc;
-            if (edge.loc === deriveEdgeLoc(beforeSource, edge.name, beforeTarget)) {
+            if (isDerivedEdgeLoc(edge.loc, beforeSource, edge.name, beforeTarget)) {
               await tx.edge.update({ where: { id: edge.id }, data: {
                 loc: deriveEdgeLoc(edge.source.loc, edge.name, edge.target.loc),
               } });
@@ -1644,7 +1645,15 @@ const syncGraphFromGithubAsSystem = async (
           // Spec 037: the edge's identity is its loc within the source's
           // memory (= graph.id here; the source came from this repo). Derive
           // it deterministically so re-syncs are idempotent.
-          const edgeLoc = deriveEdgeLoc(edge.sourceLoc, edge.name, targetExists.loc);
+          // #4583: an edge the historical migration wrote under the other non-BMP spelling is the same edge.
+          const edgeLoc = await derivedEdgeLocForUpsert(tx, {
+            memoryId: graph.id,
+            sourceId: edgeSourceId,
+            targetId: edgeTargetId,
+            sourceLoc: edge.sourceLoc,
+            targetLoc: targetExists.loc,
+            name: edge.name,
+          });
           const edgeCondition = edge.condition ?? null;
           const edgePriority = edge.priority ?? 0;
           const conditionValidation = validateEdgeCondition(edgeCondition);
@@ -1731,7 +1740,14 @@ const syncGraphFromGithubAsSystem = async (
               );
             }
             if (pSrc) {
-              const pLoc = p.loc ?? deriveEdgeLoc(pSrc.loc, p.name, target.loc);
+              const pLoc = p.loc ?? await derivedEdgeLocForUpsert(tx, {
+                memoryId: pSrc.memoryId,
+                sourceId: p.sourceId,
+                targetId: p.targetId,
+                sourceLoc: pSrc.loc,
+                targetLoc: target.loc,
+                name: p.name,
+              });
               const promotedEdge = await tx.edge.upsert({
                 where: { loc_memoryId: { loc: pLoc, memoryId: pSrc.memoryId } },
                 create: {

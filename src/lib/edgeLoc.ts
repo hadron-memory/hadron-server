@@ -12,10 +12,17 @@
  *   - re-running it (a re-sync) produces the SAME loc → sync stays idempotent.
  *
  * The migration SQL in `prisma/migrations/*_edge_first_class/migration.sql`
- * mirrors {@link sanitizeLocAtom} / {@link deriveEdgeLoc} exactly so a
- * prod-backfilled loc and a runtime-created loc agree (asserted by a parity
- * test). Keep the two in lockstep — and keep this pure ASCII (no Unicode
- * normalization) so plain Postgres `regexp_replace` can reproduce it.
+ * mirrors {@link sanitizeLocAtom} / {@link deriveEdgeLoc} for every name EXCEPT
+ * one with a non-BMP code point (an emoji) BETWEEN alphanumerics (#4583):
+ * Postgres replaces such a character with ONE `-`, the flagless JS regex below
+ * with TWO (one per UTF-16 unit). The migration is applied history and no loc
+ * is ever rewritten, so both spellings exist in databases: the migrated edges
+ * carry {@link sanitizeLocAtomCodePoint}'s, edges created at runtime since carry
+ * {@link sanitizeLocAtom}'s. Runtime derivation keeps its spelling; code that
+ * LOOKS UP an existing derived edge also accepts the other one
+ * ({@link deriveEdgeLocAlternates}, {@link isDerivedEdgeLoc}, and
+ * `derivedEdgeLocForUpsert` in `edgeLocLookup.ts`). Keep this pure ASCII (no
+ * Unicode normalization) so plain Postgres `regexp_replace` can reproduce it.
  */
 
 /** Atoms are `:`-separated; must start/end alphanumeric, charset below, ≤64. */
@@ -40,6 +47,21 @@ export function sanitizeLocAtom(input: string | null | undefined): string {
 }
 
 /**
+ * {@link sanitizeLocAtom} as the historical `edge_first_class` migration computed it (#4583): the out-of-charset
+ * replacement is per Unicode CODE POINT (the `u` flag), as Postgres `regexp_replace` does it, so `a😀b` is `a-b`,
+ * not `a--b`. Everything after the replacement is ASCII, so the trims, the 64 cap and the `rel` fallback are
+ * identical. Used only to RECOGNIZE locs the migration wrote; nothing derives a NEW loc with it.
+ */
+export function sanitizeLocAtomCodePoint(input: string | null | undefined): string {
+  let s = (input ?? '').replace(/[^A-Za-z0-9._-]/gu, '-');
+  s = s.replace(/^[^A-Za-z0-9]+/, '').replace(/[^A-Za-z0-9]+$/, '');
+  if (s.length > ATOM_MAX_LENGTH) {
+    s = s.slice(0, ATOM_MAX_LENGTH).replace(/[^A-Za-z0-9]+$/, '');
+  }
+  return s.length > 0 ? s : 'rel';
+}
+
+/**
  * Derive an edge loc from its endpoints + name:
  * `<sourceLoc>:<sanitize(name|'rel')>:<targetLoc>`.
  *
@@ -54,4 +76,34 @@ export function deriveEdgeLoc(
   targetLoc: string,
 ): string {
   return `${sourceLoc}:${sanitizeLocAtom(name)}:${targetLoc}`;
+}
+
+/**
+ * The OTHER spelling of the derived loc (#4583): what the historical migration wrote for the same endpoints and name,
+ * when that differs from {@link deriveEdgeLoc}'s. Empty for every name whose two spellings agree, which is every name
+ * without a non-BMP code point between alphanumerics, so for those nothing about a lookup changes.
+ */
+export function deriveEdgeLocAlternates(
+  sourceLoc: string,
+  name: string | null | undefined,
+  targetLoc: string,
+): string[] {
+  const alternate = `${sourceLoc}:${sanitizeLocAtomCodePoint(name)}:${targetLoc}`;
+  return alternate === deriveEdgeLoc(sourceLoc, name, targetLoc) ? [] : [alternate];
+}
+
+/**
+ * True when `loc` is the loc derived from these endpoints and this name, in either spelling (#4583). The comparison
+ * the move and re-key paths use to tell a derived loc (re-derive it when an endpoint moves) from an authored one.
+ */
+export function isDerivedEdgeLoc(
+  loc: string,
+  sourceLoc: string,
+  name: string | null | undefined,
+  targetLoc: string,
+): boolean {
+  return (
+    loc === deriveEdgeLoc(sourceLoc, name, targetLoc) ||
+    deriveEdgeLocAlternates(sourceLoc, name, targetLoc).includes(loc)
+  );
 }
