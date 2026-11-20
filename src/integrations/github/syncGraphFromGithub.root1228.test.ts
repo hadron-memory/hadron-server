@@ -71,6 +71,45 @@ describe('#1228 root README', () => {
     expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
     expect(await db.node.count({ where: { memoryId: graph.id, loc: 'root-memory' } })).toBe(1);
   });
+  it('#4583: a migrated edge and its runtime twin (both spellings of a non-BMP name) each keep their own spelling when the root moves', async () => {
+    // The root's loc changes from '' to the memory slug, so both derived locs are re-derived. If both went to the SAME
+    // spelling they would land on one (loc, memory) and abort the sync; each must stay in the spelling it carries.
+    const root = await legacyRoot();
+    const child = await db.node.create({ data: { memoryId: graph.id, loc: 'child', name: 'Child' } });
+    const migrated = await db.edge.create({ data: { memoryId: graph.id, sourceId: child.id, targetId: root.id, loc: 'child:a-b:', name: 'a😀b' } });
+    const runtime = await db.edge.create({ data: { memoryId: graph.id, sourceId: child.id, targetId: root.id, loc: 'child:a--b:', name: 'a😀b' } });
+    readme();
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect((await db.edge.findUniqueOrThrow({ where: { id: migrated.id } })).loc).toBe('child:a-b:root-memory');
+    expect((await db.edge.findUniqueOrThrow({ where: { id: runtime.id } })).loc).toBe('child:a--b:root-memory');
+  });
+  it('#4583: a migrated edge whose loc carries the backfill suffix keeps it when the root moves', async () => {
+    const root = await legacyRoot();
+    const child = await db.node.create({ data: { memoryId: graph.id, loc: 'child', name: 'Child' } });
+    const literal = await db.edge.create({ data: { memoryId: graph.id, sourceId: child.id, targetId: root.id, loc: 'child:a-b:', name: 'a-b' } });
+    const suffixed = await db.edge.create({ data: { memoryId: graph.id, sourceId: child.id, targetId: root.id, loc: 'child:a-b::2', name: 'a😀b' } });
+    readme();
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect((await db.edge.findUniqueOrThrow({ where: { id: literal.id } })).loc).toBe('child:a-b:root-memory');
+    expect((await db.edge.findUniqueOrThrow({ where: { id: suffixed.id } })).loc).toBe('child:a-b:root-memory:2');
+  });
+  it('#4583: a migrated edge whose re-keyed loc is already owned by another edge follows the existing collision policy: the sync aborts and nothing moves', async () => {
+    // The root move re-derives incident edge locs and "collisions abort the whole transaction" (the policy this block
+    // already had for runtime-spelling edges). A migrated edge newly recognized by #4583 is under the same policy.
+    const root = await legacyRoot();
+    const child = await db.node.create({ data: { memoryId: graph.id, loc: 'child', name: 'Child' } });
+    const migrated = await db.edge.create({ data: { memoryId: graph.id, sourceId: child.id, targetId: root.id, loc: 'child:a-b:', name: 'a😀b' } });
+    const other = await db.node.create({ data: { memoryId: graph.id, loc: 'other', name: 'Other' } });
+    const owner = await db.edge.create({ data: { memoryId: graph.id, sourceId: child.id, targetId: other.id, loc: 'child:a-b:root-memory', name: 'authored' } });
+    readme();
+    const outcome = await syncGraphFromGithub(graph);
+    // The collision itself, raised by the re-key's own edge update on the (loc, memory) unique: not some other failure.
+    expect(outcome.error).toMatch(/tx\.edge\.update\(\)/);
+    expect(outcome.error).toMatch(/Unique constraint failed on the fields: \(`loc`/);
+    expect(await db.node.findUniqueOrThrow({ where: { id: root.id } })).toMatchObject({ loc: '' }); // the move did not happen
+    expect((await db.edge.findUniqueOrThrow({ where: { id: migrated.id } })).loc).toBe('child:a-b:');
+    expect((await db.edge.findUniqueOrThrow({ where: { id: owner.id } })).loc).toBe('child:a-b:root-memory');
+  });
   it.each(['', 'unknown1228'])('refuses a missing or mismatched live root id (%s) before replacement', async (fileId) => {
     const root = await legacyRoot();
     readme(fileId);

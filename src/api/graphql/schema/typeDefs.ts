@@ -9324,6 +9324,14 @@ export const typeDefs = `#graphql
     "#1709 — the App's host registrations, liveness derived now (hrn:node:hadronmemory.com:specs:cor:agt:070:01). Whoever reads the App's tasks and events, the App's own key included."
     hostRegistrations(appRef: String!): [HostRegistration!]!
     """
+    #2213 S3 — \`hostRegistrations\` as a page: the same App gate and refusals, the same rows in \`hostId\` order with
+    their workers in \`workerId\` order, and the real total (hrn:node:hadronmemory.com:specs:cor:api:120:04). A consumer
+    that decides on the set follows the pages to the end; \`hostRegistrations\` remains the complete set. A host key's
+    read is recorded as one use counting the items returned. \`limit\` defaults to 20, 0 returns the count only, a
+    negative limit is 0 and a limit over 200 is served as 200 (never refused). \`offset\` below 0 is 0.
+    """
+    hostRegistrationsPage(appRef: String!, limit: Int, offset: Int): HostRegistrationPage!
+    """
     #4224 (S3 of #4229) — for each worker one host runs: whether its agent process should be running, and why. A
     host's sweep reads this once per pass and compares it with what it sees. While the App's hostSetupSource is HOST
     (the default), a host's workers are the ones its registration lists (hrn:node:hadronmemory.com:specs:cor:agt:070:01),
@@ -10026,7 +10034,7 @@ export const typeDefs = `#graphql
     verifyNode(nodeRef: ID!): NodeIntegrityCheck!
     "#1632 — one signing request; null when unknown or when its node is not readable to the caller."
     signingRequest(id: ID!): SigningRequest
-    "#3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — one grant signing request; null when unknown or when its grant is not readable to the caller: a bound worker session in its own App, or a person acting as themselves who manages the grant's live, installed App (as appGrants reads it)."
+    "#3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — one grant signing request; null when unknown or when its grant is not readable to the caller: a bound worker session in its own App, a person acting as themselves who manages the grant's live, installed App (as appGrants reads it), or (#4544, hrn:node:hadronmemory.com:specs:cor:sec:060:01) the person who issued the secret read client the grant backs, while an App participant."
     grantSigningRequest(id: ID!): GrantSigningRequest
     "#1591 — the tamper check over every live node of a memory (ID or fully-qualified URN)."
     verifyMemoryNodes(memoryRef: String!): MemoryIntegrityReport!
@@ -10313,6 +10321,13 @@ export const typeDefs = `#graphql
 
     "#772 — the caller's placed dashboard widgets, ordered by position. Empty for a non-user (App-key) caller."
     dashboardWidgets: [DashboardWidget!]!
+    """
+    #2213 S3 — \`dashboardWidgets\` as a page: the same owner scope and \`position\` order (id breaks ties), with the
+    real total (hrn:node:hadronmemory.com:specs:cor:api:120:04). Empty for a non-user or impersonated caller. A consumer
+    that decides on the set follows the pages to the end; \`dashboardWidgets\` remains the complete set. Sizes as
+    \`tickersPage\`.
+    """
+    dashboardWidgetsPage(limit: Int, offset: Int): DashboardWidgetPage!
     "#797 — data for each of the caller's PLACED widgets, in position order, one entry per placement built from its own config. Empty for a non-user caller."
     dashboardWidgetData: [DashboardWidgetData!]!
 
@@ -10589,6 +10604,14 @@ export const typeDefs = `#graphql
     'ref' accepts the entity's ID or URN.
     """
     agent(ref: ID!): Agent
+
+    """
+    An Agent's revisions, newest first, with the slot limit, the highest slot used and the saves left (#4488).
+    Read by whoever may restore a revision: the Agent's manager.
+
+    Accepts the entity's ID or URN.
+    """
+    agentRevisions(agentRef: ID!): AgentRevisionList!
     """
     #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15) - an Agent's tasks, across its base chain:
     every runnable node in its effective system memory, and every task the
@@ -12763,8 +12786,24 @@ export const typeDefs = `#graphql
 
     Identical to updateNode otherwise, selectors included ('id' XOR 'memoryId' +
     'loc'); it never creates and never moves.
+
+    #1291 — 'mergeExports: true' makes the WHOLE 'input.properties' bag a PATCH
+    (not only 'exports') instead of a replacement: named top-level keys are replaced whole, except 'exports', which
+    merges per host and per field ('null' removes a host); unnamed keys stay.
+    It is the merge 'updateNodeProperties' applies, run under the node's lock on
+    the row read after it, so two concurrent patches to different hosts both
+    land. The gate, task and schema validation judge the MERGED result;
+    'expectedRevision' still applies; who may write is unchanged. 'properties'
+    must then be an object (anything else is BAD_USER_INPUT). Omit or pass false
+    for today's whole-bag replace. Only this door has it.
     """
-    updateTaskNode(input: UpdateNodeInput!): Node!
+    updateTaskNode(
+      input: UpdateNodeInput!
+      """
+      Treat the whole 'input.properties' as a patch (unnamed keys kept; 'exports' merged per host and field) instead of replacing the bag. Default false.
+      """
+      mergeExports: Boolean
+    ): Node!
 
     """
     Update an existing node. Identify it by 'id' (PK or fully-qualified node
@@ -12966,7 +13005,7 @@ export const typeDefs = `#graphql
     "#1632 — withdraw an open signing request. Only the requester account, from any of its sessions (#10397). Refusals (hrn:node:hadronmemory.com:specs:cor:dmo:130:03, Holger #10430): SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
     withdrawSigningRequest(id: ID!): SigningRequest!
     """
-    #3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — ask for one pending grant to be signed. Two callers may ask: a bound worker session in its own App, or a person acting as themselves who manages the grant's live, installed App (as appGrants reads it); workers never sign. No signer is named: whoever signs must be able to issue it. The request pins the grant's version and terms hash. Refusals: FORBIDDEN while impersonating; GRANT_NOT_FOUND (unknown and unreadable alike); GRANT_NOT_PENDING (activated, revoked, or its holder gone; no state is named); GRANT_EXPIRED (past its expiry, so it can never be signed); GRANT_TERMS_UNREPRESENTABLE (extensions.reason). No call takes an assertion: the signer signs on the server-hosted ceremony page.
+    #3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — ask for one pending grant to be signed. Three callers may ask: a bound worker session in its own App, a person acting as themselves who manages the grant's live, installed App (as appGrants reads it), or (#4544, hrn:node:hadronmemory.com:specs:cor:sec:060:01) the person who issued the secret read client the grant backs, while an App participant, so a writer who does not manage the App can finish the hand-off; workers never sign. No signer is named: whoever signs must be able to issue it. The request pins the grant's version and terms hash. Refusals: FORBIDDEN while impersonating; GRANT_NOT_FOUND (unknown and unreadable alike); GRANT_NOT_PENDING (activated, revoked, or its holder gone; no state is named); GRANT_EXPIRED (past its expiry, so it can never be signed); GRANT_TERMS_UNREPRESENTABLE (extensions.reason). No call takes an assertion: the signer signs on the server-hosted ceremony page.
     """
     requestGrantSignature(grantRef: ID!): GrantSigningRequest!
     """
@@ -14783,6 +14822,16 @@ export const typeDefs = `#graphql
     """
     restoreRevision(agentRef: ID!, revisionLoc: String!): RevisionResult!
 
+    """
+    Delete one of an Agent's revisions by loc (#4488). Same gate as restoreRevision: the Agent's manager.
+    Refuses, before any write, the published (pinned) revision (REVISION_PUBLISHED) and the Agent's only
+    revision (REVISION_ONLY). A deleted revision leaves the list and can no longer be restored; its slot
+    number is not reused, so a delete does not free a slot (see agentRevisions).
+
+    Accepts the entity's ID or URN.
+    """
+    deleteAgentRevision(agentRef: ID!, revisionLoc: String!): RevisionResult!
+
     # Editor lock (org ADMIN)
     """
     Acquire (or renew) the editor lock for an Agent's system memory.
@@ -16053,6 +16102,27 @@ export const typeDefs = `#graphql
     offTrackReason: String
   }
 
+  "One revision in an Agent's list. #4488"
+  type AgentRevision {
+    revisionLoc: String!
+    label: String!
+    "True for the revision the Agent is pinned to (publishRevision)."
+    published: Boolean!
+    description: String
+    createdAt: DateTime!
+  }
+
+  """
+  An Agent's revisions, newest first, with the slot facts. Slot numbers are never reused: the next save takes
+  1 + the highest ever used, deleted revisions included, so a delete does not raise slotsRemaining. #4488
+  """
+  type AgentRevisionList {
+    revisions: [AgentRevision!]!
+    slotLimit: Float!
+    highestSlotUsed: Float!
+    slotsRemaining: Float!
+  }
+
   type RevisionResult {
     revisionLoc: String!
     label: String!
@@ -16686,6 +16756,20 @@ export const typeDefs = `#graphql
   "#2213 — one page of an org's exchange connections."
   type ExchangeConnectionPage {
     items: [ExchangeConnection!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2213 S3 — one page of an App's host registrations."
+  type HostRegistrationPage {
+    items: [HostRegistration!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2213 S3 — one page of the caller's placed dashboard widgets."
+  type DashboardWidgetPage {
+    items: [DashboardWidget!]!
     total: Int!
     hasMore: Boolean!
   }
@@ -17969,6 +18053,10 @@ export const typeDefs = `#graphql
     no_terminal
     bare_shell
     no_agent
+    "#4558 (hadron-cli#2677): Orca gives no rendered screen for the terminal (screen-unavailable). The CLI reports it with status locked, as it does unrecognized; like every reason, it is accepted with locked or dark."
+    no_screen
+    "#4558 (hadron-cli#2677): more than one agent terminal is bound to the worker. The CLI reports it with status locked, as it does unrecognized; like every reason, it is accepted with locked or dark."
+    multiple_terminals
   }
 
   "#2771 — the host that made a worker's latest terminal report: its id from the key, its label from its registration."

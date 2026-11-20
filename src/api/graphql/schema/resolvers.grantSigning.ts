@@ -3,15 +3,17 @@
  * request (gate selection 1). No signer is named (ruling 0255, item 12). No call here takes an assertion or makes a signature
  * (the cor:dmo:130:02 mirror): that is slice C's ceremony page, the only path that will.
  *
- * Who may do what. Exactly two readers reach a grant here, ONE arm per session, the worker arm first and exclusive:
+ * Who may do what. Exactly three readers reach a grant here, ONE arm per session, the worker arm first and exclusive:
  * - a BOUND WORKER SESSION in its own App (`resolveGrantReader` + the shared row scope in src/lib/grants/read.ts, #3789): it
  *   asks for a signature on a grant it holds or a pending one it requested;
  * - #4012: a PERSON acting as themselves who manages the grant's own live, installed App (`resolveGrantPerson` +
  *   `managesApp`, the reach `appGrants` gives, #3711), judged under the transaction's membership locks. A session bound to a
  *   worker never falls to this arm: a retired or refused worker binding reads nothing, not even as the person driving it.
- * Then: request: either reader; withdraw: the requester ACCOUNT alone (the user, from any of its sessions or workers),
- * among those who may read the grant, so a manager who did not ask is refused SIGNING_REQUEST_NOT_REQUESTER; read: either
- * reader, by id; unknown and unreadable look the same (null). An uninstalled App is reached by neither arm.
+ * - #4544: that same PERSON, while an App participant, on a grant that backs a secret read client they ISSUED (cor:sec:060:01
+ *   lets the current version's writer issue; this lets them finish the hand-off). Keyed on the client's stored issuer.
+ * Then: request: any reader; withdraw: the requester ACCOUNT alone (the user, from any of its sessions or workers),
+ * among those who may read the grant, so a manager who did not ask is refused SIGNING_REQUEST_NOT_REQUESTER; read: any
+ * reader, by id; unknown and unreadable look the same (null). An uninstalled App is reached by no arm.
  * A support (impersonation) session never asks for or ends a signature (FORBIDDEN). Every miss is GRANT_NOT_FOUND /
  * SIGNING_REQUEST_NOT_FOUND, the same answer whatever the reason, so the calls disclose no grant.
  * Behind PASSKEY_SIGNING_ENABLED with the rest of signing (deploymentSchema's removal set).
@@ -22,6 +24,7 @@ import { withAuthorizedTx } from './authorizedTx.js';
 import { resolveGrantPerson, resolveGrantReader } from './resolvers.grant.js';
 import { loadApp } from './resolvers.agentTask.js';
 import { lockAppManagerMemberships, managesApp } from '../../../lib/auth/appManagement.js';
+import { isAppParticipant } from '../../../lib/auth/appParticipantRead.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { getGrantForWorker } from '../../../lib/grants/read.js';
 import { currentActor } from '../../../lib/requestActor.js';
@@ -60,12 +63,21 @@ function refuseImpersonation(ctx: Context): void {
   }
 }
 
-type Reach = { appId: string; audience: { kind: 'worker'; workerId: string } | { kind: 'manager'; userId: string } };
+type Reach = {
+  appId: string;
+  audience: { kind: 'worker'; workerId: string } | { kind: 'manager'; userId: string } | { kind: 'issuer'; userId: string };
+};
 
 /**
  * The grant's App and the arm that reaches it, or null (the one gate; `ctx.db` is the request's or the transaction's). The
- * worker arm is tried first and alone; the person arm only for a session bound to no worker. With `locks` (the transaction),
- * the manager's memberships are held FOR SHARE before they are judged, on the transaction's own context.
+ * worker arm is tried first and alone; the person arms only for a session bound to no worker. With `locks` (the transaction),
+ * the person's memberships are held FOR SHARE before they are judged, on the transaction's own context.
+ *
+ * #4544 (cor:sec:060:01, Vera's FIT issuecomment-7034402954): besides a manager, the person who ISSUED the secret read client
+ * this grant backs reaches it, while still an App participant, so a writer who does not manage the App can finish the
+ * hand-off. Keyed on the client's stored issuer (`secret_read_clients.issuer_user_id`), a person: never a worker bound to
+ * them (the worker arm above answers for every worker session), an App key, a run or an impersonated session
+ * (`resolveGrantPerson`). A grant with no read client row gains no reader, so no other grant kind is widened.
  */
 async function readableGrantReach(ctx: Context, grantId: string, locks?: Prisma.TransactionClient): Promise<Reach | null> {
   const reader = await resolveGrantReader(ctx);
@@ -81,8 +93,11 @@ async function readableGrantReach(ctx: Context, grantId: string, locks?: Prisma.
   const app = await loadApp(ctx, grant.appId);
   if (!app || app.deletedAt || app.uninstalledAt) return null;
   if (locks) await lockAppManagerMemberships(locks, userId, app);
-  if (!(await managesApp(ctx, app))) return null;
-  return { appId: app.id, audience: { kind: 'manager', userId } };
+  if (await managesApp(ctx, app)) return { appId: app.id, audience: { kind: 'manager', userId } };
+  const client = await ctx.db.secretReadClient.findUnique({ where: { grantId }, select: { appId: true, issuerUserId: true } });
+  if (!client || client.appId !== app.id || client.issuerUserId !== userId) return null;
+  if (!(await isAppParticipant(ctx, app))) return null;
+  return { appId: app.id, audience: { kind: 'issuer', userId } };
 }
 
 const reachKey = (r: Reach): string => `${r.appId}:${r.audience.kind}:${r.audience.kind === 'worker' ? r.audience.workerId : r.audience.userId}`;
