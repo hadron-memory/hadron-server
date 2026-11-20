@@ -339,15 +339,15 @@ describe('#3999 S3 protection fold', () => {
 });
 
 /** Real signature preparation; the signature itself is spent only when the returned operation runs. */
-async function prepareClientActivation(grantId:string){
+async function prepareClientActivation(grantId:string,signerId=userId,signerKey=key){
  const req=await db.$transaction(tx=>createGrantSigningRequestInTransaction(tx,grantId,{appId,requester:{userId,workerId:null,sessionId:null,appId:null}}));
  const browser=hash(`grant-${generateId()}`),o=await openGrantProofCeremony(db,{requestId:req.id,browserNonceHash:browser});
- const p=await proveForGrantSigning(db,{requestId:req.id,ceremonyId:o.ceremonyId,browserNonceHash:browser,credentialId:key.credentialId,
-  assertion:key.assert({payload:Buffer.alloc(0),rawChallenge:Buffer.from(o.challenge,'base64url'),origin:ORIGIN,rpId:RP}),rpId:RP,origins:[ORIGIN]});
+ const p=await proveForGrantSigning(db,{requestId:req.id,ceremonyId:o.ceremonyId,browserNonceHash:browser,credentialId:signerKey.credentialId,
+  assertion:signerKey.assert({payload:Buffer.alloc(0),rawChallenge:Buffer.from(o.challenge,'base64url'),origin:ORIGIN,rpId:RP}),rpId:RP,origins:[ORIGIN]});
  if(p.outcome!=='open'||!p.canSign||!p.sessionNonce)throw new Error('grant proof expected');
  const browserHash=hash(p.sessionNonce),c=await currentGrantSigningChallenge(db,{requestId:req.id,browserNonceHash:browserHash,rpId:RP});
- return ()=>completeGrantSigning(db,{requestId:req.id,ceremonyId:c.ceremonyId,browserNonceHash:browserHash,credentialId:key.credentialId,
-  assertion:key.assert({payload:Buffer.alloc(0),rawChallenge:Buffer.from(c.challenge,'base64url'),origin:ORIGIN,rpId:RP})});
+ return ()=>completeGrantSigning(db,{requestId:req.id,ceremonyId:c.ceremonyId,browserNonceHash:browserHash,credentialId:signerKey.credentialId,
+  assertion:signerKey.assert({payload:Buffer.alloc(0),rawChallenge:Buffer.from(c.challenge,'base64url'),origin:ORIGIN,rpId:RP})});
 }
 async function pendingPerson(){return resolvers.Mutation.issueSecretReadClient({}, {input:{secretRef:secretId,holderKind:'USER',reason:'test protection race'}},ctx());}
 async function activateFixture(grantId:string){
@@ -422,5 +422,38 @@ describe('#3999 R22 own-worker issue marker',()=>{
   const events=await db.$queryRaw<Array<{marker:boolean|null}>>`SELECT (to_jsonb(c)->>'issued_to_own_worker')::boolean AS marker FROM grant_events e JOIN secret_read_clients c ON c.grant_id=e.grant_id WHERE e.grant_id=${c.grantId} AND e.action='ACTIVATE'`;
   expect(events).toEqual([{marker:own}]);
   expect((await db.secretReadClient.findUniqueOrThrow({where:{id:c.clientId}})).endedAt).toBeNull();
+ });
+});
+
+describe('#3999 R22 actual signer provenance',()=>{
+ it.each([true,false])('captures ownership relative to the signer rather than requester (%s)',async heldBySigner=>{
+  await db.secret.update({where:{id:secretId},data:{protected:false}});
+  const signer=await db.user.create({data:{email:`${generateId()}@s4.test`}});await db.appMember.create({data:{appId,userId:signer.id,role:'owner'}});
+  const signerKey=softPasskey();await insertSoftPasskey(db,signer.id,signerKey,{rpId:RP});
+  const agent=await db.agent.create({data:{name:'R22signer',urn:`${generateId()}:r22signer`,ownerUserId:userId}});
+  const worker=await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,name:'r22signer',slug:'r22signer',appId,agentId:agent.id,heldByUserId:heldBySigner?signer.id:userId,heldAt:new Date()}});
+  const c=await resolvers.Mutation.issueSecretReadClient({}, {input:{secretRef:secretId,holderKind:'WORKER',holderRef:worker.id,reason:'actual signer'}},ctx());
+  expect((await db.secretReadClient.findUniqueOrThrow({where:{id:c.clientId}})).issuedToOwnWorker).toBeNull();
+  await(await prepareClientActivation(c.grantId,signer.id,signerKey))();
+  const g=await db.grant.findUniqueOrThrow({where:{id:c.grantId}});expect(g.issuerUserId).toBe(signer.id);
+  expect((await db.secretReadClient.findUniqueOrThrow({where:{id:c.clientId}})).issuedToOwnWorker).toBe(heldBySigner);
+  await db.worker.update({where:{id:worker.id},data:{heldByUserId:heldBySigner?userId:signer.id}});
+  expect((await db.secretReadClient.findUniqueOrThrow({where:{id:c.clientId}})).issuedToOwnWorker).toBe(heldBySigner);
+  await expect(db.secretReadClient.update({where:{id:c.clientId},data:{issuedToOwnWorker:!heldBySigner}})).rejects.toThrow();
+ });
+});
+
+describe('#3999 first end stands through protection',()=>{
+ it('keeps an expired client expiry as its first end, without a second revoke or PROTECTED stamp',async()=>{
+  await db.secret.update({where:{id:secretId},data:{protected:false}});const c=await pendingPerson();
+  await db.$transaction(async tx=>{
+   await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+   await tx.$executeRaw`UPDATE grants SET expires_at=(clock_timestamp() AT TIME ZONE 'UTC')-interval '1 minute' WHERE id=${c.grantId}`;
+   await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+  });
+  const e=await error(resolvers.Mutation.setSecretProtected({}, {ref:secretId,protected:true},ctx()));await complete(e.extensions.requestId,await proof(e.extensions.requestId));
+  expect((await db.grant.findUniqueOrThrow({where:{id:c.grantId}})).revokedAt).toBeNull();
+  expect((await db.secretReadClient.findUniqueOrThrow({where:{id:c.clientId}})).endReason).toBeNull();
+  expect(await db.grantEvent.count({where:{grantId:c.grantId,action:'REVOKE'}})).toBe(0);
  });
 });
