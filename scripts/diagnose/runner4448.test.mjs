@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const LOAD_LINE = '{"kind":"load","workload":"held","cap":100,"startAt":0,"endAt":0,"ok":101,"probe":{"method":"tools/list","requests":7,"errors":0,"minMs":1,"p50Ms":1,"p95Ms":1,"p99Ms":1,"maxMs":1}}';
+const LOAD_LINE = '{"kind":"load","workload":"held","cap":100,"startAt":0,"endAt":0,"ok":101,"capRefused":0,"other":0,"closeOk":0,"closeFailed":0,"missingSession":0,"probe":{"method":"tools/list","requests":7,"errors":0,"minMs":1,"p50Ms":1,"p95Ms":1,"p99Ms":1,"maxMs":1}}';
 
 function fixture(mode) {
   const dir = mkdtempSync(join(tmpdir(), 'gloria-run4448-'));

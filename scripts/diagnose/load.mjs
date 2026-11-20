@@ -1,5 +1,5 @@
 import {realpathSync} from 'node:fs';
-import {pathToFileURL} from 'node:url';
+import {fileURLToPath} from 'node:url';
 import { assertSecretFree } from './sampler.mjs';
 // Load driver for #2589. One principal (HADRON_DIAG_KEY from the env, never printed).
 // Workloads: churn (W1/W2: initialize with no Mcp-Session-Id, never closed), closed (C1: DELETE after),
@@ -96,7 +96,37 @@ export function workloadValid(workload, c) {
     && (workload !== 'closed' || (c.capRefused === 0 && c.closeOk === c.ok));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+/**
+ * #2627: whether this module is the process's main script. Both sides are resolved to real paths, so a symlinked or
+ * spaced path, and --preserve-symlinks-main (which leaves import.meta.url on the link), all compare equal. An import
+ * whose argv[1] is missing, nonexistent or another file is not main, and never throws. A CLI run that this check
+ * misses prints no record, and run.sh refuses a run without a positive load record (loadRecordOk), so it can never
+ * pass silently.
+ */
+export function isMainModule(metaUrl, argv1) {
+  if (!argv1) return false;
+  try { return realpathSync(fileURLToPath(metaUrl)) === realpathSync(argv1); } catch { return false; }
+}
+
+const COUNT_KEYS = ['ok', 'capRefused', 'other', 'closeOk', 'closeFailed', 'missingSession'];
+/**
+ * #2627: positive evidence that the driver ran the requested workload. `text` is the generator's whole stdout and
+ * must be exactly one load record: kind 'load', this workload, every count a non-negative integer, numeric startAt
+ * and endAt, and counts that pass workloadValid. Anything else, including empty or no-op output, is not a load.
+ */
+export function loadRecordOk(text, workload) {
+  const lines = String(text).trim().split('\n');
+  if (lines.length !== 1) return false;
+  let r;
+  try { r = JSON.parse(lines[0]); } catch { return false; }
+  if (!r || typeof r !== 'object' || Array.isArray(r) || r.kind !== 'load' || r.workload !== workload) return false;
+  try { parseWorkload(workload); } catch { return false; }
+  if (!COUNT_KEYS.every((k) => Number.isInteger(r[k]) && r[k] >= 0)) return false;
+  if (!Number.isFinite(r.startAt) || !Number.isFinite(r.endAt)) return false;
+  return workloadValid(workload, r);
+}
+
+if (isMainModule(import.meta.url, process.argv[1])) {
   const [base, workload, durS] = process.argv.slice(2);
   const key = process.env.HADRON_DIAG_KEY;
   if (!key) { console.error('HADRON_DIAG_KEY is required'); process.exit(2); }

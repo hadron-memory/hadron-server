@@ -149,6 +149,13 @@ elif [ "$load_rc" -eq 0 ]; then
   echo 'load generator exited 0 but printed no load line; diagnosis is invalid' >&2
   exit 7   # not 5: that is the generator's acceptance code and cleanup_rc's
 fi
+# #2627: an exit 0 is accepted only on positive evidence, one valid load record for this workload. Output that is
+# not one (a no-op, another kind, another workload) is an invalid run, refused before any capture.
+if [ "$load_rc" -eq 0 ] && ! node --input-type=module -e 'const m = await import(process.argv[1]); process.exit(m.loadRecordOk(process.argv[2], process.argv[3]) ? 0 : 1)' \
+    "$(node -e 'process.stdout.write(require("url").pathToFileURL(process.argv[1]).href)' "$here/load.mjs")" "$load_line" "$workload"; then
+  echo "load generator exited 0 but printed no valid load record for $workload; diagnosis is invalid" >&2
+  exit 7
+fi
 # A failed generator still explains itself: the line is echoed and stashed above, the EXIT trap
 # re-appends it to DIAG_OUT after preserve_samples, and the rc propagates (samples and private
 # logs are kept on any non-zero exit).
