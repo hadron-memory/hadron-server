@@ -489,7 +489,7 @@ describe('resolveAuthContext', () => {
     // store is too busy to answer it (P2024, or P2028's "Unable to start"
     // arm), the rejection must surface as the typed RETRYABLE
     // AUTH_STORE_BUSY — never as the raw driver error an untyped 500 wraps,
-    // and never as a verdict on the key (cor:aut:010:05 S5, cor:agt:040:12).
+    // and never as a verdict on the key (cor:aut:010:05 S5).
     // The JWT path is out of scope by ruling: its own catch (#3532, rulings
     // 0192–0194) keeps these faults 'unavailable' and lets the request
     // proceed.
@@ -520,7 +520,7 @@ describe('resolveAuthContext', () => {
         new Prisma.PrismaClientKnownRequestError(message, {
           code,
           clientVersion: '6.19.2',
-        } as never);
+        });
 
       // #4504: P1xxx faults arrive as PrismaClientInitializationError — and on the per-query
       // path the engine leaves `errorCode` UNDEFINED (observed on 6.19.2; the code exists
@@ -556,7 +556,7 @@ describe('resolveAuthContext', () => {
           code: 'P1001',
           meta: { modelName: 'UserApiKey', database_location: 'db:5432' },
           clientVersion: '6.19.2',
-        } as never,
+        },
       );
 
       const USER_KEY = USER_API_KEY_PREFIX + 'a'.repeat(64);
@@ -646,10 +646,40 @@ describe('resolveAuthContext', () => {
         }
       });
 
-      it('#4504 (QA round): the warm-pool refusal is identical across key shapes too', async () => {
-        // NOTE: this leg alone cannot redden — a raw (unconverted) error is also identical
-        // across key shapes. It composes with the instanceof leg above, which is the pin;
-        // together they say CONVERTED-and-identical, the property QA observed live.
+      // #4519 (BLIND delta P3): the warm arm's discriminator is the CODE on the class, not one
+      // captured object — the engine can emit the warm P1001 with a leaner payload (no meta at
+      // all, or meta without database_location) and with any clientVersion. The captured leg
+      // above stays field-for-field (it reddens on an engine REWORDING); this leg sweeps the
+      // key-shape variants so the arm cannot over-fit the one capture.
+      it('#4519: the warm arm tolerates the P1001 key-shape variants — no meta, leaner meta, a later clientVersion', async () => {
+        const variants: { label: string; options: ConstructorParameters<typeof Prisma.PrismaClientKnownRequestError>[1] }[] = [
+          { label: 'no meta at all', options: { code: 'P1001', clientVersion: '6.19.2' } },
+          { label: 'meta without database_location', options: { code: 'P1001', clientVersion: '6.19.2', meta: { modelName: 'UserApiKey' } } },
+          { label: 'a later clientVersion', options: { code: 'P1001', clientVersion: '6.20.0', meta: { modelName: 'UserApiKey', database_location: 'db:5432' } } },
+        ];
+        for (const { label, options } of variants) {
+          const busy = busyDb(() => new Prisma.PrismaClientKnownRequestError(
+            "Can't reach database server at `db:5432`",
+            options,
+          ));
+          const err = await refuse(() => resolveAuthContextWithStatus(makeReq(`Bearer ${USER_KEY}`), busy.db));
+          expect(err, label).toBeInstanceOf(AuthStoreBusyError);
+          const typed = err as AuthStoreBusyError;
+          expect(typed.extensions.reason, label).toBe('STORE_UNREACHABLE');
+          expect(typed.message, label).toBe(AUTH_STORE_UNREACHABLE_MESSAGE);
+          expect(typed.cause, label).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+          expect((typed.cause as Prisma.PrismaClientKnownRequestError).code, label).toBe('P1001');
+        }
+      });
+
+      it('#4504 (QA round): the warm-pool typed refusal is DETERMINISTIC — the same injected fault serializes identically every call', async () => {
+        // #4519 (BLIND P3-5), relabeled: this unit leg cannot assert "identical across key
+        // shapes" on its own — a raw (unconverted) error is also identical across key shapes.
+        // What it pins is DETERMINISM: nothing request-scoped rides the conversion, so the
+        // same captured fault answers byte-identically. It composes with the instanceof leg
+        // above (together: CONVERTED-and-deterministic, the property QA observed live); the
+        // oracle-free cross-shape assertion is the e2e user-vs-App leg in
+        // api/graphql/authStoreUnreachable4504.test.ts.
         const answers = await Promise.all(
           [USER_KEY, APP_KEY, USER_API_KEY_PREFIX + 'e'.repeat(64), APP_KEY_PREFIX + 'f'.repeat(64)].map((key) =>
             refuse(() => resolveAuthContextWithStatus(makeReq(`Bearer ${key}`), busyDb(() => p1001Warm()).db)).then(
@@ -669,7 +699,7 @@ describe('resolveAuthContext', () => {
             makeReq(`Bearer ${USER_KEY}`),
             busyDb(() => new Prisma.PrismaClientKnownRequestError(
               'Authentication failed against the database server',
-              { code: 'P1002', clientVersion: '6.19.2' } as never,
+              { code: 'P1002', clientVersion: '6.19.2' },
             )).db,
           ),
         );
@@ -677,7 +707,11 @@ describe('resolveAuthContext', () => {
         expect(rejected).not.toBeInstanceOf(AuthStoreBusyError);
       });
 
-      it('#4504: the P1001 refusal is identical across key shapes — an unreachable store cannot tell a verdict it never read', async () => {
+      it('#4504: the P1001 typed refusal is DETERMINISTIC — nothing request-scoped rides the conversion', async () => {
+        // #4519 (BLIND P3-5), relabeled: the oracle-free "identical across key shapes"
+        // assertion is the e2e user-vs-App leg (api/graphql/authStoreUnreachable4504.test.ts);
+        // this unit leg pins that the conversion itself is deterministic — same fault, same
+        // serialized answer — and composes with the instanceof legs above.
         const verdicts = [USER_KEY, APP_KEY, USER_API_KEY_PREFIX + 'c'.repeat(64), APP_KEY_PREFIX + 'd'.repeat(64)]
           .map((key) => {
             const busy = busyDb(() => p1001());
@@ -699,6 +733,30 @@ describe('resolveAuthContext', () => {
         expect(err).toBe(impostor);
       });
 
+      // #4519 (LOCAL P3-1): the defensive errorCode arm, pinned on its own. On the installed
+      // engine (6.19.2) the per-query initialization error leaves `errorCode` undefined (see
+      // p1001's comment), so every other leg reaches the classifier's phrase arm — nothing fed
+      // the CODE arm until this leg. The message here cannot match the phrase, so only the
+      // errorCode arm can classify: dropping it reddens HERE first (the gate's named mutant).
+      it('#4519: an initialization error carrying errorCode P1001 but NOT the engine phrase still classifies STORE_UNREACHABLE — the defensive errorCode arm', async () => {
+        const err = await refuse(() =>
+          resolveAuthContextWithStatus(
+            makeReq(`Bearer ${USER_KEY}`),
+            busyDb(() => new Prisma.PrismaClientInitializationError(
+              'Database handshake dropped by the network',
+              '6.19.2',
+              'P1001',
+            )).db,
+          ),
+        );
+        expect(err).toBeInstanceOf(AuthStoreBusyError);
+        const typed = err as AuthStoreBusyError;
+        expect(typed.extensions.reason).toBe('STORE_UNREACHABLE');
+        expect(typed.message).toBe(AUTH_STORE_UNREACHABLE_MESSAGE);
+        expect(typed.cause).toBeInstanceOf(Prisma.PrismaClientInitializationError);
+        expect((typed.cause as Prisma.PrismaClientInitializationError).errorCode).toBe('P1001');
+      });
+
       it('#4504: a neighboring initialization fault (P1002, authentication refused) stays the raw error — only P1001 is the unreachable arm', async () => {
         const rejected = await refuse(() =>
           resolveAuthContextWithStatus(
@@ -714,11 +772,15 @@ describe('resolveAuthContext', () => {
         expect(rejected).not.toBeInstanceOf(AuthStoreBusyError);
       });
 
-      it('#4504 (Bradley P3, the reachable half of "nothing was written"): the fire-and-forget lastUsedAt stamp cannot produce this fault — its rejection is swallowed', async () => {
+      it('#4504 (Bradley P3, the reachable half of "nothing was written"): the fire-and-forget lastUsedAt stamp FIRES and its rejection is swallowed — it cannot produce this fault (#4519, BLIND P2-2)', async () => {
         // A successful lookup followed by a REJECTED stamp: the resolver must still resolve,
         // because the stamp is never awaited (`.catch(() => {})` in the resolver). Together
         // with the lookup being the only awaited store operation, this is why the typed fault
         // can only originate from the lookup itself — where nothing has been written yet.
+        // #4519 (BLIND P2-2): the stub now COUNTS the update calls and the assertions run
+        // after a tick, so the leg pins the CALL fired (remove the stamp and it reddens),
+        // not just the swallow.
+        let stampCalls = 0;
         const stampingDb = {
           userApiKey: {
             findUnique: () => Promise.resolve({
@@ -729,12 +791,19 @@ describe('resolveAuthContext', () => {
               oauthScopes: [],
               user: { id: 'user-4504', deletedAt: null, roles: ['READER'], githubUsername: 'yuri', email: null },
             }),
-            update: () => Promise.reject(p('P2024', 'Timed out fetching a new connection from the pool.')),
+            update: () => {
+              stampCalls += 1;
+              return Promise.reject(p('P2024', 'Timed out fetching a new connection from the pool.'));
+            },
           },
         } as unknown as typeof db;
         const ctx = await resolveAuthContextWithStatus(makeReq(`Bearer ${USER_KEY}`), stampingDb);
+        // One microtask tick: let the rejected stamp's promise chain (and its swallow) settle
+        // before asserting, so an unhandled rejection would surface here, not in a later test.
+        await new Promise((resolve) => setImmediate(resolve));
         expect(ctx.auth.userId).toBe('user-4504');
         expect(ctx.credentialStatus).toBe('authenticated');
+        expect(stampCalls).toBe(1);
       });
 
       it('a non-Prisma error wearing code P2024 is NOT classified — the class is closed to Prisma (LOCAL mutant)', async () => {

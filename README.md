@@ -19,6 +19,22 @@ pnpm install
 cp .env.example .env   # edit DATABASE_URL, JWT_SECRET, HADRON_ENCRYPTION_KEY
 ```
 
+### Empty-database quickstart
+
+Starting from an empty local database (single-role, as in CLAUDE.md "Local Postgres setup"):
+
+```bash
+createdb hadron_local
+psql postgresql://holger@localhost:5432/hadron_local -c 'CREATE EXTENSION IF NOT EXISTS vector'
+scripts/dev-setup.sh hadron_local          # push + post-push.sql (never a bare `db push`)
+DATABASE_URL=postgresql://holger@localhost:5432/hadron_local pnpm tsx prisma/seed.ts
+```
+
+Then set `DATABASE_URL` in `.env` and add a `RATE_LIMIT_KEYRING` (required: the server refuses to
+boot without it; the shape and a generate command are in `.env.example`), and run `pnpm run dev`.
+`/health` and `/ready` answer `{"ok":true}` when it is up. A database that already holds data from
+before migration `20261019090000_worker_signature` needs the fix tracked in #4524 first.
+
 ### PostgreSQL
 
 ```bash
@@ -45,6 +61,7 @@ pnpm run dev            # http://localhost:4000
 | `GITHUB_WEBHOOK_SECRET` | — | GitHub App webhook verification secret |
 | `RESEND_API_KEY` | — | Resend API key for magic-link emails |
 | `EMAIL_FROM` | `Hadron <noreply@hadrongraph.io>` | Sender address for emails |
+| `RATE_LIMIT_KEYRING` | — | Required at boot. JSON with `current` and one or two 64-hex `keys` (see `.env.example`) |
 | `JWT_EXPIRY` | `7d` | JWT token lifetime |
 | `TEAM_ATTENTION_TOKEN_SECRET` | `JWT_SECRET` | Optional separate HMAC secret for attention tokens and switchover proofs |
 

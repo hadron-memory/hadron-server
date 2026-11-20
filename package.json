@@ -46,7 +46,6 @@
     "@aws-sdk/client-s3": "^3.1171.0",
     "@aws-sdk/client-sagemaker-runtime": "^3.1171.0",
     "@aws-sdk/s3-request-presigner": "^3.1171.0",
-    "@azure/msal-node": "^5.1.2",
     "@hadron-memory/access-control": "0.3.0",
     "@hadron-memory/urn-lib-js": "0.0.22",
     "@modelcontextprotocol/sdk": "^1.32.0",
@@ -75,7 +74,7 @@
     "mustache": "^4.2.0",
     "pg": "^8.20.0",
     "resend": "^6.9.3",
-    "undici": "^6.27.0",
+    "undici": "^6.29.1",
     "yaml": "2.8.3",
     "zod": "^4.3.6"
   },

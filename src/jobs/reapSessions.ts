@@ -51,6 +51,7 @@
 import type { PrismaClient, SessionType } from '../generated/prisma/index.js';
 import { db as defaultDb } from '../integrations/db/client.js';
 import { sessionKeyCache } from '../lib/sessionKeyCache.js';
+import { isProcessEntry } from './isProcessEntry.js';
 
 /** Per-sweep cap. The next sweep continues where this one left off (oldest
  * first), so a first run against a long backlog drains over several sweeps
@@ -237,7 +238,7 @@ export function startSessionReaperLoop(
 }
 
 // Allow `tsx src/jobs/reapSessions.ts` to run one sweep directly.
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isProcessEntry(import.meta.url)) {
   runSessionReaper()
     .then((o) => {
       // eslint-disable-next-line no-console
