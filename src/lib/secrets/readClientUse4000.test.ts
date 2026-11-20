@@ -71,6 +71,15 @@ describe('transactional secret.use (#4000)', () => {
     expect(audit[0].outcome).toBe('SECRET_READ_CLIENT_PROTECTED');
     expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
   });
+  it('audits a known client even when its secret has been deleted', async () => {
+    await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
+    const client = await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } });
+    await db.secret.delete({ where: { id: client.secretId } });
+    await expect(prepare()).rejects.toBeDefined();
+    const audit = await db.secretEvent.findMany({ where: { clientId, kind: 'USE' } });
+    expect(audit).toHaveLength(1);
+    expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
+  });
   it('does not let later metadata widen the signed path or disagree with the encrypted kind', async () => {
     await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
     const client = await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } });
