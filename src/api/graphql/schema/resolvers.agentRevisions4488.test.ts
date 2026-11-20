@@ -73,8 +73,8 @@ describe('agentRevisions (list)', () => {
 
   it('answers another tenant\'s Agent as absent, and a reader without manage rights is refused', async () => {
     await save(agentB, { db, roles: ['READER'], userId: (await db.orgMember.findFirstOrThrow({ where: { role: 'ADMIN', organization: { urn: 'rev4488-b' } } })).userId });
-    await expect(list(agentB, asManager())).rejects.toThrow();
-    await expect(list(agentA, asOutsider())).rejects.toThrow();
+    await expect(list(agentB, asManager())).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+    await expect(list(agentA, asOutsider())).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
   });
 });
 
@@ -161,8 +161,8 @@ describe('deleteAgentRevision', () => {
     const org = await db.organization.findFirstOrThrow({ where: { urn: 'rev4488-a' } });
     await db.orgMember.create({ data: { organizationId: org.id, userId: reader.id, role: 'READER' } });
     const asReader: Context = { db, roles: ['READER'], userId: reader.id };
-    await expect(del('revisions:rev-1', agentA, asReader)).rejects.toThrow(/Forbidden|permission|admin/i);
-    await expect(list(agentA, asReader)).rejects.toThrow(/Forbidden|permission|admin/i);
+    await expect(del('revisions:rev-1', agentA, asReader)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    await expect(list(agentA, asReader)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     expect(await live(agentA, 'revisions:rev-1')).not.toBeNull();
   });
 

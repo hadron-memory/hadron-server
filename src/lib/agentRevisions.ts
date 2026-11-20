@@ -7,7 +7,7 @@
  * highest slot, and so does not free one. The list reports the slot facts a client needs to say so.
  */
 import type { Prisma } from '../generated/prisma/index.js';
-import { MAX_REVISION_SLOT, revisionSlotNumber } from './revisionSlot.js';
+import { MAX_REVISION_SLOT, highestRevisionSlot, revisionSlotNumber } from './revisionSlot.js';
 
 export interface AgentRevisionRow {
   revisionLoc: string;
@@ -42,12 +42,11 @@ export async function listAgentRevisions(
     where: { memoryId: systemMemoryId, loc: { startsWith: 'revisions:rev-' } },
     select: { loc: true, name: true, description: true, createdAt: true, deletedAt: true },
   });
-  let highest = 0;
+  const highest = highestRevisionSlot(rows.map((r) => r.loc));
   const live: Array<AgentRevisionRow & { n: number }> = [];
   for (const r of rows) {
     const n = revisionSlotNumber(r.loc);
     if (n === null) continue;
-    if (n > highest) highest = n;
     if (r.deletedAt !== null || r.loc.includes('__deleted-')) continue;
     live.push({
       n,
