@@ -213,10 +213,10 @@ test('freshness is judged by the interval recorded in the published copy, never 
     const r = f.run();
     const out = existsSync(join(f.dir, 'samples')) ? readFileSync(join(f.dir, 'samples'), 'utf8') : '';
     const published = out.split('\n').filter((l) => l.includes('"kind":"config"')).map((l) => JSON.parse(l).sampleMs);
-    // Either the run is refused, or what it published justifies its acceptance: never accepted on 2500 with 1000 published.
-    if (r.status === 0) expect(published).toEqual([2500]);
-    else expect(r.status).toBe(5);
-    expect(r.status === 0 && published.includes(1000)).toBe(false);
+    // The first copy (2500 ms, sample 4000 ms old) is valid and fresh, so the run succeeds on it and publishes it
+    // (#4609 BLIND delta F2: a retry that fell through to the stale 1000 ms copy would fail here).
+    expect(r.status, r.stderr).toBe(0);
+    expect(published).toEqual([2500]);
   } finally { f.clean(); }
 });
 

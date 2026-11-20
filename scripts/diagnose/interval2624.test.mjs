@@ -76,6 +76,23 @@ test('--until judges freshness against two periods of the interval recorded in t
   expect(stale.stderr).toBe('diagnosis samples aborted, incomplete or stale\n');
 });
 
+test('--until refuses a missing, empty, whitespace or non-decimal timestamp instead of reading it as 0 (#4609 delta F1)', () => {
+  const NOW = 1_000_000;
+  const text = `${cfg(1000)}\n${sample(NOW - 4000)}\n`;   // stale at NOW; fresh only against a cutoff near the epoch
+  for (const bad of ['', ' ', '  ', '1e6', '-5', '0x10', '1.5', 'now']) {
+    const r = withDir((dir) => {
+      const f = join(dir, 's.jsonl'); writeFileSync(f, text);
+      return spawnSync(process.execPath, [validator, f, '--until', bad], { encoding: 'utf8' });
+    });
+    expect(r.status, JSON.stringify(bad)).toBe(5);
+  }
+  const missing = withDir((dir) => {
+    const f = join(dir, 's.jsonl'); writeFileSync(f, text);
+    return spawnSync(process.execPath, [validator, f, '--until'], { encoding: 'utf8' });
+  });
+  expect(missing.status).toBe(5);
+});
+
 test('--until refuses a file with no, two, unsupported or malformed config records, with a fixed line only', () => {
   const NOW = 1_000_000;
   for (const head of [
