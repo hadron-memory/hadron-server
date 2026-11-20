@@ -333,74 +333,63 @@ describe('the real run principal: runContext, not a synthesized one (blind revie
   });
 });
 
-describe('the App and its Agent are held while the write decides (blind review F5)', () => {
+describe('the App, its AppAgent link and its Agent are held while the write decides (blind review F5, section-10 delta)', () => {
   const owner = () => ({ organizationId: org.id, ownerUserId: null });
+  const within = <T>(p: Promise<T>, ms: number) => Promise.race([
+    p, new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`not reached within ${ms}ms`)), ms)),
+  ]);
+
+  /**
+   * A write transaction that judges `appId` qualified and then sits on its locks. `start` begins the competing change;
+   * it must be observed WAITING on a lock (not merely slow) before the write is released. Every path releases the gate
+   * and drains both operations in `finally`, so a failed assertion cannot leave a transaction holding its locks.
+   */
+  async function raceHeldJudgement(appId: string, start: () => Promise<unknown>): Promise<void> {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let judged!: () => void;
+    let failedBeforeJudged!: (e: unknown) => void;
+    const judgedFirst = new Promise<void>((res, rej) => { judged = res; failedBeforeJudged = rej; });
+    const writing = db.$transaction(async (tx) => {
+      try {
+        expect(await appCarriesOwnersAgent(tx as never, appId, owner())).toBe(true);
+        judged();
+      } catch (e) { failedBeforeJudged(e); throw e; }
+      await gate;
+    }, { timeout: 15_000 });
+    writing.catch(() => undefined);
+    let settled = false;
+    let op: Promise<unknown> | undefined;
+    try {
+      await within(judgedFirst, 10_000);
+      op = start().then(() => { settled = true; });
+      op.catch(() => undefined);
+      await waitForLockWaiters(db);
+      expect(settled).toBe(false);
+    } finally {
+      release();
+      await writing;
+      if (op) await op;
+    }
+  }
 
   it('an uninstall waits for a write that already judged the App qualified, then the next write is refused', async () => {
     const a = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
-    let release!: () => void;
-    const gate = new Promise<void>((r) => { release = r; });
-    let judged!: () => void;
-    const judgedFirst = new Promise<void>((r) => { judged = r; });
-    const writing = db.$transaction(async (tx) => {
-      expect(await appCarriesOwnersAgent(tx as never, a, owner())).toBe(true);
-      judged();
-      await gate;
-    }, { timeout: 15_000 });
-    await judgedFirst;
-    let uninstalled = false;
-    const uninstall = db.app.update({ where: { id: a }, data: { uninstalledAt: new Date() } }).then(() => { uninstalled = true; });
-    await waitForLockWaiters(db);
-    expect(uninstalled).toBe(false);
-    release();
-    await writing;
-    await uninstall;
+    await raceHeldJudgement(a, () => db.app.update({ where: { id: a }, data: { uninstalledAt: new Date() } }));
     expect(await refusal(principalOf(a))).toBe(REFUSED);
   });
 
-  it('an AppAgent unlink waits for a write that already judged the App qualified (section-10 delta)', async () => {
+  it('an AppAgent unlink waits for a write that already judged the App qualified', async () => {
     const own = await agent(org.id, null);
     const a = await app({ orgId: org.id, agents: [own] });
-    let release!: () => void;
-    const gate = new Promise<void>((r) => { release = r; });
-    let judged!: () => void;
-    const judgedFirst = new Promise<void>((r) => { judged = r; });
-    const writing = db.$transaction(async (tx) => {
-      expect(await appCarriesOwnersAgent(tx as never, a, owner())).toBe(true);
-      judged();
-      await gate;
-    }, { timeout: 15_000 });
-    await judgedFirst;
-    let unlinked = false;
-    const unlink = db.appAgent.delete({ where: { appId_agentId: { appId: a, agentId: own } } }).then(() => { unlinked = true; });
-    await waitForLockWaiters(db);
-    expect(unlinked).toBe(false);
-    release();
-    await writing;
-    await unlink;
+    await raceHeldJudgement(a, () => db.appAgent.delete({ where: { appId_agentId: { appId: a, agentId: own } } }));
     expect(await refusal(principalOf(a))).toBe(REFUSED);
   });
 
   it('an Agent deletion waits for a write that already judged the App qualified', async () => {
     const own = await agent(org.id, null);
     const a = await app({ orgId: org.id, agents: [own] });
-    let release!: () => void;
-    const gate = new Promise<void>((r) => { release = r; });
-    let judged!: () => void;
-    const judgedFirst = new Promise<void>((r) => { judged = r; });
-    const writing = db.$transaction(async (tx) => {
-      expect(await appCarriesOwnersAgent(tx as never, a, owner())).toBe(true);
-      judged();
-      await gate;
-    }, { timeout: 15_000 });
-    await judgedFirst;
-    let deleted = false;
-    const del = db.agent.update({ where: { id: own }, data: { deletedAt: new Date() } }).then(() => { deleted = true; });
-    await waitForLockWaiters(db);
-    expect(deleted).toBe(false);
-    release();
-    await writing;
-    await del;
+    await raceHeldJudgement(a, () => db.agent.update({ where: { id: own }, data: { deletedAt: new Date() } }));
     expect(await refusal(principalOf(a))).toBe(REFUSED);
   });
 });
@@ -442,6 +431,26 @@ describe('the live headless path: hadron_update_node under the real run principa
       return inner.extensions?.code ? String(inner.extensions.code) : String(inner.message);
     }
   }
+  /** The same dispatch for a READ of the node, as the control that the principal can read the target. */
+  async function readRun(runApp: string, target: { id: string; urn: string }, loc: string) {
+    const schedule = await db.agentSchedule.create({
+      data: { id: generateId(), organizationId: org.id, appId: runApp, name: 'R', cron: '* * * * *', entryNodeUrn: ENTRY() },
+    });
+    const run = await db.appRun.create({
+      data: {
+        id: generateId(), organizationId: org.id, appId: runApp, agentId: await testRunAgentId(db, org.id, runApp),
+        triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: ENTRY(), status: 'RUNNING',
+      },
+    });
+    try {
+      await makeProdRunDeps(db).callScript!(run as never, { tool: 'hadron_read_node', args: { urn: `hrn:node:${target.urn}:${loc}` } } as never,
+        { onToolCall: async () => true, log: vi.fn(), nodeUrn: ENTRY() } as never);
+      return 'OK';
+    } catch (e) {
+      const inner = ((e as { cause?: unknown }).cause ?? e) as { message?: string };
+      return String(inner.message);
+    }
+  }
   const content = async (memId: string, loc: string) => (await db.node.findFirst({ where: { memoryId: memId, loc } }))!.content;
 
   it('publisher: a userless run edits an OWNER-role node in its own team space through the real tool', async () => {
@@ -473,6 +482,8 @@ describe('the live headless path: hadron_update_node under the real run principa
   it('a qualifying App with no write grant on its OWN readable space is refused by the base write gate, never the level', async () => {
     const publisher = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
     const space = await teamSpace(publisher, 'vault:own');
+    // Control: the same principal reads the same node (the space is readable), so the refusal below is the write gate.
+    expect(await readRun(publisher, space, 'vault:own')).toBe('OK');
     const refused = await liveRun(publisher, space, 'vault:own', false);
     expect(refused).not.toBe('OK');
     expect(refused).not.toBe(REFUSED);
