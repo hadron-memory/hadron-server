@@ -194,7 +194,7 @@ it('lets a historical unbounded pending mark be revoked without allowing it to b
   });
   await expect(resolvers.Mutation.revokeGrant({}, { ref: grantId }, ctx())).resolves.toMatchObject({ id: grantId });
   expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).revokedAt).not.toBeNull();
-  await expect(db.grant.update({ where: { id: grantId }, data: { revokedAt: null, revokedByUserId: null } })).rejects.toThrow();
+  await expect(db.grant.update({ where: { id: grantId }, data: { revokedAt: null, revokedBy: null } })).rejects.toThrow(/append-only|constraint/i);
 });
 
 it('keeps historical unbounded marks maintainable on withdrawal and holder departure', async () => {
