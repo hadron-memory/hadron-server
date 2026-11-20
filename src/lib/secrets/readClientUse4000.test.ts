@@ -6,7 +6,7 @@ import { generateId } from '../id.js';
 import { upsertPlatformActions } from '../grants/actions.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import type { RunToolContext } from '../runner/tools/types.js';
-import * as secretUse from './readClientReveal.js';
+import { prepareSecretUse } from './readClientReveal.js';
 let runCtx: RunToolContext;
 let grantId: string; let clientId: string; let orgId: string; let appId: string;
 beforeEach(async () => {
@@ -32,12 +32,74 @@ beforeEach(async () => {
   const run = await db.appRun.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, agentId: agent.id, triggerKind: 'MANUAL', status: 'RUNNING', entryNodeUrn: 'hrn:node:example.test:flows:start' } });
   runCtx = { db, run, principal: { db, appId: app.id, organizationId: org.id, clientId: `run:${run.id}`, roles: [] }, log: () => {} };
 });
-const prepare = (ctx = runCtx) => (secretUse as unknown as { prepareSecretUse: (ctx: RunToolContext, clientId: string, url: string, headers: Record<string, string>) => Promise<unknown> }).prepareSecretUse(ctx, clientId, 'https://api.example.test/v1/orders', {});
+const prepare = (ctx = runCtx) => prepareSecretUse(ctx, clientId, 'https://api.example.test/v1/orders', {});
 describe('transactional secret.use (#4000)', () => {
   it('refuses without a ticket and spends neither grant nor event', async () => {
-    await expect(prepare()).rejects.toBeDefined();
+    await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'comm.outbound', mintedBy: 'test' } });
+    await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'ACTION_TICKET_REQUIRED' } });
+    expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
     expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
     expect(await db.grantEvent.count({ where: { grantId, action: 'USE' } })).toBe(0);
+  });
+  it('refuses targets and model-supplied bound headers without spending a ticket', async () => {
+    await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
+    await expect(prepareSecretUse(runCtx, clientId, 'https://api.example.test/v10', {})).rejects.toBeDefined();
+    await expect(prepareSecretUse(runCtx, clientId, 'https://api.example.test/v1', { AUTHORIZATION: 'override' })).rejects.toBeDefined();
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
+    expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
+  });
+  it('does not let later metadata widen the signed path or disagree with the encrypted kind', async () => {
+    await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
+    const client = await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } });
+    await db.secret.update({ where: { id: client.secretId }, data: { metadata: { type: 'bearer', urlPrefix: 'https://api.example.test/' } } });
+    await expect(prepareSecretUse(runCtx, clientId, 'https://api.example.test/admin', {})).rejects.toBeDefined();
+    await db.secret.update({ where: { id: client.secretId }, data: { metadata: { type: 'basic', urlPrefix: 'https://api.example.test/' } } });
+    await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
+    expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
+  });
+  it('conceals wrong-holder, wrong-action and cross-App runs without spending', async () => {
+    await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
+    const other = await db.app.create({ data: { name: 'other', urn: `other-${generateId()}.test:app`, organizationId: orgId } });
+    const foreignRun = await db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId: other.id, agentId: runCtx.run.agentId, triggerKind: 'MANUAL', status: 'RUNNING', entryNodeUrn: 'hrn:node:example.test:flows:start' } });
+    const foreign: RunToolContext = { ...runCtx, run: foreignRun, principal: { ...runCtx.principal, appId: other.id, clientId: `run:${foreignRun.id}` } };
+    await expect(prepare(foreign)).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
+    const holder = await db.user.create({ data: { handle: `s5-holder-${generateId()}` } });
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+      await tx.$executeRaw`UPDATE grants SET grantee_app_id = NULL, user_id = ${holder.id} WHERE id = ${grantId}`;
+      await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+    });
+    await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+      await tx.$executeRaw`UPDATE grants SET grantee_app_id = ${appId}, user_id = NULL, action = 'secret.reveal' WHERE id = ${grantId}`;
+      await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+    });
+    await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
+    expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
+  });
+  it('accepts the run agent only and refuses a different agent holder', async () => {
+    const other = await db.agent.create({ data: { name: 'other', urn: `other-${generateId()}.test:agent`, organizationId: orgId } });
+    await db.actionTicket.createMany({ data: [generateId(), generateId()].map((id) => ({ id, organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' })) });
+    const setHolder = (id: string) => db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+      await tx.$executeRaw`UPDATE grants SET grantee_app_id = NULL, agent_id = ${id} WHERE id = ${grantId}`;
+      await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+    });
+    await setHolder(other.id);
+    await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
+    expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
+    await setHolder(runCtx.run.agentId);
+    await expect(prepare()).resolves.toMatchObject({ auth: { type: 'bearer' } });
+  });
+  it('serializes a one-use grant against concurrent uses without spending a second ticket', async () => {
+    await db.actionTicket.createMany({ data: [generateId(), generateId()].map((id) => ({ id, organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' })) });
+    const outcomes = await Promise.allSettled([prepare(), prepare()]);
+    expect(outcomes.filter((x) => x.status === 'fulfilled')).toHaveLength(1);
+    expect(outcomes.filter((x) => x.status === 'rejected')).toHaveLength(1);
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(1);
+    expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(1);
   });
   it('commits exactly one grant use and one matching ticket before returning auth', async () => {
     await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });

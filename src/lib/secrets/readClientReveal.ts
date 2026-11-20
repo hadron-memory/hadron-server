@@ -147,3 +147,75 @@ function auditErrorCode(e: unknown): string {
   const c = (e as { code?: unknown } | null)?.code;
   return typeof c === 'string' && /^[A-Z0-9]{5}$/.test(c) ? c : 'UNKNOWN';
 }
+
+/**
+ * Prepare one App-secret use for a run (#4000). The transaction checks the named client and the signed terms,
+ * consumes one ticket and one grant use, and commits its audit rows before returning the credential to core.
+ * The caller must not put the returned auth into a model-visible value or make an outbound call until it can
+ * enforce the no-redirect contract. This is an internal primitive, not a GraphQL/MCP reveal door.
+ */
+export async function prepareSecretUse(
+  tool: import('../runner/tools/types.js').RunToolContext,
+  clientId: string,
+  rawUrl: string,
+  headers: Record<string, string>,
+): Promise<{ url: string; auth: import('../webfetchClient.js').WebFetchAuth }> {
+  const { assertSecretUseBinding, assertSecretUseHeader } = await import('../runner/secrets.js');
+  const { isWebFetchAuth } = await import('../secrets.js');
+  const { chargeGrantUse } = await import('../grants/live.js');
+  const { lockAppManagerMemberships } = await import('../auth/appManagement.js');
+  const run = tool.run;
+  if (tool.principal.clientId !== `run:${run.id}` || tool.principal.appId !== run.appId) throw notFound();
+  const pre = await tool.db.secretReadClient.findUnique({ where: { id: clientId }, select: { appId: true, secretId: true, grantId: true } });
+  if (!pre || pre.appId !== run.appId) throw notFound();
+  const app = await tool.db.app.findUnique({ where: { id: run.appId }, select: { id: true, organizationId: true, ownerUserId: true } });
+  const initial = await tool.db.grant.findUnique({ where: { id: pre.grantId }, select: { issuerUserId: true } });
+  if (!app || app.organizationId !== run.organizationId || !initial?.issuerUserId) throw notFound();
+  const issuer = initial.issuerUserId;
+  const anchors = [{ kind: 'app' as const, id: app.id }, { kind: 'org' as const, id: run.organizationId },
+    { kind: 'user' as const, id: issuer }, { kind: 'agent' as const, id: run.agentId }];
+  const internal = { ...tool.principal, userId: undefined, db: tool.db } as Context;
+  return withAuthorizedTx(internal, anchors, async () => undefined, async (tx, txCtx) => {
+    const actual = await tx.appRun.findUnique({ where: { id: run.id }, select: { appId: true, agentId: true, organizationId: true, status: true } });
+    if (!actual || actual.appId !== run.appId || actual.agentId !== run.agentId || actual.organizationId !== run.organizationId || actual.status !== 'RUNNING') throw notFound();
+    if (!(await lockSecretRow(tx, pre.secretId))) throw notFound();
+    const client = await tx.secretReadClient.findUnique({ where: { id: clientId } });
+    if (!client || client.endedAt || client.appId !== run.appId || client.grantId !== pre.grantId || client.secretId !== pre.secretId) throw notFound();
+    const locked = await readGrantForUpdate(tx, client.grantId);
+    const grant = await tx.grant.findUnique({ where: { id: client.grantId } });
+    if (!locked || !grant || grant.action !== 'secret.use' || grant.appId !== run.appId || grant.issuerUserId !== issuer ||
+        !((grant.granteeAppId === run.appId && grant.agentId === null) || (grant.agentId === run.agentId && grant.granteeAppId === null)) ||
+        grant.userId !== null || grant.workerId !== null) throw notFound();
+    if (!locked.live) {
+      const [{ now }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS now`;
+      const state = deadGrantState(grant, now);
+      throw refusal(`SECRET_READ_CLIENT_${state}`, 'This read client is not live.');
+    }
+    const terms = grant.values as Record<string, unknown> | null;
+    if (!terms || terms.secret !== client.secretId || terms['auto-delete'] !== 'keep' ||
+        typeof terms['binding-prefix'] !== 'string' || typeof terms['binding-header'] !== 'string') throw notFound();
+    const secret = await tx.secret.findUnique({ where: { id: client.secretId }, select: { id: true, name: true, kind: true, ownerId: true, ownerType: true, metadata: true } });
+    if (!secret || secret.ownerType !== 'app' || secret.ownerId !== run.appId || secret.kind !== 'webfetch-auth') throw notFound();
+    await judgeSecretReadClientIssuer(txCtx, issuer, secret.id);
+    const metadata = secret.metadata as Record<string, unknown> | null;
+    if (!metadata || typeof metadata.urlPrefix !== 'string') throw notFound();
+    const url = assertSecretUseBinding(rawUrl, terms['binding-prefix'], metadata.urlPrefix);
+    let auth: unknown;
+    try { auth = await currentAppSecretValue(tx, { id: secret.id, ownerId: secret.ownerId }); }
+    catch { throw refusal('SECRET_USE_UNAVAILABLE', 'The secret cannot be used.'); }
+    if (!isWebFetchAuth(auth) || metadata.type !== auth.type) throw notFound();
+    assertSecretUseHeader(terms['binding-header'], auth, headers);
+    const tickets = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM action_tickets
+      WHERE organization_id = ${run.organizationId} AND action = 'secret.use' AND consumed_at IS NULL
+        AND (app_id = ${run.appId} OR app_id IS NULL) AND (expires_at IS NULL OR expires_at > (clock_timestamp() AT TIME ZONE 'UTC'))
+      ORDER BY (app_id IS NOT NULL) DESC, created_at ASC, id ASC FOR UPDATE SKIP LOCKED LIMIT 1`;
+    if (!tickets[0]) throw refusal('ACTION_TICKET_REQUIRED', 'No secret-use ticket is available.');
+    await tx.actionTicket.update({ where: { id: tickets[0].id }, data: { consumedAt: new Date(), consumedByRunId: run.id } });
+    if (!(await chargeGrantUse(tx, grant.id, run.appId))) throw refusal('SECRET_READ_CLIENT_SPENT', 'This read client is not live.');
+    await tx.grantEvent.create({ data: { grantId: grant.id, appId: run.appId, action: 'USE', runId: run.id } });
+    const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
+    await tx.secretEvent.create({ data: { ownerType: 'app', ownerId: run.appId, secretId: secret.id, secretName: secret.name,
+      clientId: client.id, versionNo: latest?.versionNo ?? null, kind: 'USE', outcome: 'OK', runId: run.id } });
+    return { url, auth };
+  }, { afterLock: (tx) => lockAppManagerMemberships(tx, issuer, app) });
+}
