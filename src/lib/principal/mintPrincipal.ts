@@ -50,7 +50,7 @@ export class RootNameTakenError extends Error {
 }
 
 /**
- * The #4415 root-name rule, applied to the name AS STORED (post-`toLowerCase()`
+ * The #4415 root-name rule, applied to the name AS STORED (post-`toLowerCase()`)
  * — a principal root is 1–64 lower-case ASCII letters, digits, `.`, `_` or `-`,
  * beginning and ending with a letter or digit: urn-lib's atom grammar
  * (`ATOM_RE`, `MAX_ATOM_LEN` = 64) restricted to lower case, spec

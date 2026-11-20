@@ -26,9 +26,9 @@ import {
   mintPrincipal,
   releasePrincipal,
   ensureUserPrincipal,
-  RootNameInvalidError,
   RootNameTakenError,
 } from '../../../lib/principal/mintPrincipal.js';
+import { rethrowRootNameErrors } from '../../../lib/principal/rootNameErrors.js';
 import {
   Prisma,
   type Role,
@@ -61,34 +61,6 @@ const invitationNotFound = () =>
   new GraphQLError('Invitation not found', { extensions: { code: 'NOT_FOUND' } });
 const invitationRevoked = () =>
   new GraphQLError('Invitation has been revoked', { extensions: { code: 'BAD_USER_INPUT' } });
-
-/**
- * Map the #692 principal pool's typed errors to user-facing refusals;
- * re-throw anything else. Use as a `.catch()` on a mint transaction.
- *
- * `RootNameTakenError` → the existing conflict refusal. `RootNameInvalidError`
- * (#4481, the #4415 root-name rule) → `ROOT_NAME_INVALID`, its own code so a
- * client can tell an unrepeatable name from a taken one. Both are backstops:
- * every mint caller here validates the name first (`normalizeHandle` /
- * `validateOrgRoot`), so neither is reachable through this surface today —
- * the mapping exists so a future caller that skips validation still surfaces
- * a typed refusal, not an internal error.
- */
-export function rethrowRootNameErrors(err: unknown): never {
-  if (err instanceof RootNameInvalidError) {
-    throw new GraphQLError(
-      `The name "${err.rootName}" is not a legal root name: a root name is 1–64 ` +
-        `lower-case ASCII letters, digits, ".", "_" or "-", beginning and ending with a letter or digit.`,
-      { extensions: { code: 'ROOT_NAME_INVALID' } },
-    );
-  }
-  if (err instanceof RootNameTakenError) {
-    throw new GraphQLError(`The name "${err.rootName}" is already taken.`, {
-      extensions: { code: 'BAD_USER_INPUT' },
-    });
-  }
-  throw err;
-}
 
 export const orgMutations = {
     updateMyProfile: async (
