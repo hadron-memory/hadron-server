@@ -72,8 +72,12 @@ acquire_stack_reservation() {
   if ! (umask 077; mkdir -- "$DIAG_LOCK"); then
     # #4607 BLIND F1: only an existing lock is a held reservation. Any other failure (permissions, a read-only or full
     # filesystem) is reported as such, after mkdir's own line, so nobody goes looking for a reservation that never existed.
-    if [ -e "$DIAG_LOCK" ] || [ -L "$DIAG_LOCK" ]; then
+    # #4607 BLIND delta: only a reservation DIRECTORY (not a symlink) is a reservation; any other entry is described
+    # as observed, never attributed to another run.
+    if [ -d "$DIAG_LOCK" ] && ! [ -L "$DIAG_LOCK" ]; then
       echo "diagnosis stack already reserved: $DIAG_LOCK; refusing (another run holds it, or a run ended without releasing it; a reservation is never taken over by age or PID; manual check required)" >&2
+    elif [ -e "$DIAG_LOCK" ] || [ -L "$DIAG_LOCK" ]; then
+      echo "could not create the diagnosis reservation $DIAG_LOCK: the path is occupied by something that is not a reservation directory; refusing (manual check required)" >&2
     else
       echo "could not create the diagnosis reservation $DIAG_LOCK (see the error above); refusing" >&2
     fi
@@ -109,8 +113,15 @@ stack_owned() {
 explain_stack_ownership_failure() {
   local state=${1:-} name=${2:-the stack instance} prefix='stack ownership unverified; refusing capture/teardown'
   if ! reservation_owned; then
-    # #4607 BLIND F3: a lost reservation is its own case, named by its path, whatever the state marker says.
-    echo "$prefix; inspect private state: $state (this run no longer holds its reservation ${DIAG_LOCK:-}; manual ownership check required)" >&2
+    # #4607 BLIND F3: a lost reservation is its own case, whatever the state marker says. #4607 BLIND delta: name the
+    # reservation only when its path is known, and point at the state only when it exists.
+    local lost="this run no longer holds its reservation ${DIAG_LOCK:-}"
+    [ -n "${DIAG_LOCK:-}" ] || lost="this run's reservation path is unknown"
+    if [ -e "$state" ] || [ -L "$state" ]; then
+      echo "$prefix; inspect private state: $state ($lost; manual ownership check required)" >&2
+    else
+      echo "$prefix: $lost, and no stack state found at $state; capture and teardown skipped (manual check required)" >&2
+    fi
   elif ! [ -e "$state" ] && ! [ -L "$state" ]; then
     echo "$prefix: no stack state found at $state, so ownership cannot be verified; capture and teardown skipped (if an Incus instance named $name exists, check it by hand)" >&2
   elif [ "$(cat "$state/diagnose-owner" 2>/dev/null)" != "${DIAG_RUN_TOKEN:-}" ]; then
