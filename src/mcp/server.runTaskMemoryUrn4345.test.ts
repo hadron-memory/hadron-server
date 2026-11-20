@@ -108,4 +108,14 @@ describe('hadron_run_task memory hint — URN forms (#4345)', () => {
     expect(a.replace(foreignUrn, '<H>')).toBe(b.replace(missingUrn, '<H>'));
     expect(a).not.toContain('Body of Foreign');
   });
+
+  it('does not resolve an unreadable memory through its legacy_urn either', async () => {
+    await db.memory.update({ where: { id: foreign.id }, data: { legacyUrn: 'old-b:old-foreign' } });
+    const legacy = 'urn:memory:old-b:old-foreign';
+    const missing = 'urn:memory:old-b:nothing-here';
+    const a = await run(asOutsider(), legacy);
+    const b = await run(asOutsider(), missing);
+    expect(a).not.toContain('Body of Foreign');
+    expect(a.replace(legacy, '<H>')).toBe(b.replace(missing, '<H>'));
+  });
 });
