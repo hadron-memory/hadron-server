@@ -169,14 +169,14 @@ export async function prepareSecretUse(
   const run = tool.run;
   const agentId = run.agentId;
   if (!agentId || tool.principal.clientId !== `run:${run.id}` || tool.principal.appId !== run.appId) throw notFound();
-  const pre = await tool.db.secretReadClient.findUnique({ where: { id: clientId }, select: { appId: true, secretId: true, grantId: true } });
+  const pre = await tool.db.secretReadClient.findUnique({ where: { id: clientId }, select: { appId: true, secretId: true, secretName: true, grantId: true } });
   if (!pre || pre.appId !== run.appId) throw notFound();
   const app = await tool.db.app.findUnique({ where: { id: run.appId }, select: { id: true, organizationId: true, ownerUserId: true } });
   const initial = await tool.db.grant.findUnique({ where: { id: pre.grantId }, select: { issuerUserId: true } });
-  if (!app || app.organizationId !== run.organizationId || !initial?.issuerUserId) throw notFound();
+  if (!app || app.organizationId !== run.organizationId || !initial) throw notFound();
   const issuer = initial.issuerUserId;
   const anchors = [{ kind: 'app' as const, id: app.id }, { kind: 'org' as const, id: run.organizationId },
-    { kind: 'user' as const, id: issuer }, { kind: 'agent' as const, id: agentId }];
+    ...(issuer ? [{ kind: 'user' as const, id: issuer }] : []), { kind: 'agent' as const, id: agentId }];
   const internal = { ...tool.principal, userId: undefined, db: tool.db } as Context;
   let known: { ownerId: string; secretId: string; secretName: string } | null = null;
   try {
@@ -189,9 +189,10 @@ export async function prepareSecretUse(
         (actual.budgetTokens !== null && actual.budgetTokens <= 0) || actual.budgetActions === null || actual.budgetActions < 1) {
       throw refusal('TOOL_DENIED', 'The web request is denied.');
     }
-    if (!(await lockSecretRow(tx, pre.secretId))) throw notFound();
+    known = { ownerId: pre.appId, secretId: pre.secretId, secretName: pre.secretName };
+    const secretLocked = await lockSecretRow(tx, pre.secretId);
     const client = await tx.secretReadClient.findUnique({ where: { id: clientId } });
-    if (!client || client.endedAt || client.appId !== run.appId || client.grantId !== pre.grantId || client.secretId !== pre.secretId) throw notFound();
+    if (!client || client.appId !== run.appId || client.grantId !== pre.grantId || client.secretId !== pre.secretId) throw notFound();
     const locked = await readGrantForUpdate(tx, client.grantId);
     const grant = await tx.grant.findUnique({ where: { id: client.grantId } });
     if (!locked || !grant || grant.action !== 'secret.use' || grant.appId !== run.appId || grant.issuerUserId !== issuer) throw notFound();
@@ -199,11 +200,13 @@ export async function prepareSecretUse(
     known = { ownerId: client.appId, secretId: client.secretId, secretName: client.secretName };
     if (!((grant.granteeAppId === run.appId && grant.agentId === null) || (grant.agentId === agentId && grant.granteeAppId === null)) ||
         grant.userId !== null || grant.workerId !== null) throw notFound();
+    if (!secretLocked || client.endedAt) throw refusal(`SECRET_READ_CLIENT_${client.endReason === 'PROTECTED' ? 'PROTECTED' : 'SECRET_DELETED'}`, 'This read client has ended.');
     if (!locked.live) {
       const [{ now }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS now`;
       const state = deadGrantState(grant, now);
       throw refusal(`SECRET_READ_CLIENT_${state}`, 'This read client is not live.');
     }
+    if (!issuer) throw refusal('SECRET_READ_CLIENT_ISSUER_GONE', 'This read client has no issuer.');
     const terms = grant.values as Record<string, unknown> | null;
     if (!terms || terms.secret !== client.secretId || terms['auto-delete'] !== 'keep' ||
         typeof terms['binding-prefix'] !== 'string' || typeof terms['binding-header'] !== 'string') throw notFound();
@@ -233,7 +236,7 @@ export async function prepareSecretUse(
     await tx.secretEvent.create({ data: { ownerType: 'app', ownerId: run.appId, secretId: secret.id, secretName: secret.name,
       clientId: client.id, versionNo: latest?.versionNo ?? null, kind: 'USE', outcome: 'OK', runId: run.id } });
     return { url, auth };
-  }, { afterLock: (tx) => lockAppManagerMemberships(tx, issuer, app) });
+  }, { afterLock: (tx) => lockAppManagerMemberships(tx, issuer ?? undefined, app) });
   } catch (error) {
     const audited = known as { ownerId: string; secretId: string; secretName: string } | null;
     const rawCode = error instanceof GraphQLError ? error.extensions?.code : undefined;
