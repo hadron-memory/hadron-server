@@ -1,11 +1,10 @@
 /** #4546: verified ineligible proof records only its time; request remains open and the existing read gate stays exclusive. */
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { Client } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
-import { cleanDb, createDbNode, createDbOrgAndGraph, createDbPersonalMemory } from '../test/helpers.js';
+import { cleanDb, createDbNode, createDbOrgAndGraph } from '../test/helpers.js';
 import { randomBytes } from 'node:crypto';
 import { USER_API_KEY_PREFIX, hashUserApiKey } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
@@ -13,10 +12,6 @@ import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../test/softPa
 import { upsertPlatformActions } from '../lib/grants/actions.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { createGrantSigningRequestInTransaction } from '../lib/signing/grantRequests.js';
-import { createSigningRequestInTransaction } from '../lib/signing/requests.js';
-import { switchCapabilities } from '../lib/signing/surface.js';
-import * as grantLocks from '../lib/signing/grantActivationLocks.js';
-import * as issuers from '../lib/grants/issuers.js';
 
 const ORIGIN = 'https://sign.example.test';
 const RP = 'example.test';
@@ -26,15 +21,12 @@ let server: Server | undefined;
 let base: string;
 let orgId: string;
 let appId: string;
-let appUrn: string;
 let memoryId: string;
 let entryNodeId: string;
-let entryNodeUrn: string;
 let workerId: string;
 let requester: { id: string };
 let admin: { id: string; key: SoftPasskey; passkeyId: string };
 let member: { id: string; key: SoftPasskey };
-let fresh: { id: string; key: SoftPasskey; passkeyId: string };
 
 async function person(handle: string, role: 'ADMIN' | 'CONTRIBUTOR' | null, opts: { firstWindow?: boolean } = {}) {
   const u = await db.user.create({ data: { handle, roles: [] } });
@@ -55,18 +47,14 @@ beforeEach(async () => {
   memoryId = graph.id;
   const app = await db.app.create({ data: { organizationId: orgId, name: 'gs-app', urn: `${org.urn}:gs-app` } });
   appId = app.id;
-  appUrn = `hrn:app:${app.urn}`;
   const node = await createDbNode(db, { loc: 'flows:nightly', memoryId, name: 'Nightly', content: 'x' });
   entryNodeId = node.id;
-  const mem = await db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } });
-  entryNodeUrn = `hrn:node:${mem.urn}:flows:nightly`;
   const agent = await db.agent.create({ data: { organizationId: orgId, name: 'gs-agent', urn: `${org.urn}:gs-agent` } });
   const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId: agent.id, name: 'gs-worker', slug: 'gs-worker' } });
   workerId = worker.id;
   requester = await db.user.create({ data: { handle: 'gs-requester', roles: [] } });
   admin = await person('gs-admin', 'ADMIN');
   member = await person('gs-member', 'CONTRIBUTOR');
-  fresh = await person('gs-fresh', 'ADMIN', { firstWindow: true });
   server = httpServer(await createServer());
   await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -145,10 +133,14 @@ const lastRefused = async (id: string) => (await db.grantSigningRequest.findUniq
 describe('#4546 anonymous refused-proof observation', () => {
   it('records the refused proof time for existing readers, keeps OPEN, and preserves the exact bare 403', async () => {
     const req = await openRequest(await insertGrant());
+    const [before] = await db.$queryRaw<Array<{ now: Date }>>`SELECT hadron_signing_now() AS now`;
     const p = await prove(req.id, member);
     expect(p.status).toBe(403);
     expect(p.text).toBe('{"error":"forbidden"}');
     expect(await lastRefused(req.id)).toBeInstanceOf(Date);
+    const [after] = await db.$queryRaw<Array<{ now: Date }>>`SELECT hadron_signing_now() AS now`;
+    expect((await lastRefused(req.id))!.getTime()).toBeGreaterThanOrEqual(before.now.getTime());
+    expect((await lastRefused(req.id))!.getTime()).toBeLessThanOrEqual(after.now.getTime());
     const out = await read(req.id, admin.id);
     expect(out.errors).toBeUndefined();
     expect(out.data?.grantSigningRequest).toEqual({ id: req.id, state: 'OPEN', endedAt: null, lastRefusedAt: (await lastRefused(req.id))!.toISOString() });
@@ -171,6 +163,30 @@ describe('#4546 anonymous refused-proof observation', () => {
     }
   });
 
+  it('consumes known and unknown valid refused proofs identically, and a replay cannot refresh the observation', async () => {
+    const req = await openRequest(await insertGrant());
+    for (const id of [req.id, 'A'.repeat(22)]) {
+      const c = await post(id, 'proof/challenge', {});
+      const cookie = (c.headers.get('set-cookie') ?? '').split(';')[0];
+      const { ceremonyId, challenge } = await c.json() as { ceremonyId: string; challenge: string };
+      const counter = id === req.id ? 1 : 2;
+      const assertion = member.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(challenge, 'base64url'), origin: ORIGIN, rpId: RP, counter });
+      const body = assertionBody(ceremonyId, member.key, assertion);
+      const response = await post(id, 'proof', body, cookie);
+      expect(response.status).toBe(403);
+      expect(await response.text()).toBe('{"error":"forbidden"}');
+      const proof = await db.passkeyCeremony.findUniqueOrThrow({ where: { id: ceremonyId } });
+      expect(proof.consumedAt).toBeInstanceOf(Date);
+      const rows = await db.$queryRaw<Array<{ counter: bigint }>>`SELECT counter FROM passkey_credentials WHERE owner_id = ${member.id}`;
+      expect(Number(rows[0].counter)).toBe(counter);
+      const observed = await lastRefused(req.id);
+      const replay = await post(id, 'proof', body, cookie);
+      expect(replay.status).toBe(403);
+      expect(await replay.text()).toBe('{"error":"forbidden"}');
+      expect(await lastRefused(req.id)).toEqual(observed);
+    }
+  });
+
   it('a lawful proof records no refusal and still opens signing', async () => {
     const req = await openRequest(await insertGrant());
     const p = await prove(req.id, admin);
@@ -190,6 +206,41 @@ describe('#4546 anonymous refused-proof observation', () => {
     expect(await lastRefused(req.id)).toBeNull();
   });
 
+  it('a well-shaped assertion from the wrong origin records no refusal time', async () => {
+    const req = await openRequest(await insertGrant());
+    const c = await post(req.id, 'proof/challenge', {});
+    const cookie = (c.headers.get('set-cookie') ?? '').split(';')[0];
+    const { ceremonyId, challenge } = await c.json() as { ceremonyId: string; challenge: string };
+    const assertion = member.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(challenge, 'base64url'), origin: 'https://other.example.test', rpId: RP });
+    const r = await post(req.id, 'proof', assertionBody(ceremonyId, member.key, assertion), cookie);
+    expect(r.status).toBe(403);
+    expect(await r.text()).toBe('{"error":"forbidden"}');
+    expect(await lastRefused(req.id)).toBeNull();
+    expect((await db.passkeyCeremony.findUniqueOrThrow({ where: { id: ceremonyId } })).consumedAt).toBeNull();
+  });
+
+  it('an effectively expired but still stored-open request cannot gain a refusal observation', async () => {
+    const req = await openRequest(await insertGrant());
+    const id = randomBytes(16).toString('base64url');
+    await db.$executeRaw`INSERT INTO grant_signing_requests
+      (id, grant_id, version, terms_hash, payload_version, requester_user_id, created_at, expires_at)
+      SELECT ${id}, grant_id, version, terms_hash, payload_version, requester_user_id,
+        hadron_signing_now(), hadron_signing_now() + interval '0.05 second'
+      FROM grant_signing_requests WHERE id = ${req.id}`;
+    for (let n = 0; n < 100; n++) {
+      const [r] = await db.$queryRaw<Array<{ expired: boolean }>>`SELECT expires_at <= hadron_signing_now() AS expired FROM grant_signing_requests WHERE id = ${id}`;
+      if (r.expired) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const [deadline] = await db.$queryRaw<Array<{ expired: boolean }>>`SELECT expires_at <= hadron_signing_now() AS expired FROM grant_signing_requests WHERE id = ${id}`;
+    expect(deadline.expired).toBe(true);
+    const p = await prove(id, member);
+    expect(p.status).toBe(403);
+    expect(p.text).toBe('{"error":"forbidden"}');
+    expect(await lastRefused(id)).toBeNull();
+    expect((await read(id, admin.id)).data?.grantSigningRequest?.state).toBe('EXPIRED');
+  });
+
   it('a refused proof on an ended request cannot alter its history or state', async () => {
     const req = await openRequest(await insertGrant());
     await db.$executeRaw`UPDATE grant_signing_requests SET state = 'withdrawn' WHERE id = ${req.id}`;
@@ -199,5 +250,7 @@ describe('#4546 anonymous refused-proof observation', () => {
     expect(p.text).toBe('{"error":"forbidden"}');
     expect(await db.grantSigningRequest.findUniqueOrThrow({ where: { id: req.id } })).toEqual(before);
     expect(await lastRefused(req.id)).toBeNull();
+    const rows = await db.$queryRaw<Array<{ counter: bigint }>>`SELECT counter FROM passkey_credentials WHERE owner_id = ${member.id}`;
+    expect(Number(rows[0].counter)).toBe(1); // Refusal consumption must match an unknown request even when ended.
   });
 });

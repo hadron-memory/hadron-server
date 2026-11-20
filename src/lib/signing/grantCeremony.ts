@@ -260,7 +260,10 @@ async function summaryFor(ctx: Context, tx: Prisma.TransactionClient, g: GrantRo
  * The proof step. Verifies the assertion over the request-bound proof challenge OUTSIDE any transaction, then in one
  * transaction: anchors the prover (exclusive, as node signing's proof), spends the proof ceremony, and refuses unless the
  * prover may ISSUE the grant. Only then are the terms built and, when the prover can read every node they name, the one
- * signing ceremony minted. A refusal throws `CeremonyRefused` and rolls back, so it spends nothing and moves no counter.
+ * signing ceremony minted. #4546: a cryptographically valid proof is consumed for both unknown and ineligible requests;
+ * a known OPEN request also records only the refusal time. The bare refusal is thrown AFTER commit. Consuming unknown
+ * proofs too prevents the prover using their own credential counter as a grant-existence oracle. Invalid proofs still roll
+ * back. The request state and signature/activation permissions never change.
  */
 export async function proveForGrantSigning(db: PrismaClient, a: {
   requestId: string; ceremonyId: string; browserNonceHash: string;
@@ -277,7 +280,7 @@ export async function proveForGrantSigning(db: PrismaClient, a: {
     });
   } catch { throw new CeremonyRefused(); }
 
-  return db.$transaction(async (tx) => {
+  const result = await db.$transaction<GrantProofResult | null>(async (tx) => {
     await lockAuthorityAnchors(tx, [{ kind: 'user', id: cred.owner_id }], 'exclusive');
     const ctx = await personContext(tx, cred.owner_id);
     if (!ctx) throw new CeremonyRefused();
@@ -285,11 +288,18 @@ export async function proveForGrantSigning(db: PrismaClient, a: {
     if (!decided || decided.ownerId !== cred.owner_id) throw new CeremonyRefused();
 
     const row = await tx.grantSigningRequest.findUnique({ where: { id: a.requestId } });
-    if (!row) throw new CeremonyRefused();
+    if (!row) return null;
     const grantApp = await tx.grant.findUnique({ where: { id: row.grantId }, select: { appId: true, action: true } });
-    if (!grantApp) throw new CeremonyRefused();
+    if (!grantApp) return null;
     // The issuer gate before anything about the grant: someone who may not issue it learns nothing, not even that it exists.
-    if (!(await mayIssue(ctx, grantApp.action, grantApp.appId, row.grantId))) throw new CeremonyRefused();
+    if (!(await mayIssue(ctx, grantApp.action, grantApp.appId, row.grantId))) {
+      // Follow every request writer: grant before request. Rejudge on the DB clock AFTER the grant lock;
+      // a concurrent withdrawal/completion/expiry must never acquire an observation after it ended.
+      await tx.$queryRaw`SELECT id FROM grants WHERE id = ${row.grantId} FOR UPDATE`;
+      await tx.$executeRaw`UPDATE grant_signing_requests SET last_refused_at = hadron_signing_now()
+        WHERE id = ${row.id} AND state = 'open' AND expires_at > hadron_signing_now()`;
+      return null;
+    }
 
     const [{ now }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT hadron_signing_now() AS now`;
     const state = effectiveRequestState(row, now);
@@ -333,6 +343,8 @@ export async function proveForGrantSigning(db: PrismaClient, a: {
               (clock_timestamp() AT TIME ZONE 'UTC') + make_interval(secs => ${GRANT_SIGN_TTL_SECONDS}), ${cred.owner_id}, 'sign')`;
     return { outcome: 'open' as const, view, canSign: true, sessionNonce };
   });
+  if (result === null) throw new CeremonyRefused();
+  return result;
 }
 
 /**
