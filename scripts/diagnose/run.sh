@@ -55,7 +55,7 @@ down() {
     rm -- "$state/diagnose-owner"
     (cd "$stage/src" && scripts/e2e/stack.sh down "$worker") || cleanup_rc=5
   else
-    explain_unowned_stack "$state" "$project"   # #2628: which case, and the path only when there is one to inspect
+    explain_stack_ownership_failure "${state:-}" "${project:-}"   # #2628: which case, and the path only when there is one to inspect
     if [ "$rc" = 0 ]; then cleanup_rc=5; fi
   fi
   if [ -n "$stage" ]; then git -C "$root" worktree remove --force "$stage/src" || cleanup_rc=5; rm -rf -- "$stage"; fi

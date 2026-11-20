@@ -69,10 +69,16 @@ acquire_stack_reservation() {
   DIAG_STATE=$1 DIAG_PROJECT=$2
   DIAG_LOCK="$DIAG_STATE.diagnose-lock"
   mkdir -p -- "$(dirname -- "$DIAG_STATE")" || return 1
-  (umask 077; mkdir -- "$DIAG_LOCK") || {
-    echo "diagnosis stack already reserved: $DIAG_LOCK; refusing (another run holds it, or a run ended without releasing it; a reservation is never taken over by age or PID; manual check required)" >&2
+  if ! (umask 077; mkdir -- "$DIAG_LOCK"); then
+    # #4607 BLIND F1: only an existing lock is a held reservation. Any other failure (permissions, a read-only or full
+    # filesystem) is reported as such, after mkdir's own line, so nobody goes looking for a reservation that never existed.
+    if [ -e "$DIAG_LOCK" ] || [ -L "$DIAG_LOCK" ]; then
+      echo "diagnosis stack already reserved: $DIAG_LOCK; refusing (another run holds it, or a run ended without releasing it; a reservation is never taken over by age or PID; manual check required)" >&2
+    else
+      echo "could not create the diagnosis reservation $DIAG_LOCK (see the error above); refusing" >&2
+    fi
     return 1
-  }
+  fi
   DIAG_RUN_TOKEN=$(node -e "process.stdout.write(require('crypto').randomUUID())") || { rmdir -- "$DIAG_LOCK"; return 1; }
   if ! printf '%s\n' "$DIAG_RUN_TOKEN" > "$DIAG_LOCK/owner"; then rm -f -- "$DIAG_LOCK/owner"; rmdir -- "$DIAG_LOCK"; return 1; fi
   if ! refuse_existing_stack "$DIAG_STATE" "$DIAG_PROJECT"; then release_stack_reservation; return 1; fi
@@ -96,14 +102,18 @@ stack_owned() {
   [ "$marker" = "$DIAG_RUN_TOKEN" ] || return 1
 }
 
-# explain_unowned_stack <state-dir> <instance-name>: why stack_owned refused, for the end-of-run line (#2628). It reads the same facts stack_owned
-# does and changes nothing. Missing state means the run stopped before the stack existed, so there is no path to
-# inspect; otherwise the line names the state path and says which check failed. It never advises removing anything.
-explain_unowned_stack() {
-  local state=${1:?state} name=${2:?instance name} prefix='stack ownership unverified; refusing capture/teardown'
-  if ! [ -e "$state" ] && ! [ -L "$state" ]; then
-    echo "$prefix: no stack state was created at $state; nothing to capture or tear down" >&2
-  elif ! reservation_owned || [ "$(cat "$state/diagnose-owner" 2>/dev/null)" != "${DIAG_RUN_TOKEN:-}" ]; then
+# explain_stack_ownership_failure <state-dir> <instance-name>: why stack_owned refused, for the end-of-run line (#2628).
+# It reads the same facts stack_owned does and changes nothing, and names which check failed. Missing state proves only
+# that the path is absent now, not that nothing was created (#4607 BLIND F2), so that line claims no more than that.
+# It never advises removing anything, and tolerates missing arguments so the rest of the EXIT trap always runs.
+explain_stack_ownership_failure() {
+  local state=${1:-} name=${2:-the stack instance} prefix='stack ownership unverified; refusing capture/teardown'
+  if ! reservation_owned; then
+    # #4607 BLIND F3: a lost reservation is its own case, named by its path, whatever the state marker says.
+    echo "$prefix; inspect private state: $state (this run no longer holds its reservation ${DIAG_LOCK:-}; manual ownership check required)" >&2
+  elif ! [ -e "$state" ] && ! [ -L "$state" ]; then
+    echo "$prefix: no stack state found at $state, so ownership cannot be verified; capture and teardown skipped (if an Incus instance named $name exists, check it by hand)" >&2
+  elif [ "$(cat "$state/diagnose-owner" 2>/dev/null)" != "${DIAG_RUN_TOKEN:-}" ]; then
     echo "$prefix; inspect private state: $state (it does not carry this run's owner marker: created outside this run or by another holder; manual ownership check required)" >&2
   else
     echo "$prefix; inspect private state: $state (this run's state, but the Incus instance $name is missing, unreadable or not marked by this run; manual ownership check required)" >&2
