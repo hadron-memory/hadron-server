@@ -2512,6 +2512,8 @@ export const sessionMutations = {
 
       // #4488: the revision is judged live and pinned in ONE transaction under the delete's locks (the revision's loc,
       // then the Agent row), so a concurrent deleteAgentRevision cannot leave the pin on a deleted revision.
+      // Same order as the delete (revision loc, then Agent row; the delete's extra revisions-path lock comes before both and
+      // publish never holds one while waiting for it), so the two cannot deadlock. Table `agents` is Agent's @@map name.
       const label = await ctx.db.$transaction(async (tx) => {
         await lockNodeForDelete(tx, sysMemId, revisionLoc);
         await tx.$queryRaw`SELECT id FROM agents WHERE id = ${resolvedAgentId} FOR UPDATE`;
