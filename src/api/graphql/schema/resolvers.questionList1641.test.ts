@@ -97,8 +97,8 @@ beforeEach(async () => {
   ] });
   // One App, two memories: A in this org (its members read it), B in another org (only its members read it).
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: 'list.example:team' } });
-  memA = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'team-a' }, as());
-  memB = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'team-b' }, as());
+  memA = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'team-a' }, as());
+  memB = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'team-b' }, as());
   logA = await M.createQuestionLog(null, { memoryRef: memA.id, loc: 'questions', defaultDeciders: [holger.id, admin.id] }, as());
   logB = await M.createQuestionLog(null, { memoryRef: memB.id, loc: 'questions', defaultDeciders: [admin.id] }, as());
   // Attach the memories to the App after the logs exist, so decider eligibility is judged on the plain org memories.
@@ -359,7 +359,7 @@ describe('#4428 acceptance 11: questionLogs', () => {
     const spy = vi.spyOn(questionsModule.questionListBounds, 'logCap').mockReturnValue(2);
     try {
       expect((await Q.questionLogs(null, { appRef: app.id }, as(admin.id))).length).toBe(2);
-      const memC = await resolvers.Mutation.createMemory(null, { orgId, name: 'team-c' }, as());
+      const memC = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'team-c' }, as());
       await M.createQuestionLog(null, { memoryRef: memC.id, loc: 'questions', defaultDeciders: [admin.id] }, as());
       await db.memory.update({ where: { id: memC.id }, data: { appId: app.id, class: 'app', visibility: null } });
       expect(await codeOf(Q.questionLogs(null, { appRef: app.id }, as(admin.id)))).toBe('QUESTION_LOG_TOO_LARGE_FOR_FILTER');
