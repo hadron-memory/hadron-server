@@ -114,3 +114,25 @@ test('isMainModule is exactly Node\'s import.meta.main: no argv[1] fallback (#46
   // A Node without import.meta.main: not main, so the CLI prints no record and the runner refuses the run.
   expect(isMainModule(undefined)).toBe(false);
 });
+
+// #4608 BLIND delta P3: an unsupported runtime is never silent: a named line on stderr and a non-zero exit code.
+test('on a Node without import.meta.main the module says so and sets a non-zero exit code, without exiting', async () => {
+  const { flagUnsupportedRuntime, UNSUPPORTED_NODE } = await import('./load.mjs');
+  const written = [];
+  const proc = { stderr: { write: (t) => { written.push(t); return true; } }, exitCode: undefined };
+  expect(flagUnsupportedRuntime(undefined, proc)).toBe(true);
+  expect(written).toEqual([`${UNSUPPORTED_NODE}\n`]);
+  expect(proc.exitCode).toBe(2);
+  for (const main of [true, false]) {
+    const quiet = { stderr: { write: () => { throw new Error('must not write'); } }, exitCode: undefined };
+    expect(flagUnsupportedRuntime(main, quiet)).toBe(false);
+    expect(quiet.exitCode).toBeUndefined();
+  }
+});
+
+test('on this (supported) Node, a direct run and an import print no runtime warning', () => {
+  ranOnce(drive([], join(here, 'load.mjs')));
+  const imported = importWith(join(here, 'load.mjs'));
+  expect(imported.stderr).not.toContain('import.meta.main');
+  expect(imported.status).toBe(0);
+});
