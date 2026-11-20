@@ -111,7 +111,7 @@ describe('#1507 persisted sync outcome', () => {
     await db.orgMember.create({ data: { organizationId: graph.organizationId!, userId: owner.id, role: 'OWNER' } });
     if (door === 'GraphQL') {
       const { resolvers } = await import('../../api/graphql/schema/resolvers.js');
-      await resolvers.Mutation.syncMemory({}, { id: graph.id }, { db, userId: owner.id, roles: ['READER'] });
+      await resolvers.Mutation.syncMemory({}, { ref: graph.id }, { db, userId: owner.id, roles: ['READER'] });
     } else if (door === 'MCP') {
       const { createTestableMcpServer } = await import('../../mcp/server.js');
       const server = createTestableMcpServer({ userId: owner.id, roles: ['READER'], clientId: `user:${owner.id}` });

@@ -298,7 +298,7 @@ describe('owner deletion cleans up secrets', () => {
     // deleteOrganization requires platform ADMIN (requireRole).
     await db.user.update({ where: { id: admin.id }, data: { roles: ['ADMIN'] } });
     await expect(
-      resolvers.Mutation.deleteOrganization({}, { id: org.id }, ctxFor(admin.id, ['ADMIN'])),
+      resolvers.Mutation.deleteOrganization({}, { ref: org.id }, ctxFor(admin.id, ['ADMIN'])),
     ).resolves.toBe(true);
     expect(await db.secret.findUnique({ where: { id: secret.id } })).toBeNull();
   });

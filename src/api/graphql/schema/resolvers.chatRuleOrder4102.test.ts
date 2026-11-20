@@ -81,8 +81,8 @@ async function readOrder(revisionLoc: string | null) {
 }
 
 async function publish(): Promise<string> {
-  const rev = await resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx());
-  await resolvers.Mutation.publishRevision({}, { agentId: agent.id, revisionLoc: rev.revisionLoc }, adminCtx());
+  const rev = await resolvers.Mutation.createRevision({}, { agentRef: agent.id }, adminCtx());
+  await resolvers.Mutation.publishRevision({}, { agentRef: agent.id, revisionLoc: rev.revisionLoc }, adminCtx());
   return rev.revisionLoc as string;
 }
 

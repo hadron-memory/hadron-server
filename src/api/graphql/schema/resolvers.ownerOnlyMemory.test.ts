@@ -66,7 +66,7 @@ it('syncMemory exposes a missing Git name as typed input error', async () => {
     errorCode: 'BAD_USER_INPUT',
   });
 
-  await expect(resolvers.Mutation.syncMemory(null, { id: graphId }, asOrgAdmin()))
+  await expect(resolvers.Mutation.syncMemory(null, { ref: graphId }, asOrgAdmin()))
     .rejects.toMatchObject({
       message: 'Git sync cannot import "glossary/noname.md": name must be a non-empty string.',
       extensions: { code: 'BAD_USER_INPUT' },
@@ -74,7 +74,7 @@ it('syncMemory exposes a missing Git name as typed input error', async () => {
 });
 
 async function createPrivate(name = 'my-private') {
-  return resolvers.Mutation.createMemory(null, { orgId: org.id, name, memoryClass: 'private' } as any, asOwner());
+  return resolvers.Mutation.createMemory(null, { orgRef: org.id, name, memoryClass: 'private' } as any, asOwner());
 }
 
 describe('createMemory — owner-owned classes', () => {
@@ -89,7 +89,7 @@ describe('createMemory — owner-owned classes', () => {
   });
 
   it('a READER member can create a personal memory they own', async () => {
-    const mem = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'my-personal', memoryClass: 'personal' } as any, asOwner());
+    const mem = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'my-personal', memoryClass: 'personal' } as any, asOwner());
     expect(mem.class).toBe('personal');
     expect(mem.visibility).toBeNull();
     expect(mem.userId).toBe(owner.id);
@@ -98,13 +98,13 @@ describe('createMemory — owner-owned classes', () => {
   it('a non-member cannot create a personal/private memory in the org', async () => {
     const stranger = await db.user.create({ data: { githubId: 5004, githubUsername: 'stranger', roles: ['READER'] } });
     await expect(
-      resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'nope', memoryClass: 'private' } as any, ctx({ userId: stranger.id, roles: ['READER'] })),
+      resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'nope', memoryClass: 'private' } as any, ctx({ userId: stranger.id, roles: ['READER'] })),
     ).rejects.toThrow();
   });
 
   it('an unauthenticated / app-key caller cannot create a personal/private memory', async () => {
     await expect(
-      resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'nope2', memoryClass: 'private' } as any, ctx({ appId: 'some-app' })),
+      resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'nope2', memoryClass: 'private' } as any, ctx({ appId: 'some-app' })),
     ).rejects.toThrow();
   });
 });
@@ -112,7 +112,7 @@ describe('createMemory — owner-owned classes', () => {
 describe('private/personal access is owner-only', () => {
   it.each(['private', 'personal'] as const)('updateMemory manages an org-anchored %s memory only for its strict owner', async (memoryClass) => {
     const mem = await resolvers.Mutation.createMemory(
-      null, { orgId: org.id, name: `${memoryClass}-settings`, memoryClass } as any, asOwner(),
+      null, { orgRef: org.id, name: `${memoryClass}-settings`, memoryClass } as any, asOwner(),
     );
     await db.memory.update({
       where: { id: mem.id },
@@ -156,7 +156,7 @@ describe('private/personal access is owner-only', () => {
 
   it('does not let an old org admin write after a concurrent ownership transfer', async () => {
     const mem = await resolvers.Mutation.createMemory(
-      null, { orgId: org.id, name: 'transferring-memory' }, asOrgAdmin(),
+      null, { orgRef: org.id, name: 'transferring-memory' }, asOrgAdmin(),
     );
     const destination = await db.organization.create({
       data: { id: generateId(), name: 'destination', urn: 'destination' },
@@ -184,7 +184,7 @@ describe('private/personal access is owner-only', () => {
 
   it('asks a manager of both orgs to retry after a concurrent transfer', async () => {
     const mem = await resolvers.Mutation.createMemory(
-      null, { orgId: org.id, name: 'transfer-retry' }, asOrgAdmin(),
+      null, { orgRef: org.id, name: 'transfer-retry' }, asOrgAdmin(),
     );
     const destination = await db.organization.create({
       data: { id: generateId(), name: 'managed-destination', urn: 'managed-destination' },
@@ -225,14 +225,14 @@ describe('private/personal access is owner-only', () => {
     });
 
     await expect(resolvers.Mutation.setMemorySourceToken(null, {
-      id: mem.id, token: 'former-owner-token',
+      ref: mem.id, token: 'former-owner-token',
     }, ctx({ userId: owner.id, roles: ['READER'], db: raceDb }))).rejects.toThrow('MEMORY_NOT_FOUND');
     expect((await db.memory.findUniqueOrThrow({ where: { id: mem.id } })).sourceTokenEncrypted).toBeNull();
   });
 
   it('does not let a former manager restamp failed embeddings after an org transfer', async () => {
     const mem = await resolvers.Mutation.createMemory(
-      null, { orgId: org.id, name: 'embedding-race' }, asOrgAdmin(),
+      null, { orgRef: org.id, name: 'embedding-race' }, asOrgAdmin(),
     );
     const node = await db.node.create({
       data: { id: generateId(), memoryId: mem.id, loc: 'failed-embedding', name: 'failed-embedding' },
@@ -297,13 +297,13 @@ describe('private/personal access is owner-only', () => {
 
   it.each(['private', 'personal'] as const)('other management mutations conceal an org-anchored %s memory from its admin', async (memoryClass) => {
     const mem = await resolvers.Mutation.createMemory(
-      null, { orgId: org.id, name: `${memoryClass}-controls`, memoryClass } as any, asOwner(),
+      null, { orgRef: org.id, name: `${memoryClass}-controls`, memoryClass } as any, asOwner(),
     );
     const controls = [
       () => resolvers.Mutation.retryFailedEmbeddings(null, { memoryRef: mem.id }, asOrgAdmin()),
-      () => resolvers.Mutation.setMemorySourceToken(null, { id: mem.id, token: 'synthetic-token' }, asOrgAdmin()),
-      () => resolvers.Mutation.syncMemory(null, { id: mem.id }, asOrgAdmin()),
-      () => resolvers.Mutation.pushMemoryToGit(null, { id: mem.id }, asOrgAdmin()),
+      () => resolvers.Mutation.setMemorySourceToken(null, { ref: mem.id, token: 'synthetic-token' }, asOrgAdmin()),
+      () => resolvers.Mutation.syncMemory(null, { ref: mem.id }, asOrgAdmin()),
+      () => resolvers.Mutation.pushMemoryToGit(null, { ref: mem.id }, asOrgAdmin()),
       () => resolvers.Mutation.updateMemorySubscription(
         null, { memoryRef: mem.id, orgRef: org.id, role: 'READER' }, asOrgAdmin(),
       ),
@@ -313,9 +313,9 @@ describe('private/personal access is owner-only', () => {
     }
 
     expect(await resolvers.Mutation.retryFailedEmbeddings(null, { memoryRef: mem.id }, asOwner())).toBe(0);
-    await resolvers.Mutation.setMemorySourceToken(null, { id: mem.id, token: 'owner-token' }, asOwner());
+    await resolvers.Mutation.setMemorySourceToken(null, { ref: mem.id, token: 'owner-token' }, asOwner());
     expect((await db.memory.findUniqueOrThrow({ where: { id: mem.id } })).sourceTokenEncrypted).toBeTruthy();
-    await expect(resolvers.Mutation.syncMemory(null, { id: mem.id }, asOwner())).resolves.toBeTruthy();
+    await expect(resolvers.Mutation.syncMemory(null, { ref: mem.id }, asOwner())).resolves.toBeTruthy();
   });
 
   it('the owner can read, list, and write their private memory', async () => {
@@ -357,7 +357,7 @@ describe('private/personal access is owner-only', () => {
     'an App-selected platform admin cannot replace text in another user\'s %s memory',
     async (memoryClass) => {
       const mem = await resolvers.Mutation.createMemory(
-        null, { orgId: org.id, name: `${memoryClass}-replace`, memoryClass } as any, asOwner(),
+        null, { orgRef: org.id, name: `${memoryClass}-replace`, memoryClass } as any, asOwner(),
       );
       const node = await db.node.create({
         data: { id: generateId(), memoryId: mem.id, loc: 'sentinel', name: 'sentinel', content: 'cat sentinel' },
@@ -381,7 +381,7 @@ describe('private/personal access is owner-only', () => {
 
   it.each(['private', 'personal'] as const)('an App selection admits the subscribed %s owner, not a pure App key or a platform OWNER', async (memoryClass) => {
     const mem = await resolvers.Mutation.createMemory(
-      null, { orgId: org.id, name: `${memoryClass}-selected`, memoryClass } as any, asOwner(),
+      null, { orgRef: org.id, name: `${memoryClass}-selected`, memoryClass } as any, asOwner(),
     );
     const app = await db.app.create({
       data: { id: generateId(), organizationId: org.id, urn: `micromentor:${memoryClass}-selected-app`, name: 'selected-app' },
@@ -408,7 +408,7 @@ describe('private/personal access is owner-only', () => {
 
 describe('MemoryShare boundary (U8)', () => {
   it('a personal memory can be shared; a private memory cannot', async () => {
-    const personal = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'sharable', memoryClass: 'personal' } as any, asOwner());
+    const personal = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'sharable', memoryClass: 'personal' } as any, asOwner());
     // personal: share accepted
     const share = await resolvers.Mutation.createMemoryShare(null, { memoryId: personal.id, granteeId: other.id, role: 'writer' } as any, asOwner());
     expect(share).toBeTruthy();
@@ -424,7 +424,7 @@ describe('myMemories — active-org scope (#463)', () => {
   it('shows the caller own personal memories regardless of the active org (category 1)', async () => {
     // Owner's personal memory in org A (the beforeEach org).
     const personalA = await resolvers.Mutation.createMemory(
-      null, { orgId: org.id, name: 'personal-a', memoryClass: 'personal' } as any, asOwner(),
+      null, { orgRef: org.id, name: 'personal-a', memoryClass: 'personal' } as any, asOwner(),
     );
     // A second org the owner also belongs to, with their own personal memory.
     const orgB = await db.organization.create({
@@ -432,7 +432,7 @@ describe('myMemories — active-org scope (#463)', () => {
     });
     await db.orgMember.create({ data: { organizationId: orgB.id, userId: owner.id, role: 'READER' } });
     const personalB = await resolvers.Mutation.createMemory(
-      null, { orgId: orgB.id, name: 'personal-b', memoryClass: 'personal' } as any, asOwner(),
+      null, { orgRef: orgB.id, name: 'personal-b', memoryClass: 'personal' } as any, asOwner(),
     );
 
     // Unscoped: both personal memories present (cross-org union).

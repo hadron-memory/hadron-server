@@ -320,7 +320,7 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
     const link = await legacyLink('foreignPersonal', 'read-write');
     await giveConversation(link.agentId);
     const before = await db.node.count({ where: { memoryId: mem.foreignPersonal!.id } });
-    const response = await gql(link.appKey, 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }', { agent: link.agentId });
+    const response = await gql(link.appKey, 'mutation($agent: ID!) { startChat(agentRef: $agent) { chatId } }', { agent: link.agentId });
     expect(response.errors, JSON.stringify(response)).toBeDefined();
     expect(await db.node.count({ where: { memoryId: mem.foreignPersonal!.id } })).toBe(before);
   });
@@ -329,7 +329,7 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
     const link = await legacyLink('homeOrg', 'read-write');
     await giveConversation(link.agentId);
     const before = await db.node.count({ where: { memoryId: mem.homeOrg!.id } });
-    const response = await gql(link.appKey, 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }', { agent: link.agentId });
+    const response = await gql(link.appKey, 'mutation($agent: ID!) { startChat(agentRef: $agent) { chatId } }', { agent: link.agentId });
     expect(response.errors, JSON.stringify(response)).toBeDefined();
     expect(await db.node.count({ where: { memoryId: mem.homeOrg!.id } })).toBe(before);
   });
@@ -342,7 +342,7 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
     const response = await fetch(`${baseUrl}/graphql`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', Authorization: `Bearer ${link.appKey}`, 'x-hadron-session': session.id },
-      body: JSON.stringify({ query: 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }', variables: { agent: link.agentId } }),
+      body: JSON.stringify({ query: 'mutation($agent: ID!) { startChat(agentRef: $agent) { chatId } }', variables: { agent: link.agentId } }),
     });
     expect(((await response.json()) as { errors?: unknown }).errors).toBeDefined();
     expect(await db.node.count({ where: { memoryId: mem.homeOrg!.id } })).toBe(before);
@@ -368,7 +368,7 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
       const response = await fetch(`${baseUrl}/graphql`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', Authorization: `Bearer ${link.appKey}`, 'x-hadron-session': session.id },
-        body: JSON.stringify({ query: 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }', variables: { agent: link.agentId } }),
+        body: JSON.stringify({ query: 'mutation($agent: ID!) { startChat(agentRef: $agent) { chatId } }', variables: { agent: link.agentId } }),
       });
       const body = (await response.json()) as { errors?: unknown; data?: { startChat?: { chatId?: string } } };
       expect(body.errors, `${cls}: ${JSON.stringify(body)}`).toBeUndefined();
@@ -400,7 +400,7 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
       data: { id: generateId(), urn: `home-${suffix}:shared-${generateId()}`, name: 'shared', organizationId: homeOrgId, class: 'app', appId: link.appId } as never,
     });
     await db.agentMemoryItem.create({ data: { id: generateId(), agentId: link.agentId, memoryId: shared.id, role: 'read-write' } });
-    const response = await gql(link.appKey, 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }', { agent: link.agentId });
+    const response = await gql(link.appKey, 'mutation($agent: ID!) { startChat(agentRef: $agent) { chatId } }', { agent: link.agentId });
     expect(response.errors, JSON.stringify(response)).toBeDefined();
     expect(await db.node.count({ where: { memoryId: shared.id } })).toBe(0);
   });
@@ -435,7 +435,7 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
       await db.node.create({ data: { id: generateId(), memoryId: sys.id, loc, name: loc.split(':').pop()!, nodeType: 'system', data: data as never, content } });
     }
     const before = await db.node.count({ where: { memoryId: mem.foreignOrg!.id } });
-    const err = await resolvers.Mutation.startChat({}, { agentId: foreign.agentId }, { db, appId: foreign.appId, roles: ['READER'] } as never)
+    const err = await resolvers.Mutation.startChat({}, { agentRef: foreign.agentId }, { db, appId: foreign.appId, roles: ['READER'] } as never)
       .then(() => null, (e: Error) => e.message);
     expect(err).toMatch(/No target memory available/);
     expect(await db.node.count({ where: { memoryId: mem.foreignOrg!.id } })).toBe(before);
@@ -465,7 +465,7 @@ describe("#1349 Slice 1 — the same-App row grants nothing extra (Vera's contro
   });
 });
 
-const START_CHAT = 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }';
+const START_CHAT = 'mutation($agent: ID!) { startChat(agentRef: $agent) { chatId } }';
 
 describe('#2895 — optional pins from the #2885 review (refs #1376)', () => {
   /** A session-bound bare App key calling startChat, the shape #2885 gates on the session's verified reach. */
@@ -534,7 +534,7 @@ describe('#2895 — optional pins from the #2885 review (refs #1376)', () => {
       b.errors?.map(({ message, extensions }) => ({ message, ...extensions, requestId: undefined }));
     expect(shape(refused)).toEqual(shape(unreadable));
     // and at the resolver, where HTTP masks the text, both are the same "No target memory" refusal
-    const direct = (sessionId: string) => resolvers.Mutation.startChat({}, { agentId: link.agentId }, { db, appId: link.appId, sessionId, roles: ['READER'] } as never)
+    const direct = (sessionId: string) => resolvers.Mutation.startChat({}, { agentRef: link.agentId }, { db, appId: link.appId, sessionId, roles: ['READER'] } as never)
       .then(() => null, (e: Error) => e.message);
     expect(await direct(session.id)).toMatch(/No target memory available/);
     expect(await direct(session.id)).toBe(await direct(other.id));

@@ -36,7 +36,7 @@ beforeEach(async () => {
   const owner = await db.user.create({ data: { id: generateId(), githubId: 13000, githubUsername: `cust-${t}` } });
   ownerId = owner.id;
   await db.orgMember.create({ data: { organizationId: org.id, userId: owner.id, role: 'OWNER' } });
-  const mem = await M.createMemory({}, { orgId: org.id, name: `specs-${t}` }, await ownerCtx());
+  const mem = await M.createMemory({}, { orgRef: org.id, name: `specs-${t}` }, await ownerCtx());
   memoryId = mem.id;
 });
 

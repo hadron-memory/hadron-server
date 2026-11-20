@@ -70,7 +70,7 @@ beforeEach(async () => {
   await db.orgMember.create({
     data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
   });
-  memory = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'sr-mem' }, ctx());
+  memory = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'sr-mem' }, ctx());
 });
 
 describe('searchReplaceInNodes — selection + replacement', () => {
