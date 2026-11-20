@@ -11,6 +11,7 @@ import { insertSoftPasskey, softPasskey } from '../../test/softPasskey.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { openSecretProof, proveSecretChange, completeSecretChange } from './changeCeremony.js';
 import { type ChangeRequest, sweepExpiredSecretChanges } from './changeRequests.js';
+import { upsertPlatformActions } from '../grants/actions.js';
 import { currentAppSecretValue } from './appSecrets.js';
 import { unwrapAppKey, secretVersionAad } from './appKeys.js';
 import { decryptBytesAad } from '../tokenCrypto.js';
@@ -32,7 +33,7 @@ const row=async(id:string)=>(await db.$queryRaw<ChangeRequest[]>`SELECT * FROM s
 beforeEach(async()=>{
  process.env.SECRET_ROOT_KEY='22'.repeat(32);process.env.PASSKEY_SIGNING_ENABLED='true';
  process.env.PASSKEY_RP_ID=RP;process.env.SIGNING_CEREMONY_ORIGINS=ORIGIN;
- await cleanDb(db);
+ await cleanDb(db); await upsertPlatformActions(db);
  userId=(await db.user.create({data:{email:`${generateId()}@s4.test`}})).id;
  appId=(await db.app.create({data:{ownerUserId:userId,name:'S4 ceremony',urn:`${generateId().toLowerCase()}:s4`}})).id;
  secretId=(await resolvers.Mutation.createSecret({}, {ownerType:'app',ownerRef:appId,name:'canary',kind:'generic',value:'original'},ctx())).id;
@@ -304,5 +305,29 @@ describe('#3999 proof rotation',()=>{
   const p2=await proof(second,key,{},p1.nonce);
   await expect(complete(first,p1)).rejects.toThrow();expect((await row(first)).state).toBe('open');
   await complete(second,p2);expect((await row(second)).state).toBe('completed');
+ });
+});
+
+describe('#3999 S3 protection fold', () => {
+ it('refuses a self-issued person client on a protected secret but permits another person', async () => {
+  await expect(resolvers.Mutation.issueSecretReadClient({}, {input:{secretRef:secretId,holderKind:'USER',reason:'protected self'}},ctx())).rejects.toMatchObject({extensions:{code:'SECRET_PROTECTED_TWO_PERSON_REQUIRED'}});
+  const other=await db.user.create({data:{email:`${generateId()}@s4.test`}});
+  await db.appMember.create({data:{appId,userId:other.id,role:'member'}});
+  const client=await resolvers.Mutation.issueSecretReadClient({}, {input:{secretRef:secretId,holderKind:'USER',holderRef:other.id,reason:'different person'}},ctx());
+  expect(client.selfIssued).toBe(false);
+  expect((await db.grant.findUniqueOrThrow({where:{id:client.grantId}})).userId).toBe(other.id);
+ });
+ it('ends an existing self-issued pending client and its grant atomically, attributes one end, and never revives it', async () => {
+  await db.secret.update({where:{id:secretId},data:{protected:false}});
+  const client=await resolvers.Mutation.issueSecretReadClient({}, {input:{secretRef:secretId,holderKind:'USER',reason:'before protection'}},ctx());
+  const staged=await error(resolvers.Mutation.setSecretProtected({}, {ref:secretId,protected:true},ctx()));
+  const id=staged.extensions.requestId,p=await proof(id);await complete(id,p);
+  expect(await db.secretReadClient.findUniqueOrThrow({where:{id:client.clientId}})).toMatchObject({endReason:'PROTECTED',endedAt:expect.any(Date)});
+  expect(await db.grant.findUniqueOrThrow({where:{id:client.grantId}})).toMatchObject({revokedAt:expect.any(Date),revokedBy:userId});
+  expect(await db.grantEvent.findMany({where:{grantId:client.grantId,action:'REVOKE'}})).toMatchObject([{actorUserId:userId}]);
+  const off=await error(resolvers.Mutation.setSecretProtected({}, {ref:secretId,protected:false},ctx()));
+  await complete(off.extensions.requestId,await proof(off.extensions.requestId));
+  expect((await db.secretReadClient.findUniqueOrThrow({where:{id:client.clientId}})).endReason).toBe('PROTECTED');
+  expect(await db.grantEvent.count({where:{grantId:client.grantId,action:'REVOKE'}})).toBe(1);
  });
 });
