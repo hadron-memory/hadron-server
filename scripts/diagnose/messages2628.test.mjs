@@ -59,6 +59,8 @@ test('a held reservation: the refusal names the reservation path and says it is 
   assert.match(r.stderr, /^diagnosis stack already reserved: /m); // after mkdir's own line
   assert(r.stderr.includes(`${state}.diagnose-lock`), r.stderr);
   assert.match(r.stderr, /never taken over by age or PID/);
+  assert.match(r.stderr, /a reservation directory exists at /);
+  assert.doesNotMatch(r.stderr, /another run/);   // #4607 BLIND delta 2: observed, not attributed
   noRemovalAdvice(r.stderr);
   // The other holder's reservation is untouched.
   assert.equal(readFileSync(`${state}.diagnose-lock/owner`, 'utf8'), 'someone-else\n');
@@ -181,6 +183,37 @@ test('with no reservation path at all, the line says it is unknown rather than n
   assert.match(r.stderr, /this run's reservation path is unknown, and no stack state found at /);
   assert.doesNotMatch(r.stderr, /holds its reservation ;|reservation ,/);
 }));
+
+test('a directory that appears at the lock path after mkdir fails is described, not attributed (#4607 delta 2)', () => withDir('diag-2628-', (dir) => {
+  const state = join(dir, 'state');
+  const lock = `${state}.diagnose-lock`;
+  // The injected mkdir fails AND leaves a directory behind (a racing creator).
+  const inject = `mkdir() { if [ "\${@: -1}" = '${lock}' ]; then command mkdir -- '${lock}'; echo "mkdir: injected race" >&2; return 1; fi; command mkdir "$@"; }; `;
+  const r = sh(`${inject}incus() { return 0; }; acquire_stack_reservation '${state}' hadron-e2e-x`, dir);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /a reservation directory exists at \S+\.diagnose-lock; refusing \(its owner is not known here/);
+  assert.doesNotMatch(r.stderr, /another run/);
+  noRemovalAdvice(r.stderr);
+}));
+
+test('a lost reservation whose path is known, with neither the lock nor the state present (#4607 delta 2)', () => {
+  // The reservation path is known (DIAG_LOCK set) but nothing exists at it, and there is no state either.
+  const r = downRun(`DIAG_RUN_TOKEN=tok-1`);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /this run no longer holds its reservation \S+\.diagnose-lock, and no stack state found at \S+; capture and teardown skipped/);
+  assert.doesNotMatch(r.stderr, /inspect private state/);
+  noRemovalAdvice(r.stderr);
+  assert(!r.ran.includes('stackdown') && !r.ran.includes('purge') && !r.ran.includes('preserve'), r.ran.join());
+});
+
+test('a dangling state symlink gets its own line, not advice to inspect a missing target (#4607 delta 2)', () => {
+  const r = downRun(`DIAG_RUN_TOKEN=tok-1; ln -s "$state.nowhere" "$state"`);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /the stack state path \S+ is a dangling symlink; capture and teardown skipped/);
+  assert.doesNotMatch(r.stderr, /inspect private state/);
+  noRemovalAdvice(r.stderr);
+  assert(!r.ran.includes('stackdown') && !r.ran.includes('purge') && !r.ran.includes('preserve'), r.ran.join());
+});
 
 test('the end-of-run explanation tolerates a missing instance name, so the EXIT trap keeps running (#4607 F5)', () => withDir('diag-2628-', (dir) => {
   const r = sh(`DIAG_RUN_TOKEN=t; DIAG_LOCK='${join(dir, 'l')}'; mkdir "$DIAG_LOCK"; echo t > "$DIAG_LOCK/owner"; explain_stack_ownership_failure '${join(dir, 'none')}' ''; echo AFTER`, dir);
