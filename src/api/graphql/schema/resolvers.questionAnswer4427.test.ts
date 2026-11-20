@@ -78,7 +78,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: reader.id, role: 'READER' },
     { organizationId: org.id, userId: platformAdmin.id, role: 'CONTRIBUTOR' },
   ] });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'team-shared' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'team-shared' }, as());
 });
 
 describe('answerQuestion: a decider answers, again, and takes it back', () => {

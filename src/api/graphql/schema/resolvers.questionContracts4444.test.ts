@@ -44,7 +44,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: writer.id, role: 'CONTRIBUTOR' },
     { organizationId: org.id, userId: holger.id, role: 'CONTRIBUTOR' },
   ] });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'team-shared' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'team-shared' }, as());
 });
 
 // The complete public refusal-code set of the question doors (#1641 §7, §8.4), written out. A
