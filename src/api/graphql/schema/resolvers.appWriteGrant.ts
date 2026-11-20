@@ -25,7 +25,7 @@ import { GRANT_MEMORY_SELECT, grantTargetRefusal, isStrictOwnerClass } from '../
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { parseUrnInput } from '../../../lib/urn.js';
-import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
+import { validateLocOrThrow } from '../../../lib/validateLocOrThrow.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import type { ActAdmission, ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { admitAppManagement, admitCredentialList, lockInstructedActRows } from './resolvers.instruction.js';
@@ -44,10 +44,7 @@ type AppRow = { id: string; organizationId: string | null; ownerUserId: string |
 function parsePrefix(raw: string): string {
   const prefix = raw.trim();
   if (prefix === '') throw badInput('prefix is required: a grant covers one loc prefix, never a whole memory.');
-  try { validateLoc(prefix); } catch (e) {
-    if (e instanceof InvalidLocError) throw badInput(`prefix is not a valid loc: ${e.message}`);
-    throw e;
-  }
+  validateLocOrThrow(prefix, 'prefix');
   return prefix;
 }
 

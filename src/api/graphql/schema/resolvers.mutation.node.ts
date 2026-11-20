@@ -71,10 +71,7 @@ import {
 import { parseUrnInput, splitNodeUrn } from '../../../lib/urn.js';
 import type { WriteDestination } from '../../../lib/appWriteGrant.js';
 import { splitWholeNodeUrn } from '../../../lib/splitNodeUrnTolerant.js';
-import {
-  validateLoc,
-  InvalidLocError,
-} from '../../../lib/validateLoc.js';
+import { validateLocOrThrow } from '../../../lib/validateLocOrThrow.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import {
@@ -465,21 +462,10 @@ async function writeNodeCoreRaw(
       );
 
       // Validate loc shape at the GraphQL boundary so any caller — portal,
-      // MCP, tests, future — gets the same typed InvalidLocError instead
-      // of a downstream Prisma constraint failure leaking as INTERNAL_SERVER_ERROR.
-      // The typed-error class is the source of truth for both the code
-      // string (extensions.code = e.name) and the user-facing message,
-      // matching the pattern at line ~5010.
-      try {
-        validateLoc(input.loc);
-      } catch (e) {
-        if (e instanceof InvalidLocError) {
-          throw new GraphQLError(e.message, {
-            extensions: { code: e.name, loc: e.loc, segment: e.segment },
-          });
-        }
-        throw e;
-      }
+      // MCP, tests, future — gets the same typed answer instead of a downstream
+      // Prisma constraint failure leaking as INTERNAL_SERVER_ERROR (#4461: one
+      // shared BAD_USER_INPUT answer, field + reason, the value never echoed).
+      validateLocOrThrow(input.loc, 'loc');
 
       // #4096: caller text a NUL or unpaired surrogate would fail the write (Postgres 22021 / encoding) is a typed BAD_USER_INPUT naming the field, here at the one
       // writer every node door shares, after authorization and before any write. NOT in `mapChatSeqConflict` (see unstorableTextInput.ts).
@@ -750,16 +736,7 @@ async function writeNodeCoreRaw(
         resolvedEdges = [];
         for (const e of input.edges) {
           if (e.loc != null && e.loc !== '') {
-            try {
-              validateLoc(e.loc);
-            } catch (err) {
-              if (err instanceof InvalidLocError) {
-                throw new GraphQLError(err.message, {
-                  extensions: { code: err.name, loc: err.loc, segment: err.segment },
-                });
-              }
-              throw err;
-            }
+            validateLocOrThrow(e.loc, 'loc');
           }
           try {
             const { id: targetNodeId } = await resolveNodeRefForCaller(ctx, e.targetId, input.memoryId);
@@ -1984,16 +1961,7 @@ async function resolveRelocationTarget(
     ({ id: destMemoryId } = await resolveMemoryRefForWrite(ctx, targetMemoryRef as string));
     destLoc = source.loc;
   }
-  try {
-    validateLoc(destLoc);
-  } catch (e) {
-    if (e instanceof InvalidLocError) {
-      throw new GraphQLError(e.message, {
-        extensions: { code: e.name, loc: e.loc, segment: e.segment },
-      });
-    }
-    throw e;
-  }
+  validateLocOrThrow(destLoc, 'destLoc');
   return { destMemoryId, destLoc };
 }
 
@@ -3753,14 +3721,7 @@ export const nodeMutations = {
       // already refuse with their own typed codes.
       assertStorableText({ name, loc, description, data, condition });
       const edgeLoc = loc != null && loc !== '' ? loc : deriveEdgeLoc(src.loc, name ?? null, tgt.loc);
-      try {
-        validateLoc(edgeLoc);
-      } catch (e) {
-        if (e instanceof InvalidLocError) {
-          throw new GraphQLError(e.message, { extensions: { code: e.name, loc: e.loc, segment: e.segment } });
-        }
-        throw e;
-      }
+      validateLocOrThrow(edgeLoc, 'loc');
       const edge = await ctx.db.$transaction(async (tx) => {
         await lockInstallAuthoritiesFirst(tx, ctx, [src.memoryId, tgt.memoryId]);
         const locked = await lockLiveEdgeEndpoints(
@@ -3873,15 +3834,8 @@ export const nodeMutations = {
         throwOnInvalidCondition(condition);
       }
       if (loc != null && loc !== '') {
-        assertStorableText({ loc }); // #4106: typed, and the value is never echoed (InvalidLocError's message would)
-        try {
-          validateLoc(loc);
-        } catch (e) {
-          if (e instanceof InvalidLocError) {
-            throw new GraphQLError(e.message, { extensions: { code: e.name, loc: e.loc, segment: e.segment } });
-          }
-          throw e;
-        }
+        assertStorableText({ loc }); // #4106: typed, and the value is never echoed
+        validateLocOrThrow(loc, 'loc'); // #4461: nor does this one
       }
       // Null semantics differ per arg (#263):
       // - condition/data: null CLEARS the stored value — the spec'd

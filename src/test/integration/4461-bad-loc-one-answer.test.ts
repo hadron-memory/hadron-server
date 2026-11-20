@@ -178,7 +178,7 @@ describe('#4461 — every other site answers the same', () => {
   it('setAutomationReadGrant (prefix): was BAD_USER_INPUT with the echo in the text', async () => {
     const err = await graphqlError(
       `mutation($a: String!, $k: String!, $i: ID!, $m: String!, $p: String) { setAutomationReadGrant(appRef: $a, triggerKind: $k, triggerId: $i, memoryRef: $m, prefix: $p) { id } }`,
-      { a: 'nope', k: 'schedule', i: generateId(), m: memoryId, p: BAD },
+      { a: 'nope', k: 'SCHEDULE', i: generateId(), m: memoryId, p: BAD },
     );
     expectOneAnswer(err, 'prefix', 'invalid-charset');
   });

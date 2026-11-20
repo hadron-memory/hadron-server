@@ -50,7 +50,7 @@ import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { currentActor } from '../../../lib/requestActor.js';
-import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
+import { validateLocOrThrow } from '../../../lib/validateLocOrThrow.js';
 import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
 import { deletePendingEdgesTargetingNodes } from '../../../lib/pendingEdgePromotion.js';
@@ -541,12 +541,7 @@ export const questionMutations = {
   ): Promise<QuestionLogView> => {
     refuseImpersonation(ctx);
     const { id: memoryId } = await resolveMemoryRef(ctx.db, args.memoryRef);
-    try {
-      validateLoc(args.loc);
-    } catch (error) {
-      if (error instanceof InvalidLocError) throw new GraphQLError(error.message, { extensions: { code: error.name, loc: error.loc, segment: error.segment } });
-      throw error;
-    }
+    validateLocOrThrow(args.loc, 'loc');
     const prefix = args.prefix ?? DEFAULT_QUESTION_PREFIX;
     if (!QUESTION_PREFIX_RE.test(prefix)) invalidQuestion([{ pointer: '/prefix', message: 'a prefix is one to three upper-case letters' }]);
     const name = (args.name ?? '').trim() || 'Questions';
