@@ -425,6 +425,26 @@ ON CONFLICT (name) DO NOTHING;
 -- the plain unique index on `name` is uniqueness across case. Until #4400 only the writers' lower-casing kept
 -- `Example` out beside `example`. Placed after the backfills above, which write lower(...) names.
 -- Synced with the 20261117900000_principals_name_lower_check migration.
+-- #4411: the migration refuses on a mixed-case row (SQLSTATE HDPRF) rather than lower-casing it, which could merge
+-- two owners' roots. This copy gives a development database the same guard, naming the rows and what to do, instead
+-- of failing below on a raw check violation. The sentinel comments are what principalNameLower4411.test.ts runs.
+-- #4411 preflight chk_principals_name_lower: begin
+DO $$
+DECLARE
+  n bigint;
+  bad text;
+BEGIN
+  SELECT count(*) INTO n FROM principals WHERE name <> lower(name);
+  IF n > 0 THEN
+    SELECT string_agg(format('%L (%s, %s%s)', p.name, p.kind, p.status,
+             CASE WHEN EXISTS (SELECT 1 FROM principals t WHERE t.name = lower(p.name))
+                  THEN ', lower-case twin exists' ELSE '' END), ', ' ORDER BY p.name)
+      INTO bad FROM (SELECT name, kind, status FROM principals WHERE name <> lower(name) ORDER BY name LIMIT 20) p;
+    RAISE EXCEPTION 'principals.name: % principal row(s) are not lower case, so chk_principals_name_lower cannot be added (hadron-server#4400). For a row with no lower-case twin, lower-case it and the owning users.handle / organizations.urn; for a row with a twin, decide which owner keeps the root and rename or delete the other. Then re-run pnpm db:dev-setup. Rows (first 20): %', n, bad
+      USING ERRCODE = 'HDPRF';
+  END IF;
+END $$;
+-- #4411 preflight chk_principals_name_lower: end
 ALTER TABLE principals
   DROP CONSTRAINT IF EXISTS chk_principals_name_lower;
 ALTER TABLE principals

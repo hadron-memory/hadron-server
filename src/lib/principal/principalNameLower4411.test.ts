@@ -119,7 +119,8 @@ describe('#4411 item 2: post-push.sql refuses a mixed-case principal row with an
     expect(said).toContain('2 principal row(s)');
     expect(said).toContain('Legacy.Example');
     expect(said).toContain('Lonely.Example');
-    expect(said).toMatch(/Legacy\.Example[^,]*twin/);
+    expect(said).toMatch(/'Legacy\.Example' \([^)]*lower-case twin exists\)/);
+    expect(said).not.toMatch(/'Lonely\.Example' \([^)]*twin/);
     expect(said).toContain('pnpm db:dev-setup');
     // Not the raw violation the ADD CONSTRAINT would have raised.
     expect(said).not.toContain('violates check constraint');
