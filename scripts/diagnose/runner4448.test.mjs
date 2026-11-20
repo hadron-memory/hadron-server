@@ -42,6 +42,7 @@ esac\n`);
      timeout) exit 124;;
      empty) exit 0;;
      noop) printf '%s\\n' '{"kind":"other"}'; exit 0;;
+     extraline) printf '%s\\n' '${LOAD_LINE}' '{"kind":"other"}'; exit 0;;
      wrongworkload) printf '%s\\n' '${LOAD_LINE.replace('"workload":"held"', '"workload":"idle"')}'; exit 0;;
     esac
     printf '%s\\n' '${LOAD_LINE}'; case "$MODE" in fail|failkept) exit 5;; esac;;
@@ -186,7 +187,7 @@ test('exit 0 with no load line is an invalid run, not a pass', () => {
 
 // #2627: exit 0 with output that is not a valid load record for the requested workload is an invalid run, refused
 // before any sample capture; only a positive record is accepted.
-for (const mode of ['noop', 'wrongworkload']) {
+for (const mode of ['noop', 'wrongworkload', 'extraline']) {
   test(`exit 0 with output that is not this workload's load record is refused (${mode})`, () => {
     const f = fixture(mode);
     try {
@@ -198,6 +199,18 @@ for (const mode of ['noop', 'wrongworkload']) {
     } finally { f.clean(); }
   });
 }
+
+// #4608 BLIND F2: a host that cannot run the check is named as such, not reported as a bad record.
+test('a failed load record check (no usable host node) is reported as a check failure, not a rejected record', () => {
+  const f = fixture('cap');
+  try {
+    writeFileSync(join(f.dir, 'bin', 'node'), `#!/bin/bash\nif [ "\${1:-}" = --input-type=module ]; then exit 9; fi\nexec '${process.execPath}' "$@"\n`, { mode: 0o755 });
+    const r = f.run();
+    expect(r.status).toBe(7);
+    expect(r.stderr).toContain('could not run the load record check on this host (node exit 9)');
+    expect(r.stderr).not.toContain('printed no valid load record');
+  } finally { f.clean(); }
+});
 
 // #4453 P3 #15: the in-container prerequisites are checked before the settle window, not after.
 test('a missing timeout(1) or staged load.mjs refuses before any settling', () => {

@@ -90,3 +90,26 @@ test('loadRecordOk accepts exactly one valid load record for the requested workl
     ['null', 'null', 'held'],
   ]) expect(loadRecordOk(text, workload), why).toBe(false);
 });
+
+// #4608 BLIND F1: `node -e 'import(load.mjs)' load.mjs` puts the module's own path in argv[1]; it must still not run.
+test('an import whose argv[1] is load.mjs itself does not run the driver', () => {
+  for (const argv1 of [join(here, 'load.mjs')]) {
+    const r = importWith(argv1);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toBe('imported\n');
+  }
+  withLink((linked) => {
+    const r = importWith(join(linked, 'load.mjs'));
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toBe('imported\n');
+  });
+});
+
+test('isMainModule takes Node\'s import.meta.main when it is a boolean, and falls back to real paths otherwise', async () => {
+  const { isMainModule } = await import('./load.mjs');
+  const self = pathToFileURL(join(here, 'load.mjs')).href;
+  expect(isMainModule(self, join(here, 'load.mjs'), false)).toBe(false);
+  expect(isMainModule(self, '/nonexistent', true)).toBe(true);
+  expect(isMainModule(self, join(here, 'load.mjs'), undefined)).toBe(true);
+  expect(isMainModule(self, undefined, undefined)).toBe(false);
+});
