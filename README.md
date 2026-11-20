@@ -82,7 +82,16 @@ This runs `prisma/pre-push.sql`, applies the schema, and then runs the raw SQL i
 **Use this script, not a bare `pnpm db:push`:** a bare push silently drops the vector index.
 `pnpm db:dev-setup` is safe to run again after a schema change; it does not wipe data.
 
-**5. Start the server**
+**5. Generate the Prisma client**
+
+```bash
+pnpm db:generate
+```
+
+`pnpm db:dev-setup` does not generate the client, and `pnpm install` does not either, so the
+server will not start without this step. Run it again after pulling a schema change.
+
+**6. Start the server**
 
 ```bash
 pnpm dev
@@ -96,7 +105,7 @@ GraphQL: http://localhost:4000/graphql
 MCP:     http://localhost:4000/mcp
 ```
 
-**6. Check that it works**
+**7. Check that it works**
 
 ```bash
 curl -s http://localhost:4000/health
@@ -143,7 +152,7 @@ database, for trying a change end to end without touching your development datab
 | `pnpm dev` | Start the server with hot reload |
 | `pnpm build` / `pnpm start` | Compile, then run the compiled server |
 | `pnpm db:dev-setup` | Sync your development database to the current schema without wiping it |
-| `pnpm db:generate` | Regenerate the Prisma client |
+| `pnpm db:generate` | Generate (or regenerate) the Prisma client; required before the first `pnpm dev` |
 | `pnpm db:studio` | Browse your development database in Prisma Studio |
 | `pnpm test` | Run the test suite |
 
