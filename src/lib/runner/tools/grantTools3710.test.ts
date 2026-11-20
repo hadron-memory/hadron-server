@@ -91,15 +91,54 @@ describe('hadron_list_grants (#3710)', () => {
     expect(run).toMatchObject({ grants: [], total: 0 });
   });
 
-  it('2 (20a): never a base agent\'s grant, and never a grant held by a worker, a person or the App', async () => {
+  it('2 (20a): never a base agent\'s grant, and never a grant held by a worker or a person', async () => {
     const child = await newAgent('child', { extendsAgentId: w.agentId });
     await db.appAgent.create({ data: { appId: w.appId, agentId: child.id } });
     await agentGrant(w.agentId, w.appId); // the BASE agent's grant
     await insertGrant(w, { user_id: null, worker_id: w.workerId }); // a worker's
     await insertGrant(w, {}); // a person's
-    await insertGrant(w, { user_id: null, grantee_app_id: w.appId }); // the App's
     const run = await call(await mintRun(w.appId, child.id));
     expect(run).toMatchObject({ grants: [], total: 0 });
+  });
+
+  it('1 + 2 (Peter on #4598): lists the grants the App itself holds; never another App\'s, and never one naming this App from another App', async () => {
+    const appHeld = await insertGrant(w, { user_id: null, grantee_app_id: w.appId });
+    const mine = await agentGrant(w.agentId, w.appId);
+    await db.appAgent.create({ data: { appId: w.app2Id, agentId: w.agentId } });
+    const app2Held = await insertGrant(w, { app_id: w.app2Id, user_id: null, grantee_app_id: w.app2Id }); // another App's App-held
+    const crossNaming = await insertGrant(w, { app_id: w.app2Id, user_id: null, grantee_app_id: w.appId }); // lives in App 2, names App 1
+    const a = await call(await mintRun(w.appId, w.agentId));
+    expect(a.grants.map((g) => g.id).sort()).toEqual([appHeld, mine].sort());
+    expect(a.grants.find((g) => g.id === appHeld)).toMatchObject({ holderKind: 'APP', holderId: w.appId });
+    const b = await call(await mintRun(w.app2Id, w.agentId));
+    expect(b.grants.map((g) => g.id)).toEqual([app2Held]);
+    expect([...a.grants, ...b.grants].map((g) => g.id)).not.toContain(crossNaming);
+  });
+
+  it('1: a spent grant is listed and allows nothing; the projection is exactly the Grant scalars', async () => {
+    const spent = await insertGrantUnguarded(w, { user_id: null, agent_id: w.agentId, activated_at: raw(DB_NOW), verification_kind: 'TEST', verified_by: 't', max_uses: 1, use_count: 1 });
+    const out = await call(await mintRun(w.appId, w.agentId));
+    const g = out.grants.find((x) => x.id === spent)!;
+    expect(g).toMatchObject({ state: 'SPENT', allows: false });
+    expect(Object.keys(g).sort()).toEqual(['action', 'activatedAt', 'allows', 'appId', 'createdAt', 'expiresAt', 'holderId', 'holderKind', 'id', 'issuerUserId', 'maxUses', 'reason',
+      'requestedBySessionId', 'requestedByUserId', 'requestedByWorkerId', 'revokedAt', 'signatureId', 'startsAt', 'state', 'urn', 'useCount', 'values', 'verificationKind', 'verifiedBy'].sort());
+  });
+
+  it('an installed agent whose licence is unusable lists nothing (licensing, not only installation)', async () => {
+    const foreignOrg = await db.organization.create({ data: { name: 'foreign', urn: `foreign-${generateId().slice(0, 6)}.test` } });
+    const foreign = await db.agent.create({ data: { organizationId: foreignOrg.id, name: 'foreign', urn: `${foreignOrg.urn}:agent` } });
+    await db.appAgent.create({ data: { appId: w.appId, agentId: foreign.id } });
+    await agentGrant(foreign.id, w.appId);
+    const { isAgentInstalledAndLicensed } = await import('../../appAgent.js');
+    // The fixture must be the distinct condition: installed by a row, yet not licensed here.
+    expect(await isAgentInstalledAndLicensed(db, w.appId, foreign.id)).toBe(false);
+    expect(await call(await mintRun(w.appId, foreign.id))).toMatchObject({ grants: [], total: 0 });
+  });
+
+  it('hasMore is false on an empty page, even with an offset past the end', async () => {
+    await agentGrant(w.agentId, w.appId);
+    const out = await call(await mintRun(w.appId, w.agentId), { offset: 5 });
+    expect(out).toMatchObject({ grants: [], total: 1, hasMore: false });
   });
 
   it('3: a run without an agent is refused and reads nothing: no agentless fallback', async () => {
