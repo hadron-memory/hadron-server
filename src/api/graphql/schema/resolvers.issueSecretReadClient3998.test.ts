@@ -57,6 +57,19 @@ describe('#3998 issueSecretReadClient', () => {
     expect(await code(issue(ownerId, { ...binding, secretRef: s.id, holderKind: 'APP', holderRef: generateId() }))).toBe('GRANT_HOLDER_NOT_ALLOWED');
     expect(await db.grant.count()).toBe(0);
   });
+
+  it('issues a use client for an installed agent, but not an unknown agent', async () => {
+    const org = await db.organization.create({ data: { name: 's5', urn: `${generateId().toLowerCase()}.test` } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: ownerId, role: 'ADMIN' } });
+    await db.app.update({ where: { id: appId }, data: { organizationId: org.id, ownerUserId: null } });
+    const agent = await db.agent.create({ data: { organizationId: org.id, name: 's5', urn: `${org.urn}:a`, visibility: 'ORGANIZATION' } });
+    await db.appAgent.create({ data: { appId, agentId: agent.id } });
+    const s = await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'fetch', kind: 'webfetch-auth', metadata: { urlPrefix: 'https://api.example.test/v1/' }, value: { type: 'bearer', token: 'private' } }, ctxOf(ownerId));
+    const binding = { secretRef: s.id, mode: 'USE', holderKind: 'AGENT', bindingPrefix: 'https://api.example.test/v1/', bindingHeader: 'Authorization' };
+    const result: any = await issue(ownerId, { ...binding, holderRef: agent.id });
+    expect(await db.grant.findUniqueOrThrow({ where: { id: result.grantId } })).toMatchObject({ agentId: agent.id, action: 'secret.use' });
+    expect(await code(issue(ownerId, { ...binding, holderRef: generateId() }))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+  });
   it('a manager issues to themself: one pending grant and one client, marked self-issued', async () => {
     const r: any = await issue(ownerId);
     expect(r).toMatchObject({ secretName: 'tok', selfIssued: true });
