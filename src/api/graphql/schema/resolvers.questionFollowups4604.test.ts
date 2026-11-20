@@ -10,6 +10,7 @@ import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbWorkerAttribution } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { approvedMergeProof } from '../../../test/mergeConsent.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import * as questionsModule from './resolvers.questions.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -22,14 +23,11 @@ let admin: { id: string };
 let writer: { id: string };
 let holger: { id: string };
 let reader: { id: string };
-let outsider: { id: string };
 let kay: { id: string };
-let platformAdmin: { id: string };
-let orgId: string;
-let org2Id: string;
 let app: { id: string; urn: string };
 let memA: { id: string };
 let memB: { id: string };
+let platformAdmin: { id: string };
 let logA: { row: { id: string } };
 let logB: { row: { id: string } };
 
@@ -37,7 +35,6 @@ const as = (userId = admin.id, extra: Partial<Context> = {}): Context => ({ db, 
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
 const Q = resolvers.Query as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
 const D = (resolvers as unknown as { Question: Record<string, (v: any, a: unknown, ctx: Context) => any> }).Question;
-const L = (resolvers as unknown as { QuestionLog: Record<string, (v: any, a: unknown, ctx: Context) => any> }).QuestionLog;
 
 const codeOf = async (p: Promise<unknown>) => {
   try { await p; return 'NO_ERROR'; } catch (e) {
@@ -57,14 +54,10 @@ const idSet = (page: { items: Array<{ row: { id: string } }> }) => ids(page).sor
 beforeEach(async () => {
   await cleanDb(db);
   const org = await db.organization.create({ data: { id: generateId(), name: 'List Org', urn: 'list.example' } });
-  const org2 = await db.organization.create({ data: { id: generateId(), name: 'Other Org', urn: 'other-list.example' } });
-  orgId = org.id;
-  org2Id = org2.id;
   admin = await db.user.create({ data: { githubId: 442801, githubUsername: 'ql-admin', handle: 'ql-admin', roles: [] } });
   writer = await db.user.create({ data: { githubId: 442802, githubUsername: 'ql-writer', handle: 'ql-writer', roles: [] } });
   holger = await db.user.create({ data: { githubId: 442803, githubUsername: 'ql-holger', handle: 'ql-holger', roles: [] } });
   reader = await db.user.create({ data: { githubId: 442804, githubUsername: 'ql-reader', roles: [] } });
-  outsider = await db.user.create({ data: { githubId: 442805, githubUsername: 'ql-outsider', roles: [] } });
   platformAdmin = await db.user.create({ data: { githubId: 442807, githubUsername: 'ql-platform', roles: ['ADMIN'] } });
   kay = await db.user.create({ data: { githubId: 442806, githubUsername: 'ql-kay', handle: 'ql-kay', roles: [] } });
   await db.orgMember.createMany({ data: [
@@ -73,7 +66,6 @@ beforeEach(async () => {
     { organizationId: org.id, userId: holger.id, role: 'CONTRIBUTOR' },
     { organizationId: org.id, userId: reader.id, role: 'READER' },
     { organizationId: org.id, userId: kay.id, role: 'CONTRIBUTOR' },
-    { organizationId: org2.id, userId: admin.id, role: 'ADMIN' },
   ] });
   // One App, two memories: A in this org (its members read it), B in another org (only its members read it).
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: 'list.example:team' } });
@@ -91,11 +83,11 @@ beforeEach(async () => {
 
 /** A `db` whose node delegate is observed: `count` can be stubbed, `findMany` args recorded, and identity lookups counted. */
 function observedDb(opts: { count?: number } = {}) {
-  const log = { findManyArgs: [] as Array<Record<string, unknown>>, identityLookups: 0 };
+  const log = { findManyArgs: [] as Array<Record<string, unknown>>, calls: [] as string[], identityLookups: 0 };
   const node = new Proxy(db.node, {
     get(target, prop, recv) {
-      if (prop === 'count' && opts.count !== undefined) return async () => opts.count;
-      if (prop === 'findMany') return (args: Record<string, unknown>) => { log.findManyArgs.push(args); return (target.findMany as (a: unknown) => unknown)(args); };
+      if (prop === 'count') return (args: unknown) => { log.calls.push('count'); return opts.count !== undefined ? Promise.resolve(opts.count) : (target.count as (a: unknown) => unknown)(args); };
+      if (prop === 'findMany') return (args: Record<string, unknown>) => { log.findManyArgs.push(args); log.calls.push((args.where as { role?: string } | undefined)?.role === 'question' ? 'fetch' : 'findMany-other'); return (target.findMany as (a: unknown) => unknown)(args); };
       return Reflect.get(target, prop, recv);
     },
   });
@@ -125,8 +117,12 @@ describe('#4604 F2: the cap bounds the fetch, not a separate count', () => {
       // window; a count-then-fetch list would evaluate all three rows and answer, this one refuses on the fetch itself.
       const { db: observed, log } = observedDb({ count: 0 });
       expect(await codeOf(Q.questions(null, { logRef: logA.row.id }, as(reader.id, { db: observed })))).toBe('QUESTION_LOG_TOO_LARGE_FOR_FILTER');
-      const questionFetch = log.findManyArgs.find((a) => (a.where as { role?: string } | undefined)?.role === 'question');
-      expect(questionFetch).toMatchObject({ take: 3 });
+      // The bounded fetch is the ONLY question-row fetch, it comes first, and any count is taken afterwards (the refusal's wording).
+      const questionFetches = log.findManyArgs.filter((a) => (a.where as { role?: string } | undefined)?.role === 'question');
+      expect(questionFetches).toHaveLength(1);
+      expect(questionFetches[0]).toMatchObject({ take: 3 });
+      expect(log.calls.indexOf('fetch')).toBeGreaterThanOrEqual(0);
+      expect(log.calls.indexOf('count') === -1 || log.calls.indexOf('count') > log.calls.indexOf('fetch')).toBe(true);
     } finally { spy.mockRestore(); }
   });
 
@@ -164,7 +160,7 @@ describe('#4604 F3: every sort is a total order that ends on the row id', () => 
   it('two memories with the same log path and question number page without overlap or gap', async () => {
     const a = await ask(logA.row.id, simple(), admin.id);
     const b = await ask(logB.row.id, simple(), admin.id);
-    expect((await rowOf2(a.row.id)).loc).toBe((await rowOf2(b.row.id)).loc);
+    expect((await questionRow(a.row.id)).loc).toBe((await questionRow(b.row.id)).loc);
     for (const sort of sorts) {
       const whole = ids(await Q.questions(null, { appRef: app.id, sort }, as(admin.id)));
       const p1 = ids(await Q.questions(null, { appRef: app.id, sort, limit: 1, offset: 0 }, as(admin.id)));
@@ -172,9 +168,11 @@ describe('#4604 F3: every sort is a total order that ends on the row id', () => 
       expect([...p1, ...p2]).toEqual(whole);
       expect(new Set(whole)).toEqual(new Set([a.row.id, b.row.id]));
     }
+    // CODE reads only n and loc, which tie here, so the id decides: through the query the tied rows come out in id order.
+    expect(ids(await Q.questions(null, { appRef: app.id, sort: 'CODE' }, as(admin.id)))).toEqual([a.row.id, b.row.id].sort());
   });
 });
-const rowOf2 = (id: string) => db.node.findUniqueOrThrow({ where: { id } });
+const questionRow = (id: string) => db.node.findUniqueOrThrow({ where: { id } });
 
 describe('#4604 F4: a mutation result reports what the next read reports', () => {
   it('the effective assignee of an ask, an amend and a withdraw result equals the next read\'s', async () => {
@@ -185,10 +183,12 @@ describe('#4604 F4: a mutation result reports what the next read reports', () =>
     expect(D.effectiveAssigneeId(asked, {}, as())).toBe(holger.id);
     expect(D.effectiveAssigneeId(asked, {}, as())).toBe(await read(asked.row.id));
     const amended = await asWorker('worker-ada', () => M.amendQuestion(null, { ref: asked.row.id, patch: { title: 'Ship it?' }, reason: 'reword', expectedRevision: 1 }, as(writer.id)));
-    expect(D.effectiveAssigneeId(amended, {}, as())).toBe(await read(asked.row.id));
+    expect(D.effectiveAssigneeId(amended, {}, as())).toBe(holger.id);
+    expect(await read(asked.row.id)).toBe(holger.id);
     expect(await D.effectiveAssignee(amended, {}, as(reader.id))).toMatchObject({ id: holger.id });
     const gone = await M.withdrawQuestion(null, { ref: asked.row.id, reason: 'moot', expectedRevision: amended.row.revSeq }, as(writer.id));
-    expect(D.effectiveAssigneeId(gone, {}, as())).toBe(await read(asked.row.id));
+    expect(D.effectiveAssigneeId(gone, {}, as())).toBe(holger.id);
+    expect(await read(asked.row.id)).toBe(holger.id);
   });
 });
 
@@ -213,3 +213,41 @@ describe('#4604 F5: the asker pull resolves the caller once, after the cheap fil
     expect(log.identityLookups).toBe(0);
   });
 });
+
+describe('#4604 F5 (BLIND P2): identities are resolved only for a row that needs them, once', () => {
+  it('a matching worker, an App-only caller and a worker-matched list cost no lookup; mismatched workers cost one; the answers are the per-row rule\'s', async () => {
+    await createDbWorkerAttribution(db, writer.id, 'worker-ada');
+    await createDbWorkerAttribution(db, writer.id, 'worker-bob');
+    const byAda = await asWorker('worker-ada', () => ask(logA.row.id));
+    const byBob = await asWorker('worker-bob', () => ask(logA.row.id));
+    // The matching worker arm settles every surviving row it owns: no lookup.
+    const only = observedDb();
+    const adaOnly = await asWorker('worker-ada', () => Q.questions(null, { logRef: logA.row.id, askedByMe: true, askedByWorkerId: 'worker-ada' }, as(writer.id, { db: only.db })));
+    expect(ids(adaOnly)).toEqual([byAda.row.id]);
+    expect(only.log.identityLookups).toBe(0);
+    // A worker that did not ask: the rows name a user, so ONE lookup, and the same user's rows still match by identity.
+    const mismatched = observedDb();
+    const asBob = await asWorker('worker-bob', () => Q.questions(null, { logRef: logA.row.id, askedByMe: true }, as(writer.id, { db: mismatched.db })));
+    expect(idSet(asBob)).toEqual([byAda.row.id, byBob.row.id].sort());
+    expect(mismatched.log.identityLookups).toBe(1);
+    // An App-only caller (no user): no lookup, and it finds only its own App-asked rows.
+    const key = { db, appId: app.id, appKeyId: generateId(), roles: ['ADMIN'] } as Context;
+    await db.memory.update({ where: { id: memA.id }, data: { class: 'app' } });
+    const appAsked = await M.askQuestion(null, { logRef: logA.row.id, input: simple() }, key);
+    const keyObserved = observedDb();
+    const mine = await Q.questions(null, { logRef: logA.row.id, askedByMe: true }, { ...key, db: keyObserved.db } as Context);
+    expect(ids(mine)).toEqual([appAsked.row.id]);
+    expect(keyObserved.log.identityLookups).toBe(0);
+  });
+
+  it('an identity alias still counts: the account merged into the caller\'s is the asker', async () => {
+    const q = await ask(logA.row.id, simple(), holger.id);
+    await M.mergeUsers(null, { input: { source: holger.id, target: kay.id, consentProof: await approvedMergeProof(db, holger.id, kay.id, platformAdmin.id) } },
+      as(platformAdmin.id, { roles: ['ADMIN'] }));
+    const observed = observedDb();
+    const page = await Q.questions(null, { logRef: logA.row.id, askedByMe: true }, as(kay.id, { db: observed.db }));
+    expect(ids(page)).toEqual([q.row.id]);
+    expect(observed.log.identityLookups).toBe(1);
+  });
+});
+

@@ -191,8 +191,13 @@ async function isDecider(ctx: Context, d: Pick<QuestionData, 'deciders'>): Promi
  * pure App key may bind any session of its App, so its worker id alone proves nothing.
  */
 async function isAsker(ctx: Context, d: Pick<QuestionData, 'askedBy'>): Promise<boolean> {
-  if (ctx.userId && d.askedBy.workerId && d.askedBy.workerId === actorOf(ctx).workerId) return true;
-  return isAskerWith(ctx, d.askedBy.userId && ctx.userId ? await callerIdentities(ctx) : new Set(), d);
+  return isAskerWith(ctx, askerNeedsIdentities(ctx, d) ? await callerIdentities(ctx) : new Set(), d);
+}
+
+/** Whether judging {@link isAskerWith} on this row needs the caller's identities: a user-named asker the worker arm does not already settle. */
+function askerNeedsIdentities(ctx: Context, d: Pick<QuestionData, 'askedBy'>): boolean {
+  if (ctx.userId && d.askedBy.workerId && d.askedBy.workerId === actorOf(ctx).workerId) return false;
+  return !!d.askedBy.userId && !!ctx.userId;
 }
 
 /** {@link isAsker} with the caller's identities already resolved (a list judges many rows against one set). */
@@ -1036,7 +1041,8 @@ export function sortViews(views: QuestionView[], sort: QuestionSortName): Questi
   const rank = (v: QuestionView) => PRIORITY_RANK[v.shown?.priority ?? 'normal'];
   const askedAt = (v: QuestionView) => v.shown?.askedAt ?? '';
   // #4604 F3: a loc is unique only inside one memory, and an App-scope list spans memories, so two rows can share n AND loc. The last key
-  // is the row id (unique), on EVERY comparator, so the order is total and a row never moves between offset pages.
+  // is the row id (unique), on EVERY comparator, so the order is total: for a fixed set of rows, two requests give one order (inserts, deletes
+  // and changed sort keys between requests can still shift offsets).
   const byId = (a: QuestionView, b: QuestionView) => (a.row.id < b.row.id ? -1 : a.row.id > b.row.id ? 1 : 0);
   // Every sort ends in the same stable tiebreak: n descending, then loc, then id.
   const tie = (a: QuestionView, b: QuestionView) => n(b) - n(a) || a.row.loc.localeCompare(b.row.loc) || byId(a, b);
@@ -1182,6 +1188,7 @@ export const questionQueries = {
     // Only askQuestion writes the question role, always directly under a log.
     const rows = await ctx.db.node.findMany({ where, select: QUESTION_ROW_SELECT, take: cap + 1 });
     if (rows.length > cap) {
+      // The fetch saw cap + 1 rows, so the list is over the cap; `count` is the larger of a later count and cap + 1, a lower bound at the fetch.
       const count = Math.max(await ctx.db.node.count({ where }), cap + 1);
       throw questionError('QUESTION_LOG_TOO_LARGE_FOR_FILTER', `${count} questions exceed the ${cap} this list evaluates at once.`, { count, cap });
     }
@@ -1218,12 +1225,13 @@ export const questionQueries = {
       }
       return true;
     });
-    // #4604 F5: the asker pull is judged LAST, on the rows every other filter kept, with the caller's identities resolved once for the whole
-    // request (none at all when nothing is left to judge), instead of one awaited helper call per evaluated row before the cheap filters.
-    if (byMe && views.length > 0) {
-      const mine = await callerIdentities(ctx);
+    // #4604 F5: the asker pull is judged LAST, on the rows every other filter kept. The caller's identities are resolved LAZILY, once for the
+    // request, and only when a surviving row needs them (a user-named asker the worker arm did not already settle): a matching worker, an
+    // App-only caller or an unevaluable row never costs a lookup, as under the per-row rule.
+    if (byMe) {
+      const mine = views.some((v) => !!v.shown && askerNeedsIdentities(ctx, v.shown)) ? await callerIdentities(ctx) : new Set<string>();
       views = views.filter((v) => !!v.shown && isAskerWith(ctx, mine, v.shown));
-    } else if (byMe) views = [];
+    }
     const sorted = sortViews(views, args.sort ?? 'PORTAL_DEFAULT');
     return { items: sorted.slice(offset, offset + limit), total: sorted.length };
   },
