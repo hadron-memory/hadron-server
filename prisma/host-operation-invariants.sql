@@ -209,7 +209,7 @@ ALTER TABLE task_session_end_requests ADD CONSTRAINT chk_task_session_end_reques
 -- #4558 (hadron-cli#2677) — the reason set gains no_screen (Orca gives no rendered screen for the
 -- terminal) and multiple_terminals (more than one agent terminal bound to the worker). Both ride locked, as
 -- unrecognized does: the stored status is unchanged and no terminal-status event follows (that event is not
--- built, cor:agt:050:11 slice S1c). Mirrors migration 20261120100000_worker_terminal_new_reasons.
+-- built, cor:agt:050:11 slice S1c). Mirrors migration 20261120200000_worker_terminal_new_reasons.
 ALTER TABLE workers DROP CONSTRAINT IF EXISTS chk_workers_terminal_shape;
 ALTER TABLE workers ADD CONSTRAINT chk_workers_terminal_shape CHECK (
   terminal IS NULL OR (
