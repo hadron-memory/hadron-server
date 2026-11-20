@@ -9,11 +9,13 @@ import { deriveEdgeLoc, deriveEdgeLocAlternates, compareMigratedSuffix, migrated
  *
  * The migrated spelling includes the backfill's own collision suffix (`<migrated>:2`, `:3`...).
  *
- * Precedence, so no existing behavior moves: a row at the runtime spelling always wins; the migrated spelling is used
- * only when no row holds the runtime one AND the row there is the same edge: same name, same source, same target. A
- * different edge that merely owns the migrated loc (an edge literally named `a-b` for the name `a😀b`) is never
- * taken for it. Soft-deleted rows count, as for the primary spelling: the (loc, memory) unique is unfiltered, so the
- * caller's existing occupant checks must reach them.
+ * Precedence: a row at the runtime spelling that IS this edge (same name, source, target) wins, as on main. Otherwise a
+ * same-edge row at the migrated spelling is used, even when a DIFFERENT edge owns the runtime loc (an edge literally
+ * named `a--b` beside the migrated `a😀b`): that edge must not hide the right one, or the caller's occupant check would
+ * refuse an edge that exists. A different edge that merely owns the migrated loc (an edge literally named `a-b` for the
+ * name `a😀b`) is never taken for it, and with no same-edge row anywhere the runtime loc is returned, so an occupant
+ * stays refused as before. Soft-deleted rows count, as for the primary spelling: the (loc, memory) unique is
+ * unfiltered, so the caller's existing occupant checks must reach them.
  *
  * Never writes, never rewrites a loc, and reads nothing for a name with a single spelling.
  *
@@ -62,7 +64,11 @@ export async function derivedEdgeLocForUpsert(
     },
     select: { loc: true, name: true, sourceId: true, targetId: true },
   });
-  if (rows.some((r) => r.loc === primary)) return primary;
+  const isThisEdge = (r: { name: string | null; sourceId: string; targetId: string }) =>
+    r.name === (edge.name ?? null) && r.sourceId === edge.sourceId && r.targetId === edge.targetId;
+  // The runtime loc wins when it IS this edge (what main already did for it). When a DIFFERENT edge owns it, that must
+  // not hide a same-edge migrated row: the caller's occupant check would refuse although the right edge exists.
+  if (rows.some((r) => r.loc === primary && isThisEdge(r))) return primary;
   // Rank within one alternate: the plain loc first, then suffixes as DECIMALS (shorter digit string first, then
   // lexicographic: the canonical form has no leading zeros, so this is numeric order without floating point).
   const rank = (loc: string): string | null => {
@@ -75,7 +81,7 @@ export async function derivedEdgeLocForUpsert(
   };
   // The same edge only: same name, source and target.
   const same = rows
-    .filter((r) => r.name === (edge.name ?? null) && r.sourceId === edge.sourceId && r.targetId === edge.targetId)
+    .filter(isThisEdge)
     .map((r) => ({ loc: r.loc, rank: rank(r.loc) }))
     .filter((r): r is { loc: string; rank: string } => r.rank !== null)
     .sort((x, y) => compareMigratedSuffix(x.rank, y.rank))[0];

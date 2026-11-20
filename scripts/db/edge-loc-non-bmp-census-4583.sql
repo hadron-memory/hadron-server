@@ -16,7 +16,7 @@
 --                      `migratedLocSuffix` in src/lib/edgeLoc.ts) the backfill appended when two names between the
 --                      same endpoints sanitized to one atom (a literal `a-b` beside `a😀b`): found by the lookup too.
 --   neither            everything else: authored locs, moved edges, a `:1` / `:02` continuation (not a backfill suffix).
---   twin_pairs         a migrated-spelling edge and a runtime-spelling edge with the same source, target and name:
+--   twin_pairs         a migrated-spelling edge (plain or `:N`-suffixed) and a runtime-spelling edge with the same source, target and name:
 --                      the twins the divergence has already produced. #4583 does not merge them.
 --   runtime_loc_taken_by_another / migrated_loc_taken_by_another
 --                      a divergent edge whose OTHER spelling is the loc of a DIFFERENT edge (other name or endpoints, so not its twin) in the same memory (an edge
@@ -62,7 +62,9 @@ SELECT count(*)                                                   AS divergent_e
        count(*) FILTER (WHERE d.loc NOT IN (d.migrated_loc, d.runtime_loc)
                           AND NOT (left(d.loc, length(d.migrated_loc) + 1) = d.migrated_loc || ':'
                                    AND substr(d.loc, length(d.migrated_loc) + 2) ~ '^([2-9]|[1-9][0-9]+)$')) AS neither,
-       count(*) FILTER (WHERE d.loc = d.migrated_loc AND EXISTS (
+       count(*) FILTER (WHERE (d.loc = d.migrated_loc
+                               OR (left(d.loc, length(d.migrated_loc) + 1) = d.migrated_loc || ':'
+                                   AND substr(d.loc, length(d.migrated_loc) + 2) ~ '^([2-9]|[1-9][0-9]+)$')) AND EXISTS (
          SELECT 1 FROM divergent r
           WHERE r.id <> d.id AND r.memory_id = d.memory_id AND r.source_id = d.source_id
             AND r.target_id = d.target_id AND r.name = d.name AND r.loc = r.runtime_loc)) AS twin_pairs,

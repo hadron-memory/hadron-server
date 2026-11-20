@@ -104,8 +104,12 @@ export function compareMigratedSuffix(a: string, b: string): number {
 
 /**
  * The OTHER spelling of the derived loc (#4583): what the historical migration wrote for the same endpoints and name,
- * when that differs from {@link deriveEdgeLoc}'s. Empty for every name whose two spellings agree, which is every name
- * without a non-BMP code point between alphanumerics, so for those nothing about a lookup changes.
+ * when that differs from {@link deriveEdgeLoc}'s. At most ONE element (the array is the shape callers iterate, not a
+ * promise of more). Empty exactly when the two FINAL sanitized atoms are equal. That is a comparison of outputs, not a
+ * rule about where the non-BMP code point sits: an astral character between alphanumerics usually diverges, but the
+ * trims and the 64 cap can make the outputs equal again (a leading or trailing one is trimmed) or make them differ
+ * (62 `x` then `😀b`: only the one-`-` spelling keeps the `b` inside the cap). So for names with no astral code point,
+ * and for those whose outputs happen to agree, a lookup changes nothing.
  */
 export function deriveEdgeLocAlternates(
   sourceLoc: string,

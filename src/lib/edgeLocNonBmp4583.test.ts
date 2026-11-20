@@ -41,7 +41,11 @@ const FUNCTION_SQL = MIGRATION.slice(fnStart, fnEnd + 'LANGUAGE plpgsql IMMUTABL
 /** Names with no astral code point: the two spellings are one. */
 const BMP_VECTORS = ['depends-on', 'has space', 'foo:bar', '!!foo!!', '', '___', 'x'.repeat(70), 'ünï', 'a\u0301b', '日本語', '\uFFFF'];
 /** An astral code point BETWEEN alphanumerics: the SQL writes one `-` per code point, the runtime two per code point. */
-const DIVERGENT_VECTORS = ['a😀b', 'a😀😀b', 'a👨‍👩‍👧b', 'a\u{10FFFF}b', 'a\u{10000}b', '1😀2'];
+const DIVERGENT_VECTORS = [
+  'a😀b', 'a😀😀b', 'a👨‍👩‍👧b', 'a\u{10FFFF}b', 'a\u{10000}b', '1😀2',
+  // The 64 cap: the two outputs differ in length, so one keeps the trailing `b` inside the cap and the other loses it.
+  'x'.repeat(62) + '😀b',
+];
 /** An astral code point the trimming and the cap remove again, so the two spellings still agree. */
 const ASTRAL_BUT_EQUAL_VECTORS = ['😀', '😀a', 'a😀', 'x'.repeat(63) + '😀', 'x'.repeat(63) + '😀b', '😀'.repeat(40)];
 
@@ -197,6 +201,21 @@ describe('derivedEdgeLocForUpsert — the lookup seam (#4583)', () => {
   it('a RUNTIME-created edge (the `--` spelling since the migration) still wins and is found as before', async () => {
     const { args, edge } = await fixture();
     await edge('root:a--b:leaf', 'a😀b');
+    expect(await derivedEdgeLocForUpsert(db, args('a😀b'))).toBe('root:a--b:leaf');
+  });
+
+  it('a runtime loc held by a DIFFERENT edge does not mask the migrated edge that really is this one', async () => {
+    // `root:a--b:leaf` belongs to a relationship literally named `a--b`; `root:a-b:leaf` is the migrated `a😀b`. The
+    // lookup used to return the runtime loc, so the caller's occupant check refused although the right edge existed.
+    const { args, edge } = await fixture();
+    await edge('root:a--b:leaf', 'a--b');
+    await edge('root:a-b:leaf', 'a😀b');
+    expect(await derivedEdgeLocForUpsert(db, args('a😀b'))).toBe('root:a-b:leaf');
+  });
+
+  it('a runtime loc held by a different edge and NO same-edge migrated row: the runtime loc, so the existing refusal stands', async () => {
+    const { args, edge } = await fixture();
+    await edge('root:a--b:leaf', 'a--b');
     expect(await derivedEdgeLocForUpsert(db, args('a😀b'))).toBe('root:a--b:leaf');
   });
 
@@ -395,6 +414,9 @@ describe('the census script (#4583, read only)', () => {
     const [s8, t8, s9, t9] = await Promise.all(['s8', 't8', 's9', 't9'].map(node));
     await edge(s8, t8, 's8:a-b:t8:1', 'a😀b'); // `:1` is not a backfill suffix: neither
     await edge(s9, t9, 's9:a-b:t9:02', 'a😀b'); // nor is `:02`: neither
+    const [s10, t10] = await Promise.all(['s10', 't10'].map(node));
+    await edge(s10, t10, 's10:a-b:t10:2', 'a😀b'); // a SUFFIXED migrated edge ...
+    await edge(s10, t10, 's10:a--b:t10', 'a😀b'); // ... and its runtime twin: a twin pair too
     await edge(s1, t2, 's1:plain:t2', 'plain'); // not divergent: ignored
     const before = await db.edge.count();
     const rows = await db.$transaction(async (tx) => {
@@ -403,12 +425,12 @@ describe('the census script (#4583, read only)', () => {
     });
     const r = Object.fromEntries(Object.entries(rows[0]).map(([k, v]) => [k, Number(v)]));
     expect(r).toEqual({
-      divergent_edges: 11,
+      divergent_edges: 13,
       migrated_spelling: 4, // s1, s3 (migrated half), s5, and the soft-deleted s2 edge
-      runtime_spelling: 3, // s2, s3 (runtime half), s6
-      migrated_suffixed: 1, // s7
+      runtime_spelling: 4, // s2, s3 (runtime half), s6, s10 (runtime half)
+      migrated_suffixed: 2, // s7, s10
       neither: 3, // s4, and the rejected suffixes s8 (`:1`) and s9 (`:02`)
-      twin_pairs: 1, // s3
+      twin_pairs: 2, // s3 (plain migrated + runtime) and s10 (suffixed migrated + runtime)
       runtime_loc_taken_by_another: 1, // s5
       migrated_loc_taken_by_another: 1, // s6 (the positive case: a broken predicate that always answered 0 fails here)
     });

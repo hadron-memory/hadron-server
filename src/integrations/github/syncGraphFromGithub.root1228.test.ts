@@ -93,6 +93,20 @@ describe('#1228 root README', () => {
     expect((await db.edge.findUniqueOrThrow({ where: { id: literal.id } })).loc).toBe('child:a-b:root-memory');
     expect((await db.edge.findUniqueOrThrow({ where: { id: suffixed.id } })).loc).toBe('child:a-b:root-memory:2');
   });
+  it('#4583: a migrated edge whose re-keyed loc is already owned by another edge follows the existing collision policy: the sync aborts and nothing moves', async () => {
+    // The root move re-derives incident edge locs and "collisions abort the whole transaction" (the policy this block
+    // already had for runtime-spelling edges). A migrated edge newly recognized by #4583 is under the same policy.
+    const root = await legacyRoot();
+    const child = await db.node.create({ data: { memoryId: graph.id, loc: 'child', name: 'Child' } });
+    const migrated = await db.edge.create({ data: { memoryId: graph.id, sourceId: child.id, targetId: root.id, loc: 'child:a-b:', name: 'a😀b' } });
+    const other = await db.node.create({ data: { memoryId: graph.id, loc: 'other', name: 'Other' } });
+    const owner = await db.edge.create({ data: { memoryId: graph.id, sourceId: child.id, targetId: other.id, loc: 'child:a-b:root-memory', name: 'authored' } });
+    readme();
+    expect((await syncGraphFromGithub(graph)).error).toBeDefined();
+    expect(await db.node.findUniqueOrThrow({ where: { id: root.id } })).toMatchObject({ loc: '' }); // the move did not happen
+    expect((await db.edge.findUniqueOrThrow({ where: { id: migrated.id } })).loc).toBe('child:a-b:');
+    expect((await db.edge.findUniqueOrThrow({ where: { id: owner.id } })).loc).toBe('child:a-b:root-memory');
+  });
   it.each(['', 'unknown1228'])('refuses a missing or mismatched live root id (%s) before replacement', async (fileId) => {
     const root = await legacyRoot();
     readme(fileId);
