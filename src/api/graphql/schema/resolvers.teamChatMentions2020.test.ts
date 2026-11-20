@@ -408,9 +408,9 @@ describe('S3 filter audience and transport boundaries', () => {
       expect(await refusalOf(() => Q.channelMessages({}, {channelRef: made.channel.id, teamHeadRef: rook.id, limit: 0}, ctx(manager.id)))).toEqual(missing);
       expect((await Q.channelMessages({}, {channelRef: channel.id, teamHeadRef: rook.id, limit: 0}, ctx(manager.id))).total).toBe(1);
     });
-    async function sealStampHistory(target: { id: string } = memory, label = 'mr-2595') {
+    async function sealStampHistory(target: { id: string } = memory, cacheSessionId = 'mr-2595') {
       const key = generateDataKey();
-      sessionKeyCache.set(label, target.id, key);
+      sessionKeyCache.set(cacheSessionId, target.id, key);
       await db.memory.update({where: {id: target.id}, data: {isEncrypted: true}});
       for (const row of await db.node.findMany({where: {memoryId: target.id, nodeType: 'chat-message'}})) {
         const sealed = encryptNodeFieldsWithKey({content: row.content, data: row.data}, key);
@@ -487,9 +487,10 @@ describe('S3 filter audience and transport boundaries', () => {
       // The only stamp lives in the OTHER memory's Channel (same loc as `channel`); `channel` itself holds none.
       const post = await stampThenDissolve(other.channel.id);
       await db.worker.update({where: {id: rook.id}, data: {retiredAt: new Date()}});
-      await sealStampHistory(otherMemory, 'mr-2602-other');
-      await sealStampHistory(memory, 'mr-2602-own');
       try {
+        // Sealing sits inside the try: sealStampHistory caches its key first, so a failure part-way still evicts.
+        await sealStampHistory(otherMemory, 'mr-2602-other');
+        await sealStampHistory(memory, 'mr-2602-own');
         const missing = await refusalOf(() => readAs('no-such-worker'));
         expect(missing).toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_HEAD_INVALID'}});
         // The unstamped Channel refuses exactly like an unknown head ...
