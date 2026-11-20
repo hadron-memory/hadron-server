@@ -101,10 +101,25 @@ export function workloadValid(workload, c) {
  * the e2e image is 22.22). It is true for a direct, symlinked, spaced or --preserve-symlinks-main launch, and false for
  * any import, whatever argv[1] holds (#4608 BLIND F1). There is no argv[1] fallback: argv[1] cannot tell
  * `node load.mjs` from `node -e 'import("load.mjs")' load.mjs` (#4608 BLIND delta). On a Node without import.meta.main
- * the CLI does not run, prints no record, and run.sh refuses the run (no positive load record), so it never passes.
+ * the CLI does not run, prints no record and says so with a non-zero exit (flagUnsupportedRuntime), and run.sh refuses
+ * the run (no positive load record), so it never passes.
  */
 export function isMainModule(nodeMain) {
   return nodeMain === true;
+}
+
+export const UNSUPPORTED_NODE = 'load.mjs: this Node has no import.meta.main (needs Node 22.18+ or 24.2+); the load driver did not run';
+/**
+ * #4608 BLIND delta P3: on a Node without import.meta.main a direct launch cannot be told from an import, so the driver
+ * does not run. That must not look like success: the runtime is named on stderr and the exit code is non-zero. It sets
+ * process.exitCode and never calls process.exit, so it has no side effect on an importer that exits explicitly (the
+ * runner's record check does) and none at all on a supported Node.
+ */
+export function flagUnsupportedRuntime(nodeMain, proc = process) {
+  if (typeof nodeMain === 'boolean') return false;
+  proc.stderr.write(`${UNSUPPORTED_NODE}\n`);
+  proc.exitCode = 2;
+  return true;
 }
 
 const COUNT_KEYS = ['ok', 'capRefused', 'other', 'closeOk', 'closeFailed', 'missingSession'];
@@ -125,6 +140,7 @@ export function loadRecordOk(text, workload) {
   return workloadValid(workload, r);
 }
 
+flagUnsupportedRuntime(import.meta.main);
 if (isMainModule(import.meta.main)) {
   const [base, workload, durS] = process.argv.slice(2);
   const key = process.env.HADRON_DIAG_KEY;
