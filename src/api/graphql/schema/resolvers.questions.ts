@@ -433,7 +433,9 @@ async function lockLogShared(tx: Tx, target: { memoryId: string; loc: string }, 
   await lockEdgeEndpointMemories(tx, [target.memoryId]);
   await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${found.id} FOR SHARE`;
   const row = await tx.node.findUnique({ where: { id: found.id }, select: LOG_ROW_SELECT });
-  if (!row || row.deletedAt || row.memoryId !== target.memoryId || row.role !== QUESTION_LOG_ROLE) throw logMissing(ref);
+  // The parent was found by loc BEFORE the lock; a log moved or replaced in between must not pass on its id alone,
+  // so the row is checked at the loc the question's own loc names, under the lock.
+  if (!row || row.deletedAt || row.memoryId !== target.memoryId || row.role !== QUESTION_LOG_ROLE || row.loc !== target.loc.slice(0, target.loc.lastIndexOf(':'))) throw logMissing(ref);
   return { row, data: parseLogData(row) };
 }
 
@@ -1564,9 +1566,14 @@ export const questionFieldResolvers = {
       // The same gate as the doors, on the read client; a state no door writes to is never answerable.
       const state = v.evaluation.state;
       if (!v.shown || !v.evaluation.question || BLOCKED_STATES.has(state)) return false;
+      // At the entry limit answerAct refuses every new entry (retraction included), so no one may answer.
+      if (v.shown.answers.length >= MAX_ANSWERS) return false;
       const found = await logOfQuestion(ctx.db, v.row);
       if (!found) return false;
-      return (await actingDecider(ctx, ctx.db, v.shown, parseLogData(found), v.row.memoryId)).ok;
+      // A corrupt or unsupported log payload is "no", not a null in the non-null field; a database error still surfaces.
+      const parsed = questionLogDataSchema.safeParse(found.data);
+      if (!parsed.success) return false;
+      return (await actingDecider(ctx, ctx.db, v.shown, parsed.data, v.row.memoryId)).ok;
     },
     identityMerges: (v: QuestionView, _: unknown, ctx: Context) => identityMergesOf(ctx, v.shown),
     askedBy: (v: QuestionView, _: unknown, ctx: Context) => actorOut(ctx, v.shown?.askedBy ?? { userId: null, workerId: null, appId: null }),

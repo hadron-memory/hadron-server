@@ -422,10 +422,21 @@ describe('#4427 acceptance 14: the log FOR SHARE fence, with two real connection
     // Connection 2: the answer. It must block on the log row, not read the old list.
     let settled = false;
     const attempt = codeOf(answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq)).then((c) => { settled = true; return c; });
-    await new Promise((r) => setTimeout(r, 1500));
-    expect(settled).toBe(false);
-    release();
-    await changer;
+    try {
+      // Evidence of blocking, not a sleep: another backend is waiting on a lock held by the changer, and the answer has not settled.
+      const deadline = Date.now() + 20_000;
+      let waiting = 0;
+      while (Date.now() < deadline && waiting === 0 && !settled) {
+        const rows = await db.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`;
+        waiting = rows[0]?.n ?? 0;
+        if (waiting === 0) await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(settled).toBe(false);
+      expect(waiting).toBeGreaterThan(0);
+    } finally {
+      release();
+      await changer.catch(() => undefined);
+    }
     expect(await attempt).toBe('QUESTION_NOT_DECIDER');
     expect((await dataOf(q.row.id)).answers).toHaveLength(0);
   });
@@ -476,5 +487,62 @@ describe('#4532 review pins: the via pointer, and each blocked-state guard alone
     const q2 = await ask(log.row.id);
     await db.node.update({ where: { id: q2.row.id }, data: { data: { ...(q2.row.data as object), codec: 'question@0' } as never } });
     expect(await codeOf(answer(q2.row.id, { optionKey: 'yes' }, (await rowOf(q2.row.id)).revSeq))).toBe('QUESTION_INVALID');
+  });
+});
+
+describe('#4532 blind round 4: the capability at the entry limit, a corrupt log, and a log at another loc', () => {
+  const viewFor = async (id: string, ctx: Context) => D.viewerMayAnswer({ row: await rowOf(id), shown: await dataOf(id), evaluation: { state: 'OPEN', question: await dataOf(id) } }, {}, ctx);
+
+  it('viewerMayAnswer is false for an eligible decider once the question holds MAX_ANSWERS entries, and true one below', async () => {
+    const q = await ask((await createLog()).row.id);
+    const answers = (n: number) => Array.from({ length: n }, (_, i) => ({ key: i % 2 ? 'yes' : 'no', at: '2026-01-01T00:00:00.000Z', by: { userId: holger.id, workerId: null, appId: null } }));
+    const withAnswers = async (n: number) => {
+      const data = await dataOf(q.row.id);
+      return D.viewerMayAnswer({ row: await rowOf(q.row.id), shown: { ...data, answers: answers(n) }, evaluation: { state: 'OPEN', question: { ...data, answers: answers(n) } } }, {}, as(holger.id));
+    };
+    expect(await withAnswers(MAX_ANSWERS - 1)).toBe(true);
+    expect(await withAnswers(MAX_ANSWERS)).toBe(false);
+  });
+
+  it('a corrupt log payload reads as false, not as an error in the non-null field', async () => {
+    const log = await createLog();
+    const q = await ask(log.row.id);
+    expect(await viewFor(q.row.id, as(holger.id))).toBe(true);
+    await db.node.update({ where: { id: log.row.id }, data: { data: { not: 'a log' } as never } });
+    expect(await viewFor(q.row.id, as(holger.id))).toBe(false);
+  });
+
+  it('a log moved while the answer waits on its lock is refused as a missing log, not authorized against the old row', async () => {
+    const log = await createLog();
+    const q = await ask(log.row.id);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockedIn = new Promise<void>((r) => { locked = r; });
+    // The mover holds the log lock and changes its loc; the answer already found the parent at the OLD loc.
+    const mover = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${log.row.id} FOR NO KEY UPDATE`;
+      await tx.node.update({ where: { id: log.row.id }, data: { loc: `${log.row.loc}-moved` } });
+      locked();
+      await held;
+    }, { timeout: 30_000 });
+    await lockedIn;
+    let settled = false;
+    const attempt = codeOf(answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq)).then((c) => { settled = true; return c; });
+    try {
+      const deadline = Date.now() + 20_000;
+      let waiting = 0;
+      while (Date.now() < deadline && waiting === 0 && !settled) {
+        const rows = await db.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`;
+        waiting = rows[0]?.n ?? 0;
+        if (waiting === 0) await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(settled).toBe(false);
+    } finally {
+      release();
+      await mover.catch(() => undefined);
+    }
+    expect(await attempt).toBe('QUESTION_LOG_NOT_FOUND');
+    expect((await dataOf(q.row.id)).answers).toHaveLength(0);
   });
 });
