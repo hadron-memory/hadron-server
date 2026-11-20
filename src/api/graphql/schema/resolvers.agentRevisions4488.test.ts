@@ -5,6 +5,8 @@
  * Slot numbers are never reused (#2507), so a delete does not free a slot: pinned below.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from './typeDefs.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -63,6 +65,22 @@ describe('agentRevisions (list)', () => {
     expect(r.revisions.map((x: any) => x.revisionLoc)).toEqual(['revisions:rev-2', 'revisions:rev-1']);
     expect(r.highestSlotUsed).toBe(3);
     expect((await save()).revisionLoc).toBe('revisions:rev-4');
+  });
+
+  // QA P1 at d6bc43ff: MAX_REVISION_SLOT is far above GraphQL's 32-bit Int, so the slot facts must serialize as Float.
+  // Run through the executor: a direct resolver call never serializes, so an Int-typed field passed here.
+  it('serializes the slot facts through the GraphQL executor (they exceed a 32-bit Int)', async () => {
+    await save(); await save();
+    const server = new ApolloServer<Context>({ typeDefs, resolvers: resolvers as never });
+    const r = await server.executeOperation(
+      { query: 'query($a: ID!){ agentRevisions(agentRef: $a){ slotLimit highestSlotUsed slotsRemaining revisions { revisionLoc } } }', variables: { a: agentA.id } },
+      { contextValue: asManager() },
+    );
+    expect(r.body.kind).toBe('single');
+    const body = (r.body as { singleResult: { data?: any; errors?: unknown } }).singleResult;
+    expect(body.errors).toBeUndefined();
+    expect(body.data.agentRevisions).toMatchObject({ slotLimit: MAX_REVISION_SLOT, highestSlotUsed: 2, slotsRemaining: MAX_REVISION_SLOT - 2 });
+    expect(MAX_REVISION_SLOT).toBeGreaterThan(2 ** 31 - 1);
   });
 
   it('is empty for an Agent with no revisions', async () => {

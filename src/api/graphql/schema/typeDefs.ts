@@ -16050,9 +16050,9 @@ export const typeDefs = `#graphql
   """
   type AgentRevisionList {
     revisions: [AgentRevision!]!
-    slotLimit: Int!
-    highestSlotUsed: Int!
-    slotsRemaining: Int!
+    slotLimit: Float!
+    highestSlotUsed: Float!
+    slotsRemaining: Float!
   }
 
   type RevisionResult {
