@@ -12749,11 +12749,14 @@ async function handleUnknownOrNewMcpSession(req: Request, res: Response, session
  * credential resolves to, the key its selections are stored under, and its re-authorized stored selections applied to
  * `auth`. ONE function for both serving modes (a connection being opened, and a sessionless request), so the
  * precedence below cannot drift between them. Mutates `auth` in place.
+ *
+ * `opened` is the connection being opened, or null for a sessionless request. Its two log lines record an event that
+ * happens once per connection; per request they would repeat on every call and say nothing.
  */
 async function prepareMcpPrincipal(
   req: Request,
   auth: AuthContext,
-  isReconnect: boolean,
+  opened: { isReconnect: boolean } | null,
 ): Promise<{ cachedAppResolution: AppResolution | null; clientKey: string | null; restored: RestoredMcpSelection }> {
   // Spec 025 / 026 — App-identification resolution at the MCP boundary for
   // user-credential callers (userId set, appId not set; JWT or
@@ -12789,7 +12792,7 @@ async function prepareMcpPrincipal(
       // is allowed to override it below, but must never re-point an App key.
       appIdFromSingleAppDefault = true;
     }
-    if (cachedAppResolution.kind === 'multi-app') {
+    if (cachedAppResolution.kind === 'multi-app' && opened) {
       mcpLog('warn', 'multi_app_session_opened_without_selection', {
         userId: auth.userId,
       });
@@ -12830,13 +12833,15 @@ async function prepareMcpPrincipal(
     const overrodeDefault = auth.appId !== undefined && auth.appId !== restored.appId;
     auth.appId = restored.appId;
     auth.organizationId = restored.organizationId ?? undefined;
-    mcpLog('info', 'mcp_session_state_restored', {
-      userId: auth.userId,
-      appId: restored.appId,
-      restoredMemory: Boolean(restored.memoryUrn),
-      overrodeSingleAppDefault: overrodeDefault,
-      reconnect: isReconnect,
-    });
+    if (opened) {
+      mcpLog('info', 'mcp_session_state_restored', {
+        userId: auth.userId,
+        appId: restored.appId,
+        restoredMemory: Boolean(restored.memoryUrn),
+        overrodeSingleAppDefault: overrodeDefault,
+        reconnect: opened.isReconnect,
+      });
+    }
   }
   return { cachedAppResolution, clientKey, restored };
 }
@@ -12945,7 +12950,7 @@ async function openOrRejectMcpSession(
   // client that will not mention it, so the tools need to be able to say so.
   const isReconnect = isLikelyReconnect(sessionId);
 
-  const { cachedAppResolution, clientKey, restored } = await prepareMcpPrincipal(req, auth, isReconnect);
+  const { cachedAppResolution, clientKey, restored } = await prepareMcpPrincipal(req, auth, { isReconnect });
 
   // Session not found or no session — create a new one.
   // This handles both first-time connections and reconnections after server restart.
@@ -13096,7 +13101,7 @@ async function dispatchMcpSessionlessRequest(req: Request, res: Response): Promi
   // #2123: session-sensitive consumers read THIS request's binding result.
   auth.requestSession = { sessionId: auth.sessionId, refused: auth.sessionBindingRefused === true };
 
-  const { cachedAppResolution, clientKey, restored } = await prepareMcpPrincipal(req, auth, false);
+  const { cachedAppResolution, clientKey, restored } = await prepareMcpPrincipal(req, auth, null);
   const principal: SessionlessPrincipal = { auth, cachedAppResolution, clientKey, restored };
   // The SDK forwards `req.auth` to the factory untouched and verifies nothing itself. No credential goes in it.
   (req as Request & { auth?: unknown }).auth = { token: '', clientId: '', scopes: [], extra: { [SESSIONLESS_PRINCIPAL_KEY]: principal } };
