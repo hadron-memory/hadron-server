@@ -4,6 +4,22 @@ export const NOT_SAMPLED = 'not sampled';
 export const RSS_ABORT_BYTES = 5 * 1024 ** 3;
 export const WALL_ABORT_MS = 20 * 60_000;
 
+/**
+ * #2624: the sampling interval, one setting with one rule. Unset or empty is the 1000 ms default; a plain decimal
+ * integer from 100 to 10000 ms is taken; anything else is invalid (null). The preload falls back to the default on
+ * invalid and records the interval it actually uses; the runner reads that record (validate-samples --interval)
+ * and judges freshness against two periods of it.
+ */
+export const SAMPLE_MS_DEFAULT = 1000;
+export const SAMPLE_MS_MIN = 100;
+export const SAMPLE_MS_MAX = 10000;
+export function sampleIntervalMs(raw) {
+  if (raw === undefined || raw === '') return SAMPLE_MS_DEFAULT;
+  if (!/^[0-9]+$/.test(raw)) return null;
+  const n = Number(raw);
+  return n >= SAMPLE_MS_MIN && n <= SAMPLE_MS_MAX ? n : null;
+}
+
 export function reduceTransportState(state) {
   const entries = Object.values(state.entries);
   return {

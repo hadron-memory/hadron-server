@@ -50,6 +50,15 @@ finish_samples() {
   rm -f -- "$complete"; return 5
 }
 
+# effective_sample_ms: the sampling interval the preload recorded in the container's samples (#2624). Fails, with
+# the validator's fixed line, when no supported interval is recorded.
+effective_sample_ms() {
+  declare -F app_exec >/dev/null || return 1
+  app_exec cat /var/lib/hadron/graphs/diagnose-samples.jsonl 2>/dev/null | node "$(dirname -- "${BASH_SOURCE[0]}")/validate-samples.mjs" --interval
+}
+# freshness_slack_ms <sample-ms>: samples must reach to within two sampling periods of the expected end.
+freshness_slack_ms() { echo $(( ${1:?sample ms} * 2 )); }
+
 # keep_logs_private <dest> <cmd...>: raw logs go to a fresh 0600 file, never to stderr; only a fixed line is published.
 # The destination is removed first and created exclusively, so an existing permissive file (or symlink) is never reused.
 keep_logs_private() {
