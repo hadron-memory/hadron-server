@@ -13211,7 +13211,7 @@ export const typeDefs = `#graphql
     createPrincipalGrant(orgRef: String!, userRef: String!, actions: [String!]!, expiresAt: String): PrincipalGrant!
     "Revoke an action grant (org-ADMIN, interactive-only; soft delete)."
     revokePrincipalGrant(ref: ID!): Boolean!
-    "Mint comm.outbound tickets into the org ledger (org-ADMIN; cor:acl:050:04)."
+    "Mint comm.outbound or secret.use tickets into the org ledger (org-ADMIN; hrn:node:hadronmemory.com:specs:cor:acl:050:04)."
     mintActionTickets(input: MintActionTicketsInput!): Int!
     "Set the stored (enforced) quota limit for a scope x action (#510) - the operator dial that previously required psql. Org-ADMIN."
     setQuotaLimit(input: SetQuotaLimitInput!): QuotaCounter!
