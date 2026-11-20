@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { upsertPlatformActions } from '../grants/actions.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import type { RunToolContext } from '../runner/tools/types.js';
@@ -135,10 +136,19 @@ describe('transactional secret.use (#4000)', () => {
       await tx.$executeRaw`UPDATE grants SET grantee_app_id = NULL, user_id = ${holder.id} WHERE id = ${grantId}`;
       await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
     });
-    await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
+    const runForPerson = await db.appRun.update({ where: { id: runCtx.run.id }, data: { userId: holder.id } });
+    const onBehalf: RunToolContext = { ...runCtx, run: runForPerson, principal: { ...runCtx.principal, userId: holder.id } };
+    await expect(prepare(onBehalf)).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId: runCtx.run.agentId!, name: 'S5 worker', slug: `s5-${generateId()}` } });
     await db.$transaction(async (tx) => {
       await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
-      await tx.$executeRaw`UPDATE grants SET grantee_app_id = ${appId}, user_id = NULL, action = 'secret.reveal' WHERE id = ${grantId}`;
+      await tx.$executeRaw`UPDATE grants SET user_id = NULL, worker_id = ${worker.id} WHERE id = ${grantId}`;
+      await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+    });
+    await expect(prepare(onBehalf)).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+      await tx.$executeRaw`UPDATE grants SET grantee_app_id = ${appId}, user_id = NULL, worker_id = NULL, action = 'secret.reveal' WHERE id = ${grantId}`;
       await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
     });
     await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
@@ -207,6 +217,26 @@ describe('transactional secret.use (#4000)', () => {
     expect((await db.appRun.findUniqueOrThrow({ where: { id: runCtx.run.id } })).budgetActions).toBe(1);
     expect(await db.actionTicket.count({ where: { organizationId: orgId, action: 'secret.use', consumedAt: { not: null } } })).toBe(5);
     expect(await db.grantEvent.count({ where: { grantId, action: 'USE' } })).toBe(5);
+  });
+  it('shares a five-use App grant across five distinct runs and refuses a sixth', async () => {
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+      await tx.$executeRaw`UPDATE grants SET max_uses = 5 WHERE id = ${grantId}`;
+      await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+    });
+    await db.actionTicket.createMany({ data: Array.from({ length: 6 }, () => ({ id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' })) });
+    const runs: RunToolContext[] = [];
+    for (let i = 0; i < 6; i++) {
+      const run = await db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId, agentId: runCtx.run.agentId,
+        triggerKind: 'MANUAL', status: 'RUNNING', budgetActions: 1, entryNodeUrn: 'hrn:node:example.test:flows:start' } });
+      runs.push({ ...runCtx, run, principal: { ...runCtx.principal, clientId: `run:${run.id}` } });
+    }
+    for (const ctx of runs.slice(0, 5)) await expect(prepare(ctx)).resolves.toMatchObject({ auth: { type: 'bearer' } });
+    await expect(prepare(runs[5])).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_SPENT' } });
+    const events = await db.grantEvent.findMany({ where: { grantId, action: 'USE' } });
+    expect(new Set(events.map((e) => e.runId))).toEqual(new Set(runs.slice(0, 5).map((c) => c.run.id)));
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: runs[5].run.id } })).budgetActions).toBe(1);
+    expect(await db.actionTicket.count({ where: { organizationId: orgId, action: 'secret.use', consumedAt: { not: null } } })).toBe(5);
   });
   it('commits exactly one grant use and one matching ticket before returning auth', async () => {
     await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
