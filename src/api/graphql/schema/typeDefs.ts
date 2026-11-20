@@ -6475,12 +6475,19 @@ export const typeDefs = `#graphql
   secret keeps its values as versions: every store adds one
   (hrn:node:hadronmemory.com:specs:cor:sec:010:03).
   """
+  enum SecretReadClientMode { REVEAL USE }
+
   input IssueSecretReadClientInput {
     "The App secret, by id or URN."
     secretRef: ID!
-    "WORKER: a live worker of the App (holderRef is its id). USER: the issuer themself (holderRef omitted). AGENT and APP are refused (GRANT_HOLDER_NOT_ALLOWED): a read client is held by a person or a worker."
+    "REVEAL: USER or WORKER. USE: an AGENT installed in the App or the App itself."
     holderKind: GrantHolderKind!
     holderRef: ID
+    "REVEAL by default; USE creates an injection-only client."
+    mode: SecretReadClientMode = REVEAL
+    "USE requires a signed HTTPS origin and path prefix and an auth header name."
+    bindingPrefix: String
+    bindingHeader: String
     "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refused (SECRET_AUTO_DELETE_NOT_AVAILABLE) until the deletion is available."
     autoDelete: Boolean! = false
     startsAt: DateTime

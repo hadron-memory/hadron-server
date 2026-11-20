@@ -4,6 +4,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
+import { createPendingGrant } from '../../../lib/grants/create.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
 import { autoDeleteLimitRefusal } from './resolvers.secret.js';
@@ -29,6 +30,33 @@ beforeEach(async () => {
 });
 
 describe('#3998 issueSecretReadClient', () => {
+  it('issues an App-held use client with signed binding, and rejects a mismatched header', async () => {
+    const s = await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'fetch', kind: 'webfetch-auth', metadata: { urlPrefix: 'https://api.example.test/v1/' }, value: { type: 'bearer', token: 'private' } }, ctxOf(ownerId));
+    const binding = { secretRef: s.id, mode: 'USE', holderKind: 'APP', holderRef: appId, bindingPrefix: 'https://api.example.test/v1/', bindingHeader: 'Authorization' };
+    const result: any = await issue(ownerId, binding);
+    const grant = await db.grant.findUniqueOrThrow({ where: { id: result.grantId } });
+    expect(grant).toMatchObject({ action: 'secret.use', granteeAppId: appId, activatedAt: null });
+    expect(grant.values).toEqual({ secret: s.id, 'auto-delete': 'keep', 'binding-prefix': binding.bindingPrefix, 'binding-header': binding.bindingHeader });
+    expect(await db.secretReadClient.count({ where: { grantId: result.grantId, secretId: s.id } })).toBe(1);
+    expect(await code(issue(ownerId, { ...binding, bindingHeader: 'X-Other' }))).toBe('GRANT_VALUES_INVALID');
+    expect(await db.secretReadClient.count({ where: { secretId: s.id } })).toBe(1);
+  });
+
+  it('the generic grant door also rejects a use header that does not match the payload', async () => {
+    const s = await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'fetch', kind: 'webfetch-auth', metadata: { urlPrefix: 'https://api.example.test/v1/' }, value: { type: 'bearer', token: 'private' } }, ctxOf(ownerId));
+    await expect(db.$transaction((tx) => createPendingGrant(tx, { appId, requester: { userId: ownerId, workerId: null, sessionId: null }, holder: { kind: 'app', id: appId }, action: 'secret.use', values: { secret: s.id, 'auto-delete': 'keep', 'binding-prefix': 'https://api.example.test/v1/', 'binding-header': 'X-Other' }, reason: 'r', canReadMemory: async () => false }))).rejects.toMatchObject({ code: 'GRANT_VALUES_INVALID' });
+    expect(await db.grant.count()).toBe(0);
+  });
+
+  it('does not allow a use client for a person, worker, or another App', async () => {
+    const binding = { mode: 'USE', bindingPrefix: 'https://api.example.test/v1/', bindingHeader: 'Authorization' };
+    for (const holderKind of ['USER', 'WORKER']) {
+      expect(await code(issue(ownerId, { ...binding, holderKind }))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    }
+    const s = await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'fetch', kind: 'webfetch-auth', metadata: { urlPrefix: 'https://api.example.test/v1/' }, value: { type: 'bearer', token: 'private' } }, ctxOf(ownerId));
+    expect(await code(issue(ownerId, { ...binding, secretRef: s.id, holderKind: 'APP', holderRef: generateId() }))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    expect(await db.grant.count()).toBe(0);
+  });
   it('a manager issues to themself: one pending grant and one client, marked self-issued', async () => {
     const r: any = await issue(ownerId);
     expect(r).toMatchObject({ secretName: 'tok', selfIssued: true });

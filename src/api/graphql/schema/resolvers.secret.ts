@@ -497,6 +497,7 @@ const MAX_LIVE_READ_CLIENTS = 100;
 
 interface IssueReadClientInput {
   secretRef: string; holderKind: 'USER' | 'WORKER' | 'AGENT' | 'APP'; holderRef?: string | null; autoDelete: boolean;
+  mode?: 'REVEAL' | 'USE' | null; bindingPrefix?: string | null; bindingHeader?: string | null;
   startsAt?: Date | string | null; expiresAt?: Date | string | null; maxReads?: number | null; reason: string;
 }
 
@@ -532,7 +533,8 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
   // The refusals that depend only on the INPUT come first, before the secret is looked up: judged after it, a stranger could tell an
   // existing secret from a missing one by which refusal came back (existence oracle, Rook's partial §10 at f610b2e5).
   // #4434: an agent holder (or an App) is not built here, and a read client nothing can read must never exist: refuse before any write.
-  if (input.holderKind === 'AGENT' || input.holderKind === 'APP') {
+  const use = input.mode === 'USE';
+  if ((!use && (input.holderKind === 'AGENT' || input.holderKind === 'APP')) || (use && input.holderKind !== 'AGENT' && input.holderKind !== 'APP')) {
     throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A read client is held by a person or a worker.');
   }
   const startsAt = asTime(input.startsAt);
@@ -550,10 +552,11 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
   if (!found || found.ownerType !== 'app') throw authorizationDenied();
   const app = await loadLiveApp(ctx, found.ownerId);
   if (!app) throw authorizationDenied();
+  const agentAnchor = use && input.holderKind === 'AGENT' && input.holderRef && await ctx.db.agent.findFirst({ where: { id: input.holderRef, deletedAt: null }, select: { id: true } }) ? input.holderRef : null;
   try {
     return await withAuthorizedTx(
       ctx,
-      appAnchors(app),
+      [...appAnchors(app), ...(agentAnchor ? [{ kind: 'agent' as const, id: agentAnchor }] : [])],
       async (txCtx) => {
         if (!(await lockSecretRow(txCtx.db as never, found.id))) throw authorizationDenied();
         await requireSecretReadClientIssuer(txCtx, found.id);
@@ -561,8 +564,9 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
       async (tx, txCtx) => {
         const userId = txCtx.userId as string;
         const issuance = await requireSecretReadClientIssuer({ ...txCtx, db: tx } as Context, found.id);
-        const holder = input.holderKind === 'USER'
-          ? { kind: 'user' as const, id: userId }
+        const holder = input.holderKind === 'USER' ? { kind: 'user' as const, id: userId }
+          : input.holderKind === 'AGENT' ? { kind: 'agent' as const, id: input.holderRef ?? '' }
+          : input.holderKind === 'APP' ? { kind: 'app' as const, id: input.holderRef ?? '' }
           : { kind: 'worker' as const, id: input.holderRef ?? '' };
         if (input.holderKind === 'USER' && input.holderRef && input.holderRef !== userId) {
           throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A person holds a read client only for themself.');
@@ -575,7 +579,8 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
         }
         const grantId = await createPendingGrant(tx, {
           appId: app.id, requester: { userId, workerId: null, sessionId: null }, holder,
-          action: 'secret.reveal', values: { secret: found.id, 'auto-delete': input.autoDelete ? 'delete' : 'keep' },
+          heldAgentAnchor: agentAnchor,
+          action: use ? 'secret.use' : 'secret.reveal', values: { secret: found.id, 'auto-delete': input.autoDelete ? 'delete' : 'keep', ...(use ? { 'binding-prefix': input.bindingPrefix, 'binding-header': input.bindingHeader } : {}) },
           startsAt, expiresAt, maxUses, reason: input.reason, canReadMemory: async () => false,
         });
         const clientId = generateId();

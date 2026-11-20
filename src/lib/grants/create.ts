@@ -1,4 +1,6 @@
 import { isSecretUseHeaderName, isSecretUsePrefix } from '../secrets/useBinding.js';
+import { currentAppSecretValue, lockSecretRow } from '../secrets/appSecrets.js';
+import { assertSecretUseHeader } from '../runner/secrets.js';
 /**
  * #3690 PR 2 (Grants S2a create; cor:acl:140:05 Create, :03 pending, :01, :02; rulings 0099, 0253, 0255 items 6 and 20): the ONE
  * writer of a grant row. It makes a PENDING grant and nothing else: there is no input for activation, a verifier, a signature,
@@ -219,8 +221,18 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   // other-App, org, user or inject-only secret is the same refusal as a malformed id, so this is no existence oracle.
   for (const p of declared) {
     if (p.type !== 'secret-ref') continue;
-    const secret = await tx.secret.findFirst({ where: { id: (values as Record<string, unknown>)[p.name] as string, ownerType: 'app', ownerId: appId }, select: { kind: true } });
+    const secretId = (values as Record<string, unknown>)[p.name] as string;
+    if (action.name === 'secret.use' && !(await lockSecretRow(tx, secretId))) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    const secret = await tx.secret.findFirst({ where: { id: secretId, ownerType: 'app', ownerId: appId }, select: { kind: true } });
     if (!secret || (action.name === 'secret.use' ? secret.kind !== 'webfetch-auth' : !isModelReadableKind(secret.kind))) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    if (action.name === 'secret.use') {
+      try {
+        const value = await currentAppSecretValue(tx, { id: secretId, ownerId: appId });
+        assertSecretUseHeader((values as Record<string, unknown>)['binding-header'] as string, value, {});
+      } catch {
+        throw new GrantCreateRefusal('GRANT_VALUES_INVALID', 'Invalid secret use binding');
+      }
+    }
   }
 
   // Count Unicode code points like task findings, with a UTF-16 fast bound so counting work is bounded.

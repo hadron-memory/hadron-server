@@ -7,13 +7,17 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { PLATFORM_ACTIONS, upsertPlatformActions } from './actions.js';
 import { createPendingGrant, GrantCreateRefusal } from './create.js';
+import { addAppSecretVersion } from '../secrets/appSecrets.js';
 import { dropTestActions, seedWorld, type World } from './grantFixtures3668.js';
 let w: World;
 let secretId: string;
 beforeEach(async () => {
+  process.env.SECRET_ROOT_KEY = '22'.repeat(32);
   await cleanDb(db); w = await seedWorld(); await upsertPlatformActions(db);
   secretId = generateId();
   await db.$executeRaw`INSERT INTO secrets (id, owner_type, owner_id, name, kind, updated_at) VALUES (${secretId}, 'app', ${w.appId}, 'api', 'webfetch-auth', now())`;
+  const payload = JSON.stringify({ type: 'bearer', token: 'synthetic' });
+  await db.$transaction((tx) => addAppSecretVersion(tx, { id: secretId, ownerId: w.appId }, payload, Buffer.byteLength(payload), { userId: w.userId, workerId: null, sessionId: null }));
 });
 afterAll(async () => { await cleanDb(db); await dropTestActions(); await db.$executeRawUnsafe(`DELETE FROM actions WHERE name IN ('secret.reveal', 'secret.use')`); });
 const values = () => ({ secret: secretId, 'auto-delete': 'keep', 'binding-prefix': 'https://api.example.test/v1', 'binding-header': 'Authorization' });
