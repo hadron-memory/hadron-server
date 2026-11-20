@@ -100,6 +100,20 @@ describe('R3 (BLIND P2): a second attempt cannot move the pending account check'
     expect(document.getElementById('status-first')!.textContent).toContain('Stopped');
   });
 
+  it.each([['success', [{ body: { ceremonyId: 'c1', challenge: 'AA' } }, { body: options }, { body: { kind: 'later' } }], true],
+    ['a refused start', [{ body: { ceremonyId: 'c1', challenge: 'AA' } }, { status: 403 }], false]] as const)('the guard resets after %s, so the next attempt runs', async (_label, first, confirm) => {
+    const { document, click, calls } = await load('/passkeys/register', [...first,
+      { body: { ceremonyId: 'c2', challenge: 'AA' } }, { body: options }]);
+    click('add-later');
+    await flush();
+    if (confirm) { document.getElementById('confirm-account')!.dispatchEvent(new (document.defaultView as any).Event('click')); await flush(); }
+    const before = calls.length;
+    click('add-first');
+    await flush();
+    expect(calls.length).toBeGreaterThan(before);
+    expect(calls.slice(before)[0]).toMatchObject({ path: '/passkeys/register/challenge', method: 'POST' });
+  });
+
   it('a new attempt after stop is accepted and runs its own requests', async () => {
     const { document, click, calls } = await load('/passkeys/register', [
       { body: { ceremonyId: 'c1', challenge: 'AA' } }, { body: options }, { body: {} },
