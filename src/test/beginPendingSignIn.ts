@@ -10,7 +10,7 @@ import type { PendingContinuation } from '../auth/pendingEmailSignIn.js';
 
 /** One res.cookie call, whole: the options Express would turn into the Set-Cookie flags (httpOnly, sameSite, secure, path, maxAge). */
 export interface RecordedCookie { name: string; value: string; opts: Record<string, unknown> }
-/** `cookie` / `maxAgeMs` stay as the first-cookie shortcuts the existing tests read; `cookies` is every call, in order. */
+/** `cookie` / `maxAgeMs` stay as the last-call shortcuts the existing tests read (each res.cookie call overwrites them; the flow sets one cookie); `cookies` is every call, in order. */
 export interface BegunPending { begun: boolean; cookie?: string; maxAgeMs?: number; location?: string; cookies: RecordedCookie[] }
 
 /** `secure` is the request's own flag (`req.secure`); the cookie's Secure flag follows it outside production. */

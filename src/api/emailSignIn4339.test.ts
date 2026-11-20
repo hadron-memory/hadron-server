@@ -69,13 +69,17 @@ const noPasskeyStep = async (r: Response) => {
 describe('#4339 email magic link, passkey switches ON', () => {
   it('RED: a user with NO passkey is signed in: the portal gets its handoff code, no passkey step', async () => {
     const email = 'nopass-4339@example.test';
-    await verify(await magicLink(email)); // creates the account (R82) and spends the link
+    const codes = (userId?: string) => db.authHandoffCode.count({ where: userId ? { userId, signInId: null } : { signInId: null } });
+    const first = await verify(await magicLink(email)); // creates the account (R82) and spends the link
+    expect(first.status).toBe(302);
+    const u = await db.user.findFirstOrThrow({ where: { email } });
+    expect(await codes(u.id)).toBe(1); // the account-creating verify issued exactly one code, bound to no sign-in
     const r = await verify(await magicLink(email));
     expect(r.status).toBe(302);
     expect(r.headers.get('location')).toMatch(/\/auth\/callback\?code=/);
     await noPasskeyStep(r);
-    const u = await db.user.findFirstOrThrow({ where: { email } });
-    expect(await db.authHandoffCode.count({ where: { userId: u.id } })).toBe(2); // exactly one code per verify (account-creating link + this one): a second issuance on either would make it 3
+    expect(await codes(u.id)).toBe(2); // and this verify exactly one more (a second issuance would make it 3)
+    expect(await db.authHandoffCode.count({ where: { userId: u.id } })).toBe(2); // none of them is tied to a sign-in record
   });
 
   it('RED: a brand-new address (no account yet) is signed in at once', async () => {
@@ -156,8 +160,8 @@ describe('#4339 the other providers, switches ON', () => {
     // Google and Apple need a provider token exchange that this suite does not stub; the property is structural:
     // the only thing that creates a pending sign-in flow is beginPasskeySignIn, and nothing but its definition names it.
     // LIMITS of this check (a textual grep, not an import graph): a comment or import that merely names a symbol would
-    // false-positive (fix: add the file to the expected list, or reword); a CALL inside src/api/passkeySignInRoutes.ts
-    // (the allowlisted file) is invisible to it; and paths are sliced POSIX-style (it assumes '/' separators). It
+    // false-positive (reword it; allowlisting the file would also hide real calls there, so prefer matching call sites if this ever needs to be tighter); a CALL inside src/api/passkeySignInRoutes.ts
+    // (the allowlisted file) is invisible to it; and paths are sliced POSIX-style (it assumes '/' separators, so it is POSIX-only; CI and orca run Linux). It
     // guards against a new caller appearing, nothing more.
     const walk = (dir: string): string[] => readdirSync(dir).flatMap((f) => {
       const p = join(dir, f);

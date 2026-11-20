@@ -118,7 +118,7 @@ describe('portal continuation, switch on', () => {
     expect(begun.location).not.toMatch(/token|code|@/);
   });
 
-  it('the pending cookie is set once, with the flags the code sets today: HttpOnly, SameSite=Lax, path /auth/passkey, ten-minute life; Secure follows the request (a pin of current behaviour, not a rule)', async () => {
+  it('the pending cookie is set once, with the flags the code sets today: HttpOnly, SameSite=Lax, path /auth/passkey, ten-minute life; Secure follows the request outside production (the suite runs with NODE_ENV=test; recorded from res.cookie, not the wire header; a pin of current behaviour, not a rule)', async () => {
     const { r: plain } = await begin();
     expect(plain.cookies).toHaveLength(1);
     const [c] = plain.cookies;
