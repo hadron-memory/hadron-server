@@ -25,7 +25,7 @@ esac\n`);
    *load.mjs*) printf '%s\\n' '{"kind":"load","workload":"idle","cap":25,"startAt":0,"endAt":0,"ok":0,"capRefused":0,"other":0,"closeOk":0,"closeFailed":0,"missingSession":0,"probe":"not exercised"}';
     if [ "$MODE" = held ]; then touch "$FIXTURE/ready"; for i in {1..200}; do [ -e "$FIXTURE/release" ] && exit 0; sleep .02; done; exit 9; fi;;
    *memory.max*) echo 6442450944;;
-   *diagnose-samples.jsonl*) printf '{"kind":"sample","at":%s}\\n' "$(date +%s%3N)"; if [ "$MODE" = abort ]; then echo '{"kind":"abort","why":"rss"}'; fi;;
+   *diagnose-samples.jsonl*) printf '{"kind":"config","sampleMs":1000}\\n{"kind":"sample","at":%s}\\n' "$(date +%s%3N)"; if [ "$MODE" = abort ]; then echo '{"kind":"abort","why":"rss"}'; fi;;
    *credentials.json*) echo synthetic-private-key;;
    *pg_stat_activity*) echo 2;;
    *health*) while [ "$1" != app ]; do shift; done; shift; NODE_OPTIONS="--import $FIXTURE/health.mjs" "$@";;

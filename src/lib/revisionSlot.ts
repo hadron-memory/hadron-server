@@ -25,16 +25,22 @@ export function revisionSlotNumber(loc: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
-/**
- * 1 + the highest slot number among `locs` (live, soft-deleted and archived rows alike); 1 when none.
- * Throws RevisionSlotsExhaustedError rather than emit a slot `revisionSlotNumber` would not read back.
- */
-export function nextRevisionNumber(locs: Iterable<string>): number {
+/** The highest slot number among `locs` (live, soft-deleted and archived rows alike); 0 when none. The ONE accounting both the allocator and the list use. */
+export function highestRevisionSlot(locs: Iterable<string>): number {
   let max = 0;
   for (const loc of locs) {
     const n = revisionSlotNumber(loc);
     if (n !== null && n > max) max = n;
   }
+  return max;
+}
+
+/**
+ * 1 + the highest slot number among `locs` (live, soft-deleted and archived rows alike); 1 when none.
+ * Throws RevisionSlotsExhaustedError rather than emit a slot `revisionSlotNumber` would not read back.
+ */
+export function nextRevisionNumber(locs: Iterable<string>): number {
+  const max = highestRevisionSlot(locs);
   if (max >= MAX_REVISION_SLOT) throw new RevisionSlotsExhaustedError();
   return max + 1;
 }
