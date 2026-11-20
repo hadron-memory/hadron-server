@@ -7551,6 +7551,9 @@ export function createMcpServerInstance(
     for (const key of Object.keys(shape)) {
       if (key !== 'urn' && key !== 'session' && key in rest) fields[key] = rest[key];
     }
+    // #1291: the merge option is the task door's own argument, not a field of the node input.
+    const mergeExports = kind === 'task' && mode === 'update' && fields.mergeExports === true;
+    delete fields.mergeExports;
     let memoryUrn: string;
     let loc: string;
     let fragment: string | undefined;
@@ -7618,7 +7621,7 @@ export function createMcpServerInstance(
         resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<{ id: string }>>
       )[doorName](
         {},
-        { input: { memoryId: memory.id, loc, ...fields, ...signal } },
+        { input: { memoryId: memory.id, loc, ...fields, ...signal }, ...(mergeExports ? { mergeExports: true } : {}) },
         ctx,
       );
       return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
@@ -13074,6 +13077,10 @@ const governedDoorArgs = {
 // no argument.
 const taskUpdateArgs = {
   ...governedDoorArgs,
+  mergeExports: z
+    .boolean()
+    .optional()
+    .describe('Merge instead of replace (#1291). When true, `properties` is a PATCH: named keys are replaced whole, except `exports`, which merges per host and per field (null removes a host); keys you do not name are kept, and the merge is atomic against concurrent edits. `properties` must then be an object. Omit or false: `properties` replaces the whole bag, as before.'),
   expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A mismatch refuses atomically with [node_write_conflict].'),
   isRunnable: z
     .boolean()

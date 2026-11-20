@@ -143,6 +143,29 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
     expect(await props()).toEqual({ keep: 'me', exports: { claudeSkill: claude } });
   });
 
+  it('refuses a caller without write access BEFORE taking the node lock (nothing of the stored bag is read for them)', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let locked!: () => void;
+    const gotLock = new Promise<void>((r) => (locked = r));
+    const holder = db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${taskId}))`;
+      locked();
+      await held;
+    }, { timeout: 20_000 });
+    await gotLock;
+    try {
+      const outcome = await Promise.race([
+        merge({ exports: { codexSkill: codex } }, {}, outsider()).then(() => 'wrote', (e) => `refused:${e.extensions?.code}`),
+        new Promise<string>((r) => setTimeout(() => r('blocked on the lock'), 2_000)),
+      ]);
+      expect(outcome).toMatch(/^refused:/);
+    } finally {
+      release();
+      await holder;
+    }
+  });
+
   it('never makes a non-task node writable through the door (the kind is the door\'s, not the caller\'s)', async () => {
     const plain = await M.createNode({}, { input: { memoryId: memId, loc: 'notes:n1', name: 'N', properties: { a: 1 } } }, admin());
     // The plain node is not a task: the task door still merges it as it would update it, and refuses to make it a review.

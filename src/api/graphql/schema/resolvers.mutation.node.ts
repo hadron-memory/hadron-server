@@ -2024,7 +2024,16 @@ async function updateNodeCore(
   input: UpdateNodeInput,
   ctx: Context,
   op: string,
-  opts?: { ownsKind?: GovernedKind; governedContext?: GovernedContext } & Pick<Parameters<typeof writeNodeCore>[3], 'transaction'>,
+  opts?: {
+    ownsKind?: GovernedKind;
+    governedContext?: GovernedContext;
+    /**
+     * #1291 — `properties` is a PATCH, merged by `mergePropertiesPatch` (`exports` per host and field, `null` removes a
+     * host, unnamed keys untouched) under the node lock on the row read after it. Set only by the task door's own
+     * `mergeExports` argument; every other door and the generic `updateNode` leave it unset and replace the whole bag.
+     */
+    mergeProperties?: boolean;
+  } & Pick<Parameters<typeof writeNodeCore>[3], 'transaction'>,
 ) {
   const { id, memoryId, loc, expectedRevision, ...fields } = input;
   // GraphQL guarantees a signed 32-bit integer on the wire, but resolver tests
@@ -2091,6 +2100,15 @@ async function updateNodeCore(
     targetLoc = loc as string;
   }
 
+  // #1291: the merge reads the stored bag, so it is judged and written in one locked transaction of its own.
+  if (opts?.mergeProperties && fields.properties !== undefined) {
+    return mergePropertiesAndWrite({
+      fields, ctx, expectedRevision, op, targetNodeId, targetMemoryId, targetLoc, hasId,
+      ref: hasId ? (id as string) : (memoryId as string),
+      ownsKind: opts.ownsKind, governedContext: opts.governedContext,
+    });
+  }
+
   // The PK anchors the write on the id-selector path so a concurrent
   // move (which frees the loc for reuse) can't make the loc-keyed
   // write hit a different node.
@@ -2106,6 +2124,84 @@ async function updateNodeCore(
       ref: hasId ? (id as string) : (memoryId as string),
     },
   });
+}
+
+/**
+ * #1291 — the merge half of `updateTaskNode(mergeExports: true)`.
+ *
+ * Mirrors `updateNodePropertiesWith`: the patch is merged by `mergePropertiesPatch` on the row read AFTER the node's
+ * advisory lock, in the same transaction as the write, so two concurrent patches to different hosts (or fields of one
+ * host) both land and no snapshot a caller or an earlier read produced is ever the base. The write is the door's own
+ * `writeNodeCore` call, so the governed-kind gate, task and schema validation (on the MERGED result), revision, audit
+ * and `expectedRevision` are the door's, unchanged; ownership of the kind is the door's `ownsKind`, never the caller's.
+ * Access is checked before the stored bag is read, through the same classifiers the write core uses, so a refusal is
+ * identical with the option on or off.
+ */
+async function mergePropertiesAndWrite(a: {
+  fields: Omit<UpdateNodeInput, 'id' | 'memoryId' | 'loc' | 'expectedRevision'>;
+  ctx: Context;
+  expectedRevision: number | null | undefined;
+  op: string;
+  targetNodeId: string | undefined;
+  targetMemoryId: string;
+  targetLoc: string;
+  hasId: boolean;
+  ref: string;
+  ownsKind: GovernedKind | undefined;
+  governedContext: GovernedContext | undefined;
+}) {
+  const { fields, ctx } = a;
+  const patch = fields.properties;
+  if (patch == null || typeof patch !== 'object' || Array.isArray(patch)) {
+    throw new GraphQLError(`${a.op}: with mergeExports, \`properties\` must be a JSON object patch.`, {
+      extensions: { code: 'BAD_USER_INPUT', field: 'properties' },
+    });
+  }
+  const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, a.targetMemoryId);
+  const gate = () => requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, resolvedMemoryId);
+  if (a.hasId) await concealUnreadableNodeDenial(ctx, resolvedMemoryId, () => nodeNotFoundError(a.ref), gate);
+  else await concealUnreadableDenial(ctx, resolvedMemoryId, a.ref, gate);
+
+  const nodeId =
+    a.targetNodeId ??
+    (await ctx.db.node.findFirst({ where: { memoryId: resolvedMemoryId, loc: a.targetLoc, deletedAt: null }, select: { id: true } }))?.id;
+  if (!nodeId) {
+    // No such node: the plain write answers it exactly as it does without the option.
+    return writeNodeCore({ ...fields, memoryId: a.targetMemoryId, loc: a.targetLoc }, ctx, 'update', {
+      authoring: authoringFromRequest(ctx, fields.authoredWith),
+      guardRevSeq: a.expectedRevision ?? undefined,
+      ownsKind: a.ownsKind,
+      governedContext: a.governedContext,
+      concealUnreadable: { entity: a.hasId ? 'node' : 'memory', ref: a.ref },
+    });
+  }
+
+  const effects: Array<() => void> = [];
+  const written = await ctx.db.$transaction(async (lockTx) => {
+    await lockInstallAuthorityFirst(lockTx, ctx, resolvedMemoryId);
+    await lockTx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${nodeId}))`;
+    const fresh = await lockTx.node.findUnique({ where: { id: nodeId }, select: { loc: true, properties: true } });
+    if (!fresh) {
+      throw new GraphQLError(`Node not found: "${a.ref}"`, { extensions: { code: 'NODE_NOT_FOUND', ref: a.ref } });
+    }
+    const merged = mergePropertiesPatch(fresh.properties, patch as Record<string, unknown>);
+    return writeNodeCore(
+      { ...fields, properties: merged, memoryId: resolvedMemoryId, loc: fresh.loc },
+      withoutRequestCaches(ctx, lockTx),
+      'update',
+      {
+        authoring: authoringFromRequest(ctx, fields.authoredWith),
+        targetNodeId: nodeId,
+        guardRevSeq: a.expectedRevision ?? undefined,
+        ownsKind: a.ownsKind,
+        governedContext: a.governedContext,
+        concealUnreadable: { entity: a.hasId ? 'node' : 'memory', ref: a.ref },
+        transaction: { tx: lockTx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
+      },
+    );
+  });
+  for (const effect of effects) effect();
+  return written;
 }
 
 /**
@@ -2621,8 +2717,14 @@ export const nodeMutations = {
         ],
         [
           entry.doors.update,
-          async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) =>
-            updateNodeCore(input, ctx, entry.doors.update, { ownsKind: entry.kind, governedContext: 'node-write' }),
+          async (_: unknown, { input, mergeExports }: { input: UpdateNodeInput; mergeExports?: boolean | null }, ctx: Context) =>
+            updateNodeCore(input, ctx, entry.doors.update, {
+              ownsKind: entry.kind,
+              governedContext: 'node-write',
+              // #1291: only the task door declares the argument in the SDL; the others never see one, and this
+              // keeps a direct call from smuggling it onto a different kind's door.
+              ...(entry.kind === 'task' && mergeExports === true ? { mergeProperties: true } : {}),
+            }),
         ],
       ]),
     ),
