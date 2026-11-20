@@ -2315,7 +2315,13 @@ export const sessionMutations = {
       const session = await ctx.db.session.findUnique({ where: { id: sessionId } });
       // #4537: one typed answer for unknown, deleted and another App's session alike, so it is no existence oracle
       // (never SESSION_APP_MISMATCH here). The plain Error it replaces reached the wire as INTERNAL_SERVER_ERROR.
-      if (!session || session.deletedAt || session.appId !== ctx.appId) {
+      if (!session || session.appId !== ctx.appId) {
+        throw notFoundError('SESSION_NOT_FOUND', 'Session not found');
+      }
+      if (session.deletedAt) {
+        // A deleted session of this App still has its data key released, as an end used to do (blind P2 on #4564),
+        // so the refusal never strands a key. Only this App's: a foreign call must not touch another tenant's cache.
+        sessionKeyCache.evict(sessionId);
         throw notFoundError('SESSION_NOT_FOUND', 'Session not found');
       }
       if (session.endedAt) {

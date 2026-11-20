@@ -15,9 +15,9 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { formatGraphQLError, isTrustedRefusal } from '../formatError.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { generateDataKey } from '../../../lib/crypto.js';
 
-vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
-vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn() }));
 
 const M = resolvers.Mutation as any;
 let appA: { id: string };
@@ -42,7 +42,9 @@ async function wireRefusal(sessionId: string, appId: string): Promise<{ thrown: 
   const formatted: GraphQLFormattedError = {
     message: located.message,
     path: ['endAgentSession'],
-    extensions: { code: (located.extensions?.code as string | undefined) ?? 'INTERNAL_SERVER_ERROR' },
+    // Every extension the error carries, as Apollo passes a trusted refusal's (§10 F1 on #4564): a per-branch extra
+    // field must show up in the uniformity comparisons below.
+    extensions: { ...located.extensions, code: (located.extensions?.code as string | undefined) ?? 'INTERNAL_SERVER_ERROR' },
   };
   return { thrown, wire: formatGraphQLError(formatted, located) };
 }
@@ -79,6 +81,24 @@ describe('endAgentSession typed not-found #4537', () => {
     expect(gone.wire.extensions?.code).toBe('SESSION_NOT_FOUND');
     expect(gone.wire).toEqual(unknown.wire);
     expect((await db.session.findUniqueOrThrow({ where: { id: deleted.id } })).endedAt).toBeNull();
+  });
+
+  it('releases the data key of its own deleted session, and never a foreign App\'s', async () => {
+    const memA = `mem-${generateId()}`;
+    const memB = `mem-${generateId()}`;
+    const deleted = await openSession(appA.id, { deletedAt: new Date() });
+    const foreign = await openSession(appB.id);
+    sessionKeyCache.set(deleted.id, memA, generateDataKey());
+    sessionKeyCache.set(foreign.id, memB, generateDataKey());
+    try {
+      expect((await wireRefusal(deleted.id, appA.id)).wire.extensions?.code).toBe('SESSION_NOT_FOUND');
+      expect(sessionKeyCache.hasForSession(memA, deleted.id)).toBe(false);
+      expect((await wireRefusal(foreign.id, appA.id)).wire.extensions?.code).toBe('SESSION_NOT_FOUND');
+      expect(sessionKeyCache.hasForSession(memB, foreign.id)).toBe(true);
+    } finally {
+      sessionKeyCache.evict(deleted.id);
+      sessionKeyCache.evict(foreign.id);
+    }
   });
 
   it('a session with no App answers the same not-found', async () => {
