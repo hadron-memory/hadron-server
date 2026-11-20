@@ -17,6 +17,7 @@ import { isModelReadableKind } from '../secrets.js';
 import { currentAppSecretValue, lockSecretRow, recordSecretEvent, secretActorOf } from './appSecrets.js';
 import { judgeSecretReadClientIssuer, SECRET_READ_CLIENT_SUPERSEDED } from './readClientIssuer.js';
 import { isAppParticipant } from '../auth/appParticipantRead.js';
+import { isRunPrincipal } from '../auth/runPrincipal.js';
 import { authorizationDenied } from '../auth/authorizationDenied.js';
 
 export const SECRET_READ_CLIENT_NOT_FOUND = 'SECRET_READ_CLIENT_NOT_FOUND';
@@ -46,7 +47,7 @@ export interface RevealResult { value: string; secretName: string; readsLeft: nu
 /** The GraphQL door: a bound worker only. A person, an App key, a run and an impersonation get the uniform answer. */
 export async function revealWithReadClient(ctx: Context, clientId: string): Promise<RevealResult> {
   const workerId = boundWorkerId();
-  if (!workerId || !ctx.userId || ctx.impersonation) throw notFound();
+  if (!workerId || !ctx.userId || ctx.appKeyId || ctx.impersonation || isRunPrincipal(ctx)) throw notFound();
   return revealAs(ctx, clientId, { kind: 'worker', workerId });
 }
 

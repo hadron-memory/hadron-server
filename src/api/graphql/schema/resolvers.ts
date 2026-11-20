@@ -93,7 +93,7 @@ import { untrackedTaskItemMutations, untrackedTaskItemQueries } from './resolver
 import { wakeMutations, wakeQueries } from './resolvers.wake.js';
 import { stopSignalMutations, stopSignalQueries } from './resolvers.stopSignal.js';
 import { deliveryBatchMutations, deliveryBatchQueries } from './resolvers.deliveryBatch.js';
-import { appKeyScopeMutations, appKeyScopeFieldResolvers } from './resolvers.appKeyScope.js';
+import { appKeyScopeMutations, appKeyScopeFieldResolvers, appKeyScopeQueries } from './resolvers.appKeyScope.js';
 import { hostOperationMutations, hostOperationQueries, hostOperationFieldResolvers } from './resolvers.hostOperation.js';
 import { hostSweepRunMutations, hostSweepRunQueries } from './resolvers.hostSweepRuns.js';
 import { desiredStateMutations, desiredStateQueries, desiredStateWorkerFields } from './resolvers.desiredState.js';
@@ -221,6 +221,7 @@ export const resolvers = {
     ...agentServedBootPromptQueries,
     ...orgBootPromptSigningQueries,
     ...appQueries,
+    ...appKeyScopeQueries,
     ...chatQueries,
     ...teamChatQueries,
     ...teamAttentionQueries,
