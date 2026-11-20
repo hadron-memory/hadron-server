@@ -8,12 +8,16 @@
  *  5. limit 0 is count-only; a past-the-end offset is an empty page that still states the real total.
  *  6. items equal the old field's rows for the same arguments.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { buildSchema, parse } from 'graphql';
+import { getComplexity, simpleEstimator } from 'graphql-query-complexity';
 import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { pageArgs } from './resolvers.helpers.js';
+import { hadronListEstimator } from '../admissionComplexity.js';
 import { generateId } from '../../../lib/id.js';
 import { ensureProjectZero } from '../../../lib/agentTasks/projectZero.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -40,6 +44,8 @@ async function walk(args: Record<string, unknown>, size: number) {
   }
   return { seen, total };
 }
+
+afterEach(() => { vi.restoreAllMocks(); });
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -129,5 +135,63 @@ describe('#2212 A3 agentTasksPage', () => {
     expect(await page({ limit: 0 })).toEqual({ items: [], total: 3, hasMore: true });
     expect(await page({ limit: 5, offset: 10 })).toEqual({ items: [], total: 3, hasMore: false });
     expect(await page({ tag: 'none' })).toEqual({ items: [], total: 0, hasMore: false });
+  });
+
+  it('items and total come from ONE snapshot: a task deleted between the two reads changes neither (Beckett P2)', async () => {
+    for (let i = 0; i < 6; i++) await task(`s${i}`, { createdAt: new Date(Date.UTC(2026, 10, 20, 12, i)) });
+    const oldest = (await db.agentTask.findFirstOrThrow({ where: { appId, title: 's0' } })).id;
+    let fired = false;
+    // Deleted from the OUTER pool, a different connection from any transaction the read holds, just before the count runs.
+    const deleteOldest = async () => { if (!fired) { fired = true; await db.$executeRawUnsafe('DELETE FROM agent_tasks WHERE id = $1', oldest); } };
+    // Path 1 (the coherent read): its transaction client, wrapped so its count deletes first.
+    const realTx = db.$transaction.bind(db);
+    vi.spyOn(db, '$transaction').mockImplementation(((fn: unknown, opts: unknown) => {
+      if (typeof fn !== 'function') return (realTx as any)(fn, opts);
+      return (realTx as any)((tx: any) => {
+        const agentTask = new Proxy(tx.agentTask, { get(t, k) {
+          if (k === 'count') return async (a: unknown) => { await deleteOldest(); return t.count(a); };
+          const v = Reflect.get(t, k); return typeof v === 'function' ? v.bind(t) : v;
+        } });
+        return fn(new Proxy(tx, { get(t, k) { if (k === 'agentTask') return agentTask; const v = Reflect.get(t, k); return typeof v === 'function' ? v.bind(t) : v; } }));
+      }, opts);
+    }) as never);
+    // Path 2 (a read with no shared snapshot): the plain client's count deletes first too.
+    const realCount = db.agentTask.count.bind(db.agentTask);
+    vi.spyOn(db.agentTask, 'count').mockImplementation((async (a: unknown) => { await deleteOldest(); return (realCount as any)(a); }) as never);
+    const p = await page({ limit: 5 });
+    expect(fired).toBe(true);
+    expect(p.items.map((i) => i.title)).toEqual(['s5', 's4', 's3', 's2', 's1']);
+    expect(p).toMatchObject({ total: 6, hasMore: true });
+  });
+
+  it('the App\'s own live key reads the page; another App\'s key gets APP_NOT_FOUND like an absent App', async () => {
+    await task('k1'); await task('k2');
+    const mk = async (app: string) => (await db.appKey.create({ data: { id: generateId(), appId: app, keyHash: `h-${generateId()}`, keyPreview: 'abcd' }, select: { id: true } })).id;
+    const keyCtx = (app: string, keyId: string): Context => ({ db, appId: app, appKeyId: keyId, roles: [] } as Context);
+    const own = await page({}, keyCtx(appId, await mk(appId)));
+    expect(own).toMatchObject({ total: 2, hasMore: false });
+    expect(own.items.map((i) => i.title).sort()).toEqual(['k1', 'k2']);
+    const code = (q: Promise<unknown>) => q.then(() => 'OK', (e: { extensions?: { code?: string }; message?: string }) => `${e.extensions?.code}|${e.message}`);
+    const foreign = await code(page({}, keyCtx(otherAppId, await mk(otherAppId))));
+    expect(foreign).toMatch(/^APP_NOT_FOUND\|/);
+    expect(await code(page({ appRef: generateId() }))).toBe(foreign);
+  });
+});
+
+describe('admission drift guard: agentTasksPage is charged for the page pageArgs reads (Beckett P3)', () => {
+  const schema = buildSchema(typeDefs);
+  const est = hadronListEstimator({ maxCost: 200000, listFactor: 10 });
+  const cost = (extra: string) => getComplexity({
+    schema, query: parse(`{ agentTasksPage(appRef: "a"${extra}) { items { id } } }`), variables: {},
+    estimators: [est, simpleEstimator({ defaultComplexity: 1 })],
+  });
+  // wrapper = 1 + max(1, size / listFactor) x items; items = 1 + listFactor x id (the myChatsPage guard's formula)
+  const expected = (take: number) => 1 + Math.max(1, Math.max(1, take) / 10) * 11;
+  it.each([undefined, null, 0, -5, 1, 20, 200, 201, 1000000])('limit %s costs what its pageArgs take costs', (v) => {
+    const take = pageArgs({ limit: v as number | null | undefined }).take;
+    expect(cost(v === undefined ? '' : `, limit: ${v}`)).toBe(expected(take));
+  });
+  it('an externalIds batch with no limit is charged like any omitted limit (no widening to 200)', () => {
+    expect(cost(', externalIds: ["a", "b"]')).toBe(expected(pageArgs({}).take));
   });
 });

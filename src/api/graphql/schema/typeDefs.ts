@@ -9457,13 +9457,14 @@ export const typeDefs = `#graphql
     ): [AgentTask!]!
 
     """
-    #2212 A3 (hrn:node:hadronmemory.com:specs:cor:api:120:04): agentTasks as a page. Every argument means exactly what it
-    means on agentTasks, and the order is the same (newest first, then id). total counts the tasks the same filter matches,
+    #2212 A3 (hrn:node:hadronmemory.com:specs:cor:api:120:04): agentTasks as a page. The filters are agentTasks' own (one
+    shared filter), and the order is the same (newest first, then id); only the paging differs, as below. total counts the tasks the same filter matches,
     never a task the caller cannot read: the App read gate (hrn:node:hadronmemory.com:specs:cor:agt:050:21) runs first, and
     an App you do not participate in answers APP_NOT_FOUND exactly like an absent one, never an empty page. hasMore is
     whether tasks remain past this page; pass offset + items length to continue. limit defaults to 20, 0 returns only total,
     and over 200 is served as 200. Unlike agentTasks, an externalIds batch with no limit is not widened to 200: it pages at
     20 like any filter, and hasMore says whether more of the batch remains.
+    items and total are read in one snapshot, so total and hasMore always describe the rows served.
     """
     agentTasksPage(
       appRef: ID!
@@ -9482,14 +9483,9 @@ export const typeDefs = `#graphql
       externalId: String
       """
       #4084 (hrn:node:hadronmemory.com:specs:cor:agt:120:02): the tasks holding any of these external ids, each compared
-      exactly as written. 1 to 100 ids; each entry passes the externalId check (1 to 512 characters, no unpaired
-      surrogate), and ONE bad entry refuses the whole list with BAD_USER_INPUT naming its position (externalIds[i]), never
-      its text; an empty list is BAD_USER_INPUT, never "no narrowing". At most one ACTIVE task holds an id, but finished
-      and cancelled tasks keep it (#4217, hrn:node:hadronmemory.com:specs:cor:agt:120:02, 2026-11-14), so an id can match several tasks: with limit
-      omitted — and offset omitted or 0 — the page is every task holding any of the ids, up to the list cap (200); an
-      explicit limit or offset windows the batch like any list. An id no task of this App holds matches nothing. Runs inside
-      the App read gate (hrn:node:hadronmemory.com:specs:cor:agt:050:21), so another App's task with the same id never
-      appears. ANDed with every other filter, externalId included.
+      exactly as written, with agentTasks' checks (1 to 100 ids, each 1 to 512 characters; one bad entry refuses the whole
+      list with BAD_USER_INPUT naming its position, never its text; an empty list is BAD_USER_INPUT). Paged like every other
+      filter here: an omitted limit is 20, never widened to the batch; hasMore says whether more of the batch remains.
       """
       externalIds: [String!]
       "#2649: tasks carrying a reference with exactly this target, and this kind when given; the label is ignored. Runs inside the App read gate."

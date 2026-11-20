@@ -3303,17 +3303,18 @@ export const agentTaskQueries = {
    * counts a task the list would not show. Sized like every pageArgs field: an omitted limit pages at 20, 0 is count-only,
    * over 200 is served as 200. Unlike agentTasks, an externalIds batch with no limit gets no special size: hasMore says
    * whether more of the batch remains (admission charges exactly this page, PAGE_ARGS_FIELDS).
+   *
+   * The rows and the total come from ONE repeatable-read snapshot (withReadableApp's `coherent`, #4224), so a task written or
+   * deleted between the two reads cannot make total and hasMore disagree with the rows served (Beckett BLIND P2 on #4622).
    */
   agentTasksPage: async (_: unknown, args: ListArgs, ctx: Context) =>
     withReadableApp(ctx, args.appRef, async (c, app) => {
     const where = await agentTaskListWhere(c, app, args);
     const { take, skip } = pageArgs(args);
-    const [items, total] = await Promise.all([
-      take === 0 ? Promise.resolve([]) : c.db.agentTask.findMany({ omit: { resultFindings: true }, where, orderBy: AGENT_TASK_LIST_ORDER, take, skip }),
-      c.db.agentTask.count({ where }),
-    ]);
+    const items = take === 0 ? [] : await c.db.agentTask.findMany({ omit: { resultFindings: true }, where, orderBy: AGENT_TASK_LIST_ORDER, take, skip });
+    const total = await c.db.agentTask.count({ where });
     return pageEnvelope(items, total, skip);
-    }, true),
+    }, true, undefined, { coherent: true }),
 
   /**
    * A task and every task below it, root first then by creation. Null when the
