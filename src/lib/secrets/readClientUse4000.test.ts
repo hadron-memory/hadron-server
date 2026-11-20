@@ -91,6 +91,17 @@ describe('transactional secret.use (#4000)', () => {
     await db.secret.delete({ where: { id: client.secretId } });
     await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
   });
+  it('audits refusal when the issuer has been erased', async () => {
+    await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+      await tx.$executeRaw`UPDATE grants SET issuer_user_id = NULL WHERE id = ${grantId}`;
+      await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+    });
+    await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_ISSUER_GONE' } });
+    expect(await db.secretEvent.count({ where: { clientId, kind: 'USE', outcome: 'SECRET_READ_CLIENT_ISSUER_GONE' } })).toBe(1);
+    expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
+  });
   it('does not let later metadata widen the signed path or disagree with the encrypted kind', async () => {
     await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
     const client = await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } });
