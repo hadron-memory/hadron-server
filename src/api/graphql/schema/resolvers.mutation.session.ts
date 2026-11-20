@@ -120,7 +120,7 @@ import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js
 import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../../../lib/bootPrompt.js';
 import { effortFromToken, fillEmptyAppliedRunSettings, isEffortLevel, recordRunSettings, type EffortLevel } from '../../../lib/agentTasks/runSettings.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
-import { forbiddenError } from '../../../lib/refusals.js';
+import { forbiddenError, notFoundError } from '../../../lib/refusals.js';
 import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { oauthSurfaceRefusal, oauthSurfaceRefusalMessage } from '../../../middleware/auth.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -2313,8 +2313,10 @@ export const sessionMutations = {
     endAgentSession: async (_: unknown, { sessionId }: { sessionId: string }, ctx: Context) => {
       if (!ctx.appId) throw forbiddenError('Forbidden: App Key required');
       const session = await ctx.db.session.findUnique({ where: { id: sessionId } });
-      if (!session || session.appId !== ctx.appId) {
-        throw new Error('Session not found');
+      // #4537: one typed answer for unknown, deleted and another App's session alike, so it is no existence oracle
+      // (never SESSION_APP_MISMATCH here). The plain Error it replaces reached the wire as INTERNAL_SERVER_ERROR.
+      if (!session || session.deletedAt || session.appId !== ctx.appId) {
+        throw notFoundError('SESSION_NOT_FOUND', 'Session not found');
       }
       if (session.endedAt) {
         sessionKeyCache.evict(sessionId); // defensive — idempotent

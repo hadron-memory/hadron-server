@@ -15874,6 +15874,14 @@ export const typeDefs = `#graphql
       externalUserId: String
       sessionTimeoutSeconds: Int
     ): Session!
+    """
+    App Key callers only: end one of this App's agent sessions. Re-ending an
+    already-ended session returns true. Typed refusals: FORBIDDEN without an
+    App Key; SESSION_NOT_FOUND, with one message, for an unknown id, a deleted
+    session and another App's session alike, so the answer reveals nothing
+    about sessions outside the App
+    (hrn:node:hadronmemory.com:specs:cor:api:140:01, #4537).
+    """
     endAgentSession(sessionId: ID!): Boolean!
 
     """
