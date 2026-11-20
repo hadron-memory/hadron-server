@@ -30,7 +30,8 @@ beforeAll(async () => {
       new Prisma.PrismaClientKnownRequestError('Timed out fetching a new connection from the pool.', {
         code: 'P2024',
         clientVersion: '6.19.2',
-      } as never),
+      }),
+      'POOL_WAIT',
     ));
   });
   // #4504: the unreachable arm, same forwarding shape.
@@ -44,6 +45,21 @@ beforeAll(async () => {
       'STORE_UNREACHABLE',
     ));
   });
+  // #4519 (BLIND P3-4, the boundary pin): a typed error whose `.message` was TAMPERED to carry
+  // driver text — constructor drift, a subclass with its own prose, a late mutation — must still
+  // answer the reason's fixed prose. The boundary renders from the reason, never from the message.
+  app.get('/auth-store-busy-tampered', (_req, _res, next) => {
+    const tampered = new AuthStoreBusyError(
+      new Prisma.PrismaClientInitializationError(
+        "Can't reach database server at `10.9.8.7:5432`",
+        '6.19.2',
+        'P1001',
+      ),
+      'STORE_UNREACHABLE',
+    );
+    tampered.message = "Can't reach database server at `10.9.8.7:5432`";
+    next(tampered);
+  });
   // #4504 (Bradley P3, the double-log check): headers already gone out when the fault
   // surfaces — the carve-out must log ONCE and delegate, never answer, never log again.
   app.get('/auth-store-busy-headers-sent', (_req, res, next) => {
@@ -53,7 +69,8 @@ beforeAll(async () => {
       new Prisma.PrismaClientKnownRequestError('Timed out fetching a new connection from the pool.', {
         code: 'P2024',
         clientVersion: '6.19.2',
-      } as never),
+      }),
+      'POOL_WAIT',
     ));
   });
   app.use(internalFaultErrorHandler);
@@ -143,12 +160,32 @@ describe('plain HTTP internal faults (#1789)', () => {
     log.mockRestore();
   });
 
+  it('#4519: the boundary renders the reason\'s fixed prose, never the error\'s own message — driver text cannot reach the wire even when it sits inside the typed error', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await fetch(base + '/auth-store-busy-tampered');
+    const text = await res.text();
+    const body = JSON.parse(text);
+    expect(res.status).toBe(503);
+    // The reason's constant — NOT error.message, which this route tampered to the driver phrase.
+    expect(body.error).toBe(AUTH_STORE_UNREACHABLE_MESSAGE);
+    expect(body.reason).toBe('STORE_UNREACHABLE');
+    expect(text).not.toMatch(/Can't reach|P1001|10\.9\.8\.7|INTERNAL_SERVER_ERROR/);
+    // The tampered message and the driver error stay server-side: the log sees them, the wire does not.
+    expect(log).toHaveBeenCalledTimes(1);
+    const logged = log.mock.calls[0][1] as { error: AuthStoreBusyError };
+    expect(logged.error.message).toMatch(/Can't reach database server/);
+    log.mockRestore();
+  });
+
   it('#4504 (Bradley P3, double-log check): headers already sent → the fault logs EXACTLY once and the handler delegates, never answers', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     // With headers gone out, Express's final handler closes the connection; the fetch may
     // resolve with the partial body or reject on the truncated socket — either is the
     // delegation we assert. The pin is the log count.
-    await fetch(base + '/auth-store-busy-headers-sent').catch(() => undefined);
+    const res = await fetch(base + '/auth-store-busy-headers-sent').catch(() => undefined);
+    // #4519 (BLIND P3-6): drain the body on the resolve path — an undrained response keeps its
+    // socket held in the keep-alive pool, and afterAll's server.close() then waits on it.
+    if (res) await res.text().catch(() => undefined);
     const faultCalls = log.mock.calls.filter((c) => String(c[0]).includes('internal_fault'));
     expect(faultCalls).toHaveLength(1);
     expect(faultCalls[0][1]).toEqual(expect.objectContaining({ site: 'auth-store-busy' }));

@@ -100,10 +100,10 @@ describe('AuthStoreBusyError → AUTH_STORE_BUSY (#4471)', () => {
     new Prisma.PrismaClientKnownRequestError('Timed out fetching a new connection from the pool.', {
       code: 'P2024',
       clientVersion: '6.19.2',
-    } as never);
+    });
 
   it('thrown straight from the auth middleware: the typed extensions survive the boundary', () => {
-    const typed = new AuthStoreBusyError(p2024());
+    const typed = new AuthStoreBusyError(p2024(), 'POOL_WAIT');
     const out = formatGraphQLError({ message: typed.message, extensions: { code: 'AUTH_STORE_BUSY' } }, typed);
     expect(out.extensions?.code).toBe('AUTH_STORE_BUSY');
     expect(out.extensions?.retryable).toBe(true);
@@ -112,7 +112,7 @@ describe('AuthStoreBusyError → AUTH_STORE_BUSY (#4471)', () => {
   });
 
   it('Apollo-genericized (the context-failure wrap): the mapping restores the typed code and strips the prefix', () => {
-    const typed = new AuthStoreBusyError(p2024());
+    const typed = new AuthStoreBusyError(p2024(), 'POOL_WAIT');
     // Apollo's actual wrapper for a context-builder throw: its own GraphQLError — the
     // prefixed message, the default code, the thrown error on .originalError. Built with
     // wrap()'s shape plus the real prefix (the live round trip is pinned in
