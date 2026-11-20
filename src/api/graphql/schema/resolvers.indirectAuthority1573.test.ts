@@ -76,8 +76,8 @@ describe('#1573: membership capacity is serialized across both doors', () => {
     const holder = await hold((tx) =>
       tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('app-capacity'), hashtext(${app.id}))`);
 
-    const viaJoin = M.joinApp(null, { appId: app.id }, ctxFor(joiner.id));
-    const viaEnsure = M.ensureAppMember(null, { appId: app.id, userId: invited.id, role: 'member' }, ctxFor(admin.id, ['ADMIN']));
+    const viaJoin = M.joinApp(null, { appRef: app.id }, ctxFor(joiner.id));
+    const viaEnsure = M.ensureAppMember(null, { appRef: app.id, userRef: invited.id, role: 'member' }, ctxFor(admin.id, ['ADMIN']));
     // Both doors are blocked on the SAME capacity key: proof they participate.
     try {
       await waitForLockWaitersOfType(db, 'advisory', 2);
@@ -99,15 +99,15 @@ describe('#1573: membership capacity is serialized across both doors', () => {
     await db.agent.update({ where: { id: agent.id }, data: { installationPolicy: { maxMembers: 'unlimited', memberRoles: ['member'], selfJoinRole: 'member' } as never } });
     const a = await mkUser(4);
     const b = await mkUser(5);
-    await M.joinApp(null, { appId: app.id }, ctxFor(a.id));
-    await M.joinApp(null, { appId: app.id }, ctxFor(b.id));
+    await M.joinApp(null, { appRef: app.id }, ctxFor(a.id));
+    await M.joinApp(null, { appRef: app.id }, ctxFor(b.id));
     expect(await db.appMember.count({ where: { appId: app.id } })).toBe(2);
   });
 
   it('joinApp keeps its typed lifecycle errors for an uninstalled App', async () => {
     const joiner = await mkUser(6);
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
-    await expect(M.joinApp(null, { appId: app.id }, ctxFor(joiner.id)))
+    await expect(M.joinApp(null, { appRef: app.id }, ctxFor(joiner.id)))
       .rejects.toMatchObject({ extensions: { code: 'AppUninstalledError' } });
   });
 });
@@ -121,7 +121,7 @@ describe('#1573: revokeAgentSubscription is an exclusive revoker on [agent, targ
       await lockAuthorityAnchors(tx, [{ kind: 'agent', id: agent.id }, { kind: 'user', id: target.id }], 'shared');
       await tx.agentSubscription.create({ data: { userId: target.id, agentId: agent.id, activatedAt: new Date() } });
     });
-    const revoke = M.revokeAgentSubscription(null, { agentId: agent.id, userId: target.id }, ctxFor(admin.id, ['ADMIN']));
+    const revoke = M.revokeAgentSubscription(null, { agentRef: agent.id, userRef: target.id }, ctxFor(admin.id, ['ADMIN']));
     // The revoker is blocked on the writer's anchors, not racing past it.
     try {
       await waitForLockWaitersOfType(db, 'advisory', 1);

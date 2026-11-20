@@ -82,7 +82,7 @@ beforeEach(async () => {
     data: { id: generateId(), githubId: 66231, githubUsername: `sp-out-${t}`, roles: [] },
   });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  mem = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `sp-mem-${t}` }, ctx());
+  mem = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: `sp-mem-${t}` }, ctx());
 });
 
 describe('discovery — what the plan considers', () => {
@@ -150,7 +150,7 @@ describe('the access gate', () => {
 
 describe('server-owned Scope selection for plugin EXPORT', () => {
   it('narrows by a live Scope, skips orphan assessment, and gives both hosts the same fingerprint', async () => {
-    const other = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `scope-other-${generateId()}` }, ctx());
+    const other = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: `scope-other-${generateId()}` }, ctx());
     const inside = await mkNode('tasks:inside', { properties: declaration({ name: 'inside-skill' }) });
     const outside = await db.node.create({ data: {
       id: generateId(), memoryId: other.id, loc: 'tasks:outside', name: 'outside',
@@ -219,7 +219,7 @@ describe('server-owned Scope selection for plugin EXPORT', () => {
   });
 
   it('refuses duplicate installed files for an in-scope task without surfacing out-of-scope orphans', async () => {
-    const outsideMemory = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `dup-outside-${generateId()}` }, ctx());
+    const outsideMemory = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: `dup-outside-${generateId()}` }, ctx());
     const inside = await mkNode('tasks:inside-duplicate', { properties: declaration() });
     const outside = await db.node.create({ data: {
       id: generateId(), memoryId: outsideMemory.id, loc: 'tasks:outside-duplicate', name: 'outside',
@@ -348,7 +348,7 @@ describe('a broken include warns in skill lint (#2048 S11d, cor:dmo:150:03 R9)',
   });
 
   it('an unreadable target answers byte-identically to a missing one', async () => {
-    const other = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `sp-secret-${Date.now()}` }, ctx());
+    const other = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: `sp-secret-${Date.now()}` }, ctx());
     await db.node.create({ data: { id: generateId(), memoryId: other.id, loc: 'secret', name: 'secret', content: 'hidden' } });
     await mkNode('tasks:a', { properties: declaration({ name: 'skill-a' }), content: `{{> ${other.urn}:secret}}` });
     await mkNode('tasks:b', { properties: declaration({ name: 'skill-b' }), content: '{{> missing-loc}}' });
@@ -1438,7 +1438,7 @@ describe('review round 2 — @copilot', () => {
     // the narrowing. A client running --prune against one memory would then
     // receive entries for files it never meant to touch.
     const t = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
-    const other = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `sp-other-${t}` }, ctx());
+    const other = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: `sp-other-${t}` }, ctx());
     await mkNode('tasks:in-scope', { properties: declaration() });
     await db.node.create({
       data: {
@@ -1733,7 +1733,7 @@ describe('hosts (#1254)', () => {
       const t = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
       const org2 = await db.organization.create({ data: { id: generateId(), name: 'sp2', urn: `sp2-${t}` } });
       await db.orgMember.create({ data: { organizationId: org2.id, userId: admin.id, role: 'ADMIN' } });
-      const mem2 = await resolvers.Mutation.createMemory({}, { orgId: org2.id, name: `sp2-mem-${t}` }, ctx());
+      const mem2 = await resolvers.Mutation.createMemory({}, { orgRef: org2.id, name: `sp2-mem-${t}` }, ctx());
       await mkNode('tasks:here', { properties: decl('hadron-x', true) });
       await mkNode('tasks:there', { memoryId: mem2.id, properties: decl('hadron-x', true) });
 
@@ -2270,7 +2270,7 @@ describe('#1406 selected individual skill files', () => {
   });
 
   it('selects IDs and full URNs across memories once, without classifying other installed skills as orphans', async () => {
-    const other = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `other-${generateId()}` }, ctx());
+    const other = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: `other-${generateId()}` }, ctx());
     const first = await mkNode('tasks:first', { properties: forHost('claudeSkill', 'first-skill') });
     const second = await db.node.create({ data: {
       id: generateId(), memoryId: other.id, loc: 'tasks:second', name: 'second',
@@ -2301,7 +2301,7 @@ describe('#1406 selected individual skill files', () => {
     const visible = await mkNode('tasks:visible', { properties: forHost('claudeSkill', 'visible-skill') });
     await db.orgMember.create({ data: { organizationId: org.id, userId: outsider.id, role: 'READER' } });
     const secretOrg = await db.organization.create({ data: { id: generateId(), name: 'secret', urn: `secret-${generateId()}` } });
-    const secretMem = await resolvers.Mutation.createMemory({}, { orgId: secretOrg.id, name: `secret-${generateId()}` }, ctx());
+    const secretMem = await resolvers.Mutation.createMemory({}, { orgRef: secretOrg.id, name: `secret-${generateId()}` }, ctx());
     const secret = await db.node.create({ data: {
       id: generateId(), memoryId: secretMem.id, loc: 'tasks:secret', name: 'secret',
       isRunnable: true, content: '# Secret', properties: forHost('claudeSkill', 'secret-skill'),
@@ -2324,7 +2324,7 @@ describe('#1406 selected individual skill files', () => {
     })) });
     const secondOrg = await db.organization.create({ data: { id: generateId(), name: 'other-org', urn: `other-${generateId()}` } });
     await db.orgMember.create({ data: { organizationId: secondOrg.id, userId: admin.id, role: 'ADMIN' } });
-    const other = await resolvers.Mutation.createMemory({}, { orgId: secondOrg.id, name: `other-${generateId()}` }, ctx());
+    const other = await resolvers.Mutation.createMemory({}, { orgRef: secondOrg.id, name: `other-${generateId()}` }, ctx());
     await db.node.create({ data: {
       id: generateId(), memoryId: other.id, loc: 'tasks:collider', name: 'collider',
       isRunnable: true, content: '# Collider', properties: forHost('claudeSkill', 'shared-name'),

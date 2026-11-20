@@ -952,7 +952,7 @@ describe('protection (S4)', () => {
   });
 
   it('the host memory cannot be deleted while it hosts a live Channel', async () => {
-    await expect(M.deleteMemory({}, { id: appMem.urn }, ctx(admin.id))).rejects.toMatchObject({ extensions: { code: 'MEMORY_HOSTS_CHANNEL' } });
+    await expect(M.deleteMemory({}, { ref: appMem.urn }, ctx(admin.id))).rejects.toMatchObject({ extensions: { code: 'MEMORY_HOSTS_CHANNEL' } });
   });
 });
 

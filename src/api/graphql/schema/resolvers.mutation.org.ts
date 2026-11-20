@@ -38,8 +38,8 @@ import {
   isPlatformAdmin,
   requireRole,
   requireOrgRole,
-  resolveUserRefArg,
-  resolveOrgRefArg,
+  resolveRequiredOrgRef,
+  resolveRequiredUserRef,
   ORG_INCLUDE,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
@@ -462,10 +462,10 @@ export const orgMutations = {
         .catch(rethrowRootNameErrors);
     },
 
-    deleteOrganization: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+    deleteOrganization: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       requireRole(ctx, 'ADMIN');
-      // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
-      const { id: resolvedId } = await resolveOrgRef(ctx.db, id);
+      // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
+      const { id: resolvedId } = await resolveOrgRef(ctx.db, ref);
       // Atomically soft-delete the org and hard-delete its org-scoped secrets
       // (#677) — the ONE org soft-delete cascade, shared with deleteUser's
       // sole-member-org branch (see softDeleteOrganizationCore for the
@@ -482,11 +482,11 @@ export const orgMutations = {
 
     linkGithubApp: async (
       _: unknown,
-      { orgId, installationId }: { orgId: string; installationId: number },
+      { orgRef, installationId }: { orgRef: string; installationId: number },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      // 007-entity-id-or-urn: orgRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgRef);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       return ctx.db.organization.update({
         where: { id: resolvedOrgId },
@@ -497,11 +497,11 @@ export const orgMutations = {
 
     updateOrgGithubApp: async (
       _: unknown,
-      { orgId, appId, privateKey }: { orgId: string; appId: string; privateKey: string },
+      { orgRef, appId, privateKey }: { orgRef: string; appId: string; privateKey: string },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      // 007-entity-id-or-urn: orgRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgRef);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       const encrypted = encryptToken(privateKey);
       return ctx.db.organization.update({
@@ -513,11 +513,11 @@ export const orgMutations = {
 
     unlinkGithubApp: async (
       _: unknown,
-      { orgId }: { orgId: string },
+      { orgRef }: { orgRef: string },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      // 007-entity-id-or-urn: orgRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgRef);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       return ctx.db.organization.update({
         where: { id: resolvedOrgId },
@@ -535,7 +535,7 @@ export const orgMutations = {
     createUserInvitation: async (
       _: unknown,
       {
-        orgId,
+        orgRef,
         memberRole,
         name,
         email,
@@ -543,14 +543,14 @@ export const orgMutations = {
         maxActivations,
         expiresInDays,
       }: {
-        orgId: string; memberRole: string;
+        orgRef: string; memberRole: string;
         name?: string; email?: string; githubUsername?: string;
         maxActivations?: number; expiresInDays?: number;
       },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+      // 007-entity-id-or-urn: orgRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgRef);
       const slug = generateId().slice(0, 16);
       const invite = await withAuthorizedTx(
         ctx,
@@ -721,15 +721,11 @@ export const orgMutations = {
       _: unknown,
       {
         orgRef,
-        orgId,
         userRef,
-        userId,
         role,
       }: {
-        orgRef?: string | null;
-        orgId?: string | null;
-        userRef?: string | null;
-        userId?: string | null;
+        orgRef: string;
+        userRef: string;
         role: string;
       },
       ctx: Context,
@@ -737,9 +733,9 @@ export const orgMutations = {
       // #764 (was 007-entity-id-or-urn): orgRef/userRef accept id / URN / (org)
       // handle / (user) email. Resolve the org + admin-gate FIRST, then resolve
       // the user (auth before revealing user existence).
-      const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
+      const resolvedOrgId = await resolveRequiredOrgRef(ctx.db, orgRef);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
-      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+      const resolvedUserId = await resolveRequiredUserRef(ctx.db, userRef);
       return withAuthorizedTx(
         ctx,
         [{ kind: 'org', id: resolvedOrgId }, { kind: 'user', id: resolvedUserId }],
@@ -783,23 +779,19 @@ export const orgMutations = {
       _: unknown,
       {
         orgRef,
-        orgId,
         userRef,
-        userId,
         role,
       }: {
-        orgRef?: string | null;
-        orgId?: string | null;
-        userRef?: string | null;
-        userId?: string | null;
+        orgRef: string;
+        userRef: string;
         role: string;
       },
       ctx: Context,
     ) => {
       // #764: orgRef/userRef accept id / URN / (org) handle / (user) email.
-      const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
+      const resolvedOrgId = await resolveRequiredOrgRef(ctx.db, orgRef);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
-      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+      const resolvedUserId = await resolveRequiredUserRef(ctx.db, userRef);
       // #1544: the last-owner guard is count-then-act, so the read, the count
       // and the write share ONE SERIALIZABLE transaction. Two admins demoting
       // (or removing) the org's two owners at once would otherwise each count
@@ -873,21 +865,17 @@ export const orgMutations = {
       _: unknown,
       {
         orgRef,
-        orgId,
         userRef,
-        userId,
       }: {
-        orgRef?: string | null;
-        orgId?: string | null;
-        userRef?: string | null;
-        userId?: string | null;
+        orgRef: string;
+        userRef: string;
       },
       ctx: Context,
     ) => {
       // #764: orgRef/userRef accept id / URN / (org) handle / (user) email.
-      const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
+      const resolvedOrgId = await resolveRequiredOrgRef(ctx.db, orgRef);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
-      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+      const resolvedUserId = await resolveRequiredUserRef(ctx.db, userRef);
       // #1544: one SERIALIZABLE transaction for the read, the last-owner count
       // and the revocation, for the reason updateOrgMember gives above.
       await retryOnSerializationFailure(() => withAuthorizedTx(

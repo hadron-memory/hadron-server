@@ -53,7 +53,7 @@ const CREATE_TPL = `mutation($t: MemoryConfigTemplateOwnerType!, $o: ID, $i: Cre
   createMemoryConfigTemplate(ownerType: $t, ownerRef: $o, input: $i) { template { ${TPL} } } }`;
 const UPDATE_TPL = `mutation($r: ID!, $i: UpdateMemoryConfigTemplateInput!) { updateMemoryConfigTemplate(ref: $r, input: $i) { template { ${TPL} } } }`;
 const CREATE_MEMORY = `mutation($o: ID, $n: String!, $c: MemoryClass, $s: String) {
-  createMemory(orgId: $o, name: $n, memoryClass: $c, source: $s) { id urn } }`;
+  createMemory(orgRef: $o, name: $n, memoryClass: $c, source: $s) { id urn } }`;
 const SKIPS = `query($m: ID!) { memoryConfig(memoryRef: $m) { defaultSkips { role field reason createdAt sourceTemplate { id } ref refState } } }`;
 
 let org: { id: string; urn: string };

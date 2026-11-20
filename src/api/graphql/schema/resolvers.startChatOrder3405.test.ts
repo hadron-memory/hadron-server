@@ -75,7 +75,7 @@ async function seed(path: Path, seeds: Seed[]) {
   await db.agent.update({ where: { id: agentId }, data: { publishedRevisionLoc: 'revisions:rev-3405' } });
 }
 
-const start = (args: Record<string, unknown> = {}) => M.startChat(null, { agentId, ...args }, ctx());
+const start = (args: Record<string, unknown> = {}) => M.startChat(null, { agentRef: agentId, ...args }, ctx());
 const opened = async (args: Record<string, unknown> = {}) => (await start(args)).conversationName as string;
 async function refusal(args: Record<string, unknown> = {}) {
   const err = await start(args).then(() => null, (e: unknown) => e);
