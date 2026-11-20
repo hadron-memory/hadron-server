@@ -96,10 +96,27 @@ describe('#4332 rate-limit CHECKs exist on push + post-push', () => {
  */
 describe('#4332 prisma/rate-limit-invariants.sql applies atomically', () => {
   const run = promisify(execFile);
-  const psqlUrl = () => { const u = new URL(process.env.DATABASE_URL!); u.search = ''; return u.toString(); };
-  const apply = () => run('psql', [psqlUrl(), '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-f', resolve('prisma/rate-limit-invariants.sql')], { timeout: 60_000 });
-  const def = async (name: string) =>
-    (await db.$queryRaw<Array<{ d: string }>>`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = ${name}`)[0]?.d ?? null;
+  // #4611 BLIND delta F2: psql gets the SAME database and schema as Prisma. Only Prisma's own parameters are dropped
+  // (libpq refuses them); every libpq one (sslmode and the rest) is kept, and Prisma's `schema` becomes psql's search_path.
+  const PRISMA_ONLY = ['connection_limit', 'pool_timeout', 'schema', 'pgbouncer', 'socket_timeout', 'statement_cache_size'];
+  const psqlTarget = () => {
+    const u = new URL(process.env.DATABASE_URL!);
+    const schema = u.searchParams.get('schema') ?? 'public';
+    for (const k of PRISMA_ONLY) u.searchParams.delete(k);
+    return { url: u.toString(), schema };
+  };
+  const apply = () => {
+    const { url, schema } = psqlTarget();
+    return run('psql', [url, '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-f', resolve('prisma/rate-limit-invariants.sql')], {
+      timeout: 60_000,
+      env: { ...process.env, PGOPTIONS: `-c search_path=${schema}` },
+    });
+  };
+  // Scoped to the constraint's own table in the schema Prisma uses, never a same-named constraint elsewhere.
+  const def = async (table: string, name: string) =>
+    (await db.$queryRaw<Array<{ d: string }>>`
+      SELECT pg_get_constraintdef(c.oid) AS d FROM pg_constraint c
+      WHERE c.conname = ${name} AND c.conrelid = to_regclass(quote_ident(current_schema()) || '.' || quote_ident(${table}))`)[0]?.d ?? null;
 
   it('a failing ADD late in the file leaves the earlier constraints unreplaced', async () => {
     try {
@@ -110,12 +127,12 @@ describe('#4332 prisma/rate-limit-invariants.sql applies atomically', () => {
       await insertBucket(-1);
 
       await expect(apply()).rejects.toThrow(/rate_limit_buckets_used_check/);
-      expect(await def('rate_limit_policies_principal_limit_check')).toBe('CHECK ((principal_limit > 5))');
+      expect(await def('rate_limit_policies', 'rate_limit_policies_principal_limit_check')).toBe('CHECK ((principal_limit > 5))');
     } finally {
       await cleanDb(db);
       await apply();
     }
-    expect(await def('rate_limit_policies_principal_limit_check')).toBe('CHECK ((principal_limit > 0))');
-    expect(await def('rate_limit_buckets_used_check')).toBe('CHECK ((used >= 0))');
+    expect(await def('rate_limit_policies', 'rate_limit_policies_principal_limit_check')).toBe('CHECK ((principal_limit > 0))');
+    expect(await def('rate_limit_buckets', 'rate_limit_buckets_used_check')).toBe('CHECK ((used >= 0))');
   });
 });
