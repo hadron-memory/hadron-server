@@ -1,287 +1,158 @@
-# Hadron Controller
+# hadron-server
 
-GraphQL API, MCP server, graph sync engine, and usage database for the [Hadron](https://hadrongraph.io) knowledge graph platform.
+The server behind [Hadron](https://hadronmemory.com), a memory platform for people and AI agents.
+It serves a GraphQL API, an [MCP](https://modelcontextprotocol.io) endpoint, and the
+background jobs that keep both running, on top of PostgreSQL with the pgvector extension.
 
-Serves both **consumer** and **enterprise** users. On sign-up, each user gets a personal workspace (auto-provisioned org, API key, default bundle) so they can connect their AI tool within minutes. Organizations, teams, and advanced graph management are available when needed.
+This repository is public and MIT-licensed (see [LICENSE](LICENSE)). It is the server only:
+the web portal and the command-line client live in their own repositories.
 
-Graphs are managed through the GraphQL API (via hadron-web) and optionally synced from GitHub.
-Nodes are stored in PostgreSQL and cloned locally for filesystem operations.
+> **Public and private material.** Everything in this repository is public. Hadron itself,
+> including the team's internal memories and some linked repositories, requires a login.
+> References in code comments to issue numbers (`#1234`) point at this repository's GitHub
+> issues; references to "specs" or Hadron memories may not be readable without an account.
+> A change should never depend on you being able to open one of those.
+
+## What is in here
+
+| Path | What it holds |
+|------|---------------|
+| `src/api/graphql/` | The GraphQL schema and resolvers served at `/graphql` |
+| `src/mcp/` | The MCP server served at `/mcp` |
+| `src/auth/` | Sign-in, tokens and OAuth |
+| `src/jobs/` | Background loops (sweeps, schedulers) |
+| `prisma/` | The database schema (`schema.prisma`), migrations and raw SQL that Prisma cannot express |
+| `scripts/` | Development, CI and disposable-test-stack scripts |
 
 ## Prerequisites
 
-- Node.js 20+
-- PostgreSQL 15+ with the pgvector extension
+- Node.js 22 (see `.nvmrc`)
+- [pnpm](https://pnpm.io) (the exact version is pinned in `package.json`; `corepack enable` picks it up)
+- PostgreSQL 15 or newer with the [pgvector](https://github.com/pgvector/pgvector) extension
+  available. The Docker Compose file uses the `pgvector/pgvector:pg17` image if you would
+  rather not install it yourself.
+- `psql`, which the setup script calls
 
-## Quick start
+## Run it locally
+
+These steps use throwaway values. Do not reuse them anywhere that holds real data.
+
+**1. Install dependencies**
 
 ```bash
 pnpm install
-cp .env.example .env   # edit DATABASE_URL, JWT_SECRET, HADRON_ENCRYPTION_KEY
 ```
 
-### PostgreSQL
+**2. Create a database**
+
+Create an empty database on your PostgreSQL server. The role you connect with needs to be
+able to create tables and, for the `vector` extension, to create extensions (a superuser
+or the database owner on most installs):
 
 ```bash
-pnpm run db:push        # push schema to database (first time)
-pnpm run dev            # http://localhost:4000
+createdb hadron
 ```
 
-### Environment variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATABASE_URL` | — | Prisma connection string |
-| `DB_PROVIDER` | `postgresql` | Leave unset. PostgreSQL is the only supported database (see below). |
-| `JWT_SECRET` | — | HS256 signing secret. Production refuses to boot when it is missing or under 32 UTF-8 bytes (#421) |
-| `HADRON_ENCRYPTION_KEY` | — | AES-256-GCM key for encrypting secrets at rest (32 bytes, hex) |
-| `GRAPHS_PATH` | `./graphs` | Root directory for cloned graph repos |
-| `PORT` | `4000` | HTTP listen port |
-| `BASE_URL` | `http://localhost:4000` | Public URL (used for OAuth callback) |
-| `FRONTEND_URL` | `http://localhost:5173` | hadron-web URL (OAuth redirect, CORS) |
-| `GITHUB_CLIENT_ID` | — | GitHub OAuth app client ID |
-| `GITHUB_CLIENT_SECRET` | — | GitHub OAuth app client secret |
-| `GOOGLE_CLIENT_ID` | — | Login-only Google OAuth web client ID |
-| `GOOGLE_CLIENT_SECRET` | — | Login-only Google OAuth web client secret |
-| `GITHUB_WEBHOOK_SECRET` | — | GitHub App webhook verification secret |
-| `RESEND_API_KEY` | — | Resend API key for magic-link emails |
-| `EMAIL_FROM` | `Hadron <noreply@hadrongraph.io>` | Sender address for emails |
-| `JWT_EXPIRY` | `7d` | JWT token lifetime |
-| `TEAM_ATTENTION_TOKEN_SECRET` | `JWT_SECRET` | Optional separate HMAC secret for attention tokens and switchover proofs |
-
-See `.env.example` for the full list with generation instructions.
-
-## Node filesystem format
-
-Each node is a directory containing a `.node/` subdirectory:
-
-```
-myorg/myrepo/
-  services/
-    .node/
-      node.yaml      # name, description, tags, outgoing edges
-      topic.md       # markdown content
-```
-
-`node.yaml` example:
-
-```yaml
-name: services
-description: "Service layer"
-tags: [backend, api]
-nodes:
-  - loc: models          # relative loc of target node
-    rel: "depends on"
-```
-
-The node's `loc` is derived from its path relative to the graph root, with `/`
-replaced by `.` (e.g. `services/auth` → `services.auth`).
-
-## Authentication
-
-Two token types are accepted via `Authorization: Bearer <token>`:
-
-- **JWT** (contains dots) — issued after GitHub OAuth or email magic-link login; carries `sub`, `roles`, and provider-specific claims.
-- **API key** (hex string) — created via the GraphQL API with a bcrypt-hashed key.
-
-Three identity providers are supported:
-
-- **GitHub OAuth** — `GET /auth/github` starts the flow; user is redirected back with a JWT.
-- **Google OAuth** — `GET /auth/google` starts the login-only OIDC flow when configured.
-- **Email magic link** — `POST /auth/email` sends a sign-in link via Resend; clicking it verifies the email and issues a JWT.
-
-Roles: `OWNER` > `ADMIN` > `CONTRIBUTOR` > `READER`.
-
-## Graph access control
-
-Node queries and mutations enforce graph-level access control:
-
-- **Users** see nodes from their organizations + cross-org subscriptions + public graphs
-- **Clients** see only nodes from graphs in their subscribed bundles
-- **Writes** require CONTRIBUTOR+ role, and for clients: a READ_WRITE bundle subscription
-
-See `hadron-concept/hadron-specs/Authorization/Graph Access Control.md` for the full spec.
-
-## GitHub integration
-
-Hadron integrates with GitHub in two ways: **OAuth** for user authentication and a **GitHub App** for graph synchronization.
-
-### GitHub OAuth (user login)
-
-Users log in via the standard GitHub OAuth flow (`/auth/github` → GitHub → `/auth/github/callback`). On first login, a User record is created and linked to the user's GitHub login. A JWT is issued for subsequent API calls.
-
-Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` from a GitHub OAuth App.
-
-### Google OAuth (user login)
-
-Google login is enabled when `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are
-set. Create a **Web application** OAuth client in a login-only Google Cloud
-project and register `${BASE_URL}/auth/google/callback` as an exact authorized
-redirect URI (plus `http://localhost:4000/auth/google/callback` for local
-development). The client requests only `openid email profile`; do not add Gmail
-scopes or reuse the Gmail mailbox-integration project.
-
-### GitHub App (graph sync)
-
-Graphs are stored as Git repositories on GitHub. A GitHub App provides authenticated access for cloning and pushing to these repos.
-
-**Credentials** are stored per-organization in the database (`githubAppId`, encrypted private key). This allows multi-tenant setups where each org uses its own GitHub App. If no per-org credentials exist, the server falls back to the `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` environment variables.
-
-**Authentication flow:**
-1. The server signs a short-lived JWT with the App's private key
-2. Exchanges it for a 1-hour installation access token via the GitHub API
-3. Uses the token to clone/push repos over authenticated HTTPS
-
-Private keys are encrypted at rest using AES-256-GCM (see `HADRON_ENCRYPTION_KEY`). The server handles PKCS#1 → PKCS#8 key format normalization automatically.
-
-### Webhooks
-
-The `/github/webhook` endpoint receives GitHub App events. Payloads are verified using HMAC-SHA256 with `GITHUB_WEBHOOK_SECRET`.
-
-**Installation events:**
-- **`installation.created`** — When the App is installed on a GitHub org, the controller matches the GitHub org name to a Hadron organization (by domain) and stores the installation ID.
-- **`installation.deleted`** — When the App is uninstalled, the installation ID is cleared.
-
-**Push events (auto-sync):**
-- When a push to the repository's default branch is received, the controller finds all graphs whose `source` URL matches the repository and triggers a sync. If a graph has a `readBranch` set, only pushes to that branch trigger a sync.
-
-### Graph sync flow
-
-On startup (and via `POST /reload`, which requires a platform ADMIN/OWNER bearer token since #556), the controller syncs all graphs that have a `sourceUrl`:
-
-1. Obtains an installation token for the graph's organization
-2. Clones (or pulls) the repo into `GRAPHS_PATH/<namespace>`
-3. Walks the filesystem for `.node/` directories
-4. Upserts nodes and edges into PostgreSQL
-
-When a node is modified via the API, the change is written back to the local clone.
-
-## Personal workspace provisioning
-
-When a new user signs up (via GitHub OAuth or email magic link), the controller
-automatically provisions a personal workspace:
-
-1. Creates an `Organization` with `isPersonal: true`
-2. Adds the user as OWNER
-3. Creates a default "My Graphs" bundle
-4. Creates a WORKSTATION client with an API key
-5. Subscribes the client to the default bundle (READ_WRITE)
-6. Stores the raw API key in a `PendingSetup` record (shown once on the setup page)
-
-New users are redirected to `/app/setup` where they download a config file for their AI tool.
-
-## Node version history
-
-Every call to `upsertNode` snapshots the current node state before applying changes. This creates
-a linear version history per node without requiring git branches.
-
-- `nodeVersions(nodeId, limit)` — query version history (most recent first)
-- `restoreNodeVersion(versionId)` — snapshots current state, then restores the node to a previous version
-
-## Marketplace
-
-The `publicGraphs` query returns all graphs with `visibility: PUBLIC`. The `addToMyGraphs` mutation
-lets an authenticated user add a public graph to their personal workspace (creates a subscription
-and adds the graph to their default bundle).
-
-## Endpoints
-
-| Endpoint | Auth | Description |
-|----------|------|-------------|
-| `GET /health` | — | Health check |
-| `POST /graphql` | Bearer | GraphQL API (Apollo) |
-| `POST /reload` | Bearer (platform ADMIN/OWNER) | Re-sync all graphs from GitHub. Rate limited to 10/min per source address (#556) |
-| `POST /sessions/:id/outcome` | Bearer (CONTRIBUTOR+ or App key) | Report a session outcome 0.0–1.0 (#556) |
-| `GET /auth/github` | — | Start GitHub OAuth flow |
-| `GET /auth/github/callback` | — | OAuth callback |
-| `GET /auth/google` | — | Start Google OIDC login flow |
-| `GET /auth/google/callback` | — | Google OIDC callback |
-| `POST /auth/email` | — | Send magic-link email |
-| `GET /auth/email/verify` | — | Verify magic link and issue JWT |
-| `GET /auth/me` | Bearer | Current user info |
-| `GET /setup/info` | Bearer | One-time setup info (API key, graphs) |
-| `POST /github/webhook` | HMAC | GitHub App webhook receiver |
-| `POST /mcp` | Bearer | MCP protocol endpoint |
-
-## Docker deployment
-
-### Running database migrations
-
-Never run `prisma db push` or `prisma migrate` as part of the container entrypoint — if it fails, the container enters a restart loop. Instead, run migrations separately using `docker compose run`:
+**3. Create your `.env`**
 
 ```bash
-docker compose run --rm hadron-server npx prisma db push
+cp .env.example .env
 ```
 
-This spins up a fresh container with all env vars from your compose file, runs the command, and exits.
+Then edit `.env` and set at least these four values. Everything else in the file is
+optional for a first run. The server refuses to start without the last one.
 
-For schema changes that require dropping and recreating (e.g. enum changes), use `--force-reset`. **This wipes all data:**
+| Variable | What to put there |
+|----------|-------------------|
+| `DATABASE_URL` | Your connection string, for example `postgresql://YOUR_USER@localhost:5432/hadron` |
+| `JWT_SECRET` | Any random string of 32 or more characters. Generate one with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
+| `HADRON_ENCRYPTION_KEY` | 32 random bytes as hex, generated with the same command |
+| `RATE_LIMIT_KEYRING` | A one-key JSON keyring for the rate limiter. `.env.example` does not list this variable. Generate the whole line with `node -e "console.log('RATE_LIMIT_KEYRING=' + JSON.stringify({current:'dev1',keys:{dev1:require('crypto').randomBytes(32).toString('hex')}}))"` and paste it into `.env` as printed |
+
+`.env` is ignored by git. Never commit it, and never paste its contents into an issue.
+
+**4. Create the schema**
 
 ```bash
-docker compose run --rm hadron-server npx prisma db push --force-reset
+pnpm db:dev-setup
 ```
 
-### Recovering from a restart loop
+This applies the schema and then the raw SQL in `prisma/post-push.sql`, which creates the
+`vector` extension, the vector index and the database constraints Prisma cannot model.
+**Use this script, not a bare `pnpm db:push`:** a bare push silently drops the vector index.
+`pnpm db:dev-setup` is safe to run again after a schema change; it does not wipe data.
 
-If a failed migration or startup error puts the container in a restart loop:
+**5. Start the server**
 
 ```bash
-docker compose stop hadron-server
-docker compose run --rm hadron-server npx prisma db push --force-reset
-docker compose start hadron-server
+pnpm dev
 ```
 
-### Re-seeding after a reset
+The server prints three lines when it is up:
 
-After `--force-reset`, the database is empty. Re-seed if needed:
+```
+hadron-server listening on http://localhost:4000
+GraphQL: http://localhost:4000/graphql
+MCP:     http://localhost:4000/mcp
+```
+
+**6. Check that it works**
 
 ```bash
-docker compose run --rm hadron-server npx prisma db seed
+curl -s http://localhost:4000/health
 ```
 
-## Testing
+A healthy server answers with HTTP 200. `/health` checks the database connection, so a
+failure here usually means `DATABASE_URL` is wrong or Postgres is not running.
 
-Tests need a local PostgreSQL with pgvector that the `holger` role can create
-databases on. No setup step is needed: each run clones a template that the
-vitest globalSetup builds from an empty database for this checkout's schema
-(`hadron_test_s<fingerprint>`, see `src/test/schemaTemplate.ts`). A schema
-change gets a new template; nothing is pushed over an old one.
+Sign-in providers (GitHub, Google, email links) and the other integrations in `.env.example`
+are all optional and need credentials of your own. The server starts without them; the
+sign-in routes you have not configured simply refuse requests.
 
-For serial mode (`HADRON_TEST_PARALLEL=0`, a single database and no CREATE
-DATABASE), rebuild `hadron_test` from empty after every schema change:
+## Tests
 
 ```bash
-pnpm run db:test-setup
+pnpm test
 ```
 
-Then run:
+You need a local PostgreSQL with pgvector and a role that may create databases. No setup
+step is needed: the test run builds a template database from an empty one for the schema in
+your checkout and clones it for each worker, and it never touches the database named in
+your `.env`. If you have little memory or share the machine, limit the workers with
+`HADRON_TEST_MAX_WORKERS=2`.
+
+Other checks that CI runs:
 
 ```bash
-pnpm test                # run all tests
-pnpm run test:watch      # watch mode
-pnpm run test:coverage   # with coverage report
+pnpm tsc --noEmit
+node scripts/check-loc-scope.mjs
+pnpm check:sdl-enums
+pnpm check:sdl-hash-docs
 ```
 
-Tests use Vitest with `pool: 'forks'` (one process per file), each worker on its own
-cloned database.
+## Disposable stack
 
-## Scripts
+`scripts/e2e/stack.sh` builds this checkout into a private, seeded stack with its own
+database, for trying a change end to end without touching your development database. See
+[scripts/e2e/README.md](scripts/e2e/README.md).
 
-| Script | Description |
-|--------|-------------|
-| `pnpm run dev` | Start dev server with hot reload (tsx watch) |
-| `pnpm run build` | Compile TypeScript |
-| `pnpm start` | Run compiled server |
-| `pnpm test` | Run all tests |
-| `pnpm run test:watch` | Watch mode |
-| `pnpm run test:coverage` | Coverage report |
-| `pnpm run db:generate` | Regenerate Prisma client |
-| `pnpm run db:push` | Push schema to database |
-| `pnpm run db:migrate` | Run Prisma migrations (PostgreSQL) |
-| `pnpm run db:studio` | Open Prisma Studio |
-| `pnpm run db:test-setup` | Rebuild `hadron_test` from empty (serial mode only) |
+## Useful scripts
 
-## Database provider adapter
+| Script | What it does |
+|--------|--------------|
+| `pnpm dev` | Start the server with hot reload |
+| `pnpm build` / `pnpm start` | Compile, then run the compiled server |
+| `pnpm db:dev-setup` | Sync your development database to the current schema without wiping it |
+| `pnpm db:generate` | Regenerate the Prisma client |
+| `pnpm db:studio` | Browse your development database in Prisma Studio |
+| `pnpm test` | Run the test suite |
 
-**SQLite is not supported.** PostgreSQL (with pgvector) is the only database the server runs on. The SQLite schema and the `db:use-*` scripts that switched to it were removed in #426, because the schema had fallen far behind (13 models against today's 76) and running either script overwrote the live `prisma/schema.prisma`.
+## Contributing and security
 
-`src/integrations/db/provider.ts` is a vestige of that toggle: it still reads `DB_PROVIDER` at startup and, with the default (unset), passes values through unchanged.
+- Want to change something? Read [CONTRIBUTING.md](CONTRIBUTING.md).
+- Found a vulnerability? Do not open an issue. Follow [SECURITY.md](SECURITY.md).
+- Everyone taking part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## License
+
+[MIT](LICENSE)
