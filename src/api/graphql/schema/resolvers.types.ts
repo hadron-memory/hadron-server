@@ -1919,6 +1919,13 @@ export const typeResolvers = {
     },
   },
   App: {
+    /**
+     * #4464 stage 1: the App's own role is deprecated — the field answers the
+     * constant READER whatever the row stores, and no writer persists a
+     * caller-supplied value anymore. Legacy stored values are untouched until
+     * the last stage drops the column.
+     */
+    role: () => 'READER',
     /** #2171 (R211): the union reader every admission decides with. */
     availableMemberRoles: async (a: { id: string }, _: unknown, ctx: Context) =>
       (await loadOfferedMemberRoles(ctx.db, a.id)).roles,

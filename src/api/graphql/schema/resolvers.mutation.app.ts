@@ -417,7 +417,7 @@ export const appMutations = {
         name,
         urn,
         appType,
-        role,
+        role, // accepted and ignored (#4464)
         description,
         agentTools,
         aiProvider,
@@ -692,7 +692,6 @@ export const appMutations = {
             trainingMode: trainingMode ?? false,
             ...(policy !== undefined && policy !== null ? { policy: policy as never } : {}),
             appType: appType ?? 'WORKSTATION',
-            role: role ?? 'READER',
             description: description ?? null,
             agentTools: agentTools ?? [],
             expiresAt: expiresAt ? new Date(expiresAt) : undefined,
@@ -886,7 +885,7 @@ export const appMutations = {
         name,
         urn,
         appType,
-        role,
+        role, // accepted and ignored (#4464)
         description,
         agentTools,
         aiProvider,
@@ -1115,7 +1114,6 @@ export const appMutations = {
           ...(name !== undefined ? { name } : {}),
           ...(newUrn !== undefined ? { urn: newUrn } : {}),
           ...(appType !== undefined ? { appType } : {}),
-          ...(role !== undefined ? { role } : {}),
           ...(description !== undefined ? { description } : {}),
           ...(agentTools !== undefined ? { agentTools } : {}),
           ...(expiresAt !== undefined ? { expiresAt: expiresAt ? new Date(expiresAt) : null } : {}),
