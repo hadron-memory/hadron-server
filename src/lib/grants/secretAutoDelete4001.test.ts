@@ -1,9 +1,7 @@
 /**
  * #4001 (S6), cor:sec:060:03 / cor:acl:140:02: the auto-delete mark is a grant term and needs a finite end.
- * Database-only red preparation while S3 #3998 is unmerged. These exercise real grant constraints without importing
- * absent secret/client modules. The two secret action rows below are isolated test FK targets, never production seeds
- * or byte-review evidence. When S3 supplies the real registered actions, leave their definitions untouched.
- * Runtime admission, reveal/rollback and sweep pins must be added against S3's merged interfaces before S6 is ready.
+ * Database constraint coverage, using real S3 action definitions where present and an isolated fixture for future secret.use.
+ * Runtime admission, signed reveal and sweep coverage lives in resolvers.secretAutoDelete4001.test.ts.
  */
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';

@@ -1,5 +1,4 @@
 /** #4001 S6: real passkey activation, reads and shared sweep against a private test DB. */
-import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -7,6 +6,8 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
 import { createPendingGrant } from '../../../lib/grants/create.js';
+import { endHeldGrants } from '../../../lib/grants/departure.js';
+import { mergeUsers } from '../../../test/mergeConsent.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { insertSoftPasskey, softPasskey } from '../../../test/softPasskey.js';
@@ -64,8 +65,12 @@ async function sign(grantId: string) {
 }
 const exists = () => db.secret.count({ where: { id: secretId } });
 const deletedEvents = () => db.secretEvent.count({ where: { secretId, kind: 'DELETE' } });
+async function dbDeadline(seconds: number): Promise<Date> {
+  const [row] = await db.$queryRaw<Array<{ deadline: Date }>>`SELECT (clock_timestamp() AT TIME ZONE 'UTC') + ${seconds} * interval '1 second' AS deadline`;
+  return row.deadline;
+}
 async function expired(grantId: string) {
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 600; i++) {
     const [r] = await db.$queryRaw<Array<{ done: boolean }>>`SELECT expires_at <= (clock_timestamp() AT TIME ZONE 'UTC') AS done FROM grants WHERE id = ${grantId}`;
     if (r.done) return;
     await new Promise(r => setTimeout(r, 50));
@@ -101,7 +106,7 @@ it('two last readers produce one value and one deletion', async () => {
   expect(await exists()).toBe(0); expect(await deletedEvents()).toBe(1);
 });
 it.each(['live', 'revoked', 'departed', 'protected'])('signed %s client deletes at expiry once, across two sweep instances', async ending => {
-  const a = await client('delete', null, new Date(Date.now() + 1800));
+  const a = await client('delete', null, await dbDeadline(10));
   if (ending === 'revoked') await db.$executeRaw`UPDATE grants SET revoked_at = (clock_timestamp() AT TIME ZONE 'UTC'), revoked_by = ${ownerId} WHERE id = ${a.grantId}`;
   if (ending === 'departed') await db.worker.update({ where: { id: workerId }, data: { retiredAt: new Date() } });
   if (ending === 'departed') await db.$executeRaw`UPDATE grants SET holder_departed_at = (clock_timestamp() AT TIME ZONE 'UTC') WHERE id = ${a.grantId}`;
@@ -111,13 +116,13 @@ it.each(['live', 'revoked', 'departed', 'protected'])('signed %s client deletes 
   expect(await failure(reveal(a.clientId))).not.toBe('OK');
   await Promise.all([secretSweepTick(db), secretSweepTick(db)]); await secretSweepTick(db);
   expect(await exists()).toBe(0); expect(await deletedEvents()).toBe(1);
-});
+}, 30_000);
 it('unsigned pending and unmarked expired grants never delete', async () => {
   const a = await client('delete', null, new Date(Date.now() + 200), false);
   await expired(a.grantId); await secretSweepTick(db); expect(await exists()).toBe(1);
-  const b = await client('keep', null, new Date(Date.now() + 1800));
+  const b = await client('keep', null, await dbDeadline(10));
   await expired(b.grantId); await secretSweepTick(db); expect(await exists()).toBe(1);
-});
+}, 30_000);
 
 it('failure after decryption rolls back spend, reveal event, deletion and client ends', async () => {
   const a = await client(); const original = secretValues.currentAppSecretValue;
@@ -166,16 +171,81 @@ it('rejects a stranger marking a real or missing secret with the same ruled refu
 
 it('rechecks a historical unbounded pending mark at signing without consuming or activating it', async () => {
   const grantId = generateId();
-  const constraint = readFileSync(new URL('../../../../prisma/secret-auto-delete-invariants.sql', import.meta.url), 'utf8');
   // Model the old generic door before the new NOT VALID CHECK existed; every signature/activation guard stays enabled.
   await db.$transaction(async tx => {
-    await tx.$executeRawUnsafe('ALTER TABLE grants DROP CONSTRAINT chk_secret_auto_delete_limit');
+    await tx.$executeRawUnsafe('DROP TRIGGER secret_auto_delete_limit ON grants');
     await tx.grant.create({ data: { id: grantId, appId, workerId, requestedByUserId: ownerId,
       action: 'secret.reveal', values: { secret: secretId, 'auto-delete': 'delete' }, reason: 'historical pending mark' } });
-    for (const statement of constraint.replace(/^--.*$/gm, '').split(';').map(x => x.trim()).filter(Boolean)) await tx.$executeRawUnsafe(statement);
+    await tx.$executeRawUnsafe('CREATE TRIGGER secret_auto_delete_limit BEFORE INSERT OR UPDATE ON grants FOR EACH ROW EXECUTE FUNCTION hadron_guard_secret_auto_delete_limit()');
   });
   await expect(sign(grantId)).rejects.toMatchObject({ code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT' });
   expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).activatedAt).toBeNull();
   expect(await db.grantSignature.count({ where: { grantId } })).toBe(0);
   expect(await db.secretReadClient.count({ where: { grantId } })).toBe(0);
+});
+
+it('lets a historical unbounded pending mark be revoked without allowing it to be reactivated', async () => {
+  const grantId = generateId();
+  await db.$transaction(async tx => {
+    await tx.$executeRawUnsafe('DROP TRIGGER secret_auto_delete_limit ON grants');
+    await tx.grant.create({ data: { id: grantId, appId, workerId, requestedByUserId: ownerId,
+      action: 'secret.reveal', values: { secret: secretId, 'auto-delete': 'delete' }, reason: 'historical pending mark' } });
+    await tx.$executeRawUnsafe('CREATE TRIGGER secret_auto_delete_limit BEFORE INSERT OR UPDATE ON grants FOR EACH ROW EXECUTE FUNCTION hadron_guard_secret_auto_delete_limit()');
+  });
+  await expect(resolvers.Mutation.revokeGrant({}, { ref: grantId }, ctx())).resolves.toMatchObject({ id: grantId });
+  expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).revokedAt).not.toBeNull();
+  await expect(db.grant.update({ where: { id: grantId }, data: { revokedAt: null, revokedByUserId: null } })).rejects.toThrow();
+});
+
+it('keeps historical unbounded marks maintainable on withdrawal and holder departure', async () => {
+  const ids = [generateId(), generateId()];
+  await db.$transaction(async tx => {
+    await tx.$executeRawUnsafe('DROP TRIGGER secret_auto_delete_limit ON grants');
+    for (const id of ids) await tx.grant.create({ data: { id, appId, workerId, requestedByUserId: ownerId,
+      action: 'secret.reveal', values: { secret: secretId, 'auto-delete': 'delete' }, reason: 'historical pending mark' } });
+    await tx.$executeRawUnsafe('CREATE TRIGGER secret_auto_delete_limit BEFORE INSERT OR UPDATE ON grants FOR EACH ROW EXECUTE FUNCTION hadron_guard_secret_auto_delete_limit()');
+  });
+  // A writer that names an unchanged term column is still a lifecycle-only update.
+  await db.$executeRaw`UPDATE grants SET action = action WHERE id = ${ids[0]}`;
+  await expect(resolvers.Mutation.withdrawGrant({}, { ref: ids[0] }, ctx())).resolves.toMatchObject({ id: ids[0] });
+  expect((await db.grant.findUniqueOrThrow({ where: { id: ids[0] } })).withdrawnAt).not.toBeNull();
+  await db.$transaction(async tx => {
+    await tx.worker.update({ where: { id: workerId }, data: { retiredAt: new Date() } });
+    await endHeldGrants(tx, 'worker', workerId);
+  });
+  expect((await db.grant.findUniqueOrThrow({ where: { id: ids[1] } })).holderDepartedAt).not.toBeNull();
+});
+
+// Reproduce the pre-S6 generic door inside this private test DB. S6 rejects such terms both
+// at insertion and signing, so only this fixture temporarily restores the old admission behavior.
+async function legacyUnbounded(holder: { userId: string } | { workerId: string }, signed = false) {
+  const id = generateId();
+  await db.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER secret_auto_delete_limit');
+  const oldAdmission = vi.spyOn(deletion, 'autoDeleteLimitRefusal').mockReturnValue(null);
+  try {
+    await db.grant.create({ data: { id, appId, ...holder, requestedByUserId: ownerId,
+      action: 'secret.reveal', values: { secret: secretId, 'auto-delete': 'delete' }, reason: 'legacy marked grant' } });
+    if (signed) await sign(id);
+  } finally {
+    oldAdmission.mockRestore();
+    await db.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER secret_auto_delete_limit');
+  }
+  return id;
+}
+
+it('user merge moves a historical unbounded grant holder without changing its terms', async () => {
+  const source = await db.user.create({ data: { handle: `legacy-source-${generateId()}` } });
+  const target = await db.user.create({ data: { handle: `legacy-target-${generateId()}` } });
+  const id = await legacyUnbounded({ userId: source.id });
+  await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id });
+  expect(await db.grant.findUniqueOrThrow({ where: { id } })).toMatchObject({ userId: target.id, maxUses: null, expiresAt: null,
+    values: { secret: secretId, 'auto-delete': 'delete' } });
+});
+
+it('a signed historical unbounded grant can spend while the new guard is enabled', async () => {
+  const id = await legacyUnbounded({ workerId }, true);
+  const clientId = (await db.secretReadClient.findUniqueOrThrow({ where: { grantId: id } })).id;
+  await expect(reveal(clientId)).resolves.toMatchObject({ value: JSON.stringify('s6-latest') });
+  expect((await db.grant.findUniqueOrThrow({ where: { id } })).useCount).toBe(1);
+  expect(await exists()).toBe(1);
 });

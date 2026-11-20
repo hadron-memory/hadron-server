@@ -784,12 +784,6 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
-      "name": "chk_secret_auto_delete_limit",
-      "kind": "check-constraint",
-      "file": "secret-auto-delete-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
-    },
-    {
       "name": "chk_secret_owner_type",
       "kind": "check-constraint",
       "file": "secret-versions-invariants.sql",
@@ -1315,6 +1309,12 @@
       "name": "hadron_guard_pending_email_sign_in",
       "kind": "function",
       "file": "pending-email-sign-in-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_secret_auto_delete_limit",
+      "kind": "function",
+      "file": "secret-auto-delete-invariants.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
@@ -2287,6 +2287,12 @@
       "name": "grants.grants_guard",
       "kind": "trigger",
       "file": "grant-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "grants.secret_auto_delete_limit",
+      "kind": "trigger",
+      "file": "secret-auto-delete-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
