@@ -2432,6 +2432,8 @@ export const typeDefs = `#graphql
     expiresAt: DateTime!
     "Null while OPEN. EXPIRED ends at expiresAt; every other end at the moment it happened (DB clock)."
     endedAt: DateTime
+    "Latest verified ineligible signing-proof attempt while OPEN, if any. Visible only through the existing request read gate; contains no signer identity and does not end the request (#4546; hrn:node:hadronmemory.com:specs:cor:acl:140:07)."
+    lastRefusedAt: DateTime
     "The server-hosted ceremony page where someone who may issue the grant signs it (hrn:node:hadronmemory.com:specs:cor:acl:140:07): the server origin plus /grant-signing/<id>, with no token. Copy it verbatim; never compose it. Signing there with a passkey activates the grant; no GraphQL or MCP call takes an assertion. An ended request's link only explains that it ended."
     ceremonyUrl: String!
   }
@@ -4505,7 +4507,7 @@ export const typeDefs = `#graphql
     agent: Agent
     syncStatus: SyncStatus!
     syncError: String
-    "Versioned JSON outcome of the last sync (v1, or v2 when an attestation-refused entry requires it): partial, failed or unknown. Null after a completed clean sync; consult lastSyncedAt/syncStatus for a never-synced memory. Same Memory-record read gate applies. Git sync: hrn:node:hadronmemory.com:specs:cor:int:010:01."
+    "Versioned JSON outcome of the last sync (v1, or v2 when an attestation-refused entry requires it): partial, failed or unknown. Invalid-loc skips may add invalidSources with a count, up to 50 ordinal/code items and an omitted count; the outcome remains unknown and no source path or file ID is exposed. Null after a completed clean sync; consult lastSyncedAt/syncStatus for a never-synced memory. Same Memory-record read gate applies. Git sync: hrn:node:hadronmemory.com:specs:cor:int:010:01."
     lastSyncReport: String
     pendingEdgeCount: Int!
     lastSyncedAt: DateTime
@@ -6520,6 +6522,8 @@ export const typeDefs = `#graphql
     selfIssued: Boolean!
     "Null while live, else one of SECRET_DELETED, PROTECTED, REVOKED, PENDING, SPENT, EXPIRED, NOT_STARTED, ISSUER_GONE (nothing else ended it) or ENDED. A stored end wins; otherwise the grant's own state, in the order the reveal door answers."
     endReason: String
+    "#4545 (hrn:node:hadronmemory.com:specs:cor:sec:060:02): the server-hosted page where the person who holds this client reveals the value with a passkey: the server origin plus /secret-reveal/<clientId>, with no token. Copy it verbatim; never compose it. Returned only to that person holder in their own session. Null for a client a worker holds, and for a worker session, an App key or anyone viewing a client they do not hold."
+    revealUrl: String
     createdAt: DateTime!
   }
 
