@@ -247,7 +247,7 @@ describe('user-owned App is owner-only (blocker 3 — no platform-admin bypass)'
     const adminCtx = ctx({ userId: otherId, roles: ['ADMIN'] });
     await expect(resolvers.Mutation.regenerateAppKey(null, { appRef: app.id }, adminCtx)).rejects.toThrow('Forbidden');
     await expect(
-      resolvers.Mutation.ensureAppMember(null, { appId: app.id, userId: otherId, role: 'owner' }, adminCtx),
+      resolvers.Mutation.ensureAppMember(null, { appRef: app.id, userRef: otherId, role: 'owner' }, adminCtx),
     ).rejects.toThrow('Forbidden');
   });
 

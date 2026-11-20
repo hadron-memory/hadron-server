@@ -40,8 +40,8 @@ beforeEach(async () => {
   orgId = org.id;
   admin = await db.user.create({ data: { githubId: 166401, githubUsername: 'merge-admin', handle: 'merge-admin', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  src = await resolvers.Mutation.createMemory(null, { orgId, name: 'merge-src' }, as());
-  dst = await resolvers.Mutation.createMemory(null, { orgId, name: 'merge-dst' }, as());
+  src = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'merge-src' }, as());
+  dst = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'merge-dst' }, as());
 });
 
 describe('mergeMemories carries threads (cor:dmo:110:02)', () => {
@@ -69,7 +69,7 @@ describe('mergeMemories carries threads (cor:dmo:110:02)', () => {
   it('refuses a merge into a private memory while live threads exist; nothing moves', async () => {
     const a = await node(src.id, 'a');
     await M.createComment(null, { targetRef: a.id, body: 'x' }, as());
-    const priv = await resolvers.Mutation.createMemory(null, { orgId, name: 'merge-priv', memoryClass: 'private' }, as());
+    const priv = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'merge-priv', memoryClass: 'private' }, as());
     dst = priv;
     expect((await errorOf(merge())).extensions).toMatchObject({
       code: 'COMMENT_MOVE_UNCOMMENTABLE', class: 'private', nodes: [{ nodeId: a.id, loc: 'a', comments: 1 }],
@@ -139,7 +139,7 @@ describe('#1682 review cycle', () => {
 
   it('Baloo P3-2: a live thread that appears after the preflight still refuses with the typed code', async () => {
     const a = await node(src.id, 'late');
-    const priv = await resolvers.Mutation.createMemory(null, { orgId, name: 'merge-priv2', memoryClass: 'private' }, as());
+    const priv = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'merge-priv2', memoryClass: 'private' }, as());
     dst = priv;
     await M.createComment(null, { targetRef: a.id, body: 'x' }, as());
     // Stand-in for "posted after the preflight": skip the preflight's view.

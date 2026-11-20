@@ -87,7 +87,7 @@ describe('createRevision', () => {
   it('creates a snapshot of the system memory', async () => {
     const result = await resolvers.Mutation.createRevision(
       {},
-      { agentId: agent.id, description: 'Initial save' },
+      { agentRef: agent.id, description: 'Initial save' },
       adminCtx(),
     );
 
@@ -106,8 +106,8 @@ describe('createRevision', () => {
   });
 
   it('auto-increments revision numbers', async () => {
-    await resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx());
-    const r2 = await resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx());
+    await resolvers.Mutation.createRevision({}, { agentRef: agent.id }, adminCtx());
+    const r2 = await resolvers.Mutation.createRevision({}, { agentRef: agent.id }, adminCtx());
     expect(r2.revisionLoc).toBe('revisions:rev-2');
   });
 
@@ -119,7 +119,7 @@ describe('createRevision', () => {
     });
     const result = await resolvers.Mutation.createRevision(
       {},
-      { agentId: stored.urn, description: 'urn-input' },
+      { agentRef: stored.urn, description: 'urn-input' },
       adminCtx(),
     );
     expect(result.revisionLoc).toBe('revisions:rev-1');
@@ -132,7 +132,7 @@ describe('createRevision', () => {
     });
     const result = await resolvers.Mutation.createRevision(
       {},
-      { agentId: `urn:agent:${stored.urn}`, description: 'prefixed-urn-input' },
+      { agentRef: `urn:agent:${stored.urn}`, description: 'prefixed-urn-input' },
       adminCtx(),
     );
     expect(result.revisionLoc).toBe('revisions:rev-1');
@@ -144,7 +144,7 @@ describe('createRevision', () => {
     for (let round = 0; round < 5; round++) {
       const before = await db.node.count({ where: { memoryId: systemMemory.id, loc: { startsWith: 'revisions:' }, deletedAt: null } });
       const results = await Promise.allSettled(
-        Array.from({ length: 4 }, () => resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx())),
+        Array.from({ length: 4 }, () => resolvers.Mutation.createRevision({}, { agentRef: agent.id }, adminCtx())),
       );
       expect(results.filter((r) => r.status === 'rejected')).toEqual([]);
       const locs = results.map((r) => (r as PromiseFulfilledResult<{ revisionLoc: string }>).value.revisionLoc);
@@ -156,7 +156,7 @@ describe('createRevision', () => {
 
   // #2507: a live count collides with a live rev-N after a middle deletion, and must not reuse a deleted name.
   const slotNode = (loc: string) => db.node.findFirstOrThrow({ where: { memoryId: systemMemory.id, loc } });
-  const save = () => resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx());
+  const save = () => resolvers.Mutation.createRevision({}, { agentRef: agent.id }, adminCtx());
   const del = async (loc: string) => resolvers.Mutation.deleteNode({}, { nodeRef: (await slotNode(loc)).id }, adminCtx());
 
   it('a save after a middle deletion takes rev-3, not the live rev-2 (#2507)', async () => {
@@ -169,7 +169,7 @@ describe('createRevision', () => {
   it('restore still auto-saves after a middle deletion (#2507)', async () => {
     const rev2 = (await save(), await save());
     await del('revisions:rev-1');
-    await resolvers.Mutation.restoreRevision({}, { agentId: agent.id, revisionLoc: rev2.revisionLoc }, adminCtx());
+    await resolvers.Mutation.restoreRevision({}, { agentRef: agent.id, revisionLoc: rev2.revisionLoc }, adminCtx());
     const auto = await db.node.findMany({
       where: { memoryId: systemMemory.id, deletedAt: null, description: { startsWith: 'Auto-save before restoring' } },
     });
@@ -213,9 +213,9 @@ describe('createRevision', () => {
   });
 
   it('concurrent restores each auto-save into their own slot (#2498)', async () => {
-    const rev = await resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx());
+    const rev = await resolvers.Mutation.createRevision({}, { agentRef: agent.id }, adminCtx());
     const results = await Promise.allSettled(
-      Array.from({ length: 3 }, () => resolvers.Mutation.restoreRevision({}, { agentId: agent.id, revisionLoc: rev.revisionLoc }, adminCtx())),
+      Array.from({ length: 3 }, () => resolvers.Mutation.restoreRevision({}, { agentRef: agent.id, revisionLoc: rev.revisionLoc }, adminCtx())),
     );
     expect(results.filter((r) => r.status === 'rejected')).toEqual([]);
     const autoSaves = await db.node.findMany({
@@ -227,11 +227,11 @@ describe('createRevision', () => {
 
 describe('publishRevision', () => {
   it('marks a revision as published and updates the agent', async () => {
-    await resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx());
+    await resolvers.Mutation.createRevision({}, { agentRef: agent.id }, adminCtx());
 
     const result = await resolvers.Mutation.publishRevision(
       {},
-      { agentId: agent.id, revisionLoc: 'revisions:rev-1', versionLabel: 'v1.0' },
+      { agentRef: agent.id, revisionLoc: 'revisions:rev-1', versionLabel: 'v1.0' },
       adminCtx(),
     );
 
@@ -245,14 +245,14 @@ describe('publishRevision', () => {
 
   // 007-entity-id-or-urn: publishRevision accepts agentId as ID or URN.
   it('accepts a URN as agentId input', async () => {
-    await resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx());
+    await resolvers.Mutation.createRevision({}, { agentRef: agent.id }, adminCtx());
     const stored = await db.agent.findUniqueOrThrow({
       where: { id: agent.id },
       select: { urn: true },
     });
     const result = await resolvers.Mutation.publishRevision(
       {},
-      { agentId: stored.urn, revisionLoc: 'revisions:rev-1', versionLabel: 'v1.0' },
+      { agentRef: stored.urn, revisionLoc: 'revisions:rev-1', versionLabel: 'v1.0' },
       adminCtx(),
     );
     expect(result.published).toBe(true);
@@ -266,7 +266,7 @@ describe('restoreRevision', () => {
     const target = await db.node.findFirstOrThrow({
       where: { memoryId: systemMemory.id, loc: 'prompts:hello:greet' },
     });
-    await resolvers.Mutation.createRevision({}, { agentId: agent.id, description: 'before task stamp' }, adminCtx());
+    await resolvers.Mutation.createRevision({}, { agentRef: agent.id, description: 'before task stamp' }, adminCtx());
     const task = await db.node.create({
       data: { id: generateId(), memoryId: systemMemory.id, loc: 'prompts:author-task', name: 'Author task', nodeType: 'task' },
     });
@@ -280,7 +280,7 @@ describe('restoreRevision', () => {
       },
     });
 
-    await resolvers.Mutation.restoreRevision({}, { agentId: agent.id, revisionLoc: 'revisions:rev-1' }, adminCtx());
+    await resolvers.Mutation.restoreRevision({}, { agentRef: agent.id, revisionLoc: 'revisions:rev-1' }, adminCtx());
 
     expect(await db.node.findUniqueOrThrow({ where: { id: target.id } })).toMatchObject({
       content: 'Hello world!', authorshipKind: null, authoredByTask: null,
@@ -301,10 +301,10 @@ describe('restoreRevision', () => {
     const node = await db.node.create({
       data: { id: generateId(), memoryId: systemMemory.id, loc: 'prompts:main', name: 'main', nodeType: 'system', content: 'v1' },
     });
-    await resolvers.Mutation.createRevision({}, { agentId: agent.id, description: 'v1' }, adminCtx());
+    await resolvers.Mutation.createRevision({}, { agentRef: agent.id, description: 'v1' }, adminCtx());
     await db.node.update({ where: { id: node.id }, data: { content: 'changed by a raw writer' } });
 
-    await resolvers.Mutation.restoreRevision({}, { agentId: agent.id, revisionLoc: 'revisions:rev-1' }, adminCtx());
+    await resolvers.Mutation.restoreRevision({}, { agentRef: agent.id, revisionLoc: 'revisions:rev-1' }, adminCtx());
 
     const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
     expect(after.content).toBe('v1');
@@ -322,7 +322,7 @@ describe('restoreRevision', () => {
 
   it('restores nodes from a snapshot and auto-saves current state', async () => {
     // Create initial revision
-    await resolvers.Mutation.createRevision({}, { agentId: agent.id, description: 'v1' }, adminCtx());
+    await resolvers.Mutation.createRevision({}, { agentRef: agent.id, description: 'v1' }, adminCtx());
 
     // Modify the system memory (add a new node)
     await db.node.create({
@@ -336,7 +336,7 @@ describe('restoreRevision', () => {
     // Restore to rev-1 (should remove the goodbye conversation)
     const result = await resolvers.Mutation.restoreRevision(
       {},
-      { agentId: agent.id, revisionLoc: 'revisions:rev-1' },
+      { agentRef: agent.id, revisionLoc: 'revisions:rev-1' },
       adminCtx(),
     );
 
@@ -384,10 +384,10 @@ describe('restoreRevision', () => {
     // Snapshot the graph WITH the edge, then restore it. The restore's preamble
     // soft-deletes the live edge, so the snapshot edge collides on (loc, memoryId)
     // unless it's upserted — before the fix this threw a P2002 unique violation.
-    await resolvers.Mutation.createRevision({}, { agentId: agent.id, description: 'v1' }, adminCtx());
+    await resolvers.Mutation.createRevision({}, { agentRef: agent.id, description: 'v1' }, adminCtx());
     const result = await resolvers.Mutation.restoreRevision(
       {},
-      { agentId: agent.id, revisionLoc: 'revisions:rev-1' },
+      { agentRef: agent.id, revisionLoc: 'revisions:rev-1' },
       adminCtx(),
     );
     expect(result.revisionLoc).toBe('revisions:rev-1');
@@ -404,14 +404,14 @@ describe('restoreRevision', () => {
 
   // 007-entity-id-or-urn: restoreRevision accepts agentId as ID or URN.
   it('accepts a URN as agentId input', async () => {
-    await resolvers.Mutation.createRevision({}, { agentId: agent.id, description: 'v1' }, adminCtx());
+    await resolvers.Mutation.createRevision({}, { agentRef: agent.id, description: 'v1' }, adminCtx());
     const stored = await db.agent.findUniqueOrThrow({
       where: { id: agent.id },
       select: { urn: true },
     });
     const result = await resolvers.Mutation.restoreRevision(
       {},
-      { agentId: stored.urn, revisionLoc: 'revisions:rev-1' },
+      { agentRef: stored.urn, revisionLoc: 'revisions:rev-1' },
       adminCtx(),
     );
     expect(result.revisionLoc).toBe('revisions:rev-1');
@@ -422,7 +422,7 @@ describe('Editor lock', () => {
   it('acquires a lock for the first user', async () => {
     const result = await resolvers.Mutation.acquireEditorLock(
       {},
-      { agentId: agent.id },
+      { agentRef: agent.id },
       adminCtx(),
     );
     expect(result.locked).toBe(true);
@@ -430,11 +430,11 @@ describe('Editor lock', () => {
   });
 
   it('rejects a second user while lock is active', async () => {
-    await resolvers.Mutation.acquireEditorLock({}, { agentId: agent.id }, adminCtx());
+    await resolvers.Mutation.acquireEditorLock({}, { agentRef: agent.id }, adminCtx());
 
     const result = await resolvers.Mutation.acquireEditorLock(
       {},
-      { agentId: agent.id },
+      { agentRef: agent.id },
       adminCtx(otherAdmin.id),
     );
     expect(result.locked).toBe(false);
@@ -442,24 +442,24 @@ describe('Editor lock', () => {
   });
 
   it('allows the same user to renew their lock', async () => {
-    await resolvers.Mutation.acquireEditorLock({}, { agentId: agent.id }, adminCtx());
+    await resolvers.Mutation.acquireEditorLock({}, { agentRef: agent.id }, adminCtx());
 
     const result = await resolvers.Mutation.acquireEditorLock(
       {},
-      { agentId: agent.id },
+      { agentRef: agent.id },
       adminCtx(), // same user
     );
     expect(result.locked).toBe(true);
   });
 
   it('releases the lock', async () => {
-    await resolvers.Mutation.acquireEditorLock({}, { agentId: agent.id }, adminCtx());
-    await resolvers.Mutation.releaseEditorLock({}, { agentId: agent.id }, adminCtx());
+    await resolvers.Mutation.acquireEditorLock({}, { agentRef: agent.id }, adminCtx());
+    await resolvers.Mutation.releaseEditorLock({}, { agentRef: agent.id }, adminCtx());
 
     // Now another user can acquire it
     const result = await resolvers.Mutation.acquireEditorLock(
       {},
-      { agentId: agent.id },
+      { agentRef: agent.id },
       adminCtx(otherAdmin.id),
     );
     expect(result.locked).toBe(true);
@@ -474,7 +474,7 @@ describe('Editor lock', () => {
     });
     const result = await resolvers.Mutation.acquireEditorLock(
       {},
-      { agentId: stored.urn },
+      { agentRef: stored.urn },
       adminCtx(),
     );
     expect(result.locked).toBe(true);
@@ -482,14 +482,14 @@ describe('Editor lock', () => {
   });
 
   it('releaseEditorLock accepts a URN as agentId input', async () => {
-    await resolvers.Mutation.acquireEditorLock({}, { agentId: agent.id }, adminCtx());
+    await resolvers.Mutation.acquireEditorLock({}, { agentRef: agent.id }, adminCtx());
     const stored = await db.agent.findUniqueOrThrow({
       where: { id: agent.id },
       select: { urn: true },
     });
     const released = await resolvers.Mutation.releaseEditorLock(
       {},
-      { agentId: stored.urn },
+      { agentRef: stored.urn },
       adminCtx(),
     );
     expect(released).toBe(true);
@@ -506,32 +506,32 @@ describe('#1468 — minted specs in an agent system memory', () => {
   const stamp = () => db.memory.update({ where: { id: systemMemory.id }, data: { corpusDraft: false, corpusMintedAt: new Date() } });
 
   it('restoreRevision refuses a snapshot that would drop a live minted spec', async () => {
-    await resolvers.Mutation.createRevision({}, { agentId: agent.id, description: 'before the spec' }, adminCtx());
+    await resolvers.Mutation.createRevision({}, { agentRef: agent.id, description: 'before the spec' }, adminCtx());
     const spec = await db.node.create({
       data: { id: generateId(), memoryId: systemMemory.id, loc: 'pas:010', name: 'pas:010', tags: ['spec'] },
     });
     await stamp();
-    await expect(resolvers.Mutation.restoreRevision({}, { agentId: agent.id, revisionLoc: 'revisions:rev-1' }, adminCtx()))
+    await expect(resolvers.Mutation.restoreRevision({}, { agentRef: agent.id, revisionLoc: 'revisions:rev-1' }, adminCtx()))
       .rejects.toSatisfy(permanent);
     expect(await db.node.findUniqueOrThrow({ where: { id: spec.id } })).toMatchObject({ deletedAt: null });
   });
 
   it('restoreRevision refuses restoring a minted spec from a snapshot without its marker', async () => {
     const n = await db.node.create({ data: { id: generateId(), memoryId: systemMemory.id, loc: 'pas:020', name: 'pas:020' } });
-    await resolvers.Mutation.createRevision({}, { agentId: agent.id, description: 'unmarked' }, adminCtx());
+    await resolvers.Mutation.createRevision({}, { agentRef: agent.id, description: 'unmarked' }, adminCtx());
     await db.node.update({ where: { id: n.id }, data: { tags: ['spec'], revisionContentHash: revisionStateHashRefreshMarker() } });
     await stamp();
-    await expect(resolvers.Mutation.restoreRevision({}, { agentId: agent.id, revisionLoc: 'revisions:rev-1' }, adminCtx()))
+    await expect(resolvers.Mutation.restoreRevision({}, { agentRef: agent.id, revisionLoc: 'revisions:rev-1' }, adminCtx()))
       .rejects.toSatisfy(permanent);
     expect(await db.node.findUniqueOrThrow({ where: { id: n.id } })).toMatchObject({ tags: ['spec'], deletedAt: null });
   });
 
   it('control: restoreRevision still restores over an unstamped system memory holding a spec', async () => {
-    await resolvers.Mutation.createRevision({}, { agentId: agent.id, description: 'before the spec' }, adminCtx());
+    await resolvers.Mutation.createRevision({}, { agentRef: agent.id, description: 'before the spec' }, adminCtx());
     const spec = await db.node.create({
       data: { id: generateId(), memoryId: systemMemory.id, loc: 'pas:030', name: 'pas:030', tags: ['spec'] },
     });
-    await resolvers.Mutation.restoreRevision({}, { agentId: agent.id, revisionLoc: 'revisions:rev-1' }, adminCtx());
+    await resolvers.Mutation.restoreRevision({}, { agentRef: agent.id, revisionLoc: 'revisions:rev-1' }, adminCtx());
     expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).deletedAt).not.toBeNull();
   });
 

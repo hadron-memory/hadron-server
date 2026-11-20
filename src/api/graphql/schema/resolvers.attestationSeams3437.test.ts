@@ -46,6 +46,7 @@ import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { resolvers, type Context } from './resolvers.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<Record<string, unknown>>>;
 const ORG = 'seams-3437';
@@ -173,7 +174,7 @@ describe('#3437 item 4: the seams a `carry` context would silently open', () => 
     await db.appAgent.create({ data: { appId, agentId } });
     await db.agentMemoryItem.create({ data: { agentId, memoryId, role: 'read-write' } });
     const run = await db.appRun.create({
-      data: { id: generateId(), organizationId: orgId, appId, userId, triggerKind: 'MANUAL', entryNodeUrn: `${ORG}::mem::flow`, status: 'RUNNING' },
+      data: { id: generateId(), organizationId: orgId, appId, agentId: await testRunAgentId(db, orgId, appId), userId, triggerKind: 'MANUAL', entryNodeUrn: `${ORG}::mem::flow`, status: 'RUNNING' },
     });
     return { log: vi.fn(), db, run, principal: runContext(db, run) };
   };
@@ -188,7 +189,7 @@ describe('#3437 item 4: the seams a `carry` context would silently open', () => 
     const replace = (input: Record<string, unknown>) => resolvers.Mutation.searchReplaceInSpecNodes(null, { input } as never, ctx());
 
     beforeEach(async () => {
-      draftId = (await resolvers.Mutation.createMemory(null, { orgId, name: 'specs-draft', draftCorpus: true }, ctx())).id;
+      draftId = (await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'specs-draft', draftCorpus: true }, ctx())).id;
       specTask = (await db.node.create({ data: { id: generateId(), memoryId: draftId, loc: 'author-task', name: 'T', isRunnable: true } })).id;
       const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: draftId } });
       await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'spec', authorTaskId: specTask, authorTaskRequired: true } });
@@ -291,7 +292,7 @@ describe('#3437 item 7: an encrypted no-op, on real ciphertext', () => {
 
   /** A private memory, its rules and two stamped rows, then real encryption over all of it. */
   beforeEach(async () => {
-    privateId = (await resolvers.Mutation.createMemory(null, { orgId, name: 'private-draft', memoryClass: 'private', draftCorpus: true }, ctx())).id;
+    privateId = (await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'private-draft', memoryClass: 'private', draftCorpus: true }, ctx())).id;
     privateTask = (await db.node.create({ data: { id: generateId(), memoryId: privateId, loc: 'author-task', name: 'T', isRunnable: true } })).id;
     const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: privateId } });
     const stamp = { authorshipKind: 'TASK' as const, authoredByTask: privateTask, authoredByRevision: 1, authoredAt: new Date() };
@@ -299,7 +300,7 @@ describe('#3437 item 7: an encrypted no-op, on real ciphertext', () => {
       await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role, authorTaskId: privateTask, authorTaskRequired: true } });
       await db.node.create({ data: { id: generateId(), memoryId: privateId, loc, name: loc, content: 'cat', role, ...stamp } });
     }
-    await resolvers.Mutation.encryptMemory(null, { memoryId: privateId, dataKey }, ctx());
+    await resolvers.Mutation.encryptMemory(null, { memoryRef: privateId, dataKey }, ctx());
     sessionKeyCache.set('seams-3437', privateId, key);
   });
 

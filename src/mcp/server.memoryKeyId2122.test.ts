@@ -34,7 +34,7 @@ beforeEach(async () => {
   memoryId = generateId();
   await db.memory.create({ data: { id: memoryId, organizationId: orgId, name: 'Vault', urn: URN, class: 'private', userId: ownerId } });
   await db.node.create({ data: { memoryId, loc: 'secret', name: 'Secret', content: 'key2122 plaintext' } });
-  await resolvers.Mutation.encryptMemory({}, { memoryId, passphrase: PASS }, { db, roles: ['ADMIN'], userId: ownerId } as Context);
+  await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, passphrase: PASS }, { db, roles: ['ADMIN'], userId: ownerId } as Context);
 });
 afterEach(() => sessionKeyCache.clear());
 

@@ -226,7 +226,7 @@ export const prProtocolQueries = {
   },
 };
 
-/** #4280 (Proposed cor:agt:130:05, Peter's ruling on the issue): the worker roles that may link a defect, by the CURRENT Worker.role. */
+/** #4280 (Proposed, Peter's ruling on the issue): the worker roles that may link a defect, by the CURRENT Worker.role. */
 export const DEFECT_LINK_ROLES = ['qa-engineer', 'coordinator'] as const;
 const defectLinkForbidden = () => taskError('DEFECT_LINK_FORBIDDEN',
   'Only a QA engineer or coordinator worker, or whoever manages the App, may link a defect to a pull request. Nothing was written.');
@@ -271,7 +271,7 @@ export const prProtocolMutations = {
     return { task, action: await action(ctx, task.appId, 'review.scheduled') };
   },
   /**
-   * #4280 (S12b of #4229; Proposed cor:agt:130:05): record that a defect found after the PR merged traces back to it.
+   * #4280 (S12b of #4229): record that a defect found after the PR merged traces back to it.
    * One `review.defect-linked` event on the PR's build task, and nothing else: no property, verdict, seat, readiness or
    * row field changes. One link per (defect, task): a second call returns the first link (`created: false`).
    */

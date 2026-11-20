@@ -14,6 +14,7 @@ import { canReadMemory, canWriteToMemory, getMemoryAccess, getPrincipalAppMemory
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import type { RunToolContext } from '../lib/runner/tools/types.js';
+import { testRunAgentId } from '../test/runAgent.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../integrations/r2/client.js', () => ({ putObject: vi.fn(), deleteObject: vi.fn() }));
@@ -48,7 +49,7 @@ async function fixture() {
   }
   const team = await db.memory.create({ data: { name: 'team', urn: `${root}:team`, class: 'app', appId: app.id, organizationId: org.id } });
   const schedule = await db.agentSchedule.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, name: 'S', cron: '* * * * *', entryNodeUrn: `hrn:node:${publicMemory.urn}:${LOC}` } });
-  const run = await db.appRun.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, userId: null, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn } });
+  const run = await db.appRun.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, agentId: await testRunAgentId(db, org.id, app.id), userId: null, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn } });
   const principal = { db, ...runAuthContext(run) } as Context;
   const tool: RunToolContext = { db, run, principal, log: () => undefined };
   return { org, app, agent, second, admin, user, read, write, publicMemory, granted, team, schedule, run, principal, tool };
@@ -122,7 +123,7 @@ describe('#3278 userless run item admission', () => {
     // Ruling0105 A: an App member with NO independent org access loses item-only reach as a run;
     // ruling0108 now applies the same independent-user ceiling to sessions.
     const userOnly = { ...ctx(f.user.id) };
-    const backedRun = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.run.entryNodeUrn } });
+    const backedRun = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, agentId: await testRunAgentId(db, f.org.id, f.app.id), userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.run.entryNodeUrn } });
     const onBehalf = { db, ...runAuthContext(backedRun) } as Context;
     const selectedUser = { ...userOnly, appId: f.app.id };
     expect(await getAccessibleMemoryIds(userOnly, f.read.id, { excludeAppDerived: true })).not.toContain(f.read.id);

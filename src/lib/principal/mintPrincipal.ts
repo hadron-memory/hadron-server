@@ -4,13 +4,15 @@
  * so a URN `<root>` atom resolves to exactly one principal without an `@` sigil.
  *
  * `mintPrincipal` reserves a name; `releasePrincipal` tombstones it (kept forever,
- * never recycled). The atomic guard is the `principals_name_lower_uniq`
- * functional unique — a concurrent double-mint loses on P2002, which maps to
+ * never recycled). The atomic guard is the plain unique index on `name`, which
+ * `chk_principals_name_lower` (name = lower(name), #4400) makes a guard across
+ * case — a concurrent double-mint loses on P2002, which maps to
  * `RootNameTakenError` (the repo's check-then-insert idiom; no serializable txn,
  * mirroring `userHandle.ts`). Callers run these inside their own transaction and
  * keep the entity's denormalized `handle`/`urn` in sync.
  */
 import type { PrismaClient } from '../../generated/prisma/index.js';
+import { MAX_ATOM_LEN } from '../urn.js';
 
 /** Root names reserved for the platform — cannot be minted by a user or org. */
 export const RESERVED_ROOT_NAMES: ReadonlySet<string> = new Set<string>([
@@ -47,6 +49,41 @@ export class RootNameTakenError extends Error {
   }
 }
 
+/**
+ * The #4415 root-name rule, applied to the name AS STORED (post-`toLowerCase()`
+ * — a principal root is 1–64 lower-case ASCII letters, digits, `.`, `_` or `-`,
+ * beginning and ending with a letter or digit: urn-lib's atom grammar
+ * (`ATOM_RE`, `MAX_ATOM_LEN` = 64) restricted to lower case, spec
+ * `hrn:node:hadronmemory.com:specs:cor:urn:010:01`. The pool is the last line
+ * of defense: every caller validates first (`normalizeHandle` /
+ * `validateOrgRoot`), but a new caller that skips those checks must not be able
+ * to store a name the URN grammar cannot express — one whose lower-cased form
+ * leaves ASCII (`İ` → `i̇`), where the writer's `toLowerCase()` and Postgres
+ * `lower()` (`chk_principals_name_lower`, #4405) could disagree.
+ */
+const ROOT_NAME_RE = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/;
+
+/** True iff `name` (its lower-cased form) is a legal principal root name (#4481). */
+export function isValidRootName(name: string): boolean {
+  return name.length <= MAX_ATOM_LEN && ROOT_NAME_RE.test(name);
+}
+
+/**
+ * Thrown when a root name is outside the #4415 rule (see `isValidRootName`) —
+ * DISTINCT from {@link RootNameTakenError}: an illegal name is refused however
+ * free it is, and a legal one is refused however taken. The GraphQL boundary
+ * maps it to the `ROOT_NAME_INVALID` typed refusal.
+ */
+export class RootNameInvalidError extends Error {
+  constructor(public readonly rootName: string) {
+    super(
+      `Root name "${rootName}" is not a legal root name: a root name is 1–64 ` +
+        `lower-case ASCII letters, digits, ".", "_" or "-", beginning and ending with a letter or digit.`,
+    );
+    this.name = 'RootNameInvalidError';
+  }
+}
+
 type PrincipalDb = Pick<PrismaClient, 'principal'>;
 
 /**
@@ -57,6 +94,10 @@ type PrincipalDb = Pick<PrismaClient, 'principal'>;
  */
 export async function checkRootAvailable(db: PrincipalDb, name: string): Promise<boolean> {
   const lower = name.toLowerCase();
+  // #4481: a name outside the #4415 rule is not available to mint — the probe
+  // and the mint must agree, or an availability check would green-light a mint
+  // that then refuses.
+  if (!isValidRootName(lower)) return false;
   if (RESERVED_ROOT_NAMES.has(lower)) return false;
   // `name` is a plain @unique and always stored lowercased, so this findUnique
   // is index-backed (no seq scan) and spans every status (a tombstone counts).
@@ -69,15 +110,22 @@ export async function checkRootAvailable(db: PrincipalDb, name: string): Promise
 
 /**
  * Mint a principal for `name` under `kind`, returning the new principal id to
- * wire onto the owning user/org. Throws `RootNameTakenError` if the name is
- * taken (reserved word, active, or tombstoned) — the DB unique is the atomic
- * backstop even under a concurrent race. Runs inside the caller's transaction.
+ * wire onto the owning user/org. Throws `RootNameInvalidError` if the name is
+ * outside the #4415 root-name rule (see `isValidRootName`), and
+ * `RootNameTakenError` if it is taken (reserved word, active, or tombstoned) —
+ * the DB unique is the atomic backstop even under a concurrent race. Runs
+ * inside the caller's transaction.
  */
 export async function mintPrincipal(
   db: PrincipalDb,
   opts: { kind: PrincipalKind; name: string },
 ): Promise<{ id: string }> {
   const name = opts.name.toLowerCase();
+  // #4481 (#4415): refuse a name outside the root-name rule BEFORE the insert
+  // — the pool's own backstop, independent of the callers' validation. Checked
+  // after lower-casing so the rule governs the name AS STORED (`Example` is
+  // fine; `İ` is not, because its stored form leaves ASCII).
+  if (!isValidRootName(name)) throw new RootNameInvalidError(name);
   if (RESERVED_ROOT_NAMES.has(name)) throw new RootNameTakenError(name);
   try {
     const principal = await db.principal.create({

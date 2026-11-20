@@ -31,6 +31,7 @@ import { runContext } from '../../../jobs/appRunDeps.js';
 import { hadronStoreFile, resolveRunTools } from './index.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
 import type { RunToolContext } from './types.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 const ORG_URN = 'store-tool-org';
 const MEM_URN = `${ORG_URN}:filestore`;
@@ -45,7 +46,7 @@ async function mintRun(userId?: string): Promise<AppRun> {
     data: {
       id: generateId(),
       organizationId: orgId,
-      appId,
+      appId, agentId: await testRunAgentId(db, orgId, appId),
       userId: userId ?? null,
       triggerKind: 'MANUAL',
       entryNodeUrn: `${ORG_URN}::filestore::flow:entry`,

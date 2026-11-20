@@ -31,7 +31,7 @@ beforeEach(async () => {
 });
 
 async function transferred(memoryClass: 'personal' | 'private') {
-  const memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'Transferred notes', memoryClass: 'knowledge' }, user(a.id));
+  const memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'Transferred notes', memoryClass: 'knowledge' }, user(a.id));
   expect(memory.createdBy).toBe(a.id);
   const result = await resolvers.Mutation.transferMemoryOwnership(null, { memoryRef: memory.id, userRef: b.id, targetClass: memoryClass }, user(b.id));
   expect(result.applied).toBe(true);

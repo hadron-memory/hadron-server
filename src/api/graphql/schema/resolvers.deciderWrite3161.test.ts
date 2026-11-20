@@ -1,4 +1,4 @@
-/** #3161 / cor:dmo:130:09: every decision decider must currently write the log memory. */
+/** #3161 / cor:dmo:130:09: every question decider must currently write the log memory. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -10,9 +10,9 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGi
 const M = resolvers.Mutation as any;
 let admin: string, candidate: string, orgId: string, memoryId: string;
 const ctx = (): Context => ({ db, userId: admin, roles: ['ADMIN'] });
-const createLog = (decider = admin) => M.createDecisionLog(null,
-  { memoryRef: memoryId, loc: 'decisions', defaultDeciders: [decider] }, ctx());
-const input = { title: 'Proceed?', parts: [{ question: 'Proceed?', yesno: true, recommendation: { key: 'yes', reason: 'ready' } }] };
+const createLog = (decider = admin) => M.createQuestionLog(null,
+  { memoryRef: memoryId, loc: 'questions', defaultDeciders: [decider] }, ctx());
+const input = { title: 'Proceed?', yesno: true, recommendation: { key: 'yes', reason: 'ready' } };
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -24,7 +24,7 @@ beforeEach(async () => {
     { organizationId: orgId, userId: admin, role: 'ADMIN' },
     { organizationId: orgId, userId: candidate, role: 'CONTRIBUTOR' },
   ] });
-  memoryId = (await M.createMemory(null, { orgId, name: 'Decider memory' }, ctx())).id;
+  memoryId = (await M.createMemory(null, { orgRef: orgId, name: 'Decider memory' }, ctx())).id;
 });
 
 describe('#3161 decider write eligibility at all three doors', () => {
@@ -39,13 +39,13 @@ describe('#3161 decider write eligibility at all three doors', () => {
         if (state !== 'deleted') expect(await canWriteToMemory(db, { userId: candidate, roles: [] }, memoryId)).toBe(state === 'writer');
         const before = await db.node.findMany({ where: { memoryId }, select: { id: true, data: true, revSeq: true, content: true }, orderBy: { id: 'asc' } });
         const act = () => door === 'create' ? createLog(candidate)
-          : door === 'replace' ? M.setDecisionLogDeciders(null, { logRef: log.row.id, defaultDeciders: [candidate], expectedRevision: log.row.revSeq, reason: 'change deciders' }, ctx())
-          : M.askDecision(null, { logRef: log.row.id, input: { ...input, deciders: [candidate] } }, ctx());
+          : door === 'replace' ? M.setQuestionLogDeciders(null, { logRef: log.row.id, defaultDeciders: [candidate], expectedRevision: log.row.revSeq, reason: 'change deciders' }, ctx())
+          : M.askQuestion(null, { logRef: log.row.id, input: { ...input, deciders: [candidate] } }, ctx());
         if (state === 'writer') {
           const result = await act();
           expect((door === 'ask' ? result.shown.deciders : result.data.defaultDeciders)).toEqual([candidate]);
         } else {
-          await expect(act()).rejects.toMatchObject({ extensions: { code: 'DECISION_DECIDER_NOT_ELIGIBLE' } });
+          await expect(act()).rejects.toMatchObject({ extensions: { code: 'QUESTION_DECIDER_NOT_ELIGIBLE' } });
           expect(await db.node.findMany({ where: { memoryId }, select: { id: true, data: true, revSeq: true, content: true }, orderBy: { id: 'asc' } })).toEqual(before);
         }
       });

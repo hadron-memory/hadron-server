@@ -35,6 +35,7 @@
 import type { Prisma } from '../../generated/prisma/index.js';
 import { isAgentInstalledAndLicensed } from '../appAgent.js';
 import { generateId } from '../id.js';
+import { isModelReadableKind } from '../secrets.js';
 import { grantTermsBytes, GrantTermsError, type GrantHolderKind } from './terms.js';
 
 export type GrantCreateCode =
@@ -97,10 +98,16 @@ const MAX_LIST_ENTRIES = 100;
 const NODE_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 /** Judge a value by its parameter's declared type. An unknown type is refused (fail closed), so a new type needs its rule here. */
 function valueMatchesType(type: string, value: unknown): boolean {
+  // #3998 (cor:acl:140:09, secret forms): a secret id is ONE stored id, never a list or the wildcard; the mark is one of two tokens, exactly.
+  if (type === 'secret-ref') return typeof value === 'string' && NODE_ID_RE.test(value);
+  if (type === 'secret-mark') return value === 'keep' || value === 'delete';
   if (type !== 'node-ref') return false;
   const one = (v: unknown) => v === '*' || (typeof v === 'string' && NODE_ID_RE.test(v));
   return Array.isArray(value) ? value.every(one) : one(value);
 }
+
+/** The one action a person may hold (#3998). */
+const SECRET_REVEAL_ACTION = 'secret.reveal';
 
 interface ActionRow { name: string; parameters: unknown; max_uses: number | null }
 interface WorkerRow { id: string; app_id: string; agent_id: string; retired_at: Date | null }
@@ -149,6 +156,11 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
     // Held by the agent in this App: installed, licensed and not deleted here, judged on the locked state.
     const agents = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM agents WHERE id = ${holder.id} AND deleted_at IS NULL FOR SHARE`;
     if (agents.length === 0 || !(await isAgentInstalledAndLicensed(tx, appId, holder.id))) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
+  } else if (holder.kind === 'user' && args.action === SECRET_REVEAL_ACTION) {
+    // #3998: a PERSON holds a secret.reveal grant (the one action that reads its secret on a server-hosted passkey page). Live,
+    // locked FOR SHARE so an erasure that comes next waits and ends the new row through endHeldGrants. No other action has a person holder.
+    const people = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM users WHERE id = ${holder.id} AND deleted_at IS NULL FOR SHARE`;
+    if (people.length === 0) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
   } else {
     throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
   }
@@ -189,6 +201,14 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
     if (!ok) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
   }
 
+  // #3998: a secret-ref names a secret of THIS App whose kind a model may read (an inject-only kind has no reveal client). A missing,
+  // other-App, org, user or inject-only secret is the same refusal as a malformed id, so this is no existence oracle.
+  for (const p of declared) {
+    if (p.type !== 'secret-ref') continue;
+    const secret = await tx.secret.findFirst({ where: { id: (values as Record<string, unknown>)[p.name] as string, ownerType: 'app', ownerId: appId }, select: { kind: true } });
+    if (!secret || !isModelReadableKind(secret.kind)) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+  }
+
   // Count Unicode code points like task findings, with a UTF-16 fast bound so counting work is bounded.
   // Do NOT put this admission rule in grantTermsBytes: pre-existing larger rows must stay signable/verifiable.
   if (typeof args.reason === 'string' && (args.reason.length > MAX_REASON_CHARACTERS * 2 || Array.from(args.reason).length > MAX_REASON_CHARACTERS)) {
@@ -215,13 +235,14 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   }
 
   const id = generateId();
-  // (kinds user and app were refused above: the holder column is one of this closed pair)
+  // (kind app is refused above; kind user only for secret.reveal)
+  const userId = holder.kind === 'user' ? holder.id : null;
   const agentId = holder.kind === 'agent' ? holder.id : null;
   const workerId = holder.kind === 'worker' ? holder.id : null;
   await tx.$executeRaw`
-    INSERT INTO grants (id, app_id, agent_id, worker_id, requested_by_user_id, requested_by_worker_id, requested_by_session_id,
+    INSERT INTO grants (id, app_id, user_id, agent_id, worker_id, requested_by_user_id, requested_by_worker_id, requested_by_session_id,
                         action, action_values, starts_at, expires_at, max_uses, reason, created_at, updated_at)
-    VALUES (${id}, ${appId}, ${agentId}, ${workerId}, ${requester.userId}, ${requester.workerId}, ${requester.sessionId},
+    VALUES (${id}, ${appId}, ${userId}, ${agentId}, ${workerId}, ${requester.userId}, ${requester.workerId}, ${requester.sessionId},
             ${action.name}, ${JSON.stringify(values)}::jsonb, ${startsAt?.toISOString() ?? null}::timestamptz AT TIME ZONE 'UTC', ${expiresAt?.toISOString() ?? null}::timestamptz AT TIME ZONE 'UTC', ${maxUses}, ${args.reason},
             (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`;
   return id;

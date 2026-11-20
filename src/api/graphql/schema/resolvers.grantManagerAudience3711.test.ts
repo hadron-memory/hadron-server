@@ -11,7 +11,8 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { USER_API_KEY_PREFIX, hashUserApiKey } from '../../../middleware/auth.js';
-import { DB_NOW, dropTestActions, insertGrant, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
+import { composeGrantUrnV2 } from '../../../lib/urn.js';
+import { APP_SLUG, DB_NOW, dropTestActions, insertGrant, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
 import { grantTermsFromRow, grantTermsHash } from '../../../lib/grants/terms.js';
 import { markManagerAudience, markPersonAudience } from '../../../lib/grants/read.js';
 import { grantSignaturePayloadBytes, GRANT_SIGNATURE_PAYLOAD_V1 } from '../../../lib/signing/grantPayload.js';
@@ -104,7 +105,7 @@ describe('one request, one grant, two audiences', () => {
       const mg = r.data.m.items.find((i: any) => i.id === g);
       // #3709: the MANAGER audience's page composes Grant.urn too (every COLUMNS
       // query joins the App), addressed under the App the manager named.
-      expect(mg.urn).toMatch(/^hrn:grant:[a-z0-9.-]+:app:[0-9a-f]{32}$/);
+      expect(mg.urn).toBe(composeGrantUrnV2(w.orgUrn, APP_SLUG, g));
       const m = mg.signatureStatus;
       const mine = r.data.mine.items.find((i: any) => i.id === g).signatureStatus;
       expect(m.state).toBe('CURRENT');

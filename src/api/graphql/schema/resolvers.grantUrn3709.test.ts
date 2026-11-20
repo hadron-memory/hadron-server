@@ -26,7 +26,7 @@ import { USER_API_KEY_PREFIX, hashUserApiKey } from '../../../middleware/auth.js
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { composeGrantUrnV2 } from '../../../lib/urn.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
-import { DB_NOW, dropTestActions, insertGrantUnguarded, raw, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
+import { APP2_SLUG, APP_SLUG, DB_NOW, dropTestActions, insertGrantUnguarded, raw, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
 import { closeServerIfStarted, createServerOnCleanDb } from '../../../test/startServerFixture.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -46,7 +46,6 @@ let rawKey: string;
 let sessionId: string;
 /** The org's urn (its bare `<root>` form, e.g. `g-ab12cd34.test`) and the App's slug. */
 let orgUrn: string;
-const APP_SLUG = 'app';
 
 async function keyFor(userId: string): Promise<string> {
   const k = `${USER_API_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
@@ -104,7 +103,7 @@ describe('#3709 — grant(ref:) accepts the computed URN under the id read gate'
     // The corpus fixture form: hrn:grant:<root>:<app-slug>:<grant-id> — single colons,
     // lower-case atoms, the App slug as the container, the grant id as the leaf.
     expect(mine?.urn).toBe(g.urn);
-    expect(mine?.urn).toMatch(/^hrn:grant:[a-z0-9.-]+:app:[0-9a-f]{32}$/);
+    expect(mine?.urn).toMatch(/^hrn:grant:[a-z0-9.-]+:app:[0-9a-f]{32}$/); // the shape, a second witness beside the exact value above
   });
 
   it('resolveUrn answers kind "grant" for a readable grant, null for an unreadable one', async () => {
@@ -117,7 +116,7 @@ describe('#3709 — grant(ref:) accepts the computed URN under the id read gate'
     // names nothing — the same null as for a grant that does not exist. Null AND
     // error-free: a typed GRANT_NOT_FOUND on the wire would be an existence oracle.
     const otherId = await insertGrantUnguarded(w, { app_id: w.app2Id, user_id: null, worker_id: w.workerId, ...activated } as never);
-    const foreign = await asWorker(RESOLVE, { u: composeGrantUrnV2(orgUrn, 'app2', otherId) });
+    const foreign = await asWorker(RESOLVE, { u: composeGrantUrnV2(orgUrn, APP2_SLUG, otherId) });
     expect(foreign.errors, JSON.stringify(foreign.errors)).toBeUndefined();
     expect(foreign.data.resolveUrn).toBeNull();
 
@@ -171,7 +170,7 @@ describe('#3709 — grant(ref:) accepts the computed URN under the id read gate'
     // wrong URN must not name a real row (the #3709 review round's unpinned
     // guard, folded from the seat findings).
     const g = await heldGrant();
-    const wrongAppUrn = composeGrantUrnV2(orgUrn, 'app2', g.id);
+    const wrongAppUrn = composeGrantUrnV2(orgUrn, APP2_SLUG, g.id);
 
     const byRef = await asWorker(ONE, { r: wrongAppUrn });
     expect(byRef.errors, JSON.stringify(byRef.errors)).toBeUndefined();

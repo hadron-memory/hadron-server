@@ -345,7 +345,7 @@ describe('App field resolvers', () => {
     );
     await resolvers.Mutation.ensureAppMember(
       {},
-      { appId: created.id, userId: user.id, role: 'owner' },
+      { appRef: created.id, userRef: user.id, role: 'owner' },
       adminCtx(),
     );
     const members = await resolvers.App.members({ id: created.id }, {}, adminCtx());
