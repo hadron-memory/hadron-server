@@ -6537,6 +6537,8 @@ export const typeDefs = `#graphql
     issuedToOwnWorker: Boolean
     "Null while live, else one of SECRET_DELETED, PROTECTED, REVOKED, PENDING, SPENT, EXPIRED, NOT_STARTED, ISSUER_GONE (nothing else ended it) or ENDED. A stored end wins; otherwise the grant's own state, in the order the reveal door answers."
     endReason: String
+    "#4545 (hrn:node:hadronmemory.com:specs:cor:sec:060:02): the server-hosted page where the person who holds this client reveals the value with a passkey: the server origin plus /secret-reveal/<clientId>, with no token. Copy it verbatim; never compose it. Returned only to that person holder in their own session. Null for a client a worker holds, and for a worker session, an App key or anyone viewing a client they do not hold."
+    revealUrl: String
     createdAt: DateTime!
   }
 
@@ -17993,6 +17995,10 @@ export const typeDefs = `#graphql
     no_terminal
     bare_shell
     no_agent
+    "#4558 (hadron-cli#2677): Orca gives no rendered screen for the terminal (screen-unavailable). The CLI reports it with status locked, as it does unrecognized; like every reason, it is accepted with locked or dark."
+    no_screen
+    "#4558 (hadron-cli#2677): more than one agent terminal is bound to the worker. The CLI reports it with status locked, as it does unrecognized; like every reason, it is accepted with locked or dark."
+    multiple_terminals
   }
 
   "#2771 — the host that made a worker's latest terminal report: its id from the key, its label from its registration."
