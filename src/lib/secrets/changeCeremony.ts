@@ -87,8 +87,12 @@ export async function proveSecretChange(db: PrismaClient, a: SecretAssertion) {
   // The pinned urn-lib version has only the former org/user secret arity; the App owner marker is cor:urn:010:01.
   const secretUrn = appUrn.replace(/^hrn:app:([^:]+):(.+)$/, 'hrn:secret:$1:app:$2') + ':' + current.secret_name;
   // The proof exposes metadata only; neither ciphertext nor plaintext leaves the server.
+  const change = current.operation === 'STORE'
+   ? (current.secret_id ? (current.write_version ? 'Store a new version' : 'Update secret metadata') : 'Create a protected secret') +
+     (current.protected_result === null ? '' : current.protected_result ? ' and turn protection on' : ' and turn protection off')
+   : ({DELETE:'Delete this secret',SET_PROTECTED:'Turn protection on',CLEAR_PROTECTED:'Turn protection off'} as const)[current.operation];
   return { outcome:'change' as const,nonce,ceremonyId:ceremony.id,challenge:challenge.toString('base64url'),rpId:passkeyRpId(),
-   summary:{app:appUrn,secret:secretUrn,operation:current.operation,change:current.operation==='STORE'?(current.secret_id?'Store a new version':'Create a protected secret'):({DELETE:'Delete this secret',SET_PROTECTED:'Turn protection on',CLEAR_PROTECTED:'Turn protection off'} as const)[current.operation],sizeBytes:current.size_bytes,requester:current.requester_id,expiresAt:current.expires_at.toISOString()} };
+   summary:{app:appUrn,secret:secretUrn,operation:current.operation,change,...(current.operation==='STORE'?{metadata:current.metadata}:{}),sizeBytes:current.size_bytes,requester:current.requester_id,expiresAt:current.expires_at.toISOString()} };
  });
 }
 /** Completion rejudges standing, deadlines, snapshot and credential under locks. Only its committed result leaves the server. */
@@ -126,18 +130,21 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
   }
   if(r.operation==='STORE'){
    const wasProtected = secret?.protected;
-   if(!r.staged_value_encrypted || r.key_version===null || r.size_bytes===null)throw refuse();
-   const key=await unwrapAppKey(tx,r.app_id,r.key_version);
-   const plaintext=decryptBytesAad(r.staged_value_encrypted,stagedValueAad(r.id),key.encryptionKey);
+   let plaintext: Buffer | null = null;
+   if(r.write_version){
+    if(!r.staged_value_encrypted || r.key_version===null || r.size_bytes===null)throw refuse();
+    const key=await unwrapAppKey(tx,r.app_id,r.key_version);
+    plaintext=decryptBytesAad(r.staged_value_encrypted,stagedValueAad(r.id),key.encryptionKey);
+   }else if(!secret)throw refuse();
    try{
     if(!secret)secret=await tx.secret.create({data:{ownerType:'app',ownerId:r.app_id,name:r.secret_name,kind:r.secret_kind,metadata:r.metadata as Prisma.InputJsonValue,valueEncrypted:null,protected:true,createdBy:r.requester_id}});
-    const versionNo=r.write_version?await addAppSecretVersion(tx,secret,plaintext.toString('utf8'),r.size_bytes,actor):newest?.versionNo??null;
+    const versionNo=r.write_version?await addAppSecretVersion(tx,secret,plaintext!.toString('utf8'),r.size_bytes!,actor):newest?.versionNo??null;
     await tx.secret.update({where:{id:secret.id},data:{metadata:r.metadata as Prisma.InputJsonValue,updatedBy:r.requester_id,...(r.protected_result===null?{}:{protected:r.protected_result})}});
     await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:!r.write_version?'METADATA':newest?'VERSION':'STORE',versionNo,actor});
     if (wasProtected !== undefined && r.protected_result !== null && r.protected_result !== wasProtected) {
      await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:r.protected_result?'PROTECT':'UNPROTECT',actor});
     }
-   }finally{plaintext.fill(0);}
+   }finally{plaintext?.fill(0);}
   }else{
    if(!secret)throw refuse();
    await tx.secret.update({where:{id:secret.id},data:{protected:r.operation==='SET_PROTECTED',updatedBy:r.requester_id}});

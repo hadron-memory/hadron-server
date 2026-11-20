@@ -29,7 +29,8 @@ ALTER TABLE secret_change_requests DROP CONSTRAINT IF EXISTS chk_secret_change_s
 ALTER TABLE secret_change_requests ADD CONSTRAINT chk_secret_change_shape CHECK (
  operation IN ('STORE','DELETE','SET_PROTECTED','CLEAR_PROTECTED') AND
  state IN ('open','completed','declined','expired','withdrawn','stale') AND
- ((staged_value_encrypted IS NULL) OR (operation = 'STORE' AND state = 'open' AND key_version IS NOT NULL)) AND
+ ((staged_value_encrypted IS NOT NULL) = (operation = 'STORE' AND write_version AND state = 'open')) AND
+ ((staged_value_encrypted IS NULL) OR (key_version IS NOT NULL AND size_bytes IS NOT NULL)) AND
  ((state = 'open') = (ended_at IS NULL))
 );
 CREATE INDEX secret_change_requests_secret_open ON secret_change_requests(app_id,secret_name,state);

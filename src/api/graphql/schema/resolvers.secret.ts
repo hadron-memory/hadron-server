@@ -40,6 +40,7 @@ import {
   SECRET_OWNER_TYPES,
   validateAndEncryptSecret,
   validateSecretPayload,
+  validateUnchangedSecretMetadata,
   type SecretOwnerType,
 } from '../../../lib/secrets.js';
 import { forbiddenError } from '../../../lib/refusals.js';
@@ -52,7 +53,6 @@ import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import {
   addAppSecretVersion,
   assertAppSecretRoom,
-  currentAppSecretValue,
   lockSecretRow,
   recordSecretEvent,
   secretActorOf,
@@ -408,19 +408,17 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
       if (!(await lockSecretRow(tx, found.id))) throw notFound();
       const secret = await tx.secret.findUnique({ where: { id: found.id } });
       if (!secret) throw notFound();
-      const effectiveValue = args.value !== undefined ? args.value : await currentAppSecretValue(tx, secret);
       const effectiveMetadata = args.metadata !== undefined ? args.metadata : secret.metadata;
-      const { metadata, valueJson, sizeBytes } = validateSecretPayload(secret.kind, effectiveMetadata, effectiveValue, {
-        enforceValueSize: args.value !== undefined,
-      });
+      const payload = args.value === undefined ? null : validateSecretPayload(secret.kind, effectiveMetadata, args.value);
+      const metadata = payload?.metadata ?? validateUnchangedSecretMetadata(secret.kind, effectiveMetadata, secret.metadata);
       if (secret.protected || args.protected !== undefined) {
         const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
         return stageSecretChange(tx, ctx, { appId: secret.ownerId, secretId: secret.id, name: secret.name, kind: secret.kind,
-          metadata: metadata as never, operation: 'STORE', snapshot: changeSnapshot(secret, latest?.versionNo ?? 0), valueJson, sizeBytes,
+          metadata: metadata as never, operation: 'STORE', snapshot: changeSnapshot(secret, latest?.versionNo ?? 0), valueJson: payload?.valueJson, sizeBytes: payload?.sizeBytes,
           protectedResult: args.protected, writeVersion: args.value !== undefined });
       }
       let versionNo: number | null = null;
-      if (args.value !== undefined) versionNo = await addAppSecretVersion(tx, secret, valueJson, sizeBytes, actor);
+      if (payload) versionNo = await addAppSecretVersion(tx, secret, payload.valueJson, payload.sizeBytes, actor);
       const updated = await tx.secret.update({
         where: { id: secret.id },
         data: { metadata: metadata as never, updatedBy: ctx.userId ?? null },
@@ -555,7 +553,7 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
         const holder = input.holderKind === 'USER'
           ? { kind: 'user' as const, id: input.holderRef || userId }
           : { kind: 'worker' as const, id: input.holderRef ?? '' };
-        if (holder.kind === 'user' && !(await appMember({...txCtx, userId:holder.id, roles:[]} as Context, app.id))) {
+        if (holder.kind === 'user' && !(await appMember({db:tx, userId:holder.id, roles:[]} as unknown as Context, app.id))) {
           throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A person holder must participate in this App.');
         }
         await requireProtectedSecretHolder(tx, found.id, userId, holder.kind === 'user' ? holder.id : null);
