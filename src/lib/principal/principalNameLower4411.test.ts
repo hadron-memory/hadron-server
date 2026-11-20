@@ -144,6 +144,26 @@ describe('#4411 item 1: mintPrincipal maps a chk_principals_name_lower violation
     expect(await mintWith(otherRaw)).toBe(otherRaw);
   });
 
+  it('leaves a different check untyped when this name sits in the RELATION position (#4617 item 2)', async () => {
+    // A different CHECK on a relation literally named chk_principals_name_lower: the name is quoted, but as the
+    // relation, not as the constraint that refused.
+    const real = await realViolation();
+    const other = unknownWith(withPrimaryMessage(real.message,
+      'new row for relation \\"chk_principals_name_lower\\" violates check constraint \\"chk_other\\"'));
+    expect(other.message).toMatch(/code: "23514"/);
+    expect(await mintWith(other)).toBe(other);
+    const otherRaw = rawWith('23514',
+      'new row for relation "chk_principals_name_lower" violates check constraint "chk_other"');
+    expect(await mintWith(otherRaw)).toBe(otherRaw);
+    // The true violation still maps, in both shapes, with the relation also named as the constraint's table.
+    expect(await mintWith(rawWith('23514',
+      'new row for relation "principals" violates check constraint "chk_principals_name_lower"')))
+      .toBeInstanceOf(RootNameInvalidError);
+    expect(await mintWith(unknownWith(withPrimaryMessage(real.message,
+      'new row for relation \\"principals\\" violates check constraint \\"chk_principals_name_lower\\"'))))
+      .toBeInstanceOf(RootNameInvalidError);
+  });
+
   it('leaves an error naming this constraint under another SQLSTATE untyped', async () => {
     const real = await realViolation();
     const notCheck = unknownWith(real.message.replace(/code: (\\?)"23514(\\?)"/, 'code: $1"23505$2"'));
@@ -217,6 +237,19 @@ describe('#4411 item 2: post-push.sql refuses a mixed-case principal row with an
     expect(said).toMatch(/'LEGACY\.EXAMPLE' \([^)]*shares its root with another row\)/);
     expect(said).toMatch(/'Legacy\.Example' \([^)]*shares its root with another row\)/);
     expect(said).not.toMatch(/'Lonely\.Example' \([^)]*shares its root/);
+  });
+
+  it('pins the threshold: exactly one mixed-case row is refused (#4617 item 3)', async () => {
+    const said = await runOnLegacy([{ name: 'Solo.Example' }]);
+    expect(said).toContain('HDPRF');
+    expect(said).toContain('1 principal row(s)');
+    expect(said).toContain('Solo.Example');
+  });
+
+  it('tells the owner of a collision group to lower-case the kept row with its handle or urn (#4617 item 1)', async () => {
+    const said = await runOnLegacy([{ name: 'legacy.example' }, { name: 'Legacy.Example' }]);
+    expect(said).toMatch(/rename or delete the others, then lower-case the kept row/);
+    expect(said).toMatch(/kept row[^.]*users\.handle[^.]*organizations\.urn/);
   });
 
   it('passes on a pool that is already lower case', async () => {
