@@ -1,3 +1,4 @@
+import { isSecretUseHeaderName, isSecretUsePrefix } from '../secrets/useBinding.js';
 /**
  * Run-time secret resolution (#677) — the CSS cascade under the run
  * principal. A bare name resolves most-specific-first — user → org —
@@ -139,7 +140,7 @@ export function assertSecretUseBinding(rawUrl: string, signedPrefix: string, met
     throw new Error('Secret use requires absolute URLs.');
   }
   if (target.protocol !== 'https:' || target.username || target.password ||
-      signed.protocol !== 'https:' || signed.username || signed.password || signed.search || signed.hash ||
+      !isSecretUsePrefix(signedPrefix) ||
       /%(?:2f|5c)/i.test(target.pathname) || /%(?:2f|5c)/i.test(signed.pathname)) {
     throw new Error('Secret use requires an HTTPS origin and path binding without credentials.');
   }
@@ -151,10 +152,9 @@ export function assertSecretUseBinding(rawUrl: string, signedPrefix: string, met
 /** Ensure a signed header names the payload's auth channel and is never model-controlled (#4000). */
 export function assertSecretUseHeader(header: string, value: unknown, headers: Record<string, string>): void {
   // RFC 9110 tchar: reject control bytes and delimiters before this name reaches an HTTP implementation.
-  const token = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
-  if (!token.test(header) || !isWebFetchAuth(value)) throw new Error('Invalid secret use header binding.');
+  if (!isSecretUseHeaderName(header) || !isWebFetchAuth(value)) throw new Error('Invalid secret use header binding.');
   const derived = value.type === 'header' ? value.name : 'authorization';
-  if (!token.test(derived) || derived.toLowerCase() !== header.toLowerCase() ||
+  if (!isSecretUseHeaderName(derived) || derived.toLowerCase() !== header.toLowerCase() ||
       Object.keys(headers).some((name) => name.toLowerCase() === header.toLowerCase())) {
     throw new Error('Secret use header does not match its binding.');
   }

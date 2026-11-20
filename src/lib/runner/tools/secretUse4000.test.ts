@@ -29,7 +29,7 @@ beforeEach(async () => {
   } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   const run = await db.appRun.create({ data: {
-    organizationId: org.id, appId: app.id, agentId: agent.id,
+    id: generateId(), organizationId: org.id, appId: app.id, agentId: agent.id,
     userId: user.id, triggerKind: 'MANUAL', status: 'RUNNING',
     entryNodeUrn: 'hrn:node:example.test:flows:start',
   } });

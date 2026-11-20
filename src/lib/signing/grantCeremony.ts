@@ -493,12 +493,12 @@ export async function completeGrantSigning(db: PrismaClient, a: {
 }
 
 /**
- * #3998: a `secret.reveal` grant requested through the grant path (not `issueSecretReadClient`) has no client row yet. Signing
+ * #3998/#4000: a secret grant requested through the grant path (not `issueSecretReadClient`) has no client row yet. Signing
  * creates it: the signer is the issuer, fixed here and never changed; the client is self-issued when the holder is that person.
  * Idempotent for a grant `issueSecretReadClient` already gave a row.
  */
 async function ensureSecretReadClient(tx: Prisma.TransactionClient, g: GrantRow, signerId: string): Promise<void> {
-  if (g.action !== 'secret.reveal') return;
+  if (g.action !== 'secret.reveal' && g.action !== 'secret.use') return;
   const values = (g.action_values ?? {}) as Record<string, unknown>;
   const secretId = typeof values.secret === 'string' ? values.secret : null;
   if (!secretId) return;
