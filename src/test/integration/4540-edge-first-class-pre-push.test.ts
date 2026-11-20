@@ -99,6 +99,30 @@ describe('#4540 edge-first-class pre-push transition', () => {
     });
   });
 
+  it('refuses suffix-vs-natural-loc collisions atomically, preserving legacy rows for repair and retry', async () => {
+    await scratch(async (c) => {
+      await legacy(c);
+      await c.query(`INSERT INTO nodes VALUES ('t2','target-memory','to:leaf:2');
+        INSERT INTO edges(id,source_id,target_id,label) VALUES
+          ('a','s1','t','has space'), ('b','s1','t','has:space'), ('c','s1','t2','has space')`);
+      const before = await image(c);
+      await c.query('SAVEPOINT transition');
+      await expect(prePush(c)).rejects.toThrow(/edge loc collision.*b.*c/);
+      await c.query('ROLLBACK TO SAVEPOINT transition');
+      expect(await shape(c)).toEqual([]);
+      expect(await image(c)).toEqual(before);
+      // Resolve the ambiguous legacy label, then retry the shipped entry point.
+      await c.query("UPDATE edges SET label='distinct' WHERE id='c'");
+      await prePush(c);
+      await c.query('CREATE UNIQUE INDEX edges_loc_memory_key ON edges(loc, memory_id)');
+      expect((await c.query('SELECT count(*)::int AS n FROM edges')).rows).toEqual([{ n: 3 }]);
+      expect((await c.query("SELECT name FROM edges WHERE id='c'")).rows).toEqual([{ name: 'distinct' }]);
+      const upgraded = await image(c);
+      await prePush(c);
+      expect(await image(c)).toEqual(upgraded);
+    });
+  });
+
   it('is a no-op on a second run, preserving a person-authored loc/name and row metadata', async () => {
     await scratch(async (c) => {
       await legacy(c);
