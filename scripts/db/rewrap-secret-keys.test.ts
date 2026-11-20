@@ -151,6 +151,16 @@ describe('secrets-root re-wrap tool: the run', () => {
     expect(await wrapped()).toBe(before);
   });
 
+  it('the same root in another letter case is the same root: usage (#4553 N7)', async () => {
+    await mint();
+    const before = await wrapped();
+    const lower = await rootFile('ab'.repeat(32), 0o600);
+    const upper = await rootFile('AB'.repeat(32), 0o600);
+    expect(await main(['--from-root-file', lower, '--to-root-file', upper], io())).toBe(2);
+    expect(lines.some((l) => l.includes('the two roots are the same'))).toBe(true);
+    expect(await wrapped()).toBe(before);
+  });
+
   it('a planted row under a third root exits 1 and leaves every row as it was', async () => {
     await mint();
     const before = await wrapped();
