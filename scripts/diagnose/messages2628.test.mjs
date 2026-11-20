@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -137,17 +137,16 @@ test('a lost reservation is its own case, named by its path, even when the state
 });
 
 test('a reservation that cannot be created (no lock exists) is not reported as a held reservation (#4607 F1)', () => withDir('diag-2628-', (dir) => {
-  const parent = join(dir, 'ro'); mkdirSync(parent);
-  const state = join(parent, 'state');
-  chmodSync(parent, 0o555);
-  try {
-    const r = sh(`incus() { return 0; }; acquire_stack_reservation '${state}' hadron-e2e-x`, dir);
-    assert.equal(r.status, 1);
-    assert.match(r.stderr, /mkdir: cannot create directory/);   // mkdir's own reason is kept
-    assert.match(r.stderr, /could not create the diagnosis reservation \S+\.diagnose-lock \(see the error above\); refusing/);
-    assert.doesNotMatch(r.stderr, /already reserved/);
-    noRemovalAdvice(r.stderr);
-  } finally { chmodSync(parent, 0o755); }
+  // A state name of 250 bytes makes the lock name (+ ".diagnose-lock") exceed the 255-byte name limit, so mkdir fails
+  // with no lock present for any user, root included (a permission-based setup does not fail as root, as in CI).
+  const state = join(dir, 's'.repeat(250));
+  const r = sh(`incus() { return 0; }; acquire_stack_reservation '${state}' hadron-e2e-x`, dir);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /mkdir: cannot create directory/);   // mkdir's own reason is kept
+  assert.match(r.stderr, /could not create the diagnosis reservation \S+\.diagnose-lock \(see the error above\); refusing/);
+  assert.doesNotMatch(r.stderr, /already reserved/);
+  assert.equal(existsSync(`${state}.diagnose-lock`), false);
+  noRemovalAdvice(r.stderr);
 }));
 
 test('the end-of-run explanation tolerates a missing instance name, so the EXIT trap keeps running (#4607 F5)', () => withDir('diag-2628-', (dir) => {
