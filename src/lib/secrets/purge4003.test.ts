@@ -235,6 +235,31 @@ describe('rotation at version level', () => {
   });
 });
 
+describe('a store racing a rotation (#4553 §10 F1)', () => {
+  it('a store that starts while a rotation with --reencrypt is uncommitted lands under the new key, not the retired one', async () => {
+    const s = await create('race', 'v1');
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let rotated!: () => void;
+    const rotatedSignal = new Promise<void>((r) => { rotated = r; });
+    const ops = db.$transaction(async (tx) => {
+      await rotateAppKey(tx, appId);
+      expect(await reencryptAppSecretVersions(tx, appId)).toBe(1);
+      rotated();
+      await held; // the ops transaction stays open: key 1 is retired but not yet committed
+    }, { timeout: 20_000 });
+    await rotatedSignal;
+    const store = update(s.id, 'v2');
+    await new Promise((r) => setTimeout(r, 400));
+    release();
+    await ops;
+    await store;
+    const rows = await db.secretVersion.findMany({ where: { secretId: s.id }, orderBy: { versionNo: 'asc' } });
+    expect(rows.map((r) => [r.versionNo, r.keyVersion])).toEqual([[1, 2], [2, 2]]);
+    expect(await decryptVersion(s.id, 2)).toBe('v2');
+  });
+});
+
 describe('purgeExpiredSecretEvents: one year after the App is gone (R25)', () => {
   const eventsOf = (owner: string) => db.secretEvent.count({ where: { ownerType: 'app', ownerId: owner } });
   const tombOf = (owner: string) => db.secretOwnerTombstone.count({ where: { ownerType: 'app', ownerId: owner } });
