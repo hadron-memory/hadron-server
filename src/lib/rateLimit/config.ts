@@ -11,8 +11,12 @@ export const DEFAULTS: Record<FieldClass, { windowSeconds: number; principalLimi
   OTHER_READS: { windowSeconds: 60, principalLimit: 1200, keyLimit: 600, ipLimit: 2400 },
 };
 export class RateConfigurationError extends Error {
-  constructor() { super('Rate limiter configuration is invalid; serving readiness refused.'); }
+  constructor(message = 'Rate limiter configuration is invalid; serving readiness refused.') { super(message); }
 }
+/** Fixed text: names the variable and the expected shape, never the value or any parse detail (#4527). */
+export const RATE_KEYRING_REFUSAL =
+  'Rate limiter configuration is invalid; serving readiness refused. RATE_LIMIT_KEYRING must be set to JSON of the shape '
+  + '{"current":"<key id>","keys":{"<key id>":"<64 lowercase hex characters>"}} with one or two keys, one of them the current id.';
 export function readRateKeys(env = process.env): { current: string; keys: Map<string, Buffer> } {
   try {
     const value = JSON.parse(env.RATE_LIMIT_KEYRING ?? '');
@@ -26,7 +30,7 @@ export function readRateKeys(env = process.env): { current: string; keys: Map<st
     }
     if (!keys.has(value.current)) throw 0;
     return { current: value.current, keys };
-  } catch { throw new RateConfigurationError(); }
+  } catch { throw new RateConfigurationError(RATE_KEYRING_REFUSAL); }
 }
 export function keyFingerprint(key: Buffer): string { return createHash('sha256').update(key).digest('hex'); }
 export function seedLimits(fieldClass: FieldClass) {
