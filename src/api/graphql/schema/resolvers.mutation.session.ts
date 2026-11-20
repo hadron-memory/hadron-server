@@ -2319,7 +2319,7 @@ export const sessionMutations = {
         throw notFoundError('SESSION_NOT_FOUND', 'Session not found');
       }
       if (session.deletedAt) {
-        // A deleted session of this App still has its data key released, as an end used to do (blind P2 on #4564),
+        // A deleted session of this App still has its data key released, as an end used to do,
         // so the refusal never strands a key. Only this App's: a foreign call must not touch another tenant's cache.
         sessionKeyCache.evict(sessionId);
         throw notFoundError('SESSION_NOT_FOUND', 'Session not found');

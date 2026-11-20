@@ -18,7 +18,6 @@ import { formatGraphQLError, isTrustedRefusal } from '../formatError.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { generateDataKey } from '../../../lib/crypto.js';
 
-
 const M = resolvers.Mutation as any;
 let appA: { id: string };
 let appB: { id: string };
