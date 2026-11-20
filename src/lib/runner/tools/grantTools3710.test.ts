@@ -1,13 +1,15 @@
 /**
  * #3710 (Grants S2a-run; cor:acl:140:05 "An agent reads its own grants", cor:agt:010:01 rev 45, cor:acl:040:02): the run tool
- * `hadron_list_grants`. A run lists the grants its OWN agent holds in its OWN App, through S2a's data-layer read
- * (`listGrantsForRunAgent`), ids and scalars only. Pins, one per gate item:
- *   1  every state listed, with `allows` from the one live function and the stored facts, NO state label (Patrick, 2026-11-09);
- *   2  two Apps, two agents: no other App's grant, no other agent's, not the same agent's grant in another App (item 20b),
- *      not a base agent's (20a), nothing held by a worker, person or App;
+ * `hadron_list_grants`. A run lists the grants it holds in its OWN App: its agent's and the App's own (Peter on #4598), through S2a's
+ * data-layer read (`listGrantsForRunAgent`), ids and scalars only, with `allows` and NO state label (Patrick, 2026-11-09). Pins:
+ *   1  every state listed, with `allows` from the one live function and the stored facts; App-held rows included;
+ *   2  two Apps, two agents: no other App's grant (App-held or not), no other agent's, not the same agent's grant in another App
+ *      (item 20b), not a base agent's (20a), nothing held by a worker or a person, and a grant living in ANOTHER App that only names
+ *      this App as grantee is not listed;
  *   3  a run without an agent has no branch: it is refused and reads nothing (mutant: an agentless fallback);
- *   4  the policy chain gates `tool.hadron_list_grants`, at cost 0.
- * Plus the principal guard, closed arguments, a deleted App's concealment and an uninstalled agent.
+ *   4  the policy chain gates `tool.hadron_list_grants`, at cost 0;
+ *   5  eligibility and the rows are read in ONE snapshot (RepeatableRead), so no concurrent change can split them (BLIND P2s on #4598).
+ * Plus the principal guard, closed arguments, a deleted App's concealment and an uninstalled or unlicensed agent.
  */
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { evaluatePolicyChain, parsePolicyLink } from '@hadron-memory/access-control';
@@ -124,6 +126,24 @@ describe('hadron_list_grants (#3710)', () => {
     const b = await call(await mintRun(w.app2Id, w.agentId));
     expect(b.grants.map((g) => g.id)).toEqual([app2Held]);
     expect([...a.grants, ...b.grants].map((g) => g.id)).not.toContain(crossNaming);
+  });
+
+  it('1: App-held rows carry their own allows: active allows, revoked does not (BLIND P3 on #4598)', async () => {
+    const active = await insertGrantUnguarded(w, { user_id: null, grantee_app_id: w.appId, activated_at: raw(DB_NOW), verification_kind: 'TEST', verified_by: 't' });
+    const revoked = await insertGrantUnguarded(w, { user_id: null, grantee_app_id: w.appId, activated_at: raw(DB_NOW), verification_kind: 'TEST', verified_by: 't', revoked_at: raw(DB_NOW), revoked_by: w.userId });
+    const out = await call(await mintRun(w.appId, w.agentId));
+    expect(out.grants.find((g) => g.id === active)).toMatchObject({ holderKind: 'APP', allows: true });
+    expect(out.grants.find((g) => g.id === revoked)).toMatchObject({ holderKind: 'APP', allows: false });
+  });
+
+  it('5: the eligibility check and the rows are read in ONE RepeatableRead transaction (no split between the two)', async () => {
+    await agentGrant(w.agentId, w.appId);
+    const spy = vi.spyOn(db, '$transaction');
+    try {
+      await call(await mintRun(w.appId, w.agentId));
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0]![1]).toMatchObject({ isolationLevel: 'RepeatableRead' });
+    } finally { spy.mockRestore(); }
   });
 
   it('1: a spent grant is listed and allows nothing; the projection is exactly the Grant scalars', async () => {
