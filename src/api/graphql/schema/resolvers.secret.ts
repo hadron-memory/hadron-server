@@ -64,6 +64,7 @@ import { createPendingGrant, GrantCreateRefusal } from '../../../lib/grants/crea
 import { requireSecretReadClientIssuer } from '../../../lib/secrets/readClientIssuer.js';
 import { generateId } from '../../../lib/id.js';
 import { revealWithReadClient } from '../../../lib/secrets/readClientReveal.js';
+import { secretRevealUrl } from '../../../lib/signing/ceremonyUrl.js';
 import { tickBatch } from './tickBatch.js';
 
 function badInput(message: string): GraphQLError {
@@ -601,8 +602,17 @@ export const secretQueries = {
     const rows = await ctx.db.secretReadClient.findMany({
       where: { OR: [{ issuerUserId: ctx.userId }, { grant: { userId: ctx.userId } }, ...(workerId ? [{ grant: { workerId } }] : [])] },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take, skip: Math.max(0, args.offset ?? 0),
+      include: { grant: { select: { userId: true, workerId: true, agentId: true } } },
     });
-    return rows.map((r) => ({ clientId: r.id, grantId: r.grantId, secretId: r.secretId, secretName: r.secretName, selfIssued: r.selfIssued, endReason: r.endReason, createdAt: r.createdAt }));
+    // #4545 (cor:sec:060:02): the reveal page link goes only to the person holder in their own session. The person-holder test
+    // is the reveal page's own (`revealAs`: userId matches, no worker, no agent). A worker session and an App key never get it;
+    // an impersonation and a run returned above, so the field adds no reach.
+    const personSession = !workerId && !ctx.appKeyId;
+    const callerId = ctx.userId;
+    return rows.map((r) => ({
+      clientId: r.id, grantId: r.grantId, secretId: r.secretId, secretName: r.secretName, selfIssued: r.selfIssued, endReason: r.endReason, createdAt: r.createdAt,
+      revealUrl: personSession && r.grant.userId === callerId && r.grant.workerId === null && r.grant.agentId === null ? secretRevealUrl(r.id) : null,
+    }));
   },
 
   /**

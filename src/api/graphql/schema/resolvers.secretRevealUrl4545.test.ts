@@ -81,6 +81,30 @@ describe('#4545 SecretReadClient.revealUrl', () => {
     expect(byId(rows, personClientId)).toHaveProperty('revealUrl', null);
   });
 
+  it('another person holder\'s client: its issuer sees the row with null, only that holder gets the URL', async () => {
+    // Today a USER client is always self-issued, so plant the shape directly: a person-held client whose holder is not the issuer
+    // (as an account merge or a later issuance rule could leave it). The issuer still lists it, and must not receive the link.
+    const other = (await db.user.create({ data: { email: `${generateId()}@4545.test` } })).id;
+    const { grantId } = await db.secretReadClient.findUniqueOrThrow({ where: { id: personClientId } });
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+      await tx.$executeRawUnsafe('UPDATE grants SET user_id = $2 WHERE id = $1', grantId, other);
+      await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+    });
+    expect(byId(await list(ctxOf(ownerId)), personClientId)).toHaveProperty('revealUrl', null);
+    expect(byId(await list(ctxOf(other)), personClientId)?.revealUrl).toBe(`${BASE}/secret-reveal/${personClientId}`);
+  });
+
+  it('the no-worker and no-agent holder tests stand on chk_grants_exactly_one_holder: a person grant cannot also name either', async () => {
+    const { grantId } = await db.secretReadClient.findUniqueOrThrow({ where: { id: personClientId } });
+    const plant = (col: 'worker_id' | 'agent_id') => db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+      await tx.$executeRawUnsafe(`UPDATE grants SET ${col} = $2 WHERE id = $1`, grantId, workerId);
+    }).then(() => 'OK', (e: Error) => e.message);
+    expect(await plant('worker_id')).toContain('chk_grants_exactly_one_holder');
+    expect(await plant('agent_id')).toContain('chk_grants_exactly_one_holder');
+  });
+
   it('widens nobody: an outsider, an impersonation and a run see no client at all, unchanged', async () => {
     const outsider = (await db.user.create({ data: { email: `${generateId()}@4545.test` } })).id;
     expect(await list(ctxOf(outsider))).toEqual([]);
