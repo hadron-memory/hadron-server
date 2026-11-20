@@ -27,7 +27,8 @@ export type TerminalPrompt = (typeof TERMINAL_PROMPTS)[number];
 /**
  * The closed reason codes (hadron-cli#1187). Required for `locked`/`dark`, null otherwise.
  * #4558 (hadron-cli#2677): `no_screen` (Orca gives no rendered screen) and `multiple_terminals` (more than one
- * agent terminal bound to the worker) join; both ride `locked`, as `unrecognized` does. The same list lives in the
+ * agent terminal bound to the worker) join. The CLI reports both with `locked`, as it does `unrecognized`; like every
+ * reason, the server accepts them with `locked` or `dark` (no pairing is enforced). The same list lives in the
  * SDL enum `WorkerTerminalReason`, the CHECK on `workers.terminal` (`prisma/host-operation-invariants.sql` and its
  * migration copy) and the CLI contract — all change together.
  */

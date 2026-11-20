@@ -7,7 +7,8 @@
  * `prisma/host-operation-invariants.sql`, which `prisma/post-push.sql` applies to every test template; the
  * migration re-adds the same CHECK for production), and the CLI contract (downstream, hadron-cli#2677).
  *
- * Both new reasons ride `locked`, as `unrecognized` does today (Xan's FIT answer on the issue): the stored
+ * The CLI reports both new reasons with `locked`, as it does `unrecognized` (Xan's FIT answer on the issue); like every
+ * reason, the server accepts them with `locked` or `dark`, and no pairing is enforced (gate a pins both). The stored
  * status is unchanged and no terminal-status event follows — that event is not built at all (cor:agt:050:11,
  * slice S1c deferred to #2926), and this file pins that adding reasons does not sneak one in.
  */
@@ -15,6 +16,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { parse, buildASTSchema } from 'graphql';
+import { ApolloServer } from '@apollo/server';
 import { randomBytes } from 'node:crypto';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -24,6 +26,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { TERMINAL_REASONS } from '../../../lib/workerTerminal.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { deploymentSchema } from './deploymentSchema.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -58,7 +61,10 @@ const keyCtx = (k: { id: string }, appId = app.id): Context => ({ db, appId, app
 const register = (k: { id: string }, workers: unknown[]) =>
   M.registerHost({}, { input: { appRef: app.id, label: 'Orca One', pollIntervalSeconds: 60, workers } }, keyCtx(k));
 
-const NOW = () => new Date();
+// Report times strictly increase within a test, so acceptance never rests on two `new Date()` calls differing
+// (#4566 BLIND P3). They start 50 s ago, after every report's lastTurnAt (2 min ago), and step 1 s.
+let clock = 0;
+const NOW = () => new Date(clock += 1000);
 const ago = (min: number) => new Date(Date.now() - min * 60_000);
 const rep = (worker: string, extra: Record<string, unknown> = {}) => ({
   worker, status: 'idle', prompt: 'empty', reason: null, lastTurnAt: ago(2), checkedAt: ago(1), ...extra,
@@ -67,6 +73,7 @@ const send = (k: { id: string }, reports: unknown[]) => M.setHostWorkerTerminals
 const stored = (id: string) => db.worker.findUniqueOrThrow({ where: { id }, select: { terminal: true } }).then((w) => w.terminal as any);
 
 beforeEach(async () => {
+  clock = Date.now() - 50_000;
   await cleanDb(db);
   const n = Math.floor(Math.random() * 1_000_000);
   org = await db.organization.create({ data: { name: 'Reasons', urn: `rsn-${n}.example` }, select: { id: true, urn: true } });
@@ -122,6 +129,45 @@ describe('#4558 a report with a new reason persists and reads back on Worker.ter
     const byWorker = (id: string) => roster.workers.find((r: any) => r.workerId === id);
     expect(Q.TeamRosterEntry.terminal(byWorker(kit.id))).toMatchObject({ status: 'locked', reason: 'no_screen' });
     expect(Q.TeamRosterEntry.terminal(byWorker(ada.id))).toMatchObject({ status: 'locked', reason: 'multiple_terminals' });
+  });
+});
+
+describe('#4558 the new reasons through the assembled schema (enum coercion and serialization)', () => {
+  // #4566 BLIND P3: input coercion of the enum literals and output serialization, in one executed operation each,
+  // through the construction src/server.ts uses (deploymentSchema's typeDefs + resolvers on one ApolloServer), so
+  // the real DateTime scalar and enum wiring are in the path.
+  const run = async (query: string, contextValue: Context, variables?: Record<string, unknown>) => {
+    const wired = deploymentSchema();
+    const server = new ApolloServer<Context>({ typeDefs: wired.typeDefs, resolvers: wired.resolvers });
+    await server.start();
+    try {
+      const r = await server.executeOperation({ query, variables }, { contextValue });
+      if (r.body.kind !== 'single') throw new Error('expected a single result');
+      return r.body.singleResult;
+    } finally {
+      await server.stop();
+    }
+  };
+  it('a mutation with both enum literals stores them and Query.worker reads them back as the same names', async () => {
+    const at = (d: Date) => d.toISOString();
+    const set = await run(`mutation($app: String!, $kit: String!, $ada: String!, $t1: DateTime!, $t2: DateTime!, $last: DateTime!) {
+      setHostWorkerTerminals(input: { appRef: $app, reports: [
+        { worker: $kit, status: locked, prompt: empty, reason: no_screen, lastTurnAt: $last, checkedAt: $t1 },
+        { worker: $ada, status: locked, prompt: menu, reason: multiple_terminals, lastTurnAt: $last, checkedAt: $t2 }
+      ] }) { stored { id } refused { worker } }
+    }`, keyCtx(orca1), { app: app.id, kit: kit.id, ada: ada.id, t1: at(NOW()), t2: at(NOW()), last: at(ago(2)) });
+    expect(set.errors).toBeUndefined();
+    expect((set.data as any).setHostWorkerTerminals.refused).toEqual([]);
+    expect((set.data as any).setHostWorkerTerminals.stored.map((r: { id: string }) => r.id).sort()).toEqual([kit.id, ada.id].sort());
+    const read = await run(`query($kit: ID!, $ada: ID!) {
+      kit: worker(ref: $kit) { terminal { status reason } }
+      ada: worker(ref: $ada) { terminal { status reason } }
+    }`, ctx(manager.id), { kit: kit.id, ada: ada.id });
+    expect(read.errors).toBeUndefined();
+    expect(read.data).toEqual({
+      kit: { terminal: { status: 'locked', reason: 'no_screen' } },
+      ada: { terminal: { status: 'locked', reason: 'multiple_terminals' } },
+    });
   });
 });
 
