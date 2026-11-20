@@ -45,7 +45,9 @@ describe('#1507 persisted sync outcome', () => {
     const root = join(graphsPath, 'report-org', 'report-memory');
     writeFileSync(join(root, 'private--> invalid.md'), '---\nname: invalid source\nid: untrusted-foreign-id\n---\nignored');
     if (mixed) file('bad', '{{> good bogus}}');
-    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    const result = await syncGraphFromGithub(graph);
+    expect(result.error).toBeUndefined();
+    expect(JSON.stringify(result)).not.toMatch(/private|untrusted-foreign-id|invalid source/);
     const text = (await storedReport())!;
     const report = JSON.parse(text);
     expect(report).toMatchObject({ version: 1, outcome: 'unknown', invalidSources: { count: 1, items: [{ ordinal: 1, code: 'INVALID_LOC' }], omitted: 0 } });

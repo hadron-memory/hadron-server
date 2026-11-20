@@ -47,6 +47,7 @@ export interface SyncReport {
   recordedAt: string;
   entries: SyncReportEntry[];
   code?: 'SYNC_FAILED' | 'BAD_USER_INPUT';
+  invalidSources?: { count: number; items: Array<{ ordinal: number; code: 'INVALID_LOC' }>; omitted: number };
 }
 
 /**
@@ -54,13 +55,20 @@ export interface SyncReport {
  * invalid-loc skips make completion unknown, retaining safe supported entries;
  * only a completion with no skips is clean. Never serialize messages or IDs.
  */
-export function committedSyncReport(entries: readonly SyncReportEntry[], now = new Date(), hasUnsupportedSkips = false): string | null {
-  if (entries.length === 0 && !hasUnsupportedSkips) return null;
+export function committedSyncReport(entries: readonly SyncReportEntry[], now = new Date(), invalidSourceCount = 0): string | null {
+  if (entries.length === 0 && invalidSourceCount === 0) return null;
   const publicEntries = entries.map(e => ({ kind: e.kind, loc: e.loc, ...(e.fromLoc === undefined ? {} : { fromLoc: e.fromLoc }), code: e.code }));
   const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
   publicEntries.sort((a, b) => compare(a.loc, b.loc) || compare(a.kind, b.kind) || compare(a.fromLoc ?? '', b.fromLoc ?? '') || compare(a.code, b.code));
   const version: SyncReportVersion = publicEntries.some(e => kindVersion[e.kind] === 2 || codeVersion[e.code] === 2) ? 2 : 1;
-  return JSON.stringify({ version, outcome: hasUnsupportedSkips ? 'unknown' : 'partial', recordedAt: now.toISOString(), entries: publicEntries } satisfies SyncReport);
+  // Ordinals are positions in byte-sorted skipped paths. All items have the same fixed code,
+  // so only the count is needed to construct their projection; paths and IDs never enter it.
+  const shown = Math.min(invalidSourceCount, 50);
+  const invalidSources = invalidSourceCount === 0 ? {} : { invalidSources: {
+    count: invalidSourceCount, items: Array.from({ length: shown }, (_, i) => ({ ordinal: i + 1, code: 'INVALID_LOC' as const })),
+    omitted: invalidSourceCount - shown,
+  } };
+  return JSON.stringify({ version, outcome: invalidSourceCount > 0 ? 'unknown' : 'partial', recordedAt: now.toISOString(), entries: publicEntries, ...invalidSources } satisfies SyncReport);
 }
 
 export function failedSyncReport(code: 'SYNC_FAILED' | 'BAD_USER_INPUT', now = new Date()): string {
