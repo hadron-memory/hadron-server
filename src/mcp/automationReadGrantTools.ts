@@ -5,7 +5,7 @@
  * one `Forbidden`, the same answer as an unknown App, trigger, memory or grant.
  */
 import { z } from 'zod';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { HadronMcpServer as McpServer } from './hadronMcpServer.js';
 import { GraphQLError } from 'graphql';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { isTrustedRefusal } from '../api/graphql/formatError.js';

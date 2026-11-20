@@ -41,7 +41,8 @@ import {
   GOVERNED_KINDS,
 } from '../lib/governedRole.js';
 import { assertEdgeSourceWritersById, assertRoleWritersForNodes, assertRoleWritersForWrite, roleWriterRefusalText } from '../lib/nodeRoleWriters.js';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer, isInitializeRequest } from '@modelcontextprotocol/server';
+import { registerLegacyTool, type HadronMcpServer } from './hadronMcpServer.js';
 import { generateId } from '../lib/id.js';
 import {
   type UsageNodeRef,
@@ -117,8 +118,7 @@ import {
   lockEdgeEndpointMemories,
   lockLiveEdgeEndpoints,
 } from '../lib/edgeEndpointLock.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { NodeStreamableHTTPServerTransport as StreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
@@ -2357,10 +2357,11 @@ export function createMcpServerInstance(
     'memory you had selected — selections live only for the current connection, ' +
     'and clients re-connect without mentioning it. This is not a client ' +
     'limitation and nothing you did is wrong: re-select and continue.';
+  // `tool` is Hadron's own positional registration method, installed by the gate below (see ./hadronMcpServer.ts).
   const server = new McpServer(
     { name: 'hadron', version: HADRON_SERVER_VERSION },
     { capabilities: { tools: {} } },
-  );
+  ) as HadronMcpServer;
 
   /**
    * "Worker Name (session <id>)" for each session, in order — for refusals and
@@ -2533,7 +2534,7 @@ export function createMcpServerInstance(
 
   {
     type ToolCallback = (args: unknown, extra: unknown) => unknown;
-    const sdkRegisterTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
+    const sdkRegisterTool = (...args: unknown[]) => registerLegacyTool(server, args);
     // Every registered handler (including reads and caller-session settlement)
     // gets this outer boundary before the SDK can stringify a database fault.
     const registerTool = (...args: unknown[]) => {

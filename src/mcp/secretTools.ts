@@ -1,6 +1,6 @@
 /** #3998: MCP exposes App-secret metadata only. Values, writes and read-client reveals have no MCP door. */
 import { z } from 'zod';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { HadronMcpServer as McpServer } from './hadronMcpServer.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';

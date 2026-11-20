@@ -7,7 +7,7 @@
  */
 import { z } from 'zod';
 import { signingSurfacePolicy } from '../lib/signing/surface.js';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { HadronMcpServer as McpServer } from './hadronMcpServer.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';

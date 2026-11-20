@@ -2,1305 +2,1305 @@
  "user": [
   [
    "hadron_search",
-   "bb34f2033f75faa8ba1970688919851154865b288a2824d195a6615fa46094cf"
+   "205b7a95391fdd2326191f3862b68d89009f65ad95a2e4e9d1b8ceff12a29dc1"
   ],
   [
    "hadron_list_memories",
-   "2fff9275e05c37bb6ae314a6717882291e59e2f85ab9cfdacbeaaedbdd2d1d15"
+   "2b9b61503c3836a764effed8555025b374f9b3ed2ab9bd2b2aa0aae1aef1583f"
   ],
   [
    "hadron_set_active_memory",
-   "fd7888b0b6fcfdc974e4de68d8fd998ea2f7618181f95e9faf39088b2828bccd"
+   "062d85f1b2cb615a4b7bd32ebd1ea89dcf12ee51c3088c98ec12a9764f680887"
   ],
   [
    "hadron_create_memory",
-   "6a6dbcc360d0abc1b9526ca38e9c2fa094def0a0fbc6e0ac114bd88a250ff7be"
+   "54655c64526a819659f17dc44e1c2c03113a337bef559d839ae1e1f35d271a20"
   ],
   [
    "hadron_create_app_memory",
-   "58a107410592b0f41aedc4d9a81c40c17c42f3cd39e481262cb7f0ea08b6922c"
+   "d70d850f23fee443f3768ac96d7c4df4014f9588ef411240450a844981fb2441"
   ],
   [
    "hadron_record_content_validation",
-   "e108e0ca3d45332cb0517eec6ea1613d6150dab9d05d6134705e8cad3da6b8fd"
+   "58877008f70509057b3c4188281052e163a13d882565cbc4c6bbfee3a40349a6"
   ],
   [
    "hadron_server_info",
-   "bcea769d284f7a695aa0d8c04c83812b61dfd0c583cd917cd9a8e799dfc90485"
+   "5c1af043ce931126e95fc5e61f06f90eb9eaf90a29e5ea95907b8ba1faf749dd"
   ],
   [
    "hadron_list_apps",
-   "e0ec37e561ba103452711affded975e430389ab1ad04a045ae3a2acf6ed20e45"
+   "ef50f29d21e0a08cd80c2d0940074c285e2c8ba5a73f636f8b4a6462840fa983"
   ],
   [
    "hadron_set_active_app",
-   "9363b7b29b3a0531a4e7792f6de6416f19d653feb49db6946c4ac2e159d84148"
+   "1f0f53f745dd4c721cb89aa4c068c8548772c3021f0d4af914a832dd3a3f71f5"
   ],
   [
    "hadron_set_active_org",
-   "56bf4018c803580a1e0927bb9755b5c57e62c3736b356b656c76455f4cfe4de8"
+   "9326e6116ecc662d1582cc267d0d88337af37251919017bea4fe3bc4872c16c6"
   ],
   [
    "hadron_list_comments",
-   "28af9f4a8f8ecdb64445bf1613c4ac10cab907b74bba305bd718d294abffdcdd"
+   "8c5434c7a51a90e14433fb37db85ba4c8e7d79d2c8724eb83f9fbaa70f18dc62"
   ],
   [
    "hadron_get_comment",
-   "25e308dcf682a48457dc659ee3dfe3fe7a6b01e846b830c30412e4d4313182d8"
+   "53153cac245f336db0f39433bf2632a9b40d1fd5b1f399e68c0725bbbd53af0a"
   ],
   [
    "hadron_create_comment",
-   "71768b52b6bf935316b8848eb7fca67f4d2e94679d19f8d8c85171dedbcafb35"
+   "ffe6efdf102a3cdeb7487fc81fc4a88a5a0cf1f5692d878309c9e3b2568d3263"
   ],
   [
    "hadron_reply_to_comment",
-   "98e3816017c45ea4e91058ac6b8487c23e5c39370356bdd1cacd038c42927b91"
+   "aa10ba5677b89eca568cb124c6c3c161209c2ef4cff914540eb1bb6188db1887"
   ],
   [
    "hadron_edit_comment",
-   "6f7e201f8a78f0fde687e876de9102e3f4fd66114badcd09a148d1bb9684ad33"
+   "5a4cb52e917b018571e7df0d62ff666736a2e94a2172695310a8e76f9536c8df"
   ],
   [
    "hadron_delete_comment",
-   "655178a0f704c1e4a5e24f01b4ae75b5cd9c0a0daea79d11f6b454efae8a39a9"
+   "dbc1d9209b48d278277299bbe4b880011ab78d2eeeba8e8668e3b747306307f6"
   ],
   [
    "hadron_resolve_comment_thread",
-   "62292481e886643729196af51d50454c967168f13d0202cb53f57614bf10f873"
+   "37333f763c86d4fb2f05702a8ba2241f27f065703225a0bd3454b76b07597036"
   ],
   [
    "hadron_reopen_comment_thread",
-   "9ae33556abc21a2755a2db6d1a37a8c4ae4fc8c41bf81c969b8a75c4ec220bc2"
+   "4377cfabdd6bad8e7e0403e65b1d0d1728cc779b7fb1cddf6c03e6255ff8b6f0"
   ],
   [
    "hadron_set_asset_public_link",
-   "4d757107b6dc076a32a4c18662460ec10442a370851a15746939e3a4f60c823a"
+   "9ea3f3b840cbc88d16235c9c800062cc71a422ddf26db0e4f0922245d72dfbcc"
   ],
   [
    "hadron_set_automation_read_grant",
-   "794d5db028b3d28a3df7fba57826f974460b0544e7e9e29d418468a3200a3380"
+   "4e56ded49744b141b68f81f5b51f0a523d48e69933c3b82cec519888b027bffe"
   ],
   [
    "hadron_revoke_automation_read_grant",
-   "5c1b1f995ed9efdee856629261f40ed7de0c5b005fa5b0b57a38ede3ba35dc71"
+   "f0f1f7fa222acfa1d1bd2dd71f0d5258b782d1141b3bda8e1904a0fa0e488b0c"
   ],
   [
    "hadron_list_automation_read_grants",
-   "04b5644fd8c70c19bc3b6cbbcd37cee4cdec0d09713fce92cc70e05e73064833"
+   "31b4a8aaf636508f146889bb719aa50a010884105ff4e6d1ff7941b5b6f9e372"
   ],
   [
    "hadron_set_automation_team_snapshot_grant",
-   "7b5798b4a22b35d3f8938e1b8fa02ddd5a65087e962d3bc73465033b3dc18b13"
+   "ae22bb7386d95e3f7534c8a957f9f86419bbdfe9483468766388b09e3e238678"
   ],
   [
    "hadron_revoke_automation_team_snapshot_grant",
-   "bd0f6c4ce104c2f89722b0077dac0ad2c1ea39dfee33bcc959ee512a2208b8bb"
+   "4eb50bb7ecc781ca6a0afdffa436849f2a532a67809a01cb3cc070f9a339c074"
   ],
   [
    "hadron_get_automation_team_snapshot_grant",
-   "a1623ef318bd8db702bbb9e68477d11301c2a4b626b280a6dc7128a82e278f10"
+   "0117eb505fbf67cc2e793a078662e69f3aba11431c3de482702305cf657709d4"
   ],
   [
    "hadron_list_automation_team_snapshot_grants",
-   "2f2c709f30a5d3dd5c3cb09dd7d7f8df72b81f4cc474afc34505a9df4335b6a1"
+   "853a24bb1c1b33311235a81404c5934ce80334e3bc4da9e81be2ece5609bbea6"
   ],
   [
    "hadron_web_poll_list",
-   "5cf9446377a7f32573d710d64f95f6cdac8b4853a887f02d3f2bb13923738655"
+   "f592321e2b4618ea6863d9d6709a3e0c3844b3b957657a252dee36dadebbd971"
   ],
   [
    "hadron_web_poll_cancel",
-   "3db72c050879a9f76722bb50920a98ae381d88fc4943eac02260251180041fe4"
+   "ff31039308719d1a6020c4223e15245fb79e9612f8dbaf71a4a6f2d1b310534e"
   ],
   [
    "hadron_list_secrets",
-   "eb656e5feb4dc502a7f168716f660f165000d78c75c135fabe4cda1addb4f405"
+   "69c12833689ba415dffc29b82f9c2a100706ac75a96a7782c158c330a0064e01"
   ],
   [
    "hadron_get_secret",
-   "b340a5e35da4dd543d4caba796cedd6e318f95cb6b9ddff26c2676d81cd5d8f8"
+   "dabd11c8d7cef3ae22d85cba9f75fe24abb2bb615e2923dfe2287d2476d3b4b0"
   ],
   [
    "hadron_preview_automation",
-   "23706da4ebb3d62b5f4d97d6203d0c7bb0085180ccd2bac4d3875858169b02d8"
+   "0c98ed673e3bc4911fc54084cef26eb50b8b7ba91c9c74e825fae7eef9258ba5"
   ],
   [
    "hadron_re_adopt_automation",
-   "8e1d258a5d7ea0d1a3d7991fe30011165fa27db1db8938a0e981aa6048801f20"
+   "588c22dd14f62b622aa90852aec37bb9dab9089931eafed42ce9fa07ee8eca1c"
   ],
   [
    "hadron_agent_tasks",
-   "ff505d4c18614f0f4ab4671b3e88a523a2d61b4c346974edf16c82c91db4254b"
+   "34cc66b8e9c39a9670009d1e6811e0a731ce833f0467b677f57433028b443557"
   ],
   [
    "hadron_agent_processes",
-   "1135780aa004373f12e03cc4ad9ff293423d286535c69fef8c4c8ec9a5e317ab"
+   "2bd151f8e4af2065bc8116ebad7128e484180e7fa656bcff56c401e7f5f196aa"
   ],
   [
    "hadron_agent_boot_prompt",
-   "5b8e46d793de1fa79c7764100ba4ff06154912c9b7de98104ab06223bf146989"
+   "f77dbf6248a1b3354099bbb1eda94864108241d8568b1aa18f39686f05d7c156"
   ],
   [
    "hadron_agent_set_base",
-   "a97224c6ebfc1923edbdc5a675c36fa5047d397718f3d9ba18ef20185ce9c0dd"
+   "8576ccd191f6d984406a333e5077cf8f999b5efcce24f1abbae6ab45939d229f"
   ],
   [
    "hadron_agent_set_index_refs",
-   "02e38d0804bcebbdf6bc0e2b183f25b021aa090220b76b96ba51c72aa843839a"
+   "d563f41970020b964f9b61aaa8de9fae7c73aed209c0318a810f03e41eaaedb9"
   ],
   [
    "hadron_list_recovery_nodes",
-   "5a72ea6b01866b186efe19a8b3d2afb9ca50aec3a3097c762afa08246e0d2737"
+   "1d485e086d9d96c3e8be796df9f9b3f9fe7943ec27e546681b14aab2de26308b"
   ],
   [
    "hadron_list_recovery_edges",
-   "af4b37458d32923fe5cc496423afcd25b0025042cada4771bd29c16909118e45"
+   "4e0537a4440638ecb831a47499cf4a62a7e5c9763eca64d3ba462c5feebfc33f"
   ],
   [
    "hadron_get_recovery_node",
-   "683fc1ee64374ec7a0b1f88e51efa6cc20c28fa7895f09a6ef35ff863d421dff"
+   "01eb35b7caa7fa8bba19fbb1a2f44486a7acd12d64a284887751c54e44d7b3e9"
   ],
   [
    "hadron_restore_node",
-   "79d2e72010363b92d5e53694b113d66de591e17e9632a1e6973b541f700bd64a"
+   "9d314c62deb96d14891065fc61fbe378712f7146b967288e409ab4b2d31c515f"
   ],
   [
    "hadron_list_scopes",
-   "33bb3114967c2d3ccd667e93d71a21a30c4db2d456246b50321933c8c049d3de"
+   "cc3e3c34050cbd5b611d5c7d90272c754e1475e26404166d3ab11e6c784b7b9e"
   ],
   [
    "hadron_create_scope",
-   "394fbfd49c90c494e3d8107340dacd9320e9cfcd2fbc500eabc4ed90a338bd35"
+   "772284b2091cb24a981de2f08597dc6c90b72af48f3f48b728c34b13566693c5"
   ],
   [
    "hadron_update_scope",
-   "831b636f8a330ec1ff158c377b7a7dfd7f3123756aa45583de6723a39bd39961"
+   "9227aed4d95b3688192f5c8ebee1e6aae64ceec0ab04fce5898b63bce0e0cdaf"
   ],
   [
    "hadron_delete_scope",
-   "d3523522f327d182effc3a930d75cec9f753b882709567515abfb36470d56a63"
+   "aabdb599dec1c5cde2e8fd401c6a419e1bc3485b4b3b855b645d112fc15d5925"
   ],
   [
    "hadron_scope_explain",
-   "90f2749a4368668ff263b980d566ad56d9027227448e33cfd8f80e873427323c"
+   "23f48552756531803b731518be164132b9d298203510bf975f55e0f3536d0226"
   ],
   [
    "hadron_set_active_scope",
-   "4ef0344bbb9af85cf2b750f27955df3ea196583410a8b6e652607e1fd802d3ef"
+   "a9d30a72a99e802acf215298401626a284cc492287be8ca991ff54423911b88d"
   ],
   [
    "hadron_create_parent_node",
-   "e1032c1ed971905063a5d154a0b593e1cb412a78cd63b3b3badbf06b3c9f6369"
+   "d1cbe2c7112a305373ad77e8a7923f83c5adffeeb74bc2839e1eb2b010fffa00"
   ],
   [
    "hadron_find_nodes",
-   "6a1b5ee18d69b8e5b58c61e631a79c2cefc4964b8a74fefbbf7129f54074f09d"
+   "77499516714df668acd7cb1ebf489455b4fb5253b87f2198cde2b27ef5e9584b"
   ],
   [
    "hadron_get_node",
-   "eae599c71cc9dc1d61d00a002482574b76fe1ee4c555bad57b37688676562d4a"
+   "198cc26fddae93bf9126edec940aecd5678e6641ff7154107e895d95be98847a"
   ],
   [
    "hadron_get_nodes",
-   "75c791760d8f93174c046f355b7477c074b3890455954f4c140967fb66a624f6"
+   "3a18dc41764a33b1c5b8b2fec95011b7935b12d5020f220f0c4cf9bd3a807a58"
   ],
   [
    "hadron_get_next_node",
-   "46c8587079f1efb9da1d966e7d9e18fa78517c2f61f170badccb7682a66d5868"
+   "89037ef714066af04b4a867ca514d2b56f3e471a471f19c4cc5e4e3c8ddbb778"
   ],
   [
    "hadron_list_nodes",
-   "ddaf683fc66fb845be1b3975f575a506abe755b5f0241edd7507b4a50d63bf33"
+   "91892b42a3064716754197ec369d1a06c44d27f75cf33251e602161b346689fc"
   ],
   [
    "hadron_unlock_memory",
-   "b716e62c870d03db1e6363481ddb98f99cc6025ba0ec2b9b00b60a0b2663d934"
+   "d2e25b17ea202083a5b6d9d5e19da2bcda247421181695443215fe1bdd9568c5"
   ],
   [
    "hadron_lock_memory",
-   "1de56bb2f71d8b27589ccee67cf22ba131860589f1685d5a58ee2b47e1191441"
+   "04ede4b16bec6d5af0dfa619235fad0480d343e42db7337f538b42a5b6bbfc06"
   ],
   [
    "hadron_create_node",
-   "64beeb71c042d4712f35546308642d7c3c8076431716494b0d1c17adef87dd78"
+   "bef0d430408f57978aa6e7dff9d597a285b2908035af7901116ceacf14da434e"
   ],
   [
    "hadron_update_node",
-   "b2e282bd01d801b5a9362250b228f661af165feb333fba6b853de7200f3c2c67"
+   "e7c91cb617d8a8ed5898feac12f4fe6709532a3793f30b6a9e6eb2b63d32f310"
   ],
   [
    "hadron_create_task",
-   "61d5948643acd17b4ec25b3bd0b0ed1039a24d251d7a4a4326871e44bc310a68"
+   "5bfd76216ac408f39ffc820f3e7308fc4b2ccf46d3ae752b1d115c8d22234a8a"
   ],
   [
    "hadron_update_task",
-   "8e87664e94ad0b072fdc09dbf55c2ff86f09f6eda0abe7a34f60d89da2cb6948"
+   "f6e4da1ee96d7a298c896e6fafdd8af5165f769cc0df61cc5b9fe8b987e6389a"
   ],
   [
    "hadron_create_review",
-   "54879a05e42f96f295f22208a4b2aa324dcd30ffb8b2f04391eeac623f22cd35"
+   "0a91d82172f9ccb23518f5aef2ebdb40a694225b13920eaf8a06895543977913"
   ],
   [
    "hadron_update_review",
-   "8c35cddc3c87106fdaf8adcb134889f9080334bef76df6b9f87e5f433d9f0fd0"
+   "b6f08df15baf3e9d3bace314d966d352a366d28c1bedb366b86639da6134cfdf"
   ],
   [
    "hadron_update_node_data",
-   "73b43958302f63f877189815776e280c6a86b8e32554cf3b719ad06f780e9166"
+   "f8ca24c4ae36e82aae979f1a60fab255457525af48a9f5f702c20dbe258f0775"
   ],
   [
    "hadron_create_object",
-   "2b62b7293e2fe1f8c47bcc515c33a07e147bb024b4d250c367072ad40c3f762e"
+   "cecaa6cf05add4b72373f1a7cca8bc6073abc33851450607997e22905dfcda29"
   ],
   [
    "hadron_get_object",
-   "c033fb1d52ff5bfee0461774841e7f2cff1386c97e51b807d69462de11ef48f1"
+   "cfbfc13d227b36419c7d2200c6b4bc7dadeda7292f6d6ef37780a104edeefe5a"
   ],
   [
    "hadron_update_object",
-   "72a566ce453746eef2e22b6c1e2ab38f40ec78e46e215f4373061cc71bca92d7"
+   "f23798cc70c3bed642e09f7f892e93d7cb08be08bf9999f1bde0e42b5ad7b2f0"
   ],
   [
    "hadron_delete_object",
-   "4cea0285c3dc782a2414ac4960d5d9c71191a7b468d0eee2afa12b5db9b02bb1"
+   "2f86100b42a1fb713d71d83221952faed9a3f1f82abadd4d74bf116a6ac8286a"
   ],
   [
    "hadron_find_objects",
-   "d852bae4301d5d14d71c42f8f4fa065b85fb39051c0796afc102e19ece0f60e8"
+   "93ab1892209c3e2843095021077bf443fe2030639517bd124aa6793db2c23afa"
   ],
   [
    "hadron_replace_text",
-   "b8e7f8dfaec950018cb0f77d7256ef04bd3086139462a99520b378387d9f47c3"
+   "eba737545739f6882e10b3051623705be897f08d76387f40a4ff04253f387ed2"
   ],
   [
    "hadron_create_edge",
-   "dcacf79ae8a331ef1f5de41777613c4f81877a558c22bf4f7085450e13541a4f"
+   "605fe9447aa4dd8a355c2d228bc4485f2e77d37694e7b86c9e5a9560aeab6d36"
   ],
   [
    "hadron_update_edge",
-   "1167204ee92499b6805cec66f9fb575fc16fb699ad8c08174e730a1669c77b18"
+   "5185f282467919b21e1fca6ab05bb1900af02b1653de23abae9892cfe2afe25e"
   ],
   [
    "hadron_delete_edge",
-   "812e33f54907fbe86e695ab7013b7e0eb931b73aacd4f87a908db2b6c1eba7b2"
+   "0505511dea4c994a58860e6b204dceafbb9c0f514023a27a88266a3aa0417e99"
   ],
   [
    "hadron_delete_node",
-   "5813ebba270720a69861411c4aff418a632bae5c3dfd71b0d28772f96c05da79"
+   "98c2809b52640f59f72a49b86eff1295222e5b1fe238f48b0c7c809a5868de2e"
   ],
   [
    "hadron_move_node",
-   "0d1e75c4b47118eabaa0418761edbb9add2ceeddda91e6a383ca394fad6c34dc"
+   "f35cde7d04cfd7f745ab4df6e8a49975606965813c49e283b3d62e52f19ece89"
   ],
   [
    "hadron_run_action",
-   "05e11b4f3e369f122395c39169cd095bd4149b34b1d49969e6f7ea9133424da6"
+   "a7f1672547bdfa0b541d084f7066619139d6e7008cb8d6fa82116c3b1542716b"
   ],
   [
    "hadron_get_run",
-   "90839b966d5a8d76525af221aba1100384a9f9d53d35aa17ab421c9057176446"
+   "6a8a4c87dda244263bf829ddefbc43aa876a843af3a4ddd347d51f6fb10ec752"
   ],
   [
    "hadron_run_task",
-   "e61639487d20384afcc4f401faf820abfb4b56fcb58fe295f4ed2673413aaba8"
+   "768db08edcf098052ec087305a9723a847197f546f606453187556bf716b8ccc"
   ],
   [
    "hadron_start_session",
-   "a2fc544a84eb79c46d18a063db2d86504a4cf2f27257f78ce4cc57cbc3987e5c"
+   "9be56af6ffe194c7417ac5a40f521f98fbf327749e83b40f3e577f1afd7b550c"
   ],
   [
    "hadron_end_session",
-   "b2423e09cbc3133dd3b8d9fc7527c4b9c624e18cedd9fa92ec4a8b23bfaf9eb5"
+   "b8a60367bc9c9154af0b3b0e162b7d64d30399d23fe6fde4d48e5bb1a33a2854"
   ],
   [
    "hadron_whoami",
-   "1b99d201fcb2311abaf356e718cb61f13811d9fa61703f89482a785b71b2d822"
+   "85d9bdd1b4dbbd3ec61ced9aae45839eb83749af976074b247d86167be339b65"
   ],
   [
    "hadron_validate",
-   "f6d0a7c1db3770cdad69a73a213f514add5da8dec18e1f683ba7e7399978e283"
+   "b803dbc53a7f54e6a654c9e0ff4737e0f4791e3be5b015c8c4804f96d184d09f"
   ],
   [
    "hadron_sync_graph",
-   "7e447781abbf309a9f141ef68b795ca95814ed043f8b1f660037e6243cc85e1e"
+   "fe7167c39b2c6eca42a85e77f48b7c79edd9b6f988495d1e3791e5a9d8eaf1b3"
   ]
  ],
  "userWithApp": [
   [
    "hadron_search",
-   "bb34f2033f75faa8ba1970688919851154865b288a2824d195a6615fa46094cf"
+   "205b7a95391fdd2326191f3862b68d89009f65ad95a2e4e9d1b8ceff12a29dc1"
   ],
   [
    "hadron_list_memories",
-   "2fff9275e05c37bb6ae314a6717882291e59e2f85ab9cfdacbeaaedbdd2d1d15"
+   "2b9b61503c3836a764effed8555025b374f9b3ed2ab9bd2b2aa0aae1aef1583f"
   ],
   [
    "hadron_set_active_memory",
-   "fd7888b0b6fcfdc974e4de68d8fd998ea2f7618181f95e9faf39088b2828bccd"
+   "062d85f1b2cb615a4b7bd32ebd1ea89dcf12ee51c3088c98ec12a9764f680887"
   ],
   [
    "hadron_create_memory",
-   "6a6dbcc360d0abc1b9526ca38e9c2fa094def0a0fbc6e0ac114bd88a250ff7be"
+   "54655c64526a819659f17dc44e1c2c03113a337bef559d839ae1e1f35d271a20"
   ],
   [
    "hadron_create_app_memory",
-   "58a107410592b0f41aedc4d9a81c40c17c42f3cd39e481262cb7f0ea08b6922c"
+   "d70d850f23fee443f3768ac96d7c4df4014f9588ef411240450a844981fb2441"
   ],
   [
    "hadron_record_content_validation",
-   "e108e0ca3d45332cb0517eec6ea1613d6150dab9d05d6134705e8cad3da6b8fd"
+   "58877008f70509057b3c4188281052e163a13d882565cbc4c6bbfee3a40349a6"
   ],
   [
    "hadron_server_info",
-   "bcea769d284f7a695aa0d8c04c83812b61dfd0c583cd917cd9a8e799dfc90485"
+   "5c1af043ce931126e95fc5e61f06f90eb9eaf90a29e5ea95907b8ba1faf749dd"
   ],
   [
    "hadron_list_apps",
-   "e0ec37e561ba103452711affded975e430389ab1ad04a045ae3a2acf6ed20e45"
+   "ef50f29d21e0a08cd80c2d0940074c285e2c8ba5a73f636f8b4a6462840fa983"
   ],
   [
    "hadron_set_active_app",
-   "9363b7b29b3a0531a4e7792f6de6416f19d653feb49db6946c4ac2e159d84148"
+   "1f0f53f745dd4c721cb89aa4c068c8548772c3021f0d4af914a832dd3a3f71f5"
   ],
   [
    "hadron_set_active_org",
-   "56bf4018c803580a1e0927bb9755b5c57e62c3736b356b656c76455f4cfe4de8"
+   "9326e6116ecc662d1582cc267d0d88337af37251919017bea4fe3bc4872c16c6"
   ],
   [
    "hadron_list_comments",
-   "28af9f4a8f8ecdb64445bf1613c4ac10cab907b74bba305bd718d294abffdcdd"
+   "8c5434c7a51a90e14433fb37db85ba4c8e7d79d2c8724eb83f9fbaa70f18dc62"
   ],
   [
    "hadron_get_comment",
-   "25e308dcf682a48457dc659ee3dfe3fe7a6b01e846b830c30412e4d4313182d8"
+   "53153cac245f336db0f39433bf2632a9b40d1fd5b1f399e68c0725bbbd53af0a"
   ],
   [
    "hadron_create_comment",
-   "71768b52b6bf935316b8848eb7fca67f4d2e94679d19f8d8c85171dedbcafb35"
+   "ffe6efdf102a3cdeb7487fc81fc4a88a5a0cf1f5692d878309c9e3b2568d3263"
   ],
   [
    "hadron_reply_to_comment",
-   "98e3816017c45ea4e91058ac6b8487c23e5c39370356bdd1cacd038c42927b91"
+   "aa10ba5677b89eca568cb124c6c3c161209c2ef4cff914540eb1bb6188db1887"
   ],
   [
    "hadron_edit_comment",
-   "6f7e201f8a78f0fde687e876de9102e3f4fd66114badcd09a148d1bb9684ad33"
+   "5a4cb52e917b018571e7df0d62ff666736a2e94a2172695310a8e76f9536c8df"
   ],
   [
    "hadron_delete_comment",
-   "655178a0f704c1e4a5e24f01b4ae75b5cd9c0a0daea79d11f6b454efae8a39a9"
+   "dbc1d9209b48d278277299bbe4b880011ab78d2eeeba8e8668e3b747306307f6"
   ],
   [
    "hadron_resolve_comment_thread",
-   "62292481e886643729196af51d50454c967168f13d0202cb53f57614bf10f873"
+   "37333f763c86d4fb2f05702a8ba2241f27f065703225a0bd3454b76b07597036"
   ],
   [
    "hadron_reopen_comment_thread",
-   "9ae33556abc21a2755a2db6d1a37a8c4ae4fc8c41bf81c969b8a75c4ec220bc2"
+   "4377cfabdd6bad8e7e0403e65b1d0d1728cc779b7fb1cddf6c03e6255ff8b6f0"
   ],
   [
    "hadron_set_asset_public_link",
-   "4d757107b6dc076a32a4c18662460ec10442a370851a15746939e3a4f60c823a"
+   "9ea3f3b840cbc88d16235c9c800062cc71a422ddf26db0e4f0922245d72dfbcc"
   ],
   [
    "hadron_set_automation_read_grant",
-   "794d5db028b3d28a3df7fba57826f974460b0544e7e9e29d418468a3200a3380"
+   "4e56ded49744b141b68f81f5b51f0a523d48e69933c3b82cec519888b027bffe"
   ],
   [
    "hadron_revoke_automation_read_grant",
-   "5c1b1f995ed9efdee856629261f40ed7de0c5b005fa5b0b57a38ede3ba35dc71"
+   "f0f1f7fa222acfa1d1bd2dd71f0d5258b782d1141b3bda8e1904a0fa0e488b0c"
   ],
   [
    "hadron_list_automation_read_grants",
-   "04b5644fd8c70c19bc3b6cbbcd37cee4cdec0d09713fce92cc70e05e73064833"
+   "31b4a8aaf636508f146889bb719aa50a010884105ff4e6d1ff7941b5b6f9e372"
   ],
   [
    "hadron_set_automation_team_snapshot_grant",
-   "7b5798b4a22b35d3f8938e1b8fa02ddd5a65087e962d3bc73465033b3dc18b13"
+   "ae22bb7386d95e3f7534c8a957f9f86419bbdfe9483468766388b09e3e238678"
   ],
   [
    "hadron_revoke_automation_team_snapshot_grant",
-   "bd0f6c4ce104c2f89722b0077dac0ad2c1ea39dfee33bcc959ee512a2208b8bb"
+   "4eb50bb7ecc781ca6a0afdffa436849f2a532a67809a01cb3cc070f9a339c074"
   ],
   [
    "hadron_get_automation_team_snapshot_grant",
-   "a1623ef318bd8db702bbb9e68477d11301c2a4b626b280a6dc7128a82e278f10"
+   "0117eb505fbf67cc2e793a078662e69f3aba11431c3de482702305cf657709d4"
   ],
   [
    "hadron_list_automation_team_snapshot_grants",
-   "2f2c709f30a5d3dd5c3cb09dd7d7f8df72b81f4cc474afc34505a9df4335b6a1"
+   "853a24bb1c1b33311235a81404c5934ce80334e3bc4da9e81be2ece5609bbea6"
   ],
   [
    "hadron_web_poll_list",
-   "5cf9446377a7f32573d710d64f95f6cdac8b4853a887f02d3f2bb13923738655"
+   "f592321e2b4618ea6863d9d6709a3e0c3844b3b957657a252dee36dadebbd971"
   ],
   [
    "hadron_web_poll_cancel",
-   "3db72c050879a9f76722bb50920a98ae381d88fc4943eac02260251180041fe4"
+   "ff31039308719d1a6020c4223e15245fb79e9612f8dbaf71a4a6f2d1b310534e"
   ],
   [
    "hadron_list_secrets",
-   "eb656e5feb4dc502a7f168716f660f165000d78c75c135fabe4cda1addb4f405"
+   "69c12833689ba415dffc29b82f9c2a100706ac75a96a7782c158c330a0064e01"
   ],
   [
    "hadron_get_secret",
-   "b340a5e35da4dd543d4caba796cedd6e318f95cb6b9ddff26c2676d81cd5d8f8"
+   "dabd11c8d7cef3ae22d85cba9f75fe24abb2bb615e2923dfe2287d2476d3b4b0"
   ],
   [
    "hadron_preview_automation",
-   "23706da4ebb3d62b5f4d97d6203d0c7bb0085180ccd2bac4d3875858169b02d8"
+   "0c98ed673e3bc4911fc54084cef26eb50b8b7ba91c9c74e825fae7eef9258ba5"
   ],
   [
    "hadron_re_adopt_automation",
-   "8e1d258a5d7ea0d1a3d7991fe30011165fa27db1db8938a0e981aa6048801f20"
+   "588c22dd14f62b622aa90852aec37bb9dab9089931eafed42ce9fa07ee8eca1c"
   ],
   [
    "hadron_agent_tasks",
-   "ff505d4c18614f0f4ab4671b3e88a523a2d61b4c346974edf16c82c91db4254b"
+   "34cc66b8e9c39a9670009d1e6811e0a731ce833f0467b677f57433028b443557"
   ],
   [
    "hadron_agent_processes",
-   "1135780aa004373f12e03cc4ad9ff293423d286535c69fef8c4c8ec9a5e317ab"
+   "2bd151f8e4af2065bc8116ebad7128e484180e7fa656bcff56c401e7f5f196aa"
   ],
   [
    "hadron_agent_boot_prompt",
-   "5b8e46d793de1fa79c7764100ba4ff06154912c9b7de98104ab06223bf146989"
+   "f77dbf6248a1b3354099bbb1eda94864108241d8568b1aa18f39686f05d7c156"
   ],
   [
    "hadron_agent_set_base",
-   "a97224c6ebfc1923edbdc5a675c36fa5047d397718f3d9ba18ef20185ce9c0dd"
+   "8576ccd191f6d984406a333e5077cf8f999b5efcce24f1abbae6ab45939d229f"
   ],
   [
    "hadron_agent_set_index_refs",
-   "02e38d0804bcebbdf6bc0e2b183f25b021aa090220b76b96ba51c72aa843839a"
+   "d563f41970020b964f9b61aaa8de9fae7c73aed209c0318a810f03e41eaaedb9"
   ],
   [
    "hadron_list_recovery_nodes",
-   "5a72ea6b01866b186efe19a8b3d2afb9ca50aec3a3097c762afa08246e0d2737"
+   "1d485e086d9d96c3e8be796df9f9b3f9fe7943ec27e546681b14aab2de26308b"
   ],
   [
    "hadron_list_recovery_edges",
-   "af4b37458d32923fe5cc496423afcd25b0025042cada4771bd29c16909118e45"
+   "4e0537a4440638ecb831a47499cf4a62a7e5c9763eca64d3ba462c5feebfc33f"
   ],
   [
    "hadron_get_recovery_node",
-   "683fc1ee64374ec7a0b1f88e51efa6cc20c28fa7895f09a6ef35ff863d421dff"
+   "01eb35b7caa7fa8bba19fbb1a2f44486a7acd12d64a284887751c54e44d7b3e9"
   ],
   [
    "hadron_restore_node",
-   "79d2e72010363b92d5e53694b113d66de591e17e9632a1e6973b541f700bd64a"
+   "9d314c62deb96d14891065fc61fbe378712f7146b967288e409ab4b2d31c515f"
   ],
   [
    "hadron_list_scopes",
-   "33bb3114967c2d3ccd667e93d71a21a30c4db2d456246b50321933c8c049d3de"
+   "cc3e3c34050cbd5b611d5c7d90272c754e1475e26404166d3ab11e6c784b7b9e"
   ],
   [
    "hadron_create_scope",
-   "394fbfd49c90c494e3d8107340dacd9320e9cfcd2fbc500eabc4ed90a338bd35"
+   "772284b2091cb24a981de2f08597dc6c90b72af48f3f48b728c34b13566693c5"
   ],
   [
    "hadron_update_scope",
-   "831b636f8a330ec1ff158c377b7a7dfd7f3123756aa45583de6723a39bd39961"
+   "9227aed4d95b3688192f5c8ebee1e6aae64ceec0ab04fce5898b63bce0e0cdaf"
   ],
   [
    "hadron_delete_scope",
-   "d3523522f327d182effc3a930d75cec9f753b882709567515abfb36470d56a63"
+   "aabdb599dec1c5cde2e8fd401c6a419e1bc3485b4b3b855b645d112fc15d5925"
   ],
   [
    "hadron_scope_explain",
-   "90f2749a4368668ff263b980d566ad56d9027227448e33cfd8f80e873427323c"
+   "23f48552756531803b731518be164132b9d298203510bf975f55e0f3536d0226"
   ],
   [
    "hadron_set_active_scope",
-   "4ef0344bbb9af85cf2b750f27955df3ea196583410a8b6e652607e1fd802d3ef"
+   "a9d30a72a99e802acf215298401626a284cc492287be8ca991ff54423911b88d"
   ],
   [
    "hadron_create_parent_node",
-   "e1032c1ed971905063a5d154a0b593e1cb412a78cd63b3b3badbf06b3c9f6369"
+   "d1cbe2c7112a305373ad77e8a7923f83c5adffeeb74bc2839e1eb2b010fffa00"
   ],
   [
    "hadron_find_nodes",
-   "6a1b5ee18d69b8e5b58c61e631a79c2cefc4964b8a74fefbbf7129f54074f09d"
+   "77499516714df668acd7cb1ebf489455b4fb5253b87f2198cde2b27ef5e9584b"
   ],
   [
    "hadron_get_node",
-   "eae599c71cc9dc1d61d00a002482574b76fe1ee4c555bad57b37688676562d4a"
+   "198cc26fddae93bf9126edec940aecd5678e6641ff7154107e895d95be98847a"
   ],
   [
    "hadron_get_nodes",
-   "75c791760d8f93174c046f355b7477c074b3890455954f4c140967fb66a624f6"
+   "3a18dc41764a33b1c5b8b2fec95011b7935b12d5020f220f0c4cf9bd3a807a58"
   ],
   [
    "hadron_get_next_node",
-   "46c8587079f1efb9da1d966e7d9e18fa78517c2f61f170badccb7682a66d5868"
+   "89037ef714066af04b4a867ca514d2b56f3e471a471f19c4cc5e4e3c8ddbb778"
   ],
   [
    "hadron_list_nodes",
-   "ddaf683fc66fb845be1b3975f575a506abe755b5f0241edd7507b4a50d63bf33"
+   "91892b42a3064716754197ec369d1a06c44d27f75cf33251e602161b346689fc"
   ],
   [
    "hadron_unlock_memory",
-   "b716e62c870d03db1e6363481ddb98f99cc6025ba0ec2b9b00b60a0b2663d934"
+   "d2e25b17ea202083a5b6d9d5e19da2bcda247421181695443215fe1bdd9568c5"
   ],
   [
    "hadron_lock_memory",
-   "1de56bb2f71d8b27589ccee67cf22ba131860589f1685d5a58ee2b47e1191441"
+   "04ede4b16bec6d5af0dfa619235fad0480d343e42db7337f538b42a5b6bbfc06"
   ],
   [
    "hadron_create_node",
-   "64beeb71c042d4712f35546308642d7c3c8076431716494b0d1c17adef87dd78"
+   "bef0d430408f57978aa6e7dff9d597a285b2908035af7901116ceacf14da434e"
   ],
   [
    "hadron_update_node",
-   "b2e282bd01d801b5a9362250b228f661af165feb333fba6b853de7200f3c2c67"
+   "e7c91cb617d8a8ed5898feac12f4fe6709532a3793f30b6a9e6eb2b63d32f310"
   ],
   [
    "hadron_create_task",
-   "61d5948643acd17b4ec25b3bd0b0ed1039a24d251d7a4a4326871e44bc310a68"
+   "5bfd76216ac408f39ffc820f3e7308fc4b2ccf46d3ae752b1d115c8d22234a8a"
   ],
   [
    "hadron_update_task",
-   "8e87664e94ad0b072fdc09dbf55c2ff86f09f6eda0abe7a34f60d89da2cb6948"
+   "f6e4da1ee96d7a298c896e6fafdd8af5165f769cc0df61cc5b9fe8b987e6389a"
   ],
   [
    "hadron_create_review",
-   "54879a05e42f96f295f22208a4b2aa324dcd30ffb8b2f04391eeac623f22cd35"
+   "0a91d82172f9ccb23518f5aef2ebdb40a694225b13920eaf8a06895543977913"
   ],
   [
    "hadron_update_review",
-   "8c35cddc3c87106fdaf8adcb134889f9080334bef76df6b9f87e5f433d9f0fd0"
+   "b6f08df15baf3e9d3bace314d966d352a366d28c1bedb366b86639da6134cfdf"
   ],
   [
    "hadron_update_node_data",
-   "73b43958302f63f877189815776e280c6a86b8e32554cf3b719ad06f780e9166"
+   "f8ca24c4ae36e82aae979f1a60fab255457525af48a9f5f702c20dbe258f0775"
   ],
   [
    "hadron_create_object",
-   "2b62b7293e2fe1f8c47bcc515c33a07e147bb024b4d250c367072ad40c3f762e"
+   "cecaa6cf05add4b72373f1a7cca8bc6073abc33851450607997e22905dfcda29"
   ],
   [
    "hadron_get_object",
-   "c033fb1d52ff5bfee0461774841e7f2cff1386c97e51b807d69462de11ef48f1"
+   "cfbfc13d227b36419c7d2200c6b4bc7dadeda7292f6d6ef37780a104edeefe5a"
   ],
   [
    "hadron_update_object",
-   "72a566ce453746eef2e22b6c1e2ab38f40ec78e46e215f4373061cc71bca92d7"
+   "f23798cc70c3bed642e09f7f892e93d7cb08be08bf9999f1bde0e42b5ad7b2f0"
   ],
   [
    "hadron_delete_object",
-   "4cea0285c3dc782a2414ac4960d5d9c71191a7b468d0eee2afa12b5db9b02bb1"
+   "2f86100b42a1fb713d71d83221952faed9a3f1f82abadd4d74bf116a6ac8286a"
   ],
   [
    "hadron_find_objects",
-   "d852bae4301d5d14d71c42f8f4fa065b85fb39051c0796afc102e19ece0f60e8"
+   "93ab1892209c3e2843095021077bf443fe2030639517bd124aa6793db2c23afa"
   ],
   [
    "hadron_replace_text",
-   "b8e7f8dfaec950018cb0f77d7256ef04bd3086139462a99520b378387d9f47c3"
+   "eba737545739f6882e10b3051623705be897f08d76387f40a4ff04253f387ed2"
   ],
   [
    "hadron_create_edge",
-   "dcacf79ae8a331ef1f5de41777613c4f81877a558c22bf4f7085450e13541a4f"
+   "605fe9447aa4dd8a355c2d228bc4485f2e77d37694e7b86c9e5a9560aeab6d36"
   ],
   [
    "hadron_update_edge",
-   "1167204ee92499b6805cec66f9fb575fc16fb699ad8c08174e730a1669c77b18"
+   "5185f282467919b21e1fca6ab05bb1900af02b1653de23abae9892cfe2afe25e"
   ],
   [
    "hadron_delete_edge",
-   "812e33f54907fbe86e695ab7013b7e0eb931b73aacd4f87a908db2b6c1eba7b2"
+   "0505511dea4c994a58860e6b204dceafbb9c0f514023a27a88266a3aa0417e99"
   ],
   [
    "hadron_delete_node",
-   "5813ebba270720a69861411c4aff418a632bae5c3dfd71b0d28772f96c05da79"
+   "98c2809b52640f59f72a49b86eff1295222e5b1fe238f48b0c7c809a5868de2e"
   ],
   [
    "hadron_move_node",
-   "0d1e75c4b47118eabaa0418761edbb9add2ceeddda91e6a383ca394fad6c34dc"
+   "f35cde7d04cfd7f745ab4df6e8a49975606965813c49e283b3d62e52f19ece89"
   ],
   [
    "hadron_run_action",
-   "05e11b4f3e369f122395c39169cd095bd4149b34b1d49969e6f7ea9133424da6"
+   "a7f1672547bdfa0b541d084f7066619139d6e7008cb8d6fa82116c3b1542716b"
   ],
   [
    "hadron_get_run",
-   "90839b966d5a8d76525af221aba1100384a9f9d53d35aa17ab421c9057176446"
+   "6a8a4c87dda244263bf829ddefbc43aa876a843af3a4ddd347d51f6fb10ec752"
   ],
   [
    "hadron_run_task",
-   "e61639487d20384afcc4f401faf820abfb4b56fcb58fe295f4ed2673413aaba8"
+   "768db08edcf098052ec087305a9723a847197f546f606453187556bf716b8ccc"
   ],
   [
    "hadron_start_session",
-   "a2fc544a84eb79c46d18a063db2d86504a4cf2f27257f78ce4cc57cbc3987e5c"
+   "9be56af6ffe194c7417ac5a40f521f98fbf327749e83b40f3e577f1afd7b550c"
   ],
   [
    "hadron_end_session",
-   "b2423e09cbc3133dd3b8d9fc7527c4b9c624e18cedd9fa92ec4a8b23bfaf9eb5"
+   "b8a60367bc9c9154af0b3b0e162b7d64d30399d23fe6fde4d48e5bb1a33a2854"
   ],
   [
    "hadron_whoami",
-   "1b99d201fcb2311abaf356e718cb61f13811d9fa61703f89482a785b71b2d822"
+   "85d9bdd1b4dbbd3ec61ced9aae45839eb83749af976074b247d86167be339b65"
   ],
   [
    "hadron_validate",
-   "f6d0a7c1db3770cdad69a73a213f514add5da8dec18e1f683ba7e7399978e283"
+   "b803dbc53a7f54e6a654c9e0ff4737e0f4791e3be5b015c8c4804f96d184d09f"
   ],
   [
    "hadron_sync_graph",
-   "7e447781abbf309a9f141ef68b795ca95814ed043f8b1f660037e6243cc85e1e"
+   "fe7167c39b2c6eca42a85e77f48b7c79edd9b6f988495d1e3791e5a9d8eaf1b3"
   ]
  ],
  "appKeyOnly": [
   [
    "hadron_search",
-   "bb34f2033f75faa8ba1970688919851154865b288a2824d195a6615fa46094cf"
+   "205b7a95391fdd2326191f3862b68d89009f65ad95a2e4e9d1b8ceff12a29dc1"
   ],
   [
    "hadron_list_memories",
-   "2fff9275e05c37bb6ae314a6717882291e59e2f85ab9cfdacbeaaedbdd2d1d15"
+   "2b9b61503c3836a764effed8555025b374f9b3ed2ab9bd2b2aa0aae1aef1583f"
   ],
   [
    "hadron_set_active_memory",
-   "fd7888b0b6fcfdc974e4de68d8fd998ea2f7618181f95e9faf39088b2828bccd"
+   "062d85f1b2cb615a4b7bd32ebd1ea89dcf12ee51c3088c98ec12a9764f680887"
   ],
   [
    "hadron_create_memory",
-   "6a6dbcc360d0abc1b9526ca38e9c2fa094def0a0fbc6e0ac114bd88a250ff7be"
+   "54655c64526a819659f17dc44e1c2c03113a337bef559d839ae1e1f35d271a20"
   ],
   [
    "hadron_create_app_memory",
-   "58a107410592b0f41aedc4d9a81c40c17c42f3cd39e481262cb7f0ea08b6922c"
+   "d70d850f23fee443f3768ac96d7c4df4014f9588ef411240450a844981fb2441"
   ],
   [
    "hadron_record_content_validation",
-   "e108e0ca3d45332cb0517eec6ea1613d6150dab9d05d6134705e8cad3da6b8fd"
+   "58877008f70509057b3c4188281052e163a13d882565cbc4c6bbfee3a40349a6"
   ],
   [
    "hadron_server_info",
-   "bcea769d284f7a695aa0d8c04c83812b61dfd0c583cd917cd9a8e799dfc90485"
+   "5c1af043ce931126e95fc5e61f06f90eb9eaf90a29e5ea95907b8ba1faf749dd"
   ],
   [
    "hadron_list_apps",
-   "e0ec37e561ba103452711affded975e430389ab1ad04a045ae3a2acf6ed20e45"
+   "ef50f29d21e0a08cd80c2d0940074c285e2c8ba5a73f636f8b4a6462840fa983"
   ],
   [
    "hadron_set_active_app",
-   "9363b7b29b3a0531a4e7792f6de6416f19d653feb49db6946c4ac2e159d84148"
+   "1f0f53f745dd4c721cb89aa4c068c8548772c3021f0d4af914a832dd3a3f71f5"
   ],
   [
    "hadron_set_active_org",
-   "56bf4018c803580a1e0927bb9755b5c57e62c3736b356b656c76455f4cfe4de8"
+   "9326e6116ecc662d1582cc267d0d88337af37251919017bea4fe3bc4872c16c6"
   ],
   [
    "hadron_list_comments",
-   "28af9f4a8f8ecdb64445bf1613c4ac10cab907b74bba305bd718d294abffdcdd"
+   "8c5434c7a51a90e14433fb37db85ba4c8e7d79d2c8724eb83f9fbaa70f18dc62"
   ],
   [
    "hadron_get_comment",
-   "25e308dcf682a48457dc659ee3dfe3fe7a6b01e846b830c30412e4d4313182d8"
+   "53153cac245f336db0f39433bf2632a9b40d1fd5b1f399e68c0725bbbd53af0a"
   ],
   [
    "hadron_create_comment",
-   "71768b52b6bf935316b8848eb7fca67f4d2e94679d19f8d8c85171dedbcafb35"
+   "ffe6efdf102a3cdeb7487fc81fc4a88a5a0cf1f5692d878309c9e3b2568d3263"
   ],
   [
    "hadron_reply_to_comment",
-   "98e3816017c45ea4e91058ac6b8487c23e5c39370356bdd1cacd038c42927b91"
+   "aa10ba5677b89eca568cb124c6c3c161209c2ef4cff914540eb1bb6188db1887"
   ],
   [
    "hadron_edit_comment",
-   "6f7e201f8a78f0fde687e876de9102e3f4fd66114badcd09a148d1bb9684ad33"
+   "5a4cb52e917b018571e7df0d62ff666736a2e94a2172695310a8e76f9536c8df"
   ],
   [
    "hadron_delete_comment",
-   "655178a0f704c1e4a5e24f01b4ae75b5cd9c0a0daea79d11f6b454efae8a39a9"
+   "dbc1d9209b48d278277299bbe4b880011ab78d2eeeba8e8668e3b747306307f6"
   ],
   [
    "hadron_resolve_comment_thread",
-   "62292481e886643729196af51d50454c967168f13d0202cb53f57614bf10f873"
+   "37333f763c86d4fb2f05702a8ba2241f27f065703225a0bd3454b76b07597036"
   ],
   [
    "hadron_reopen_comment_thread",
-   "9ae33556abc21a2755a2db6d1a37a8c4ae4fc8c41bf81c969b8a75c4ec220bc2"
+   "4377cfabdd6bad8e7e0403e65b1d0d1728cc779b7fb1cddf6c03e6255ff8b6f0"
   ],
   [
    "hadron_set_asset_public_link",
-   "4d757107b6dc076a32a4c18662460ec10442a370851a15746939e3a4f60c823a"
+   "9ea3f3b840cbc88d16235c9c800062cc71a422ddf26db0e4f0922245d72dfbcc"
   ],
   [
    "hadron_set_automation_read_grant",
-   "794d5db028b3d28a3df7fba57826f974460b0544e7e9e29d418468a3200a3380"
+   "4e56ded49744b141b68f81f5b51f0a523d48e69933c3b82cec519888b027bffe"
   ],
   [
    "hadron_revoke_automation_read_grant",
-   "5c1b1f995ed9efdee856629261f40ed7de0c5b005fa5b0b57a38ede3ba35dc71"
+   "f0f1f7fa222acfa1d1bd2dd71f0d5258b782d1141b3bda8e1904a0fa0e488b0c"
   ],
   [
    "hadron_list_automation_read_grants",
-   "04b5644fd8c70c19bc3b6cbbcd37cee4cdec0d09713fce92cc70e05e73064833"
+   "31b4a8aaf636508f146889bb719aa50a010884105ff4e6d1ff7941b5b6f9e372"
   ],
   [
    "hadron_set_automation_team_snapshot_grant",
-   "7b5798b4a22b35d3f8938e1b8fa02ddd5a65087e962d3bc73465033b3dc18b13"
+   "ae22bb7386d95e3f7534c8a957f9f86419bbdfe9483468766388b09e3e238678"
   ],
   [
    "hadron_revoke_automation_team_snapshot_grant",
-   "bd0f6c4ce104c2f89722b0077dac0ad2c1ea39dfee33bcc959ee512a2208b8bb"
+   "4eb50bb7ecc781ca6a0afdffa436849f2a532a67809a01cb3cc070f9a339c074"
   ],
   [
    "hadron_get_automation_team_snapshot_grant",
-   "a1623ef318bd8db702bbb9e68477d11301c2a4b626b280a6dc7128a82e278f10"
+   "0117eb505fbf67cc2e793a078662e69f3aba11431c3de482702305cf657709d4"
   ],
   [
    "hadron_list_automation_team_snapshot_grants",
-   "2f2c709f30a5d3dd5c3cb09dd7d7f8df72b81f4cc474afc34505a9df4335b6a1"
+   "853a24bb1c1b33311235a81404c5934ce80334e3bc4da9e81be2ece5609bbea6"
   ],
   [
    "hadron_web_poll_list",
-   "5cf9446377a7f32573d710d64f95f6cdac8b4853a887f02d3f2bb13923738655"
+   "f592321e2b4618ea6863d9d6709a3e0c3844b3b957657a252dee36dadebbd971"
   ],
   [
    "hadron_web_poll_cancel",
-   "3db72c050879a9f76722bb50920a98ae381d88fc4943eac02260251180041fe4"
+   "ff31039308719d1a6020c4223e15245fb79e9612f8dbaf71a4a6f2d1b310534e"
   ],
   [
    "hadron_list_secrets",
-   "eb656e5feb4dc502a7f168716f660f165000d78c75c135fabe4cda1addb4f405"
+   "69c12833689ba415dffc29b82f9c2a100706ac75a96a7782c158c330a0064e01"
   ],
   [
    "hadron_get_secret",
-   "b340a5e35da4dd543d4caba796cedd6e318f95cb6b9ddff26c2676d81cd5d8f8"
+   "dabd11c8d7cef3ae22d85cba9f75fe24abb2bb615e2923dfe2287d2476d3b4b0"
   ],
   [
    "hadron_preview_automation",
-   "23706da4ebb3d62b5f4d97d6203d0c7bb0085180ccd2bac4d3875858169b02d8"
+   "0c98ed673e3bc4911fc54084cef26eb50b8b7ba91c9c74e825fae7eef9258ba5"
   ],
   [
    "hadron_re_adopt_automation",
-   "8e1d258a5d7ea0d1a3d7991fe30011165fa27db1db8938a0e981aa6048801f20"
+   "588c22dd14f62b622aa90852aec37bb9dab9089931eafed42ce9fa07ee8eca1c"
   ],
   [
    "hadron_agent_tasks",
-   "ff505d4c18614f0f4ab4671b3e88a523a2d61b4c346974edf16c82c91db4254b"
+   "34cc66b8e9c39a9670009d1e6811e0a731ce833f0467b677f57433028b443557"
   ],
   [
    "hadron_agent_processes",
-   "1135780aa004373f12e03cc4ad9ff293423d286535c69fef8c4c8ec9a5e317ab"
+   "2bd151f8e4af2065bc8116ebad7128e484180e7fa656bcff56c401e7f5f196aa"
   ],
   [
    "hadron_agent_boot_prompt",
-   "5b8e46d793de1fa79c7764100ba4ff06154912c9b7de98104ab06223bf146989"
+   "f77dbf6248a1b3354099bbb1eda94864108241d8568b1aa18f39686f05d7c156"
   ],
   [
    "hadron_agent_set_base",
-   "a97224c6ebfc1923edbdc5a675c36fa5047d397718f3d9ba18ef20185ce9c0dd"
+   "8576ccd191f6d984406a333e5077cf8f999b5efcce24f1abbae6ab45939d229f"
   ],
   [
    "hadron_agent_set_index_refs",
-   "02e38d0804bcebbdf6bc0e2b183f25b021aa090220b76b96ba51c72aa843839a"
+   "d563f41970020b964f9b61aaa8de9fae7c73aed209c0318a810f03e41eaaedb9"
   ],
   [
    "hadron_list_recovery_nodes",
-   "5a72ea6b01866b186efe19a8b3d2afb9ca50aec3a3097c762afa08246e0d2737"
+   "1d485e086d9d96c3e8be796df9f9b3f9fe7943ec27e546681b14aab2de26308b"
   ],
   [
    "hadron_list_recovery_edges",
-   "af4b37458d32923fe5cc496423afcd25b0025042cada4771bd29c16909118e45"
+   "4e0537a4440638ecb831a47499cf4a62a7e5c9763eca64d3ba462c5feebfc33f"
   ],
   [
    "hadron_get_recovery_node",
-   "683fc1ee64374ec7a0b1f88e51efa6cc20c28fa7895f09a6ef35ff863d421dff"
+   "01eb35b7caa7fa8bba19fbb1a2f44486a7acd12d64a284887751c54e44d7b3e9"
   ],
   [
    "hadron_restore_node",
-   "79d2e72010363b92d5e53694b113d66de591e17e9632a1e6973b541f700bd64a"
+   "9d314c62deb96d14891065fc61fbe378712f7146b967288e409ab4b2d31c515f"
   ],
   [
    "hadron_list_scopes",
-   "33bb3114967c2d3ccd667e93d71a21a30c4db2d456246b50321933c8c049d3de"
+   "cc3e3c34050cbd5b611d5c7d90272c754e1475e26404166d3ab11e6c784b7b9e"
   ],
   [
    "hadron_create_scope",
-   "394fbfd49c90c494e3d8107340dacd9320e9cfcd2fbc500eabc4ed90a338bd35"
+   "772284b2091cb24a981de2f08597dc6c90b72af48f3f48b728c34b13566693c5"
   ],
   [
    "hadron_update_scope",
-   "831b636f8a330ec1ff158c377b7a7dfd7f3123756aa45583de6723a39bd39961"
+   "9227aed4d95b3688192f5c8ebee1e6aae64ceec0ab04fce5898b63bce0e0cdaf"
   ],
   [
    "hadron_delete_scope",
-   "d3523522f327d182effc3a930d75cec9f753b882709567515abfb36470d56a63"
+   "aabdb599dec1c5cde2e8fd401c6a419e1bc3485b4b3b855b645d112fc15d5925"
   ],
   [
    "hadron_scope_explain",
-   "90f2749a4368668ff263b980d566ad56d9027227448e33cfd8f80e873427323c"
+   "23f48552756531803b731518be164132b9d298203510bf975f55e0f3536d0226"
   ],
   [
    "hadron_set_active_scope",
-   "4ef0344bbb9af85cf2b750f27955df3ea196583410a8b6e652607e1fd802d3ef"
+   "a9d30a72a99e802acf215298401626a284cc492287be8ca991ff54423911b88d"
   ],
   [
    "hadron_create_parent_node",
-   "e1032c1ed971905063a5d154a0b593e1cb412a78cd63b3b3badbf06b3c9f6369"
+   "d1cbe2c7112a305373ad77e8a7923f83c5adffeeb74bc2839e1eb2b010fffa00"
   ],
   [
    "hadron_find_nodes",
-   "6a1b5ee18d69b8e5b58c61e631a79c2cefc4964b8a74fefbbf7129f54074f09d"
+   "77499516714df668acd7cb1ebf489455b4fb5253b87f2198cde2b27ef5e9584b"
   ],
   [
    "hadron_get_node",
-   "eae599c71cc9dc1d61d00a002482574b76fe1ee4c555bad57b37688676562d4a"
+   "198cc26fddae93bf9126edec940aecd5678e6641ff7154107e895d95be98847a"
   ],
   [
    "hadron_get_nodes",
-   "75c791760d8f93174c046f355b7477c074b3890455954f4c140967fb66a624f6"
+   "3a18dc41764a33b1c5b8b2fec95011b7935b12d5020f220f0c4cf9bd3a807a58"
   ],
   [
    "hadron_get_next_node",
-   "46c8587079f1efb9da1d966e7d9e18fa78517c2f61f170badccb7682a66d5868"
+   "89037ef714066af04b4a867ca514d2b56f3e471a471f19c4cc5e4e3c8ddbb778"
   ],
   [
    "hadron_list_nodes",
-   "ddaf683fc66fb845be1b3975f575a506abe755b5f0241edd7507b4a50d63bf33"
+   "91892b42a3064716754197ec369d1a06c44d27f75cf33251e602161b346689fc"
   ],
   [
    "hadron_unlock_memory",
-   "b716e62c870d03db1e6363481ddb98f99cc6025ba0ec2b9b00b60a0b2663d934"
+   "d2e25b17ea202083a5b6d9d5e19da2bcda247421181695443215fe1bdd9568c5"
   ],
   [
    "hadron_lock_memory",
-   "1de56bb2f71d8b27589ccee67cf22ba131860589f1685d5a58ee2b47e1191441"
+   "04ede4b16bec6d5af0dfa619235fad0480d343e42db7337f538b42a5b6bbfc06"
   ],
   [
    "hadron_create_node",
-   "64beeb71c042d4712f35546308642d7c3c8076431716494b0d1c17adef87dd78"
+   "bef0d430408f57978aa6e7dff9d597a285b2908035af7901116ceacf14da434e"
   ],
   [
    "hadron_update_node",
-   "b2e282bd01d801b5a9362250b228f661af165feb333fba6b853de7200f3c2c67"
+   "e7c91cb617d8a8ed5898feac12f4fe6709532a3793f30b6a9e6eb2b63d32f310"
   ],
   [
    "hadron_create_task",
-   "61d5948643acd17b4ec25b3bd0b0ed1039a24d251d7a4a4326871e44bc310a68"
+   "5bfd76216ac408f39ffc820f3e7308fc4b2ccf46d3ae752b1d115c8d22234a8a"
   ],
   [
    "hadron_update_task",
-   "8e87664e94ad0b072fdc09dbf55c2ff86f09f6eda0abe7a34f60d89da2cb6948"
+   "f6e4da1ee96d7a298c896e6fafdd8af5165f769cc0df61cc5b9fe8b987e6389a"
   ],
   [
    "hadron_create_review",
-   "54879a05e42f96f295f22208a4b2aa324dcd30ffb8b2f04391eeac623f22cd35"
+   "0a91d82172f9ccb23518f5aef2ebdb40a694225b13920eaf8a06895543977913"
   ],
   [
    "hadron_update_review",
-   "8c35cddc3c87106fdaf8adcb134889f9080334bef76df6b9f87e5f433d9f0fd0"
+   "b6f08df15baf3e9d3bace314d966d352a366d28c1bedb366b86639da6134cfdf"
   ],
   [
    "hadron_update_node_data",
-   "73b43958302f63f877189815776e280c6a86b8e32554cf3b719ad06f780e9166"
+   "f8ca24c4ae36e82aae979f1a60fab255457525af48a9f5f702c20dbe258f0775"
   ],
   [
    "hadron_create_object",
-   "2b62b7293e2fe1f8c47bcc515c33a07e147bb024b4d250c367072ad40c3f762e"
+   "cecaa6cf05add4b72373f1a7cca8bc6073abc33851450607997e22905dfcda29"
   ],
   [
    "hadron_get_object",
-   "c033fb1d52ff5bfee0461774841e7f2cff1386c97e51b807d69462de11ef48f1"
+   "cfbfc13d227b36419c7d2200c6b4bc7dadeda7292f6d6ef37780a104edeefe5a"
   ],
   [
    "hadron_update_object",
-   "72a566ce453746eef2e22b6c1e2ab38f40ec78e46e215f4373061cc71bca92d7"
+   "f23798cc70c3bed642e09f7f892e93d7cb08be08bf9999f1bde0e42b5ad7b2f0"
   ],
   [
    "hadron_delete_object",
-   "4cea0285c3dc782a2414ac4960d5d9c71191a7b468d0eee2afa12b5db9b02bb1"
+   "2f86100b42a1fb713d71d83221952faed9a3f1f82abadd4d74bf116a6ac8286a"
   ],
   [
    "hadron_find_objects",
-   "d852bae4301d5d14d71c42f8f4fa065b85fb39051c0796afc102e19ece0f60e8"
+   "93ab1892209c3e2843095021077bf443fe2030639517bd124aa6793db2c23afa"
   ],
   [
    "hadron_replace_text",
-   "b8e7f8dfaec950018cb0f77d7256ef04bd3086139462a99520b378387d9f47c3"
+   "eba737545739f6882e10b3051623705be897f08d76387f40a4ff04253f387ed2"
   ],
   [
    "hadron_create_edge",
-   "dcacf79ae8a331ef1f5de41777613c4f81877a558c22bf4f7085450e13541a4f"
+   "605fe9447aa4dd8a355c2d228bc4485f2e77d37694e7b86c9e5a9560aeab6d36"
   ],
   [
    "hadron_update_edge",
-   "1167204ee92499b6805cec66f9fb575fc16fb699ad8c08174e730a1669c77b18"
+   "5185f282467919b21e1fca6ab05bb1900af02b1653de23abae9892cfe2afe25e"
   ],
   [
    "hadron_delete_edge",
-   "812e33f54907fbe86e695ab7013b7e0eb931b73aacd4f87a908db2b6c1eba7b2"
+   "0505511dea4c994a58860e6b204dceafbb9c0f514023a27a88266a3aa0417e99"
   ],
   [
    "hadron_delete_node",
-   "5813ebba270720a69861411c4aff418a632bae5c3dfd71b0d28772f96c05da79"
+   "98c2809b52640f59f72a49b86eff1295222e5b1fe238f48b0c7c809a5868de2e"
   ],
   [
    "hadron_move_node",
-   "0d1e75c4b47118eabaa0418761edbb9add2ceeddda91e6a383ca394fad6c34dc"
+   "f35cde7d04cfd7f745ab4df6e8a49975606965813c49e283b3d62e52f19ece89"
   ],
   [
    "hadron_run_action",
-   "05e11b4f3e369f122395c39169cd095bd4149b34b1d49969e6f7ea9133424da6"
+   "a7f1672547bdfa0b541d084f7066619139d6e7008cb8d6fa82116c3b1542716b"
   ],
   [
    "hadron_get_run",
-   "90839b966d5a8d76525af221aba1100384a9f9d53d35aa17ab421c9057176446"
+   "6a8a4c87dda244263bf829ddefbc43aa876a843af3a4ddd347d51f6fb10ec752"
   ],
   [
    "hadron_run_task",
-   "e61639487d20384afcc4f401faf820abfb4b56fcb58fe295f4ed2673413aaba8"
+   "768db08edcf098052ec087305a9723a847197f546f606453187556bf716b8ccc"
   ],
   [
    "hadron_start_session",
-   "a2fc544a84eb79c46d18a063db2d86504a4cf2f27257f78ce4cc57cbc3987e5c"
+   "9be56af6ffe194c7417ac5a40f521f98fbf327749e83b40f3e577f1afd7b550c"
   ],
   [
    "hadron_end_session",
-   "b2423e09cbc3133dd3b8d9fc7527c4b9c624e18cedd9fa92ec4a8b23bfaf9eb5"
+   "b8a60367bc9c9154af0b3b0e162b7d64d30399d23fe6fde4d48e5bb1a33a2854"
   ],
   [
    "hadron_whoami",
-   "1b99d201fcb2311abaf356e718cb61f13811d9fa61703f89482a785b71b2d822"
+   "85d9bdd1b4dbbd3ec61ced9aae45839eb83749af976074b247d86167be339b65"
   ],
   [
    "hadron_validate",
-   "f6d0a7c1db3770cdad69a73a213f514add5da8dec18e1f683ba7e7399978e283"
+   "b803dbc53a7f54e6a654c9e0ff4737e0f4791e3be5b015c8c4804f96d184d09f"
   ],
   [
    "hadron_sync_graph",
-   "7e447781abbf309a9f141ef68b795ca95814ed043f8b1f660037e6243cc85e1e"
+   "fe7167c39b2c6eca42a85e77f48b7c79edd9b6f988495d1e3791e5a9d8eaf1b3"
   ]
  ],
  "impersonation": [
   [
    "hadron_search",
-   "bb34f2033f75faa8ba1970688919851154865b288a2824d195a6615fa46094cf"
+   "205b7a95391fdd2326191f3862b68d89009f65ad95a2e4e9d1b8ceff12a29dc1"
   ],
   [
    "hadron_list_memories",
-   "2fff9275e05c37bb6ae314a6717882291e59e2f85ab9cfdacbeaaedbdd2d1d15"
+   "2b9b61503c3836a764effed8555025b374f9b3ed2ab9bd2b2aa0aae1aef1583f"
   ],
   [
    "hadron_set_active_memory",
-   "fd7888b0b6fcfdc974e4de68d8fd998ea2f7618181f95e9faf39088b2828bccd"
+   "062d85f1b2cb615a4b7bd32ebd1ea89dcf12ee51c3088c98ec12a9764f680887"
   ],
   [
    "hadron_create_memory",
-   "6a6dbcc360d0abc1b9526ca38e9c2fa094def0a0fbc6e0ac114bd88a250ff7be"
+   "54655c64526a819659f17dc44e1c2c03113a337bef559d839ae1e1f35d271a20"
   ],
   [
    "hadron_create_app_memory",
-   "58a107410592b0f41aedc4d9a81c40c17c42f3cd39e481262cb7f0ea08b6922c"
+   "d70d850f23fee443f3768ac96d7c4df4014f9588ef411240450a844981fb2441"
   ],
   [
    "hadron_record_content_validation",
-   "e108e0ca3d45332cb0517eec6ea1613d6150dab9d05d6134705e8cad3da6b8fd"
+   "58877008f70509057b3c4188281052e163a13d882565cbc4c6bbfee3a40349a6"
   ],
   [
    "hadron_server_info",
-   "bcea769d284f7a695aa0d8c04c83812b61dfd0c583cd917cd9a8e799dfc90485"
+   "5c1af043ce931126e95fc5e61f06f90eb9eaf90a29e5ea95907b8ba1faf749dd"
   ],
   [
    "hadron_list_apps",
-   "e0ec37e561ba103452711affded975e430389ab1ad04a045ae3a2acf6ed20e45"
+   "ef50f29d21e0a08cd80c2d0940074c285e2c8ba5a73f636f8b4a6462840fa983"
   ],
   [
    "hadron_set_active_app",
-   "9363b7b29b3a0531a4e7792f6de6416f19d653feb49db6946c4ac2e159d84148"
+   "1f0f53f745dd4c721cb89aa4c068c8548772c3021f0d4af914a832dd3a3f71f5"
   ],
   [
    "hadron_set_active_org",
-   "56bf4018c803580a1e0927bb9755b5c57e62c3736b356b656c76455f4cfe4de8"
+   "9326e6116ecc662d1582cc267d0d88337af37251919017bea4fe3bc4872c16c6"
   ],
   [
    "hadron_list_comments",
-   "28af9f4a8f8ecdb64445bf1613c4ac10cab907b74bba305bd718d294abffdcdd"
+   "8c5434c7a51a90e14433fb37db85ba4c8e7d79d2c8724eb83f9fbaa70f18dc62"
   ],
   [
    "hadron_get_comment",
-   "25e308dcf682a48457dc659ee3dfe3fe7a6b01e846b830c30412e4d4313182d8"
+   "53153cac245f336db0f39433bf2632a9b40d1fd5b1f399e68c0725bbbd53af0a"
   ],
   [
    "hadron_create_comment",
-   "71768b52b6bf935316b8848eb7fca67f4d2e94679d19f8d8c85171dedbcafb35"
+   "ffe6efdf102a3cdeb7487fc81fc4a88a5a0cf1f5692d878309c9e3b2568d3263"
   ],
   [
    "hadron_reply_to_comment",
-   "98e3816017c45ea4e91058ac6b8487c23e5c39370356bdd1cacd038c42927b91"
+   "aa10ba5677b89eca568cb124c6c3c161209c2ef4cff914540eb1bb6188db1887"
   ],
   [
    "hadron_edit_comment",
-   "6f7e201f8a78f0fde687e876de9102e3f4fd66114badcd09a148d1bb9684ad33"
+   "5a4cb52e917b018571e7df0d62ff666736a2e94a2172695310a8e76f9536c8df"
   ],
   [
    "hadron_delete_comment",
-   "655178a0f704c1e4a5e24f01b4ae75b5cd9c0a0daea79d11f6b454efae8a39a9"
+   "dbc1d9209b48d278277299bbe4b880011ab78d2eeeba8e8668e3b747306307f6"
   ],
   [
    "hadron_resolve_comment_thread",
-   "62292481e886643729196af51d50454c967168f13d0202cb53f57614bf10f873"
+   "37333f763c86d4fb2f05702a8ba2241f27f065703225a0bd3454b76b07597036"
   ],
   [
    "hadron_reopen_comment_thread",
-   "9ae33556abc21a2755a2db6d1a37a8c4ae4fc8c41bf81c969b8a75c4ec220bc2"
+   "4377cfabdd6bad8e7e0403e65b1d0d1728cc779b7fb1cddf6c03e6255ff8b6f0"
   ],
   [
    "hadron_set_asset_public_link",
-   "4d757107b6dc076a32a4c18662460ec10442a370851a15746939e3a4f60c823a"
+   "9ea3f3b840cbc88d16235c9c800062cc71a422ddf26db0e4f0922245d72dfbcc"
   ],
   [
    "hadron_set_automation_read_grant",
-   "794d5db028b3d28a3df7fba57826f974460b0544e7e9e29d418468a3200a3380"
+   "4e56ded49744b141b68f81f5b51f0a523d48e69933c3b82cec519888b027bffe"
   ],
   [
    "hadron_revoke_automation_read_grant",
-   "5c1b1f995ed9efdee856629261f40ed7de0c5b005fa5b0b57a38ede3ba35dc71"
+   "f0f1f7fa222acfa1d1bd2dd71f0d5258b782d1141b3bda8e1904a0fa0e488b0c"
   ],
   [
    "hadron_list_automation_read_grants",
-   "04b5644fd8c70c19bc3b6cbbcd37cee4cdec0d09713fce92cc70e05e73064833"
+   "31b4a8aaf636508f146889bb719aa50a010884105ff4e6d1ff7941b5b6f9e372"
   ],
   [
    "hadron_set_automation_team_snapshot_grant",
-   "7b5798b4a22b35d3f8938e1b8fa02ddd5a65087e962d3bc73465033b3dc18b13"
+   "ae22bb7386d95e3f7534c8a957f9f86419bbdfe9483468766388b09e3e238678"
   ],
   [
    "hadron_revoke_automation_team_snapshot_grant",
-   "bd0f6c4ce104c2f89722b0077dac0ad2c1ea39dfee33bcc959ee512a2208b8bb"
+   "4eb50bb7ecc781ca6a0afdffa436849f2a532a67809a01cb3cc070f9a339c074"
   ],
   [
    "hadron_get_automation_team_snapshot_grant",
-   "a1623ef318bd8db702bbb9e68477d11301c2a4b626b280a6dc7128a82e278f10"
+   "0117eb505fbf67cc2e793a078662e69f3aba11431c3de482702305cf657709d4"
   ],
   [
    "hadron_list_automation_team_snapshot_grants",
-   "2f2c709f30a5d3dd5c3cb09dd7d7f8df72b81f4cc474afc34505a9df4335b6a1"
+   "853a24bb1c1b33311235a81404c5934ce80334e3bc4da9e81be2ece5609bbea6"
   ],
   [
    "hadron_web_poll_list",
-   "5cf9446377a7f32573d710d64f95f6cdac8b4853a887f02d3f2bb13923738655"
+   "f592321e2b4618ea6863d9d6709a3e0c3844b3b957657a252dee36dadebbd971"
   ],
   [
    "hadron_web_poll_cancel",
-   "3db72c050879a9f76722bb50920a98ae381d88fc4943eac02260251180041fe4"
+   "ff31039308719d1a6020c4223e15245fb79e9612f8dbaf71a4a6f2d1b310534e"
   ],
   [
    "hadron_list_secrets",
-   "eb656e5feb4dc502a7f168716f660f165000d78c75c135fabe4cda1addb4f405"
+   "69c12833689ba415dffc29b82f9c2a100706ac75a96a7782c158c330a0064e01"
   ],
   [
    "hadron_get_secret",
-   "b340a5e35da4dd543d4caba796cedd6e318f95cb6b9ddff26c2676d81cd5d8f8"
+   "dabd11c8d7cef3ae22d85cba9f75fe24abb2bb615e2923dfe2287d2476d3b4b0"
   ],
   [
    "hadron_preview_automation",
-   "23706da4ebb3d62b5f4d97d6203d0c7bb0085180ccd2bac4d3875858169b02d8"
+   "0c98ed673e3bc4911fc54084cef26eb50b8b7ba91c9c74e825fae7eef9258ba5"
   ],
   [
    "hadron_re_adopt_automation",
-   "8e1d258a5d7ea0d1a3d7991fe30011165fa27db1db8938a0e981aa6048801f20"
+   "588c22dd14f62b622aa90852aec37bb9dab9089931eafed42ce9fa07ee8eca1c"
   ],
   [
    "hadron_agent_tasks",
-   "ff505d4c18614f0f4ab4671b3e88a523a2d61b4c346974edf16c82c91db4254b"
+   "34cc66b8e9c39a9670009d1e6811e0a731ce833f0467b677f57433028b443557"
   ],
   [
    "hadron_agent_processes",
-   "1135780aa004373f12e03cc4ad9ff293423d286535c69fef8c4c8ec9a5e317ab"
+   "2bd151f8e4af2065bc8116ebad7128e484180e7fa656bcff56c401e7f5f196aa"
   ],
   [
    "hadron_agent_boot_prompt",
-   "5b8e46d793de1fa79c7764100ba4ff06154912c9b7de98104ab06223bf146989"
+   "f77dbf6248a1b3354099bbb1eda94864108241d8568b1aa18f39686f05d7c156"
   ],
   [
    "hadron_agent_set_base",
-   "a97224c6ebfc1923edbdc5a675c36fa5047d397718f3d9ba18ef20185ce9c0dd"
+   "8576ccd191f6d984406a333e5077cf8f999b5efcce24f1abbae6ab45939d229f"
   ],
   [
    "hadron_agent_set_index_refs",
-   "02e38d0804bcebbdf6bc0e2b183f25b021aa090220b76b96ba51c72aa843839a"
+   "d563f41970020b964f9b61aaa8de9fae7c73aed209c0318a810f03e41eaaedb9"
   ],
   [
    "hadron_list_recovery_nodes",
-   "5a72ea6b01866b186efe19a8b3d2afb9ca50aec3a3097c762afa08246e0d2737"
+   "1d485e086d9d96c3e8be796df9f9b3f9fe7943ec27e546681b14aab2de26308b"
   ],
   [
    "hadron_list_recovery_edges",
-   "af4b37458d32923fe5cc496423afcd25b0025042cada4771bd29c16909118e45"
+   "4e0537a4440638ecb831a47499cf4a62a7e5c9763eca64d3ba462c5feebfc33f"
   ],
   [
    "hadron_get_recovery_node",
-   "683fc1ee64374ec7a0b1f88e51efa6cc20c28fa7895f09a6ef35ff863d421dff"
+   "01eb35b7caa7fa8bba19fbb1a2f44486a7acd12d64a284887751c54e44d7b3e9"
   ],
   [
    "hadron_restore_node",
-   "79d2e72010363b92d5e53694b113d66de591e17e9632a1e6973b541f700bd64a"
+   "9d314c62deb96d14891065fc61fbe378712f7146b967288e409ab4b2d31c515f"
   ],
   [
    "hadron_list_scopes",
-   "33bb3114967c2d3ccd667e93d71a21a30c4db2d456246b50321933c8c049d3de"
+   "cc3e3c34050cbd5b611d5c7d90272c754e1475e26404166d3ab11e6c784b7b9e"
   ],
   [
    "hadron_create_scope",
-   "394fbfd49c90c494e3d8107340dacd9320e9cfcd2fbc500eabc4ed90a338bd35"
+   "772284b2091cb24a981de2f08597dc6c90b72af48f3f48b728c34b13566693c5"
   ],
   [
    "hadron_update_scope",
-   "831b636f8a330ec1ff158c377b7a7dfd7f3123756aa45583de6723a39bd39961"
+   "9227aed4d95b3688192f5c8ebee1e6aae64ceec0ab04fce5898b63bce0e0cdaf"
   ],
   [
    "hadron_delete_scope",
-   "d3523522f327d182effc3a930d75cec9f753b882709567515abfb36470d56a63"
+   "aabdb599dec1c5cde2e8fd401c6a419e1bc3485b4b3b855b645d112fc15d5925"
   ],
   [
    "hadron_scope_explain",
-   "90f2749a4368668ff263b980d566ad56d9027227448e33cfd8f80e873427323c"
+   "23f48552756531803b731518be164132b9d298203510bf975f55e0f3536d0226"
   ],
   [
    "hadron_set_active_scope",
-   "4ef0344bbb9af85cf2b750f27955df3ea196583410a8b6e652607e1fd802d3ef"
+   "a9d30a72a99e802acf215298401626a284cc492287be8ca991ff54423911b88d"
   ],
   [
    "hadron_create_parent_node",
-   "e1032c1ed971905063a5d154a0b593e1cb412a78cd63b3b3badbf06b3c9f6369"
+   "d1cbe2c7112a305373ad77e8a7923f83c5adffeeb74bc2839e1eb2b010fffa00"
   ],
   [
    "hadron_find_nodes",
-   "6a1b5ee18d69b8e5b58c61e631a79c2cefc4964b8a74fefbbf7129f54074f09d"
+   "77499516714df668acd7cb1ebf489455b4fb5253b87f2198cde2b27ef5e9584b"
   ],
   [
    "hadron_get_node",
-   "eae599c71cc9dc1d61d00a002482574b76fe1ee4c555bad57b37688676562d4a"
+   "198cc26fddae93bf9126edec940aecd5678e6641ff7154107e895d95be98847a"
   ],
   [
    "hadron_get_nodes",
-   "75c791760d8f93174c046f355b7477c074b3890455954f4c140967fb66a624f6"
+   "3a18dc41764a33b1c5b8b2fec95011b7935b12d5020f220f0c4cf9bd3a807a58"
   ],
   [
    "hadron_get_next_node",
-   "46c8587079f1efb9da1d966e7d9e18fa78517c2f61f170badccb7682a66d5868"
+   "89037ef714066af04b4a867ca514d2b56f3e471a471f19c4cc5e4e3c8ddbb778"
   ],
   [
    "hadron_list_nodes",
-   "ddaf683fc66fb845be1b3975f575a506abe755b5f0241edd7507b4a50d63bf33"
+   "91892b42a3064716754197ec369d1a06c44d27f75cf33251e602161b346689fc"
   ],
   [
    "hadron_unlock_memory",
-   "b716e62c870d03db1e6363481ddb98f99cc6025ba0ec2b9b00b60a0b2663d934"
+   "d2e25b17ea202083a5b6d9d5e19da2bcda247421181695443215fe1bdd9568c5"
   ],
   [
    "hadron_lock_memory",
-   "1de56bb2f71d8b27589ccee67cf22ba131860589f1685d5a58ee2b47e1191441"
+   "04ede4b16bec6d5af0dfa619235fad0480d343e42db7337f538b42a5b6bbfc06"
   ],
   [
    "hadron_create_node",
-   "64beeb71c042d4712f35546308642d7c3c8076431716494b0d1c17adef87dd78"
+   "bef0d430408f57978aa6e7dff9d597a285b2908035af7901116ceacf14da434e"
   ],
   [
    "hadron_update_node",
-   "b2e282bd01d801b5a9362250b228f661af165feb333fba6b853de7200f3c2c67"
+   "e7c91cb617d8a8ed5898feac12f4fe6709532a3793f30b6a9e6eb2b63d32f310"
   ],
   [
    "hadron_create_task",
-   "61d5948643acd17b4ec25b3bd0b0ed1039a24d251d7a4a4326871e44bc310a68"
+   "5bfd76216ac408f39ffc820f3e7308fc4b2ccf46d3ae752b1d115c8d22234a8a"
   ],
   [
    "hadron_update_task",
-   "8e87664e94ad0b072fdc09dbf55c2ff86f09f6eda0abe7a34f60d89da2cb6948"
+   "f6e4da1ee96d7a298c896e6fafdd8af5165f769cc0df61cc5b9fe8b987e6389a"
   ],
   [
    "hadron_create_review",
-   "54879a05e42f96f295f22208a4b2aa324dcd30ffb8b2f04391eeac623f22cd35"
+   "0a91d82172f9ccb23518f5aef2ebdb40a694225b13920eaf8a06895543977913"
   ],
   [
    "hadron_update_review",
-   "8c35cddc3c87106fdaf8adcb134889f9080334bef76df6b9f87e5f433d9f0fd0"
+   "b6f08df15baf3e9d3bace314d966d352a366d28c1bedb366b86639da6134cfdf"
   ],
   [
    "hadron_update_node_data",
-   "73b43958302f63f877189815776e280c6a86b8e32554cf3b719ad06f780e9166"
+   "f8ca24c4ae36e82aae979f1a60fab255457525af48a9f5f702c20dbe258f0775"
   ],
   [
    "hadron_create_object",
-   "2b62b7293e2fe1f8c47bcc515c33a07e147bb024b4d250c367072ad40c3f762e"
+   "cecaa6cf05add4b72373f1a7cca8bc6073abc33851450607997e22905dfcda29"
   ],
   [
    "hadron_get_object",
-   "c033fb1d52ff5bfee0461774841e7f2cff1386c97e51b807d69462de11ef48f1"
+   "cfbfc13d227b36419c7d2200c6b4bc7dadeda7292f6d6ef37780a104edeefe5a"
   ],
   [
    "hadron_update_object",
-   "72a566ce453746eef2e22b6c1e2ab38f40ec78e46e215f4373061cc71bca92d7"
+   "f23798cc70c3bed642e09f7f892e93d7cb08be08bf9999f1bde0e42b5ad7b2f0"
   ],
   [
    "hadron_delete_object",
-   "4cea0285c3dc782a2414ac4960d5d9c71191a7b468d0eee2afa12b5db9b02bb1"
+   "2f86100b42a1fb713d71d83221952faed9a3f1f82abadd4d74bf116a6ac8286a"
   ],
   [
    "hadron_find_objects",
-   "d852bae4301d5d14d71c42f8f4fa065b85fb39051c0796afc102e19ece0f60e8"
+   "93ab1892209c3e2843095021077bf443fe2030639517bd124aa6793db2c23afa"
   ],
   [
    "hadron_replace_text",
-   "b8e7f8dfaec950018cb0f77d7256ef04bd3086139462a99520b378387d9f47c3"
+   "eba737545739f6882e10b3051623705be897f08d76387f40a4ff04253f387ed2"
   ],
   [
    "hadron_create_edge",
-   "dcacf79ae8a331ef1f5de41777613c4f81877a558c22bf4f7085450e13541a4f"
+   "605fe9447aa4dd8a355c2d228bc4485f2e77d37694e7b86c9e5a9560aeab6d36"
   ],
   [
    "hadron_update_edge",
-   "1167204ee92499b6805cec66f9fb575fc16fb699ad8c08174e730a1669c77b18"
+   "5185f282467919b21e1fca6ab05bb1900af02b1653de23abae9892cfe2afe25e"
   ],
   [
    "hadron_delete_edge",
-   "812e33f54907fbe86e695ab7013b7e0eb931b73aacd4f87a908db2b6c1eba7b2"
+   "0505511dea4c994a58860e6b204dceafbb9c0f514023a27a88266a3aa0417e99"
   ],
   [
    "hadron_delete_node",
-   "5813ebba270720a69861411c4aff418a632bae5c3dfd71b0d28772f96c05da79"
+   "98c2809b52640f59f72a49b86eff1295222e5b1fe238f48b0c7c809a5868de2e"
   ],
   [
    "hadron_move_node",
-   "0d1e75c4b47118eabaa0418761edbb9add2ceeddda91e6a383ca394fad6c34dc"
+   "f35cde7d04cfd7f745ab4df6e8a49975606965813c49e283b3d62e52f19ece89"
   ],
   [
    "hadron_run_action",
-   "05e11b4f3e369f122395c39169cd095bd4149b34b1d49969e6f7ea9133424da6"
+   "a7f1672547bdfa0b541d084f7066619139d6e7008cb8d6fa82116c3b1542716b"
   ],
   [
    "hadron_get_run",
-   "90839b966d5a8d76525af221aba1100384a9f9d53d35aa17ab421c9057176446"
+   "6a8a4c87dda244263bf829ddefbc43aa876a843af3a4ddd347d51f6fb10ec752"
   ],
   [
    "hadron_run_task",
-   "e61639487d20384afcc4f401faf820abfb4b56fcb58fe295f4ed2673413aaba8"
+   "768db08edcf098052ec087305a9723a847197f546f606453187556bf716b8ccc"
   ],
   [
    "hadron_start_session",
-   "a2fc544a84eb79c46d18a063db2d86504a4cf2f27257f78ce4cc57cbc3987e5c"
+   "9be56af6ffe194c7417ac5a40f521f98fbf327749e83b40f3e577f1afd7b550c"
   ],
   [
    "hadron_end_session",
-   "b2423e09cbc3133dd3b8d9fc7527c4b9c624e18cedd9fa92ec4a8b23bfaf9eb5"
+   "b8a60367bc9c9154af0b3b0e162b7d64d30399d23fe6fde4d48e5bb1a33a2854"
   ],
   [
    "hadron_whoami",
-   "1b99d201fcb2311abaf356e718cb61f13811d9fa61703f89482a785b71b2d822"
+   "85d9bdd1b4dbbd3ec61ced9aae45839eb83749af976074b247d86167be339b65"
   ],
   [
    "hadron_validate",
-   "f6d0a7c1db3770cdad69a73a213f514add5da8dec18e1f683ba7e7399978e283"
+   "b803dbc53a7f54e6a654c9e0ff4737e0f4791e3be5b015c8c4804f96d184d09f"
   ],
   [
    "hadron_sync_graph",
-   "7e447781abbf309a9f141ef68b795ca95814ed043f8b1f660037e6243cc85e1e"
+   "fe7167c39b2c6eca42a85e77f48b7c79edd9b6f988495d1e3791e5a9d8eaf1b3"
   ]
  ]
 }

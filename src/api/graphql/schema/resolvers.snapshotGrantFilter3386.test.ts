@@ -1,9 +1,10 @@
 /** #3386: narrowing trigger filters, authority-first on both call paths. */
 import { beforeAll, afterAll, beforeEach, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/client';
+import { McpServer } from '@modelcontextprotocol/server';
+import { withPositionalTool } from '../../../mcp/hadronMcpServer.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -153,7 +154,7 @@ it('GraphQL and MCP expose the same filters and page, for person and instructed 
     const result = await server.executeOperation({ query: 'query($app:ID!,$kind:String,$id:ID,$instruction:ActInstructionInput){automationTeamSnapshotGrants(appRef:$app,triggerKind:$kind,triggerId:$id,includeRevoked:true,instruction:$instruction){items{id appId triggerKind triggerId grantedBy revokedBy createdAt revokedAt} total hasMore}}', variables }, { contextValue: context });
     if (result.body.kind !== 'single') throw new Error('incremental');
     expect(result.body.singleResult.errors).toBeUndefined();
-    const mcp = new McpServer({ name: 'filter3386', version: '1' });
+    const mcp = withPositionalTool(new McpServer({ name: 'filter3386', version: '1' }));
     registerAutomationTeamSnapshotGrantTools(mcp, { db, auth: { userId: f.holder.id, roles: ['READER'], ...(worker ? { sessionId: f.session.id } : {}) } as any });
     const client = new Client({ name: 'test', version: '1' });
     const [a, b] = InMemoryTransport.createLinkedPair();

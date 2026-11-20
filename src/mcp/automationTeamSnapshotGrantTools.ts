@@ -1,6 +1,6 @@
 /** #3350: MCP parity delegates every authority decision and audit to the GraphQL doors. */
 import { z } from 'zod';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { HadronMcpServer as McpServer } from './hadronMcpServer.js';
 import { GraphQLError } from 'graphql';
 import { runTeamSnapshotMutations, runTeamSnapshotQueries } from '../api/graphql/schema/resolvers.runTeamSnapshot.js';
 import type { Context } from '../api/graphql/schema/resolvers.js';

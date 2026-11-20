@@ -10,7 +10,7 @@ import { mcpRequestSessionContext } from './requestSession.js';
  */
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { HadronMcpServer as McpServer } from './hadronMcpServer.js';
 import { offTeamTool } from './disabledTools.js';
 import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import { appKeyCaller } from '../lib/appKeyScopes/scopes.js';
