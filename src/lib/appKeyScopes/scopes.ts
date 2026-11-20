@@ -19,7 +19,7 @@ export type AppKeyScopeName = (typeof APP_KEY_SCOPES)[number];
  * Keyed by scope name, so a scope added to APP_KEY_SCOPES without a row here fails tsc. Static platform metadata: no tenant data.
  */
 export const APP_KEY_SCOPE_CATALOGUE: Record<AppKeyScopeName, { description: string; requiresHostId: boolean }> = {
-  'attention:deliver': { description: 'Deliver attention messages for the App, as a team router does. Takes no host.', requiresHostId: false },
+  'attention:deliver': { description: 'Read and acknowledge due wakes for the App, as a team router does. Takes no host.', requiresHostId: false },
   'host:operate': { description: 'Operate as one named host: register it, collect its operations and report on them. Granted for one host.', requiresHostId: true },
 };
 

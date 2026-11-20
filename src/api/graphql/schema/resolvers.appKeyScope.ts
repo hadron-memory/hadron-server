@@ -93,7 +93,7 @@ async function changeScope(
 export const appKeyScopeMutations = {
   grantAppKeyScope: (_: unknown, a: { id: string; scope: string; hostId?: string | null }, ctx: Context) =>
     changeScope(ctx, a.id, a.scope, async (tx, keyId, scope, userId) => {
-      const hostId = scope === 'host:operate' ? a.hostId!.trim() : null;
+      const hostId = APP_KEY_SCOPE_CATALOGUE[scope].requiresHostId ? a.hostId!.trim() : null;
       // One live row per key and scope: granting again changes nothing, and keeps the first grant's record.
       const have = await tx.appKeyScope.findFirst({ where: { appKeyId: keyId, scope, revokedAt: null }, select: { id: true, hostId: true } });
       if (have && have.hostId !== hostId) {
@@ -114,11 +114,15 @@ export const appKeyScopeMutations = {
     }, undefined, undefined, { instruction: a.instruction }),
 };
 
-/** #1709: host:operate names exactly one host (cor:agt:070:04); no other scope takes one. */
-function checkHostArg(scope: AppKeyScopeName, hostId: string | null): void {
-  if (scope === 'host:operate') {
+/**
+ * #1709: host:operate names exactly one host (cor:agt:070:04); no other scope takes one. #4489: the rule is read from
+ * APP_KEY_SCOPE_CATALOGUE, the same row Query.appKeyScopeCatalogue publishes, so what a client is told and what a grant
+ * enforces cannot drift.
+ */
+export function checkHostArg(scope: AppKeyScopeName, hostId: string | null): void {
+  if (APP_KEY_SCOPE_CATALOGUE[scope].requiresHostId) {
     if (!hostId || !HOST_ID_PATTERN.test(hostId.trim())) {
-      throw new GraphQLError('host:operate is granted for one host: name it with hostId (a host token).', { extensions: { code: 'BAD_USER_INPUT' } });
+      throw new GraphQLError(`${scope} is granted for one host: name it with hostId (a host token).`, { extensions: { code: 'BAD_USER_INPUT' } });
     }
   } else if (hostId != null) {
     throw new GraphQLError(`${scope} is not granted for a host; send no hostId.`, { extensions: { code: 'BAD_USER_INPUT' } });

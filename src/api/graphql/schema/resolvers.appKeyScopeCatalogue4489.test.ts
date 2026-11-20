@@ -1,18 +1,17 @@
 /**
  * #4489 — the closed App key scope list as data (hrn:node:hadronmemory.com:specs:cor:aut:010:03).
- * Pins: the catalogue matches the closed list one for one, states the hostId rule, is readable by any signed-in
- * caller (person or App key) and by nobody anonymous, and a granted scope's rule agrees with the grant's own check.
+ * Pins: the catalogue matches the closed list one for one and states the hostId rule; the rule agrees with the grant's own
+ * hostId check; any signed-in caller (person or App key) may read it and nobody anonymous.
  */
 import { describe, it, expect } from 'vitest';
-import { GraphQLError } from 'graphql';
-import { buildSchema, parse, validate } from 'graphql';
-import { db } from '../../../integrations/db/client.js';
+import { buildSchema } from 'graphql';
 import { resolvers, type Context } from './resolvers.js';
+import { checkHostArg } from './resolvers.appKeyScope.js';
 import { typeDefs } from './typeDefs.js';
 import { APP_KEY_SCOPES } from '../../../lib/appKeyScopes/scopes.js';
 
 const Q = resolvers.Query as any;
-const ctx = (extra: Partial<Context> = {}): Context => ({ db, roles: ['READER'], ...extra }) as Context;
+const ctx = (extra: Partial<Context> = {}): Context => ({ db: {}, roles: ['READER'], ...extra }) as unknown as Context;
 
 describe('appKeyScopeCatalogue (#4489)', () => {
   it('lists every scope of the closed list, once, in order, with a description and the hostId rule', async () => {
@@ -31,14 +30,26 @@ describe('appKeyScopeCatalogue (#4489)', () => {
   });
 
   it('refuses an anonymous caller UNAUTHENTICATED', async () => {
-    let code: string | undefined;
-    try { await Q.appKeyScopeCatalogue(null, {}, ctx()); } catch (e) { expect(e).toBeInstanceOf(GraphQLError); code = (e as GraphQLError).extensions?.code as string; }
-    expect(code).toBe('UNAUTHENTICATED');
+    await expect(Q.appKeyScopeCatalogue(null, {}, ctx())).rejects.toMatchObject({ extensions: { code: 'UNAUTHENTICATED' } });
   });
 
   it('is in the SDL as a non-null list of non-null rows', () => {
-    const doc = parse(`{ appKeyScopeCatalogue { scope description requiresHostId } }`);
-    const schema = buildSchema(typeDefs);
-    expect(validate(schema, doc)).toEqual([]);
+    const field = buildSchema(typeDefs).getQueryType()!.getFields().appKeyScopeCatalogue;
+    expect(String(field.type)).toBe('[AppKeyScopeInfo!]!');
+  });
+
+  it('every row agrees with the rule grantAppKeyScope enforces on hostId', async () => {
+    const rows = await Q.appKeyScopeCatalogue(null, {}, ctx({ userId: 'u1' }));
+    for (const r of rows) {
+      const withHost = () => checkHostArg(r.scope, 'orca1');
+      const without = () => checkHostArg(r.scope, null);
+      if (r.requiresHostId) {
+        expect(withHost).not.toThrow();
+        expect(without).toThrow(/hostId/);
+      } else {
+        expect(without).not.toThrow();
+        expect(withHost).toThrow(/send no hostId/);
+      }
+    }
   });
 });
