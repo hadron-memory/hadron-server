@@ -21,6 +21,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { roleWritersRefusal, appCarriesOwnersAgent } from '../../../lib/nodeRoleWriters.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
+import { hadronUpdateNode } from '../../../lib/runner/tools/nodeTools.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { testRunAgentId } from '../../../test/runAgent.js';
 import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
@@ -379,5 +380,69 @@ describe('the App and its Agent are held while the write decides (blind review F
     await writing;
     await del;
     expect(await refusal(principalOf(a))).toBe(REFUSED);
+  });
+});
+
+describe('the live headless path: hadron_update_node under the real run principal (Peter, #125592)', () => {
+  const ENTRY = () => `${org.urn}:mem:flow:entry`;
+
+  /** The App's own team space (class app) with an OWNER-role rule: the one org memory a userless run reads by itself. */
+  async function teamSpace(appId: string, loc: string) {
+    const mem = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, appId, urn: `${org.urn}:team-${appId}`.toLowerCase(), name: 'team', class: 'app' },
+    });
+    await rule(mem.id, 'vault', 'OWNER');
+    await db.node.create({ data: { id: generateId(), memoryId: mem.id, loc, name: loc, content: 'before', role: 'vault' } });
+    return mem;
+  }
+
+  /** A userless SCHEDULE run of `runApp`, with the write grant on `vault`, editing `loc` in `target`'s team space. */
+  async function liveRun(runApp: string, target: { id: string; urn: string }, loc: string, grant = true) {
+    if (grant) await db.appMemoryWriteGrant.create({ data: { appId: runApp, memoryId: target.id, prefix: 'vault', grantedBy: user.owner! } });
+    const schedule = await db.agentSchedule.create({
+      data: { id: generateId(), organizationId: org.id, appId: runApp, name: 'S', cron: '* * * * *', entryNodeUrn: ENTRY() },
+    });
+    const run = await db.appRun.create({
+      data: {
+        id: generateId(), organizationId: org.id, appId: runApp, agentId: await testRunAgentId(db, org.id, runApp),
+        triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: ENTRY(), status: 'RUNNING',
+      },
+    });
+    const ctx = { log: vi.fn(), db, run, principal: runContext(db, run) } as never;
+    try {
+      await (hadronUpdateNode as { execute: (c: never, a: unknown) => Promise<unknown> }).execute(ctx, {
+        urn: `hrn:node:${target.urn}:${loc}`, content: 'after',
+      });
+      return 'OK';
+    } catch (e) {
+      return e instanceof GraphQLError ? String(e.extensions.code) : (e as Error).message;
+    }
+  }
+  const content = async (memId: string, loc: string) => (await db.node.findFirst({ where: { memoryId: memId, loc } }))!.content;
+
+  it('publisher: a userless run edits an OWNER-role node in its own team space through the real tool', async () => {
+    const publisher = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
+    const space = await teamSpace(publisher, 'vault:pub');
+    expect(await liveRun(publisher, space, 'vault:pub')).toBe('OK');
+    expect(await content(space.id, 'vault:pub')).toBe('after');
+  });
+
+  it('installer: a run whose App only carries a vendor agent is refused the level and the node is unchanged', async () => {
+    const installer = await app({ orgId: org.id, agents: [await agent(vendorOrg.id, null)] });
+    const space = await teamSpace(installer, 'vault:ins');
+    expect(await liveRun(installer, space, 'vault:ins')).toBe(REFUSED);
+    expect(await content(space.id, 'vault:ins')).toBe('before');
+  });
+
+  it('a run of a publisher App on ANOTHER App\'s team space has no read: refused, identically whether or not the node exists', async () => {
+    const publisher = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
+    const otherApp = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
+    const space = await teamSpace(otherApp, 'vault:secret');
+    const existing = await liveRun(publisher, space, 'vault:secret', false);
+    const missing = await liveRun(publisher, space, 'vault:nothing-here', false);
+    expect(existing).not.toBe('OK');
+    expect(existing).not.toBe(REFUSED);
+    expect(missing).toBe(existing);
+    expect(await content(space.id, 'vault:secret')).toBe('before');
   });
 });
