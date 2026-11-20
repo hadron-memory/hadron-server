@@ -191,9 +191,15 @@ async function isDecider(ctx: Context, d: Pick<QuestionData, 'deciders'>): Promi
  * pure App key may bind any session of its App, so its worker id alone proves nothing.
  */
 async function isAsker(ctx: Context, d: Pick<QuestionData, 'askedBy'>): Promise<boolean> {
+  if (ctx.userId && d.askedBy.workerId && d.askedBy.workerId === actorOf(ctx).workerId) return true;
+  return isAskerWith(ctx, d.askedBy.userId && ctx.userId ? await callerIdentities(ctx) : new Set(), d);
+}
+
+/** {@link isAsker} with the caller's identities already resolved (a list judges many rows against one set). */
+function isAskerWith(ctx: Context, identities: ReadonlySet<string>, d: Pick<QuestionData, 'askedBy'>): boolean {
   const actor = actorOf(ctx);
   if (ctx.userId && d.askedBy.workerId && d.askedBy.workerId === actor.workerId) return true;
-  if (d.askedBy.userId && ctx.userId && (await callerIdentities(ctx)).has(d.askedBy.userId)) return true;
+  if (d.askedBy.userId && ctx.userId && identities.has(d.askedBy.userId)) return true;
   return !d.askedBy.userId && !ctx.userId && !!d.askedBy.appId && d.askedBy.appId === ctx.appId;
 }
 
@@ -1025,13 +1031,16 @@ type QuestionSortName = 'PORTAL_DEFAULT' | 'CODE' | 'ASKED_AT_DESC' | 'ASKED_AT_
 
 const answeredAtOf = (v: QuestionView): string | null => (v.shown ? currentAnswer(v.shown)?.at ?? null : null);
 
-function sortViews(views: QuestionView[], sort: QuestionSortName): QuestionView[] {
+export function sortViews(views: QuestionView[], sort: QuestionSortName): QuestionView[] {
   const n = (v: QuestionView) => v.shown?.n ?? v.row.seq ?? 0;
   const rank = (v: QuestionView) => PRIORITY_RANK[v.shown?.priority ?? 'normal'];
   const askedAt = (v: QuestionView) => v.shown?.askedAt ?? '';
-  // Every sort ends in the same stable tiebreak: n descending, then loc.
-  const tie = (a: QuestionView, b: QuestionView) => n(b) - n(a) || a.row.loc.localeCompare(b.row.loc);
-  if (sort === 'CODE') return [...views].sort((a, b) => n(a) - n(b) || a.row.loc.localeCompare(b.row.loc));
+  // #4604 F3: a loc is unique only inside one memory, and an App-scope list spans memories, so two rows can share n AND loc. The last key
+  // is the row id (unique), on EVERY comparator, so the order is total and a row never moves between offset pages.
+  const byId = (a: QuestionView, b: QuestionView) => (a.row.id < b.row.id ? -1 : a.row.id > b.row.id ? 1 : 0);
+  // Every sort ends in the same stable tiebreak: n descending, then loc, then id.
+  const tie = (a: QuestionView, b: QuestionView) => n(b) - n(a) || a.row.loc.localeCompare(b.row.loc) || byId(a, b);
+  if (sort === 'CODE') return [...views].sort((a, b) => n(a) - n(b) || a.row.loc.localeCompare(b.row.loc) || byId(a, b));
   if (sort === 'ASKED_AT_DESC') return [...views].sort((a, b) => askedAt(b).localeCompare(askedAt(a)) || tie(a, b));
   if (sort === 'ASKED_AT_ASC') return [...views].sort((a, b) => askedAt(a).localeCompare(askedAt(b)) || tie(a, b));
   if (sort === 'PRIORITY_DESC') return [...views].sort((a, b) => rank(a) - rank(b) || askedAt(b).localeCompare(askedAt(a)) || tie(a, b));
@@ -1047,7 +1056,7 @@ function sortViews(views: QuestionView[], sort: QuestionSortName): QuestionView[
     rank(a) - rank(b) ||
     STATE_ORDER[a.evaluation.state] - STATE_ORDER[b.evaluation.state] ||
     askedAt(b).localeCompare(askedAt(a)) ||
-    n(b) - n(a));
+    tie(a, b));
 }
 
 /** #4428 §2 — the memories of an App the caller can read, or null when the App does not resolve. */
@@ -1167,13 +1176,15 @@ export const questionQueries = {
       if (!log) return { items: [], total: 0 };
       where = { role: QUESTION_ROLE, deletedAt: null, memoryId: log.row.memoryId, loc: { startsWith: `${log.row.loc}:` } };
     }
-    const count = await ctx.db.node.count({ where });
     const cap = questionListBounds.cap();
-    if (count > cap) {
+    // #4604 F2: ONE statement bounds the evaluation: fetch at most cap + 1 and refuse, before evaluating anything, when the extra row is there.
+    // A separate count-then-fetch let an insert between the two statements push the fetch past the cap. The count below only words the refusal.
+    // Only askQuestion writes the question role, always directly under a log.
+    const rows = await ctx.db.node.findMany({ where, select: QUESTION_ROW_SELECT, take: cap + 1 });
+    if (rows.length > cap) {
+      const count = Math.max(await ctx.db.node.count({ where }), cap + 1);
       throw questionError('QUESTION_LOG_TOO_LARGE_FOR_FILTER', `${count} questions exceed the ${cap} this list evaluates at once.`, { count, cap });
     }
-    // Only askQuestion writes the question role, always directly under a log.
-    const rows = await ctx.db.node.findMany({ where, select: QUESTION_ROW_SELECT });
     let views = await attachEffectiveAssignees(ctx.db as unknown as Tx, await evaluateRows(ctx.db as unknown as Tx, rows));
     if (args.awaitingMe) {
       const me = await callerIdentities(ctx);
@@ -1184,8 +1195,6 @@ export const questionQueries = {
     // #4428 §3 — every filter reads the EVALUATED view, never `properties`.
     const assigneeIds = args.assigneeId ? await identitiesOf(ctx.db, args.assigneeId) : null;
     const byMe = args.askedByMe ? true : null;
-    const askers = new Map<QuestionView, boolean>();
-    if (byMe) for (const v of views) askers.set(v, !!v.shown && (await isAsker(ctx, v.shown)));
     views = views.filter((v) => {
       if (args.state && !args.state.includes(v.evaluation.state)) return false;
       if (tier && v.shown?.tier !== tier) return false;
@@ -1201,7 +1210,6 @@ export const questionQueries = {
       if (args.assigneeId && args.unassigned) { if (!mine && eff !== null) return false; }
       else if (args.assigneeId) { if (!mine) return false; }
       else if (args.unassigned != null) { if (args.unassigned ? eff !== null : eff === null) return false; }
-      if (byMe && !askers.get(v)) return false;
       if (args.askedByWorkerId && v.shown?.askedBy.workerId !== args.askedByWorkerId) return false;
       if (args.askedByAppId && v.shown?.askedBy.appId !== args.askedByAppId) return false;
       if (answeredSince !== null) {
@@ -1210,6 +1218,12 @@ export const questionQueries = {
       }
       return true;
     });
+    // #4604 F5: the asker pull is judged LAST, on the rows every other filter kept, with the caller's identities resolved once for the whole
+    // request (none at all when nothing is left to judge), instead of one awaited helper call per evaluated row before the cheap filters.
+    if (byMe && views.length > 0) {
+      const mine = await callerIdentities(ctx);
+      views = views.filter((v) => !!v.shown && isAskerWith(ctx, mine, v.shown));
+    } else if (byMe) views = [];
     const sorted = sortViews(views, args.sort ?? 'PORTAL_DEFAULT');
     return { items: sorted.slice(offset, offset + limit), total: sorted.length };
   },
