@@ -58,6 +58,12 @@ describe('#4411 item 1: mintPrincipal maps a chk_principals_name_lower violation
   it('still maps a unique violation to RootNameTakenError', async () => {
     await mintPrincipal(db, { kind: 'org', name: 'taken.example' });
     await expect(mintPrincipal(db, { kind: 'user', name: 'taken.example' })).rejects.toBeInstanceOf(RootNameTakenError);
+    // The catch branch itself, with no availability check in front of it (#4547 BLIND re-rate P3).
+    const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed on the fields: (`name`)', {
+      code: 'P2002', clientVersion: Prisma.prismaVersion.client, meta: { target: ['name'] },
+    });
+    await expect(mintPrincipal(failingWith(p2002), { kind: 'org', name: 'race.example' }))
+      .rejects.toBeInstanceOf(RootNameTakenError);
   });
 
   /** The real error a model write gets from the CHECK, captured so the variants below keep Prisma's own rendering. */
@@ -68,6 +74,18 @@ describe('#4411 item 1: mintPrincipal maps a chk_principals_name_lower violation
     const err = e as Prisma.PrismaClientUnknownRequestError;
     expect(err.message).toMatch(/code: \\?"23514\\?"/);
     return err;
+  };
+  /** The engine's rendering: `PostgresError { code: "…", message: "…", severity: …, detail: Some("…"), … }`. */
+  const PRIMARY_MESSAGE_RE = /(PostgresError \{ code: "[0-9A-Z]{5}", message: ")((?:[^"\\]|\\.)*)(")/;
+  const DETAIL_RE = /(detail: Some\(")((?:[^"\\]|\\.)*)("\))/;
+  /** Replace the primary message, whatever language the server wrote it in. */
+  const withPrimaryMessage = (rendered: string, text: string): string => {
+    expect(rendered, 'the engine rendering this test rewrites').toMatch(PRIMARY_MESSAGE_RE);
+    return rendered.replace(PRIMARY_MESSAGE_RE, (_m, a: string, _b: string, c: string) => a + text + c);
+  };
+  const withDetail = (rendered: string, text: string): string => {
+    expect(rendered, 'the engine renders a failing-row detail').toMatch(DETAIL_RE);
+    return rendered.replace(DETAIL_RE, (_m, a: string, _b: string, c: string) => a + text + c);
   };
   const unknownWith = (message: string) =>
     new Prisma.PrismaClientUnknownRequestError(message, { clientVersion: Prisma.prismaVersion.client });
@@ -85,9 +103,12 @@ describe('#4411 item 1: mintPrincipal maps a chk_principals_name_lower violation
   });
 
   it('maps a translated message: only the SQLSTATE and the quoted constraint name are matched (lc_messages)', async () => {
+    // A deterministic localized message, written over the engine's primary-message field (#4547 BLIND re-rate P2):
+    // the test no longer depends on the live server writing English.
     const real = await realViolation();
-    const translated = real.message.replace(/violates check constraint/, 'verletzt Check-Constraint');
-    expect(translated).not.toBe(real.message);
+    const translated = withPrimaryMessage(real.message,
+      'neue Zeile für Relation \\"principals\\" verletzt Check-Constraint \\"chk_principals_name_lower\\"');
+    expect(translated).toContain('verletzt Check-Constraint');
     expect(await mintWith(unknownWith(translated))).toBeInstanceOf(RootNameInvalidError);
     expect(await mintWith(rawWith('23514', 'neue Zeile verletzt Check-Constraint "chk_principals_name_lower"')))
       .toBeInstanceOf(RootNameInvalidError);
@@ -100,6 +121,19 @@ describe('#4411 item 1: mintPrincipal maps a chk_principals_name_lower violation
     expect(await mintWith(other)).toBe(other);
     const otherRaw = rawWith('23514', 'new row violates check constraint "chk_principals_something_else"');
     expect(await mintWith(otherRaw)).toBe(otherRaw);
+  });
+
+  it('leaves a different check untyped when this constraint\'s name appears only in the failing-row detail', async () => {
+    // #4547 BLIND re-rate P2: the SQLSTATE and the constraint name must come from the primary error, not from
+    // anywhere in the rendering (the detail echoes the failing row's values).
+    const real = await realViolation();
+    const other = unknownWith(withDetail(
+      withPrimaryMessage(real.message, 'new row for relation \\"principals\\" violates check constraint \\"chk_principals_other\\"'),
+      'Failing row contains (x, \\"chk_principals_name_lower\\", org).',
+    ));
+    expect(other.message).toMatch(/code: "23514"/);
+    expect(other.message).toMatch(/\\?"chk_principals_name_lower\\?"/);
+    expect(await mintWith(other)).toBe(other);
   });
 
   it('leaves an error naming this constraint under another SQLSTATE untyped', async () => {
@@ -151,7 +185,7 @@ describe('#4411 item 2: post-push.sql refuses a mixed-case principal row with an
     expect(postPush.indexOf(END)).toBeLessThan(at);
   });
 
-  it('names each offending row, says whether it has a lower-case twin, and says what to do', async () => {
+  it('names each offending row, says whether another row shares its root, and says what to do', async () => {
     const said = await runOnLegacy([
       { name: 'legacy.example' },
       { name: 'Legacy.Example', status: 'released' },
@@ -161,11 +195,20 @@ describe('#4411 item 2: post-push.sql refuses a mixed-case principal row with an
     expect(said).toContain('2 principal row(s)');
     expect(said).toContain('Legacy.Example');
     expect(said).toContain('Lonely.Example');
-    expect(said).toMatch(/'Legacy\.Example' \([^)]*lower-case twin exists\)/);
-    expect(said).not.toMatch(/'Lonely\.Example' \([^)]*twin/);
+    expect(said).toMatch(/'Legacy\.Example' \([^)]*shares its root with another row\)/);
+    expect(said).not.toMatch(/'Lonely\.Example' \([^)]*shares its root/);
     expect(said).toContain('pnpm db:dev-setup');
     // Not the raw violation the ADD CONSTRAINT would have raised.
     expect(said).not.toContain('violates check constraint');
+  });
+
+  it('flags two mixed-case spellings of one root even when no lower-case row exists', async () => {
+    // #4547 BLIND re-rate P2: both spellings compete for `legacy.example`; lower-casing both would collide.
+    const said = await runOnLegacy([{ name: 'Legacy.Example' }, { name: 'LEGACY.EXAMPLE', kind: 'user' }, { name: 'Lonely.Example' }]);
+    expect(said).toContain('3 principal row(s)');
+    expect(said).toMatch(/'LEGACY\.EXAMPLE' \([^)]*shares its root with another row\)/);
+    expect(said).toMatch(/'Legacy\.Example' \([^)]*shares its root with another row\)/);
+    expect(said).not.toMatch(/'Lonely\.Example' \([^)]*shares its root/);
   });
 
   it('passes on a pool that is already lower case', async () => {
