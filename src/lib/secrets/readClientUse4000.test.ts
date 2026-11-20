@@ -42,6 +42,15 @@ describe('transactional secret.use (#4000)', () => {
     expect(await db.grantEvent.count({ where: { grantId, action: 'USE' } })).toBe(0);
     expect((await db.appRun.findUniqueOrThrow({ where: { id: runCtx.run.id } })).budgetActions).toBe(3);
   });
+  it('refuses policy denial and exhausted budget without spending a ticket or grant', async () => {
+    await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
+    await db.appRun.update({ where: { id: runCtx.run.id }, data: { policy: { allow: ['tool.unrelated'] } } });
+    await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'TOOL_DENIED' } });
+    await db.appRun.update({ where: { id: runCtx.run.id }, data: { policy: { allow: ['tool.web_request'] }, budgetActions: 0 } });
+    await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'TOOL_DENIED' } });
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
+    expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
+  });
   it('refuses targets and model-supplied bound headers without spending a ticket', async () => {
     await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
     await expect(prepareSecretUse(runCtx, clientId, 'https://api.example.test/v10', {})).rejects.toBeDefined();
