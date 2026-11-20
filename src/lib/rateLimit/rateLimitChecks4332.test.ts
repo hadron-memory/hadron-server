@@ -101,20 +101,23 @@ export function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
 export function psqlArgs(databaseUrl: string, file: string): string[] {
-  const u = new URL(databaseUrl);
-  const schema = u.searchParams.get('schema') ?? 'public';
-  for (const k of PRISMA_ONLY) u.searchParams.delete(k);
-  return [u.toString(), '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-c', `SET search_path TO ${quoteIdent(schema)}`, '-f', file];
+  const schema = new URL(databaseUrl).searchParams.get('schema') ?? 'public';
+  // #4611 BLIND delta F1 at e86277a8: the retained parameters keep their RAW encoding. URLSearchParams re-serializes a
+  // space as `+`, which libpq does not decode, so the query is filtered as text, never rebuilt.
+  const q = databaseUrl.indexOf('?');
+  const kept = q === -1 ? [] : databaseUrl.slice(q + 1).split('&').filter((pair) => {
+    const key = decodeURIComponent(pair.split('=')[0].replace(/\+/g, ' '));
+    return pair !== '' && !PRISMA_ONLY.includes(key);
+  });
+  const url = (q === -1 ? databaseUrl : databaseUrl.slice(0, q)) + (kept.length ? `?${kept.join('&')}` : '');
+  return [url, '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-c', `SET search_path TO ${quoteIdent(schema)}`, '-f', file];
 }
 
 describe('#4332 psqlArgs (the atomicity pin\'s psql target)', () => {
   it('quotes a non-simple schema and keeps libpq parameters', () => {
     const args = psqlArgs('postgresql://u@h:5432/db?schema=Odd%20"Name",x&sslmode=require&connection_limit=3&options=-c%20a%3Db', '/f.sql');
-    const url = new URL(args[0]);
-    expect(url.searchParams.get('sslmode')).toBe('require');
-    expect(url.searchParams.get('options')).toBe('-c a=b');
-    expect(url.searchParams.has('schema')).toBe(false);
-    expect(url.searchParams.has('connection_limit')).toBe(false);
+    // The exact text psql receives: retained parameters byte-for-byte, the space still `%20` (libpq reads `+` literally).
+    expect(args[0]).toBe('postgresql://u@h:5432/db?sslmode=require&options=-c%20a%3Db');
     expect(args.slice(1)).toEqual(['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-c', 'SET search_path TO "Odd ""Name"",x"', '-f', '/f.sql']);
   });
 
