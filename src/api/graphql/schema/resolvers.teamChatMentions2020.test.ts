@@ -408,11 +408,11 @@ describe('S3 filter audience and transport boundaries', () => {
       expect(await refusalOf(() => Q.channelMessages({}, {channelRef: made.channel.id, teamHeadRef: rook.id, limit: 0}, ctx(manager.id)))).toEqual(missing);
       expect((await Q.channelMessages({}, {channelRef: channel.id, teamHeadRef: rook.id, limit: 0}, ctx(manager.id))).total).toBe(1);
     });
-    async function sealStampHistory() {
+    async function sealStampHistory(target: { id: string } = memory, cacheSessionId = 'mr-2595') {
       const key = generateDataKey();
-      sessionKeyCache.set('mr-2595', memory.id, key);
-      await db.memory.update({where: {id: memory.id}, data: {isEncrypted: true}});
-      for (const row of await db.node.findMany({where: {memoryId: memory.id, nodeType: 'chat-message'}})) {
+      sessionKeyCache.set(cacheSessionId, target.id, key);
+      await db.memory.update({where: {id: target.id}, data: {isEncrypted: true}});
+      for (const row of await db.node.findMany({where: {memoryId: target.id, nodeType: 'chat-message'}})) {
         const sealed = encryptNodeFieldsWithKey({content: row.content, data: row.data}, key);
         await db.node.update({where: {id: row.id}, data: {content: sealed.content, data: sealed.data as never}});
       }
@@ -480,6 +480,27 @@ describe('S3 filter audience and transport boundaries', () => {
       const page = await Q.channelMessages({}, {channelRef: other.channel.id, teamHeadRef: rook.id}, ctx(manager.id));
       expect(page.items.map((m: any) => m.seq)).toEqual([post.seq]);
       expect(page.total).toBe(1);
+    });
+    it('H5c: encrypted — a sealed stamp in another memory at the same Channel loc cannot supply a stamp (#2602)', async () => {
+      const otherMemory = await db.memory.create({data: {id: generateId(), organizationId: org.id, appId: app.id, urn: `${org.urn}:other-tags-enc`, name: 'other tags enc', class: 'app'}});
+      const other = await ensureChannelWithRoot(db, {memoryId: otherMemory.id, loc: channel.loc, name: 'other', createdBy: manager.id});
+      // The only stamp lives in the OTHER memory's Channel (same loc as `channel`); `channel` itself holds none.
+      const post = await stampThenDissolve(other.channel.id);
+      await db.worker.update({where: {id: rook.id}, data: {retiredAt: new Date()}});
+      try {
+        // Sealing sits inside the try: sealStampHistory caches its key first, so a failure part-way still evicts.
+        await sealStampHistory(otherMemory, 'mr-2602-other');
+        await sealStampHistory(memory, 'mr-2602-own');
+        const missing = await refusalOf(() => readAs('no-such-worker'));
+        expect(missing).toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_HEAD_INVALID'}});
+        // The unstamped Channel refuses exactly like an unknown head ...
+        expect(await refusalOf(() => readAs(rook.id))).toEqual(missing);
+        expect(await refusalOf(() => Q.channelMessages({}, {channelRef: channel.id, teamHeadRef: rook.id, limit: 0}, ctx(manager.id)))).toEqual(missing);
+        // ... while the stamped Channel stays readable.
+        const page = await Q.channelMessages({}, {channelRef: other.channel.id, teamHeadRef: rook.id}, ctx(manager.id));
+        expect(page.items.map((m: any) => m.seq)).toEqual([post.seq]);
+        expect(page.total).toBe(1);
+      } finally { sessionKeyCache.evict('mr-2602-other'); sessionKeyCache.evict('mr-2602-own'); }
     });
     it.each(['early', 'late', 'missing'] as const)('bounds encrypted stamp scan batches and keeps %s-stamp outcomes, even at limit 0 (#2595)', async position => {
       await stampThenDissolve();
