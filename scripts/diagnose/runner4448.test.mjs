@@ -41,6 +41,8 @@ esac\n`);
     case "$MODE" in
      timeout) exit 124;;
      empty) exit 0;;
+     noop) printf '%s\\n' '{"kind":"other"}'; exit 0;;
+     wrongworkload) printf '%s\\n' '${LOAD_LINE.replace('"workload":"held"', '"workload":"idle"')}'; exit 0;;
     esac
     printf '%s\\n' '${LOAD_LINE}'; case "$MODE" in fail|failkept) exit 5;; esac;;
    *memory.max*) echo 6442450944;;
@@ -181,6 +183,21 @@ test('exit 0 with no load line is an invalid run, not a pass', () => {
     expect(readFileSync(join(f.dir, 'down'), 'utf8')).toBe('down\n');
   } finally { f.clean(); }
 });
+
+// #2627: exit 0 with output that is not a valid load record for the requested workload is an invalid run, refused
+// before any sample capture; only a positive record is accepted.
+for (const mode of ['noop', 'wrongworkload']) {
+  test(`exit 0 with output that is not this workload's load record is refused (${mode})`, () => {
+    const f = fixture(mode);
+    try {
+      const r = f.run();
+      expect(r.status).toBe(7);
+      expect(r.stderr).toContain('printed no valid load record for held');
+      expect(existsSync(join(f.dir, 'sleeps')) ? readFileSync(join(f.dir, 'sleeps'), 'utf8').split('\n').filter(Boolean).length : 0).toBe(1);
+      expect(readFileSync(join(f.dir, 'down'), 'utf8')).toBe('down\n');
+    } finally { f.clean(); }
+  });
+}
 
 // #4453 P3 #15: the in-container prerequisites are checked before the settle window, not after.
 test('a missing timeout(1) or staged load.mjs refuses before any settling', () => {
