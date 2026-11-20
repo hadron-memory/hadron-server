@@ -38,7 +38,7 @@ async function mkOrgMem(orgName: string, memName: string, adminId: string): Prom
   const org = await db.organization.create({ data: { id: generateId(), name: orgName, urn: orgName } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: adminId, role: 'ADMIN' } });
   const ctx: Context = { db, roles: ['ADMIN'], userId: adminId };
-  const created = (await resolvers.Mutation.createMemory({}, { orgId: org.id, name: memName }, ctx)) as {
+  const created = (await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: memName }, ctx)) as {
     id: string;
   };
   const mem = await db.memory.findUniqueOrThrow({
