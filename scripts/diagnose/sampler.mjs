@@ -13,6 +13,8 @@ export const WALL_ABORT_MS = 20 * 60_000;
 export const SAMPLE_MS_DEFAULT = 1000;
 export const SAMPLE_MS_MIN = 100;
 export const SAMPLE_MS_MAX = 10000;
+/** #2624: samples must reach to within two sampling periods of the end the runner expects. */
+export function freshnessSlackMs(sampleMs) { return 2 * sampleMs; }
 export function sampleIntervalMs(raw) {
   if (raw === undefined || raw === '') return SAMPLE_MS_DEFAULT;
   if (!/^[0-9]+$/.test(raw)) return null;

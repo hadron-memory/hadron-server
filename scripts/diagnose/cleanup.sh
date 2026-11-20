@@ -34,14 +34,17 @@ preserve_samples() {
   return 0
 }
 
-# finish_samples <dest> <connections>: the success path. Mandatory copy, then the pg_stat_activity control line.
+# finish_samples <dest> <connections> <bound...>: the success path. Mandatory copy, then the pg_stat_activity control line.
 finish_samples() {
-  local dest=$1 conns=$2 expected=${3:?expected sample end required} complete token attempt
+  # Validator arguments after <connections>: a fixed <minSampleAt>, or --until <nowMs> (#2624, #4609 BLIND F1: the
+  # cutoff then comes from the interval recorded in the very copy that is validated and published).
+  local dest=$1 conns=$2 complete token attempt
+  : "${3:?a freshness bound is required}"
   complete=$(umask 077; mktemp "$(dirname -- "$dest")/.diagnose-finish-XXXXXXXX") || return 5
   # A live append can race cat. Retry bounded fresh copies; never discard a fragment
   # that could be an abort record, and require positive validator execution evidence.
   for attempt in 1 2 3; do
-    if copy_samples "$complete" && token=$(node "$(dirname -- "${BASH_SOURCE[0]}")/validate-samples.mjs" "$complete" "$expected") && [ "$token" = validated ]; then
+    if copy_samples "$complete" && token=$(node "$(dirname -- "${BASH_SOURCE[0]}")/validate-samples.mjs" "$complete" "${@:3}") && [ "$token" = validated ]; then
       if printf '{"kind":"pg_activity","connectionsAfterLoad":%s}\n' "$conns" >> "$complete" && mv -fT -- "$complete" "$dest"; then return 0; fi
       break
     fi
@@ -49,15 +52,6 @@ finish_samples() {
   done
   rm -f -- "$complete"; return 5
 }
-
-# effective_sample_ms: the sampling interval the preload recorded in the container's samples (#2624). Fails, with
-# the validator's fixed line, when no supported interval is recorded.
-effective_sample_ms() {
-  declare -F app_exec >/dev/null || return 1
-  app_exec cat /var/lib/hadron/graphs/diagnose-samples.jsonl 2>/dev/null | node "$(dirname -- "${BASH_SOURCE[0]}")/validate-samples.mjs" --interval
-}
-# freshness_slack_ms <sample-ms>: samples must reach to within two sampling periods of the expected end.
-freshness_slack_ms() { echo $(( ${1:?sample ms} * 2 )); }
 
 # keep_logs_private <dest> <cmd...>: raw logs go to a fresh 0600 file, never to stderr; only a fixed line is published.
 # The destination is removed first and created exclusively, so an existing permissive file (or symlink) is never reused.

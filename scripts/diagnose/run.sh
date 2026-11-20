@@ -167,14 +167,14 @@ conns=$(compose_exec db psql -U e2e -d e2e -Atc "select count(*) from pg_stat_ac
 [[ "$conns" =~ ^[0-9]+$ ]] || conns=null
 # Idle tail: the sampler keeps running after load stops, so retention vs release is visible.
 sleep "${DIAG_IDLE_S:-300}"
-# Require coverage to within two sampling periods of the expected end, plus a live server: an idle-tail abort
-# cannot pass. #2624: the period is the one the preload recorded in its config record, not an assumed 1 s, so a
-# non-default interval is judged by its own cadence; a run that records no supported interval is refused.
-sample_ms=$(effective_sample_ms) || exit 5
-expected_end=$(( $(date +%s%3N) - $(freshness_slack_ms "$sample_ms") ))
+# Require coverage to within two sampling periods of this moment, plus a live server: an idle-tail abort cannot
+# pass. #2624: the period is the one the preload recorded in its config record, not an assumed 1 s, so a non-default
+# interval is judged by its own cadence; a run that records no supported interval is refused. The validator reads the
+# interval from the same copy it judges and publishes (#4609 BLIND F1).
+freshness_now_ms=$(date +%s%3N)
 app_exec node -e "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:5)).catch(()=>process.exit(5))"
 take_snapshot idle
-finish_samples "$DIAG_OUT" "$conns" "$expected_end"
+finish_samples "$DIAG_OUT" "$conns" --until "$freshness_now_ms"
 w2=null; heap=null
 # #4448: the load line and its per-session reduction join the record after finish_samples has placed
 # the container's series (both asserted secret-free at write).
