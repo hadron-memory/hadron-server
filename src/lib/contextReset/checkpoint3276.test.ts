@@ -54,19 +54,17 @@ it.each(['both','neither'])('refuses %s checkpoint inputs without a node or phas
  expect(await code(call(s,mode==='both'?{checkpointNode:(await f.checkpoint()).id}:{checkpoint:undefined}))).toBe('RECOVERY_REF_INVALID');
  expect(await nodeCount()).toBe(n+(mode==='both'?1:0));
  expect((await db.contextReset.findUniqueOrThrow({where:{id:s.resetId}})).phase).toBe('claimed');
- // #4424: filter on the code instead of taking the last row, so the claim's own accepted row cannot be mistaken for the refusal.
+ // #4424: read the refusal by its code, never by position. The table is append-only, so put an accepted row AFTER the
+ // refusal (timestamp taken from the stored refusal), the order that made `.at(-1)` return null; the filtered read must still find it.
  const action=mode==='both'?'checkpoint':'reset';
- expect(await db.hostKeyUse.findMany({where:{appKeyId:f.orca1.id,action,refusedCode:'RECOVERY_REF_INVALID'}})).toHaveLength(1);
- expect(await db.hostKeyUse.count({where:{appKeyId:f.orca1.id,action:'reset',refusedCode:null}})).toBeGreaterThan(0);
-});
-it('finds the refusal row even when an accepted row comes after it (#4424)',async()=>{
- const s=await claimed();expect(await code(call(s,{checkpoint:undefined}))).toBe('RECOVERY_REF_INVALID');
- // The host-key table is append-only, so put an accepted row AFTER the refusal: the order that made `.at(-1)` return null.
+ const refusal=await db.hostKeyUse.findFirstOrThrow({where:{appKeyId:f.orca1.id,action,refusedCode:'RECOVERY_REF_INVALID'}});
  const key=await db.appKey.findUniqueOrThrow({where:{id:f.orca1.id}});
- await db.hostKeyUse.create({data:{id:generateId(),appKeyId:key.id,appId:key.appId,hostId:'orca1',action:'reset',operationId:s.operationId,refusedCode:null,usedAt:new Date(Date.now()+1000)}});
- const rows=await db.hostKeyUse.findMany({where:{appKeyId:f.orca1.id,action:'reset'},orderBy:{usedAt:'asc'}});
- expect(rows.at(-1)?.refusedCode).toBeNull();
- expect(await db.hostKeyUse.findMany({where:{appKeyId:f.orca1.id,action:'reset',refusedCode:'RECOVERY_REF_INVALID'}})).toHaveLength(1);
+ await db.hostKeyUse.create({data:{id:generateId(),appKeyId:key.id,appId:key.appId,hostId:refusal.hostId,action,operationId:s.operationId,refusedCode:null,usedAt:new Date(refusal.usedAt.getTime()+1000)}});
+ const rows=await db.hostKeyUse.findMany({where:{appKeyId:f.orca1.id,action},orderBy:{usedAt:'asc'}});
+ expect(rows.at(-1)?.refusedCode).toBeNull(); // the position-based read would now see an accepted row
+ expect(rows.filter(r=>r.refusedCode==='RECOVERY_REF_INVALID')).toHaveLength(1);
+ // The claim's own accepted step is still recorded under this reset's operation.
+ expect(await db.hostKeyUse.count({where:{appKeyId:f.orca1.id,action:'reset',operationId:s.operationId,refusedCode:null}})).toBeGreaterThan(0);
 });
 it.each(['missing-memory','encrypted'])('refuses %s working memory and writes nothing',async kind=>{
  const s=await claimed(),n=await nodeCount();
