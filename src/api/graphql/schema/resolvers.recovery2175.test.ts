@@ -306,7 +306,7 @@ describe('single-node restore', () => {
       held(); await gate;
     }, { timeout: 15_000 });
     await holding;
-    const conversion = M.encryptMemory({}, { memoryId, dataKey: Buffer.alloc(32, 37).toString('base64') }, ctx()).then(
+    const conversion = M.encryptMemory({}, { memoryRef: memoryId, dataKey: Buffer.alloc(32, 37).toString('base64') }, ctx()).then(
       (value: any) => ({ value, error: undefined }), (error: any) => ({ value: undefined, error }));
     let restoration: Promise<any>;
     try {

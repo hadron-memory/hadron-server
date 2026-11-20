@@ -34,7 +34,7 @@ beforeEach(async () => {
   const a = await db.user.create({ data: { githubId: 6611, githubUsername: 'omcp-admin', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: a.id, role: 'ADMIN' } });
   adminId = a.id;
-  const mem = await resolvers.Mutation.createMemory({}, { orgId, name: 'intel' }, admin());
+  const mem = await resolvers.Mutation.createMemory({}, { orgRef: orgId, name: 'intel' }, admin());
   memId = mem.id;
   memUrn = mem.urn;
   await (resolvers.Mutation as any).updateMemory(null, { ref: memId, schema }, admin());
@@ -116,7 +116,7 @@ describe('findObjects exact totals (#2514)', () => {
     const c = await db.node.findFirstOrThrow({ where: { memoryId: memId, loc: 'competitor:c' } });
     await call('hadron_delete_object', { ref: c.id });
     await db.node.create({ data: { id: generateId(), memoryId: memId, loc: 'other:x', name: 'other', nodeType: 'info', objectType: 'other', properties: { stage: 'seed' } } });
-    const foreign = await resolvers.Mutation.createMemory({}, { orgId, name: 'foreign' }, admin());
+    const foreign = await resolvers.Mutation.createMemory({}, { orgRef: orgId, name: 'foreign' }, admin());
     await db.node.create({ data: { id: generateId(), memoryId: foreign.id, loc: 'competitor:x', name: 'foreign', nodeType: 'info', objectType: 'competitor', properties: { stage: 'seed' } } });
     for (const match of [undefined, { stage: 'seed' }]) {
       const found = JSON.parse(await call('hadron_find_objects', { memoryUrn: memUrn, type: 'competitor', match }));

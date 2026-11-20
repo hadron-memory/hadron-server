@@ -47,7 +47,7 @@ beforeEach(async () => {
 
 type Home = { chatId: string; memoryId: string; rootId: string };
 async function start(userId: string): Promise<Home> {
-  const out = await M.startChat({}, { agentId, scope: 'private', conversationName: 'flow' }, context(userId));
+  const out = await M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, context(userId));
   const root = await chatNodeByLocOrThrow(db, out.chatId);
   return { chatId: out.chatId, memoryId: root.memoryId, rootId: root.id };
 }

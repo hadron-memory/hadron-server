@@ -50,8 +50,8 @@ beforeEach(async () => {
 
 describe('already-existing memory URN is CONFLICT (#2819)', () => {
   it('a. createMemory twice in an org: CONFLICT with the unchanged message', async () => {
-    await M.createMemory({}, { orgId, name: 'Probe Yed', vectorIndexEnabled: false }, ctx());
-    const r = await refusal(M.createMemory({}, { orgId, name: 'Probe Yed', vectorIndexEnabled: false }, ctx()));
+    await M.createMemory({}, { orgRef: orgId, name: 'Probe Yed', vectorIndexEnabled: false }, ctx());
+    const r = await refusal(M.createMemory({}, { orgRef: orgId, name: 'Probe Yed', vectorIndexEnabled: false }, ctx()));
     expect(r.extensions?.code).toBe('CONFLICT');
     expect(r.message).toBe(`A memory with URN "${orgUrn}:probe-yed" already exists`);
   });
@@ -65,21 +65,21 @@ describe('already-existing memory URN is CONFLICT (#2819)', () => {
   });
 
   it('c1. cloneMemory onto an existing memory URN: CONFLICT', async () => {
-    const src = await M.createMemory({}, { orgId, name: 'src', vectorIndexEnabled: false }, ctx());
-    await M.createMemory({}, { orgId, name: 'taken', vectorIndexEnabled: false }, ctx());
+    const src = await M.createMemory({}, { orgRef: orgId, name: 'src', vectorIndexEnabled: false }, ctx());
+    await M.createMemory({}, { orgRef: orgId, name: 'taken', vectorIndexEnabled: false }, ctx());
     const r = await refusal(M.cloneMemory({}, { ref: src.id, targetUrn: `hrn:mem:${orgUrn}:taken` }, ctx()));
     expect(r.extensions?.code).toBe('CONFLICT');
   });
 
   it('c2. extractParentNodeToMemory onto an existing memory URN: CONFLICT', async () => {
-    const src = await M.createMemory({}, { orgId, name: 'esrc', vectorIndexEnabled: false }, ctx());
+    const src = await M.createMemory({}, { orgRef: orgId, name: 'esrc', vectorIndexEnabled: false }, ctx());
     const parent = await db.node.create({
       data: { id: generateId(), memoryId: src.id, loc: 'sec', name: 'Sec', content: 'x' },
     });
     await db.node.create({
       data: { id: generateId(), memoryId: src.id, loc: 'sec:child', name: 'Child', content: 'y' },
     });
-    await M.createMemory({}, { orgId, name: 'etaken', vectorIndexEnabled: false }, ctx());
+    await M.createMemory({}, { orgRef: orgId, name: 'etaken', vectorIndexEnabled: false }, ctx());
     const r = await refusal(
       M.extractParentNodeToMemory({}, { parentRef: parent.id, targetUrn: `hrn:mem:${orgUrn}:etaken` }, ctx()),
     );
@@ -89,7 +89,7 @@ describe('already-existing memory URN is CONFLICT (#2819)', () => {
   it('d. oracle: the response is identical for a holder the caller can see and one they cannot', async () => {
     // The caller (org admin) can see their own memory; another member's
     // private memory in the same org is not visible to them.
-    await M.createMemory({}, { orgId, name: 'visible', vectorIndexEnabled: false }, ctx());
+    await M.createMemory({}, { orgRef: orgId, name: 'visible', vectorIndexEnabled: false }, ctx());
     const hiddenHolder = await db.memory.create({
       data: {
         id: generateId(), name: 'hidden', urn: `${orgUrn}:hidden`, organizationId: orgId,
@@ -98,7 +98,7 @@ describe('already-existing memory URN is CONFLICT (#2819)', () => {
     });
     // Premise: the holder really is invisible to this caller.
     expect(await getAccessibleMemoryIds(ctx(), hiddenHolder.id)).toEqual([]);
-    const attempt = (name: string) => M.createMemory({}, { orgId, name, vectorIndexEnabled: false }, ctx());
+    const attempt = (name: string) => M.createMemory({}, { orgRef: orgId, name, vectorIndexEnabled: false }, ctx());
     const v = await refusal(attempt('visible'));
     const h = await refusal(attempt('hidden'));
     expect(v.extensions?.code).toBe('CONFLICT');
@@ -108,9 +108,9 @@ describe('already-existing memory URN is CONFLICT (#2819)', () => {
   });
 
   it('e. a soft-deleted memory at the URN is still reclaimed', async () => {
-    const first = await M.createMemory({}, { orgId, name: 'gone', vectorIndexEnabled: false }, ctx());
+    const first = await M.createMemory({}, { orgRef: orgId, name: 'gone', vectorIndexEnabled: false }, ctx());
     await db.memory.update({ where: { id: first.id }, data: { deletedAt: new Date() } });
-    const again = await M.createMemory({}, { orgId, name: 'gone', vectorIndexEnabled: false }, ctx());
+    const again = await M.createMemory({}, { orgRef: orgId, name: 'gone', vectorIndexEnabled: false }, ctx());
     expect(again.urn).toBe(`${orgUrn}:gone`);
   });
 });

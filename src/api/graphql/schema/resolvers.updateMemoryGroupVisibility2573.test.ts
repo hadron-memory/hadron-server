@@ -33,7 +33,7 @@ async function setup(): Promise<Fixture> {
 async function create(fx: Fixture, name: string, memoryClass: 'knowledge' | 'group', visibility?: string) {
   return (await resolvers.Mutation.createMemory(
     {},
-    { orgId: fx.orgId, name, memoryClass, ...(visibility ? { visibility } : {}) },
+    { orgRef: fx.orgId, name, memoryClass, ...(visibility ? { visibility } : {}) },
     fx.ctx,
   )) as { id: string };
 }

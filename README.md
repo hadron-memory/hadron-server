@@ -67,7 +67,7 @@ optional for a first run. The server refuses to start without the last one.
 | `DATABASE_URL` | Your connection string, for example `postgresql://YOUR_USER@localhost:5432/hadron` |
 | `JWT_SECRET` | Any random string of 32 or more characters. Generate one with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
 | `HADRON_ENCRYPTION_KEY` | 32 random bytes as hex, generated with the same command |
-| `RATE_LIMIT_KEYRING` | A one-key JSON keyring for the rate limiter. `.env.example` does not list this variable. Generate the whole line with `node -e "console.log('RATE_LIMIT_KEYRING=' + JSON.stringify({current:'dev1',keys:{dev1:require('crypto').randomBytes(32).toString('hex')}}))"` and paste it into `.env` as printed |
+| `RATE_LIMIT_KEYRING` | A one-key JSON keyring for the rate limiter. `.env.example` has a commented example of its shape; this command generates a complete line: `node -e "console.log('RATE_LIMIT_KEYRING=' + JSON.stringify({current:'dev1',keys:{dev1:require('crypto').randomBytes(32).toString('hex')}}))"` and paste it into `.env` as printed |
 
 `.env` is ignored by git. Never commit it, and never paste its contents into an issue.
 

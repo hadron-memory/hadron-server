@@ -241,7 +241,7 @@ describe('transferMemoryOwnership', () => {
         return Reflect.get(target, key);
       },
     });
-    await expect(resolvers.Mutation.deleteMemory(null, { id: memory.id }, {
+    await expect(resolvers.Mutation.deleteMemory(null, { ref: memory.id }, {
       db: raceDb, userId: owner.id, roles: ['READER'],
     })).rejects.toMatchObject({ name: 'MemoryNotFoundError' });
     expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({

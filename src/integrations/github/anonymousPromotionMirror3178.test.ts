@@ -76,7 +76,7 @@ let appContextId: string;
 const appCtx = (): Context => ({ db, appId: appContextId, roles: [] });
 const userCtx = (): Context => ({ db, userId: ownerId, roles: [] });
 const promote = () => withTestOperationKey(dataKey, appContextId, () =>
-  resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'promotion-owner-3178' }, appCtx()));
+  resolvers.Mutation.linkMemoryToUser({}, { memoryRef: memoryId, externalUserId: 'promotion-owner-3178' }, appCtx()));
 const refs = (): MirrorObligationRef[] => [{ nodeId, kind: 'WRITE' }];
 const mirror = (mutate: Parameters<typeof withMirrorCheckout>[1] = vi.fn(() => {})) =>
   withMirrorCheckout({ memoryId, commitSubject: '3178 probe', logPrefix: '[3178]', obligations: refs() }, mutate);
