@@ -10,13 +10,13 @@ importers:
     dependencies:
       '@ai-sdk/amazon-bedrock':
         specifier: ^5.0.10
-        version: 5.0.10(zod@4.3.6)
+        version: 5.0.10(zod@4.6.6)
       '@ai-sdk/anthropic':
         specifier: ^4.0.7
-        version: 4.0.7(zod@4.3.6)
+        version: 4.0.7(zod@4.6.6)
       '@ai-sdk/openai':
         specifier: ^4.0.7
-        version: 4.0.7(zod@4.3.6)
+        version: 4.0.7(zod@4.6.6)
       '@apollo/server':
         specifier: ^4.11.0
         version: 4.13.0(graphql@16.13.1)
@@ -40,7 +40,7 @@ importers:
         version: 0.0.22
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.0
-        version: 1.32.0(zod@4.3.6)
+        version: 1.32.0(zod@4.6.6)
       '@mozilla/readability':
         specifier: ^0.6.0
         version: 0.6.0
@@ -64,7 +64,7 @@ importers:
         version: 8.20.0
       ai:
         specifier: 7.0.14
-        version: 7.0.14(zod@4.3.6)
+        version: 7.0.14(zod@4.6.6)
       ajv:
         specifier: 8.20.0
         version: 8.20.0
@@ -123,8 +123,8 @@ importers:
         specifier: 2.8.3
         version: 2.8.3
       zod:
-        specifier: ^4.3.6
-        version: 4.3.6
+        specifier: ^4.6.6
+        version: 4.6.6
     devDependencies:
       '@types/bcrypt':
         specifier: ^5.0.2
@@ -2370,9 +2370,9 @@ packages:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
     engines: {node: '>=0.10.0'}
 
-  source-map-js@1.2.2:
-    resolution: {integrity: sha512-KGj/8Y43x35aZVDtt+J4mK1hoLGHULMYfSkODJNQjNDC3oW1PqPoxMwo0pLUsWM/UEGzON/NxeHywEfNXNP3Vw==}
-    engines: {node: '>=0.10.0'}
+  source-map-js@1.2.4:
+    resolution: {integrity: sha512-J7ZjMvHd9O1fcT/5V09QWaaSl2BbWx3F6O08spde82Namf9UB0GxRVIPiNbVsdKkoizHiSpTodo3vp2bAy91MA==}
+    engines: {node: '>=6.0.0'}
 
   source-map@0.6.1:
     resolution: {integrity: sha512-UjgapumWlbMhkBgzT7Ykc5YXUT46F0iKu8SGXq0bcwP5dz/h0Plj6enJqjz1Zbq2l5WaqYnrVbwWOWMyF3F47g==}
@@ -2655,48 +2655,48 @@ packages:
     peerDependencies:
       zod: ^3.25.28 || ^4
 
-  zod@4.3.6:
-    resolution: {integrity: sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg==}
+  zod@4.6.6:
+    resolution: {integrity: sha512-4UmzQUF5fxvfcYHlbjBmejU+w+hbDnWFx4aS8kBx7nPBHcO2SqPbpAG8snbdg+Xse4pRefR98hgjFgIMCI/UhA==}
 
 snapshots:
 
-  '@ai-sdk/amazon-bedrock@5.0.10(zod@4.3.6)':
+  '@ai-sdk/amazon-bedrock@5.0.10(zod@4.6.6)':
     dependencies:
-      '@ai-sdk/anthropic': 4.0.7(zod@4.3.6)
-      '@ai-sdk/openai': 4.0.7(zod@4.3.6)
+      '@ai-sdk/anthropic': 4.0.7(zod@4.6.6)
+      '@ai-sdk/openai': 4.0.7(zod@4.6.6)
       '@ai-sdk/provider': 4.0.2
-      '@ai-sdk/provider-utils': 5.0.5(zod@4.3.6)
+      '@ai-sdk/provider-utils': 5.0.5(zod@4.6.6)
       '@smithy/eventstream-codec': 4.5.2
       '@smithy/util-utf8': 4.5.2
       aws4fetch: 1.0.20
-      zod: 4.3.6
+      zod: 4.6.6
 
-  '@ai-sdk/anthropic@4.0.7(zod@4.3.6)':
+  '@ai-sdk/anthropic@4.0.7(zod@4.6.6)':
     dependencies:
       '@ai-sdk/provider': 4.0.2
-      '@ai-sdk/provider-utils': 5.0.5(zod@4.3.6)
-      zod: 4.3.6
+      '@ai-sdk/provider-utils': 5.0.5(zod@4.6.6)
+      zod: 4.6.6
 
-  '@ai-sdk/gateway@4.0.11(zod@4.3.6)':
+  '@ai-sdk/gateway@4.0.11(zod@4.6.6)':
     dependencies:
       '@ai-sdk/provider': 4.0.2
-      '@ai-sdk/provider-utils': 5.0.5(zod@4.3.6)
+      '@ai-sdk/provider-utils': 5.0.5(zod@4.6.6)
       '@vercel/oidc': 3.2.0
-      zod: 4.3.6
+      zod: 4.6.6
 
-  '@ai-sdk/openai@4.0.7(zod@4.3.6)':
+  '@ai-sdk/openai@4.0.7(zod@4.6.6)':
     dependencies:
       '@ai-sdk/provider': 4.0.2
-      '@ai-sdk/provider-utils': 5.0.5(zod@4.3.6)
-      zod: 4.3.6
+      '@ai-sdk/provider-utils': 5.0.5(zod@4.6.6)
+      zod: 4.6.6
 
-  '@ai-sdk/provider-utils@5.0.5(zod@4.3.6)':
+  '@ai-sdk/provider-utils@5.0.5(zod@4.6.6)':
     dependencies:
       '@ai-sdk/provider': 4.0.2
       '@standard-schema/spec': 1.1.0
       '@workflow/serde': 4.1.0
       eventsource-parser: 3.1.1
-      zod: 4.3.6
+      zod: 4.6.6
 
   '@ai-sdk/provider@4.0.2':
     dependencies:
@@ -3200,7 +3200,7 @@ snapshots:
       - encoding
       - supports-color
 
-  '@modelcontextprotocol/sdk@1.32.0(zod@4.3.6)':
+  '@modelcontextprotocol/sdk@1.32.0(zod@4.6.6)':
     dependencies:
       '@hono/node-server': 2.1.5(hono@4.13.13)
       ajv: 8.20.0
@@ -3217,8 +3217,8 @@ snapshots:
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
       raw-body: 3.0.2
-      zod: 4.3.6
-      zod-to-json-schema: 3.25.2(zod@4.3.6)
+      zod: 4.6.6
+      zod-to-json-schema: 3.25.2(zod@4.6.6)
     transitivePeerDependencies:
       - supports-color
 
@@ -3806,12 +3806,12 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  ai@7.0.14(zod@4.3.6):
+  ai@7.0.14(zod@4.6.6):
     dependencies:
-      '@ai-sdk/gateway': 4.0.11(zod@4.3.6)
+      '@ai-sdk/gateway': 4.0.11(zod@4.6.6)
       '@ai-sdk/provider': 4.0.2
-      '@ai-sdk/provider-utils': 5.0.5(zod@4.3.6)
-      zod: 4.3.6
+      '@ai-sdk/provider-utils': 5.0.5(zod@4.6.6)
+      zod: 4.6.6
 
   ajv-formats@3.0.1(ajv@8.20.0):
     optionalDependencies:
@@ -4814,7 +4814,7 @@ snapshots:
     dependencies:
       nanoid: 3.3.20
       picocolors: 1.1.1
-      source-map-js: 1.2.2
+      source-map-js: 1.2.4
 
   postgres-array@2.0.0: {}
 
@@ -5085,7 +5085,7 @@ snapshots:
 
   source-map-js@1.2.1: {}
 
-  source-map-js@1.2.2: {}
+  source-map-js@1.2.4: {}
 
   source-map@0.6.1: {}
 
@@ -5308,8 +5308,8 @@ snapshots:
 
   yaml@2.8.3: {}
 
-  zod-to-json-schema@3.25.2(zod@4.3.6):
+  zod-to-json-schema@3.25.2(zod@4.6.6):
     dependencies:
-      zod: 4.3.6
+      zod: 4.6.6
 
-  zod@4.3.6: {}
+  zod@4.6.6: {}
