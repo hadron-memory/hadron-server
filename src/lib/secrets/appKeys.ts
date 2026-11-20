@@ -279,7 +279,8 @@ export async function unwrapAppKey(
 
 /**
  * The App's active key, minting version 1 (or n+1 after every earlier version was retired) when none is active.
- * The common path takes no lock; creation is serialized by a transaction-scoped advisory lock per App, and the
+ * The common path locks only the active key row, FOR SHARE, so a concurrent rotation cannot retire the key between
+ * this read and the caller's commit (#4553 §10 F1); creation is serialized by a transaction-scoped advisory lock per App, and the
  * loser re-reads under it and returns the winner's key, so two racing callers leave one active key. The partial
  * unique index `(app_id) WHERE retired_at IS NULL` is the backstop (a P2002 on create re-reads the winner). Call it
  * INSIDE a transaction: the advisory lock is transaction-scoped. On a client that is not a transaction (autocommit)
@@ -297,9 +298,16 @@ export async function ensureAppKey(db: Prisma.TransactionClient, appId: string):
     orderBy: { keyVersion: 'desc' },
     select: { keyVersion: true },
   });
-  let row = await active();
-  if (row) return unwrapAppKey(db, appId, row.keyVersion);
+  // #4553 §10 F1: the common path locks the active key row FOR SHARE. A rotation retires that row with an UPDATE, so
+  // a store either holds the share lock first (the rotation waits, and its re-encrypt then sees this version) or
+  // waits for the rotation to commit, finds the row no longer active and takes the locked path below, which reads
+  // the new key. Stores share the lock, so they never wait on each other.
+  const shared = await db.$queryRaw<Array<{ key_version: number }>>`
+    SELECT key_version FROM secret_app_keys WHERE app_id = ${appId} AND retired_at IS NULL
+    ORDER BY key_version DESC LIMIT 1 FOR SHARE`;
+  if (shared[0]) return unwrapAppKey(db, appId, shared[0].key_version);
   await lockAppKeyMint(db, appId);
+  let row = await active();
   row = await active();
   if (row) return unwrapAppKey(db, appId, row.keyVersion);
   // #4003 FIT delta 2: an instance whose root is not the recorded one mints nothing (checked under the lock).
