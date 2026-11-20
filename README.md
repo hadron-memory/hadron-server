@@ -24,16 +24,27 @@ cp .env.example .env   # edit DATABASE_URL, JWT_SECRET, HADRON_ENCRYPTION_KEY
 Starting from an empty local database (single-role, as in CLAUDE.md "Local Postgres setup"):
 
 ```bash
-createdb hadron_local
-psql postgresql://holger@localhost:5432/hadron_local -c 'CREATE EXTENSION IF NOT EXISTS vector'
-scripts/dev-setup.sh hadron_local          # push + post-push.sql (never a bare `db push`)
-DATABASE_URL=postgresql://holger@localhost:5432/hadron_local pnpm tsx prisma/seed.ts
+createdb -h localhost -U <role> hadron_local
+psql postgresql://<role>@localhost:5432/hadron_local -c 'CREATE EXTENSION IF NOT EXISTS vector'
+export DATABASE_URL=postgresql://<role>@localhost:5432/hadron_local   # <role>: a Postgres role that can create tables
+pnpm run db:generate                       # the Prisma client; nothing else generates it, and the seed and the server import it
+scripts/dev-setup.sh                       # push + post-push.sql from $DATABASE_URL (never a bare `db push`)
+pnpm tsx prisma/seed.ts
 ```
 
 Then set `DATABASE_URL` in `.env` and add a `RATE_LIMIT_KEYRING` (required: the server refuses to
 boot without it; the shape and a generate command are in `.env.example`), and run `pnpm run dev`.
 `/health` and `/ready` answer `{"ok":true}` when it is up. A database that already holds data from
 before migration `20261019090000_worker_signature` needs the fix tracked in #4524 first.
+
+Keep the same `RATE_LIMIT_KEYRING` for as long as you keep that database. The first boot records the
+key's fingerprint in the database, and a different key under the same id is then refused at boot with
+`RateConfigurationError` (rotate with the two-key overlap described in `.env.example`, or start from a new database).
+
+A first boot on an empty database needs neither `JWT_SECRET` nor `HADRON_ENCRYPTION_KEY`: with only
+`DATABASE_URL` and `RATE_LIMIT_KEYRING` set, `pnpm run dev` serves `/health` and `/ready`. Set both
+before you use the server for real: `NODE_ENV=production` refuses to boot without a `JWT_SECRET` of
+at least 32 bytes, and `HADRON_ENCRYPTION_KEY` encrypts secrets at rest.
 
 ### PostgreSQL
 
