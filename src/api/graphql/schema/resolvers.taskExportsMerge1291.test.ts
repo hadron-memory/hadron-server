@@ -225,7 +225,15 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
         .then(() => 'wrote', (e) => `refused:${e.extensions?.code}`);
       // The merge now holds the original id and is queued on the lock. Bounded and raced with the merge settling early,
       // so a merge that never reaches the lookup fails the test instead of hanging it with the spy installed.
-      await Promise.race([lookedUp, attempt, new Promise((r) => setTimeout(r, 10_000))]);
+      // The lookup signal must WIN: an early settlement or a timeout is a failure here, never a silent pass that skipped
+      // the stale-resolution path (BLIND P3). The timer is cleared either way.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const seen = await Promise.race([
+        lookedUp.then(() => 'looked-up' as const),
+        attempt.then((o) => `settled-early:${o}` as const),
+        new Promise<'timeout'>((r) => { timer = setTimeout(() => r('timeout'), 10_000); }),
+      ]).finally(() => clearTimeout(timer));
+      if (seen !== 'looked-up') throw new Error(`the merge did not reach its loc lookup while the lock was held (${seen})`);
       release();
       await holder;
       return await attempt;
@@ -250,6 +258,30 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
     });
     expect(outcome).toBe('wrote');
     expect((await db.node.findUniqueOrThrow({ where: { id: repl.id } })).properties).toEqual({ keep: 'repl', exports: { codexSkill: codex } });
+  });
+
+  it('an id-selected merge on a physically deleted row is NODE_NOT_FOUND at once, never routed through the loc retry (SEC note)', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let locked!: () => void;
+    const gotLock = new Promise<void>((r) => (locked = r));
+    const holder = db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${taskId}))`;
+      locked();
+      await held;
+      await tx.node.delete({ where: { id: taskId } });
+    }, { timeout: 20_000 });
+    try {
+      await gotLock;
+      const attempt = merge({ exports: { codexSkill: codex } }).then(() => 'wrote', (e) => `refused:${e.extensions?.code}`);
+      await new Promise((r) => setTimeout(r, 500)); // queued on the lock behind the holder
+      release();
+      await holder;
+      expect(await attempt).toBe('refused:NODE_NOT_FOUND');
+    } finally {
+      release();
+      await holder.catch(() => undefined);
+    }
   });
 
   it('a loc-selected merge lands on the node that took the loc when the original moved away (BLIND delta P2)', async () => {
