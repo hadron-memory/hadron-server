@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -77,7 +77,9 @@ const runShDown = () => {
  */
 const downRun = (setup) => withDir('diag-2628-down-', (dir) => {
   const log = join(dir, 'ran');
-  mkdirSync(join(dir, 'stage/src'), { recursive: true });
+  // #4607 BLIND F4: a stack.sh that logs any teardown attempt, so "no teardown" is an observation, not an absent script.
+  mkdirSync(join(dir, 'stage/src/scripts/e2e'), { recursive: true });
+  writeFileSync(join(dir, 'stage/src/scripts/e2e/stack.sh'), `#!/bin/sh\necho stackdown >> '${log}'\n`, { mode: 0o755 });
   const stubs = `note() { echo "$1" >> '${log}'; }; preserve_samples() { note preserve; }; keep_logs_private() { note logs; }; `
     + `purge_snapshots() { note purge; }; release_stack_reservation() { note release; }; git() { return 0; }; `
     + `incus() { note incus; return 1; }; `
@@ -91,11 +93,13 @@ const downRun = (setup) => withDir('diag-2628-down-', (dir) => {
 /** This run's own reservation, so stack_owned gets as far as the state checks. */
 const ownReservation = `DIAG_RUN_TOKEN=tok-1; mkdir "$DIAG_LOCK"; echo tok-1 > "$DIAG_LOCK/owner"`;
 
-test('missing state: an early failure says no stack state was created and prints no inspection path', () => {
+test('missing state: the line says only that no state is found, skips capture and teardown, and prints no inspection path', () => {
   const r = downRun(ownReservation);
   assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /no stack state was created at .*; nothing to capture or tear down/);
-  assert.doesNotMatch(r.stderr, /inspect private state/);
+  // #4607 BLIND F2: absent now is not "never created": the line says only what is known, and skips capture and teardown.
+  assert.match(r.stderr, /no stack state found at \S+, so ownership cannot be verified; capture and teardown skipped/);
+  assert.match(r.stderr, /if an Incus instance named hadron-e2e-w exists, check it by hand/);
+  assert.doesNotMatch(r.stderr, /was created|nothing to capture|inspect private state/);
   noRemovalAdvice(r.stderr);
   assert(!r.ran.includes('stackdown') && !r.ran.includes('purge') && !r.ran.includes('preserve'), r.ran.join());
 });
@@ -107,7 +111,7 @@ test('state without this run\'s owner marker: says it belongs to another holder 
     assert.match(r.stderr, /stack ownership unverified; refusing capture\/teardown; inspect private state: \S+/);
     assert.match(r.stderr, /does not carry this run's owner marker/);
     noRemovalAdvice(r.stderr);
-    assert(!r.ran.includes('purge') && !r.ran.includes('preserve'), r.ran.join());
+    assert(!r.ran.includes('stackdown') && !r.ran.includes('purge') && !r.ran.includes('preserve'), r.ran.join());
   }
 });
 
@@ -117,5 +121,38 @@ test('this run\'s state but no verified instance: says the Incus instance is mis
   assert.match(r.stderr, /stack ownership unverified; refusing capture\/teardown; inspect private state: \S+/);
   assert.match(r.stderr, /Incus instance hadron-e2e-w is missing, unreadable or not marked by this run/);
   noRemovalAdvice(r.stderr);
-  assert(!r.ran.includes('purge') && !r.ran.includes('preserve'), r.ran.join());
+  assert(!r.ran.includes('stackdown') && !r.ran.includes('purge') && !r.ran.includes('preserve'), r.ran.join());
 });
+
+// ── #4607 BLIND fix head ───────────────────────────────────────────────────────────────────────────────────────
+
+test('a lost reservation is its own case, named by its path, even when the state marker matches (#4607 F3)', () => {
+  // The state marker is this run's token, but the reservation's owner file no longer is.
+  const r = downRun(`DIAG_RUN_TOKEN=tok-1; mkdir "$DIAG_LOCK"; echo someone-else > "$DIAG_LOCK/owner"; mkdir "$state"; echo tok-1 > "$state/diagnose-owner"; echo incus > "$state/backend"`);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /this run no longer holds its reservation \S+\.diagnose-lock/);
+  assert.doesNotMatch(r.stderr, /owner marker/);
+  noRemovalAdvice(r.stderr);
+  assert(!r.ran.includes('stackdown') && !r.ran.includes('purge') && !r.ran.includes('preserve'), r.ran.join());
+});
+
+test('a reservation that cannot be created (no lock exists) is not reported as a held reservation (#4607 F1)', () => withDir('diag-2628-', (dir) => {
+  const parent = join(dir, 'ro'); mkdirSync(parent);
+  const state = join(parent, 'state');
+  chmodSync(parent, 0o555);
+  try {
+    const r = sh(`incus() { return 0; }; acquire_stack_reservation '${state}' hadron-e2e-x`, dir);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /mkdir: cannot create directory/);   // mkdir's own reason is kept
+    assert.match(r.stderr, /could not create the diagnosis reservation \S+\.diagnose-lock \(see the error above\); refusing/);
+    assert.doesNotMatch(r.stderr, /already reserved/);
+    noRemovalAdvice(r.stderr);
+  } finally { chmodSync(parent, 0o755); }
+}));
+
+test('the end-of-run explanation tolerates a missing instance name, so the EXIT trap keeps running (#4607 F5)', () => withDir('diag-2628-', (dir) => {
+  const r = sh(`DIAG_RUN_TOKEN=t; DIAG_LOCK='${join(dir, 'l')}'; mkdir "$DIAG_LOCK"; echo t > "$DIAG_LOCK/owner"; explain_stack_ownership_failure '${join(dir, 'none')}' ''; echo AFTER`, dir);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /AFTER/);
+  assert.match(r.stderr, /no stack state found at /);
+}));
