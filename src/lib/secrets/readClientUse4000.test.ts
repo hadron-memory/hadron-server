@@ -80,6 +80,17 @@ describe('transactional secret.use (#4000)', () => {
     expect(audit).toHaveLength(1);
     expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
   });
+  it('conceals deletion from a run that does not hold the known client', async () => {
+    const client = await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } });
+    const holder = await db.user.create({ data: { handle: `s5-wrong-${generateId()}` } });
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+      await tx.$executeRaw`UPDATE grants SET grantee_app_id = NULL, user_id = ${holder.id} WHERE id = ${grantId}`;
+      await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+    });
+    await db.secret.delete({ where: { id: client.secretId } });
+    await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
+  });
   it('does not let later metadata widen the signed path or disagree with the encrypted kind', async () => {
     await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
     const client = await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } });
