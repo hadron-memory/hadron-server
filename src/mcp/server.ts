@@ -99,6 +99,7 @@ import { registerTickerTools } from './tickerTools.js';
 import { registerStopSignalTools } from './stopSignalTools.js';
 import { registerWebPollTools } from './webPollTools.js';
 import { registerGrantTools } from './grantTools.js';
+import { registerSecretTools } from './secretTools.js';
 import { openThreadCounts, type CommentCounts } from '../lib/comments/summary.js';
 import { loadSignatureStatuses, type NodeSignatureStatusView } from '../lib/signing/status.js';
 import { nodeContentValidationState } from '../lib/nodeContentValidation.js';
@@ -1199,6 +1200,16 @@ function safeEmitEntityUrnV2(type: 'memory' | 'app' | 'agent' | 'org', bareUrn: 
   } catch {
     return bareUrn;
   }
+}
+
+/**
+ * Tenant-editable text (an org, App or memory name) inside a line-parsed answer: control characters (CR, LF, the
+ * Unicode line separators) collapse to a space so a name can never forge an extra `signed in as:` or `active memory:`
+ * line, and it is cut at `max` characters. Shared by the #1412 org block and the #4290 whoami header.
+ */
+function oneLineText(name: string, max = 100): string {
+  const flat = name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ');
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
 /**
@@ -2437,6 +2448,7 @@ export function createMcpServerInstance(
     'hadron_web_poll_list',
     // #3711 — hadron_create_grant acts as the person and clears any worker binding itself (src/mcp/grantTools.ts); no session argument.
     'hadron_create_grant',
+    'hadron_list_secrets', 'hadron_get_secret', // #3998: metadata reads, never a reveal or write.
     // Per-connection selections and key handling: nothing authored.
     'hadron_set_active_memory', 'hadron_set_active_app', 'hadron_set_active_org', 'hadron_set_active_scope',
     'hadron_unlock_memory', 'hadron_lock_memory',
@@ -2723,10 +2735,7 @@ export function createMcpServerInstance(
       }),
       db.organization.count({ where }),
     ]);
-    const oneLine = (name: string) => {
-      const flat = name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ');
-      return flat.length > ORG_NAME_RENDER_MAX ? `${flat.slice(0, ORG_NAME_RENDER_MAX - 1)}…` : flat;
-    };
+    const oneLine = (name: string) => oneLineText(name, ORG_NAME_RENDER_MAX);
     const lines = orgs.map((o) => `  - ${safeEmitEntityUrnV2('org', o.urn)} (${oneLine(o.name)})`);
     if (total > orgs.length) {
       lines.push(`  … and ${total - orgs.length} more not shown`);
@@ -3874,6 +3883,7 @@ export function createMcpServerInstance(
   registerWebPollTools(server, { db, auth });
   // #3711 — a person who manages an App asks for a grant (ruling 0255 item 21); never as a worker.
   registerGrantTools(server, { db, auth });
+  registerSecretTools(server, { db, auth });
   registerAutomationPinTools(server, { db, auth });
   // #1892 — an Agent's task and process lists (cor:dmo:050:15, :16).
   registerAgentDefinitionTools(server, { db, auth });
@@ -9956,7 +9966,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_whoami',
-    'Answer "what am I driving right now?" — your own OPEN sessions. Optional app and workerRef filters narrow the complete authorized set before paging; omit both for the existing view. Every successful answer opens with an `active memory:` line naming the memory selected on this connection, or `none` when none is set or it is no longer readable (#2515); it describes the connection, not any session row, and is not a guarantee of where a write lands. Each session shows its App, when it started, and the worker it is bound to IF it is bound (#1016). Not every row is a worker session: a plain session says "working as: nobody". MCP does not start worker sessions (#3082); a bound row was started by the CLI, and its id passed as `session` on a core write (or sent in the X-Hadron-Session header) attributes that write to the worker. For a BOUND row, its session id is the only handle that makes the work attributable, and nothing on the wire carries it, so a host that loses it to a context compaction loses attribution with it: come here for the id. Do NOT read a successful call as evidence your binding is alive: hadron_end_session is idempotent, so neither a live nor a dead binding makes this call fail. Call this whenever you are unsure which session you are driving, or after any context loss. With includeEnded this list also returns bound rows marked [ENDED]. Read-only, and scoped to sessions you started.',
+    'Answer "what am I driving right now?" — your own OPEN sessions. Optional app and workerRef filters narrow the complete authorized set before paging; omit both for the existing view. Every successful answer opens with an `active memory:` line naming the memory selected on this connection, or `none` when none is set or it is no longer readable (#2515); a `signed in as:` line follows it naming you: your @handle and the orgs you belong to, or, for an App-key caller, its own App (#4290); the active-memory line describes the connection, not any session row, and is not a guarantee of where a write lands. Each session shows its App, when it started, and the worker it is bound to IF it is bound (#1016). Not every row is a worker session: a plain session says "working as: nobody". MCP does not start worker sessions (#3082); a bound row was started by the CLI, and its id passed as `session` on a core write (or sent in the X-Hadron-Session header) attributes that write to the worker. For a BOUND row, its session id is the only handle that makes the work attributable, and nothing on the wire carries it, so a host that loses it to a context compaction loses attribution with it: come here for the id. Do NOT read a successful call as evidence your binding is alive: hadron_end_session is idempotent, so neither a live nor a dead binding makes this call fail. Call this whenever you are unsure which session you are driving, or after any context loss. With includeEnded this list also returns bound rows marked [ENDED]. Read-only, and scoped to sessions you started.',
     SHAPE_HADRON_WHOAMI,
     async ({ limit, includeEnded, app, workerRef }) => {
       // Scoped by IDENTITY, deliberately narrower than the GraphQL `sessions`
@@ -10051,14 +10061,45 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const mem = activeMemoryUrn ? await resolveVisibleMemoryByUrn(auth, activeMemoryUrn, 'read') : null;
         if (!mem) return 'active memory: none\n';
         const named = await db.memory.findUnique({ where: { id: mem.id }, select: { name: true } });
-        return `active memory: ${safeEmitEntityUrnV2('memory', mem.urn)}${named?.name ? ` (${named.name})` : ''}\n`;
+        return `active memory: ${safeEmitEntityUrnV2('memory', mem.urn)}${named?.name ? ` (${oneLineText(named.name)})` : ''}\n`;
       })();
+      // #4290 — who this connection is signed in as, on the line AFTER the
+      // `active memory:` line (cor:api:020:01 pins that one first). Only the
+      // caller's OWN identity: a user's handle and live orgs (the same live
+      // membership predicate the org-scoped queries use), or a pure App-key
+      // caller's own App. Email is deliberately left out (personal data in an
+      // answer an agent may log). Refusals returned above name no one.
+      const principalLine = await (async () => {
+        // An App-key credential is the App's, whatever else the context carries: it never prints a person's identity.
+        if (auth.userId && !auth.appKeyId) {
+          const [u, orgIds] = await Promise.all([
+            db.user.findUnique({ where: { id: auth.userId }, select: { handle: true } }),
+            getMemberOrgIds(db, auth.userId),
+          ]);
+          if (!u) return '';
+          const orgWhere = { id: { in: orgIds }, deletedAt: null };
+          const [orgs, orgTotal] = orgIds.length
+            ? await Promise.all([
+                db.organization.findMany({ where: orgWhere, select: { urn: true, name: true }, orderBy: [{ urn: 'asc' }], take: 50 }),
+                db.organization.count({ where: orgWhere }),
+              ])
+            : [[], 0];
+          const more = orgTotal > orgs.length ? ` … and ${orgTotal - orgs.length} more not shown` : '';
+          return `signed in as: @${u.handle}${orgs.length ? ` — orgs: ${orgs.map((o) => `${safeEmitEntityUrnV2('org', o.urn)} (${oneLineText(o.name)})`).join(', ')}${more}` : ' — no orgs'}\n`;
+        }
+        if (auth.appId) {
+          const a = await db.app.findUnique({ where: { id: auth.appId }, select: { urn: true, name: true } });
+          return a ? `signed in as: App ${safeEmitEntityUrnV2('app', a.urn)} (${oneLineText(a.name)}) via App Key\n` : '';
+        }
+        return '';
+      })();
+      const headerLines = activeMemoryLine + principalLine;
       if (sessions.length === 0 && (app !== undefined || workerRef !== undefined)) {
-        return textResult(`${activeMemoryLine}No matching session.`);
+        return textResult(`${headerLines}No matching session.`);
       }
       if (sessions.length === 0) {
         return textResult(
-          activeMemoryLine +
+          headerLines +
           (includeEnded
             ? 'You have no sessions. Start a plain session with hadron_start_session(description: "<task>"). A worker session starts only from the CLI (hadron team session start), never over MCP.'
             : 'You have no open sessions. Start a plain session with hadron_start_session(description: "<task>"); pass includeEnded to see recent ended ones. A worker session starts only from the CLI (hadron team session start), never over MCP.'),
@@ -10154,7 +10195,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         : `${sessions.length} session(s):\n`;
 
       return textResult(
-        `${activeMemoryLine}${header}${lines.join('\n')}\n\n` +
+        `${headerLines}${header}${lines.join('\n')}\n\n` +
           // #1034: "session id" stays GENERAL here, because this list includes
           // unbound sessions whose own row says "working as: nobody" — calling
           // every id a worker session id would contradict the line above it and

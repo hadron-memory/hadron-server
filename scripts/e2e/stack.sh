@@ -96,7 +96,7 @@ case "$action" in
       archive=$(mktemp)
       trap 'rm -- "$archive"' EXIT
       # Staged/tracked files only; never ship untracked notes or secrets.
-      git -C "$ROOT" ls-files -z package.json pnpm-lock.yaml pnpm-workspace.yaml prisma.config.ts tsconfig.json prisma src .dockerignore scripts/e2e |
+      git -C "$ROOT" ls-files -z package.json pnpm-lock.yaml pnpm-workspace.yaml prisma.config.ts tsconfig.json prisma src .dockerignore scripts/e2e scripts/db/upsert-actions.ts |
         tar -C "$ROOT" --null -T - -cf "$archive"
       # Not /tmp (#2858): the instance mounts a tmpfs there shortly after
       # launch, which would hide an archive pushed before it.

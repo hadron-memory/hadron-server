@@ -2432,6 +2432,8 @@ export const typeDefs = `#graphql
     expiresAt: DateTime!
     "Null while OPEN. EXPIRED ends at expiresAt; every other end at the moment it happened (DB clock)."
     endedAt: DateTime
+    "Latest verified ineligible signing-proof attempt while OPEN, if any. Visible only through the existing request read gate; contains no signer identity and does not end the request (#4546; hrn:node:hadronmemory.com:specs:cor:acl:140:07)."
+    lastRefusedAt: DateTime
     "The server-hosted ceremony page where someone who may issue the grant signs it (hrn:node:hadronmemory.com:specs:cor:acl:140:07): the server origin plus /grant-signing/<id>, with no token. Copy it verbatim; never compose it. Signing there with a passkey activates the grant; no GraphQL or MCP call takes an assertion. An ended request's link only explains that it ended."
     ceremonyUrl: String!
   }
@@ -3929,6 +3931,16 @@ export const typeDefs = `#graphql
     hostId: String
   }
 
+  "#4489 — one scope of the closed App key scope list (Query.appKeyScopeCatalogue)."
+  type AppKeyScopeInfo {
+    "The name grantAppKeyScope and revokeAppKeyScope take."
+    scope: String!
+    "One line on what holding the scope permits."
+    description: String!
+    "True when granting it needs hostId (host:operate); false when hostId is refused."
+    requiresHostId: Boolean!
+  }
+
   "#1709 — one use of a host key (hrn:node:hadronmemory.com:specs:cor:agt:070:07)."
   type HostKeyUse {
     id: ID!
@@ -4495,7 +4507,7 @@ export const typeDefs = `#graphql
     agent: Agent
     syncStatus: SyncStatus!
     syncError: String
-    "Versioned JSON outcome of the last sync (v1, or v2 when an attestation-refused entry requires it): partial, failed or unknown. Null after a completed clean sync; consult lastSyncedAt/syncStatus for a never-synced memory. Same Memory-record read gate applies. Git sync: hrn:node:hadronmemory.com:specs:cor:int:010:01."
+    "Versioned JSON outcome of the last sync (v1, or v2 when an attestation-refused entry requires it): partial, failed or unknown. Invalid-loc skips may add invalidSources with a count, up to 50 ordinal/code items and an omitted count; the outcome remains unknown and no source path or file ID is exposed. Null after a completed clean sync; consult lastSyncedAt/syncStatus for a never-synced memory. Same Memory-record read gate applies. Git sync: hrn:node:hadronmemory.com:specs:cor:int:010:01."
     lastSyncReport: String
     pendingEdgeCount: Int!
     lastSyncedAt: DateTime
@@ -6486,13 +6498,26 @@ export const typeDefs = `#graphql
     selfIssued: Boolean!
   }
 
+  type SecretReadClientsPage {
+    items: [SecretReadClient!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
   type SecretReadClient {
-    clientId: ID!
+    "Full id only for the current issuer or holder; managers otherwise see a prefix."
+    clientId: ID
+    clientPrefix: String!
+    startsAt: DateTime
+    expiresAt: DateTime
+    maxReads: Int
+    readCount: Int!
+    destroyOnEnd: Boolean!
     grantId: ID!
     secretId: ID!
     secretName: String!
     selfIssued: Boolean!
-    "SECRET_DELETED | PROTECTED once the client has ended, else null."
+    "Null while live, else one of SECRET_DELETED, PROTECTED, REVOKED, PENDING, SPENT, EXPIRED, NOT_STARTED, ISSUER_GONE (nothing else ended it) or ENDED. A stored end wins; otherwise the grant's own state, in the order the reveal door answers."
     endReason: String
     createdAt: DateTime!
   }
@@ -6526,6 +6551,8 @@ export const typeDefs = `#graphql
     currentVersion: Int
     "An App secret's kept versions, newest first: numbers, sizes and authorship, never a value. Paged (hrn:node:hadronmemory.com:specs:cor:api:120:04): default 20, cap 200, limit 0 counts only. Empty for org and user secrets."
     versions(limit: Int, offset: Int): SecretVersionsPage!
+    "Client metadata for current issuers and App managers; never a secret value."
+    readClients(activeOnly: Boolean = false, limit: Int, offset: Int): SecretReadClientsPage!
   }
 
   """
@@ -6553,7 +6580,7 @@ export const typeDefs = `#graphql
     secretId: ID!
     secretName: String!
     versionNo: Int
-    "STORE | VERSION | METADATA | DELETE."
+    "STORE | VERSION | METADATA | DELETE | PURGE (a superseded version removed by retention or the kept-versions cap)."
     kind: String!
     outcome: String!
     actorUserId: String
@@ -11546,6 +11573,14 @@ export const typeDefs = `#graphql
     (it may carry credentials).
     """
     serverInfo: ServerInfo!
+
+    """
+    #4489 — the closed list of App key scopes a client may grant, as data: name, one line on what it permits, and
+    whether granting it needs a hostId (hrn:node:hadronmemory.com:specs:cor:aut:010:03). Static platform metadata, no
+    tenant data: any signed-in caller (a person or an App key) may read it; anonymous is UNAUTHENTICATED. Adding a scope
+    stays a spec change.
+    """
+    appKeyScopeCatalogue: [AppKeyScopeInfo!]!
 
     # Spec 040 — the run audit surface (what ran, why, what it cost).
     """

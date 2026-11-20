@@ -45,7 +45,6 @@ import { forbiddenError } from '../../../lib/refusals.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
-import { boundWorkerId } from '../../../lib/bootPrompt.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -64,6 +63,7 @@ import { createPendingGrant, GrantCreateRefusal } from '../../../lib/grants/crea
 import { requireSecretReadClientIssuer } from '../../../lib/secrets/readClientIssuer.js';
 import { generateId } from '../../../lib/id.js';
 import { revealWithReadClient } from '../../../lib/secrets/readClientReveal.js';
+import { readClientPage, myReadClients } from '../../../lib/secrets/readClientList.js';
 import { tickBatch } from './tickBatch.js';
 
 function badInput(message: string): GraphQLError {
@@ -150,6 +150,7 @@ async function loadLiveApp(ctx: Context, appId: string): Promise<AppSecretRow | 
     select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
   });
   if (!app || app.deletedAt || app.uninstalledAt) return null;
+  if (app.organizationId && !(await ctx.db.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } }))) return null;
   return app;
 }
 
@@ -159,7 +160,7 @@ async function loadLiveApp(ctx: Context, appId: string): Promise<AppSecretRow | 
  * or null. A bound worker session is its driving person's session, so it passes when that person is a member.
  */
 async function appMember(ctx: Context, appId: string): Promise<AppSecretRow | null> {
-  if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return null;
+  if (!ctx.userId || ctx.appKeyId || ctx.impersonation || isRunPrincipal(ctx)) return null;
   const app = await loadLiveApp(ctx, appId);
   if (!app) return null;
   return (await isAppParticipant(ctx, app)) ? app : null;
@@ -173,7 +174,7 @@ async function requireAppMember(ctx: Context, appId: string): Promise<AppSecretR
 
 /** Whoever manages the live App, as a person acting as themselves (cor:dmo:050:12). */
 async function appManager(ctx: Context, appId: string): Promise<AppSecretRow | null> {
-  if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return null;
+  if (!ctx.userId || ctx.appKeyId || ctx.impersonation || isRunPrincipal(ctx)) return null;
   const app = await loadLiveApp(ctx, appId);
   if (!app) return null;
   return (await managesApp(ctx, app)) ? app : null;
@@ -593,16 +594,10 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
 
 export const secretQueries = {
   mySecretReadClients: async (_: unknown, args: { limit?: number | null; offset?: number | null }, ctx: Context) => {
-    const workerId = boundWorkerId();
-    if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return [];
+    // Callers that can never be a person get the empty answer before they reach the limiter, as before #3998 B.
+    if (!ctx.userId || ctx.appKeyId || ctx.impersonation || isRunPrincipal(ctx)) return [];
     await admitOperationRate(ctx, ctx.db, 'OTHER_READS', appRateIdentity(ctx));
-    const take = clampListTake(args.limit);
-    if (take === 0) return [];
-    const rows = await ctx.db.secretReadClient.findMany({
-      where: { OR: [{ issuerUserId: ctx.userId }, { grant: { userId: ctx.userId } }, ...(workerId ? [{ grant: { workerId } }] : [])] },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take, skip: Math.max(0, args.offset ?? 0),
-    });
-    return rows.map((r) => ({ clientId: r.id, grantId: r.grantId, secretId: r.secretId, secretName: r.secretName, selfIssued: r.selfIssued, endReason: r.endReason, createdAt: r.createdAt }));
+    return myReadClients(ctx, args);
   },
 
   /**
@@ -736,6 +731,13 @@ const versionsPageBatch = tickBatch<string, VersionsPageResult>(async (ctx, keys
 
 /** `Secret` field resolvers for the App half: versions are metadata only, newest first. Org and user secrets have none. */
 export const secretFields = {
+  /** Separate audience from Secret metadata: current issuer or manager; prefix-only for other managers. */
+  readClients: async (s: { id: string; ownerType: string; ownerId: string }, args: { activeOnly?: boolean; limit?: number | null; offset?: number | null }, ctx: Context) => {
+    // readClientPage's SQL joins apps and organizations, so liveness is judged there; appManager is false for a dead App.
+    if (s.ownerType !== 'app') return pageEnvelope([], 0, 0);
+    const manager = !!(await appManager(ctx, s.ownerId));
+    return readClientPage(ctx, s.id, args, manager);
+  },
   currentVersion: async (s: { id: string; ownerType: string }, _: unknown, ctx: Context) => {
     if (s.ownerType !== 'app') return null;
     return currentVersionBatch(ctx, s.id);

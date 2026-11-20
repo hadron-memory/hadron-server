@@ -26,6 +26,17 @@ describe('public sync report wire format', () => {
   });
 });
 
+describe('#2365 invalid source projection', () => {
+  it.each([1, 50, 51])('bounds %i skipped sources without paths or IDs', count => {
+    const wire = JSON.parse(committedSyncReport([], now, count)!);
+    const shown = Math.min(count, 50);
+    expect(wire).toEqual({
+      version: 1, outcome: 'unknown', recordedAt: now.toISOString(), entries: [],
+      invalidSources: { count, items: Array.from({ length: shown }, (_, i) => ({ ordinal: i + 1, code: 'INVALID_LOC' })), omitted: count - shown },
+    });
+  });
+});
+
 describe('#3612 reviewed report versions', () => {
  const attestationCodes = [
   'AUTHORING_ATTESTATION_MISSING', 'AUTHORING_ATTESTATION_WRONG_TASK',
@@ -38,19 +49,21 @@ describe('#3612 reviewed report versions', () => {
     { kind: 'protected', loc: 'z', code: 'PROTECTED_LOC' } as const,
     { ...refusal, message: 'secret', taskId: 'private-id', role: 'guide', attestation: { task: 'hidden' } },
    ];
-   const text = committedSyncReport(entries, now, unsupported)!;
-   expect(text).toBe(committedSyncReport([...entries].reverse(), now, unsupported));
+   const text = committedSyncReport(entries, now, unsupported ? 1 : 0)!;
+   expect(text).toBe(committedSyncReport([...entries].reverse(), now, unsupported ? 1 : 0));
    expect(JSON.parse(text)).toEqual({
     version: 2, outcome: unsupported ? 'unknown' : 'partial', recordedAt: now.toISOString(),
     entries: [refusal, { kind: 'protected', loc: 'z', code: 'PROTECTED_LOC' }],
+    ...(unsupported ? { invalidSources: { count: 1, items: [{ ordinal: 1, code: 'INVALID_LOC' }], omitted: 0 } } : {}),
    });
    expect(text).not.toMatch(/secret|private-id|guide|hidden|taskId|role|attestation":/);
    expect(JSON.stringify(JSON.parse(text))).toBe(text);
   });
  }
  it('keeps unknown, failed and old-vocabulary reports at the lowest expressible v1', () => {
-  expect(JSON.parse(committedSyncReport([], now, true)!)).toEqual({
+  expect(JSON.parse(committedSyncReport([], now, 1)!)).toEqual({
    version: 1, outcome: 'unknown', recordedAt: now.toISOString(), entries: [],
+   invalidSources: { count: 1, items: [{ ordinal: 1, code: 'INVALID_LOC' }], omitted: 0 },
   });
   for (const code of ['SYNC_FAILED', 'BAD_USER_INPUT'] as const)
    expect(JSON.parse(failedSyncReport(code, now))).toEqual({
