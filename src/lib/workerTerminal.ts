@@ -24,7 +24,13 @@ export type TerminalStatus = (typeof TERMINAL_STATUSES)[number];
 export const TERMINAL_PROMPTS = ['empty', 'not_empty', 'menu', 'unknown'] as const;
 export type TerminalPrompt = (typeof TERMINAL_PROMPTS)[number];
 
-/** The closed reason codes (hadron-cli#1187). Required for `locked`/`dark`, null otherwise. */
+/**
+ * The closed reason codes (hadron-cli#1187). Required for `locked`/`dark`, null otherwise.
+ * #4558 (hadron-cli#2677): `no_screen` (Orca gives no rendered screen) and `multiple_terminals` (more than one
+ * agent terminal bound to the worker) join; both ride `locked`, as `unrecognized` does. The same list lives in the
+ * SDL enum `WorkerTerminalReason`, the CHECK on `workers.terminal` (`prisma/host-operation-invariants.sql` and its
+ * migration copy) and the CLI contract — all change together.
+ */
 export const TERMINAL_REASONS = [
   'model_at_capacity',
   'token_budget_exhausted',
@@ -37,6 +43,8 @@ export const TERMINAL_REASONS = [
   'no_terminal',
   'bare_shell',
   'no_agent',
+  'no_screen',
+  'multiple_terminals',
 ] as const;
 export type TerminalReason = (typeof TERMINAL_REASONS)[number];
 

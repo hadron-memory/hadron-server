@@ -17882,6 +17882,10 @@ export const typeDefs = `#graphql
     no_terminal
     bare_shell
     no_agent
+    "#4558 (hadron-cli#2677): Orca gives no rendered screen for the terminal (screen-unavailable). Rides locked."
+    no_screen
+    "#4558 (hadron-cli#2677): more than one agent terminal is bound to the worker. Rides locked."
+    multiple_terminals
   }
 
   "#2771 — the host that made a worker's latest terminal report: its id from the key, its label from its registration."
