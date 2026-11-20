@@ -780,6 +780,12 @@
       "resolver": "src/api/graphql/schema/resolvers.channel.ts::readableMemoryWhere",
       "target": "Channel"
     },
+    "AgentTaskPage.items": {
+      "class": "parent-implies-child",
+      "audience": "callers who passed the App's task gate (participant or the App's live key via withReadableApp); Query.agentTasksPage reads through the same agentTaskListWhere as Query.agentTasks, and task reads are App-wide for that audience",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AgentTask"
+    },
     "ChatPage.items": {
       "class": "self-gated",
       "resolver": "src/api/graphql/schema/resolvers.query.chat.ts::myChatsScope",
