@@ -440,7 +440,7 @@ BEGIN
              CASE WHEN EXISTS (SELECT 1 FROM principals t WHERE t.name = lower(p.name))
                   THEN ', lower-case twin exists' ELSE '' END), ', ' ORDER BY p.name)
       INTO bad FROM (SELECT name, kind, status FROM principals WHERE name <> lower(name) ORDER BY name LIMIT 20) p;
-    RAISE EXCEPTION 'principals.name: % principal row(s) are not lower case, so chk_principals_name_lower cannot be added (hadron-server#4400). For a row with no lower-case twin, lower-case it and the owning users.handle / organizations.urn; for a row with a twin, decide which owner keeps the root and rename or delete the other. Then re-run pnpm db:dev-setup. Rows (first 20): %', n, bad
+    RAISE EXCEPTION 'principals.name: % principal row(s) are not lower case, so chk_principals_name_lower cannot be added (hadron-server#4400; this guard: #4411). For a row with no lower-case twin, lower-case it and the owning users.handle / organizations.urn; for a row with a twin, decide which owner keeps the root and rename or delete the other. Then re-run pnpm db:dev-setup. Rows (first 20): %', n, bad
       USING ERRCODE = 'HDPRF';
   END IF;
 END $$;

@@ -47,11 +47,14 @@ describe('#4400 principals.name is lower case in the database', () => {
     // not libc C/POSIX or builtin C). The test database is en_US.UTF-8 (the collation prerequisite in CLAUDE.md);
     // production's is read by the #4400 preflight. #4411: judge the folding itself, not `datctype` alone, which is
     // not the governing setting under the ICU or builtin provider; the provider and its locale name the cause.
-    const [{ provider, locale, folds }] = await db.$queryRaw<{ provider: string; locale: string | null; folds: boolean }[]>`
-      SELECT datlocprovider::text AS provider,
-             CASE datlocprovider WHEN 'c' THEN datctype ELSE datlocale END AS locale,
+    // The provider and locale are read through to_jsonb so the query runs on every supported version: the
+    // pg16 floor has `datlocprovider` and `daticulocale` but no `datlocale` (PG 17), and a missing key is null.
+    const [{ provider, locale, folds }] = await db.$queryRaw<{ provider: string | null; locale: string | null; folds: boolean }[]>`
+      SELECT j->>'datlocprovider' AS provider,
+             CASE COALESCE(j->>'datlocprovider', 'c') WHEN 'c' THEN j->>'datctype'
+                  ELSE COALESCE(j->>'datlocale', j->>'daticulocale') END AS locale,
              lower('É') = 'é' AS folds
-      FROM pg_database WHERE datname = current_database()`;
+      FROM (SELECT to_jsonb(d) AS j FROM pg_database d WHERE d.datname = current_database()) s`;
     expect(folds, `lower() does not fold non-ASCII under provider ${provider}, locale ${locale}`).toBe(true);
     expect(await refusal(rawInsert('École.example'))).toContain('chk_principals_name_lower');
   });

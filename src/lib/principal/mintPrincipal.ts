@@ -75,10 +75,11 @@ export function isValidRootName(name: string): boolean {
  * maps it to the `ROOT_NAME_INVALID` typed refusal.
  */
 export class RootNameInvalidError extends Error {
-  constructor(public readonly rootName: string) {
+  constructor(public readonly rootName: string, options?: { cause?: unknown }) {
     super(
       `Root name "${rootName}" is not a legal root name: a root name is 1–64 ` +
         `lower-case ASCII letters, digits, ".", "_" or "-", beginning and ending with a letter or digit.`,
+      options,
     );
     this.name = 'RootNameInvalidError';
   }
@@ -87,21 +88,27 @@ export class RootNameInvalidError extends Error {
 type PrincipalDb = Pick<PrismaClient, 'principal'>;
 
 /**
- * The #4400 CHECK that keeps every stored root name lower case (`name = lower(name)`), as Postgres names it in a
- * violation. The quotes are optionally backslash-escaped: a model write's message carries the engine's debug
- * rendering of the Postgres error (`\"chk_principals_name_lower\"`), a raw statement's `meta.message` the plain one.
+ * The #4400 CHECK that keeps every stored root name lower case (`name = lower(name)`), matched by its quoted name
+ * alone: the words around it ("violates check constraint") follow the server's `lc_messages` and are not matched, so
+ * a translated message still maps (#4547 BLIND P2). The quotes are optionally backslash-escaped: a model write's
+ * message carries the engine's debug rendering of the Postgres error (`\"chk_principals_name_lower\"`), a raw
+ * statement's `meta.message` the plain one. The SQLSTATE, checked alongside, is locale-proof.
  */
-const NAME_LOWER_CHECK_RE = /check constraint \\?"chk_principals_name_lower\\?"/;
+const NAME_LOWER_CHECK_RE = /\\?"chk_principals_name_lower\\?"/;
+/** The SQLSTATE as the engine renders it in a model write's message (`code: "23514"`). */
+const CHECK_VIOLATION_IN_MESSAGE_RE = /\bcode: \\?"23514\\?"/;
 
 /**
  * #4411: true iff `err` is Postgres refusing a principal row under `chk_principals_name_lower` (SQLSTATE 23514),
- * in either shape Prisma reports it: a model write raises `PrismaClientUnknownRequestError` whose message names the
- * constraint (Prisma 6 has no known code for a CHECK), a raw statement raises P2010 with the SQLSTATE in `meta`.
- * Narrow on purpose: it names THIS constraint, so any other database error stays untyped.
+ * in either shape Prisma reports it: a model write raises `PrismaClientUnknownRequestError` whose message carries
+ * the SQLSTATE and names the constraint (Prisma 6 has no known code for a CHECK); a raw statement raises P2010 with
+ * both in `meta`. `mintPrincipal` writes through `principal.create`, so only the first shape reaches it today; the
+ * P2010 arm covers a caller-supplied client whose create runs raw SQL. Narrow on purpose: it needs BOTH the
+ * check-violation SQLSTATE and THIS constraint's name, so any other database error stays untyped.
  */
 function isNameLowerCheckViolation(err: unknown): boolean {
   if (err instanceof Prisma.PrismaClientUnknownRequestError) {
-    return err.message.includes('23514') && NAME_LOWER_CHECK_RE.test(err.message);
+    return CHECK_VIOLATION_IN_MESSAGE_RE.test(err.message) && NAME_LOWER_CHECK_RE.test(err.message);
   }
   if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2010') {
     const meta = err.meta as { code?: unknown; message?: unknown } | undefined;
@@ -166,7 +173,9 @@ export async function mintPrincipal(
     // `isValidRootName` admits only lower-case ASCII (both above); it is the backstop for a name on which
     // JavaScript `toLowerCase()` and Postgres `lower()` disagree, surfaced as the same typed refusal as the rule
     // (one code for one cause, cor:urn:010:01) instead of a raw database error.
-    if (isNameLowerCheckViolation(err)) throw new RootNameInvalidError(name);
+    // The database error is kept as `cause`: reaching this line means the writer and the CHECK disagree, a
+    // platform bug rather than bad input, so whoever logs the refusal can see what Postgres said.
+    if (isNameLowerCheckViolation(err)) throw new RootNameInvalidError(name, { cause: err });
     throw err;
   }
 }

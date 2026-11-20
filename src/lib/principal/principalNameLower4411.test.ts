@@ -60,13 +60,55 @@ describe('#4411 item 1: mintPrincipal maps a chk_principals_name_lower violation
     await expect(mintPrincipal(db, { kind: 'user', name: 'taken.example' })).rejects.toBeInstanceOf(RootNameTakenError);
   });
 
-  it('leaves any other database error untyped: a different CHECK is not this refusal', async () => {
-    const other = new Prisma.PrismaClientUnknownRequestError(
-      'new row for relation "principals" violates check constraint "chk_principals_something_else"',
-      { clientVersion: Prisma.prismaVersion.client },
-    );
-    const err = await mintPrincipal(failingWith(other), { kind: 'org', name: 'other.example' }).catch((e: unknown) => e);
-    expect(err).toBe(other);
+  /** The real error a model write gets from the CHECK, captured so the variants below keep Prisma's own rendering. */
+  const realViolation = async (): Promise<Prisma.PrismaClientUnknownRequestError> => {
+    const e = await db.principal.create({ data: { name: 'Real.Violation', kind: 'org', status: 'active' } })
+      .catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(Prisma.PrismaClientUnknownRequestError);
+    const err = e as Prisma.PrismaClientUnknownRequestError;
+    expect(err.message).toMatch(/code: \\?"23514\\?"/);
+    return err;
+  };
+  const unknownWith = (message: string) =>
+    new Prisma.PrismaClientUnknownRequestError(message, { clientVersion: Prisma.prismaVersion.client });
+  const rawWith = (code: string, message: string) =>
+    new Prisma.PrismaClientKnownRequestError('raw query failed', {
+      code: 'P2010', clientVersion: Prisma.prismaVersion.client, meta: { code, message },
+    });
+  const mintWith = (err: unknown) =>
+    mintPrincipal(failingWith(err), { kind: 'org', name: 'other.example' }).catch((e: unknown) => e);
+
+  it('keeps the database error as the cause of the typed refusal', async () => {
+    const err = await mintPrincipal(disagreeingWriter, { kind: 'org', name: 'cause.example' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RootNameInvalidError);
+    expect((err as Error).cause).toBeInstanceOf(Prisma.PrismaClientUnknownRequestError);
+  });
+
+  it('maps a translated message: only the SQLSTATE and the quoted constraint name are matched (lc_messages)', async () => {
+    const real = await realViolation();
+    const translated = real.message.replace(/violates check constraint/, 'verletzt Check-Constraint');
+    expect(translated).not.toBe(real.message);
+    expect(await mintWith(unknownWith(translated))).toBeInstanceOf(RootNameInvalidError);
+    expect(await mintWith(rawWith('23514', 'neue Zeile verletzt Check-Constraint "chk_principals_name_lower"')))
+      .toBeInstanceOf(RootNameInvalidError);
+  });
+
+  it('leaves a real violation of a DIFFERENT check untyped, though it carries 23514', async () => {
+    const real = await realViolation();
+    const other = unknownWith(real.message.replaceAll('chk_principals_name_lower', 'chk_principals_something_else'));
+    expect(other.message).toMatch(/23514/);
+    expect(await mintWith(other)).toBe(other);
+    const otherRaw = rawWith('23514', 'new row violates check constraint "chk_principals_something_else"');
+    expect(await mintWith(otherRaw)).toBe(otherRaw);
+  });
+
+  it('leaves an error naming this constraint under another SQLSTATE untyped', async () => {
+    const real = await realViolation();
+    const notCheck = unknownWith(real.message.replace(/code: (\\?)"23514(\\?)"/, 'code: $1"23505$2"'));
+    expect(notCheck.message).not.toMatch(/23514/);
+    expect(await mintWith(notCheck)).toBe(notCheck);
+    const notCheckRaw = rawWith('23505', 'duplicate key value violates "chk_principals_name_lower"');
+    expect(await mintWith(notCheckRaw)).toBe(notCheckRaw);
   });
 });
 
