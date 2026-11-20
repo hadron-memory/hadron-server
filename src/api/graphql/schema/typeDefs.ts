@@ -3929,6 +3929,16 @@ export const typeDefs = `#graphql
     hostId: String
   }
 
+  "#4489 — one scope of the closed App key scope list (Query.appKeyScopeCatalogue)."
+  type AppKeyScopeInfo {
+    "The name grantAppKeyScope and revokeAppKeyScope take."
+    scope: String!
+    "One line on what holding the scope permits."
+    description: String!
+    "True when granting it needs hostId (host:operate); false when hostId is refused."
+    requiresHostId: Boolean!
+  }
+
   "#1709 — one use of a host key (hrn:node:hadronmemory.com:specs:cor:agt:070:07)."
   type HostKeyUse {
     id: ID!
@@ -11546,6 +11556,14 @@ export const typeDefs = `#graphql
     (it may carry credentials).
     """
     serverInfo: ServerInfo!
+
+    """
+    #4489 — the closed list of App key scopes a client may grant, as data: name, one line on what it permits, and
+    whether granting it needs a hostId (hrn:node:hadronmemory.com:specs:cor:aut:010:03). Static platform metadata, no
+    tenant data: any signed-in caller (a person or an App key) may read it; anonymous is UNAUTHENTICATED. Adding a scope
+    stays a spec change.
+    """
+    appKeyScopeCatalogue: [AppKeyScopeInfo!]!
 
     # Spec 040 — the run audit surface (what ran, why, what it cost).
     """
