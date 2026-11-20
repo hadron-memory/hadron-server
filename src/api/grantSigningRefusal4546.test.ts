@@ -14,28 +14,28 @@ import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../test/softPa
 import { upsertPlatformActions } from '../lib/grants/actions.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { createGrantSigningRequestInTransaction } from '../lib/signing/grantRequests.js';
+import { recordGrantRefusalObservation } from '../lib/signing/grantRefusalObservation.js';
 
 const ORIGIN = 'https://sign.example.test';
 const RP = 'example.test';
-const REASON = 'Run the nightly <b>report</b> & mail it';
+const REASON = 'Test a refused grant proof';
 
 let server: Server | undefined;
 let base: string;
 let orgId: string;
 let appId: string;
-let memoryId: string;
 let entryNodeId: string;
 let workerId: string;
 let requester: { id: string };
-let admin: { id: string; key: SoftPasskey; passkeyId: string };
+let admin: { id: string; key: SoftPasskey };
 let member: { id: string; key: SoftPasskey };
 
-async function person(handle: string, role: 'ADMIN' | 'CONTRIBUTOR' | null, opts: { firstWindow?: boolean } = {}) {
+async function person(handle: string, role: 'ADMIN' | 'CONTRIBUTOR' | null) {
   const u = await db.user.create({ data: { handle, roles: [] } });
   if (role) await db.orgMember.create({ data: { organizationId: orgId, userId: u.id, role } });
   const key = softPasskey();
-  const passkeyId = await insertSoftPasskey(db, u.id, key, { label: `${handle} key`, firstWindow: opts.firstWindow });
-  return { id: u.id, key, passkeyId };
+  await insertSoftPasskey(db, u.id, key, { label: `${handle} key` });
+  return { id: u.id, key };
 }
 
 beforeEach(async () => {
@@ -46,10 +46,9 @@ beforeEach(async () => {
   await upsertPlatformActions(db);
   const { org, graph } = await createDbOrgAndGraph(db, { orgName: 'gs-org', graphName: 'gs' });
   orgId = org.id;
-  memoryId = graph.id;
   const app = await db.app.create({ data: { organizationId: orgId, name: 'gs-app', urn: `${org.urn}:gs-app` } });
   appId = app.id;
-  const node = await createDbNode(db, { loc: 'flows:nightly', memoryId, name: 'Nightly', content: 'x' });
+  const node = await createDbNode(db, { loc: 'flows:nightly', memoryId: graph.id, name: 'Nightly', content: 'x' });
   entryNodeId = node.id;
   const agent = await db.agent.create({ data: { organizationId: orgId, name: 'gs-agent', urn: `${org.urn}:gs-agent` } });
   const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId: agent.id, name: 'gs-worker', slug: 'gs-worker' } });
@@ -70,19 +69,14 @@ afterEach(async () => {
 });
 
 async function insertGrant(): Promise<string> {
-  return insertGrantFor(appId, { workerId });
-}
-/** #3730: the same pending grant shape, for an App and holder the default fixture does not cover (a user-owned App, a user holder). */
-async function insertGrantFor(aId: string, holder: { workerId: string; userId?: never } | { userId: string; workerId?: never }): Promise<string> {
   const id = generateId();
-  await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, ${holder.userId !== undefined ? 'user_id' : 'worker_id'}, action, action_values, reason, max_uses, created_at, updated_at)
-    VALUES ($1, $2, $3, 'schedule.create', $4::jsonb, $5, 3, (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
-  id, aId, holder.userId ?? holder.workerId, JSON.stringify({ entryNode: entryNodeId }), REASON);
+  await db.$executeRaw`INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, max_uses, created_at, updated_at)
+    VALUES (${id}, ${appId}, ${workerId}, 'schedule.create', ${JSON.stringify({ entryNode: entryNodeId })}::jsonb, ${REASON}, 3,
+      (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`;
   return id;
 }
-const openRequest = (grantId: string) => openRequestFor(grantId, appId);
-const openRequestFor = (grantId: string, aId: string) => db.$transaction((tx) => createGrantSigningRequestInTransaction(tx, grantId, {
-  appId: aId, requester: { userId: requester.id, appId: null, workerId: null, sessionId: null },
+const openRequest = (grantId: string) => db.$transaction((tx) => createGrantSigningRequestInTransaction(tx, grantId, {
+  appId, requester: { userId: requester.id, appId: null, workerId: null, sessionId: null },
 }));
 
 const post = (id: string, path: string, body: unknown, cookie?: string, origin: string | null = ORIGIN) =>
@@ -100,26 +94,19 @@ function assertionBody(ceremonyId: string, key: SoftPasskey, a: ReturnType<SoftP
   };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-interface Proved { cookie: string; status: number; json: any; text: string }
+interface Proved { status: number; json: { outcome?: string; canSign?: boolean } | null; text: string }
 
-async function prove(id: string, who: { key: SoftPasskey }, opts: { cookie?: string; counter?: number } = {}): Promise<Proved> {
-  const c = await post(id, 'proof/challenge', {}, opts.cookie);
+async function prove(id: string, who: { key: SoftPasskey }, opts: { counter?: number } = {}): Promise<Proved> {
+  const c = await post(id, 'proof/challenge', {});
   expect(c.status).toBe(200);
-  const preCookie = (c.headers.get('set-cookie') ?? '').split(';')[0] || (opts.cookie ?? '');
+  const preCookie = (c.headers.get('set-cookie') ?? '').split(';')[0];
   const { ceremonyId, challenge } = await c.json() as { ceremonyId: string; challenge: string };
   const a = who.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(challenge, 'base64url'), origin: ORIGIN, rpId: RP, counter: opts.counter ?? 1 });
   const r = await post(id, 'proof', assertionBody(ceremonyId, who.key, a), preCookie);
-  const cookie = (r.headers.get('set-cookie') ?? '').split(';')[0] || preCookie;
   const text = await r.text();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let json: any = null;
+    let json: Proved['json'] = null;
   try { json = JSON.parse(text); } catch { json = null; }
-  if (json?.outcome === 'open' && json.canSign) {
-    const s = await post(id, 'challenge', {}, cookie);
-    json.signing = s.status === 200 ? await s.json() : null;
-  }
-  return { cookie, status: r.status, json, text };
+  return { status: r.status, json, text };
 }
 
 
@@ -130,7 +117,7 @@ async function read(id: string, userId: string) {
     body: JSON.stringify({ query: 'query($id:ID!){grantSigningRequest(id:$id){id state endedAt lastRefusedAt}}', variables: { id } }) });
   return r.json() as Promise<{ data?: { grantSigningRequest: { id: string; state: string; endedAt: string | null; lastRefusedAt: string | null } | null }; errors?: unknown[] }>;
 }
-const lastRefused = async (id: string) => (await db.grantSigningRequest.findUniqueOrThrow({ where: { id } }) as unknown as { lastRefusedAt?: Date | null }).lastRefusedAt ?? null;
+const lastRefused = async (id: string) => (await db.grantSigningRequest.findUniqueOrThrow({ where: { id } })).lastRefusedAt;
 
 describe('#4546 anonymous refused-proof observation', () => {
   it('records the refused proof time for existing readers, keeps OPEN, and preserves the exact bare 403', async () => {
@@ -165,7 +152,7 @@ describe('#4546 anonymous refused-proof observation', () => {
     }
   });
 
-  it('consumes known and unknown valid refused proofs identically, and a replay cannot refresh the observation', async () => {
+  it('consumes known and unknown proofs identically; replaying a consumed assertion cannot change the recorded observation', async () => {
     const req = await openRequest(await insertGrant());
     for (const id of [req.id, 'A'.repeat(22)]) {
       const c = await post(id, 'proof/challenge', {});
@@ -182,6 +169,7 @@ describe('#4546 anonymous refused-proof observation', () => {
       const rows = await db.$queryRaw<Array<{ counter: bigint }>>`SELECT counter FROM passkey_credentials WHERE owner_id = ${member.id}`;
       expect(Number(rows[0].counter)).toBe(counter);
       const observed = await lastRefused(req.id);
+      expect(observed).toBeInstanceOf(Date);
       const replay = await post(id, 'proof', body, cookie);
       expect(replay.status).toBe(403);
       expect(await replay.text()).toBe('{"error":"forbidden"}');
@@ -217,6 +205,27 @@ describe('#4546 anonymous refused-proof observation', () => {
     expect(warn).toHaveBeenCalledWith('grant.signing.refusal_observation_failed');
   });
 
+  it('a real grant-lock timeout loses only the optional observation and preserves the proof spend', async () => {
+    const req = await openRequest(await insertGrant());
+    const gate = new Client({ connectionString: process.env.DATABASE_URL });
+    await gate.connect();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await gate.query('BEGIN');
+      await gate.query('SELECT id FROM grants WHERE id = $1 FOR UPDATE', [req.grantId]);
+      const p = await prove(req.id, member); // the bounded observer times out while this independent lock remains held
+      expect(p.status).toBe(403);
+      expect(p.text).toBe('{"error":"forbidden"}');
+      const rows = await db.$queryRaw<Array<{ counter: bigint }>>`SELECT counter FROM passkey_credentials WHERE owner_id = ${member.id}`;
+      expect(Number(rows[0].counter)).toBe(1);
+      expect(await lastRefused(req.id)).toBeNull();
+      expect(warn).toHaveBeenCalledWith('grant.signing.refusal_observation_failed');
+    } finally {
+      await gate.query('ROLLBACK');
+      await gate.end();
+    }
+  }, 10_000);
+
   it('a withdrawal while the observation waits cannot undo proof consumption or record a late observation', async () => {
     const req = await openRequest(await insertGrant());
     const gate = new Client({ connectionString: process.env.DATABASE_URL });
@@ -240,6 +249,7 @@ describe('#4546 anonymous refused-proof observation', () => {
       // The grant wait happens only AFTER the proof transaction committed, with no prover anchor held.
       const counters = await db.$queryRaw<Array<{ counter: bigint }>>`SELECT counter FROM passkey_credentials WHERE owner_id = ${member.id}`;
       expect(Number(counters[0].counter)).toBe(1);
+      await gate.query('SELECT id FROM users WHERE id = $1 FOR UPDATE NOWAIT', [member.id]);
       await gate.query("UPDATE grant_signing_requests SET state = 'withdrawn' WHERE id = $1", [req.id]);
       await gate.query('COMMIT');
       const p = await pending;
@@ -260,20 +270,43 @@ describe('#4546 anonymous refused-proof observation', () => {
     expect(first.status).toBe(403);
     const previous = await lastRefused(req.id);
     expect(previous).toBeInstanceOf(Date);
+    const next = await prove(req.id, member, { counter: 2 });
+    expect(next.status).toBe(403);
+    const nextObserved = await lastRefused(req.id);
+    expect(nextObserved!.getTime()).toBeGreaterThan(previous!.getTime());
     const outsider = await person('proving-outsider', null);
     const second = await prove(req.id, outsider);
     expect(second.status).toBe(403);
     expect(second.text).toBe(first.text);
-    expect((await lastRefused(req.id))!.getTime()).toBeGreaterThan(previous!.getTime());
+    const latest = await lastRefused(req.id);
+    expect(latest!.getTime()).toBeGreaterThan(nextObserved!.getTime());
+    // Delayed delivery of an older verified observation must not move the latest proof time backward.
+    await recordGrantRefusalObservation(db, { requestId: req.id, grantId: req.grantId, attemptedAt: previous! });
+    expect(await lastRefused(req.id)).toEqual(latest);
     expect((await read(req.id, outsider.id)).data?.grantSigningRequest).toBeNull();
     expect((await read(req.id, admin.id)).data?.grantSigningRequest?.state).toBe('OPEN');
+  });
+
+  it('preserves the proof UTC time when the observation transaction has a non-UTC session timezone', async () => {
+    const req = await openRequest(await insertGrant());
+    const [{ now }] = await db.$queryRaw<Array<{ now: Date }>>`SELECT hadron_signing_now() AS now`;
+    const original = db.$transaction.bind(db);
+    vi.spyOn(db, '$transaction').mockImplementation((async (
+      work: (tx: Prisma.TransactionClient) => Promise<unknown>,
+      opts?: { maxWait?: number; timeout?: number; isolationLevel?: Prisma.TransactionIsolationLevel },
+    ) => original(async (tx) => {
+      await tx.$executeRaw`SET LOCAL TIME ZONE 'Pacific/Auckland'`;
+      return work(tx);
+    }, opts)) as never);
+    await recordGrantRefusalObservation(db, { requestId: req.id, grantId: req.grantId, attemptedAt: now });
+    expect(await lastRefused(req.id)).toEqual(now);
   });
 
   it('a lawful proof records no refusal and still opens signing', async () => {
     const req = await openRequest(await insertGrant());
     const p = await prove(req.id, admin);
     expect(p.status).toBe(200);
-    expect(p.json.canSign).toBe(true);
+    expect(p.json?.canSign).toBe(true);
     expect(await lastRefused(req.id)).toBeNull();
   });
 
