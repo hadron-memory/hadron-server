@@ -16,7 +16,7 @@
  *               people the shared memory-management predicate admits at
  *               `CONTRIBUTOR` (the owning user, the owning org's contributors,
  *               ADMINs and OWNERs, a platform admin), plus an App PUBLISHED by
- *               the owner ({@link publisherAppQualifies}). A share grantee, a
+ *               the owner ({@link appCarriesOwnersAgent}). A share grantee, a
  *               subscriber org and a vendor App merely installed by the owner
  *               are not in it. It is never read as `ALL`: the level is a real
  *               check, and a level this server does not know (anything but
@@ -125,7 +125,7 @@ export class RoleWritersUnsupportedError extends GraphQLError {
   }
 }
 
-type Db = Pick<Prisma.TransactionClient, 'memory' | 'memoryConfig' | 'app'>;
+type Db = Pick<Prisma.TransactionClient, 'memory' | 'memoryConfig' | '$queryRaw'>;
 
 /** Whether the principal is in the ADMIN writer audience of `memoryId`, judged on `db`. */
 async function inAdminAudience(db: Db, principal: RoleWriterPrincipal, memoryId: string): Promise<boolean> {
@@ -144,24 +144,43 @@ async function inAdminAudience(db: Db, principal: RoleWriterPrincipal, memoryId:
 }
 
 /**
- * Whether an App is published by the memory's owner (#1333, option A, no schema change): the App is active
- * (`uninstalledAt IS NULL`) and has an `AppAgent` row whose Agent is not deleted and belongs to the memory's owning
- * org, or, for a user-owned memory, to the owning user. Any one match qualifies (a multi-Agent App is an accepted
- * consequence). Read on live rows at write time, never cached on a session. An App the owner merely installed carries
- * a vendor Agent, so it does not match.
+ * Whether an App currently carries an Agent of the memory's owner (#1333, option A, no schema change): the App is live
+ * (`deleted_at` and `uninstalled_at` both NULL) and has an `AppAgent` row whose Agent is not deleted and belongs to the
+ * memory's owning org, or, for a user-owned memory, to the owning user. Any one match qualifies (a multi-Agent App is
+ * an accepted consequence). Read on live rows at write time, never cached on a session. An App the owner merely
+ * installed carries a vendor Agent, so it does not match.
+ *
+ * This is a relationship, not a recorded publisher: nothing stores "published by". Installing an Agent into an App
+ * needs the Agent to be visible to the installer (a PUBLIC Agent or an org grant), and an App still needs memory write
+ * access, which the owner controls, before this is ever asked (hrn:node:hadronmemory.com:specs:cor:acl:010:03).
+ *
+ * The App row and the matching Agent row are locked `FOR SHARE` (the precedent is `userlessRunHoldsWriteGrant`), so an
+ * uninstall or an Agent deletion either commits before this read and is seen, or waits for the write to finish. Outside
+ * a transaction (a preview) the locks are plain reads. A deadlock against an App hard delete aborts one side, which the
+ * write door reports as `NODE_WRITE_CONFLICT`: safe, not ordered.
  */
-export async function publisherAppQualifies(
-  db: Pick<Prisma.TransactionClient, 'app'>,
+export async function appCarriesOwnersAgent(
+  db: Pick<Prisma.TransactionClient, '$queryRaw'>,
   appId: string,
   owner: { organizationId: string | null; ownerUserId: string | null },
 ): Promise<boolean> {
-  const agent: Prisma.AgentWhereInput | null = owner.organizationId
-    ? { organizationId: owner.organizationId }
-    : owner.ownerUserId ? { ownerUserId: owner.ownerUserId } : null;
-  if (!agent) return false;
-  return (await db.app.count({
-    where: { id: appId, uninstalledAt: null, appAgents: { some: { agent: { deletedAt: null, ...agent } } } },
-  })) > 0;
+  if (!owner.organizationId && !owner.ownerUserId) return false;
+  const rows = owner.organizationId
+    ? await db.$queryRaw<Array<{ id: string }>>`
+        SELECT a.id FROM apps a
+          JOIN app_agents aa ON aa.app_id = a.id
+          JOIN agents ag ON ag.id = aa.agent_id
+        WHERE a.id = ${appId} AND a.deleted_at IS NULL AND a.uninstalled_at IS NULL
+          AND ag.deleted_at IS NULL AND ag.organization_id = ${owner.organizationId}
+        LIMIT 1 FOR SHARE OF a, ag`
+    : await db.$queryRaw<Array<{ id: string }>>`
+        SELECT a.id FROM apps a
+          JOIN app_agents aa ON aa.app_id = a.id
+          JOIN agents ag ON ag.id = aa.agent_id
+        WHERE a.id = ${appId} AND a.deleted_at IS NULL AND a.uninstalled_at IS NULL
+          AND ag.deleted_at IS NULL AND ag.owner_user_id = ${owner.ownerUserId}
+        LIMIT 1 FOR SHARE OF a, ag`;
+  return rows.length > 0;
 }
 
 /** Whether the principal is in the OWNER writer audience of `memoryId` (see the file header), judged on `db`. */
@@ -173,7 +192,7 @@ async function inOwnerAudience(db: Db, principal: RoleWriterPrincipal, memoryId:
   if (!memory) return false;
   // D23: a headless principal is the App service identity; the triggering user's own standing never counts.
   if (isRunPrincipal(principal) || (principal.appId && !principal.userId)) {
-    return principal.appId ? publisherAppQualifies(db, principal.appId, memory) : false;
+    return principal.appId ? appCarriesOwnersAgent(db, principal.appId, memory) : false;
   }
   try {
     await requireMemoryManageAccess({ ...principal, db } as unknown as Context, memory, 'CONTRIBUTOR');

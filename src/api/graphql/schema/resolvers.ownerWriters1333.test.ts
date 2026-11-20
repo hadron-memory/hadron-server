@@ -18,8 +18,11 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { roleWritersRefusal } from '../../../lib/nodeRoleWriters.js';
+import { roleWritersRefusal, appCarriesOwnersAgent } from '../../../lib/nodeRoleWriters.js';
+import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
+import { runContext } from '../../../jobs/appRunDeps.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -122,6 +125,29 @@ describe('people: the owning party writes, OWNER is never read as ALL', () => {
   });
 });
 
+describe('the refusal is the OWNER writer level, not the base write gate (blind review F1)', () => {
+  it('a share grantee never reaches the level on an org memory: the base gate answers first, and the level itself excludes them', async () => {
+    await db.memoryShare.create({ data: { memoryId, granteeId: user.grantee!, grantorId: user.owner!, role: 'writer' as never } });
+    // The base gate (memory visibility and write access) refuses the grantee of an org memory before any level is read.
+    expect(await code(resolvers.Mutation.createNode(null, { input: { memoryId, loc: 'ctl', name: 'ctl', content: 'x' } }, as('grantee'))))
+      .toBe('MEMORY_NOT_FOUND: ' + memoryId);
+    // So the level is pinned where it is judged: the grantee is outside the OWNER audience.
+    expect(await refusal({ userId: user.grantee!, roles: [], clientId: `user:${user.grantee}` } as never)).toBe(REFUSED);
+  });
+
+  it('a contributor passes the base gate and is inside the OWNER audience (positive control)', async () => {
+    // Positive control for the base gate, then the level: a contributor writes the ungoverned node AND the OWNER one.
+    expect(await code(resolvers.Mutation.createNode(null, { input: { memoryId, loc: 'plain', name: 'plain', content: 'x' } }, as('contrib')))).toBe('OK');
+    expect(await code(create(as('contrib'), 'owned'))).toBe('OK');
+  });
+
+  it('an outsider, a reader and a grantee are all outside the OWNER audience at the level itself', async () => {
+    for (const who of ['reader', 'outsider', 'grantee']) {
+      expect(await refusal({ userId: user[who]!, roles: [], clientId: `user:${user[who]}` } as never), who).toBe(REFUSED);
+    }
+  });
+});
+
 describe('Apps: published by the owning org vs merely installed', () => {
   it('publisher: an active App holding an agent of the owning org qualifies; the run writes through the real door', async () => {
     const own = await agent(org.id, null);
@@ -159,6 +185,12 @@ describe('Apps: published by the owning org vs merely installed', () => {
     expect(await refusal(p)).toBeNull();
     await db.agent.update({ where: { id: own }, data: { deletedAt: new Date() } });
     expect(await refusal(p)).toBe(REFUSED);
+  });
+
+  it('a soft-deleted App never qualifies', async () => {
+    const a = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
+    await db.app.update({ where: { id: a }, data: { deletedAt: new Date() } });
+    expect(await refusal(principalOf(a))).toBe(REFUSED);
   });
 
   it('an unknown appId never qualifies', async () => {
@@ -268,5 +300,84 @@ describe('the write doors: generic GraphQL, MCP and the run tool path share the 
     expect(await mcpAs('reader').callToolText('hadron_create_node', { urn: `hrn:node:${org.urn}:mem:mr`, name: 'mr', content: 'x', role: 'vault' }))
       .not.toContain('role_writers_unsupported');
     expect(await exists('mr')).toBe(false);
+  });
+});
+
+describe('the real run principal: runContext, not a synthesized one (blind review F2)', () => {
+  /** A userless run of `appId` with the principal `runContext` builds, optionally holding the write grant on `vault`. */
+  async function runOf(appId: string, grant: boolean) {
+    if (grant) await db.appMemoryWriteGrant.create({ data: { appId, memoryId, prefix: 'vault', grantedBy: user.owner! } });
+    const run = await db.appRun.create({
+      data: {
+        id: generateId(), organizationId: org.id, appId, agentId: await testRunAgentId(db, org.id, appId), triggerKind: 'MANUAL',
+        entryNodeUrn: `${org.urn}:mem:flow:entry`, status: 'RUNNING',
+      },
+    });
+    return { run, principal: runContext(db, run) };
+  }
+  it('GraphQL createNode under runContext: a qualifying App holding the grant writes the OWNER role; an installed vendor-only App is refused the level', async () => {
+    const publisher = await runOf(await app({ orgId: org.id, agents: [await agent(org.id, null)] }), true);
+    const installer = await runOf(await app({ orgId: org.id, agents: [await agent(vendorOrg.id, null)] }), true);
+    expect(await code(create(publisher.principal, 'vault:pub'))).toBe('OK');
+    expect(await code(create(installer.principal, 'vault:ins'))).toBe(REFUSED);
+    expect(await exists('vault:pub')).toBe(true);
+    expect(await exists('vault:ins')).toBe(false);
+  });
+
+  it('a qualifying App with no write access on the memory fails the base gate and never reaches the level', async () => {
+    const publisher = await runOf(await app({ orgId: org.id, agents: [await agent(org.id, null)] }), false);
+    const refused = await code(create(publisher.principal, 'vault:nogrant'));
+    expect(refused).not.toBe('OK');
+    expect(refused).not.toBe(REFUSED);
+    expect(await exists('vault:nogrant')).toBe(false);
+  });
+});
+
+describe('the App and its Agent are held while the write decides (blind review F5)', () => {
+  const owner = () => ({ organizationId: org.id, ownerUserId: null });
+
+  it('an uninstall waits for a write that already judged the App qualified, then the next write is refused', async () => {
+    const a = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let judged!: () => void;
+    const judgedFirst = new Promise<void>((r) => { judged = r; });
+    const writing = db.$transaction(async (tx) => {
+      expect(await appCarriesOwnersAgent(tx as never, a, owner())).toBe(true);
+      judged();
+      await gate;
+    }, { timeout: 15_000 });
+    await judgedFirst;
+    let uninstalled = false;
+    const uninstall = db.app.update({ where: { id: a }, data: { uninstalledAt: new Date() } }).then(() => { uninstalled = true; });
+    await waitForLockWaiters(db);
+    expect(uninstalled).toBe(false);
+    release();
+    await writing;
+    await uninstall;
+    expect(await refusal(principalOf(a))).toBe(REFUSED);
+  });
+
+  it('an Agent deletion waits for a write that already judged the App qualified', async () => {
+    const own = await agent(org.id, null);
+    const a = await app({ orgId: org.id, agents: [own] });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let judged!: () => void;
+    const judgedFirst = new Promise<void>((r) => { judged = r; });
+    const writing = db.$transaction(async (tx) => {
+      expect(await appCarriesOwnersAgent(tx as never, a, owner())).toBe(true);
+      judged();
+      await gate;
+    }, { timeout: 15_000 });
+    await judgedFirst;
+    let deleted = false;
+    const del = db.agent.update({ where: { id: own }, data: { deletedAt: new Date() } }).then(() => { deleted = true; });
+    await waitForLockWaiters(db);
+    expect(deleted).toBe(false);
+    release();
+    await writing;
+    await del;
+    expect(await refusal(principalOf(a))).toBe(REFUSED);
   });
 });
