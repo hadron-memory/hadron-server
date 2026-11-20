@@ -91,27 +91,45 @@ describe('#4332 rate-limit CHECKs exist on push + post-push', () => {
 });
 
 /**
+ * #4611 BLIND delta F2 and F1 at 8c629d6f (LOCAL F1): psql runs on the SAME database and schema as Prisma. Only Prisma's
+ * own URL parameters are dropped (libpq refuses them); every libpq one (sslmode, `options` and the rest) is kept, and the
+ * inherited PGOPTIONS is left alone. Prisma's `schema` is set in the same psql session before the file runs, as a
+ * quoted identifier, so a mixed-case name or one with spaces, commas or quotes selects exactly that schema.
+ */
+const PRISMA_ONLY = ['connection_limit', 'pool_timeout', 'schema', 'pgbouncer', 'socket_timeout', 'statement_cache_size'];
+export function quoteIdent(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`;
+}
+export function psqlArgs(databaseUrl: string, file: string): string[] {
+  const u = new URL(databaseUrl);
+  const schema = u.searchParams.get('schema') ?? 'public';
+  for (const k of PRISMA_ONLY) u.searchParams.delete(k);
+  return [u.toString(), '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-c', `SET search_path TO ${quoteIdent(schema)}`, '-f', file];
+}
+
+describe('#4332 psqlArgs (the atomicity pin\'s psql target)', () => {
+  it('quotes a non-simple schema and keeps libpq parameters', () => {
+    const args = psqlArgs('postgresql://u@h:5432/db?schema=Odd%20"Name",x&sslmode=require&connection_limit=3&options=-c%20a%3Db', '/f.sql');
+    const url = new URL(args[0]);
+    expect(url.searchParams.get('sslmode')).toBe('require');
+    expect(url.searchParams.get('options')).toBe('-c a=b');
+    expect(url.searchParams.has('schema')).toBe(false);
+    expect(url.searchParams.has('connection_limit')).toBe(false);
+    expect(args.slice(1)).toEqual(['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-c', 'SET search_path TO "Odd ""Name"",x"', '-f', '/f.sql']);
+  });
+
+  it('defaults to public when the URL names no schema', () => {
+    expect(psqlArgs('postgresql://u@h/db', '/f.sql')).toContain('SET search_path TO "public"');
+  });
+});
+
+/**
  * #4611 BLIND F1: post-push runs through psql statement by statement, so the file is one transaction. A failure part way
  * through must leave every constraint as it was, not some replaced and the rest dropped.
  */
 describe('#4332 prisma/rate-limit-invariants.sql applies atomically', () => {
   const run = promisify(execFile);
-  // #4611 BLIND delta F2: psql gets the SAME database and schema as Prisma. Only Prisma's own parameters are dropped
-  // (libpq refuses them); every libpq one (sslmode and the rest) is kept, and Prisma's `schema` becomes psql's search_path.
-  const PRISMA_ONLY = ['connection_limit', 'pool_timeout', 'schema', 'pgbouncer', 'socket_timeout', 'statement_cache_size'];
-  const psqlTarget = () => {
-    const u = new URL(process.env.DATABASE_URL!);
-    const schema = u.searchParams.get('schema') ?? 'public';
-    for (const k of PRISMA_ONLY) u.searchParams.delete(k);
-    return { url: u.toString(), schema };
-  };
-  const apply = () => {
-    const { url, schema } = psqlTarget();
-    return run('psql', [url, '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-f', resolve('prisma/rate-limit-invariants.sql')], {
-      timeout: 60_000,
-      env: { ...process.env, PGOPTIONS: `-c search_path=${schema}` },
-    });
-  };
+  const apply = () => run('psql', psqlArgs(process.env.DATABASE_URL!, resolve('prisma/rate-limit-invariants.sql')), { timeout: 60_000 });
   // Scoped to the constraint's own table in the schema Prisma uses, never a same-named constraint elsewhere.
   const def = async (table: string, name: string) =>
     (await db.$queryRaw<Array<{ d: string }>>`
