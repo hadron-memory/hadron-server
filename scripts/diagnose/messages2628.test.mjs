@@ -56,7 +56,7 @@ test('a held reservation: the refusal names the reservation path and says it is 
   mkdirSync(`${state}.diagnose-lock`); writeFileSync(`${state}.diagnose-lock/owner`, 'someone-else\n');
   const r = sh(`incus() { return 0; }; acquire_stack_reservation '${state}' hadron-e2e-x`, dir);
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /^diagnosis stack already reserved: /);
+  assert.match(r.stderr, /^diagnosis stack already reserved: /m); // after mkdir's own line
   assert(r.stderr.includes(`${state}.diagnose-lock`), r.stderr);
   assert.match(r.stderr, /never taken over by age or PID/);
   noRemovalAdvice(r.stderr);

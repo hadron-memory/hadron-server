@@ -4,11 +4,15 @@
 # Returns 1 when the name is already in use (recorded state, or a live Incus instance of that name).
 refuse_existing_stack() {
   local state=$1 name=$2 instances
-  if [ -e "$state" ] || [ -L "$state" ]; then echo "stack name already in use; refusing (not created by this run)" >&2; return 1; fi
+  # #2628: each refusal names the path or instance that blocks the run. None advises removing anything: this harness
+  # holds no authority over state or instances it did not create, so the operator checks ownership by hand.
+  if [ -e "$state" ] || [ -L "$state" ]; then
+    echo "stack state already exists: $state; refusing (not created by this run; manual ownership check required)" >&2; return 1
+  fi
   command -v incus >/dev/null 2>&1 || { echo "Incus is required for owned diagnosis stacks" >&2; return 1; }
   instances=$(incus list --format csv -c n) || { echo "cannot inspect Incus; refusing" >&2; return 1; }
   if grep -qxF "$name" <<< "$instances"; then
-    echo "instance name already in use; refusing (not created by this run)" >&2; return 1
+    echo "Incus instance $name already exists with no stack state at $state; refusing (foreign or unverified instance; manual ownership check required)" >&2; return 1
   fi
   return 0
 }
@@ -65,7 +69,10 @@ acquire_stack_reservation() {
   DIAG_STATE=$1 DIAG_PROJECT=$2
   DIAG_LOCK="$DIAG_STATE.diagnose-lock"
   mkdir -p -- "$(dirname -- "$DIAG_STATE")" || return 1
-  (umask 077; mkdir -- "$DIAG_LOCK") || { echo "diagnosis stack already reserved" >&2; return 1; }
+  (umask 077; mkdir -- "$DIAG_LOCK") || {
+    echo "diagnosis stack already reserved: $DIAG_LOCK; refusing (another run holds it, or a run ended without releasing it; a reservation is never taken over by age or PID; manual check required)" >&2
+    return 1
+  }
   DIAG_RUN_TOKEN=$(node -e "process.stdout.write(require('crypto').randomUUID())") || { rmdir -- "$DIAG_LOCK"; return 1; }
   if ! printf '%s\n' "$DIAG_RUN_TOKEN" > "$DIAG_LOCK/owner"; then rm -f -- "$DIAG_LOCK/owner"; rmdir -- "$DIAG_LOCK"; return 1; fi
   if ! refuse_existing_stack "$DIAG_STATE" "$DIAG_PROJECT"; then release_stack_reservation; return 1; fi
@@ -87,6 +94,20 @@ stack_owned() {
   grep -qxF "$DIAG_PROJECT" <<< "$instances" || return 1
   marker=$(incus config get "$DIAG_PROJECT" user.hadron-diagnose) || return 1
   [ "$marker" = "$DIAG_RUN_TOKEN" ] || return 1
+}
+
+# explain_unowned_stack <state-dir> <instance-name>: why stack_owned refused, for the end-of-run line (#2628). It reads the same facts stack_owned
+# does and changes nothing. Missing state means the run stopped before the stack existed, so there is no path to
+# inspect; otherwise the line names the state path and says which check failed. It never advises removing anything.
+explain_unowned_stack() {
+  local state=${1:?state} name=${2:?instance name} prefix='stack ownership unverified; refusing capture/teardown'
+  if ! [ -e "$state" ] && ! [ -L "$state" ]; then
+    echo "$prefix: no stack state was created at $state; nothing to capture or tear down" >&2
+  elif ! reservation_owned || [ "$(cat "$state/diagnose-owner" 2>/dev/null)" != "${DIAG_RUN_TOKEN:-}" ]; then
+    echo "$prefix; inspect private state: $state (it does not carry this run's owner marker: created outside this run or by another holder; manual ownership check required)" >&2
+  else
+    echo "$prefix; inspect private state: $state (this run's state, but the Incus instance $name is missing, unreadable or not marked by this run; manual ownership check required)" >&2
+  fi
 }
 
 # purge_snapshots: heap snapshots hold real values, so they are deleted from the stack host and the deletion is verified.
