@@ -103,7 +103,11 @@ export function workloadValid(workload, c) {
  * misses prints no record, and run.sh refuses a run without a positive load record (loadRecordOk), so it can never
  * pass silently.
  */
-export function isMainModule(metaUrl, argv1) {
+export function isMainModule(metaUrl, argv1, nodeMain = undefined) {
+  // #4608 BLIND F1: Node's own answer when it has one (import.meta.main, Node 22.18+ and 24.2+; the e2e image is 22.22).
+  // argv[1] alone cannot tell `node load.mjs` from `node -e 'import("load.mjs")' load.mjs`, where the trailing argument
+  // also lands in argv[1]. The realpath comparison below is only the fallback for a Node without import.meta.main.
+  if (typeof nodeMain === 'boolean') return nodeMain;
   if (!argv1) return false;
   try { return realpathSync(fileURLToPath(metaUrl)) === realpathSync(argv1); } catch { return false; }
 }
@@ -126,7 +130,7 @@ export function loadRecordOk(text, workload) {
   return workloadValid(workload, r);
 }
 
-if (isMainModule(import.meta.url, process.argv[1])) {
+if (isMainModule(import.meta.url, process.argv[1], import.meta.main)) {
   const [base, workload, durS] = process.argv.slice(2);
   const key = process.env.HADRON_DIAG_KEY;
   if (!key) { console.error('HADRON_DIAG_KEY is required'); process.exit(2); }
