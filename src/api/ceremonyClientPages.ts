@@ -210,9 +210,10 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
   // #3700 (BLIND P2): one account check serves both openers, so a second attempt while one is pending is ignored.
   var registering = false;
   var register = function (vouch) {
-    if (registering) return;
-    registering = true;
     var out = vouch ? 'status-later' : 'status-first';
+    // #4621 item 4: an ignored click says why, on the clicked opener's own line, and leaves the pending check alone.
+    if (registering) { say(out, 'Finish or stop the passkey you are adding first.'); return; }
+    registering = true;
     say('status-first', ''); say('status-later', '');
     var ceremonyId;
     challenge().then(function (c) {
@@ -247,6 +248,14 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
     return new Date(v).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
   };
   var el = function (tag, text, cls) { var e = document.createElement(tag); if (text) e.textContent = text; if (cls) e.className = cls; return e; };
+  // #4621 item 3: a date is a <time datetime> holding the ISO instant; the text stays the local, minute-precision form.
+  var timeEl = function (v) { var t = el('time', fmtDate(v)); t.setAttribute('datetime', new Date(v).toISOString()); return t; };
+  // A line of plain text with dates in it: parts are strings or ISO dates marked { date: v }.
+  var line = function (tag, parts, cls) {
+    var e = el(tag, '', cls);
+    parts.forEach(function (x) { e.appendChild(typeof x === 'string' ? document.createTextNode(x) : timeEl(x.date)); });
+    return e;
+  };
   var row = function (p) {
     var li = el('li');
     var removed = !!p.revokedAt;
@@ -255,12 +264,12 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
     head.appendChild(document.createTextNode(' '));
     head.appendChild(el('span', removed ? 'Removed' : p.prover ? 'In use' : 'Active', 'badge'));
     li.appendChild(head);
-    var when = 'Added ' + fmtDate(p.registeredAt);
-    if (p.inWindow && !removed) when += ' (in its cooling-off window)';
-    li.appendChild(el('div', when));
+    li.appendChild(line('div', ['Added ', { date: p.registeredAt }, p.inWindow && !removed ? ' (in its cooling-off window)' : '']));
+    // #4621 item 1: every removed row says when, whether or not it came with an email-link record.
+    if (removed) li.appendChild(line('div', ['Removed ', { date: p.revokedAt }]));
     if (p.cancel) {
       var d = el('details'); d.appendChild(el('summary', 'Details'));
-      d.appendChild(el('p', 'Removed by its email link at ' + fmtDate(p.cancel.at) + ' from ' + (p.cancel.ip || 'an unknown address') + ' (' + (p.cancel.userAgent || 'unknown browser') + ')'));
+      d.appendChild(line('p', ['Removed by its email link at ', { date: p.cancel.at }, ' from ' + (p.cancel.ip || 'an unknown address') + ' (' + (p.cancel.userAgent || 'unknown browser') + ')']));
       li.appendChild(d);
     }
     if (p.prover && !removed) {
@@ -284,7 +293,8 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
     var removable = passkeys.filter(function (p) { return !p.revokedAt && !p.prover; });
     var removedOrProver = passkeys.filter(function (p) { return p.revokedAt || p.prover; });
     var group = function (items) { var ul = el('ul'); items.forEach(function (p) { ul.appendChild(row(p)); }); return ul; };
-    if (removable.length) box.appendChild(group(removable));
+    // #4621 item 2: say so when nothing here can be removed.
+    if (removable.length) box.appendChild(group(removable)); else box.appendChild(el('p', 'No passkey here can be removed.', 'hint'));
     if (removedOrProver.length) { box.appendChild(el('h3', 'Removed, or used to prove it is you')); box.appendChild(group(removedOrProver)); }
   };
   // The identity-provider confirmation is spent (or was refused) at start: offer the providers again (Uma #2230 P2-1).
@@ -326,7 +336,9 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
     }).then(function (p) {
       var w = $('window-passkey'); var b = $('confirm-window');
       var how = { github: 'GitHub', google: 'Google', apple: 'Apple', email: 'an email link' }[p.method] || 'another method';
-      w.textContent = 'The passkey "' + p.label + '" was added on ' + fmtDate(p.registeredAt) + ' after confirming with ' + how + '. Ending its cooling-off window makes anything it signed count as signed by you, so continue only if you added it.';
+      w.textContent = '';
+      [ 'The passkey "' + p.label + '" was added on ', { date: p.registeredAt }, ' after confirming with ' + how + '. Ending its cooling-off window makes anything it signed count as signed by you, so continue only if you added it.' ]
+        .forEach(function (x) { w.appendChild(typeof x === 'string' ? document.createTextNode(x) : timeEl(x.date)); });
       var n = $('not-mine-window');
       w.hidden = false; b.hidden = false; n.hidden = false; w.focus();
       // Uma P2-4: the case this preview exists to catch.
