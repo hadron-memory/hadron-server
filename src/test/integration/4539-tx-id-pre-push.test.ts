@@ -141,3 +141,15 @@ describe('#4539 the pre-push counterpart of the tx_id NOT NULL backfill', () => 
     expect(await triggerImage()).toEqual(triggers);
   });
 });
+
+/**
+ * #4618: this file drops NOT NULL on the key and disables the append-only trigger; each vitest worker shares one database
+ * clone across the files scheduled on it, so whatever a test leaves behind reaches later files. This MUST stay the file's
+ * last test: it runs after every other test's cleanup and proves the shared schema is back as the real one.
+ */
+describe('#4618 the shared schema is restored when this file is done', () => {
+  it('leaves agent_team_events.tx_id NOT NULL and its append-only trigger enabled', async () => {
+    expect(await nullable()).toBe(false);
+    expect(await triggerImage()).toContain('agent_team_event_append_only=O');
+  });
+});
