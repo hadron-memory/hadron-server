@@ -58,6 +58,8 @@ it.each(['both','neither'])('refuses %s checkpoint inputs without a node or phas
  expect((await db.contextReset.findUniqueOrThrow({where:{id:s.resetId}})).phase).toBe('claimed');
  // #4424: read the refusal by its code, never by position. The table is append-only, so put an accepted row AFTER the
  // refusal (timestamp taken from the stored refusal), the order that made `.at(-1)` return null; the filtered read must still find it.
+ // Reads are by f.orca1.id, which is a fresh key per case (setUpResetFixture runs in beforeEach). They are not scoped to
+ // operationId because a refusal row can legally carry none.
  const action=mode==='both'?'checkpoint':'reset';
  const refusal=await db.hostKeyUse.findFirstOrThrow({where:{appKeyId:f.orca1.id,action,refusedCode:'RECOVERY_REF_INVALID'}});
  const key=await db.appKey.findUniqueOrThrow({where:{id:f.orca1.id}});
