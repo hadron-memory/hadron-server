@@ -10,6 +10,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { MAX_REVISION_SLOT } from '../../../lib/revisionSlot.js';
+import { lockNodeForDelete } from '../../../lib/nodeSubtreeLock.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -132,18 +133,26 @@ describe('deleteAgentRevision', () => {
   });
 
   it('tenant isolation: cannot delete another Agent\'s revision by its loc, and not as an outsider', async () => {
-    await save(); await save();
+    // The OTHER tenant's same-loc rows are saved FIRST (lower creation order), so a delete that lost its memory scope
+    // would find B's rev-1 before A's and delete it (#4550 §10 P2).
     const bOwner = (await db.orgMember.findFirstOrThrow({ where: { organization: { urn: 'rev4488-b' } } })).userId;
     await save(agentB, { db, roles: ['READER'], userId: bOwner });
     await save(agentB, { db, roles: ['READER'], userId: bOwner });
-    // the manager of A names B's Agent: refused, and B's rows stay
-    await expect(del('revisions:rev-1', agentB, asManager())).rejects.toThrow();
-    await expect(del('revisions:rev-1', agentA, asOutsider())).rejects.toThrow();
+    await save(); await save();
+    // the manager of A names B's Agent: answered as absent (#1944), and B's rows stay
+    await expect(del('revisions:rev-1', agentB, asManager())).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+    await expect(del('revisions:rev-1', agentA, asOutsider())).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
     expect(await live(agentB, 'revisions:rev-1')).not.toBeNull();
     expect(await live(agentA, 'revisions:rev-1')).not.toBeNull();
-    // deleting A's rev-1 leaves B's rev-1 alone (same loc, different memory)
+    // and the reverse: B's owner deleting B's rev-1 leaves A's rev-1 alone. Both directions, because an unscoped lookup
+    // returns whichever same-loc row the index yields first, so one direction alone can pass by luck of row order.
+    await del('revisions:rev-1', agentB, { db, roles: ['READER'], userId: bOwner });
+    expect(await live(agentB, 'revisions:rev-1')).toBeNull();
+    expect(await live(agentA, 'revisions:rev-1')).not.toBeNull();
+    // deleting A's rev-1 leaves B's rev-2 alone (same loc, different memory), in either creation order
     await del('revisions:rev-1', agentA, asManager());
-    expect(await live(agentB, 'revisions:rev-1')).not.toBeNull();
+    expect(await live(agentA, 'revisions:rev-1')).toBeNull();
+    expect(await live(agentB, 'revisions:rev-2')).not.toBeNull();
   });
 
   it('a member who can read the Agent but does not manage it is refused (list and delete), and nothing is written', async () => {
@@ -157,14 +166,35 @@ describe('deleteAgentRevision', () => {
     expect(await live(agentA, 'revisions:rev-1')).not.toBeNull();
   });
 
-  it('concurrent delete and publish of the same revision never leaves the pin on a deleted one', async () => {
+  // Deterministic interleave (#4550 P2): a second connection holds one lock; delete and publish of the same revision
+  // must both WAIT on it and finish once it is released. Removing either operation's lock lets it finish while held.
+  const LOC = 'revisions:rev-1';
+  async function bothWaitWhileHeld(hold: (tx: any) => Promise<void>) {
     await save(); await save();
-    const results = await Promise.allSettled([
-      del('revisions:rev-1'),
-      resolvers.Mutation.publishRevision({}, { agentRef: agentA.id, revisionLoc: 'revisions:rev-1' }, asManager()),
-    ]);
-    expect(results.some((r) => r.status === 'fulfilled')).toBe(true);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const holding = new Promise<void>((r) => { held = r; });
+    const holder = db.$transaction(async (tx) => { await hold(tx); held(); await gate; }, { timeout: 30000 });
+    await holding;
+    let done = 0;
+    const d = del(LOC).catch(() => undefined).finally(() => { done++; });
+    const p = resolvers.Mutation.publishRevision({}, { agentRef: agentA.id, revisionLoc: LOC }, asManager()).catch(() => undefined).finally(() => { done++; });
+    await new Promise((r) => setTimeout(r, 400));
+    const whileHeld = done;
+    release();
+    await holder; await Promise.all([d, p]);
+    expect(whileHeld).toBe(0);
+    expect(done).toBe(2);
     const pin = (await db.agent.findUniqueOrThrow({ where: { id: agentA.id } })).publishedRevisionLoc;
     if (pin) expect(await live(agentA, pin)).not.toBeNull();
+  }
+
+  it('delete and publish of one revision both wait on the revision\'s node lock, and never leave the pin on a deleted one', async () => {
+    await bothWaitWhileHeld((tx) => lockNodeForDelete(tx, agentA.systemMemoryId!, LOC));
+  });
+
+  it('delete and publish of one revision both wait on the Agent row lock', async () => {
+    await bothWaitWhileHeld(async (tx) => { await tx.$queryRaw`SELECT id FROM agents WHERE id = ${agentA.id} FOR UPDATE`; });
   });
 });
