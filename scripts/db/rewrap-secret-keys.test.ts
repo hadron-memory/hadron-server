@@ -6,13 +6,24 @@
 import { chmod, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../src/integrations/db/client.js';
 import { cleanDb, createDbAppWithKey } from '../../src/test/helpers.js';
 import { generateId } from '../../src/lib/id.js';
 import { decryptBytesAad, encryptBytesAad } from '../../src/lib/tokenCrypto.js';
 import { appKeyAad, appKeyCache, ensureAppKey, unwrapAppKey } from '../../src/lib/secrets/appKeys.js';
 import { main, type SecretRewrapToolIo } from './rewrap-secret-keys.js';
+
+/** #4553 §10 F3 (G4): a library re-wrap that reports success but wrote nothing, so the tool's own AFTER check is tested. */
+const fake = vi.hoisted(() => ({ silentRewrap: false }));
+vi.mock('../../src/lib/secrets/rotation.js', async (orig) => {
+  const real = await orig<typeof import('../../src/lib/secrets/rotation.js')>();
+  return {
+    ...real,
+    rewrapSecretRootKeys: (...args: Parameters<typeof real.rewrapSecretRootKeys>) =>
+      fake.silentRewrap ? Promise.resolve({ rows: 1, rewrapped: 1 }) : real.rewrapSecretRootKeys(...args),
+  };
+});
 
 const ROOT_A = 'a1'.repeat(32);
 const ROOT_B = 'b2'.repeat(32);
@@ -59,6 +70,7 @@ beforeEach(async () => {
   lines = [];
 });
 afterEach(async () => {
+  fake.silentRewrap = false;
   await Promise.allSettled(paths.map((p) => rm(join(p, '..'), { recursive: true, force: true })));
   paths = [];
   delete process.env.SECRET_ROOT_KEY;
@@ -119,6 +131,24 @@ describe('secrets-root re-wrap tool: the run', () => {
     lines = [];
     expect(await main(['--from-root-file', from, '--to-root-file', to], io())).toBe(0);
     expect(lines.some((l) => /rewrapped=0/.test(l))).toBe(true);
+  });
+
+  it('the AFTER check reads the NEW root only: a re-wrap that left a row under the old root exits 1 (#4553 G4)', async () => {
+    await mint();
+    const before = await wrapped();
+    const [from, to] = await rootPair();
+    fake.silentRewrap = true;
+    expect(await main(['--from-root-file', from, '--to-root-file', to], io())).toBe(1);
+    expect(lines.some((l) => l.includes('does not unwrap under the NEW root'))).toBe(true);
+    expect(await wrapped()).toBe(before);
+  });
+
+  it('--from equal to --to is usage, and nothing runs (#4553 F3)', async () => {
+    await mint();
+    const before = await wrapped();
+    const same = await rootFile(ROOT_A, 0o600);
+    expect(await main(['--from-root-file', same, '--to-root-file', same], io())).toBe(2);
+    expect(await wrapped()).toBe(before);
   });
 
   it('a planted row under a third root exits 1 and leaves every row as it was', async () => {

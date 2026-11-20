@@ -136,6 +136,8 @@ export async function main(argv: readonly string[], io: SecretRewrapToolIo): Pro
     if (!HEX64.test(fromHex) || !HEX64.test(toHex)) return usage(io, 'roots must be 64 hex characters');
   }
 
+  if (fromHex.toLowerCase() === toHex.toLowerCase()) return usage(io, 'the two roots are the same');
+
   if (!io.env.DATABASE_URL) {
     io.log(`${TAG}.database_url_missing`);
     return 2;
@@ -151,7 +153,7 @@ export async function main(argv: readonly string[], io: SecretRewrapToolIo): Pro
     try {
       out = await rewrapSecretRootKeys(db, fromHex, toHex);
     } catch (e) {
-      io.log(e instanceof SecretKeyUnavailableError ? `${TAG}.refused: an App key unwraps under neither root; nothing was changed` : `${TAG}.rewrap_failed`);
+      io.log(e instanceof SecretKeyUnavailableError ? `${TAG}.refused: an App key, or the recorded root check, names neither root; nothing was changed` : `${TAG}.rewrap_failed`);
       return 1;
     }
     const after = await unwrapDigests(db, [toRoot], 'after', io.log);
