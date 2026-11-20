@@ -23,16 +23,18 @@ const roster = (): Prisma.Sql => workerActivitySql(Prisma.sql`w.app_id = ${APP}`
 /**
  * #4627: "the buffers bound is not vacuous" — the every-row shape must read FAR more than the per-session probe under the
  * same skew. The bar is a ratio over the probe's own reading, so the margin depends on how many buffers the probe touched
- * on that run, which varies with the environment (private PG17: fix 49 / every 707, 14.4x; CI shard 2 of runs 44806192859
- * and 44813299117: every 712 with fix of at least 72, about 9.9x). Why the probe read more on that shard is NOT confirmed.
- * 5x keeps the purpose with room on both: the every-row shape still has to read over 5x the probe, which the sibling pin
- * caps below 150 buffers, while the old 10x bar had no margin left on the shard.
+ * on that run, which varies with the environment. Measured: private PG17, probe 49 or 67 / every-row 707; CI shard 2
+ * (PG 17.12), probe 72 / every-row 712 in both failing runs 44806192859 and 44813299117 (their `720` is 10 x the probe,
+ * so 72 is exact), and probe 67 / every-row 710 in diagnostic run 44831396073. Why the shard's probe reads 67-72 rather
+ * than 49 is NOT confirmed. At 5x the every-row reading of ~710 fails only once the probe passes 142 buffers, about twice
+ * the highest probe reading measured anywhere, while the old 10x bar had no margin left on the shard (720 > 712).
  */
 const EVERY_ROW_MIN_RATIO = 5;
-const everyRowFarLarger = (fix: number, every: number): boolean => every > fix * EVERY_ROW_MIN_RATIO;
+const everyRowFarLarger = (probeBuffers: number, everyRowBuffers: number): boolean =>
+  everyRowBuffers > probeBuffers * EVERY_ROW_MIN_RATIO;
 /** Names both sides and the server, so a failure says which one moved. */
-const everyRowBoundMessage = (fix: number, every: number, pg: string): string =>
-  `every-row shape read ${every} buffers, per-session probe ${fix}; need every > ${EVERY_ROW_MIN_RATIO} x fix (${fix * EVERY_ROW_MIN_RATIO}); Postgres ${pg}`;
+const everyRowBoundMessage = (probeBuffers: number, everyRowBuffers: number, pg: string): string =>
+  `every-row shape read ${everyRowBuffers} buffers, per-session probe read ${probeBuffers}; need every-row > ${EVERY_ROW_MIN_RATIO} x probe (${probeBuffers * EVERY_ROW_MIN_RATIO}); Postgres ${pg}`;
 
 /** The pre-#4397 probe (#1952's max over `created_at + interval '0'`): reads every activity row of the session. */
 function everyRowShape(sql: Prisma.Sql): Prisma.Sql {
@@ -145,14 +147,24 @@ describe('#4627 the not-vacuous bound, at measured numbers', () => {
   it('holds at the local PG17 numbers (fix 49, every 707)', () => {
     expect(everyRowFarLarger(49, 707)).toBe(true);
   });
+  it('holds at the diagnostic shard reading (probe 67, every-row 710, run 44831396073)', () => {
+    expect(everyRowFarLarger(67, 710)).toBe(true);
+  });
+  it('has headroom to about twice the highest measured probe: 142 holds at every-row 712, 143 does not', () => {
+    expect(everyRowFarLarger(142, 712)).toBe(true);
+    expect(everyRowFarLarger(143, 712)).toBe(false);
+  });
   it('still fails when the every-row shape is no longer far larger', () => {
     expect(everyRowFarLarger(72, 73)).toBe(false);
     expect(everyRowFarLarger(72, 72 * 2)).toBe(false);
+    // The cutoff is strict: at a probe of 72 the every-row shape needs MORE than 360.
+    expect(everyRowFarLarger(72, 360)).toBe(false);
+    expect(everyRowFarLarger(72, 361)).toBe(true);
     expect(everyRowFarLarger(149, 149 * 4)).toBe(false);
   });
   it('the failure message names both readings and the Postgres version', () => {
     const m = everyRowBoundMessage(72, 712, '17.6');
-    for (const part of ['read 712 buffers', 'probe 72;', 'Postgres 17.6']) expect(m).toContain(part);
+    for (const part of ['every-row shape read 712 buffers', 'per-session probe read 72;', 'Postgres 17.6']) expect(m).toContain(part);
   });
 });
 
