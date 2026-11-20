@@ -95,8 +95,8 @@ async function compile(content = 'compiled v1') {
   await mk(SOURCE, { role: 'boot-prompt', content: 'source' });
   return mk(COMPILED, { nodeType: 'compiled-boot-prompt', role: 'boot-prompt', content });
 }
-const save = () => M.createRevision({}, { agentId: agent.id }, adminCtx()) as Promise<{ revisionLoc: string }>;
-const restore = (revisionLoc: string) => M.restoreRevision({}, { agentId: agent.id, revisionLoc }, adminCtx());
+const save = () => M.createRevision({}, { agentRef: agent.id }, adminCtx()) as Promise<{ revisionLoc: string }>;
+const restore = (revisionLoc: string) => M.restoreRevision({}, { agentRef: agent.id, revisionLoc }, adminCtx());
 const asWas = (n: Record<string, unknown>) => ({
   id: n.id, content: n.content, nodeType: n.nodeType, role: n.role, deletedAt: n.deletedAt, rev: n.rev, name: n.name, data: n.data, tags: n.tags, updatedAt: n.updatedAt,
 });
@@ -183,7 +183,7 @@ describe('#4313: a compile that commits while a restore runs is left as it is', 
     const rev = await save(); // taken before the first compile: no compiled node in it
     let made: { id: string } | undefined;
     const { ctx, state } = ctxInterleaving(at, async () => { made = await commitCompiledFixture(); });
-    await M.restoreRevision({}, { agentId: agent.id, revisionLoc: rev.revisionLoc }, ctx);
+    await M.restoreRevision({}, { agentRef: agent.id, revisionLoc: rev.revisionLoc }, ctx);
     expect(state.fired, 'the compile must have committed inside the restore').toBe(true);
     const after = await node(COMPILED);
     expect(after).toMatchObject({ id: made!.id, deletedAt: null, nodeType: 'compiled-boot-prompt', role: 'boot-prompt', content: 'compiled while restoring' });
@@ -195,7 +195,7 @@ describe('#4313: a compile that commits while a restore runs is left as it is', 
     const rev = await save();
     const extra = await mk('notes:later', { content: 'added after the snapshot' });
     const { ctx, state } = ctxInterleaving({ model: 'node', op: 'findMany', nth: 1 }, async () => undefined);
-    await M.restoreRevision({}, { agentId: agent.id, revisionLoc: rev.revisionLoc }, ctx);
+    await M.restoreRevision({}, { agentRef: agent.id, revisionLoc: rev.revisionLoc }, ctx);
     expect(state.fired).toBe(true);
     expect((await db.node.findUniqueOrThrow({ where: { id: extra.id } })).deletedAt).not.toBeNull();
   });
@@ -215,7 +215,7 @@ describe('#4313: a compile that commits while a restore runs is left as it is', 
     await db.node.delete({ where: { id: squatter.id } });
     let made: { id: string } | undefined;
     const { ctx, state } = ctxInterleaving({ model: 'node', op: 'findMany', nth: 1, where: readsCompiledRows }, async () => { made = await commitCompiledFixture(); });
-    await M.restoreRevision({}, { agentId: agent.id, revisionLoc: rev.revisionLoc }, ctx);
+    await M.restoreRevision({}, { agentRef: agent.id, revisionLoc: rev.revisionLoc }, ctx);
     expect(state.fired).toBe(true);
     expect((state.seen as Array<{ loc: string }>).map((r) => r.loc)).not.toContain(COMPILED); // the hooked read did not hold it
     // …and the write loop then read the compile's row back under its lock and judged THAT row: the locked lookup

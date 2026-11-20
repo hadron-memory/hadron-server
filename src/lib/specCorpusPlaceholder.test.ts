@@ -46,8 +46,8 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { githubId: 145001, githubUsername: 'corpus-admin', roles: [] } });
   outsider = await db.user.create({ data: { githubId: 145002, githubUsername: 'corpus-outsider', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  draft = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft', draftCorpus: true }, as(admin.id));
-  minted = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs' }, as(admin.id));
+  draft = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs-draft', draftCorpus: true }, as(admin.id));
+  minted = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs' }, as(admin.id));
 });
 
 describe('reserveSpecCitation (#1450)', () => {
@@ -248,7 +248,7 @@ describe('every content write fills a placeholder (@codex P2 on #1452)', () => {
     // reachable only for the legacy role-drifted placeholder in the issue.
     await db.node.update({ where: { id: placeholder.id }, data: { role: null } });
     const source = await resolvers.Mutation.createMemory(null, {
-      orgId: org.id, name: 'source-draft', draftCorpus: true,
+      orgRef: org.id, name: 'source-draft', draftCorpus: true,
     }, as(admin.id));
     await db.node.create({ data: {
       id: generateId(), memoryId: source.id, loc: 'pas:121:01', name: 'Written spec',

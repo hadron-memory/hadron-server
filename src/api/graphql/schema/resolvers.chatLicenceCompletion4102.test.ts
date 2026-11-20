@@ -81,10 +81,10 @@ async function loseLicence(loss: Loss) {
 
 async function start(pinned = false) {
   if (pinned) {
-    const rev = await M.createRevision({}, { agentId }, ctx());
-    await M.publishRevision({}, { agentId, revisionLoc: rev.revisionLoc }, ctx());
+    const rev = await M.createRevision({}, { agentRef: agentId }, ctx());
+    await M.publishRevision({}, { agentRef: agentId, revisionLoc: rev.revisionLoc }, ctx());
   }
-  return M.startChat({}, { agentId, scope: 'private', conversationName: 'flow' }, ctx());
+  return M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, ctx());
 }
 
 /** Observe memory-scoped Node/edge reads from the Agent's definition, without replacing results (as #4043's). */

@@ -44,7 +44,7 @@ beforeEach(async () => {
   outsider = await db.user.create({ data: { githubId: 178003, githubUsername: 'alloc-outsider', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: reader.id, role: 'READER' } });
-  mem = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs' }, as(admin.id));
+  mem = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs' }, as(admin.id));
   await mk('cor');
   await mk('cor:dmo');
   await mk('cor:dmo:060');

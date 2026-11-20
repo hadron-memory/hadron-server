@@ -27,7 +27,7 @@ const callAs = (auth: AuthContext, args: Record<string, unknown>): Promise<strin
   createTestableMcpServer(auth).callToolText('hadron_create_memory', args);
 // The tool names the organization `org`; the mutation takes it as `orgId`.
 const mutate = (ctx: Context, { org, ...rest }: Record<string, unknown>) =>
-  (resolvers.Mutation as any).createMemory({}, { ...rest, ...(org ? { orgId: org } : {}) }, ctx);
+  (resolvers.Mutation as any).createMemory({}, { ...rest, ...(org ? { orgRef: org } : {}) }, ctx);
 const rejection = async (p: Promise<unknown>): Promise<string> => {
   try { await p; } catch (e) { return (e as Error).message; }
   throw new Error('expected a refusal');

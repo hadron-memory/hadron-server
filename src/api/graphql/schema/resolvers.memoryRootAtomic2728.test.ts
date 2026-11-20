@@ -12,7 +12,7 @@ const M = resolvers.Mutation as any;
 let org: any, admin: any, app: any, agent: any;
 const ctx = (): Context => ({ db, userId: admin.id, roles: ['READER'] });
 const inject = () => vi.spyOn(rootFs, 'saveNodeToFs').mockResolvedValueOnce({ error: 'injected root failure' });
-const createMemory = () => M.createMemory({}, { name: 'Notes2728', orgId: org.id }, ctx());
+const createMemory = () => M.createMemory({}, { name: 'Notes2728', orgRef: org.id }, ctx());
 const inApp = () => M.createMemoryInApp({}, { appRef: app.id, agentRef: agent.id, memoryClass: 'knowledge', name: 'AppNotes2728' }, ctx());
 const counts = async () => ({ memories: await db.memory.count(), nodes: await db.node.count() });
 
@@ -46,7 +46,7 @@ describe.each([
 
 it('createMemory with class group keeps its owner row and rolls it back with the memory', async () => {
   inject();
-  await expect(M.createMemory({}, { name: 'Grp2728', orgId: org.id, memoryClass: 'group' }, ctx())).rejects.toThrow('injected root failure');
+  await expect(M.createMemory({}, { name: 'Grp2728', orgRef: org.id, memoryClass: 'group' }, ctx())).rejects.toThrow('injected root failure');
   expect(await db.memory.count()).toBe(0);
   expect(await db.memoryMember.count()).toBe(0);
 });

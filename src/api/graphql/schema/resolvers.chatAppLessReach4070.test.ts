@@ -59,7 +59,7 @@ beforeEach(async () => {
  *  - `'production'`: `detachAppOwnerMemories`, which clears BOTH `appId` and the pointer, as deleting or replacing an App does.
  * `{ keepApp: true }` leaves the home App-bearing, still attached to App L. */
 async function retainedHome(who: Context, { keepApp = false, detach = 'legacy' }: { keepApp?: boolean; detach?: 'legacy' | 'production' } = {}) {
-  const started = await M.startChat({}, { agentId, scope: 'private', conversationName: 'flow' }, who);
+  const started = await M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, who);
   const root = await chatNodeByLocOrThrow(db, started.chatId);
   if (!keepApp) {
     if (detach === 'production') await db.$transaction(tx => detachAppOwnerMemories(tx, [appId]));
@@ -178,7 +178,7 @@ describe('#4105 the knowledge-home shape', () => {
     const agentOrgId = (await db.agent.findUniqueOrThrow({ where: { id: agentId } })).organizationId!;
     await db.orgMember.create({ data: { organizationId: agentOrgId, userId: loneId, role: 'ADMIN' } });
     const loneCtx = (): Context => ({ db, userId: loneId, roles: ['READER'] });
-    const started = await M.startChat({}, { agentId, scope: 'private', conversationName: 'flow' }, loneCtx());
+    const started = await M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, loneCtx());
     const root = await chatNodeByLocOrThrow(db, started.chatId);
     const memory = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
     expect([memory.class, memory.appId], 'the knowledge-home shape').toEqual(['knowledge', null]);
@@ -246,8 +246,8 @@ describe('#4070 controls', () => {
 
 describe('#4070 review follow-ups', () => {
   it('S1: send on a lost-reach App-less home refuses AGENT_NOT_FOUND BEFORE it reads the pinned revision (Baloo P2_1)', async () => {
-    const rev = await M.createRevision({}, { agentId }, managerCtx());
-    await M.publishRevision({}, { agentId, revisionLoc: rev.revisionLoc }, managerCtx());
+    const rev = await M.createRevision({}, { agentRef: agentId }, managerCtx());
+    await M.publishRevision({}, { agentRef: agentId, revisionLoc: rev.revisionLoc }, managerCtx());
     const home = await retainedHome(consumerCtx());
     const root = await db.node.findUniqueOrThrow({ where: { id: home.rootId } });
     expect((root.data as any).startedWithRevision, 'the chat must be pinned for this pin to mean anything').toBe(rev.revisionLoc);
@@ -258,8 +258,8 @@ describe('#4070 review follow-ups', () => {
   });
 
   it('S1c: positive control for S1: with reach intact the same observer sees the pinned-revision read, so S1 cannot pass vacuously', async () => {
-    const rev = await M.createRevision({}, { agentId }, managerCtx());
-    await M.publishRevision({}, { agentId, revisionLoc: rev.revisionLoc }, managerCtx());
+    const rev = await M.createRevision({}, { agentRef: agentId }, managerCtx());
+    await M.publishRevision({}, { agentRef: agentId, revisionLoc: rev.revisionLoc }, managerCtx());
     const home = await retainedHome(managerCtx());
     const root = await db.node.findUniqueOrThrow({ where: { id: home.rootId } });
     expect((root.data as any).startedWithRevision).toBe(rev.revisionLoc);
