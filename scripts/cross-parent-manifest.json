@@ -238,6 +238,7 @@
     "SummarizationRequest": "value",
     "ChatResponseResult": "envelope",
     "RevisionResult": "envelope",
+    "AgentRevision": "value",
     "EditorLockResult": "envelope",
     "UntrackedTaskItem": "value",
     "UntrackedTaskItemPage": "envelope",
