@@ -8,6 +8,7 @@
  * - `rewrapSecretRootKeys` moves every wrapped key from the old root to the new one in one transaction, moves the
  *   key-check value with them, is idempotent, and on any row that unwraps under neither root changes nothing.
  */
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey } from '../../test/helpers.js';
@@ -161,5 +162,19 @@ describe('rewrapSecretRootKeys (the root re-wrap)', () => {
     const wrapped = (await keysOf(appA))[0].wrappedKey;
     expect(() => decryptBytesAad(wrapped, appKeyAad(appB, 1), Buffer.from(NEW_ROOT, 'hex'))).toThrow();
     expect(decryptBytesAad(wrapped, appKeyAad(appA, 1), Buffer.from(NEW_ROOT, 'hex'))).toHaveLength(32);
+  });
+});
+
+describe('deployment files (#4003)', () => {
+  const file = (rel: string) => readFileSync(new URL(`../../../${rel}`, import.meta.url), 'utf8');
+  it('the migration and post-push carry the root-check invariants verbatim', () => {
+    const inv = file('prisma/secret-rotation-invariants.sql');
+    expect(file('prisma/migrations/20261120090000_secret_root_check/migration.sql')).toContain(inv);
+    expect(file('prisma/post-push.sql')).toContain('\\ir secret-rotation-invariants.sql');
+  });
+  it('the prod snapshot leaves out secret_root_check: prod\'s value would make every local mint refuse (R18)', () => {
+    // The snapshot has no App keys (secret_app_keys is excluded), so a copied check value names a root no developer
+    // holds, and assertRootCheck refuses the first local mint with SECRET_KEY_UNAVAILABLE.
+    expect(file('scripts/dev-from-prod-snapshot.sh')).toMatch(/--exclude-table='secret_root_check'/);
   });
 });
