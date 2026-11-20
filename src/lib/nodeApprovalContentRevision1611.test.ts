@@ -44,7 +44,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'Rev Org', urn: 'rev1611.example' } });
   admin = await db.user.create({ data: { githubId: 161101, githubUsername: 'rev-admin', handle: 'rev-admin', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'approvals' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'approvals' }, as());
 });
 
 /** An approved node, then one revisioned write; returns the node id. */

@@ -35,7 +35,7 @@ beforeEach(async()=>{
   const org=await db.organization.create({data:{name:'plan2054',urn:'plan2054'}});
   user=await db.user.create({data:{githubId:2054001,githubUsername:'plan2054',roles:['ADMIN']}});
   await db.orgMember.create({data:{organizationId:org.id,userId:user.id,role:'ADMIN'}});
-  memory=await resolvers.Mutation.createMemory({}, {orgId:org.id,name:'plan2054'},context());
+  memory=await resolvers.Mutation.createMemory({}, {orgRef:org.id,name:'plan2054'},context());
 });
 afterEach(()=>{vi.restoreAllMocks();});
 
@@ -209,7 +209,7 @@ describe('MCP source/destination revocation does not become plan conflict',()=>{
     const source=await node('source');
     const other=await db.organization.create({data:{name:'other2054',urn:'other2054'}});
     await db.orgMember.create({data:{organizationId:other.id,userId:user.id,role:'ADMIN'}});
-    const destination=await resolvers.Mutation.createMemory({}, {orgId:other.id,name:'destination2054'},context());
+    const destination=await resolvers.Mutation.createMemory({}, {orgRef:other.id,name:'destination2054'},context());
     await db.node.create({data:{id:generateId(),memoryId:destination.id,loc:'target',name:'target',nodeType:'info',deletedAt:new Date()}});
     const from=await db.memory.findUniqueOrThrow({where:{id:memory.id}});
     await db.user.update({where:{id:user.id},data:{roles:['READER']}});
@@ -228,7 +228,7 @@ describe('MCP source/destination revocation does not become plan conflict',()=>{
     const source=await node('source');
     const other=await db.organization.create({data:{name:'other2054',urn:'other2054'}});
     await db.orgMember.create({data:{organizationId:other.id,userId:user.id,role:'ADMIN'}});
-    const destination=await resolvers.Mutation.createMemory({}, {orgId:other.id,name:'destination2054'},context());
+    const destination=await resolvers.Mutation.createMemory({}, {orgRef:other.id,name:'destination2054'},context());
     await db.node.create({data:{id:generateId(),memoryId:destination.id,loc:'target',name:'target',nodeType:'info',deletedAt:new Date()}});
     const from=await db.memory.findUniqueOrThrow({where:{id:memory.id}});
     await db.user.update({where:{id:user.id},data:{roles:['READER']}});
@@ -280,7 +280,7 @@ describe('MCP move re-reads the caller per attempt (platform-role demotion, soft
     const source=await node('source');
     const other=await db.organization.create({data:{name:'other2054b',urn:'other2054b'}});
     await db.orgMember.create({data:{organizationId:other.id,userId:user.id,role:'ADMIN'}});
-    const destination=await resolvers.Mutation.createMemory({}, {orgId:other.id,name:'destination2054b'},context());
+    const destination=await resolvers.Mutation.createMemory({}, {orgRef:other.id,name:'destination2054b'},context());
     await db.node.create({data:{id:generateId(),memoryId:destination.id,loc:'target',name:'target',nodeType:'info',deletedAt:new Date()}});
     await db.orgMember.deleteMany({where:{userId:user.id}});
     return {source,destination};

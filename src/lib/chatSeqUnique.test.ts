@@ -152,7 +152,7 @@ beforeEach(async () => {
   await db.appAgent.create({ data: { appId: app.id, agentId: teamAgent.id } });
   await db.appMember.create({ data: { appId: app.id, userId: appMember.id, role: 'member' } });
 
-  legacyMem = await M.createMemory({}, { orgId: org.id, name: 'csq-legacy' }, ctx(admin.id));
+  legacyMem = await M.createMemory({}, { orgRef: org.id, name: 'csq-legacy' }, ctx(admin.id));
   await db.node.create({
     data: {
       id: generateId(), memoryId: legacyMem.id, loc: TEAM_CHAT_LOC,

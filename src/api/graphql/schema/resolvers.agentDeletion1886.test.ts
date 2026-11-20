@@ -140,7 +140,7 @@ describe('#1886 Agent retirement dependencies', () => {
 
   it('AgentMemoryItem alone is non-blocking and its memory is untouched', async () => {
     const target = await makeAgent('Linked Knowledge');
-    const memory = await M.createMemory(null, { orgId: beta.id, name: 'Linked knowledge' }, ctx());
+    const memory = await M.createMemory(null, { orgRef: beta.id, name: 'Linked knowledge' }, ctx());
     await db.agentMemoryItem.create({ data: { agentId: target.id, memoryId: memory.id } });
     expect(await M.deleteAgent(null, { ref: target.id }, ctx())).toBe(true);
     expect((await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).deletedAt).toBeNull();

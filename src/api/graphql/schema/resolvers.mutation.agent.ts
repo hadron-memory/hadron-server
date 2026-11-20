@@ -71,14 +71,14 @@ import {
   requireOrgRole,
   requireAgentAccess,
   resolveReadableAgentRef,
+  resolveReadableAgentRefArg,
   requireReadableAgent,
   requireOwnerOrOrgRole,
   aiConfigOwnerOf,
   toGqlAiServiceConfig,
   requireAiConfigOwnerAdmin,
   rethrowAiConfigTyped,
-  resolveUserRefArg,
-  resolveReadableAgentRefArg,
+  resolveRequiredUserRef,
   getAccessibleMemoryIds,
   requireMemoryWriteAccess,
   AGENT_INCLUDE,
@@ -1665,26 +1665,19 @@ export const agentMutations = {
 
     revokeAgentSubscription: async (
       _: unknown,
-      {
-        userRef,
-        userId,
-        agentRef,
-        agentId,
-      }: {
-        userRef?: string | null;
-        userId?: string | null;
-        agentRef?: string | null;
-        agentId?: string | null;
-      },
+      { userRef, agentRef }: { userRef: string; agentRef: string },
       ctx: Context,
     ) => {
       // #764: agentRef/userRef accept id / URN / (user) handle / email. Resolve
-      // the agent + owner-gate FIRST, then resolve the user.
+      // the agent + owner-gate FIRST, then resolve the user. #4142 (S6 chunk F)
+      // dropped the deprecated userId/agentId aliases: the refs are required,
+      // so agentRef goes through the collapsed single-ref form — its blank-ref
+      // BAD_USER_INPUT refusal included.
       // #1944: an Agent the caller can't read answers as absent.
-      const agent = await resolveReadableAgentRefArg(ctx, { ref: agentRef, id: agentId });
+      const agent = await resolveReadableAgentRefArg(ctx, agentRef);
       const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
-      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+      const resolvedUserId = await resolveRequiredUserRef(ctx.db, userRef);
 
       // #1573: the revoker of the subscription writers (startChat, personal
       // createApp, install). It takes the same [agent, target user] anchors
@@ -1740,12 +1733,12 @@ export const agentMutations = {
 
     updateAgentAIConfig: async (
       _: unknown,
-      { agentId, provider, apiKey, model }: { agentId: string; provider: string; apiKey?: string | null; model: string },
+      { agentRef, provider, apiKey, model }: { agentRef: string; provider: string; apiKey?: string | null; model: string },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
       // #1944: through the read gate, so an unreadable Agent answers as absent.
-      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
       const resolvedAgentId = agent.id;
       // #1787 review (Rook P2-1): updating config can keep the stored key under a
       // changed endpoint/provider — same exfil shape as the registry gate — so on a
@@ -1839,10 +1832,10 @@ export const agentMutations = {
       });
     },
 
-    clearAgentAIConfig: async (_: unknown, { agentId }: { agentId: string }, ctx: Context) => {
-      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+    clearAgentAIConfig: async (_: unknown, { agentRef }: { agentRef: string }, ctx: Context) => {
+      // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
       // #1944: through the read gate, so an unreadable Agent answers as absent.
-      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
       const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       // #1882 / cor:dmo:050:13 (R12): a user-owned Agent clear removes every

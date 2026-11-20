@@ -98,7 +98,7 @@ beforeEach(async () => {
   const a = await db.user.create({ data: { githubId: 6711, githubUsername: 'emcp-admin', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: a.id, role: 'ADMIN' } });
   adminId = a.id;
-  const mem = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'edges' }, admin());
+  const mem = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'edges' }, admin());
   memId = mem.id;
   memUrn = mem.urn;
 
@@ -374,7 +374,7 @@ describe('the hazard #835 exists to remove', () => {
     });
     const movedMemory = await resolvers.Mutation.createMemory(
       {},
-      { orgId: organizationId!, name: 'moved pending source' },
+      { orgRef: organizationId!, name: 'moved pending source' },
       admin(),
     );
     const pending = await db.pendingEdge.create({
@@ -466,7 +466,7 @@ describe('the hazard #835 exists to remove', () => {
     });
     const movedMemory = await resolvers.Mutation.createMemory(
       {},
-      { orgId: organizationId!, name: 'pending retry destination' },
+      { orgRef: organizationId!, name: 'pending retry destination' },
       admin(),
     );
     const pending = await db.pendingEdge.create({

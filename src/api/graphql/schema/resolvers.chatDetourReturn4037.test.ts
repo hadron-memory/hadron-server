@@ -14,7 +14,7 @@ const other = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL });
 afterAll(() => other.$disconnect());
 let userId: string, agentId: string, systemId: string, ids: Record<string, string>;
 const ctx = (client = db): Context => ({ db: client, roles: ['READER'], userId });
-const start = (conversationName = 'recent') => resolvers.Mutation.startChat({}, { agentId, conversationName }, ctx());
+const start = (conversationName = 'recent') => resolvers.Mutation.startChat({}, { agentRef: agentId, conversationName }, ctx());
 const respond = (chatId: string, fields: Record<string, unknown> = {}, client = db) => resolvers.Mutation.processChatResponse({}, { chatId, toolResponse: { message: 'reply', onTrack: true, ...fields } }, ctx(client));
 async function state(chatId: string) {
   const root = await chatNodeByLocOrThrow(db, chatId);

@@ -83,7 +83,7 @@ beforeEach(async () => {
   const localGqlCtx: Context = { db, roles: ['ADMIN'], userId: admin.id };
   const memory = await resolvers.Mutation.createMemory(
     {},
-    { orgId: org.id, name: 'absmem' },
+    { orgRef: org.id, name: 'absmem' },
     localGqlCtx,
   );
 

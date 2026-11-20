@@ -46,7 +46,7 @@ function ownerCtx(): Context {
 /** encryptMemory refuses an indexed memory without an inversion ack; turn the index off first. */
 async function encryptWithIndexOff(): Promise<void> {
   await db.memory.update({ where: { id: memoryId }, data: { vectorIndexEnabled: false } });
-  await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+  await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
 }
 
 /** The `plaintext` argument of every enqueue call so far. */

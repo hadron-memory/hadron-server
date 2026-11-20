@@ -138,7 +138,7 @@ describe('US2: AppMember without OrgMember', () => {
     // permits her to be an AppMember of an App in that org anyway.
     const payload = await resolvers.Mutation.joinApp(
       {},
-      { appId: fx.therapyAppId },
+      { appRef: fx.therapyAppId },
       userCtx(fx.daisyUserId),
     );
     expect(payload.appMember.appId).toBe(fx.therapyAppId);
@@ -158,7 +158,7 @@ describe('US2: AppMember without OrgMember', () => {
   it('joinApp is idempotent — re-joining returns the existing row, role unchanged', async () => {
     await resolvers.Mutation.joinApp(
       {},
-      { appId: fx.therapyAppId },
+      { appRef: fx.therapyAppId },
       userCtx(fx.daisyUserId),
     );
     // Manually change role to verify re-join doesn't overwrite it.
@@ -170,7 +170,7 @@ describe('US2: AppMember without OrgMember', () => {
     });
     const second = await resolvers.Mutation.joinApp(
       {},
-      { appId: fx.therapyAppId },
+      { appRef: fx.therapyAppId },
       userCtx(fx.daisyUserId),
     );
     expect(second.appMember.role).toBe('therapist');
@@ -183,7 +183,7 @@ describe('US2: AppMember without OrgMember', () => {
   it('joinApp accepts URN as appId', async () => {
     await resolvers.Mutation.joinApp(
       {},
-      { appId: `${fx.orgTherapistUrn}:therapy-app` },
+      { appRef: `${fx.orgTherapistUrn}:therapy-app` },
       userCtx(fx.daisyUserId),
     );
     const row = await db.appMember.findUnique({
@@ -197,7 +197,7 @@ describe('US2: AppMember without OrgMember', () => {
   it('joinApp rejects unauthenticated callers with UNAUTHENTICATED', async () => {
     let caught: unknown;
     try {
-      await resolvers.Mutation.joinApp({}, { appId: fx.therapyAppId }, { db });
+      await resolvers.Mutation.joinApp({}, { appRef: fx.therapyAppId }, { db });
     } catch (err) {
       caught = err;
     }
@@ -220,14 +220,14 @@ describe('US2: AppMember without OrgMember', () => {
     });
     await resolvers.Mutation.joinApp(
       {},
-      { appId: fx.therapyAppId },
+      { appRef: fx.therapyAppId },
       userCtx(fx.therapistUserId),
     );
     let caught: unknown;
     try {
       await resolvers.Mutation.joinApp(
         {},
-        { appId: fx.therapyAppId },
+        { appRef: fx.therapyAppId },
         userCtx(fx.daisyUserId),
       );
     } catch (err) {
@@ -240,7 +240,7 @@ describe('US2: AppMember without OrgMember', () => {
   it('AppMember.isOrgExternal is true for an org-external User (FR-011)', async () => {
     await resolvers.Mutation.joinApp(
       {},
-      { appId: fx.therapyAppId },
+      { appRef: fx.therapyAppId },
       userCtx(fx.daisyUserId),
     );
     const row = await db.appMember.findUniqueOrThrow({
@@ -256,7 +256,7 @@ describe('US2: AppMember without OrgMember', () => {
   it('AppMember.isOrgExternal is false for an OrgMember of the App org', async () => {
     await resolvers.Mutation.joinApp(
       {},
-      { appId: fx.therapyAppId },
+      { appRef: fx.therapyAppId },
       userCtx(fx.therapistUserId),
     );
     const row = await db.appMember.findUniqueOrThrow({
@@ -285,7 +285,7 @@ describe('US2: AppMember without OrgMember', () => {
     // Add the AppMember row → predicate flips to true.
     await resolvers.Mutation.joinApp(
       {},
-      { appId: fx.therapyAppId },
+      { appRef: fx.therapyAppId },
       userCtx(fx.daisyUserId),
     );
     expect(
@@ -300,7 +300,7 @@ describe('US2: AppMember without OrgMember', () => {
     // they're an OrgMember of the App's owning org.
     await resolvers.Mutation.joinApp(
       {},
-      { appId: fx.therapyAppId },
+      { appRef: fx.therapyAppId },
       userCtx(fx.therapistUserId),
     );
     expect(
@@ -323,12 +323,12 @@ describe('US2: AppMember without OrgMember', () => {
   it('leaveApp deletes the AppMember row idempotently', async () => {
     await resolvers.Mutation.joinApp(
       {},
-      { appId: fx.therapyAppId },
+      { appRef: fx.therapyAppId },
       userCtx(fx.daisyUserId),
     );
     const payload = await resolvers.Mutation.leaveApp(
       {},
-      { appId: fx.therapyAppId },
+      { appRef: fx.therapyAppId },
       userCtx(fx.daisyUserId),
     );
     expect(payload.appId).toBe(fx.therapyAppId);
@@ -344,7 +344,7 @@ describe('US2: AppMember without OrgMember', () => {
     await expect(
       resolvers.Mutation.leaveApp(
         {},
-        { appId: fx.therapyAppId },
+        { appRef: fx.therapyAppId },
         userCtx(fx.daisyUserId),
       ),
     ).resolves.toMatchObject({ appId: fx.therapyAppId, userId: fx.daisyUserId });
@@ -353,7 +353,7 @@ describe('US2: AppMember without OrgMember', () => {
   it('leaveApp preserves the user\'s personal-class Memory (FR-015 orphan retention)', async () => {
     await resolvers.Mutation.joinApp(
       {},
-      { appId: fx.therapyAppId },
+      { appRef: fx.therapyAppId },
       userCtx(fx.daisyUserId),
     );
     // Daisy has a personal-class Memory in the App (the kind the chat
@@ -375,7 +375,7 @@ describe('US2: AppMember without OrgMember', () => {
 
     await resolvers.Mutation.leaveApp(
       {},
-      { appId: fx.therapyAppId },
+      { appRef: fx.therapyAppId },
       userCtx(fx.daisyUserId),
     );
 
@@ -388,7 +388,7 @@ describe('US2: AppMember without OrgMember', () => {
   it('leaveApp rejects unauthenticated callers with UNAUTHENTICATED', async () => {
     let caught: unknown;
     try {
-      await resolvers.Mutation.leaveApp({}, { appId: fx.therapyAppId }, { db });
+      await resolvers.Mutation.leaveApp({}, { appRef: fx.therapyAppId }, { db });
     } catch (err) {
       caught = err;
     }
@@ -407,7 +407,7 @@ describe('US2: AppMember without OrgMember', () => {
     try {
       await resolvers.Mutation.joinApp(
         {},
-        { appId: fx.therapyAppId },
+        { appRef: fx.therapyAppId },
         userCtx(fx.daisyUserId),
       );
     } catch (err) {
@@ -423,7 +423,7 @@ describe('US2: AppMember without OrgMember', () => {
     // — joinApp's pre-checks reject the soft-deleted App.
     await resolvers.Mutation.joinApp(
       {},
-      { appId: fx.therapyAppId },
+      { appRef: fx.therapyAppId },
       userCtx(fx.daisyUserId),
     );
     await db.app.update({
@@ -434,7 +434,7 @@ describe('US2: AppMember without OrgMember', () => {
     try {
       await resolvers.Mutation.joinApp(
         {},
-        { appId: fx.therapyAppId },
+        { appRef: fx.therapyAppId },
         userCtx(fx.daisyUserId),
       );
     } catch (err) {

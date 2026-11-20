@@ -7,8 +7,8 @@
  *      and that BOTH the new xRef and the deprecated xId route through the
  *      resolver (so id-named args that already accepted URNs keep doing so).
  *   2. End-to-end on addOrgMember — a handle, an email, and an hrn:user URN all
- *      resolve the same grantee; orgRef accepts the org slug; the deprecated
- *      userId still works.
+ *      resolve the same grantee; orgRef accepts the org slug; a raw PK through
+ *      userRef keeps working (#4142 S6 dropped the deprecated userId alias).
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -94,12 +94,12 @@ describe('#764 addOrgMember accepts refs end-to-end', () => {
     }));
 
   it('resolves the grantee by handle', async () => {
-    await M.addOrgMember(null, { orgId: org.id, userRef: target.handle, role: 'READER' }, ctx(owner.id));
+    await M.addOrgMember(null, { orgRef: org.id, userRef: target.handle, role: 'READER' }, ctx(owner.id));
     expect(await isMember()).toBe(true);
   });
 
   it('resolves the grantee by email', async () => {
-    await M.addOrgMember(null, { orgId: org.id, userRef: target.email, role: 'READER' }, ctx(owner.id));
+    await M.addOrgMember(null, { orgRef: org.id, userRef: target.email, role: 'READER' }, ctx(owner.id));
     expect(await isMember()).toBe(true);
   });
 
@@ -112,27 +112,24 @@ describe('#764 addOrgMember accepts refs end-to-end', () => {
     expect(await isMember()).toBe(true);
   });
 
-  it('still accepts the deprecated userId', async () => {
-    await M.addOrgMember(null, { orgId: org.id, userId: target.id, role: 'READER' }, ctx(owner.id));
+  it('still accepts the raw id through userRef (the PK path)', async () => {
+    // #4142 (S6 chunk F): the deprecated userId alias dropped — but a raw PK
+    // passed AS userRef keeps resolving (it always did; the alias only named
+    // the same slot).
+    await M.addOrgMember(null, { orgRef: org.id, userRef: target.id, role: 'READER' }, ctx(owner.id));
     expect(await isMember()).toBe(true);
   });
 
   it('rejects an unknown grantee ref with NOT_FOUND (after the auth gate)', async () => {
     await expect(
-      M.addOrgMember(null, { orgId: org.id, userRef: 'nobody-here', role: 'READER' }, ctx(owner.id)),
+      M.addOrgMember(null, { orgRef: org.id, userRef: 'nobody-here', role: 'READER' }, ctx(owner.id)),
     ).rejects.toThrow(/No match for userRef/);
     expect(await isMember()).toBe(false);
   });
 
-  it('rejects supplying both userRef and userId', async () => {
-    await expect(
-      M.addOrgMember(
-        null,
-        { orgId: org.id, userRef: target.handle, userId: target.id, role: 'READER' },
-        ctx(owner.id),
-      ),
-    ).rejects.toThrow(/not both/);
-  });
+  // #4142 (S6 chunk F) deleted "rejects supplying both userRef and userId":
+  // the alias is gone from the SDL, so the pair is unconstructable — the
+  // entityRefS6 pin file holds the unknown-argument refusal instead.
 });
 
 // #816 review: resolving a ref must not become an existence oracle. On the
@@ -166,7 +163,7 @@ describe('#816 member surfaces do not leak existence via refs', () => {
     });
     mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: org.id, name: 'oracle-group', memoryClass: 'group', visibility: 'GROUP' },
+      { orgRef: org.id, name: 'oracle-group', memoryClass: 'group', visibility: 'GROUP' },
       adminCtx(owner.id),
     );
     // The owner adds `target` as a reader — also proves userRef-by-handle on the

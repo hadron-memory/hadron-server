@@ -23,7 +23,7 @@ async function syncMemory() {
   const response = await fetch(`${baseUrl}/graphql`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', Authorization: `Bearer ${jwt}` },
-    body: JSON.stringify({ query: 'mutation($id: ID!) { syncMemory(id: $id) { id } }', variables: { id: memoryId } }),
+    body: JSON.stringify({ query: 'mutation($id: ID!) { syncMemory(ref: $id) { id } }', variables: { id: memoryId } }),
   });
   return response.json() as Promise<{ data?: unknown; errors?: Array<{ message: string; extensions: { code: string; requestId?: string } }> }>;
 }

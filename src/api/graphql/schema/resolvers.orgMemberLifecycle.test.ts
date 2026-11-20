@@ -54,7 +54,7 @@ beforeEach(async () => {
 describe('removeOrgMember — revocation is a soft delete', () => {
   it('soft-deletes the row (audit preserved) and the member loses list access', async () => {
     expect(
-      await M.removeOrgMember(null, { orgId: org.id, userId: member.id }, ctx(owner.id)),
+      await M.removeOrgMember(null, { orgRef: org.id, userRef: member.id }, ctx(owner.id)),
     ).toBe(true);
     const row = await membershipRow();
     expect(row).not.toBeNull(); // tombstone persists
@@ -71,24 +71,24 @@ describe('removeOrgMember — revocation is a soft delete', () => {
       where: { organizationId_userId: { organizationId: org.id, userId: member.id } },
       data: { role: 'OWNER' },
     });
-    await M.removeOrgMember(null, { orgId: org.id, userId: member.id }, ctx(owner.id));
+    await M.removeOrgMember(null, { orgRef: org.id, userRef: member.id }, ctx(owner.id));
     // Re-removal: the revoked ex-OWNER is not in the live owners count, and
     // must NOT trip the last-owner guard — idempotent success.
     expect(
-      await M.removeOrgMember(null, { orgId: org.id, userId: member.id }, ctx(owner.id)),
+      await M.removeOrgMember(null, { orgRef: org.id, userRef: member.id }, ctx(owner.id)),
     ).toBe(true);
   });
 
   it('still refuses to remove the last LIVE owner', async () => {
     await expect(
-      M.removeOrgMember(null, { orgId: org.id, userId: owner.id }, ctx(owner.id)),
+      M.removeOrgMember(null, { orgRef: org.id, userRef: owner.id }, ctx(owner.id)),
     ).rejects.toThrow('last owner');
   });
 });
 
 describe('rejoin — reactivation of the tombstone', () => {
   beforeEach(async () => {
-    await M.removeOrgMember(null, { orgId: org.id, userId: member.id }, ctx(owner.id));
+    await M.removeOrgMember(null, { orgRef: org.id, userRef: member.id }, ctx(owner.id));
   });
 
   it('acceptInvitation reactivates a revoked membership with the invite role', async () => {
@@ -112,7 +112,7 @@ describe('rejoin — reactivation of the tombstone', () => {
   it('addOrgMember reactivates a revoked row instead of failing with P2002', async () => {
     const out = await M.addOrgMember(
       null,
-      { orgId: org.id, userId: member.id, role: 'READER' },
+      { orgRef: org.id, userRef: member.id, role: 'READER' },
       ctx(owner.id),
     );
     expect(out.deletedAt).toBeNull();
@@ -128,13 +128,13 @@ describe('rejoin — reactivation of the tombstone', () => {
     });
     const out = await M.addOrgMember(
       null,
-      { orgId: org.id, userId: member.id, role: 'READER' },
+      { orgRef: org.id, userRef: member.id, role: 'READER' },
       ctx(owner.id),
     );
     expect(out.canInvite).toBe(false);
 
     // Same via invitation acceptance: revoke again, re-set the stale grant.
-    await M.removeOrgMember(null, { orgId: org.id, userId: member.id }, ctx(owner.id));
+    await M.removeOrgMember(null, { orgRef: org.id, userRef: member.id }, ctx(owner.id));
     await db.orgMember.update({
       where: { organizationId_userId: { organizationId: org.id, userId: member.id } },
       data: { canInvite: true },
@@ -155,15 +155,15 @@ describe('rejoin — reactivation of the tombstone', () => {
   });
 
   it('addOrgMember rejects a LIVE duplicate with a clean error', async () => {
-    await M.addOrgMember(null, { orgId: org.id, userId: member.id, role: 'READER' }, ctx(owner.id));
+    await M.addOrgMember(null, { orgRef: org.id, userRef: member.id, role: 'READER' }, ctx(owner.id));
     await expect(
-      M.addOrgMember(null, { orgId: org.id, userId: member.id, role: 'ADMIN' }, ctx(owner.id)),
+      M.addOrgMember(null, { orgRef: org.id, userRef: member.id, role: 'ADMIN' }, ctx(owner.id)),
     ).rejects.toThrow('already a member');
   });
 
   it('updateOrgMember refuses to edit a revoked row', async () => {
     await expect(
-      M.updateOrgMember(null, { orgId: org.id, userId: member.id, role: 'ADMIN' }, ctx(owner.id)),
+      M.updateOrgMember(null, { orgRef: org.id, userRef: member.id, role: 'ADMIN' }, ctx(owner.id)),
     ).rejects.toThrow('not a member');
   });
 });
@@ -171,13 +171,13 @@ describe('rejoin — reactivation of the tombstone', () => {
 describe('updateOrgMember — last-owner demotion guard (PR-480 Gemini review)', () => {
   it('refuses to demote the last LIVE owner; allows it once a second owner exists', async () => {
     await expect(
-      M.updateOrgMember(null, { orgId: org.id, userId: owner.id, role: 'ADMIN' }, ctx(owner.id)),
+      M.updateOrgMember(null, { orgRef: org.id, userRef: owner.id, role: 'ADMIN' }, ctx(owner.id)),
     ).rejects.toThrow('last owner');
     // Promote the member to OWNER — now demoting the original owner is fine.
-    await M.updateOrgMember(null, { orgId: org.id, userId: member.id, role: 'OWNER' }, ctx(owner.id));
+    await M.updateOrgMember(null, { orgRef: org.id, userRef: member.id, role: 'OWNER' }, ctx(owner.id));
     const demoted = await M.updateOrgMember(
       null,
-      { orgId: org.id, userId: owner.id, role: 'ADMIN' },
+      { orgRef: org.id, userRef: owner.id, role: 'ADMIN' },
       ctx(owner.id),
     );
     expect(demoted.role).toBe('ADMIN');
