@@ -4505,7 +4505,7 @@ export const typeDefs = `#graphql
     agent: Agent
     syncStatus: SyncStatus!
     syncError: String
-    "Versioned JSON outcome of the last sync (v1, or v2 when an attestation-refused entry requires it): partial, failed or unknown. Null after a completed clean sync; consult lastSyncedAt/syncStatus for a never-synced memory. Same Memory-record read gate applies. Git sync: hrn:node:hadronmemory.com:specs:cor:int:010:01."
+    "Versioned JSON outcome of the last sync (v1, or v2 when an attestation-refused entry requires it): partial, failed or unknown. Invalid-loc skips may add invalidSources with a count, up to 50 ordinal/code items and an omitted count; the outcome remains unknown and no source path or file ID is exposed. Null after a completed clean sync; consult lastSyncedAt/syncStatus for a never-synced memory. Same Memory-record read gate applies. Git sync: hrn:node:hadronmemory.com:specs:cor:int:010:01."
     lastSyncReport: String
     pendingEdgeCount: Int!
     lastSyncedAt: DateTime
