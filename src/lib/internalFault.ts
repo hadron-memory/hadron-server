@@ -87,16 +87,14 @@ export function respondAuthStoreBusy(res: Response, error: unknown): boolean {
   const requestId = typeof res.locals?.requestId === 'string' ? res.locals.requestId : faultRequestId();
   logInternalFault('http', 'auth-store-busy', requestId, error);
   if (res.headersSent) return false; // Delegate to Express's final handler, as #3818 does.
-  // The prose is looked up from `reason` AT THE BOUNDARY (#4519, BLIND P3-4), not read off
-  // `error.message`: no path exists from any message — the driver's text, a tampered `.message`,
-  // a subclass's own prose — to the wire. `reason` is one of the two by construction
-  // (isAuthStoreBusyError proved the class), and the lookup is total, so a stranger value still
-  // answers fixed prose — no redundant re-validation of what the type already states (BLIND P3).
+  // Normalize at the boundary: instanceof proves the class, not that a subclass or late
+  // mutation kept its extensions intact. The default matches authStoreBusyMessage's fixed prose.
+  const reason = error.extensions.reason === 'STORE_UNREACHABLE' ? 'STORE_UNREACHABLE' : 'POOL_WAIT';
   res.status(503).json({
-    error: authStoreBusyMessage(error.extensions.reason),
+    error: authStoreBusyMessage(reason),
     code: 'AUTH_STORE_BUSY',
     retryable: true,
-    reason: error.extensions.reason,
+    reason,
     requestId,
   });
   return true;

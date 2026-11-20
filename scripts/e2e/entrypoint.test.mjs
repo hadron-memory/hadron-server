@@ -35,12 +35,21 @@ test('fresh public schema proceeds through setup, seed and supervised server', t
     env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, DATABASE_URL: 'postgresql://fixture@db/e2e', RATE_LIMIT_KEYRING: '' } });
   assert.equal(run.status, 0, run.stderr);
   const calls = readFileSync(log, 'utf8').trim().split('\n');
-  assert.equal(calls.length, 9);
+  assert.equal(calls.length, 10);
   assert(calls[0].includes('SELECT EXISTS'));
   assert(calls[3].includes("current:'e2e'"));
   assert(calls[4].endsWith('-f prisma/pre-push.sql'));
   assert.equal(calls[5], 'pnpm prisma db push --skip-generate');
   assert(calls[6].endsWith('-f prisma/post-push.sql'));
-  assert.equal(calls[7], 'pnpm tsx scripts/e2e/seed.ts');
-  assert.equal(calls[8], 'node scripts/e2e/supervise.mjs');
+  // #4577: the platform actions come from the same upsert the normal boot runs, after the schema exists and before the server starts.
+  assert.equal(calls[7], 'pnpm tsx scripts/db/upsert-actions.ts');
+  assert.equal(calls[8], 'pnpm tsx scripts/e2e/seed.ts');
+  assert.equal(calls[9], 'node scripts/e2e/supervise.mjs');
+});
+// #4577: the entrypoint can only run the upsert if the image carries it; the build context, the Dockerfile and the source archive stack.sh ships must all name it.
+test('the upsert script is shipped to the E2E image by every layer', () => {
+  const read = (f) => readFileSync(new URL(f, import.meta.url), 'utf8');
+  assert.match(read('./Dockerfile'), /^COPY scripts\/db\/upsert-actions\.ts \.\/scripts\/db\/upsert-actions\.ts$/m);
+  assert.match(read('./Dockerfile.dockerignore'), /^!scripts\/db\/upsert-actions\.ts$/m);
+  assert.match(read('./stack.sh'), /ls-files -z [^\n]*scripts\/db\/upsert-actions\.ts/);
 });

@@ -77,6 +77,8 @@ export interface Fixture {
   sessionId: string;
   probeTable: string;
   fenceId: string;
+  /** #4553 N8: an App the owner seeds with one key row, so the secret store check locks a real row. */
+  appId: string;
 }
 
 export function newFixture(): Fixture {
@@ -90,6 +92,7 @@ export function newFixture(): Fixture {
     sessionId: `smk_sess_${tag}`,
     probeTable: `serve_smoke_probe_${tag}`,
     fenceId: `smk_fence_${tag}`,
+    appId: `smk_app_${tag}`,
   };
 }
 
@@ -138,6 +141,27 @@ export function buildChecks(f: Fixture, owner: Client): Check[] {
         inTx(s, async () => {
           await s.query(`SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`, [f.memoryId, `smoke-${f.tag}`]);
         }),
+    },
+    {
+      // #4003 / #4553: an App secret store locks the active key row FOR SHARE (which needs UPDATE on the table), and a
+      // first mint reads and records the root check. The key row is the owner-seeded one (N8), so the lock is real.
+      // Rolled back, so the database keeps no root-check row.
+      name: 'App secret store: the key row share lock and the root check record',
+      run: async (s) => {
+        await s.query('BEGIN');
+        try {
+          const locked = await s.query(
+            `SELECT key_version FROM secret_app_keys WHERE app_id = $1 AND retired_at IS NULL
+               ORDER BY key_version DESC LIMIT 1 FOR SHARE`,
+            [f.appId],
+          );
+          if (locked.rowCount !== 1) throw new Error('the share lock locked no App key row');
+          await s.query(`SELECT check_value FROM secret_root_check WHERE id = 1`);
+          await s.query(`INSERT INTO secret_root_check (id, check_value) VALUES (1, $1) ON CONFLICT (id) DO NOTHING`, ['0'.repeat(64)]);
+        } finally {
+          await s.query('ROLLBACK');
+        }
+      },
     },
     {
       name: 'session start (trigger-guarded insert)',
@@ -219,6 +243,7 @@ export async function cleanup(owner: Client, f: Fixture): Promise<string[]> {
     [`DELETE FROM worker_reference_fences WHERE subject_id = $1`, [f.fenceId]],
     [`DELETE FROM nodes WHERE memory_id = $1`, [f.memoryId]],
     [`DELETE FROM memories WHERE id = $1`, [f.memoryId]],
+    [`DELETE FROM apps WHERE id = $1`, [f.appId]],
     [`DELETE FROM organizations WHERE id = $1`, [f.orgId]],
     [`DELETE FROM users WHERE id = $1`, [f.userId]],
   ];
@@ -273,6 +298,9 @@ export async function main(env: NodeJS.ProcessEnv, log: (line: string) => void):
     fixturesStarted = true;
     await owner.query(`INSERT INTO users (id, updated_at) VALUES ($1, now())`, [f.userId]);
     await owner.query(`INSERT INTO organizations (id, name, urn, updated_at) VALUES ($1, $2, $3, now())`, [f.orgId, `smk-${f.tag}`, `smk-${f.tag}`]);
+    // #4553 N8: one App with one key row. The wrapped key is a placeholder: the check only locks the row.
+    await owner.query(`INSERT INTO apps (id, name, urn, organization_id, updated_at) VALUES ($1, $2, $3, $4, now())`, [f.appId, `smk-${f.tag}`, `smk-app-${f.tag}`, f.orgId]);
+    await owner.query(`INSERT INTO secret_app_keys (app_id, key_version, wrapped_key) VALUES ($1, 1, 'smoke-placeholder')`, [f.appId]);
 
     for (const check of buildChecks(f, owner)) {
       try {
