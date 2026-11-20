@@ -417,6 +417,9 @@ describe('the census script (#4583, read only)', () => {
     const [s10, t10] = await Promise.all(['s10', 't10'].map(node));
     await edge(s10, t10, 's10:a-b:t10:2', 'a😀b'); // a SUFFIXED migrated edge ...
     await edge(s10, t10, 's10:a--b:t10', 'a😀b'); // ... and its runtime twin: a twin pair too
+    const [s11, t11] = await Promise.all(['s11', 't11'].map(node));
+    await edge(s11, t11, 's11:a-b:t11', 'a😀b'); // migrated spelling ...
+    await edge(s11, t11, 's11:a--b:t11', 'a🙂b'); // ... and a runtime spelling of a DIFFERENT astral name (same atom): NOT a twin
     await edge(s1, t2, 's1:plain:t2', 'plain'); // not divergent: ignored
     const before = await db.edge.count();
     const rows = await db.$transaction(async (tx) => {
@@ -425,14 +428,14 @@ describe('the census script (#4583, read only)', () => {
     });
     const r = Object.fromEntries(Object.entries(rows[0]).map(([k, v]) => [k, Number(v)]));
     expect(r).toEqual({
-      divergent_edges: 13,
-      migrated_spelling: 4, // s1, s3 (migrated half), s5, and the soft-deleted s2 edge
-      runtime_spelling: 4, // s2, s3 (runtime half), s6, s10 (runtime half)
+      divergent_edges: 15,
+      migrated_spelling: 5, // s1, s3 (migrated half), s5, the soft-deleted s2 edge, and s11
+      runtime_spelling: 5, // s2, s3 (runtime half), s6, s10 (runtime half), s11
       migrated_suffixed: 2, // s7, s10
       neither: 3, // s4, and the rejected suffixes s8 (`:1`) and s9 (`:02`)
-      twin_pairs: 2, // s3 (plain migrated + runtime) and s10 (suffixed migrated + runtime)
-      runtime_loc_taken_by_another: 1, // s5
-      migrated_loc_taken_by_another: 1, // s6 (the positive case: a broken predicate that always answered 0 fails here)
+      twin_pairs: 2, // s3 (plain migrated + runtime) and s10 (suffixed migrated + runtime); s11 is NOT one: other name
+      runtime_loc_taken_by_another: 2, // s5 and s11 (the other astral name owns it)
+      migrated_loc_taken_by_another: 2, // s6 and s11 (the other astral name owns it) (the positive case: a broken predicate that always answered 0 fails here)
     });
     expect(await db.edge.count()).toBe(before);
   });
