@@ -101,6 +101,9 @@ export function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
 export function psqlArgs(databaseUrl: string, file: string): string[] {
+  // #4611 BLIND delta F1 at 3987d9ca: a libpq connection URI has no fragment, and text after `#` must never be read as
+  // a connection parameter, so a URL carrying one is refused rather than scanned.
+  if (databaseUrl.includes('#')) throw new Error('psqlArgs: a connection URL with a fragment (#) is not supported');
   const schema = new URL(databaseUrl).searchParams.get('schema') ?? 'public';
   // #4611 BLIND delta F1 at e86277a8: the retained parameters keep their RAW encoding. URLSearchParams re-serializes a
   // space as `+`, which libpq does not decode, so the query is filtered as text, never rebuilt.
@@ -119,6 +122,14 @@ describe('#4332 psqlArgs (the atomicity pin\'s psql target)', () => {
     // The exact text psql receives: retained parameters byte-for-byte, the space still `%20` (libpq reads `+` literally).
     expect(args[0]).toBe('postgresql://u@h:5432/db?sslmode=require&options=-c%20a%3Db');
     expect(args.slice(1)).toEqual(['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-c', 'SET search_path TO "Odd ""Name"",x"', '-f', '/f.sql']);
+  });
+
+  it('refuses a URL with a fragment instead of reading parameters from it', () => {
+    expect(() => psqlArgs('postgresql://u@h/db?schema=test#note&sslmode=disable', '/f.sql')).toThrow(/fragment/);
+  });
+
+  it('keeps a query-less URL as is', () => {
+    expect(psqlArgs('postgresql://u@h/db', '/f.sql')[0]).toBe('postgresql://u@h/db');
   });
 
   it('defaults to public when the URL names no schema', () => {
