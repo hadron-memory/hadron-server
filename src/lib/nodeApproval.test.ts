@@ -62,7 +62,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: writer.id, role: 'CONTRIBUTOR' },
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'approvals' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'approvals' }, as());
 });
 
 describe('approveNode (#1591)', () => {
@@ -365,12 +365,12 @@ describe('findNodes approvalState filter (#1591)', () => {
 describe('approvals on an encrypted memory (#1591)', () => {
   it('refuses encrypted approval and integrity reads, cached key or not, without writes', async () => {
     const enc = await resolvers.Mutation.createMemory(null, {
-      orgId: (await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).organizationId!,
+      orgRef: (await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).organizationId!,
       name: 'approvals-encrypted', memoryClass: 'private',
     }, as());
     const n = await db.node.create({data: {id: generateId(), memoryId: enc.id, loc: 'e:1', name: 'Secret', content: 'Hidden body'}});
     const dataKey = Buffer.alloc(32, 7).toString('base64');
-    await resolvers.Mutation.encryptMemory(null, { memoryId: enc.id, dataKey }, as());
+    await resolvers.Mutation.encryptMemory(null, { memoryRef: enc.id, dataKey }, as());
     const stored = await db.node.findUniqueOrThrow({where: {id: n.id}});
     expect(isCiphertext(stored.content)).toBe(true);
     try {
@@ -399,7 +399,7 @@ describe('approvals on an encrypted memory (#1591)', () => {
 
   it('hides retained approval metadata from list and by-id encrypted revision reads with and without a key', async () => {
     memory = await resolvers.Mutation.createMemory(null, {
-      orgId: (await db.memory.findUniqueOrThrow({where:{id:memory.id}})).organizationId!,
+      orgRef: (await db.memory.findUniqueOrThrow({where:{id:memory.id}})).organizationId!,
       name:'encrypted-history',memoryClass:'private',
     }, as());
     const n = await node('history');
@@ -407,7 +407,7 @@ describe('approvals on an encrypted memory (#1591)', () => {
     await edit(n.id, 'changed');
     const retained = await db.nodeRevision.findFirstOrThrow({where:{nodeId:n.id,approvalHash:{not:null}}});
     const dataKey = Buffer.alloc(32,9).toString('base64');
-    await resolvers.Mutation.encryptMemory(null,{memoryId:memory.id,dataKey},as());
+    await resolvers.Mutation.encryptMemory(null,{memoryRef:memory.id,dataKey},as());
     try {
       for (const cached of [false,true]) {
         sessionKeyCache.clear();

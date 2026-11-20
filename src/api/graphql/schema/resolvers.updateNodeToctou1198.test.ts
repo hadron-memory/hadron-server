@@ -126,12 +126,12 @@ beforeEach(async () => {
   });
   adminId = admin.id;
   await db.orgMember.create({ data: { organizationId: orgId, userId: adminId, role: 'ADMIN' } });
-  memoryId = (await resolvers.Mutation.createMemory({}, { orgId, name: 'toctoumem' }, ctx())).id;
+  memoryId = (await resolvers.Mutation.createMemory({}, { orgRef: orgId, name: 'toctoumem' }, ctx())).id;
 });
 
 describe('update TOCTOU 1: the target moved after it was read (@codex P1)', () => {
   it('REFUSES a write whose target moved to another memory', async () => {
-    const dest = await resolvers.Mutation.createMemory({}, { orgId, name: 'toctou-dest' }, ctx());
+    const dest = await resolvers.Mutation.createMemory({}, { orgRef: orgId, name: 'toctou-dest' }, ctx());
     const node = await seed('doc:one');
 
     // The concurrent move, already committed — the state the race produces.

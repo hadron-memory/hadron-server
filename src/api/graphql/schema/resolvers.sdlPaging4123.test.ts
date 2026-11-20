@@ -30,7 +30,7 @@ beforeEach(async () => {
     appId = app.id;
     const agent = await db.agent.create({ data: { organizationId: orgId, name: 'Paging', urn: 'paging4123.example:agent', visibility: 'ORGANIZATION' } });
     runId = (await db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId, agentId: agent.id, triggerKind: 'MANUAL', entryNodeUrn: 'flow:start', status: 'RUNNING' } })).id;
-    const mem = await resolvers.Mutation.createMemory(null, { orgId, name: 'Paging' }, ctx());
+    const mem = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'Paging' }, ctx());
     nodeId = (await db.node.create({ data: { memoryId: mem.id, loc: 'sign', name: 'Sign' } })).id;
 });
 it('SDL preserves the portal page type and exposes distinct marketplace/page/cursor contracts', () => {

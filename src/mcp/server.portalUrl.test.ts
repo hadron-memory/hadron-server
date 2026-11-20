@@ -76,7 +76,7 @@ beforeEach(async () => {
     data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
   });
   const ctx: Context = { db, roles: ['ADMIN'], userId: admin.id };
-  const memory = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: MEM }, ctx);
+  const memory = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: MEM }, ctx);
 
   fx = { admin: { id: admin.id }, memory };
 });

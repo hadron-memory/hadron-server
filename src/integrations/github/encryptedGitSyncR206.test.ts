@@ -154,7 +154,7 @@ describe('R206: encrypted memories never sync to Git', () => {
   });
 
   it('exposes the full push refusal as a typed GraphQL error', async () => {
-    await expect(M.pushMemoryToGit({}, { id: memoryId }, ctx())).rejects.toMatchObject({ extensions: { code: 'ENCRYPTED_GIT_SYNC_UNAVAILABLE' } });
+    await expect(M.pushMemoryToGit({}, { ref: memoryId }, ctx())).rejects.toMatchObject({ extensions: { code: 'ENCRYPTED_GIT_SYNC_UNAVAILABLE' } });
   });
 
   it('refuses Git import with a request key, writing no node or revision', async () => {
@@ -171,7 +171,7 @@ describe('R206: encrypted memories never sync to Git', () => {
     ['a request key', true],
   ])('refuses an explicit sync of an encrypted memory with NO source, with %s, with the typed code', async (_label, keyed) => {
     await db.memory.update({ where: { id: memoryId }, data: { source: null } });
-    const run = () => M.syncMemory({}, { id: memoryId }, ctx());
+    const run = () => M.syncMemory({}, { ref: memoryId }, ctx());
     const rejects = expect(keyed ? requestKeyStorage.run(new Map([[memoryId, key]]), run) : run())
       .rejects.toMatchObject({ extensions: { code: 'ENCRYPTED_GIT_SYNC_UNAVAILABLE' } });
     await rejects;

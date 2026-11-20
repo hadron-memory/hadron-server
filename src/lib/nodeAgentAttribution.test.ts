@@ -42,7 +42,7 @@ beforeEach(async () => {
   user = await db.user.create({ data: { githubId: 161001, githubUsername: 'attr-user', handle: 'attr-user', roles: [] } });
   other = await db.user.create({ data: { githubId: 161002, githubUsername: 'attr-other', handle: 'attr-other', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'attribution' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'attribution' }, as());
   agent = await db.agent.create({ data: { id: generateId(), urn: 'attr.example:server-engineer', name: 'server-engineer', organizationId: org.id } });
   const app = await db.app.create({ data: { id: generateId(), name: 'Team', urn: 'attr.example:team', organizationId: org.id } });
   worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });

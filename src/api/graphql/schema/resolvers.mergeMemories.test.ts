@@ -54,8 +54,8 @@ beforeEach(async () => {
   await db.orgMember.create({
     data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
   });
-  srcMem = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'mm-src' }, ctx());
-  tgtMem = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'mm-tgt' }, ctx());
+  srcMem = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'mm-src' }, ctx());
+  tgtMem = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'mm-tgt' }, ctx());
 });
 
 describe('mergeMemories — partition (collide vs relocate)', () => {

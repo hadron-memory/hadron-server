@@ -2332,12 +2332,12 @@ export const sessionMutations = {
 
     createRevision: async (
       _: unknown,
-      { agentId, description }: { agentId: string; description?: string },
+      { agentRef, description }: { agentRef: string; description?: string },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
       // #1944: through the read gate, so an unreadable Agent answers as absent.
-      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
       const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
@@ -2491,12 +2491,12 @@ export const sessionMutations = {
 
     publishRevision: async (
       _: unknown,
-      { agentId, revisionLoc, versionLabel }: { agentId: string; revisionLoc: string; versionLabel?: string },
+      { agentRef, revisionLoc, versionLabel }: { agentRef: string; revisionLoc: string; versionLabel?: string },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
       // #1944: through the read gate, so an unreadable Agent answers as absent.
-      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
       const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
@@ -2534,12 +2534,12 @@ export const sessionMutations = {
 
     restoreRevision: async (
       _: unknown,
-      { agentId, revisionLoc }: { agentId: string; revisionLoc: string },
+      { agentRef, revisionLoc }: { agentRef: string; revisionLoc: string },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
       // #1944: through the read gate, so an unreadable Agent answers as absent.
-      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
       const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
@@ -2557,7 +2557,7 @@ export const sessionMutations = {
       const restoresScriptFields = snapshot.edgeFormat === CHAT_SCRIPT_EDGE_FORMAT;
 
       // Auto-save current state before restoring
-      await sessionMutations.createRevision({}, { agentId: resolvedAgentId, description: `Auto-save before restoring ${revisionLoc}` }, ctx);
+      await sessionMutations.createRevision({}, { agentRef: resolvedAgentId, description: `Auto-save before restoring ${revisionLoc}` }, ctx);
 
       // Restore is ATOMIC (#752 review, Codex P1): the destructive soft-deletes
       // AND the snapshot restore run in ONE transaction, so any failure — the
@@ -2763,12 +2763,12 @@ export const sessionMutations = {
 
     acquireEditorLock: async (
       _: unknown,
-      { agentId }: { agentId: string },
+      { agentRef }: { agentRef: string },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
       // #1944: through the read gate, so an unreadable Agent answers as absent.
-      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
       const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
 
@@ -2793,12 +2793,12 @@ export const sessionMutations = {
 
     releaseEditorLock: async (
       _: unknown,
-      { agentId }: { agentId: string },
+      { agentRef }: { agentRef: string },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
+      // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
       // #1944: through the read gate, so an unreadable Agent answers as absent.
-      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
       const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
 

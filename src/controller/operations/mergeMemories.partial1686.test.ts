@@ -46,8 +46,8 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'Partial Org', urn: 'partial.example' } });
   admin = await db.user.create({ data: { githubId: 168601, githubUsername: 'partial-admin', handle: 'partial-admin', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  src = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'partial-src' }, as());
-  dst = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'partial-dst' }, as());
+  src = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'partial-src' }, as());
+  dst = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'partial-dst' }, as());
 });
 
 describe('#1686 — a mid-merge refusal reports the partial state', () => {
