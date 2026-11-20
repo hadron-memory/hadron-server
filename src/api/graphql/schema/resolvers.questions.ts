@@ -1398,35 +1398,47 @@ export const questionQueries = {
 
 // ─── Answer doors (#4427) ────────────────────────────────────────────────────
 
+/** A raw field of a door call: absent, or a string. The doors are reached through GraphQL, whose types guarantee this; a direct caller that bypasses coercion gets the typed refusal, never a TypeError. */
+function stringOrAbsent(value: unknown, pointer: string): string | null {
+  if (value == null) return null;
+  if (typeof value !== 'string') invalidQuestion([{ pointer, message: 'must be a string' }]);
+  return value as string;
+}
+
 const ANSWER_VIA = new Set(['portal', 'cli', 'mcp', 'api']);
 
 /** Where the answer was given, as the caller states it (a claim, never authority); the default is the API. */
-function answerVia(via: string | null | undefined, pointer = '/via'): AnswerEntry['via'] {
-  const v = (via ?? 'API').toLowerCase();
+function answerVia(via: unknown, pointer = '/via'): AnswerEntry['via'] {
+  const v = (stringOrAbsent(via, pointer) ?? 'API').toLowerCase();
   if (!ANSWER_VIA.has(v)) invalidQuestion([{ pointer, message: 'must be one of PORTAL, CLI, MCP, API' }]);
   return v as AnswerEntry['via'];
 }
 
 /** A reason: at most {@link SHORT_TEXT_MAX} characters, line endings normalised; blank counts as not given. */
-function shortOrNull(value: string | null | undefined, pointer: string): string | null {
-  if (value == null) return null;
-  const v = value.replace(/\r\n?/g, '\n');
+function shortOrNull(value: unknown, pointer: string): string | null {
+  const raw = stringOrAbsent(value, pointer);
+  if (raw == null) return null;
+  const v = raw.replace(/\r\n?/g, '\n');
   if (v.length > SHORT_TEXT_MAX) invalidQuestion([{ pointer, message: `at most ${SHORT_TEXT_MAX} characters` }]);
   return v.trim().length === 0 ? null : v;
 }
 
-function parseAnswerInput(input: { optionKey?: string | null; text?: string | null; reason?: string | null; via?: string | null }): {
+function parseAnswerInput(raw: unknown): {
   optionKey: string | null; text: string | null; reason: string | null; via: AnswerEntry['via'];
 } {
+  if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) invalidQuestion([{ pointer: '/input', message: 'must be an object' }]);
+  const input = raw as Record<string, unknown>;
+  const key = stringOrAbsent(input.optionKey, '/input/optionKey');
   let optionKey: string | null = null;
-  if (input.optionKey != null) {
-    const parsed = optionKeySchema.safeParse(input.optionKey);
+  if (key != null) {
+    const parsed = optionKeySchema.safeParse(key);
     if (!parsed.success) invalidQuestion([{ pointer: '/input/optionKey', message: parsed.error.issues[0]?.message ?? 'not an option key' }]);
-    optionKey = input.optionKey;
+    optionKey = key;
   }
   let text: string | null = null;
-  if (input.text != null) {
-    const v = input.text.replace(/\r\n?/g, '\n');
+  const rawText = stringOrAbsent(input.text, '/input/text');
+  if (rawText != null) {
+    const v = rawText.replace(/\r\n?/g, '\n');
     if (v.length > LONG_TEXT_MAX) invalidQuestion([{ pointer: '/input/text', message: `at most ${LONG_TEXT_MAX} characters` }]);
     text = v.trim().length === 0 ? null : v;
   }
@@ -1463,7 +1475,7 @@ async function answerAct(
     // The last slot is kept for the take-back: an answer may not fill the history, so a standing answer can always be retracted.
     const limit = act.entry.kind === 'retraction' ? MAX_ANSWERS : MAX_ANSWERS - 1;
     if (current.answers.length >= limit) {
-      invalidQuestion([{ pointer: act.entry.kind === 'retraction' ? '/expectedRevision' : '/input', message: `this question has reached its limit of ${MAX_ANSWERS} answer entries${act.entry.kind === 'answer' ? ' (the last is kept for taking an answer back)' : ''}` }]);
+      invalidQuestion([{ pointer: act.entry.kind === 'retraction' ? '/expectedRevision' : '/input', message: act.entry.kind === 'answer' ? `this question has reached its limit of ${MAX_ANSWERS} answer entries (the last is kept for taking an answer back)` : `this question's answer history is full (${MAX_ANSWERS} entries), so its standing answer cannot be taken back` }]);
     }
     const next: QuestionData = structuredClone(current);
     next.answers.push(act.entry);

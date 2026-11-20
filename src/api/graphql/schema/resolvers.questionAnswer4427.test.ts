@@ -491,6 +491,55 @@ describe('#4532 blind delta: a SIGNED-tier question, and the on-log arm after a 
   });
 });
 
+describe('#4532 blind round 7: a malformed direct call is a typed refusal, and a full history refuses the take-back typed', () => {
+  const pointersOf = (e: GraphQLError) => (e.extensions.pointers as Array<{ pointer: string }>).map((x) => x.pointer);
+
+  it.each([
+    ['via', { optionKey: 'yes', via: 5 }, '/input/via'],
+    ['text', { text: 5 }, '/input/text'],
+    ['reason', { optionKey: 'yes', reason: 5 }, '/input/reason'],
+    ['optionKey', { optionKey: 5 }, '/input/optionKey'],
+  ])('a non-string %s on the answer door is QUESTION_INVALID, not a TypeError', async (_name, input, pointer) => {
+    const q = await ask((await createLog()).row.id);
+    const e = await errorOf(answer(q.row.id, input as Record<string, unknown>, q.row.revSeq));
+    expect(e.extensions.code).toBe('QUESTION_INVALID');
+    expect(pointersOf(e)).toEqual([pointer]);
+    expect((await dataOf(q.row.id)).answers).toHaveLength(0);
+  });
+
+  it('a null or non-object input is QUESTION_INVALID at /input', async () => {
+    const q = await ask((await createLog()).row.id);
+    for (const input of [null, 'yes', 7, ['yes']]) {
+      const e = await errorOf(M.answerQuestion(null, { ref: q.row.id, input, expectedRevision: q.row.revSeq }, as(holger.id)));
+      expect(e.extensions.code).toBe('QUESTION_INVALID');
+      expect(pointersOf(e)).toEqual(['/input']);
+    }
+  });
+
+  it('a non-string via or reason on the take-back door is QUESTION_INVALID at /via and /reason', async () => {
+    const q = await ask((await createLog()).row.id);
+    await answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq);
+    const r = (await rowOf(q.row.id)).revSeq;
+    const a = await errorOf(retract(q.row.id, r, { via: 5 }));
+    expect([a.extensions.code, pointersOf(a)]).toEqual(['QUESTION_INVALID', ['/via']]);
+    const b = await errorOf(retract(q.row.id, r, { reason: 5 }));
+    expect([b.extensions.code, pointersOf(b)]).toEqual(['QUESTION_INVALID', ['/reason']]);
+  });
+
+  it('a stored full history ending in an answer refuses the take-back with a typed QUESTION_INVALID and writes nothing', async () => {
+    const q = await ask((await createLog()).row.id);
+    const entry: AnswerEntry = { kind: 'answer', key: 'yes', text: null, reason: null, by: holger.id, at: '2026-11-01T00:00:00.000Z', via: 'api' };
+    await seedEntries(q.row.id, Array.from({ length: MAX_ANSWERS }, (_, i) => ({ ...entry, key: i % 2 ? 'no' : 'yes' })));
+    const r = (await rowOf(q.row.id)).revSeq;
+    const e = await errorOf(retract(q.row.id, r));
+    expect(e.extensions.code).toBe('QUESTION_INVALID');
+    expect(pointersOf(e)).toEqual(['/expectedRevision']);
+    expect(e.message).toMatch(/history is full/);
+    expect((await dataOf(q.row.id)).answers).toHaveLength(MAX_ANSWERS);
+    expect((await rowOf(q.row.id)).revSeq).toBe(r);
+  });
+});
+
 describe('#4532 blind round 6: the public boundary, executed through the schema', () => {
   const server = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
   const wire = async (query: string, variables: Record<string, unknown>, ctx: Context) => {
