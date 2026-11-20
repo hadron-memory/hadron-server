@@ -14,7 +14,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { decryptBytesAad, encryptBytesAad } from '../tokenCrypto.js';
-import { appKeyAad, appKeyCache, ensureAppKey, rootCheckValue, unwrapAppKey } from './appKeys.js';
+import { appKeyAad, appKeyCache, ensureAppKey, lockAppKeyMint, rootCheckValue, unwrapAppKey } from './appKeys.js';
 import { rewrapSecretRootKeys, rotateAppKey } from './rotation.js';
 
 const ROOT = 'a1'.repeat(32);
@@ -153,6 +153,29 @@ describe('a store with keys but no recorded check (made before the check existed
     expect([a.keyVersion, b.keyVersion]).toEqual([1, 1]);
     expect(await db.secretRootCheck.count()).toBe(1);
     expect(await recorded()).toBe(rootCheckValue(Buffer.from(ROOT, 'hex')));
+  });
+});
+
+describe('the re-wrap and a mint never interleave (#4553 local F1)', () => {
+  it('a re-wrap waits for a transaction holding the mint locks, then runs', async () => {
+    await ensure(appA);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockedSignal = new Promise<void>((r) => { locked = r; });
+    const minter = db.$transaction(async (tx) => {
+      await lockAppKeyMint(tx, appB);
+      locked();
+      await held;
+    }, { timeout: 20_000 });
+    await lockedSignal;
+    let done = false;
+    const rewrap = rewrapSecretRootKeys(db, ROOT, NEW_ROOT).then((r) => { done = true; return r; });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(done).toBe(false); // the exclusive root lock waits for the mint's shared one
+    release();
+    await minter;
+    await expect(rewrap).resolves.toMatchObject({ rows: 1, rewrapped: 1 });
   });
 });
 

@@ -235,6 +235,33 @@ describe('rotation at version level', () => {
   });
 });
 
+describe('the re-encrypt locks the versions it reads (#4553 local F1)', () => {
+  it('a version deleted by a transaction that held it is not counted as moved', async () => {
+    const s = await create('lock', 'v1');
+    await update(s.id, 'v2'); // v1 superseded, both under key 1
+    await db.$transaction((tx) => rotateAppKey(tx, appId));
+    const v1 = await db.secretVersion.findFirstOrThrow({ where: { secretId: s.id, versionNo: 1 }, select: { id: true } });
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockedSignal = new Promise<void>((r) => { locked = r; });
+    const deleter = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM secret_versions WHERE id = ${v1.id} FOR UPDATE`;
+      locked();
+      await held;
+      await tx.$executeRaw`DELETE FROM secret_versions WHERE id = ${v1.id}`;
+    }, { timeout: 20_000 });
+    await lockedSignal;
+    const moved = db.$transaction((tx) => reencryptAppSecretVersions(tx, appId), { timeout: 20_000 });
+    await new Promise((r) => setTimeout(r, 300));
+    release();
+    await deleter;
+    expect(await moved).toBe(1); // only v2: the re-encrypt waited for v1's lock and then skipped the deleted row
+    const rows = await db.secretVersion.findMany({ where: { secretId: s.id }, orderBy: { versionNo: 'asc' } });
+    expect(rows.map((r) => [r.versionNo, r.keyVersion])).toEqual([[2, 2]]);
+  });
+});
+
 describe('a store racing a rotation (#4553 §10 F1)', () => {
   it('a store that starts while a rotation with --reencrypt is uncommitted lands under the new key, not the retired one', async () => {
     const s = await create('race', 'v1');
