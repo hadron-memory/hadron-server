@@ -9457,6 +9457,70 @@ export const typeDefs = `#graphql
     ): [AgentTask!]!
 
     """
+    #2212 A3 (hrn:node:hadronmemory.com:specs:cor:api:120:04): agentTasks as a page. Every argument means exactly what it
+    means on agentTasks, and the order is the same (newest first, then id). total counts the tasks the same filter matches,
+    never a task the caller cannot read: the App read gate (hrn:node:hadronmemory.com:specs:cor:agt:050:21) runs first, and
+    an App you do not participate in answers APP_NOT_FOUND exactly like an absent one, never an empty page. hasMore is
+    whether tasks remain past this page; pass offset + items length to continue. limit defaults to 20 (an externalIds batch
+    with no limit keeps agentTasks' rule), 0 returns only total, and over 200 is served as 200.
+    """
+    agentTasksPage(
+      appRef: ID!
+      status: [AgentTaskStatus!]
+      owner: AgentTaskPartyInput
+      assignee: AgentTaskPartyInput
+      creator: AgentTaskPartyInput
+      tag: String
+      "Match at least one tag. Empty arrays do not narrow the list."
+      tagsAny: [String!]
+      "Match every tag. Empty arrays do not narrow the list."
+      tagsAll: [String!]
+      "Exact opaque source value, without interpretation or prefix matching."
+      source: String
+      "#3125 S2, #4217: the tasks with exactly this externalId (compared as written, 1 to 512 characters, else BAD_USER_INPUT): at most one ACTIVE task (backlog, pending or started) holds it, and any number of finished or cancelled tasks that held it before it. Newest first, so a caller that wants the live one picks the active one. Runs inside the App read gate, so it only finds this App's tasks."
+      externalId: String
+      """
+      #4084 (hrn:node:hadronmemory.com:specs:cor:agt:120:02): the tasks holding any of these external ids, each compared
+      exactly as written. 1 to 100 ids; each entry passes the externalId check (1 to 512 characters, no unpaired
+      surrogate), and ONE bad entry refuses the whole list with BAD_USER_INPUT naming its position (externalIds[i]), never
+      its text; an empty list is BAD_USER_INPUT, never "no narrowing". At most one ACTIVE task holds an id, but finished
+      and cancelled tasks keep it (#4217, hrn:node:hadronmemory.com:specs:cor:agt:120:02, 2026-11-14), so an id can match several tasks: with limit
+      omitted — and offset omitted or 0 — the page is every task holding any of the ids, up to the list cap (200); an
+      explicit limit or offset windows the batch like any list. An id no task of this App holds matches nothing. Runs inside
+      the App read gate (hrn:node:hadronmemory.com:specs:cor:agt:050:21), so another App's task with the same id never
+      appears. ANDed with every other filter, externalId included.
+      """
+      externalIds: [String!]
+      "#2649: tasks carrying a reference with exactly this target, and this kind when given; the label is ignored. Runs inside the App read gate."
+      reference: AgentTaskReferenceFilter
+      "#2663: true narrows to finished tasks with at least one undisposed finding; false/omitted do not narrow. Existing App read scope, before paging (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
+      unresolvedFindings: Boolean
+      "Case-insensitive substring of the title or description, 1 to 200 characters after trimming (else BAD_USER_INPUT). Percent, underscore and backslash match literally. ANDed with every other filter."
+      text: String
+      "True: overdue on the server clock (the database clock). Two arms: a pending task, not started, whose start-by has passed; or a pending or started task whose finish-by has passed and which has not ended. An ended (finished or cancelled) task and a backlog task are never overdue, and neither is a task with neither time. Blocking is ignored. False: all other tasks. Not an alarm: listing raises nothing."
+      overdue: Boolean
+      "Inclusive creation-time lower bound."
+      createdAfter: DateTime
+      "Inclusive creation-time upper bound."
+      createdBefore: DateTime
+      "Inclusive start-time lower bound; tasks with no start time never match."
+      startedAfter: DateTime
+      "Inclusive start-time upper bound; tasks with no start time never match."
+      startedBefore: DateTime
+      "Inclusive finish-time lower bound; tasks with no finish time never match."
+      finishedAfter: DateTime
+      "Inclusive finish-time upper bound; tasks with no finish time never match."
+      finishedBefore: DateTime
+      parentTaskId: ID
+      rootsOnly: Boolean
+      queued: Boolean
+      "True: only single-shot match failures; false: unmarked tasks. Does not change who may read."
+      matchFailed: Boolean
+      limit: Int
+      offset: Int
+    ): AgentTaskPage!
+
+    """
     #1705 — a task and every task below it, the root first, then by depth and
     creation. Null when the root is missing or unreadable. Bounded at 1000 rows.
     """
@@ -16644,6 +16708,13 @@ export const typeDefs = `#graphql
   "#2213 — one page of tickers; hasMore is whether rows remain past it."
   type TickerPage {
     items: [Ticker!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2212 A3 — one page of an App's agent tasks, counted over the same filter and read gate."
+  type AgentTaskPage {
+    items: [AgentTask!]!
     total: Int!
     hasMore: Boolean!
   }

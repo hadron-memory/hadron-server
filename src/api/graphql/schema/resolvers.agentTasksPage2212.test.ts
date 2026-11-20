@@ -14,6 +14,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { generateId } from '../../../lib/id.js';
 import { ensureProjectZero } from '../../../lib/agentTasks/projectZero.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -68,13 +69,13 @@ describe('#2212 A3 agentTasksPage', () => {
 
   it('25 tasks paged at 7 cover every task once, in the old field\'s order; each filter\'s total is the filtered count', async () => {
     for (let i = 0; i < 25; i++) {
-      await task(`t${i}`, { tags: i % 2 ? ['odd'] : ['even'], status: i % 5 === 0 ? 'started' : 'pending' });
+      await task(`t${i}`, { tags: i % 2 ? ['odd'] : ['even'], status: i % 5 === 0 ? 'backlog' : 'pending' });
     }
     const all = await walk({}, 7);
     expect(all.total).toBe(25);
     expect(all.seen).toEqual((await list({ limit: 200 })).map((r) => r.id));
     expect(new Set(all.seen).size).toBe(25);
-    for (const [args, n] of [[{ tag: 'odd' }, 12], [{ status: ['STARTED'] }, 5], [{ queued: true }, 20], [{ rootsOnly: true }, 25]] as const) {
+    for (const [args, n] of [[{ tag: 'odd' }, 12], [{ status: ['BACKLOG'] }, 5], [{ queued: true }, 20], [{ rootsOnly: true }, 25]] as const) {
       const w = await walk(args, 7);
       expect(w.total).toBe(n);
       expect(w.seen).toEqual((await list({ ...args, limit: 200 })).map((r) => r.id));
@@ -95,7 +96,7 @@ describe('#2212 A3 agentTasksPage', () => {
     const code = (p: Promise<unknown>) => p.then(() => 'OK', (e: { extensions?: { code?: string }; message?: string }) => `${e.extensions?.code}|${e.message}`);
     const pageOutsider = await code(page({}, outsider()));
     expect(pageOutsider).toMatch(/^APP_NOT_FOUND\|/);
-    expect(await code(page({ appRef: 'no-such-app' }))).toBe(pageOutsider);
+    expect(await code(page({ appRef: generateId() }))).toBe(pageOutsider);
     expect(await code(list({}, outsider()))).toBe(pageOutsider);
   });
 
