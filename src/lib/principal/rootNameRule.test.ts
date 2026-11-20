@@ -14,19 +14,17 @@
  * carries a combining mark (the writer's `toLowerCase()` and Postgres
  * `lower()` could otherwise disagree — the #4415 motivation).
  *
- * Red on main (3810250e1): every refusal pin fails as "resolved instead of
- * rejected" — main's mint accepts `ünï`, a 65-char name, a leading `.` etc.
- * and writes the row; `checkRootAvailable` answers true for each; the
- * resolver-mapping pin fails because the shared mapper and its
- * `ROOT_NAME_INVALID` code do not exist yet. The accepted-edge pins are
- * green on main BY DESIGN: they pin the rule's other side and go red at a
- * head whose guard is over-tight (a refusal of `a`, a 64-char name, `a.b_c-d`
- * or `Example` would fail them). Xanthos' binding addition (#4481 gate): a
- * refused name writes no row and leaves `ensure*Principal`'s behavior for
- * conforming names unchanged.
+ * The accepted-edge pins pin the rule's other side and go red at a guard that
+ * is over-tight (a refusal of `a`, a 64-char name, `a.b_c-d`, `a..b`,
+ * `Example` or the Kelvin sign would fail them). A refused name writes no row
+ * and leaves `ensure*Principal`'s behavior for conforming names unchanged.
+ * The error-to-GraphQL mapper's own pins live in `rootNameErrors.test.ts`.
+ *
+ * #4515 added the direct `isValidRootName` table, the adjacent-separator,
+ * trailing-newline and Kelvin-sign pins at both the mint and the probe, the
+ * `ensureOrgPrincipal` contract, and the real-class taken-name path.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
-import { GraphQLError } from 'graphql';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
@@ -34,6 +32,9 @@ import {
   mintPrincipal,
   checkRootAvailable,
   ensureUserPrincipal,
+  ensureOrgPrincipal,
+  isValidRootName,
+  RootNameTakenError,
 } from './mintPrincipal.js';
 
 beforeEach(async () => {
@@ -41,11 +42,9 @@ beforeEach(async () => {
 });
 
 /**
- * Assert `promise` (a mint or availability probe) refuses `name` with the
- * TYPED #4481 error. Written without importing `RootNameInvalidError`
- * statically so the file runs on main, where the class does not exist: there
- * the mint resolves and the first line fails with a readable message instead
- * of a module-load error.
+ * Assert `promise` (a mint or an `ensure*Principal` call — the availability
+ * probe never rejects, it answers false) refuses `name` with the TYPED
+ * #4481 error.
  */
 async function expectTypedRefusal(
   promise: Promise<unknown>,
@@ -95,7 +94,7 @@ const REFUSALS: ReadonlyArray<{ name: string; guard: string }> = [
   { name: 'a:b', guard: 'mid-string colon' },
 ];
 
-describe('mintPrincipal — #4481 refusals (red on main)', () => {
+describe('mintPrincipal — #4481 refusals', () => {
   for (const { name, guard } of REFUSALS) {
     it(`refuses "${name === '' ? '(empty)' : name.length > 12 ? `${name.slice(0, 4)}…${name.length}ch` : name}" (${guard}) with the typed error and no row`, async () => {
       await expectTypedRefusal(
@@ -207,54 +206,106 @@ describe('ensureUserPrincipal — unchanged for conforming names, refuses illega
   });
 });
 
-describe('GraphQL surfacing — the shared mapper gives RootNameInvalidError its own code (#4481)', () => {
-  // The org-resolver callers (updateMyProfile / createOrganization /
-  // updateOrganization) validate BEFORE the mint, so the mapping is a
-  // backstop that no end-to-end call can reach today. Pin the mapper itself.
-  // Imported dynamically: on main the export (and the error class) do not
-  // exist, and this pin must fail with a readable assertion, not a load error.
-  it('maps RootNameInvalidError to the ROOT_NAME_INVALID typed refusal', async () => {
-    const org = await import('../../api/graphql/schema/resolvers.mutation.org.js');
-    const mint = await import('./mintPrincipal.js');
-    const mapper = (org as { rethrowRootNameErrors?: (err: unknown) => never })
-      .rethrowRootNameErrors;
-    expect(typeof mapper).toBe('function');
-    const invalid = new (mint as unknown as { RootNameInvalidError: new (name: string) => Error })
-      .RootNameInvalidError('ünï');
-    expect(() => mapper!(invalid)).toThrow(GraphQLError);
-    try {
-      mapper!(invalid);
-    } catch (e) {
-      const gql = e as GraphQLError;
-      expect(gql.extensions.code).toBe('ROOT_NAME_INVALID');
-      expect(gql.message).toMatch(/1–64 lower-case ASCII/);
-    }
+describe('isValidRootName — the rule itself, direct table (#4515)', () => {
+  // The mint and the probe lower-case before validating, so a test that goes
+  // through them cannot tell a lower-case-only rule from one that also admits
+  // upper case. Judge the predicate directly.
+  const ACCEPTED = ['a', 'a1', 'a.b_c-d', 'a..b', 'a--b', '0', 'a'.repeat(64)];
+  const REFUSED = [
+    'Example', 'EXAMPLE', 'aB', 'Ab', // upper case: the rule governs the STORED (lower-cased) form
+    '', 'a'.repeat(65), '.a', 'a.', '-a', 'a-', '_a', 'a_', 'a b', 'a:b', 'ünï', 'a\n', '\na', 'a\n\n', 'K',
+  ];
+  for (const name of ACCEPTED) {
+    it(`accepts ${JSON.stringify(name.length > 12 ? `${name.slice(0, 4)}…${name.length}ch` : name)}`, () => {
+      expect(isValidRootName(name)).toBe(true);
+    });
+  }
+  for (const name of REFUSED) {
+    it(`refuses ${JSON.stringify(name.length > 12 ? `${name.slice(0, 4)}…${name.length}ch` : name)}`, () => {
+      expect(isValidRootName(name)).toBe(false);
+    });
+  }
+});
+
+describe('root-name edges at BOTH the mint and the probe (#4515)', () => {
+  it('`a..b` is legal: adjacent interior separators are part of the atom grammar', async () => {
+    expect(await checkRootAvailable(db, 'a..b')).toBe(true);
+    const { id } = await mintPrincipal(db, { kind: 'org', name: 'a..b' });
+    expect((await db.principal.findUniqueOrThrow({ where: { id } })).name).toBe('a..b');
+    expect(await checkRootAvailable(db, 'a..b')).toBe(false); // now taken, not refused
   });
 
-  it('the mapper still maps RootNameTakenError to the existing taken refusal (regression guard)', async () => {
-    const org = await import('../../api/graphql/schema/resolvers.mutation.org.js');
-    const mint = await import('./mintPrincipal.js');
-    const mapper = (org as { rethrowRootNameErrors?: (err: unknown) => never })
-      .rethrowRootNameErrors;
-    expect(typeof mapper).toBe('function');
-    const taken = new (mint as unknown as { RootNameTakenError: new (name: string) => Error })
-      .RootNameTakenError('holger');
-    try {
-      mapper!(taken);
-      throw new Error('mapper let RootNameTakenError through');
-    } catch (e) {
-      const gql = e as GraphQLError;
-      expect(gql.extensions.code).toBe('BAD_USER_INPUT');
-      expect(gql.message).toMatch(/already taken/i);
-    }
+  it("a trailing newline `'a\\n'` is refused: `$` must not tolerate it", async () => {
+    expect(await checkRootAvailable(db, 'a\n')).toBe(false);
+    await expectTypedRefusal(mintPrincipal(db, { kind: 'org', name: 'a\n' }), 'a\n');
+    expect(await db.principal.count()).toBe(0);
+    // And the legal neighbour is untouched, so the refusal is the newline's.
+    expect(await checkRootAvailable(db, 'a')).toBe(true);
   });
 
-  it('the mapper rethrows an unrelated error untouched', async () => {
-    const org = await import('../../api/graphql/schema/resolvers.mutation.org.js');
-    const mapper = (org as { rethrowRootNameErrors?: (err: unknown) => never })
-      .rethrowRootNameErrors;
-    expect(typeof mapper).toBe('function');
-    const unrelated = new Error('boom');
-    expect(() => mapper!(unrelated)).toThrow('boom');
+  it('the Kelvin sign (U+212A) is accepted: its stored form is the ASCII `k`', async () => {
+    // Lower-casing happens BEFORE the rule, so the rule judges the stored `k`.
+    // A guard moved above the lower-casing would refuse this name.
+    const kelvin = 'K';
+    expect(kelvin.toLowerCase()).toBe('k');
+    expect(await checkRootAvailable(db, kelvin)).toBe(true);
+    const { id } = await mintPrincipal(db, { kind: 'org', name: kelvin });
+    expect((await db.principal.findUniqueOrThrow({ where: { id } })).name).toBe('k');
+    expect(await checkRootAvailable(db, 'k')).toBe(false); // the same root, now taken
+  });
+});
+
+describe('ensureOrgPrincipal — the wrapper contract (#4515)', () => {
+  it('mints for a principal-less org and links it', async () => {
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'o', urn: 'ensure-org-pin' },
+    });
+    await ensureOrgPrincipal(db, org);
+    const linked = await db.organization.findUniqueOrThrow({
+      where: { id: org.id },
+      select: { principalId: true },
+    });
+    expect(linked.principalId).not.toBeNull();
+    const row = await db.principal.findUniqueOrThrow({ where: { id: linked.principalId! } });
+    expect(row).toMatchObject({ name: 'ensure-org-pin', kind: 'org', status: 'active' });
+  });
+
+  it('is a no-op for an org that already has a principal (no second mint, link unchanged)', async () => {
+    const first = await mintPrincipal(db, { kind: 'org', name: 'already-linked' });
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'o', urn: 'already-linked', principalId: first.id },
+    });
+    // A wrapper without its `principalId` guard would mint `already-linked` again and throw RootNameTakenError.
+    await expect(ensureOrgPrincipal(db, org)).resolves.toBeUndefined();
+    expect(await db.principal.count()).toBe(1);
+    expect(
+      (await db.organization.findUniqueOrThrow({ where: { id: org.id }, select: { principalId: true } })).principalId,
+    ).toBe(first.id);
+  });
+
+  it('refuses an illegal org urn with the typed error, writes no row and leaves the org unlinked', async () => {
+    // The wrapper goes through the mint, so it cannot store a name the grammar cannot express.
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'o', urn: 'ünï-org' },
+    });
+    await expectTypedRefusal(ensureOrgPrincipal(db, org), 'ünï-org');
+    expect(await db.principal.count()).toBe(0);
+    expect(
+      (await db.organization.findUniqueOrThrow({ where: { id: org.id }, select: { principalId: true } })).principalId,
+    ).toBeNull();
+  });
+});
+
+describe('the taken-name error is the REAL class from the real path (#4515)', () => {
+  it('a second mint of the same name rejects with RootNameTakenError (the P2002 mapping)', async () => {
+    await mintPrincipal(db, { kind: 'user', name: 'taken-name' });
+    // Removing the P2002 -> RootNameTakenError mapping in mintPrincipal lets the raw Prisma error through.
+    const err = await mintPrincipal(db, { kind: 'org', name: 'Taken-Name' }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(RootNameTakenError);
+    expect((err as RootNameTakenError).rootName).toBe('taken-name');
+    expect(await db.principal.count()).toBe(1);
   });
 });
