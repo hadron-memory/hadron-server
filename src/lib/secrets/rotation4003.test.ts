@@ -115,7 +115,7 @@ describe('an old-root instance fails closed (FIT delta 2)', () => {
     expect((await ensure(appB)).keyVersion).toBe(1);
   });
 
-  it('the first mint on an empty store records the check value of the root it ran under', async () => {
+  it('a later mint under the same root as the recorded one succeeds', async () => {
     await ensure(appA);
     useRoot(ROOT);
     expect((await ensure(appB)).keyVersion).toBe(1);
