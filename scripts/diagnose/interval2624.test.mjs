@@ -56,39 +56,38 @@ test('an invalid container value records the default it falls back to, never a N
   expect(rows.filter((r) => r.kind === 'sample').length).toBeLessThanOrEqual(1);
 }));
 
-// ── the runner side: the slack derives from the recorded interval ──────────────────────────────────────────
+// ── the runner side: the slack derives from the interval recorded in the SAME file ───────────────────────────
 
-const interval = (text) => spawnSync(process.execPath, [validator, '--interval'], { input: text, encoding: 'utf8' });
+/** validate-samples <file> --until <now>: exit status and the fixed line, for a file holding `text`. */
+const until = (text, now) => withDir((dir) => {
+  const f = join(dir, 's.jsonl'); writeFileSync(f, text);
+  return spawnSync(process.execPath, [validator, f, '--until', String(now)], { encoding: 'utf8' });
+});
+const cfg = (ms) => JSON.stringify({ kind: 'config', sampleMs: ms });
+const sample = (at) => JSON.stringify({ kind: 'sample', at });
 
-test('validate-samples --interval prints the recorded interval of a valid config record', () => {
-  const r = interval('{"kind":"config","sampleMs":2500}\n{"kind":"sample","at":1}\n');
-  expect(r.status, r.stderr).toBe(0);
-  expect(r.stdout).toBe('2500\n');
+test('--until judges freshness against two periods of the interval recorded in the same file', () => {
+  const NOW = 1_000_000;
+  expect(until(`${cfg(2500)}\n${sample(NOW - 4000)}\n`, NOW).status).toBe(0);   // slack 5000
+  expect(until(`${cfg(1000)}\n${sample(NOW - 4000)}\n`, NOW).status).toBe(5);   // slack 2000: stale
+  expect(until(`${cfg(2500)}\n${sample(NOW - 6000)}\n`, NOW).status).toBe(5);   // the stale control at 2500
+  expect(until(`${cfg(1000)}\n${sample(NOW - 2000)}\n`, NOW).status).toBe(0);   // exactly two periods is in
+  const stale = until(`${cfg(1000)}\n${sample(NOW - 4000)}\n`, NOW);
+  expect(stale.stderr).toBe('diagnosis samples aborted, incomplete or stale\n');
 });
 
-test('validate-samples --interval refuses a missing, unsupported or malformed recorded interval', () => {
-  for (const text of [
-    '{"kind":"sample","at":1}\n',
-    '{"kind":"config"}\n',
-    '{"kind":"config","sampleMs":50}\n',
-    '{"kind":"config","sampleMs":20000}\n',
-    '{"kind":"config","sampleMs":"1000"}\n',
-    '{"kind":"config","sampleMs":1000.5}\n',
-    'not json\n',
+test('--until refuses a file with no, two, unsupported or malformed config records, with a fixed line only', () => {
+  const NOW = 1_000_000;
+  for (const head of [
     '',
+    `${cfg(1000)}\n${cfg(1000)}\n`,           // #4609 BLIND F2: a restarted preload leaves two
+    `${cfg(1000)}\n${cfg(2500)}\n`,
+    `${cfg(50)}\n`, `${cfg(20000)}\n`, `${cfg(1000.5)}\n`,
+    `${JSON.stringify({ kind: 'config', sampleMs: '1000' })}\n`, `${JSON.stringify({ kind: 'config' })}\n`,
   ]) {
-    const r = interval(text);
-    expect(r.status, text).toBe(5);
-    expect(r.stdout, text).toBe('');
-    expect(r.stderr, text).toBe('diagnosis samples carry no supported sampling interval\n');
+    const r = until(`${head}${sample(NOW)}\n`, NOW);
+    expect(r.status, head).toBe(5);
+    expect(r.stdout, head).toBe('');
+    expect(r.stderr, head).toBe('diagnosis samples carry no supported sampling interval\n');
   }
 });
-
-test('effective_sample_ms reads the container record and freshness_slack_ms is two periods of it', () => withDir((dir) => {
-  const sh = (body) => spawnSync('bash', ['-c', `set -euo pipefail; . '${join(here, 'cleanup.sh')}'; ${body}`], { cwd: dir, encoding: 'utf8' });
-  const ok = sh(`app_exec() { printf '{"kind":"config","sampleMs":2500}\\n{"kind":"sample","at":1}\\n'; }; ms=$(effective_sample_ms); echo "$ms $(freshness_slack_ms "$ms")"`);
-  expect(ok.status, ok.stderr).toBe(0);
-  expect(ok.stdout).toBe('2500 5000\n');
-  const bad = sh(`app_exec() { printf '{"kind":"sample","at":1}\\n'; }; effective_sample_ms`);
-  expect(bad.status).not.toBe(0);
-}));
