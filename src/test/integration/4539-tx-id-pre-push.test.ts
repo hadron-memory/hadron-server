@@ -37,6 +37,9 @@ const tableImage = async () => (await db.$queryRaw<{ r: string }[]>`SELECT e::te
 const triggerImage = async () =>
   (await db.$queryRaw<{ t: string }[]>`
     SELECT tgname::text || '=' || tgenabled::text AS t FROM pg_trigger WHERE tgrelid = 'agent_team_events'::regclass ORDER BY tgname`).map((x) => x.t);
+/** Every column but tx_id, per row: what the backfill must leave byte-identical. */
+const imageWithoutKey = async () =>
+  (await db.$queryRaw<{ r: string }[]>`SELECT (to_jsonb(e) - 'tx_id')::text AS r FROM agent_team_events e ORDER BY id`).map((x) => x.r);
 const nullable = async () =>
   (await db.$queryRaw<{ n: boolean }[]>`
     SELECT NOT attnotnull AS n FROM pg_attribute WHERE attrelid = 'agent_team_events'::regclass AND attname = 'tx_id'`)[0].n;
@@ -73,13 +76,11 @@ describe('#4539 the pre-push counterpart of the tx_id NOT NULL backfill', () => 
   it('backfills the legacy NULL keys to 0, changes nothing else, and leaves every trigger as it was', async () => {
     const ids = await legacy();
     const triggers = await triggerImage();
-    const before = await tableImage();
+    const before = await imageWithoutKey();
     await withPg((c) => c.query(read(BLOCK_FILE)));
     expect([await txOf(ids.a), await txOf(ids.keyed), await txOf(ids.b)]).toEqual(['0', '77', '0']);
     expect(await triggerImage()).toEqual(triggers);
-    // Every column but tx_id is byte-identical: compare the images with the key column blanked.
-    const strip = (rows: string[]) => rows.map((r) => r.replace(/,"?(0|77|\d+)"?\)$/, ')'));
-    expect(strip(await tableImage())).toEqual(strip(before));
+    expect(await imageWithoutKey()).toEqual(before); // every column but tx_id is unchanged
     expect(await nullable()).toBe(true); // making it required is `prisma db push`'s step, not this block's
   });
 
@@ -106,6 +107,15 @@ describe('#4539 the pre-push counterpart of the tx_id NOT NULL backfill', () => 
     const image = await tableImage();
     await withPg((c) => c.query(read(BLOCK_FILE)));
     expect(await tableImage()).toEqual(image);
+  });
+
+  it('returns before touching the trigger when no NULL row exists (even a disabled trigger raises nothing)', async () => {
+    await db.$executeRawUnsafe('ALTER TABLE agent_team_events ALTER COLUMN tx_id DROP NOT NULL');
+    await addEvent('9');
+    await db.$executeRawUnsafe('ALTER TABLE agent_team_events DISABLE TRIGGER agent_team_event_append_only');
+    const triggers = await triggerImage();
+    await withPg((c) => c.query(read(BLOCK_FILE)));
+    expect(await triggerImage()).toEqual(triggers);
   });
 
   it('is a no-op on a schema with no agent_team_events table (a fresh database)', async () => {
