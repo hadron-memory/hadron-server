@@ -404,7 +404,7 @@ async function logOfQuestion(db: Pick<Tx, 'node'>, question: { memoryId: string;
     where: { loc_memoryId: { loc: question.loc.slice(0, cut), memoryId: question.memoryId } },
     select: LOG_ROW_SELECT,
   });
-  return row && row.role === QUESTION_LOG_ROLE ? row : null;
+  return row && !row.deletedAt && row.role === QUESTION_LOG_ROLE ? row : null;
 }
 
 /**
@@ -416,7 +416,7 @@ async function logOfQuestion(db: Pick<Tx, 'node'>, question: { memoryId: string;
  */
 async function lockLogShared(tx: Tx, target: { memoryId: string; loc: string }, ref: string): Promise<{ row: LogRow; data: QuestionLogData }> {
   const found = await logOfQuestion(tx, target);
-  if (!found) throw new Error(`question ${ref} has no log`);
+  if (!found) throw logMissing(ref);
   await lockEdgeEndpointMemories(tx, [target.memoryId]);
   await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${found.id} FOR SHARE`;
   const row = await tx.node.findUnique({ where: { id: found.id }, select: LOG_ROW_SELECT });
@@ -480,6 +480,10 @@ async function evaluateRows(db: Pick<Tx, 'nodeRevision'>, rows: QuestionRow[]): 
     return { row, evaluation, shown: evaluation.question ?? (cached?.success ? cached.data : null) };
   });
 }
+
+/** The states no door writes to: corrupt evidence, and withdrawn. One set, read by {@link requireWritable} and `viewerMayAnswer`. */
+const BLOCKED_STATES: ReadonlySet<string> = new Set(['TAMPERED', 'UNVERIFIABLE', 'WITHDRAWN']);
+// requireWritable below names the refusal per state; its three branches are exactly this set.
 
 /**
  * Refuse a door write on a question whose state forbids it: corrupt evidence
@@ -1405,7 +1409,7 @@ export const questionFieldResolvers = {
     viewerMayAnswer: async (v: QuestionView, _: unknown, ctx: Context) => {
       // The same gate as the doors, on the read client; a state no door writes to is never answerable.
       const state = v.evaluation.state;
-      if (!v.shown || state === 'WITHDRAWN' || state === 'TAMPERED' || state === 'UNVERIFIABLE') return false;
+      if (!v.shown || !v.evaluation.question || BLOCKED_STATES.has(state)) return false;
       const found = await logOfQuestion(ctx.db, v.row);
       if (!found) return false;
       return (await actingDecider(ctx, ctx.db, v.shown, parseLogData(found), v.row.memoryId)).ok;

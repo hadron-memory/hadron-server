@@ -11,6 +11,8 @@ import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { questionDataSchema, MAX_ANSWERS, type AnswerEntry, type QuestionData } from '../../../lib/questions/codec.js';
 import { questionName, renderQuestion, renderQuestionAbstract } from '../../../lib/questions/render.js';
+import { computeApprovalHash } from '../../../lib/approvalHash.js';
+import { approvedMergeProof } from '../../../test/mergeConsent.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -349,5 +351,44 @@ describe('viewerMayAnswer: the same gate, read side', () => {
     }
     // viewerIsDecider keeps its meaning: the stored list, so a worker session still shows "you are a decider"
     expect(await D.viewerIsDecider({ shown: await dataOf(q.row.id) }, {}, as(holger.id))).toBe(true);
+  });
+});
+
+describe('#4532 blind review: approved re-answer, merged decider, a missing log', () => {
+  it('a question whose answer was approved is answered again on the same node, as a new revision', async () => {
+    const q = await ask((await createLog()).row.id);
+    await answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq);
+    const r = await rowOf(q.row.id);
+    // Stands in for the approval door: holger approved the standing revision.
+    await db.node.update({ where: { id: q.row.id }, data: {
+      approvedBy: holger.id, approvedRevNo: r.revSeq, approvedAt: new Date(),
+      approvalHash: computeApprovalHash({ title: r.name, abstract: r.abstract, content: r.content }),
+    } });
+    await answer(q.row.id, { optionKey: 'no', reason: 'after approval' }, r.revSeq);
+    const d = await dataOf(q.row.id);
+    expect(d.answers.map((a) => [a.kind, a.key])).toEqual([['answer', 'yes'], ['answer', 'no']]);
+    expect(await db.node.count({ where: { memoryId: memory.id, role: 'question' } })).toBe(1);
+  });
+
+  it('the survivor of a merge answers as the decider the merged account was; the stored list is not rewritten', async () => {
+    const q = await ask((await createLog()).row.id);
+    const survivor = await db.user.create({ data: { githubId: 442799, githubUsername: 'qa-survivor', handle: 'qa-survivor', roles: [] } });
+    await db.orgMember.create({ data: { organizationId: orgId, userId: survivor.id, role: 'CONTRIBUTOR' } });
+    await M.mergeUsers(null, { input: { source: holger.id, target: survivor.id, consentProof: await approvedMergeProof(db, holger.id, survivor.id, platformAdmin.id) } }, as(platformAdmin.id, { roles: ['ADMIN'] }));
+    const view = await answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq, as(survivor.id));
+    expect((await D.answer(view, {}, as()))?.key).toBe('yes');
+    expect((await dataOf(q.row.id)).deciders).toEqual([holger.id]);
+  });
+
+  it('a question whose log is gone is a typed refusal on every act door, never INTERNAL, and not answerable on the read side', async () => {
+    const log = await createLog();
+    const q = await ask(log.row.id);
+    await db.node.update({ where: { id: log.row.id }, data: { deletedAt: new Date() } });
+    expect(await codeOf(answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq))).toBe('QUESTION_LOG_NOT_FOUND');
+    expect(await codeOf(retract(q.row.id, q.row.revSeq))).toBe('QUESTION_LOG_NOT_FOUND');
+    expect(await codeOf(M.amendQuestion(null, { ref: q.row.id, input: { priority: 'HIGH' }, expectedRevision: q.row.revSeq, reason: 'r' }, as(holger.id)))).toBe('QUESTION_LOG_NOT_FOUND');
+    expect(await codeOf(M.withdrawQuestion(null, { ref: q.row.id, reason: 'r', expectedRevision: q.row.revSeq }, as(writer.id)))).toBe('QUESTION_LOG_NOT_FOUND');
+    const row = await rowOf(q.row.id);
+    expect(await D.viewerMayAnswer({ row, shown: await dataOf(q.row.id), evaluation: { state: 'OPEN', question: await dataOf(q.row.id) } }, {}, as(holger.id))).toBe(false);
   });
 });
