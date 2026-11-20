@@ -32,8 +32,10 @@ try {text=readFileSync(process.argv[2],'utf8');} catch {}
 if (text !== null && process.argv[3] === '--until') {
   const ms = recordedInterval(text);
   if (ms === null) {console.error('diagnosis samples carry no supported sampling interval');process.exit(5);}
-  const now = Number(process.argv[4]);
-  valid = Number.isFinite(now) && validSamples(text, now - freshnessSlackMs(ms));
+  // #4609 BLIND delta F1: a plain decimal millisecond timestamp only. Number('') and Number(' ') are 0, which would
+  // put the cutoff before the epoch and pass stale samples.
+  const raw = process.argv[4] ?? '';
+  valid = /^[0-9]+$/.test(raw) && validSamples(text, Number(raw) - freshnessSlackMs(ms));
 } else if (text !== null) {
   valid=validSamples(text,process.argv[3] ? Number(process.argv[3]) : NaN);
 }
