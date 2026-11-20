@@ -102,6 +102,18 @@ describe('transactional secret.use (#4000)', () => {
     expect(await db.secretEvent.count({ where: { clientId, kind: 'USE', outcome: 'SECRET_READ_CLIENT_ISSUER_GONE' } })).toBe(1);
     expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
   });
+  it('refuses an expired grant without consuming a ticket or run budget', async () => {
+    await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+      await tx.$executeRaw`UPDATE grants SET expires_at = (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 second' WHERE id = ${grantId}`;
+      await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+    });
+    await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_EXPIRED' } });
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: runCtx.run.id } })).budgetActions).toBe(3);
+    expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
+    expect(await db.secretEvent.count({ where: { clientId, kind: 'USE', outcome: 'SECRET_READ_CLIENT_EXPIRED' } })).toBe(1);
+  });
   it('does not let later metadata widen the signed path or disagree with the encrypted kind', async () => {
     await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
     const client = await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } });
