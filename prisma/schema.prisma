@@ -5557,7 +5557,8 @@ model SecretAppKey {
 
 /// #4003 (S8 of #3991; FIT delta 2) — the key-check value of the ACTIVE secrets root, one row. A mint compares the
 /// instance's root against it and refuses on a mismatch, so an instance still running the old root after a re-wrap
-/// mints nothing. Moved only by the root re-wrap, in the same transaction as the keys. Holds no key material: an
+/// mints nothing. Recorded by the first mint when absent (after the newest App key, if any, unwraps under the
+/// instance's root); after that moved only by the root re-wrap, in the same transaction as the keys. Holds no key material: an
 /// HMAC under the root over a fixed label. `id` is always 1 (CHECK in prisma/secret-rotation-invariants.sql).
 model SecretRootCheck {
   id         Int      @id @default(1)

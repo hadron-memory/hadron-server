@@ -363,7 +363,8 @@ export async function mintAppKeyVersion(
 /**
  * The key-check value of a root: HMAC-SHA256 under the root over a fixed label. It identifies which root is active
  * without revealing it (a 256-bit root cannot be recovered or guessed from it). Stored once, in
- * `secret_root_check`, and moved only by the root re-wrap, in the same transaction as the keys.
+ * `secret_root_check`: recorded by the first mint when absent ({@link assertRootCheck}), and after that moved only by
+ * the root re-wrap, in the same transaction as the keys.
  */
 export const rootCheckValue = (root: Buffer): string => createHmac('sha256', root).update('hadron:secret-root-check:v1').digest('hex');
 

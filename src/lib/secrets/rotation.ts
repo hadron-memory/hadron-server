@@ -117,6 +117,10 @@ function tryUnwrap(wrapped: string, aad: string, root: Buffer): Buffer | null {
  * under neither root refuses `SECRET_KEY_UNAVAILABLE` and the transaction rolls back, so the keys and the check
  * value stay together under the old root. Each row keeps its AAD (its App and version). Clears this process's key
  * cache on success. The roots are never logged; the caller supplies them from protected input, never argv.
+ *
+ * It also refuses, before writing anything, when `from` equals `to`, and when a check value is recorded that names
+ * neither root (#4553 F3): otherwise a store with no App keys would let any `--from` move the check silently. The
+ * recorded value naming `to` is the post-switch re-run.
  */
 export async function rewrapSecretRootKeys(
   db: PrismaClient,
@@ -126,8 +130,13 @@ export async function rewrapSecretRootKeys(
   if (!HEX64.test(fromRootHex) || !HEX64.test(toRootHex)) throw new SecretKeyUnavailableError();
   const from = Buffer.from(fromRootHex, 'hex');
   const to = Buffer.from(toRootHex, 'hex');
+  if (from.equals(to)) throw new SecretKeyUnavailableError();
   const out = await db.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${SECRET_ROOT_LOCK}))`;
+    const recorded = await tx.secretRootCheck.findUnique({ where: { id: 1 }, select: { checkValue: true } });
+    if (recorded && recorded.checkValue !== rootCheckValue(from) && recorded.checkValue !== rootCheckValue(to)) {
+      throw new SecretKeyUnavailableError();
+    }
     const rows = await tx.secretAppKey.findMany({
       select: { appId: true, keyVersion: true, wrappedKey: true },
       orderBy: [{ appId: 'asc' }, { keyVersion: 'asc' }],
