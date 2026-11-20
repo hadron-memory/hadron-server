@@ -137,16 +137,49 @@ test('a lost reservation is its own case, named by its path, even when the state
 });
 
 test('a reservation that cannot be created (no lock exists) is not reported as a held reservation (#4607 F1)', () => withDir('diag-2628-', (dir) => {
-  // A state name of 250 bytes makes the lock name (+ ".diagnose-lock") exceed the 255-byte name limit, so mkdir fails
-  // with no lock present for any user, root included (a permission-based setup does not fail as root, as in CI).
-  const state = join(dir, 's'.repeat(250));
-  const r = sh(`incus() { return 0; }; acquire_stack_reservation '${state}' hadron-e2e-x`, dir);
+  // #4607 BLIND delta P3: inject the failure for the lock alone (parent creation still works), so the pin does not rely
+  // on any filesystem's name limit or on the user being unable to write.
+  const state = join(dir, 'state');
+  const lock = `${state}.diagnose-lock`;
+  const inject = `mkdir() { if [ "\${@: -1}" = '${lock}' ]; then echo "mkdir: injected failure" >&2; return 1; fi; command mkdir "$@"; }; `;
+  const r = sh(`${inject}incus() { return 0; }; acquire_stack_reservation '${state}' hadron-e2e-x`, dir);
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /^mkdir: /m);   // mkdir's own line is kept (its wording differs between builds)
+  assert.match(r.stderr, /^mkdir: injected failure$/m);   // mkdir's own line is kept
   assert.match(r.stderr, /could not create the diagnosis reservation \S+\.diagnose-lock \(see the error above\); refusing/);
   assert.doesNotMatch(r.stderr, /already reserved/);
-  assert.equal(existsSync(`${state}.diagnose-lock`), false);
+  assert.equal(existsSync(lock), false);
   noRemovalAdvice(r.stderr);
+}));
+
+test('a non-directory entry at the reservation path is described as such, not as another run\'s reservation (#4607 delta)', () => withDir('diag-2628-', (dir) => {
+  const state = join(dir, 'state');
+  for (const make of [() => writeFileSync(`${state}.diagnose-lock`, 'x'), () => symlinkSync(join(dir, 'nowhere'), `${state}.diagnose-lock`)]) {
+    rmSync(`${state}.diagnose-lock`, { force: true });
+    make();
+    const r = sh(`incus() { return 0; }; acquire_stack_reservation '${state}' hadron-e2e-x`, dir);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /the path is occupied by something that is not a reservation directory/);
+    assert.doesNotMatch(r.stderr, /already reserved|another run/);
+    noRemovalAdvice(r.stderr);
+  }
+}));
+
+
+test('a lost reservation with no state names what is absent and points at no state path (#4607 delta P2)', () => {
+  // Reservation lost (owner file not ours) and no state directory at all.
+  const r = downRun(`DIAG_RUN_TOKEN=tok-1; mkdir "$DIAG_LOCK"; echo someone-else > "$DIAG_LOCK/owner"`);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /this run no longer holds its reservation \S+\.diagnose-lock, and no stack state found at \S+; capture and teardown skipped/);
+  assert.doesNotMatch(r.stderr, /inspect private state/);
+  noRemovalAdvice(r.stderr);
+  assert(!r.ran.includes('stackdown') && !r.ran.includes('purge') && !r.ran.includes('preserve'), r.ran.join());
+});
+
+test('with no reservation path at all, the line says it is unknown rather than naming nothing (#4607 delta P2)', () => withDir('diag-2628-', (dir) => {
+  const r = sh(`unset DIAG_LOCK DIAG_RUN_TOKEN; explain_stack_ownership_failure '${join(dir, 'none')}' hadron-e2e-x`, dir);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /this run's reservation path is unknown, and no stack state found at /);
+  assert.doesNotMatch(r.stderr, /holds its reservation ;|reservation ,/);
 }));
 
 test('the end-of-run explanation tolerates a missing instance name, so the EXIT trap keeps running (#4607 F5)', () => withDir('diag-2628-', (dir) => {
