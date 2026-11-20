@@ -13,6 +13,9 @@ import { questionDataSchema, MAX_ANSWERS, type AnswerEntry, type QuestionData } 
 import { questionName, renderQuestion, renderQuestionAbstract } from '../../../lib/questions/render.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { approvedMergeProof } from '../../../test/mergeConsent.js';
+import { ApolloServer } from '@apollo/server';
+import { formatGraphQLError } from '../formatError.js';
+import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -488,8 +491,46 @@ describe('#4532 blind delta: a SIGNED-tier question, and the on-log arm after a 
   });
 });
 
+describe('#4532 blind round 6: the public boundary, executed through the schema', () => {
+  const server = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
+  const wire = async (query: string, variables: Record<string, unknown>, ctx: Context) => {
+    const res = await server.executeOperation({ query, variables }, { contextValue: ctx });
+    if (res.body.kind !== 'single') throw new Error('unexpected');
+    const { data, errors } = res.body.singleResult;
+    return { data: data as Record<string, any> | null | undefined, errors: (errors ?? []).map((e) => ({ message: e.message, code: e.extensions?.code })) };
+  };
+  const ANSWER = 'mutation($ref: ID!, $input: AnswerQuestionInput!, $rev: Int!) { answerQuestion(ref: $ref, input: $input, expectedRevision: $rev) { code viewerMayAnswer answers { kind via } } }';
+  const RETRACT = 'mutation($ref: ID!, $rev: Int!, $via: QuestionAnswerVia) { retractQuestionAnswer(ref: $ref, expectedRevision: $rev, via: $via) { code } }';
+
+  it('an invalid via never reaches the resolver: GraphQL rejects the enum value at validation, and nothing is written', async () => {
+    const q = await ask((await createLog()).row.id);
+    const a = await wire(ANSWER, { ref: q.row.id, input: { optionKey: 'yes', via: 'FAX' }, rev: q.row.revSeq }, as(holger.id));
+    expect(a.data ?? null).toBeNull();
+    expect(a.errors).toHaveLength(1);
+    expect(a.errors[0].code).toBe('BAD_USER_INPUT');
+    expect((await dataOf(q.row.id)).answers).toHaveLength(0);
+    await answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq);
+    const r = await wire(RETRACT, { ref: q.row.id, rev: (await rowOf(q.row.id)).revSeq, via: 'FAX' }, as(holger.id));
+    expect(r.data ?? null).toBeNull();
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0].code).toBe('BAD_USER_INPUT');
+    expect((await dataOf(q.row.id)).answers).toHaveLength(1);
+  });
+
+  it('a valid via answers and takes back through the schema, and the capability field reads through it', async () => {
+    const q = await ask((await createLog()).row.id);
+    const a = await wire(ANSWER, { ref: q.row.id, input: { optionKey: 'yes', via: 'CLI' }, rev: q.row.revSeq }, as(holger.id));
+    expect(a.errors).toEqual([]);
+    expect(a.data?.answerQuestion.answers.map((e: { kind: string; via: string }) => [e.kind, e.via])).toEqual([['ANSWER', 'CLI']]);
+    expect(a.data?.answerQuestion.viewerMayAnswer).toBe(true);
+    const r = await wire(RETRACT, { ref: q.row.id, rev: (await rowOf(q.row.id)).revSeq, via: 'MCP' }, as(holger.id));
+    expect(r.errors).toEqual([]);
+    expect((await dataOf(q.row.id)).answers.map((e) => [e.kind, e.via])).toEqual([['answer', 'cli'], ['retraction', 'mcp']]);
+  });
+});
+
 describe('#4532 review pins: the via pointer, and each blocked-state guard alone', () => {
-  it('an invalid via is QUESTION_INVALID at /input/via on the answer door and /via on the take-back door', async () => {
+  it('the resolvers refuse an invalid via typed, with the pointer (defense for callers that skip GraphQL enum coercion)', async () => {
     const q = await ask((await createLog()).row.id);
     const e1 = await errorOf(answer(q.row.id, { optionKey: 'yes', via: 'FAX' }, q.row.revSeq));
     expect(JSON.stringify(e1.extensions)).toContain('/input/via');
@@ -553,18 +594,27 @@ describe('#4532 blind round 4: the capability at the entry limit, a corrupt log,
     expect((await dataOf(q.row.id)).answers).toHaveLength(0);
   });
 
-  it('a question moved under another log while the answer waits is refused, not judged by the old log', async () => {
+  // requireInLog sits on four doors; each is pinned, so removing it from any one fails here.
+  const doors: Array<[string, (id: string, rev: number) => Promise<unknown>]> = [
+    ['answer', (id, rev) => answer(id, { optionKey: 'yes' }, rev)],
+    ['take-back', (id, rev) => retract(id, rev)],
+    ['amend', (id, rev) => M.amendQuestion(null, { ref: id, input: { priority: 'HIGH' }, expectedRevision: rev, reason: 'r' }, as(holger.id))],
+    ['withdraw', (id, rev) => M.withdrawQuestion(null, { ref: id, reason: 'r', expectedRevision: rev }, as(holger.id))],
+  ];
+  it.each(doors)('a question moved under another parent while the %s door waits is refused, not judged by the old log', async (name, door) => {
     const logA = await createLog();
     const q = await ask(logA.row.id);
+    if (name === 'take-back') await answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq);
     const row = await rowOf(q.row.id);
-    // Hold the QUESTION row and move it to another parent loc; the answer's log lookup and lock already passed for log A.
+    const before = (await dataOf(q.row.id)).answers.length;
+    // Hold the QUESTION row and move it to another parent loc; the door's log lookup and lock already passed for log A.
     const mover = holdTx(async (tx) => {
       await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${q.row.id} FOR UPDATE`;
       await tx.node.update({ where: { id: q.row.id }, data: { loc: `${row.loc.slice(0, row.loc.lastIndexOf(':'))}-elsewhere:${row.loc.slice(row.loc.lastIndexOf(':') + 1)}` } });
     });
     const holderPid = await mover.ready;
     let settled = false;
-    const attempt = codeOf(answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq)).then((c) => { settled = true; return c; });
+    const attempt = codeOf(door(q.row.id, row.revSeq)).then((c) => { settled = true; return c; });
     let blocked = false;
     try {
       blocked = await waitBlockedBy(holderPid, () => settled);
@@ -572,8 +622,10 @@ describe('#4532 blind round 4: the capability at the entry limit, a corrupt log,
       await mover.finish();
     }
     expect(blocked).toBe(true);
-    expect(['QUESTION_LOG_NOT_FOUND', 'NODE_WRITE_CONFLICT']).toContain(await attempt);
-    expect((await dataOf(q.row.id)).answers).toHaveLength(0);
+    expect(await attempt).toBe('QUESTION_LOG_NOT_FOUND');
+    const after = await db.node.findUniqueOrThrow({ where: { id: q.row.id } });
+    expect((after.data as { answers: unknown[] }).answers).toHaveLength(before);
+    expect((after.data as { status?: string }).status).not.toBe('withdrawn');
   });
 
   it('the last history slot is kept for the take-back: an answer cannot fill the history, and the standing answer can be retracted', async () => {
