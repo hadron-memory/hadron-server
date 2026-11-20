@@ -102,7 +102,10 @@ describe('#1228 root README', () => {
     const other = await db.node.create({ data: { memoryId: graph.id, loc: 'other', name: 'Other' } });
     const owner = await db.edge.create({ data: { memoryId: graph.id, sourceId: child.id, targetId: other.id, loc: 'child:a-b:root-memory', name: 'authored' } });
     readme();
-    expect((await syncGraphFromGithub(graph)).error).toBeDefined();
+    const outcome = await syncGraphFromGithub(graph);
+    // The collision itself, raised by the re-key's own edge update on the (loc, memory) unique: not some other failure.
+    expect(outcome.error).toMatch(/tx\.edge\.update\(\)/);
+    expect(outcome.error).toMatch(/Unique constraint failed on the fields: \(`loc`/);
     expect(await db.node.findUniqueOrThrow({ where: { id: root.id } })).toMatchObject({ loc: '' }); // the move did not happen
     expect((await db.edge.findUniqueOrThrow({ where: { id: migrated.id } })).loc).toBe('child:a-b:');
     expect((await db.edge.findUniqueOrThrow({ where: { id: owner.id } })).loc).toBe('child:a-b:root-memory');
