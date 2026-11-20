@@ -317,7 +317,7 @@ function noteFragment(projection: string, fragment: string | undefined): string 
 // #1012 — durable per-client MCP selections (active App / active memory).
 import {
   CLIENT_KEY_HEADER,
-  normalizeClientKey,
+  selectionClientKey,
   loadMcpSessionState,
   saveActiveApp,
   saveActiveMemory,
@@ -12903,7 +12903,7 @@ async function openOrRejectMcpSession(
   // session construction — because that is the one moment a restore is useful:
   // the selections must be in place before the first tool call, not after one
   // has already been refused.
-  const clientKey = normalizeClientKey(req.headers[CLIENT_KEY_HEADER]);
+  const clientKey = selectionClientKey(req.headers[CLIENT_KEY_HEADER], auth);
 
   // Restore this client's durable selections, re-authorized (see
   // loadMcpSessionState — a stored selection is a cache of a choice, never a

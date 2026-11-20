@@ -30,7 +30,7 @@ import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
 import { enqueueNodeEmbedding } from '../../../services/embedding/enqueue.js';
 import type { CheckpointWrite } from '../../../lib/contextReset/contextReset.js';
 import { Prisma } from '../../../generated/prisma/index.js';
-import type { Context } from './resolvers.helpers.js';
+import { pageArgs, pageEnvelope, type Context } from './resolvers.helpers.js';
 import {
   actorManagesApp,
   recordInstructedManagerAct,
@@ -918,11 +918,13 @@ async function loadRegistrationView(ctx: Context, appId: string, hostId: string)
   return views[0]!;
 }
 
-async function loadRegistrationViews(ctx: Context, appId: string, hostId?: string) {
+/** #2213 S3: `page` takes one window of the same `hostId asc` order (unique per App), so a page is a slice of the full list. */
+async function loadRegistrationViews(ctx: Context, appId: string, hostId?: string, page?: { take: number; skip: number }) {
   const regs = await ctx.db.hostRegistration.findMany({
     where: { appId, ...(hostId ? { hostId } : {}) },
     include: { workers: { orderBy: { workerId: 'asc' } } },
     orderBy: { hostId: 'asc' },
+    ...(page ?? {}),
   });
   const schedule = await ctx.db.agentTaskStallSchedule.findUnique({ where: { appId }, select: { hostLapseCheckIns: true } });
   const checkIns = schedule?.hostLapseCheckIns ?? HOST_LAPSE_CHECK_INS_DEFAULT;
@@ -967,6 +969,25 @@ export const hostOperationQueries = {
       const key = appKeyCaller(ctx);
       if (key) await recordHostKeyUseApart(ctx.db, key, 'read', { count: views.length });
       return views;
+    }),
+
+  /**
+   * #2213 S3 (cor:api:120:04): `hostRegistrations` as a page. The same gate (`recordingRefusal` around
+   * `withReadableApp`), the same rows, order and nested workers, with the real total. Count and page are read on one
+   * repeatable-read snapshot (`coherent`), so they agree. A host key's read is recorded apart, as the old field's is,
+   * with `count` = the items on this page.
+   */
+  hostRegistrationsPage: (_: unknown, a: { appRef: string; limit?: number | null; offset?: number | null }, ctx: Context) =>
+    recordingRefusal(ctx, 'read', null, async () => {
+      const { take, skip } = pageArgs(a);
+      const page = await withReadableApp(ctx, a.appRef, async (c, app) => {
+        const total = await c.db.hostRegistration.count({ where: { appId: app.id } });
+        const items = take === 0 ? [] : await loadRegistrationViews(c, app.id, undefined, { take, skip });
+        return pageEnvelope(items, total, skip);
+      }, false, undefined, { coherent: true });
+      const key = appKeyCaller(ctx);
+      if (key) await recordHostKeyUseApart(ctx.db, key, 'read', { count: page.items.length });
+      return page;
     }),
 
   /** The App's host operations, newest first: whoever reads its tasks and events (cor:agt:050:21). */

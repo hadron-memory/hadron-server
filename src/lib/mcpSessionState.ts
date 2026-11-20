@@ -24,9 +24,17 @@
  * switch the others' active App mid-conversation — turning a LOST selection
  * into a SILENTLY WRONG one, which is a worse failure than the one being fixed.
  *
- * A client that sends no header is not persisted at all and keeps the pre-#1012
- * in-memory behaviour, so opting out costs nothing and nothing regresses for
- * clients that never opt in.
+ * Narrowed for OAuth callers only (Holger, 2026-11-20, #2605 ruling 7): an OAuth
+ * caller whose client has NO record of its own starts from a copy of the user's
+ * last explicit selection (`USER_DEFAULT_CLIENT_KEY`). A client that has a
+ * record is still never changed by another client, and a caller on an API key
+ * neither reads nor feeds the per-user record.
+ *
+ * A client that sends no header is keyed on the OAuth client its credential was
+ * issued to (#2605, `selectionClientKey`): no client application sends the
+ * header, and a connector user cannot add one. A caller with neither (a portal
+ * or legacy user key, a JWT) is not persisted at all and keeps the pre-#1012
+ * in-memory behaviour.
  *
  * ## Storage is not authorization
  *
@@ -70,6 +78,33 @@ export function normalizeClientKey(raw: unknown): string | null {
   return trimmed;
 }
 
+/**
+ * #2605 (ruling 6) — the key a caller's selections are stored under.
+ *
+ * The caller's own `X-Hadron-Client-Id` when it sends a usable one: that is a client INSTANCE and the narrowest key
+ * there is. Otherwise the OAuth client its credential was issued to, as `oauth:<client_id>`: no client application
+ * sends the header, and a connector user cannot add one, so without this their selections were lost on every
+ * reconnect. Otherwise null, which means "do not persist", as before.
+ *
+ * A caller could send a header that spells another client's derived key. It reaches only rows of its OWN user (the
+ * store is keyed on (userId, clientKey) and the userId comes from the credential), so that is a user pointing one of
+ * their clients at another's selection, not a boundary. For the same reason an OAuth client shared by many users
+ * never carries a selection between them.
+ */
+export function selectionClientKey(header: unknown, auth: Pick<AuthContext, 'oauthClientId'>): string | null {
+  return normalizeClientKey(header) ?? (auth.oauthClientId ? normalizeClientKey(`oauth:${auth.oauthClientId}`) : null);
+}
+
+/**
+ * #2605 (ruling 7) — the key of a user's own record: the last explicit selection they made from an OAuth client.
+ *
+ * The empty string, which `normalizeClientKey` never returns, so no `X-Hadron-Client-Id` header can address it.
+ * Read and written for OAUTH callers only (`auth.oauthClientId`): a person in a chat app. A caller on a portal or
+ * legacy API key neither reads nor feeds it, because the agents sharing one account through API keys must not all
+ * follow one record.
+ */
+export const USER_DEFAULT_CLIENT_KEY = '';
+
 /** A re-authorized selection. Absent fields mean "nothing usable stored". */
 export interface RestoredMcpSelection {
   appId?: string;
@@ -102,23 +137,29 @@ export async function loadMcpSessionState(
   if (!clientKey || !auth.userId) return {};
 
   try {
-    const row = await db.mcpSessionState.findUnique({
-      where: { userId_clientKey: { userId: auth.userId, clientKey } },
-      select: {
-        app: {
-          select: {
-            id: true,
-            organizationId: true,
-            ownerUserId: true,
-            deletedAt: true,
-            uninstalledAt: true,
-          },
+    const select = {
+      app: {
+        select: {
+          id: true,
+          organizationId: true,
+          ownerUserId: true,
+          deletedAt: true,
+          uninstalledAt: true,
         },
-        memory: { select: { id: true, urn: true, deletedAt: true } },
-        organization: { select: { id: true, deletedAt: true } },
-        scope: true,
       },
-    });
+      memory: { select: { id: true, urn: true, deletedAt: true } },
+      organization: { select: { id: true, deletedAt: true } },
+      scope: true,
+    } as const;
+    const where = { userId_clientKey: { userId: auth.userId, clientKey } };
+    let row = await db.mcpSessionState.findUnique({ where, select });
+    // #2605 (ruling 7): an OAuth caller whose client has no record of its own STARTS FROM the user's last explicit
+    // selection. The copy gives the client its own record, so nothing another client selects later moves it. What
+    // is copied is the stored pointers; they are re-authorized below like any other stored selection.
+    if (!row && auth.oauthClientId) {
+      await adoptUserDefault(db, auth.userId, clientKey);
+      row = await db.mcpSessionState.findUnique({ where, select });
+    }
     if (!row) return {};
 
     const restored: RestoredMcpSelection = {};
@@ -234,6 +275,24 @@ export async function saveActiveScope(
 }
 
 /** Shared upsert for the selections — one row per (user, client instance). */
+/**
+ * #2605 (ruling 7) — give a client that has no record a copy of the user's own record, if there is one. Losing a
+ * race to a concurrent open of the same client is fine: the unique (userId, clientKey) keeps the first copy, and the
+ * caller re-reads. Any failure leaves the client with no record, which is what it had.
+ */
+async function adoptUserDefault(db: PrismaClient, userId: string, clientKey: string): Promise<void> {
+  try {
+    const own = await db.mcpSessionState.findUnique({
+      where: { userId_clientKey: { userId, clientKey: USER_DEFAULT_CLIENT_KEY } },
+      select: { appId: true, memoryId: true, organizationId: true, scopeId: true },
+    });
+    if (!own) return;
+    await db.mcpSessionState.create({ data: { userId, clientKey, ...own } });
+  } catch {
+    // Lost the race, or a pointer was deleted between the read and the copy: nothing to adopt.
+  }
+}
+
 async function upsertSelection(
   db: PrismaClient,
   auth: AuthContext,
@@ -241,10 +300,22 @@ async function upsertSelection(
   patch: { appId?: string; memoryId?: string; organizationId?: string | null; scopeId?: string | null },
 ): Promise<void> {
   if (!clientKey || !auth.userId) return;
+  // #2605 (ruling 7): an OAuth caller's explicit selection is also the user's last one, which a client of theirs
+  // with no record of its own starts from. An API-key caller's selection stays in its own record only.
+  const keys = auth.oauthClientId ? [clientKey, USER_DEFAULT_CLIENT_KEY] : [clientKey];
+  for (const key of keys) await upsertOne(db, auth.userId, key, patch);
+}
+
+async function upsertOne(
+  db: PrismaClient,
+  userId: string,
+  clientKey: string,
+  patch: { appId?: string; memoryId?: string; organizationId?: string | null; scopeId?: string | null },
+): Promise<void> {
   try {
     await db.mcpSessionState.upsert({
-      where: { userId_clientKey: { userId: auth.userId, clientKey } },
-      create: { userId: auth.userId, clientKey, ...patch },
+      where: { userId_clientKey: { userId, clientKey } },
+      create: { userId, clientKey, ...patch },
       update: patch,
     });
   } catch {

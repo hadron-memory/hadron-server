@@ -19,8 +19,10 @@
  *     choice; it can outlive the membership that justified it, so both pointers
  *     are re-authorized on load through the shared gates.
  *
- * A client that sends no `X-Hadron-Client-Id` is never persisted and keeps the
- * pre-#1012 behaviour exactly.
+ * A client that sends no `X-Hadron-Client-Id` and holds no OAuth-issued
+ * credential is never persisted and keeps the pre-#1012 behaviour exactly. An
+ * OAuth-issued credential is keyed on its OAuth client (#2605, pinned in
+ * server.oauthClientSelection2605.test.ts).
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
