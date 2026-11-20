@@ -73,6 +73,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.connectionGrants",
   "Query.creditLedgerEntries",
   "Query.dashboardWidgetPresetsPage",
+  "Query.dashboardWidgetsPage", // #2213 S3: pageArgs, default 20, cap 200; in PAGE_ARGS_FIELDS.
   "Query.deliveryBatches",
   "Query.driveFiles",
   "Query.dueWakes",
@@ -87,6 +88,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.heldWorkers",
   "Query.homeAssistantInstances",
   "Query.hostOperations",
+  "Query.hostRegistrationsPage", // #2213 S3: pageArgs, default 20, cap 200; in PAGE_ARGS_FIELDS.
   "Query.hostSweepRuns",
   "Query.impersonationSessions",
   "Query.marketplaceAgents",

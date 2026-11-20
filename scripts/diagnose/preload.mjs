@@ -2,7 +2,7 @@
 import v8 from 'node:v8';
 import { appendFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
-import { reduceTransportState, sampleProcess, shouldAbort, assertSecretFree, safeNodeOptions, countTimeouts, snapshotLabel } from './sampler.mjs';
+import { reduceTransportState, sampleProcess, shouldAbort, assertSecretFree, safeNodeOptions, countTimeouts, snapshotLabel, sampleIntervalMs, SAMPLE_MS_DEFAULT } from './sampler.mjs';
 
 if (/index\.ts$/.test(process.argv[1] ?? '') || process.argv.includes('src/index.ts')) {
   const out = process.env.DIAG_SAMPLES_PATH ?? '/tmp/diagnose-samples.jsonl';
@@ -23,7 +23,10 @@ if (/index\.ts$/.test(process.argv[1] ?? '') || process.argv.includes('src/index
   const loop = monitorEventLoopDelay({ resolution: RES_MS });
   loop.enable();
 
-  line({ kind: 'config', node: process.version, heapSizeLimit: v8.getHeapStatistics().heap_size_limit,
+  // #2624: the interval actually used. An invalid DIAG_SAMPLE_MS falls back to the default (it used to become NaN, a
+  // 1 ms timer); the record states the effective value, and the runner's freshness slack derives from it.
+  const sampleMs = sampleIntervalMs(process.env.DIAG_SAMPLE_MS) ?? SAMPLE_MS_DEFAULT;
+  line({ kind: 'config', node: process.version, sampleMs, heapSizeLimit: v8.getHeapStatistics().heap_size_limit,
     nodeFlags: safeNodeOptions(process.env.NODE_OPTIONS), preloadActive: true,
     exposeGc: typeof globalThis.gc === 'function',
     poolLimit: process.env.DB_POOL_CONNECTION_LIMIT || null, poolTimeoutS: process.env.DB_POOL_TIMEOUT_SECONDS || null,
@@ -57,6 +60,6 @@ if (/index\.ts$/.test(process.argv[1] ?? '') || process.argv.includes('src/index
     line({ kind: 'sample', t, at: Date.now(), ...proc, eventLoop, timeouts: { ...timeouts }, mcp: seam ? reduceTransportState(seam()) : 'not sampled' });
     const why = shouldAbort({ rss: proc.rss, elapsedMs: t });
     if (why) { line({ kind: 'abort', why, t }); process.exit(3); }
-  }, Number(process.env.DIAG_SAMPLE_MS ?? 1000));
+  }, sampleMs);
   timer.unref();
 }
