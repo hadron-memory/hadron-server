@@ -38,14 +38,17 @@ preserve_samples() {
   return 0
 }
 
-# finish_samples <dest> <connections>: the success path. Mandatory copy, then the pg_stat_activity control line.
+# finish_samples <dest> <connections> <bound...>: the success path. Mandatory copy, then the pg_stat_activity control line.
 finish_samples() {
-  local dest=$1 conns=$2 expected=${3:?expected sample end required} complete token attempt
+  # Validator arguments after <connections>: a fixed <minSampleAt>, or --until <nowMs> (#2624, #4609 BLIND F1: the
+  # cutoff then comes from the interval recorded in the very copy that is validated and published).
+  local dest=$1 conns=$2 complete token attempt
+  : "${3:?a freshness bound is required}"
   complete=$(umask 077; mktemp "$(dirname -- "$dest")/.diagnose-finish-XXXXXXXX") || return 5
   # A live append can race cat. Retry bounded fresh copies; never discard a fragment
   # that could be an abort record, and require positive validator execution evidence.
   for attempt in 1 2 3; do
-    if copy_samples "$complete" && token=$(node "$(dirname -- "${BASH_SOURCE[0]}")/validate-samples.mjs" "$complete" "$expected") && [ "$token" = validated ]; then
+    if copy_samples "$complete" && token=$(node "$(dirname -- "${BASH_SOURCE[0]}")/validate-samples.mjs" "$complete" "${@:3}") && [ "$token" = validated ]; then
       if printf '{"kind":"pg_activity","connectionsAfterLoad":%s}\n' "$conns" >> "$complete" && mv -fT -- "$complete" "$dest"; then return 0; fi
       break
     fi

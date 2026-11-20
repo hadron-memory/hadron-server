@@ -206,6 +206,10 @@ ALTER TABLE task_session_end_requests ADD CONSTRAINT chk_task_session_end_reques
 -- that outcome's own set) and repairAttempt (a whole number from 1), all three or none, and only on a dark report. An
 -- ABSENT key makes its test SQL NULL, which a CHECK passes, so the three-key branch is wrapped in COALESCE(..., false).
 -- #4259 — the failure set gains SETUP_FAILED and VERIFY_FAILED.
+-- #4558 (hadron-cli#2677) — the reason set gains no_screen (Orca gives no rendered screen for the
+-- terminal) and multiple_terminals (more than one agent terminal bound to the worker). Both ride locked, as
+-- unrecognized does: the stored status is unchanged and no terminal-status event follows (that event is not
+-- built, cor:agt:050:11 slice S1c). Mirrors migration 20261120200000_worker_terminal_new_reasons.
 ALTER TABLE workers DROP CONSTRAINT IF EXISTS chk_workers_terminal_shape;
 ALTER TABLE workers ADD CONSTRAINT chk_workers_terminal_shape CHECK (
   terminal IS NULL OR (
@@ -220,7 +224,7 @@ ALTER TABLE workers ADD CONSTRAINT chk_workers_terminal_shape CHECK (
     COALESCE((terminal ->> 'status') IN ('busy', 'idle', 'locked', 'dark'), false) AND
     COALESCE((terminal ->> 'prompt') IN ('empty', 'not_empty', 'menu', 'unknown'), false) AND
     (CASE WHEN (terminal ->> 'status') IN ('locked', 'dark')
-          THEN COALESCE((terminal ->> 'reason') IN ('model_at_capacity', 'token_budget_exhausted', 'rate_limited', 'guardrail_triggered', 'menu_or_question', 'shed_staged_not_relaunched', 'unrecognized', 'no_turn_for_due_ticker', 'no_terminal', 'bare_shell', 'no_agent'), false)
+          THEN COALESCE((terminal ->> 'reason') IN ('model_at_capacity', 'token_budget_exhausted', 'rate_limited', 'guardrail_triggered', 'menu_or_question', 'shed_staged_not_relaunched', 'unrecognized', 'no_turn_for_due_ticker', 'no_terminal', 'bare_shell', 'no_agent', 'no_screen', 'multiple_terminals'), false)
           ELSE jsonb_typeof(terminal -> 'reason') = 'null' END) AND
     jsonb_typeof(terminal -> 'lastTurnAt') IN ('string', 'null') AND
     jsonb_typeof(terminal -> 'checkedAt') = 'string' AND
