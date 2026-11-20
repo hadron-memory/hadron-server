@@ -33,7 +33,7 @@ async function setup(): Promise<Fixture> {
 async function create(fx: Fixture, name: string, memoryClass: 'knowledge' | 'group', visibility?: string) {
   return (await resolvers.Mutation.createMemory(
     {},
-    { orgId: fx.orgId, name, memoryClass, ...(visibility ? { visibility } : {}) },
+    { orgRef: fx.orgId, name, memoryClass, ...(visibility ? { visibility } : {}) },
     fx.ctx,
   )) as { id: string };
 }
@@ -58,7 +58,7 @@ describe('#2573 updateMemory class/visibility guard', () => {
   it('refuses visibility=GROUP on a knowledge-class memory and leaves the row unchanged', async () => {
     const m = await create(fx, 'k1', 'knowledge', 'ORGANIZATION');
     const err = await refusal(
-      resolvers.Mutation.updateMemory({}, { id: m.id, visibility: 'GROUP' }, fx.ctx),
+      resolvers.Mutation.updateMemory({}, { ref: m.id, visibility: 'GROUP' }, fx.ctx),
     );
     expect(err.extensions?.code).toBe('INVALID_GROUP_MEMORY_VISIBILITY');
     const row = await db.memory.findUniqueOrThrow({ where: { id: m.id } });
@@ -68,7 +68,7 @@ describe('#2573 updateMemory class/visibility guard', () => {
   it('refuses a non-GROUP visibility on a group-class memory and leaves the row unchanged', async () => {
     const m = await create(fx, 'g1', 'group');
     const err = await refusal(
-      resolvers.Mutation.updateMemory({}, { id: m.id, visibility: 'ORGANIZATION' }, fx.ctx),
+      resolvers.Mutation.updateMemory({}, { ref: m.id, visibility: 'ORGANIZATION' }, fx.ctx),
     );
     expect(err.extensions?.code).toBe('INVALID_GROUP_MEMORY_VISIBILITY');
     const row = await db.memory.findUniqueOrThrow({ where: { id: m.id } });
@@ -80,7 +80,7 @@ describe('#2573 updateMemory class/visibility guard', () => {
     await refusal(
       resolvers.Mutation.updateMemory(
         {},
-        { id: m.id, visibility: 'GROUP', shortDescription: 'changed' },
+        { ref: m.id, visibility: 'GROUP', shortDescription: 'changed' },
         fx.ctx,
       ),
     );
@@ -92,7 +92,7 @@ describe('#2573 updateMemory class/visibility guard', () => {
     const m = await create(fx, 'k3', 'knowledge', 'ORGANIZATION');
     const out = (await resolvers.Mutation.updateMemory(
       {},
-      { id: m.id, visibility: 'PUBLIC' },
+      { ref: m.id, visibility: 'PUBLIC' },
       fx.ctx,
     )) as { visibility: string };
     expect(out.visibility).toBe('PUBLIC');
@@ -102,7 +102,7 @@ describe('#2573 updateMemory class/visibility guard', () => {
     const m = await create(fx, 'g2', 'group');
     const out = (await resolvers.Mutation.updateMemory(
       {},
-      { id: m.id, visibility: 'GROUP', shortDescription: 'ok' },
+      { ref: m.id, visibility: 'GROUP', shortDescription: 'ok' },
       fx.ctx,
     )) as { visibility: string };
     expect(out.visibility).toBe('GROUP');

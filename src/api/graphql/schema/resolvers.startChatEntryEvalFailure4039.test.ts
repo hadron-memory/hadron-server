@@ -29,7 +29,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'org-4039e', urn: 'org-4039e' } });
   admin = await db.user.create({ data: { githubId: 40399, githubUsername: 'u4039e', roles: ['ADMIN'] as never } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  const created = await M.createAgent({}, { orgId: org.id, name: 'eval-agent', visibility: 'ORGANIZATION' }, ctx());
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'eval-agent', visibility: 'ORGANIZATION' }, ctx());
   agentId = created.id;
   const rows = [
     { loc: 'conversations', data: null },
@@ -47,7 +47,7 @@ beforeEach(async () => {
 describe('#4039 an evaluator failure refuses the start', () => {
   it('TYPE_MISMATCH: refused with the type_mismatch messageId; the scan does not skip to the next conversation; no value, URN or edge id in the detail', async () => {
     const before = { memories: await db.memory.count(), nodes: await db.node.count() };
-    const err = await M.startChat({}, { agentId }, ctx()).then(() => null, (e: any) => e);
+    const err = await M.startChat({}, { agentRef: agentId }, ctx()).then(() => null, (e: any) => e);
     expect(err?.extensions).toMatchObject({
       code: 'ENTRY_CONDITION_FAILED', reason: 'TYPE_MISMATCH', messageId: 'chat-start.error.type_mismatch',
       detail: { conversation: 'a', field: 'memory.age', operator: '<' },

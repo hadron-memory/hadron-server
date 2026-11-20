@@ -76,7 +76,7 @@ beforeEach(async () => {
   const other = await db.organization.create({ data: { id: generateId(), name: 'Other Org', urn: 'wa-other.example' } });
   writer = await db.user.create({ data: { githubId: 204201, githubUsername: 'wa-writer', handle: 'wa-writer', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: writer.id, role: 'ADMIN' } });
-  const m = await M.createMemory(null, { orgId: org.id, name: 'wa' }, as());
+  const m = await M.createMemory(null, { orgRef: org.id, name: 'wa' }, as());
   memoryId = m.id; memoryUrn = m.urn;
   const fm = await db.memory.create({
     data: { name: 'Foreign', urn: 'wa-other.example:foreign', organizationId: other.id, class: 'knowledge', visibility: 'ORGANIZATION' },

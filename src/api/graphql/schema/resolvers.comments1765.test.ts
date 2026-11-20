@@ -58,7 +58,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
     { organizationId: org.id, userId: writer.id, role: 'CONTRIBUTOR' },
   ] });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'discussion' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'discussion' }, as());
 });
 
 const live = (id: string) => db.node.findUniqueOrThrow({ where: { id } });

@@ -100,7 +100,7 @@ beforeEach(async () => {
   const mkMem = async (name: string, memoryClass?: 'personal') => {
     const created = (await resolvers.Mutation.createMemory(
       {},
-      { orgId: org.id, name, ...(memoryClass ? { memoryClass } : {}) },
+      { orgRef: org.id, name, ...(memoryClass ? { memoryClass } : {}) },
       ctx,
     )) as { id: string };
     return db.memory.findUniqueOrThrow({
@@ -221,7 +221,7 @@ describe('#1063 — the run bundle honours a per-target memory-read gate', () =>
     });
     const revocable = (await resolvers.Mutation.createMemory(
       {},
-      { orgId: org2.id, name: `Revocable-${generateId()}` },
+      { orgRef: org2.id, name: `Revocable-${generateId()}` },
       { db, roles: ['ADMIN'], userId: fx.ownerId } as Context,
     )) as { id: string };
     const dep = await mkNode(revocable.id, 'docs:revocable', 'Revocable dep', 'EXTRA-SECRET');

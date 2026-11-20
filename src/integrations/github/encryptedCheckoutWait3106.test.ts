@@ -28,7 +28,7 @@ const key = generateDataKey();
 const ORIGINAL = 'original repository bytes';
 const originalLock = locks.withMirrorCheckoutLock;
 const ctx = (): Context => ({ db, userId: ownerId, roles: ['READER'] });
-const encrypt = () => resolvers.Mutation.encryptMemory({}, { memoryId, dataKey: key.raw.toString('base64') }, ctx());
+const encrypt = () => resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey: key.raw.toString('base64') }, ctx());
 const refs = (): MirrorObligationRef[] => [{ nodeId, kind: 'WRITE' }, { nodeId, kind: 'REMOVE', removeLoc: 'old' }];
 const mirror = (mutate: Parameters<typeof withMirrorCheckout>[1] = vi.fn(() => {})) => withMirrorCheckout({ memoryId, commitSubject: '3106 probe', logPrefix: '[3106]', obligations: refs() }, mutate);
 const flag = async () => (await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).isEncrypted;

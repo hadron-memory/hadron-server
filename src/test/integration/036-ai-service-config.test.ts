@@ -973,7 +973,7 @@ describe('legacy surface shims (US3)', () => {
   it('updateAgentAIConfig upserts the default registry row; agentAIConfig returns it decrypted', async () => {
     await resolvers.Mutation.updateAgentAIConfig(
       {},
-      { agentId: agent.id, provider: 'anthropic', model: 'claude-opus-4-6', apiKey: 'sk-legacy' },
+      { agentRef: agent.id, provider: 'anthropic', model: 'claude-opus-4-6', apiKey: 'sk-legacy' },
       ctxFor(admin.id),
     );
     const row = await db.aiServiceConfig.findFirstOrThrow({
@@ -984,7 +984,7 @@ describe('legacy surface shims (US3)', () => {
     // Update without key keeps the stored key (legacy semantics).
     await resolvers.Mutation.updateAgentAIConfig(
       {},
-      { agentId: agent.id, provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+      { agentRef: agent.id, provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
       ctxFor(admin.id),
     );
     const cfg = await resolvers.Query.agentAIConfig({}, { agentRef: agent.id }, ctxFor(admin.id));
@@ -1000,10 +1000,10 @@ describe('legacy surface shims (US3)', () => {
   it('clearAgentAIConfig deletes the default registry row', async () => {
     await resolvers.Mutation.updateAgentAIConfig(
       {},
-      { agentId: agent.id, provider: 'anthropic', model: 'm', apiKey: 'sk' },
+      { agentRef: agent.id, provider: 'anthropic', model: 'm', apiKey: 'sk' },
       ctxFor(admin.id),
     );
-    await resolvers.Mutation.clearAgentAIConfig({}, { agentId: agent.id }, ctxFor(admin.id));
+    await resolvers.Mutation.clearAgentAIConfig({}, { agentRef: agent.id }, ctxFor(admin.id));
     expect(
       await db.aiServiceConfig.findFirst({ where: { agentId: agent.id, name: 'default' } }),
     ).toBeNull();
@@ -1029,7 +1029,7 @@ describe('legacy surface shims (US3)', () => {
   it('App-overrides-Agent precedence holds end-to-end through resolveAIConfig', async () => {
     await resolvers.Mutation.updateAgentAIConfig(
       {},
-      { agentId: agent.id, provider: 'openai', model: 'gpt-4o', apiKey: 'sk-agent-default' },
+      { agentRef: agent.id, provider: 'openai', model: 'gpt-4o', apiKey: 'sk-agent-default' },
       ctxFor(admin.id),
     );
     await resolvers.Mutation.createAiServiceConfig(
@@ -1170,10 +1170,10 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     const legacy = await createConfig({ agentId: agent.id }, 'default', { provider: 'openai' });
     await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { apiStyle: 'CHAT_COMPLETIONS' } });
     // Same provider: the style survives the legacy write.
-    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai', model: 'gpt-x' }, ctxFor(admin.id));
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentRef: agent.id, provider: 'openai', model: 'gpt-x' }, ctxFor(admin.id));
     expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } })).apiStyle).toBe('CHAT_COMPLETIONS');
     // A provider with one protocol: the stranded style is cleared.
-    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'anthropic', model: 'claude-x' }, ctxFor(admin.id));
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentRef: agent.id, provider: 'anthropic', model: 'claude-x' }, ctxFor(admin.id));
     const row = await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } });
     expect([row.provider, row.apiStyle]).toEqual(['anthropic', null]);
     // …and the modern surface can edit it again without tripping the pair check.
@@ -1183,9 +1183,9 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
   it('a legacy provider change clears the endpoint too: the new key never goes to the old host (#1380 review)', async () => {
     const legacy = await createConfig({ agentId: agent.id }, 'default', { provider: 'openai' });
     await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { endpoint: 'https://api.openai.com/v1' } });
-    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai', model: 'gpt-y' }, ctxFor(admin.id));
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentRef: agent.id, provider: 'openai', model: 'gpt-y' }, ctxFor(admin.id));
     expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } })).endpoint).toBe('https://api.openai.com/v1');
-    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'anthropic', model: 'claude-x', apiKey: 'sk-new' }, ctxFor(admin.id));
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentRef: agent.id, provider: 'anthropic', model: 'claude-x', apiKey: 'sk-new' }, ctxFor(admin.id));
     expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } })).endpoint).toBeNull();
 
     const appCfg = await createConfig({ appId: app.id }, 'default', { provider: 'openai' });
@@ -1198,7 +1198,7 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     const legacy = await createConfig({ agentId: agent.id }, 'default', { provider: 'openai' });
     await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { apiStyle: 'RESPONSES' } });
     // glm supports apiStyle, but RESPONSES was chosen for OpenAI; Z.ai serves chat.
-    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'glm', model: 'GLM-5.3', apiKey: 'k' }, ctxFor(admin.id));
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentRef: agent.id, provider: 'glm', model: 'GLM-5.3', apiKey: 'k' }, ctxFor(admin.id));
     const row = await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } });
     expect([row.provider, row.apiStyle]).toEqual(['glm', null]);
   });
@@ -1252,7 +1252,7 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     const other = await mk({ name: 'switch' });
     expect(await code(resolvers.Mutation.updateAiServiceConfig({}, { id: other.id, provider: 'openai-compatible' }, ctxFor(admin.id)))).toBe('AiConfigValidationError');
     // The legacy surfaces cannot set an endpoint, so they cannot create one.
-    expect(await code(resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai-compatible', model: 'x', apiKey: 'k' }, ctxFor(admin.id)))).toBe('AiConfigValidationError');
+    expect(await code(resolvers.Mutation.updateAgentAIConfig({}, { agentRef: agent.id, provider: 'openai-compatible', model: 'x', apiKey: 'k' }, ctxFor(admin.id)))).toBe('AiConfigValidationError');
     expect(await code(resolvers.Mutation.updateApp({}, { ref: app.id, aiProvider: 'openai-compatible', aiModel: 'x', aiApiKey: 'k' } as never, ctxFor(admin.id)))).toBe('AiConfigValidationError');
     expect(await db.aiServiceConfig.count({ where: { provider: 'openai-compatible', endpoint: null } })).toBe(0);
     // A key is required too: with none stored, an SDK would reach for the
@@ -1337,7 +1337,7 @@ describe('write-time invariants hold against a concurrent edit (#1389 review)', 
       ctxFor(admin.id),
     );
     const err = await race(c.id, { provider: 'openai', endpoint: null }, () =>
-      resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai-compatible', model: 'm2', apiKey: 'k-2' }, ctxFor(admin.id)),
+      resolvers.Mutation.updateAgentAIConfig({}, { agentRef: agent.id, provider: 'openai-compatible', model: 'm2', apiKey: 'k-2' }, ctxFor(admin.id)),
     );
     expect(codeOf(err)).toBe('AiConfigValidationError');
     expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ provider: 'openai', endpoint: null });
@@ -1438,7 +1438,7 @@ describe('the legacy writers clear a stale endpoint/style against the LOCKED row
       ctxFor(admin.id),
     );
     await holdAndSwitch(c.id, () =>
-      resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai', model: 'gpt-2', apiKey: 'k-2' }, ctxFor(admin.id)),
+      resolvers.Mutation.updateAgentAIConfig({}, { agentRef: agent.id, provider: 'openai', model: 'gpt-2', apiKey: 'k-2' }, ctxFor(admin.id)),
     );
     expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ provider: 'openai', endpoint: null, apiStyle: null });
   });

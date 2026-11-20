@@ -73,28 +73,22 @@ export async function provisionSignIns(db: PrismaClient): Promise<SignInEvidence
     // dropped or overridden switch fails loudly instead of silently seeding through the OFF branch.
     const requested = process.env.PASSKEY_SIGNING_ENABLED === 'true' && process.env.PASSKEY_REGISTRATION_ENABLED === 'true';
     assert.equal(registrationOn, requested, `stack asked for registration=${requested} but /capabilities says ${registrationOn}`);
-    // The Location may be relative (the passkey hand-off is), so resolve it against the base.
+    // The Location may be relative, so resolve it against the base.
     const location = new URL(verified.headers.get('location')!, base);
     const fresh = await db.user.findUniqueOrThrow({ where: { email: 'fresh-user@e2e.test' } });
-    if (registrationOn) {
-      // cor:aut:030:02: following an email link never signs anyone in on its own. Pin the rule, do not work around it:
-      // a hand-off to the passkey page, no login code, no session cookie. The account exists but holds nothing.
-      assert.equal(location.pathname, '/auth/passkey/sign-in');
-      assert.equal(location.searchParams.get('code'), null);
-      assert.equal(verified.headers.getSetCookie().some(c => c.startsWith('hadron_token=')), false);
-      evidence['fresh-user'] = { path: 'email-verify-passkey-handoff-no-session', isNew: true };
-    } else {
-      const code = location.searchParams.get('code');
-      assert(code);
-      const redeemed = await fetch(`${base}/auth/session`, { method: 'POST',
-        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, clientState }) });
-      assert.equal(redeemed.status, 200);
-      const session = await redeemed.json() as { token: string; isNew: boolean };
-      assert.equal(session.isNew, true);
-      const identity = await graphqlIdentity(base, session.token);
-      assert.equal(identity.id, fresh.id);
-      evidence['fresh-user'] = { path: 'email-verify-and-handoff', isNew: true };
-    }
+    // #4339: sign-in never depends on a passkey, so the same completion contract holds with the registration switch
+    // ON and OFF: a handoff code, redeemed by the browser that asked for it, and the real identity. No passkey step.
+    assert.notEqual(location.pathname, '/auth/passkey/sign-in');
+    const code = location.searchParams.get('code');
+    assert(code);
+    const redeemed = await fetch(`${base}/auth/session`, { method: 'POST',
+      headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, clientState }) });
+    assert.equal(redeemed.status, 200);
+    const session = await redeemed.json() as { token: string; isNew: boolean };
+    assert.equal(session.isNew, true);
+    const identity = await graphqlIdentity(base, session.token);
+    assert.equal(identity.id, fresh.id);
+    evidence['fresh-user'] = { path: 'email-verify-and-handoff', isNew: true };
     assert.equal(await db.orgMember.count({ where: { userId: fresh.id } }), 0);
     assert.equal(await db.memory.count({ where: { OR: [{ userId: fresh.id }, { ownerUserId: fresh.id }, { createdBy: fresh.id }] } }), 0);
 

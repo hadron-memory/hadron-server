@@ -1,6 +1,6 @@
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from './comments/index.js';
-import { DECISION_LOG_ROLE, isDecisionFamilyRole } from './decisions/index.js';
+import { QUESTION_LOG_ROLE, isQuestionFamilyRole } from './questions/index.js';
 import { computeApprovalHash, type ApprovalHashFields } from './approvalHash.js';
 import type { EncryptionKey } from './crypto.js';
 import { decryptNodeFieldsWithKey } from './nodeCrypto.js';
@@ -132,8 +132,8 @@ export class NodeApprovalRefusal extends Error {
       | 'NODE_IS_PLACEHOLDER'
       | 'REVISION_MISMATCH'
       | 'COMMENT_NOT_APPROVABLE'
-      | 'DECISION_NOT_APPROVABLE'
-      | 'DECISION_LOG_NOT_APPROVABLE'
+      | 'QUESTION_NOT_APPROVABLE'
+      | 'QUESTION_LOG_NOT_APPROVABLE'
       | BootPromptApprovalRefusalCode,
     message: string,
     readonly details: Record<string, unknown> = {},
@@ -204,15 +204,15 @@ export async function approveNodeInTransaction(
   });
   if (!locked) throw new NodeApprovalRefusal('NODE_NOT_FOUND', 'Node not found');
   const { updatedAt, nodeType, role, ...node } = locked;
-  // #1641 §6.1a — a log holds settings, not a decision, and is never approved
-  // (Baloo P3-4). A decision is approved only by one of its deciders, through
+  // #1641 §6.1a — a log holds settings, not a question, and is never approved
+  // (Baloo P3-4). A question is approved only by one of its deciders, through
   // the per-node predicate that lands with answering (slice S2); until then no
-  // path approves one, so a memory writer cannot pre-stamp a decision.
-  if (role === DECISION_LOG_ROLE) {
-    throw new NodeApprovalRefusal('DECISION_LOG_NOT_APPROVABLE', 'A decision log holds settings, not a decision; it is never approved.');
+  // path approves one, so a memory writer cannot pre-stamp a question.
+  if (role === QUESTION_LOG_ROLE) {
+    throw new NodeApprovalRefusal('QUESTION_LOG_NOT_APPROVABLE', 'A question log holds settings, not a question; it is never approved.');
   }
-  if (isDecisionFamilyRole(role)) {
-    throw new NodeApprovalRefusal('DECISION_NOT_APPROVABLE', 'A decision is approved only by one of its deciders, which is not available yet.');
+  if (isQuestionFamilyRole(role)) {
+    throw new NodeApprovalRefusal('QUESTION_NOT_APPROVABLE', 'A question is approved only by one of its deciders, which is not available yet.');
   }
   // #1607 (cor:dmo:110:06) — a comment is never approved. Refused before the
   // revision check, so the answer does not depend on which revision was named.

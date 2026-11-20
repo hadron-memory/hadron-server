@@ -21,7 +21,6 @@ import type { AddressInfo } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
@@ -36,6 +35,7 @@ import { ensureChannelWithRoot } from '../lib/channels.js';
 import { readAgentServedBootPrompt } from '../api/graphql/schema/resolvers.bootPromptPointer.js';
 import { runAuthContext } from '../lib/auth/runPrincipal.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
+import { createServerOnCleanDb } from '../test/startServerFixture.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -66,7 +66,7 @@ let sessionId: string;
 const tokens: Record<'admin' | 'outsider' | 'member' | 'appKey' | 'otherAppKey' | 'signIn', string> = {} as never;
 
 beforeAll(async () => {
-  http = createHttpServer(await createServer());
+  http = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>((r) => http.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
 });

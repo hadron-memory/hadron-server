@@ -12,7 +12,8 @@
  *   pnpm vitest run src/mcp/server.sharedToolShapes2260.test.ts
  * Regenerate the golden (only when a tool's wire surface is meant to change) with UPDATE_TOOL_GOLDEN=1.
  * Pinned from 92ff99df; #2249 amended exactly three entries (hadron_task_create / _assign / _reassign), whose text states the
- * closeSessionWhenDone default.
+ * closeSessionWhenDone default. #863 amended exactly two (hadron_run_action / hadron_run_task), whose text states what
+ * the render returns since it is the prompt runTask executes.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';

@@ -80,7 +80,7 @@ describe('#1578 git failure credential containment', () => {
     const logged: unknown[][] = [];
     const log = vi.spyOn(console, 'error').mockImplementation((...args) => { logged.push(args); });
     try {
-      const failed = await graphql('mutation($id: ID!) { syncMemory(id: $id) { id } }');
+      const failed = await graphql('mutation($id: ID!) { syncMemory(ref: $id) { id } }');
       const row = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
       const read = await graphql('query($id: ID!) { memory(ref: $id) { syncError } }');
 

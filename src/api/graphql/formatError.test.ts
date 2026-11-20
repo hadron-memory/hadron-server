@@ -19,6 +19,7 @@ import {
   AppNotFoundError,
   AppRunNotFoundError,
   EdgeNotFoundError,
+  InvalidChunkConfigError,
   MemoryNotFoundError,
   NodeNotFoundError,
   NodeRevisionNotFoundError,
@@ -28,8 +29,10 @@ import {
   UserNotFoundError,
   WorkerNotFoundError,
 } from '../../lib/entityRef/errors.js';
+import { SessionExpiredError } from '../../lib/nodeCrypto.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
 import { SetAssetEnabledError } from '../../controller/operations/setAgentAssetUploadEnabled.js';
+import { AUTH_STORE_BUSY_MESSAGE, AuthStoreBusyError } from '../../lib/authStoreBusy.js';
 
 /** What Apollo hands `formatError` for a thrown (non-GraphQLError) error. */
 function wrap(original: Error): { formatted: GraphQLFormattedError; error: GraphQLError } {
@@ -89,6 +92,44 @@ describe('AssetUploadError → extensions.code (#918)', () => {
   it('replaces the default INTERNAL_SERVER_ERROR rather than sitting beside it', () => {
     const out = format(new AssetUploadError('SCAN_PENDING', 'nope'));
     expect(out.extensions?.code).not.toBe('INTERNAL_SERVER_ERROR');
+  });
+});
+
+describe('AuthStoreBusyError → AUTH_STORE_BUSY (#4471)', () => {
+  const p2024 = () =>
+    new Prisma.PrismaClientKnownRequestError('Timed out fetching a new connection from the pool.', {
+      code: 'P2024',
+      clientVersion: '6.19.2',
+    });
+
+  it('thrown straight from the auth middleware: the typed extensions survive the boundary', () => {
+    const typed = new AuthStoreBusyError(p2024(), 'POOL_WAIT');
+    const out = formatGraphQLError({ message: typed.message, extensions: { code: 'AUTH_STORE_BUSY' } }, typed);
+    expect(out.extensions?.code).toBe('AUTH_STORE_BUSY');
+    expect(out.extensions?.retryable).toBe(true);
+    expect(out.extensions?.reason).toBe('POOL_WAIT');
+    expect(out.message).toBe(AUTH_STORE_BUSY_MESSAGE);
+  });
+
+  it('Apollo-genericized (the context-failure wrap): the mapping restores the typed code and strips the prefix', () => {
+    const typed = new AuthStoreBusyError(p2024(), 'POOL_WAIT');
+    // Apollo's actual wrapper for a context-builder throw: its own GraphQLError — the
+    // prefixed message, the default code, the thrown error on .originalError. Built with
+    // wrap()'s shape plus the real prefix (the live round trip is pinned in
+    // authStoreBusyContext4471.test.ts; this unit case isolates the mapping).
+    const error = new GraphQLError(`Context creation failed: ${typed.message}`, { originalError: typed });
+    const out = formatGraphQLError(
+      { message: error.message, extensions: { code: 'INTERNAL_SERVER_ERROR' } },
+      error,
+    );
+    expect(out.extensions?.code).toBe('AUTH_STORE_BUSY');
+    expect(out.extensions?.retryable).toBe(true);
+    expect(out.extensions?.reason).toBe('POOL_WAIT');
+    // The domain prose, not Apollo's decoration of it — the prefix never reaches the wire.
+    expect(out.message).toBe(AUTH_STORE_BUSY_MESSAGE);
+    expect(out.message).not.toMatch(/Context creation failed/i);
+    // The driver error never rides the wire — not the code, not the prose.
+    expect(JSON.stringify(out)).not.toMatch(/P2024|Timed out fetching/i);
   });
 });
 
@@ -226,6 +267,68 @@ describe('EntityNotFoundError → its own code on the wire (#1174)', () => {
     for (const [, err] of FAMILY) expect(isExpectedClientError(err)).toBe(true);
     // And a genuine fault is still reported.
     expect(isExpectedClientError(new Error('boom'))).toBe(false);
+  });
+});
+
+
+describe('#3136 — the swept refusals reach extensions.code', () => {
+  it('SessionExpiredError → SESSION_EXPIRED with memoryId, message prefix intact for the internal catchers', () => {
+    // The re-typing catchers in resolvers.comments/teamChat/teamRole match on
+    // message.startsWith('SESSION_EXPIRED'), so the class mapping must not
+    // reword the prefix — and the wire shape (code + memoryId) is what those
+    // hand-wrapped sites already deliver, now from every path.
+    const err = new SessionExpiredError('mem_1');
+    expect(err.message.startsWith('SESSION_EXPIRED')).toBe(true);
+    const out = format(err);
+    expect(out.extensions?.code).toBe('SESSION_EXPIRED');
+    expect(out.extensions?.memoryId).toBe('mem_1');
+    expect(out.message.startsWith('SESSION_EXPIRED')).toBe(true);
+  });
+
+  it('InvalidChunkConfigError → INVALID_CHUNK_CONFIG with the reason', () => {
+    // updateMemory throws this raw; the doc once promised a code the mapping
+    // never delivered. Nothing ever reached the wire, so the convention's
+    // SCREAMING_SNAKE (the message prefix) applies rather than the class name.
+    const out = format(new InvalidChunkConfigError('chunkTokens must be > 0 (got 0).'));
+    expect(out.extensions?.code).toBe('INVALID_CHUNK_CONFIG');
+    expect(out.extensions?.reason).toBe('chunkTokens must be > 0 (got 0).');
+    expect(out.message).toBe('INVALID_CHUNK_CONFIG: chunkTokens must be > 0 (got 0).');
+  });
+
+  // #3136 review (local seat F1) removed the AmbiguousUserRefError wire pin along
+  // with the mapping: no GraphQL path throws the class raw (every caller answers
+  // BAD_USER_INPUT or conceals), so there is no wire code to pin. The
+  // disposition is recorded on the class doc in entityRef/errors.ts.
+
+  it('both are silenced in Sentry — caller-state refusals, not faults', () => {
+    // SESSION_EXPIRED: the hand-wrapped sites were already skipped by the
+    // plugin's non-INTERNAL_SERVER_ERROR branch; this keeps parity. The other
+    // one is a caller-input refusal in the EntityNotFoundError sense.
+    expect(isExpectedClientError(new SessionExpiredError('mem_1'))).toBe(true);
+    expect(isExpectedClientError(new InvalidChunkConfigError('x'))).toBe(true);
+  });
+
+  it('a site-constructed typed GraphQLError passes through the boundary untouched', () => {
+    // Pass-through pin for the shape channel.createChannel now throws (the
+    // createChannel wire leg itself is the integration test): a GraphQLError
+    // that already carries extensions.code survives formatGraphQLError
+    // byte-identical. A central InvalidLocError mapping is deliberately NOT
+    // added — every GraphQL validateLoc site wraps it typed at the site with
+    // the same shape (code/loc/segment), so a central entry would be dead code
+    // today. (The wrap does echo the offending loc; #4106's no-echo question
+    // for this shape is separate from this PR and unchanged by it.)
+    const siteWrapped = new GraphQLError('Invalid loc "a:b!".', {
+      extensions: { code: 'InvalidLocError', loc: 'a:b!', segment: 'b!' },
+    });
+    const out = formatGraphQLError(
+      {
+        message: siteWrapped.message,
+        extensions: { code: 'InvalidLocError', loc: 'a:b!', segment: 'b!' },
+      },
+      siteWrapped,
+    );
+    expect(out.extensions?.code).toBe('InvalidLocError');
+    expect(out.extensions?.loc).toBe('a:b!');
   });
 });
 

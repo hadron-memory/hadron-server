@@ -103,8 +103,8 @@ function expectOneRefusedAsLastOwner(outcomes: PromiseSettledResult<unknown>[]):
 describe('#1544 — the last-owner guard holds under concurrency', () => {
   it('two concurrent removeOrgMember calls on the two owners: one wins, one is refused', async () => {
     const outcomes = await race(
-      () => M.removeOrgMember(null, { orgId: org.id, userId: ownerA.id }, ctx(admin.id)),
-      () => M.removeOrgMember(null, { orgId: org.id, userId: ownerB.id }, ctx(admin.id)),
+      () => M.removeOrgMember(null, { orgRef: org.id, userRef: ownerA.id }, ctx(admin.id)),
+      () => M.removeOrgMember(null, { orgRef: org.id, userRef: ownerB.id }, ctx(admin.id)),
     );
     expectOneRefusedAsLastOwner(outcomes);
     expect(await liveOwners()).toBe(1);
@@ -112,8 +112,8 @@ describe('#1544 — the last-owner guard holds under concurrency', () => {
 
   it('two concurrent updateOrgMember demotions of the two owners: one wins, one is refused', async () => {
     const outcomes = await race(
-      () => M.updateOrgMember(null, { orgId: org.id, userId: ownerA.id, role: 'ADMIN' }, ctx(admin.id)),
-      () => M.updateOrgMember(null, { orgId: org.id, userId: ownerB.id, role: 'ADMIN' }, ctx(admin.id)),
+      () => M.updateOrgMember(null, { orgRef: org.id, userRef: ownerA.id, role: 'ADMIN' }, ctx(admin.id)),
+      () => M.updateOrgMember(null, { orgRef: org.id, userRef: ownerB.id, role: 'ADMIN' }, ctx(admin.id)),
     );
     expectOneRefusedAsLastOwner(outcomes);
     expect(await liveOwners()).toBe(1);
@@ -121,8 +121,8 @@ describe('#1544 — the last-owner guard holds under concurrency', () => {
 
   it('a removal racing a demotion: one wins, one is refused', async () => {
     const outcomes = await race(
-      () => M.removeOrgMember(null, { orgId: org.id, userId: ownerA.id }, ctx(admin.id)),
-      () => M.updateOrgMember(null, { orgId: org.id, userId: ownerB.id, role: 'ADMIN' }, ctx(admin.id)),
+      () => M.removeOrgMember(null, { orgRef: org.id, userRef: ownerA.id }, ctx(admin.id)),
+      () => M.updateOrgMember(null, { orgRef: org.id, userRef: ownerB.id, role: 'ADMIN' }, ctx(admin.id)),
     );
     expectOneRefusedAsLastOwner(outcomes);
     expect(await liveOwners()).toBe(1);
@@ -130,7 +130,7 @@ describe('#1544 — the last-owner guard holds under concurrency', () => {
 
   it('a removal racing the other owner deleting their account (deleteUser, also SERIALIZABLE)', async () => {
     const outcomes = await race(
-      () => M.removeOrgMember(null, { orgId: org.id, userId: ownerA.id }, ctx(admin.id)),
+      () => M.removeOrgMember(null, { orgRef: org.id, userRef: ownerA.id }, ctx(admin.id)),
       () => deleteUserAccount(db, { targetUserId: ownerB.id, actorUserId: ownerB.id }),
     );
     const refused = outcomes.filter((o): o is PromiseRejectedResult => o.status === 'rejected');
@@ -143,12 +143,12 @@ describe('#1544 — the last-owner guard holds under concurrency', () => {
   });
 
   it('CONTROL: sequential calls still remove a non-last owner and refuse the last one', async () => {
-    expect(await M.removeOrgMember(null, { orgId: org.id, userId: ownerA.id }, ctx(admin.id))).toBe(true);
+    expect(await M.removeOrgMember(null, { orgRef: org.id, userRef: ownerA.id }, ctx(admin.id))).toBe(true);
     await expect(
-      M.removeOrgMember(null, { orgId: org.id, userId: ownerB.id }, ctx(admin.id)),
+      M.removeOrgMember(null, { orgRef: org.id, userRef: ownerB.id }, ctx(admin.id)),
     ).rejects.toThrow('Cannot remove the last owner of an organization');
     await expect(
-      M.updateOrgMember(null, { orgId: org.id, userId: ownerB.id, role: 'ADMIN' }, ctx(admin.id)),
+      M.updateOrgMember(null, { orgRef: org.id, userRef: ownerB.id, role: 'ADMIN' }, ctx(admin.id)),
     ).rejects.toThrow('Cannot demote the last owner of an organization');
     expect(await liveOwners()).toBe(1);
   });

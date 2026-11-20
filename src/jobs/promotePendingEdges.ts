@@ -15,6 +15,7 @@ import {
   promotePendingEdgeForTarget,
   reconcileAllPendingEdgeCounts,
 } from '../lib/pendingEdgePromotion.js';
+import { isProcessEntry } from './isProcessEntry.js';
 
 export interface PendingEdgePromotionSweepOutcome {
   promoted: number;
@@ -123,7 +124,7 @@ export function startPendingEdgePromotionSweepLoop(
   };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isProcessEntry(import.meta.url)) {
   runPendingEdgePromotionSweep()
     .then((outcome) => {
       console.log(JSON.stringify({ ...outcome, ranAt: new Date().toISOString() }));

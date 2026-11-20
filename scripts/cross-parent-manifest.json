@@ -83,12 +83,12 @@
     "LintWarning": "value",
     "LintWarningPage": "envelope",
     "ApproveMemoryNodesResult": "envelope",
-    "DecisionOption": "value",
-    "DecisionRecommendation": "value",
-    "DecisionApprovalEvidence": "value",
-    "DecisionWithdrawal": "value",
-    "DecisionPage": "envelope",
-    "DecisionVerification": "value",
+    "QuestionOption": "value",
+    "QuestionRecommendation": "value",
+    "QuestionApprovalEvidence": "value",
+    "QuestionWithdrawal": "value",
+    "QuestionPage": "envelope",
+    "QuestionVerification": "value",
     "CommentThreadPage": "envelope",
     "CommentSummary": "value",
     "RevisionApproval": "value",
@@ -115,7 +115,7 @@
     "StartImpersonationResult": "envelope",
     "AppCreated": "value",
     "AppAIConfig": "value",
-    "PublicResourceRefPage": "envelope",
+    "MarketplaceResourcePage": "envelope",
     "PublicResourceRefsPage": "envelope",
     "MemoryTransferDependent": "value",
     "MemoryTransferBlocker": "value",
@@ -245,6 +245,7 @@
     "AgentTaskRequirements": "value",
     "AgentTaskResult": "envelope",
     "AgentTaskFinding": "value",
+    "AgentTaskRoleTaskRef": "value",
     "AgentTaskFindingDisposition": "value",
     "AgentTaskFindingDispositionPage": "envelope",
     "AgentTaskFindingPage": "envelope",
@@ -287,6 +288,8 @@
     "AgentTeamAlarmSchedule": "value",
     "HostRegistrationWorker": "value",
     "HostOperationPage": "envelope",
+    "HostSetup": "envelope",
+    "HostRegistrationRefusal": "value",
     "ContextResetStep": "value",
     "WorkerTerminal": "value",
     "WorkerTerminalRef": "value",
@@ -295,6 +298,9 @@
     "ModelGroup": "value",
     "EffectiveModelGroup": "value",
     "WorkerCheckStatus": "value",
+    "WorkerRunSettings": "value",
+    "AgentTaskRunSettings": "value",
+    "AgentTaskAppliedRunSettings": "value",
     "TeamRosterTaskSummary": "value",
     "RegisterRoleCandidatePage": "envelope",
     "ActionRegisterIndexPage": "envelope",
@@ -315,7 +321,12 @@
     "ReviewSlotReadiness": "value",
     "GrantSignatureStatus": "value",
     "TeamUtilization": "value",
-    "WorkerUtilization": "value"
+    "WorkerUtilization": "value",
+    "WebPollsPage": "envelope",
+    "SigningRequestsPage": "envelope",
+    "WorkerDesiredState": "value",
+    "HostDesiredState": "envelope",
+    "HostSweepRunLine": "value"
   },
   "entries": {
     "ActionTicketsPage.items": {
@@ -885,152 +896,160 @@
       "resolver": "src/api/graphql/schema/resolvers.dashboard.ts::dashboardWidgetPresetsPage",
       "target": "DashboardWidgetPreset"
     },
-    "Decision.askedBy": {
+    "Question.answer": {
+      "class": "parent-implies-child",
+      "audience": "a Question is produced only after the question log's memory read gate (resolveGovernedNode); the standing answer is part of the question node's data",
+      "resolver": "src/api/graphql/schema/resolvers.questions.ts::questionFieldResolvers",
+      "maskingTest": "src/api/graphql/schema/resolvers.questions1641.test.ts::question by code or citation, questions sorted and filtered after evaluation, awaitingMe; unreadable is null",
+      "target": "QuestionAnswer"
+    },
+    "Question.answers": {
+      "class": "parent-implies-child",
+      "audience": "a Question is produced only after the question log's memory read gate (resolveGovernedNode); every answer-list entry is part of the question node's data",
+      "resolver": "src/api/graphql/schema/resolvers.questions.ts::questionFieldResolvers",
+      "maskingTest": "src/api/graphql/schema/resolvers.questions1641.test.ts::question by code or citation, questions sorted and filtered after evaluation, awaitingMe; unreadable is null",
+      "target": "QuestionAnswer"
+    },
+    "Question.askedBy": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
-      "target": "DecisionActor"
+      "target": "QuestionActor"
     },
-    "Decision.blocks": {
+    "Question.blocks": {
       "class": "closed-projection",
-      "projection": "DecisionRef",
-      "why": "DecisionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
-      "target": "DecisionRef"
+      "projection": "QuestionRef",
+      "why": "QuestionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
+      "target": "QuestionRef"
     },
-    "Decision.deciders": {
+    "Question.deciders": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "Decision.evidence": {
-      "class": "parent-implies-child",
-      "audience": "the node's latest approval record, shown to every reader of the node; a Decision is only produced for readers of the log memory",
-      "spec": "cor:dmo:120:10",
-      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::decisionFieldResolvers",
-      "maskingTest": "src/api/graphql/schema/resolvers.decisions1641.test.ts::decision by code or citation, decisions sorted and filtered after evaluation, awaitingMe; unreadable is null",
-      "target": "DecisionEvidence"
-    },
-    "Decision.followUps": {
-      "class": "closed-projection",
-      "projection": "DecisionRef",
-      "why": "DecisionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
-      "target": "DecisionRef"
-    },
-    "Decision.identityMerges": {
+    "Question.assignee": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
-      "target": "DecisionIdentityMerge"
+      "target": "CommentActorRef"
     },
-    "Decision.node": {
+    "Question.effectiveAssignee": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "Question.evidence": {
+      "class": "parent-implies-child",
+      "audience": "the node's latest approval record, shown to every reader of the node; a Question is only produced for readers of the log memory",
+      "spec": "cor:dmo:120:10",
+      "resolver": "src/api/graphql/schema/resolvers.questions.ts::questionFieldResolvers",
+      "maskingTest": "src/api/graphql/schema/resolvers.questions1641.test.ts::question by code or citation, questions sorted and filtered after evaluation, awaitingMe; unreadable is null",
+      "target": "QuestionEvidence"
+    },
+    "Question.identityMerges": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "QuestionIdentityMerge"
+    },
+    "Question.node": {
       "target": "Node",
       "class": "parent-implies-child",
-      "audience": "A Decision is a view of its backing node; decision and decisions are gated on that node's memory.",
-      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::decisionFieldResolvers"
+      "audience": "A Question is a view of its backing node; question and questions are gated on that node's memory.",
+      "resolver": "src/api/graphql/schema/resolvers.questions.ts::questionFieldResolvers"
     },
-    "Decision.parts": {
-      "class": "parent-implies-child",
-      "audience": "parts are the decision node's own data; every path that yields a Decision first passes the log memory's read or write gate",
-      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::decisionFieldResolvers",
-      "maskingTest": "src/api/graphql/schema/resolvers.decisions1641.test.ts::decision by code or citation, decisions sorted and filtered after evaluation, awaitingMe; unreadable is null",
-      "target": "DecisionPart"
-    },
-    "Decision.sources": {
+    "Question.specsMustChange": {
       "class": "closed-projection",
-      "projection": "DecisionRef",
-      "why": "DecisionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
-      "target": "DecisionRef"
+      "projection": "QuestionRef",
+      "why": "QuestionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
+      "target": "QuestionRef"
     },
-    "DecisionActor.app": {
-      "class": "open",
-      "evidence": "private follow-up (hadron-internal#30); details withheld",
-      "target": "CommentActorRef"
-    },
-    "DecisionActor.user": {
-      "class": "open",
-      "evidence": "private follow-up (hadron-internal#30); details withheld",
-      "target": "CommentActorRef"
-    },
-    "DecisionActor.worker": {
-      "class": "open",
-      "evidence": "private follow-up (hadron-internal#30); details withheld",
-      "target": "CommentActorRef"
-    },
-    "DecisionAnswer.source": {
+    "Question.specsTouched": {
       "class": "closed-projection",
-      "projection": "DecisionRef",
-      "why": "DecisionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
-      "target": "DecisionRef"
+      "projection": "QuestionRef",
+      "why": "QuestionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
+      "target": "QuestionRef"
     },
-    "DecisionApprovalEvidence.by": {
+    "Question.sources": {
+      "class": "closed-projection",
+      "projection": "QuestionRef",
+      "why": "QuestionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
+      "target": "QuestionRef"
+    },
+    "QuestionActor.app": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "DecisionIdentityMerge.from": {
+    "QuestionActor.user": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "DecisionIdentityMerge.to": {
+    "QuestionActor.worker": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "DecisionLog.defaultDeciders": {
+    "QuestionAnswer.by": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "DecisionLog.eligibleDeciders": {
+    "QuestionApprovalEvidence.by": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "DecisionLog.identityMerges": {
+    "QuestionIdentityMerge.from": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
-      "target": "DecisionIdentityMerge"
+      "target": "CommentActorRef"
     },
-    "DecisionLog.purges": {
+    "QuestionIdentityMerge.to": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "QuestionLog.defaultDeciders": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "QuestionLog.eligibleDeciders": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "QuestionLog.identityMerges": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "QuestionIdentityMerge"
+    },
+    "QuestionLog.purges": {
       "class": "parent-implies-child",
-      "audience": "purge records live in the log node's data; a DecisionLog is produced only through loadLogView (resolveGovernedNode) or the create/set-deciders mutations",
-      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::decisionFieldResolvers",
-      "maskingTest": "src/api/graphql/schema/resolvers.decisions1641.test.ts::decision by code or citation, decisions sorted and filtered after evaluation, awaitingMe; unreadable is null",
-      "target": "DecisionPurge"
+      "audience": "purge records live in the log node's data; a QuestionLog is produced only through loadLogView (resolveGovernedNode) or the create/set-deciders mutations",
+      "resolver": "src/api/graphql/schema/resolvers.questions.ts::questionFieldResolvers",
+      "maskingTest": "src/api/graphql/schema/resolvers.questions1641.test.ts::question by code or citation, questions sorted and filtered after evaluation, awaitingMe; unreadable is null",
+      "target": "QuestionPurge"
     },
-    "DecisionPage.items": {
+    "QuestionPage.items": {
       "class": "parent-implies-child",
-      "audience": "callers who can read the log's memory (resolveGovernedNode requires isMemoryReadableCached); decisions are nodes of that memory",
-      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::resolveGovernedNode",
-      "target": "Decision"
+      "audience": "callers who can read the log's memory (resolveGovernedNode requires isMemoryReadableCached); questions are nodes of that memory",
+      "resolver": "src/api/graphql/schema/resolvers.questions.ts::resolveGovernedNode",
+      "target": "Question"
     },
-    "DecisionPart.answer": {
-      "class": "parent-implies-child",
-      "audience": "a Decision is produced only after the decision log's memory read gate (resolveGovernedNode); answers are part of that node's data",
-      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::answerOut",
-      "maskingTest": "src/api/graphql/schema/resolvers.decisions1641.test.ts::decision by code or citation, decisions sorted and filtered after evaluation, awaitingMe; unreadable is null",
-      "target": "DecisionAnswer"
-    },
-    "DecisionPart.answerHistory": {
-      "class": "parent-implies-child",
-      "audience": "same as DecisionPart.answer: the history is part of the decision node's data, reachable only through a Decision that passed the log memory's read gate",
-      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::answerOut",
-      "maskingTest": "src/api/graphql/schema/resolvers.decisions1641.test.ts::decision by code or citation, decisions sorted and filtered after evaluation, awaitingMe; unreadable is null",
-      "target": "DecisionAnswer"
-    },
-    "DecisionPurge.by": {
+    "QuestionPurge.by": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
-    "DecisionRecommendation.by": {
+    "QuestionRecommendation.by": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
-      "target": "DecisionActor"
+      "target": "QuestionActor"
     },
-    "DecisionWithdrawal.by": {
+    "QuestionWithdrawal.by": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
-      "target": "DecisionActor"
+      "target": "QuestionActor"
     },
     "DeliveryBatch.worker": {
       "class": "parent-implies-child",
@@ -1162,6 +1181,18 @@
       "audience": "whoever reads the App's tasks and events (withReadableApp); a key that ever held host:operate is refused; rows limited to the App",
       "resolver": "src/api/graphql/schema/resolvers.hostOperation.ts::withReadableApp",
       "target": "HostOperation"
+    },
+    "HostSetup.assignments": {
+      "class": "parent-implies-child",
+      "audience": "hostSetup gated by withReadableApp: App participants plus the App's own key; a host key reads only its own host's rows, a revoked host scope reads nothing (#4222)",
+      "resolver": "src/api/graphql/schema/resolvers.hostAssignment.ts::withReadableApp",
+      "target": "HostWorkerAssignment"
+    },
+    "HostWorkerAssignment.worker": {
+      "class": "parent-implies-child",
+      "audience": "hostSetup gated by withReadableApp; assignHostWorker needs resolveParticipatedApp and actorManagesApp; rows limited to the App, a worker of the same App only (DB trigger) (#4222)",
+      "resolver": "src/api/graphql/schema/resolvers.hostAssignment.ts::withReadableApp",
+      "target": "Worker"
     },
     "HostRegistrationWorker.worker": {
       "class": "parent-implies-child",
@@ -1639,6 +1670,12 @@
       "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
       "target": "AccountUsageWindowProjection"
     },
+    "ReviewQualityReport.rows": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:050:21, :23; #4281): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A row holds a model family and model name as the App's own verdict events recorded them, and counts of the App's own reviews and findings: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "ReviewQualityRow"
+    },
     "AccountUsageProjection.whatIf": {
       "class": "parent-implies-child",
       "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
@@ -1704,7 +1741,7 @@
       "why": "PublicResourceRef(id,name,urn,description; public-readable rows only)",
       "target": "PublicResourceRef"
     },
-    "PublicResourceRefPage.items": {
+    "MarketplaceResourcePage.items": {
       "class": "closed-projection",
       "projection": "PublicResourceRef",
       "why": "PublicResourceRef(id,name,urn,description; public-readable rows only)",
@@ -1841,6 +1878,18 @@
       "audience": "callers passing canSeeSecretOwner: the user themselves (not impersonating), org members, or for an App secret a member of the App or whoever manages it (a person acting as themselves, never an App key, an impersonated session or a run); metadata only, never the value",
       "resolver": "src/api/graphql/schema/resolvers.secret.ts::canSeeSecretOwner",
       "target": "Secret"
+    },
+    "Secret.readClients": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.secret.ts::readClients",
+      "gate": "readClientPage",
+      "target": "SecretReadClientsPage"
+    },
+    "SecretReadClientsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "readClientPage filters current issuers or App managers before paging, refuses App keys, runs, impersonation and deleted scopes, and exposes full client ids only to current issuers or holders; metadata only",
+      "resolver": "src/lib/secrets/readClientList.ts::readClientPage",
+      "target": "SecretReadClient"
     },
     "Secret.versions": {
       "class": "parent-implies-child",
@@ -2236,6 +2285,18 @@
       "spec": "cor:agt:050:21",
       "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
       "target": "AgentTaskExternalIdChange"
+    },
+    "WebPollsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "Same org ADMIN and tool.web_poll policy authorization as the existing webPolls list, with org-bound redacted rows.",
+      "resolver": "src/api/graphql/schema/resolvers.webPoll.ts::webPollsPage",
+      "target": "WebPoll"
+    },
+    "SigningRequestsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "Only signing requests of the already readable Node; no authorization widening.",
+      "resolver": "src/api/graphql/schema/resolvers.signing.ts::signingRequestsPage",
+      "target": "SigningRequest"
     }
   }
 }

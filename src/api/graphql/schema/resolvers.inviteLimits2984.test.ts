@@ -27,7 +27,7 @@ async function ask(c: Context, query: string, variables: Record<string, unknown>
 }
 
 const INVITE_USER = `mutation($e: Int, $m: Int) { inviteUser(expiresInDays: $e, maxActivations: $m) { id expiresAt maxActivations } }`;
-const INVITE_ORG = `mutation($o: ID!, $e: Int, $m: Int) { createUserInvitation(orgId: $o, memberRole: READER, expiresInDays: $e, maxActivations: $m) { id expiresAt maxActivations } }`;
+const INVITE_ORG = `mutation($o: ID!, $e: Int, $m: Int) { createUserInvitation(orgRef: $o, memberRole: READER, expiresInDays: $e, maxActivations: $m) { id expiresAt maxActivations } }`;
 
 let adminId: string;
 let readerId: string;

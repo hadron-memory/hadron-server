@@ -75,7 +75,7 @@ beforeEach(async () => {
   removed = await user('rem', 3);
   platformAdmin = await user('pad', 4, ['ADMIN']);
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: orgAdmin.id, role: 'ADMIN' } });
-  const created = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, { db, userId: orgAdmin.id, roles: ['READER'] });
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, { db, userId: orgAdmin.id, roles: ['READER'] });
   teamAgent = { id: created.id };
   // The worklog's first write bootstraps through the App's Team Agent, inferred from a roles: branch (#947).
   await db.node.create({ data: { id: generateId(), memoryId: created.systemMemoryId, loc: 'roles:server-engineer', name: 'server-engineer', content: 'You are {{worker.name}}.' } });

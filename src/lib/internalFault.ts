@@ -8,6 +8,7 @@
 import { randomUUID } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import { respondSessionSuperseded } from './sessionSuperseded.js';
+import { authStoreBusyMessage, isAuthStoreBusyError } from './authStoreBusy.js';
 import { currentRequestId } from './requestContext.js';
 
 export const INTERNAL_ERROR_CODE = 'INTERNAL_SERVER_ERROR';
@@ -63,11 +64,54 @@ export function respondOAuthServerError(res: Response, description: string, erro
 }
 
 /**
+ * #4471: the plain-HTTP render of the typed store-busy fault (the `/graphql/schema`, `/reload`,
+ * `/sessions/:id/outcome` routes see it via `next(err)`). Like respondSessionSuperseded above, a
+ * typed auth-path fault is not genericized by the #1789 envelope — the caller must see
+ * AUTH_STORE_BUSY to back off and resend the same key, not read the generic 500 as "bad key".
+ * Unlike the envelope it answers 503 retryable — and (BLIND P2-2) it is no logging blind spot
+ * either: the fault is logged under the request id with the driver error on `.cause` reaching
+ * only that log, exactly as respondInternalFault does, so "countable evidence" holds on this
+ * surface too.
+ *
+ * #4504, on the log/headersSent order (Bradley's "could log twice"): the log fires BEFORE the
+ * headersSent check on purpose — a request whose headers already went out is precisely the one
+ * where the log is the ONLY evidence left, so it must not be skipped. The double-log cannot
+ * happen in this wiring: when headersSent makes this return false, internalFaultErrorHandler's
+ * own headersSent guard delegates via next(err) instead of falling through to
+ * respondInternalFault. That coupling is load-bearing — reorder those checks and the fault logs
+ * twice. Pinned in internalFaultHttp1789.test.ts (exactly one internal_fault line on the
+ * headersSent path).
+ */
+export function respondAuthStoreBusy(res: Response, error: unknown): boolean {
+  if (!isAuthStoreBusyError(error)) return false;
+  const requestId = typeof res.locals?.requestId === 'string' ? res.locals.requestId : faultRequestId();
+  logInternalFault('http', 'auth-store-busy', requestId, error);
+  if (res.headersSent) return false; // Delegate to Express's final handler, as #3818 does.
+  // The prose is looked up from `reason` AT THE BOUNDARY (#4519, BLIND P3-4), not read off
+  // `error.message`: no path exists from any message — the driver's text, a tampered `.message`,
+  // a subclass's own prose — to the wire. `reason` is one of the two by construction
+  // (isAuthStoreBusyError proved the class), and the lookup is total, so a stranger value still
+  // answers fixed prose — no redundant re-validation of what the type already states (BLIND P3).
+  res.status(503).json({
+    error: authStoreBusyMessage(error.extensions.reason),
+    code: 'AUTH_STORE_BUSY',
+    retryable: true,
+    reason: error.extensions.reason,
+    requestId,
+  });
+  return true;
+}
+
+/**
  * Express's final error handler. A client-class status (body-parser's 400/413, ...) is a framework refusal and keeps
  * today's handling until it is ruled on; only a fault is genericized.
  */
 export function internalFaultErrorHandler(err: unknown, _req: Request, res: Response, next: NextFunction): void {
   if (respondSessionSuperseded(res, err)) return;
+  // #4471: a typed retryable store-busy fault from the auth middleware is not genericized — the
+  // caller must see AUTH_STORE_BUSY to back off and resend the same key, not read the generic
+  // envelope as "bad key". The same carve-out shape respondSessionSuperseded established.
+  if (respondAuthStoreBusy(res, err)) return;
   const e = err as { status?: unknown; statusCode?: unknown } | null;
   const status = e?.status ?? e?.statusCode;
   if (res.headersSent || (typeof status === 'number' && status >= 400 && status < 500)) {

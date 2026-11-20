@@ -61,7 +61,7 @@ import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent, chatAuthorityAnchors, chatCarrierApps } from './agentChatAccess.js';
 import { withAuthorizedMemoryTx, withAuthorizedTx } from './authorizedTx.js';
 import { activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
-import { chatHomeAgentIfLicensed, refuseUnreachableChatHomeAgent, resolveChatHomeAgent } from '../../../lib/chatHomeAgent.js';
+import { chatHomeAgentIfReachable, refuseUnreachableChatHomeAgent, resolveChatHomeAgent } from '../../../lib/chatHomeAgent.js';
 import { canManageAgentSystemMemory } from '../../../lib/auth/managedSystemMemory.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
 import { GraphQLError } from 'graphql';
@@ -78,7 +78,7 @@ import {
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
 import { decideChatRouting, applyChatRoutingDecision, getGoalStack } from '../../../lib/chatRouting.js';
 import { reportPartialTurn, routingRefusedReport } from '../../../lib/chatPartialTurn.js';
-import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
+import { recordNodeUsage, recordNodeWrite, type UsageNodeRef } from '../../../lib/usageRecorder.js';
 import {
   type Context,
   requireRole,
@@ -91,7 +91,7 @@ import {
 } from './resolvers.helpers.js';
 import { normalizeChatAiConfigChoice } from '../../../lib/chatbotAiConfig.js';
 import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
-import { refuseDecisionFamily } from '../../../lib/decisions/index.js';
+import { refuseQuestionFamily } from '../../../lib/questions/index.js';
 import { assertBatchMutable } from '../../../lib/bulkMutationGate.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
@@ -207,7 +207,7 @@ export const chatMutations = {
     startChat: async (
       _: unknown,
       {
-        agentId,
+        agentRef,
         userId,
         conversationName,
         scope,
@@ -215,7 +215,7 @@ export const chatMutations = {
         llmModel,
         aiConfigChoice,
       }: {
-        agentId: string;
+        agentRef: string;
         userId?: string;
         conversationName?: string;
         // Spec 017: chosen at chat creation, immutable afterward.
@@ -242,8 +242,10 @@ export const chatMutations = {
       // scope to `private`; the resolver default is a defensive belt.
       const chatScope: 'private' | 'shared' = scope ?? 'private';
 
-      // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
+      // #4142 (S6): userId stays a raw PK — a compare-and-set against the
+      // session's user, not an entity the caller names.
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
 
       // #1581: the caller must be able to reach this Agent BEFORE anything is
       // read from it (its system prompt is returned below) or provisioned for
@@ -264,12 +266,12 @@ export const chatMutations = {
             throw bootPromptRefusal('BOOT_PROMPT_INSTALL_LICENSE_INACTIVE', { surface: 'chat', agentName: '' });
           }
         }
-        throw new AgentNotFoundError(agentId);
+        throw new AgentNotFoundError(agentRef);
       }
       // A session-bound App key chats only with its session's Agent: the chat
       // is hosted in the session's memory (Ada #6070).
       if (pureAppKey && !(await appKeySessionMatchesAgent(ctx, resolvedAgentId))) {
-        throw new AgentNotFoundError(agentId);
+        throw new AgentNotFoundError(agentRef);
       }
 
       // Resolve effective user id. The portal calls with userId omitted and
@@ -578,11 +580,11 @@ export const chatMutations = {
       }
       if (!target.targetMemoryId && !target.ensureTarget) throw new Error('No target memory available for this chat');
       if (target.appId) {
-        if (!await chatHomeAgentIfLicensed(ctx.db, { appId: target.appId }, agent)) {
-          throw new AgentNotFoundError(agentId);
+        if (!await chatHomeAgentIfReachable(ctx.db, { appId: target.appId }, agent)) {
+          throw new AgentNotFoundError(agentRef);
         }
       } else if (!await canManageAgentSystemMemory(ctx.db, ctx, systemMemoryId)) {
-        throw new AgentNotFoundError(agentId);
+        throw new AgentNotFoundError(agentRef);
       }
 
       // #664/#752: the chat node and its messages parent live under the `chats`
@@ -641,12 +643,12 @@ export const chatMutations = {
               current.ownerUserId !== gateRow.ownerUserId ||
               !(await canChatWithAgent(txCtx, current, { carriers }))
             ) {
-              throw new AgentNotFoundError(agentId);
+              throw new AgentNotFoundError(agentRef);
             }
             // A home transfer or App-owner change must not admit from an unanchored snapshot.
             if (target.targetMemoryId) {
               const home = await txCtx.db.memory.findUnique({ where: { id: target.targetMemoryId }, select: { appId: true } });
-              if (!home || home.appId !== target.appId) throw new AgentNotFoundError(agentId);
+              if (!home || home.appId !== target.appId) throw new AgentNotFoundError(agentRef);
             }
             if (target.appId) {
               const app = await txCtx.db.app.findUnique({ where: { id: target.appId }, select: { organizationId: true, ownerUserId: true } });
@@ -657,28 +659,28 @@ export const chatMutations = {
             // preserve stale App participation after an anchor wait.
             if (target.sharedAppId && txCtx.userId) {
               const member = await txCtx.db.appMember.findUnique({ where: { appId_userId: { appId: target.sharedAppId, userId: txCtx.userId } } });
-              if (!member) throw new AgentNotFoundError(agentId);
+              if (!member) throw new AgentNotFoundError(agentRef);
             } else if (target.ensureTarget && target.appId && txCtx.userId) {
               const participation = await coldAppWhere(txCtx.db, txCtx);
               if (!participation || !await txCtx.db.app.findFirst({ where: { AND: [participation, { id: target.appId }] }, select: { id: true } })) {
-                throw new AgentNotFoundError(agentId);
+                throw new AgentNotFoundError(agentRef);
               }
             }
             // Re-judge the start route after waiting for authority anchors (#4046).
             if (target.appId
-              ? !await chatHomeAgentIfLicensed(txCtx.db, { appId: target.appId }, current)
+              ? !await chatHomeAgentIfReachable(txCtx.db, { appId: target.appId }, current)
               : !await canManageAgentSystemMemory(txCtx.db, txCtx, systemMemoryId)) {
-              throw new AgentNotFoundError(agentId);
+              throw new AgentNotFoundError(agentRef);
             }
             if (pureAppKey && !(await appKeySessionMatchesAgent(txCtx, resolvedAgentId))) {
-              throw new AgentNotFoundError(agentId);
+              throw new AgentNotFoundError(agentRef);
             }
             if (actingUserId != null && actingUserId !== ctx.userId && !(await appKeyMayActFor(txCtx, actingUserId))) {
               throw new UserNotFoundError(actingUserId);
             }
           }, async (tx, txCtx) => {
             const agent = await txCtx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId }, include: { memoryItems: { include: { memory: true } } } });
-            if (agent.systemMemoryId !== systemMemoryId) throw new AgentNotFoundError(agentId);
+            if (agent.systemMemoryId !== systemMemoryId) throw new AgentNotFoundError(agentRef);
             // #3957/#3960: validate the prospective App choice before reads or provisioning.
             const chatAppId = target.appId;
             const startAiConfigChoice = aiConfigChoice == null
@@ -837,7 +839,7 @@ export const chatMutations = {
             // #1835 intersects either filter with targetMemoryId, so bare refs stay
             // in the holding memory without weakening the chat's authority gate.
             const actualHome = await txCtx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } });
-            if (!actualHome || actualHome.appId !== chatAppId) throw new AgentNotFoundError(agentId);
+            if (!actualHome || actualHome.appId !== chatAppId) throw new AgentNotFoundError(agentRef);
             let systemMessage = promptContent;
             if (promptContent.includes('{{')) {
               const access =
@@ -1630,7 +1632,15 @@ export const chatMutations = {
           ? mergeTurnExtraction(stored, extracted, declaredMemoryWide, ctx.userId ?? null)
           : { ...(stored ?? {}), ...extracted };
       let extractionPersisted = false;
-      if (data && hasExtraction) recordNodeWrite(ctx.db, await inTx(async (tx) => {
+      // #4102 F3 — the extraction transaction's report contract: it resolves to a UsageNodeRef only
+      // after its write committed in this transaction (the update path or the create path below), or
+      // to null exactly when the fold changed nothing authored — nothing is written then, so an
+      // encrypted row is not re-encrypted and a stamp is not cleared. A refusal never resolves to
+      // null: it throws (AuthoringAttestationError → reportPartialTurn's #3514 partial-turn error),
+      // so `extractionPersisted` (ref !== null) means "a write committed", never "refused" — the
+      // distinction routingRefusedReport reports on a later refused leg, whose wire shape rides the
+      // Proposed partial-turn rule in cor:cht:020:01 (R1 on #4036) and is unchanged here.
+      if (data && hasExtraction) recordNodeWrite(ctx.db, await inTx(async (tx): Promise<UsageNodeRef | null> => {
         // #910: two members extract into the same memory from different chats,
         // under different chat locks. Serialize the read-modify-write on the
         // `data` loc so neither turn loses the other's bucket.
@@ -1699,6 +1709,7 @@ export const chatMutations = {
         }
       // #3514: the assistant message and counter are already committed above; a refused extraction says so.
       }).catch(reportPartialTurn).then(ref => {
+        // null is "no authored change, nothing written", never a refusal — a refusal throws above (#4102 F3).
         extractionPersisted = ref !== null;
         return ref;
       }), ctx);
@@ -1956,11 +1967,11 @@ export const chatMutations = {
           select: { id: true, loc: true, role: true, isRunnable: true },
         })).filter((n) => n.id === chatNode.id || n.loc === messages || n.loc.startsWith(`${messages}:`));
         const scope = rows.map((n) => n.id);
-        // #1641 — a chat root is never a decision or a log (chatLocFilter), but
+        // #1641 — a chat root is never a question or a log (chatLocFilter), but
         // the subtree it takes may hold a log beneath it; withdrawn, never
         // deleted. Checked before the general governed-kind gate below, which
         // also refuses it, so the caller gets the specific reason.
-        await refuseDecisionFamily(tx, scope, 'deleteChat');
+        await refuseQuestionFamily(tx, scope, 'deleteChat');
         await assertBatchMutable(tx, [chatNode.memoryId], rows, 'delete the chat holding');
         await assertNoMintedSpecRemoval(tx, chatNode.memoryId, scope, 'delete the chat holding');
         await tx.node.updateMany({

@@ -34,7 +34,7 @@ beforeEach(async () => {
     return u.id;
   };
   adminId = await mk('admin', 'ADMIN'); aliceId = await mk('alice', 'CONTRIBUTOR'); bobId = await mk('bob', 'CONTRIBUTOR');
-  const agent = await M.createAgent({}, { orgId, name: 'Rules agent', visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId: adminId });
+  const agent = await M.createAgent({}, { orgRef: orgId, name: 'Rules agent', visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId: adminId });
   agentId = agent.id; systemId = agent.systemMemoryId;
   const app = await db.app.create({ data: { name: 'Rules app', urn: `${org.urn}:app`, organizationId: org.id } });
   appId = app.id;
@@ -61,7 +61,7 @@ beforeEach(async () => {
   await serveEveryAgent(db);
 });
 
-const startShared = (userId: string) => M.startChat({}, { agentId, scope: 'shared', conversationName: 'intake' }, as(userId));
+const startShared = (userId: string) => M.startChat({}, { agentRef: agentId, scope: 'shared', conversationName: 'intake' }, as(userId));
 const complete = (ctx: Context, chatId: string, data?: Record<string, unknown>) =>
   M.processChatResponse({}, { chatId, toolResponse: { message: 'ok', goal_reached: true, ...(data ? { data } : {}), onTrack: true } }, ctx);
 const uninstall = () => db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
@@ -132,7 +132,7 @@ describe('#4038 App-key session memory', () => {
 
   it.each(['personal'] as const)('a chat in a %s session memory evaluates rules for a pure App key', async (cls) => {
     const { memory, keyCtx } = await sessionHome(cls);
-    const chat = await M.startChat({}, { agentId, conversationName: 'intake' }, keyCtx);
+    const chat = await M.startChat({}, { agentRef: agentId, conversationName: 'intake' }, keyCtx);
     expect((await db.node.findUnique({ where: { loc_memoryId: { loc: chat.chatId, memoryId: memory.id } } }))?.id).toBeTruthy();
     // A pure key has no person: `industry` is not memory-wide, so use an always-true view by dropping the condition.
     await db.edge.updateMany({ where: { memoryId: systemId, loc: { contains: 'route' } }, data: { condition: Prisma.DbNull } });
@@ -141,7 +141,7 @@ describe('#4038 App-key session memory', () => {
 
   it.each(['personal'] as const)('C1: after uninstall a %s session chat evaluates no rules and reads no definition, on send and response', async (cls) => {
     const { keyCtx } = await sessionHome(cls);
-    const chat = await M.startChat({}, { agentId, conversationName: 'intake' }, keyCtx);
+    const chat = await M.startChat({}, { agentRef: agentId, conversationName: 'intake' }, keyCtx);
     await db.edge.updateMany({ where: { memoryId: systemId, loc: { contains: 'route' } }, data: { condition: Prisma.DbNull } });
     await uninstall();
     const sent = await observeDefinitionReads(() => M.sendChatMessage({}, { chatId: chat.chatId, userMessage: 'after uninstall' }, as(aliceId)));

@@ -62,6 +62,7 @@ on:
       - 'scripts/cross-parent-*'
       - 'scripts/sdl-hash-descriptions-allowed.txt'
       - 'scripts/sdl-spec-citations-baseline.txt'
+      - 'scripts/sdl-spec-citations-snapshot.txt'
       - '.github/workflows/graphql-sdl-parse.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -74,9 +75,14 @@ on:
       - 'scripts/cross-parent-*'
       - 'scripts/sdl-hash-descriptions-allowed.txt'
       - 'scripts/sdl-spec-citations-baseline.txt'
+      - 'scripts/sdl-spec-citations-snapshot.txt'
       - '.github/workflows/graphql-sdl-parse.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   graphql-sdl-parse:

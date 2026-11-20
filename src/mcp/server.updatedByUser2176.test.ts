@@ -7,13 +7,13 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { mintUserApiKey } from '../middleware/auth.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../test/startServerFixture.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -31,11 +31,11 @@ let agent: { id: string };
 let sessionId: string;
 
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
-afterAll(async () => { await new Promise<void>((resolve) => server.close(() => resolve())); });
+afterAll(async () => { await closeServerIfStarted(server); });
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -45,7 +45,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: target.id, role: 'CONTRIBUTOR' } });
   const ctx: Context = { db, userId: user.id, roles: [] };
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'upd-user' }, ctx);
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'upd-user' }, ctx);
   agent = await db.agent.create({ data: { id: generateId(), urn: 'updbyuser.example:eng', name: 'eng', organizationId: org.id } });
   const app = await db.app.create({ data: { id: generateId(), name: 'Team', urn: 'updbyuser.example:team', organizationId: org.id } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });

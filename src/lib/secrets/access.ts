@@ -13,6 +13,7 @@ export async function loadLiveApp(ctx: Context, appId: string): Promise<AppSecre
     select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
   });
   if (!app || app.deletedAt || app.uninstalledAt) return null;
+  if (app.organizationId && !(await ctx.db.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } }))) return null;
   return app;
 }
 

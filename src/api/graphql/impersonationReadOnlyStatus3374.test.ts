@@ -3,11 +3,11 @@ import { readFileSync } from 'node:fs';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { signJwt } from '../../auth/jwt.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../test/startServerFixture.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -33,7 +33,7 @@ async function ask(query: string, bearer: string | undefined = token, operationN
 const counts = () => db.$queryRawUnsafe<Array<{ name: string; n: bigint }>>(countSql);
 
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   // The isolated worker owns this database. Count ALL base tables, including events/audit,
@@ -44,7 +44,7 @@ beforeAll(async () => {
     `SELECT '${tablename.replaceAll("'", "''")}'::text AS name, count(*)::bigint AS n FROM "${tablename.replaceAll('"', '""')}"`,
   ).join(' UNION ALL ') + ' ORDER BY name';
 });
-afterAll(async () => { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); });
+afterAll(async () => { await closeServerIfStarted(server); });
 
 beforeEach(async () => {
   await cleanDb(db);

@@ -1,3 +1,4 @@
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 /** #3449: App action contract, real database; the stream remains App-wide. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -8,9 +9,10 @@ import { pendingTaskWakes } from '../../../lib/agentTasks/taskWakes.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { resolvers, type Context } from './resolvers.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
-const M = resolvers.Mutation as any, Q = resolvers.Query as any;
+const M = resolvers.Mutation as any, Q = settledTeamEventQueries(resolvers.Query, db) as any;
 let userId: string, outsiderId: string, appId: string, foreignAppId: string;
 const ctx = (id = userId): Context => ({ db, userId: id, roles: ['READER'] });
 const record = (args: Record<string, unknown> = {}, c = ctx()) => M.recordAppAction({}, { appRef: appId, code: 'app.team.design.approved', ...args }, c);
@@ -96,7 +98,7 @@ describe('App-defined actions', () => {
 describe('App actions are passive', () => {
   it('keeps both assignment and child-finished wakes due after task-bound actions', async () => {
     const app = await db.app.findUniqueOrThrow({ where: { id: appId } });
-    const agent = await M.createAgent({}, { orgId: app.organizationId, name: 'Action worker' }, ctx());
+    const agent = await M.createAgent({}, { orgRef: app.organizationId, name: 'Action worker' }, ctx());
     const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: agent.id, name: 'Writer', slug: 'writer' } });
     const root = await M.createAgentTask({}, { input: { appRef: appId, title: 'Parent', owner: { worker: worker.id }, assignee: { worker: worker.id } } }, ctx());
     const actor = { workerId: worker.id, agentId: agent.id };
@@ -134,8 +136,8 @@ describe('register and App-wide access', () => {
 
   it('maps a worker through its own Agent and keeps the task loc when unresolved', async () => {
     const app = await db.app.findUniqueOrThrow({ where: { id: appId } });
-    const team = await M.createAgent({}, { orgId: app.organizationId, name: 'Team Agent' }, ctx());
-    const coder = await M.createAgent({}, { orgId: app.organizationId, name: 'Coder' }, ctx());
+    const team = await M.createAgent({}, { orgRef: app.organizationId, name: 'Team Agent' }, ctx());
+    const coder = await M.createAgent({}, { orgRef: app.organizationId, name: 'Coder' }, ctx());
     const teamRow = await db.agent.findUniqueOrThrow({ where: { id: team.id } });
     const coderRow = await db.agent.findUniqueOrThrow({ where: { id: coder.id } });
     await db.appAgent.create({ data: { appId, agentId: team.id } });
@@ -157,7 +159,7 @@ describe('register and App-wide access', () => {
     expect(mapped.taskUrn).toContain(':tasks:approve');
     const foreignOrg = await db.organization.create({ data: { id: generateId(), name: 'Foreign', urn: 'foreign-' + generateId().toLowerCase() } });
     await db.orgMember.create({ data: { organizationId: foreignOrg.id, userId: outsiderId, role: 'ADMIN' } });
-    const hidden = await M.createAgent({}, { orgId: foreignOrg.id, name: 'Hidden base' }, ctx(outsiderId));
+    const hidden = await M.createAgent({}, { orgRef: foreignOrg.id, name: 'Hidden base' }, ctx(outsiderId));
     await db.agent.update({ where: { id: coder.id }, data: { extendsAgentId: hidden.id } });
     const withheld = await asCoder(() => record());
     expect(withheld.action).toEqual({ code: 'app.team.design.approved', state: 'WITHHELD', taskLoc: null, taskUrn: null });

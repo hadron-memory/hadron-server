@@ -69,8 +69,8 @@ beforeEach(async () => {
     data: { id: generateId(), githubId: 66120, githubUsername: `bg-${t}`, roles: ['ADMIN'] },
   });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  srcMem = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `bg-src-${t}` }, ctx());
-  tgtMem = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `bg-tgt-${t}` }, ctx());
+  srcMem = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: `bg-src-${t}` }, ctx());
+  tgtMem = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: `bg-tgt-${t}` }, ctx());
 });
 
 describe('mergeMemories consults both gates (#1191)', () => {

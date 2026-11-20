@@ -61,13 +61,13 @@ async function graphql(query: string, variables: Record<string, unknown>) {
 
 const UPDATE = `
   mutation Update($id: ID!, $source: String) {
-    updateMemory(id: $id, source: $source) { id source }
+    updateMemory(ref: $id, source: $source) { id source }
   }
 `;
 
 const CREATE = `
   mutation Create($orgId: ID!, $name: String!, $source: String) {
-    createMemory(orgId: $orgId, name: $name, source: $source) { id source }
+    createMemory(orgRef: $orgId, name: $name, source: $source) { id source }
   }
 `;
 

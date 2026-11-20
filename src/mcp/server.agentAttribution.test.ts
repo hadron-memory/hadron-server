@@ -7,7 +7,6 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { serveEveryAgent } from '../test/servedBootPrompt.js';
@@ -15,6 +14,7 @@ import { generateId } from '../lib/id.js';
 import { mintUserApiKey } from '../middleware/auth.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { startWorkerSessionGql } from '../test/startWorkerSessionGql.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../test/startServerFixture.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -32,11 +32,11 @@ let userId: string;
 let appId: string;
 
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
-afterAll(async () => { await new Promise<void>((resolve) => server.close(() => resolve())); });
+afterAll(async () => { await closeServerIfStarted(server); });
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -45,7 +45,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
   userId = user.id;
   const ctx: Context = { db, userId: user.id, roles: [] };
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'attr-http' }, ctx);
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'attr-http' }, ctx);
   agent = await db.agent.create({ data: { id: generateId(), urn: 'attrhttp.example:server-engineer', name: 'server-engineer', organizationId: org.id } });
   const app = await db.app.create({ data: { id: generateId(), name: 'Team', urn: 'attrhttp.example:team', organizationId: org.id } });
   appId = app.id;

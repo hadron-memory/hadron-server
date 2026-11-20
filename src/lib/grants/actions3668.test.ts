@@ -17,7 +17,8 @@ import { PLATFORM_ACTIONS, upsertPlatformActions, type ActionDefinition } from '
 
 const act = (name: string, over: Partial<ActionDefinition> = {}): ActionDefinition => ({
   name, source: 'PLATFORM', parameters: [{ name: 'entryNode', type: 'node-ref', refusesWildcard: true }], tool: null,
-  enforcement: 'SERVER', issuerRule: 'TEST_ONLY', summaryTemplate: 'Create a thing in {app}', ...over,
+  // #3730: a REAL closed-set key — the upsert refuses anything else now, and these rows only exercise upsert mechanics.
+  enforcement: 'SERVER', issuerRule: 'APP_SCHEDULE_ADMIN', summaryTemplate: 'Create a thing in {app} at {entryNode}', ...over,
 });
 type Row = { name: string; xmin: string; updated_at: Date; summary_template: string };
 const rows = () => db.$queryRawUnsafe<Row[]>(`SELECT name, xmin::text AS xmin, updated_at, summary_template FROM actions WHERE name LIKE 'test.s1a.%' ORDER BY name`);
@@ -26,11 +27,11 @@ beforeEach(async () => { await cleanDb(db); await dropTestActions(); });
 afterAll(async () => { await dropTestActions(); });
 
 describe('the platform list', () => {
-  it('#3707 (S1b): the shipped list is exactly the four seeded actions, and a repeat of the upsert changes nothing (terms: seed3707.test.ts)', async () => {
-    expect(PLATFORM_ACTIONS.map((a) => a.name).sort()).toEqual(['bootprompt.compile.approve', 'bootprompt.source.edit', 'schedule.create', 'webhook.create']);
+  it('#3707 (S1b): the shipped list is exactly the five seeded actions, and a repeat of the upsert changes nothing (terms: seed3707.test.ts)', async () => {
+    expect(PLATFORM_ACTIONS.map((a) => a.name).sort()).toEqual(['bootprompt.compile.approve', 'bootprompt.source.edit', 'schedule.create', 'secret.reveal', 'webhook.create']);
     await upsertPlatformActions(db);
     const before = await db.$queryRawUnsafe<Array<{ n: number }>>(`SELECT count(*)::int AS n FROM actions`);
-    expect(await upsertPlatformActions(db)).toEqual({ inserted: 0, updated: 0, unchanged: 4 });
+    expect(await upsertPlatformActions(db)).toEqual({ inserted: 0, updated: 0, unchanged: 5 });
     expect(await db.$queryRawUnsafe(`SELECT count(*)::int AS n FROM actions`)).toEqual(before);
   });
 });
@@ -49,9 +50,9 @@ describe('upsertPlatformActions is idempotent and never deletes', () => {
     await upsertPlatformActions(db, [act('test.s1a.one'), act('test.s1a.two')]);
     const first = await rows();
     await new Promise((r) => setTimeout(r, 25));
-    expect(await upsertPlatformActions(db, [act('test.s1a.one', { summaryTemplate: 'Changed' }), act('test.s1a.two')])).toEqual({ inserted: 0, updated: 1, unchanged: 1 });
+    expect(await upsertPlatformActions(db, [act('test.s1a.one', { summaryTemplate: 'Changed {entryNode}' }), act('test.s1a.two')])).toEqual({ inserted: 0, updated: 1, unchanged: 1 });
     const after = await rows();
-    expect(after[0].summary_template).toBe('Changed');
+    expect(after[0].summary_template).toBe('Changed {entryNode}');
     expect(after[0].updated_at.getTime()).toBeGreaterThan(first[0].updated_at.getTime());
     expect(after[1]).toEqual(first[1]);
   });
@@ -65,6 +66,16 @@ describe('upsertPlatformActions is idempotent and never deletes', () => {
     await expect(upsertPlatformActions(db, [act('test.s1a.ok'), act('')])).rejects.toThrow(/action/i);
     await expect(upsertPlatformActions(db, [act('test.s1a.dup'), act('test.s1a.dup')])).rejects.toThrow(/duplicate/i);
     await expect(upsertPlatformActions(db, [act('test.s1a.bad', { enforcement: 'WISHFUL' as never })])).rejects.toThrow(/enforcement/i);
+    expect(await rows()).toEqual([]);
+  });
+  // #3730 item 1: the issuer-rule registry is CLOSED. A key that only LOOKS like one — an inherited property name such as
+  // 'toString'/'__proto__', or a typo — is refused at validation, before any write, instead of reaching the issuer door
+  // where a plain Record lookup would answer it with a "gate" that either never refuses or is not callable.
+  it('#3730: refuses an issuerRule outside the closed set before writing anything — including inherited property names', async () => {
+    for (const bad of ['toString', '__proto__', 'constructor', 'APP_SCHEDULE_ADMIX', '']) {
+      await expect(upsertPlatformActions(db, [act(`test.s1a.k${bad.length}`, { issuerRule: bad as never })]),
+        JSON.stringify(bad)).rejects.toThrow(/issuerRule/i);
+    }
     expect(await rows()).toEqual([]);
   });
 });
@@ -154,6 +165,6 @@ const BASELINE = [
   'TYPE AccessGrant', 'TYPE ActionRegisterIndexEntry', 'TYPE ActionRegisterIndexPage', 'TYPE ActionRegisterIndexState', 'TYPE ActionTicket', 'TYPE ActionTicketsPage',
   'TYPE AgentOrgGrant', 'TYPE AppGrant', 'TYPE AppGrantName', 'TYPE AppMemoryWriteGrant', 'TYPE AutomationReadGrant', 'TYPE AutomationTeamSnapshotGrant',
   'TYPE AutomationTeamSnapshotGrantPage', 'TYPE ConnectionGrant', 'TYPE ConnectionGrantsPage', 'TYPE CreateGrantInput', 'TYPE EffectiveActionPolicy', 'TYPE Grant', 'TYPE GrantAction', 'TYPE GrantActionParameter', 'TYPE GrantActionsPage', 'TYPE GrantAnnouncement',
-  'TYPE GrantCreditsInput', 'TYPE GrantHolderKind', 'TYPE GrantSignature', 'TYPE GrantSignatureState', 'TYPE GrantSignatureStatus', 'TYPE GrantSigningRequest', 'TYPE GrantSigningRequestState', 'TYPE GrantsPage', 'TYPE MintActionTicketsInput', 'TYPE PrProtocolAction', 'TYPE PrincipalGrant', 'TYPE PrincipalGrantsPage', 'TYPE RecordAppActionResult',
+  'TYPE GrantCreditsInput', 'TYPE GrantHolderKind', 'TYPE GrantSignature', 'TYPE GrantSignatureState', 'TYPE GrantSignatureStatus', 'TYPE GrantSigningRequest', 'TYPE GrantSigningRequestState', 'TYPE GrantState', 'TYPE GrantsPage', 'TYPE MintActionTicketsInput', 'TYPE PrProtocolAction', 'TYPE PrincipalGrant', 'TYPE PrincipalGrantsPage', 'TYPE RecordAppActionResult',
   'TYPE SkillExportAction', 'TYPE TickAction', 'TYPE TickActionState',
 ];

@@ -61,6 +61,15 @@ export class UserNotFoundError extends EntityNotFoundError {
  * coexist. Rather than resolve to an arbitrary account (a wrong-grantee hazard on
  * a share), the resolver rejects the ambiguous ref — the caller can disambiguate
  * with the exact-case email, the handle, or the id.
+ *
+ * NOT in `CLIENT_ERROR_MAPPINGS` (#3136 review, local seat F1): no GraphQL path
+ * throws it raw. Every `resolveUserRefOrEmail` caller already answers the same
+ * condition typed — `resolveRefArg` and `resolveGranteeId` as `BAD_USER_INPUT`,
+ * `workersHeldBy` as an empty page — and `resolveUserRef` (the
+ * effectiveAccess/cloneAgent path) never throws it. A central code would mint a
+ * permanent synonym of that existing answer (cor:agt:110:01) and, since
+ * `resolveUserRefOrEmail` reads the full user table for cross-org shares, an
+ * account-existence oracle no read gate covers (cor:api:140:02/:03).
  */
 export class AmbiguousUserRefError extends Error {
   constructor(public ref: string) {
@@ -118,6 +127,20 @@ export class WorkerNotFoundError extends EntityNotFoundError {
   constructor(ref: string) {
     super('WORKER_NOT_FOUND', ref);
     this.name = 'WorkerNotFoundError';
+  }
+}
+
+/**
+ * Surfaced by `resolveGrantRef` when the inbound reference (a Grant id or an
+ * `hrn:grant:<root>:<app-slug>:<grant-id>` URN, #3709) does not name a grant —
+ * or when the URN's App doesn't resolve (including through the rename alias
+ * map). Callers that conceal rather than refuse catch it (it is in
+ * `refNamesNothing`'s set via the {@link EntityNotFoundError} base).
+ */
+export class GrantNotFoundError extends EntityNotFoundError {
+  constructor(ref: string) {
+    super('GRANT_NOT_FOUND', ref);
+    this.name = 'GrantNotFoundError';
   }
 }
 
@@ -242,11 +265,14 @@ export class NodeAbstractTooLongError extends Error {
 /**
  * Surfaced by `hadron_get_node` when `contentScope` is outside the allowed
  * enum (`'content' | 'abstract' | 'all'`). Zod's `.enum()` produces the
- * validation error at the MCP boundary; this class exists for the
- * GraphQL surface and for any internal caller that re-validates.
+ * validation error at the MCP boundary; this class exists for any internal
+ * caller that re-validates.
  *
- * GraphQL `extensions.code: 'InvalidContentScopeError'` per constitution
- * S2.
+ * #3136 verified: NO GraphQL throw site exists (GraphQL's own enum coercion
+ * rejects an invalid `contentScope` before any resolver runs), so this class
+ * is NOT in `CLIENT_ERROR_MAPPINGS` and delivers no `extensions.code`; the
+ * MCP sites surface its message as `refusalResult` prose, per the MCP
+ * convention (error text, not codes).
  */
 export class InvalidContentScopeError extends Error {
   public readonly allowed = ['content', 'abstract', 'all'] as const;
@@ -309,7 +335,10 @@ export class EncryptedVectorIndexNotAcknowledgedError extends Error {
  * `chk_memory_chunk_tokens_positive` / `chk_memory_chunk_overlap_valid` are the
  * DB backstop; this class is the friendly GraphQL-boundary error.
  *
- * GraphQL `extensions.code: 'InvalidChunkConfigError'`.
+ * GraphQL `extensions.code: 'INVALID_CHUNK_CONFIG'` (with the `reason`), delivered by the
+ * class mapping in `api/graphql/formatError.ts` (#3136; the SCREAMING_SNAKE the message
+ * prefix always carried — the old doc's 'InvalidChunkConfigError' spelling never reached
+ * the wire, so the convention governs).
  */
 export class InvalidChunkConfigError extends Error {
   constructor(public readonly reason: string) {

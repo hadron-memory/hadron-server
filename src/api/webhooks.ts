@@ -26,6 +26,7 @@ import { generateId } from '../lib/id.js';
 import { mintAppRun, RunLaunchDeniedError, consumeActionTicket } from '../jobs/appRuns.js';
 import { assertUrlAllowed } from '../lib/webFetch.js';
 import { respondInternalFault } from '../lib/internalFault.js';
+import { bootPromptRefusalCode } from '../lib/bootPrompt/refusal.js';
 
 const HPT_DEFAULT_TTL = process.env.WEBHOOK_TOKEN_TTL ?? '90d';
 const CALLBACK_TIMEOUT_MS = 10_000;
@@ -157,6 +158,14 @@ async function handleWebhook(db: PrismaClient, req: Request, res: Response): Pro
       // Launch-gate denials are visible to the caller (quota, policy) —
       // they hold a valid two-factor URL, so this is not an oracle.
       res.status(429).json({ error: err.code });
+      return;
+    }
+    // #3689 (gate R2): a hook whose trigger names no Agent, or whose Agent's boot prompt cannot be served, is refused with
+    // the boot-prompt code (cor:agt:040:07 / 040:10), not answered as an internal fault. 409: the trigger's own setup
+    // conflicts with launching, so a retry cannot succeed. The body carries the code only, as a denial's does.
+    const refusal = bootPromptRefusalCode(err);
+    if (refusal) {
+      res.status(409).json({ error: refusal });
       return;
     }
     throw err;

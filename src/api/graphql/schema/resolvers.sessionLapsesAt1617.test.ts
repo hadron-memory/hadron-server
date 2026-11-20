@@ -104,9 +104,9 @@ describe('#1617 — Session.lapsesAt', () => {
     }
   });
 
-  it('isLive and lapsesAt over a list still cost ONE grouped usage-event query', async () => {
+  it('isLive and lapsesAt over a list still cost ONE batched last-event read (#4406: one short transaction)', async () => {
     for (let i = 0; i < 6; i++) await session({ startedAt: new Date(Date.now() - i * H) });
-    const groupBy = vi.spyOn(db.usageEvent, 'groupBy');
+    const groupBy = vi.spyOn(db, '$transaction');
     try {
       expect(Object.values(await rows())).toHaveLength(6);
       expect(groupBy).toHaveBeenCalledTimes(1);

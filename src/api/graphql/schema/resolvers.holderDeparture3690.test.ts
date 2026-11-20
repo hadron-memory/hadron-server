@@ -37,13 +37,13 @@ beforeEach(async () => {
   const app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: 'dep3690.test:team' } });
   const app2 = await db.app.create({ data: { organizationId: org.id, name: 'Other', urn: 'dep3690.test:other' } });
   await db.appMember.create({ data: { appId: app.id, userId: holder.id, role: 'owner' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Role', personaRole: 'server-engineer' }, ctx(admin.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Role', personaRole: 'server-engineer' }, ctx(admin.id));
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await serveAgentBootPrompt(db, agent.id, '{{worker.name}} {{worker.role}}');
   const target = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Target', slug: 'target' } });
   const sibling = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Sibling', slug: 'sibling' } });
   f = { holder, admin, org, app, app2, agent, target, sibling };
-  w = { orgId: org.id, appId: app.id, app2Id: app2.id, userId: holder.id, user2Id: admin.id, agentId: agent.id, workerId: target.id, sessionId: '' };
+  w = { orgUrn: org.urn, orgId: org.id, appId: app.id, app2Id: app2.id, userId: holder.id, user2Id: admin.id, agentId: agent.id, workerId: target.id, sessionId: '' };
 });
 afterAll(async () => { await cleanDb(db); await dropTestActions(); });
 
@@ -164,8 +164,8 @@ describe('deleteWorker: holding a grant is not "in use"; the delete ends the gra
 
 describe('deleteAgent (a SOFT delete: no FK action fires) ends the grants the agent holds', () => {
   it('an agent-held grant is ended and stamped; another agent\'s grant is untouched', async () => {
-    const spare = await M.createAgent({}, { orgId: f.org.id, name: 'Spare', personaRole: 'x' }, adminCtx());
-    const other = await M.createAgent({}, { orgId: f.org.id, name: 'Keeper', personaRole: 'y' }, adminCtx());
+    const spare = await M.createAgent({}, { orgRef: f.org.id, name: 'Spare', personaRole: 'x' }, adminCtx());
+    const other = await M.createAgent({}, { orgRef: f.org.id, name: 'Keeper', personaRole: 'y' }, adminCtx());
     const mine = await active({ user_id: null, agent_id: spare.id });
     const theirs = await active({ user_id: null, agent_id: other.id });
     expect(await M.deleteAgent(null, { ref: spare.id }, adminCtx())).toBe(true);

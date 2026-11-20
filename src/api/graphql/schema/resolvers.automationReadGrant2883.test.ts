@@ -28,6 +28,7 @@ import { judgeAuthoring } from '../../../lib/authoringAttestation.js';
 import { runAuthoring, runReadsNode } from '../../../lib/runner/runAuthoring.js';
 import { isMemoryReadableFresh } from './resolvers.helpers.js';
 import { resolvers, type Context } from './resolvers.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
 const Q = resolvers.Query as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
@@ -45,8 +46,8 @@ let f: F;
 
 const uctx = (userId: string) => ({ db, userId, roles: ['READER'] }) as unknown as Context;
 const schedule = (appId: string, orgId: string) => db.agentSchedule.create({ data: { id: generateId(), organizationId: orgId, appId, name: 'S', cron: '* * * * *', entryNodeUrn: ENTRY } });
-const run = (kind: 'SCHEDULE' | 'WEBHOOK' | 'MANUAL' | 'SPAWN', triggerId: string | null, parentRunId: string | null = null, userId: string | null = null) =>
-  db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, triggerKind: kind, triggerId, parentRunId, userId, entryNodeUrn: ENTRY } });
+const run = async (kind: 'SCHEDULE' | 'WEBHOOK' | 'MANUAL' | 'SPAWN', triggerId: string | null, parentRunId: string | null = null, userId: string | null = null) =>
+  db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, agentId: await testRunAgentId(db, f.org.id, f.app.id), triggerKind: kind, triggerId, parentRunId, userId, entryNodeUrn: ENTRY } });
 const node = (memoryId: string, loc: string) => db.node.create({ data: { id: generateId(), memoryId, loc, name: loc, content: `body of ${loc}`, nodeType: 'record' } as never });
 
 /** The run's `hadron_read_node`, exactly as the kernel calls it. */
@@ -71,8 +72,8 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: member.id, role: 'READER' } });
   const adminCtx = uctx(admin.id);
-  const first = await M.createAgent({}, { orgId: org.id, name: 'First' }, adminCtx);
-  const second = await M.createAgent({}, { orgId: org.id, name: 'Second' }, adminCtx);
+  const first = await M.createAgent({}, { orgRef: org.id, name: 'First' }, adminCtx);
+  const second = await M.createAgent({}, { orgRef: org.id, name: 'Second' }, adminCtx);
   const { app } = await createDbAppWithKey(db, 'rg-app', org.id);
   const { app: otherApp } = await createDbAppWithKey(db, 'rg-other', org.id);
   await createDbAppAgent(db, app.id, first.id);
@@ -193,7 +194,7 @@ describe('scope: only the granted automation', () => {
 
 describe('what may be a target', () => {
   it('an Agent not installed in the App, personal, private, encrypted and cap-exceeding targets are refused at give; byte-identical to unknown', async () => {
-    const notInstalled = await M.createAgent({}, { orgId: f.org.id, name: 'Not installed' }, f.adminCtx);
+    const notInstalled = await M.createAgent({}, { orgRef: f.org.id, name: 'Not installed' }, f.adminCtx);
     const personal = await db.memory.create({ data: { id: generateId(), name: 'p', urn: `t:${generateId().toLowerCase()}`, class: 'personal', userId: f.admin.id, ownerUserId: f.admin.id } as never });
     const priv = await db.memory.create({ data: { id: generateId(), name: 'q', urn: `t:${generateId().toLowerCase()}`, class: 'private', userId: f.admin.id, ownerUserId: f.admin.id } as never });
     const enc = await db.memory.create({ data: { id: generateId(), name: 'e', urn: `t:${generateId().toLowerCase()}`, class: 'knowledge', organizationId: f.org.id, visibility: 'ORGANIZATION', isEncrypted: true } as never });
@@ -285,7 +286,7 @@ describe('who may give, revoke and list', () => {
     const orgB = await db.organization.create({ data: { id: generateId(), name: 'B', urn: `b-${generateId().toLowerCase()}.example` } });
     const bAdmin = await db.user.create({ data: { id: generateId(), name: 'badmin', handle: `b-${generateId().slice(-6).toLowerCase()}`, roles: ['READER'] } });
     await db.orgMember.create({ data: { organizationId: orgB.id, userId: bAdmin.id, role: 'ADMIN' } });
-    const bAgent = await M.createAgent({}, { orgId: orgB.id, name: 'B agent' }, uctx(bAdmin.id));
+    const bAgent = await M.createAgent({}, { orgRef: orgB.id, name: 'B agent' }, uctx(bAdmin.id));
     await createDbAppAgent(db, f.app.id, bAgent.id);
     const bCtx = uctx(bAdmin.id);
     const g = await give(bCtx, { memoryRef: bAgent.systemMemoryId });
@@ -301,7 +302,7 @@ describe('who may give, revoke and list', () => {
     const orgB = await db.organization.create({ data: { id: generateId(), name: 'B2', urn: `b2-${generateId().toLowerCase()}.example` } });
     const bAdmin = await db.user.create({ data: { id: generateId(), name: 'b2admin', handle: `b2-${generateId().slice(-6).toLowerCase()}`, roles: ['READER'] } });
     await db.orgMember.create({ data: { organizationId: orgB.id, userId: bAdmin.id, role: 'ADMIN' } });
-    const bAgent = await M.createAgent({}, { orgId: orgB.id, name: 'B2 agent' }, uctx(bAdmin.id));
+    const bAgent = await M.createAgent({}, { orgRef: orgB.id, name: 'B2 agent' }, uctx(bAdmin.id));
     await createDbAppAgent(db, f.app.id, bAgent.id);
     const bMem = await db.memory.findUniqueOrThrow({ where: { id: bAgent.systemMemoryId } });
     await node(bMem.id, 'tasks:report');
@@ -485,7 +486,7 @@ describe('#3275 read-grant follow-up pins', () => {
     const org = await db.organization.create({ data: { name: 'Foreign3275', urn: `foreign3275-${generateId()}.example` } });
     const user = await db.user.create({ data: { handle: `foreign3275-${generateId()}` } });
     await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
-    const agent = await M.createAgent({}, { orgId: org.id, name: 'Foreign3275' }, uctx(user.id));
+    const agent = await M.createAgent({}, { orgRef: org.id, name: 'Foreign3275' }, uctx(user.id));
     await createDbAppAgent(db, f.app.id, agent.id);
     const target = await db.memory.findUniqueOrThrow({ where: { id: agent.systemMemoryId } });
     for (const loc of ['tasks:report', 'tasks:report:child', 'tasks:reportX', 'other:x']) await node(target.id, loc);

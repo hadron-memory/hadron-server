@@ -4,6 +4,7 @@ import { PrismaClient } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
+import { respondToolDefinition } from './resolvers.helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
@@ -20,7 +21,7 @@ afterAll(() => other.$disconnect());
 afterEach(() => sessionKeyCache.clear());
 let userId: string, agentId: string, systemId: string, ids: Record<string, string>;
 const ctx = (client = db): Context => ({ db: client, roles: ['READER'], userId });
-const start = () => resolvers.Mutation.startChat({}, { agentId, conversationName: 'main' }, ctx());
+const start = () => resolvers.Mutation.startChat({}, { agentRef: agentId, conversationName: 'main' }, ctx());
 const respond = (chatId: string, fields: Record<string, unknown> = {}, client = db) => resolvers.Mutation.processChatResponse({}, { chatId, toolResponse: { message: 'reply', onTrack: true, ...fields } }, ctx(client));
 async function state(chatId: string) {
   const root = await chatNodeByLocOrThrow(db, chatId);
@@ -35,7 +36,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { name: 'Completion4036', urn: 'completion4036.example' } });
   const user = await db.user.create({ data: { githubId: 40361, githubUsername: 'completion4036', roles: ['ADMIN'] } }); userId = user.id;
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
-  const agent = await resolvers.Mutation.createAgent({}, { orgId: org.id, name: 'Completion fixture', visibility: 'ORGANIZATION' }, { ...ctx(), roles: ['ADMIN'] });
+  const agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Completion fixture', visibility: 'ORGANIZATION' }, { ...ctx(), roles: ['ADMIN'] });
   agentId = agent.id; systemId = agent.systemMemoryId!; ids = {};
   for (const [loc, data] of [
     ['config', {}], ['conversations', {}],
@@ -145,5 +146,15 @@ describe('#4036 completion by explicit goal_reached', () => {
     expect(after.engine).toMatchObject({ conversationName: 'rerouted', stageName: 'fresh', lastOffTrackReason: 'late' });
     expect(after.engine.completedConversations ?? []).toEqual([]);
     expect((await db.chatRootCounter.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).lastMessageAt).toBeTruthy();
+  });
+});
+
+// #4102 F9: moved from src/lib/chatRouting4036.test.ts so that lib-only file imports no api-layer code
+// (the 4035 file's respond-tool describe is the precedent for asserting the schema at this layer).
+describe('#4036 respond tool contract', () => {
+  it('adds an optional boolean goal_reached to the shared respond schema', () => {
+    const parameters = respondToolDefinition({})[0].parameters as any;
+    expect(parameters.properties.goal_reached).toMatchObject({ type: 'boolean', description: expect.any(String) });
+    expect(parameters.required).not.toContain('goal_reached');
   });
 });

@@ -82,7 +82,7 @@ beforeEach(async () => {
   member = await u(2, 'member');
   outsider = await u(3, 'outsider');
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  agentId = (await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id))).id;
+  agentId = (await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id))).id;
   appX = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'X', urn: `${org.urn}:x` }, select: { id: true, urn: true } });
   appY = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Y', urn: `${org.urn}:y` }, select: { id: true, urn: true } });
   await db.appMember.create({ data: { appId: appX.id, userId: member.id, role: 'member' } });
@@ -253,8 +253,6 @@ describe('#2931 refusals, byte-identical to a non-participant\'s', () => {
       ['grantApp', (c) => M.grantApp({}, { appRef: appX.id, workerRef: ada.id, name: 'TICKER_SUBSCRIBE_WORKERS' }, c)],
       ['revokeAppGrant', (c) => M.revokeAppGrant({}, { appRef: appX.id, workerRef: ada.id, name: 'TICKER_SUBSCRIBE_WORKERS' }, c)],
       ['setWorkerWakeSettings', (c) => M.setWorkerWakeSettings({}, { workerRef: ada.id, input: { mentions: 'OFF' } }, c)],
-      ['isolateWorker', (c) => M.isolateWorker({}, { workerRef: ada.id }, c)],
-      ['clearWorkerIsolation', (c) => M.clearWorkerIsolation({}, { workerRef: ada.id }, c)],
       ['applyAgentTickerTemplates', (c) => M.applyAgentTickerTemplates({}, { workerRef: ada.id }, c)],
     ];
     for (const [name, call] of writes) {

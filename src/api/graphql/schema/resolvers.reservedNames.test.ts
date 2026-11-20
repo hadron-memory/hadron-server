@@ -38,7 +38,7 @@ beforeEach(async () => {
   });
   memory = await resolvers.Mutation.createMemory(
     {},
-    { orgId: org.id, name: 'rn-memory' },
+    { orgRef: org.id, name: 'rn-memory' },
     ctx(),
   );
 });

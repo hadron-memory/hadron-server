@@ -14,6 +14,7 @@
 
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { sweepRetiredMergeConsents } from '../lib/userMergeConsent.js';
+import { isProcessEntry } from './isProcessEntry.js';
 
 const BATCH_SIZE = 500;
 const MAX_PASSES = 20;
@@ -50,7 +51,7 @@ export function startMergeConsentSweepLoop(
   }, initialDelayMs);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isProcessEntry(import.meta.url)) {
   const { db } = await import('../integrations/db/client.js');
   console.log(`deleted ${await sweepMergeConsents(db)}`);
   await db.$disconnect();

@@ -48,7 +48,7 @@ const AUDIT_SCHEMA = 'hadron_restore';
 const WORKING_CONNECTION_LIMIT = 4;
 
 /** Points where a test injects a failure. The CLI never sets one. */
-export type FaultPoint = 'S1-reply' | 'S3' | 'S4' | 'final-verify' | 'pre-release' | 'release-reply';
+export type FaultPoint = 'S1-reply' | 'S1-error' | 'S3' | 'S4' | 'final-verify' | 'pre-release' | 'release-reply';
 
 export interface RunOptions {
   /** restore_admin on the maintenance database. */
@@ -314,7 +314,7 @@ async function chooseDatabaseOid(maint: Client): Promise<number> {
  * Did the server answer this statement with an ERROR? Then its transaction rolled back and created nothing. A FATAL or
  * PANIC reply, a dropped connection or any non-server error leaves the outcome open.
  */
-function refusedByServer(err: unknown): boolean {
+export function refusedByServer(err: unknown): boolean {
   return err instanceof DatabaseError && err.severity === 'ERROR';
 }
 
@@ -462,6 +462,12 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
            ALLOW_CONNECTIONS false CONNECTION LIMIT ${WORKING_CONNECTION_LIMIT} OID ${chosenOid}`,
       );
       createAnswered = true;
+      // #4118: an ERROR after a successful CREATE is NOT a refusal of that CREATE.
+      if (opts.fault === 'S1-error') {
+        const error = new DatabaseError('injected ERROR after CREATE answered', 0, 'error');
+        error.severity = 'ERROR';
+        throw error;
+      }
       if (opts.fault === 'S1-reply') {
         // The CREATE committed; lose its reply: the session dies and this run never saw the answer.
         await terminateBackend(opts.adminUrl, maint.processID as number);

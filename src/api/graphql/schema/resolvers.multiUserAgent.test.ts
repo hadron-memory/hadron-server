@@ -586,7 +586,7 @@ describe('linkMemoryToUser', () => {
     );
     const linked = await resolvers.Mutation.linkMemoryToUser(
       {},
-      { memoryId: session.memoryId!, externalUserId: 'mm-new' },
+      { memoryRef: session.memoryId!, externalUserId: 'mm-new' },
       appCtx(app.id),
     );
     expect(linked.anonymousExpiresAt).toBeNull();
@@ -619,7 +619,7 @@ describe('linkMemoryToUser', () => {
     await expect(
       resolvers.Mutation.linkMemoryToUser(
         {},
-        { memoryId: foreignMem.id, externalUserId: 'mm-42' },
+        { memoryRef: foreignMem.id, externalUserId: 'mm-42' },
         appCtx(app.id),
       ),
     ).rejects.toMatchObject({ code: 'MEMORY_NOT_FOUND' });
@@ -639,7 +639,7 @@ describe('linkMemoryToUser', () => {
     });
     const linked = await resolvers.Mutation.linkMemoryToUser(
       {},
-      { memoryId: memoryRow.urn, externalUserId: 'mm-urn-input' },
+      { memoryRef: memoryRow.urn, externalUserId: 'mm-urn-input' },
       appCtx(app.id),
     );
     expect(linked.id).toBe(session.memoryId);
@@ -838,7 +838,7 @@ describe('Agent type + surfaces', () => {
   it('creates an ASSISTANT with mcp surface by default', async () => {
     const created = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'assistant-1' },
+      { orgRef: orgA.id, name: 'assistant-1' },
       adminCtx(),
     );
     expect(created.type).toBe('ASSISTANT');
@@ -857,7 +857,7 @@ describe('Agent type + surfaces', () => {
     });
     const created = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'bot-1', systemMemoryId: sysMem.id },
+      { orgRef: orgA.id, name: 'bot-1', systemMemoryRef: sysMem.id },
       adminCtx(),
     );
     expect(created.type).toBe('CHATBOT');
@@ -868,7 +868,7 @@ describe('Agent type + surfaces', () => {
     const created = await resolvers.Mutation.createAgent(
       {},
       {
-        orgId: orgA.id,
+        orgRef: orgA.id,
         name: 'custom-1',
         type: 'CHATBOT',
         surfaces: ['portal-chat', 'api'],
