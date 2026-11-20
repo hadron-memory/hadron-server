@@ -100,18 +100,38 @@ describe('R3 (BLIND P2): a second attempt cannot move the pending account check'
     expect(document.getElementById('status-first')!.textContent).toContain('Stopped');
   });
 
-  it.each([['success', [{ body: { ceremonyId: 'c1', challenge: 'AA' } }, { body: options }, { body: { kind: 'later' } }], true],
-    ['a refused start', [{ body: { ceremonyId: 'c1', challenge: 'AA' } }, { status: 403 }], false]] as const)('the guard resets after %s, so the next attempt runs', async (_label, first, confirm) => {
+  it.each([
+    ['success', 'add-first', 'add-later', [{ body: { ceremonyId: 'c1', challenge: 'AA' } }, { body: options }, { body: { kind: 'first' } }], true],
+    ['a refused start', 'add-first', 'add-later', [{ body: { ceremonyId: 'c1', challenge: 'AA' } }, { status: 403 }], false]] as const)('the guard resets after %s, so the next attempt runs', async (_label, opener, second, first, confirm) => {
     const { document, click, calls } = await load('/passkeys/register', [...first,
       { body: { ceremonyId: 'c2', challenge: 'AA' } }, { body: options }]);
-    click('add-later');
+    click(opener);
     await flush();
-    if (confirm) { document.getElementById('confirm-account')!.dispatchEvent(new (document.defaultView as any).Event('click')); await flush(); }
+    if (confirm) {
+      document.getElementById('confirm-account')!.dispatchEvent(new (document.defaultView as any).Event('click')); await flush();
+      // #4621 item 5: the first registration has really succeeded before the second attempt is made.
+      expect(document.getElementById('status-first')!.textContent).toContain('Passkey added');
+    }
     const before = calls.length;
-    click('add-first');
+    click(second);
     await flush();
     expect(calls.length).toBeGreaterThan(before);
     expect(calls.slice(before)[0]).toMatchObject({ path: '/passkeys/register/challenge', method: 'POST' });
+  });
+
+  // #4621 item 4: an ignored click says why, on the clicked opener's own status line.
+  it('an ignored second click tells the person to finish or stop the first, without moving the check', async () => {
+    const { document, click, calls } = await load('/passkeys/register', [
+      { body: { ceremonyId: 'c', challenge: 'AA' } }, { body: options }]);
+    click('add-first');
+    await flush();
+    const before = calls.length;
+    click('add-later');
+    await flush();
+    expect(calls.length).toBe(before);
+    expect(document.getElementById('status-later')!.textContent).toContain('Finish or stop the passkey you are adding first');
+    expect(document.getElementById('status-first')!.textContent).toBe('');
+    expect(document.getElementById('add-first')!.nextElementSibling).toBe(document.getElementById('account-check'));
   });
 
   it('a new attempt after stop is accepted and runs its own requests', async () => {
@@ -162,6 +182,51 @@ describe('R4: one row per passkey', () => {
     expect(details[0].textContent).toContain('TestAgent/1');
     expect(first.textContent).not.toContain('203.0.113.9');
     expect(box.textContent).not.toMatch(/:\d\d:\d\d/); // no seconds
+  });
+});
+
+describe('#4621 items 1-3: removal dates, the empty list, <time>', () => {
+  const at = (p: object) => load('/passkeys/revoke', [{ body: { ceremonyId: 'c', challenge: 'AA' } }, { body: { passkeys: [p] } }]);
+  const base1 = { label: 'Gone', credentialId: 'g', registeredAt: '2026-10-01T10:00:00Z', inWindow: false, prover: false };
+  const open = async (r: Awaited<ReturnType<typeof at>>) => { r.click('revoke-passkey'); await flush(); return r.document.getElementById('passkey-list')!; };
+
+  it('item 1: a passkey removed without its email link shows when it was removed', async () => {
+    const box = await open(await at({ ...base1, revokedAt: '2026-10-05T10:00:00Z', cancel: null }));
+    const t = [...box.querySelectorAll('time')].find((x: any) => x.getAttribute('datetime') === '2026-10-05T10:00:00.000Z') as any;
+    expect(t).toBeTruthy();
+    expect(t.parentNode.textContent).toContain('Removed ');
+  });
+
+  it('item 1: a passkey removed by its email link shows the removal line too, not only inside the details', async () => {
+    const box = await open(await at({ ...base1, revokedAt: '2026-10-05T10:00:00Z', cancel: { at: '2026-10-05T10:00:00Z', ip: null, userAgent: null } }));
+    const li = box.querySelector('li')!;
+    const outside = [...li.children].filter((c: any) => c.tagName !== 'DETAILS').map((c: any) => c.textContent).join(' ');
+    expect(outside).toMatch(/Removed [A-Z][a-z]{2} \d/);
+  });
+
+  it('item 2: no removable passkey says so, with or without removed rows', async () => {
+    const none = await load('/passkeys/revoke', [{ body: { ceremonyId: 'c', challenge: 'AA' } }, { body: { passkeys: [] } }]);
+    expect((await open(none)).textContent).toContain('No passkey here can be removed.');
+    const proverOnly = await at({ ...base1, revokedAt: null, prover: true, cancel: null });
+    expect((await open(proverOnly)).textContent).toContain('No passkey here can be removed.');
+    const some = await at({ ...base1, revokedAt: null, cancel: null });
+    expect((await open(some)).textContent).not.toContain('No passkey here can be removed.');
+  });
+
+  it('item 3: every date is a <time datetime> holding the ISO instant', async () => {
+    const box = await open(await at({ ...base1, revokedAt: '2026-10-05T10:00:00Z', cancel: { at: '2026-10-05T10:00:00Z', ip: '203.0.113.9', userAgent: 'T/1' } }));
+    const times = [...box.querySelectorAll('time')] as any[];
+    expect(times.length).toBe(3); // added, removed line, details
+    for (const t of times) expect(t.getAttribute('datetime')).toMatch(/^2026-10-0[15]T10:00:00\.000Z$/);
+  });
+
+  it('item 3: the end-window preview wraps its date in <time datetime> too', async () => {
+    const { document, click } = await load('/passkeys/window/end', [{ body: { label: 'Laptop', registeredAt: '2026-11-01T10:00:00Z', method: 'github' } }]);
+    click('end-window');
+    await flush();
+    const t = document.getElementById('window-passkey')!.querySelector('time') as any;
+    expect(t.getAttribute('datetime')).toBe('2026-11-01T10:00:00.000Z');
+    expect(document.getElementById('window-passkey')!.textContent).toContain('Laptop');
   });
 });
 
