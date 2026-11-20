@@ -2440,10 +2440,10 @@ export const sessionMutations = {
      */
     deleteAgentRevision: async (
       _: unknown,
-      { agentId, revisionLoc }: { agentId: string; revisionLoc: string },
+      { agentRef, revisionLoc }: { agentRef: string; revisionLoc: string },
       ctx: Context,
     ) => {
-      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');

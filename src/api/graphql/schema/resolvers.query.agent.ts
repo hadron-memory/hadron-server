@@ -127,8 +127,8 @@ export const agentQueries = {
      * #4488 — an Agent's revisions, newest first, with the slot facts. The gate is restoreRevision's: through the
      * read gate (an unreadable Agent answers as absent, #1944), then ADMIN on the Agent.
      */
-    agentRevisions: async (_: unknown, { agentId }: { agentId: string }, ctx: Context) => {
-      const agent = await resolveReadableAgentRef(ctx, agentId);
+    agentRevisions: async (_: unknown, { agentRef }: { agentRef: string }, ctx: Context) => {
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string | null;
       if (!sysMemId) throw new Error('Agent has no system memory');

@@ -21,10 +21,10 @@ let agentB: { id: string; systemMemoryId: string | null };
 
 const asManager = (): Context => ({ db, roles: ['READER'], userId: manager.id });
 const asOutsider = (): Context => ({ db, roles: ['READER'], userId: outsider.id });
-const save = (a = agentA, ctx = asManager()) => resolvers.Mutation.createRevision({}, { agentId: a.id }, ctx);
-const list = (a = agentA, ctx = asManager()) => resolvers.Query.agentRevisions({}, { agentId: a.id }, ctx);
+const save = (a = agentA, ctx = asManager()) => resolvers.Mutation.createRevision({}, { agentRef: a.id }, ctx);
+const list = (a = agentA, ctx = asManager()) => resolvers.Query.agentRevisions({}, { agentRef: a.id }, ctx);
 const del = (loc: string, a = agentA, ctx = asManager()) =>
-  resolvers.Mutation.deleteAgentRevision({}, { agentId: a.id, revisionLoc: loc }, ctx);
+  resolvers.Mutation.deleteAgentRevision({}, { agentRef: a.id, revisionLoc: loc }, ctx);
 const live = (a: { systemMemoryId: string | null }, loc: string) =>
   db.node.findFirst({ where: { memoryId: a.systemMemoryId!, loc, deletedAt: null } });
 
@@ -46,7 +46,7 @@ beforeEach(async () => {
 describe('agentRevisions (list)', () => {
   it('lists newest first with the slot facts, the pinned one marked published', async () => {
     await save(); await save(); await save();
-    await resolvers.Mutation.publishRevision({}, { agentId: agentA.id, revisionLoc: 'revisions:rev-2' }, asManager());
+    await resolvers.Mutation.publishRevision({}, { agentRef: agentA.id, revisionLoc: 'revisions:rev-2' }, asManager());
     const r = await list();
     expect(r.revisions.map((x: any) => x.revisionLoc)).toEqual(['revisions:rev-3', 'revisions:rev-2', 'revisions:rev-1']);
     expect(r.revisions.map((x: any) => x.published)).toEqual([false, true, false]);
@@ -80,12 +80,12 @@ describe('agentRevisions (list)', () => {
 describe('deleteAgentRevision', () => {
   it('deletes a non-published revision by loc; it leaves the list and cannot be restored', async () => {
     await save(); await save(); await save();
-    await resolvers.Mutation.publishRevision({}, { agentId: agentA.id, revisionLoc: 'revisions:rev-3' }, asManager());
+    await resolvers.Mutation.publishRevision({}, { agentRef: agentA.id, revisionLoc: 'revisions:rev-3' }, asManager());
     const out = await del('revisions:rev-1');
     expect(out).toMatchObject({ revisionLoc: 'revisions:rev-1', label: 'rev-1' });
     expect(await live(agentA, 'revisions:rev-1')).toBeNull();
     await expect(
-      resolvers.Mutation.restoreRevision({}, { agentId: agentA.id, revisionLoc: 'revisions:rev-1' }, asManager()),
+      resolvers.Mutation.restoreRevision({}, { agentRef: agentA.id, revisionLoc: 'revisions:rev-1' }, asManager()),
     ).rejects.toThrow(/Revision not found/);
   });
 
@@ -98,7 +98,7 @@ describe('deleteAgentRevision', () => {
 
   it('refuses the published revision with REVISION_PUBLISHED, writing nothing', async () => {
     await save(); await save();
-    await resolvers.Mutation.publishRevision({}, { agentId: agentA.id, revisionLoc: 'revisions:rev-1' }, asManager());
+    await resolvers.Mutation.publishRevision({}, { agentRef: agentA.id, revisionLoc: 'revisions:rev-1' }, asManager());
     await expect(del('revisions:rev-1')).rejects.toMatchObject({ extensions: { code: 'REVISION_PUBLISHED' } });
     expect(await live(agentA, 'revisions:rev-1')).not.toBeNull();
     expect((await db.agent.findUniqueOrThrow({ where: { id: agentA.id } })).publishedRevisionLoc).toBe('revisions:rev-1');
@@ -118,7 +118,7 @@ describe('deleteAgentRevision', () => {
 
   it('refuses the published one before the only one when it is both', async () => {
     await save();
-    await resolvers.Mutation.publishRevision({}, { agentId: agentA.id, revisionLoc: 'revisions:rev-1' }, asManager());
+    await resolvers.Mutation.publishRevision({}, { agentRef: agentA.id, revisionLoc: 'revisions:rev-1' }, asManager());
     await expect(del('revisions:rev-1')).rejects.toMatchObject({ extensions: { code: 'REVISION_PUBLISHED' } });
   });
 
@@ -161,7 +161,7 @@ describe('deleteAgentRevision', () => {
     await save(); await save();
     const results = await Promise.allSettled([
       del('revisions:rev-1'),
-      resolvers.Mutation.publishRevision({}, { agentId: agentA.id, revisionLoc: 'revisions:rev-1' }, asManager()),
+      resolvers.Mutation.publishRevision({}, { agentRef: agentA.id, revisionLoc: 'revisions:rev-1' }, asManager()),
     ]);
     expect(results.some((r) => r.status === 'fulfilled')).toBe(true);
     const pin = (await db.agent.findUniqueOrThrow({ where: { id: agentA.id } })).publishedRevisionLoc;

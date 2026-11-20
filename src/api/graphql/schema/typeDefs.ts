@@ -10525,7 +10525,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    agentRevisions(agentId: ID!): AgentRevisionList!
+    agentRevisions(agentRef: ID!): AgentRevisionList!
     """
     #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15) - an Agent's tasks, across its base chain:
     every runnable node in its effective system memory, and every task the
@@ -14720,7 +14720,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    deleteAgentRevision(agentId: ID!, revisionLoc: String!): RevisionResult!
+    deleteAgentRevision(agentRef: ID!, revisionLoc: String!): RevisionResult!
 
     # Editor lock (org ADMIN)
     """
