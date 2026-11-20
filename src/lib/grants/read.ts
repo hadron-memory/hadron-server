@@ -134,27 +134,38 @@ export async function listGrantsForWorker(db: Db, reader: GrantReader, page: { t
 export interface GrantRunReader { appId: string; agentId: string }
 
 /**
- * #3710 (cor:acl:140:05 "An agent reads its own grants"; ruling 0255 items 20, 20a, 20b): the grants the run's AGENT holds in the run's own
- * App, in every state, newest first, through the same projection as the worker's read. The caller (the run tool) judges that this is a run;
- * this module owns the row scope:
- *   - `agent_id` is the run's agent AND `app_id` is the run's App: a grant is held by the PAIR (agent, App), so the same agent's grant in
- *     another App is absent (20b), and nothing passes down the base-agent chain (20a: only this agent's own rows);
- *   - rows held by a worker, a person or the App are not listed: this is the agent's own list, not the worker's or the App's;
- *   - the agent must be installed and licensed in the App now (the test {@link roleAgentReachedBy} and the reach rule apply), else nothing;
+ * #3710 (cor:acl:140:05 "An agent reads its own grants"; ruling 0255 items 20, 20a, 20b; Peter's call on #4598: App-held grants are in): the
+ * grants a run holds, in the run's own App, in every state, newest first, through the same projection as the worker's read. "Held" means
+ * the run's AGENT in this App (`agent_id`) and the App itself (`grantee_app_id` = this App). The caller (the run tool) judges that this
+ * is a run; this module owns the row scope:
+ *   - `app_id` is the run's App, so another App's rows are absent, App-held or not. A grant is held by the PAIR (agent, App): the same
+ *     agent's grant in another App is absent (20b), and nothing passes down the base-agent chain (20a: only this agent's own rows);
+ *   - rows held by a worker or a person are not listed;
+ *   - the agent must be installed and licensed in the App (the {@link isAgentInstalledAndLicensed} test, as the reach rule applies it),
+ *     judged at the start of the read; the same statement also carries the SQL twin of the installation test
+ *     (`hadron_agent_installed_in_app`), so a row is not returned once the installation is gone by the time the rows are read.
+ *     A licence that lapses mid-read is read as of the start, as if the read had been a moment earlier;
  *   - a soft-deleted App conceals its grants (the join).
- * A row out of scope is simply absent. `take` 0 is count-only. The caller clamps `take` and `skip`.
+ * The page and its total come from ONE statement (a window count), so the metadata describes the rows returned. A row out of scope is
+ * simply absent. `take` 0 is count-only. The caller clamps `take` and `skip`.
  */
 export async function listGrantsForRunAgent(db: Db, reader: GrantRunReader, page: { take?: number; skip?: number }): Promise<{ items: GrantView[]; total: number }> {
   const take = page.take ?? 20;
   const skip = page.skip ?? 0;
   if (!(await isAgentInstalledAndLicensed(db, reader.appId, reader.agentId))) return { items: [], total: 0 };
   const from = Prisma.sql`FROM grants g JOIN apps a ON a.id = g.app_id AND a.deleted_at IS NULL
-    WHERE g.app_id = ${reader.appId} AND g.agent_id = ${reader.agentId}`;
+    WHERE g.app_id = ${reader.appId} AND (g.agent_id = ${reader.agentId} OR g.grantee_app_id = ${reader.appId})
+      AND hadron_agent_installed_in_app(${reader.appId}, ${reader.agentId})`;
+  if (take === 0) {
+    const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`SELECT count(*) AS n ${from}`);
+    return { items: [], total: Number(n) };
+  }
+  const rows = await db.$queryRaw<Array<Row & { total_n: bigint }>>(Prisma.sql`SELECT ${COLUMNS}, count(*) OVER () AS total_n ${from} ORDER BY g.created_at DESC, g.id DESC LIMIT ${take} OFFSET ${skip}`);
+  if (rows.length > 0) return { items: rows.map((r) => view(r)), total: Number(rows[0]!.total_n) };
+  // An empty page: the offset may be past the end, so the total still has to be asked (the one count, never an item).
+  if (skip === 0) return { items: [], total: 0 };
   const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`SELECT count(*) AS n ${from}`);
-  const total = Number(n);
-  if (take === 0 || total === 0) return { items: [], total };
-  const rows = await db.$queryRaw<Row[]>(Prisma.sql`SELECT ${COLUMNS} ${from} ORDER BY g.created_at DESC, g.id DESC LIMIT ${take} OFFSET ${skip}`);
-  return { items: rows.map((r) => view(r)), total };
+  return { items: [], total: Number(n) };
 }
 
 const managerAudience = new WeakSet<object>();

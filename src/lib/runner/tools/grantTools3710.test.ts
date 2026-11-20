@@ -107,7 +107,9 @@ describe('hadron_list_grants (#3710)', () => {
     await db.appAgent.create({ data: { appId: w.app2Id, agentId: w.agentId } });
     const app2Held = await insertGrant(w, { app_id: w.app2Id, user_id: null, grantee_app_id: w.app2Id }); // another App's App-held
     const crossNaming = await insertGrant(w, { app_id: w.app2Id, user_id: null, grantee_app_id: w.appId }); // lives in App 2, names App 1
+    const namesOther = await insertGrant(w, { app_id: w.appId, user_id: null, grantee_app_id: w.app2Id }); // lives here, held by ANOTHER App
     const a = await call(await mintRun(w.appId, w.agentId));
+    expect(a.grants.map((g) => g.id)).not.toContain(namesOther);
     expect(a.grants.map((g) => g.id).sort()).toEqual([appHeld, mine].sort());
     expect(a.grants.find((g) => g.id === appHeld)).toMatchObject({ holderKind: 'APP', holderId: w.appId });
     const b = await call(await mintRun(w.app2Id, w.agentId));
