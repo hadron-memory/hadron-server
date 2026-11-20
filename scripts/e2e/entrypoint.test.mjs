@@ -46,3 +46,10 @@ test('fresh public schema proceeds through setup, seed and supervised server', t
   assert.equal(calls[8], 'pnpm tsx scripts/e2e/seed.ts');
   assert.equal(calls[9], 'node scripts/e2e/supervise.mjs');
 });
+// #4577: the entrypoint can only run the upsert if the image carries it; the build context, the Dockerfile and the source archive stack.sh ships must all name it.
+test('the upsert script is shipped to the E2E image by every layer', () => {
+  const read = (f) => readFileSync(new URL(f, import.meta.url), 'utf8');
+  assert.match(read('./Dockerfile'), /^COPY scripts\/db\/upsert-actions\.ts \.\/scripts\/db\/upsert-actions\.ts$/m);
+  assert.match(read('./Dockerfile.dockerignore'), /^!scripts\/db\/upsert-actions\.ts$/m);
+  assert.match(read('./stack.sh'), /ls-files -z [^\n]*scripts\/db\/upsert-actions\.ts/);
+});
