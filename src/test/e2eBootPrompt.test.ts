@@ -140,4 +140,35 @@ describe('#4506 E2E seed: install-default register rows', () => {
     await db.registerEntry.update({ where: { id: row.id }, data: { deletedAt: new Date() } });
     expect(await e2eRegisterGaps(db, app.id)).toEqual([row.attendeeAgentId]);
   });
+
+  // Local review P2 (AT0.8725.5): each filter of e2eRegisterGaps is pinned by a row that matches every OTHER condition.
+  const rowFor = (agentId: string, channelId: string, extra: Record<string, unknown>) =>
+    db.registerEntry.create({ data: { id: generateId(), channelId, attendeeAgentId: agentId, role: 'BOTH', ...extra } as never });
+
+  it('a row for the Agent on another Channel is a gap (the check is on the default Channel)', async () => {
+    await seed();
+    const c = await channel();
+    const root = await db.node.create({ data: { id: id('other-root'), memoryId: appMemoryId, loc: 'chats:other', name: 'other', nodeType: 'chat', data: { lastSeq: 0 } } });
+    const other = await db.channel.create({ data: { id: id('other-channel'), memoryId: appMemoryId, loc: 'chats:other', name: 'Other', chatRootNodeId: root.id } });
+    const agents = await db.agent.findMany({ where: { organizationId }, select: { id: true } });
+    for (const a of agents) await rowFor(a.id, other.id, { appId: app.id });
+    expect((await e2eRegisterGaps(db, app.id)).sort()).toEqual(agents.map(a => a.id).sort());
+    expect(c.id).not.toBe(other.id);
+  });
+
+  it('an org-owned row (not App-owned) naming the Agent is a gap', async () => {
+    await seed();
+    const c = await channel();
+    const agents = await db.agent.findMany({ where: { organizationId }, select: { id: true } });
+    for (const a of agents) await rowFor(a.id, c.id, { organizationId });
+    expect((await e2eRegisterGaps(db, app.id)).sort()).toEqual(agents.map(a => a.id).sort());
+  });
+
+  it('a WATCH-only App-owned row is a gap (the seed writes BOTH, as a real install does)', async () => {
+    await seed();
+    const c = await channel();
+    const agents = await db.agent.findMany({ where: { organizationId }, select: { id: true } });
+    for (const a of agents) await rowFor(a.id, c.id, { appId: app.id, role: 'WATCH' });
+    expect((await e2eRegisterGaps(db, app.id)).sort()).toEqual(agents.map(a => a.id).sort());
+  });
 });

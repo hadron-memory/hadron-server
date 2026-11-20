@@ -129,7 +129,7 @@ export async function e2eRegisterGaps(db: PrismaClient, appId: string): Promise<
   const app = await db.app.findUniqueOrThrow({ where: { id: appId }, select: { defaultChannelId: true } });
   const installs = await listAppInstallations(db, appId);
   const have = new Set((await db.registerEntry.findMany({
-    where: { appId, channelId: app.defaultChannelId ?? '', deletedAt: null, attendeeAgentId: { not: null } },
+    where: { appId, channelId: app.defaultChannelId ?? '', role: 'BOTH', deletedAt: null, attendeeAgentId: { not: null } },
     select: { attendeeAgentId: true },
   })).map(r => r.attendeeAgentId));
   return installs.filter(i => !have.has(i.agentId)).map(i => i.agentId);

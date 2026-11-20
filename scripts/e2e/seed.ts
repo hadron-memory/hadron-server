@@ -5,7 +5,7 @@ import { PrismaClient } from '../../src/generated/prisma/index.js';
 import { computeApprovalHash } from '../../src/lib/approvalHash.js';
 import { ensureCurrentNodeRevisionInTransaction } from '../../src/lib/nodeRevisionSnapshot.js';
 import { resolveServedBootPrompt } from '../../src/lib/bootPrompt/serve.js';
-import { seedE2eStockAgents, seedE2eInstallRegister, e2eRegisterGaps, E2E_BOOT_PROMPT } from '../../src/test/e2eBootPrompt.js';
+import { seedE2eStockAgents, seedE2eInstallRegister, e2eRegisterGaps, E2E_BOOT_PROMPT, E2E_STOCK_ROLES } from '../../src/test/e2eBootPrompt.js';
 
 // Separate from the narrative dev seed: every principal has global READER
 // except the org-less platform-admin fixture, so org-role journeys exercise
@@ -166,7 +166,7 @@ async function check() {
     }
     // #4506: one live App-owned register row per installed Agent, not merely a non-empty register.
     assert.deepEqual(await e2eRegisterGaps(db, id(`${org}:team`)), []);
-    assert.equal(await db.registerEntry.count({ where: { appId: id(`${org}:team`), deletedAt: null, installDefault: true } }), 2);
+    assert.equal(await db.registerEntry.count({ where: { appId: id(`${org}:team`), deletedAt: null, installDefault: true } }), E2E_STOCK_ROLES.length);
     assert.equal(await db.appKey.count({ where: { appId: id(`${org}:team`) } }), 1);
     const specs = await db.node.findMany({ where: { memoryId: id(`${org}:specs`) } });
     assert.equal(specs.length, 2);
