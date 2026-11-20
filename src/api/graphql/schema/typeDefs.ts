@@ -3929,6 +3929,16 @@ export const typeDefs = `#graphql
     hostId: String
   }
 
+  "#4489 — one scope of the closed App key scope list (Query.appKeyScopeCatalogue)."
+  type AppKeyScopeInfo {
+    "The name grantAppKeyScope and revokeAppKeyScope take."
+    scope: String!
+    "One line on what holding the scope permits."
+    description: String!
+    "True when granting it needs hostId (host:operate); false when hostId is refused."
+    requiresHostId: Boolean!
+  }
+
   "#1709 — one use of a host key (hrn:node:hadronmemory.com:specs:cor:agt:070:07)."
   type HostKeyUse {
     id: ID!
@@ -6486,13 +6496,26 @@ export const typeDefs = `#graphql
     selfIssued: Boolean!
   }
 
+  type SecretReadClientsPage {
+    items: [SecretReadClient!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
   type SecretReadClient {
-    clientId: ID!
+    "Full id only for the current issuer or holder; managers otherwise see a prefix."
+    clientId: ID
+    clientPrefix: String!
+    startsAt: DateTime
+    expiresAt: DateTime
+    maxReads: Int
+    readCount: Int!
+    destroyOnEnd: Boolean!
     grantId: ID!
     secretId: ID!
     secretName: String!
     selfIssued: Boolean!
-    "SECRET_DELETED | PROTECTED once the client has ended, else null."
+    "Null while live, else one of SECRET_DELETED, PROTECTED, REVOKED, PENDING, SPENT, EXPIRED, NOT_STARTED, ISSUER_GONE (nothing else ended it) or ENDED. A stored end wins; otherwise the grant's own state, in the order the reveal door answers."
     endReason: String
     "#4545 (hrn:node:hadronmemory.com:specs:cor:sec:060:02): the server-hosted page where the person who holds this client reveals the value with a passkey: the server origin plus /secret-reveal/<clientId>, with no token. Copy it verbatim; never compose it. Returned only to that person holder in their own session. Null for a client a worker holds, and for a worker session, an App key or anyone viewing a client they do not hold."
     revealUrl: String
@@ -6528,6 +6551,8 @@ export const typeDefs = `#graphql
     currentVersion: Int
     "An App secret's kept versions, newest first: numbers, sizes and authorship, never a value. Paged (hrn:node:hadronmemory.com:specs:cor:api:120:04): default 20, cap 200, limit 0 counts only. Empty for org and user secrets."
     versions(limit: Int, offset: Int): SecretVersionsPage!
+    "Client metadata for current issuers and App managers; never a secret value."
+    readClients(activeOnly: Boolean = false, limit: Int, offset: Int): SecretReadClientsPage!
   }
 
   """
@@ -11548,6 +11573,14 @@ export const typeDefs = `#graphql
     (it may carry credentials).
     """
     serverInfo: ServerInfo!
+
+    """
+    #4489 — the closed list of App key scopes a client may grant, as data: name, one line on what it permits, and
+    whether granting it needs a hostId (hrn:node:hadronmemory.com:specs:cor:aut:010:03). Static platform metadata, no
+    tenant data: any signed-in caller (a person or an App key) may read it; anonymous is UNAUTHENTICATED. Adding a scope
+    stays a spec change.
+    """
+    appKeyScopeCatalogue: [AppKeyScopeInfo!]!
 
     # Spec 040 — the run audit surface (what ran, why, what it cost).
     """

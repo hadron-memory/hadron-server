@@ -49,6 +49,7 @@ export async function judgeSecretReadClientIssuer(ctx: Context, userId: string, 
     select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
   });
   if (!app || app.deletedAt || app.uninstalledAt) throw authorizationDenied();
+  if (app.organizationId && !(await tx.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } }))) throw authorizationDenied();
   const base = { secretId: secret.id, secretName: secret.name, appId: app.id, userId };
 
   // No platform arm: judge the manager predicate without the caller's platform roles (Q26).

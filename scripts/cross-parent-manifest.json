@@ -1879,6 +1879,18 @@
       "resolver": "src/api/graphql/schema/resolvers.secret.ts::canSeeSecretOwner",
       "target": "Secret"
     },
+    "Secret.readClients": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.secret.ts::readClients",
+      "gate": "readClientPage",
+      "target": "SecretReadClientsPage"
+    },
+    "SecretReadClientsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "readClientPage filters current issuers or App managers before paging, refuses App keys, runs, impersonation and deleted scopes, and exposes full client ids only to current issuers or holders; metadata only",
+      "resolver": "src/lib/secrets/readClientList.ts::readClientPage",
+      "target": "SecretReadClient"
+    },
     "Secret.versions": {
       "class": "parent-implies-child",
       "audience": "the callers Query.secret admits for the parent (canSeeSecretOwner); a page of an App secret's versions, paged per parent (cor:api:120:04)",

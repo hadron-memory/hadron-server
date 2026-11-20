@@ -24,6 +24,7 @@ const ACTOR_NEUTRAL = new Set([
   'hadron_start_session',
   // #1562 — the watch list acts as the connection's user and writes nothing.
   'hadron_web_poll_list',
+  'hadron_list_secrets', 'hadron_get_secret', // #3998: metadata-only reads.
 ]);
 
 /** Neutral tools that define their own `session` parameter (it is not the gate's). */

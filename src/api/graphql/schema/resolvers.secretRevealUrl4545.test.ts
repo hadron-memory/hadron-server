@@ -18,7 +18,7 @@ import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 
 const BASE = 'https://hadron.example.test';
-let ownerId: string; let workerId: string; let personClientId: string; let workerClientId: string;
+let ownerId: string; let workerId: string; let personClientId: string; let workerClientId: string; let secretId: string; let appId: string;
 let savedBase: string | undefined;
 const ctxOf = (userId: string, extra: Partial<Context> = {}): Context => ({ db, userId, roles: [], ...extra } as unknown as Context);
 const asWorker = <T>(id: string | null, p: () => Promise<T>) => runAsActor({ workerId: id, agentId: null }, p);
@@ -35,9 +35,10 @@ beforeEach(async () => {
   await cleanDb(db); await upsertPlatformActions(db);
   ownerId = (await db.user.create({ data: { email: `${generateId()}@4545.test` } })).id;
   const app = await db.app.create({ data: { name: 'R4545', ownerUserId: ownerId, urn: `${generateId().toLowerCase()}:rv` } });
+  appId = app.id;
   const agent = await db.agent.create({ data: { ownerUserId: ownerId, name: 'a', urn: `${generateId().toLowerCase()}:ag` } as never });
   workerId = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'w1', slug: 'w1' } })).id;
-  const secretId = (await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: app.id, name: 'tok', kind: 'generic', value: 'hunter2' }, ctxOf(ownerId))).id;
+  secretId = (await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: app.id, name: 'tok', kind: 'generic', value: 'hunter2' }, ctxOf(ownerId))).id;
   const issue = async (holderKind: 'USER' | 'WORKER', holderRef?: string) =>
     ((await resolvers.Mutation.issueSecretReadClient({}, { input: { secretRef: secretId, holderKind, holderRef, autoDelete: false, maxReads: 2, reason: 'need it' } }, ctxOf(ownerId))) as { clientId: string }).clientId;
   personClientId = await issue('USER');
@@ -67,18 +68,33 @@ describe('#4545 SecretReadClient.revealUrl', () => {
     expect(row?.revealUrl).toBeNull();
   });
 
-  it('a worker session never gets the URL: neither the worker holder nor the person holder driving a worker', async () => {
+  it('a worker session never gets the URL: the worker holder sees its row with null, and the person\'s client is not listed', async () => {
     const rows = await list(ctxOf(ownerId), workerId);
     expect(byId(rows, workerClientId)).toHaveProperty('revealUrl', null);
-    // The person's own client may show in the list, but its URL is not handed to the worker session.
-    const own = byId(rows, personClientId);
+    expect(byId(rows, personClientId)).toBeUndefined();
+  });
+
+  it('Secret.readClients (the manager view) follows the same rule: the holder gets the URL, a worker-held row null', async () => {
+    const page = (ctx: Context) => asWorker(null, () =>
+      (resolvers as any).Secret.readClients({ id: secretId, ownerType: 'app', ownerId: appId }, {}, ctx) as Promise<{ items: Row[] }>);
+    const items = (await page(ctxOf(ownerId))).items;
+    expect(byId(items, personClientId)?.revealUrl).toBe(`${BASE}/secret-reveal/${personClientId}`);
+    expect(byId(items, workerClientId)).toHaveProperty('revealUrl', null);
+  });
+
+  it('the manager view in a worker session hands over no URL, even for the driving person\'s own client', async () => {
+    const managed = await asWorker(workerId, () =>
+      (resolvers as any).Secret.readClients({ id: secretId, ownerType: 'app', ownerId: appId }, {}, ctxOf(ownerId)) as Promise<{ items: Array<Row & { clientPrefix: string }> }>);
+    const own = managed.items.find((r) => r.clientPrefix === personClientId.slice(0, 8));
     expect(own).toBeDefined();
     expect(own).toHaveProperty('revealUrl', null);
+    for (const r of managed.items) expect(r).toHaveProperty('revealUrl', null);
   });
 
   it('an App key session gets no URL even if a user rides along', async () => {
     const rows = await list(ctxOf(ownerId, { appKeyId: 'k1', appId: 'a1' } as Partial<Context>));
-    expect(byId(rows, personClientId)).toHaveProperty('revealUrl', null);
+    for (const r of rows) expect(r).toHaveProperty('revealUrl', null);
+    expect(byId(rows, personClientId)?.revealUrl ?? null).toBeNull();
   });
 
   it('another person holder\'s client: its issuer sees the row with null, only that holder gets the URL', async () => {
@@ -93,6 +109,10 @@ describe('#4545 SecretReadClient.revealUrl', () => {
     });
     expect(byId(await list(ctxOf(ownerId)), personClientId)).toHaveProperty('revealUrl', null);
     expect(byId(await list(ctxOf(other)), personClientId)?.revealUrl).toBe(`${BASE}/secret-reveal/${personClientId}`);
+    // The manager view (the App owner manages it) lists the row too, and still hands over no link it does not hold.
+    const managed = await asWorker(null, () =>
+      (resolvers as any).Secret.readClients({ id: secretId, ownerType: 'app', ownerId: appId }, {}, ctxOf(ownerId)) as Promise<{ items: Row[] }>);
+    expect(byId(managed.items, personClientId)).toHaveProperty('revealUrl', null);
   });
 
   it('the no-worker and no-agent holder tests stand on chk_grants_exactly_one_holder: a person grant cannot also name either', async () => {
