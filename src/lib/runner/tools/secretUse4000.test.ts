@@ -10,6 +10,7 @@ import type { RunToolContext } from './types.js';
 vi.mock('../../webfetchClient.js', () => ({ httpRequest: vi.fn(), fetchUrl: vi.fn() }));
 import { httpRequest } from '../../webfetchClient.js';
 import { webRequest } from './webTools.js';
+import { admitAndExecuteTool } from '../toolAdmission.js';
 
 let ctx: RunToolContext;
 beforeEach(async () => {
@@ -66,6 +67,14 @@ describe('S5 secret.use public run-tool boundary', () => {
       await expect(webRequest.execute(ctx, { method: 'GET', url: 'https://api.example.test/v1/orders', secretClientId }))
         .rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
     }
+    expect(httpRequest).not.toHaveBeenCalled();
+  });
+
+  it('checks policy without charging outside the transaction and fails closed before outbound', async () => {
+    const gate = vi.fn(async () => true);
+    await expect(admitAndExecuteTool(webRequest, { method: 'GET', url: 'https://api.example.test/v1/orders', secretClientId: 'synthetic' },
+      { toolCtx: ctx, onToolCall: gate })).rejects.toThrow(/Secret use is unavailable/);
+    expect(gate).toHaveBeenCalledExactlyOnceWith('tool.web_request', 0);
     expect(httpRequest).not.toHaveBeenCalled();
   });
 

@@ -1,5 +1,5 @@
 /** #4000: the run's use spend is atomic with its ticket and never grants another App or agent access. */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
@@ -172,6 +172,18 @@ describe('transactional secret.use (#4000)', () => {
     expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
     await setHolder(runCtx.run.agentId!);
     await expect(prepare()).resolves.toMatchObject({ auth: { type: 'bearer' } });
+  });
+  it('rolls back ticket and budget if the locked grant becomes unspendable at the final guard', async () => {
+    await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
+    const live = await import('../grants/live.js');
+    const guard = vi.spyOn(live, 'chargeGrantUse').mockResolvedValueOnce(false);
+    try {
+      await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_SPENT' } });
+      expect(guard).toHaveBeenCalledOnce();
+      expect((await db.appRun.findUniqueOrThrow({ where: { id: runCtx.run.id } })).budgetActions).toBe(3);
+      expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
+      expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
+    } finally { guard.mockRestore(); }
   });
   it('serializes a one-use grant against concurrent uses without spending a second ticket', async () => {
     await db.actionTicket.createMany({ data: [generateId(), generateId()].map((id) => ({ id, organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' })) });
