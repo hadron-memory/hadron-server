@@ -152,7 +152,7 @@ describe('hadron_set_active_memory — includes deployment info in success messa
     });
     memory = await resolvers.Mutation.createMemory(
       {},
-      { orgId: org.id, name: 'sm-mem' },
+      { orgRef: org.id, name: 'sm-mem' },
       { db, roles: ['ADMIN'], userId: admin.id } as Context,
     );
   });

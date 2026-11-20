@@ -244,7 +244,7 @@ export function encryptMemoryTargetRef(body: unknown): string | null {
   if (rest.length > 0 || field?.kind !== Kind.FIELD || field.name.value !== 'encryptMemory' || field.directives?.length) {
     return null;
   }
-  const value = field.arguments?.find((argument) => argument.name.value === 'memoryId')?.value;
+  const value = field.arguments?.find((argument) => argument.name.value === 'memoryRef')?.value;
   if (value?.kind === Kind.STRING) return value.value;
   if (value?.kind !== Kind.VARIABLE) return null;
   const name = value.name.value;

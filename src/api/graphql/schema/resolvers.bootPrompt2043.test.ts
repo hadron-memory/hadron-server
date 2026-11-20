@@ -59,7 +59,7 @@ beforeEach(async () => {
   orgId = org.id;
   admin = await db.user.create({ data: { githubId: 204301, githubUsername: 'boot-admin', handle: 'boot-admin', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  memory = await resolvers.Mutation.createMemory(null, { orgId, name: 'boot-memory' }, ctx());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'boot-memory' }, ctx());
   const app = await db.app.create({ data: { id: generateId(), name: 'Boot App', urn: 'boot.example:app', organizationId: org.id } });
   const agent = await db.agent.create({ data: { id: generateId(), name: 'Boot agent', urn: 'boot.example:agent', organizationId: org.id } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
@@ -166,7 +166,7 @@ describe('guard B: a worker session never edits a boot prompt (#2043, cor:agt:04
       input: { nodeIds: [s.id], fields: ['content'], oldText: 'You', newText: 'We', dryRun: false },
     }, ctx()));
     expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).content).toBe('You are {{worker.name}}.');
-    const target = await resolvers.Mutation.createMemory(null, { orgId, name: 'boot-target' }, ctx());
+    const target = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'boot-target' }, ctx());
     const targetBefore = await db.node.count({ where: { memoryId: target.id } });
     expect(await asWorker(() => codeOf(resolvers.Mutation.cloneMemory(null, { ref: memory.id, targetUrn: `hrn:mem:${memory.urn}-clone` }, ctx()))))
       .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
@@ -198,7 +198,7 @@ describe('merge and MCP twins (#2043)', () => {
   it('an admin merge carries the source and not the compiled node (Elena rule A)', async () => {
     await source();
     const c = await compiled();
-    const target = await resolvers.Mutation.createMemory(null, { orgId, name: 'merge-target' }, ctx());
+    const target = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'merge-target' }, ctx());
     await resolvers.Mutation.mergeMemories(null, { input: { source: memory.id, target: target.id } }, ctx());
     const locs = (await db.node.findMany({ where: { memoryId: target.id }, select: { loc: true } })).map((n) => n.loc);
     expect(locs).toContain('boot:source');
@@ -225,7 +225,7 @@ describe('merge and MCP twins (#2043)', () => {
 
 describe('merge target collisions (#2043, Ruth P2)', () => {
   it('a merge cannot fold a source node onto a compiled target; a worker session cannot fold onto a boot-prompt target', async () => {
-    const target = await resolvers.Mutation.createMemory(null, { orgId, name: 'collide-target' }, ctx());
+    const target = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'collide-target' }, ctx());
     const tCompiled = await withCompileWrite(() => db.node.create({ data: {
       id: generateId(), memoryId: target.id, loc: 'boot:compiled', name: 'TC', content: 'compiled', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE,
     } }));
@@ -252,7 +252,7 @@ describe('merge batches recheck under their locks (#2043, Jane/Cameron P2)', () 
   it('with the preflights pierced, the fold and the relocate batch still refuse boot-prompt rows', async () => {
     preflight.off = true;
     try {
-      const target = await resolvers.Mutation.createMemory(null, { orgId, name: 'late-target' }, ctx());
+      const target = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'late-target' }, ctx());
       // fold: plain source onto a compiled target, and onto a boot-prompt target under a worker session.
       const tCompiled = await withCompileWrite(() => db.node.create({ data: {
         id: generateId(), memoryId: target.id, loc: 'boot:compiled', name: 'TC', content: 'compiled', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE,

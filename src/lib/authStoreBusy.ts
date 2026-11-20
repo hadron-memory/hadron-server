@@ -1,5 +1,5 @@
 /**
- * #4471 — a busy store during the API-key credential check, typed and retryable (cor:agt:040:12).
+ * #4471 — a busy store during the API-key credential check, typed and retryable (cor:aut:010:05 S5).
  * #4504 — the unreachable arm (P1001) joins it, as a sibling reason under the same code.
  *
  * The App-key and user-API-key paths resolve their credential by one hash lookup
@@ -59,6 +59,17 @@ export const AUTH_STORE_UNREACHABLE_MESSAGE =
 export type AuthStoreBusyReason = 'POOL_WAIT' | 'STORE_UNREACHABLE';
 
 /**
+ * The fixed prose for a reason — the ONE lookup both ends render from (#4519, BLIND P3-4): the
+ * constructor's message AND the plain-HTTP boundary's body. Total on purpose: anything that is
+ * not STORE_UNREACHABLE answers the busy prose, so no message content — the driver's text, a
+ * tampered `.message`, a subclass's own prose — can reach the wire; "no driver text rides the
+ * message" is enforced by the render point, not by constructor convention alone.
+ */
+export function authStoreBusyMessage(reason: unknown): string {
+  return reason === 'STORE_UNREACHABLE' ? AUTH_STORE_UNREACHABLE_MESSAGE : AUTH_STORE_BUSY_MESSAGE;
+}
+
+/**
  * The credential check could not complete because the store would not answer — busy past its
  * pool wait, or unreachable outright. ONE code and ONE class for both shapes (the carve-out in
  * internalFault.ts, the formatError mapping and the Sentry column all key on the class), the
@@ -67,8 +78,11 @@ export type AuthStoreBusyReason = 'POOL_WAIT' | 'STORE_UNREACHABLE';
  * STORE_UNREACHABLE)".
  */
 export class AuthStoreBusyError extends GraphQLError {
-  constructor(original: unknown, reason: AuthStoreBusyReason = 'POOL_WAIT') {
-    super(reason === 'STORE_UNREACHABLE' ? AUTH_STORE_UNREACHABLE_MESSAGE : AUTH_STORE_BUSY_MESSAGE, {
+  // #4519 (BLIND P3-3): `reason` is REQUIRED — there is no meaningful default for "which shape
+  // fired" (the single production construction site derives it via authStoreBusyReason), and a
+  // silent POOL_WAIT default would mistype an unreachable store as merely busy.
+  constructor(original: unknown, reason: AuthStoreBusyReason) {
+    super(authStoreBusyMessage(reason), {
       extensions: {
         code: 'AUTH_STORE_BUSY',
         // SAFE to retry (the check held nothing), not "a retry will succeed" — the same

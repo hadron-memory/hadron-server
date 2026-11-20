@@ -52,7 +52,7 @@ beforeEach(async () => {
     data: { id: generateId(), githubId: 66221, githubUsername: `xf-${t}`, roles: ['ADMIN'] },
   });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  srcMem = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `xf-src-${t}` }, ctx());
+  srcMem = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: `xf-src-${t}` }, ctx());
 });
 
 async function extractAndRead(parentId: string): Promise<Record<string, { role: string | null; isRunnable: boolean | null }>> {

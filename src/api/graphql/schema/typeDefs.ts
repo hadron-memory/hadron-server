@@ -2644,6 +2644,14 @@ export const typeDefs = `#graphql
   enum QuestionSort {
     PORTAL_DEFAULT
     CODE
+    "#4428 — newest ask first."
+    ASKED_AT_DESC
+    "#4428 — oldest ask first."
+    ASKED_AT_ASC
+    "#4428 — urgent, high, normal, low; within a priority, newest ask first."
+    PRIORITY_DESC
+    "#4428 — most recently answered first; unanswered last."
+    ANSWERED_AT_DESC
   }
 
   "#4426 — one entry of a question\'s answer list."
@@ -2789,6 +2797,11 @@ export const typeDefs = `#graphql
     specsMustChange: [QuestionRef!]!
     "The user the asker directed this question to, when it named one. Routing only: any decider may answer."
     assigneeId: ID
+    "#4428 — the explicit assignee, by name and handle."
+    assignee: CommentActorRef
+    "#4428 — who this question is routed to: the explicit assignee, else the holder of the worker that asked, else null. Worked out at read, never stored. Routing only: any decider may answer."
+    effectiveAssigneeId: ID
+    effectiveAssignee: CommentActorRef
     "The asker\'s agent task this question blocks. Always null until slice S7."
     taskId: ID
     deciderIds: [ID!]!
@@ -2827,6 +2840,8 @@ export const typeDefs = `#graphql
     id: ID!
     urn: String!
     portalUrl: String
+    "#4428 — the memory this log is in."
+    memoryId: ID!
     loc: String!
     name: String!
     "Codes are this prefix plus letters: Q → QA, QB, …"
@@ -9993,14 +10008,30 @@ export const typeDefs = `#graphql
     questions(
       logRef: ID
       awaitingMe: Boolean
+      "#4428 — every question in the memories of this App that the caller can read. Not with logRef."
+      appRef: ID
       state: [QuestionState!]
       tier: QuestionTier
       priority: [QuestionPriority!]
       authorizes: Boolean
+      "#4428 — true: answered (ANSWERED_UNCONFIRMED, DECIDED or STALE); false: OPEN."
+      answered: Boolean
+      "#4428 — the question\'s effective assignee is this user (an account merged into theirs matches)."
+      assigneeId: ID
+      "#4428 — true: no effective assignee. With assigneeId, either match is kept; false alone: has one."
+      unassigned: Boolean
+      "#4428 — the caller asked it (same worker with a person behind it, same user, or same bare App key)."
+      askedByMe: Boolean
+      askedByWorkerId: ID
+      askedByAppId: ID
+      "#4428 — has a standing answer given at or after this instant."
+      answeredSince: DateTime
       sort: QuestionSort = PORTAL_DEFAULT
       limit: Int = 20
       offset: Int = 0
     ): QuestionPage!
+    "#4428 — the question logs in the memories of this App the caller can read, or in this memory. Give exactly one of appRef and memoryRef; an unknown or unreadable one is an empty list. At most 200 logs: more refuses with QUESTION_LOG_TOO_LARGE_FOR_FILTER, never truncates."
+    questionLogs(appRef: ID, memoryRef: ID): [QuestionLog!]!
     "#1641 — re-render a question from its payload and check it against its content, data and approval: the findings behind its state."
     verifyQuestion(ref: ID!): QuestionVerification!
 
@@ -13426,28 +13457,28 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    deleteOrganization(id: ID!): Boolean!
+    deleteOrganization(ref: ID!): Boolean!
 
     """
     Link a GitHub App installation to an organization (org ADMIN or platform ADMIN).
 
     Accepts the entity's ID or URN.
     """
-    linkGithubApp(orgId: ID!, installationId: Int!): Organization!
+    linkGithubApp(orgRef: ID!, installationId: Int!): Organization!
 
     """
     Set GitHub App credentials for an organization (encrypted at rest).
 
     Accepts the entity's ID or URN.
     """
-    updateOrgGithubApp(orgId: ID!, appId: String!, privateKey: String!): Organization!
+    updateOrgGithubApp(orgRef: ID!, appId: String!, privateKey: String!): Organization!
 
     """
     Remove all GitHub App config from an organization.
 
     Accepts the entity's ID or URN.
     """
-    unlinkGithubApp(orgId: ID!): Organization!
+    unlinkGithubApp(orgRef: ID!): Organization!
 
     """
     User invitations (org ADMIN or platform ADMIN).
@@ -13458,7 +13489,7 @@ export const typeDefs = `#graphql
     null means 10 days and two activations (Holger V49). 0, negatives, an explicit 1 for maxActivations and larger values are refused as BAD_USER_INPUT
     (hrn:node:hadronmemory.com:specs:cor:api:260:01), judged after the org-admin gate.
     """
-    createUserInvitation(orgId: ID!, memberRole: Role!, name: String, email: String, githubUsername: String, maxActivations: Int, expiresInDays: Int): UserInvitation!
+    createUserInvitation(orgRef: ID!, memberRole: Role!, name: String, email: String, githubUsername: String, maxActivations: Int, expiresInDays: Int): UserInvitation!
     """
     Platform invite — no org association, just onboards a new user
 
@@ -13477,52 +13508,46 @@ export const typeDefs = `#graphql
     acceptInvitation(slug: String!): Boolean!
 
     # Organization membership (platform ADMIN or org OWNER/ADMIN).
-    # orgId accepts the entity's ID or URN. userId is keyed by raw ID only —
-    # User has no urn column.
+    # #4142 (S6 chunk F): the deprecated orgId/userId aliases dropped; both
+    # survivors resolve id / slug / URN (user: id / email / handle / URN).
     """
-    Accepts the entity's ID or URN (orgId). A user who is already a live member is refused with CONFLICT.
+    Accepts the entity's ID or URN (orgRef). A user who is already a live member is refused with CONFLICT.
     """
     addOrgMember(
-      "#764 — the organization as an id / slug / hrn:org:<slug> URN. Supply this OR orgId."
-      orgRef: String
-      orgId: ID @deprecated(reason: "Use orgRef (accepts id / slug / URN).")
-      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
-      userRef: String
-      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
+      "#764 — the organization as an id / slug / hrn:org:<slug> URN."
+      orgRef: ID!
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN."
+      userRef: ID!
       role: Role!
     ): OrgMember!
     """
-    Accepts the entity's ID or URN (orgId). Refused with NOT_FOUND when the user is not a live member, and with CONFLICT when it would demote the organization's last live owner.
+    Accepts the entity's ID or URN (orgRef). Refused with NOT_FOUND when the user is not a live member, and with CONFLICT when it would demote the organization's last live owner.
     """
     updateOrgMember(
-      "#764 — the organization as an id / slug / hrn:org:<slug> URN. Supply this OR orgId."
-      orgRef: String
-      orgId: ID @deprecated(reason: "Use orgRef (accepts id / slug / URN).")
-      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
-      userRef: String
-      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
+      "#764 — the organization as an id / slug / hrn:org:<slug> URN."
+      orgRef: ID!
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN."
+      userRef: ID!
       role: Role!
     ): OrgMember!
     """
-    Accepts the entity's ID or URN (orgId). Refused with NOT_FOUND when the user never held a membership, and with CONFLICT when it would remove the last live owner; removing an already-revoked member succeeds again.
+    Accepts the entity's ID or URN (orgRef). Refused with NOT_FOUND when the user never held a membership, and with CONFLICT when it would remove the last live owner; removing an already-revoked member succeeds again.
     """
     removeOrgMember(
-      "#764 — the organization as an id / slug / hrn:org:<slug> URN. Supply this OR orgId."
-      orgRef: String
-      orgId: ID @deprecated(reason: "Use orgRef (accepts id / slug / URN).")
-      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
-      userRef: String
-      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
+      "#764 — the organization as an id / slug / hrn:org:<slug> URN."
+      orgRef: ID!
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN."
+      userRef: ID!
     ): Boolean!
 
     # Memory management (org ADMIN)
     """
-    Create a free-standing memory. orgId accepts an organization's ID or URN.
-    With orgId, the default is knowledge-class with ORGANIZATION visibility;
+    Create a free-standing memory. orgRef accepts an organization's ID or URN.
+    With orgRef, the default is knowledge-class with ORGANIZATION visibility;
     knowledge/group creation requires the org's memory.create grant. Omitting
-    orgId (or passing null) creates a user-owned memory in the authenticated
+    orgRef (or passing null) creates a user-owned memory in the authenticated
     caller's namespace and requires an explicit personal/private memoryClass.
-    The default knowledge class is refused without orgId. Pass
+    The default knowledge class is refused without orgRef. Pass
     memoryClass: group + visibility: GROUP for a group-class memory
     (023-app-shape US4; the caller is auto-added as the first owner),
     or memoryClass: personal | private for an owner-only memory the
@@ -13539,9 +13564,9 @@ export const typeDefs = `#graphql
       handle namespace (organizationId NULL, ownerUserId = caller), and its URN
       roots on the caller's handle (hrn:mem:<handle>:<slug>) rather than an org
       domain. The org-less path supports only the owner-only classes 'personal'
-      and 'private'; pass orgId for 'knowledge' / 'group'.
+      and 'private'; pass orgRef for 'knowledge' / 'group'.
       """
-      orgId: ID
+      orgRef: ID
       name: String!
       shortDescription: String
       description: String
@@ -13698,7 +13723,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    deleteMemory(id: ID!): Boolean!
+    deleteMemory(ref: ID!): Boolean!
 
     """
     Clone a Memory into a new Memory at \`targetUrn\`.
@@ -13796,7 +13821,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    setMemorySourceToken(id: ID!, token: String!, expiresAt: String): Memory!
+    setMemorySourceToken(ref: ID!, token: String!, expiresAt: String): Memory!
 
     # Agent management
     """
@@ -13946,12 +13971,10 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     createMemorySubscription(
-      "#764 — the memory as an id or URN. Supply this OR memoryId."
-      memoryRef: String
-      memoryId: ID @deprecated(reason: "Use memoryRef (accepts id / URN).")
-      "#764 — the organization as an id / slug / hrn:org:<slug> URN. Supply this OR orgId."
-      orgRef: String
-      orgId: ID @deprecated(reason: "Use orgRef (accepts id / slug / URN).")
+      "#764 — the memory as an id or URN."
+      memoryRef: ID!
+      "#764 — the organization as an id / slug / hrn:org:<slug> URN."
+      orgRef: ID!
       role: Role!
     ): MemorySubscription!
 
@@ -13975,12 +13998,10 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     updateMemorySubscription(
-      "#764 — the memory as an id or URN. Supply this OR memoryId."
-      memoryRef: String
-      memoryId: ID @deprecated(reason: "Use memoryRef (accepts id / URN).")
-      "#764 — the organization as an id / slug / hrn:org:<slug> URN. Supply this OR orgId."
-      orgRef: String
-      orgId: ID @deprecated(reason: "Use orgRef (accepts id / slug / URN).")
+      "#764 — the memory as an id or URN."
+      memoryRef: ID!
+      "#764 — the organization as an id / slug / hrn:org:<slug> URN."
+      orgRef: ID!
       role: Role!
     ): MemorySubscription!
 
@@ -13990,12 +14011,10 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     deleteMemorySubscription(
-      "#764 — the memory as an id or URN. Supply this OR memoryId."
-      memoryRef: String
-      memoryId: ID @deprecated(reason: "Use memoryRef (accepts id / URN).")
-      "#764 — the organization as an id / slug / hrn:org:<slug> URN. Supply this OR orgId."
-      orgRef: String
-      orgId: ID @deprecated(reason: "Use orgRef (accepts id / slug / URN).")
+      "#764 — the memory as an id or URN."
+      memoryRef: ID!
+      "#764 — the organization as an id / slug / hrn:org:<slug> URN."
+      orgRef: ID!
     ): Boolean!
 
     """
@@ -14005,14 +14024,14 @@ export const typeDefs = `#graphql
     no sync status, timestamp or report is written. Access is checked first; encrypted-memory refusal is unchanged.
     Accepts the entity's ID or URN.
     """
-    syncMemory(id: ID!): Memory!
+    syncMemory(ref: ID!): Memory!
 
     """
     Push all nodes in a memory to its configured git repo.
 
     Accepts the entity's ID or URN.
     """
-    pushMemoryToGit(id: ID!): Boolean!
+    pushMemoryToGit(ref: ID!): Boolean!
 
     # Exchange integration (connection created via OAuth at /auth/microsoft)
     deleteExchangeConnection(id: ID!): Boolean!
@@ -14341,7 +14360,7 @@ export const typeDefs = `#graphql
     # session, and chats only with its session's Agent. Anything else reads as an unknown user
     # or Agent. A signed-in user acts as themselves. The
     # subscription is provisioned in the transaction that creates the chat.
-    startChat(agentId: ID!, userId: String, conversationName: String, scope: ChatScope = private, isTestRun: Boolean = false, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String, "#3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): optional AI config choice for this chat, stored with it: \`default\` or one of the chat App's own config ids from chatAiConfigChoices. Omitted keeps what the chat has. Any other id is refused as a missing config, revealing nothing about it." aiConfigChoice: String): ChatStartResult!
+    startChat(agentRef: ID!, userId: String, conversationName: String, scope: ChatScope = private, isTestRun: Boolean = false, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String, "#3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): optional AI config choice for this chat, stored with it: \`default\` or one of the chat App's own config ids from chatAiConfigChoices. Omitted keeps what the chat has. Any other id is refused as a missing config, revealing nothing about it." aiConfigChoice: String): ChatStartResult!
     """
     Process a user message (saves message, builds context, returns next prompt).
     #3501: CHAT_STATE_INVALID refuses unusable conversational state before the turn writes or builds a model prompt.
@@ -14400,7 +14419,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateAgentAIConfig(agentId: ID!, provider: String!, model: String!, apiKey: String): Agent!
+    updateAgentAIConfig(agentRef: ID!, provider: String!, model: String!, apiKey: String): Agent!
 
     """
     Clear an Agent's AI provider config without returning or decrypting keys.
@@ -14412,7 +14431,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    clearAgentAIConfig(agentId: ID!): Agent!
+    clearAgentAIConfig(agentRef: ID!): Agent!
 
     """
     036-ai-service-config: create a named AI config on an owner entity.
@@ -14700,21 +14719,21 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    createRevision(agentId: ID!, description: String): RevisionResult!
+    createRevision(agentRef: ID!, description: String): RevisionResult!
 
     """
     Publish a revision and pin the Agent to it.
 
     Accepts the entity's ID or URN.
     """
-    publishRevision(agentId: ID!, revisionLoc: String!, versionLabel: String): RevisionResult!
+    publishRevision(agentRef: ID!, revisionLoc: String!, versionLabel: String): RevisionResult!
 
     """
     Restore an Agent's system memory from a revision (auto-saves first).
 
     Accepts the entity's ID or URN.
     """
-    restoreRevision(agentId: ID!, revisionLoc: String!): RevisionResult!
+    restoreRevision(agentRef: ID!, revisionLoc: String!): RevisionResult!
 
     # Editor lock (org ADMIN)
     """
@@ -14722,14 +14741,14 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    acquireEditorLock(agentId: ID!): EditorLockResult!
+    acquireEditorLock(agentRef: ID!): EditorLockResult!
 
     """
     Release the editor lock for an Agent's system memory.
 
     Accepts the entity's ID or URN.
     """
-    releaseEditorLock(agentId: ID!): Boolean!
+    releaseEditorLock(agentRef: ID!): Boolean!
 
     # Public mutations (no auth required)
     joinWaitingList(email: String!, requestedFeatures: String): Boolean!
@@ -15483,12 +15502,10 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     ensureAppMember(
-      "#764 — the App as an id / URN. Supply this OR appId."
-      appRef: String
-      appId: ID @deprecated(reason: "Use appRef (accepts id / URN).")
-      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
-      userRef: String
-      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
+      "#764 — the App as an id / URN."
+      appRef: ID!
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN."
+      userRef: ID!
       role: String!
           "#3308: worker sessions need a validated instruction or their own live app.members grant, including self-leave; the holder still needs the original manager/self right. Refusal precedes target-user resolution. Instructed no-ops record a claim only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, hrn:node:hadronmemory.com:specs:cor:agt:080:24)."
       instruction: ActInstructionInput
@@ -15503,12 +15520,10 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     removeAppMember(
-      "#764 — the App as an id / URN. Supply this OR appId."
-      appRef: String
-      appId: ID @deprecated(reason: "Use appRef (accepts id / URN).")
-      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
-      userRef: String
-      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
+      "#764 — the App as an id / URN."
+      appRef: ID!
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN."
+      userRef: ID!
           "#3308: worker sessions need a validated instruction or their own live app.members grant, including self-leave; the holder still needs the original manager/self right. Refusal precedes target-user resolution. Instructed no-ops record a claim only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, hrn:node:hadronmemory.com:specs:cor:agt:080:24)."
       instruction: ActInstructionInput
     ): Boolean!
@@ -15543,7 +15558,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    joinApp(appId: ID!): JoinAppPayload!
+    joinApp(appRef: ID!): JoinAppPayload!
 
     """
     023-app-shape US2 — user-level uninstall. The currently-logged-in user
@@ -15556,7 +15571,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    leaveApp(appId: ID!, instruction: ActInstructionInput): LeaveAppPayload!
+    leaveApp(appRef: ID!, instruction: ActInstructionInput): LeaveAppPayload!
 
     """
     023-app-shape US3 — asymmetric cross-user grant on a personal-class
@@ -15859,12 +15874,10 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN (agentId).
     """
     revokeAgentSubscription(
-      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
-      userRef: String
-      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
-      "#764 — the Agent as an id / URN. Supply this OR agentId."
-      agentRef: String
-      agentId: ID @deprecated(reason: "Use agentRef (accepts id / URN).")
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN."
+      userRef: ID!
+      "#764 — the Agent as an id / URN."
+      agentRef: ID!
     ): AgentSubscription!
 
     # Identity lifecycle — this mutation plus the session group below.
@@ -15905,7 +15918,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    linkMemoryToUser(memoryId: ID!, externalUserId: String!): Memory!
+    linkMemoryToUser(memoryRef: ID!, externalUserId: String!): Memory!
 
     """
     Convert a plaintext PRIVATE memory to encrypted (spec 041, caller-held
@@ -15926,7 +15939,7 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     encryptMemory(
-      memoryId: ID!
+      memoryRef: ID!
       dataKey: String @deprecated(reason: "Send the key in x-hadron-memory-keys, or x-hadron-operation-key for an owning App's completion.")
       passphrase: String @deprecated(reason: "Send the passphrase in x-hadron-memory-keys.")
     ): Memory!

@@ -49,7 +49,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
     { organizationId: org.id, userId: member.id, role: 'ADMIN' },
   ] });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'seq' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'seq' }, as());
   // A legacy chat: a root and ordered messages with no Channel row anywhere.
   await mk('chats:legacy', 'chat', null);
   await mk('chats:legacy:messages', 'record', null);

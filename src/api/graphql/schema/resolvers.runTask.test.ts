@@ -56,7 +56,7 @@ beforeEach(async () => {
   // Create a memory via the GraphQL resolver to get the proper URN format.
   const memData = (await resolvers.Mutation.createMemory(
     {},
-    { orgId: org.id, name: 'Alpha' },
+    { orgRef: org.id, name: 'Alpha' },
     ctx,
   )) as { id: string };
 

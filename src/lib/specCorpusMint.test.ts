@@ -84,7 +84,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
-  draft = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft', draftCorpus: true }, as());
+  draft = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs-draft', draftCorpus: true }, as());
   await spec('pas:010', `Feature. See [Rule [pas:010:01]](https://h/app/u/hrn:node:${draft.urn}:pas:010:01).`);
   await spec('pas:010:01', 'Rule body.');
 });
@@ -133,7 +133,7 @@ describe('mintSpecCorpus: a clean corpus (#1448)', () => {
 
 describe('mintSpecCorpus lints exactly the CLI --all scope (ruling (a); @codex P2s on #1462)', () => {
   it('lints a memory root that sits at a citation-shaped name, as the CLI does', async () => {
-    const pas = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'pas', draftCorpus: true }, as());
+    const pas = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'pas', draftCorpus: true }, as());
     expect((await mint(true, admin.id, pas.id)).blockers.map((b) => [b.loc, b.rule])).toEqual([['pas', 'tag-spec']]);
     // Marked as the module's spec, it passes like any spec.
     await db.node.updateMany({ where: { memoryId: pas.id, loc: 'pas' }, data: { tags: ['spec'] } });
@@ -209,7 +209,7 @@ describe('mintSpecCorpus: an edge into another memory can point at a placeholder
   };
 
   it('blocks on a placeholder in another draft the caller can read, named by its node URN', async () => {
-    const other = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'other-draft', draftCorpus: true }, as());
+    const other = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'other-draft', draftCorpus: true }, as());
     const reserved = await resolvers.Mutation.reserveSpecCitation(null, { memoryRef: other.id, loc: 'pas:900' }, as());
     await edgeFrom010To(reserved.id);
     expect((await mint(true)).blockers).toEqual([expect.objectContaining({
@@ -218,7 +218,7 @@ describe('mintSpecCorpus: an edge into another memory can point at a placeholder
   });
 
   it('blocks on a deleted node in another readable memory as MISSING (@codex P2 on #1462)', async () => {
-    const other = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'other-specs' }, as());
+    const other = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'other-specs' }, as());
     const gone = await db.node.create({ data: {
       id: generateId(), memoryId: other.id, loc: 'cor:010', name: 'cor:010', role: 'spec', nodeType: 'info', tags: ['spec'], content: 'Old.',
     } });
@@ -236,7 +236,7 @@ describe('mintSpecCorpus: an edge into another memory can point at a placeholder
   });
 
   it('checks CITES_UNMINTED only for sources in the mint scope (#1612): a minted unchanged source is skipped, an edited one blocks', async () => {
-    const other = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'other-specs' }, as());
+    const other = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'other-specs' }, as());
     const target = await db.node.create({ data: {
       id: generateId(), memoryId: other.id, loc: 'cor:010', name: 'cor:010', role: 'spec', nodeType: 'info', tags: ['spec'], content: 'Draft.',
     } });
@@ -419,7 +419,7 @@ describe('mintSpecCorpus: who may mint (#1448)', () => {
   });
 
   it('mints a memory that was never asked to be a draft: minting is per node (#1591)', async () => {
-    const plain = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'plain' }, as());
+    const plain = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'plain' }, as());
     expect(await resolvers.Memory.corpusState({ id: plain.id }, {}, as())).toBe('DRAFT');
     expect(await mint(false, admin.id, plain.id)).toMatchObject({ minted: true, mintedCount: 1 });
     expect(await resolvers.Memory.corpusState({ id: plain.id }, {}, as())).toBe('MINTED');
@@ -611,7 +611,7 @@ describe('Memory.corpusMintedAt is derived from the nodes (#1591)', () => {
 
 describe('mintSpecCorpus: a text citation into another memory is a CITES_UNMINTED reference (#1594, cor:dmo:120:07)', () => {
   const foreign = async (name: string, loc: string, extra: Record<string, unknown> = {}) => {
-    const m = await resolvers.Mutation.createMemory(null, { orgId: org.id, name }, as());
+    const m = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name }, as());
     const n = await db.node.create({ data: {
       id: generateId(), memoryId: m.id, loc, name: loc, role: 'spec', nodeType: 'info', tags: ['spec'], content: 'Draft.', ...extra,
     } });
@@ -688,7 +688,7 @@ describe('mintSpecCorpus: a text citation into another memory is a CITES_UNMINTE
   it('gates on the RESOLVED node: a real NODE alias into an unreadable memory reports nothing, into a readable one reports', async () => {
     const t = await foreign('open-specs', 'cor:010');
     const hidden = await hiddenMemory();
-    const dest = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'dest-specs' }, as());
+    const dest = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'dest-specs' }, as());
     const aliasUrn = `${t.m.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:cor:010`;
     await db.urnAlias.create({ data: {
       urn: aliasUrn, entityType: 'NODE', entityId: t.n.id, reason: 'RENAME', replacedByUrn: `${hidden.urn}:moved:010`,

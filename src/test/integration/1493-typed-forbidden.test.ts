@@ -56,7 +56,7 @@ function expectForbidden(r: Gql, message = 'Forbidden') {
 
 const UPDATE_ORG = `mutation($id: ID!, $n: String) { updateOrganization(ref: $id, name: $n) { id } }`;
 const UPDATE_AGENT = `mutation($r: ID!, $d: String) { updateAgent(ref: $r, description: $d) { id } }`;
-const CREATE_MEMORY = `mutation($o: ID, $n: String!) { createMemory(orgId: $o, name: $n) { id } }`;
+const CREATE_MEMORY = `mutation($o: ID, $n: String!) { createMemory(orgRef: $o, name: $n) { id } }`;
 const NODE_REVISIONS = `query($n: ID!) { nodeRevisions(nodeRef: $n) { id } }`;
 const LATEST_APP_RUN = `query($a: String!) { latestAppRun(appRef: $a) { id } }`;
 

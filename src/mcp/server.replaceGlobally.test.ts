@@ -53,7 +53,7 @@ beforeEach(async () => {
   await db.orgMember.create({
     data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
   });
-  memory = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'rg-mem' }, adminCtx());
+  memory = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'rg-mem' }, adminCtx());
 });
 
 describe('hadron_replace_text', () => {

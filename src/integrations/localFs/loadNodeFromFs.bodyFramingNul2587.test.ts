@@ -33,7 +33,7 @@ describe('#2587 NUL row in the shared body-framing fixture', () => {
       const user = await db.user.create({ data: { githubId: 258701, githubUsername: 'u2587' } });
       await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
       ctx = { db, userId: user.id, roles: [] };
-      memoryId = (await (resolvers.Mutation as any).createMemory({}, { orgId: org.id, name: 'framing' }, ctx)).id;
+      memoryId = (await (resolvers.Mutation as any).createMemory({}, { orgRef: org.id, name: 'framing' }, ctx)).id;
     });
 
     it.each(refused.map((c) => [c.name, c] as const))('%s: createNode rejects and leaves no node', async (_name, c) => {

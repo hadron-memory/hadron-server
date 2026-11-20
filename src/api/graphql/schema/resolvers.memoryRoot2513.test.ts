@@ -19,7 +19,7 @@ const memoryUrn = `hrn:mem:${orgUrn}:${memoryName}`;
 const ctx = (): Context => ({ db, userId, roles: ['ADMIN'] });
 const server = () => createTestableMcpServer({ userId, roles: ['ADMIN'], clientId: `user:${userId}` });
 const createMemory = (name = memoryName) => resolvers.Mutation.createMemory(
-  {}, { orgId, name, vectorIndexEnabled: false }, ctx(),
+  {}, { orgRef: orgId, name, vectorIndexEnabled: false }, ctx(),
 );
 
 beforeEach(async () => {
