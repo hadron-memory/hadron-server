@@ -80,6 +80,8 @@ test('loadRecordOk accepts exactly one valid load record for the requested workl
     ['another kind', rec({ kind: 'sample' }), 'held'],
     ['another workload', rec(), 'churn'],
     ['an unknown workload', rec({ workload: 'nope' }), 'nope'],
+    // #4608 LOCAL F1: inherited names are not workloads.
+    ...['constructor', 'toString', '__proto__', 'hasOwnProperty'].map((name) => [`inherited ${name}`, rec({ workload: name }), name]),
     ['a missing count', JSON.stringify({ kind: 'load', workload: 'held', startAt: 1, endAt: 2, ok: 101 }), 'held'],
     ['a non-integer count', rec({ other: '0' }), 'held'],
     ['a negative count', rec({ capRefused: -1 }), 'held'],

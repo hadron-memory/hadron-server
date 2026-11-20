@@ -10,7 +10,9 @@ const INIT = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVe
 
 // `cap` is the server's per-principal session cap; held opens cap + 1 so it always probes eviction.
 export function parseWorkload(name, cap = 25) {
-  const w = { churn: { perMin: 40, close: false }, closed: { perMin: 40, close: true }, idle: { perMin: 0, close: false }, held: { perMin: 0, close: false, hold: cap + 1 } }[name];
+  const all = { churn: { perMin: 40, close: false }, closed: { perMin: 40, close: true }, idle: { perMin: 0, close: false }, held: { perMin: 0, close: false, hold: cap + 1 } };
+  // #4608 LOCAL F1: own keys only, so an inherited name (constructor, toString, __proto__) is unknown, not a workload.
+  const w = Object.hasOwn(all, name) ? all[name] : undefined;
   if (!w) throw new Error(`unknown workload: ${name}`);
   return w;
 }
