@@ -154,7 +154,7 @@ async function inAdminAudience(db: Db, principal: RoleWriterPrincipal, memoryId:
  * needs the Agent to be visible to the installer (a PUBLIC Agent or an org grant), and an App still needs memory write
  * access, which the owner controls, before this is ever asked (hrn:node:hadronmemory.com:specs:cor:acl:010:03).
  *
- * The App row and the matching Agent row are locked `FOR SHARE` (the precedent is `userlessRunHoldsWriteGrant`), so an
+ * The App row, the `AppAgent` link and the matching Agent row are locked `FOR SHARE` (the precedent is `userlessRunHoldsWriteGrant`), so an
  * uninstall or an Agent deletion either commits before this read and is seen, or waits for the write to finish. Outside
  * a transaction (a preview) the locks are plain reads. A deadlock against an App hard delete aborts one side, which the
  * write door reports as `NODE_WRITE_CONFLICT`: safe, not ordered.
@@ -172,14 +172,14 @@ export async function appCarriesOwnersAgent(
           JOIN agents ag ON ag.id = aa.agent_id
         WHERE a.id = ${appId} AND a.deleted_at IS NULL AND a.uninstalled_at IS NULL
           AND ag.deleted_at IS NULL AND ag.organization_id = ${owner.organizationId}
-        LIMIT 1 FOR SHARE OF a, ag`
+        LIMIT 1 FOR SHARE OF a, aa, ag`
     : await db.$queryRaw<Array<{ id: string }>>`
         SELECT a.id FROM apps a
           JOIN app_agents aa ON aa.app_id = a.id
           JOIN agents ag ON ag.id = aa.agent_id
         WHERE a.id = ${appId} AND a.deleted_at IS NULL AND a.uninstalled_at IS NULL
           AND ag.deleted_at IS NULL AND ag.owner_user_id = ${owner.ownerUserId}
-        LIMIT 1 FOR SHARE OF a, ag`;
+        LIMIT 1 FOR SHARE OF a, aa, ag`;
   return rows.length > 0;
 }
 

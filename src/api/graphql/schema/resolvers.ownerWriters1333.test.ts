@@ -358,6 +358,29 @@ describe('the App and its Agent are held while the write decides (blind review F
     expect(await refusal(principalOf(a))).toBe(REFUSED);
   });
 
+  it('an AppAgent unlink waits for a write that already judged the App qualified (section-10 delta)', async () => {
+    const own = await agent(org.id, null);
+    const a = await app({ orgId: org.id, agents: [own] });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let judged!: () => void;
+    const judgedFirst = new Promise<void>((r) => { judged = r; });
+    const writing = db.$transaction(async (tx) => {
+      expect(await appCarriesOwnersAgent(tx as never, a, owner())).toBe(true);
+      judged();
+      await gate;
+    }, { timeout: 15_000 });
+    await judgedFirst;
+    let unlinked = false;
+    const unlink = db.appAgent.delete({ where: { appId_agentId: { appId: a, agentId: own } } }).then(() => { unlinked = true; });
+    await waitForLockWaiters(db);
+    expect(unlinked).toBe(false);
+    release();
+    await writing;
+    await unlink;
+    expect(await refusal(principalOf(a))).toBe(REFUSED);
+  });
+
   it('an Agent deletion waits for a write that already judged the App qualified', async () => {
     const own = await agent(org.id, null);
     const a = await app({ orgId: org.id, agents: [own] });
