@@ -1,15 +1,19 @@
 /**
  * #4003 (S8 of #3991; R21) — the restore runbook's step "end every live read client after any restore". A restore
  * brings back read clients that had been revoked, or whose read budget was spent, after the backup was taken.
+ * Rule: hrn:node:hadronmemory.com:specs:cor:sec:010:03 (with Holger's ruling 5A: no read is served before this step has
+ * run, and a failed step stays closed). The runbook keeps reads closed by order: the server is stopped BEFORE the
+ * restore, this runs with --apply while it is down, and the server starts only after a successful run.
  *
  *   DATABASE_URL=<owner url> pnpm tsx scripts/db/end-secret-read-clients.ts --revoked-by <operator user id>           # dry run
  *   DATABASE_URL=<owner url> pnpm tsx scripts/db/end-secret-read-clients.ts --revoked-by <operator user id> --apply
  *
  * Run as the OWNER under a register grant, never on the strength of this file or the PR that adds it (CLAUDE.md,
  * "Production database"). Ops-script only: no GraphQL, CLI or MCP surface (Bill's conditions, team chat #121979).
- * Without `--apply` it counts and writes nothing. With it, one transaction ends every pending or active
- * `secret.reveal` grant of a live App through the shared `endGrant` (revoked_at with revoked_by, one REVOKE grant
- * event each, the first end stands), so a second run ends nothing. `--revoked-by` must name an existing, non-erased
+ * Without `--apply` it counts and writes nothing (a preview: the runbook's step is the `--apply` run). With it, one
+ * transaction ends every pending or active read-client grant (READ_CLIENT_GRANT_ACTIONS, today `secret.reveal`) of a
+ * live App through the shared `endGrant` (revoked_at with revoked_by, one REVOKE grant event each, the first end
+ * stands), so a second run ends nothing. `--revoked-by` must name an existing, non-erased
  * user: the operator, recorded as the revoker. Output is counts only, never an id or a value. Runbook:
  * hrn:node:hadronmemory.com:dev:ops:alpha:app-secrets-key-rotation (D. Restore).
  *

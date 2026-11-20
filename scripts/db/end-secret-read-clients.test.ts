@@ -3,13 +3,14 @@
  * Dry run writes nothing; --apply ends only secret.reveal grants, through the shared endGrant (revoked_at paired with
  * revoked_by, one REVOKE event each); a second run ends nothing; the revoker must be an existing user; output is counts only.
  */
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../src/integrations/db/client.js';
 import { cleanDb } from '../../src/test/helpers.js';
 import { generateId } from '../../src/lib/id.js';
 import { upsertPlatformActions } from '../../src/lib/grants/actions.js';
 import { resolvers, type Context } from '../../src/api/graphql/schema/resolvers.js';
-import { endLiveSecretReadClients, UnknownRevokerError } from '../../src/lib/secrets/endReadClients.js';
+import { endLiveSecretReadClients, READ_CLIENT_GRANT_ACTIONS, UnknownRevokerError } from '../../src/lib/secrets/endReadClients.js';
 import { main } from './end-secret-read-clients.js';
 
 let ownerId: string; let operatorId: string; let appId: string; let secretId: string;
@@ -94,6 +95,19 @@ describe('endLiveSecretReadClients', () => {
     await expect(endLiveSecretReadClients(db, { revokedBy: operatorId, apply: true })).rejects.toBeInstanceOf(UnknownRevokerError);
     expect((await grant(liveGrant)).revokedAt).toBeNull();
     expect(await revokes()).toBe(0);
+  });
+});
+
+describe('the read-client grant actions are one list (Bill, team chat #122006)', () => {
+  it('is secret.reveal today, a registered platform action; S5 (#4000) adds secret.use to it', async () => {
+    expect([...READ_CLIENT_GRANT_ACTIONS]).toEqual(['secret.reveal']);
+    for (const name of READ_CLIENT_GRANT_ACTIONS) expect(await db.action.findUnique({ where: { name } })).not.toBeNull();
+  });
+  it('is the one place: the module names no action outside the list', () => {
+    const src = readFileSync(new URL('../../src/lib/secrets/endReadClients.ts', import.meta.url), 'utf8');
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    expect(code.match(/'secret\.[a-z-]+'/g)).toEqual(['\'secret.reveal\'']);
+    expect(code).toMatch(/g\.action IN \(\$\{Prisma\.join\(READ_CLIENT_GRANT_ACTIONS\)\}\)/);
   });
 });
 
