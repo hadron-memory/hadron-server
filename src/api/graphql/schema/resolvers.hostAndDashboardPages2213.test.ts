@@ -61,6 +61,17 @@ async function sizeEdges(read: (args: Record<string, unknown>) => Promise<Page<u
   expect((await read({ limit: 2, offset: -9 })).items).toEqual((await read({ limit: 2, offset: 0 })).items);
 }
 
+/** With 201 rows a limit at or over the cap serves exactly 200 and says more remain; the 201st is the next page. */
+async function capAt200(read: (args: Record<string, unknown>) => Promise<Page<any>>, key: (row: any) => string) {
+  const all = [...(await read({ limit: 200 })).items, ...(await read({ limit: 200, offset: 200 })).items].map(key);
+  expect(new Set(all).size).toBe(201);
+  for (const limit of [200, 201, 100_000]) {
+    const p = await read({ limit });
+    expect(p.items.map(key), `limit ${limit}`).toEqual(all.slice(0, 200));
+    expect(p, `limit ${limit}`).toMatchObject({ total: 201, hasMore: true });
+  }
+}
+
 let n: number;
 let org: { id: string; urn: string };
 let app: { id: string };
@@ -126,6 +137,14 @@ describe('hostRegistrationsPage', () => {
     await sizeEdges((a) => page(ctx(member.id), a), 25);
   });
 
+  it('a limit over 200 is served as 200 (admission\'s PAGE_ARGS_FIELDS relies on it)', async () => {
+    const now = new Date();
+    await db.hostRegistration.createMany({
+      data: Array.from({ length: 201 }, (_, i) => ({ appId: app.id, hostId: `c${String(i).padStart(3, '0')}`, label: 'c', pollIntervalSeconds: 60, refreshedAt: now })),
+    });
+    await capAt200((args) => page(ctx(member.id), args), (r) => r.hostId);
+  });
+
   it('each item keeps its workers, in workerId order', async () => {
     await seedRegistrations(app.id, 3, 'h', workers);
     const p = await page(ctx(member.id), { limit: 2, offset: 1 });
@@ -156,14 +175,19 @@ describe('hostRegistrationsPage', () => {
 
   it('the App\'s own key reads the page, and its read is recorded once with count = the items on that page', async () => {
     await seedRegistrations(app.id, 9);
-    const key = await mkKey(app.id, 'plain');
+    const key = await mkKey(app.id, 'orca1');
+    await M.grantAppKeyScope({}, { id: key.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
+    // The old field records the same way: one use, count = what it returned.
+    await Q.hostRegistrations({}, { appRef: app.id }, keyCtx(key, app.id));
+    const counts = async () =>
+      (await db.hostKeyUse.findMany({ where: { appKeyId: key.id, action: 'read' }, orderBy: { usedAt: 'asc' } })).map((u) => u.count);
+    expect(await counts()).toEqual([9]);
     const p = await page(keyCtx(key, app.id), { limit: 4, offset: 6 });
     expect(p).toMatchObject({ total: 9, hasMore: false });
     expect(p.items).toHaveLength(3);
-    const uses = await db.hostKeyUse.findMany({ where: { appKeyId: key.id, action: 'read' } });
-    expect(uses.map((u) => u.count)).toEqual([3]);
+    expect(await counts()).toEqual([9, 3]);
     await page(keyCtx(key, app.id), { limit: 0 });
-    expect((await db.hostKeyUse.findMany({ where: { appKeyId: key.id, action: 'read' }, orderBy: { usedAt: 'asc' } })).map((u) => u.count)).toEqual([3, 0]);
+    expect(await counts()).toEqual([9, 3, 0]);
   });
 
   it('is in the schema with the envelope, and its description sends a deciding consumer to the end', async () => {
@@ -198,6 +222,11 @@ describe('dashboardWidgetsPage', () => {
     expect(rows.map((w) => w.id)).toEqual(old.map((w: any) => w.id));
     expect(new Set(rows.map((w) => w.id)).size).toBe(25);
     await sizeEdges((a) => page(ctx(member.id), a), 25);
+  });
+
+  it('a limit over 200 is served as 200 (admission\'s PAGE_ARGS_FIELDS relies on it)', async () => {
+    await seedWidgets(member.id, 201);
+    await capAt200((args) => page(ctx(member.id), args), (w) => w.id);
   });
 
   it('another user\'s widgets are in neither items nor total', async () => {

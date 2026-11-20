@@ -271,6 +271,7 @@
     "UsageEventPage": "envelope",
     "ExchangeConnectionPage": "envelope",
     "DashboardWidgetPresetPage": "envelope",
+    "DashboardWidgetPage": "envelope",
     "AppKeyPage": "envelope",
     "UserApiKeyPage": "envelope",
     "AgentSubscriptionPage": "envelope",
@@ -288,6 +289,7 @@
     "AgentTeamAlarmSchedule": "value",
     "HostRegistrationWorker": "value",
     "HostOperationPage": "envelope",
+    "HostRegistrationPage": "envelope",
     "HostSetup": "envelope",
     "HostRegistrationRefusal": "value",
     "ContextResetStep": "value",
@@ -889,6 +891,18 @@
       "audience": "org ADMIN of the named org or platform admin (requireOrgRole ADMIN); the org's own ledger; scalars only",
       "resolver": "src/api/graphql/schema/resolvers.metering.ts::requireOrgRole",
       "target": "CreditLedgerEntry"
+    },
+    "DashboardWidgetPage.items": {
+      "class": "parent-implies-child",
+      "audience": "only the caller's own placed widgets (userId = ctx.userId); non-users and impersonation get an empty page",
+      "resolver": "src/api/graphql/schema/resolvers.dashboard.ts::dashboardWidgetsPage",
+      "target": "DashboardWidget"
+    },
+    "HostRegistrationPage.items": {
+      "class": "parent-implies-child",
+      "audience": "hostRegistrationsPage gated by withReadableApp, as hostRegistrations: App participants plus the App's own key",
+      "resolver": "src/api/graphql/schema/resolvers.hostOperation.ts::withReadableApp",
+      "target": "HostRegistration"
     },
     "DashboardWidgetPresetPage.items": {
       "class": "parent-implies-child",
