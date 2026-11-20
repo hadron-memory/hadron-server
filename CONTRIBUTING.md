@@ -68,7 +68,7 @@ A good pull request:
 - names anything you deliberately left out.
 
 You do not need to rebase. If `main` has moved on, merging it into your branch is fine.
-Please do not force-push over a review in progress; add commits and we will squash on merge.
+Please do not force-push over a review in progress; add commits instead so reviewers can see what changed.
 
 ## Review
 

@@ -77,7 +77,7 @@ optional for a first run. The server refuses to start without the last one.
 pnpm db:dev-setup
 ```
 
-This applies the schema and then the raw SQL in `prisma/post-push.sql`, which creates the
+This runs `prisma/pre-push.sql`, applies the schema, and then runs the raw SQL in `prisma/post-push.sql`, which creates the
 `vector` extension, the vector index and the database constraints Prisma cannot model.
 **Use this script, not a bare `pnpm db:push`:** a bare push silently drops the vector index.
 `pnpm db:dev-setup` is safe to run again after a schema change; it does not wipe data.
