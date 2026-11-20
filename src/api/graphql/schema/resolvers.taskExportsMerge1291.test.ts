@@ -140,23 +140,28 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
     const on = await merge({ exports: { codexSkill: codex } }, {}, outsider()).then(() => null, (e) => e);
     expect(off).not.toBeNull();
     expect(on).not.toBeNull();
-    expect(on.extensions?.code).toBe(off.extensions?.code);
+    expect(off.extensions?.code).toBe('NODE_NOT_FOUND'); // an unreadable node is concealed as a missing one
+    expect(on.extensions?.code).toBe('NODE_NOT_FOUND');
     expect(on.message).toBe(off.message);
     expect(await props()).toEqual({ keep: 'me', exports: { claudeSkill: claude } });
   });
 
   it('a malformed patch from a caller without write access is refused as any patch is (BLIND P2), by id and by loc', async () => {
+    const plainId = await M.updateTaskNode({}, { input: { id: taskId, properties: { exports: {} } } }, outsider()).then(() => null, (e) => e);
+    const plainLoc = await M.updateTaskNode({}, { input: { memoryId: memId, loc: 'tasks:t1', properties: { exports: {} } } }, outsider()).then(() => null, (e) => e);
     const asId = (properties: unknown) => merge(properties, {}, outsider()).then(() => null, (e) => e);
     const asLoc = (properties: unknown) =>
       M.updateTaskNode({}, { input: { memoryId: memId, loc: 'tasks:t1', properties }, mergeExports: true }, outsider()).then(() => null, (e) => e);
-    for (const call of [asId, asLoc]) {
-      const good = await call({ exports: {} });
-      const bad = await call(null);
-      expect(good).not.toBeNull();
-      expect(bad).not.toBeNull();
-      expect(bad.extensions?.code).toBe(good.extensions?.code);
-      expect(bad.extensions?.code).not.toBe('BAD_USER_INPUT');
-      expect(bad.message).toBe(good.message);
+    expect(plainId?.extensions?.code).toBe('NODE_NOT_FOUND');
+    expect(plainLoc).not.toBeNull();
+    for (const [call, plain] of [[asId, plainId], [asLoc, plainLoc]] as const) {
+      for (const properties of [{ exports: {} }, null, [1], 'x']) {
+        const got = await call(properties);
+        expect(got).not.toBeNull();
+        expect(got.extensions?.code).toBe(plain.extensions?.code);
+        expect(got.extensions?.code).not.toBe('BAD_USER_INPUT');
+        expect(got.message).toBe(plain.message);
+      }
     }
   });
 
@@ -193,7 +198,16 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
     expect(gap.properties).toEqual({ x: 1 });
   });
 
-  it('a loc-selected merge does not follow a node that moved while it waited for the lock (BLIND P2)', async () => {
+  /** Holds the node's lock, lets the merge resolve its loc selector and queue behind it, then runs `whileHeld` and commits. */
+  async function mergeBehindLock(whileHeld: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<void>) {
+    const real = db.node.findFirst.bind(db.node);
+    let looked!: () => void;
+    const lookedUp = new Promise<void>((r) => (looked = r));
+    const spy = vi.spyOn(db.node, 'findFirst').mockImplementation(((args: any) => {
+      const out = real(args);
+      if (args?.where?.loc === 'tasks:t1' && args?.where?.deletedAt === null) return out.then((x: unknown) => { looked(); return x; });
+      return out;
+    }) as never);
     let release!: () => void;
     const held = new Promise<void>((r) => (release = r));
     let locked!: () => void;
@@ -202,19 +216,42 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${taskId}))`;
       locked();
       await held;
-      await tx.node.update({ where: { id: taskId }, data: { loc: 'tasks:moved' } });
+      await whileHeld(tx);
     }, { timeout: 20_000 });
-    await gotLock;
-    const attempt = M.updateTaskNode({}, { input: { memoryId: memId, loc: 'tasks:t1', properties: { exports: { codexSkill: codex } } }, mergeExports: true }, admin())
-      .then(() => 'wrote', (e) => `refused:${e.extensions?.code}`);
-    await new Promise((r) => setTimeout(r, 500));
-    release();
-    await holder;
-    expect(await attempt).toBe('refused:NODE_NOT_FOUND');
+    try {
+      await gotLock;
+      const attempt = M.updateTaskNode({}, { input: { memoryId: memId, loc: 'tasks:t1', properties: { exports: { codexSkill: codex } } }, mergeExports: true }, admin())
+        .then(() => 'wrote', (e) => `refused:${e.extensions?.code}`);
+      await lookedUp; // the merge now holds the original id and is queued on the lock
+      release();
+      await holder;
+      return await attempt;
+    } finally {
+      release();
+      await holder.catch(() => undefined);
+      spy.mockRestore();
+    }
+  }
+
+  it('a loc-selected merge does not follow a node that moved while it waited for the lock (BLIND P2)', async () => {
+    const outcome = await mergeBehindLock(async (tx) => { await tx.node.update({ where: { id: taskId }, data: { loc: 'tasks:moved' } }); });
+    expect(outcome).toBe('refused:NODE_NOT_FOUND');
     expect((await props()).exports.codexSkill).toBeUndefined();
   });
 
-  it('refuses a caller without write access BEFORE taking the node lock (nothing of the stored bag is read for them)', async () => {
+  it('a loc-selected merge lands on the node that took the loc when the original moved away (BLIND delta P2)', async () => {
+    const repl = await M.createTaskNode({}, { input: { memoryId: memId, loc: 'tasks:repl', name: 'Repl', isRunnable: true, properties: { keep: 'repl' } } }, admin());
+    const outcome = await mergeBehindLock(async (tx) => {
+      await tx.node.update({ where: { id: taskId }, data: { loc: 'tasks:moved' } });
+      await tx.node.update({ where: { id: repl.id }, data: { loc: 'tasks:t1' } });
+    });
+    expect(outcome).toBe('wrote');
+    const landed = (await db.node.findUniqueOrThrow({ where: { id: repl.id } })).properties as Record<string, any>;
+    expect(landed).toEqual({ keep: 'repl', exports: { codexSkill: codex } });
+    expect((await props()).exports.codexSkill).toBeUndefined(); // the original, moved node is untouched
+  });
+
+  it('refuses a caller without write access without waiting on the node lock', async () => {
     let release!: () => void;
     const held = new Promise<void>((r) => (release = r));
     let locked!: () => void;
@@ -230,7 +267,7 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
         merge({ exports: { codexSkill: codex } }, {}, outsider()).then(() => 'wrote', (e) => `refused:${e.extensions?.code}`),
         new Promise<string>((r) => setTimeout(() => r('blocked on the lock'), 2_000)),
       ]);
-      expect(outcome).toMatch(/^refused:/);
+      expect(outcome).toBe('refused:NODE_NOT_FOUND');
     } finally {
       release();
       await holder;
@@ -264,8 +301,9 @@ describe('a userless App run under a prefix-scoped write grant (#4599 LOCAL P2)'
 
   it('a task under the granted prefix takes the merge exactly as it takes the plain update', async () => {
     const { inside, upd } = await setup();
-    expect(await upd(inside.id, false)).toBe('wrote');
     expect(await upd(inside.id, true)).toBe('wrote');
+    expect((await db.node.findUniqueOrThrow({ where: { id: inside.id } })).properties).toEqual({ keep: 1, exports: { codexSkill: codex } });
+    expect(await upd(inside.id, false)).toBe('wrote');
   });
 
   it('outside the prefix, and after the grant is revoked, the merge is refused exactly as the plain update is', async () => {

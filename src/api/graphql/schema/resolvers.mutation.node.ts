@@ -2169,46 +2169,59 @@ async function mergePropertiesAndWrite(a: {
     });
   }
 
-  const nodeId =
-    a.targetNodeId ??
-    (await ctx.db.node.findFirst({ where: { memoryId: resolvedMemoryId, loc: a.targetLoc, deletedAt: null }, select: { id: true } }))?.id;
-  if (!nodeId) {
+  const notFound = () =>
+    new GraphQLError(`Node not found: "${a.ref}"`, {
+      extensions: { code: 'NODE_NOT_FOUND', ...(a.hasId ? { ref: a.ref } : { loc: a.targetLoc, memoryId: resolvedMemoryId }) },
+    });
+  // An id selector is anchored on the PK, as the plain door is: one attempt. A loc selector names whatever lives at
+  // (memory, loc) NOW, so the id it resolved to before the lock can be stale when the lock is granted (the node moved
+  // or was deleted, and another may have taken its loc): it re-resolves and tries again rather than follow the moved
+  // node or refuse while a node sits at the loc (#4599 BLIND P2). Bounded, then a retryable conflict.
+  const MAX_ATTEMPTS = a.hasId ? 1 : 3;
+  const STALE = Symbol('stale-loc-resolution');
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     // A merge needs a stored base, so a missing node is the same refusal the plain update gives. Falling through to the
     // plain write would replace the whole bag of a node created in the gap (#4599 BLIND P2).
-    throw new GraphQLError(`Node not found: "${a.ref}"`, {
-      extensions: { code: 'NODE_NOT_FOUND', loc: a.targetLoc, memoryId: resolvedMemoryId },
-    });
-  }
+    const nodeId =
+      a.targetNodeId ??
+      (await ctx.db.node.findFirst({ where: { memoryId: resolvedMemoryId, loc: a.targetLoc, deletedAt: null }, select: { id: true } }))?.id;
+    if (!nodeId) throw notFound();
 
-  const effects: Array<() => void> = [];
-  const written = await ctx.db.$transaction(async (lockTx) => {
-    await lockInstallAuthorityFirst(lockTx, ctx, resolvedMemoryId);
-    await lockTx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${nodeId}))`;
-    const fresh = await lockTx.node.findUnique({ where: { id: nodeId }, select: { loc: true, memoryId: true, deletedAt: true, properties: true } });
-    // A loc selector names whatever lives at (memory, loc) NOW: a node that moved or was deleted while this call waited
-    // for the lock is no longer the one named, so it is refused, never followed to its new loc (#4599 BLIND P2).
-    // An id selector is anchored on the PK, as the plain door is.
-    if (!fresh || (!a.hasId && (fresh.deletedAt || fresh.loc !== a.targetLoc || fresh.memoryId !== resolvedMemoryId))) {
-      throw new GraphQLError(`Node not found: "${a.ref}"`, { extensions: { code: 'NODE_NOT_FOUND', ref: a.ref } });
+    const effects: Array<() => void> = [];
+    let written: Awaited<ReturnType<typeof writeNodeCore>>;
+    try {
+      written = await ctx.db.$transaction(async (lockTx) => {
+        await lockInstallAuthorityFirst(lockTx, ctx, resolvedMemoryId);
+        await lockTx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${nodeId}))`;
+        const fresh = await lockTx.node.findUnique({ where: { id: nodeId }, select: { loc: true, memoryId: true, deletedAt: true, properties: true } });
+        if (!fresh) throw notFound();
+        if (!a.hasId && (fresh.deletedAt || fresh.loc !== a.targetLoc || fresh.memoryId !== resolvedMemoryId)) throw STALE;
+        const merged = mergePropertiesPatch(fresh.properties, patch as Record<string, unknown>);
+        return writeNodeCore(
+          { ...fields, properties: merged, memoryId: resolvedMemoryId, loc: fresh.loc },
+          withoutRequestCaches(ctx, lockTx),
+          'update',
+          {
+            authoring: authoringFromRequest(ctx, fields.authoredWith),
+            targetNodeId: nodeId,
+            guardRevSeq: a.expectedRevision ?? undefined,
+            ownsKind: a.ownsKind,
+            governedContext: a.governedContext,
+            concealUnreadable: { entity: a.hasId ? 'node' : 'memory', ref: a.ref },
+            transaction: { tx: lockTx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
+          },
+        );
+      });
+    } catch (e) {
+      if (e === STALE) continue;
+      throw e;
     }
-    const merged = mergePropertiesPatch(fresh.properties, patch as Record<string, unknown>);
-    return writeNodeCore(
-      { ...fields, properties: merged, memoryId: resolvedMemoryId, loc: fresh.loc },
-      withoutRequestCaches(ctx, lockTx),
-      'update',
-      {
-        authoring: authoringFromRequest(ctx, fields.authoredWith),
-        targetNodeId: nodeId,
-        guardRevSeq: a.expectedRevision ?? undefined,
-        ownsKind: a.ownsKind,
-        governedContext: a.governedContext,
-        concealUnreadable: { entity: a.hasId ? 'node' : 'memory', ref: a.ref },
-        transaction: { tx: lockTx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
-      },
-    );
+    for (const effect of effects) effect();
+    return written;
+  }
+  throw new GraphQLError(`${a.op}: the node at "${a.targetLoc}" kept changing while the merge waited; retry.`, {
+    extensions: { code: 'NODE_WRITE_CONFLICT', loc: a.targetLoc, memoryId: resolvedMemoryId },
   });
-  for (const effect of effects) effect();
-  return written;
 }
 
 /**
