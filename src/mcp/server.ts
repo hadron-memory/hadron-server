@@ -3459,7 +3459,7 @@ export function createMcpServerInstance(
       try {
         const created = await resolvers.Mutation.createMemory(
           {},
-          { name, memoryClass, orgId: org, shortDescription, description, tags, visibility },
+          { name, memoryClass, orgRef: org, shortDescription, description, tags, visibility },
           ctx,
         );
         return textResult(

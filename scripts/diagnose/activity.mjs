@@ -18,8 +18,8 @@ export async function run({ base, key, nodes = 40, tasks = 5, fetchImpl = fetch 
     'mutation($app: ID!) { setAgentTaskStallSchedule(appRef: $app, input: { assignmentMinutes: 1 }) { assignmentMinutes } }', { app: APP });
   // The seeded memories are not vector-indexed (raw inserts), so the embed worker would have nothing to do: make our own.
   const memory = await gql(base, key, fetchImpl, 'createMemory',
-    'mutation($orgId: ID!, $name: String!, $vectorIndexEnabled: Boolean) { createMemory(orgId: $orgId, name: $name, vectorIndexEnabled: $vectorIndexEnabled) { id } }',
-    { orgId: ORG, name: 'diag w2 synthetic', vectorIndexEnabled: true });
+    'mutation($orgRef: ID!, $name: String!, $vectorIndexEnabled: Boolean) { createMemory(orgRef: $orgRef, name: $name, vectorIndexEnabled: $vectorIndexEnabled) { id } }',
+    { orgRef: ORG, name: 'diag w2 synthetic', vectorIndexEnabled: true });
   let nodesCreated = 0, tasksQueued = 0;
   for (let i = 0; i < nodes; i++) {
     await gql(base, key, fetchImpl, 'createNode',

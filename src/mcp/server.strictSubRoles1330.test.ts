@@ -29,7 +29,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'ss-mcp', urn: 'ss-mcp' } });
   admin = await db.user.create({ data: { githubId: 13301, githubUsername: 'ss-mcp-admin', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  memory = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'docs' }, { db, roles: ['ADMIN'], userId: admin.id } as Context);
+  memory = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'docs' }, { db, roles: ['ADMIN'], userId: admin.id } as Context);
   const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: memory.id } });
   await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'doc', strictSubRoles: true } });
   await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'doc.guide' } });

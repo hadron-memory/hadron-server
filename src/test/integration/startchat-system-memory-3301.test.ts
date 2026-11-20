@@ -56,7 +56,7 @@ async function fixture() {
 
 type Ctx = Record<string, unknown>;
 const start = (agentId: string, ctx: Ctx, args: Record<string, unknown> = {}) =>
-  resolvers.Mutation.startChat({}, { agentId, ...args }, { db, roles: ['READER'], ...ctx } as never)
+  resolvers.Mutation.startChat({}, { agentRef: agentId, ...args }, { db, roles: ['READER'], ...ctx } as never)
     .then(() => null as string | null, (e: Error) => e.message);
 
 /** Everything a refused call must leave alone. */

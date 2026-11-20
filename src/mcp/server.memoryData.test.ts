@@ -76,7 +76,7 @@ describe('Memory.data over MCP (hadron_list_memories)', () => {
     const payload = { color: 'blue', counts: [1, 2, 3], nested: { ok: true } };
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: org.id, name: 'with-data', data: payload },
+      { orgRef: org.id, name: 'with-data', data: payload },
       gqlCtx(),
     );
 
@@ -89,7 +89,7 @@ describe('Memory.data over MCP (hadron_list_memories)', () => {
   });
 
   it('omits the data: sub-line for a memory with no data', async () => {
-    await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'no-data' }, gqlCtx());
+    await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'no-data' }, gqlCtx());
 
     const text = await createTestableMcpServer(memberAuth()).callToolText('hadron_list_memories', {});
 
@@ -102,7 +102,7 @@ describe('Memory.data over MCP (hadron_list_memories)', () => {
   it('drops the data: sub-line again after updateMemory clears it (null)', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: org.id, name: 'clear-later', data: { keep: false } },
+      { orgRef: org.id, name: 'clear-later', data: { keep: false } },
       gqlCtx(),
     );
 
@@ -119,10 +119,10 @@ describe('Memory.data over MCP (hadron_list_memories)', () => {
   it('surfaces each memory\'s own bag when several are listed together', async () => {
     const memA = await resolvers.Mutation.createMemory(
       {},
-      { orgId: org.id, name: 'mem-a', data: { which: 'a' } },
+      { orgRef: org.id, name: 'mem-a', data: { which: 'a' } },
       gqlCtx(),
     );
-    await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'mem-b' }, gqlCtx());
+    await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'mem-b' }, gqlCtx());
 
     const text = await createTestableMcpServer(memberAuth()).callToolText('hadron_list_memories', {});
 

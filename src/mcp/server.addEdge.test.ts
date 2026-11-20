@@ -84,7 +84,7 @@ beforeEach(async () => {
   });
   memory = await resolvers.Mutation.createMemory(
     {},
-    { orgId: org.id, name: 'addedge-mem' },
+    { orgRef: org.id, name: 'addedge-mem' },
     gqlCtx(),
   );
   source = await db.node.create({

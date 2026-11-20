@@ -33,7 +33,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'mcpdr-org', urn: 'mcpdr-org' } });
   admin = await db.user.create({ data: { githubId: 13391, githubUsername: 'mcpdr-admin', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  memory = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'drift' }, {
+  memory = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'drift' }, {
     db, roles: ['ADMIN'], userId: admin.id,
   } as Context);
 });
@@ -148,7 +148,7 @@ describe('#1339 review — hadron_update_node re-checks the address after its ro
 
 describe('#1339 review round 5 — MCP reads never reconcile into another memory', () => {
   it('hadron_get_node on a row relocated in its window writes nothing and reads as not found', async () => {
-    const other = await resolvers.Mutation.createMemory({}, { orgId: (await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).organizationId!, name: 'other-tenant' }, {
+    const other = await resolvers.Mutation.createMemory({}, { orgRef: (await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).organizationId!, name: 'other-tenant' }, {
       db, roles: ['ADMIN'], userId: admin.id,
     } as Context);
     const node = await seed('drift:read-leaver');

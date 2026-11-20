@@ -93,8 +93,8 @@ async function compile(content = 'compiled v1') {
   await mk(SOURCE, { role: 'boot-prompt', content: 'source' });
   return mk(COMPILED, { nodeType: 'compiled-boot-prompt', role: 'boot-prompt', content });
 }
-const save = () => M.createRevision({}, { agentId: agent.id }, adminCtx()) as Promise<{ revisionLoc: string }>;
-const restore = (revisionLoc: string) => M.restoreRevision({}, { agentId: agent.id, revisionLoc }, adminCtx());
+const save = () => M.createRevision({}, { agentRef: agent.id }, adminCtx()) as Promise<{ revisionLoc: string }>;
+const restore = (revisionLoc: string) => M.restoreRevision({}, { agentRef: agent.id, revisionLoc }, adminCtx());
 const asWas = (n: Record<string, unknown>) => ({
   id: n.id, content: n.content, nodeType: n.nodeType, role: n.role, deletedAt: n.deletedAt, rev: n.rev, name: n.name, data: n.data, tags: n.tags, updatedAt: n.updatedAt,
 });
@@ -206,8 +206,8 @@ describe('#4244 B: an unknown revisionLoc is a typed refusal, before any write',
 
   it('publishRevision: BAD_USER_INPUT, and the published revision is unchanged', async () => {
     const rev = await save();
-    await M.publishRevision({}, { agentId: agent.id, revisionLoc: rev.revisionLoc }, adminCtx());
-    await expect(M.publishRevision({}, { agentId: agent.id, revisionLoc: 'revisions:rev-999' }, adminCtx()))
+    await M.publishRevision({}, { agentRef: agent.id, revisionLoc: rev.revisionLoc }, adminCtx());
+    await expect(M.publishRevision({}, { agentRef: agent.id, revisionLoc: 'revisions:rev-999' }, adminCtx()))
       .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).publishedRevisionLoc).toBe(rev.revisionLoc);
   });
