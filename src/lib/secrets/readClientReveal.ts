@@ -178,7 +178,9 @@ export async function prepareSecretUse(
   const anchors = [{ kind: 'app' as const, id: app.id }, { kind: 'org' as const, id: run.organizationId },
     { kind: 'user' as const, id: issuer }, { kind: 'agent' as const, id: agentId }];
   const internal = { ...tool.principal, userId: undefined, db: tool.db } as Context;
-  return withAuthorizedTx(internal, anchors, async () => undefined, async (tx, txCtx) => {
+  let known: { ownerId: string; secretId: string; secretName: string } | null = null;
+  try {
+  return await withAuthorizedTx(internal, anchors, async () => undefined, async (tx, txCtx) => {
     // Lock the run before judging its policy and budget; cancellation and budget edits serialize with this spend.
     await tx.$queryRaw`SELECT id FROM app_runs WHERE id = ${run.id} FOR UPDATE`;
     const actual = await tx.appRun.findUnique({ where: { id: run.id }, select: { appId: true, agentId: true, organizationId: true, status: true, policy: true, budgetTokens: true, budgetActions: true } });
@@ -192,8 +194,10 @@ export async function prepareSecretUse(
     if (!client || client.endedAt || client.appId !== run.appId || client.grantId !== pre.grantId || client.secretId !== pre.secretId) throw notFound();
     const locked = await readGrantForUpdate(tx, client.grantId);
     const grant = await tx.grant.findUnique({ where: { id: client.grantId } });
-    if (!locked || !grant || grant.action !== 'secret.use' || grant.appId !== run.appId || grant.issuerUserId !== issuer ||
-        !((grant.granteeAppId === run.appId && grant.agentId === null) || (grant.agentId === agentId && grant.granteeAppId === null)) ||
+    if (!locked || !grant || grant.action !== 'secret.use' || grant.appId !== run.appId || grant.issuerUserId !== issuer) throw notFound();
+    // A real client in this App is auditable even when its holder or a later guard refuses the use.
+    known = { ownerId: client.appId, secretId: client.secretId, secretName: client.secretName };
+    if (!((grant.granteeAppId === run.appId && grant.agentId === null) || (grant.agentId === agentId && grant.granteeAppId === null)) ||
         grant.userId !== null || grant.workerId !== null) throw notFound();
     if (!locked.live) {
       const [{ now }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS now`;
@@ -230,4 +234,16 @@ export async function prepareSecretUse(
       clientId: client.id, versionNo: latest?.versionNo ?? null, kind: 'USE', outcome: 'OK', runId: run.id } });
     return { url, auth };
   }, { afterLock: (tx) => lockAppManagerMemberships(tx, issuer, app) });
+  } catch (error) {
+    const audited = known as { ownerId: string; secretId: string; secretName: string } | null;
+    const rawCode = error instanceof GraphQLError ? error.extensions?.code : undefined;
+    const outcome = typeof rawCode === 'string' && /^[A-Z0-9_]{1,64}$/.test(rawCode) ? rawCode : 'REFUSED';
+    if (audited) {
+      await tool.db.secretEvent.create({ data: { ownerType: 'app', ownerId: audited.ownerId, secretId: audited.secretId,
+        secretName: audited.secretName, clientId, kind: 'USE', outcome, runId: run.id } }).catch((auditError: unknown) => {
+        console.error('[secretUse] audit write failed', { secretId: audited.secretId, ownerId: audited.ownerId, outcome, errorCode: auditErrorCode(auditError) });
+      });
+    }
+    throw error;
+  }
 }
