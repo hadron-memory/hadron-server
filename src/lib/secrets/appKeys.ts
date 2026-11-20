@@ -293,21 +293,19 @@ export async function unwrapAppKey(
  */
 export async function ensureAppKey(db: Prisma.TransactionClient, appId: string): Promise<AppKeyHandle> {
   const root = rootKey();
-  const active = () => db.secretAppKey.findFirst({
-    where: { appId, retiredAt: null },
-    orderBy: { keyVersion: 'desc' },
-    select: { keyVersion: true },
-  });
-  // #4553 §10 F1: the common path locks the active key row FOR SHARE. A rotation retires that row with an UPDATE, so
-  // a store either holds the share lock first (the rotation waits, and its re-encrypt then sees this version) or
-  // waits for the rotation to commit, finds the row no longer active and takes the locked path below, which reads
-  // the new key. Stores share the lock, so they never wait on each other.
-  const shared = await db.$queryRaw<Array<{ key_version: number }>>`
-    SELECT key_version FROM secret_app_keys WHERE app_id = ${appId} AND retired_at IS NULL
-    ORDER BY key_version DESC LIMIT 1 FOR SHARE`;
-  if (shared[0]) return unwrapAppKey(db, appId, shared[0].key_version);
-  await lockAppKeyMint(db, appId);
+  // #4553 §10 F1: the active key row is read FOR SHARE (under the default READ COMMITTED isolation). A rotation
+  // retires that row with an UPDATE, so a store either holds the share lock first (the rotation waits, and its
+  // re-encrypt then sees this version) or waits for the rotation to commit, finds the row no longer active and takes
+  // the locked path below, which reads the new key. Stores share the lock, so they never wait on each other.
+  const active = async (): Promise<{ keyVersion: number } | null> => {
+    const rows = await db.$queryRaw<Array<{ key_version: number }>>`
+      SELECT key_version FROM secret_app_keys WHERE app_id = ${appId} AND retired_at IS NULL
+      ORDER BY key_version DESC LIMIT 1 FOR SHARE`;
+    return rows[0] ? { keyVersion: rows[0].key_version } : null;
+  };
   let row = await active();
+  if (row) return unwrapAppKey(db, appId, row.keyVersion);
+  await lockAppKeyMint(db, appId);
   row = await active();
   if (row) return unwrapAppKey(db, appId, row.keyVersion);
   // #4003 FIT delta 2: an instance whose root is not the recorded one mints nothing (checked under the lock).

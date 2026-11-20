@@ -140,6 +140,25 @@ export function buildChecks(f: Fixture, owner: Client): Check[] {
         }),
     },
     {
+      // #4003 / #4553: an App secret store locks the active key row FOR SHARE (which needs UPDATE on the table), and a
+      // first mint reads and records the root check. Rolled back, so the database keeps no row.
+      name: 'App secret store: the key row share lock and the root check record',
+      run: async (s) => {
+        await s.query('BEGIN');
+        try {
+          await s.query(
+            `SELECT key_version FROM secret_app_keys WHERE app_id = $1 AND retired_at IS NULL
+               ORDER BY key_version DESC LIMIT 1 FOR SHARE`,
+            [f.orgId],
+          );
+          await s.query(`SELECT check_value FROM secret_root_check WHERE id = 1`);
+          await s.query(`INSERT INTO secret_root_check (id, check_value) VALUES (1, $1) ON CONFLICT (id) DO NOTHING`, ['0'.repeat(64)]);
+        } finally {
+          await s.query('ROLLBACK');
+        }
+      },
+    },
+    {
       name: 'session start (trigger-guarded insert)',
       run: async (s) => {
         await s.query(`INSERT INTO sessions (id) VALUES ($1)`, [f.sessionId]);
