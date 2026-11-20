@@ -29,7 +29,7 @@ beforeEach(async () => {
     await tx.$executeRaw`UPDATE grants SET activated_at = now(), verification_kind = 'passkey', verified_by = ${user.id}, issuer_user_id = ${user.id} WHERE id = ${grantId}`;
     await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
   });
-  const run = await db.appRun.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, agentId: agent.id, triggerKind: 'MANUAL', status: 'RUNNING', entryNodeUrn: 'hrn:node:example.test:flows:start' } });
+  const run = await db.appRun.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, agentId: agent.id, triggerKind: 'MANUAL', status: 'RUNNING', budgetActions: 3, entryNodeUrn: 'hrn:node:example.test:flows:start' } });
   runCtx = { db, run, principal: { db, appId: app.id, organizationId: org.id, clientId: `run:${run.id}`, roles: [] }, log: () => {} };
 });
 const prepare = (ctx = runCtx) => prepareSecretUse(ctx, clientId, 'https://api.example.test/v1/orders', {});
@@ -40,6 +40,7 @@ describe('transactional secret.use (#4000)', () => {
     expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
     expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
     expect(await db.grantEvent.count({ where: { grantId, action: 'USE' } })).toBe(0);
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: runCtx.run.id } })).budgetActions).toBe(3);
   });
   it('refuses targets and model-supplied bound headers without spending a ticket', async () => {
     await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
@@ -90,7 +91,7 @@ describe('transactional secret.use (#4000)', () => {
     await setHolder(other.id);
     await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
     expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
-    await setHolder(runCtx.run.agentId);
+    await setHolder(runCtx.run.agentId!);
     await expect(prepare()).resolves.toMatchObject({ auth: { type: 'bearer' } });
   });
   it('serializes a one-use grant against concurrent uses without spending a second ticket', async () => {
@@ -106,6 +107,7 @@ describe('transactional secret.use (#4000)', () => {
     await expect(prepare()).resolves.toMatchObject({ auth: { type: 'bearer', token: 'synthetic-canary' } });
     expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(1);
     expect(await db.grantEvent.count({ where: { grantId, action: 'USE' } })).toBe(1);
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: runCtx.run.id } })).budgetActions).toBe(2);
     expect(await db.actionTicket.count({ where: { organizationId: orgId, action: 'secret.use', consumedByRunId: runCtx.run.id } })).toBe(1);
     await expect(prepare()).rejects.toBeDefined();
   });
