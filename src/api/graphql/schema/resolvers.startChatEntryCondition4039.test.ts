@@ -74,7 +74,7 @@ beforeEach(async () => {
   for (const u of [admin, alice, bob]) {
     await db.orgMember.create({ data: { organizationId: org.id, userId: u.id, role: u === admin ? 'ADMIN' : 'CONTRIBUTOR' } });
   }
-  const created = await M.createAgent({}, { orgId: org.id, name: 'intake-agent', visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId: admin.id });
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'intake-agent', visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId: admin.id });
   agentId = created.id;
   systemMemoryId = created.systemMemoryId!;
   const app = await db.app.create({ data: {
@@ -86,7 +86,7 @@ beforeEach(async () => {
 });
 
 const startShared = (userId: string, args: Record<string, unknown> = {}) =>
-  M.startChat({}, { agentId, scope: 'shared', ...args }, ctxFor(userId));
+  M.startChat({}, { agentRef: agentId, scope: 'shared', ...args }, ctxFor(userId));
 const opened = async (userId: string, args: Record<string, unknown> = {}) => (await startShared(userId, args)).conversationName as string;
 async function refusal(userId: string, args: Record<string, unknown> = {}) {
   const err = await startShared(userId, args).then(() => null, (e: unknown) => e) as { extensions?: Record<string, any> } | null;
@@ -232,7 +232,7 @@ describe('#4039 refusals judged before any write', () => {
       userId: bob.id, userMemoryOfAgentId: agentId, appId, createdBy: alice.id,
     } });
     const before = await footprint();
-    const err = await M.startChat({}, { agentId }, ctxFor(alice.id)).then(() => null, (e: any) => e);
+    const err = await M.startChat({}, { agentRef: agentId }, ctxFor(alice.id)).then(() => null, (e: any) => e);
     expect(err?.extensions).toMatchObject({ code: 'ENTRY_CONDITION_FAILED', reason: 'MEMORY_UNREADABLE', messageId: 'chat-start.error.memory_unreadable', detail: {} });
     expect(await footprint()).toEqual(before);
     expect((await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).deletedAt).toBeNull();

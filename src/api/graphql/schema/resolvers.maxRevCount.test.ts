@@ -52,14 +52,14 @@ async function updateContent(id: string, content: string) {
 describe('Memory.maxRevCount default + column', () => {
   it('a created memory defaults to maxRevCount 10', async () => {
     const m = await resolvers.Mutation.createMemory(
-      {}, { orgId: org.id, name: 'defcap' }, ctx(),
+      {}, { orgRef: org.id, name: 'defcap' }, ctx(),
     );
     expect(m.maxRevCount).toBe(10);
   });
 
   it('createMemory accepts an explicit maxRevCount', async () => {
     const m = await resolvers.Mutation.createMemory(
-      {}, { orgId: org.id, name: 'capped', maxRevCount: 5 }, ctx(),
+      {}, { orgRef: org.id, name: 'capped', maxRevCount: 5 }, ctx(),
     );
     expect(m.maxRevCount).toBe(5);
   });
@@ -82,7 +82,7 @@ describe('NodeRevision pruning (#621)', () => {
   });
 
   it('honors a lower cap set via updateMemory', async () => {
-    await resolvers.Mutation.updateMemory({}, { id: memory.id, maxRevCount: 3 }, ctx());
+    await resolvers.Mutation.updateMemory({}, { ref: memory.id, maxRevCount: 3 }, ctx());
     const n = await makeNode('small');
     for (let i = 1; i <= 5; i++) await updateContent(n.id, `c${i}`);
 
@@ -96,7 +96,7 @@ describe('NodeRevision pruning (#621)', () => {
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(10);
 
     // Lower the cap, then a single further write prunes the whole overflow.
-    await resolvers.Mutation.updateMemory({}, { id: memory.id, maxRevCount: 2 }, ctx());
+    await resolvers.Mutation.updateMemory({}, { ref: memory.id, maxRevCount: 2 }, ctx());
     await updateContent(n.id, 'c11');
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(2);
   });
@@ -135,22 +135,22 @@ describe('NodeRevision pruning (#621)', () => {
 describe('maxRevCount validation', () => {
   it('rejects maxRevCount < 1 on updateMemory', async () => {
     await expect(
-      resolvers.Mutation.updateMemory({}, { id: memory.id, maxRevCount: 0 }, ctx()),
+      resolvers.Mutation.updateMemory({}, { ref: memory.id, maxRevCount: 0 }, ctx()),
     ).rejects.toThrow(/at least 1/);
   });
 
   it('rejects maxRevCount < 1 on createMemory', async () => {
     await expect(
-      resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'bad', maxRevCount: 0 }, ctx()),
+      resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'bad', maxRevCount: 0 }, ctx()),
     ).rejects.toThrow(/at least 1/);
   });
 
   it('rejects explicit null maxRevCount (omit to use the default)', async () => {
     await expect(
-      resolvers.Mutation.updateMemory({}, { id: memory.id, maxRevCount: null }, ctx()),
+      resolvers.Mutation.updateMemory({}, { ref: memory.id, maxRevCount: null }, ctx()),
     ).rejects.toThrow(/at least 1/);
     await expect(
-      resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'nullcap', maxRevCount: null }, ctx()),
+      resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'nullcap', maxRevCount: null }, ctx()),
     ).rejects.toThrow(/at least 1/);
   });
 });

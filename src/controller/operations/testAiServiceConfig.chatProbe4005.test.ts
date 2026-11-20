@@ -14,11 +14,14 @@ import { encryptToken } from '../../lib/tokenCrypto.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { assertModelBuildable, generateText } from '../../lib/llm/index.js';
 import { chatToolChoiceFor, RESPOND_ONCE_INSTRUCTION, sdkToolChoiceFor } from '../../lib/llm/chatToolChoice.js';
+import { respondToolDefinition } from '../../api/graphql/schema/resolvers.helpers.js';
 import { listChatAiConfigChoices } from '../../lib/chatbotAiConfig.js';
 import { defaultQuotaLimit, recordQuotaUsage } from '../../jobs/appRuns.js';
 import {
   testAiServiceConfig,
   AI_CONFIG_CHAT_PROBE_MAX_TOKENS,
+  AI_CONFIG_CHAT_PROBE_CHARS_PER_TOKEN,
+  chatProbeReserveBase,
   AI_CONFIG_TEST_LIMIT,
   AI_CONFIG_TEST_PROBE_MAX_TOKENS,
   AI_CONFIG_TEST_TOKEN_RESERVE,
@@ -390,7 +393,7 @@ describe('spend accounting', () => {
     expect(await db.usageEvent.count({ where: { type: 'ai-config-test-chat' } })).toBe(AI_CONFIG_TEST_LIMIT);
   });
 
-  it('a platform-funded chat leg reserves 64+64 and settles to what it spent, in addition to the run leg', async () => {
+  it('a platform-funded chat leg reserves its encoded-request base plus 64 and settles to what it spent, in addition to the run leg', async () => {
     const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
     const cfg = await mkConfig({ organizationId: null, hadronServerId: host.id });
     const r = await run(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id }), true);
@@ -403,19 +406,53 @@ describe('spend accounting', () => {
     expect((await db.quotaCounter.findFirstOrThrow({ where: { scopeId: org.id, action: 'llm.tokens' } })).used).toBe(50);
   });
 
-  it('the chat reservation is 128: room for the run leg but not the chat leg → the chat leg is refused, no chat request', async () => {
+  // #4028: the chat reservation is sized from the request actually sent, not a constant. The auto tool choice adds the
+  // system line, and the default test model is the one whose choice we ask for, so the expectation is derived the same way.
+  const expectedChatReserve = (withSystem: boolean) =>
+    chatProbeReserveBase(
+      { prompt: 'Say hello.', ...(withSystem ? { system: RESPOND_ONCE_INSTRUCTION } : {}) },
+      respondToolDefinition({}),
+    ) + AI_CONFIG_CHAT_PROBE_MAX_TOKENS;
+
+  it('the chat reservation covers the encoded request that goes on the wire (#4028), and is above the old 128', async () => {
+    const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
+    const cfg = await mkConfig({ organizationId: null, hadronServerId: host.id });
+    const r = await run(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id }), true);
+    expect(r.chat).toEqual({ status: 'PASS' });
+    const chatReq = captured.find((c) => Array.isArray(c.body.tools));
+    expect(chatReq).toBeDefined();
+    // what the provider is sent: the tool schema as encoded on the wire. The reservation's input part (no cap, no
+    // framing margin) must cover it at the stated characters-per-token ratio.
+    const wireToolChars = JSON.stringify(chatReq!.body.tools).length;
+    const inputPart = expectedChatReserve(false) - AI_CONFIG_CHAT_PROBE_MAX_TOKENS - AI_CONFIG_TEST_TOKEN_RESERVE;
+    // a literal 3 chars/token, so loosening the production ratio cannot loosen this pin with it
+    expect(AI_CONFIG_CHAT_PROBE_CHARS_PER_TOKEN).toBeLessThanOrEqual(3);
+    expect(inputPart).toBeGreaterThanOrEqual(Math.ceil(wireToolChars / 3));
+    expect(expectedChatReserve(false)).toBeGreaterThan(AI_CONFIG_TEST_TOKEN_RESERVE + AI_CONFIG_CHAT_PROBE_MAX_TOKENS);
+  });
+
+  it('one token short of the chat reservation: the chat leg is refused with no chat request; exactly enough: it runs', async () => {
     const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
     const cfg = await mkConfig({ organizationId: null, hadronServerId: host.id });
     const limit = defaultQuotaLimit('org', 'llm.tokens');
-    const runReserve = AI_CONFIG_TEST_TOKEN_RESERVE + AI_CONFIG_TEST_PROBE_MAX_TOKENS; // 80
-    const chatReserve = AI_CONFIG_TEST_TOKEN_RESERVE + AI_CONFIG_CHAT_PROBE_MAX_TOKENS; // 128
-    expect([runReserve, chatReserve]).toEqual([80, 128]);
-    // The run leg reserves 80 (fits) and settles to the 25 it spent, leaving 100 of room: under 128.
-    await recordQuotaUsage(db, 'org', org.id, 'llm.tokens', limit, limit - 125);
-    const r = await run(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id }), true);
-    expect(r.ok).toBe(true);
-    expect(r.chat).toEqual({ status: 'FAIL_PROVIDER_UNAVAILABLE' });
+    const reserve = expectedChatReserve(chatToolChoiceFor('openai', 'gpt-4o') === 'AUTO');
+    // The run leg reserves 80 (fits) and settles to the 25 it spent, so the chat leg sees (initial room - 25).
+    await recordQuotaUsage(db, 'org', org.id, 'llm.tokens', limit, limit - (25 + reserve - 1));
+    const short = await run(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id }), true);
+    expect(short.ok).toBe(true);
+    expect(short.chat).toEqual({ status: 'FAIL_PROVIDER_UNAVAILABLE' });
     expect(captured.filter((c) => Array.isArray(c.body.tools))).toHaveLength(0);
     expect(await db.usageEvent.count({ where: { type: 'ai-config-test-chat' } })).toBe(0);
+  });
+
+  it('exactly the chat reservation in room: the chat leg runs and settles to what it spent', async () => {
+    const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
+    const cfg = await mkConfig({ organizationId: null, hadronServerId: host.id });
+    const limit = defaultQuotaLimit('org', 'llm.tokens');
+    const reserve = expectedChatReserve(chatToolChoiceFor('openai', 'gpt-4o') === 'AUTO');
+    await recordQuotaUsage(db, 'org', org.id, 'llm.tokens', limit, limit - (25 + reserve));
+    const r = await run(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id }), true);
+    expect(r.chat).toEqual({ status: 'PASS' });
+    expect(captured.filter((c) => Array.isArray(c.body.tools))).toHaveLength(1);
   });
 });

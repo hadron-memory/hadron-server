@@ -87,7 +87,7 @@ function adminCtx(): GqlContext {
 async function seedEncryptedIndexedMemory(): Promise<{ id: string; urn: string }> {
   const mem = await resolvers.Mutation.createMemory(
     {},
-    { orgId, name: `us5-${generateId().slice(0, 6)}` },
+    { orgRef: orgId, name: `us5-${generateId().slice(0, 6)}` },
     adminCtx(),
   );
   // The knowledge-class memory starts vector-indexed (class default).
@@ -107,7 +107,7 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
     await expect(
       resolvers.Mutation.updateMemory(
         {},
-        { id, vectorIndexEnabled: true },
+        { ref: id, vectorIndexEnabled: true },
         adminCtx(),
       ),
     ).rejects.toBeInstanceOf(EncryptedVectorIndexNotAcknowledgedError);
@@ -118,7 +118,7 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
     expect(after?.vectorIndexEncryptedAckAt).toBeNull();
     // The friendly error carries the memory URN for the disclosure UI.
     try {
-      await resolvers.Mutation.updateMemory({}, { id, vectorIndexEnabled: true }, adminCtx());
+      await resolvers.Mutation.updateMemory({}, { ref: id, vectorIndexEnabled: true }, adminCtx());
     } catch (e) {
       expect(e).toBeInstanceOf(EncryptedVectorIndexNotAcknowledgedError);
       expect((e as EncryptedVectorIndexNotAcknowledgedError).memoryRef).toBe(urn);
@@ -131,7 +131,7 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
     const before = Date.now();
     const updated = await resolvers.Mutation.updateMemory(
       {},
-      { id, vectorIndexEnabled: true, acknowledgeVectorInversionRisk: true },
+      { ref: id, vectorIndexEnabled: true, acknowledgeVectorInversionRisk: true },
       adminCtx(),
     );
     expect(updated.vectorIndexEnabled).toBe(true);
@@ -143,7 +143,7 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
     const { id } = await seedEncryptedIndexedMemory();
     const first = await resolvers.Mutation.updateMemory(
       {},
-      { id, vectorIndexEnabled: true, acknowledgeVectorInversionRisk: true },
+      { ref: id, vectorIndexEnabled: true, acknowledgeVectorInversionRisk: true },
       adminCtx(),
     );
     const firstAckAt = first.vectorIndexEncryptedAckAt!;
@@ -152,7 +152,7 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
     // audit-significant one.)
     await resolvers.Mutation.updateMemory(
       {},
-      { id, vectorIndexEnabled: false },
+      { ref: id, vectorIndexEnabled: false },
       adminCtx(),
     );
     // A second ack on a memory that ALREADY has vectorIndexEncryptedAckAt
@@ -160,7 +160,7 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
     // so no new timestamp is stamped — the original survives the round-trip.
     const reEnabled = await resolvers.Mutation.updateMemory(
       {},
-      { id, vectorIndexEnabled: true, acknowledgeVectorInversionRisk: true },
+      { ref: id, vectorIndexEnabled: true, acknowledgeVectorInversionRisk: true },
       adminCtx(),
     );
     expect(reEnabled.vectorIndexEncryptedAckAt!.getTime()).toBe(firstAckAt.getTime());
@@ -169,20 +169,20 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
   it('non-encrypted memory: ack flag is a harmless no-op', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId, name: `us5-plain-${generateId().slice(0, 6)}` },
+      { orgRef: orgId, name: `us5-plain-${generateId().slice(0, 6)}` },
       adminCtx(),
     );
     // Knowledge → already vector-indexed. Toggle it off then back on with the
     // ack flag set; nothing about the ack should fire because !isEncrypted.
     await resolvers.Mutation.updateMemory(
       {},
-      { id: mem.id, vectorIndexEnabled: false },
+      { ref: mem.id, vectorIndexEnabled: false },
       adminCtx(),
     );
     const updated = await resolvers.Mutation.updateMemory(
       {},
       {
-        id: mem.id,
+        ref: mem.id,
         vectorIndexEnabled: true,
         acknowledgeVectorInversionRisk: true,
       },
@@ -199,7 +199,7 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
     // queued and (after drain) stored.
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId, name: `us5-revoke-${generateId().slice(0, 6)}` },
+      { orgRef: orgId, name: `us5-revoke-${generateId().slice(0, 6)}` },
       adminCtx(),
     );
     const nodeId = generateId();
@@ -224,7 +224,7 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
     // Revoke
     await resolvers.Mutation.updateMemory(
       {},
-      { id: mem.id, vectorIndexEnabled: false },
+      { ref: mem.id, vectorIndexEnabled: false },
       adminCtx(),
     );
 
@@ -257,14 +257,14 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
     // DB state the sweep encounters.
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId, name: `us5-perma-${generateId().slice(0, 6)}` },
+      { orgRef: orgId, name: `us5-perma-${generateId().slice(0, 6)}` },
       adminCtx(),
     );
     // Flip to encrypted + ack via the standard path (index already on by
     // class default, so we toggle off→on to land the ack timestamp).
     await resolvers.Mutation.updateMemory(
       {},
-      { id: mem.id, vectorIndexEnabled: false },
+      { ref: mem.id, vectorIndexEnabled: false },
       adminCtx(),
     );
     await db.memory.update({
@@ -274,7 +274,7 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
     await resolvers.Mutation.updateMemory(
       {},
       {
-        id: mem.id,
+        ref: mem.id,
         vectorIndexEnabled: true,
         acknowledgeVectorInversionRisk: true,
       },

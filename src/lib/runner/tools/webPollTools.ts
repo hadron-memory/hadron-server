@@ -11,8 +11,9 @@ import {
   type WebPollCondition,
 } from '../../webfetchClient.js';
 import { loadWebFetchAuthSecret } from '../secrets.js';
-import { isSecretOwnerType, SECRET_OWNER_TYPES, SECRET_SCOPE_ORDER, type SecretOwnerType } from '../../secrets.js';
+import { SECRET_SCOPE_ORDER, type SecretOwnerType } from '../../secrets.js';
 import { redactUrl } from '../../webUrl.js';
+import { idListPage, listPageArgs, type ListPageArgs } from '../../listPage.js';
 import { cancelOrgWebPoll } from '../../webPolls.js';
 import type { RunToolDef } from './types.js';
 import { coerceHeaders } from './webTools.js';
@@ -84,13 +85,12 @@ export const webPollStart: RunToolDef = {
       },
       credentialScope: {
         type: 'string',
-        // #1564: derived from the secret store's own owner list, so the
-        // advertised scopes can never drift from what it accepts again (the
-        // app/memory owners were removed by #696 and kept being offered here).
-        enum: [...SECRET_OWNER_TYPES],
+        // #1564: derived from the secret store's own CASCADE (not its owner list: #3997 made `app` an owner, and an App
+        // secret is never resolved by a run), so the advertised scopes can never drift from what a run resolves.
+        enum: [...SECRET_SCOPE_ORDER],
         description:
           'Optional: resolve credentialName at exactly this scope instead of the cascade ' +
-          `(user, then org). One of: ${SECRET_OWNER_TYPES.join(', ')}.`,
+          `(user, then org). One of: ${SECRET_SCOPE_ORDER.join(', ')}.`,
       },
       headers: {
         type: 'object',
@@ -121,10 +121,10 @@ export const webPollStart: RunToolDef = {
         : undefined;
     let credentialScope: SecretOwnerType | undefined;
     if (args.credentialScope != null) {
-      if (!isSecretOwnerType(args.credentialScope)) {
-        throw new Error(`web_poll_start: "credentialScope" must be one of ${SECRET_OWNER_TYPES.join(', ')}.`);
+      if (typeof args.credentialScope !== 'string' || !(SECRET_SCOPE_ORDER as readonly string[]).includes(args.credentialScope)) {
+        throw new Error(`web_poll_start: "credentialScope" must be one of ${SECRET_SCOPE_ORDER.join(', ')}.`);
       }
-      credentialScope = args.credentialScope;
+      credentialScope = args.credentialScope as SecretOwnerType;
     }
     // INJECT path (#677): the secret resolves server-side and goes straight
     // to the sidecar — a poll fetches untrusted external content, so the
@@ -216,10 +216,16 @@ export const webPollList: RunToolDef = {
   name: 'web_poll_list',
   policyAction: 'tool.web_poll',
   description:
-    'List this organization\'s active web polls with status and counters only. Credential material is never returned.',
-  inputSchema: { type: 'object', properties: {} },
+    'List one page of this organization\'s active web polls with status and counters only. Default 20, cap 100; total is exact; hasMore and nextCursor disclose authenticated keyset continuation. offset is a separate alternative, never combined with after. Pass after to continue. Credential material is never returned.',
+  inputSchema: { type: 'object', properties: { first: { type: 'integer', description: 'Default 20, clamp 1–100.' }, after: { type: 'string', description: 'Authenticated nextCursor from the previous page, never with offset.' }, offset: { type: 'integer', description: 'Offset alternative, never with after.' } } },
   cost: 0,
-  execute: async (ctx) => listPolls(ctx.run.organizationId),
+  execute: async (ctx, args) => {
+    const scope = `runWebPolls:${ctx.run.organizationId}`;
+    const window = listPageArgs(args as ListPageArgs, scope);
+    const { jobs } = await listPolls(ctx.run.organizationId);
+    const { items, ...page } = idListPage(jobs, window, row => row.jobId);
+    return { jobs: items, ...page };
+  },
 };
 
 export const WEB_POLL_TOOLS: readonly RunToolDef[] = [webPollStart, webPollCancel, webPollList];

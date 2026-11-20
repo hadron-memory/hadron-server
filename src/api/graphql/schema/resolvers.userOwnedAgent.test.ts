@@ -9,6 +9,7 @@
  * carve-outs (Query.memory blocker #676, Query.agents, effectiveAccess).
  */
 
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { Prisma } from '../../../generated/prisma/index.js';
@@ -94,7 +95,7 @@ describe('createAgent — user-owned (no orgId)', () => {
     await expect(
       resolvers.Mutation.createAgent(
         {},
-        { orgId: '', name: 'Ambiguous' },
+        { orgRef: '', name: 'Ambiguous' },
         ctx({ userId: ownerId, roles: ['READER'] }),
       ),
     ).rejects.toThrow(/non-empty organization/i);
@@ -385,16 +386,16 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
     await expect(resolvers.Mutation.deleteAiServiceConfig(null, { id: cfg.id }, admin())).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     // The agentAIConfig upsert has the same kept-key shape — owner-only too.
     await expect(resolvers.Mutation.updateAgentAIConfig(
-      null, { agentId: agent.id, provider: 'openai', model: 'gpt-x' }, admin(),
+      null, { agentRef: agent.id, provider: 'openai', model: 'gpt-x' }, admin(),
     )).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     // Clearing is pure deletion (no exfil): the admin arm holds, covering shutdown.
-    expect(await resolvers.Mutation.clearAgentAIConfig(null, { agentId: agent.id }, admin())).not.toBeNull();
+    expect(await resolvers.Mutation.clearAgentAIConfig(null, { agentRef: agent.id }, admin())).not.toBeNull();
     // Owner control: set still works for the owner (with a key — the admin's
     // clear above removed the stored one). The test operation is not exercised
     // for the owner: it would call the real provider; its owner path is
     // unchanged by this diff and covered by the 036 suites.
     const set = await resolvers.Mutation.updateAgentAIConfig(
-      null, { agentId: agent.id, provider: 'openai', model: 'gpt-x', apiKey: 'sk-owner-new' },
+      null, { agentRef: agent.id, provider: 'openai', model: 'gpt-x', apiKey: 'sk-owner-new' },
       ctx({ userId: ownerId, roles: ['READER'] }),
     );
     expect(set).not.toBeNull();
@@ -413,14 +414,14 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
     });
     await db.agent.update({ where: { id: agent.id }, data: { systemMemoryId: null } });
     await expect(
-      resolvers.Mutation.updateAgent(null, { ref: agent.id, systemMemoryId: victimMemory.id }, admin()),
+      resolvers.Mutation.updateAgent(null, { ref: agent.id, systemMemoryRef: victimMemory.id }, admin()),
     ).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     const untouched = await db.memory.findUniqueOrThrow({ where: { id: victimMemory.id } });
     expect(untouched.class).toBe('knowledge');
     expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).systemMemoryId).toBeNull();
     // Owner control: the wizard-flow first-attach still works for the owner.
     const ownerAttach = await resolvers.Mutation.updateAgent(
-      null, { ref: agent.id, systemMemoryId: victimMemory.id }, ctx({ userId: ownerId, roles: ['READER'] }),
+      null, { ref: agent.id, systemMemoryRef: victimMemory.id }, ctx({ userId: ownerId, roles: ['READER'] }),
     );
     expect(ownerAttach.systemMemoryId).toBe(victimMemory.id);
     expect((await db.memory.findUniqueOrThrow({ where: { id: victimMemory.id } })).class).toBe('system');
@@ -428,15 +429,15 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
 
   it('the admin may update the definition through the revision surface (within "update it"; PR body corrected)', async () => {
     const agent = await rogueAgent();
-    const revision = await resolvers.Mutation.createRevision(null, { agentId: agent.id, description: 'admin snapshot' }, admin());
+    const revision = await resolvers.Mutation.createRevision(null, { agentRef: agent.id, description: 'admin snapshot' }, admin());
     expect(revision).not.toBeNull();
   });
 
   it('the admin restores a definition revision too (#1841: the revision surface is pinned at both ends)', async () => {
     const agent = await rogueAgent();
-    const revision = await resolvers.Mutation.createRevision(null, { agentId: agent.id, description: 'to restore' }, admin());
+    const revision = await resolvers.Mutation.createRevision(null, { agentRef: agent.id, description: 'to restore' }, admin());
     expect(revision.revisionLoc).toMatch(/^revisions:/);
-    const restored = await resolvers.Mutation.restoreRevision(null, { agentId: agent.id, revisionLoc: revision.revisionLoc }, admin());
+    const restored = await resolvers.Mutation.restoreRevision(null, { agentRef: agent.id, revisionLoc: revision.revisionLoc }, admin());
     expect(restored).not.toBeNull();
   });
 });
@@ -444,11 +445,14 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
 
 // DAR / #1687: this caller has NO organization or OrgMember rows. Exercise
 // Apollo field rendering, not just createAgent's already-atomic core.
+// #1694 / Rook #1692 P3-2: pin the portal's full AgentFields selection on
+// BOTH create and read. Keep orgGrants as additional pre-existing coverage.
+const portalAgentFields1694 = readFileSync(new URL('./__fixtures__/agentFields1694.graphql', import.meta.url), 'utf8');
 const personalAgentApi = new ApolloServer<Context>({ typeDefs, resolvers });
 afterAll(async () => { await personalAgentApi.stop(); });
 it('lets an org-less user create, view and use a personal agent through GraphQL', async () => {
   const contextValue = ctx({ userId: ownerId, roles: ['READER'] });
-  expect(await db.orgMember.count({ where: { userId: ownerId } })).toBe(0);
+  expect(await db.orgMember.count()).toBe(0);
   const execute = async (query: string, variables: Record<string, unknown> = {}) => {
     const response = await personalAgentApi.executeOperation({ query, variables }, { contextValue });
     expect(response.body.kind).toBe('single');
@@ -457,13 +461,18 @@ it('lets an org-less user create, view and use a personal agent through GraphQL'
     return response.body.singleResult.data as Record<string, any>;
   };
   const created = (await execute(`mutation {
-    createAgent(name: "Orgless helper") { id urn organizationId systemMemoryId appCount orgGrants { organization { id } } }
-  }`)).createAgent;
-  expect(created).toMatchObject({ organizationId: null, appCount: 0, orgGrants: [] });
+    createAgent(name: "Orgless helper") { ...AgentFields orgGrants { organization { id } } }
+  }
+  ${portalAgentFields1694}`)).createAgent;
+  expect(created).toMatchObject({ organizationId: null, hasAiApiKey: false, memoryItems: [],
+    memoryProvisioning: { appMemory: 'shared' }, installationPolicy: { maxMembers: 'unlimited', memberRoles: ['owner', 'member'] },
+    imports: [], appCount: 0, orgGrants: [] });
   const viewed = (await execute(`query($ref: ID!) {
-    agent(ref: $ref) { id appCount orgGrants { organization { id } } systemMemoryId }
-  }`, { ref: created.id })).agent;
-  expect(viewed).toMatchObject({ id: created.id, appCount: 0, orgGrants: [], systemMemoryId: created.systemMemoryId });
+    agent(ref: $ref) { ...AgentFields orgGrants { organization { id } } }
+  }
+  ${portalAgentFields1694}`, { ref: created.id })).agent;
+  expect(viewed).toEqual(created);
+  expect(await db.orgMember.count()).toBe(0);
   const task = await db.node.create({ data: {
     id: generateId(), memoryId: created.systemMemoryId, loc: 'tasks:hello', name: 'Hello', nodeType: 'task',
     content: 'Help {{person}} with this personal task.', data: {}, createdBy: ownerId,

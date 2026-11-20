@@ -40,39 +40,39 @@ beforeEach(async () => {
   const a = await db.user.create({ data: { githubId: 9811, githubUsername: 'ms-admin', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: a.id, role: 'ADMIN' } });
   adminId = a.id;
-  const mem = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'intel' }, admin());
+  const mem = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'intel' }, admin());
   memId = mem.id;
   memUrn = mem.urn;
 });
 
 describe('Memory.schema — write + validation', () => {
   it('stores a valid schema (normalized)', async () => {
-    const m = await updateMemory({ id: memId, schema: validSchema });
+    const m = await updateMemory({ ref: memId, schema: validSchema });
     expect(m.schema.objectTypes.competitor.fields.name).toEqual({ type: 'text', required: true });
     expect(m.schema.objectTypes.competitor.fields.stage.values).toEqual(['seed', 'series-a']);
   });
 
   it('rejects a malformed schema (bad field type) as BAD_USER_INPUT', async () => {
     await expect(
-      updateMemory({ id: memId, schema: { objectTypes: { c: { fields: { a: { type: 'json' } } } } } }),
+      updateMemory({ ref: memId, schema: { objectTypes: { c: { fields: { a: { type: 'json' } } } } } }),
     ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 
   it('rejects an unknown field-def key (typo) as BAD_USER_INPUT', async () => {
     await expect(
-      updateMemory({ id: memId, schema: { objectTypes: { c: { fields: { a: { type: 'text', requird: true } } } } } }),
+      updateMemory({ ref: memId, schema: { objectTypes: { c: { fields: { a: { type: 'text', requird: true } } } } } }),
     ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 
   it('clears the schema with null', async () => {
-    await updateMemory({ id: memId, schema: validSchema });
-    const cleared = await updateMemory({ id: memId, schema: null });
+    await updateMemory({ ref: memId, schema: validSchema });
+    const cleared = await updateMemory({ ref: memId, schema: null });
     expect(cleared.schema).toBeNull();
   });
 
   it('a rejected write does not persist (memory keeps the prior schema)', async () => {
-    await updateMemory({ id: memId, schema: validSchema });
-    await expect(updateMemory({ id: memId, schema: { objectTypes: {} } })).rejects.toMatchObject({
+    await updateMemory({ ref: memId, schema: validSchema });
+    await expect(updateMemory({ ref: memId, schema: { objectTypes: {} } })).rejects.toMatchObject({
       extensions: { code: 'BAD_USER_INPUT' },
     });
     const row = await db.memory.findUniqueOrThrow({ where: { id: memId } });
@@ -82,7 +82,7 @@ describe('Memory.schema — write + validation', () => {
 
 describe('Memory.schema — carried through a memory clone', () => {
   it('cloneMemoryGraph copies the schema to the clone', async () => {
-    await updateMemory({ id: memId, schema: validSchema });
+    await updateMemory({ ref: memId, schema: validSchema });
     const orgId = (await db.memory.findUniqueOrThrow({ where: { id: memId } })).organizationId!;
     const { memoryId: cloneId } = await cloneMemoryGraph(db, {
       sourceMemoryId: memId,
@@ -129,7 +129,7 @@ describe('Memory.schema — carried through a memory clone', () => {
 
 describe('Memory.schema — MCP discovery (read-only)', () => {
   it('hadron_list_memories surfaces the schema', async () => {
-    await updateMemory({ id: memId, schema: validSchema });
+    await updateMemory({ ref: memId, schema: validSchema });
     const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_list_memories', {});
     expect(text).toContain(memUrn);
     expect(text).toContain('schema:');

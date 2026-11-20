@@ -18,7 +18,7 @@ beforeEach(async () => {
   user = await db.user.create({ data: { githubId: 2028001, githubUsername: 's12-owner' } });
   const org = await db.organization.create({ data: { name: 'S12', urn: `s12-${generateId()}.com` } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'S12 agent', personaRole: 'test-worker' }, ctx());
+  agent = await M.createAgent({}, { orgRef: org.id, name: 'S12 agent', personaRole: 'test-worker' }, ctx());
   app = await db.app.create({ data: { organizationId: org.id, name: 'S12 app', urn: `s12-${generateId()}:team` } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await serveEveryAgent(db); // #2712: binds need a served prompt
@@ -499,7 +499,7 @@ it('public self-leave cannot commit between the deciding membership read and the
   await started;
   const observed = observeTransactionBackend(db);
   let left = false;
-  const leaving = observed.db.$transaction(tx => M.leaveApp({}, { appId: app.id }, { ...memberCtx, db: tx }));
+  const leaving = observed.db.$transaction(tx => M.leaveApp({}, { appRef: app.id }, { ...memberCtx, db: tx }));
   const outcome = leaving.then(value => { left = true; return { value }; }, error => { left = true; return { error }; });
   try {
     const pid = await observed.backendFor(leaving);
@@ -526,7 +526,7 @@ it('self-leave winning its row lock is rechecked after the cast waits, with no m
   let release!: () => void; let ready!: () => void;
   const held = new Promise<void>(r => { release = r; }); const started = new Promise<void>(r => { ready = r; });
   const leaving = db.$transaction(async tx => {
-    await M.leaveApp({}, { appId: app.id }, { ...memberCtx, db: tx }); ready(); await held;
+    await M.leaveApp({}, { appRef: app.id }, { ...memberCtx, db: tx }); ready(); await held;
   }, { timeout: 30000 });
   await started;
   const observed = observeTransactionBackend(db);

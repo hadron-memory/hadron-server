@@ -334,7 +334,7 @@ describe('what a userless run of the App may write', () => {
     const outside = await db.node.create({ data: { memoryId: f.dest.id, loc: 'reports:other', name: 'other' } });
     await notDone(M.deleteNode({}, { nodeRef: a.id }, run));
     await notDone(M.createEdge({}, { sourceRef: a.id, targetRef: outside.id, name: 'x' }, run));
-    await notDone(M.updateMemory({}, { id: f.dest.id, name: 'renamed' }, run));
+    await notDone(M.updateMemory({}, { ref: f.dest.id, name: 'renamed' }, run));
     // inline edges ride the node write but reach past the prefix, so a write that carries any is not a grant write
     await refused(writeNodeCore({ memoryId: f.dest.id, loc: `${PREFIX}:b`, name: 'b', edges: [{ targetId: outside.id, name: 'x' }] } as never, run as never, 'create', { authoring: attestedAuthoring(null) }));
     await refused(writeNodeCore({ memoryId: f.dest.id, loc: `${PREFIX}:b`, name: 'b', edges: [] } as never, run as never, 'create', { authoring: attestedAuthoring(null) }));

@@ -1,0 +1,191 @@
+-- #2719 slice 2 — usage-activity rollup. Expand only: two new tables, six functions, four statement triggers on
+-- usage_events and one state row. No data is scanned at deploy: the table starts empty and the state row says the
+-- triggers maintain cells from the next 15-minute boundary on, so until the backfill job runs the reader answers
+-- earlier cells from usage_events (deploying before the backfill is correct, only not faster). Running the backfill
+-- on production is a separate step with its own grant; this migration does not authorise it.
+-- The invariants block below is byte-identical to prisma/usage-activity-rollup-invariants.sql (pinned by a test).
+
+-- CreateTable
+CREATE TABLE "usage_activity_cells" (
+    "scope_kind" TEXT NOT NULL,
+    "scope_id" TEXT NOT NULL,
+    "cell" TIMESTAMP(3) NOT NULL,
+    "reads" BIGINT NOT NULL DEFAULT 0,
+    "writes" BIGINT NOT NULL DEFAULT 0,
+
+    CONSTRAINT "usage_activity_cells_pkey" PRIMARY KEY ("scope_kind","scope_id","cell")
+);
+
+-- CreateTable
+CREATE TABLE "usage_activity_rollup_state" (
+    "id" INTEGER NOT NULL DEFAULT 1,
+    "applies_from" TIMESTAMP(3) NOT NULL,
+    "complete" BOOLEAN NOT NULL DEFAULT false,
+
+    CONSTRAINT "usage_activity_rollup_state_pkey" PRIMARY KEY ("id")
+);
+
+-- #2719 slice 2: the usage-activity rollup is maintained by statement-level triggers on usage_events, so ONE mechanism
+-- covers every writer (the recorder's createMany, mergeUsers' raw reassignment, the user-delete SET NULL, a later
+-- soft-delete writer, a hand-run fix). Prisma can model neither the functions nor the triggers; the migration carries
+-- this block byte-identically (pinned by a test).
+--
+-- A cell is (scope, 15-minute UTC cell): scope 'user' counts the events attributed to a user, scope 'memory' the events
+-- attributed to a memory (the event's OWN memory_id, cor:dmo:080:02). An event with both ids counts in both scopes; one
+-- with neither counts in none. Only live read/write events count, exactly the predicate getUsageActivity reads.
+-- The reader uses whole cells only for times from 1990 on, where every IANA offset is a multiple of 15 minutes, so a cell
+-- never straddles a local day, week or month edge; earlier times are answered from usage_events.
+--
+-- The triggers maintain EVERY cell from the moment they exist, whatever the backfill has done. usage_activity_rollup_state
+-- only tells the READER where to trust the cells: applies_from is the first cell that is complete by construction, and
+-- until the backfill job sets complete, cells before it are answered from usage_events. The backfill rebuilds each span
+-- from usage_events under a write lock on that table, so a later change to an already rebuilt span is netted by these
+-- triggers like any other write.
+
+CREATE OR REPLACE FUNCTION hadron_usage_cell(ts timestamp) RETURNS timestamp
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+  SELECT date_trunc('hour', ts) + floor(extract(minute FROM ts) / 15)::int * interval '15 minutes'
+$$;
+
+-- -infinity (the triggers maintain every cell) while a state row exists, NULL (the triggers do nothing, the reader never
+-- uses the rollup) when none does.
+CREATE OR REPLACE FUNCTION hadron_usage_rollup_floor() RETURNS timestamp
+LANGUAGE sql STABLE AS $$
+  SELECT '-infinity'::timestamp FROM usage_activity_rollup_state WHERE id = 1
+$$;
+
+CREATE OR REPLACE FUNCTION hadron_usage_rollup_after_insert() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE floor_cell timestamp := hadron_usage_rollup_floor();
+BEGIN
+  IF floor_cell IS NULL THEN RETURN NULL; END IF;
+  -- One grouped upsert per statement, rows in key order, so the row locks of ONE statement are taken in key order. Two
+  -- single-statement writers therefore cannot deadlock on each other; a transaction that runs several statements can
+  -- still lock cells in opposite orders across statements, and a writer that needs that case reliable must retry.
+  INSERT INTO usage_activity_cells (scope_kind, scope_id, cell, reads, writes)
+  SELECT d.k, d.sid, d.cell, d.r, d.w FROM (
+    SELECT s.k, s.sid, hadron_usage_cell(n.created_at) AS cell,
+           sum((n.type = 'read')::int)::bigint AS r, sum((n.type = 'write')::int)::bigint AS w
+    FROM new_rows n
+    CROSS JOIN LATERAL (VALUES ('user', n.user_id), ('memory', n.memory_id)) AS s(k, sid)
+    WHERE n.type IN ('read', 'write') AND n.deleted_at IS NULL AND s.sid IS NOT NULL
+      AND hadron_usage_cell(n.created_at) >= floor_cell
+    GROUP BY s.k, s.sid, hadron_usage_cell(n.created_at)
+  ) d ORDER BY d.k, d.sid, d.cell
+  ON CONFLICT (scope_kind, scope_id, cell) DO UPDATE
+    SET reads = usage_activity_cells.reads + EXCLUDED.reads, writes = usage_activity_cells.writes + EXCLUDED.writes;
+  RETURN NULL;
+END $$;
+
+CREATE OR REPLACE FUNCTION hadron_usage_rollup_after_delete() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE floor_cell timestamp := hadron_usage_rollup_floor();
+BEGIN
+  IF floor_cell IS NULL THEN RETURN NULL; END IF;
+  INSERT INTO usage_activity_cells (scope_kind, scope_id, cell, reads, writes)
+  SELECT d.k, d.sid, d.cell, d.r, d.w FROM (
+    SELECT s.k, s.sid, hadron_usage_cell(o.created_at) AS cell,
+           -sum((o.type = 'read')::int)::bigint AS r, -sum((o.type = 'write')::int)::bigint AS w
+    FROM old_rows o
+    CROSS JOIN LATERAL (VALUES ('user', o.user_id), ('memory', o.memory_id)) AS s(k, sid)
+    WHERE o.type IN ('read', 'write') AND o.deleted_at IS NULL AND s.sid IS NOT NULL
+      AND hadron_usage_cell(o.created_at) >= floor_cell
+    GROUP BY s.k, s.sid, hadron_usage_cell(o.created_at)
+  ) d ORDER BY d.k, d.sid, d.cell
+  ON CONFLICT (scope_kind, scope_id, cell) DO UPDATE
+    SET reads = usage_activity_cells.reads + EXCLUDED.reads, writes = usage_activity_cells.writes + EXCLUDED.writes;
+  RETURN NULL;
+END $$;
+
+-- An UPDATE nets the old rows against the new: a change to type, user_id, memory_id, created_at or deleted_at moves
+-- the counts, anything else nets to zero and writes nothing.
+CREATE OR REPLACE FUNCTION hadron_usage_rollup_after_update() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE floor_cell timestamp := hadron_usage_rollup_floor();
+BEGIN
+  IF floor_cell IS NULL THEN RETURN NULL; END IF;
+  INSERT INTO usage_activity_cells (scope_kind, scope_id, cell, reads, writes)
+  SELECT d.k, d.sid, d.cell, d.r, d.w FROM (
+    SELECT x.k, x.sid, x.cell, sum(x.r)::bigint AS r, sum(x.w)::bigint AS w FROM (
+      SELECT s.k, s.sid, hadron_usage_cell(o.created_at) AS cell,
+             -(o.type = 'read')::int AS r, -(o.type = 'write')::int AS w
+      FROM old_rows o
+      CROSS JOIN LATERAL (VALUES ('user', o.user_id), ('memory', o.memory_id)) AS s(k, sid)
+      WHERE o.type IN ('read', 'write') AND o.deleted_at IS NULL AND s.sid IS NOT NULL
+      UNION ALL
+      SELECT s.k, s.sid, hadron_usage_cell(n.created_at) AS cell,
+             (n.type = 'read')::int AS r, (n.type = 'write')::int AS w
+      FROM new_rows n
+      CROSS JOIN LATERAL (VALUES ('user', n.user_id), ('memory', n.memory_id)) AS s(k, sid)
+      WHERE n.type IN ('read', 'write') AND n.deleted_at IS NULL AND s.sid IS NOT NULL
+    ) x
+    WHERE x.cell >= floor_cell
+    GROUP BY x.k, x.sid, x.cell
+    HAVING sum(x.r) <> 0 OR sum(x.w) <> 0
+  ) d ORDER BY d.k, d.sid, d.cell
+  ON CONFLICT (scope_kind, scope_id, cell) DO UPDATE
+    SET reads = usage_activity_cells.reads + EXCLUDED.reads, writes = usage_activity_cells.writes + EXCLUDED.writes;
+  RETURN NULL;
+END $$;
+
+-- TRUNCATE leaves no events, so no cells: the rollup follows the events, never the other way round.
+CREATE OR REPLACE FUNCTION hadron_usage_rollup_after_truncate() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  TRUNCATE usage_activity_cells;
+  RETURN NULL;
+END $$;
+
+-- A cell that nets to zero or below (an erased user's events were only partly counted, the rest pre-date the install), or is
+-- born with nothing positive, is removed, so the rollup never keeps the id or the activity
+-- timeline of an erased user (the user-delete foreign-key action, a merge's loser, a hard delete) behind a row of zeros
+-- or of negatives. The upserts reach a zero by UPDATING an existing row; a cell INSERTED with no positive count is the
+-- removal of an event that was never counted (history from before the install, not yet backfilled), which no cell holds
+-- and which the backfill rebuilds from usage_events anyway, so the row is dropped rather than kept as a negative.
+CREATE OR REPLACE FUNCTION hadron_usage_rollup_drop_zero() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  DELETE FROM usage_activity_cells
+  WHERE scope_kind = NEW.scope_kind AND scope_id = NEW.scope_id AND cell = NEW.cell AND reads <= 0 AND writes <= 0;
+  RETURN NULL;
+END $$;
+
+DROP TRIGGER IF EXISTS usage_activity_cells_drop_zero ON usage_activity_cells;
+CREATE TRIGGER usage_activity_cells_drop_zero
+  AFTER UPDATE ON usage_activity_cells
+  FOR EACH ROW WHEN (NEW.reads <= 0 AND NEW.writes <= 0)
+  EXECUTE FUNCTION hadron_usage_rollup_drop_zero();
+
+DROP TRIGGER IF EXISTS usage_activity_cells_drop_nonpositive_insert ON usage_activity_cells;
+CREATE TRIGGER usage_activity_cells_drop_nonpositive_insert
+  AFTER INSERT ON usage_activity_cells
+  FOR EACH ROW WHEN (NEW.reads <= 0 AND NEW.writes <= 0)
+  EXECUTE FUNCTION hadron_usage_rollup_drop_zero();
+
+DROP TRIGGER IF EXISTS usage_events_rollup_insert ON usage_events;
+CREATE TRIGGER usage_events_rollup_insert
+  AFTER INSERT ON usage_events
+  REFERENCING NEW TABLE AS new_rows
+  FOR EACH STATEMENT EXECUTE FUNCTION hadron_usage_rollup_after_insert();
+
+DROP TRIGGER IF EXISTS usage_events_rollup_update ON usage_events;
+CREATE TRIGGER usage_events_rollup_update
+  AFTER UPDATE ON usage_events
+  REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows
+  FOR EACH STATEMENT EXECUTE FUNCTION hadron_usage_rollup_after_update();
+
+DROP TRIGGER IF EXISTS usage_events_rollup_delete ON usage_events;
+CREATE TRIGGER usage_events_rollup_delete
+  AFTER DELETE ON usage_events
+  REFERENCING OLD TABLE AS old_rows
+  FOR EACH STATEMENT EXECUTE FUNCTION hadron_usage_rollup_after_delete();
+
+DROP TRIGGER IF EXISTS usage_events_rollup_truncate ON usage_events;
+CREATE TRIGGER usage_events_rollup_truncate
+  AFTER TRUNCATE ON usage_events
+  FOR EACH STATEMENT EXECUTE FUNCTION hadron_usage_rollup_after_truncate();
+
+-- The state row: the triggers maintain every cell from the first 15-minute boundary after this migration.
+INSERT INTO "usage_activity_rollup_state" ("id", "applies_from", "complete")
+VALUES (1, hadron_usage_cell((now() AT TIME ZONE 'UTC')::timestamp) + interval '15 minutes', false)
+ON CONFLICT ("id") DO NOTHING;

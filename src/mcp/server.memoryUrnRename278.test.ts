@@ -39,7 +39,7 @@ beforeEach(async () => {
     data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
   });
   const memory = await resolvers.Mutation.createMemory(
-    {}, { orgId: org.id, name: 'before' }, graphCtx(),
+    {}, { orgRef: org.id, name: 'before' }, graphCtx(),
   );
   memoryId = memory.id;
   const action = await db.node.create({
@@ -69,7 +69,7 @@ describe('#278 fresh MCP memory URNs', () => {
     expect(beforeEdge).toContain(`hrn:edge:${oldPrefix}:${'tasks:run:depends-on:docs:target'}`);
     expect(beforeBundle).toContain(nodeUrn(oldPrefix, 'docs:target'));
 
-    await resolvers.Mutation.updateMemory({}, { id: memoryId, urn: 'after' }, graphCtx());
+    await resolvers.Mutation.updateMemory({}, { ref: memoryId, urn: 'after' }, graphCtx());
     expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).urn).toBe(newPrefix);
 
     const afterRead = await render('hadron_get_node', { urn: nodeUrn(newPrefix, 'tasks:run') });

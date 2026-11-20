@@ -11,8 +11,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  ESCALATION_TOKENS, FLOOR_TOKENS, FRESHNESS_MS, HYSTERESIS_TOKENS, LOCK_STALE_MS, REMINDER_TEXT, STATE_MAX_FILES, TAIL_BYTES,
-  decide, observe, run, scanTail, thresholdFor, withLock,
+  ESCALATION_TOKENS, FLOOR_TOKENS, HYSTERESIS_TOKENS, LOCK_STALE_MS, REMINDER_TEXT, STATE_MAX_FILES, STOP_REMINDER_TEXT, TAIL_BYTES, THRESHOLDS,
+  decide, escalationFor, observe, run, scanTail, thresholdFor, withLock,
 } from './worker-shed-reminder.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -60,7 +60,7 @@ const logOf = (b: Box) => (existsSync(join(b.stateDir, 'reminder.log')) ? readFi
 
 describe('thresholds and the floor', () => {
   it.each([
-    [OPUS, 150_000], [SONNET, 100_000], ['glm-5', 100_000],
+    [OPUS, 150_000], [SONNET, 100_000], ['glm-5', 50_000],
   ])('%s: silent just below, fires at and above %i reclaimable', (model, threshold) => {
     const b = box();
     write(b, [asst(occ(threshold - 1), { model })]);
@@ -129,7 +129,7 @@ describe('exact output', () => {
   });
 });
 
-describe('malformed, stale, future and unknown data stay silent', () => {
+describe('malformed, future and unknown data stay silent', () => {
   const cases: Array<[string, (b: Box) => void]> = [
     ['no assistant line', (b) => write(b, [JSON.stringify({ type: 'user', message: { content: 'hi' } })])],
     ['no usage object', (b) => write(b, [JSON.stringify({ type: 'assistant', timestamp: iso(NOW), message: { model: OPUS } })])],
@@ -137,7 +137,6 @@ describe('malformed, stale, future and unknown data stay silent', () => {
     ['negative counts', (b) => write(b, [asst(0, { input: 2, read: -300_000, create: 0 })])],
     ['fractional counts', (b) => write(b, [asst(0, { input: 2.5, read: 300_000, create: 0 })])],
     ['non-finite counts', (b) => write(b, [JSON.stringify({ type: 'assistant', timestamp: iso(NOW), message: { model: OPUS, usage: { input_tokens: 1e999, cache_read_input_tokens: 1, cache_creation_input_tokens: 1 } } })])],
-    ['stale last usage', (b) => write(b, [asst(occ(200_000), { ts: NOW - FRESHNESS_MS - 1_000 })])],
     ['future timestamp', (b) => write(b, [asst(occ(200_000), { ts: NOW + 5 * 60_000 })])],
     ['missing timestamp', (b) => write(b, [JSON.stringify({ type: 'assistant', message: { model: OPUS, usage: { input_tokens: 1, cache_read_input_tokens: occ(200_000), cache_creation_input_tokens: 0 } } })])],
     ['unparseable timestamp', (b) => write(b, [asst(occ(200_000)).replace(/"timestamp":"[^"]+"/, '"timestamp":"not-a-date"')])],
@@ -152,10 +151,42 @@ describe('malformed, stale, future and unknown data stay silent', () => {
     expect(existsSync(join(b.stateDir, 'reminder', `${SID}.json`))).toBe(false);
   });
 
-  it('a stale latest line wins over an older fresh one: it is the LATEST usage that counts', () => {
+  it('the LATEST usage counts, however old it is: an older high line does not outvote a newer low one', () => {
     const b = box();
-    write(b, [asst(occ(200_000), { ts: NOW - 60_000 }), asst(occ(5_000), { ts: NOW - FRESHNESS_MS - 5_000 })]);
+    write(b, [asst(occ(200_000), { ts: NOW - 3 * 3_600_000 }), asst(occ(5_000), { ts: NOW - 60_000 })]);
     expect(call(b)).toBeNull();
+  });
+
+  it('an idle gap does not silence the reminder: a last usage hours old still fires (Cedric, 2026-11-13)', () => {
+    const b = box();
+    write(b, [asst(occ(200_000), { ts: NOW - 6 * 3_600_000 })]);
+    expect(call(b)).not.toBeNull();
+  });
+
+  it('the Stop text claims neither a task boundary nor that nothing is stopped (Stop runs at every end of turn and continues it once)', () => {
+    const text = STOP_REMINDER_TEXT(160, 150);
+    expect(text).not.toMatch(/you are at a task boundary/i);
+    expect(text).not.toMatch(/nothing is stopped/i);
+    expect(text).toMatch(/If you are at a completed-task boundary/);
+    expect(text).toMatch(/mid-task or waiting for an answer, end your turn again/);
+  });
+
+  it('Stop at end of turn blocks once with the reminder, never when stop_hook_active, and shares the arm', () => {
+    const b = box();
+    write(b, [asst(occ(200_000))]);
+    expect(call(b, { hook_event_name: 'Stop', stop_hook_active: true })).toBeNull();
+    const stop = JSON.parse(call(b, { hook_event_name: 'Stop' })!);
+    expect(stop.decision).toBe('block');
+    expect(stop.reason).toContain('run the shed procedure now');
+    expect(stop.hookSpecificOutput).toBeUndefined();
+    // The arm was consumed by the Stop fire: the next prompt is silent.
+    expect(call(b)).toBeNull();
+  });
+
+  it('Stop below the threshold is silent', () => {
+    const b = box();
+    write(b, [asst(occ(5_000))]);
+    expect(call(b, { hook_event_name: 'Stop' })).toBeNull();
   });
 
   it('a boundary with bad data is silent and does not fall back to an older assistant usage', () => {
@@ -163,7 +194,7 @@ describe('malformed, stale, future and unknown data stay silent', () => {
     for (const bad of [boundary('b1', -5), boundary('b1', 1.5), boundary('', occ(200_000)),
       JSON.stringify({ type: 'system', subtype: 'compact_boundary', timestamp: iso(NOW - 2_000), compactMetadata: { postTokens: occ(200_000) } }),
       JSON.stringify({ type: 'system', subtype: 'compact_boundary', uuid: 'b1', timestamp: iso(NOW) }),
-      boundary('b1', 200_000, NOW - FRESHNESS_MS - 1_000), boundary('b1', 200_000, NOW + 600_000)]) {
+      boundary('b1', 200_000, NOW + 600_000)]) {
       rmSync(b.stateDir, { recursive: true, force: true });
       write(b, [asst(occ(300_000)), bad]);
       expect(call(b)).toBeNull();
@@ -207,6 +238,74 @@ describe('bounded and partial transcripts', () => {
 });
 
 describe('one arm: threshold fire, one escalation, never a third', () => {
+  // Incident 2026-11-19: GLM auto-compacts at ~167k occupied (92 measured compactions: min 165k, median 167k). The reminder
+  // must fire, and escalate, BEFORE that point or the compaction sheds the worker mid-task and the reminder is moot.
+  // A MEASUREMENT, not a source constant (the minimum of the 92 compactions): if the GLM window or Claude Code's buffer
+  // changes, re-measure and update it here and in the README.
+  const GLM_AUTO_COMPACT_OCCUPIED = 165_000;
+  it('GLM fires with runway before the auto-compact point, escalates once after 20k more, still before it', () => {
+    const b = box();
+    write(b, [asst(occ(49_999), { model: 'glm-5.3' })]);
+    expect(call(b)).toBeNull();
+    write(b, [asst(occ(50_000), { model: 'glm-5.3' })]);
+    expect(call(b)).not.toBeNull();
+    expect(occ(50_000)).toBeLessThan(GLM_AUTO_COMPACT_OCCUPIED - 40_000);
+    expect(escalationFor('glm-5.3')).toBe(20_000);
+    write(b, [asst(occ(50_000 + 20_000 - 1), { model: 'glm-5.3' })]);
+    expect(call(b)).toBeNull();
+    write(b, [asst(occ(50_000 + 20_000), { model: 'glm-5.3' })]);
+    expect(call(b)).not.toBeNull();
+    expect(occ(50_000 + 20_000)).toBeLessThan(GLM_AUTO_COMPACT_OCCUPIED);
+    expect(stateOf(b)).toMatchObject({ fires: 2 });
+    write(b, [asst(occ(50_000 + 100_000), { model: 'glm-5.3' })]);
+    expect(call(b)).toBeNull();
+  });
+
+  it('a fresh GLM recovery context (about 84k occupied, 17k reclaimable) stays silent; Claude models keep the default step', () => {
+    const b = box();
+    write(b, [asst(84_000, { model: 'glm-5.3' })]);
+    expect(call(b)).toBeNull();
+    expect(escalationFor(OPUS)).toBe(ESCALATION_TOKENS);
+    expect(escalationFor(SONNET)).toBe(ESCALATION_TOKENS);
+    expect(escalationFor(undefined)).toBe(ESCALATION_TOKENS);
+  });
+
+  it('from the source constants: GLM fire and escalation both land below the measured compaction point', () => {
+    const fire = thresholdFor('glm-5.3');
+    expect(fire).not.toBeNull();
+    expect(FLOOR_TOKENS + (fire as number)).toBeLessThan(GLM_AUTO_COMPACT_OCCUPIED);
+    expect(FLOOR_TOKENS + (fire as number) + escalationFor('glm-5.3')).toBeLessThan(GLM_AUTO_COMPACT_OCCUPIED);
+  });
+
+  it('every per-model escalation step in THRESHOLDS is a positive integer (escalationFor never silently falls back)', () => {
+    for (const entry of THRESHOLDS) {
+      if (entry.length < 3) continue;
+      const step = (entry as readonly [string, number, number])[2];
+      expect(Number.isInteger(step) && step > 0).toBe(true);
+      expect(escalationFor(`${entry[0]}-x`)).toBe(step);
+    }
+  });
+
+  // #4518 acceptance 3: the GLM change leaves every other family exactly as it was. Literal numbers on purpose: a pin written
+  // against the exported constants would follow a change to them instead of catching it.
+  it('non-GLM policy is byte-identical: Opus 150k and Sonnet 100k with no step of their own, default escalation 50k', () => {
+    expect(THRESHOLDS.filter(([prefix]) => !prefix.startsWith('glm'))).toEqual([['claude-opus', 150_000], ['claude-sonnet', 100_000]]);
+    expect(ESCALATION_TOKENS).toBe(50_000);
+    expect(FLOOR_TOKENS).toBe(67_000);
+    for (const model of [OPUS, SONNET]) expect(escalationFor(model)).toBe(50_000);
+  });
+
+  it('Sonnet escalates at exactly +50k after its 100k fire, the step it had before the GLM change', () => {
+    const b = box();
+    write(b, [asst(occ(100_000), { model: SONNET })]);
+    expect(call(b)).not.toBeNull();
+    write(b, [asst(occ(149_999), { model: SONNET })]);
+    expect(call(b)).toBeNull();
+    write(b, [asst(occ(150_000), { model: SONNET })]);
+    expect(call(b)).not.toBeNull();
+    expect(stateOf(b)).toMatchObject({ fires: 2, atReclaimable: 150_000 });
+  });
+
   it('fires once at the threshold, is silent on repeated prompts, escalates once at +50k, then never again', () => {
     const b = box();
     write(b, [asst(occ(150_000))]);

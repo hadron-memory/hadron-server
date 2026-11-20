@@ -22,7 +22,7 @@ const ctx = (): Context => ({ db, roles: ['ADMIN'], userId: admin.id });
 const server = new ApolloServer<Context>({ typeDefs, resolvers });
 
 async function memory(name: string, draftCorpus: boolean) {
-  return resolvers.Mutation.createMemory(null, { orgId: org.id, name, draftCorpus }, ctx());
+  return resolvers.Mutation.createMemory(null, { orgRef: org.id, name, draftCorpus }, ctx());
 }
 async function node(loc: string, fields: Record<string, unknown> = {}, memoryId = draft.id) {
   return db.node.create({
@@ -204,7 +204,7 @@ describe('searchReplaceInSpecNodes', () => {
     try {
       const applying = call(request([spec.id], { dryRun: false, expectedPlan: preview.plan }));
       await atSelection;
-      await resolvers.Mutation.deleteMemory(null, { id: draft.id }, ctx());
+      await resolvers.Mutation.deleteMemory(null, { ref: draft.id }, ctx());
       release();
       await expect(applying).rejects.toMatchObject({ extensions: { code: 'SEARCH_REPLACE_PLAN_STALE' } });
     } finally {
@@ -346,11 +346,11 @@ describe('searchReplaceInSpecNodes', () => {
 
   it('keeps an encrypted draft corpus encrypted through preview, apply, and revision history', async () => {
     const privateDraft = await resolvers.Mutation.createMemory(null, {
-      orgId: org.id, name: 'private-draft', memoryClass: 'private', draftCorpus: true,
+      orgRef: org.id, name: 'private-draft', memoryClass: 'private', draftCorpus: true,
     }, ctx());
     const spec = await node('pas:050:01', { abstract: 'cat summary' }, privateDraft.id);
     const dataKey = Buffer.alloc(32, 9).toString('base64');
-    await resolvers.Mutation.encryptMemory(null, { memoryId: privateDraft.id, dataKey }, ctx());
+    await resolvers.Mutation.encryptMemory(null, { memoryRef: privateDraft.id, dataKey }, ctx());
     const key = parseDataKey(dataKey);
     sessionKeyCache.set('spec-replace-test', privateDraft.id, key);
 
@@ -377,11 +377,11 @@ describe('searchReplaceInSpecNodes', () => {
 
   it('refuses an encrypted draft preview when its session key is unavailable', async () => {
     const privateDraft = await resolvers.Mutation.createMemory(null, {
-      orgId: org.id, name: 'locked-draft', memoryClass: 'private', draftCorpus: true,
+      orgRef: org.id, name: 'locked-draft', memoryClass: 'private', draftCorpus: true,
     }, ctx());
     const spec = await node('pas:051:01', {}, privateDraft.id);
     await resolvers.Mutation.encryptMemory(null, {
-      memoryId: privateDraft.id, dataKey: Buffer.alloc(32, 10).toString('base64'),
+      memoryRef: privateDraft.id, dataKey: Buffer.alloc(32, 10).toString('base64'),
     }, ctx());
     sessionKeyCache.clear();
     await expect(call(request([spec.id], { memoryRef: privateDraft.id })))

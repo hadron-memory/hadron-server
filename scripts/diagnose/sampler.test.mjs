@@ -56,7 +56,7 @@ test('closed workload counts failed DELETEs separately from successful closes', 
   const ctl = new AbortController();
   const p = run({ base: 'http://x', key: 'k', workload: 'closed', durationMs: 50, signal: ctl.signal, fetchImpl });
   setTimeout(() => ctl.abort(), 20);
-  const c = await p;
+  const { counts: c } = await p;
   assert.equal(c.ok, 1);
   assert.equal(c.closeFailed, 1);
   assert.equal(c.closeOk, 0);
@@ -67,7 +67,7 @@ test('closed workload counts a 2xx DELETE as a successful close', async () => {
   const ctl = new AbortController();
   const p = run({ base: 'http://x', key: 'k', workload: 'closed', durationMs: 50, signal: ctl.signal, fetchImpl });
   setTimeout(() => ctl.abort(), 20);
-  const c = await p;
+  const { counts: c } = await p;
   assert.equal(c.closeOk, 1);
   assert.equal(c.closeFailed, 0);
 });

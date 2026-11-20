@@ -5,6 +5,10 @@
  * requester ending its OWN still-pending request. The manager arm of `createGrant` lives in resolvers.grantCreate.ts and uses
  * {@link resolveGrantManager} here.
  *
+ * #4167 (cor:acl:140:05 Revoke, Holger 2026-11-14): a manager may revoke also while the App is UNINSTALLED (not deleted). The
+ * widening is the manager arm alone — the issuer arm (below) and `withdrawGrant` keep their installed-App refusals, a deleted App
+ * refuses exactly as an unknown one does, and the uninstalled-App refusal a non-manager sees is byte-identical to the installed one.
+ *
  * WHO. A manager is a PERSON acting as themselves (the one person gate, `resolveGrantPerson`: not an App key, a run, an impersonated
  * session or a worker session) for whom the ONE shared predicate `managesApp` holds, judged on the transaction under the App's
  * anchors with the caller's memberships locked (a revoked membership never authorizes: `managesApp` reads `deletedAt: null`).
@@ -42,7 +46,7 @@ const notManager = () => manageRefusal(new GrantManageRefusal('GRANT_NOT_MANAGER
 const notFound = () => manageRefusal(new GrantManageRefusal('GRANT_NOT_FOUND'));
 
 /** An App by id or URN, or null when it is missing, malformed or soft-deleted (all one answer). Never an uninstalled-App distinction. */
-async function resolveLiveApp(ctx: Context, appRef: string): Promise<TaskApp | null> {
+export async function resolveLiveApp(ctx: Context, appRef: string): Promise<TaskApp | null> {
   let id: string;
   try {
     ({ id } = await resolveAppRef(ctx.db, appRef));
@@ -97,9 +101,13 @@ export const grantManageMutations = {
     const app = found ? await loadApp(ctx, found.appId) : null;
     const actor = app ? await resolveTaskActor(ctx, app) : null;
     // A NEW door: no headless run is admitted (the gate: no headless or impersonation bypass; Xanthos' keep-runs carve-out is for main's
-    // older doors). A run, and every write precondition (uninstalled App, impersonation, refused binding), answers as a non-manager does.
+    // older doors). A run, and every write precondition (impersonation, refused binding), answers as a non-manager does. #4167
+    // (hrn:node:hadronmemory.com:specs:cor:acl:140:05, Holger 2026-11-14) is the one exception: an UNINSTALLED (not deleted) App no
+    // longer refuses this door — whoever manages the App may end its grants — and the judge below scopes that to the manager arm alone.
     if (!app || app.deletedAt || !actor || isRunPrincipal(ctx)) throw notManager();
-    try { requireWritable(ctx, app); } catch (e) { if (e instanceof GraphQLError) throw notManager(); throw e; }
+    try {
+      requireWritable(ctx, app, { allowUninstalled: true });
+    } catch (e) { if (e instanceof GraphQLError) throw notManager(); throw e; }
     try {
       return await inTaskWriteTx(ctx, app, actor, notManager, async (tx, txCtx, fresh) => {
         // The caller's session row is fenced before the judgement, so a session end cannot commit between it and the write.
@@ -111,6 +119,9 @@ export const grantManageMutations = {
         let manager = false;
         const admission: ActAdmission = await requireInstructedAct(txCtx, fresh.id, instruction, async () => {
           manager = await managesApp(txCtx, fresh);
+          // #4167: while the App is UNINSTALLED (not deleted) only the manager arm is admitted — a false return
+          // (issuer, instructed-worker, non-manager alike) is refused by requireInstructedAct as notManager.
+          if (fresh.uninstalledAt) return manager;
           return manager || (issuerHint !== null && issuerHint === txCtx.userId && await issuerStillMember(txCtx, fresh, txCtx.userId));
         }, readActInstruction, notManager);
         const ender: GrantEnder = {
@@ -124,17 +135,19 @@ export const grantManageMutations = {
           if (row.issuerUserId === null || row.issuerUserId !== txCtx.userId || !(await issuerStillMember(txCtx, fresh, txCtx.userId!))) throw notManager();
         };
         const { changed } = await endGrant(tx, ref, ender, {
-          authorize,
+          kind: 'revoke', authorize,
           beforeStamp: async (t) => { if (admission.kind === 'instructed-worker' && !(await sessionOpen(t, txCtx.sessionId))) throw notManager(); },
         });
         if (changed) await appendCredentialInstructionEvent(tx, { appId: fresh.id, admission, act: 'grant.revoke' });
         const view = await getGrantForManager(tx, fresh.id, ref, manager);
         if (!view) throw notManager();
         return view;
-      }, { ...(actor.kind === 'worker' ? { lockWorkerIds: [actor.workerId] } : {}) });
+      }, { allowUninstalledApp: true, ...(actor.kind === 'worker' ? { lockWorkerIds: [actor.workerId] } : {}) });
     } catch (e) {
       if (e instanceof GrantManageRefusal) throw manageRefusal(e.code === 'GRANT_NOT_FOUND' ? new GrantManageRefusal('GRANT_NOT_MANAGER') : e);
-      // An App uninstalled between the read and the lock reads as the same refusal (the task door's own code would tell a non-manager).
+      // Reachable, not stale: inTaskWriteTx's own catch rewrites a mid-tx gate refusal (e.g. a membership that
+      // lapsed between the pre-tx and in-tx actor resolves) to APP_UNINSTALLED while the App is uninstalled.
+      // This door answers that as the non-manager does, so no refusal ever names the App's install state.
       if (e instanceof GraphQLError && e.extensions?.code === 'APP_UNINSTALLED') throw notManager();
       throw e;
     }
@@ -175,7 +188,7 @@ export const grantManageMutations = {
             if (!mine) throw new GrantManageRefusal('GRANT_NOT_REQUESTER');
           };
           await endGrant(tx, ref, ender, {
-            authorize, pendingOnly: true,
+            kind: 'withdraw', authorize, pendingOnly: true,
             beforeStamp: async (t) => { if (reader && !(await sessionOpen(t, txCtx.sessionId))) throw notFound(); },
           });
           // A manager sees the audit facts; a requester who does not manage reads the plain record.

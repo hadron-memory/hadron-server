@@ -123,6 +123,7 @@ import type { SessionType } from '../../../generated/prisma/index.js';
 import { hasBoundAppSession, strictSessionMemoryFilter } from '../../../lib/auth/sessionPrivacy.js';
 import { projectSessionEventsFor } from './resolvers.usageProjection.js';
 import { NODE_URN_FALLBACK_EVENT, nodeUrnFallbackEvent } from '../../../lib/nodeUrnDiagnostic.js';
+import { secretFields } from './resolvers.secret.js';
 
 // Request-local only: a session list computes the event memory set once.
 type SessionEventMemorySet = { ids: string[]; delegatedMemoryId: string | null };
@@ -1201,6 +1202,7 @@ export const typeResolvers = {
   Chat: {
     servedPrompts: servedPromptOwnerFields.chatServedPrompts,
   },
+  Secret: secretFields,
   McpServer: {
     // headersEncrypted is not in the GraphQL type at all; readers get only
     // this boolean (write-only secret posture, same as tool-held tokens).
@@ -1917,6 +1919,13 @@ export const typeResolvers = {
     },
   },
   App: {
+    /**
+     * #4464 stage 1: the App's own role is deprecated — the field answers the
+     * constant READER whatever the row stores, and no writer persists a
+     * caller-supplied value anymore. Legacy stored values are untouched until
+     * the last stage drops the column.
+     */
+    role: () => 'READER',
     /** #2171 (R211): the union reader every admission decides with. */
     availableMemberRoles: async (a: { id: string }, _: unknown, ctx: Context) =>
       (await loadOfferedMemberRoles(ctx.db, a.id)).roles,

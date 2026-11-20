@@ -64,7 +64,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { id: generateId(), organizationId: otherOrg.id, userId: otherAdmin.id, role: 'ADMIN' } });
 
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Meal Plan', urn: `${org.urn}:mealplan` } });
-  const ag = await M.createAgent({}, { orgId: org.id, name: 'Juno Coach' }, ctx(orgAdmin.id));
+  const ag = await M.createAgent({}, { orgRef: org.id, name: 'Juno Coach' }, ctx(orgAdmin.id));
   agent = { id: ag.id, urn: (await db.agent.findUniqueOrThrow({ where: { id: ag.id } })).urn };
   const server = await db.hadronServer.create({ data: { id: generateId(), url: 'https://aiconf.test' } });
 
@@ -325,7 +325,7 @@ describe('#3857 review — each URN resolves to ITS owner\'s config, not any con
     const admin = ctx(platformAdmin.id, ['ADMIN']);
     const org2 = await db.organization.create({ data: { id: generateId(), name: 'aiconf-org2', urn: `aiconf-org2-${suffix}.com` } });
     const app2 = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other Plan', urn: `${org.urn}:otherplan` } });
-    const ag2 = await M.createAgent({}, { orgId: org.id, name: 'Other Coach' }, ctx(orgAdmin.id));
+    const ag2 = await M.createAgent({}, { orgRef: org.id, name: 'Other Coach' }, ctx(orgAdmin.id));
     const mk = (owner: Record<string, string>) =>
       db.aiServiceConfig.create({ data: { id: generateId(), name: 'default', provider: 'openai', model: 'm', ...owner } });
     const second = { org: await mk({ organizationId: org2.id }), app: await mk({ appId: app2.id }), agent: await mk({ agentId: ag2.id }) };

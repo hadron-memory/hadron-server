@@ -66,8 +66,8 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: staff.id, role: 'CONTRIBUTOR' } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
-  oldAgent = await M.createAgent({}, { orgId: org.id, name: 'Security', personaRole: 'security-engineer' }, ctx());
-  newAgent = await M.createAgent({}, { orgId: org.id, name: 'Specs', personaRole: 'specs-engineer' }, ctx());
+  oldAgent = await M.createAgent({}, { orgRef: org.id, name: 'Security', personaRole: 'security-engineer' }, ctx());
+  newAgent = await M.createAgent({}, { orgRef: org.id, name: 'Specs', personaRole: 'specs-engineer' }, ctx());
   await db.appAgent.create({ data: { appId: app.id, agentId: oldAgent.id } });
   await db.appAgent.create({ data: { appId: app.id, agentId: newAgent.id } });
   await serveAgentBootPrompt(db, oldAgent.id, 'OLD {{worker.name}} {{worker.role}}');
@@ -149,7 +149,7 @@ describe('#2458 changeWorkerAgent: refusals change nothing', () => {
   });
 
   it('refuses an agent that is not installed, or deleted, as one answer', async () => {
-    const stray = await M.createAgent({}, { orgId: org.id, name: 'Stray', personaRole: 'stray' }, ctx());
+    const stray = await M.createAgent({}, { orgRef: org.id, name: 'Stray', personaRole: 'stray' }, ctx());
     const before = await snapshot();
     expect(await code(change(stray.id))).toBe('WORKER_AGENT_NOT_INSTALLED');
     await db.agent.update({ where: { id: newAgent.id }, data: { deletedAt: new Date() } });
@@ -176,7 +176,7 @@ describe('#2458 changeWorkerAgent: refusals change nothing', () => {
 
     const other = await db.organization.create({ data: { name: 'Vendor', urn: `vendor-${generateId().toLowerCase()}.example` } });
     await db.orgMember.create({ data: { organizationId: other.id, userId: outsider.id, role: 'ADMIN' } });
-    const foreign = await M.createAgent({}, { orgId: other.id, name: 'Vendor', personaRole: 'vendor', visibility: 'PUBLIC' }, ctx(outsider));
+    const foreign = await M.createAgent({}, { orgRef: other.id, name: 'Vendor', personaRole: 'vendor', visibility: 'PUBLIC' }, ctx(outsider));
     await db.appAgent.create({ data: { appId: app.id, agentId: foreign.id } });
     expect(await code(change(foreign.id))).toBe('AGENT_ORG_GRANT_REQUIRED');
     expect(await snapshot()).toEqual(before);
@@ -185,7 +185,7 @@ describe('#2458 changeWorkerAgent: refusals change nothing', () => {
   it('refuses when the served compiled prompt includes from an Agent the org holds no grant for', async () => {
     const other = await db.organization.create({ data: { name: 'Lib', urn: `lib-${generateId().toLowerCase()}.example` } });
     await db.orgMember.create({ data: { organizationId: other.id, userId: outsider.id, role: 'ADMIN' } });
-    const lib = await M.createAgent({}, { orgId: other.id, name: 'Lib', personaRole: 'lib', visibility: 'PUBLIC' }, ctx(outsider));
+    const lib = await M.createAgent({}, { orgRef: other.id, name: 'Lib', personaRole: 'lib', visibility: 'PUBLIC' }, ctx(outsider));
     const libAgent = await db.agent.findUniqueOrThrow({ where: { id: lib.id } });
     const newRow = await db.agent.findUniqueOrThrow({ where: { id: newAgent.id } });
     expect(libAgent.systemMemoryId && newRow.systemMemoryId).toBeTruthy();
@@ -221,7 +221,7 @@ describe('#2458 changeWorkerAgent: refusals change nothing', () => {
   });
 
   it('refuses an agent with no role of its own rather than storing a null role', async () => {
-    const roleless = await M.createAgent({}, { orgId: org.id, name: 'Roleless' }, ctx());
+    const roleless = await M.createAgent({}, { orgRef: org.id, name: 'Roleless' }, ctx());
     await db.appAgent.create({ data: { appId: app.id, agentId: roleless.id } });
     const before = await snapshot();
     expect(await code(change(roleless.id))).toBe('WORKER_AGENT_HAS_NO_ROLE');
@@ -287,7 +287,7 @@ describe('#2458 cast uses the same checks (R222: no role override)', () => {
     const own = await M.createAgent({}, { name: 'Own', personaRole: 'own-role' }, ctx());
     const vendor = await db.organization.create({ data: { name: 'Vendor3', urn: `vendor3-${generateId().toLowerCase()}.example` } });
     await db.orgMember.create({ data: { organizationId: vendor.id, userId: outsider.id, role: 'ADMIN' } });
-    const theirs = await M.createAgent({}, { orgId: vendor.id, name: 'Theirs', personaRole: 'their-role', visibility: 'PUBLIC' }, ctx(outsider));
+    const theirs = await M.createAgent({}, { orgRef: vendor.id, name: 'Theirs', personaRole: 'their-role', visibility: 'PUBLIC' }, ctx(outsider));
     for (const a of [own, theirs]) await db.appAgent.create({ data: { appId: mine.id, agentId: a.id } });
     const cast = (agentRef: string, name: string) => M.castWorker({}, { appRef: mine.id, agentRef, name }, ctx());
     expect(await code(cast(theirs.id, 'Gus'))).toBe('AGENT_ORG_GRANT_REQUIRED');
@@ -301,7 +301,7 @@ describe('#2458 cast uses the same checks (R222: no role override)', () => {
   it('refuses a cast without the org grant (the cast-time grant check)', async () => {
     const other = await db.organization.create({ data: { name: 'Vendor2', urn: `vendor2-${generateId().toLowerCase()}.example` } });
     await db.orgMember.create({ data: { organizationId: other.id, userId: outsider.id, role: 'ADMIN' } });
-    const foreign = await M.createAgent({}, { orgId: other.id, name: 'Vendor', personaRole: 'vendor', visibility: 'PUBLIC' }, ctx(outsider));
+    const foreign = await M.createAgent({}, { orgRef: other.id, name: 'Vendor', personaRole: 'vendor', visibility: 'PUBLIC' }, ctx(outsider));
     await db.appAgent.create({ data: { appId: app.id, agentId: foreign.id } });
     expect(await code(M.castWorker({}, { appRef: app.id, agentRef: foreign.id, name: 'Dee' }, ctx()))).toBe('AGENT_ORG_GRANT_REQUIRED');
     expect(await db.worker.count({ where: { appId: app.id, name: 'Dee' } })).toBe(0);

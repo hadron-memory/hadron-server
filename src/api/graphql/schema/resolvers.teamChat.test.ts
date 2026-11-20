@@ -109,7 +109,7 @@ beforeEach(async () => {
 
   // The Team Agent — through the real mutation so it owns a real system
   // memory; the roles: branch is what marks it as the Team Agent.
-  const created = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   teamAgent = { id: created.id, urn: created.urn, systemMemoryId: created.systemMemoryId };
   await db.node.create({
     data: {
@@ -227,7 +227,7 @@ describe('createTeamChatMessage — happy path + bootstrap', () => {
   });
 
   it('falls back to the single installed Agent when no roles: branch marks a Team Agent', async () => {
-    const plain = await M.createAgent({}, { orgId: org.id, name: 'Solo Agent' }, ctx(admin.id));
+    const plain = await M.createAgent({}, { orgRef: org.id, name: 'Solo Agent' }, ctx(admin.id));
     const app2 = await db.app.create({
       data: { id: generateId(), organizationId: org.id, name: 'Solo App', urn: `${org.urn}:solo` },
     });

@@ -45,7 +45,7 @@ beforeEach(async () => {
   orgId = org.id;
   admin = await db.user.create({ data: { githubId: 204701, githubUsername: 'served-admin', handle: 'served-admin', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'served-prune' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'served-prune' }, as());
   await db.memory.update({ where: { id: memory.id }, data: { maxRevCount: 2 } });
   agentId = (await db.agent.create({ data: { id: generateId(), name: 'A', organizationId: org.id, urn: `${org.urn}:a` } as never })).id;
   appId = (await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'T', urn: `${org.urn}:t` } })).id;

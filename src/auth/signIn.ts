@@ -8,7 +8,8 @@ import { verifyJwt, type HadronJwtPayload } from './jwt.js';
  *
  * A factor-protected sign-in is a `SignIn` row. Its id is the JWT `sid` claim and the immutable
  * root of every handoff code, authorization code and key that descends from it, so ending it
- * (the first-passkey cancel link, cor:aut:030:02) ends exactly that lineage and nothing else.
+ * (the first-passkey cancel link, hrn:node:hadronmemory.com:specs:cor:aut:040:08) ends exactly that lineage and nothing
+ * else.
  *
  * Lock order for every writer here, matching the cancel path: user authority anchor → credential
  * row → SignIn rows by id → handoff/auth-code rows → key rows by id.

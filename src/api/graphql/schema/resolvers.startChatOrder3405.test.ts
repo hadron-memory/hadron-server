@@ -38,7 +38,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'org-3405', urn: 'org-3405' } });
   admin = await db.user.create({ data: { githubId: 340500, githubUsername: 'u3405', roles: ['ADMIN'] as never } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  const created = await M.createAgent({}, { orgId: org.id, name: 'order-agent', visibility: 'ORGANIZATION' }, ctx());
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'order-agent', visibility: 'ORGANIZATION' }, ctx());
   agentId = created.id;
   systemMemoryId = created.systemMemoryId!;
   await serveEveryAgent(db);
@@ -75,7 +75,7 @@ async function seed(path: Path, seeds: Seed[]) {
   await db.agent.update({ where: { id: agentId }, data: { publishedRevisionLoc: 'revisions:rev-3405' } });
 }
 
-const start = (args: Record<string, unknown> = {}) => M.startChat(null, { agentId, ...args }, ctx());
+const start = (args: Record<string, unknown> = {}) => M.startChat(null, { agentRef: agentId, ...args }, ctx());
 const opened = async (args: Record<string, unknown> = {}) => (await start(args)).conversationName as string;
 async function refusal(args: Record<string, unknown> = {}) {
   const err = await start(args).then(() => null, (e: unknown) => e);

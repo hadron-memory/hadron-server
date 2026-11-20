@@ -1,3 +1,4 @@
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 /** #3448: PR protocol facts are typed events, never opaque properties (cor:agt:050:28). */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -12,10 +13,11 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import * as taskGraphLocks from '../../../lib/agentTasks/blockers.js';
 import { RegisterLookup } from '../../../lib/actionRegister/lookup.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 
 const M = resolvers.Mutation as Record<string, (...args: any[]) => Promise<any>>;
-const Q = resolvers.Query as Record<string, (...args: any[]) => Promise<any>>;
+const Q = settledTeamEventQueries(resolvers.Query, db) as Record<string, (...args: any[]) => Promise<any>>;
 const H = 'a'.repeat(40), H2 = 'b'.repeat(40);
 let owner: any, author: any, reviewer: any, other: any, outsider: any, app: any, build: any;
 const ctx = (userId = owner.id) => ({ db, userId, roles: ['READER' as const] });
@@ -64,7 +66,7 @@ beforeEach(async () => {
 
 describe('typed PR schedule and freeze', () => {
   it('adds the GraphQL commands and closed verdict enum', async () => {
-    const api = new ApolloServer({ typeDefs, resolvers });
+    const api = new ApolloServer({ typeDefs, resolvers: { ...resolvers, Query: settledTeamEventQueries(resolvers.Query, db) } });
     const r = await api.executeOperation({ query: '{__type(name:"ReviewVerdict"){enumValues{name}}}' });
     expect((r.body as any).singleResult.data.__type.enumValues.map((v: any) => v.name)).toEqual(['APPROVE', 'CHANGES_REQUESTED', 'PASS', 'FAIL', 'CARRY', 'REFUSED']);
     await api.stop();
@@ -301,7 +303,7 @@ describe('readiness uses only event facts', () => {
     expect(await events()).toHaveLength(0);
   });
   it('the GraphQL commands expose task + register action and the event-only readiness answer', async () => {
-    const api = new ApolloServer({ typeDefs, resolvers });
+    const api = new ApolloServer({ typeDefs, resolvers: { ...resolvers, Query: settledTeamEventQueries(resolvers.Query, db) } });
     try {
       const call = async (query: string, userId: string) => {
         const r = await api.executeOperation({ query, variables: { id: build.id } }, { contextValue: ctx(userId) });
@@ -389,7 +391,7 @@ describe('protocol event feed compatibility', () => {
   it('round-trips protocol event types and payloads through the public GraphQL history query', async () => {
     const seats=await readySeats();
     await command('recordReadyCall', { taskRef: build.id, head: H }, author.id);
-    const api = new ApolloServer({ typeDefs, resolvers });
+    const api = new ApolloServer({ typeDefs, resolvers: { ...resolvers, Query: settledTeamEventQueries(resolvers.Query, db) } });
     try {
       const r = await api.executeOperation({
         query: 'query($app: ID!, $task: ID!) { agentTeamEvents(appRef:$app,taskId:$task) { type payload } }',
@@ -406,7 +408,7 @@ describe('protocol event feed compatibility', () => {
       const answer=(child.body as any).singleResult;expect(answer.errors).toBeUndefined();
       expect(answer.data.agentTeamEvents).toEqual(expect.arrayContaining([
         {type:'review.seat.assigned',payload:{slot:'local',head:H,supersedes:null}},
-        {type:'review.verdict',payload:{slot:'local',head:H,verdict:'APPROVE',node:'hrn:node:example.test:reviews:one',receipt:'https://example.test/receipt'}},
+        {type:'review.verdict',payload:{slot:'local',head:H,verdict:'APPROVE',node:'hrn:node:example.test:reviews:one',receipt:'https://example.test/receipt',reviewerFamily:null,reviewerModel:null,modelReportedAt:null}}, // #4235: a person's verdict carries null for all three
       ]));
     } finally { await api.stop(); }
   });
@@ -459,7 +461,7 @@ describe('LOCAL delta: finished negative verdicts and seat provenance', () => {
       .rejects.toMatchObject(error('TASK_CHILD_OWNER_MISMATCH'));
     const t = await M.createAgentTask!({}, { input }, ctx(author.id));
     expect((await stored(t.id)).ownerUserId).toBe(author.id);
-    const api = new ApolloServer({ typeDefs, resolvers });
+    const api = new ApolloServer({ typeDefs, resolvers: { ...resolvers, Query: settledTeamEventQueries(resolvers.Query, db) } });
     try {
       const r = await api.executeOperation({ query: '{ __type(name:"UpdateAgentTaskInput") { inputFields { name } } }' });
       expect((r.body as any).singleResult.data.__type.inputFields.map((f:any) => f.name)).not.toContain('owner');

@@ -12,11 +12,17 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 import { computeApprovalHash } from '../lib/approvalHash.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../lib/bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../lib/bootCompile/provenance.js';
+import { ensureInstallRegisterRows } from '../lib/registerInstall.js';
+import { listAppInstallations } from '../lib/appInstallations.js';
 import { safeNodeUrnV2 } from '../lib/urnEmit.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { workerNames } from './e2eWorkerNames.js';
 
 export const E2E_STOCK_ROLES = ['coordinator', 'qa-engineer'] as const;
+
+/** #3160: the one conversation the seed gives the stock Agents, so stack QA can start a chat with `coordinator`. */
+export const E2E_CONVERSATION = 'welcome';
+export const E2E_CONVERSATION_PROMPT = 'Greet the tester and say this is a disposable E2E fixture.';
 
 export const E2E_BOOT_PROMPT = 'You are {{worker.name}}, the synthetic {{worker.role}} fixture.';
 
@@ -92,4 +98,39 @@ export async function seedE2eStockAgents(db: PrismaClient, o: {
     await seedE2eBootPrompt(db, { agentId: o.id(`${o.org}:${role}`), memoryId: o.systemMemoryId, slot: role, approvedAt: o.approvedAt,
       idFor: part => o.id(`${o.org}:${role}:boot-${part}`) });
   }
+  // #3160: one ordinary top-level conversation (cor:cht:020:01 step 1: neither setup nor fallback) with one stage, in the
+  // shared system memory, so an unnamed `startChat` on the coordinator opens it instead of AGENT_HAS_NO_CONVERSATIONS.
+  // The root `conversations` node, the conversation (data.stageOrder) and its one stage carrying the prompt.
+  const conv = async (loc: string, data: object | null, content: string | null) => {
+    await db.node.create({ data: { id: o.id(`${o.org}:${loc}`), memoryId: o.systemMemoryId, loc, name: loc.split(':').pop()!,
+      nodeType: 'system', data: data as never, content, tags: ['e2e'] } });
+  };
+  await conv('conversations', null, null);
+  await conv(`conversations:${E2E_CONVERSATION}`, { stageOrder: ['greet'] }, null);
+  await conv(`conversations:${E2E_CONVERSATION}:greet`, {}, E2E_CONVERSATION_PROMPT);
+}
+
+/**
+ * #4506 — the install-default register rows a real install writes (cor:dmo:090:04: App-owned, attendee = the installed
+ * Agent, role BOTH; the register is attention, not permission). The seed builds Apps, Channels and Agents with raw
+ * writes, so without this the register is empty and every register-gated path (`markOwnTeamChatRead`) refuses
+ * CHANNEL_NOT_FOUND on a fresh stack. Call AFTER the App's default Channel is set (the helper is a no-op without one).
+ * Idempotent (`ON CONFLICT DO NOTHING`).
+ */
+export async function seedE2eInstallRegister(db: PrismaClient, appId: string, opts: { agentId?: string } = {}): Promise<number> {
+  return ensureInstallRegisterRows(db, appId, opts);
+}
+
+/**
+ * The seed's self-check for #4506: the ids of installed Agents of `appId` that have NO live App-owned row on the App's
+ * default Channel. An empty array is the pass; a merely non-empty register is not enough.
+ */
+export async function e2eRegisterGaps(db: PrismaClient, appId: string): Promise<string[]> {
+  const app = await db.app.findUniqueOrThrow({ where: { id: appId }, select: { defaultChannelId: true } });
+  const installs = await listAppInstallations(db, appId);
+  const have = new Set((await db.registerEntry.findMany({
+    where: { appId, channelId: app.defaultChannelId ?? '', role: 'BOTH', deletedAt: null, attendeeAgentId: { not: null } },
+    select: { attendeeAgentId: true },
+  })).map(r => r.attendeeAgentId));
+  return installs.filter(i => !have.has(i.agentId)).map(i => i.agentId);
 }

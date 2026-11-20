@@ -72,7 +72,9 @@ export const ASSIGNED_EVENT_TYPES = ['task.assigned', 'task.reassigned', 'assign
 export const ASSIGNEE_CLEARED_EVENT_TYPES = ['task.handed-back'] as const satisfies readonly TaskEventPayload['type'][];
 
 /** Passive history must be excluded from EVERY later-event/activity predicate when a kind is added here. */
-export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed', 'task.external-id-released'] as const;
+// #4286: a defect link (review.defect-linked) is a QA fact about the task, not its assignee acting on it, so it never
+// clears an assignment or child-end wake (taskWakes.ts).
+export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed', 'task.external-id-released', 'review.defect-linked'] as const;
 /** #2609: only facts already readable by every team-event reader. Assignee state and future codes are excluded. */
 export const RECORDED_TASK_WARNING_CODES = ['task.create.no-source', 'task.finish.open-children'] as const;
 export type RecordedTaskWarningCode = (typeof RECORDED_TASK_WARNING_CODES)[number];
@@ -123,6 +125,11 @@ export type TaskEventPayload =
   /** #2651: the code only. The optional reason text is on the task row, never here (cor:agt:050:29). */
   | { type: 'task.handed-back'; code: TaskHandBackCode }
   /**
+   * #4280 (S12b): a defect found after the PR merged traces to this build task's PR. `defect`
+   * is the issue URL as given; `introducedAtHead` a head frozen on this task, or null. Never a readiness input.
+   */
+  | { type: 'review.defect-linked'; defect: string; introducedAtHead: string | null }
+  /**
    * #4084 (cor:agt:120:02, V87 Proposed): the external id a release cleared. The id is readable to every reader of the
    * team's events already (it is on the task, under the same read gate, cor:agt:050:21), so naming it discloses nothing
    * new; the team's reconcile pass needs it, because the task no longer holds it.
@@ -158,8 +165,12 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
   switch (e.type) {
     case 'review.scheduled': return { slots: e.slots };
     case 'pr.frozen': return { head: e.head, pullRequest: e.pullRequest };
+    case 'review.defect-linked': return { defect: e.defect, introducedAtHead: e.introducedAtHead };
     case 'review.seat.assigned': return { slot: e.slot, head: e.head, supersedes: e.supersedes };
-    case 'review.verdict': return { slot: e.slot, head: e.head, verdict: e.verdict, node: e.node, receipt: e.receipt };
+    case 'review.verdict': return {
+      slot: e.slot, head: e.head, verdict: e.verdict, node: e.node, receipt: e.receipt,
+      reviewerFamily: e.reviewerFamily, reviewerModel: e.reviewerModel, modelReportedAt: e.modelReportedAt,
+    };
     case 'pr.ready': return { head: e.head };
     case 'task.edited':
       if (e.fields.some(f => !(TASK_EDIT_FIELDS as readonly string[]).includes(f))) throw new Error('Unsupported task edit field');
@@ -266,6 +277,10 @@ export const ALARM_EVENT_TYPES = [
   'alarm.coordinator-cadence',
   // #2014: a worker's team-chat post refused by the rate limit. Task-less; its episode lives in `post_limit_episodes`.
   'alarm.post-limit',
+  // #4231: a worker whose platform starts keep failing (three in an hour). Task-less; its episode lives in `start_failing_episodes`.
+  'alarm.start-failing',
+  // #4233: a host whose sweep stopped reporting (S10 of #4229). Task-less and workerless; its episode lives in `host_sweep_episodes`.
+  'alarm.stale-sweep',
 ] as const;
 export type AlarmEventType = (typeof ALARM_EVENT_TYPES)[number];
 
@@ -621,6 +636,45 @@ export async function appendReportsToEvent(
   });
 }
 
+/**
+ * #4224 (S3 of #4229): one `worker.leave-alone-changed` event per change of a worker's leave-alone marker, in the
+ * write's own transaction. The marker's new value only: the reason is text and stays on the worker row
+ * (cor:agt:050:11, ids only).
+ */
+export async function appendLeaveAloneChangedEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; workerId: string; leaveAlone: boolean },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: 'worker.leave-alone-changed',
+      actorUserId: args.actor.userId,
+      actorWorkerId: args.actor.workerId,
+      actorAgentId: args.actor.agentId,
+      subjectWorkerId: args.workerId,
+      payload: { leaveAlone: args.leaveAlone },
+    },
+  });
+}
+
+/** #4224 (S3 of #4229): one `team.sweep-mode-changed` event per change of the App's sweep mode: from and to. */
+export async function appendSweepModeChangedEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; from: string; to: string },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: 'team.sweep-mode-changed',
+      actorUserId: args.actor.userId,
+      actorWorkerId: args.actor.workerId,
+      actorAgentId: args.actor.agentId,
+      payload: { from: args.from, to: args.to },
+    },
+  });
+}
+
 /** #3307 / cor:dmo:050:12: one instruction record for a signature/trailer act; no template text is recorded. */
 export async function appendWorkerSignatureInstructionEvent(
  tx: Prisma.TransactionClient,
@@ -701,7 +755,13 @@ export type ManagerAct =
   | `host-operation.${'worker.start' | 'worker.end' | 'worktree.create' | 'worktree.remove'}`
   | 'stop.set' | 'stop.lift' | 'ticker.update' | 'ticker.delete' | 'ticker.subscribe' | 'ticker.unsubscribe'
   | 'ticker.templates-apply' | 'worker.wake-settings'
-  | 'app.ticker-settings' | 'app.delivery-settings' | 'team.pause' | 'team.resume' | 'wake.read';
+  | 'app.ticker-settings' | 'app.delivery-settings' | 'team.pause' | 'team.resume' | 'wake.read'
+  // #4224 (S3 of #4229): the leave-alone marker and the App's sweep mode.
+  | 'worker.leave-alone' | 'app.sweep-mode'
+  // #4222: the host-setup doors (which workers a host runs, and the App's switch for it).
+  | 'host-setup.assign' | 'host-setup.unassign' | 'host-setup.source'
+  // #4280 (S12b): linking a post-merge defect to the PR it escaped from.
+  | 'review.defect-link';
 
 /** The ids an instructed App-manager act concerns; never content (cor:agt:050:11). */
 export type ManagerActSubject = { taskId?: string; workerId?: string; eventId?: string; tickerId?: string; signalId?: string };

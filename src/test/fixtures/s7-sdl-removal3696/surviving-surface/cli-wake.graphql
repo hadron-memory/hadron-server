@@ -1,0 +1,36 @@
+# TEST-AUTHORED remaining-surface regression. NOT released/deployed client evidence for C1/R1(b).
+fragment WorkerWakeSettingsFields on WorkerWakeSettings {
+  worker {
+    id
+    name
+    urn
+  }
+  mentions
+  pausedUntil
+  subscriptions {
+    id
+    ticker {
+      id
+      urn
+      name
+      cadenceSeconds
+      enabled
+    }
+    viaGrant
+    createdAt
+  }
+  effectiveCadenceSeconds
+  dormant
+}
+
+query WorkerWakeSettings($workerRef: String!) {
+  workerWakeSettings(workerRef: $workerRef) {
+    ...WorkerWakeSettingsFields
+  }
+}
+
+mutation SetWorkerWakeSettings($workerRef: String!, $input: WorkerWakeSettingsInput!) {
+  setWorkerWakeSettings(workerRef: $workerRef, input: $input) {
+    ...WorkerWakeSettingsFields
+  }
+}

@@ -1,3 +1,4 @@
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 /**
  * #3949 (cor:api:120:04, cor:agt:050:11): agentTeamEventsPage(limit: 0) read one lookahead row yet served none, so an existing
  * event gave events: [], hasMore: true, nextCursor: null - a continuation the caller could not follow. The decided contract
@@ -10,11 +11,12 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 
-const Q = resolvers.Query as any;
+const Q = settledTeamEventQueries(resolvers.Query, db) as any;
 const T0 = Date.UTC(2026, 10, 1);
 
 async function code(p: Promise<unknown>): Promise<string | undefined> {

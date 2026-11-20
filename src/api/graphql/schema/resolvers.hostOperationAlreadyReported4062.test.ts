@@ -65,7 +65,7 @@ beforeEach(async () => {
   org = await db.organization.create({ data: { name: 'Hosts', urn: `hostops4062-${n}.example` }, select: { id: true, urn: true } });
   manager = await db.user.create({ data: { githubId: 406_000_000 + n, githubUsername: `ho4062-manager-${n}`, roles: ['READER'] }, select: { id: true } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: manager.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(manager.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(manager.id));
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true } });
   kit = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit' }, select: { id: true } });
   const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;

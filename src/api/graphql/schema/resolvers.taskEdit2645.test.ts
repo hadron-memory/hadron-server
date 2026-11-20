@@ -100,7 +100,8 @@ describe('task edit #2645',()=>{
  });
  it('reanchors only not-started deadline and gives a changed startBy a new episode',async()=>{
   const assignedAt=new Date(Date.now()-3600_000);
-  await db.agentTask.update({where:{id:task.id},data:{assignedAt}});
+  // #3775 B: a person-assigned task raises no stall alarm, so these tests move the assignment to a worker first. 
+  await db.agentTask.update({where:{id:task.id},data:{assignedAt,assigneeUserId:null,assigneeWorkerId:worker.id}});
   const before=(await loadStallInputs(db,{id:task.id},new Date()))[0];
   const old=stallCandidates(before,effectiveWindows(null),new Date()).find(c=>c.rule==='not-started')!;
   const alarmId=await raiseStallAlarm(db,old,new Date());

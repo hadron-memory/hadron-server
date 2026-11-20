@@ -40,10 +40,10 @@ describe('G1: the fixture is the reference, and it matches cor:acl:140:09', () =
     expect(fixture.cases.map((c) => c.name)).toEqual([
       'spec-example', 'spec-reason-line-break', 'spec-version-2', 'other-request', 'holder-user', 'holder-worker',
       'holder-app', 'time-frame-and-count', 'no-time-frame', 'wildcard', 'list-stored-order', 'list-other-order',
-      'keys-sorted', 'empty-values', 'reason-escapes', 'reason-nfc', 'reason-nfd', 'reason-surrounding-space',
+      'keys-sorted', 'empty-values', 'reason-escapes', 'reason-nfc', 'reason-nfd', 'secret-reveal-keep', 'secret-reveal-delete', 'reason-surrounding-space',
     ]);
     // Independent Python hashlib pin of the compact UTF-8 JSON: a regenerated fixture that moves any byte moves this hash.
-    expect(sha256hex(JSON.stringify(fixture.cases))).toBe('a2b5a21431a9b2f487cc7083b6e94e3fc339a1fd324d26d52b5a7119470d8674');
+    expect(sha256hex(JSON.stringify(fixture.cases))).toBe('7dd3288cee132bab393bec527a1480bd0fe812cb0bd996789e11dd78f99bc115');
   });
 
   it('carries the spec worked example literally: terms hash, both challenges, base64url', () => {

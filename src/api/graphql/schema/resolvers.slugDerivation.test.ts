@@ -32,7 +32,7 @@ beforeEach(async () => {
 describe('#574 — display name → slug at create', () => {
   it('createMemory slugifies a spacey, uppercase name', async () => {
     const mem = await resolvers.Mutation.createMemory(
-      {}, { orgId: org.id, name: 'Flow Lab Notes' }, ctx,
+      {}, { orgRef: org.id, name: 'Flow Lab Notes' }, ctx,
     );
     expect(mem.urn).toBe('slug-org:flow-lab-notes');
     expect(mem.urn).not.toMatch(/[A-Z ]/);
@@ -40,7 +40,7 @@ describe('#574 — display name → slug at create', () => {
 
   it('createAgent slugifies the name, and its system memory inherits the clean slug', async () => {
     const agent = await resolvers.Mutation.createAgent(
-      {}, { orgId: org.id, name: 'Flow Lab' }, ctx,
+      {}, { orgRef: org.id, name: 'Flow Lab' }, ctx,
     );
     expect(agent.urn).toBe('slug-org:flow-lab');
     const sysMem = await db.memory.findUniqueOrThrow({ where: { id: agent.systemMemoryId! } });
@@ -51,7 +51,7 @@ describe('#574 — display name → slug at create', () => {
   it('createApp still slugifies (shared helper, dots now preserved)', async () => {
     const app = await resolvers.Mutation.createApp(
       {}, { orgRef: org.id, name: 'My Cool App', agentRef: (await resolvers.Mutation.createAgent(
-        {}, { orgId: org.id, name: 'helper agent' }, ctx,
+        {}, { orgRef: org.id, name: 'helper agent' }, ctx,
       )).id }, ctx,
     );
     expect(app.urn).toBe('slug-org:my-cool-app');
@@ -60,15 +60,15 @@ describe('#574 — display name → slug at create', () => {
 
 describe('#574 — display name → slug at rename', () => {
   it('updateMemory slugifies an explicit rename slug', async () => {
-    const mem = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'start' }, ctx);
+    const mem = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'start' }, ctx);
     const renamed = await resolvers.Mutation.updateMemory(
-      {}, { id: mem.id, urn: 'New Slug Value' }, ctx,
+      {}, { ref: mem.id, urn: 'New Slug Value' }, ctx,
     );
     expect(renamed.urn).toBe('slug-org:new-slug-value');
   });
 
   it('updateAgent slugifies an explicit rename slug', async () => {
-    const agent = await resolvers.Mutation.createAgent({}, { orgId: org.id, name: 'start-agent' }, ctx);
+    const agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'start-agent' }, ctx);
     const renamed = await resolvers.Mutation.updateAgent(
       {}, { ref: agent.id, urn: 'Renamed Agent' }, ctx,
     );

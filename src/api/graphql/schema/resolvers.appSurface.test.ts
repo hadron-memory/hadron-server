@@ -97,7 +97,7 @@ beforeEach(async () => {
 // ---------------------------------------------------------------------------
 
 describe('createApp accepts absorbed Station fields', () => {
-  it('persists appType, role, description, agentTools, ai* fields', async () => {
+  it('persists appType, description, agentTools, ai* fields; role is accepted-and-ignored (#4464)', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
       {
@@ -116,7 +116,9 @@ describe('createApp accepts absorbed Station fields', () => {
       adminCtx(),
     );
     expect(created.appType).toBe('CHATBOT');
-    expect(created.role).toBe('CONTRIBUTOR');
+    // #4464 stage 1: a `role` input is accepted and ignored — nothing
+    // persists it, so the row keeps the READER default.
+    expect(created.role).toBe('READER');
     expect(created.description).toBe('a chatbot');
     expect(created.agentTools).toEqual(['hadron_find_nodes', 'hadron_get_node']);
     // 036-ai-service-config: the legacy args land in the App's 'default'
@@ -147,7 +149,7 @@ describe('createApp accepts absorbed Station fields', () => {
 });
 
 describe('updateApp updates absorbed Station fields', () => {
-  it('updates appType, role, description, agentTools, ai*', async () => {
+  it('updates appType, description, agentTools, ai*; role is accepted-and-ignored (#4464)', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
       { orgRef: orgId, agentRef: agentId, name: 'To Update' },
@@ -168,7 +170,9 @@ describe('updateApp updates absorbed Station fields', () => {
       adminCtx(),
     );
     expect(updated.appType).toBe('AGENT');
-    expect(updated.role).toBe('ADMIN');
+    // #4464 stage 1: the `role` input no longer writes anything — the row
+    // keeps the value it already had.
+    expect(updated.role).toBe('READER');
     expect(updated.description).toBe('updated');
     expect(updated.agentTools).toEqual(['hadron_create_node']);
     const config = await db.aiServiceConfig.findFirstOrThrow({
@@ -341,7 +345,7 @@ describe('App field resolvers', () => {
     );
     await resolvers.Mutation.ensureAppMember(
       {},
-      { appId: created.id, userId: user.id, role: 'owner' },
+      { appRef: created.id, userRef: user.id, role: 'owner' },
       adminCtx(),
     );
     const members = await resolvers.App.members({ id: created.id }, {}, adminCtx());

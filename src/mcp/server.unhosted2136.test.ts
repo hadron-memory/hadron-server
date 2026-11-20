@@ -3,7 +3,6 @@ import { beforeAll, afterAll, beforeEach, describe, expect, it, vi } from 'vites
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
@@ -15,17 +14,18 @@ import { getMemoryEncryptionInfo } from '../lib/nodeCrypto.js';
 import { authorizeLegacyWakeWorkers } from '../lib/tickers/wakeKeyScope.js';
 import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../test/startServerFixture.js';
 vi.mock('../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 let server: Server, base: string, appId: string, orgId: string, managerId: string;
 let hosted: string, unhosted: string, rawKey: string, bareId: string, hostKeyId: string;
 let hostRawKey: string;
 beforeAll(async () => {
-  server = httpServer(await createServer());
+  server = httpServer(await createServerOnCleanDb());
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
-afterAll(async () => { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); });
+afterAll(async () => { server.closeAllConnections(); await closeServerIfStarted(server); });
 async function key(label: string) {
   const raw = APP_KEY_PREFIX + randomBytes(32).toString('hex');
   const row = await db.appKey.create({ data: { appId, label, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4) } });
@@ -251,7 +251,8 @@ describe('R64 legacy wake scope', () => {
     let changed = false;
     const spy = vi.spyOn(db, '$transaction').mockImplementation((async (...args: any[]) => {
       transactions++;
-      if (transactions === 2) {
+      // #4273: the liveness read opens its own (JIT-off) transaction first, so the second of the endpoint's own is the third.
+      if (transactions === 3) {
         spy.mockRestore();
         expect(await db.appWakeReservation.count({ where: { workerId: unhosted } })).toBe(1);
         await hostWorker(unhosted); changed = true;

@@ -37,7 +37,7 @@ beforeEach(async () => {
   mia = await db.user.create({ data: { githubId: 620_000 + n, githubUsername: `ro-mia-${n}`, roles: ['READER'] } });
   outsider = await db.user.create({ data: { githubId: 630_000 + n, githubUsername: `ro-out-${n}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   agentId = agent.id;
   appUrn = `roster-${n}.example:team`;
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: appUrn }, select: { id: true } });
@@ -110,13 +110,14 @@ describe('#2278 roster binding model scalars', () => {
       return query(args);
     } } });
     const before = await Q.teamRoster({}, { appRef: app.id }, { ...ctx(mia.id), db: traced });
-    // Existing roster-state and check-status loaders each batch activity; no per-worker read.
-    expect(activityQueries).toBe(2);
+    // Activity is batched, never one read per worker. #4271: the roster read shares ONE App-wide fold across its
+    // loaders (withSharedWorkerActivity), so it is a single query.
+    expect(activityQueries).toBe(1);
     activityQueries = 0;
     const extra = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Extra', slug: 'extra', heldByUserId: mia.id } });
     const grown = await Q.teamRoster({}, { appRef: app.id }, { ...ctx(mia.id), db: traced });
     expect(grown.workers).toHaveLength(before.workers.length + 1);
-    expect(activityQueries).toBe(2);
+    expect(activityQueries).toBe(1);
     await db.worker.delete({ where: { id: extra.id } });
     const decisions = (rows: any[]) => rows.map(({ workerId, family, state, free, liveSession, bound }) => ({ workerId, family, state, free, liveSession, bound }));
     await db.session.updateMany({ where: { workerId: w.Kit.id }, data: { llmModel: 'unknown-model', modelReportedAt: ago(2) } });

@@ -1,0 +1,200 @@
+name: Migration Replay
+
+# #434 Slice C: replay EVERY migration from an empty pgvector database with `prisma migrate deploy` (the production
+# path) and compare its pg_catalog with the dev/test schema (pre-push.sql, `prisma db push`, post-push.sql), against the
+# shrink-only baseline in scripts/db/migration-replay-baseline.txt. It fails on drift the baseline does not list (for
+# example a structural `IF NOT EXISTS` object a migration redefined while post-push.sql kept the old definition) and on a
+# baseline line that no longer differs. A separate workflow, so the Migration Smoke Test's two jobs and their triggers
+# are unchanged.
+
+on:
+  pull_request:
+    # labeled/unlabeled: the change manager's baseline-growth-approved label re-runs the check (#4338 BLIND F1).
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - 'prisma/**'
+      - 'prisma.config.*'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'scripts/db/migration-replay*'
+      - 'scripts/db/growth-approval.sh'
+      - 'src/test/catalogSnapshot.ts'
+      - 'src/test/schemaTemplate.ts'
+      - '.github/workflows/migration-replay.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'prisma/**'
+      - 'prisma.config.*'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'scripts/db/migration-replay*'
+      - 'scripts/db/growth-approval.sh'
+      - 'src/test/catalogSnapshot.ts'
+      - 'src/test/schemaTemplate.ts'
+      - '.github/workflows/migration-replay.yml'
+
+permissions:
+  contents: read
+  # #4378 item 2: on a push to main, the merged PR's labels decide whether its baseline growth was approved.
+  pull-requests: read
+
+# Match the other workflows: cancel superseded PR runs while keeping non-PR runs independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  replay-from-empty:
+    runs-on: ubuntu-latest
+    # #4378 item 4: measured 75-108 s over the last eight green runs (one replay is ~5 s, the red controls ~35 s), so
+    # 10 minutes is about 5x the slowest. Raise it with a fresh measurement if the history or the controls grow.
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A push to main compares with HEAD^ (the main it landed on), which needs the parent commit.
+          fetch-depth: 2
+      # No `version:`: read from package.json `packageManager`.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      # #4338 BLIND F1, #4378 items 2 and 6: shrink-only is enforced against the BASE's baseline on BOTH events. A PR
+      # compares with its base branch; a push to main with HEAD^, the main it landed on (main's ruleset requires a PR,
+      # so this is defence in depth). Growth fails unless the change manager applied the baseline-growth-approved
+      # label: the PR's own labels on a PR, the merged PR's labels on a push (looked up, so no expression ever reads
+      # pull_request fields on a push; a failed lookup counts as not approved).
+      - name: Resolve the base baseline and the growth approval
+        id: base
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          if [ "$EVENT" = pull_request ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_REF" # a fetch failure fails the step (#4392 BLIND F2)
+            src=FETCH_HEAD
+            # #4395 item 2: both label filters live in scripts/db/growth-approval.sh, which the tests run too.
+            allow=$(bash scripts/db/growth-approval.sh pr < "$GITHUB_EVENT_PATH") \
+              || { echo "::warning::could not read this PR's labels from the event; growth is not approved"; allow=false; }
+          else
+            src=HEAD^
+            # Only the PR whose merge commit IS this push (#4392 BLIND F1): an associated PR that merely contains the
+            # commit (a stacked or batched PR) never lends its label. Merge commits are this repo's only merge method.
+            allow=$(set -o pipefail; gh api "repos/$REPO/commits/$SHA/pulls" | bash scripts/db/growth-approval.sh push "$SHA") \
+              || { echo "::warning::could not read the merged PR's labels; growth is not approved"; allow=false; }
+          fi
+          # A base without the baseline (the bootstrapping change) is not judged; a base commit git cannot read fails
+          # the step instead of silently disabling the growth check (#4392 BLIND F2).
+          git cat-file -e "$src^{commit}" || { echo "::error::cannot read the base commit $src"; exit 1; }
+          if git cat-file -e "$src:scripts/db/migration-replay-baseline.txt" 2>/dev/null; then
+            git show "$src:scripts/db/migration-replay-baseline.txt" > "$RUNNER_TEMP/base-baseline.txt"
+            echo "path=$RUNNER_TEMP/base-baseline.txt" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::the base has no migration replay baseline yet (the bootstrapping change); growth is not judged"
+            echo "path=" >> "$GITHUB_OUTPUT"
+          fi
+          [ "$allow" = true ] || allow=false
+          echo "allow=$allow" >> "$GITHUB_OUTPUT"
+          echo "base: $src; growth approved: $allow"
+      - name: Replay every migration from empty and compare with push + post-push (shrink-only baseline)
+        env:
+          MIGRATION_REPLAY_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          MIGRATION_REPLAY_BASE_BASELINE: ${{ steps.base.outputs.path }}
+          MIGRATION_REPLAY_ALLOW_GROWTH: ${{ steps.base.outputs.allow }}
+        run: pnpm tsx scripts/db/migration-replay.ts
+      # #4395: the script's process-level tests (the early-closed stdout run needs a CREATEDB role, so the main suite skips
+      # it) and the label-filter tests, run where that role exists.
+      - name: Replay script tests (early-closed stdout cleanup, growth-approval filters)
+        env:
+          MIGRATION_REPLAY_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hadron_test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hadron_test # prisma.config reads it to generate
+        # The suite's setup files load the Prisma client, which this job otherwise never generates.
+        run: |
+          pnpm prisma generate
+          pnpm vitest run scripts/db/migration-replay.test.ts
+      # #4338 BLIND F4: the red controls run here, every time, so the check's teeth are regression-covered. Each seeds one
+      # throwaway change in this disposable checkout, expects its exact exit status naming the entry, and reverts it.
+      # #4378 item 3: the controls name today's schema objects and baseline lines. Each is guarded, so a rename or a
+      # fixed drift fails with a message naming the control to update, not an indirect "exited 0".
+      - name: Red controls (each must fail the check, naming its entry)
+        env:
+          MIGRATION_REPLAY_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: |
+          set -u
+          # #4338 BLIND F5: an exact exit status (1 = a detection, 2 = an operational failure) AND the diagnostic line
+          # naming the exact injected entry.
+          expect_exit() { # <status> <label> <the diagnostic line's prefix, ending in the injected entry>
+            set +e; pnpm -s tsx scripts/db/migration-replay.ts > out.txt 2>&1; code=$?; set -e
+            [ "$code" -eq "$1" ] || { echo "::error::control '$2' exited $code, not $1"; cat out.txt; exit 1; }
+            grep -qF -- "$3" out.txt || { echo "::error::control '$2' did not name its entry"; cat out.txt; exit 1; }
+            echo "control '$2': exit $1 as expected ($3)"
+          }
+          expect_red() { expect_exit 1 "$@"; }
+          needs_object() { # <control> <object name>: the control redefines an object a migration must still create
+            grep -rqF -- "$2" prisma/migrations || { echo "::error::control '$1' redefines '$2', which no migration creates any more; update this control"; exit 1; }
+          }
+          needs_line() { # <control> <baseline line prefix>: the control removes a line the baseline must still list
+            grep -q -- "^$2" baseline.bak || { echo "::error::control '$1' needs the baseline line '$2…', which is gone; update this control"; exit 1; }
+          }
+          probe=prisma/migrations/29991231000000_replay_probe
+          cp scripts/db/migration-replay-baseline.txt baseline.bak
+
+          needs_object 'seeded new object' '"nodes"'
+          mkdir -p "$probe"; printf 'CREATE INDEX replay_probe_idx ON "nodes" ("created_at");\n' > "$probe/migration.sql"
+          expect_red 'seeded new object' 'NEW DRIFT (not in the baseline): added idx:replay_probe_idx'
+          rm -rf "$probe"
+
+          needs_object 'stale IF NOT EXISTS redefinition' nodes_embedding_pending_idx
+          mkdir -p "$probe"; printf 'DROP INDEX IF EXISTS nodes_embedding_pending_idx;\nCREATE INDEX nodes_embedding_pending_idx ON "nodes" ("embedding_pending_at", "id");\n' > "$probe/migration.sql"
+          expect_red 'stale IF NOT EXISTS redefinition' 'NEW DRIFT (not in the baseline): changed idx:nodes_embedding_pending_idx'
+          rm -rf "$probe"
+
+          needs_object 'a baselined object changed again' memories_user_id_idx
+          mkdir -p "$probe"; printf 'DROP INDEX IF EXISTS memories_user_id_idx;\nCREATE INDEX memories_user_id_idx ON "memories" ("user_id", "id") WHERE "user_id" IS NOT NULL;\n' > "$probe/migration.sql"
+          expect_red 'a baselined object changed again' 'NEW DRIFT (not in the baseline): changed idx:memories_user_id_idx'
+          rm -rf "$probe"
+
+          needs_line 'removed baseline line' 'changed col:stamp_signing_keys.id '
+          grep -v '^changed col:stamp_signing_keys.id ' baseline.bak > scripts/db/migration-replay-baseline.txt
+          expect_red 'removed baseline line' 'NEW DRIFT (not in the baseline): changed col:stamp_signing_keys.id'
+          cp baseline.bak scripts/db/migration-replay-baseline.txt
+
+          { cat baseline.bak; echo 'added idx:no_such_index_anywhere 0000000000000000'; } > scripts/db/migration-replay-baseline.txt
+          expect_red 'stale baseline line' 'STALE BASELINE LINE (no longer differs, or duplicated; delete it): added idx:no_such_index_anywhere 0000000000000000'
+          cp baseline.bak scripts/db/migration-replay-baseline.txt
+
+          # #4378 item 8: a malformed line is refused before any database is made, as an operational failure.
+          { cat baseline.bak; echo 'added idx:no_fingerprint'; } > scripts/db/migration-replay-baseline.txt
+          expect_exit 2 'malformed baseline line' 'malformed baseline line'
+          cp baseline.bak scripts/db/migration-replay-baseline.txt
+
+          # Growth over the base's baseline fails without the label (F1): the unaltered baseline is no growth against
+          # itself, and a base that lacks a line makes that line growth.
+          cp baseline.bak "$RUNNER_TEMP/growth-base.txt"
+          MIGRATION_REPLAY_BASE_BASELINE="$RUNNER_TEMP/growth-base.txt" MIGRATION_REPLAY_ALLOW_GROWTH=false \
+            pnpm -s tsx scripts/db/migration-replay.ts > /dev/null 2>&1 || { echo "::error::the unaltered baseline is growth against itself"; exit 1; }
+          grep -v '^changed col:stamp_signing_keys.id ' baseline.bak > "$RUNNER_TEMP/growth-base.txt"
+          export MIGRATION_REPLAY_BASE_BASELINE="$RUNNER_TEMP/growth-base.txt" MIGRATION_REPLAY_ALLOW_GROWTH=false
+          expect_red 'baseline growth over the base' 'BASELINE GROWTH (not on the base branch; needs the change manager'"'"'s baseline-growth-approved label): changed col:stamp_signing_keys.id'
+          unset MIGRATION_REPLAY_BASE_BASELINE MIGRATION_REPLAY_ALLOW_GROWTH

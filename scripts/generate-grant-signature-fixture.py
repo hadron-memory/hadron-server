@@ -101,6 +101,11 @@ CASES = [
      with_(reason='say "hi" \\ tab\there \u0001\u001f \u007f \u2028\u2029 <a&b> a/b \U0001f600'), 1, REQ),
     ('reason-nfc', 'the reason in NFC', with_(reason='Gr\u00fc\u00dfe'), 1, REQ),
     ('reason-nfd', 'the same reason in NFD: never normalized, so a different terms hash', with_(reason='Gru\u0308\u00dfe'), 1, REQ),
+    # #3998 (cor:acl:140:09 secret forms, the section 10 byte review at checkpoint 1): the two seeded-action value forms, hyphenated keys sorted.
+    ('secret-reveal-keep', 'secret.reveal: the secret as its stored id and the mark "keep"; auto-delete < secret',
+     with_(action='secret.reveal', values={'secret': GRANT, 'auto-delete': 'keep'}), 1, REQ),
+    ('secret-reveal-delete', 'secret.reveal with the mark "delete": a different terms hash',
+     with_(action='secret.reveal', values={'secret': GRANT, 'auto-delete': 'delete'}), 1, REQ),
     ('reason-surrounding-space', 'leading and trailing spaces kept as stored', with_(reason='  padded  '), 1, REQ),
 ]
 

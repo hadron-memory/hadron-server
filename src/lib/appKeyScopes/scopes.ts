@@ -14,6 +14,15 @@ import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 export const APP_KEY_SCOPES = ['attention:deliver', 'host:operate'] as const;
 export type AppKeyScopeName = (typeof APP_KEY_SCOPES)[number];
 
+/**
+ * #4489: the closed list as data a client can read (Query.appKeyScopeCatalogue, hrn:node:hadronmemory.com:specs:cor:aut:010:03).
+ * Keyed by scope name, so a scope added to APP_KEY_SCOPES without a row here fails tsc. Static platform metadata: no tenant data.
+ */
+export const APP_KEY_SCOPE_CATALOGUE: Record<AppKeyScopeName, { description: string; requiresHostId: boolean }> = {
+  'attention:deliver': { description: 'Read and acknowledge due wakes for the App, as a team router does. Takes no host.', requiresHostId: false },
+  'host:operate': { description: 'Operate as one named host: register it, collect its operations and report on them. Granted for one host.', requiresHostId: true },
+};
+
 export const isAppKeyScope = (v: unknown): v is AppKeyScopeName =>
   typeof v === 'string' && (APP_KEY_SCOPES as readonly string[]).includes(v);
 

@@ -57,7 +57,8 @@ import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
 import { mountSigningCeremonyRoutes } from './api/signingCeremonyRoutes.js';
 import { mountGrantSigningCeremonyRoutes } from './api/grantSigningCeremonyRoutes.js';
-import { beginPasskeySignIn, mountPasskeySignInRoutes } from './api/passkeySignInRoutes.js';
+import { mountSecretRevealRoutes } from './api/secretRevealRoutes.js';
+import { mountPasskeySignInRoutes } from './api/passkeySignInRoutes.js';
 import { signingSurfacePolicy } from './lib/signing/surface.js';
 import { completeCeremonyLeg, mountFreshSignInRoutes } from './api/freshSignInRoutes.js';
 import { googleReauthenticatedSince, isGoogleConfigured } from './auth/google.js';
@@ -96,6 +97,7 @@ import { handleMcpRequest, handleMcpDelete, startMcpTransportSweepLoop } from '.
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startPasskeyCeremonySweepLoop } from './jobs/sweepPasskeyCeremonies.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
+import { secretSweepDisabledReason, startSecretSweepLoop } from './jobs/secretSweep.js';
 import { startGitMirrorObligationSweepLoop } from './jobs/sweepGitMirrorObligations.js';
 import { startOauthClientGcLoop } from './jobs/gcOauthClients.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
@@ -103,6 +105,7 @@ import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
 import { startAssetBytesSweepLoop } from './jobs/sweepAssetBytes.js';
 import { startSessionKeySweepLoop } from './lib/sessionKeyCache.js';
+import { startAppKeyCacheSweepLoop } from './lib/secrets/appKeys.js';
 import { startSessionReaperLoop } from './jobs/reapSessions.js';
 import { startPendingEdgePromotionSweepLoop } from './jobs/promotePendingEdges.js';
 import { startEmbeddingWorkerLoop, startEmbeddingBusListener, stopEmbeddingWorkerOutcome, assertEmbeddingObligationsReconciled } from './jobs/embedNodes.js';
@@ -968,9 +971,6 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     },
   );
 
-  // #1897 B1: read once, at mount, with the routes it pairs with (restart semantics are #1895's).
-  const passkeySignInOn = signingSurfacePolicy().registration;
-
   app.get('/auth/email/verify', async (req, res) => {
     const { token, redirect: redirectParam, return_to: returnToRaw } = req.query as {
       token?: string;
@@ -1037,23 +1037,12 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       // onboarding hint only.
       const isNew = user.createdAt.getTime() >= startedAt;
 
-      // #1897 slice B1 (cor:aut:030:02): with the registration switch on, a magic link alone signs nobody in.
-      // The account exists as above (R82), but no handoff code, JWT, cookie or key is published until the
-      // person's passkey completes the server-hosted step. The portal continuation carries the ORIGINAL
-      // clientStateHash through unchanged. A user with no usable passkey gets the same fixed refusal as a bad
-      // token: enrollment is B2, and signing in without the factor is never the fallback.
-      if (passkeySignInOn) {
-        const dest = redirectParam && isServerLocalPath(redirectParam) ? redirectParam : '/';
-        const begun = await beginPasskeySignIn(req, res, {
-          userId: user.id,
-          continuation: isOptionC
-            ? { kind: 'OAUTH', returnTo: returnTo! }
-            : { kind: 'PORTAL', clientStateHash: result.clientStateHash, redirect: dest, isNew },
-        });
-        if (!begun) res.status(400).json({ error: 'Invalid or expired token' });
-        return;
-      }
-
+      // #4339 (decision of 2026-11-17, recorded on the private tracker): sign-in never depends on a passkey and never prompts for one, whatever the
+      // passkey switches say and whatever passkeys this person holds. A passkey is asked for only by an act that needs
+      // one (signing). This reverses the #1897 B1 step that redirected here to /auth/passkey/sign-in (the passkey-for-every-magic-link
+      // rule, withdrawn 2026-11-18 (Holger)),
+      // which dead-ended every user without a passkey. Nothing on a sign-in path begins a passkey step now: a valid magic
+      // link signs the user in (hrn:node:hadronmemory.com:specs:cor:aut:030:01).
       // #804 Option-C: same contract as the github/google/apple callbacks —
       // set the JWT as an HttpOnly `hadron_token` cookie on THIS server's
       // origin and 302 to the validated server-local return_to (the original
@@ -1123,6 +1112,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   mountSigningCeremonyRoutes(app);
   // #3649 slice C: the grant signing ceremony, on the same switch.
   mountGrantSigningCeremonyRoutes(app);
+  mountSecretRevealRoutes(app);
   mountPasskeySignInRoutes(app);
   mountFreshSignInRoutes(app, { emailSendPerIpRateLimit, emailRecipientRateLimit });
 
@@ -1934,6 +1924,14 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     startMergeConsentSweepLoop(db);
   }
 
+  // #4003 (S8 of #3991) — App secret retention: superseded versions past SECRET_VERSION_RETENTION_DAYS or the
+  // kept-versions cap, and events a year after their App is gone. Hourly. A disabled sweep is logged (plan #3991).
+  {
+    const off = secretSweepDisabledReason();
+    if (off === null) startSecretSweepLoop(db);
+    else if (off !== 'NODE_ENV=test') console.warn(`secret_sweep.disabled reason=${off}`);
+  }
+
   // #3122: transient passkey/signing ceremonies; independent of feature flags so old rows still retire.
   startPasskeyCeremonySweepLoop(db);
 
@@ -2038,6 +2036,12 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // subsystem's off switch (#1120 review, Codex P2).
   if (process.env.NODE_ENV !== 'test') {
     startSessionKeySweepLoop();
+  }
+
+  // #3996 — the App secret key cache's sweep, on its OWN timer for the same reason: it is never behind
+  // DISABLE_SECRET_SWEEP (or any sibling flag), so unwrapped App keys cannot outlive SECRET_APP_KEY_CACHE_TTL_MS.
+  if (process.env.NODE_ENV !== 'test') {
+    startAppKeyCacheSweepLoop();
   }
 
   // 033 — embedding worker sweep (retries / restarts / backfill). Skipped in

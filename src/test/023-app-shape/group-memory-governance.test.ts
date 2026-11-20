@@ -140,7 +140,7 @@ describe('US4: group memory governance via MemoryMember', () => {
 
   it('removes a member inserted while a serializable revoker waits on its anchor', async () => {
     const memory = await resolvers.Mutation.createMemory({}, {
-      orgId: fx.orgId, name: 'concurrent-group', memoryClass: 'group', visibility: 'GROUP',
+      orgRef: fx.orgId, name: 'concurrent-group', memoryClass: 'group', visibility: 'GROUP',
     }, adminCtx(fx.ownerUserId));
     let release!: () => void;
     let held!: () => void;
@@ -179,7 +179,7 @@ describe('US4: group memory governance via MemoryMember', () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
       {
-        orgId: fx.orgId,
+        orgRef: fx.orgId,
         name: 'team-alpha-brain',
         memoryClass: 'group',
         visibility: 'GROUP',
@@ -202,7 +202,7 @@ describe('US4: group memory governance via MemoryMember', () => {
       await resolvers.Mutation.createMemory(
         {},
         {
-          orgId: fx.orgId,
+          orgRef: fx.orgId,
           name: 'bad-group',
           memoryClass: 'group',
           visibility: 'ORGANIZATION',
@@ -222,7 +222,7 @@ describe('US4: group memory governance via MemoryMember', () => {
       await resolvers.Mutation.createMemory(
         {},
         {
-          orgId: fx.orgId,
+          orgRef: fx.orgId,
           name: 'bad-knowledge-group',
           memoryClass: 'knowledge',
           visibility: 'GROUP',
@@ -239,7 +239,7 @@ describe('US4: group memory governance via MemoryMember', () => {
   it('addMemoryMember + role enforcement: reader/writer/owner per the predicate', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: fx.orgId, name: 'team-roles', memoryClass: 'group', visibility: 'GROUP' },
+      { orgRef: fx.orgId, name: 'team-roles', memoryClass: 'group', visibility: 'GROUP' },
       adminCtx(fx.ownerUserId),
     );
     await resolvers.Mutation.addMemoryMember(
@@ -274,7 +274,7 @@ describe('US4: group memory governance via MemoryMember', () => {
   it('add → remove cycle: u4 added, can read; then removed, denied on next read', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: fx.orgId, name: 'team-cycle', memoryClass: 'group', visibility: 'GROUP' },
+      { orgRef: fx.orgId, name: 'team-cycle', memoryClass: 'group', visibility: 'GROUP' },
       adminCtx(fx.ownerUserId),
     );
     await resolvers.Mutation.addMemoryMember(
@@ -294,7 +294,7 @@ describe('US4: group memory governance via MemoryMember', () => {
   it('updateMemoryMemberRole upgrades reader → writer', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: fx.orgId, name: 'team-update', memoryClass: 'group', visibility: 'GROUP' },
+      { orgRef: fx.orgId, name: 'team-update', memoryClass: 'group', visibility: 'GROUP' },
       adminCtx(fx.ownerUserId),
     );
     await resolvers.Mutation.addMemoryMember(
@@ -313,7 +313,7 @@ describe('US4: group memory governance via MemoryMember', () => {
   it('FR-038 last-owner protection — remove rejects the sole owner', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: fx.orgId, name: 'team-last-owner', memoryClass: 'group', visibility: 'GROUP' },
+      { orgRef: fx.orgId, name: 'team-last-owner', memoryClass: 'group', visibility: 'GROUP' },
       adminCtx(fx.ownerUserId),
     );
     // owner is the sole owner. Removing them must fail.
@@ -334,7 +334,7 @@ describe('US4: group memory governance via MemoryMember', () => {
   it('FR-038 last-owner protection — demote rejects the sole owner', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: fx.orgId, name: 'team-demote-last-owner', memoryClass: 'group', visibility: 'GROUP' },
+      { orgRef: fx.orgId, name: 'team-demote-last-owner', memoryClass: 'group', visibility: 'GROUP' },
       adminCtx(fx.ownerUserId),
     );
     let caught: unknown;
@@ -354,7 +354,7 @@ describe('US4: group memory governance via MemoryMember', () => {
   it('FR-038 — second owner makes original owner removable', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: fx.orgId, name: 'team-two-owners', memoryClass: 'group', visibility: 'GROUP' },
+      { orgRef: fx.orgId, name: 'team-two-owners', memoryClass: 'group', visibility: 'GROUP' },
       adminCtx(fx.ownerUserId),
     );
     await resolvers.Mutation.addMemoryMember(
@@ -378,7 +378,7 @@ describe('US4: group memory governance via MemoryMember', () => {
   it('FR-031 — removing the last NON-OWNER preserves the Memory', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: fx.orgId, name: 'team-last-nonowner', memoryClass: 'group', visibility: 'GROUP' },
+      { orgRef: fx.orgId, name: 'team-last-nonowner', memoryClass: 'group', visibility: 'GROUP' },
       adminCtx(fx.ownerUserId),
     );
     await resolvers.Mutation.addMemoryMember(
@@ -403,7 +403,7 @@ describe('US4: group memory governance via MemoryMember', () => {
   it('addMemoryMember rejected for non-owner caller (FORBIDDEN)', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: fx.orgId, name: 'team-no-non-owner-add', memoryClass: 'group', visibility: 'GROUP' },
+      { orgRef: fx.orgId, name: 'team-no-non-owner-add', memoryClass: 'group', visibility: 'GROUP' },
       adminCtx(fx.ownerUserId),
     );
     await resolvers.Mutation.addMemoryMember(
@@ -429,7 +429,7 @@ describe('US4: group memory governance via MemoryMember', () => {
   it('removeMemoryMember permits self-removal even by a non-owner', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: fx.orgId, name: 'team-self-remove', memoryClass: 'group', visibility: 'GROUP' },
+      { orgRef: fx.orgId, name: 'team-self-remove', memoryClass: 'group', visibility: 'GROUP' },
       adminCtx(fx.ownerUserId),
     );
     await resolvers.Mutation.addMemoryMember(
@@ -453,7 +453,7 @@ describe('US4: group memory governance via MemoryMember', () => {
   it('addMemoryMember is idempotent — re-call upserts the role', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: fx.orgId, name: 'team-idempotent', memoryClass: 'group', visibility: 'GROUP' },
+      { orgRef: fx.orgId, name: 'team-idempotent', memoryClass: 'group', visibility: 'GROUP' },
       adminCtx(fx.ownerUserId),
     );
     await resolvers.Mutation.addMemoryMember(
@@ -476,7 +476,7 @@ describe('US4: group memory governance via MemoryMember', () => {
   it('Memory.members field returns rows for current members; empty for non-members', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: fx.orgId, name: 'team-visibility', memoryClass: 'group', visibility: 'GROUP' },
+      { orgRef: fx.orgId, name: 'team-visibility', memoryClass: 'group', visibility: 'GROUP' },
       adminCtx(fx.ownerUserId),
     );
     await resolvers.Mutation.addMemoryMember(
@@ -506,12 +506,12 @@ describe('US4: group memory governance via MemoryMember', () => {
   it('two teams in the same org with separate group memories — no cross-read', async () => {
     const teamAlpha = await resolvers.Mutation.createMemory(
       {},
-      { orgId: fx.orgId, name: 'team-alpha', memoryClass: 'group', visibility: 'GROUP' },
+      { orgRef: fx.orgId, name: 'team-alpha', memoryClass: 'group', visibility: 'GROUP' },
       adminCtx(fx.ownerUserId),
     );
     const teamBeta = await resolvers.Mutation.createMemory(
       {},
-      { orgId: fx.orgId, name: 'team-beta', memoryClass: 'group', visibility: 'GROUP' },
+      { orgRef: fx.orgId, name: 'team-beta', memoryClass: 'group', visibility: 'GROUP' },
       adminCtx(fx.ownerUserId),
     );
     // u1 → alpha; u2 → beta.

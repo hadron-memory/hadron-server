@@ -39,7 +39,7 @@ beforeEach(async () => {
   const user = await db.user.create({ data: { githubId: 404301, githubUsername: 'ww40', handle: 'ww40', roles: [] } });
   userId = user.id;
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
-  const m = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'ww40' }, ctx());
+  const m = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'ww40' }, ctx());
   memoryId = m.id; memoryUrn = m.urn;
   setResolutionLimits({ limits: { maxBytes: 16 } });
 });
