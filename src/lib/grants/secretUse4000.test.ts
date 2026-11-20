@@ -1,3 +1,4 @@
+import { composeAppSecretUrnV2 } from '@hadron-memory/urn-lib-js';
 /** S5 (#4000): the complete, signed secret.use parameter set at grant creation. */
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -38,9 +39,29 @@ describe('secret.use grant terms (#4000)', () => {
       expect(await refusal(grant({ ...values(), [key]: value }))).toBe('GRANT_VALUES_INVALID');
     }
   });
+  it('allows this App as holder, while refusing a different App holder', async () => {
+    const appGrant = (id: string) => db.$transaction((tx) => createPendingGrant(tx, {
+      appId: w.appId, requester: { userId: w.userId, workerId: null, sessionId: null }, holder: { kind: 'app', id },
+      action: 'secret.use', values: values(), reason: 'r', canReadMemory: async () => true,
+    }));
+    expect(await refusal(appGrant(w.appId))).toBe('OK');
+    expect(await refusal(appGrant(w.app2Id))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+  });
   it('does not admit a generic secret as an inject client', async () => {
     const generic = generateId();
     await db.$executeRaw`INSERT INTO secrets (id, owner_type, owner_id, name, kind, updated_at) VALUES (${generic}, 'app', ${w.appId}, 'generic', 'generic', now())`;
     expect(await refusal(grant({ ...values(), secret: generic }))).toBe('GRANT_VALUES_INVALID');
+  });
+});
+
+describe('secret.use signing summary', () => {
+  it('shows both signed binding terms and refuses malformed terms', async () => {
+    const { renderGrantSummary } = await import('./summary.js');
+    const action = PLATFORM_ACTIONS.find((a) => a.name === 'secret.use')!;
+    const input = { action, app: { urn: 'hrn:app:acme.com:ops' },
+      values: { secret: 'S1', 'auto-delete': 'keep', 'binding-prefix': 'https://api.example.test/v1', 'binding-header': 'Authorization' },
+      refs: { S1: { urn: composeAppSecretUrnV2('acme.com', 'ops', 'key') } } };
+    expect(renderGrantSummary(input)).toContain('https://api.example.test/v1 with header Authorization');
+    expect(() => renderGrantSummary({ ...input, values: { ...input.values, 'binding-header': 'X-Injected\r\nX' } })).toThrow();
   });
 });
