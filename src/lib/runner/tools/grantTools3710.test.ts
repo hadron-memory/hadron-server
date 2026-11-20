@@ -2,7 +2,7 @@
  * #3710 (Grants S2a-run; cor:acl:140:05 "An agent reads its own grants", cor:agt:010:01 rev 45, cor:acl:040:02): the run tool
  * `hadron_list_grants`. A run lists the grants its OWN agent holds in its OWN App, through S2a's data-layer read
  * (`listGrantsForRunAgent`), ids and scalars only. Pins, one per gate item:
- *   1  every state listed, with `allows` and `state` from the one live function and the one derivation;
+ *   1  every state listed, with `allows` from the one live function and the stored facts, NO state label (Patrick, 2026-11-09);
  *   2  two Apps, two agents: no other App's grant, no other agent's, not the same agent's grant in another App (item 20b),
  *      not a base agent's (20a), nothing held by a worker, person or App;
  *   3  a run without an agent has no branch: it is refused and reads nothing (mutant: an agentless fallback);
@@ -39,7 +39,7 @@ const agentGrant = (agentId: string, appId: string, over: Record<string, unknown
 const newAgent = (name: string, extra: Record<string, unknown> = {}) => db.agent.create({ data: { organizationId: w.orgId, name, urn: `${w.orgUrn}:${name}-${generateId().slice(0, 6)}`, ...extra } });
 
 describe('hadron_list_grants (#3710)', () => {
-  it('1: lists the run agent\'s grants in every state, with allows and state, ids and scalars only', async () => {
+  it('1: lists the run agent\'s grants in every state, with allows and no state label, ids and scalars only', async () => {
     const run = await mintRun(w.appId, w.agentId);
     const pending = await agentGrant(w.agentId, w.appId);
     const active = await insertGrantUnguarded(w, { user_id: null, agent_id: w.agentId, activated_at: raw(DB_NOW), verification_kind: 'TEST', verified_by: 't' });
@@ -49,13 +49,15 @@ describe('hadron_list_grants (#3710)', () => {
     expect(out.total).toBe(4);
     const byId = new Map(out.grants.map((g) => [g.id as string, g]));
     expect([...byId.keys()].sort()).toEqual([pending, active, revoked, expired].sort());
-    expect(byId.get(active)).toMatchObject({ allows: true, state: 'ACTIVE', holderKind: 'AGENT', holderId: w.agentId, appId: w.appId });
-    expect(byId.get(pending)).toMatchObject({ allows: false, state: 'PENDING' });
-    expect(byId.get(revoked)).toMatchObject({ allows: false, state: 'REVOKED' });
-    expect(byId.get(expired)).toMatchObject({ allows: false, state: 'EXPIRED' });
+    expect(byId.get(active)).toMatchObject({ allows: true, holderKind: 'AGENT', holderId: w.agentId, appId: w.appId });
+    expect(byId.get(pending)).toMatchObject({ allows: false });
+    expect(byId.get(revoked)).toMatchObject({ allows: false });
+    expect(byId.get(expired)).toMatchObject({ allows: false });
     for (const g of out.grants) {
       expect(typeof g.urn).toBe('string');
       for (const v of Object.values(g)) expect(v === null || typeof v !== 'object' || v instanceof Date || Array.isArray(v) || Object.getPrototypeOf(v) === Object.prototype).toBe(true);
+      // Patrick's 2026-11-09 note, Peter's call on #4598: allows plus the stored facts, NO state label.
+      expect(g).not.toHaveProperty('state');
       expect(g).not.toHaveProperty('revokedBy');
       expect(g).not.toHaveProperty('holderDepartedAt');
       expect(g).not.toHaveProperty('signatures');
@@ -128,9 +130,9 @@ describe('hadron_list_grants (#3710)', () => {
     const spent = await insertGrantUnguarded(w, { user_id: null, agent_id: w.agentId, activated_at: raw(DB_NOW), verification_kind: 'TEST', verified_by: 't', max_uses: 1, use_count: 1 });
     const out = await call(await mintRun(w.appId, w.agentId));
     const g = out.grants.find((x) => x.id === spent)!;
-    expect(g).toMatchObject({ state: 'SPENT', allows: false });
+    expect(g).toMatchObject({ allows: false });
     expect(Object.keys(g).sort()).toEqual(['action', 'activatedAt', 'allows', 'appId', 'createdAt', 'expiresAt', 'holderId', 'holderKind', 'id', 'issuerUserId', 'maxUses', 'reason',
-      'requestedBySessionId', 'requestedByUserId', 'requestedByWorkerId', 'revokedAt', 'signatureId', 'startsAt', 'state', 'urn', 'useCount', 'values', 'verificationKind', 'verifiedBy'].sort());
+      'requestedBySessionId', 'requestedByUserId', 'requestedByWorkerId', 'revokedAt', 'signatureId', 'startsAt', 'urn', 'useCount', 'values', 'verificationKind', 'verifiedBy'].sort());
   });
 
   it('an installed agent whose licence is unusable lists nothing (licensing, not only installation)', async () => {
