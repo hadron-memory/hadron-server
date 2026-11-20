@@ -1,4 +1,15 @@
 /**
+ * #4464 stage 1 — the deprecation notice for the App's own `role`, applied to
+ * exactly three places: the `App.role` field and the `role` arg of
+ * `createApp` and `updateApp`. ONE edit point by design: all three
+ * annotations move with this constant. The notice period is 30 days from merge
+ * (proposed on #4464 on 2026-11-18, confirmed by the LOCAL review per the
+ * issue's rule), so the removal date is fixed at 2026-12-21.
+ */
+export const APP_ROLE_DEPRECATION_NOTICE =
+  'Deprecated (#4464): App.role is a constant READER and the role input is accepted and ignored; the field and the input will be removed no earlier than 2026-12-21.';
+
+/**
  * The #3340 run-refusal sentence shared by the app-key surfaces (appKeys,
  * revokeAppKey, revokeAppGrant, revokeAppKeyScope). One interpolated constant
  * instead of four pasted copies kept in sync only by the guard (#4479, F5).
@@ -3373,7 +3384,7 @@ export const typeDefs = `#graphql
     """
     sharedMemory: Memory
     appType: AppType!
-    role: AppMembershipRole!
+    role: AppMembershipRole! @deprecated(reason: "${APP_ROLE_DEPRECATION_NOTICE}")
     description: String
     agentTools: [String!]!
     # 036-ai-service-config: the three AI fields below are registry-backed
@@ -14816,7 +14827,7 @@ export const typeDefs = `#graphql
       name: String!
       urn: String
       appType: AppType
-      role: AppMembershipRole
+      role: AppMembershipRole @deprecated(reason: "${APP_ROLE_DEPRECATION_NOTICE}")
       description: String
       agentTools: [String!]
       aiProvider: String
@@ -14853,7 +14864,7 @@ export const typeDefs = `#graphql
       name: String
       urn: String
       appType: AppType
-      role: AppMembershipRole
+      role: AppMembershipRole @deprecated(reason: "${APP_ROLE_DEPRECATION_NOTICE}")
       description: String
       agentTools: [String!]
       aiProvider: String
@@ -15923,6 +15934,14 @@ export const typeDefs = `#graphql
       externalUserId: String
       sessionTimeoutSeconds: Int
     ): Session!
+    """
+    App Key callers only: end one of this App's agent sessions. Re-ending an
+    already-ended session returns true. Typed refusals: FORBIDDEN without an
+    App Key; SESSION_NOT_FOUND, with one message, for an unknown id, a deleted
+    session and another App's session alike, so the answer reveals nothing
+    about sessions outside the App
+    (hrn:node:hadronmemory.com:specs:cor:api:140:01, #4537).
+    """
     endAgentSession(sessionId: ID!): Boolean!
 
     """
