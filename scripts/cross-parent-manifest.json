@@ -927,6 +927,16 @@
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
     },
+    "Question.assignee": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "Question.effectiveAssignee": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
     "Question.evidence": {
       "class": "parent-implies-child",
       "audience": "the node's latest approval record, shown to every reader of the node; a Question is only produced for readers of the log memory",
