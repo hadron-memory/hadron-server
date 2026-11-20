@@ -13,7 +13,11 @@
  * Regenerate the golden (only when a tool's wire surface is meant to change) with UPDATE_TOOL_GOLDEN=1.
  * Pinned from 92ff99df; #2249 amended exactly three entries (hadron_task_create / _assign / _reassign), whose text states the
  * closeSessionWhenDone default. #863 amended exactly two (hadron_run_action / hadron_run_task), whose text states what
- * the render returns since it is the prompt runTask executes.
+ * the render returns since it is the prompt runTask executes. The SDK 2.x upgrade (#2605 step 1, @modelcontextprotocol/server
+ * 2.4.0) amended EVERY entry, for two reasons only, measured by diffing `tools/list` under 1.32.0 and 2.4.0 for the same
+ * principal: each tool's `inputSchema.$schema` is now JSON Schema 2020-12 (was draft-07), and the tool-level
+ * `execution: { taskSupport: 'forbidden' }` is no longer emitted. Names, order, descriptions, properties, `required` and
+ * `additionalProperties` are unchanged.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -21,8 +25,8 @@ import v8 from 'node:v8';
 import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/client';
 import { createMcpServerInstance } from './server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';

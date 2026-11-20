@@ -268,8 +268,8 @@ it('a failed audit insert rolls back the give and terminal revoke together with 
   expect(await db.appAutomationTeamSnapshotGrantEvent.count()).toBe(1);
 });
 it('MCP give/list/revoke delegates the same manager gate and atomic audit, with key/run refusals', async () => {
-  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
-  const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+  const { Client } = await import('@modelcontextprotocol/client');
+  const { InMemoryTransport } = await import('@modelcontextprotocol/client');
   const { createMcpServerInstance } = await import('../../../mcp/server.js');
   async function clientAs(auth: Record<string, unknown>, fn: (c: any) => Promise<void>) {
     const server = createMcpServerInstance(auth as never, () => undefined, { kind: 'multi-app' });

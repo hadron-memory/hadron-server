@@ -10,10 +10,11 @@ import { resolvers, type Context } from './resolvers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 import { ApolloServer } from '@apollo/server';
 import { typeDefs } from './typeDefs.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/client';
 import { createMcpServerInstance } from '../../../mcp/server.js';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer } from '@modelcontextprotocol/server';
+import { withPositionalTool } from '../../../mcp/hadronMcpServer.js';
 import { registerAutomationReadGrantTools } from '../../../mcp/automationReadGrantTools.js';
 import { registerAutomationTeamSnapshotGrantTools } from '../../../mcp/automationTeamSnapshotGrantTools.js';
 import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
@@ -289,7 +290,7 @@ describe('#3361 instructed automation grants', () => {
       userId: f.holder.id, roles: ['READER'], appId: f.app.id, sessionId: f.session.id,
       ...(principal === 'app-key' ? { appKeyId: f.key.id } : { sessionBindingRefused: true }),
     };
-    const mcp = new McpServer({ name: '3361-projection', version: '1' });
+    const mcp = withPositionalTool(new McpServer({ name: '3361-projection', version: '1' }));
     registerAutomationReadGrantTools(mcp, { db, auth: auth as any }); registerAutomationTeamSnapshotGrantTools(mcp, { db, auth: auth as any });
     const client = new Client({ name: '3361-projection', version: '1' }); const [a, b] = InMemoryTransport.createLinkedPair();
     await mcp.connect(b); await client.connect(a); const before = await snapshot();
@@ -363,7 +364,7 @@ describe('#3361 instructed automation grants', () => {
       expect(control.body.singleResult.errors).toBeUndefined();
       expect((control.body.singleResult.data as any).automationReadGrants).toEqual([{ id: f.readGrant.id }]);
     } else {
-      const mcp = new McpServer({ name: '3361-person', version: '1' });
+      const mcp = withPositionalTool(new McpServer({ name: '3361-person', version: '1' }));
       registerAutomationReadGrantTools(mcp, { db, auth: { userId: f.holder.id, roles: ['READER'], appId: f.app.id } as any });
       const client = new Client({ name: '3361-person', version: '1' }); const [a, b] = InMemoryTransport.createLinkedPair();
       await mcp.connect(b); await client.connect(a);
@@ -439,7 +440,7 @@ describe('#3361 instructed automation grants', () => {
           if (r.body.kind !== 'single') throw Error('incremental');
           expect(r.body.singleResult.errors).toBeUndefined(); answers.push(r.body.singleResult.data);
         } else {
-          const mcp = new McpServer({ name: '3361-oracle', version: '1' });
+          const mcp = withPositionalTool(new McpServer({ name: '3361-oracle', version: '1' }));
           registerAutomationReadGrantTools(mcp, { db, auth: { userId: f.holder.id, roles: ['READER'], appId: f.app.id, ...(worker ? { sessionId: f.session.id } : {}) } as any });
           const client = new Client({ name: '3361-oracle', version: '1' }); const [a, b] = InMemoryTransport.createLinkedPair();
           await mcp.connect(b); await client.connect(a);

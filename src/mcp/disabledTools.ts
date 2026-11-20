@@ -23,7 +23,7 @@
  * `session` argument (#1081). Binding a worker through MCP is refused by `hadron_start_session`
  * (MCP_WORKER_BINDING_UNSUPPORTED, cor:agt:020:03).
  */
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { HadronMcpServer as McpServer } from './hadronMcpServer.js';
 
 /** Names passed through `off`, in registration order: lets a test or a future generator read the switch. */
 export const DISABLED_TEAM_TOOLS: string[] = [];

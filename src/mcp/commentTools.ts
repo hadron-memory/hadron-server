@@ -26,7 +26,7 @@
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
 import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { HadronMcpServer as McpServer } from './hadronMcpServer.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { commentFieldResolvers, type CommentView } from '../api/graphql/schema/resolvers.comments.js';
 import { userUrn } from '../lib/userHandle.js';

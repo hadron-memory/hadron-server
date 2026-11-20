@@ -4,8 +4,8 @@ import type { AddressInfo } from 'node:net';
 import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client, ProtocolError } from '@modelcontextprotocol/client';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { signJwt } from '../auth/jwt.js';
 
 let server: Server | undefined;
@@ -69,9 +69,12 @@ it.each([['false', 'true'], ['malformed', 'true'], ['true', undefined], ['true',
       if (!signingOn) {
         const missing = await client.callTool({ name, arguments: {} }).catch(e => e);
         const control = await client.callTool({ name: 'hadron_absent_control', arguments: {} }).catch(e => e);
-        expect(missing.isError).toBe(true);
-        expect(JSON.stringify(missing).replaceAll(name, '<tool>'))
-          .toBe(JSON.stringify(control).replaceAll('hadron_absent_control', '<tool>'));
+        // SDK 2.x (#2605): a call to a tool that is not registered is a JSON-RPC error (-32602), no longer an isError
+        // result. The property under test is unchanged: a switched-off tool answers exactly as a name that never existed.
+        const shape = (e: { code?: unknown; message?: unknown }) => JSON.stringify({ code: e.code, message: e.message });
+        expect(missing).toBeInstanceOf(ProtocolError);
+        expect(missing.code).toBe(-32602);
+        expect(shape(missing).replaceAll(name, '<tool>')).toBe(shape(control).replaceAll('hadron_absent_control', '<tool>'));
       }
     }
   } finally { await client.close(); }
