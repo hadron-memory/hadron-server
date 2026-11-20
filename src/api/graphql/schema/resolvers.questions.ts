@@ -483,7 +483,6 @@ async function evaluateRows(db: Pick<Tx, 'nodeRevision'>, rows: QuestionRow[]): 
 
 /** The states no door writes to: corrupt evidence, and withdrawn. One set, read by {@link requireWritable} and `viewerMayAnswer`. */
 const BLOCKED_STATES: ReadonlySet<string> = new Set(['TAMPERED', 'UNVERIFIABLE', 'WITHDRAWN']);
-// requireWritable below names the refusal per state; its three branches are exactly this set.
 
 /**
  * Refuse a door write on a question whose state forbids it: corrupt evidence
@@ -491,14 +490,14 @@ const BLOCKED_STATES: ReadonlySet<string> = new Set(['TAMPERED', 'UNVERIFIABLE',
  */
 function requireWritable(view: QuestionView): QuestionData {
   const { state, question } = view.evaluation;
-  if (state === 'TAMPERED' || state === 'UNVERIFIABLE' || !question) {
+  if (!question || BLOCKED_STATES.has(state)) {
+    if (question && state === 'WITHDRAWN') throw questionError('QUESTION_WITHDRAWN', `${question.code} was withdrawn.`, { questionCode: question.code });
     throw questionError(
       'QUESTION_INVALID',
       `This question is ${state} and cannot be changed through the question operations; run verifyQuestion for the findings.`,
       { state },
     );
   }
-  if (state === 'WITHDRAWN') throw questionError('QUESTION_WITHDRAWN', `${question.code} was withdrawn.`, { questionCode: question.code });
   return question;
 }
 

@@ -365,6 +365,7 @@ describe('#4532 blind review: approved re-answer, merged decider, a missing log'
       approvalHash: computeApprovalHash({ title: r.name, abstract: r.abstract, content: r.content }),
     } });
     await answer(q.row.id, { optionKey: 'no', reason: 'after approval' }, r.revSeq);
+    expect((await rowOf(q.row.id)).revSeq).toBeGreaterThan(r.revSeq);
     const d = await dataOf(q.row.id);
     expect(d.answers.map((a) => [a.kind, a.key])).toEqual([['answer', 'yes'], ['answer', 'no']]);
     expect(await db.node.count({ where: { memoryId: memory.id, role: 'question' } })).toBe(1);
@@ -420,5 +421,32 @@ describe('#4427 acceptance 14: the log FOR SHARE fence, with two real connection
     await changer;
     expect(await attempt).toBe('QUESTION_NOT_DECIDER');
     expect((await dataOf(q.row.id)).answers).toHaveLength(0);
+  });
+});
+
+describe('#4532 blind delta: a SIGNED-tier question, and the on-log arm after a merge', () => {
+  it('a SIGNED-tier question that was answered and approved is answered again, as a new revision', async () => {
+    const q = await ask((await createLog()).row.id, { title: 'Sign off?', yesno: true, recommendation: { key: 'yes', reason: 'ready' }, tier: 'SIGNED' });
+    await answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq);
+    const r = await rowOf(q.row.id);
+    await db.node.update({ where: { id: q.row.id }, data: {
+      approvedBy: holger.id, approvedRevNo: r.revSeq, approvedAt: new Date(),
+      approvalHash: computeApprovalHash({ title: r.name, abstract: r.abstract, content: r.content }),
+    } });
+    await answer(q.row.id, { optionKey: 'no', reason: 'second thoughts' }, r.revSeq);
+    expect((await rowOf(q.row.id)).revSeq).toBeGreaterThan(r.revSeq);
+    expect((await dataOf(q.row.id)).answers.map((a) => a.key)).toEqual(['yes', 'no']);
+  });
+
+  it('after a merge the survivor answers when the LOG names the survivor and the question still names the merged account', async () => {
+    const log = await createLog();
+    const q = await ask(log.row.id);
+    const survivor = await db.user.create({ data: { githubId: 442798, githubUsername: 'qa-survivor2', handle: 'qa-survivor2', roles: [] } });
+    await db.orgMember.create({ data: { organizationId: orgId, userId: survivor.id, role: 'CONTRIBUTOR' } });
+    await M.mergeUsers(null, { input: { source: holger.id, target: survivor.id, consentProof: await approvedMergeProof(db, holger.id, survivor.id, platformAdmin.id) } }, as(platformAdmin.id, { roles: ['ADMIN'] }));
+    await M.setQuestionLogDeciders(null, { logRef: log.row.id, defaultDeciders: [survivor.id], expectedRevision: (await rowOf(log.row.id)).revSeq, reason: 'merged' }, as());
+    await answer(q.row.id, { optionKey: 'yes' }, (await rowOf(q.row.id)).revSeq, as(survivor.id));
+    expect((await dataOf(q.row.id)).deciders).toEqual([holger.id]);
+    expect((await dataOf(q.row.id)).answers).toHaveLength(1);
   });
 });
