@@ -19,7 +19,8 @@ import {
 } from '../../../lib/nodeRevisionSnapshot.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
 import { nextRevisionNumber, RevisionSlotsExhaustedError } from '../../../lib/revisionSlot.js';
-import { lockAncestorsForCreate, lockAncestorsForCreateMany, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
+import { isLiveSlotLoc } from '../../../lib/agentRevisions.js';
+import { lockAncestorsForCreate, lockAncestorsForCreateMany, lockNodeForDelete, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
@@ -2439,6 +2440,63 @@ export const sessionMutations = {
       return { revisionLoc: revLoc, label, published: false, createdAt: new Date().toISOString() };
     },
 
+    /**
+     * #4488 — delete one Agent revision by loc. The gate is restoreRevision's (the read gate, then ADMIN). Refuses
+     * the published (pinned) revision (REVISION_PUBLISHED) and the Agent's only revision (REVISION_ONLY), both
+     * judged on locked rows before any write. The row is soft-deleted: it leaves the list and restore, and its
+     * slot number stays used (#2507), so this does not free a slot.
+     */
+    deleteAgentRevision: async (
+      _: unknown,
+      { agentRef, revisionLoc }: { agentRef: string; revisionLoc: string },
+      ctx: Context,
+    ) => {
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
+      await requireAgentAccess(ctx, agent, 'ADMIN');
+      const sysMemId = (agent as any).systemMemoryId as string;
+      if (!sysMemId) throw new Error('Agent has no system memory');
+      // Only a direct live slot is a revision: anything else (a descendant, a tombstone, another node) is not one.
+      if (!isLiveSlotLoc(revisionLoc)) throw revisionNotFound(revisionLoc);
+
+      return ctx.db.$transaction(async (tx) => {
+        // Lock order: the revisions path (the key every save and restore takes), then this revision's loc, then the
+        // Agent row, which carries the pin. publishRevision takes the Agent row last too.
+        await lockPathForCreateUnder(tx, sysMemId, 'revisions');
+        await lockNodeForDelete(tx, sysMemId, revisionLoc);
+        const [pinRow] = await tx.$queryRaw<Array<{ published_revision_loc: string | null }>>`
+          SELECT published_revision_loc FROM agents WHERE id = ${agent.id} FOR UPDATE`;
+        const publishedLoc = pinRow?.published_revision_loc ?? null;
+
+        const revNode = await tx.node.findFirst({
+          where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
+        });
+        if (!revNode) throw revisionNotFound(revisionLoc);
+        if (publishedLoc === revisionLoc) {
+          throw new GraphQLError('The published revision cannot be deleted. Publish another revision first.', {
+            extensions: { code: 'REVISION_PUBLISHED' },
+          });
+        }
+        const liveSlots = (await tx.node.findMany({
+          where: { memoryId: sysMemId, deletedAt: null, loc: { startsWith: 'revisions:rev-' } },
+          select: { loc: true },
+        })).filter((r) => isLiveSlotLoc(r.loc));
+        if (liveSlots.length <= 1) {
+          throw new GraphQLError('The only revision cannot be deleted.', { extensions: { code: 'REVISION_ONLY' } });
+        }
+        await tx.node.update({
+          where: { id: revNode.id },
+          data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null },
+        });
+        const data = (revNode.data as Record<string, unknown>) ?? {};
+        return {
+          revisionLoc,
+          label: (data.label as string) ?? revNode.name,
+          published: false,
+          createdAt: revNode.createdAt.toISOString(),
+        };
+      });
+    },
+
     publishRevision: async (
       _: unknown,
       { agentRef, revisionLoc, versionLabel }: { agentRef: string; revisionLoc: string; versionLabel?: string },
@@ -2452,24 +2510,33 @@ export const sessionMutations = {
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
-      const revNode = await ctx.db.node.findFirst({
-        where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
-      });
-      if (!revNode) throw revisionNotFound(revisionLoc);
+      // #4488: the revision is judged live and pinned in ONE transaction under the delete's locks (the revision's loc,
+      // then the Agent row), so a concurrent deleteAgentRevision cannot leave the pin on a deleted revision.
+      // Same order as the delete (revision loc, then Agent row; the delete's extra revisions-path lock comes before both and
+      // publish never holds one while waiting for it), so the two cannot deadlock. Table `agents` is Agent's @@map name.
+      const label = await ctx.db.$transaction(async (tx) => {
+        await lockNodeForDelete(tx, sysMemId, revisionLoc);
+        await tx.$queryRaw`SELECT id FROM agents WHERE id = ${resolvedAgentId} FOR UPDATE`;
+        const revNode = await tx.node.findFirst({
+          where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
+        });
+        if (!revNode) throw revisionNotFound(revisionLoc);
 
-      const revData = (revNode.data as Record<string, unknown>) ?? {};
-      const label = versionLabel ?? (revData.label as string) ?? revisionLoc;
+        const revData = (revNode.data as Record<string, unknown>) ?? {};
+        const label = versionLabel ?? (revData.label as string) ?? revisionLoc;
 
-      // Mark as published
-      await ctx.db.node.update({
-        where: { id: revNode.id },
-        data: { data: { ...revData, published: true, publishedAt: new Date().toISOString(), versionLabel: label } as InputJsonValue },
-      });
+        // Mark as published
+        await tx.node.update({
+          where: { id: revNode.id },
+          data: { data: { ...revData, published: true, publishedAt: new Date().toISOString(), versionLabel: label } as InputJsonValue },
+        });
 
-      // Update agent to point to this revision
-      await ctx.db.agent.update({
-        where: { id: resolvedAgentId },
-        data: { publishedRevisionLoc: revisionLoc },
+        // Update agent to point to this revision
+        await tx.agent.update({
+          where: { id: resolvedAgentId },
+          data: { publishedRevisionLoc: revisionLoc },
+        });
+        return label;
       });
 
       return { revisionLoc, label, published: true, createdAt: new Date().toISOString() };
