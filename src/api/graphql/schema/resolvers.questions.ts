@@ -1454,7 +1454,7 @@ async function answerAct(
     const next: QuestionData = structuredClone(current);
     next.answers.push(act.entry);
     next.status = statusHint(next);
-    const final = finalize(next);
+    const final = await finalize(tx, next);
     await writeNodeCore(
       { memoryId: target.memoryId, loc: row.loc, ...renderedFields(final), reason: act.label },
       txCtx,
