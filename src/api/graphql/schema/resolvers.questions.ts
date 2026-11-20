@@ -544,9 +544,13 @@ function renderedFields(d: QuestionData) {
 }
 
 /** Re-validate a payload a door built, so a door bug fails loudly rather than persisting. */
-function finalize(d: QuestionData): QuestionData {
+async function finalize(tx: Tx, d: QuestionData): Promise<QuestionData> {
   const parsed = questionDataSchema.parse(d);
-  checkQuestion(parsed);
+  // #4525: deciders are stored as survivors AT ASK TIME and never rewritten, so a later merge can leave one merged away.
+  // The assignee is a survivor, so compare identities, not raw ids (as byDecider does, #1715).
+  const ids = parsed.assignee == null ? [] : [...parsed.deciders, parsed.assignee];
+  const links = await mergeLinksFrom(tx, ids);
+  checkQuestion(parsed, '', (a, b) => survivorOf(links, a) === survivorOf(links, b));
   return parsed;
 }
 
@@ -785,7 +789,7 @@ export const questionMutations = {
         // to every other writer); loud, so an operator can move the squatter.
         throw questionError('QUESTION_CONTAINED', `The next code ${code} is occupied by another node at "${loc}"; move it out of the log before asking.`, { loc });
       }
-      const data = finalize({
+      const data = await finalize(tx, {
         codec: QUESTION_CODEC, renderer: CURRENT_QUESTION_RENDERER, kind: 'question',
         logId: logRow.id, code, n,
         title: input.title, background: input.background ?? null, whyNow: input.whyNow ?? null,
@@ -908,7 +912,7 @@ export const questionMutations = {
         next.noRecommendation = patch.noRecommendation;
       }
       next.status = statusHint(next);
-      const final = finalize(next);
+      const final = await finalize(tx, next);
       if (canonicalQuestionJson(final) === canonicalQuestionJson(current)) return; // nothing changed: no revision
       await writeNodeCore(
         { memoryId: target.memoryId, loc: row.loc, ...renderedFields(final), reason },
@@ -954,7 +958,7 @@ export const questionMutations = {
           { questionCode: current.code },
         );
       }
-      const next = finalize({ ...current, withdrawn: { by: actorOf(ctx), at: new Date().toISOString(), reason }, status: 'withdrawn' });
+      const next = await finalize(tx, { ...current, withdrawn: { by: actorOf(ctx), at: new Date().toISOString(), reason }, status: 'withdrawn' });
       await writeNodeCore(
         { memoryId: target.memoryId, loc: row.loc, ...renderedFields(next), reason },
         txCtx,

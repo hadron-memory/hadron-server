@@ -238,6 +238,7 @@
     "SummarizationRequest": "value",
     "ChatResponseResult": "envelope",
     "RevisionResult": "envelope",
+    "AgentRevision": "value",
     "EditorLockResult": "envelope",
     "UntrackedTaskItem": "value",
     "UntrackedTaskItemPage": "envelope",
@@ -1878,6 +1879,18 @@
       "audience": "callers passing canSeeSecretOwner: the user themselves (not impersonating), org members, or for an App secret a member of the App or whoever manages it (a person acting as themselves, never an App key, an impersonated session or a run); metadata only, never the value",
       "resolver": "src/api/graphql/schema/resolvers.secret.ts::canSeeSecretOwner",
       "target": "Secret"
+    },
+    "Secret.readClients": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.secret.ts::readClients",
+      "gate": "readClientPage",
+      "target": "SecretReadClientsPage"
+    },
+    "SecretReadClientsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "readClientPage filters current issuers or App managers before paging, refuses App keys, runs, impersonation and deleted scopes, and exposes full client ids only to current issuers or holders; metadata only",
+      "resolver": "src/lib/secrets/readClientList.ts::readClientPage",
+      "target": "SecretReadClient"
     },
     "Secret.versions": {
       "class": "parent-implies-child",

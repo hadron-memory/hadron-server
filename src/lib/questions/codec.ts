@@ -303,11 +303,16 @@ export function optionsOf(
  *     a recommendation names one of the options;
  *   - with no options (a free-text question): neither;
  *   - `defaultAction` only with `neededBy`;
- *   - `assignee`, when set, is one of the deciders (`QUESTION_ASSIGNEE_NOT_DECIDER`);
+ *   - `assignee`, when set, is one of the deciders, or the account one of them was merged into (`QUESTION_ASSIGNEE_NOT_DECIDER`);
  *   - every answer entry is well formed and names an existing option;
  *   - an authorizing question is of the signed tier, and only it carries a grant.
  */
-export function checkQuestion(d: QuestionData, pointer = ''): void {
+export function checkQuestion(
+  d: QuestionData,
+  pointer = '',
+  /** Whether two user ids are the same person (a merge may have made a stored id a merged-away one, #1715, #4525). */
+  sameUser: (a: string, b: string) => boolean = (a, b) => a === b,
+): void {
   const keys = new Set<string>();
   for (const [i, option] of d.options.entries()) {
     if (keys.has(option.key)) invalidQuestion([{ pointer: `${pointer}/options/${i}/key`, message: `duplicate option key "${option.key}"` }]);
@@ -333,7 +338,7 @@ export function checkQuestion(d: QuestionData, pointer = ''): void {
   if (d.defaultAction != null && d.neededBy == null) {
     invalidQuestion([{ pointer: `${pointer}/defaultAction`, message: 'defaultAction needs neededBy' }]);
   }
-  if (d.assignee != null && !d.deciders.includes(d.assignee)) {
+  if (d.assignee != null && !d.deciders.some((id) => sameUser(id, d.assignee as string))) {
     throw questionError(
       'QUESTION_ASSIGNEE_NOT_DECIDER',
       `The assignee must be one of the question's deciders: only a decider can answer it.`,

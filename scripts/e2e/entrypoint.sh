@@ -18,5 +18,8 @@ export JWT_SECRET HADRON_ENCRYPTION_KEY RATE_LIMIT_KEYRING
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f prisma/pre-push.sql
 pnpm prisma db push --skip-generate
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f prisma/post-push.sql
+# #4577: register the platform actions through the one upsert the normal boot runs (scripts/docker-start.sh), so signed-action
+# fixtures (secret.reveal etc.) need no manual step. Idempotent; DATABASE_URL is this stack's own single-role database.
+pnpm tsx scripts/db/upsert-actions.ts
 pnpm tsx scripts/e2e/seed.ts
 exec node scripts/e2e/supervise.mjs

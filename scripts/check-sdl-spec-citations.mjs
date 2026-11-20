@@ -41,6 +41,21 @@
  *    malformed baseline FAILS rather than exempting anything: every entry is
  *    `<whole citation> <non-negative integer>`, once.
  *
+ * 3. EXISTENCE (#4508). Every QUALIFIED citation in typeDefs.ts
+ *    (`hrn:node:hadronmemory.com:specs:cor:…`, or the legacy `urn:node:` scheme)
+ *    must name a WRITTEN spec in `scripts/sdl-spec-citations-snapshot.txt`, a
+ *    committed inventory of the corpus's written nodes. A citation to a node
+ *    that does not exist (#4442's `cor:agt:130:06`, which the corpus never
+ *    had) or is only a placeholder fails, wherever in the file it sits: the
+ *    snapshot is judged for the whole file, not only for added lines. CI has
+ *    no corpus access, hence a snapshot rather than a lookup. The cost is a
+ *    drift window equal to the snapshot's age: a citation to a rule written
+ *    after the last refresh fails until an author refreshes it
+ *    (`node scripts/refresh-sdl-spec-citation-snapshot.mjs`, which needs the
+ *    `hadron` CLI and a token; CI only reads the file). A missing, empty or
+ *    malformed snapshot FAILS. Qualified citations into any other memory are
+ *    not judged here: this snapshot says nothing about them.
+ *
  * A base that does not resolve is a failure, never a pass: an empty diff is
  * wrong in the passing direction (the portal workflow's note on the same).
  *
@@ -57,6 +72,10 @@ const REPO = join(HERE, '..');
 const TYPEDEFS_PATH = 'src/api/graphql/schema/typeDefs.ts';
 const TYPEDEFS = join(REPO, TYPEDEFS_PATH);
 const BASELINE = join(HERE, 'sdl-spec-citations-baseline.txt');
+const SNAPSHOT_PATH = 'scripts/sdl-spec-citations-snapshot.txt';
+const SNAPSHOT = join(REPO, SNAPSHOT_PATH);
+/** Qualified citations are judged only against the corpus the snapshot describes. */
+const SPECS_MEMORY_PREFIX = /(?:hrn|urn):node:hadronmemory\.com:specs:$/;
 
 /** hadron-portal scripts/check-bare-loc-citations.mjs `SPEC_CITATION`, verbatim. */
 export const SPEC_CITATION = String.raw`cor:[a-z]{3}:\d{3}(?::\d{2})*`;
@@ -91,6 +110,54 @@ export function findBareCitations(source) {
     }
   }
   return out;
+}
+
+/**
+ * Every fully qualified citation into the specs corpus in `source`:
+ * `{ line, citation }`, 1-based lines, the citation WITHOUT its URN prefix.
+ * A range (`…:14–:17`) returns its head AND its tail (`…:17`), so a range that
+ * ends on a rule that is not written fails; the rules between the two are not
+ * checked (a gap there is not an error). Qualified citations into another
+ * memory are not returned.
+ */
+export function findQualifiedCitations(source) {
+  const out = [];
+  for (const [i, line] of source.split('\n').entries()) {
+    for (const m of line.matchAll(CITATION)) {
+      if (!isQualified(line, m.index) || !isWholeSpecCitation(line, m.index + m[0].length)) continue;
+      if (!SPECS_MEMORY_PREFIX.test(line.slice(0, m.index))) continue;
+      out.push({ line: i + 1, citation: m[0] });
+      const tail = /^[–-]:(\d{2})(?!\d)/.exec(line.slice(m.index + m[0].length));
+      if (tail) out.push({ line: i + 1, citation: m[0].replace(/:\d{2}$/, `:${tail[1]}`) });
+    }
+  }
+  return out;
+}
+
+/**
+ * The snapshot: one written citation per line; `#` comments and blanks ignored.
+ * THROWS on anything else (a key that is not a whole citation, extra fields, a
+ * duplicate) and on an EMPTY inventory, which would otherwise fail every
+ * citation for the wrong reason, or, worse, be mistaken for "nothing to check".
+ */
+export function parseSnapshot(raw) {
+  const out = new Set();
+  const problems = [];
+  for (const [i, line] of raw.split('\n').entries()) {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) continue;
+    if (!WHOLE_CITATION.test(t)) problems.push(`line ${i + 1}: "${t}" is not one whole spec citation`);
+    else if (out.has(t)) problems.push(`line ${i + 1}: ${t} is listed twice`);
+    else out.add(t);
+  }
+  if (!problems.length && out.size === 0) problems.push('the snapshot lists no citation');
+  if (problems.length) throw new Error(`malformed snapshot:\n  ${problems.join('\n  ')}`);
+  return out;
+}
+
+/** The qualified citations that name no written spec in `snapshot`. */
+export function missingFromSnapshot(qualified, snapshot) {
+  return qualified.filter((q) => !snapshot.has(q.citation));
 }
 
 const WHOLE_CITATION = new RegExp(String.raw`^${SPEC_CITATION}$`);
@@ -179,7 +246,17 @@ function main() {
     process.exit(1);
   }
 
-  const found = findBareCitations(readFileSync(TYPEDEFS, 'utf8'));
+  let snapshot;
+  try {
+    snapshot = parseSnapshot(readFileSync(SNAPSHOT, 'utf8'));
+  } catch (e) {
+    console.error(`::error file=${SNAPSHOT_PATH}::${e.message}`);
+    process.exit(1);
+  }
+
+  const source = readFileSync(TYPEDEFS, 'utf8');
+  const missing = missingFromSnapshot(findQualifiedCitations(source), snapshot);
+  const found = findBareCitations(source);
   const added = onAddedLines(found, addedLines(diff));
   const { over, lowerable } = compareWithBaseline(found, baseline);
   for (const a of added) {
@@ -201,11 +278,24 @@ function main() {
         lowerable.map((l) => `${l.citation} ${l.allowed}→${l.count}`).join(', '),
     );
   }
-  if (added.length || over.length) {
-    console.error(`\n✗ ${added.length} bare citation(s) on added lines, ${over.length} citation(s) above the baseline. SDL citations must be fully qualified.`);
+  for (const m of missing) {
+    console.error(
+      `::error file=${TYPEDEFS_PATH},line=${m.line}::spec citation ${m.citation} names no written spec in ${SNAPSHOT_PATH}. ` +
+        'Check the citation against the corpus (`hadron spec get <citation> -m hadronmemory.com:specs`). If the rule was written after the ' +
+        'snapshot, refresh it: node scripts/refresh-sdl-spec-citation-snapshot.mjs. A placeholder does not count as written.',
+    );
+  }
+  if (added.length || over.length || missing.length) {
+    console.error(
+      `\n✗ ${added.length} bare citation(s) on added lines, ${over.length} citation(s) above the baseline, ` +
+        `${missing.length} qualified citation(s) naming no written spec. SDL citations must be fully qualified and must exist.`,
+    );
     process.exit(1);
   }
-  console.log(`✓ No bare spec citations on lines added since ${base}; ${found.length} pre-existing bare, within the baseline.`);
+  console.log(
+    `✓ No bare spec citations on lines added since ${base}; ${found.length} pre-existing bare, within the baseline; ` +
+      `every qualified citation names a written spec in the snapshot (${snapshot.size}).`,
+  );
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

@@ -11,7 +11,7 @@
  * mirroring `userHandle.ts`). Callers run these inside their own transaction and
  * keep the entity's denormalized `handle`/`urn` in sync.
  */
-import type { PrismaClient } from '../../generated/prisma/index.js';
+import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { MAX_ATOM_LEN } from '../urn.js';
 
 /** Root names reserved for the platform — cannot be minted by a user or org. */
@@ -50,7 +50,7 @@ export class RootNameTakenError extends Error {
 }
 
 /**
- * The #4415 root-name rule, applied to the name AS STORED (post-`toLowerCase()`
+ * The #4415 root-name rule, applied to the name AS STORED (post-`toLowerCase()`)
  * — a principal root is 1–64 lower-case ASCII letters, digits, `.`, `_` or `-`,
  * beginning and ending with a letter or digit: urn-lib's atom grammar
  * (`ATOM_RE`, `MAX_ATOM_LEN` = 64) restricted to lower case, spec
@@ -75,16 +75,57 @@ export function isValidRootName(name: string): boolean {
  * maps it to the `ROOT_NAME_INVALID` typed refusal.
  */
 export class RootNameInvalidError extends Error {
-  constructor(public readonly rootName: string) {
+  constructor(public readonly rootName: string, options?: { cause?: unknown }) {
     super(
       `Root name "${rootName}" is not a legal root name: a root name is 1–64 ` +
         `lower-case ASCII letters, digits, ".", "_" or "-", beginning and ending with a letter or digit.`,
+      options,
     );
     this.name = 'RootNameInvalidError';
   }
 }
 
 type PrincipalDb = Pick<PrismaClient, 'principal'>;
+
+/**
+ * The #4400 CHECK that keeps every stored root name lower case (`name = lower(name)`), matched by its quoted name
+ * alone: the words around it ("violates check constraint") follow the server's `lc_messages` and are not matched, so
+ * a translated message still maps (#4547 BLIND P2). The quotes are optionally backslash-escaped: the engine renders
+ * a model write's Postgres error with inner quotes as `\"`, a raw statement's `meta.message` plainly.
+ */
+const NAME_LOWER_CHECK_RE = /\\?"chk_principals_name_lower\\?"/;
+
+/**
+ * The PRIMARY fields of the Postgres error inside a model write's message, as the query engine renders it:
+ * `PostgresError { code: "23514", message: "…", severity: …, detail: Some("…"), … }`. Only these two fields are
+ * judged (#4547 BLIND re-rate P2): the detail echoes the failing row's values and the rest of the rendering is free
+ * text, so a name or a code found anywhere else proves nothing about which constraint refused.
+ */
+const ENGINE_PRIMARY_ERROR_RE = /PostgresError \{ code: "([0-9A-Z]{5})", message: "((?:[^"\\]|\\.)*)"/;
+
+/**
+ * #4411: true iff `err` is Postgres refusing a principal row under `chk_principals_name_lower` (SQLSTATE 23514),
+ * in either shape Prisma reports it: a model write raises `PrismaClientUnknownRequestError` carrying the engine's
+ * rendering of the Postgres error (Prisma 6 has no known code for a CHECK); a raw statement raises P2010 with the
+ * SQLSTATE and the server's text (primary message first) in `meta`. `mintPrincipal` writes through `principal.create`, so only the first
+ * shape reaches it today; the P2010 arm covers a caller-supplied client whose create runs raw SQL. Narrow on
+ * purpose: it needs the check-violation SQLSTATE AND this constraint's name, both from the primary error, so any
+ * other database error stays untyped. A rendering it cannot parse is not matched (fails closed to the raw error).
+ */
+function isNameLowerCheckViolation(err: unknown): boolean {
+  if (err instanceof Prisma.PrismaClientUnknownRequestError) {
+    const primary = ENGINE_PRIMARY_ERROR_RE.exec(err.message);
+    return primary !== null && primary[1] === '23514' && NAME_LOWER_CHECK_RE.test(primary[2]);
+  }
+  if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2010') {
+    const meta = err.meta as { code?: unknown; message?: unknown } | undefined;
+    // `meta.message` is the server's text: the primary message on its first line, then `DETAIL:` (the failing
+    // row's values) and any `HINT:` on later lines. Only the first line is judged, as above.
+    return meta?.code === '23514' && typeof meta.message === 'string'
+      && NAME_LOWER_CHECK_RE.test(meta.message.split('\n', 1)[0]);
+  }
+  return false;
+}
 
 /**
  * The single availability seam (federation hook, D-2026-07-15-003). Today it
@@ -111,7 +152,8 @@ export async function checkRootAvailable(db: PrincipalDb, name: string): Promise
 /**
  * Mint a principal for `name` under `kind`, returning the new principal id to
  * wire onto the owning user/org. Throws `RootNameInvalidError` if the name is
- * outside the #4415 root-name rule (see `isValidRootName`), and
+ * outside the #4415 root-name rule (see `isValidRootName`) or the database's
+ * `chk_principals_name_lower` refuses it (#4411), and
  * `RootNameTakenError` if it is taken (reserved word, active, or tombstoned) —
  * the DB unique is the atomic backstop even under a concurrent race. Runs
  * inside the caller's transaction.
@@ -137,6 +179,13 @@ export async function mintPrincipal(
     if ((err as { code?: string } | null)?.code === 'P2002') {
       throw new RootNameTakenError(name);
     }
+    // #4411: the database refused the name as not lower case. Unreachable while the writer lower-cases and
+    // `isValidRootName` admits only lower-case ASCII (both above); it is the backstop for a name on which
+    // JavaScript `toLowerCase()` and Postgres `lower()` disagree, surfaced as the same typed refusal as the rule
+    // (one code for one cause, cor:urn:010:01) instead of a raw database error.
+    // The database error is kept as `cause`: reaching this line means the writer and the CHECK disagree, a
+    // platform bug rather than bad input, so whoever logs the refusal can see what Postgres said.
+    if (isNameLowerCheckViolation(err)) throw new RootNameInvalidError(name, { cause: err });
     throw err;
   }
 }

@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { maintenanceUrl } from '../../src/test/dbWorkers.js';
-import { EXIT, main } from './serve-role-smoke.js';
+import { buildChecks, EXIT, main, newFixture } from './serve-role-smoke.js';
 import { cleanupOwnedSmokeFixture } from './smokeTeardown.js';
 
 const GRANTS_SQL = fileURLToPath(new URL('../../prisma/runtime-role.sql', import.meta.url));
@@ -191,7 +191,8 @@ describe('serve-role-smoke (#2413 S3)', { timeout: 120_000 }, () => {
     const { code, out } = await smoke();
     expect(out).toContain('ok: the serve role passes every smoke check');
     expect(code).toBe(EXIT.OK);
-    const left = await asOwner((c) => c.query(`SELECT (SELECT count(*) FROM memories WHERE id LIKE 'smk\\_%') + (SELECT count(*) FROM sessions WHERE id LIKE 'smk\\_%') AS n`));
+    const left = await asOwner((c) => c.query(`SELECT (SELECT count(*) FROM memories WHERE id LIKE 'smk\\_%') + (SELECT count(*) FROM sessions WHERE id LIKE 'smk\\_%')
+      + (SELECT count(*) FROM apps WHERE id LIKE 'smk\\_%') + (SELECT count(*) FROM secret_app_keys WHERE app_id LIKE 'smk\\_%') AS n`));
     expect(Number(left.rows[0].n)).toBe(0);
   });
 
@@ -201,6 +202,17 @@ describe('serve-role-smoke (#2413 S3)', { timeout: 120_000 }, () => {
       const { code, out } = await smoke();
       expect(code).toBe(EXIT.FAILED);
       expect(out).toMatch(/FAIL .*nodes|FAIL read of every public table: no SELECT on nodes/);
+    } finally {
+      grant();
+    }
+  });
+
+  it('fails when the serve role cannot take the store\'s share lock on secret_app_keys (#4553)', async () => {
+    await asOwner((c) => c.query(`REVOKE UPDATE ON TABLE secret_app_keys FROM ${SERVE}`));
+    try {
+      const { code, out } = await smoke();
+      expect(code).toBe(EXIT.FAILED);
+      expect(out).toContain('FAIL App secret store');
     } finally {
       grant();
     }
@@ -298,3 +310,23 @@ describe('serve-role-smoke (#2413 S3)', { timeout: 120_000 }, () => {
     expect(lines.join('\n')).not.toContain(PASSWORD);
   });
 });
+
+describe('the App secret store check locks a real, owner-seeded key row (#4553 N8)', () => {
+  it('runs the store\'s FOR SHARE read on the fixture\'s own App, and refuses when it locks no row', async () => {
+    const f = newFixture();
+    expect(f.appId).toMatch(/^smk_app_/);
+    const check = buildChecks(f, {} as Client).find((c) => c.name.startsWith('App secret store'))!;
+    const seen: Array<{ sql: string; params?: unknown[] }> = [];
+    const fake = (rowsFor: (sql: string) => number) => ({
+      query: async (sql: string, params?: unknown[]) => {
+        seen.push({ sql, params });
+        const n = rowsFor(sql);
+        return { rowCount: n, rows: Array.from({ length: n }, () => ({ key_version: 1 })) };
+      },
+    }) as unknown as Client;
+    await check.run(fake((sql) => (/FOR SHARE/.test(sql) ? 1 : 0)));
+    expect(seen.find((q) => /FOR SHARE/.test(q.sql))?.params).toEqual([f.appId]);
+    await expect(check.run(fake(() => 0))).rejects.toThrow(/locked no App key row/);
+  });
+});
+

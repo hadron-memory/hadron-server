@@ -12,6 +12,8 @@
 !scripts/
 !scripts/e2e/
 !scripts/e2e/**
+!scripts/db/
+!scripts/db/upsert-actions.ts
 src/generated/
 **/node_modules/
 **/.env*

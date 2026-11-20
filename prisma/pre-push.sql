@@ -171,3 +171,5 @@ END $$;
 \ir delivery-settings-pre-push.sql
 \ir ticker-tick-code-pre-push.sql
 \ir app-run-agent-pre-push.sql
+\ir agent-team-event-tx-id-pre-push.sql
+\ir edge-first-class-pre-push.sql
