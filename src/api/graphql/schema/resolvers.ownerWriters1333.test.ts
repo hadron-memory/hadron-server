@@ -21,8 +21,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { roleWritersRefusal, appCarriesOwnersAgent } from '../../../lib/nodeRoleWriters.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
-import { hadronUpdateNode } from '../../../lib/runner/tools/nodeTools.js';
-import { runContext } from '../../../jobs/appRunDeps.js';
+import { makeProdRunDeps, runContext } from '../../../jobs/appRunDeps.js';
 import { testRunAgentId } from '../../../test/runAgent.js';
 import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
 
@@ -408,14 +407,16 @@ describe('the live headless path: hadron_update_node under the real run principa
         triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: ENTRY(), status: 'RUNNING',
       },
     });
-    const ctx = { log: vi.fn(), db, run, principal: runContext(db, run) } as never;
+    // The production dispatch of a script node's declared tool call (no model needed): callScript -> admitAndExecuteTool.
     try {
-      await (hadronUpdateNode as { execute: (c: never, a: unknown) => Promise<unknown> }).execute(ctx, {
-        urn: `hrn:node:${target.urn}:${loc}`, content: 'after',
-      });
+      await makeProdRunDeps(db).callScript!(run as never, {
+        tool: 'hadron_update_node', args: { urn: `hrn:node:${target.urn}:${loc}`, content: 'after' },
+      } as never, { onToolCall: async () => true, log: vi.fn(), nodeUrn: ENTRY() } as never);
       return 'OK';
     } catch (e) {
-      return e instanceof GraphQLError ? String(e.extensions.code) : (e as Error).message;
+      // admitAndExecuteTool wraps a handler's refusal as ToolExecutionError; the typed code rides its cause.
+      const inner = ((e as { cause?: unknown }).cause ?? e) as { extensions?: { code?: unknown }; message?: string };
+      return inner.extensions?.code ? String(inner.extensions.code) : String(inner.message);
     }
   }
   const content = async (memId: string, loc: string) => (await db.node.findFirst({ where: { memoryId: memId, loc } }))!.content;
@@ -432,6 +433,28 @@ describe('the live headless path: hadron_update_node under the real run principa
     const space = await teamSpace(installer, 'vault:ins');
     expect(await liveRun(installer, space, 'vault:ins')).toBe(REFUSED);
     expect(await content(space.id, 'vault:ins')).toBe('before');
+  });
+
+  it('the same installer run passes the base gate for an ordinary node and is refused only the OWNER-role one (state unchanged)', async () => {
+    const installer = await app({ orgId: org.id, agents: [await agent(vendorOrg.id, null)] });
+    const space = await teamSpace(installer, 'vault:keep');
+    await db.node.create({ data: { id: generateId(), memoryId: space.id, loc: 'vault:plain', name: 'note', content: 'before' } });
+    // Control: the base write gate admits this run on an ungoverned node.
+    expect(await liveRun(installer, space, 'vault:plain')).toBe('OK');
+    expect(await content(space.id, 'vault:plain')).toBe('after');
+    // The same run, same grant, same memory: the OWNER-role node is refused by the level alone.
+    expect(await liveRun(installer, space, 'vault:keep', false)).toBe(REFUSED);
+    expect(await content(space.id, 'vault:keep')).toBe('before');
+  });
+
+  it('a qualifying App with no write grant on its OWN readable space is refused by the base write gate, never the level', async () => {
+    const publisher = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
+    const space = await teamSpace(publisher, 'vault:own');
+    const refused = await liveRun(publisher, space, 'vault:own', false);
+    expect(refused).not.toBe('OK');
+    expect(refused).not.toBe(REFUSED);
+    expect(refused).toBe('FORBIDDEN');
+    expect(await content(space.id, 'vault:own')).toBe('before');
   });
 
   it('a run of a publisher App on ANOTHER App\'s team space has no read: refused, identically whether or not the node exists', async () => {
