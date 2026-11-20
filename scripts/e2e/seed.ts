@@ -5,7 +5,7 @@ import { PrismaClient } from '../../src/generated/prisma/index.js';
 import { computeApprovalHash } from '../../src/lib/approvalHash.js';
 import { ensureCurrentNodeRevisionInTransaction } from '../../src/lib/nodeRevisionSnapshot.js';
 import { resolveServedBootPrompt } from '../../src/lib/bootPrompt/serve.js';
-import { seedE2eStockAgents, E2E_BOOT_PROMPT } from '../../src/test/e2eBootPrompt.js';
+import { seedE2eStockAgents, seedE2eInstallRegister, e2eRegisterGaps, E2E_BOOT_PROMPT, E2E_STOCK_ROLES } from '../../src/test/e2eBootPrompt.js';
 
 // Separate from the narrative dev seed: every principal has global READER
 // except the org-less platform-admin fixture, so org-role journeys exercise
@@ -92,6 +92,8 @@ async function seed() {
     const channel = await db.channel.create({ data: { id: id(`${org}:channel`), memoryId: memoryIds.app,
       loc: 'chats:team', name: 'Team', chatRootNodeId: root.id } });
     await db.app.update({ where: { id: appId }, data: { defaultChannelId: channel.id } });
+    // #4506: the install-default register rows a real install writes, so register-gated paths (chat mark-read) work.
+    await seedE2eInstallRegister(db, appId);
     await node(memoryIds.app, 'tasks:check-stack', { nodeType: 'task', isRunnable: true,
       content: 'Read the welcome fixture and report which disposable organization it belongs to.' });
     const specsId = id(`${org}:specs`);
@@ -162,6 +164,9 @@ async function check() {
       assert.equal(served.content, E2E_BOOT_PROMPT);
       assert.equal(served.pointerLevel, 'AGENT');
     }
+    // #4506: one live App-owned register row per installed Agent, not merely a non-empty register.
+    assert.deepEqual(await e2eRegisterGaps(db, id(`${org}:team`)), []);
+    assert.equal(await db.registerEntry.count({ where: { appId: id(`${org}:team`), deletedAt: null, installDefault: true } }), E2E_STOCK_ROLES.length);
     assert.equal(await db.appKey.count({ where: { appId: id(`${org}:team`) } }), 1);
     const specs = await db.node.findMany({ where: { memoryId: id(`${org}:specs`) } });
     assert.equal(specs.length, 2);
