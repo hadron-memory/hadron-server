@@ -35,6 +35,7 @@ describe('secret.use grant terms (#4000)', () => {
       ['binding-prefix', 'http://api.example.test/v1'], ['binding-prefix', 'https://u:p@api.example.test/v1'],
       ['binding-prefix', 'https://api.example.test/v1?q=1'], ['binding-prefix', 'https://api.example.test/v1%2fother'],
       ['binding-header', 'X-Bad\r\nInjected'], ['binding-header', '*'], ['binding-header', ['Authorization']],
+      ['binding-header', 'Host'], ['binding-header', 'X_Bad'], ['binding-header', 'x'.repeat(65)],
       ['secret', '*'], ['secret', [secretId]],
     ] as const) {
       expect(await refusal(grant({ ...values(), [key]: value }))).toBe('GRANT_VALUES_INVALID');
