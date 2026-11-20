@@ -12,6 +12,8 @@
 --                      the runtime derivation does not find it, a re-sync would have created a twin. #4583 makes the
 --                      lookups accept it.
 --   runtime_spelling   edge loc equals the RUNTIME's spelling (what runtime creation derives): found by the runtime, as before.
+--   migrated_suffixed  edge loc is the backfill's spelling plus the `:N` the backfill appended when two names between the
+--                      same endpoints sanitized to one atom (a literal `a-b` beside `a😀b`): found by the lookup too.
 --   neither            authored locs, `:2`-style disambiguated locs, moved edges: not derived from this name.
 --   twin_pairs         a migrated-spelling edge and a runtime-spelling edge with the same source, target and name:
 --                      the twins the divergence has already produced. #4583 does not merge them.
@@ -54,7 +56,11 @@ WITH divergent AS (
 SELECT count(*)                                                   AS divergent_edges,
        count(*) FILTER (WHERE d.loc = d.migrated_loc)             AS migrated_spelling,
        count(*) FILTER (WHERE d.loc = d.runtime_loc)              AS runtime_spelling,
-       count(*) FILTER (WHERE d.loc NOT IN (d.migrated_loc, d.runtime_loc)) AS neither,
+       count(*) FILTER (WHERE left(d.loc, length(d.migrated_loc) + 1) = d.migrated_loc || ':'
+                          AND substr(d.loc, length(d.migrated_loc) + 2) ~ '^[0-9]+$')       AS migrated_suffixed,
+       count(*) FILTER (WHERE d.loc NOT IN (d.migrated_loc, d.runtime_loc)
+                          AND NOT (left(d.loc, length(d.migrated_loc) + 1) = d.migrated_loc || ':'
+                                   AND substr(d.loc, length(d.migrated_loc) + 2) ~ '^[0-9]+$')) AS neither,
        count(*) FILTER (WHERE d.loc = d.migrated_loc AND EXISTS (
          SELECT 1 FROM divergent r
           WHERE r.id <> d.id AND r.memory_id = d.memory_id AND r.source_id = d.source_id

@@ -1193,6 +1193,32 @@ describe('syncGraphFromGithub', () => {
     expect(edges.map((e) => [e.id, e.loc])).toEqual([[created.id, 'source:a-b:target']]); // same edge, no twin, loc untouched
   });
 
+  it('#4583: a re-sync reaches a migrated edge whose loc the backfill suffixed (`:2`, beside an edge literally named `a-b`)', async () => {
+    const sourceId = generateId();
+    const targetId = generateId();
+    const root = join(mockSources, 'test-org', 'test/repo');
+    mkdirSync(root, { recursive: true });
+    const write = () => {
+      const source = buildNodeFrontmatter({ id: sourceId, name: 'Source', tags: [] }, [
+        { target: { id: targetId, loc: 'target' }, name: 'a😀b', description: '' },
+      ]);
+      writeFileSync(join(root, 'source.md'), `---\n${stringify(source, { lineWidth: 0 }).trim()}\n---\n`, 'utf-8');
+      const target = buildNodeFrontmatter({ id: targetId, name: 'Target', tags: [] });
+      writeFileSync(join(root, 'target.md'), `---\n${stringify(target, { lineWidth: 0 }).trim()}\n---\n`, 'utf-8');
+    };
+    write();
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    const emoji = await db.edge.findFirstOrThrow({ where: { sourceId, targetId, name: 'a😀b' } });
+    // The backfill's outcome for two names that sanitize to `a-b`: the literal one took the plain loc, the emoji one `:2`.
+    await db.edge.update({ where: { id: emoji.id }, data: { loc: 'source:a-b:target:2' } });
+    await db.edge.create({
+      data: { id: generateId(), memoryId: dbGraphId, sourceId, targetId, loc: 'source:a-b:target', name: 'a-b' },
+    });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    const emojiEdges = await db.edge.findMany({ where: { sourceId, targetId, name: 'a😀b' } });
+    expect(emojiEdges.map((e) => [e.id, e.loc])).toEqual([[emoji.id, 'source:a-b:target:2']]); // the same edge, no twin
+  });
+
   it('#4583: promoting a PendingEdge reaches the edge the historical migration wrote under the code-point spelling, not a twin', async () => {
     const { graph: sourceMemory } = await createDbOrgAndGraph(db, {
       orgName: 'foreign-nonbmp-org',

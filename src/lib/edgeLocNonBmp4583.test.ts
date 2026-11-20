@@ -185,6 +185,41 @@ describe('derivedEdgeLocForUpsert — the lookup seam (#4583)', () => {
     expect(await derivedEdgeLocForUpsert(db, args('a😀b'))).toBe('root:a--b:leaf');
   });
 
+  it('a migrated edge whose loc the backfill suffixed (`<base>:2`, two names sanitizing to one atom) is found', async () => {
+    // Migration lines 70-89: when two edges between the same endpoints sanitize to the same atom, the second gets
+    // `:2`. A literal `a-b` took `root:a-b:leaf`; the emoji edge, ranked after it, holds `root:a-b:leaf:2`.
+    const { args, edge } = await fixture();
+    await edge('root:a-b:leaf', 'a-b');
+    await edge('root:a-b:leaf:2', 'a😀b');
+    expect(await derivedEdgeLocForUpsert(db, args('a😀b'))).toBe('root:a-b:leaf:2');
+  });
+
+  it('suffix collision: the unsuffixed migrated loc wins over a suffixed one; the lowest suffix over a higher one', async () => {
+    const { args, edge } = await fixture();
+    await edge('root:a-b:leaf:3', 'a😀b');
+    await edge('root:a-b:leaf:2', 'a😀b');
+    expect(await derivedEdgeLocForUpsert(db, args('a😀b'))).toBe('root:a-b:leaf:2');
+    await edge('root:a-b:leaf', 'a😀b');
+    expect(await derivedEdgeLocForUpsert(db, args('a😀b'))).toBe('root:a-b:leaf');
+  });
+
+  it('a suffixed loc of a DIFFERENT edge is not taken: other name, or other target', async () => {
+    const { graph, args, edge } = await fixture();
+    const other = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'other', name: 'other' } });
+    await edge('root:a-b:leaf:2', 'a-b'); // another name
+    await edge('root:a-b:leaf:3', 'a😀b', other.id); // another target
+    expect(await derivedEdgeLocForUpsert(db, args('a😀b'))).toBe('root:a--b:leaf');
+  });
+
+  it('a non-numeric, deeper, or below-2 continuation of the migrated loc is not a suffix', async () => {
+    const { args, edge } = await fixture();
+    await edge('root:a-b:leaf:x', 'a😀b');
+    await edge('root:a-b:leaf:2:deeper', 'a😀b');
+    await edge('root:a-b:leaf:1', 'a😀b'); // the backfill numbers from 2: the first edge keeps the plain loc
+    await edge('root:a-b:leaf:0', 'a😀b');
+    expect(await derivedEdgeLocForUpsert(db, args('a😀b'))).toBe('root:a--b:leaf');
+  });
+
   it('a soft-deleted migrated edge is still found (the (loc, memory) unique is unfiltered, so the upsert must reach it)', async () => {
     const { args, edge } = await fixture();
     await edge('root:a-b:leaf', 'a😀b', undefined, new Date());
@@ -291,6 +326,9 @@ describe('the census script (#4583, read only)', () => {
     const [s6, t6] = await Promise.all(['s6', 't6'].map(node));
     await edge(s6, t6, 's6:a--b:t6', 'a😀b'); // runtime spelling whose migrated loc is taken by another edge ...
     await edge(s6, t6, 's6:a-b:t6', 'a-b'); // ... (named `a-b`, so not its twin)
+    const [s7, t7] = await Promise.all(['s7', 't7'].map(node));
+    await edge(s7, t7, 's7:a-b:t7', 'a-b');
+    await edge(s7, t7, 's7:a-b:t7:2', 'a😀b'); // the backfill's collision suffix
     await edge(s1, t2, 's1:plain:t2', 'plain'); // not divergent: ignored
     const before = await db.edge.count();
     const rows = await db.$transaction(async (tx) => {
@@ -299,9 +337,10 @@ describe('the census script (#4583, read only)', () => {
     });
     const r = Object.fromEntries(Object.entries(rows[0]).map(([k, v]) => [k, Number(v)]));
     expect(r).toEqual({
-      divergent_edges: 8,
+      divergent_edges: 9,
       migrated_spelling: 4, // s1, s3 (migrated half), s5, and the soft-deleted s2 edge
       runtime_spelling: 3, // s2, s3 (runtime half), s6
+      migrated_suffixed: 1, // s7
       neither: 1, // s4
       twin_pairs: 1, // s3
       runtime_loc_taken_by_another: 1, // s5
