@@ -2682,6 +2682,18 @@ export const typeDefs = `#graphql
     API
   }
 
+  "#4427 — an answer: an option, free text, or both. Never pre-selected; the caller names one."
+  input AnswerQuestionInput {
+    "One of the question\'s option keys. Optional when text is given."
+    optionKey: String
+    "Free text: alone, or a note beside the chosen option."
+    text: String
+    "Why this answer replaces an earlier one. Always optional; blank counts as not given."
+    reason: String
+    "Where the answer was given, as the client states it (a claim). Default API."
+    via: QuestionAnswerVia
+  }
+
   "#1641 — a reference: exactly one of an external ref (hadron-server#1640, team:6783), a node id or URN, or a spec citation."
   type QuestionRef {
     ref: String
@@ -2821,6 +2833,15 @@ export const typeDefs = `#graphql
     deciders: [CommentActorRef!]!
     "True when the caller is a decider, including through an account merged into theirs (#1715)."
     viewerIsDecider: Boolean!
+    """
+    #4427 — true when the caller may answer or take back an answer right now: one of the question\'s deciders, acting as
+    themselves (a person in a session bound to no worker or agent, no App key or run, no impersonation), still among the
+    log\'s deciders and able to write its memory, on a question that is not withdrawn, tampered or unverifiable
+    (hrn:node:hadronmemory.com:specs:cor:dmo:140:05). It is the capability to submit a new answer: it is false once the
+    answer history is full (the last entry is kept for taking an answer back), and it does not say that an answer stands to
+    take back (retractQuestionAnswer refuses QUESTION_NOT_ANSWERED otherwise).
+    """
+    viewerMayAnswer: Boolean!
     "Account merges the stored user ids follow: the record keeps the merged-away id (#1715)."
     identityMerges: [QuestionIdentityMerge!]!
     askedBy: QuestionActor!
@@ -13137,6 +13158,21 @@ export const typeDefs = `#graphql
     amendQuestion(ref: ID!, input: AmendQuestionInput!, expectedRevision: Int!, reason: String!): Question!
     "#1641 — withdraw a question (terminal; the code stays consumed): the asker or a decider, a decider once answered, whatever its state."
     withdrawQuestion(ref: ID!, reason: String!, expectedRevision: Int!): Question!
+    """
+    #4427 — answer a question, or answer it again. One of its deciders, acting as themselves: never a worker or agent
+    session, an App key, a run or an impersonated session (hrn:node:hadronmemory.com:specs:cor:dmo:140:05). Appends an answer
+    entry; earlier entries stay, and an answered, approved or signed question can always be answered again on the same node.
+    expectedRevision is required: the answer covers exactly the revision the decider saw (Question.revSeq). The identical
+    answer again with no reason writes nothing. Refusals: QUESTION_NOT_DECIDER, QUESTION_IMPERSONATION_REFUSED,
+    QUESTION_UNKNOWN_OPTION, QUESTION_WITHDRAWN, QUESTION_INVALID, QUESTION_NOT_FOUND, QUESTION_FORBIDDEN, QUESTION_LOG_NOT_FOUND,
+    NODE_WRITE_CONFLICT.
+    """
+    answerQuestion(ref: ID!, input: AnswerQuestionInput!, expectedRevision: Int!): Question!
+    """
+    #4427 — take the standing answer back: the question is OPEN again and the answer stays in its history. Same callers
+    and refusals as answerQuestion, plus QUESTION_NOT_ANSWERED when no answer stands.
+    """
+    retractQuestionAnswer(ref: ID!, expectedRevision: Int!, reason: String, via: QuestionAnswerVia): Question!
     "#1641 — a platform admin hard-deletes a question that was never answered (or one stranded in the pre-#4426 format), recorded on its log (QUESTION_ANSWERED otherwise). The code stays consumed."
     purgeUnansweredQuestion(ref: ID!, reason: String!): Boolean!
 
