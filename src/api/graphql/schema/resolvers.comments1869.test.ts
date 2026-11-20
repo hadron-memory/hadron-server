@@ -30,7 +30,7 @@ let orgId: string;
 const as = (userId = admin.id): Context => ({ db, userId, roles: [] });
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
 
-const memoryNamed = (name: string) => M.createMemory(null, { orgId, name }, as()) as Promise<{ id: string }>;
+const memoryNamed = (name: string) => M.createMemory(null, { orgRef: orgId, name }, as()) as Promise<{ id: string }>;
 const node = (memoryId: string, loc: string) => db.node.create({
   data: { id: generateId(), memoryId, loc, name: `Title ${loc}`, abstract: `Abstract ${loc}`, content: `Body ${loc}` },
 });

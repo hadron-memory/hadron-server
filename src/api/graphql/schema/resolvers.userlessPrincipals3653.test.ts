@@ -128,7 +128,7 @@ describe('chat serve', () => {
   it.each([['its session user', () => ownerId], ['an anonymous session', () => null]])(
     'serves a session-bound App key with %s through startChat', async (_label, sessionUser) => {
       await seedConversation();
-      const started = await mutation.startChat({}, { agentId, scope: 'private' }, await keyInSession(sessionUser()));
+      const started = await mutation.startChat({}, { agentRef: agentId, scope: 'private' }, await keyInSession(sessionUser()));
       expect(started.systemMessage).toContain(SENTINEL);
     },
   );
@@ -139,7 +139,7 @@ describe('chat serve', () => {
     await seedConversation();
     const ordinaryAppId = (await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Ordinary', urn: 'publisher3653.test:ordinary' } })).id;
     await db.appAgent.create({ data: { appId: ordinaryAppId, agentId } });
-    const answer = (ctx: Context) => mutation.startChat({}, { agentId, scope: 'private' }, ctx).catch((error: Error) => error.message);
+    const answer = (ctx: Context) => mutation.startChat({}, { agentRef: agentId, scope: 'private' }, ctx).catch((error: Error) => error.message);
     expect(await answer(appKey(ordinaryAppId))).toBe('No target memory available for this chat');
     expect(await answer(appKey())).toBe('No target memory available for this chat');
   });
@@ -155,18 +155,18 @@ describe('chat serve', () => {
       await seedConversation();
       await lapse();
       expect(await chatCarrierApps(appKey(), agentId)).toEqual([]);
-      await expect(mutation.startChat({}, { agentId, scope: 'private' }, await keyInSession(ownerId))).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+      await expect(mutation.startChat({}, { agentRef: agentId, scope: 'private' }, await keyInSession(ownerId))).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
       await expect(serveChatPrompt(db, await agentRow(), appId, null, appKey())).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
     },
   );
 
   it('gives another App key no carrier', async () => {
     expect(await chatCarrierApps(appKey(otherAppId), agentId)).toEqual([]);
-    await expect(mutation.startChat({}, { agentId, scope: 'private' }, appKey(otherAppId))).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+    await expect(mutation.startChat({}, { agentRef: agentId, scope: 'private' }, appKey(otherAppId))).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
   });
 
   it('keeps a person outside the organization refused, as built', async () => {
-    await expect(mutation.startChat({}, { agentId, scope: 'private' }, { ...person(outsiderId), appId })).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+    await expect(mutation.startChat({}, { agentRef: agentId, scope: 'private' }, { ...person(outsiderId), appId })).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
     await expect(serveChatPrompt(db, await agentRow(), appId, null, { ...person(outsiderId), appId }))
       .rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
   });

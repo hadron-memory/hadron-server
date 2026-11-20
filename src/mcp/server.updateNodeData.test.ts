@@ -57,7 +57,7 @@ beforeEach(async () => {
     data: { githubId: 9702, githubUsername: 'und-mcp-viewer', roles: [] },
   });
   const ctx: Context = { db, roles: ['ADMIN'], userId: admin.id };
-  memory = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'und-mcp-mem' }, ctx);
+  memory = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'und-mcp-mem' }, ctx);
 });
 
 describe('hadron_update_node_data', () => {

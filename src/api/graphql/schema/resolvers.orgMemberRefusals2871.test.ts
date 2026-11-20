@@ -42,41 +42,41 @@ beforeEach(async () => {
 describe('#2871 org-member refusals are typed', () => {
   it('adding a live member is CONFLICT and changes nothing', async () => {
     const before = await snapshot();
-    expect(await refusal(() => M.addOrgMember(null, { orgId, userId: ownerId, role: 'READER' }, ctx(ownerId))))
+    expect(await refusal(() => M.addOrgMember(null, { orgRef: orgId, userRef: ownerId, role: 'READER' }, ctx(ownerId))))
       .toMatchObject({ code: 'CONFLICT', message: 'User is already a member of this organization' });
     expect(await snapshot()).toEqual(before);
   });
 
   it('demoting the last live owner is CONFLICT and changes nothing', async () => {
     const before = await snapshot();
-    expect(await refusal(() => M.updateOrgMember(null, { orgId, userId: ownerId, role: 'ADMIN' }, ctx(ownerId))))
+    expect(await refusal(() => M.updateOrgMember(null, { orgRef: orgId, userRef: ownerId, role: 'ADMIN' }, ctx(ownerId))))
       .toMatchObject({ code: 'CONFLICT', message: 'Cannot demote the last owner of an organization' });
     expect(await snapshot()).toEqual(before);
   });
 
   it('removing the last live owner is CONFLICT and changes nothing', async () => {
     const before = await snapshot();
-    expect(await refusal(() => M.removeOrgMember(null, { orgId, userId: ownerId }, ctx(ownerId))))
+    expect(await refusal(() => M.removeOrgMember(null, { orgRef: orgId, userRef: ownerId }, ctx(ownerId))))
       .toMatchObject({ code: 'CONFLICT', message: 'Cannot remove the last owner of an organization' });
     expect(await snapshot()).toEqual(before);
   });
 
   it('updating a never-member is NOT_FOUND', async () => {
     const before = await snapshot();
-    expect(await refusal(() => M.updateOrgMember(null, { orgId, userId: strangerId, role: 'READER' }, ctx(ownerId))))
+    expect(await refusal(() => M.updateOrgMember(null, { orgRef: orgId, userRef: strangerId, role: 'READER' }, ctx(ownerId))))
       .toMatchObject({ code: 'NOT_FOUND', message: 'User is not a member of this organization' });
     expect(await snapshot()).toEqual(before);
   });
 
   it('removing a never-member is NOT_FOUND and changes nothing', async () => {
     const before = await snapshot();
-    expect(await refusal(() => M.removeOrgMember(null, { orgId, userId: strangerId }, ctx(ownerId))))
+    expect(await refusal(() => M.removeOrgMember(null, { orgRef: orgId, userRef: strangerId }, ctx(ownerId))))
       .toMatchObject({ code: 'NOT_FOUND', message: 'User is not a member of this organization' });
     expect(await snapshot()).toEqual(before);
   });
 
   it('through the response formatter a refusal keeps its code and message', async () => {
-    const { error } = await refusal(() => M.removeOrgMember(null, { orgId, userId: strangerId }, ctx(ownerId)));
+    const { error } = await refusal(() => M.removeOrgMember(null, { orgRef: orgId, userRef: strangerId }, ctx(ownerId)));
     const formatted = formatGraphQLError(
       { message: error.message, extensions: { ...error.extensions }, path: ['removeOrgMember'] }, error,
     );
@@ -125,7 +125,7 @@ describe('#2871 org-member refusals are typed', () => {
     await locked;
     let outcome: Promise<{ code?: string; message: string }> | undefined;
     try {
-      outcome = refusal(() => M[mutation](null, { orgId, userId, role: 'ADMIN' }, ctx(adminId)));
+      outcome = refusal(() => M[mutation](null, { orgRef: orgId, userRef: userId, role: 'ADMIN' }, ctx(adminId)));
       await waitForLockWaiters(db, 1);
       release();
       await revoker;
@@ -174,7 +174,7 @@ describe('#2871 org-member refusals are typed', () => {
       },
     });
     const result = await refusal(() => M[mutation](
-      null, { orgId, userRef: userId, role: 'ADMIN' }, { ...ctx(adminId), db: racing } as Context,
+      null, { orgRef: orgId, userRef: userId, role: 'ADMIN' }, { ...ctx(adminId), db: racing } as Context,
     ));
     expect(revoked).toBe(true);
     expect(result.code).toBe('FORBIDDEN');
@@ -183,18 +183,18 @@ describe('#2871 org-member refusals are typed', () => {
   });
 
   it('controls: add, change role, remove, and a repeat removal of a revoked row all succeed', async () => {
-    expect((await M.addOrgMember(null, { orgId, userId: strangerId, role: 'READER' }, ctx(ownerId))).role).toBe('READER');
-    expect((await M.updateOrgMember(null, { orgId, userId: strangerId, role: 'CONTRIBUTOR' }, ctx(ownerId))).role)
+    expect((await M.addOrgMember(null, { orgRef: orgId, userRef: strangerId, role: 'READER' }, ctx(ownerId))).role).toBe('READER');
+    expect((await M.updateOrgMember(null, { orgRef: orgId, userRef: strangerId, role: 'CONTRIBUTOR' }, ctx(ownerId))).role)
       .toBe('CONTRIBUTOR');
-    expect(await M.removeOrgMember(null, { orgId, userId: strangerId }, ctx(ownerId))).toBe(true);
-    expect(await M.removeOrgMember(null, { orgId, userId: strangerId }, ctx(ownerId))).toBe(true);
+    expect(await M.removeOrgMember(null, { orgRef: orgId, userRef: strangerId }, ctx(ownerId))).toBe(true);
+    expect(await M.removeOrgMember(null, { orgRef: orgId, userRef: strangerId }, ctx(ownerId))).toBe(true);
     expect(await db.orgMember.count({ where: { organizationId: orgId, deletedAt: null } })).toBe(1);
   });
 
   it('control: the revoked row stays distinct from a never-member (update refuses it as NOT_FOUND)', async () => {
-    await M.addOrgMember(null, { orgId, userId: strangerId, role: 'READER' }, ctx(ownerId));
-    await M.removeOrgMember(null, { orgId, userId: strangerId }, ctx(ownerId));
-    expect((await refusal(() => M.updateOrgMember(null, { orgId, userId: strangerId, role: 'ADMIN' }, ctx(ownerId)))).code)
+    await M.addOrgMember(null, { orgRef: orgId, userRef: strangerId, role: 'READER' }, ctx(ownerId));
+    await M.removeOrgMember(null, { orgRef: orgId, userRef: strangerId }, ctx(ownerId));
+    expect((await refusal(() => M.updateOrgMember(null, { orgRef: orgId, userRef: strangerId, role: 'ADMIN' }, ctx(ownerId)))).code)
       .toBe('NOT_FOUND');
   });
 });

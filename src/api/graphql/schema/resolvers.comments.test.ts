@@ -55,7 +55,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: writer.id, role: 'CONTRIBUTOR' },
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'discussion' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'discussion' }, as());
 });
 
 describe('createComment (cor:dmo:110:01–05)', () => {
@@ -350,7 +350,7 @@ describe('database invariants (cor:dmo:110:01/04)', () => {
   it('a comment cannot be moved away from its target\'s memory', async () => {
     const target = await node('db:6');
     const c = await comment(target.id);
-    const elsewhere = await resolvers.Mutation.createMemory(null, { orgId, name: 'elsewhere' }, as());
+    const elsewhere = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'elsewhere' }, as());
     await expect(db.node.update({ where: { id: c.id }, data: { memoryId: elsewhere.id } })).rejects.toThrow(/COMMENT_INVARIANT/);
   });
 

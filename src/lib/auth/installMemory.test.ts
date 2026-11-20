@@ -170,7 +170,7 @@ describe('#2044 install memory — after the App is soft-deleted (ruling A, R45)
     ['stranger', false], ['revokedAdmin', false], ['foreignAdmin', false], ['otherMember', false]] as const)(
     'whoever manages the App deletes it by hand; everyone else gets the same not-found (%s)', async (who, ok) => {
       const f = await deleted();
-      const run = () => (resolvers.Mutation as any).deleteMemory({}, { id: f.install.id }, gql(f[who].id));
+      const run = () => (resolvers.Mutation as any).deleteMemory({}, { ref: f.install.id }, gql(f[who].id));
       if (ok) {
         await expect(run(), who).resolves.toBe(true);
         expect((await db.memory.findUniqueOrThrow({ where: { id: f.install.id } })).deletedAt, who).not.toBeNull();
@@ -184,11 +184,11 @@ describe('#2044 install memory — after the App is soft-deleted (ruling A, R45)
 
   it('a live-App manager deletes it too, and an Agent system memory is still undeletable by hand', async () => {
     const f = await fixture();
-    await expect((resolvers.Mutation as any).deleteMemory({}, { id: f.install.id }, gql(f.admin.id))).resolves.toBe(true);
+    await expect((resolvers.Mutation as any).deleteMemory({}, { ref: f.install.id }, gql(f.admin.id))).resolves.toBe(true);
     const own = await db.memory.create({
       data: { id: generateId(), class: 'system', name: 'brain', urn: `${orgId}:brain`, organizationId: orgId },
     });
-    await expect((resolvers.Mutation as any).deleteMemory({}, { id: own.id }, gql(f.admin.id)))
+    await expect((resolvers.Mutation as any).deleteMemory({}, { ref: own.id }, gql(f.admin.id)))
       .rejects.toThrow(/system memory/i);
   });
 
@@ -222,8 +222,8 @@ describe('#2044 install memory — user-owned App', () => {
     expect((await getMemoryAccess(db, auth(owner.id))).has(install.id)).toBe(false);
     expect((await getAccessibleMemoryIds(gql(owner.id), install.id)) ?? []).not.toContain(install.id);
     expect(await canReadMemoryRecord(gql(owner.id), install)).toBe(true);
-    await expect((resolvers.Mutation as any).deleteMemory({}, { id: install.id }, gql(member.id))).rejects.toThrow();
-    await expect((resolvers.Mutation as any).deleteMemory({}, { id: install.id }, gql(owner.id))).resolves.toBe(true);
+    await expect((resolvers.Mutation as any).deleteMemory({}, { ref: install.id }, gql(member.id))).rejects.toThrow();
+    await expect((resolvers.Mutation as any).deleteMemory({}, { ref: install.id }, gql(owner.id))).resolves.toBe(true);
   });
 });
 

@@ -47,7 +47,7 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { githubId: 283601, githubUsername: 'chat-search-admin', handle: 'chat-search-admin', roles: [] } });
   outsider = await db.user.create({ data: { githubId: 283602, githubUsername: 'chat-search-outsider', handle: 'chat-search-outsider', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'chatsearch' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'chatsearch' }, as());
   await db.memory.update({ where: { id: memory.id }, data: { vectorIndexEnabled: true } });
 
   // Every node mentions "harbor" so keyword, regex and vector all match it.

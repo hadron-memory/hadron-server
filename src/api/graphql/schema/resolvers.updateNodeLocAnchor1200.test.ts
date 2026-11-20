@@ -85,7 +85,7 @@ beforeEach(async () => {
   });
   adminId = admin.id;
   await db.orgMember.create({ data: { organizationId: orgId, userId: adminId, role: 'ADMIN' } });
-  memoryId = (await resolvers.Mutation.createMemory({}, { orgId, name: 'anchormem' }, ctx())).id;
+  memoryId = (await resolvers.Mutation.createMemory({}, { orgRef: orgId, name: 'anchormem' }, ctx())).id;
 });
 
 

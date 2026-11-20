@@ -45,7 +45,7 @@ beforeEach(async () => {
   outsider = await db.user.create({ data: { githubId: 204102, githubUsername: 'rd-out', handle: 'rd-out', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: reader.id, role: 'ADMIN' } });
   const gqlAdmin: Context = { db, userId: reader.id, roles: [] };
-  const m = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'rd' }, gqlAdmin);
+  const m = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'rd' }, gqlAdmin);
   memoryId = m.id; memoryUrn = m.urn;
   const fm = await db.memory.create({
     data: { name: 'Foreign', urn: 'other.example:foreign', organizationId: other.id, class: 'knowledge', visibility: 'ORGANIZATION' },
