@@ -114,6 +114,8 @@ describe('#4397 roster liveness: one probe per open session', () => {
 
   it('the buffers bound is not vacuous: the every-row shape (main) reads far more under the same skew', () => {
     const { fix, every, pg } = heavyRun;
+    // DIAGNOSTIC ONLY (#4627 blind F1): never merged; prints the shard's real readings.
+    for (let i = 0; i < 3; i++) console.log(`DIAG4627 probe=${fix.buffers} every=${every.buffers} pg=${pg}`);
     expect(everyRowFarLarger(fix.buffers, every.buffers), everyRowBoundMessage(fix.buffers, every.buffers, pg)).toBe(true);
   });
 
