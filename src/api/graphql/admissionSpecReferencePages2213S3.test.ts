@@ -45,7 +45,7 @@ beforeEach(async () => {
   const user = await db.user.create({ data: { githubId: 322211, githubUsername: 'adm3222', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
   const ctx = { db, userId: user.id, roles: [] };
-  const draft = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft', draftCorpus: true }, ctx);
+  const draft = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs-draft', draftCorpus: true }, ctx);
   draftId = draft.id;
   const cite = (loc: string) => Array.from({ length: 241 }, () => `hrn:node:${draft.urn}:${loc}`).join(' ');
   for (const loc of ['pas:010', 'pas:020']) {

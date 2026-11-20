@@ -191,7 +191,7 @@ describe('US1 Step (c): ensureAppMember adds Mike as a cook (FR-004)', () => {
 
     const member = await resolvers.Mutation.ensureAppMember(
       {},
-      { appId: app.id, userId: mike.id, role: 'cook' },
+      { appRef: app.id, userRef: mike.id, role: 'cook' },
       adminCtx(mike.id),
     );
     expect(member.role).toBe('cook');
@@ -202,7 +202,7 @@ describe('US1 Step (c): ensureAppMember adds Mike as a cook (FR-004)', () => {
     await expect(
       resolvers.Mutation.ensureAppMember(
         {},
-        { appId: app.id, userId: dana.id, role: 'principal' },
+        { appRef: app.id, userRef: dana.id, role: 'principal' },
         adminCtx(mike.id),
       ),
     ).rejects.toThrow(/Role "principal"/);
@@ -224,7 +224,7 @@ describe('US1 Step (d): App.aiProvider overrides Agent default for that App\'s s
     await resolvers.Mutation.updateAgentAIConfig(
       {},
       {
-        agentId: mealplan.id,
+        agentRef: mealplan.id,
         provider: 'openai',
         model: 'gpt-4o',
         apiKey: 'sk-default',

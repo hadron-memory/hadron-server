@@ -277,7 +277,7 @@ describe('createAgent(systemMemoryId) is serialized with a revocation of the cal
                 if (k === 'update') {
                   return async (a: any) => {
                     if (a.where?.id === target.id && a.data?.class === 'system' && !removal) {
-                      removal = M.removeOrgMember({}, { orgId: org.id, userId: admin.id }, userCtx(ownerAdmin.id))
+                      removal = M.removeOrgMember({}, { orgRef: org.id, userRef: admin.id }, userCtx(ownerAdmin.id))
                         .finally(() => { removalSettled = true; });
                       try {
                         await waitForLockWaitersOfType(db, 'advisory', 1, 2_000);
@@ -528,7 +528,7 @@ describe('updateAgent first attach is serialized with a revocation of the caller
                 if (k === 'update') {
                   return async (a: any) => {
                     if (a.where?.id === target.id && a.data?.class === 'system' && !removal) {
-                      removal = M.removeOrgMember({}, { orgId: org.id, userId: admin.id }, userCtx(ownerAdmin.id));
+                      removal = M.removeOrgMember({}, { orgRef: org.id, userRef: admin.id }, userCtx(ownerAdmin.id));
                       try {
                         await waitForLockWaitersOfType(db, 'advisory', 1, 2_000);
                         blockedOnAnchor = true;

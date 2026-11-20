@@ -63,7 +63,7 @@ describe('#1714: self-join is closed by default', () => {
     const policy = (await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).installationPolicy;
     expect(policy).toMatchObject({ memberRoles: ['owner'] });
     for (const ref of [app.id, app.urn]) {
-      await expect(M.joinApp(null, { appId: ref }, ctxFor(stranger.id)))
+      await expect(M.joinApp(null, { appRef: ref }, ctxFor(stranger.id)))
         .rejects.toMatchObject({ extensions: { code: 'SelfJoinNotAllowedError' } });
     }
     expect(await member(stranger.id)).toBeNull();
@@ -77,7 +77,7 @@ describe('#1714: self-join is closed by default', () => {
     ['has no member roles to match', { maxMembers: 'unlimited', memberRoles: [], selfJoinRole: 'member' }],
   ])('refuses when selfJoinRole %s', async (_label, policy) => {
     await setPolicy(policy);
-    await expect(M.joinApp(null, { appId: app.id }, ctxFor(stranger.id)))
+    await expect(M.joinApp(null, { appRef: app.id }, ctxFor(stranger.id)))
       .rejects.toMatchObject({ extensions: { code: 'SelfJoinNotAllowedError' } });
     expect(await member(stranger.id)).toBeNull();
   });
@@ -85,19 +85,19 @@ describe('#1714: self-join is closed by default', () => {
   it('refuses before capacity: a full App answers the gate, not MaxMembersExceededError', async () => {
     await setPolicy({ maxMembers: 1, memberRoles: ['member'] });
     await db.appMember.create({ data: { appId: app.id, userId: orgAdmin.id, role: 'member' } });
-    await expect(M.joinApp(null, { appId: app.id }, ctxFor(stranger.id)))
+    await expect(M.joinApp(null, { appRef: app.id }, ctxFor(stranger.id)))
       .rejects.toMatchObject({ extensions: { code: 'SelfJoinNotAllowedError' } });
   });
 
   it('refuses an App with no installed Agent with the gate, not OrphanAppError', async () => {
     await db.appAgent.deleteMany({ where: { appId: app.id } });
-    await expect(M.joinApp(null, { appId: app.id }, ctxFor(stranger.id)))
+    await expect(M.joinApp(null, { appRef: app.id }, ctxFor(stranger.id)))
       .rejects.toMatchObject({ extensions: { code: 'SelfJoinNotAllowedError' } });
   });
 
   it('an existing member re-joining a closed App is still a no-op that returns their row', async () => {
     await db.appMember.create({ data: { appId: app.id, userId: stranger.id, role: 'owner' } });
-    const out = await M.joinApp(null, { appId: app.id }, ctxFor(stranger.id));
+    const out = await M.joinApp(null, { appRef: app.id }, ctxFor(stranger.id));
     expect(out.appMember.role).toBe('owner');
   });
 });
@@ -108,22 +108,22 @@ describe('#1714: an opted-in App admits self-join at its declared role, and only
   });
 
   it('a stranger joins at selfJoinRole, not memberRoles[0]', async () => {
-    const out = await M.joinApp(null, { appId: app.id }, ctxFor(stranger.id));
+    const out = await M.joinApp(null, { appRef: app.id }, ctxFor(stranger.id));
     expect(out.appMember.role).toBe('member');
     expect((await member(stranger.id))?.role).toBe('member');
   });
 
   it('a self-joiner cannot self-grant owner, by re-joining or through ensureAppMember', async () => {
-    await M.joinApp(null, { appId: app.id }, ctxFor(stranger.id));
+    await M.joinApp(null, { appRef: app.id }, ctxFor(stranger.id));
     await expect(M.ensureAppMember(null, { appRef: app.id, userRef: stranger.id, role: 'owner' }, ctxFor(stranger.id)))
       .rejects.toThrow(/Forbidden/);
     await setPolicy({ maxMembers: 'unlimited', memberRoles: ['owner', 'member'], selfJoinRole: 'owner' });
-    await M.joinApp(null, { appId: app.id }, ctxFor(stranger.id));
+    await M.joinApp(null, { appRef: app.id }, ctxFor(stranger.id));
     expect((await member(stranger.id))?.role).toBe('member');
   });
 
   it('an org ADMIN manager CAN promote the self-joiner to owner', async () => {
-    await M.joinApp(null, { appId: app.id }, ctxFor(stranger.id));
+    await M.joinApp(null, { appRef: app.id }, ctxFor(stranger.id));
     const promoted = await M.ensureAppMember(null, { appRef: app.id, userRef: stranger.id, role: 'owner' }, ctxFor(orgAdmin.id));
     expect(promoted.role).toBe('owner');
     expect((await member(stranger.id))?.role).toBe('owner');
@@ -135,7 +135,7 @@ describe('#1714: an opted-in App admits self-join at its declared role, and only
       id: generateId(), ownerUserId: owner.id, urn: `u1714-owner:app`, name: 'user app',
       appAgents: { create: { agentId: agent.id } },
     } });
-    await M.joinApp(null, { appId: userApp.id }, ctxFor(stranger.id));
+    await M.joinApp(null, { appRef: userApp.id }, ctxFor(stranger.id));
     await expect(M.ensureAppMember(null, { appRef: userApp.id, userRef: stranger.id, role: 'owner' }, ctxFor(stranger.id)))
       .rejects.toThrow(/Forbidden/);
     const promoted = await M.ensureAppMember(null, { appRef: userApp.id, userRef: stranger.id, role: 'owner' }, ctxFor(owner.id));
@@ -150,7 +150,7 @@ describe('#1714: an opted-in App admits self-join at its declared role, and only
 describe('#1718: who manages members (callerManagesAppMembers)', () => {
   beforeEach(async () => {
     await setPolicy({ maxMembers: 'unlimited', memberRoles: ['owner', 'member'], selfJoinRole: 'member' });
-    await M.joinApp(null, { appId: app.id }, ctxFor(stranger.id));
+    await M.joinApp(null, { appRef: app.id }, ctxFor(stranger.id));
   });
 
   it('an owner-role AppMember CAN promote to owner and add a new member', async () => {
@@ -187,7 +187,7 @@ describe('#1718: who manages members (callerManagesAppMembers)', () => {
     ]) {
       await setPolicy(policy);
       const joiner = await mkUser();
-      await M.joinApp(null, { appId: app.id }, ctxFor(joiner.id)).catch(() => undefined);
+      await M.joinApp(null, { appRef: app.id }, ctxFor(joiner.id)).catch(() => undefined);
       expect((await member(joiner.id))?.role ?? null).not.toBe('owner');
       const victim = await mkUser();
       await expect(M.ensureAppMember(null, { appRef: app.id, userRef: victim.id, role: 'owner' }, ctxFor(joiner.id)))

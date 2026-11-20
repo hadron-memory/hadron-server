@@ -21,7 +21,7 @@ afterAll(() => other.$disconnect());
 afterEach(() => sessionKeyCache.clear());
 let userId: string, agentId: string, systemId: string, ids: Record<string, string>;
 const ctx = (client = db): Context => ({ db: client, roles: ['READER'], userId });
-const start = () => resolvers.Mutation.startChat({}, { agentId, conversationName: 'main' }, ctx());
+const start = () => resolvers.Mutation.startChat({}, { agentRef: agentId, conversationName: 'main' }, ctx());
 const respond = (chatId: string, fields: Record<string, unknown> = {}, client = db) => resolvers.Mutation.processChatResponse({}, { chatId, toolResponse: { message: 'reply', onTrack: true, ...fields } }, ctx(client));
 async function state(chatId: string) {
   const root = await chatNodeByLocOrThrow(db, chatId);
