@@ -1,4 +1,16 @@
 import { assertSecretFree } from './sampler.mjs';
+
+export const UNSUPPORTED_NODE = 'load.mjs needs Node 22.18+ or 24.2+ (this Node has no import.meta.main); refusing to load';
+/**
+ * Bruce's ruling on #4608 (chat #125985): on a Node without import.meta.main, a launch cannot be told from an import, so
+ * BOTH refuse, loudly and the same way. The guard runs once, at module load, and throws: a direct run exits non-zero with
+ * this message, and an import rejects with it (run.sh's record check turns that into "could not run the load record
+ * check"). On every declared runtime (.nvmrc v22.22.0, the e2e image node:22.22.0, CI node 22) it does nothing.
+ */
+export function requireImportMetaMain(nodeMain) {
+  if (typeof nodeMain !== 'boolean') throw new Error(UNSUPPORTED_NODE);
+}
+requireImportMetaMain(import.meta.main);   // first, before anything else runs
 // Load driver for #2589. One principal (HADRON_DIAG_KEY from the env, never printed).
 // Workloads: churn (W1/W2: initialize with no Mcp-Session-Id, never closed), closed (C1: DELETE after),
 // idle (C2), held (C3: N sessions held open). Output is counts only.
@@ -101,26 +113,12 @@ export function workloadValid(workload, c) {
  * the e2e image is 22.22). It is true for a direct, symlinked, spaced or --preserve-symlinks-main launch, and false for
  * any import, whatever argv[1] holds (#4608 BLIND F1). There is no argv[1] fallback: argv[1] cannot tell
  * `node load.mjs` from `node -e 'import("load.mjs")' load.mjs` (#4608 BLIND delta). On a Node without import.meta.main
- * the CLI does not run, prints no record and says so with a non-zero exit (flagUnsupportedRuntime), and run.sh refuses
- * the run (no positive load record), so it never passes.
+ * this module refuses to load at all, for a launch and an import alike (the guard at the top), so it never passes.
  */
 export function isMainModule(nodeMain) {
   return nodeMain === true;
 }
 
-export const UNSUPPORTED_NODE = 'load.mjs: this Node has no import.meta.main (needs Node 22.18+ or 24.2+); the load driver did not run';
-/**
- * #4608 BLIND delta P3: on a Node without import.meta.main a direct launch cannot be told from an import, so the driver
- * does not run. That must not look like success: the runtime is named on stderr and the exit code is non-zero. It sets
- * process.exitCode and never calls process.exit, so it has no side effect on an importer that exits explicitly (the
- * runner's record check does) and none at all on a supported Node.
- */
-export function flagUnsupportedRuntime(nodeMain, proc = process) {
-  if (typeof nodeMain === 'boolean') return false;
-  proc.stderr.write(`${UNSUPPORTED_NODE}\n`);
-  proc.exitCode = 2;
-  return true;
-}
 
 const COUNT_KEYS = ['ok', 'capRefused', 'other', 'closeOk', 'closeFailed', 'missingSession'];
 /**
@@ -140,7 +138,6 @@ export function loadRecordOk(text, workload) {
   return workloadValid(workload, r);
 }
 
-flagUnsupportedRuntime(import.meta.main);
 if (isMainModule(import.meta.main)) {
   const [base, workload, durS] = process.argv.slice(2);
   const key = process.env.HADRON_DIAG_KEY;
