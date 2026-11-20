@@ -9,6 +9,11 @@
  * (hrn:node:hadronmemory.com:specs:cor:aut:040:08). Read the rest of this header as the design of the retained machinery,
  * not as live sign-in behavior.
  *
+ * Still mounted, with no producer of pending rows (#4359): while the switch is on the routes answer, but nothing sends a
+ * browser here and no pending row exists unless a test or the add-a-passkey slice begins one. Kept mounted deliberately (the
+ * #1897 suites drive them over real HTTP); unmounting until that slice lands is a runtime change for that slice's tracker.
+ * Decision record: hrn:node:hadronmemory.com:specs:cor:aut:030:03 (Holger, 2026-11-17).
+ *
  * Mounted only when `signingSurfacePolicy().registration` is on (#1895); while off nothing is mounted, so the
  * paths are ordinary 404s with no switch oracle. {@link beginPasskeySignIn} creates the pending row and redirects
  * here; nothing is published until `complete` succeeds.

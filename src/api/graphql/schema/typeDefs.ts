@@ -10654,6 +10654,14 @@ export const typeDefs = `#graphql
     'ref' accepts the entity's ID or URN.
     """
     agent(ref: ID!): Agent
+
+    """
+    An Agent's revisions, newest first, with the slot limit, the highest slot used and the saves left (#4488).
+    Read by whoever may restore a revision: the Agent's manager.
+
+    Accepts the entity's ID or URN.
+    """
+    agentRevisions(agentRef: ID!): AgentRevisionList!
     """
     #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15) - an Agent's tasks, across its base chain:
     every runnable node in its effective system memory, and every task the
@@ -12828,8 +12836,24 @@ export const typeDefs = `#graphql
 
     Identical to updateNode otherwise, selectors included ('id' XOR 'memoryId' +
     'loc'); it never creates and never moves.
+
+    #1291 — 'mergeExports: true' makes the WHOLE 'input.properties' bag a PATCH
+    (not only 'exports') instead of a replacement: named top-level keys are replaced whole, except 'exports', which
+    merges per host and per field ('null' removes a host); unnamed keys stay.
+    It is the merge 'updateNodeProperties' applies, run under the node's lock on
+    the row read after it, so two concurrent patches to different hosts both
+    land. The gate, task and schema validation judge the MERGED result;
+    'expectedRevision' still applies; who may write is unchanged. 'properties'
+    must then be an object (anything else is BAD_USER_INPUT). Omit or pass false
+    for today's whole-bag replace. Only this door has it.
     """
-    updateTaskNode(input: UpdateNodeInput!): Node!
+    updateTaskNode(
+      input: UpdateNodeInput!
+      """
+      Treat the whole 'input.properties' as a patch (unnamed keys kept; 'exports' merged per host and field) instead of replacing the bag. Default false.
+      """
+      mergeExports: Boolean
+    ): Node!
 
     """
     Update an existing node. Identify it by 'id' (PK or fully-qualified node
@@ -14848,6 +14872,16 @@ export const typeDefs = `#graphql
     """
     restoreRevision(agentRef: ID!, revisionLoc: String!): RevisionResult!
 
+    """
+    Delete one of an Agent's revisions by loc (#4488). Same gate as restoreRevision: the Agent's manager.
+    Refuses, before any write, the published (pinned) revision (REVISION_PUBLISHED) and the Agent's only
+    revision (REVISION_ONLY). A deleted revision leaves the list and can no longer be restored; its slot
+    number is not reused, so a delete does not free a slot (see agentRevisions).
+
+    Accepts the entity's ID or URN.
+    """
+    deleteAgentRevision(agentRef: ID!, revisionLoc: String!): RevisionResult!
+
     # Editor lock (org ADMIN)
     """
     Acquire (or renew) the editor lock for an Agent's system memory.
@@ -16116,6 +16150,27 @@ export const typeDefs = `#graphql
     routingSkipped: Boolean!
     onTrack: Boolean!
     offTrackReason: String
+  }
+
+  "One revision in an Agent's list. #4488"
+  type AgentRevision {
+    revisionLoc: String!
+    label: String!
+    "True for the revision the Agent is pinned to (publishRevision)."
+    published: Boolean!
+    description: String
+    createdAt: DateTime!
+  }
+
+  """
+  An Agent's revisions, newest first, with the slot facts. Slot numbers are never reused: the next save takes
+  1 + the highest ever used, deleted revisions included, so a delete does not raise slotsRemaining. #4488
+  """
+  type AgentRevisionList {
+    revisions: [AgentRevision!]!
+    slotLimit: Float!
+    highestSlotUsed: Float!
+    slotsRemaining: Float!
   }
 
   type RevisionResult {
