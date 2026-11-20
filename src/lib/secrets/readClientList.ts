@@ -15,6 +15,16 @@ async function currentPerson(ctx: Context): Promise<string | null> {
   return (await ctx.db.user.findFirst({ where: { id: ctx.userId, deletedAt: null }, select: { id: true } }))?.id ?? null;
 }
 
+/**
+ * The state of a client that has no stored end: null while live, else the grant's own cause (revoked, pending, spent, expired,
+ * not started), the same order the reveal door answers in. ISSUER_GONE names only a grant nothing else has ended.
+ */
+function endStateOf(r: Parameters<typeof deadGrantState>[0] & { live: boolean; now: Date; issuerUserId: string | null }): string | null {
+  if (r.live) return null;
+  const state = deadGrantState(r, r.now);
+  return state === 'ENDED' && r.issuerUserId === null ? 'ISSUER_GONE' : state;
+}
+
 /** Page on SQL audience and liveness predicates before projecting; limit zero is count-only. */
 async function list(ctx: Context, args: Args, audience: Prisma.Sql, fullId: Prisma.Sql) {
   const { take, skip } = pageArgs(args);
@@ -43,7 +53,7 @@ async function list(ctx: Context, args: Args, audience: Prisma.Sql, fullId: Pris
     clientId: r.fullId ? r.id : null, clientPrefix: r.id.slice(0, 8), grantId: r.grantId, secretId: r.secretId,
     secretName: r.secretName, selfIssued: r.selfIssued, createdAt: r.createdAt,
     startsAt: r.startsAt, expiresAt: r.expiresAt, maxReads: r.maxUses, readCount: r.useCount, destroyOnEnd: !!r.destroyOnEnd,
-    endReason: r.endReason ?? (r.issuerUserId === null ? 'ISSUER_GONE' : r.live ? null : deadGrantState(r, r.now)),
+    endReason: r.endReason ?? endStateOf(r),
   })), total, skip);
 }
 

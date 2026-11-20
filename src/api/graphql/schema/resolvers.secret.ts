@@ -594,6 +594,8 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
 
 export const secretQueries = {
   mySecretReadClients: async (_: unknown, args: { limit?: number | null; offset?: number | null }, ctx: Context) => {
+    // Callers that can never be a person get the empty answer before they reach the limiter, as before #3998 B.
+    if (!ctx.userId || ctx.appKeyId || ctx.impersonation || isRunPrincipal(ctx)) return [];
     await admitOperationRate(ctx, ctx.db, 'OTHER_READS', appRateIdentity(ctx));
     return myReadClients(ctx, args);
   },
@@ -731,7 +733,8 @@ const versionsPageBatch = tickBatch<string, VersionsPageResult>(async (ctx, keys
 export const secretFields = {
   /** Separate audience from Secret metadata: current issuer or manager; prefix-only for other managers. */
   readClients: async (s: { id: string; ownerType: string; ownerId: string }, args: { activeOnly?: boolean; limit?: number | null; offset?: number | null }, ctx: Context) => {
-    if (s.ownerType !== 'app' || !(await loadLiveApp(ctx, s.ownerId))) return pageEnvelope([], 0, 0);
+    // readClientPage's SQL joins apps and organizations, so liveness is judged there; appManager is false for a dead App.
+    if (s.ownerType !== 'app') return pageEnvelope([], 0, 0);
     const manager = !!(await appManager(ctx, s.ownerId));
     return readClientPage(ctx, s.id, args, manager);
   },

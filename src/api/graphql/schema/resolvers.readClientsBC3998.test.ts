@@ -175,3 +175,44 @@ describe('#3998 B+C org deletion and current identities', () => {
     expect(await resolvers.Query.mySecretReadClients({}, {}, ctx(ownerId))).toEqual([]);
   });
 });
+
+describe('#3998 B+C blind-review pins (Eli P2 2, 3, 5)', () => {
+  const endReasonOf = async (caller = ctx()) => ((await clients('', caller)).data?.secret as any).readClients.items[0].endReason;
+
+  it('a pending client reads PENDING, not ISSUER_GONE', async () => {
+    await db.appMember.create({ data: { appId, userId: ownerId, role: 'owner' } });
+    expect(await endReasonOf()).toBe('PENDING');
+  });
+
+  it('a revoked grant keeps REVOKED when its issuer is later erased; ISSUER_GONE only when nothing else ended it', async () => {
+    await activate();
+    const survivor = await db.user.create({ data: { handle: `rv-${generateId()}` } });
+    await db.orgMember.create({ data: { organizationId: orgId, userId: survivor.id, role: 'ADMIN' } });
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+      await tx.$executeRawUnsafe(`UPDATE grants SET revoked_at = (clock_timestamp() AT TIME ZONE 'UTC'), revoked_by = $2 WHERE id = $1`, grantId, ownerId);
+      await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+    });
+    await deleteUserAccount(db, { targetUserId: ownerId, actorUserId: ownerId });
+    expect(await endReasonOf(ctx(survivor.id))).toBe('REVOKED');
+  });
+
+  it('the existing secret mutations refuse an App key and a deleted organization, and a live member still writes', async () => {
+    await db.appMember.create({ data: { appId, userId: ownerId, role: 'owner' } });
+    const keyed = ctx(ownerId, { appId, appKeyId: 'test-key' });
+    await expect(resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'x' }, keyed)).rejects.toBeDefined();
+    await expect(resolvers.Mutation.deleteSecret({}, { ref: secretId }, keyed)).rejects.toBeDefined();
+    await expect(resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'k2', kind: 'generic', value: 'v' }, keyed)).rejects.toBeDefined();
+    await resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'live' }, ctx());
+    await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
+    await expect(resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'y' }, ctx())).rejects.toBeDefined();
+    await expect(resolvers.Mutation.deleteSecret({}, { ref: secretId }, ctx())).rejects.toBeDefined();
+    await expect(resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'k3', kind: 'generic', value: 'v' }, ctx())).rejects.toBeDefined();
+    expect(await db.secret.count({ where: { id: secretId } })).toBe(1);
+  });
+
+  it('an anonymous caller, an App key and a run reach no limiter and no rows on mySecretReadClients', async () => {
+    expect(await resolvers.Query.mySecretReadClients({}, {}, { db, roles: [] } as Context)).toEqual([]);
+    expect(await resolvers.Query.mySecretReadClients({}, {}, ctx(ownerId, { appId, appKeyId: 'test-key' }))).toEqual([]);
+  });
+});
