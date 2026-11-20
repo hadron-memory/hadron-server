@@ -1,6 +1,8 @@
 /** #4546: verified ineligible proof records only its time; request remains open and the existing read gate stays exclusive. */
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { Client } from 'pg';
+import type { Prisma } from '../generated/prisma/index.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
@@ -185,6 +187,86 @@ describe('#4546 anonymous refused-proof observation', () => {
       expect(await replay.text()).toBe('{"error":"forbidden"}');
       expect(await lastRefused(req.id)).toEqual(observed);
     }
+  });
+
+  it('an observation SQL failure cannot roll back the already-consumed valid proof', async () => {
+    const req = await openRequest(await insertGrant());
+    const original = db.$transaction.bind(db);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(db, '$transaction').mockImplementation((async (
+      work: (tx: Prisma.TransactionClient) => Promise<unknown>,
+      opts?: { maxWait?: number; timeout?: number; isolationLevel?: Prisma.TransactionIsolationLevel },
+    ) => original(async (tx) => {
+      const wrapped = new Proxy(tx, { get(target, key, receiver) {
+        if (key === '$executeRaw') return async (sql: TemplateStringsArray, ...values: unknown[]) => {
+          if (sql.join(' ').includes('UPDATE grant_signing_requests SET last_refused_at')) {
+            return target.$executeRawUnsafe('SELECT 1 / 0'); // real PostgreSQL transaction failure
+          }
+          return target.$executeRaw(sql, ...values);
+        };
+        return Reflect.get(target, key, receiver);
+      } });
+      return work(wrapped);
+    }, opts)) as never);
+    const p = await prove(req.id, member);
+    expect(p.status).toBe(403);
+    expect(p.text).toBe('{"error":"forbidden"}');
+    const rows = await db.$queryRaw<Array<{ counter: bigint }>>`SELECT counter FROM passkey_credentials WHERE owner_id = ${member.id}`;
+    expect(Number(rows[0].counter)).toBe(1);
+    expect(await lastRefused(req.id)).toBeNull();
+    expect(warn).toHaveBeenCalledWith('grant.signing.refusal_observation_failed');
+  });
+
+  it('a withdrawal while the observation waits cannot undo proof consumption or record a late observation', async () => {
+    const req = await openRequest(await insertGrant());
+    const gate = new Client({ connectionString: process.env.DATABASE_URL });
+    await gate.connect();
+    let pending: Promise<Proved> | undefined;
+    let settled = false;
+    try {
+      await gate.query('BEGIN');
+      await gate.query('SELECT id FROM grants WHERE id = $1 FOR UPDATE', [req.grantId]);
+      const { rows: [self] } = await gate.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+      pending = prove(req.id, member).finally(() => { settled = true; });
+      let blocked = false;
+      for (let n = 0; n < 100 && !settled; n++) {
+        const [r] = await db.$queryRaw<Array<{ blocked: boolean }>>`SELECT EXISTS (
+          SELECT 1 FROM pg_stat_activity WHERE ${self.pid} = ANY(pg_blocking_pids(pid))
+        ) AS blocked`;
+        if (r.blocked) { blocked = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      }
+      expect(blocked, 'observation must take grant before request').toBe(true);
+      // The grant wait happens only AFTER the proof transaction committed, with no prover anchor held.
+      const counters = await db.$queryRaw<Array<{ counter: bigint }>>`SELECT counter FROM passkey_credentials WHERE owner_id = ${member.id}`;
+      expect(Number(counters[0].counter)).toBe(1);
+      await gate.query("UPDATE grant_signing_requests SET state = 'withdrawn' WHERE id = $1", [req.id]);
+      await gate.query('COMMIT');
+      const p = await pending;
+      expect(p.status).toBe(403);
+      expect(p.text).toBe('{"error":"forbidden"}');
+      expect(await lastRefused(req.id)).toBeNull();
+      expect((await read(req.id, admin.id)).data?.grantSigningRequest?.state).toBe('WITHDRAWN');
+    } finally {
+      await gate.query('ROLLBACK');
+      await pending?.catch(() => {});
+      await gate.end();
+    }
+  });
+
+  it('a second fresh refused proof advances the latest time, including a stranger with no membership', async () => {
+    const req = await openRequest(await insertGrant());
+    const first = await prove(req.id, member);
+    expect(first.status).toBe(403);
+    const previous = await lastRefused(req.id);
+    expect(previous).toBeInstanceOf(Date);
+    const outsider = await person('proving-outsider', null);
+    const second = await prove(req.id, outsider);
+    expect(second.status).toBe(403);
+    expect(second.text).toBe(first.text);
+    expect((await lastRefused(req.id))!.getTime()).toBeGreaterThan(previous!.getTime());
+    expect((await read(req.id, outsider.id)).data?.grantSigningRequest).toBeNull();
+    expect((await read(req.id, admin.id)).data?.grantSigningRequest?.state).toBe('OPEN');
   });
 
   it('a lawful proof records no refusal and still opens signing', async () => {
