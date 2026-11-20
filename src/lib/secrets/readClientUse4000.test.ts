@@ -34,12 +34,16 @@ beforeEach(async () => {
 });
 const prepare = (ctx = runCtx) => prepareSecretUse(ctx, clientId, 'https://api.example.test/v1/orders', {});
 describe('transactional secret.use (#4000)', () => {
-  it('refuses without a ticket and spends neither grant nor event', async () => {
+  it('refuses without a ticket, recording only the refusal audit', async () => {
     await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'comm.outbound', mintedBy: 'test' } });
     await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'ACTION_TICKET_REQUIRED' } });
     expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
     expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
     expect(await db.grantEvent.count({ where: { grantId, action: 'USE' } })).toBe(0);
+    const audit = await db.secretEvent.findMany({ where: { clientId, kind: 'USE' } });
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ outcome: 'ACTION_TICKET_REQUIRED', runId: runCtx.run.id });
+    expect(JSON.stringify(audit)).not.toContain('synthetic-canary');
     expect((await db.appRun.findUniqueOrThrow({ where: { id: runCtx.run.id } })).budgetActions).toBe(3);
   });
   it('refuses policy denial and exhausted budget without spending a ticket or grant', async () => {
