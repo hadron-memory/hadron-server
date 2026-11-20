@@ -43,11 +43,13 @@ import {
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveNodeUrnField } from './resolvers.types.js';
 import { withAuthorizedMemoryTx } from './authorizedTx.js';
-import { identitiesOf, mergeLinksFrom, survivorsOf } from '../../../lib/userMerges.js';
+import { identitiesOf, mergeLinksFrom, survivorOf, survivorsOf } from '../../../lib/userMerges.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
 import { loadCommentActor, type CommentActorRef } from './resolvers.comments.js';
 import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { AppNotFoundError, EntityNotFoundError } from '../../../lib/entityRef/errors.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
@@ -105,6 +107,11 @@ type Tx = Prisma.TransactionClient;
 
 /** A list above this many questions refuses rather than paging on unevaluated hints (§5.5). */
 export const QUESTION_LIST_EVALUATION_CAP = 5_000;
+/** #4428 — `questionLogs` answers at most this many logs and refuses beyond it rather than truncating. */
+export const QUESTION_LOGS_LIST_CAP = 200;
+
+/** The cap a list reads, behind one property so a test can lower it (#4428 acceptance 10). */
+export const questionListBounds = { cap: (): number => QUESTION_LIST_EVALUATION_CAP, logCap: (): number => QUESTION_LOGS_LIST_CAP };
 
 /** Reasons ride in `NodeRevision.revLabel`, so they share its cap. */
 const REASON_MAX = 500;
@@ -133,6 +140,12 @@ export interface QuestionView {
   evaluation: QuestionEvaluation;
   /** What the card shows: the authenticated block, else the cache, else nothing (TAMPERED / UNVERIFIABLE). */
   shown: QuestionData | null;
+  /**
+   * #4428 — who the question is routed to, worked out at read and never stored: the explicit assignee
+   * (followed through account merges), else the current holder of the worker that asked, else null.
+   * Set by `attachEffectiveAssignees` on the read paths; undefined on a view a write holds.
+   */
+  effectiveAssigneeId?: string | null;
 }
 
 /** The log a `QuestionLog` field resolver reads. */
@@ -1070,10 +1083,34 @@ export const questionMutations = {
 
 // ─── Reads ───────────────────────────────────────────────────────────────────
 
+/**
+ * #4428 §1 — the effective assignee of each view, in one worker query and one merge lookup for the
+ * whole batch: the stored assignee (through `survivorOf`), else the holder of the asking worker.
+ * Computed at read because a worker changes holder; a stored default would go stale.
+ */
+async function attachEffectiveAssignees(db: Pick<Tx, 'worker' | '$queryRaw'>, views: QuestionView[]): Promise<QuestionView[]> {
+  const explicit = [...new Set(views.map((v) => v.shown?.assignee).filter((id): id is string => !!id))];
+  const workerIds = [...new Set(views.filter((v) => !v.shown?.assignee).map((v) => v.shown?.askedBy.workerId).filter((id): id is string => !!id))];
+  const holders = new Map<string, string | null>();
+  if (workerIds.length > 0) {
+    for (const w of await db.worker.findMany({ where: { id: { in: workerIds } }, select: { id: true, heldByUserId: true } })) {
+      holders.set(w.id, w.heldByUserId);
+    }
+  }
+  // One merge lookup covers explicit assignees AND worker holders, so display and filter agree after a merge.
+  const mergeIds = [...new Set([...explicit, ...[...holders.values()].filter((id): id is string => !!id)])];
+  const links = mergeIds.length > 0 ? await mergeLinksFrom(db, mergeIds) : [];
+  for (const v of views) {
+    const stored = v.shown?.assignee;
+    v.effectiveAssigneeId = stored ? survivorOf(links, stored) : (() => { const h = v.shown?.askedBy.workerId ? holders.get(v.shown.askedBy.workerId) ?? null : null; return h ? survivorOf(links, h) : null; })();
+  }
+  return views;
+}
+
 async function loadQuestionView(ctx: Context, id: string): Promise<QuestionView> {
   const row = await ctx.db.node.findUnique({ where: { id }, select: QUESTION_ROW_SELECT });
   if (!row || row.deletedAt || row.role !== QUESTION_ROLE) throw questionMissing(id);
-  const [view] = await evaluateRows(ctx.db as unknown as Tx, [row]);
+  const [view] = await attachEffectiveAssignees(ctx.db as unknown as Tx, await evaluateRows(ctx.db as unknown as Tx, [row]));
   return view;
 }
 
@@ -1094,16 +1131,51 @@ const STATE_ORDER: Record<QuestionState, number> = {
 };
 const PRIORITY_RANK = { urgent: 0, high: 1, normal: 2, low: 3 } as const;
 
-function sortViews(views: QuestionView[], sort: 'PORTAL_DEFAULT' | 'CODE'): QuestionView[] {
+type QuestionSortName = 'PORTAL_DEFAULT' | 'CODE' | 'ASKED_AT_DESC' | 'ASKED_AT_ASC' | 'PRIORITY_DESC' | 'ANSWERED_AT_DESC';
+
+const answeredAtOf = (v: QuestionView): string | null => (v.shown ? currentAnswer(v.shown)?.at ?? null : null);
+
+function sortViews(views: QuestionView[], sort: QuestionSortName): QuestionView[] {
   const n = (v: QuestionView) => v.shown?.n ?? v.row.seq ?? 0;
-  if (sort === 'CODE') return [...views].sort((a, b) => n(a) - n(b) || a.row.loc.localeCompare(b.row.loc));
-  // Uma's list sort (§8.4, #4426): priority (urgent first), open-before-answered, then newest ask.
   const rank = (v: QuestionView) => PRIORITY_RANK[v.shown?.priority ?? 'normal'];
+  const askedAt = (v: QuestionView) => v.shown?.askedAt ?? '';
+  // Every sort ends in the same stable tiebreak: n descending, then loc.
+  const tie = (a: QuestionView, b: QuestionView) => n(b) - n(a) || a.row.loc.localeCompare(b.row.loc);
+  if (sort === 'CODE') return [...views].sort((a, b) => n(a) - n(b) || a.row.loc.localeCompare(b.row.loc));
+  if (sort === 'ASKED_AT_DESC') return [...views].sort((a, b) => askedAt(b).localeCompare(askedAt(a)) || tie(a, b));
+  if (sort === 'ASKED_AT_ASC') return [...views].sort((a, b) => askedAt(a).localeCompare(askedAt(b)) || tie(a, b));
+  if (sort === 'PRIORITY_DESC') return [...views].sort((a, b) => rank(a) - rank(b) || askedAt(b).localeCompare(askedAt(a)) || tie(a, b));
+  if (sort === 'ANSWERED_AT_DESC') {
+    return [...views].sort((a, b) => {
+      const x = answeredAtOf(a), y = answeredAtOf(b);
+      if (x === null || y === null) return x === y ? tie(a, b) : x === null ? 1 : -1;
+      return y.localeCompare(x) || tie(a, b);
+    });
+  }
+  // Uma's list sort (§8.4, #4426): priority (urgent first), open-before-answered, then newest ask.
   return [...views].sort((a, b) =>
     rank(a) - rank(b) ||
     STATE_ORDER[a.evaluation.state] - STATE_ORDER[b.evaluation.state] ||
-    (b.shown?.askedAt ?? '').localeCompare(a.shown?.askedAt ?? '') ||
+    askedAt(b).localeCompare(askedAt(a)) ||
     n(b) - n(a));
+}
+
+/** #4428 §2 — the memories of an App the caller can read, or null when the App does not resolve. */
+async function readableAppMemoryIds(ctx: Context, appRef: string): Promise<string[]> {
+  let app: { id: string };
+  try {
+    app = await resolveAppRef(ctx.db, appRef);
+  } catch (error) {
+    // An unknown App answers like one with nothing to show: no existence oracle.
+    if (error instanceof AppNotFoundError) return [];
+    throw error;
+  }
+  const accessible = await getAccessibleMemoryIds(ctx);
+  const memories = await ctx.db.memory.findMany({
+    where: { appId: app.id, deletedAt: null, id: { in: accessible } },
+    select: { id: true },
+  });
+  return memories.map((m) => m.id);
 }
 
 export const questionQueries = {
@@ -1155,14 +1227,28 @@ export const questionQueries = {
   questions: async (
     _: unknown,
     args: {
-      logRef?: string | null; awaitingMe?: boolean | null;
+      logRef?: string | null; awaitingMe?: boolean | null; appRef?: string | null;
       state?: QuestionState[] | null; tier?: string | null; priority?: string[] | null; authorizes?: boolean | null;
-      sort?: 'PORTAL_DEFAULT' | 'CODE' | null; limit?: number | null; offset?: number | null;
+      answered?: boolean | null; assigneeId?: string | null; unassigned?: boolean | null;
+      askedByMe?: boolean | null; askedByWorkerId?: string | null; askedByAppId?: string | null; answeredSince?: Date | string | null;
+      sort?: QuestionSortName | null; limit?: number | null; offset?: number | null;
     },
     ctx: Context,
   ): Promise<{ items: QuestionView[]; total: number }> => {
     const limit = Math.min(Math.max(args.limit ?? 20, 1), 200);
     const offset = Math.max(args.offset ?? 0, 0);
+    if (args.logRef && args.appRef) {
+      throw new GraphQLError('Give logRef or appRef, not both.', { extensions: { code: 'BAD_USER_INPUT' } });
+    }
+    if (!args.logRef && !args.appRef && !args.awaitingMe) {
+      throw new GraphQLError('Give logRef, appRef, or awaitingMe: true.', { extensions: { code: 'BAD_USER_INPUT' } });
+    }
+    let answeredSince: string | null = null;
+    if (args.answeredSince != null) {
+      const at = new Date(args.answeredSince);
+      if (Number.isNaN(at.getTime())) throw new GraphQLError('answeredSince is not a time.', { extensions: { code: 'BAD_USER_INPUT' } });
+      answeredSince = at.toISOString();
+    }
     let where: Prisma.NodeWhereInput;
     if (args.awaitingMe) {
       if (!ctx.userId || ctx.impersonation) return { items: [], total: 0 };
@@ -1178,33 +1264,99 @@ export const questionQueries = {
         const log = await loadLogView(ctx, args.logRef);
         if (!log) return { items: [], total: 0 };
         where = { ...where, memoryId: log.row.memoryId, loc: { startsWith: `${log.row.loc}:` } };
+      } else if (args.appRef) {
+        const ids = new Set(await readableAppMemoryIds(ctx, args.appRef));
+        where = { ...where, memoryId: { in: accessible.filter((id) => ids.has(id)) } };
       }
+    } else if (args.appRef) {
+      const ids = await readableAppMemoryIds(ctx, args.appRef);
+      if (ids.length === 0) return { items: [], total: 0 };
+      where = { role: QUESTION_ROLE, deletedAt: null, memoryId: { in: ids } };
     } else {
-      if (!args.logRef) throw new GraphQLError('Give logRef, or awaitingMe: true.', { extensions: { code: 'BAD_USER_INPUT' } });
-      const log = await loadLogView(ctx, args.logRef);
+      const log = await loadLogView(ctx, args.logRef!);
       if (!log) return { items: [], total: 0 };
       where = { role: QUESTION_ROLE, deletedAt: null, memoryId: log.row.memoryId, loc: { startsWith: `${log.row.loc}:` } };
     }
     const count = await ctx.db.node.count({ where });
-    if (count > QUESTION_LIST_EVALUATION_CAP) {
-      throw questionError('QUESTION_LOG_TOO_LARGE_FOR_FILTER', `${count} questions exceed the ${QUESTION_LIST_EVALUATION_CAP} this list evaluates at once.`, { count, cap: QUESTION_LIST_EVALUATION_CAP });
+    const cap = questionListBounds.cap();
+    if (count > cap) {
+      throw questionError('QUESTION_LOG_TOO_LARGE_FOR_FILTER', `${count} questions exceed the ${cap} this list evaluates at once.`, { count, cap });
     }
     // Only askQuestion writes the question role, always directly under a log.
     const rows = await ctx.db.node.findMany({ where, select: QUESTION_ROW_SELECT });
-    let views = await evaluateRows(ctx.db as unknown as Tx, rows);
+    let views = await attachEffectiveAssignees(ctx.db as unknown as Tx, await evaluateRows(ctx.db as unknown as Tx, rows));
     if (args.awaitingMe) {
       const me = await callerIdentities(ctx);
       views = views.filter((v) => v.evaluation.state === 'OPEN' && !!v.evaluation.question?.deciders.some((id) => me.has(id)));
     }
     const tier = toTier(args.tier);
     const priorities = args.priority?.map(toPriority);
-    views = views.filter((v) =>
-      (!args.state || args.state.includes(v.evaluation.state)) &&
-      (!tier || v.shown?.tier === tier) &&
-      (!priorities || (!!v.shown && priorities.includes(v.shown.priority))) &&
-      (args.authorizes == null || v.shown?.authorizes === args.authorizes));
+    // #4428 §3 — every filter reads the EVALUATED view, never `properties`.
+    const assigneeIds = args.assigneeId ? await identitiesOf(ctx.db, args.assigneeId) : null;
+    const byMe = args.askedByMe ? true : null;
+    const askers = new Map<QuestionView, boolean>();
+    if (byMe) for (const v of views) askers.set(v, !!v.shown && (await isAsker(ctx, v.shown)));
+    views = views.filter((v) => {
+      if (args.state && !args.state.includes(v.evaluation.state)) return false;
+      if (tier && v.shown?.tier !== tier) return false;
+      if (priorities && !(v.shown && priorities.includes(v.shown.priority))) return false;
+      if (args.authorizes != null && v.shown?.authorizes !== args.authorizes) return false;
+      if (args.answered != null) {
+        const st = v.evaluation.state;
+        const isAnswered = st === 'ANSWERED_UNCONFIRMED' || st === 'DECIDED' || st === 'STALE';
+        if (args.answered ? !isAnswered : st !== 'OPEN') return false;
+      }
+      const eff = v.effectiveAssigneeId ?? null;
+      const mine = !!assigneeIds && eff !== null && assigneeIds.has(eff);
+      if (args.assigneeId && args.unassigned) { if (!mine && eff !== null) return false; }
+      else if (args.assigneeId) { if (!mine) return false; }
+      else if (args.unassigned != null) { if (args.unassigned ? eff !== null : eff === null) return false; }
+      if (byMe && !askers.get(v)) return false;
+      if (args.askedByWorkerId && v.shown?.askedBy.workerId !== args.askedByWorkerId) return false;
+      if (args.askedByAppId && v.shown?.askedBy.appId !== args.askedByAppId) return false;
+      if (answeredSince !== null) {
+        const at = answeredAtOf(v);
+        if (at === null || new Date(at).getTime() < new Date(answeredSince).getTime()) return false;
+      }
+      return true;
+    });
     const sorted = sortViews(views, args.sort ?? 'PORTAL_DEFAULT');
     return { items: sorted.slice(offset, offset + limit), total: sorted.length };
+  },
+
+  /**
+   * #4428 §5 — the question logs in the readable memories of an App, or in one memory. Exactly one
+   * of appRef and memoryRef; an unknown or unreadable scope answers [] so nothing tells them apart.
+   */
+  questionLogs: async (_: unknown, args: { appRef?: string | null; memoryRef?: string | null }, ctx: Context): Promise<QuestionLogView[]> => {
+    if ((args.appRef == null) === (args.memoryRef == null)) {
+      throw new GraphQLError('Give exactly one of appRef and memoryRef.', { extensions: { code: 'BAD_USER_INPUT' } });
+    }
+    let memoryIds: string[];
+    if (args.appRef != null) {
+      memoryIds = await readableAppMemoryIds(ctx, args.appRef);
+    } else {
+      let memory: { id: string };
+      try {
+        memory = await resolveMemoryRef(ctx.db, args.memoryRef!);
+      } catch (error) {
+        if (error instanceof EntityNotFoundError) return [];
+        throw error;
+      }
+      memoryIds = (await isMemoryReadableCached(ctx, memory.id)) ? [memory.id] : [];
+    }
+    if (memoryIds.length === 0) return [];
+    const rows = await ctx.db.node.findMany({
+      where: { role: QUESTION_LOG_ROLE, deletedAt: null, memoryId: { in: memoryIds } },
+      select: LOG_ROW_SELECT,
+      orderBy: [{ memoryId: 'asc' }, { loc: 'asc' }],
+      take: questionListBounds.logCap() + 1,
+    });
+    const logCap = questionListBounds.logCap();
+    if (rows.length > logCap) {
+      throw questionError('QUESTION_LOG_TOO_LARGE_FOR_FILTER', `More than ${logCap} question logs; narrow the scope.`, { cap: logCap });
+    }
+    return rows.map((row) => ({ row, data: parseLogData(row) }));
   },
 
   /** §8.1 — the integrity and evidence check, through the one evaluation. */
@@ -1401,6 +1553,9 @@ export const questionFieldResolvers = {
     specsTouched: (v: QuestionView) => (v.shown?.specsTouched ?? []).map(refOut),
     specsMustChange: (v: QuestionView) => (v.shown?.specsMustChange ?? []).map(refOut),
     assigneeId: (v: QuestionView) => v.shown?.assignee ?? null,
+    assignee: (v: QuestionView, _: unknown, ctx: Context) => (v.shown?.assignee ? loadCommentActor(ctx, 'user', v.shown.assignee) : null),
+    effectiveAssigneeId: (v: QuestionView) => v.effectiveAssigneeId ?? null,
+    effectiveAssignee: (v: QuestionView, _: unknown, ctx: Context) => (v.effectiveAssigneeId ? loadCommentActor(ctx, 'user', v.effectiveAssigneeId) : null),
     taskId: (v: QuestionView) => v.shown?.taskId ?? null,
     deciderIds: (v: QuestionView) => v.shown?.deciders ?? [],
     deciders: (v: QuestionView, _: unknown, ctx: Context) => users(ctx, v.shown?.deciders ?? []),
@@ -1442,6 +1597,7 @@ export const questionFieldResolvers = {
     id: (v: QuestionLogView) => v.row.id,
     urn: (v: QuestionLogView, _: unknown, ctx: Context) => resolveNodeUrnField(v.row, ctx),
     portalUrl: async (v: QuestionLogView, _: unknown, ctx: Context) => portalUrlForUrn(await resolveNodeUrnField(v.row, ctx)),
+    memoryId: (v: QuestionLogView) => v.row.memoryId,
     loc: (v: QuestionLogView) => v.row.loc,
     name: (v: QuestionLogView) => v.row.name,
     prefix: (v: QuestionLogView) => v.data.prefix,
