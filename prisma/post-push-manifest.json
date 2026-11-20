@@ -802,6 +802,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_secret_root_check_shape",
+      "kind": "check-constraint",
+      "file": "secret-rotation-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_secret_version_shape",
       "kind": "check-constraint",
       "file": "secret-versions-invariants.sql",
