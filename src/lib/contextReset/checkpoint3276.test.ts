@@ -54,6 +54,9 @@ it.each(['both','neither'])('refuses %s checkpoint inputs without a node or phas
  expect(await code(call(s,mode==='both'?{checkpointNode:(await f.checkpoint()).id}:{checkpoint:undefined}))).toBe('RECOVERY_REF_INVALID');
  expect(await nodeCount()).toBe(n+(mode==='both'?1:0));
  expect((await db.contextReset.findUniqueOrThrow({where:{id:s.resetId}})).phase).toBe('claimed');
+ // The claim's own accepted step is recorded under this reset's operation. Counted BEFORE the fixture row below is inserted,
+ // so only the claim itself can satisfy it.
+ expect(await db.hostKeyUse.count({where:{appKeyId:f.orca1.id,action:'reset',operationId:s.operationId,refusedCode:null}})).toBe(1);
  // #4424: read the refusal by its code, never by position. The table is append-only, so put an accepted row AFTER the
  // refusal (timestamp taken from the stored refusal), the order that made `.at(-1)` return null; the filtered read must still find it.
  const action=mode==='both'?'checkpoint':'reset';
@@ -63,8 +66,6 @@ it.each(['both','neither'])('refuses %s checkpoint inputs without a node or phas
  const rows=await db.hostKeyUse.findMany({where:{appKeyId:f.orca1.id,action},orderBy:{usedAt:'asc'}});
  expect(rows.at(-1)?.refusedCode).toBeNull(); // the position-based read would now see an accepted row
  expect(rows.filter(r=>r.refusedCode==='RECOVERY_REF_INVALID')).toHaveLength(1);
- // The claim's own accepted step is still recorded under this reset's operation.
- expect(await db.hostKeyUse.count({where:{appKeyId:f.orca1.id,action:'reset',operationId:s.operationId,refusedCode:null}})).toBeGreaterThan(0);
 });
 it.each(['missing-memory','encrypted'])('refuses %s working memory and writes nothing',async kind=>{
  const s=await claimed(),n=await nodeCount();
