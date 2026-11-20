@@ -22,7 +22,7 @@ describe('#3999 server ceremony shell',()=>{
   vi.spyOn(ceremony,'openSecretProof').mockRejectedValue(new Error('database-staged-ciphertext-canary'));
   const log=vi.spyOn(console,'error').mockImplementation(()=>{});
   const base=await host(true),r=await fetch(base+'/secret-changes/request/proof/challenge',{method:'POST',headers:{origin:'http://localhost:4000'}});
-  expect(r.status).toBe(500);const out=await r.json();expect(out).toMatchObject({code:'INTERNAL_SERVER_ERROR',error:'Internal server error.',requestId:expect.any(String)});
+  expect(r.status).toBe(500);const out=await r.json() as {requestId:string};expect(out).toMatchObject({code:'INTERNAL_SERVER_ERROR',error:'Internal server error.',requestId:expect.any(String)});
   expect(log).toHaveBeenCalledTimes(1);expect(log.mock.calls[0][1]).toMatchObject({requestId:out.requestId,site:'secret-change-ceremony'});
   expect(JSON.stringify(log.mock.calls)).not.toContain('database-staged-ciphertext-canary');expect(JSON.stringify(out)).not.toContain('canary');
  });
@@ -59,6 +59,11 @@ describe('#3999 readable approval model (Node VM; no browser)',()=>{
   const values=dl.children.filter((_,i)=>i%2===1).map(n=>n.textContent);expect(values[0]).toBe('Turn protection on');
   expect(values[3]).toBe(new Intl.NumberFormat().format(1024)+' bytes');expect(values[4]).not.toBe(summary.expiresAt);expect(values[4]).toContain(Intl.DateTimeFormat().resolvedOptions().timeZone);
   const text=JSON.stringify(dl);expect(text).not.toContain('opaque-user-id');expect(text).not.toContain('SET_PROTECTED');expect(text).not.toContain('never-render-canary');
+ });
+ it('renders the proposed inspectable metadata as plain text for a store',async()=>{
+  const metadata={type:'bearer',urlPrefix:'https://example.test/<script>unsafe</script>'};
+  const {elements}=await pageModel({operation:'STORE',change:'Update secret metadata',sizeBytes:null,metadata});await elements.start.onclick!();
+  const rows=elements.review.children[0].children;const i=rows.findIndex(n=>n.textContent==='New metadata');expect(i).toBeGreaterThan(-1);expect(rows[i+1].textContent).toBe(JSON.stringify(metadata));
  });
  it('a dismissed proof prompt is a retryable cancellation, not an unavailable request',async()=>{
   const {elements}=await pageModel({}, {cancelled:true});await elements.start.onclick!();

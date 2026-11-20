@@ -223,6 +223,27 @@ describe('#3999 update protection terms',()=>{
  });
 });
 
+describe('#3999 completion rejudges membership and unprotect authority',()=>{
+ it('refuses a requester removed after proof, leaving the request open and value unchanged',async()=>{
+  const owner=(await db.user.create({data:{email:`${generateId()}@s4.test`}})).id;
+  await db.app.update({where:{id:appId},data:{ownerUserId:owner}});
+  await db.appMember.create({data:{appId,userId,role:'reader'}});
+  const id=await stage(),p=await proof(id);
+  await db.appMember.deleteMany({where:{appId,userId}});
+  await expect(complete(id,p)).rejects.toThrow();expect((await row(id)).state).toBe('open');
+  expect(await db.secretVersion.count({where:{secretId}})).toBe(1);expect(await currentAppSecretValue(db as never,{id:secretId,ownerId:appId})).toBe('original');
+ });
+ it.each(['setSecretProtected','updateSecret'] as const)('refuses a demoted manager at %s completion even while still a member',async door=>{
+  const owner=(await db.user.create({data:{email:`${generateId()}@s4.test`}})).id;
+  const id=(await error(resolvers.Mutation[door]({}, {ref:secretId,protected:false},ctx()))).extensions.requestId;
+  const p=await proof(id);
+  await db.app.update({where:{id:appId},data:{ownerUserId:owner}});
+  await db.appMember.create({data:{appId,userId,role:'reader'}});
+  await expect(complete(id,p)).rejects.toThrow();expect((await row(id)).state).toBe('open');
+  expect((await db.secret.findUniqueOrThrow({where:{id:secretId}})).protected).toBe(true);
+ });
+});
+
 describe('#3999 delete authority is current at completion',()=>{
  it('refuses a former manager who remains a member but did not create the secret',async()=>{
   const writer=(await db.user.create({data:{email:`${generateId()}@s4.test`}})).id;
