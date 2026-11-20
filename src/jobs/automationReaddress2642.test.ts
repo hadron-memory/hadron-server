@@ -103,7 +103,7 @@ for (const kind of ['SCHEDULE', 'WEBHOOK'] as Kind[]) describe(`#2642 ${kind}`, 
   });
   it('renaming the memory keeps the adoption', async () => {
     const f = await fixture(kind);
-    await (memoryMutations as never as { updateMemory: (...a: unknown[]) => Promise<unknown> }).updateMemory({}, { id: f.memory.id, urn: 'rd.test:flow2' }, f.ctx);
+    await (memoryMutations as never as { updateMemory: (...a: unknown[]) => Promise<unknown> }).updateMemory({}, { ref: f.memory.id, urn: 'rd.test:flow2' }, f.ctx);
     expect((await db.memory.findUniqueOrThrow({ where: { id: f.memory.id } })).urn).not.toBe('rd.test:flow');
     expect((await f.run()).outcome).toBe('completed');
   });

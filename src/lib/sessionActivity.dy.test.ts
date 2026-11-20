@@ -341,7 +341,10 @@ describe('#1741 Rook P3: resume refuses foreign ownership before lifecycle locks
     await db.$transaction(async (tx) => {
       const sql = vi.spyOn(tx, '$queryRaw');
       expect(await resumeOwnLapsedSessionInTx(principal, tx, s.id)).toBe(false);
-      expect(sql).not.toHaveBeenCalled();
+      // The test is about LOCKS: the foreign principal reads usage events (the lock-free #4406 probe) but never issues
+      // a FOR SHARE / FOR UPDATE statement on an App or Worker row.
+      const issued = sql.mock.calls.map((c) => ((c[0] as unknown as { strings?: string[] }).strings ?? []).join('?'));
+      expect(issued.filter((text) => /FOR (SHARE|UPDATE)/i.test(text))).toEqual([]);
     });
     expect(await live(s.id)).toBe(false);
   });

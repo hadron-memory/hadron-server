@@ -1,3 +1,4 @@
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 /**
  * #2553 (epic #1704, T12, rev 6): every AgentTask has a hierarchical, immutable handle `AT<n>(.<n>)*`: a project is
  * numbered per App (AT3), a task within its parent (AT3.405, AT3.405.16). `AT0` is the reserved project "No project",
@@ -17,12 +18,13 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 
 const M = resolvers.Mutation as any;
-const Q = resolvers.Query as any;
+const Q = settledTeamEventQueries(resolvers.Query, db) as any;
 const T = (resolvers as any).AgentTask as Record<string, (t: any, a: unknown, c: Context) => unknown>;
 
 async function refusal(p: Promise<unknown>): Promise<GraphQLError> {
@@ -64,7 +66,7 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId: appY.id, userId: alice.id, role: 'member' } });
   await db.appMember.create({ data: { appId: appX.id, userId: bob.id, role: 'member' } });
   await db.appMember.create({ data: { appId: appZ.id, userId: zed.id, role: 'member' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, as(alice));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, as(alice));
   agentId = agent.id;
   anne = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: appX.id, agentId, name: 'Anne', slug: 'anne' }, select: { id: true } });
   keyX = await db.appKey.create({ data: { id: generateId(), appId: appX.id, keyHash: `h-${generateId()}`, keyPreview: 'abcd' }, select: { id: true } });

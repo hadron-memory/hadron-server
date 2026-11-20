@@ -19,6 +19,7 @@
  * memory-owned scope stays superseded (#696, D-2026-07-15-006).
  */
 import { GraphQLError } from 'graphql';
+import { assertOneRevealPerOperation, type RevealOperationInfo } from '../../../lib/secrets/revealOperationGuard.js';
 import { pageArgs, pageEnvelope, type Context } from './resolvers.helpers.js';
 import {
   clampListTake,
@@ -58,6 +59,12 @@ import {
   secretActorOf,
 } from '../../../lib/secrets/appSecrets.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { createPendingGrant, GrantCreateRefusal } from '../../../lib/grants/create.js';
+import { requireSecretReadClientIssuer } from '../../../lib/secrets/readClientIssuer.js';
+import { generateId } from '../../../lib/id.js';
+import { revealWithReadClient } from '../../../lib/secrets/readClientReveal.js';
+import { readClientPage, myReadClients } from '../../../lib/secrets/readClientList.js';
+import { tickBatch } from './tickBatch.js';
 
 function badInput(message: string): GraphQLError {
   return new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
@@ -143,6 +150,7 @@ async function loadLiveApp(ctx: Context, appId: string): Promise<AppSecretRow | 
     select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
   });
   if (!app || app.deletedAt || app.uninstalledAt) return null;
+  if (app.organizationId && !(await ctx.db.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } }))) return null;
   return app;
 }
 
@@ -152,7 +160,7 @@ async function loadLiveApp(ctx: Context, appId: string): Promise<AppSecretRow | 
  * or null. A bound worker session is its driving person's session, so it passes when that person is a member.
  */
 async function appMember(ctx: Context, appId: string): Promise<AppSecretRow | null> {
-  if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return null;
+  if (!ctx.userId || ctx.appKeyId || ctx.impersonation || isRunPrincipal(ctx)) return null;
   const app = await loadLiveApp(ctx, appId);
   if (!app) return null;
   return (await isAppParticipant(ctx, app)) ? app : null;
@@ -166,7 +174,7 @@ async function requireAppMember(ctx: Context, appId: string): Promise<AppSecretR
 
 /** Whoever manages the live App, as a person acting as themselves (cor:dmo:050:12). */
 async function appManager(ctx: Context, appId: string): Promise<AppSecretRow | null> {
-  if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return null;
+  if (!ctx.userId || ctx.appKeyId || ctx.impersonation || isRunPrincipal(ctx)) return null;
   const app = await loadLiveApp(ctx, appId);
   if (!app) return null;
   return (await managesApp(ctx, app)) ? app : null;
@@ -255,6 +263,10 @@ export interface UpdateSecretArgs {
 }
 
 export const secretMutations = {
+  /** Issue a read client for an App secret: a pending reveal grant and its client, made together (cor:sec:060:01). */
+  revealSecret: (_: unknown, { clientId }: { clientId: string }, ctx: Context, info?: RevealOperationInfo) => revealSecretMutation(ctx, clientId, info),
+  issueSecretReadClient: (_: unknown, { input }: { input: IssueReadClientInput }, ctx: Context) => issueSecretReadClient(ctx, input),
+
   /** Create a named, owner-scoped secret (gate per the matrix above). */
   createSecret: async (_: unknown, args: CreateSecretArgs, ctx: Context) => {
     const ownerType = assertOwnerType(args.ownerType);
@@ -465,13 +477,129 @@ async function deleteAppSecret(ctx: Context, found: SecretRow) {
       if (secret.protected) throw protectedRefusal();
       const newest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
       await recordSecretEvent(tx, { ownerId: secret.ownerId, secretId: secret.id, secretName: secret.name, kind: 'DELETE', versionNo: newest?.versionNo ?? null, actor });
+      await tx.$executeRaw`UPDATE secret_read_clients SET end_reason = 'SECRET_DELETED', ended_at = (clock_timestamp() AT TIME ZONE 'UTC')
+         WHERE secret_id = ${secret.id} AND ended_at IS NULL`;
       await tx.secret.delete({ where: { id: secret.id } });
       return true;
     },
   );
 }
 
+async function revealSecretMutation(ctx: Context, clientId: string, info?: RevealOperationInfo) {
+  // R8: judged whole, before the rate limit or any read, so two fields in one operation are both refused and neither reads.
+  assertOneRevealPerOperation(info);
+  await admitOperationRate(ctx, ctx.db, 'CREDENTIALS', appRateIdentity(ctx));
+  return revealWithReadClient(ctx, clientId);
+}
+
+/** The most live read clients one secret carries (#3998 plan R4): a bound on the list a manager reads and the grants a secret answers to. */
+const MAX_LIVE_READ_CLIENTS = 100;
+
+interface IssueReadClientInput {
+  secretRef: string; holderKind: 'USER' | 'WORKER' | 'AGENT' | 'APP'; holderRef?: string | null; autoDelete: boolean;
+  startsAt?: Date | string | null; expiresAt?: Date | string | null; maxReads?: number | null; reason: string;
+}
+
+function readClientRefusal(code: string, message: string): GraphQLError {
+  return new GraphQLError(message, { extensions: { code } });
+}
+
+function asTime(v: Date | string | null | undefined): Date | null {
+  if (v === null || v === undefined) return null;
+  const d = v instanceof Date ? v : new Date(v);
+  if (Number.isNaN(d.getTime())) throw badInput('A time is not a valid date.');
+  return d;
+}
+
+/** The auto-delete limit rule, as a pure function so it is tested while the NOT_AVAILABLE guard shadows it (#4443, Bridget P2 1). */
+export function autoDeleteLimitRefusal(
+  autoDelete: boolean, expiresAt: Date | null, maxUses: number | null,
+): { code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT'; message: string } | null {
+  if (autoDelete && !expiresAt && maxUses === null) {
+    return { code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT', message: 'An auto-delete mark needs a window or a read budget.' };
+  }
+  return null;
+}
+
+/**
+ * Issue a read client (cor:sec:060:01): the pending `secret.reveal` grant and its client row, in ONE transaction. Only a person
+ * acting as themselves, who manages the App or wrote the current version (`requireSecretReadClientIssuer`, judged under the
+ * secret row's lock so a newer version cannot slip in). The grant still needs the issuer's passkey signature, which judges the
+ * issuer rule again. A client with an auto-delete mark needs a window or a read budget.
+ */
+async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) {
+  await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
+  // The refusals that depend only on the INPUT come first, before the secret is looked up: judged after it, a stranger could tell an
+  // existing secret from a missing one by which refusal came back (existence oracle, Rook's partial §10 at f610b2e5).
+  // #4434: an agent holder (or an App) is not built here, and a read client nothing can read must never exist: refuse before any write.
+  if (input.holderKind === 'AGENT' || input.holderKind === 'APP') {
+    throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A read client is held by a person or a worker.');
+  }
+  const startsAt = asTime(input.startsAt);
+  const expiresAt = asTime(input.expiresAt);
+  const maxUses = input.maxReads ?? null;
+  // The "delete" mark is signed but nothing consumes it until S6 (#4001): a person must not sign a retention term the server does not
+  // keep. Judged FIRST, so a caller is not walked through adding a limit only to be refused after it (#4443 item 6). S6's first act is
+  // to remove this guard; the limit rule (`autoDeleteLimitRefusal`, pinned by its own test now) then applies unchanged.
+  if (input.autoDelete) {
+    throw readClientRefusal('SECRET_AUTO_DELETE_NOT_AVAILABLE', 'Auto-delete on a read client is not available yet.');
+  }
+  const limitRefusal = autoDeleteLimitRefusal(input.autoDelete, expiresAt, maxUses);
+  if (limitRefusal) throw readClientRefusal(limitRefusal.code, limitRefusal.message);
+  const found = await findSecretByRef(ctx, input.secretRef);
+  if (!found || found.ownerType !== 'app') throw authorizationDenied();
+  const app = await loadLiveApp(ctx, found.ownerId);
+  if (!app) throw authorizationDenied();
+  try {
+    return await withAuthorizedTx(
+      ctx,
+      appAnchors(app),
+      async (txCtx) => {
+        if (!(await lockSecretRow(txCtx.db as never, found.id))) throw authorizationDenied();
+        await requireSecretReadClientIssuer(txCtx, found.id);
+      },
+      async (tx, txCtx) => {
+        const userId = txCtx.userId as string;
+        const issuance = await requireSecretReadClientIssuer({ ...txCtx, db: tx } as Context, found.id);
+        const holder = input.holderKind === 'USER'
+          ? { kind: 'user' as const, id: userId }
+          : { kind: 'worker' as const, id: input.holderRef ?? '' };
+        if (input.holderKind === 'USER' && input.holderRef && input.holderRef !== userId) {
+          throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A person holds a read client only for themself.');
+        }
+        const live = await tx.$queryRaw<Array<{ n: bigint }>>`
+          SELECT count(*) AS n FROM secret_read_clients c JOIN grants g ON g.id = c.grant_id
+           WHERE c.secret_id = ${found.id} AND c.ended_at IS NULL AND g.revoked_at IS NULL AND g.holder_departed_at IS NULL`;
+        if (Number(live[0]?.n ?? 0) >= MAX_LIVE_READ_CLIENTS) {
+          throw readClientRefusal('SECRET_READ_CLIENT_LIMIT', 'This secret already has the most read clients it may have.');
+        }
+        const grantId = await createPendingGrant(tx, {
+          appId: app.id, requester: { userId, workerId: null, sessionId: null }, holder,
+          action: 'secret.reveal', values: { secret: found.id, 'auto-delete': input.autoDelete ? 'delete' : 'keep' },
+          startsAt, expiresAt, maxUses, reason: input.reason, canReadMemory: async () => false,
+        });
+        const clientId = generateId();
+        const selfIssued = holder.kind === 'user' && holder.id === userId;
+        await tx.secretReadClient.create({
+          data: { id: clientId, grantId, appId: app.id, secretId: found.id, secretName: issuance.secretName, issuerUserId: userId, selfIssued },
+        });
+        return { clientId, grantId, secretName: issuance.secretName, selfIssued };
+      },
+    );
+  } catch (error) {
+    if (error instanceof GrantCreateRefusal) throw readClientRefusal(error.code, error.message);
+    throw error;
+  }
+}
+
 export const secretQueries = {
+  mySecretReadClients: async (_: unknown, args: { limit?: number | null; offset?: number | null }, ctx: Context) => {
+    // Callers that can never be a person get the empty answer before they reach the limiter, as before #3998 B.
+    if (!ctx.userId || ctx.appKeyId || ctx.impersonation || isRunPrincipal(ctx)) return [];
+    await admitOperationRate(ctx, ctx.db, 'OTHER_READS', appRateIdentity(ctx));
+    return myReadClients(ctx, args);
+  },
+
   /**
    * Fetch one secret (inspectable half only). Null for missing AND for
    * not-entitled — indistinguishable by design.
@@ -552,12 +680,67 @@ export const secretQueries = {
   },
 };
 
+type VersionRow = { id: string; versionNo: number; sizeBytes: number; writtenAt: Date; writtenByUserId: string | null; writtenByWorkerId: string | null; supersededAt: Date | null };
+type VersionsPageResult = { items: VersionRow[]; total: number };
+
+/**
+ * #4157: `Secret.currentVersion` of every App secret raised in the same tick shares ONE grouped query, not one
+ * `findFirst` per parent. Keyed by the request Context (see `tickBatch`), so nothing outlives the tick. The newest
+ * version is the max over ALL of a secret's versions, never derived from a paged subset.
+ */
+const currentVersionBatch = tickBatch<string, number | null>(async (ctx, ids) => {
+  const rows = await ctx.db.secretVersion.groupBy({ by: ['secretId'], where: { secretId: { in: ids } }, _max: { versionNo: true } });
+  return new Map(rows.map((r) => [r.secretId, r._max.versionNo ?? null]));
+}, null);
+
+/**
+ * #4157: `Secret.versions` pages raised in the same tick share one grouped count and one lateral read (an index-bounded `LIMIT` per secret, via the unique `(secret_id, version_no)`) per distinct
+ * (take, skip), so each parent keeps its own page and `hasMore`. The key is `<secretId>|<take>|<skip>`; a secret id
+ * is a cuid, which cannot contain the separator.
+ */
+const versionsPageBatch = tickBatch<string, VersionsPageResult>(async (ctx, keys) => {
+  const wanted = keys.map((k) => { const [id, take, skip] = k.split('|'); return { key: k, id, take: Number(take), skip: Number(skip) }; });
+  const ids = [...new Set(wanted.map((w) => w.id))];
+  const counts = await ctx.db.secretVersion.groupBy({ by: ['secretId'], where: { secretId: { in: ids } }, _count: { _all: true } });
+  const total = new Map(counts.map((c) => [c.secretId, c._count._all]));
+  const out = new Map<string, VersionsPageResult>();
+  const windows = new Map<string, { take: number; skip: number; ids: string[] }>();
+  for (const w of wanted) {
+    out.set(w.key, { items: [], total: total.get(w.id) ?? 0 });
+    if (w.take === 0) continue;
+    const g = windows.get(`${w.take}|${w.skip}`) ?? { take: w.take, skip: w.skip, ids: [] };
+    g.ids.push(w.id);
+    windows.set(`${w.take}|${w.skip}`, g);
+  }
+  for (const g of windows.values()) {
+    const rows = await ctx.db.$queryRaw<(VersionRow & { secretId: string })[]>`
+      SELECT v.id, v.secret_id AS "secretId", v.version_no AS "versionNo", v.size_bytes AS "sizeBytes", v.written_at AS "writtenAt",
+             v.written_by_user_id AS "writtenByUserId", v.written_by_worker_id AS "writtenByWorkerId", v.superseded_at AS "supersededAt"
+        FROM unnest(${g.ids}::text[]) AS s(id)
+        CROSS JOIN LATERAL (
+          SELECT * FROM secret_versions x WHERE x.secret_id = s.id ORDER BY x.version_no DESC OFFSET ${g.skip} LIMIT ${g.take}
+        ) v
+       ORDER BY v.secret_id, v.version_no DESC`;
+    for (const r of rows) {
+      const { secretId, ...item } = r;
+      out.get(`${secretId}|${g.take}|${g.skip}`)?.items.push(item);
+    }
+  }
+  return out;
+}, { items: [], total: 0 });
+
 /** `Secret` field resolvers for the App half: versions are metadata only, newest first. Org and user secrets have none. */
 export const secretFields = {
+  /** Separate audience from Secret metadata: current issuer or manager; prefix-only for other managers. */
+  readClients: async (s: { id: string; ownerType: string; ownerId: string }, args: { activeOnly?: boolean; limit?: number | null; offset?: number | null }, ctx: Context) => {
+    // readClientPage's SQL joins apps and organizations, so liveness is judged there; appManager is false for a dead App.
+    if (s.ownerType !== 'app') return pageEnvelope([], 0, 0);
+    const manager = !!(await appManager(ctx, s.ownerId));
+    return readClientPage(ctx, s.id, args, manager);
+  },
   currentVersion: async (s: { id: string; ownerType: string }, _: unknown, ctx: Context) => {
     if (s.ownerType !== 'app') return null;
-    const row = await ctx.db.secretVersion.findFirst({ where: { secretId: s.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
-    return row?.versionNo ?? null;
+    return currentVersionBatch(ctx, s.id);
   },
   /** Paged (cor:api:120:04): default 20, cap 200, limit 0 counts only; `hasMore` says whether rows remain. */
   versions: async (
@@ -567,19 +750,7 @@ export const secretFields = {
   ) => {
     if (s.ownerType !== 'app') return pageEnvelope([], 0, 0);
     const { take, skip } = pageArgs(args ?? {});
-    const where = { secretId: s.id };
-    const [items, total] = await Promise.all([
-      take === 0
-        ? Promise.resolve([])
-        : ctx.db.secretVersion.findMany({
-            where,
-            orderBy: { versionNo: 'desc' },
-            take,
-            skip,
-            select: { id: true, versionNo: true, sizeBytes: true, writtenAt: true, writtenByUserId: true, writtenByWorkerId: true, supersededAt: true },
-          }),
-      ctx.db.secretVersion.count({ where }),
-    ]);
-    return pageEnvelope(items, total, skip);
+    const page = await versionsPageBatch(ctx, `${s.id}|${take}|${skip}`);
+    return pageEnvelope(page.items, page.total, skip);
   },
 };

@@ -26,7 +26,7 @@ import { createHmac, randomUUID } from 'crypto';
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentGovernedError, isCommentGovernedError } from '../lib/comments/index.js';
 import { commentHitInfo, commentHitLabel } from '../lib/comments/hitLabel.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, softDeleteThreadsOfTargets } from '../lib/comments/lifecycle.js';
-import { decisionContainedError, decisionFamilyAmong, isDecisionFamilyRole, refuseDecisionFamily } from '../lib/decisions/index.js';
+import { questionContainedError, questionFamilyAmong, isQuestionFamilyRole, refuseQuestionFamily } from '../lib/questions/index.js';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import { assertNoGenericMessageSeqWrite, isLegacyMessageSeqError } from '../lib/legacyMessageSeq.js';
 import {
@@ -99,6 +99,7 @@ import { registerTickerTools } from './tickerTools.js';
 import { registerStopSignalTools } from './stopSignalTools.js';
 import { registerWebPollTools } from './webPollTools.js';
 import { registerGrantTools } from './grantTools.js';
+import { registerSecretTools } from './secretTools.js';
 import { openThreadCounts, type CommentCounts } from '../lib/comments/summary.js';
 import { loadSignatureStatuses, type NodeSignatureStatusView } from '../lib/signing/status.js';
 import { nodeContentValidationState } from '../lib/nodeContentValidation.js';
@@ -169,7 +170,7 @@ import {
   releaseOnceOnResponseEnd,
 } from './transportBounds.js';
 import { unstorableTextRefusal, refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
-import { edgeTextFields, unstorableTextText } from '../lib/unstorableTextInput.js';
+import { edgeTextFields, findUnstorableText, unstorableTextMessage, unstorableTextText } from '../lib/unstorableTextInput.js';
 import { refNamesNothing } from '../lib/entityRef/refNamesNothing.js';
 import { textResult } from './textResult.js';
 import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
@@ -227,7 +228,8 @@ import { resolveSuppliedKey, MemoryUnlockError } from '../lib/memoryUnlock.js';
 import { resolveNodeRef, isConcealedNodeRefAmbiguity } from '../lib/entityRef/nodeRef.js';
 import { resolveChannelRefId } from '../lib/entityRef/channelRef.js';
 import { sortSiblings } from '../lib/siblingOrder.js';
-import { renderRunNodeBundle } from '../lib/runNodeRender.js';
+import { assembleRunNodePrompt } from '../lib/runNodeRender.js';
+import { compileTemplate } from '../lib/template.js';
 import {
   NodeNotFoundError,
   AmbiguousLegacyUrnError,
@@ -262,9 +264,9 @@ import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
-import { resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
+import { chargeRequestServed, resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
 import {
-  CONTENT_RESOLUTION_LIMIT_EXCEEDED, isContentResolutionLimitError, resolutionLimitPhrase,
+  CONTENT_RESOLUTION_LIMIT_EXCEEDED, isContentResolutionLimitError, resolutionLimitMessage, resolutionLimitPhrase,
   type ResolutionLimit,
 } from '../lib/includes/resolutionBudget.js';
 import { checkNodeTypesFilter, NodeTypesFilterError } from '../lib/retrieval/nodeTypeList.js';
@@ -484,7 +486,10 @@ export const GOVERNED_MCP_DOOR_FIELDS: readonly string[] = [
 /**
  * Whether a generic MCP node write could be replayed through `kind`'s door
  * (`op`): every field it sets is one that door carries, and it clears neither
- * `content` nor `abstract` (the doors take strings only).
+ * `content`, `abstract` nor `data` (the doors take strings for the first two
+ * and an OBJECT for data — none of the three is nullable, so a null cannot
+ * replay; #3729, which became reachable when #3721 made the generic update
+ * schema's `data` nullable).
  *
  * The kind SIGNALS are door-specific (@copilot + @codex, PR #1305): only the
  * task update door carries `isRunnable`, only the review update door carries
@@ -528,7 +533,10 @@ export function mcpDoorCanReplay(
       continue;
     }
     if (!GOVERNED_MCP_DOOR_FIELDS.includes(key)) return false;
-    if ((key === 'content' || key === 'abstract') && value === null) return false;
+    // #3729 — a null cannot replay: content/abstract take strings on the
+    // doors, and `data` takes an object (governedDoorArgs.data is optional,
+    // never nullable), so a bag-clearing `data: null` has no door either.
+    if ((key === 'content' || key === 'abstract' || key === 'data') && value === null) return false;
   }
   // The create doors require a non-blank name (callGovernedDoor), which the
   // generic create tool does not (@codex, PR #1305).
@@ -903,6 +911,10 @@ export async function addEdge(args: {
   // Spec 037: the edge's identity is its loc within the source memory.
   // Author-supplied loc is validated; otherwise derive it deterministically
   // so re-running with the same endpoints + name stays idempotent.
+  // #4106: caller text Postgres would reject (NUL, lone surrogate) is refused typed, after the gates above and before
+  // the loc derives from `name`; `loc` itself is validated just below.
+  const unstorable = findUnstorableText({ name, loc: authoredLoc, description });
+  if (unstorable) return { error: `[bad_user_input] ${unstorableTextMessage(unstorable)}` };
   const edgeLoc =
     authoredLoc != null && authoredLoc !== '' ? authoredLoc : deriveEdgeLoc(sourceNode.loc, name, target.loc);
   try {
@@ -2426,6 +2438,7 @@ export function createMcpServerInstance(
     'hadron_web_poll_list',
     // #3711 — hadron_create_grant acts as the person and clears any worker binding itself (src/mcp/grantTools.ts); no session argument.
     'hadron_create_grant',
+    'hadron_list_secrets', 'hadron_get_secret', // #3998: metadata reads, never a reveal or write.
     // Per-connection selections and key handling: nothing authored.
     'hadron_set_active_memory', 'hadron_set_active_app', 'hadron_set_active_org', 'hadron_set_active_scope',
     'hadron_unlock_memory', 'hadron_lock_memory',
@@ -3448,7 +3461,7 @@ export function createMcpServerInstance(
       try {
         const created = await resolvers.Mutation.createMemory(
           {},
-          { name, memoryClass, orgId: org, shortDescription, description, tags, visibility },
+          { name, memoryClass, orgRef: org, shortDescription, description, tags, visibility },
           ctx,
         );
         return textResult(
@@ -3456,7 +3469,7 @@ export function createMcpServerInstance(
             'Use hadron_set_active_memory to work in it.',
         );
       } catch (e) {
-        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_memory:resolver');
+        return toolErrorResult(e, () => unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_memory:resolver');
       }
     },
   );
@@ -3479,7 +3492,7 @@ export function createMcpServerInstance(
         const created = await resolvers.Mutation.createAppMemory({}, { appRef: app, name, shortDescription, description, tags }, ctx);
         return textResult(`Memory created: ${safeEmitEntityUrnV2('memory', created.urn)} (class: app, id: ${created.id}).`);
       } catch (e) {
-        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_app_memory:resolver');
+        return toolErrorResult(e, () => unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_app_memory:resolver');
       }
     },
   );
@@ -3863,6 +3876,7 @@ export function createMcpServerInstance(
   registerWebPollTools(server, { db, auth });
   // #3711 — a person who manages an App asks for a grant (ruling 0255 item 21); never as a worker.
   registerGrantTools(server, { db, auth });
+  registerSecretTools(server, { db, auth });
   registerAutomationPinTools(server, { db, auth });
   // #1892 — an Agent's task and process lists (cor:dmo:050:15, :16).
   registerAgentDefinitionTools(server, { db, auth });
@@ -7955,7 +7969,7 @@ export function createMcpServerInstance(
           )}`,
         );
       } catch (err) {
-        return roleWriterRefusalText(err) !== null ? refusalResult(roleWriterRefusalText(err) as string) : toolErrorResult(err, () => String((err as Error)?.message ?? err), 'hadron_update_edge');
+        return roleWriterRefusalText(err) !== null ? refusalResult(roleWriterRefusalText(err) as string) : toolErrorResult(err, () => unstorableTextText(err) ?? String((err as Error)?.message ?? err), 'hadron_update_edge');
       }
     },
   );
@@ -8062,7 +8076,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         | { refused: 'access' }
         | { refused: 'mintedSpec'; message: string }
         | { refused: 'comment'; message: string }
-        | { refused: 'decision'; message: string }
+        | { refused: 'question'; message: string }
         | { refused: 'governed'; message: string }
         | { refused: 'writerLevel'; message: string }
         | { ok: true; descendantCount: number };
@@ -8136,10 +8150,10 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
           return { refused: 'comment', message: commentGovernedError('delete', 'removes').message };
         }
         await assertNoBootPromptRows(tx, affectedIds, 'delete');
-        // #1641 §3.2 — a decision is withdrawn, never deleted.
-        const decisions = await decisionFamilyAmong(tx, affectedIds);
-        if (decisions.length > 0) {
-          return { refused: 'decision', message: decisionContainedError('Deleting this node', decisions.map((d) => d.loc)).message };
+        // #1641 §3.2 — a question is withdrawn, never deleted.
+        const questions = await questionFamilyAmong(tx, affectedIds);
+        if (questions.length > 0) {
+          return { refused: 'question', message: questionContainedError('Deleting this node', questions.map((d) => d.loc)).message };
         }
         // A governed node is removed only after its marker is cleared through
         // the kind's door: the whole affected set is judged on locked rows.
@@ -8239,8 +8253,8 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         if (result.refused === 'comment') {
           return refusalResult(`[role_governed] ${result.message}`);
         }
-        if (result.refused === 'decision') {
-          return refusalResult(`[decision_contained] ${result.message}`);
+        if (result.refused === 'question') {
+          return refusalResult(`[question_contained] ${result.message}`);
         }
         if (result.refused === 'governed') {
           return refusalResult(`[role_governed] ${result.message}`);
@@ -8478,9 +8492,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                 }
                 await ensureCurrentNodeRevisionInTransaction(tx, existing.id, { expectedMemoryId: fromMemory.id });
                 const locked = await tx.node.findUniqueOrThrow({ where: { id: existing.id } });
-                // #1641 — a decision's name is its rendered `<code>: <title>`,
-                // which its approval covers; only the decision doors change it.
-                if (isDecisionFamilyRole(locked.role)) throw decisionContainedError('Renaming this node', [locked.loc]);
+                // #1641 — a question's name is its rendered `<code>: <title>`,
+                // which its approval covers; only the question doors change it.
+                if (isQuestionFamilyRole(locked.role)) throw questionContainedError('Renaming this node', [locked.loc]);
                 // #1328 — the name is authored; the address is not.
                 const renameStamp = await assertRenameAuthoring(tx, fromMemory.id, toMemory.id, {
                   priorRole: locked.role, priorRunnable: locked.isRunnable,
@@ -8576,8 +8590,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               // whole transaction back.
               if (existingTarget) {
                 await assertNoMintedSpecRemoval(tx, toMemory.id, [existingTarget.id], 'overwrite');
-                // #1641 §3.2 — evicting a decision would delete it.
-                await refuseDecisionFamily(tx, [existingTarget.id], 'Overwriting this node');
+                // #1641 §3.2 — evicting a question would delete it.
+                await refuseQuestionFamily(tx, [existingTarget.id], 'Overwriting this node');
                 // Evicting a live occupant is a removal: a governed occupant is
                 // replaced only after its marker is cleared through the kind's
                 // door. A tombstoned occupant is only re-keyed.
@@ -8745,7 +8759,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_run_action',
-    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). An action URN (hrn:action:<root>:<agent-slug>:<code>) is also accepted: it is a register entry\'s second address, resolved to that entry and run exactly as by its node URN, under the same memory read gate (the action address additionally needs the Agent\'s system memory to be readable, so a refusal reads as not found).',
+    'Load an action node and resolve its dependencies. Returns the prompt a run of the node executes (hrn:node:hadronmemory.com:specs:cor:api:060:05): its instructions with {{placeholders}} filled from args and then from the memory default data (an unsupplied placeholder renders empty), followed by the content of every referenced node you can read. The next-step edges of a flow (next, next.<label>) are routing, not references, and are not included. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). An action URN (hrn:action:<root>:<agent-slug>:<code>) is also accepted: it is a register entry\'s second address, resolved to that entry and run exactly as by its node URN, under the same memory read gate (the action address additionally needs the Agent\'s system memory to be readable, so a refusal reads as not found).',
     SHAPE_HADRON_RUN_ACTION,
     async ({ urn: rawUrn, args }) => {
       // #2718 — an action URN is a register entry's SECOND address. Resolve it
@@ -8765,13 +8779,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // not-found (cor:api:140:03).
         const viaEntry = await loadRunNodeById(entry);
         if ('error' in viaEntry) return unreadable();
-        return textResult(await renderRunNode(viaEntry.node, viaEntry.loc, args));
+        return runBundleResult(viaEntry.node, viaEntry.loc, args);
       }
       // Spec 022 qualification + loading + rendering are shared with hadron_run_task
       // (cor:api:060) via loadNodeForRun / renderRunNode below.
       const loaded = await loadNodeForRun(rawUrn);
       if ('error' in loaded) return refusalResult(loaded.error);
-      return textResult(await renderRunNode(loaded.node, loaded.loc, args));
+      return runBundleResult(loaded.node, loaded.loc, args);
     },
   );
 
@@ -8849,14 +8863,28 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     });
   }
 
-  // {{arg}} substitution + inlined edge-linked node content + one action-run
-  // usage event. Returns the rendered markdown bundle.
+  /**
+   * #863: the run bundle as a tool result. A read over a content resolution limit (#40) is the tool's named refusal,
+   * with nothing partial returned and nothing recorded; every other fault stays a fault.
+   */
+  async function runBundleResult(node: RunNode, loc: string, args?: Record<string, string>) {
+    try {
+      return textResult(await renderRunNode(node, loc, args));
+    } catch (e) {
+      if (!isContentResolutionLimitError(e)) throw e;
+      return refusalResult(`Refused (${CONTENT_RESOLUTION_LIMIT_EXCEEDED}): ${resolutionLimitMessage(e.limit)}`);
+    }
+  }
+
+  // The rendered run bundle (the template compile, then the content of every
+  // edge-linked reference) plus one action-run usage event.
   //
-  // #818: the SUBSTITUTION + INLINING is now `renderRunNodeBundle` in
-  // src/lib/runNodeRender.ts, shared with the GraphQL `renderRunNode` query so
-  // a preview cannot disagree with what actually executes. The `action-run`
-  // UsageEvent stays HERE — it meters a tool invocation, and the read-only
-  // GraphQL preview must not inflate the ledger with one.
+  // #818, #863: the assembly is `assembleRunNodePrompt` in
+  // src/lib/runNodeRender.ts, the function `runTask` executes and the GraphQL
+  // `renderRunNode` query previews with, so a preview cannot disagree with
+  // what runs. The `action-run` UsageEvent stays HERE — it meters a tool
+  // invocation, and the read-only GraphQL preview must not inflate the ledger
+  // with one.
   async function renderRunNode(
     node: RunNode,
     loc: string,
@@ -8892,11 +8920,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       }
       return pending;
     };
-    const rendered = await renderRunNodeBundle(node, args, {
+    // #863 (cor:api:060:05): the SAME assembler `runTask` and the GraphQL `renderRunNode` preview call, with the
+    // dependencies they pass: a Mustache compile over the node's memory, and no flow-routing edge inlined. A limit
+    // refusal (#40) is thrown before anything is recorded and becomes the tool's named refusal in `runBundleResult`.
+    const readCtx = scopeCtx();
+    const rendered = await assembleRunNodePrompt({ ...node, loc }, args, {
       memoryUrnOf: memoizedMemoryUrnLookup(),
+      compileTemplate: (content, data, memoryId) =>
+        compileTemplate(content, data, memoryId, db, {}).then((text) => chargeRequestServed(readCtx, content, text)),
       // The run node's OWN memory was gated by loadNodeForRun; this gates each
       // dependency separately, because an edge can cross memories (#781).
-      includeTarget: (target) => canRead(target.memoryId),
+      includeTarget: (target) => !!target && canRead(target.memoryId),
       onTargetInlined: (target) => inlined.push(target),
     });
     trackUsageWrite(db, db.usageEvent
@@ -9289,7 +9323,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_run_task',
-    "Render or execute a node. By-name task discovery, resolution and listing require isRunnable=true (hrn:node:hadronmemory.com:specs:cor:api:060:01); an explicit fully-qualified `urn` skips resolution and does not require that flag. Give `task` (and optionally `memory`); the server resolves both against what you can read and runs the match. When a name is ambiguous or omitted you get a list to choose from (an interactive picker where the client supports it, otherwise a numbered list to re-invoke with `urn`). Pass a fully-qualified `urn` to skip resolution and run directly. By DEFAULT this RENDERS the task — returns the assembled instructions ({{arg}} substitution + inlined dependencies) for YOU to execute. Pass `appRef` to EXECUTE server-side instead (#529): the server mints a MANUAL app run and returns the run id to poll. Spec cor:api:060.",
+    "Render or execute a node. By-name task discovery, resolution and listing require isRunnable=true (hrn:node:hadronmemory.com:specs:cor:api:060:01); an explicit fully-qualified `urn` skips resolution and does not require that flag. Give `task` (and optionally `memory`); the server resolves both against what you can read and runs the match. When a name is ambiguous or omitted you get a list to choose from (an interactive picker where the client supports it, otherwise a numbered list to re-invoke with `urn`). Pass a fully-qualified `urn` to skip resolution and run directly. By DEFAULT this RENDERS the task — returns the assembled instructions (placeholders filled, referenced nodes inlined; the same prompt an execution runs) for YOU to execute. Pass `appRef` to EXECUTE server-side instead (#529): the server mints a MANUAL app run and returns the run id to poll. Spec cor:api:060.",
     SHAPE_HADRON_RUN_TASK,
     async (rawArgs) => {
       // createTestableMcpServer bypasses zod — normalize args defensively.
@@ -9350,7 +9384,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         const loaded = await loadNodeForRun(nodeUrn);
         if ('error' in loaded) return refusalResult(loaded.error);
-        return textResult(await renderRunNode(loaded.node, loaded.loc, args));
+        return runBundleResult(loaded.node, loaded.loc, args);
       };
 
       // URN bypass — run directly, exactly like hadron_run_action (cor:api:060:02).
@@ -12467,8 +12501,13 @@ function respondMcpAuthenticationRequired(req: Request, res: Response): void {
  * A session ID routes to a transport; it never authenticates its bearer. The
  * bearer must still be live, MCP-scoped, and bound to this transport's principal.
  * Recheck the exact transport after credential resolution, which may await DB.
+ *
+ * Exported for the #4471 pin (mcp/authStoreBusy4471.test.ts). The catch below is an
+ * UNTYPED catch-all that predates #4471 and swallows every rejection identically —
+ * so a busy store answers the fixed 503 whether the middleware threw the typed
+ * AuthStoreBusyError or the raw driver error; that surface is unchanged by construction.
  */
-async function authenticateBoundMcpSession(
+export async function authenticateBoundMcpSession(
   req: Request,
   res: Response,
   sessionId: string,
@@ -13279,7 +13318,7 @@ const SHAPE_HADRON_CREATE_NODE = {
   nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Running is gated by isRunnable, independent of nodeType.'),
   objectType: z.string().optional().describe('#725 — collection this node belongs to (the domain-object discriminator, e.g. "competitor" / "insight"), orthogonal to nodeType. On a memory with a property schema, it MUST name a declared collection and the node\'s properties are validated against it; free-form on an unschema\'d memory. Omit for an ordinary node.'),
   isRunnable: z.boolean().optional().describe('#1201 — REFUSED on this tool if true: a write producing a runnable node must go through hadron_create_task, because authoring something the platform will EXECUTE is not the same act as writing prose. Accepted only as false/omitted (the default). Independent of nodeType — a runnable node may carry any nodeType.'),
-  role: z.string().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType (the platform-kind axis) and NOT objectType (the collection discriminator); role does not affect default ranking, though hadron_find_nodes can filter by its dotted family. Most values are inert, but the GOVERNED families — "review" / "review.*", "spec" / "spec.*" and "decision" / "decision.*" — are refused on this tool. Use hadron_create_review for a review; a spec is authored with the `hadron spec` CLI, its only authoring surface; a decision is asked with the GraphQL askDecision operation (#1641). The same applies to isRunnable — this tool cannot create a runnable node; use hadron_create_task.'),
+  role: z.string().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType (the platform-kind axis) and NOT objectType (the collection discriminator); role does not affect default ranking, though hadron_find_nodes can filter by its dotted family. Most values are inert, but the GOVERNED families — "review" / "review.*", "spec" / "spec.*" and "question" / "question.*" — are refused on this tool. Use hadron_create_review for a review; a spec is authored with the `hadron spec` CLI, its only authoring surface; a question is asked with the GraphQL askQuestion operation (#1641). The same applies to isRunnable — this tool cannot create a runnable node; use hadron_create_task.'),
   description: z.string().optional().describe('Short description'),
   abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars). Opt-in on hadron_get_node via the contentScope parameter. (hadron_find_nodes preview surfacing of abstract ships in spec 031 US2 — not yet live.) Empty + whitespace-only values normalize to null. Spec 031.'),
   content: z.string().optional().describe('Markdown content'),
@@ -13310,7 +13349,7 @@ const SHAPE_HADRON_UPDATE_NODE = {
   nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Changing nodeType does NOT change isRunnable or properties (e.g. claudeSkill) — a retyped runnable node stays runnable until you clear isRunnable yourself. Running is gated by isRunnable, not nodeType.'),
   objectType: z.string().optional().describe('#725 — collection this node belongs to (e.g. "competitor" / "insight"), orthogonal to nodeType. On a schema-governed memory it must name a declared collection and the resulting properties are validated against it. Omit to preserve.'),
   isRunnable: z.boolean().optional().describe('#1201 — REFUSED on this tool: making a node runnable, and RETIRING a runnable one, both go through hadron_update_task. Editing a node that is already runnable is refused here too, whatever this field says, because the result is still a runnable node. Omit to preserve. Independent of nodeType — retyping the node never changes this flag.'),
-  role: z.string().nullable().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType and NOT objectType. Omit to preserve; null to clear. GOVERNED families ("review" / "review.*", "spec" / "spec.*", "decision" / "decision.*") are refused here — use hadron_update_review, the `hadron spec` CLI for a spec, or the decision operations (amendDecision, …) for a decision — and so is EDITING a node that already carries one — the gate reads the resulting state, not the change — because a governed node must not be rewritable through the generic surface.'),
+  role: z.string().nullable().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType and NOT objectType. Omit to preserve; null to clear. GOVERNED families ("review" / "review.*", "spec" / "spec.*", "question" / "question.*") are refused here — use hadron_update_review, the `hadron spec` CLI for a spec, or the question operations (amendQuestion, …) for a question — and so is EDITING a node that already carries one — the gate reads the resulting state, not the change — because a governed node must not be rewritable through the generic surface.'),
   description: z.string().optional().describe('New short description'),
   abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on hadron_get_node via contentScope; hadron_find_nodes preview surfacing ships in spec 031 US2. STALENESS: the abstract is fingerprinted against the content AS OF THIS CALL, so passing `abstract` and `content` TOGETHER keeps them in sync and needs no ordering. If you instead change `content` in a LATER call, this abstract is marked `abstract-stale` on read until you re-save it (re-sending the identical text is enough) or assert `abstractStillAccurate`. It also arms for an abstract that was NEVER fingerprinted — one saved against an empty node, where a body arrived later (#1128). Read the ABSENCE of the marker narrowly: it means "checked against this exact content" ONLY on a read that could have shown it — `contentScope` of `abstract` or `all`, on a memory that is unencrypted or unlocked. Under the default `content` scope, or on a locked memory, no marker is emitted either way and its absence says nothing at all. Spec 031/032.'),
   content: z.string().nullable().optional().describe('New markdown content. Pass `null` to clear; omit to preserve. Spec 032 widened the schema from string-only to allow null per the consistent partial-update convention; clearing content interacts with abstractOriginHash maintenance (FR-006/FR-007). Changing content WITHOUT also passing `abstract` arms the `abstract-stale` marker on this node — that is intended (the abstract was written against the old content and may no longer describe it). Pass both together, or assert `abstractStillAccurate` if you have re-read the abstract and it survives the edit.'),

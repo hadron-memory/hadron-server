@@ -93,7 +93,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: member.id, role: 'CONTRIBUTOR' } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } as never });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'Role', personaRole: 'tester', description: 'd' }, ctx());
+  agent = await M.createAgent({}, { orgRef: org.id, name: 'Role', personaRole: 'tester', description: 'd' }, ctx());
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   const made = await M.castWorker({}, { appRef: app.id, agentRef: agent.id, name: 'Iris' }, ctx());
   worker = await db.worker.findUniqueOrThrow({ where: { id: made.id } });

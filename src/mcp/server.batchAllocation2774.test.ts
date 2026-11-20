@@ -66,14 +66,14 @@ beforeEach(async () => {
 
   const memory = await resolvers.Mutation.createMemory(
     {},
-    { orgId: org.id, name: 'batchmem' },
+    { orgRef: org.id, name: 'batchmem' },
     { db, roles: ['ADMIN'], userId: admin.id } as Context,
   );
   // A personal memory owned by user2 — ADMIN does NOT bypass personal
   // ownership, so it is the clean "denied" case for the partial-success test.
   const pmem = await resolvers.Mutation.createMemory(
     {},
-    { orgId: org.id, name: 'pmem', memoryClass: 'personal' },
+    { orgRef: org.id, name: 'pmem', memoryClass: 'personal' },
     { db, roles: ['READER'], userId: user2.id } as Context,
   );
 
@@ -218,7 +218,7 @@ it.each([
   const single = () => server.callToolText('hadron_get_node', { urn: 'hrn:node:batch-org:parity:root', ...options });
   const batch = () => server.callToolText('hadron_get_nodes', { refs: [root.id], ...options });
   if (encrypted) {
-    await resolvers.Mutation.encryptMemory({}, { memoryId: memory.id, passphrase: 'synthetic2774' }, { db, roles: ['ADMIN'], userId: fx.user2.id } as Context);
+    await resolvers.Mutation.encryptMemory({}, { memoryRef: memory.id, passphrase: 'synthetic2774' }, { db, roles: ['ADMIN'], userId: fx.user2.id } as Context);
     const locked = await single();
     expect(await batch()).toContain(locked);
     expect(locked).toContain('Locked:');
@@ -287,7 +287,7 @@ it.each([[true, false, false], [false, false, false], [true, true, false], [fals
   const node = await db.node.create({ data: { memoryId: memory.id, loc: 'no-abstract', name: 'No abstract', content: 'UNNEEDED'.repeat(16_384), abstract: null, data: { note: 'VISIBLE DATA' } } });
   const server = createTestableMcpServer(adminAuth(), { sessionId: 'batch2774-empty' });
   if (encrypted) {
-    await resolvers.Mutation.encryptMemory({}, { memoryId: memory.id, passphrase: 'synthetic2774' }, { db, roles: ['ADMIN'], userId: fx.admin.id } as Context);
+    await resolvers.Mutation.encryptMemory({}, { memoryRef: memory.id, passphrase: 'synthetic2774' }, { db, roles: ['ADMIN'], userId: fx.admin.id } as Context);
     if (!locked) expect(await server.callToolText('hadron_unlock_memory', { memoryUrn: memory.urn, passphrase: 'synthetic2774' })).toContain('unlocked');
     else sessionKeyCache.clear();
   }

@@ -144,7 +144,7 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: org.id, userId: admin.id, role: 'ADMIN' },
   });
   // The Team Agent through the real mutation so it owns a real system memory.
-  const created = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const created = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   teamAgent = { id: created.id, urn: created.urn, systemMemoryId: created.systemMemoryId };
   app = await db.app.create({
     data: { id: generateId(), organizationId: org.id, name: 'Team App', urn: `${org.urn}:team` },
@@ -152,7 +152,7 @@ beforeEach(async () => {
   await db.appAgent.create({ data: { appId: app.id, agentId: teamAgent.id } });
   await db.appMember.create({ data: { appId: app.id, userId: appMember.id, role: 'member' } });
 
-  legacyMem = await M.createMemory({}, { orgId: org.id, name: 'csq-legacy' }, ctx(admin.id));
+  legacyMem = await M.createMemory({}, { orgRef: org.id, name: 'csq-legacy' }, ctx(admin.id));
   await db.node.create({
     data: {
       id: generateId(), memoryId: legacyMem.id, loc: TEAM_CHAT_LOC,

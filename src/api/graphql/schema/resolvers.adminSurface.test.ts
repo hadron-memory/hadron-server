@@ -196,7 +196,7 @@ describe('policy links + effectiveActionPolicy (#510, cor:acl:040:02)', () => {
   it('updateOrganization/updateApp store a valid link and reject a malformed one', async () => {
     await resolvers.Mutation.updateOrganization(
       {},
-      { id: org.id, policy: { allow: ['run.execute', 'llm.invoke', 'memory.*'] } },
+      { ref: org.id, policy: { allow: ['run.execute', 'llm.invoke', 'memory.*'] } },
       adminCtx(),
     );
     await expect(
@@ -209,7 +209,7 @@ describe('policy links + effectiveActionPolicy (#510, cor:acl:040:02)', () => {
   it('explains per-layer verdicts and pinpoints the denying layer', async () => {
     await resolvers.Mutation.updateOrganization(
       {},
-      { id: org.id, policy: { allow: ['*'] } },
+      { ref: org.id, policy: { allow: ['*'] } },
       adminCtx(),
     );
     await resolvers.Mutation.updateApp(

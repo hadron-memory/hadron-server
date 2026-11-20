@@ -18,7 +18,7 @@ beforeEach(async () => {
   const user = await db.user.create({ data: { githubId: 206301, githubUsername: 'prune2063', handle: 'prune2063', roles: [] } });
   userId = user.id;
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
-  const memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'prune2063' }, ctx());
+  const memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'prune2063' }, ctx());
   memoryId = memory.id;
 });
 async function node(loc: string) {
@@ -177,7 +177,7 @@ it('#2751 a foreign carrier cannot qualify current-memory text after movement', 
   await edit(n.id, { tags: ['covered'] });
   await edit(n.id, { content: 'unapproved' });
   const sourceMemory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
-  const target = await resolvers.Mutation.createMemory(null, { orgId: sourceMemory.organizationId!, name: 'target' }, ctx());
+  const target = await resolvers.Mutation.createMemory(null, { orgRef: sourceMemory.organizationId!, name: 'target' }, ctx());
   await db.node.update({ where: { id: n.id }, data: { memoryId: target.id, approvalHash: null } });
   await db.nodeRevision.create({ data: { id: generateId(), nodeId: n.id, memoryId: target.id, loc: n.loc, name: n.name, content: 'approved text', tags: [], revNo: 10 } });
   expect((await newestApprovedRevisionOf(db, n.id)).found).toBeNull();

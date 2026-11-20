@@ -23,6 +23,7 @@ import {
   VALIDATION_TASK_SELECT,
   type ContentValidationReportInput,
 } from '../../../lib/contentValidationReport.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -55,7 +56,7 @@ const asWorker = <T>(workerId: string, userId: string, fn: () => Promise<T>) =>
 async function mintRun(entryNodeId: string | null, userId: string = leo) {
   return db.appRun.create({
     data: {
-      id: generateId(), organizationId: orgId, appId, userId,
+      id: generateId(), organizationId: orgId, appId, agentId: await testRunAgentId(db, orgId, appId), userId,
       triggerKind: 'MANUAL', entryNodeUrn: 'cv-org:mem:flow', entryNodeId, status: 'RUNNING',
     },
   });

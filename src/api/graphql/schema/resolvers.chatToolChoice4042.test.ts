@@ -40,7 +40,7 @@ beforeEach(async () => {
   [admin, member, outsider] = await Promise.all(['admin', 'member', 'outsider'].map(h =>
     db.user.create({ data: { handle: `${h}-${s}`, roles: ['READER'] } })));
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'chat-agent', visibility: 'ORGANIZATION' }, { db, userId: admin.id, roles: ['ADMIN'] } as Context);
+  agent = await M.createAgent({}, { orgRef: org.id, name: 'chat-agent', visibility: 'ORGANIZATION' }, { db, userId: admin.id, roles: ['ADMIN'] } as Context);
   app = await db.app.create({ data: { organizationId: org.id, name: 'Workspace', urn: `${org.urn}:workspace` } });
   await db.appMember.createMany({ data: [
     { appId: app.id, userId: admin.id, role: 'admin' },
@@ -127,7 +127,7 @@ describe('(b) chatToolChoiceFor(provider, model): the pure unsaved-pair decision
 
 describe('(c) chatEffectiveToolChoice(chatId)', () => {
   const asMember = (extra: Partial<Context> = {}) => ctx(member, extra);
-  const start = (args: Record<string, unknown> = {}, c: Context = asMember()) => M.startChat(null, { agentId: agent.id, scope: 'shared', ...args }, c);
+  const start = (args: Record<string, unknown> = {}, c: Context = asMember()) => M.startChat(null, { agentRef: agent.id, scope: 'shared', ...args }, c);
   const effective = (chatId: string, c: Context = asMember()) => Q.chatEffectiveToolChoice(null, { chatId }, c);
 
   it('default branch: a chat on `default` returns the decision of the config the walk lands on, at Agent, Org and Host level', async () => {

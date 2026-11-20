@@ -7,7 +7,10 @@
 import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
 import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
-import { getGrantForWorker, isManagerAudience, isPersonAudience, listGrantsForPerson, listGrantsForWorker, type GrantReader } from '../../../lib/grants/read.js';
+import { getGrantForWorker, isManagerAudience, isPersonAudience, listGrantsForPerson, listGrantsForWorker, type GrantReader, type GrantView } from '../../../lib/grants/read.js';
+import { composeGrantUrn, resolveGrantRef } from '../../../lib/entityRef/grantRef.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
+import { UrnNotQualifiedError, UrnParseError } from '../../../lib/urn.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { loadGrantSignatureStatuses, type GrantSignatureStatusView, type GrantSignatureView } from '../../../lib/signing/grantStatus.js';
 import { clampListTake, type Context } from './resolvers.helpers.js';
@@ -54,7 +57,25 @@ export async function resolveGrantPerson(ctx: Context): Promise<string | null> {
 export const grantQueries = {
   grant: async (_p: unknown, { ref }: { ref: string }, ctx: Context) => {
     const reader = await resolveGrantReader(ctx);
-    return reader ? getGrantForWorker(ctx.db, reader, ref) : null;
+    if (!reader) return null;
+    // #3709: the ref is a bare id or an `hrn:grant:<root>:<app-slug>:<grant-id>` URN —
+    // identity first ({@link resolveGrantRef}, the App by reference through the rename
+    // alias map), then the row scope. A well-formed URN naming nothing — another App's
+    // grant, a foreign leaf, an App that no longer resolves — is the SAME null as a
+    // missing id, never an error (no existence oracle, cor:api:140:02). A malformed or
+    // wrong-type URN is the one typed input refusal on this surface (cor:api:140:01):
+    // it propagates, and the boundary answers URN_NOT_QUALIFIED.
+    let id: string;
+    try {
+      ({ id } = await resolveGrantRef(ctx.db, ref));
+    } catch (error) {
+      if (error instanceof UrnNotQualifiedError) throw error;
+      // GrantNotFoundError (and only it, or a fault propagates — #2975, cor:api:260:01)
+      // reads as names-nothing here.
+      if (!refNamesNothing(error)) throw error;
+      return null;
+    }
+    return getGrantForWorker(ctx.db, reader, id);
   },
   grants: async (_p: unknown, { limit, offset }: { limit?: number | null; offset?: number | null }, ctx: Context) => {
     const reader = await resolveGrantReader(ctx);
@@ -106,6 +127,25 @@ function loadGrantSignatureStatus(ctx: Context, grantId: string): Promise<GrantS
 
 export const grantFieldResolvers = {
   Grant: {
+    /**
+     * #3709 (cor:urn:010:01's Grant row, rulings:0255 item 9): the computed
+     * `hrn:grant:<root>:<app-slug>:<grant-id>` URN — never stored, composed from the
+     * App's CURRENT urn plus the row id (the leaf atom is the id, so the URN is 1:1 with
+     * the row). After an App rename only the NEW spelling is emitted, while both
+     * spellings keep resolving (the alias map, cor:urn:030). Null only when the stored
+     * App urn cannot compose — a wrong URN is worse than none.
+     */
+    urn: (g: Pick<GrantView, 'appUrn' | 'id'>): string | null => {
+      try {
+        return composeGrantUrn(g.appUrn, g.id);
+      } catch (error) {
+        // Only the compose refusal — the stored App urn cannot form a grant URN — is
+        // null ("a wrong URN is worse than none"). A bare catch cannot tell that from
+        // a fault, and a fault must propagate (#2975, cor:api:260:01).
+        if (!(error instanceof UrnParseError || error instanceof UrnNotQualifiedError)) throw error;
+        return null;
+      }
+    },
     /** #3711 (V56): the revoker and the holder's departure are the MANAGER's. Read off the parent's own mark, so a worker's or a person's read of the same grant never carries them. */
     revokedByUserId: (g: { revokedBy?: string | null }) => (isManagerAudience(g) ? g.revokedBy ?? null : null),
     holderDepartedAt: (g: { holderDepartedAt?: Date | null }) => (isManagerAudience(g) ? g.holderDepartedAt ?? null : null),

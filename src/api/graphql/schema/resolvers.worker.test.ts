@@ -140,7 +140,7 @@ beforeEach(async () => {
   // The Team Agent — created through the real mutation so it owns a real
   // system memory; the cast-list register lives as CONTENT there
   // (cor:agt:020:01 — cast lists are ergonomics, never gates).
-  const team = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const team = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   teamAgent = { id: team.id, urn: team.urn, systemMemoryId: team.systemMemoryId };
   await createRoleNode(teamAgent.systemMemoryId, 'backend-engineer');
 
@@ -149,7 +149,7 @@ beforeEach(async () => {
   const role = await M.createAgent(
     {},
     {
-      orgId: org.id,
+      orgRef: org.id,
       name: 'Backend Engineer',
       personaRole: 'backend-engineer',
     },
@@ -336,7 +336,7 @@ describe('castWorker — agent resolution', () => {
   it('two installed agents with the personaRole → WORKER_AGENT_AMBIGUOUS; agentRef resolves it', async () => {
     const second = await M.createAgent(
       {},
-      { orgId: org.id, name: 'Backend Two', personaRole: 'backend-engineer' },
+      { orgRef: org.id, name: 'Backend Two', personaRole: 'backend-engineer' },
       ctx(admin.id),
     );
     await db.appAgent.create({ data: { appId: app.id, agentId: second.id } });
@@ -351,7 +351,7 @@ describe('castWorker — agent resolution', () => {
   });
 
   it('agentRef naming an agent NOT installed here → WORKER_AGENT_NOT_INSTALLED', async () => {
-    const foreign = await M.createAgent({}, { orgId: org.id, name: 'Uninstalled' }, ctx(admin.id));
+    const foreign = await M.createAgent({}, { orgRef: org.id, name: 'Uninstalled' }, ctx(admin.id));
     await expectCode(cast({ agentRef: foreign.id, name: 'Zoe' }), 'WORKER_AGENT_NOT_INSTALLED');
   });
 
@@ -1693,6 +1693,13 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
       // attribution, not activity. Both derivations must still read it lapsed.
       Ida: { startedAt: t(-5000), updatedAt: t(-4000), endedAt: null, autoExpiredAt: null,
              eventAt: t(-1), eventCounts: false },
+      // #4271 (#4272 QA P2): the row classes of the liveness guard, which skips usage events only for a session its
+      // own stamps close. Ended with no updated_at and an event inside: the event counts.
+      Nell: { startedAt: t(-900), updatedAt: null, endedAt: t(-600), autoExpiredAt: null, eventAt: t(-700) },
+      // Ended and closed by its own stamps, with an event after the end: capped at the end.
+      Ola: { startedAt: t(-900), updatedAt: t(-600), endedAt: t(-600), autoExpiredAt: null, eventAt: t(-500) },
+      // Ended with updated_at before the end and an event between: the event counts.
+      Pim: { startedAt: t(-900), updatedAt: t(-850), endedAt: t(-600), autoExpiredAt: null, eventAt: t(-700) },
     };
 
     const workers: Record<string, { id: string; appId: string }> = {};

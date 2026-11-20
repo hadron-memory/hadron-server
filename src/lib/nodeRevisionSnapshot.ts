@@ -23,7 +23,7 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from './id.js';
 import { clearNodeAuthorship } from './nodeAuthorship.js';
 import { normalizeRole } from './enforceNodeSchema.js';
-import { isDecisionFamilyRole } from './decisions/index.js';
+import { isQuestionFamilyRole } from './questions/index.js';
 import { computeApprovalHash } from './approvalHash.js';
 import { newestApprovedRevisionOf } from './nodeApproval.js';
 import { includeHistoryClient, type IncludeHistoryTransaction } from './includes/includeHistoryFence.js';
@@ -380,13 +380,13 @@ export async function createNodeRevision(
   // to scope to, so we skip pruning for it.
   const memoryId = data.memoryId;
   if (!memoryId) return;
-  // #1641 §3.2 — a decision's history is its audit trail, and its approvals
+  // #1641 §3.2 — a question's history is its audit trail, and its approvals
   // and signatures are revision-keyed: never pruned. The snapshot carries the
-  // role at capture; a decision's role never changes.
+  // role at capture; a question's role never changes.
   const role = data.role !== undefined
     ? data.role
     : (await db.node.findUnique({ where: { id: data.nodeId }, select: { role: true } }))?.role;
-  if (isDecisionFamilyRole(role)) return;
+  if (isQuestionFamilyRole(role)) return;
 
   const max =
     (

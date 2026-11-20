@@ -49,7 +49,7 @@ beforeEach(async () => {
   org = await db.organization.create({ data: { name: 'Repair', urn: `repair-${n}.example` }, select: { id: true, urn: true } });
   manager = await db.user.create({ data: { githubId: 91_000_000 + n, githubUsername: `rp-manager-${n}`, roles: ['READER'] }, select: { id: true } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: manager.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(manager.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(manager.id));
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true, urn: true } });
   const memory = await db.memory.create({
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:team-shared`, name: 'shared', class: 'app', appId: app.id, sharedMemoryOfAgentId: agent.id },
@@ -284,7 +284,7 @@ describe('a repair outcome is judged per worker, the rest of the batch stands', 
   it('the stored report keeps its exact keys: the outcome is not stored on it', async () => {
     await send([dark(kit.id, { repair: 'RELAUNCHED', attempt: 1 })]);
     const t = (await db.worker.findUniqueOrThrow({ where: { id: kit.id } })).terminal as any;
-    expect(Object.keys(t).sort()).toEqual(['checkedAt', 'host', 'lastTurnAt', 'prompt', 'reason', 'reportedAt', 'status']);
+    expect(Object.keys(t).sort()).toEqual(['checkedAt', 'contextMeasuredAt', 'contextTokens', 'host', 'lastTurnAt', 'prompt', 'reason', 'reportedAt', 'status']);
   });
 });
 

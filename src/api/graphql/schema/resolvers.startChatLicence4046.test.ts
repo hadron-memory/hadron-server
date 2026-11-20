@@ -21,7 +21,7 @@ beforeEach(async () => {
   const user = await db.user.create({ data: { handle: 'chat4043-manager' } });
   userId = user.id;
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Chat agent', visibility: 'ORGANIZATION' }, ctx());
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Chat agent', visibility: 'ORGANIZATION' }, ctx());
   agentId = agent.id; systemId = agent.systemMemoryId;
   const app = await db.app.create({ data: {
     name: 'Chat app', urn: `${org.urn}:chat`, organizationId: org.id,
@@ -72,7 +72,7 @@ async function loseLicence(loss: Loss) {
 }
 
 async function start(scope: 'private' | 'shared' = 'private') {
-  const started = await M.startChat({}, { agentId, scope, conversationName: 'flow' }, ctx());
+  const started = await M.startChat({}, { agentRef: agentId, scope, conversationName: 'flow' }, ctx());
   expect(started.systemMessage).toContain('LICENSED STAGE');
   return started;
 }
@@ -226,7 +226,7 @@ for (const route of ['app', 'manager'] as const) {
       return transaction(...args);
     }) as any);
     try {
-      await expect(M.startChat({}, { agentId, conversationName: 'flow' }, ctx())).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+      await expect(M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, ctx())).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
       expect(changed).toBe(true); // The test reaches the locked write, not just the early guard.
       expect(await state()).toBe(before);
     } finally { spy.mockRestore(); }
@@ -247,9 +247,9 @@ it('live platform admin can use a retained App-less home; a stale platform claim
   await db.memory.update({ where: { id: root.memoryId }, data: { appId: null } });
   await db.orgMember.updateMany({ where: { userId }, data: { role: 'READER' } });
   const platformCtx = { ...ctx(), roles: ['ADMIN'] } as Context;
-  await expect(M.startChat({}, { agentId, conversationName: 'flow' }, platformCtx)).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+  await expect(M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, platformCtx)).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
   await db.user.update({ where: { id: userId }, data: { roles: ['ADMIN'] } });
-  expect((await M.startChat({}, { agentId, conversationName: 'flow' }, platformCtx)).systemMessage).toContain('LICENSED STAGE');
+  expect((await M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, platformCtx)).systemMessage).toContain('LICENSED STAGE');
 });
 
 for (const route of ['app', 'manager'] as const) {
@@ -270,7 +270,7 @@ for (const route of ['app', 'manager'] as const) {
       return transaction(...args);
     }) as any);
     try {
-      await expect(M.startChat({}, { agentId, conversationName: 'flow' }, ctx())).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+      await expect(M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, ctx())).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
       expect(changed).toBe(true);
       expect(await state()).toBe(before);
     } finally { spy.mockRestore(); }
@@ -309,11 +309,11 @@ it('a bound App-key session starts only in its licensed home', async () => {
   const root = await chatNodeByLocOrThrow(db, first.chatId);
   const session = await db.session.create({ data: { id: generateId(), appId, agentId, userId, memoryId: root.memoryId, tool: 'vitest' } });
   const keyCtx: Context = { db, appId, sessionId: session.id, roles: [] };
-  expect((await M.startChat({}, { agentId, conversationName: 'flow' }, keyCtx)).systemMessage).toContain('LICENSED STAGE');
+  expect((await M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, keyCtx)).systemMessage).toContain('LICENSED STAGE');
   await db.memory.update({ where: { id: root.memoryId }, data: { appId: null } });
   const before = await state();
   const seen = await observeDefinitionReads(async () => {
-    try { await M.startChat({}, { agentId, conversationName: 'flow' }, keyCtx); return null; }
+    try { await M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, keyCtx); return null; }
     catch (error) { return error; }
   });
   expect(seen.value).toBeTruthy();
@@ -348,7 +348,7 @@ it('shared admission stays on the selected App if the located home moves before 
   }) as any);
   try {
     const seen = await observeDefinitionReads(async () => {
-      try { await M.startChat({}, { agentId, scope: 'shared', conversationName: 'flow' }, ctx()); return null; }
+      try { await M.startChat({}, { agentRef: agentId, scope: 'shared', conversationName: 'flow' }, ctx()); return null; }
       catch (error) { return error as any; }
     });
     expect(changed).toBe(true);
@@ -374,7 +374,7 @@ async function assertHeldRefusal(anchor: { kind: 'app' | 'org' | 'user'; id: str
   await ready;
   let completed = false;
   const request = observeDefinitionReads(async () => {
-    try { await M.startChat({}, { agentId, scope, conversationName: 'flow' }, ctx()); return null; }
+    try { await M.startChat({}, { agentRef: agentId, scope, conversationName: 'flow' }, ctx()); return null; }
     catch (error) { return error as any; }
   }).then(result => { completed = true; return result; });
   try {
@@ -470,7 +470,7 @@ it('failed savepoint recovery preserves the original provisioning error', async 
     } }));
   }, ...options)) as any);
   try {
-    await expect(M.startChat({}, { agentId, scope: 'shared', conversationName: 'flow' }, ctx())).rejects.toBe(original);
+    await expect(M.startChat({}, { agentRef: agentId, scope: 'shared', conversationName: 'flow' }, ctx())).rejects.toBe(original);
     expect(reached).toBe(true);
     expect(await state()).toBe(before);
   } finally { spy.mockRestore(); }
@@ -497,7 +497,7 @@ it('a cold start rolls back its home when parent creation fails after provisioni
     } }));
   }, ...options)) as any);
   try {
-    await expect(M.startChat({}, { agentId, conversationName: 'flow' }, ctx())).rejects.toBe(original);
+    await expect(M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, ctx())).rejects.toBe(original);
     expect(reached).toBe(true);
     expect(await state()).toBe(before);
   } finally { spy.mockRestore(); }
@@ -522,7 +522,7 @@ it('an ineligible App-less start keeps the unknown-Agent answer even with an inv
   await db.orgMember.updateMany({ where: { userId }, data: { role: 'READER' } });
   const before = await state();
   const result = await observeDefinitionReads(async () => {
-    try { await M.startChat({}, { agentId, conversationName: 'flow', aiConfigChoice: generateId() }, ctx()); return null; }
+    try { await M.startChat({}, { agentRef: agentId, conversationName: 'flow', aiConfigChoice: generateId() }, ctx()); return null; }
     catch (error) { return error as any; }
   });
   expect(result.value?.code).toBe('AGENT_NOT_FOUND');
@@ -535,7 +535,7 @@ it('a replaced system pointer cannot read the old definition at locked admission
   const before = await state();
   let changed = false;
   const result = await observeDefinitionReads(async () => {
-    try { await M.startChat({}, { agentId, conversationName: 'flow' }, ctx()); return null; }
+    try { await M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, ctx()); return null; }
     catch (error) { return error as any; }
   }, async () => {
     if (!changed) {

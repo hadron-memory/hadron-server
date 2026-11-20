@@ -9,17 +9,18 @@ import { randomBytes } from 'node:crypto';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createServer } from '../../../server.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { USER_API_KEY_PREFIX, hashUserApiKey } from '../../../middleware/auth.js';
 import { runAsActor } from '../../../lib/requestActor.js';
-import { DB_NOW, dbNowPlus, dropTestActions, insertGrant, insertGrantUnguarded, raw, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
+import { composeGrantUrnV2 } from '../../../lib/urn.js';
+import { APP_SLUG, DB_NOW, dbNowPlus, dropTestActions, insertGrant, insertGrantUnguarded, raw, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
 import { isGrantLive } from '../../../lib/grants/live.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { formatGraphQLError } from '../formatError.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../../test/startServerFixture.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -28,12 +29,12 @@ let http: Server;
 let base: string;
 const direct = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError, includeStacktraceInErrorResponses: false });
 beforeAll(async () => {
-  http = httpServer(await createServer());
+  http = httpServer(await createServerOnCleanDb());
   await new Promise<void>((r) => http.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
   await direct.start();
 });
-afterAll(async () => { await new Promise<void>((r) => http.close(() => r())); await direct.stop(); await cleanDb(db); await dropTestActions(); });
+afterAll(async () => { await closeServerIfStarted(http); await direct?.stop(); await cleanDb(db); await dropTestActions(); });
 
 let w: World;
 let personKey: string;
@@ -54,7 +55,7 @@ async function post(key: string | null, session: string | null, query: string, v
   });
   return res.json();
 }
-const LIST = 'query($l:Int,$o:Int){myGrants(limit:$l,offset:$o){total items{id allows holderKind holderId reason values}}}';
+const LIST = 'query($l:Int,$o:Int){myGrants(limit:$l,offset:$o){total items{id urn allows holderKind holderId reason values}}}';
 const asMe = (v: Record<string, unknown> = {}) => post(personKey, null, LIST, v);
 const ids = (r: any): string[] => (r.data.myGrants.items as Array<{ id: string }>).map((i) => i.id).sort();
 const activated = { activated_at: raw(DB_NOW), verification_kind: 'TEST', verified_by: 'test' };
@@ -102,6 +103,10 @@ describe('which rows a person lists', () => {
     const id = await mine({ reason: 'the terms', action_values: { to: ['a'] } });
     const before = (await asMe()).data.myGrants.items[0];
     expect(before).toMatchObject({ id, allows: true, reason: 'the terms', values: { to: ['a'] } });
+    // #3709: the PERSON audience's page composes Grant.urn too — every COLUMNS
+    // query joins the App (a.urn AS app_urn), so the computed field resolves on
+    // this audience as on the worker's, and stays identical across the leave.
+    expect(before.urn).toBe(composeGrantUrnV2(w.orgUrn, APP_SLUG, id));
     await db.orgMember.updateMany({ where: { organizationId: w.orgId, userId: w.userId }, data: { deletedAt: new Date() } });
     const after = (await asMe()).data.myGrants.items[0];
     expect(after).toEqual(before);
@@ -231,8 +236,25 @@ describe('allows', () => {
       expect(item.allows, name).toBe(allows);
       const row = await db.grant.findUniqueOrThrow({ where: { id: item.id } });
       const [{ now }] = await db.$queryRaw<Array<{ now: Date }>>`SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS now`;
-      expect(isGrantLive({ ...row, appDeletedAt: null }, now), `isGrantLive ${name}`).toBe(allows);
+      expect(isGrantLive({ ...row, appDeletedAt: null, actionMaxUses: null, actionLifetimeSeconds: null }, now), `isGrantLive ${name}`).toBe(allows);
     }
+  });
+});
+
+describe('allows reads the ACTION\'s limits (#4163)', () => {
+  const setLimits = (max: string, life: string) => db.$executeRawUnsafe(`UPDATE actions SET max_uses = ${max}, lifetime_seconds = ${life} WHERE name LIKE 'test.s1a.%'`);
+  it('an hour-old grant and a once-used grant read allows false though the row states no limit; a fresh one reads true', async () => {
+    await setLimits('1', '3600');
+    try {
+      const old = await mine({ activated_at: raw(`${DB_NOW} - interval '2 hours'`) });
+      const used = await mine({ use_count: 1 });
+      const fresh = await mine({ activated_at: raw(`${DB_NOW} - interval '10 minutes'`) });
+      const r = await asMe();
+      const by = new Map((r.data.myGrants.items as Array<{ id: string; allows: boolean }>).map((i) => [i.id, i.allows]));
+      expect(by.get(old)).toBe(false);
+      expect(by.get(used)).toBe(false);
+      expect(by.get(fresh)).toBe(true);
+    } finally { await setLimits('NULL', 'NULL'); }
   });
 });
 

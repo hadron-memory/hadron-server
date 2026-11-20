@@ -62,7 +62,7 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { githubId: 322201, githubUsername: 'pages-admin', roles: [] } });
   outsider = await db.user.create({ data: { githubId: 322202, githubUsername: 'pages-outsider', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  draft = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft', draftCorpus: true }, as());
+  draft = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs-draft', draftCorpus: true }, as());
 
   const target = await spec('pas:010', 'The target.');
   await resolvers.Mutation.reserveSpecCitation(null, { memoryRef: draft.id, loc: 'pas:030' }, as());

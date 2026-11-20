@@ -1,4 +1,5 @@
 import { refuseSupersededSession } from '../lib/sessionSuperseded.js';
+import { AuthStoreBusyError, authStoreBusyReason } from '../lib/authStoreBusy.js';
 import { transportRateIdentity, type RateIdentity } from '../lib/rateLimit/identity.js';
 import { ownsSession } from '../lib/sessionOwnership.js';
 import { createHash, randomBytes } from 'crypto';
@@ -225,6 +226,29 @@ export async function resolveCredentialContextWithStatus(req: Request, db: Prism
  */
 const incompleteChecks = new WeakSet<AuthContext>();
 
+/**
+ * #4471: the API-key paths' hash lookup can be refused by a busy store (P2024, or P2028's
+ * "Unable to start" arm) — and #4504: by an unreachable one (P1001, a new connection that
+ * cannot establish) — an operational fault, not a verdict on the key. Converted to the typed
+ * retryable AUTH_STORE_BUSY at this ONE shared point (lib/authStoreBusy.ts), so every surface
+ * (the Apollo context builder, the plain HTTP routes, MCP's catch) sees the same typed error
+ * and no caller reads a store blip as a bad key (cor:aut:010:05 S5: never refused).
+ *
+ * The JWT path is deliberately NOT wrapped: its own catch already rules these faults
+ * 'unavailable' and lets the request proceed (#3532, rulings 0192–0194); changing that is a
+ * behavior change beyond this issue. Every fault authStoreBusyReason does not name keeps
+ * today's raw propagation.
+ */
+async function resolveKeyCredentialLookup(lookup: () => Promise<AuthContext>): Promise<AuthContext> {
+  try {
+    return await lookup();
+  } catch (error) {
+    const reason = authStoreBusyReason(error);
+    if (reason) throw new AuthStoreBusyError(error, reason);
+    throw error;
+  }
+}
+
 async function resolveAuthContextInner(
   req: Request,
   db: PrismaClient,
@@ -239,9 +263,9 @@ async function resolveAuthContextInner(
 
   let ctx: AuthContext;
   if (token.startsWith(APP_KEY_PREFIX)) {
-    ctx = await resolveAppKey(token, db);
+    ctx = await resolveKeyCredentialLookup(() => resolveAppKey(token, db));
   } else if (token.startsWith(USER_API_KEY_PREFIX)) {
-    ctx = await resolveUserApiKey(token, db);
+    ctx = await resolveKeyCredentialLookup(() => resolveUserApiKey(token, db));
   } else if (/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) {
     // JWTs have the form header.payload.signature — three base64url segments.
     ctx = await resolveJwt(token, db);

@@ -18,7 +18,7 @@ async function seed() {
   const user = await db.user.create({ data: { handle: `owner-${generateId().toLowerCase()}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
   const userContext = { db, userId: user.id, roles: ['READER'] } as Context;
-  const agent = await mutations.createAgent({}, { orgId: org.id, name: 'Credential Agent' }, userContext);
+  const agent = await mutations.createAgent({}, { orgRef: org.id, name: 'Credential Agent' }, userContext);
   const { app } = await createDbAppWithKey(db, 'credential-default', org.id);
   await createDbAppAgent(db, app.id, agent.id);
   const memory = async (name: string, visibility: 'ORGANIZATION' | 'PUBLIC') => db.memory.create({
@@ -87,12 +87,12 @@ describe('#3292 legacy chat item target (direct hypothetical context, not run tr
     const principal = shape === 'key' ? { appId: fixture.app.id, roles: [] } : fixture.run;
     const ctx = { db, ...principal } as Context;
     const before = await db.node.count({ where: { memoryId: fixture.knowledge.id } });
-    await expect(mutations.startChat({}, { agentId: fixture.agent.id }, ctx)).rejects.toThrow('No target memory available for this chat');
+    await expect(mutations.startChat({}, { agentRef: fixture.agent.id }, ctx)).rejects.toThrow('No target memory available for this chat');
     expect(await db.node.count({ where: { memoryId: fixture.knowledge.id } })).toBe(before);
     expect(await db.agentSubscription.count({ where: { agentId: fixture.agent.id } })).toBe(0);
   });
   it('CONTROL: an ordinary user still starts a private chat outside item-only knowledge', async () => {
-    const out = await mutations.startChat({}, { agentId: fixture.agent.id }, fixture.userContext);
+    const out = await mutations.startChat({}, { agentRef: fixture.agent.id }, fixture.userContext);
     expect(out.chatId).toMatch(/^chats:/);
     const chat = await db.node.findFirstOrThrow({ where: { loc: out.chatId, memoryId: out.memoryId } });
     expect(chat.memoryId).not.toBe(fixture.knowledge.id);

@@ -50,7 +50,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'Search Org', urn: 'search.example' } });
   admin = await db.user.create({ data: { githubId: 160801, githubUsername: 'search-admin', handle: 'search-admin', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'retention' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'retention' }, as());
 });
 
 afterAll(() => {
@@ -207,7 +207,7 @@ describe('#1674 review cycle (Jane)', () => {
       const org = await db.organization.create({ data: { id: generateId(), name: 'S Org', urn: 'search.example' } });
       admin = await db.user.create({ data: { githubId: 160802, githubUsername: 'search-admin2', handle: 'search-admin2', roles: [] } });
       await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-      memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: `idx-${embeddingSource}` }, as());
+      memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: `idx-${embeddingSource}` }, as());
       await db.memory.update({ where: { id: memory.id }, data: { vectorIndexEnabled: true, embeddingSource } });
       const { comments } = await seed(2);
       await sweep();

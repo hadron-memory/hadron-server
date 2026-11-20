@@ -53,6 +53,7 @@ export const DIRECT_USER_REFERENCES: ReadonlyArray<readonly [string, string] | r
   // deliberately NOT here: append-only history, sealed like agent_team_events above. A merge never moves a row's App.
   // #3997: secret_events.actor_user_id (append-only, a trigger refuses the UPDATE) and secret_versions.written_by_user_id (a version is
   // never edited in place, cor:sec:010:03) are the same sealed provenance: who stored a value is a fact of the time.
+  // #3998: secret_read_clients.issuer_user_id is likewise sealed; authorization uses the current grants.issuer_user_id.
   ['grants', 'user_id'],
   ['grants', 'issuer_user_id'],
   ['grants', 'requested_by_user_id'],

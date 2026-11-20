@@ -1,3 +1,4 @@
+import { settledTeamEventQueries, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../workerSignature.js';
 /**
  * hadron_task_create — a headless run creates root agent tasks in its own App
@@ -19,6 +20,8 @@ import { typeDefs } from '../../../api/graphql/schema/typeDefs.js';
 import { lockAuthorityAnchors } from '../../auth/authorityAnchors.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
 import type { RunToolContext } from './types.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 let orgId: string;
 let appId: string;
@@ -35,7 +38,7 @@ async function mkUser(n: number) {
 async function mintRun(extra: Record<string, unknown> = {}, forApp = appId): Promise<AppRun> {
   return db.appRun.create({
     data: {
-      id: generateId(), organizationId: orgId, appId: forApp, triggerKind: 'MANUAL',
+      id: generateId(), organizationId: orgId, appId: forApp, agentId: await testRunAgentId(db, orgId, forApp), triggerKind: 'MANUAL',
       entryNodeUrn: 'rt-org::mem::flow:entry', status: 'RUNNING', ...extra,
     },
   });
@@ -287,7 +290,7 @@ describe('follow-ups to #1756 (#1832, #1833)', () => {
   it('#1833: a run-created event names its run on the event read; the SDL declares the field', async () => {
     const run = await mintRun({ userId: person.id });
     await hadronTaskCreate.execute(toolCtx(run), { title: 'x' });
-    const Q = resolvers.Query as any;
+    const Q = settledTeamEventQueries(resolvers.Query, db) as any;
     const events = await Q.agentTeamEvents({}, { appRef: appId }, { db, userId: person.id, roles: ['READER'] });
     expect(events.length).toBeGreaterThan(0);
     expect(events.map((e: any) => e.actorRunId)).toEqual(events.map(() => run.id));

@@ -51,7 +51,7 @@ describe('createMemory vector-index defaults (#281)', () => {
   it('defaults a knowledge memory to vectorIndexEnabled + contentChunks', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'kb' },
+      { orgRef: orgA.id, name: 'kb' },
       adminCtx(),
     );
     const row = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
@@ -63,7 +63,7 @@ describe('createMemory vector-index defaults (#281)', () => {
   it('keeps the column defaults (off / abstract) for a non-knowledge class', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'team', memoryClass: 'group', visibility: 'GROUP' },
+      { orgRef: orgA.id, name: 'team', memoryClass: 'group', visibility: 'GROUP' },
       adminCtx(),
     );
     const row = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
@@ -76,7 +76,7 @@ describe('createMemory vector-index defaults (#281)', () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
       {
-        orgId: orgA.id,
+        orgRef: orgA.id,
         name: 'kb-explicit',
         vectorIndexEnabled: false,
         embeddingSource: 'abstract',
@@ -94,7 +94,7 @@ describe('createMemory vector-index defaults (#281)', () => {
     // to Prisma (the column is non-nullable — null would be a runtime error).
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'kb-null', vectorIndexEnabled: null, embeddingSource: null },
+      { orgRef: orgA.id, name: 'kb-null', vectorIndexEnabled: null, embeddingSource: null },
       adminCtx(),
     );
     const row = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
@@ -106,7 +106,7 @@ describe('createMemory vector-index defaults (#281)', () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
       {
-        orgId: orgA.id,
+        orgRef: orgA.id,
         name: 'team-indexed',
         memoryClass: 'group',
         visibility: 'GROUP',
@@ -135,7 +135,7 @@ describe('createMemory vector-index defaults (#281)', () => {
 async function createAgentWithSystem(name: string, extra: Record<string, unknown> = {}) {
   const agent = await resolvers.Mutation.createAgent(
     {},
-    { orgId: orgA.id, name, ...extra },
+    { orgRef: orgA.id, name, ...extra },
     adminCtx(),
   );
   const sys = await db.memory.findUniqueOrThrow({ where: { id: agent.systemMemoryId! } });
@@ -159,7 +159,7 @@ describe('createAgent auto-provisions a system memory', () => {
   it('creates and attaches a class=system memory (URN derived from the agent, name synced, visibility NULL)', async () => {
     const agent = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'solo' },
+      { orgRef: orgA.id, name: 'solo' },
       adminCtx(),
     );
     expect(agent.systemMemoryId).toBeTruthy();
@@ -174,7 +174,7 @@ describe('createAgent auto-provisions a system memory', () => {
   it('provisions a system memory even for an ASSISTANT (no systemMemoryId supplied)', async () => {
     const agent = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'assistant-1', type: 'ASSISTANT' },
+      { orgRef: orgA.id, name: 'assistant-1', type: 'ASSISTANT' },
       adminCtx(),
     );
     expect(agent.type).toBe('ASSISTANT');
@@ -186,12 +186,12 @@ describe('createAgent auto-provisions a system memory', () => {
   it('promotes a caller-supplied systemMemoryId instead of provisioning a new one', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'byo-brain' },
+      { orgRef: orgA.id, name: 'byo-brain' },
       adminCtx(),
     );
     const agent = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'wizard-agent', systemMemoryId: mem.id },
+      { orgRef: orgA.id, name: 'wizard-agent', systemMemoryRef: mem.id },
       adminCtx(),
     );
     expect(agent.systemMemoryId).toBe(mem.id);
@@ -245,7 +245,7 @@ describe('updateAgent syncs the derived system-memory URN on rename', () => {
     // stale `reuse-me-system` memory blocked it on the URN-reclaim check).
     const fresh = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'reuse-me' },
+      { orgRef: orgA.id, name: 'reuse-me' },
       adminCtx(),
     );
     expect(fresh.systemMemoryId).toBeTruthy();
@@ -256,12 +256,12 @@ describe('updateAgent syncs the derived system-memory URN on rename', () => {
   it('leaves a wizard-supplied (non-derived) system-memory URN untouched on rename', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'custom-brain' },
+      { orgRef: orgA.id, name: 'custom-brain' },
       adminCtx(),
     );
     const agent = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'wiz', systemMemoryId: mem.id },
+      { orgRef: orgA.id, name: 'wiz', systemMemoryRef: mem.id },
       adminCtx(),
     );
     await resolvers.Mutation.updateAgent(
@@ -286,13 +286,13 @@ describe('updateAgent first-attach of systemMemoryId (legacy agents)', () => {
     const agent = await createLegacyAgent('juno');
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'juno-system' },
+      { orgRef: orgA.id, name: 'juno-system' },
       adminCtx(),
     );
 
     await resolvers.Mutation.updateAgent(
       {},
-      { ref: agent.id, systemMemoryId: mem.id },
+      { ref: agent.id, systemMemoryRef: mem.id },
       adminCtx(),
     );
 
@@ -325,7 +325,7 @@ describe('updateAgent first-attach of systemMemoryId (legacy agents)', () => {
     await expect(
       resolvers.Mutation.updateAgent(
         {},
-        { ref: agent.id, systemMemoryId: foreign.id },
+        { ref: agent.id, systemMemoryRef: foreign.id },
         adminCtx(),
       ),
     ).rejects.toThrow(/same owner as its agent/);
@@ -336,18 +336,18 @@ describe('updateAgent first-attach of systemMemoryId (legacy agents)', () => {
     const agent2 = await createLegacyAgent('other');
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'shared-system' },
+      { orgRef: orgA.id, name: 'shared-system' },
       adminCtx(),
     );
     await resolvers.Mutation.updateAgent(
       {},
-      { ref: agent1.id, systemMemoryId: mem.id },
+      { ref: agent1.id, systemMemoryRef: mem.id },
       adminCtx(),
     );
     await expect(
       resolvers.Mutation.updateAgent(
         {},
-        { ref: agent2.id, systemMemoryId: mem.id },
+        { ref: agent2.id, systemMemoryRef: mem.id },
         adminCtx(),
       ),
     ).rejects.toThrow(/another agent/);
@@ -371,7 +371,7 @@ describe('updateAgent lock on existing systemMemoryId', () => {
     await expect(
       resolvers.Mutation.updateAgent(
         {},
-        { ref: agent.id, systemMemoryId: '' },
+        { ref: agent.id, systemMemoryRef: '' },
         adminCtx(),
       ),
     ).rejects.toThrow(/unset or change/);
@@ -381,13 +381,13 @@ describe('updateAgent lock on existing systemMemoryId', () => {
     const { agent } = await agentWithSystem();
     const other = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'other-brain' },
+      { orgRef: orgA.id, name: 'other-brain' },
       adminCtx(),
     );
     await expect(
       resolvers.Mutation.updateAgent(
         {},
-        { ref: agent.id, systemMemoryId: other.id },
+        { ref: agent.id, systemMemoryRef: other.id },
         adminCtx(),
       ),
     ).rejects.toThrow(/unset or change/);
@@ -442,7 +442,7 @@ describe('AGENT_SYSTEM memory guards', () => {
 
     const other = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'other' },
+      { orgRef: orgA.id, name: 'other' },
       adminCtx(),
     );
     await expect(
@@ -475,7 +475,7 @@ describe('AGENT_SYSTEM memory guards', () => {
     it(`refuses to attach a ${klass}-class memory via addMemoryToAgent (#1101)`, async () => {
       const agent = await resolvers.Mutation.createAgent(
         {},
-        { orgId: orgA.id, name: `attach-${klass}` },
+        { orgRef: orgA.id, name: `attach-${klass}` },
         adminCtx(),
       );
       const owner = await db.user.create({
@@ -587,7 +587,7 @@ describe('AGENT_SYSTEM memory guards', () => {
     // checks the denial. `knowledge` is the class this mutation exists for.
     const agent = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'attach-knowledge' },
+      { orgRef: orgA.id, name: 'attach-knowledge' },
       adminCtx(),
     );
     const ok = await db.memory.create({
@@ -613,7 +613,7 @@ describe('AGENT_SYSTEM memory guards', () => {
     const { sys: mem } = await createAgentWithSystem('juno');
 
     await expect(
-      resolvers.Mutation.deleteMemory({}, { id: mem.id }, adminCtx()),
+      resolvers.Mutation.deleteMemory({}, { ref: mem.id }, adminCtx()),
     ).rejects.toThrow(/system memory/);
   });
 
@@ -624,12 +624,12 @@ describe('AGENT_SYSTEM memory guards', () => {
   it('addMemoryToAgent accepts URN for both agentId and memoryId', async () => {
     const agent = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'agent-urn-input' },
+      { orgRef: orgA.id, name: 'agent-urn-input' },
       adminCtx(),
     );
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'mem-urn-input' },
+      { orgRef: orgA.id, name: 'mem-urn-input' },
       adminCtx(),
     );
     await resolvers.Mutation.addMemoryToAgent(
@@ -647,12 +647,12 @@ describe('AGENT_SYSTEM memory guards', () => {
   it('updateAgentMemoryRole accepts URN for both agentId and memoryId', async () => {
     const agent = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'agent-update-urn' },
+      { orgRef: orgA.id, name: 'agent-update-urn' },
       adminCtx(),
     );
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'mem-update-urn' },
+      { orgRef: orgA.id, name: 'mem-update-urn' },
       adminCtx(),
     );
     await resolvers.Mutation.addMemoryToAgent(
@@ -675,12 +675,12 @@ describe('AGENT_SYSTEM memory guards', () => {
   it('removeMemoryFromAgent accepts URN for both agentId and memoryId', async () => {
     const agent = await resolvers.Mutation.createAgent(
       {},
-      { orgId: orgA.id, name: 'agent-remove-urn' },
+      { orgRef: orgA.id, name: 'agent-remove-urn' },
       adminCtx(),
     );
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'mem-remove-urn' },
+      { orgRef: orgA.id, name: 'mem-remove-urn' },
       adminCtx(),
     );
     await resolvers.Mutation.addMemoryToAgent(
@@ -718,7 +718,7 @@ describe('memory list filtering', () => {
     const { sys } = await createAgentWithSystem('juno');
     const knowledge = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'knowledge' },
+      { orgRef: orgA.id, name: 'knowledge' },
       adminCtx(),
     );
     return { sys, knowledge };
@@ -797,7 +797,7 @@ describe('Memory.agent derived field', () => {
   it('returns null for a regular knowledge memory', async () => {
     const m = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'knowledge' },
+      { orgRef: orgA.id, name: 'knowledge' },
       adminCtx(),
     );
     const resolved = await resolvers.Memory.agent(
@@ -819,12 +819,12 @@ describe('deleteMemory (spec 013)', () => {
   it('admin can soft-delete a knowledge-class memory and sets deletedAt', async () => {
     const m = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'doomed' },
+      { orgRef: orgA.id, name: 'doomed' },
       adminCtx(),
     );
     const result = await resolvers.Mutation.deleteMemory(
       {},
-      { id: m.id },
+      { ref: m.id },
       adminCtx(),
     );
     expect(result).toBe(true);
@@ -835,10 +835,10 @@ describe('deleteMemory (spec 013)', () => {
   it('is idempotent: re-delete preserves the original deletedAt', async () => {
     const m = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'doomed-twice' },
+      { orgRef: orgA.id, name: 'doomed-twice' },
       adminCtx(),
     );
-    await resolvers.Mutation.deleteMemory({}, { id: m.id }, adminCtx());
+    await resolvers.Mutation.deleteMemory({}, { ref: m.id }, adminCtx());
     const firstSnapshot = await db.memory.findUniqueOrThrow({ where: { id: m.id } });
     expect(firstSnapshot.deletedAt).toBeInstanceOf(Date);
     const firstTs = firstSnapshot.deletedAt!.getTime();
@@ -848,7 +848,7 @@ describe('deleteMemory (spec 013)', () => {
 
     const secondResult = await resolvers.Mutation.deleteMemory(
       {},
-      { id: m.id },
+      { ref: m.id },
       adminCtx(),
     );
     expect(secondResult).toBe(true);
@@ -914,7 +914,7 @@ describe('deleteMemory (spec 013)', () => {
     it('owner can delete', async () => {
       const result = await resolvers.Mutation.deleteMemory(
         {},
-        { id: personalMemory.id },
+        { ref: personalMemory.id },
         { db, userId: owner.id },
       );
       expect(result).toBe(true);
@@ -931,7 +931,7 @@ describe('deleteMemory (spec 013)', () => {
       // "only the owner can delete a personal memory" confirmed it exists AND
       // named its class.
       await expect(
-        resolvers.Mutation.deleteMemory({}, { id: personalMemory.id }, adminCtx()),
+        resolvers.Mutation.deleteMemory({}, { ref: personalMemory.id }, adminCtx()),
       ).rejects.toThrow(`MEMORY_NOT_FOUND: ${personalMemory.id}`);
       const after = await db.memory.findUniqueOrThrow({
         where: { id: personalMemory.id },
@@ -943,7 +943,7 @@ describe('deleteMemory (spec 013)', () => {
       await expect(
         resolvers.Mutation.deleteMemory(
           {},
-          { id: personalMemory.id },
+          { ref: personalMemory.id },
           { db, userId: nonOwner.id },
         ),
       ).rejects.toThrow(`MEMORY_NOT_FOUND: ${personalMemory.id}`);
@@ -957,7 +957,7 @@ describe('deleteMemory (spec 013)', () => {
       await expect(
         resolvers.Mutation.deleteMemory(
           {},
-          { id: personalMemory.id },
+          { ref: personalMemory.id },
           { db },
         ),
       ).rejects.toThrow(`MEMORY_NOT_FOUND: ${personalMemory.id}`);
@@ -966,7 +966,7 @@ describe('deleteMemory (spec 013)', () => {
     it('personal-class authz is idempotent for the owner', async () => {
       await resolvers.Mutation.deleteMemory(
         {},
-        { id: personalMemory.id },
+        { ref: personalMemory.id },
         { db, userId: owner.id },
       );
       const first = await db.memory.findUniqueOrThrow({
@@ -976,7 +976,7 @@ describe('deleteMemory (spec 013)', () => {
       await new Promise((resolve) => setTimeout(resolve, 5));
       const secondResult = await resolvers.Mutation.deleteMemory(
         {},
-        { id: personalMemory.id },
+        { ref: personalMemory.id },
         { db, userId: owner.id },
       );
       expect(secondResult).toBe(true);
@@ -994,15 +994,15 @@ describe('deleteMemory (spec 013)', () => {
   it('myMemories does not include a soft-deleted memory', async () => {
     const live = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'still-here' },
+      { orgRef: orgA.id, name: 'still-here' },
       adminCtx(),
     );
     const doomed = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'gone-soon' },
+      { orgRef: orgA.id, name: 'gone-soon' },
       adminCtx(),
     );
-    await resolvers.Mutation.deleteMemory({}, { id: doomed.id }, adminCtx());
+    await resolvers.Mutation.deleteMemory({}, { ref: doomed.id }, adminCtx());
     const list = (await resolvers.Query.memories({}, {}, adminCtx())).items;
     const ids = (list as { id: string }[]).map((m) => m.id);
     expect(ids).toContain(live.id);

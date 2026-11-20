@@ -25,7 +25,7 @@ const rename = async (orgId: string, urn: string) => {
     create: { organizationId: orgId, userId: user.id, role: 'OWNER' },
     update: {},
   });
-  return M.updateOrganization({}, { id: orgId, urn }, ctx());
+  return M.updateOrganization({}, { ref: orgId, urn }, ctx());
 };
 const reasonOf = async (p: Promise<unknown>) => {
   try { await p; return 'NO_ERROR'; } catch (e) {
@@ -56,7 +56,7 @@ describe('#1733: an org may take an undotted root', () => {
 
   it('an org can rename between undotted and dotted roots: children follow, and old URNs still resolve', async () => {
     const org = await create('minicoders');
-    const memory = await M.createMemory({}, { orgId: org.id, name: 'notes' }, ctx());
+    const memory = await M.createMemory({}, { orgRef: org.id, name: 'notes' }, ctx());
     const slug = memory.urn.slice('minicoders:'.length);
     await expect(rename(org.id, 'minicoders.org')).resolves.toMatchObject({ urn: 'minicoders.org' });
     expect((await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).urn).toBe(`minicoders.org:${slug}`);
@@ -72,7 +72,7 @@ describe('#1733: an org may take an undotted root', () => {
   it('an undotted root resolves to its org by lookup: the org ref, and memories under it', async () => {
     const org = await create('minicoders');
     expect(await resolveOrgRef(db, 'hrn:org:minicoders')).toEqual({ id: org.id });
-    const memory = await M.createMemory({}, { orgId: org.id, name: 'notes' }, ctx());
+    const memory = await M.createMemory({}, { orgRef: org.id, name: 'notes' }, ctx());
     expect(memory.urn.startsWith('minicoders:')).toBe(true);
     const found = await resolvers.Query.memory({}, { ref: `hrn:mem:${memory.urn}` }, ctx());
     expect(found?.id).toBe(memory.id);

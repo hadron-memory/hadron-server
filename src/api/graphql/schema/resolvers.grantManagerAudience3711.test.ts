@@ -7,12 +7,12 @@ import { randomBytes } from 'node:crypto';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createServer } from '../../../server.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { USER_API_KEY_PREFIX, hashUserApiKey } from '../../../middleware/auth.js';
-import { DB_NOW, dropTestActions, insertGrant, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
+import { composeGrantUrnV2 } from '../../../lib/urn.js';
+import { APP_SLUG, DB_NOW, dropTestActions, insertGrant, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
 import { grantTermsFromRow, grantTermsHash } from '../../../lib/grants/terms.js';
 import { markManagerAudience, markPersonAudience } from '../../../lib/grants/read.js';
 import { grantSignaturePayloadBytes, GRANT_SIGNATURE_PAYLOAD_V1 } from '../../../lib/signing/grantPayload.js';
@@ -21,6 +21,7 @@ import { clearSignatureVerifyCache } from '../../../lib/signing/verify.js';
 import { insertSoftPasskey, softPasskey } from '../../../test/softPasskey.js';
 import { grantFieldResolvers } from './resolvers.grant.js';
 import type { Context } from './resolvers.helpers.js';
+import { closeServerIfStarted, createServerOnCleanDb } from '../../../test/startServerFixture.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -33,11 +34,11 @@ let http: Server;
 let base: string;
 beforeAll(async () => {
   vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
-  http = httpServer(await createServer());
+  http = httpServer(await createServerOnCleanDb());
   await new Promise<void>((r) => http.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
 });
-afterAll(async () => { await new Promise<void>((r) => http.close(() => r())); await cleanDb(db); await dropTestActions(); });
+afterAll(async () => { await closeServerIfStarted(http); await cleanDb(db); await dropTestActions(); });
 
 let w: World;
 let holderKey: string;
@@ -96,12 +97,16 @@ describe('one request, one grant, two audiences', () => {
   it('the manager\'s list shows the signer and the device; myGrants withholds them; in either order, aliased', async () => {
     const g = await signedPersonGrant();
     for (const query of [
-      `query($a:String!){ m: appGrants(appRef:$a){ items{ id signatureStatus{ ${FULL} } } } mine: myGrants{ items{ id signatureStatus{ ${FULL} } } } }`,
-      `query($a:String!){ mine: myGrants{ items{ id signatureStatus{ ${FULL} } } } m: appGrants(appRef:$a){ items{ id signatureStatus{ ${FULL} } } } }`,
+      `query($a:String!){ m: appGrants(appRef:$a){ items{ id urn signatureStatus{ ${FULL} } } } mine: myGrants{ items{ id signatureStatus{ ${FULL} } } } }`,
+      `query($a:String!){ mine: myGrants{ items{ id signatureStatus{ ${FULL} } } } m: appGrants(appRef:$a){ items{ id urn signatureStatus{ ${FULL} } } } }`,
     ]) {
       const r = await gql(query, { a: w.appId });
       expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
-      const m = r.data.m.items.find((i: any) => i.id === g).signatureStatus;
+      const mg = r.data.m.items.find((i: any) => i.id === g);
+      // #3709: the MANAGER audience's page composes Grant.urn too (every COLUMNS
+      // query joins the App), addressed under the App the manager named.
+      expect(mg.urn).toBe(composeGrantUrnV2(w.orgUrn, APP_SLUG, g));
+      const m = mg.signatureStatus;
       const mine = r.data.mine.items.find((i: any) => i.id === g).signatureStatus;
       expect(m.state).toBe('CURRENT');
       expect(m.signatures).toHaveLength(1);

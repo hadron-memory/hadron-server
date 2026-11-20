@@ -1,0 +1,3079 @@
+{
+  "note": "Known-acceptable drift and raw-SQL object inventory for the migration smoke lane (#434). diff-whitelist: the exact `prisma migrate diff` lines the CI drift check may drop — each row names the object, its kind, and WHY the drift is acceptable; the filter (scripts/db/migrateDiffFilter.mjs) matches lines exactly, so any definition change re-surfaces as drift. This half is hand-maintained: a row whose line prisma no longer emits at all is pruned by hand on regen, and the smoke lane's own exact matching is what surfaces a changed line. post-push-owned: every durable object the prisma/post-push.sql closure creates — regenerate with scripts/db/gen-post-push-manifest.mjs; the completeness test (src/test/postPushManifest.test.ts) pins THIS half against the closure in both directions (a missing or stale row is red), and gen --check compares full rows (name, kind, file, why).",
+  "diff-whitelist": [
+    {
+      "name": "memories_user_id_idx",
+      "kind": "partial-index",
+      "why": "Partial index (WHERE clause) in the baseline migration; Prisma schema language cannot express a WHERE on an index, so the diff wants to 'fix' it into non-partial form on every run.",
+      "line": "CREATE INDEX \"memories_user_id_idx\" ON \"memories\"(\"user_id\");"
+    },
+    {
+      "name": "users_external_app_id_external_id_key",
+      "kind": "partial-index",
+      "why": "Partial unique index in the baseline migration; same Prisma limitation as memories_user_id_idx — the diff wants to drop the partiality it cannot model.",
+      "line": "CREATE UNIQUE INDEX \"users_external_app_id_external_id_key\" ON \"users\"(\"external_app_id\", \"external_id\");"
+    },
+    {
+      "name": "node_embeddings_embedding_hnsw",
+      "kind": "hnsw-index",
+      "why": "pgvector HNSW index, created by raw SQL (post-push.sql on dev/test, the migration in prod — prod never runs post-push.sql). Prisma cannot express it, so the diff wants to DROP it; it must survive.",
+      "line": "DROP INDEX \"node_embeddings_embedding_hnsw\";"
+    },
+    {
+      "name": "nodes_tsv_gin",
+      "kind": "gin-index",
+      "why": "GIN index over the nodes.tsv generated tsvector column (cor:api:090 findNodes). Raw SQL in post-push.sql/migrations; Prisma models neither the column nor the index, so the diff wants to DROP it.",
+      "line": "DROP INDEX \"nodes_tsv_gin\";"
+    },
+    {
+      "name": "nodes.tsv",
+      "kind": "generated-column",
+      "why": "STORED generated tsvector column (cor:api:090). Prisma schema language does not model generated columns, so the diff wants to DROP the column; prod needs it (no post-push.sql there), so the drop is whitelisted.",
+      "line": "ALTER TABLE \"nodes\" DROP COLUMN \"tsv\";"
+    },
+    {
+      "name": "nodes_properties_gin",
+      "kind": "gin-index",
+      "why": "GIN(jsonb_path_ops) index (#719 where-query); Prisma cannot express the operator class, so the diff wants to DROP it. Same prod-needs-it rationale as the HNSW index.",
+      "line": "DROP INDEX \"nodes_properties_gin\";"
+    },
+    {
+      "name": "nodes_data_gin",
+      "kind": "gin-index",
+      "why": "GIN(jsonb_path_ops) index (#719 where-query), same rationale as nodes_properties_gin.",
+      "line": "DROP INDEX \"nodes_data_gin\";"
+    },
+    {
+      "name": "agent_tasks.task_number",
+      "kind": "not-null-invariant",
+      "why": "#2553: task_number is NOT NULL in the DB (the invariants file fills it; no row ever lacks its identity) but optional in schema.prisma so a writer that states neither still type-checks and the assign-number trigger fills it. The diff wants to DROP NOT NULL; whitelisted so the invariant stays.",
+      "line": "ALTER TABLE \"agent_tasks\" ALTER COLUMN \"task_number\" DROP NOT NULL,"
+    },
+    {
+      "name": "agent_tasks.handle",
+      "kind": "not-null-invariant",
+      "why": "#2553: handle is NOT NULL in the DB for the same reason as task_number (continuation line of the same ALTER). Whitelisted so the invariant stays.",
+      "line": "ALTER COLUMN \"handle\" DROP NOT NULL;"
+    },
+    {
+      "name": "app_runs.agent_id",
+      "kind": "not-null-invariant",
+      "why": "#3689 (#3910 F1): agent_id is NOT NULL in the DB (the migration; post-push.sql for push-synced DBs) but optional in schema.prisma, so a build serving the old nullable column after an HDPRF-refused migration can still read retained agentless runs. The diff wants to DROP NOT NULL; whitelisted so the invariant stays.",
+      "line": "ALTER TABLE \"app_runs\" ALTER COLUMN \"agent_id\" DROP NOT NULL;"
+    },
+    {
+      "name": "served_prompts_chat_fkey",
+      "kind": "foreign-key-constraint",
+      "why": "#2047: served_prompts owner-consistency foreign keys (chat, run and session owner) are database facts (prisma/served-prompt-invariants.sql) — composite keys against a polymorphic owner Prisma cannot model — so the diff wants to DROP them; prod needs them.",
+      "line": "ALTER TABLE \"served_prompts\" DROP CONSTRAINT \"served_prompts_chat_fkey\";"
+    },
+    {
+      "name": "served_prompts_run_owner_fkey",
+      "kind": "foreign-key-constraint",
+      "why": "#2047: run-owner consistency foreign key; same rationale as served_prompts_chat_fkey.",
+      "line": "ALTER TABLE \"served_prompts\" DROP CONSTRAINT \"served_prompts_run_owner_fkey\";"
+    },
+    {
+      "name": "served_prompts_session_owner_fkey",
+      "kind": "foreign-key-constraint",
+      "why": "#2047: session-owner consistency foreign key; same rationale as served_prompts_chat_fkey.",
+      "line": "ALTER TABLE \"served_prompts\" DROP CONSTRAINT \"served_prompts_session_owner_fkey\";"
+    },
+    {
+      "name": "app_runs_served_prompt_owner_uniq",
+      "kind": "unique-index",
+      "why": "#2047: the unique index the app_runs owner-consistency foreign key targets; a database fact Prisma cannot model, so the diff wants to DROP it; prod needs it.",
+      "line": "DROP INDEX \"app_runs_served_prompt_owner_uniq\";"
+    },
+    {
+      "name": "sessions_served_prompt_owner_uniq",
+      "kind": "unique-index",
+      "why": "#2047: the unique index the sessions owner-consistency foreign key targets; same rationale as app_runs_served_prompt_owner_uniq.",
+      "line": "DROP INDEX \"sessions_served_prompt_owner_uniq\";"
+    }
+  ],
+  "post-push-owned": [
+    {
+      "name": "chk_actions_shape",
+      "kind": "check-constraint",
+      "file": "grant-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agent_clone_audit_one_target",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agent_owner_xor",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agent_schedule_cron_xor_run_at",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agent_task_findings",
+      "kind": "check-constraint",
+      "file": "agent-task-findings-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agent_task_role_task_refs",
+      "kind": "check-constraint",
+      "file": "agent-task-role-task-refs-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agent_task_stall_schedule_range",
+      "kind": "check-constraint",
+      "file": "agent-task-stall-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agent_task_stop_holds_shape",
+      "kind": "check-constraint",
+      "file": "stop-signal-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agent_tasks_external_id",
+      "kind": "check-constraint",
+      "file": "agent-task-external-id-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agent_tasks_hand_back",
+      "kind": "check-constraint",
+      "file": "agent-task-hand-back-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agent_tasks_handle",
+      "kind": "check-constraint",
+      "file": "agent-task-number-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agent_tasks_references",
+      "kind": "check-constraint",
+      "file": "agent-task-references-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agent_tasks_shape",
+      "kind": "check-constraint",
+      "file": "agent-task-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agent_tasks_zero_backlog",
+      "kind": "check-constraint",
+      "file": "agent-task-number-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agent_team_alarm_schedule_shape",
+      "kind": "check-constraint",
+      "file": "agent-task-stall-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agent_team_events_episode",
+      "kind": "check-constraint",
+      "file": "agent-task-stall-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agent_team_events_shape",
+      "kind": "check-constraint",
+      "file": "agent-task-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agent_ticker_templates_shape",
+      "kind": "check-constraint",
+      "file": "agent-ticker-template-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agents_boot_prompt_pointer_pair",
+      "kind": "check-constraint",
+      "file": "boot-prompt-pointer-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_agents_context_cap",
+      "kind": "check-constraint",
+      "file": "context-reset-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_ai_service_config_owner",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_app_agent_customizations_boot_prompt_pointer_pair",
+      "kind": "check-constraint",
+      "file": "derived-install-prompt-pointer-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_app_agents_boot_prompt_pointer_pair",
+      "kind": "check-constraint",
+      "file": "boot-prompt-pointer-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_app_automation_read_grant_event_shape",
+      "kind": "check-constraint",
+      "file": "app-automation-read-grant-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_app_automation_read_grant_shape",
+      "kind": "check-constraint",
+      "file": "app-automation-read-grant-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_app_automation_team_snapshot_grant_event_shape",
+      "kind": "check-constraint",
+      "file": "app-automation-team-snapshot-grant-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_app_automation_team_snapshot_grant_shape",
+      "kind": "check-constraint",
+      "file": "app-automation-team-snapshot-grant-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_app_grants_shape",
+      "kind": "check-constraint",
+      "file": "ticker-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_app_key_scopes_shape",
+      "kind": "check-constraint",
+      "file": "app-key-scope-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_app_memory_write_grant_event_shape",
+      "kind": "check-constraint",
+      "file": "app-memory-write-grant-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_app_memory_write_grant_shape",
+      "kind": "check-constraint",
+      "file": "app-memory-write-grant-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_app_owner_xor",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_app_session_dormancy_days_positive",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_apps_delivery_check_settings",
+      "kind": "check-constraint",
+      "file": "channel-checks-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_apps_delivery_dark_alarm_window",
+      "kind": "check-constraint",
+      "file": "dark-alarm-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_apps_delivery_settings",
+      "kind": "check-constraint",
+      "file": "delivery-settings-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_apps_host_setup_source",
+      "kind": "check-constraint",
+      "file": "host-assignment-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_apps_properties",
+      "kind": "check-constraint",
+      "file": "app-properties-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_apps_ticker_settings",
+      "kind": "check-constraint",
+      "file": "ticker-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_automation_adoption_event_shape",
+      "kind": "check-constraint",
+      "file": "automation-adoption-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_automation_shape",
+      "kind": "check-constraint",
+      "file": "automation-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_comment_meta_state_top_level",
+      "kind": "check-constraint",
+      "file": "comment-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_compiled_prompt_revisions_shape",
+      "kind": "check-constraint",
+      "file": "compiled-prompt-revision-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_context_resets_cause",
+      "kind": "check-constraint",
+      "file": "context-reset-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_context_resets_shape",
+      "kind": "check-constraint",
+      "file": "context-reset-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_coordinator_cadence_episodes_shape",
+      "kind": "check-constraint",
+      "file": "coordinator-cadence-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_dark_worker_episodes_shape",
+      "kind": "check-constraint",
+      "file": "dark-alarm-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_edges_governed_anchor",
+      "kind": "check-constraint",
+      "file": "comment-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_fresh_sign_in_shape",
+      "kind": "check-constraint",
+      "file": "fresh-sign-in-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_git_mirror_obligation_shape",
+      "kind": "check-constraint",
+      "file": "git-mirror-obligation-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_grant_events_shape",
+      "kind": "check-constraint",
+      "file": "grant-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_grant_signature_shape",
+      "kind": "check-constraint",
+      "file": "grant-signing-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_grant_signing_request_shape",
+      "kind": "check-constraint",
+      "file": "grant-signing-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_grants_exactly_one_holder",
+      "kind": "check-constraint",
+      "file": "grant-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_grants_shape",
+      "kind": "check-constraint",
+      "file": "grant-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_host_key_uses_shape",
+      "kind": "check-constraint",
+      "file": "host-operation-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_host_operations_hold",
+      "kind": "check-constraint",
+      "file": "host-launch-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_host_operations_issued_reason",
+      "kind": "check-constraint",
+      "file": "desired-start-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_host_operations_shape",
+      "kind": "check-constraint",
+      "file": "host-operation-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_host_registration_workers_family",
+      "kind": "check-constraint",
+      "file": "agent-task-matching-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_host_registration_workers_worktrees",
+      "kind": "check-constraint",
+      "file": "agent-task-matching-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_host_registrations_capabilities",
+      "kind": "check-constraint",
+      "file": "context-reset-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_host_registrations_shape",
+      "kind": "check-constraint",
+      "file": "agent-task-matching-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_host_sweep_episodes_shape",
+      "kind": "check-constraint",
+      "file": "host-sweep-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_host_sweep_runs_shape",
+      "kind": "check-constraint",
+      "file": "host-sweep-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_host_worker_assignments_shape",
+      "kind": "check-constraint",
+      "file": "host-assignment-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_launch_grants_shape",
+      "kind": "check-constraint",
+      "file": "host-launch-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_memory_chunk_overlap_valid",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_memory_chunk_tokens_positive",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_memory_class_app_id",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_memory_config_template_org_default_org_only",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_memory_config_template_owner",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_memory_config_template_rule_role_format",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_memory_config_template_rule_task_markers",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_memory_group_no_owner",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_memory_group_visibility",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_memory_max_rev_count_positive",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_memory_owner_xor",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_memory_personal_agent_id",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_memory_shared_agent_scope",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_memory_urn_not_prefixed",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_memory_vector_encrypted_ack",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_memory_visibility_class",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_model_family_availability_shape",
+      "kind": "check-constraint",
+      "file": "agent-task-stall-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_model_group_owner",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_node_approval_complete",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_node_content_validation_reporter_shape",
+      "kind": "check-constraint",
+      "file": "content-validation-report-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_node_content_validation_revisions_positive",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_node_mint_complete",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_node_revisions_authorship_shape",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_node_role_rule_role_format",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_node_role_rule_task_markers",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_node_signature_shape",
+      "kind": "check-constraint",
+      "file": "signing-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_node_signature_stamp",
+      "kind": "check-constraint",
+      "file": "signing-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_nodes_authorship_shape",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_nodes_comment_unapproved",
+      "kind": "check-constraint",
+      "file": "comment-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_nodes_compiled_boot_prompt_role",
+      "kind": "check-constraint",
+      "file": "boot-prompt-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_passkey_cancel_token_shape",
+      "kind": "check-constraint",
+      "file": "passkey-registration-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_passkey_ceremony_registration",
+      "kind": "check-constraint",
+      "file": "passkey-registration-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_passkey_registration_notice_shape",
+      "kind": "check-constraint",
+      "file": "passkey-registration-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_passkey_shape",
+      "kind": "check-constraint",
+      "file": "passkey-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_pending_email_sign_in_shape",
+      "kind": "check-constraint",
+      "file": "pending-email-sign-in-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_pending_login_ceremony",
+      "kind": "check-constraint",
+      "file": "fresh-sign-in-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_pending_login_provider_nonce",
+      "kind": "check-constraint",
+      "file": "login-nonce-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_personal_visibility_user",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_post_limit_episodes_shape",
+      "kind": "check-constraint",
+      "file": "post-limit-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_principals_name_lower",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_read_state_agent_app",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_read_state_attendee",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_register_attendee",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_register_owner",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_schedule_run_budgets_positive",
+      "kind": "check-constraint",
+      "file": "trigger-run-budget-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_scope_owner",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_secret_app_key_shape",
+      "kind": "check-constraint",
+      "file": "secret-app-keys-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_secret_app_value",
+      "kind": "check-constraint",
+      "file": "secret-versions-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_secret_owner_type",
+      "kind": "check-constraint",
+      "file": "secret-versions-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_secret_protected_app_only",
+      "kind": "check-constraint",
+      "file": "secret-versions-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_secret_read_client_end",
+      "kind": "check-constraint",
+      "file": "secret-read-clients-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_secret_version_shape",
+      "kind": "check-constraint",
+      "file": "secret-versions-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_served_prompts_app",
+      "kind": "check-constraint",
+      "file": "served-prompt-app-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_served_prompts_shape",
+      "kind": "check-constraint",
+      "file": "served-prompt-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_sessions_family",
+      "kind": "check-constraint",
+      "file": "agent-task-matching-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_sessions_launch",
+      "kind": "check-constraint",
+      "file": "host-launch-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_sign_in_shape",
+      "kind": "check-constraint",
+      "file": "signin-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_signing_request_shape",
+      "kind": "check-constraint",
+      "file": "signing-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_stamp_signing_key_shape",
+      "kind": "check-constraint",
+      "file": "signing-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_start_failing_episodes_shape",
+      "kind": "check-constraint",
+      "file": "desired-start-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_started_not_blocked",
+      "kind": "check-constraint",
+      "file": "task-blocker-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_task_blocker_self",
+      "kind": "check-constraint",
+      "file": "task-blocker-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_task_priority",
+      "kind": "check-constraint",
+      "file": "task-blocker-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_task_session_end_requests_shape",
+      "kind": "check-constraint",
+      "file": "host-operation-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_team_stop_coverage_shape",
+      "kind": "check-constraint",
+      "file": "stop-signal-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_team_stop_signals_shape",
+      "kind": "check-constraint",
+      "file": "stop-signal-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_ticker_subscriptions_shape",
+      "kind": "check-constraint",
+      "file": "ticker-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_tickers_generated",
+      "kind": "check-constraint",
+      "file": "agent-ticker-template-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_tickers_shape",
+      "kind": "check-constraint",
+      "file": "ticker-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_user_api_key_deletion_shape",
+      "kind": "check-constraint",
+      "file": "user-api-key-deletion-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_user_deletion_reason",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_webhook_run_budgets_positive",
+      "kind": "check-constraint",
+      "file": "trigger-run-budget-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_worker_availability_shape",
+      "kind": "check-constraint",
+      "file": "agent-task-stall-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_worker_team_choice",
+      "kind": "check-constraint",
+      "file": "worker-team-choice-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_worker_wake_settings_shape",
+      "kind": "check-constraint",
+      "file": "ticker-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_workers_boot_prompt_pointer_pair",
+      "kind": "check-constraint",
+      "file": "boot-prompt-pointer-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_workers_leave_alone_shape",
+      "kind": "check-constraint",
+      "file": "desired-state-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_workers_terminal_shape",
+      "kind": "check-constraint",
+      "file": "host-operation-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "tickers_tick_code_shape",
+      "kind": "check-constraint",
+      "file": "ticker-tick-code-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "vector",
+      "kind": "extension",
+      "file": "post-push.sql",
+      "why": "Postgres extension the raw-SQL corpus ensures exists (CREATE EXTENSION); not a Prisma-schema concept."
+    },
+    {
+      "name": "node_signatures_stamp_key_id_fkey",
+      "kind": "foreign-key-constraint",
+      "file": "signing-invariants.sql",
+      "why": "Foreign key created and owned by the raw-SQL corpus, not modeled in schema.prisma as written."
+    },
+    {
+      "name": "served_prompts_chat_fkey",
+      "kind": "foreign-key-constraint",
+      "file": "served-prompt-invariants.sql",
+      "why": "Foreign key created and owned by the raw-SQL corpus, not modeled in schema.prisma as written."
+    },
+    {
+      "name": "served_prompts_run_owner_fkey",
+      "kind": "foreign-key-constraint",
+      "file": "served-prompt-invariants.sql",
+      "why": "Foreign key created and owned by the raw-SQL corpus, not modeled in schema.prisma as written."
+    },
+    {
+      "name": "served_prompts_session_owner_fkey",
+      "kind": "foreign-key-constraint",
+      "file": "served-prompt-invariants.sql",
+      "why": "Foreign key created and owned by the raw-SQL corpus, not modeled in schema.prisma as written."
+    },
+    {
+      "name": "agent_base_guard",
+      "kind": "function",
+      "file": "agent-base-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_tasks_assign_number",
+      "kind": "function",
+      "file": "agent-task-number-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_tasks_number_immutable",
+      "kind": "function",
+      "file": "agent-task-number-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "app_grant_grantee_same_app",
+      "kind": "function",
+      "file": "ticker-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "context_reset_cause_immutable",
+      "kind": "function",
+      "file": "context-reset-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "context_reset_forward_only",
+      "kind": "function",
+      "file": "context-reset-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "context_reset_same_app",
+      "kind": "function",
+      "file": "context-reset-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "guard_agent_task_findings",
+      "kind": "function",
+      "file": "agent-task-findings-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "guard_agent_task_role_task_refs",
+      "kind": "function",
+      "file": "agent-task-role-task-refs-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_agent_clone_audit_immutable",
+      "kind": "function",
+      "file": "post-push.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_agent_installed_in_app",
+      "kind": "function",
+      "file": "grant-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_alarm_escalation_end_write_once",
+      "kind": "function",
+      "file": "alarm-escalation-end-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_append_only_agent_team_event",
+      "kind": "function",
+      "file": "agent-task-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_append_only_app_automation_read_grant_event",
+      "kind": "function",
+      "file": "app-automation-read-grant-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_append_only_app_automation_team_snapshot_grant_event",
+      "kind": "function",
+      "file": "app-automation-team-snapshot-grant-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_append_only_app_memory_write_grant_event",
+      "kind": "function",
+      "file": "app-memory-write-grant-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_append_only_automation_adoption_event",
+      "kind": "function",
+      "file": "automation-adoption-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_append_only_grant_event",
+      "kind": "function",
+      "file": "grant-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_append_only_user_api_key_deletion",
+      "kind": "function",
+      "file": "user-api-key-deletion-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_apps_secrets_gone",
+      "kind": "function",
+      "file": "secret-versions-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_bind_grant_event",
+      "kind": "function",
+      "file": "grant-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_boot_prompt_entered",
+      "kind": "function",
+      "file": "boot-prompt-approval-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_boot_prompt_placed",
+      "kind": "function",
+      "file": "boot-prompt-approval-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_check_comment_node",
+      "kind": "function",
+      "file": "comment-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_comment_meta_immutable",
+      "kind": "function",
+      "file": "comment-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_comment_node_changed",
+      "kind": "function",
+      "file": "comment-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_compiled_prompt_revision_immutable",
+      "kind": "function",
+      "file": "compiled-prompt-revision-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_edges_governed_immutable",
+      "kind": "function",
+      "file": "comment-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_end_boot_prompt_approvals_in",
+      "kind": "function",
+      "file": "boot-prompt-approval-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_end_boot_prompt_approvals_on_agent_attach",
+      "kind": "function",
+      "file": "boot-prompt-approval-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_end_boot_prompt_approvals_on_install",
+      "kind": "function",
+      "file": "boot-prompt-approval-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_end_boot_prompt_node_approval",
+      "kind": "function",
+      "file": "boot-prompt-approval-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_end_boot_prompt_revision_approvals",
+      "kind": "function",
+      "file": "boot-prompt-approval-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_end_open_grant_signing_requests",
+      "kind": "function",
+      "file": "grant-signing-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_end_open_signing_requests",
+      "kind": "function",
+      "file": "signing-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_grant_holder_gone",
+      "kind": "function",
+      "file": "grant-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_grant_link_merged",
+      "kind": "function",
+      "file": "grant-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_grant_signing_stale",
+      "kind": "function",
+      "file": "grant-signing-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_app_automation_read_grant",
+      "kind": "function",
+      "file": "app-automation-read-grant-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_app_automation_team_snapshot_grant",
+      "kind": "function",
+      "file": "app-automation-team-snapshot-grant-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_app_memory_write_grant",
+      "kind": "function",
+      "file": "app-memory-write-grant-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_fresh_sign_in",
+      "kind": "function",
+      "file": "fresh-sign-in-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_grant",
+      "kind": "function",
+      "file": "grant-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_grant_signature",
+      "kind": "function",
+      "file": "grant-signing-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_grant_signing_request",
+      "kind": "function",
+      "file": "grant-signing-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_node_signature",
+      "kind": "function",
+      "file": "signing-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_passkey_cancel_token",
+      "kind": "function",
+      "file": "passkey-registration-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_passkey_ceremony_binding",
+      "kind": "function",
+      "file": "passkey-registration-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_passkey_credential",
+      "kind": "function",
+      "file": "passkey-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_passkey_registration_notice",
+      "kind": "function",
+      "file": "passkey-registration-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_pending_email_sign_in",
+      "kind": "function",
+      "file": "pending-email-sign-in-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_sign_in",
+      "kind": "function",
+      "file": "signin-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_sign_in_delete",
+      "kind": "function",
+      "file": "signin-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_sign_in_root",
+      "kind": "function",
+      "file": "signin-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_signing_request",
+      "kind": "function",
+      "file": "signing-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_immutable_automation_version",
+      "kind": "function",
+      "file": "automation-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_initialize_node_revision_content_hash",
+      "kind": "function",
+      "file": "post-push.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_is_boot_prompt_role",
+      "kind": "function",
+      "file": "boot-prompt-approval-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_memory_encrypted_signing",
+      "kind": "function",
+      "file": "signing-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_node_content_change",
+      "kind": "function",
+      "file": "signing-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_node_content_validation_report_immutable",
+      "kind": "function",
+      "file": "content-validation-report-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_node_revision_state_hash",
+      "kind": "function",
+      "file": "post-push.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_nodes_tsv",
+      "kind": "function",
+      "file": "post-push.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_passkey_clock_offset",
+      "kind": "function",
+      "file": "passkey-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_passkey_now",
+      "kind": "function",
+      "file": "passkey-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_passkey_wall_now",
+      "kind": "function",
+      "file": "passkey-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_refresh_task_blocked",
+      "kind": "function",
+      "file": "task-blocker-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_safe_numeric",
+      "kind": "function",
+      "file": "post-push.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_safe_timestamptz",
+      "kind": "function",
+      "file": "post-push.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_secret_deleted_ends_clients",
+      "kind": "function",
+      "file": "secret-read-clients-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_secret_event_guard",
+      "kind": "function",
+      "file": "secret-versions-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_secret_read_client_guard",
+      "kind": "function",
+      "file": "secret-read-clients-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_secret_read_client_secret",
+      "kind": "function",
+      "file": "secret-read-clients-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_secret_tombstone_guard",
+      "kind": "function",
+      "file": "secret-versions-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_secret_version_owner",
+      "kind": "function",
+      "file": "secret-versions-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_served_prompt_guard",
+      "kind": "function",
+      "file": "served-prompt-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_served_prompt_no_truncate",
+      "kind": "function",
+      "file": "served-prompt-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_signing_now",
+      "kind": "function",
+      "file": "signing-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_task_blocker_app_fixed",
+      "kind": "function",
+      "file": "task-blocker-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_task_blocker_guard",
+      "kind": "function",
+      "file": "task-blocker-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_task_blocker_refresh",
+      "kind": "function",
+      "file": "task-blocker-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_task_end_releases",
+      "kind": "function",
+      "file": "task-blocker-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_usage_cell",
+      "kind": "function",
+      "file": "usage-activity-rollup-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_usage_rollup_after_delete",
+      "kind": "function",
+      "file": "usage-activity-rollup-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_usage_rollup_after_insert",
+      "kind": "function",
+      "file": "usage-activity-rollup-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_usage_rollup_after_truncate",
+      "kind": "function",
+      "file": "usage-activity-rollup-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_usage_rollup_after_update",
+      "kind": "function",
+      "file": "usage-activity-rollup-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_usage_rollup_drop_zero",
+      "kind": "function",
+      "file": "usage-activity-rollup-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_usage_rollup_floor",
+      "kind": "function",
+      "file": "usage-activity-rollup-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_user_deletion_audit_immutable",
+      "kind": "function",
+      "file": "post-push.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "host_key_use_append_only",
+      "kind": "function",
+      "file": "host-operation-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "host_launcher_model_ok",
+      "kind": "function",
+      "file": "host-operation-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "host_operation_args_ok",
+      "kind": "function",
+      "file": "host-operation-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "host_operation_forward_only",
+      "kind": "function",
+      "file": "host-operation-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "host_operation_hold_fixed",
+      "kind": "function",
+      "file": "host-launch-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "host_operation_same_app",
+      "kind": "function",
+      "file": "host-operation-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "host_operation_token_array_ok",
+      "kind": "function",
+      "file": "agent-task-matching-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "host_operation_token_ok",
+      "kind": "function",
+      "file": "agent-task-matching-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "host_registration_worker_same_app",
+      "kind": "function",
+      "file": "agent-task-matching-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "maintain_agent_task_dispositions",
+      "kind": "function",
+      "file": "agent-task-dispositions-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "team_stop_signal_end_once",
+      "kind": "function",
+      "file": "stop-signal-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "team_stop_signal_target_same_app",
+      "kind": "function",
+      "file": "stop-signal-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "ticker_subscription_worker_same_app",
+      "kind": "function",
+      "file": "ticker-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "worker_reference_fence_1162",
+      "kind": "function",
+      "file": "worker-reference-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "worker_reference_targets_1162",
+      "kind": "function",
+      "file": "worker-reference-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.tsv",
+      "kind": "generated-column",
+      "file": "post-push.sql",
+      "why": "STORED generated column maintained by Postgres; Prisma schema language does not model generated columns."
+    },
+    {
+      "name": "agent_team_alarm_schedule_open_due_idx",
+      "kind": "index",
+      "file": "agent-task-stall-invariants.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "agent_team_events_person_activity_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "agent_team_events_pr_frozen_head_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "agent_team_events_unacked_alarms_idx",
+      "kind": "index",
+      "file": "alarm-escalation-end-invariants.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "agents_organization_id_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "agents_urn_migration_pending_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "apps_urn_migration_pending_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "assets_staged_uploaded_at_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "assets_uploaded_by_staged_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "coordinator_cadence_episodes_app_id_ended_at_idx",
+      "kind": "index",
+      "file": "coordinator-cadence-invariants.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "dark_worker_episodes_app_id_ended_at_idx",
+      "kind": "index",
+      "file": "dark-alarm-invariants.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "edges_source_id_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "host_operations_failed_platform_start_idx",
+      "kind": "index",
+      "file": "desired-start-invariants.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "host_sweep_episodes_app_id_ended_at_idx",
+      "kind": "index",
+      "file": "host-sweep-invariants.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "host_sweep_runs_host_recent_idx",
+      "kind": "index",
+      "file": "host-sweep-invariants.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "host_sweep_runs_unposted_idx",
+      "kind": "index",
+      "file": "host-sweep-invariants.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "memories_urn_migration_pending_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "node_embeddings_embedding_hnsw",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "nodes_chat_worker_created_idx",
+      "kind": "index",
+      "file": "post-limit-invariants.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "nodes_data_gin",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "nodes_embedding_failed_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "nodes_embedding_pending_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "nodes_memory_id_loc_c_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "nodes_memory_parent_loc_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "nodes_memory_segment_key_eligible_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "nodes_memory_segment_key_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "nodes_msg_channel_seq_loc_c_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "nodes_properties_gin",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "nodes_tsv_gin",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "post_limit_episodes_app_id_ended_at_idx",
+      "kind": "index",
+      "file": "post-limit-invariants.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "sessions_agent_id_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "sessions_memory_id_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "sessions_worker_ended_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "sessions_worker_started_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "start_failing_episodes_app_id_ended_at_idx",
+      "kind": "index",
+      "file": "desired-start-invariants.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "team_stop_signals_live_idx",
+      "kind": "index",
+      "file": "stop-signal-invariants.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "usage_events_node_id_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "usage_events_session_activity_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "git_mirror_attempt_seq",
+      "kind": "sequence",
+      "file": "git-mirror-obligation-invariants.sql",
+      "why": "Sequence created by the raw-SQL corpus; no Prisma model exists for it."
+    },
+    {
+      "name": "coordinator_cadence_clocks",
+      "kind": "table",
+      "file": "coordinator-cadence-invariants.sql",
+      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+    },
+    {
+      "name": "coordinator_cadence_episodes",
+      "kind": "table",
+      "file": "coordinator-cadence-invariants.sql",
+      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+    },
+    {
+      "name": "dark_worker_episodes",
+      "kind": "table",
+      "file": "dark-alarm-invariants.sql",
+      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+    },
+    {
+      "name": "host_sweep_episodes",
+      "kind": "table",
+      "file": "host-sweep-invariants.sql",
+      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+    },
+    {
+      "name": "host_sweep_runs",
+      "kind": "table",
+      "file": "host-sweep-invariants.sql",
+      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+    },
+    {
+      "name": "post_limit_episodes",
+      "kind": "table",
+      "file": "post-limit-invariants.sql",
+      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+    },
+    {
+      "name": "stamp_signing_keys",
+      "kind": "table",
+      "file": "signing-invariants.sql",
+      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+    },
+    {
+      "name": "start_failing_episodes",
+      "kind": "table",
+      "file": "desired-start-invariants.sql",
+      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+    },
+    {
+      "name": "worker_reference_fences",
+      "kind": "table",
+      "file": "worker-reference-invariants.sql",
+      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+    },
+    {
+      "name": "agent_clone_audits.agent_clone_audits_immutable",
+      "kind": "trigger",
+      "file": "post-push.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_task_blockers.task_blocker_guard",
+      "kind": "trigger",
+      "file": "task-blocker-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_task_blockers.task_blocker_refresh",
+      "kind": "trigger",
+      "file": "task-blocker-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_tasks.agent_task_dispositions",
+      "kind": "trigger",
+      "file": "agent-task-dispositions-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_tasks.agent_task_findings_immutable",
+      "kind": "trigger",
+      "file": "agent-task-findings-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_tasks.agent_task_role_task_refs_immutable",
+      "kind": "trigger",
+      "file": "agent-task-role-task-refs-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_tasks.task_blocker_app_fixed",
+      "kind": "trigger",
+      "file": "task-blocker-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_tasks.task_end_releases",
+      "kind": "trigger",
+      "file": "task-blocker-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_tasks.trg_agent_tasks_assign_number",
+      "kind": "trigger",
+      "file": "agent-task-number-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_tasks.trg_agent_tasks_number_immutable",
+      "kind": "trigger",
+      "file": "agent-task-number-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_tasks.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_team_events.agent_team_event_append_only",
+      "kind": "trigger",
+      "file": "agent-task-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_team_events.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agents.agent_base_guard",
+      "kind": "trigger",
+      "file": "agent-base-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agents.agents_grant_holder_gone",
+      "kind": "trigger",
+      "file": "grant-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agents.boot_prompt_approval_entry_agent",
+      "kind": "trigger",
+      "file": "boot-prompt-approval-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "alarm_escalation_ends.alarm_escalation_end_write_once",
+      "kind": "trigger",
+      "file": "alarm-escalation-end-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "app_automation_read_grant_events.app_automation_read_grant_event_append_only",
+      "kind": "trigger",
+      "file": "app-automation-read-grant-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "app_automation_read_grants.app_automation_read_grant_guard",
+      "kind": "trigger",
+      "file": "app-automation-read-grant-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "app_automation_team_snapshot_grant_events.app_automation_team_snapshot_grant_event_append_only",
+      "kind": "trigger",
+      "file": "app-automation-team-snapshot-grant-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "app_automation_team_snapshot_grants.app_automation_team_snapshot_grant_guard",
+      "kind": "trigger",
+      "file": "app-automation-team-snapshot-grant-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "app_grants.trg_app_grants_same_app",
+      "kind": "trigger",
+      "file": "ticker-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "app_grants.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "app_log.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "app_memory_write_grant_events.app_memory_write_grant_event_append_only",
+      "kind": "trigger",
+      "file": "app-memory-write-grant-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "app_memory_write_grants.app_memory_write_grant_guard",
+      "kind": "trigger",
+      "file": "app-memory-write-grant-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "app_wake_reservations.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "apps.apps_grant_holder_gone",
+      "kind": "trigger",
+      "file": "grant-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "apps.apps_secrets_gone",
+      "kind": "trigger",
+      "file": "secret-versions-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "assets.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "auth_codes.auth_codes_sign_in_root",
+      "kind": "trigger",
+      "file": "signin-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "auth_handoff_codes.auth_handoff_codes_sign_in_root",
+      "kind": "trigger",
+      "file": "signin-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "automation_adoption_events.automation_adoption_event_append_only",
+      "kind": "trigger",
+      "file": "automation-adoption-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "automation_versions.automation_version_immutable",
+      "kind": "trigger",
+      "file": "automation-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "channel_read_states.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "comment_meta.comment_meta_changed",
+      "kind": "trigger",
+      "file": "comment-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "comment_meta.comment_meta_immutable",
+      "kind": "trigger",
+      "file": "comment-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "comment_meta.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "compiled_prompt_revisions.compiled_prompt_revisions_immutable",
+      "kind": "trigger",
+      "file": "compiled-prompt-revision-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "compiled_prompt_revisions.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "context_resets.trg_context_resets_cause_immutable",
+      "kind": "trigger",
+      "file": "context-reset-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "context_resets.trg_context_resets_forward_only",
+      "kind": "trigger",
+      "file": "context-reset-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "context_resets.trg_context_resets_same_app",
+      "kind": "trigger",
+      "file": "context-reset-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "context_resets.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "coordinator_cadence_clocks.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "coordinator-cadence-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "coordinator_cadence_episodes.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "coordinator-cadence-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "dark_worker_episodes.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "dark-alarm-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "edges.edges_governed_immutable",
+      "kind": "trigger",
+      "file": "comment-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "edges.edges_governed_insert",
+      "kind": "trigger",
+      "file": "comment-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "edges.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "fresh_sign_ins.fresh_sign_in_guard",
+      "kind": "trigger",
+      "file": "fresh-sign-in-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "grant_events.grant_events_append_only",
+      "kind": "trigger",
+      "file": "grant-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "grant_events.grant_events_bind_app",
+      "kind": "trigger",
+      "file": "grant-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "grant_events.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "grant_signatures.grant_signature_guard",
+      "kind": "trigger",
+      "file": "grant-signing-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "grant_signing_requests.grant_signing_request_guard",
+      "kind": "trigger",
+      "file": "grant-signing-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "grant_signing_requests.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "grants.grant_signing_stale",
+      "kind": "trigger",
+      "file": "grant-signing-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "grants.grants_guard",
+      "kind": "trigger",
+      "file": "grant-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "grants.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "host_key_uses.trg_host_key_uses_append_only",
+      "kind": "trigger",
+      "file": "host-operation-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "host_operations.trg_host_operations_forward_only",
+      "kind": "trigger",
+      "file": "host-operation-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "host_operations.trg_host_operations_hold_fixed",
+      "kind": "trigger",
+      "file": "host-launch-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "host_operations.trg_host_operations_same_app",
+      "kind": "trigger",
+      "file": "host-operation-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "host_operations.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "host_registration_workers.trg_host_registration_workers_same_app",
+      "kind": "trigger",
+      "file": "agent-task-matching-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "host_registration_workers.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "host_worker_assignments.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "host-assignment-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "launch_grants.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "memories.boot_prompt_approval_entry_install",
+      "kind": "trigger",
+      "file": "boot-prompt-approval-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "memories.memories_comment_class",
+      "kind": "trigger",
+      "file": "comment-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "memories.memory_encrypted_signing",
+      "kind": "trigger",
+      "file": "signing-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "model_family_availability.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "node_content_validation_reports.node_content_validation_reports_immutable",
+      "kind": "trigger",
+      "file": "content-validation-report-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "node_content_validation_reports.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "node_revisions.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "node_signatures.node_signature_guard",
+      "kind": "trigger",
+      "file": "signing-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.boot_prompt_approval_entry_node",
+      "kind": "trigger",
+      "file": "boot-prompt-approval-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.boot_prompt_approval_entry_revisions",
+      "kind": "trigger",
+      "file": "boot-prompt-approval-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.node_content_change",
+      "kind": "trigger",
+      "file": "signing-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.node_content_change_insert",
+      "kind": "trigger",
+      "file": "signing-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.nodes_comment_insert",
+      "kind": "trigger",
+      "file": "comment-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.nodes_comment_update",
+      "kind": "trigger",
+      "file": "comment-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.nodes_initialize_revision_content_hash",
+      "kind": "trigger",
+      "file": "post-push.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "passkey_cancel_tokens.passkey_cancel_token_guard",
+      "kind": "trigger",
+      "file": "passkey-registration-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "passkey_ceremonies.passkey_ceremony_binding_guard",
+      "kind": "trigger",
+      "file": "passkey-registration-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "passkey_credentials.passkey_credential_guard",
+      "kind": "trigger",
+      "file": "passkey-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "passkey_registration_notices.passkey_registration_notice_guard",
+      "kind": "trigger",
+      "file": "passkey-registration-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "pending_email_sign_ins.pending_email_sign_in_guard",
+      "kind": "trigger",
+      "file": "pending-email-sign-in-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "post_limit_episodes.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "post-limit-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "register_entries.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "resume_claims.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secret_events.secret_event_append_only",
+      "kind": "trigger",
+      "file": "secret-versions-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secret_events.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "secret-versions-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secret_owner_tombstones.secret_owner_tombstone_guard",
+      "kind": "trigger",
+      "file": "secret-versions-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secret_read_clients.secret_read_client_guard",
+      "kind": "trigger",
+      "file": "secret-read-clients-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secret_read_clients.secret_read_client_secret",
+      "kind": "trigger",
+      "file": "secret-read-clients-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secret_versions.secret_version_owner",
+      "kind": "trigger",
+      "file": "secret-versions-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secret_versions.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "secret-versions-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secrets.secret_deleted_ends_clients",
+      "kind": "trigger",
+      "file": "secret-read-clients-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secrets.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "secret-versions-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "served_prompts.served_prompts_guard",
+      "kind": "trigger",
+      "file": "served-prompt-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "served_prompts.served_prompts_no_truncate",
+      "kind": "trigger",
+      "file": "served-prompt-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "served_prompts.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "served-prompt-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "sessions.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "sign_ins.sign_ins_guard",
+      "kind": "trigger",
+      "file": "signin-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "sign_ins.sign_ins_no_delete_with_keys",
+      "kind": "trigger",
+      "file": "signin-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "signing_requests.signing_request_guard",
+      "kind": "trigger",
+      "file": "signing-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "signing_requests.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "start_failing_episodes.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "desired-start-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "task_session_end_requests.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "team_stop_coverage.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "team_stop_signals.trg_team_stop_signals_end_once",
+      "kind": "trigger",
+      "file": "stop-signal-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "team_stop_signals.trg_team_stop_signals_same_app",
+      "kind": "trigger",
+      "file": "stop-signal-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "team_stop_signals.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "ticker_subscriptions.trg_ticker_subscriptions_same_app",
+      "kind": "trigger",
+      "file": "ticker-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "ticker_subscriptions.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "tickers.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "usage_activity_cells.usage_activity_cells_drop_nonpositive_insert",
+      "kind": "trigger",
+      "file": "usage-activity-rollup-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "usage_activity_cells.usage_activity_cells_drop_zero",
+      "kind": "trigger",
+      "file": "usage-activity-rollup-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "usage_events.usage_events_rollup_delete",
+      "kind": "trigger",
+      "file": "usage-activity-rollup-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "usage_events.usage_events_rollup_insert",
+      "kind": "trigger",
+      "file": "usage-activity-rollup-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "usage_events.usage_events_rollup_truncate",
+      "kind": "trigger",
+      "file": "usage-activity-rollup-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "usage_events.usage_events_rollup_update",
+      "kind": "trigger",
+      "file": "usage-activity-rollup-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "usage_events.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "user_api_key_deletions.user_api_key_deletion_append_only",
+      "kind": "trigger",
+      "file": "user-api-key-deletion-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "user_api_keys.user_api_keys_sign_in_root",
+      "kind": "trigger",
+      "file": "signin-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "user_deletion_audits.user_deletion_audits_immutable",
+      "kind": "trigger",
+      "file": "post-push.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "users.users_grant_holder_gone",
+      "kind": "trigger",
+      "file": "grant-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "worker_availability.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "worker_delivery_channels.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "worker_delivery_task_events.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "worker_delivery_ticks.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "worker_wake_acks.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "worker_wake_settings.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "workers.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "workers.workers_grant_holder_gone",
+      "kind": "trigger",
+      "file": "grant-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_task_counters_project_uniq",
+      "kind": "unique-index",
+      "file": "agent-task-number-backfill.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "agent_task_stop_holds_open_uniq",
+      "kind": "unique-index",
+      "file": "stop-signal-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "agent_tasks_app_external_id_uniq",
+      "kind": "unique-index",
+      "file": "agent-task-external-id-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "agent_tasks_app_id_handle_key",
+      "kind": "unique-index",
+      "file": "agent-task-number-backfill.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "agent_ticker_templates_name_live_uniq",
+      "kind": "unique-index",
+      "file": "agent-ticker-template-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "ai_service_configs_agent_name_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "ai_service_configs_app_name_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "ai_service_configs_org_name_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "ai_service_configs_server_name_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "app_automation_read_grants_live_uq",
+      "kind": "unique-index",
+      "file": "app-automation-read-grant-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "app_automation_team_snapshot_grants_live_uq",
+      "kind": "unique-index",
+      "file": "app-automation-team-snapshot-grant-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "app_grants_live_uniq",
+      "kind": "unique-index",
+      "file": "ticker-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "app_key_scopes_live_uniq",
+      "kind": "unique-index",
+      "file": "app-key-scope-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "app_memory_write_grants_live_uq",
+      "kind": "unique-index",
+      "file": "app-memory-write-grant-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "app_runs_served_prompt_owner_uniq",
+      "kind": "unique-index",
+      "file": "served-prompt-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "apps_urn_active_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "channel_read_states_agent_app_channel_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "channel_read_states_worker_channel_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "comment_meta_one_open_thread",
+      "kind": "unique-index",
+      "file": "comment-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "coordinator_cadence_episodes_one_open_uniq",
+      "kind": "unique-index",
+      "file": "coordinator-cadence-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "dark_worker_episodes_one_open_uniq",
+      "kind": "unique-index",
+      "file": "dark-alarm-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "host_sweep_episodes_one_open_uniq",
+      "kind": "unique-index",
+      "file": "host-sweep-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "host_sweep_runs_run_uniq",
+      "kind": "unique-index",
+      "file": "host-sweep-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "launch_grants_live_per_operation",
+      "kind": "unique-index",
+      "file": "host-launch-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "memories_install_memory_live_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "memory_config_templates_app_name_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "memory_config_templates_org_name_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "memory_config_templates_server_name_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "memory_config_templates_user_name_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "node_embeddings_abstract_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "nodes_chat_message_seq_unique_idx",
+      "kind": "unique-index",
+      "file": "chat-seq-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "post_limit_episodes_one_open_uniq",
+      "kind": "unique-index",
+      "file": "post-limit-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "register_entries_app_channel_agent_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "register_entries_app_channel_all_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "register_entries_app_channel_worker_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "register_entries_org_channel_agent_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "register_entries_org_channel_all_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "register_entries_org_channel_worker_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "scopes_agent_name_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "scopes_app_name_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "scopes_org_name_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "secret_app_keys_one_active_idx",
+      "kind": "unique-index",
+      "file": "secret-app-keys-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "served_prompts_chat_ordinal_uniq",
+      "kind": "unique-index",
+      "file": "served-prompt-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "served_prompts_run_uniq",
+      "kind": "unique-index",
+      "file": "served-prompt-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "served_prompts_session_uniq",
+      "kind": "unique-index",
+      "file": "served-prompt-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "sessions_served_prompt_owner_uniq",
+      "kind": "unique-index",
+      "file": "served-prompt-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "slack_connections_org_team_active_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "start_failing_episodes_one_open_uniq",
+      "kind": "unique-index",
+      "file": "desired-start-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "team_stop_coverage_open_uniq",
+      "kind": "unique-index",
+      "file": "stop-signal-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "ticker_subscriptions_live_uniq",
+      "kind": "unique-index",
+      "file": "ticker-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "tickers_app_name_live_uniq",
+      "kind": "unique-index",
+      "file": "ticker-invariants.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "tickers_generated_live_uniq",
+      "kind": "unique-index",
+      "file": "ticker-generated-live-unique.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "users_handle_lower_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "workers_app_name_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    }
+  ]
+}
