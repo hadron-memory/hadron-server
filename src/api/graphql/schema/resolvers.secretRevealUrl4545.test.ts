@@ -19,7 +19,9 @@ import { resolvers, type Context } from './resolvers.js';
 
 const BASE = 'https://hadron.example.test';
 let ownerId: string; let workerId: string; let personClientId: string; let workerClientId: string; let secretId: string; let appId: string;
-let savedBase: string | undefined;
+const ENV_KEYS = ['BASE_URL', 'HADRON_ENCRYPTION_KEY', 'SECRET_ROOT_KEY'] as const;
+let savedEnv: Record<string, string | undefined> = {};
+let agentId: string;
 const ctxOf = (userId: string, extra: Partial<Context> = {}): Context => ({ db, userId, roles: [], ...extra } as unknown as Context);
 const asWorker = <T>(id: string | null, p: () => Promise<T>) => runAsActor({ workerId: id, agentId: null }, p);
 type Row = { clientId: string; revealUrl?: string | null };
@@ -28,7 +30,7 @@ const list = (ctx: Context, worker: string | null = null): Promise<Row[]> =>
 const byId = (rows: Row[], id: string) => rows.find((r) => r.clientId === id);
 
 beforeEach(async () => {
-  savedBase = process.env.BASE_URL;
+  savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   process.env.BASE_URL = BASE;
   process.env.HADRON_ENCRYPTION_KEY = '11'.repeat(32);
   process.env.SECRET_ROOT_KEY = '22'.repeat(32);
@@ -37,6 +39,7 @@ beforeEach(async () => {
   const app = await db.app.create({ data: { name: 'R4545', ownerUserId: ownerId, urn: `${generateId().toLowerCase()}:rv` } });
   appId = app.id;
   const agent = await db.agent.create({ data: { ownerUserId: ownerId, name: 'a', urn: `${generateId().toLowerCase()}:ag` } as never });
+  agentId = agent.id;
   workerId = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'w1', slug: 'w1' } })).id;
   secretId = (await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: app.id, name: 'tok', kind: 'generic', value: 'hunter2' }, ctxOf(ownerId))).id;
   const issue = async (holderKind: 'USER' | 'WORKER', holderRef?: string) =>
@@ -46,7 +49,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
-  if (savedBase === undefined) delete process.env.BASE_URL; else process.env.BASE_URL = savedBase;
+  for (const k of ENV_KEYS) { if (savedEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedEnv[k]; }
 });
 
 describe('#4545 SecretReadClient.revealUrl', () => {
@@ -117,12 +120,30 @@ describe('#4545 SecretReadClient.revealUrl', () => {
 
   it('the no-worker and no-agent holder tests stand on chk_grants_exactly_one_holder: a person grant cannot also name either', async () => {
     const { grantId } = await db.secretReadClient.findUniqueOrThrow({ where: { id: personClientId } });
-    const plant = (col: 'worker_id' | 'agent_id') => db.$transaction(async (tx) => {
+    // The transaction ALWAYS rolls back: if the update ever succeeds, the sentinel throw undoes it together with the disabled
+    // trigger, so a regression in the constraint cannot leak a disabled guard or a malformed grant into later tests (Diego P2).
+    const ROLLBACK = 'rollback-4545';
+    const plant = (col: 'worker_id' | 'agent_id', id: string) => db.$transaction(async (tx) => {
       await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
-      await tx.$executeRawUnsafe(`UPDATE grants SET ${col} = $2 WHERE id = $1`, grantId, workerId);
-    }).then(() => 'OK', (e: Error) => e.message);
-    expect(await plant('worker_id')).toContain('chk_grants_exactly_one_holder');
-    expect(await plant('agent_id')).toContain('chk_grants_exactly_one_holder');
+      await tx.$executeRawUnsafe(`UPDATE grants SET ${col} = $2 WHERE id = $1`, grantId, id);
+      throw new Error(ROLLBACK);
+    }).then(() => 'COMMITTED', (e: Error) => e.message);
+    expect(await plant('worker_id', workerId)).toContain('chk_grants_exactly_one_holder');
+    expect(await plant('agent_id', agentId)).toContain('chk_grants_exactly_one_holder');
+    // Nothing leaked: the grant is unchanged and the guard trigger is still enabled.
+    expect(await db.grant.findUniqueOrThrow({ where: { id: grantId }, select: { userId: true, workerId: true, agentId: true } }))
+      .toEqual({ userId: ownerId, workerId: null, agentId: null });
+    const [{ tgenabled }] = await db.$queryRawUnsafe<Array<{ tgenabled: string }>>(
+      `SELECT tgenabled FROM pg_trigger WHERE tgname = 'grants_guard' AND tgrelid = 'grants'::regclass`);
+    expect(tgenabled).not.toBe('D');
+  });
+
+  it('the manager view widens nobody either: an App key, an impersonation and a run get an empty page', async () => {
+    const page = (ctx: Context) => asWorker(null, () =>
+      (resolvers as any).Secret.readClients({ id: secretId, ownerType: 'app', ownerId: appId }, {}, ctx) as Promise<{ items: Row[] }>);
+    for (const extra of [{ appKeyId: 'k1', appId }, { impersonation: { by: 'x' } }, { clientId: 'run:r1', appId }] as Array<Partial<Context>>) {
+      expect((await page(ctxOf(ownerId, extra))).items).toEqual([]);
+    }
   });
 
   it('widens nobody: an outsider, an impersonation and a run see no client at all, unchanged', async () => {

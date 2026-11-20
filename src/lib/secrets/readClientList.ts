@@ -29,16 +29,17 @@ function endStateOf(r: Parameters<typeof deadGrantState>[0] & { live: boolean; n
 /**
  * #4545 (hrn:node:hadronmemory.com:specs:cor:sec:060:02): the reveal page link goes only to the person holder, in their own
  * session. The holder test is the reveal page's own (`revealAs`): the grant's userId is that person, with no worker and no agent.
- * `revealTo` is that person's id, or null for a worker session. An App key, an impersonation, a run or an erased account never
+ * `viewerPersonUserId` is the id of the person viewing in their own session; null means there is no eligible person viewer (a
+ * worker session). An App key, an impersonation, a run or an erased account never
  * gets this far (`currentPerson`), and a viewer who does not hold the client (an issuer, a manager) gets null, so the field
  * reaches nobody who could not already see the row.
  */
-function revealUrlFor(r: { id: string; holderUserId: string | null; holderWorkerId: string | null; holderAgentId: string | null }, revealTo: string | null): string | null {
-  return revealTo !== null && r.holderUserId === revealTo && r.holderWorkerId === null && r.holderAgentId === null ? secretRevealUrl(r.id) : null;
+function revealUrlFor(r: { id: string; holderUserId: string | null; holderWorkerId: string | null; holderAgentId: string | null }, viewerPersonUserId: string | null): string | null {
+  return viewerPersonUserId !== null && r.holderUserId === viewerPersonUserId && r.holderWorkerId === null && r.holderAgentId === null ? secretRevealUrl(r.id) : null;
 }
 
 /** Page on SQL audience and liveness predicates before projecting; limit zero is count-only. */
-async function list(ctx: Context, args: Args, audience: Prisma.Sql, fullId: Prisma.Sql, revealTo: string | null) {
+async function list(ctx: Context, args: Args, audience: Prisma.Sql, fullId: Prisma.Sql, viewerPersonUserId: string | null) {
   const { take, skip } = pageArgs(args);
   const live = Prisma.sql`(c.ended_at IS NULL AND g.issuer_user_id IS NOT NULL AND ${grantLiveSql('g')})`;
   const where = Prisma.sql`g.id = c.grant_id AND a.id = c.app_id AND g.app_id = c.app_id
@@ -68,7 +69,7 @@ async function list(ctx: Context, args: Args, audience: Prisma.Sql, fullId: Pris
     secretName: r.secretName, selfIssued: r.selfIssued, createdAt: r.createdAt,
     startsAt: r.startsAt, expiresAt: r.expiresAt, maxReads: r.maxUses, readCount: r.useCount, destroyOnEnd: !!r.destroyOnEnd,
     endReason: r.endReason ?? endStateOf(r),
-    revealUrl: r.fullId ? revealUrlFor(r, revealTo) : null,
+    revealUrl: r.fullId ? revealUrlFor(r, viewerPersonUserId) : null,
   })), total, skip);
 }
 
