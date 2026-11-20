@@ -38,6 +38,7 @@ afterAll(async () => {
 });
 
 let appA: { id: string; urn: string };
+let appB: { id: string; urn: string };
 let userA: { id: string };
 let userB: { id: string };
 
@@ -49,7 +50,7 @@ beforeEach(async () => {
   const suffix = generateId().slice(-8);
   const org = await db.organization.create({ data: { id: generateId(), name: 'oc-org', urn: `oc-${suffix}.com` } });
   appA = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'App A', urn: `${org.urn}:app-a` } });
-  const appB = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'App B', urn: `${org.urn}:app-b` } });
+  appB = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'App B', urn: `${org.urn}:app-b` } });
   // Two Apps each, so App scope is ambiguous without a selection and a restore is observable.
   const mkUser = async (n: number) => {
     const user = await db.user.create({ data: { id: generateId(), githubId: 26050 + n, githubUsername: `oc-${n}-${suffix}`, roles: ['READER'] } });
@@ -91,12 +92,22 @@ async function call(rawKey: string, sessionId: string, name: string, args: Recor
   return (await mcpFetch(rawKey, callBody(name, args), { sessionId, clientId })).text();
 }
 
+/** Select an App on a new connection of this credential. */
+async function select(rawKey: string, app: { urn: string }, clientId?: string) {
+  const sid = await connect(rawKey, clientId);
+  expect(await call(rawKey, sid, 'hadron_set_active_app', { app: app.urn }, clientId)).toContain('Active App set to');
+}
+
+/** The App scope a brand-new connection of this credential starts with. */
+async function scopeOnReconnect(rawKey: string, clientId?: string) {
+  const sid = await connect(rawKey, clientId);
+  return call(rawKey, sid, 'hadron_list_memories', {}, clientId);
+}
+
 /** Select App A on one connection, then read the App scope on a brand-new one. */
 async function selectThenReconnect(selectKey: string, readKey: string, opts: { selectClientId?: string; readClientId?: string } = {}) {
-  const first = await connect(selectKey, opts.selectClientId);
-  expect(await call(selectKey, first, 'hadron_set_active_app', { app: appA.urn }, opts.selectClientId)).toContain('Active App set to');
-  const second = await connect(readKey, opts.readClientId);
-  return call(readKey, second, 'hadron_list_memories', {}, opts.readClientId);
+  await select(selectKey, appA, opts.selectClientId);
+  return scopeOnReconnect(readKey, opts.readClientId);
 }
 
 describe('#2605 — a stored selection keyed on the OAuth client', () => {
@@ -113,10 +124,14 @@ describe('#2605 — a stored selection keyed on the OAuth client', () => {
     expect(await selectThenReconnect(first, reissued)).toContain(appA.urn);
   });
 
-  it('a DIFFERENT OAuth client of the same user does not inherit it', async () => {
+  it('a DIFFERENT OAuth client that has its own selection keeps it', async () => {
     const desktop = await mintKey(userA.id, 'oauth:dcr_desktop');
     const cursor = await mintKey(userA.id, 'oauth:dcr_cursor');
-    expect(await selectThenReconnect(desktop, cursor)).toContain('no active App');
+    await select(cursor, appB);
+    await select(desktop, appA);
+    const text = await scopeOnReconnect(cursor);
+    expect(text).toContain(appB.urn);
+    expect(text).not.toContain(appA.urn);
   });
 
   it('ANOTHER user on the same OAuth client gets nothing of it', async () => {
@@ -125,18 +140,86 @@ describe('#2605 — a stored selection keyed on the OAuth client', () => {
     expect(await selectThenReconnect(a, b)).toContain('no active App');
   });
 
-  it('an explicit X-Hadron-Client-Id outranks the OAuth client, in both directions', async () => {
+  it('an explicit X-Hadron-Client-Id outranks the OAuth client: two windows of one client keep separate selections', async () => {
     const key = await mintKey(userA.id, 'oauth:dcr_desktop');
-    // Stored under the header's key: the same credential without the header does not see it.
-    expect(await selectThenReconnect(key, key, { selectClientId: 'window-1' })).toContain('no active App');
-    // And the header's own row is what a headered reconnect restores.
-    const again = await connect(key, 'window-1');
-    expect(await call(key, again, 'hadron_list_memories', {}, 'window-1')).toContain(appA.urn);
+    await select(key, appA, 'window-1');
+    await select(key, appB, 'window-2');
+    expect(await scopeOnReconnect(key, 'window-1')).toContain(appA.urn);
+    expect(await scopeOnReconnect(key, 'window-2')).toContain(appB.urn);
   });
 
   it('a credential that is not OAuth-issued and sends no client id is still not persisted', async () => {
     const key = await mintKey(userA.id, 'portal');
     expect(await selectThenReconnect(key, key)).toContain('no active App');
+  });
+});
+
+/**
+ * #2605 (ruling 7, Holger 2026-11-20: "Fallback only for OAuth") — an OAuth caller whose client has no stored
+ * selection of its own STARTS FROM the user's last explicit selection. "Starts from" is a copy made once: after it,
+ * the client has its own selection, and nothing another client does moves it. A caller on a portal or legacy API key
+ * neither reads nor feeds that per-user record: the agents that share one account through API keys must not all
+ * follow one record (the 2026-08-16 "per client, not per user" ruling, which this narrows for OAuth callers only).
+ */
+describe('#2605 — the per-user fallback, OAuth callers only', () => {
+  it('a NEW OAuth client starts from the last explicit selection the user made in another OAuth client', async () => {
+    const desktop = await mintKey(userA.id, 'oauth:dcr_desktop');
+    const phone = await mintKey(userA.id, 'oauth:dcr_phone');
+    await select(desktop, appA);
+    const text = await scopeOnReconnect(phone);
+    expect(text).toContain(appA.urn);
+    expect(text).not.toContain('no active App');
+  });
+
+  it('starting from it is a copy: a later selection elsewhere does not move a client that has already started', async () => {
+    const desktop = await mintKey(userA.id, 'oauth:dcr_desktop');
+    const phone = await mintKey(userA.id, 'oauth:dcr_phone');
+    await select(desktop, appA);
+    expect(await scopeOnReconnect(phone)).toContain(appA.urn);
+    await select(desktop, appB);
+    const text = await scopeOnReconnect(phone);
+    expect(text).toContain(appA.urn);
+    expect(text).not.toContain(appB.urn);
+  });
+
+  it('follows the LAST explicit selection, whichever OAuth client made it', async () => {
+    const desktop = await mintKey(userA.id, 'oauth:dcr_desktop');
+    const cursor = await mintKey(userA.id, 'oauth:dcr_cursor');
+    const phone = await mintKey(userA.id, 'oauth:dcr_phone');
+    await select(desktop, appA);
+    await select(cursor, appB);
+    expect(await scopeOnReconnect(phone)).toContain(appB.urn);
+  });
+
+  it('an API-key caller does not read the per-user record, with or without a client id', async () => {
+    const desktop = await mintKey(userA.id, 'oauth:dcr_desktop');
+    const agent = await mintKey(userA.id, 'portal');
+    await select(desktop, appA);
+    expect(await scopeOnReconnect(agent)).toContain('no active App');
+    expect(await scopeOnReconnect(agent, 'agent-9')).toContain('no active App');
+  });
+
+  it('an API-key caller that sends a client id keeps its own selection and does not feed the per-user record', async () => {
+    const agent = await mintKey(userA.id, 'portal');
+    const phone = await mintKey(userA.id, 'oauth:dcr_phone');
+    await select(agent, appB, 'agent-1');
+    expect(await scopeOnReconnect(agent, 'agent-1')).toContain(appB.urn);
+    expect(await scopeOnReconnect(phone)).toContain('no active App');
+    // And another header-sending API-key client of the same user starts from nothing.
+    expect(await scopeOnReconnect(agent, 'agent-2')).toContain('no active App');
+  });
+
+  it("another user's OAuth client never starts from this user's selection", async () => {
+    const a = await mintKey(userA.id, 'oauth:dcr_desktop');
+    const b = await mintKey(userB.id, 'oauth:dcr_phone');
+    await select(a, appA);
+    expect(await scopeOnReconnect(b)).toContain('no active App');
+  });
+
+  it('no client id header can address the per-user record', async () => {
+    const { normalizeClientKey, USER_DEFAULT_CLIENT_KEY } = await import('../lib/mcpSessionState.js');
+    expect(normalizeClientKey(USER_DEFAULT_CLIENT_KEY)).toBeNull();
+    expect(normalizeClientKey(` ${USER_DEFAULT_CLIENT_KEY} `)).toBeNull();
   });
 });
 
