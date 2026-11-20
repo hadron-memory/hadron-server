@@ -425,6 +425,29 @@ ON CONFLICT (name) DO NOTHING;
 -- the plain unique index on `name` is uniqueness across case. Until #4400 only the writers' lower-casing kept
 -- `Example` out beside `example`. Placed after the backfills above, which write lower(...) names.
 -- Synced with the 20261117900000_principals_name_lower_check migration.
+-- #4411: the migration refuses on a mixed-case row (SQLSTATE HDPRF) rather than lower-casing it, which could merge
+-- two owners' roots. This copy gives a development database the same guard, naming the rows and what to do, instead
+-- of failing below on a raw check violation. The sentinel comments are what principalNameLower4411.test.ts runs.
+-- #4411 preflight chk_principals_name_lower: begin
+DO $$
+DECLARE
+  offending_count bigint;
+  offending_rows_summary text;
+BEGIN
+  SELECT count(*) INTO offending_count FROM principals WHERE name <> lower(name);
+  IF offending_count > 0 THEN
+    -- A row "shares its root" when any OTHER row has the same lower(name): a lower-case twin, or another mixed-case
+    -- spelling (`Legacy.Example` beside `LEGACY.EXAMPLE`), so lower-casing it alone would collide.
+    SELECT string_agg(format('%L (%s, %s%s)', p.name, p.kind, p.status,
+             CASE WHEN EXISTS (SELECT 1 FROM principals t WHERE lower(t.name) = lower(p.name) AND t.id <> p.id)
+                  THEN ', shares its root with another row' ELSE '' END), ', ' ORDER BY p.name)
+      INTO offending_rows_summary
+      FROM (SELECT id, name, kind, status FROM principals WHERE name <> lower(name) ORDER BY name LIMIT 20) p;
+    RAISE EXCEPTION 'principals.name: % principal row(s) are not lower case, so chk_principals_name_lower cannot be added (hadron-server#4400; this guard: #4411). For a row that shares its root with no other row, lower-case it and the owning users.handle / organizations.urn; for rows that share a root, decide which owner keeps it and rename or delete the others. Then re-run pnpm db:dev-setup. Rows (first 20): %', offending_count, offending_rows_summary
+      USING ERRCODE = 'HDPRF';
+  END IF;
+END $$;
+-- #4411 preflight chk_principals_name_lower: end
 ALTER TABLE principals
   DROP CONSTRAINT IF EXISTS chk_principals_name_lower;
 ALTER TABLE principals

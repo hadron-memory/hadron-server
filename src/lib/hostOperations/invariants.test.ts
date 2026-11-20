@@ -102,10 +102,18 @@ describe('the invariants file', () => {
     const current = source.slice(source.indexOf(block));
     const L4259 = "-- #4259 — the failure set gains SETUP_FAILED and VERIFY_FAILED.\n";
     expect(current.includes(L4259) && current.includes(", 'SETUP_FAILED', 'VERIFY_FAILED'")).toBe(true);
+    const L4558 = '-- #4558 (hadron-cli#2677) — the reason set gains no_screen (Orca gives no rendered screen for the\n-- terminal) and multiple_terminals (more than one agent terminal bound to the worker). Both ride locked, as\n-- unrecognized does: the stored status is unchanged and no terminal-status event follows (that event is not\n-- built, cor:agt:050:11 slice S1c). Mirrors migration 20261120200000_worker_terminal_new_reasons.\n';
+    const asBefore4558 = (t: string) => t.replace(L4558, '').replace(", 'no_screen', 'multiple_terminals'", '');
+    expect(current.includes(L4558) && current.includes(", 'no_screen', 'multiple_terminals'")).toBe(true);
     const relaunch = readFileSync(new URL('../../../prisma/migrations/20261115170000_worker_terminal_relaunch_repair/migration.sql', import.meta.url), 'utf8');
-    expect(relaunch.endsWith(`\n${current.replace(L4259, '').replace(", 'SETUP_FAILED', 'VERIFY_FAILED'", '')}`)).toBe(true);
+    expect(relaunch.endsWith(`\n${asBefore4558(current.replace(L4259, '').replace(", 'SETUP_FAILED', 'VERIFY_FAILED'", ''))}`)).toBe(true);
+    // #4558 (hadron-cli#2677): the reason list widened once more (no_screen, multiple_terminals, both riding locked).
+    // 20261120200000_worker_terminal_new_reasons carries the current block; the #4259 copy is compared with the block
+    // as it was before, exactly as the older copies above are compared with their later widenings taken out.
     const codes = readFileSync(new URL('../../../prisma/migrations/20261115260000_relaunch_failure_codes/migration.sql', import.meta.url), 'utf8');
-    expect(codes.endsWith(`\n${current}`)).toBe(true);
+    expect(codes.endsWith(`\n${asBefore4558(current)}`)).toBe(true);
+    const newReasons = readFileSync(new URL('../../../prisma/migrations/20261120200000_worker_terminal_new_reasons/migration.sql', import.meta.url), 'utf8');
+    expect(newReasons.endsWith(`\n${current}`)).toBe(true);
     const checkpoint = readFileSync(new URL('../../../prisma/migrations/20261103014500_host_checkpoint_use_action/migration.sql', import.meta.url),'utf8');
     const check = source.slice(source.indexOf('ALTER TABLE host_key_uses DROP CONSTRAINT'),source.indexOf('CREATE OR REPLACE FUNCTION host_key_use_append_only')).trim();
     // #4233: the checkpoint migration's copy predates 'sweep'; the sweep migration carries the current CHECK.

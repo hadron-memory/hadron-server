@@ -2432,6 +2432,8 @@ export const typeDefs = `#graphql
     expiresAt: DateTime!
     "Null while OPEN. EXPIRED ends at expiresAt; every other end at the moment it happened (DB clock)."
     endedAt: DateTime
+    "Latest verified ineligible signing-proof attempt while OPEN, if any. Visible only through the existing request read gate; contains no signer identity and does not end the request (#4546; hrn:node:hadronmemory.com:specs:cor:acl:140:07)."
+    lastRefusedAt: DateTime
     "The server-hosted ceremony page where someone who may issue the grant signs it (hrn:node:hadronmemory.com:specs:cor:acl:140:07): the server origin plus /grant-signing/<id>, with no token. Copy it verbatim; never compose it. Signing there with a passkey activates the grant; no GraphQL or MCP call takes an assertion. An ended request's link only explains that it ended."
     ceremonyUrl: String!
   }
@@ -4505,7 +4507,7 @@ export const typeDefs = `#graphql
     agent: Agent
     syncStatus: SyncStatus!
     syncError: String
-    "Versioned JSON outcome of the last sync (v1, or v2 when an attestation-refused entry requires it): partial, failed or unknown. Null after a completed clean sync; consult lastSyncedAt/syncStatus for a never-synced memory. Same Memory-record read gate applies. Git sync: hrn:node:hadronmemory.com:specs:cor:int:010:01."
+    "Versioned JSON outcome of the last sync (v1, or v2 when an attestation-refused entry requires it): partial, failed or unknown. Invalid-loc skips may add invalidSources with a count, up to 50 ordinal/code items and an omitted count; the outcome remains unknown and no source path or file ID is exposed. Null after a completed clean sync; consult lastSyncedAt/syncStatus for a never-synced memory. Same Memory-record read gate applies. Git sync: hrn:node:hadronmemory.com:specs:cor:int:010:01."
     lastSyncReport: String
     pendingEdgeCount: Int!
     lastSyncedAt: DateTime
@@ -6517,6 +6519,8 @@ export const typeDefs = `#graphql
     selfIssued: Boolean!
     "Null while live, else one of SECRET_DELETED, PROTECTED, REVOKED, PENDING, SPENT, EXPIRED, NOT_STARTED, ISSUER_GONE (nothing else ended it) or ENDED. A stored end wins; otherwise the grant's own state, in the order the reveal door answers."
     endReason: String
+    "#4545 (hrn:node:hadronmemory.com:specs:cor:sec:060:02): the server-hosted page where the person who holds this client reveals the value with a passkey: the server origin plus /secret-reveal/<clientId>, with no token. Copy it verbatim; never compose it. Returned only to that person holder in their own session. Null for a client a worker holds, and for a worker session, an App key or anyone viewing a client they do not hold."
+    revealUrl: String
     createdAt: DateTime!
   }
 
@@ -10585,6 +10589,14 @@ export const typeDefs = `#graphql
     'ref' accepts the entity's ID or URN.
     """
     agent(ref: ID!): Agent
+
+    """
+    An Agent's revisions, newest first, with the slot limit, the highest slot used and the saves left (#4488).
+    Read by whoever may restore a revision: the Agent's manager.
+
+    Accepts the entity's ID or URN.
+    """
+    agentRevisions(agentRef: ID!): AgentRevisionList!
     """
     #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15) - an Agent's tasks, across its base chain:
     every runnable node in its effective system memory, and every task the
@@ -12759,8 +12771,24 @@ export const typeDefs = `#graphql
 
     Identical to updateNode otherwise, selectors included ('id' XOR 'memoryId' +
     'loc'); it never creates and never moves.
+
+    #1291 — 'mergeExports: true' makes the WHOLE 'input.properties' bag a PATCH
+    (not only 'exports') instead of a replacement: named top-level keys are replaced whole, except 'exports', which
+    merges per host and per field ('null' removes a host); unnamed keys stay.
+    It is the merge 'updateNodeProperties' applies, run under the node's lock on
+    the row read after it, so two concurrent patches to different hosts both
+    land. The gate, task and schema validation judge the MERGED result;
+    'expectedRevision' still applies; who may write is unchanged. 'properties'
+    must then be an object (anything else is BAD_USER_INPUT). Omit or pass false
+    for today's whole-bag replace. Only this door has it.
     """
-    updateTaskNode(input: UpdateNodeInput!): Node!
+    updateTaskNode(
+      input: UpdateNodeInput!
+      """
+      Treat the whole 'input.properties' as a patch (unnamed keys kept; 'exports' merged per host and field) instead of replacing the bag. Default false.
+      """
+      mergeExports: Boolean
+    ): Node!
 
     """
     Update an existing node. Identify it by 'id' (PK or fully-qualified node
@@ -14779,6 +14807,16 @@ export const typeDefs = `#graphql
     """
     restoreRevision(agentRef: ID!, revisionLoc: String!): RevisionResult!
 
+    """
+    Delete one of an Agent's revisions by loc (#4488). Same gate as restoreRevision: the Agent's manager.
+    Refuses, before any write, the published (pinned) revision (REVISION_PUBLISHED) and the Agent's only
+    revision (REVISION_ONLY). A deleted revision leaves the list and can no longer be restored; its slot
+    number is not reused, so a delete does not free a slot (see agentRevisions).
+
+    Accepts the entity's ID or URN.
+    """
+    deleteAgentRevision(agentRef: ID!, revisionLoc: String!): RevisionResult!
+
     # Editor lock (org ADMIN)
     """
     Acquire (or renew) the editor lock for an Agent's system memory.
@@ -16047,6 +16085,27 @@ export const typeDefs = `#graphql
     routingSkipped: Boolean!
     onTrack: Boolean!
     offTrackReason: String
+  }
+
+  "One revision in an Agent's list. #4488"
+  type AgentRevision {
+    revisionLoc: String!
+    label: String!
+    "True for the revision the Agent is pinned to (publishRevision)."
+    published: Boolean!
+    description: String
+    createdAt: DateTime!
+  }
+
+  """
+  An Agent's revisions, newest first, with the slot facts. Slot numbers are never reused: the next save takes
+  1 + the highest ever used, deleted revisions included, so a delete does not raise slotsRemaining. #4488
+  """
+  type AgentRevisionList {
+    revisions: [AgentRevision!]!
+    slotLimit: Float!
+    highestSlotUsed: Float!
+    slotsRemaining: Float!
   }
 
   type RevisionResult {
@@ -17965,6 +18024,10 @@ export const typeDefs = `#graphql
     no_terminal
     bare_shell
     no_agent
+    "#4558 (hadron-cli#2677): Orca gives no rendered screen for the terminal (screen-unavailable). The CLI reports it with status locked, as it does unrecognized; like every reason, it is accepted with locked or dark."
+    no_screen
+    "#4558 (hadron-cli#2677): more than one agent terminal is bound to the worker. The CLI reports it with status locked, as it does unrecognized; like every reason, it is accepted with locked or dark."
+    multiple_terminals
   }
 
   "#2771 — the host that made a worker's latest terminal report: its id from the key, its label from its registration."
