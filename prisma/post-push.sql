@@ -982,16 +982,17 @@ CREATE INDEX IF NOT EXISTS "assets_uploaded_by_staged_idx"      ON "assets"   US
 -- otherwise accept a NULL that production refuses. The migrations stay the authority: no migration or production DDL change,
 -- and no default changes (an empty array stays an empty array, never NULL).
 --
--- A NULL row can only exist in a long-lived dev database. The eight columns below get the same default the migration gives
+-- A NULL row can only exist in a long-lived dev database. The six columns below get the same default the migration gives
 -- the column, so the ALTER cannot fail on them (tickers and apps get theirs, not an empty array); no row is dropped and no column skipped.
 UPDATE agents SET surfaces = ARRAY[]::text[] WHERE surfaces IS NULL;
 UPDATE apps SET surfaces = ARRAY['chat']::text[] WHERE surfaces IS NULL;
 UPDATE agent_tasks SET unresolved_finding_ids = ARRAY[]::text[] WHERE unresolved_finding_ids IS NULL;
 UPDATE app_wake_reservations SET absorbed_keys = ARRAY[]::text[] WHERE absorbed_keys IS NULL;
-UPDATE home_assistant_instances SET op_allowlist = ARRAY[]::text[] WHERE op_allowlist IS NULL;
 UPDATE host_registration_workers SET worktrees = ARRAY[]::text[] WHERE worktrees IS NULL;
-UPDATE mcp_servers SET tool_allowlist = ARRAY[]::text[] WHERE tool_allowlist IS NULL;
 UPDATE tickers SET reasons = ARRAY['read-team-channel']::text[] WHERE reasons IS NULL;
+-- home_assistant_instances.op_allowlist and mcp_servers.tool_allowlist are NOT backfilled either: haOpAllowed and mcpToolAllowed read an
+-- empty list as "no restriction" (src/lib/homeAssistant.ts, src/lib/mcpServers.ts), so inventing '{}' for a NULL would silently widen an
+-- allowlist to allow-all. A NULL there makes the ALTER fail loudly instead.
 -- rate_limit_manifests.key_ids has no neutral default (a manifest without keys is not a manifest): a NULL row makes the ALTER fail.
 -- user_api_keys.oauth_scopes and auth_codes.oauth_scopes are deliberately NOT backfilled: cor:aut:010:02 rule 3 reads an empty
 -- set as "unscoped: the user's full authority", so inventing '{}' for a NULL would silently widen a credential. A NULL there
