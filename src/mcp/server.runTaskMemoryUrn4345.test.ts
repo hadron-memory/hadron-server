@@ -126,7 +126,9 @@ describe('hadron_run_task memory hint — URN forms (#4345)', () => {
     await db.urnAlias.create({
       data: { id: generateId(), urn: 'dup-org:dup', entityType: 'MEMORY', entityId: foreign.id, reason: 'RENAME' },
     });
-    expect(await run(asAdmin(), 'urn:memory:dup-org:dup')).toContain('Body of Alpha');
+    const orgA = await db.organization.findFirstOrThrow({ where: { urn: 'urn-org-a' } });
+    await db.orgMember.create({ data: { organizationId: orgA.id, userId: outsider.id, role: 'READER' } });
+    expect(await run(asOutsider(), 'urn:memory:dup-org:dup')).toContain('Body of Alpha');
   });
 
   it('a legacy URN that two readable memories claim is refused, not guessed', async () => {
@@ -137,5 +139,15 @@ describe('hadron_run_task memory hint — URN forms (#4345)', () => {
     const text = await run(asAdmin(), 'urn:memory:amb-org:amb');
     expect(text).toContain('No memory matching "urn:memory:amb-org:amb"');
     expect(text).not.toContain('Body of');
+  });
+
+  it('same, with the unreadable co-claimant on the legacy_urn column', async () => {
+    await db.memory.update({ where: { id: foreign.id }, data: { legacyUrn: 'dup2-org:dup2' } });
+    await db.urnAlias.create({
+      data: { id: generateId(), urn: 'dup2-org:dup2', entityType: 'MEMORY', entityId: alpha.id, reason: 'RENAME' },
+    });
+    const orgA = await db.organization.findFirstOrThrow({ where: { urn: 'urn-org-a' } });
+    await db.orgMember.create({ data: { organizationId: orgA.id, userId: outsider.id, role: 'READER' } });
+    expect(await run(asOutsider(), 'urn:memory:dup2-org:dup2')).toContain('Body of Alpha');
   });
 });
