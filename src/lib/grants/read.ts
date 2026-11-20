@@ -1,6 +1,6 @@
 /**
  * #3789 (Grants S2a-read; cor:acl:140:05 List, :03 live, :01): the data-layer read of grants for a BOUND WORKER, shared by
- * the GraphQL `grant(ref:)` / `grants` resolvers and, once it exists (#3710, not built), the run tool, which will call it directly and not through the resolver.
+ * the GraphQL `grant(ref:)` / `grants` resolvers and the run tool `hadron_list_grants` (#3710), which calls {@link listGrantsForRunAgent} directly and not through the resolver.
  *
  * Who is a reader is decided by the CALLER (the resolver's gate), which hands this module a {@link GrantReader}: a worker and
  * the App it belongs to. This module owns the row scope, and it is the same for every caller:
@@ -20,6 +20,7 @@ import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { grantLiveSql } from './live.js';
 import { grantStateSql, type GrantState } from './state.js';
 import { roleAgentReachedBy } from './reach.js';
+import { isAgentInstalledAndLicensed } from '../appAgent.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -122,6 +123,33 @@ export async function listGrantsForWorker(db: Db, reader: GrantReader, page: { t
   const take = page.take ?? 20;
   const skip = page.skip ?? 0;
   const from = scope(reader, await roleAgentReachedBy(db, reader.appId, reader.workerId));
+  const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`SELECT count(*) AS n ${from}`);
+  const total = Number(n);
+  if (take === 0 || total === 0) return { items: [], total };
+  const rows = await db.$queryRaw<Row[]>(Prisma.sql`SELECT ${COLUMNS} ${from} ORDER BY g.created_at DESC, g.id DESC LIMIT ${take} OFFSET ${skip}`);
+  return { items: rows.map((r) => view(r)), total };
+}
+
+/** A RUN reading its own agent's grants (#3710): the run's App and the Agent the run names (`AppRun.agentId`, required by #3689). */
+export interface GrantRunReader { appId: string; agentId: string }
+
+/**
+ * #3710 (cor:acl:140:05 "An agent reads its own grants"; ruling 0255 items 20, 20a, 20b): the grants the run's AGENT holds in the run's own
+ * App, in every state, newest first, through the same projection as the worker's read. The caller (the run tool) judges that this is a run;
+ * this module owns the row scope:
+ *   - `agent_id` is the run's agent AND `app_id` is the run's App: a grant is held by the PAIR (agent, App), so the same agent's grant in
+ *     another App is absent (20b), and nothing passes down the base-agent chain (20a: only this agent's own rows);
+ *   - rows held by a worker, a person or the App are not listed: this is the agent's own list, not the worker's or the App's;
+ *   - the agent must be installed and licensed in the App now (the test {@link roleAgentReachedBy} and the reach rule apply), else nothing;
+ *   - a soft-deleted App conceals its grants (the join).
+ * A row out of scope is simply absent. `take` 0 is count-only. The caller clamps `take` and `skip`.
+ */
+export async function listGrantsForRunAgent(db: Db, reader: GrantRunReader, page: { take?: number; skip?: number }): Promise<{ items: GrantView[]; total: number }> {
+  const take = page.take ?? 20;
+  const skip = page.skip ?? 0;
+  if (!(await isAgentInstalledAndLicensed(db, reader.appId, reader.agentId))) return { items: [], total: 0 };
+  const from = Prisma.sql`FROM grants g JOIN apps a ON a.id = g.app_id AND a.deleted_at IS NULL
+    WHERE g.app_id = ${reader.appId} AND g.agent_id = ${reader.agentId}`;
   const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`SELECT count(*) AS n ${from}`);
   const total = Number(n);
   if (take === 0 || total === 0) return { items: [], total };

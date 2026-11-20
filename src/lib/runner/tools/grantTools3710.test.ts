@@ -43,8 +43,8 @@ describe('hadron_list_grants (#3710)', () => {
     const run = await mintRun(w.appId, w.agentId);
     const pending = await agentGrant(w.agentId, w.appId);
     const active = await insertGrantUnguarded(w, { user_id: null, agent_id: w.agentId, activated_at: raw(DB_NOW), verification_kind: 'TEST', verified_by: 't' });
-    const revoked = await insertGrantUnguarded(w, { user_id: null, agent_id: w.agentId, activated_at: raw(DB_NOW), verification_kind: 'TEST', verified_by: 't', revoked_at: raw(DB_NOW) });
-    const expired = await insertGrantUnguarded(w, { user_id: null, agent_id: w.agentId, activated_at: raw(DB_NOW), verification_kind: 'TEST', verified_by: 't', expires_at: raw(`${DB_NOW} - interval '1 hour'`) });
+    const revoked = await insertGrantUnguarded(w, { user_id: null, agent_id: w.agentId, activated_at: raw(DB_NOW), verification_kind: 'TEST', verified_by: 't', revoked_at: raw(DB_NOW), revoked_by: w.userId });
+    const expired = await insertGrantUnguarded(w, { user_id: null, agent_id: w.agentId, created_at: raw(`${DB_NOW} - interval '3 hours'`), activated_at: raw(`${DB_NOW} - interval '2 hours'`), verification_kind: 'TEST', verified_by: 't', expires_at: raw(`${DB_NOW} - interval '1 hour'`) });
     const out = await call(run);
     expect(out.total).toBe(4);
     const byId = new Map(out.grants.map((g) => [g.id as string, g]));
@@ -119,7 +119,7 @@ describe('hadron_list_grants (#3710)', () => {
     const restrictive = parsePolicyLink({ allow: ['run.execute', 'llm.invoke'] });
     expect(evaluatePolicyChain('tool.hadron_list_grants', [restrictive])).toBe(false);
     expect(evaluatePolicyChain('tool.hadron_list_grants', [parsePolicyLink({ allow: ['tool.hadron_list_grants'] })])).toBe(true);
-    expect(evaluatePolicyChain('tool.hadron_list_grants', [parsePolicyLink({ allow: ['*'] }), parsePolicyLink({ deny: ['tool.hadron_list_grants'] })])).toBe(false);
+    expect(evaluatePolicyChain('tool.hadron_list_grants', [parsePolicyLink({ allow: ['*'] }), restrictive])).toBe(false);
   });
 
   it('refuses a principal that is not this run\'s run principal', async () => {
