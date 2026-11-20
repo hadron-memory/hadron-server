@@ -4,6 +4,7 @@
  * foreign-key targets behave differently between the two forms, so the dev and test path (push + post-push.sql) must
  * carry the constraint form too, under the migration's names.
  */
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
@@ -38,5 +39,19 @@ describe('#4333 the six migration UNIQUE constraints exist on push + post-push',
     await upsert();
     const [row] = await db.$queryRaw<Array<{ used: bigint }>>`SELECT used FROM rate_limit_buckets WHERE field_class = 'pin4333'`;
     expect(Number(row.used)).toBe(2);
+  });
+
+  it('re-applying the invariants file is a no-op (a second db:dev-setup)', async () => {
+    const sql = readFileSync(new URL('../../../prisma/unique-constraint-invariants.sql', import.meta.url), 'utf8');
+    const statements = sql.split('\n').filter((l) => l && !l.startsWith('--') && l !== 'BEGIN;' && l !== 'COMMIT;');
+    expect(statements).toHaveLength(CONSTRAINTS.length * 3);
+    for (let run = 0; run < 2; run++) {
+      await db.$transaction(async (tx) => {
+        for (const st of statements) await tx.$executeRawUnsafe(st);
+      });
+    }
+    const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`
+      SELECT count(*) AS n FROM pg_constraint WHERE contype = 'u' AND conname = ANY(${CONSTRAINTS.map((c) => c[1])})`;
+    expect(Number(n)).toBe(CONSTRAINTS.length);
   });
 });

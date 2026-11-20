@@ -857,6 +857,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- src/lib/rateLimit/rateLimitChecks4332.test.ts and scripts/db/migration-replay.ts).
 \ir rate-limit-invariants.sql
 
+-- #4333 (#434 Slice C): the six UNIQUE constraints the migrations create, promoted from the same-name unique indexes
+-- db push leaves (pinned by src/test/migrations/uniqueConstraints4333.test.ts and scripts/db/migration-replay.ts).
+\ir unique-constraint-invariants.sql
+
 -- #1885: an Agent extends at most one base Agent; no cycles, at most 4 in a
 -- chain. One source, shared verbatim with migration 20261014120000_agent_base
 -- (pinned by src/api/graphql/schema/resolvers.agentBase1885.test.ts).
