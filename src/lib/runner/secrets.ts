@@ -148,6 +148,18 @@ export function assertSecretUseBinding(rawUrl: string, signedPrefix: string, met
   return target.href;
 }
 
+/** Ensure a signed header names the payload's auth channel and is never model-controlled (#4000). */
+export function assertSecretUseHeader(header: string, value: unknown, headers: Record<string, string>): void {
+  // RFC 9110 tchar: reject control bytes and delimiters before this name reaches an HTTP implementation.
+  const token = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+  if (!token.test(header) || !isWebFetchAuth(value)) throw new Error('Invalid secret use header binding.');
+  const derived = value.type === 'header' ? value.name : 'authorization';
+  if (!token.test(derived) || derived.toLowerCase() !== header.toLowerCase() ||
+      Object.keys(headers).some((name) => name.toLowerCase() === header.toLowerCase())) {
+    throw new Error('Secret use header does not match its binding.');
+  }
+}
+
 export interface ResolvedWebFetchAuth {
   auth: WebFetchAuth;
   urlPrefix: string;

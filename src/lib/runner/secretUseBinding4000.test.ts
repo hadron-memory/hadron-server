@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import * as secrets from './secrets.js';
-const { assertSecretUseBinding } = secrets;
+import { assertSecretUseBinding, assertSecretUseHeader } from './secrets.js';
 
 // S5: a signed prefix is an HTTPS origin and path boundary, independent of the mutable kind metadata.
 describe('secret.use signed binding (#4000)', () => {
@@ -17,7 +16,7 @@ describe('secret.use signed binding (#4000)', () => {
 
 describe('secret.use header binding (#4000)', () => {
   it('binds the derived auth header and refuses a model-set copy, case insensitively', () => {
-    const validate = (secrets as unknown as { assertSecretUseHeader: (header: string, auth: unknown, headers: Record<string, string>) => void }).assertSecretUseHeader;
+    const validate = assertSecretUseHeader;
     expect(() => validate('Authorization', { type: 'bearer', token: 'synthetic' }, {})).not.toThrow();
     expect(() => validate('authorization', { type: 'basic', username: 'u', password: 'p' }, {})).not.toThrow();
     expect(() => validate('x-api-key', { type: 'header', name: 'X-Api-Key', value: 'synthetic' }, {})).not.toThrow();
