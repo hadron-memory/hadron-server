@@ -1,6 +1,6 @@
 import type { PendingEdge, Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { db as defaultDb } from '../integrations/db/client.js';
-import { deriveEdgeLoc } from './edgeLoc.js';
+import { derivedEdgeLocForUpsert } from './edgeLocLookup.js';
 import { lockEdgeEndpointMemories } from './edgeEndpointLock.js';
 import { generateId } from './id.js';
 import { acquireLockSet, ancestorLocs } from './nodeSubtreeLock.js';
@@ -301,11 +301,15 @@ export async function promotePendingEdgeForTarget(
         }
 
         if (currentSource && currentTarget) {
-          const pEdgeLoc = currentPending.loc ?? deriveEdgeLoc(
-            currentSource.loc,
-            currentPending.name,
-            currentTarget.loc,
-          );
+          // #4583: an edge the historical migration wrote under the other non-BMP spelling is the same edge.
+          const pEdgeLoc = currentPending.loc ?? await derivedEdgeLocForUpsert(tx, {
+            memoryId: currentSource.memoryId,
+            sourceId: currentSource.id,
+            targetId: currentTarget.id,
+            sourceLoc: currentSource.loc,
+            targetLoc: currentTarget.loc,
+            name: currentPending.name,
+          });
           const promotedEdge = await tx.edge.upsert({
             where: { loc_memoryId: { loc: pEdgeLoc, memoryId: currentSource.memoryId } },
             create: {
