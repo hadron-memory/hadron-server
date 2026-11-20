@@ -1202,6 +1202,16 @@ function safeEmitEntityUrnV2(type: 'memory' | 'app' | 'agent' | 'org', bareUrn: 
 }
 
 /**
+ * Tenant-editable text (an org, App or memory name) inside a line-parsed answer: control characters (CR, LF, the
+ * Unicode line separators) collapse to a space so a name can never forge an extra `signed in as:` or `active memory:`
+ * line, and it is cut at `max` characters. Shared by the #1412 org block and the #4290 whoami header.
+ */
+function oneLineText(name: string, max = 100): string {
+  const flat = name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ');
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/**
  * The portal link for a worker URN, or null (#1026).
  *
  * ONE resolver for every MCP surface that prints a worker URN — the cast
@@ -2723,10 +2733,7 @@ export function createMcpServerInstance(
       }),
       db.organization.count({ where }),
     ]);
-    const oneLine = (name: string) => {
-      const flat = name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ');
-      return flat.length > ORG_NAME_RENDER_MAX ? `${flat.slice(0, ORG_NAME_RENDER_MAX - 1)}…` : flat;
-    };
+    const oneLine = (name: string) => oneLineText(name, ORG_NAME_RENDER_MAX);
     const lines = orgs.map((o) => `  - ${safeEmitEntityUrnV2('org', o.urn)} (${oneLine(o.name)})`);
     if (total > orgs.length) {
       lines.push(`  … and ${total - orgs.length} more not shown`);
@@ -10051,7 +10058,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const mem = activeMemoryUrn ? await resolveVisibleMemoryByUrn(auth, activeMemoryUrn, 'read') : null;
         if (!mem) return 'active memory: none\n';
         const named = await db.memory.findUnique({ where: { id: mem.id }, select: { name: true } });
-        return `active memory: ${safeEmitEntityUrnV2('memory', mem.urn)}${named?.name ? ` (${named.name})` : ''}\n`;
+        return `active memory: ${safeEmitEntityUrnV2('memory', mem.urn)}${named?.name ? ` (${oneLineText(named.name)})` : ''}\n`;
       })();
       // #4290 — who this connection is signed in as, on the line AFTER the
       // `active memory:` line (cor:api:020:01 pins that one first). Only the
@@ -10060,25 +10067,26 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // caller's own App. Email is deliberately left out (personal data in an
       // answer an agent may log). Refusals returned above name no one.
       const principalLine = await (async () => {
-        if (auth.userId) {
+        // An App-key credential is the App's, whatever else the context carries: it never prints a person's identity.
+        if (auth.userId && !auth.appKeyId) {
           const [u, orgIds] = await Promise.all([
             db.user.findUnique({ where: { id: auth.userId }, select: { handle: true } }),
             getMemberOrgIds(db, auth.userId),
           ]);
           if (!u) return '';
-          const orgs = orgIds.length
-            ? await db.organization.findMany({
-                where: { id: { in: orgIds }, deletedAt: null },
-                select: { urn: true, name: true },
-                orderBy: [{ urn: 'asc' }],
-                take: 50,
-              })
-            : [];
-          return `signed in as: @${u.handle}${orgs.length ? ` — orgs: ${orgs.map((o) => `${o.urn} (${o.name})`).join(', ')}` : ' — no orgs'}\n`;
+          const orgWhere = { id: { in: orgIds }, deletedAt: null };
+          const [orgs, orgTotal] = orgIds.length
+            ? await Promise.all([
+                db.organization.findMany({ where: orgWhere, select: { urn: true, name: true }, orderBy: [{ urn: 'asc' }], take: 50 }),
+                db.organization.count({ where: orgWhere }),
+              ])
+            : [[], 0];
+          const more = orgTotal > orgs.length ? ` … and ${orgTotal - orgs.length} more not shown` : '';
+          return `signed in as: @${u.handle}${orgs.length ? ` — orgs: ${orgs.map((o) => `${safeEmitEntityUrnV2('org', o.urn)} (${oneLineText(o.name)})`).join(', ')}${more}` : ' — no orgs'}\n`;
         }
         if (auth.appId) {
           const a = await db.app.findUnique({ where: { id: auth.appId }, select: { urn: true, name: true } });
-          return a ? `signed in as: App ${safeEmitEntityUrnV2('app', a.urn)} (${a.name}) via App Key\n` : '';
+          return a ? `signed in as: App ${safeEmitEntityUrnV2('app', a.urn)} (${oneLineText(a.name)}) via App Key\n` : '';
         }
         return '';
       })();
