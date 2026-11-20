@@ -2,6 +2,8 @@
 -- `db push` cannot model a CHECK, so dev and test carry them here, under the names Postgres gave the migration's inline
 -- constraints and with the migration's expressions. The migration is the authority (ops:alpha:prisma-deploy-flow); keep
 -- these in step with it. Pinned by src/lib/rateLimit/rateLimitChecks4332.test.ts and the migration replay check.
+-- psql sends separate statements: one transaction, so a failure part way leaves every constraint as it was (#4611 BLIND F1).
+BEGIN;
 ALTER TABLE rate_limit_policies DROP CONSTRAINT IF EXISTS rate_limit_policies_principal_limit_check;
 ALTER TABLE rate_limit_policies ADD CONSTRAINT rate_limit_policies_principal_limit_check CHECK (principal_limit > 0);
 ALTER TABLE rate_limit_policies DROP CONSTRAINT IF EXISTS rate_limit_policies_key_limit_check;
@@ -16,3 +18,4 @@ ALTER TABLE rate_limit_policies DROP CONSTRAINT IF EXISTS rate_limit_policies_en
 ALTER TABLE rate_limit_policies ADD CONSTRAINT rate_limit_policies_enforcement_mode_check CHECK (enforcement_mode IN ('LOG_ONLY','ENFORCING'));
 ALTER TABLE rate_limit_buckets DROP CONSTRAINT IF EXISTS rate_limit_buckets_used_check;
 ALTER TABLE rate_limit_buckets ADD CONSTRAINT rate_limit_buckets_used_check CHECK (used >= 0);
+COMMIT;

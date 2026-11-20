@@ -15,8 +15,6 @@
 #
 # Recorded at origin/main 4954deaf (Bradley, 2026-11-17; spike https://github.com/hadron-memory/hadron-server/issues/434#issuecomment-6949698384).
 
-# Rate-limit CHECKs exist only on the migration path. Escalated (access constraints), needs ruling: #4332
-
 # UNIQUE constraints on the migration path are plain unique indexes after db push: #4333
 added con:coordinator_cadence_episodes.coordinator_cadence_episodes_event_id_key 6582efad72dad492
 added con:dark_worker_episodes.dark_worker_episodes_event_id_key 6582efad72dad492
