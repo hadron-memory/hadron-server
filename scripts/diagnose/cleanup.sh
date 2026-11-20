@@ -78,7 +78,8 @@ acquire_stack_reservation() {
     # #4607 BLIND delta: only a reservation DIRECTORY (not a symlink) is a reservation; any other entry is described
     # as observed, never attributed to another run.
     if [ -d "$DIAG_LOCK" ] && ! [ -L "$DIAG_LOCK" ]; then
-      echo "diagnosis stack already reserved: $DIAG_LOCK; refusing (another run holds it, or a run ended without releasing it; a reservation is never taken over by age or PID; manual check required)" >&2
+      # #4607 BLIND delta 2: an observed directory says only that it exists, never whose it is.
+      echo "diagnosis stack already reserved: a reservation directory exists at $DIAG_LOCK; refusing (its owner is not known here; a reservation is never taken over by age or PID; manual check required)" >&2
     elif [ -e "$DIAG_LOCK" ] || [ -L "$DIAG_LOCK" ]; then
       echo "could not create the diagnosis reservation $DIAG_LOCK: the path is occupied by something that is not a reservation directory; refusing (manual check required)" >&2
     else
@@ -120,7 +121,10 @@ explain_stack_ownership_failure() {
     # reservation only when its path is known, and point at the state only when it exists.
     local lost="this run no longer holds its reservation ${DIAG_LOCK:-}"
     [ -n "${DIAG_LOCK:-}" ] || lost="this run's reservation path is unknown"
-    if [ -e "$state" ] || [ -L "$state" ]; then
+    if [ -L "$state" ] && ! [ -e "$state" ]; then
+      # #4607 BLIND delta 2: a dangling state symlink has no target to inspect; say so instead.
+      echo "$prefix: $lost, and the stack state path $state is a dangling symlink; capture and teardown skipped (manual check required)" >&2
+    elif [ -e "$state" ]; then
       echo "$prefix; inspect private state: $state ($lost; manual ownership check required)" >&2
     else
       echo "$prefix: $lost, and no stack state found at $state; capture and teardown skipped (manual check required)" >&2
