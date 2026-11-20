@@ -12,6 +12,8 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 import { computeApprovalHash } from '../lib/approvalHash.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../lib/bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../lib/bootCompile/provenance.js';
+import { ensureInstallRegisterRows } from '../lib/registerInstall.js';
+import { listAppInstallations } from '../lib/appInstallations.js';
 import { safeNodeUrnV2 } from '../lib/urnEmit.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { workerNames } from './e2eWorkerNames.js';
@@ -106,4 +108,29 @@ export async function seedE2eStockAgents(db: PrismaClient, o: {
   await conv('conversations', null, null);
   await conv(`conversations:${E2E_CONVERSATION}`, { stageOrder: ['greet'] }, null);
   await conv(`conversations:${E2E_CONVERSATION}:greet`, {}, E2E_CONVERSATION_PROMPT);
+}
+
+/**
+ * #4506 — the install-default register rows a real install writes (cor:dmo:090:04: App-owned, attendee = the installed
+ * Agent, role BOTH; the register is attention, not permission). The seed builds Apps, Channels and Agents with raw
+ * writes, so without this the register is empty and every register-gated path (`markOwnTeamChatRead`) refuses
+ * CHANNEL_NOT_FOUND on a fresh stack. Call AFTER the App's default Channel is set (the helper is a no-op without one).
+ * Idempotent (`ON CONFLICT DO NOTHING`).
+ */
+export async function seedE2eInstallRegister(db: PrismaClient, appId: string, opts: { agentId?: string } = {}): Promise<number> {
+  return ensureInstallRegisterRows(db, appId, opts);
+}
+
+/**
+ * The seed's self-check for #4506: the ids of installed Agents of `appId` that have NO live App-owned row on the App's
+ * default Channel. An empty array is the pass; a merely non-empty register is not enough.
+ */
+export async function e2eRegisterGaps(db: PrismaClient, appId: string): Promise<string[]> {
+  const app = await db.app.findUniqueOrThrow({ where: { id: appId }, select: { defaultChannelId: true } });
+  const installs = await listAppInstallations(db, appId);
+  const have = new Set((await db.registerEntry.findMany({
+    where: { appId, channelId: app.defaultChannelId ?? '', deletedAt: null, attendeeAgentId: { not: null } },
+    select: { attendeeAgentId: true },
+  })).map(r => r.attendeeAgentId));
+  return installs.filter(i => !have.has(i.agentId)).map(i => i.agentId);
 }

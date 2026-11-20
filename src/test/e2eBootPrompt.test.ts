@@ -131,4 +131,13 @@ describe('#4506 E2E seed: install-default register rows', () => {
     await seedE2eInstallRegister(db, app.id);
     expect(await db.registerEntry.count({ where: { appId: app.id, deletedAt: null } })).toBe(E2E_STOCK_ROLES.length);
   });
+
+  it('a soft-deleted row is a gap (the check counts live rows only)', async () => {
+    await seed();
+    await channel();
+    await seedE2eInstallRegister(db, app.id);
+    const row = await db.registerEntry.findFirstOrThrow({ where: { appId: app.id } });
+    await db.registerEntry.update({ where: { id: row.id }, data: { deletedAt: new Date() } });
+    expect(await e2eRegisterGaps(db, app.id)).toEqual([row.attendeeAgentId]);
+  });
 });
