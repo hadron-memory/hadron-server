@@ -61,8 +61,14 @@ export async function judgeSecretReadClientIssuer(ctx: Context, userId: string, 
   });
   if (newest && newest.writtenByUserId === userId && newest.writtenByWorkerId === null) return { ...base, asWriter: true };
 
+  // A former writer is told SUPERSEDED. Their version row may be gone (the retention purge, #4003), so their own STORE or
+  // VERSION event also proves it: events outlive a purged version for the App's whole life (R25). A worker's write has no
+  // person writer (Q21), so an event carrying a worker proves nothing for its driver, exactly as a version row would not.
   const wroteEarlier = await tx.secretVersion.findFirst({
     where: { secretId: secret.id, writtenByUserId: userId, writtenByWorkerId: null }, select: { id: true },
+  }) ?? await tx.secretEvent.findFirst({
+    where: { secretId: secret.id, ownerType: 'app', kind: { in: ['STORE', 'VERSION'] }, outcome: 'OK', actorUserId: userId, workerId: null },
+    select: { id: true },
   });
   if (wroteEarlier) {
     throw new GraphQLError('A newer version of this secret has been written since yours.', { extensions: { code: SECRET_READ_CLIENT_SUPERSEDED } });
