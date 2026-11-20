@@ -98,7 +98,7 @@ const nextStageProp = (tools: any) => tools![0].parameters.properties.next_stage
 describe('next_stage check (#4035)', () => {
   it('pin 1: an unknown next_stage leaves the stage, adds no route entry, records the turn and reports the name', async () => {
     await seedNodes(flow(['step1', 'step2']));
-    const chat = await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(adminUser.id));
+    const chat = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(adminUser.id));
     const before = await engineState(chat.chatId);
     // loc-scope-ok: the chat id is unique to this test's one chat
     const assistantTurns = () => db.node.count({ where: { loc: { startsWith: `${chat.chatId}:messages:` }, name: { endsWith: '-assistant' } } });
@@ -121,7 +121,7 @@ describe('next_stage check (#4035)', () => {
 
   it('pin 2: startChat and sendChatMessage tools list exactly the conversation stages, null included', async () => {
     await seedNodes(flow(['step1', 'step2', 'step3']));
-    const chat = await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(adminUser.id));
+    const chat = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(adminUser.id));
     const prop = nextStageProp(chat.tools);
     expect(prop.enum).toEqual(['step1', 'step2', 'step3', null]);
     for (const n of ['step1', 'step2', 'step3']) expect(prop.description).toContain(n);
@@ -132,9 +132,9 @@ describe('next_stage check (#4035)', () => {
 
   it('pin 3: the list is the pinned revision; a stage added to the draft afterwards is neither listed nor accepted', async () => {
     await seedNodes(flow(['step1', 'step2']));
-    await resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx());
-    await resolvers.Mutation.publishRevision({}, { agentId: agent.id, revisionLoc: 'revisions:rev-1', versionLabel: 'v1' }, adminCtx());
-    const chat = await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(adminUser.id));
+    await resolvers.Mutation.createRevision({}, { agentRef: agent.id }, adminCtx());
+    await resolvers.Mutation.publishRevision({}, { agentRef: agent.id, revisionLoc: 'revisions:rev-1', versionLabel: 'v1' }, adminCtx());
+    const chat = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(adminUser.id));
     await db.node.updateMany({
       where: { memoryId: systemMemory.id, loc: 'conversations:flow' },
       data: { data: { stageOrder: ['step1', 'step2', 'step3'], isSetup: false } as any },
@@ -154,7 +154,7 @@ describe('next_stage check (#4035)', () => {
 
   it('pin 4 (green on main, regression): a known next_stage still moves; naming the current stage is a quiet no-op', async () => {
     await seedNodes(flow(['step1', 'step2']));
-    const chat = await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(adminUser.id));
+    const chat = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(adminUser.id));
     const same = await resolvers.Mutation.processChatResponse(
       {}, { chatId: chat.chatId, toolResponse: { message: 'a', next_stage: 'step1', onTrack: true } }, userCtx(adminUser.id),
     );
@@ -175,7 +175,7 @@ describe('next_stage check (#4035)', () => {
     await db.appMember.create({ data: { appId: app.id, userId: adminUser.id, role: 'admin' } });
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     await createDbAgentOrgGrant(db, orgA.id, agent.id);
-    const chat = await resolvers.Mutation.startChat({}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id));
+    const chat = await resolvers.Mutation.startChat({}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id));
     const home = await db.memory.findUniqueOrThrow({ where: { id: (await chatNodeByLoc(db, chat.chatId, { includeDeleted: true }))!.memoryId } });
     expect(home.sharedMemoryOfAgentId).toBe(agent.id);
     expect(home.userMemoryOfAgentId).toBeNull();
@@ -199,7 +199,7 @@ describe('next_stage check (#4035)', () => {
 
   it('pin 7 (#4077): a stage list that cannot be read mid-chat moves nothing, records the turn and reports the name', async () => {
     await seedNodes(flow(['step1', 'step2']));
-    const chat = await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(adminUser.id));
+    const chat = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(adminUser.id));
     // The conversation node disappears from the script the chat reads (no published revision pins it).
     await db.node.deleteMany({ where: { memoryId: systemMemory.id, loc: 'conversations:flow' } });
     const before = await engineState(chat.chatId);

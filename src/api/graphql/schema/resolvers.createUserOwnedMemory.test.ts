@@ -116,7 +116,7 @@ describe('createMemory — user-owned (no orgId)', () => {
     await db.orgMember.create({ data: { organizationId: org.id, userId: handled.id, role: 'READER' } });
     const mem = await resolvers.Mutation.createMemory(
       null,
-      { orgId: org.id, name: 'kb', memoryClass: 'personal' } as any,
+      { orgRef: org.id, name: 'kb', memoryClass: 'personal' } as any,
       asHandled(),
     );
     expect(mem.organizationId).toBe(org.id);

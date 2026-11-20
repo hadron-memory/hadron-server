@@ -33,7 +33,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'links' }, as(admin.id)) as typeof memory;
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'links' }, as(admin.id)) as typeof memory;
   await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'l:1', name: 'One', content: 'Body' } });
 });
 afterEach(() => vi.unstubAllEnvs());

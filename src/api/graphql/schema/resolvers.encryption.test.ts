@@ -569,7 +569,7 @@ describe('encryptMemory', () => {
     const key = generateDataKey().raw.toString('base64');
     const encrypted = await resolvers.Mutation.encryptMemory(
       {},
-      { memoryId: session.memoryId!, dataKey: key },
+      { memoryRef: session.memoryId!, dataKey: key },
       sessionCtx,
     );
     expect(encrypted.isEncrypted).toBe(true);
@@ -593,7 +593,7 @@ describe('encryptMemory', () => {
     ));
     const completed = await resolvers.Mutation.encryptMemory(
       {},
-      { memoryId: session.memoryId!, dataKey: key },
+      { memoryRef: session.memoryId!, dataKey: key },
       await sessionOwnerCtx(secretApp.id, session.id),
     );
     expect(completed.keyVerifier).toMatch(/^enc:v1:/);
@@ -607,7 +607,7 @@ describe('encryptMemory', () => {
     ));
     await db.memory.update({ where: { id: session.memoryId! }, data: { keyVerifier: null } });
     await expect(resolvers.Mutation.encryptMemory(
-      {}, { memoryId: session.memoryId!, dataKey: key }, await sessionOwnerCtx(secretApp.id, session.id),
+      {}, { memoryRef: session.memoryId!, dataKey: key }, await sessionOwnerCtx(secretApp.id, session.id),
     )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT' } });
   });
 
@@ -656,7 +656,7 @@ describe('encryptMemory', () => {
     });
 
     await expect(resolvers.Mutation.encryptMemory(
-      {}, { memoryId: first.memoryId!, dataKey: wrongKey }, await sessionOwnerCtx(secretApp.id, first.id, false),
+      {}, { memoryRef: first.memoryId!, dataKey: wrongKey }, await sessionOwnerCtx(secretApp.id, first.id, false),
     )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: first.memoryId } });
     expect((await db.memory.findUniqueOrThrow({ where: { id: first.memoryId! } })).keyVerifier).toBeNull();
     expect((await db.node.findUniqueOrThrow({ where: { id: original.id } })).content).toBe(beforeOriginal.content);
@@ -692,7 +692,7 @@ describe('encryptMemory', () => {
     const key = generateDataKey().raw.toString('base64');
     const encrypted = await resolvers.Mutation.encryptMemory(
       {},
-      { memoryId: memoryRow.urn, dataKey: key },
+      { memoryRef: memoryRow.urn, dataKey: key },
       sessionCtx,
     );
     expect(encrypted.isEncrypted).toBe(true);
@@ -714,7 +714,7 @@ describe('encryptMemory', () => {
     await expect(
       resolvers.Mutation.encryptMemory(
         {},
-        { memoryId: session.memoryId!, dataKey: key },
+        { memoryRef: session.memoryId!, dataKey: key },
         await sessionOwnerCtx(plaintextApp.id, session.id),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
@@ -767,7 +767,7 @@ describe('linkMemoryToUser with encryption', () => {
     }) as typeof db.$transaction);
     try {
       await expect(withTestOperationKey(generateDataKey().raw.toString('base64'), (appCtx(plaintextApp.id)).appId, () => resolvers.Mutation.linkMemoryToUser(
-        {}, { memoryId: anon.memoryId!, externalUserId: 'claimant' },
+        {}, { memoryRef: anon.memoryId!, externalUserId: 'claimant' },
         appCtx(plaintextApp.id),
       ))).rejects.toMatchObject({ extensions: { code: 'MEMORY_WRITE_CONFLICT' } });
     } finally {
@@ -820,7 +820,7 @@ describe('linkMemoryToUser with encryption', () => {
     const key = generateDataKey().raw.toString('base64');
     await withTestOperationKey(key, (appCtx(plaintextApp.id)).appId, () => resolvers.Mutation.linkMemoryToUser(
       {},
-      { memoryId: anonSession.memoryId!, externalUserId: 'mm-registered' },
+      { memoryRef: anonSession.memoryId!, externalUserId: 'mm-registered' },
       appCtx(plaintextApp.id),
     ));
 
@@ -856,7 +856,7 @@ describe('linkMemoryToUser with encryption', () => {
     );
     await resolvers.Mutation.linkMemoryToUser(
       {},
-      { memoryId: anonSession.memoryId!, externalUserId: 'mm-2' },
+      { memoryRef: anonSession.memoryId!, externalUserId: 'mm-2' },
       appCtx(plaintextApp.id),
     );
     const mem = await db.memory.findUnique({ where: { id: anonSession.memoryId! } });
