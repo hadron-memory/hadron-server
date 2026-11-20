@@ -27,7 +27,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'Clamp MCP Org', urn: 'clampmcp437.example' } });
   admin = await db.user.create({ data: { id: generateId(), handle: 'clamp-mcp-admin', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'clamp' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'clamp' }, as());
   await db.node.createMany({
     data: Array.from({ length: N }, (_, i) => ({
       id: generateId(), memoryId: memory.id, loc: `doc:${String(i).padStart(4, '0')}`,

@@ -12,7 +12,7 @@ beforeEach(async()=>{
  const org=await db.organization.create({data:{name:'MCP grooming',urn:`mcp-groom-${generateId()}.test`}});
  userId=(await db.user.create({data:{handle:`mcp-groom-${generateId()}`}})).id;
  await db.orgMember.create({data:{organizationId:org.id,userId,role:'ADMIN'}});
- const memory=await resolvers.Mutation.createMemory(null,{orgId:org.id,name:'groom'}, {db,userId,roles:[]});memoryId=memory.id;memoryUrn=`hrn:mem:${memory.urn}`;
+ const memory=await resolvers.Mutation.createMemory(null,{orgRef:org.id,name:'groom'}, {db,userId,roles:[]});memoryId=memory.id;memoryUrn=`hrn:mem:${memory.urn}`;
  for(const loc of ['open','closed','none']){
   const node=await db.node.create({data:{memoryId,loc,name:`mcpgroom ${loc}`,content:'mcpgroom'}});
   if(loc!=='none'){

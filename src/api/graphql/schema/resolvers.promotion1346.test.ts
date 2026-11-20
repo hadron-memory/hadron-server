@@ -28,7 +28,7 @@ beforeEach(async () => {
 
 function promote() {
   return withTestOperationKey(dataKey, appId, () => resolvers.Mutation.linkMemoryToUser({},
-    { memoryId, externalUserId: 'promotion-owner' }, { db, appId, roles: [] }));
+    { memoryRef: memoryId, externalUserId: 'promotion-owner' }, { db, appId, roles: [] }));
 }
 
 /** Commit a competing change immediately before the deciding Memory lock.
@@ -162,7 +162,7 @@ describe('#1346 anonymous encrypted promotion', () => {
     let results: PromiseSettledResult<unknown>[];
     try {
       results = await Promise.allSettled([promote(), withTestOperationKey(otherKey, appId,
-        () => resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'other-owner' }, { db, appId, roles: [] }))]);
+        () => resolvers.Mutation.linkMemoryToUser({}, { memoryRef: memoryId, externalUserId: 'other-owner' }, { db, appId, roles: [] }))]);
     } finally { ready(); spy.mockRestore(); }
     expect(arrivals).toBe(2);
     expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);

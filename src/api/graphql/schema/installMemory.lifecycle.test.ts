@@ -144,8 +144,8 @@ describe('#2044 install memory — uninstall, reinstall, App deletion (ruling A)
     expect(nodes ?? []).toHaveLength(0);
     // New customisation is impossible: the App is gone.
     await expect(f.create(f.admin, 'prompts:late')).rejects.toThrow();
-    await expect(M.deleteMemory({}, { id: row!.id }, ctxOf(f.member.id))).rejects.toThrow(/MEMORY_NOT_FOUND/);
-    await expect(M.deleteMemory({}, { id: row!.id }, ctxOf(f.admin.id))).resolves.toBe(true);
+    await expect(M.deleteMemory({}, { ref: row!.id }, ctxOf(f.member.id))).rejects.toThrow(/MEMORY_NOT_FOUND/);
+    await expect(M.deleteMemory({}, { ref: row!.id }, ctxOf(f.admin.id))).resolves.toBe(true);
   });
 });
 
@@ -161,7 +161,7 @@ describe('#2044 install memory — URN reclaim (R29) and account erasure', () =>
     // Nothing was destroyed by the refused attempt.
     expect(await db.app.count({ where: { id: f.app.id } })).toBe(1);
     expect((await db.memory.findUniqueOrThrow({ where: { id: row!.id } })).deletedAt).toBeNull();
-    await expect(M.deleteMemory({}, { id: row!.id }, ctxOf(f.admin.id))).resolves.toBe(true);
+    await expect(M.deleteMemory({}, { ref: row!.id }, ctxOf(f.admin.id))).resolves.toBe(true);
     await expect(reclaim()).resolves.toBeTruthy();
     expect(await db.app.count({ where: { id: f.app.id } })).toBe(0);
   });
@@ -189,12 +189,12 @@ describe('#2044 install memory — URN reclaim (R29) and account erasure', () =>
     // A stranger finds nothing, and a detached install takes no further write.
     expect(await Q.memory({}, { ref: install.id }, ctxOf(f.stranger.id))).toBeNull();
     await expect(M.updateNode({}, { input: { memoryId: install.id, loc: 'prompts:lane', name: 'x' } }, ctxOf(f.admin.id))).rejects.toThrow();
-    await expect(M.deleteMemory({}, { id: install.id }, ctxOf(f.stranger.id))).rejects.toThrow();
+    await expect(M.deleteMemory({}, { ref: install.id }, ctxOf(f.stranger.id))).rejects.toThrow();
     // Once its App is deleted the manager still finds the detached record but reads no content (R45).
     await M.deleteApp({}, { ref: app.id }, ctxOf(f.admin.id));
     expect((await Q.memory({}, { ref: install.id }, ctxOf(f.admin.id)))?.id).toBe(install.id);
     expect(await Q.node({}, { ref: node.id, raw: true }, ctxOf(f.admin.id))).toBeNull();
-    await expect(M.deleteMemory({}, { id: install.id }, ctxOf(f.admin.id))).resolves.toBe(true);
+    await expect(M.deleteMemory({}, { ref: install.id }, ctxOf(f.admin.id))).resolves.toBe(true);
   });
 });
 
@@ -583,7 +583,7 @@ describe('#2044 install memory — it can never become an Agent\'s brain (Andi P
       .rejects.toThrow(/install memory/i);
     // And it still blocks reclaiming the deleted App's URN until a manager deletes it.
     await M.deleteApp({}, { ref: f.app.id }, ctxOf(f.admin.id));
-    await expect(M.deleteMemory({}, { id: row!.id }, ctxOf(f.admin.id))).resolves.toBe(true);
+    await expect(M.deleteMemory({}, { ref: row!.id }, ctxOf(f.admin.id))).resolves.toBe(true);
   });
 
   it('the install discriminator is forbidden on every non-system class, app-class with an App included', async () => {
@@ -685,7 +685,7 @@ describe('#2044 install memory — the cleanup delete carries the fence too (Xan
       await lockAuthorityAnchors(tx, [{ kind: 'org', id: orgId }, { kind: 'user', id: f.admin.id }], 'exclusive');
       await tx.orgMember.updateMany({ where: { organizationId: orgId, userId: f.admin.id }, data: { role: 'READER' } });
     });
-    const deleting = M.deleteMemory({}, { id: row!.id }, ctxOf(f.admin.id)).then(() => 'deleted', (e: Error) => e);
+    const deleting = M.deleteMemory({}, { ref: row!.id }, ctxOf(f.admin.id)).then(() => 'deleted', (e: Error) => e);
     try {
       await waitForLockWaitersOfType(db, 'advisory', 1);
     } finally {
@@ -700,7 +700,7 @@ describe('#2044 install memory — the cleanup delete carries the fence too (Xan
     const f = await fixture();
     await f.create(f.admin);
     const [row] = await f.installRows();
-    await expect(M.deleteMemory({}, { id: row!.id }, ctxOf(f.admin.id))).resolves.toBe(true);
+    await expect(M.deleteMemory({}, { ref: row!.id }, ctxOf(f.admin.id))).resolves.toBe(true);
   });
 });
 
@@ -734,7 +734,7 @@ describe('#2044 install memory — lock order and the pooled-only writers (Diego
     await f.create(f.admin);
     const [row] = await f.installRows();
     const revoker = await hold((tx) => lockAuthorityAnchors(tx, [{ kind: 'org', id: orgId }], 'exclusive'));
-    const deleting = M.deleteMemory({}, { id: row!.id }, ctxOf(f.admin.id)).then(() => 'deleted', (e: Error) => e);
+    const deleting = M.deleteMemory({}, { ref: row!.id }, ctxOf(f.admin.id)).then(() => 'deleted', (e: Error) => e);
     try {
       await waitForLockWaitersOfType(db, 'advisory', 1);
       await db.$transaction(async (tx) => {

@@ -76,8 +76,8 @@ async function seedEdge(
 }
 
 async function publish(): Promise<string> {
-  const rev = await resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx());
-  await resolvers.Mutation.publishRevision({}, { agentId: agent.id, revisionLoc: rev.revisionLoc }, adminCtx());
+  const rev = await resolvers.Mutation.createRevision({}, { agentRef: agent.id }, adminCtx());
+  await resolvers.Mutation.publishRevision({}, { agentRef: agent.id, revisionLoc: rev.revisionLoc }, adminCtx());
   return rev.revisionLoc;
 }
 
@@ -96,7 +96,7 @@ async function seedScript(extra: Seed[] = []) {
 }
 
 const startMain = () =>
-  resolvers.Mutation.startChat({}, { agentId: agent.id, conversationName: 'main' }, userCtx());
+  resolvers.Mutation.startChat({}, { agentRef: agent.id, conversationName: 'main' }, userCtx());
 const finishStage = (chatId: string) =>
   resolvers.Mutation.processChatResponse(
     {}, { chatId, toolResponse: { message: 'done', next_stage: null, goal_reached: true, onTrack: true } }, userCtx(),
@@ -189,7 +189,7 @@ describe('#4034 a pinned chat reads its script from the pinned revision', () => 
     const rule = await seedEdge(ids, 'conversations:main:check', 'conversations:alpha', {
       condition: { '==': [1, 1] }, priority: 4,
     });
-    const revLoc = (await resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx())).revisionLoc;
+    const revLoc = (await resolvers.Mutation.createRevision({}, { agentRef: agent.id }, adminCtx())).revisionLoc;
     // The served boot prompt fixture is a compiled node a restore cannot rewrite (chk_nodes_compiled_boot_prompt_role);
     // it is not part of what this pin is about, so the revision under test leaves it out.
     const revNode = await db.node.findFirstOrThrow({ where: { memoryId: systemMemory.id, loc: revLoc } });
@@ -201,7 +201,7 @@ describe('#4034 a pinned chat reads its script from the pinned revision', () => 
     await db.node.update({ where: { id: ids['conversations:main'] }, data: { seq: 99 } });
     await db.node.update({ where: { id: ids['conversations:alpha'] }, data: { seq: null } });
 
-    await resolvers.Mutation.restoreRevision({}, { agentId: agent.id, revisionLoc: revLoc }, adminCtx());
+    await resolvers.Mutation.restoreRevision({}, { agentRef: agent.id, revisionLoc: revLoc }, adminCtx());
 
     const edge = await db.edge.findFirstOrThrow({ where: { memoryId: systemMemory.id, sourceId: ids['conversations:main:check'], deletedAt: null } });
     expect(edge.condition).toEqual({ '==': [1, 1] });

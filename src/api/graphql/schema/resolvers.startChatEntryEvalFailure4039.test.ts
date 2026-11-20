@@ -47,7 +47,7 @@ beforeEach(async () => {
 describe('#4039 an evaluator failure refuses the start', () => {
   it('TYPE_MISMATCH: refused with the type_mismatch messageId; the scan does not skip to the next conversation; no value, URN or edge id in the detail', async () => {
     const before = { memories: await db.memory.count(), nodes: await db.node.count() };
-    const err = await M.startChat({}, { agentId }, ctx()).then(() => null, (e: any) => e);
+    const err = await M.startChat({}, { agentRef: agentId }, ctx()).then(() => null, (e: any) => e);
     expect(err?.extensions).toMatchObject({
       code: 'ENTRY_CONDITION_FAILED', reason: 'TYPE_MISMATCH', messageId: 'chat-start.error.type_mismatch',
       detail: { conversation: 'a', field: 'memory.age', operator: '<' },
