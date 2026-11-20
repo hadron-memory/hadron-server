@@ -846,14 +846,26 @@ describe('resolveAuthContext', () => {
             },
           },
         } as unknown as typeof db;
-        const ctx = await resolveAuthContextWithStatus(makeReq(`Bearer ${APP_KEY}`), stampingDb);
-        // One tick so the rejected stamp's promise chain (and its swallow) settles before
-        // asserting; an unhandled rejection would surface here, not in a later test.
-        await new Promise((resolve) => setImmediate(resolve));
-        expect(ctx.auth.appId).toBe('app-4561');
-        expect(ctx.auth.appKeyId).toBe('key-4561');
-        expect(ctx.credentialStatus).toBe('authenticated');
-        expect(stampCalls).toBe(1);
+        // The swallow is asserted by THIS test, not by the runner: an unhandled rejection is
+        // captured here, so dropping the resolver's `.catch` fails this test by name instead of
+        // surfacing only as a run-level error attributed to whichever test is running (#4571, BLIND P2).
+        const unhandled: unknown[] = [];
+        const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+        process.on('unhandledRejection', onUnhandled);
+        try {
+          const ctx = await resolveAuthContextWithStatus(makeReq(`Bearer ${APP_KEY}`), stampingDb);
+          // Let the rejected stamp's promise chain settle (a rejection is reported after the
+          // microtask queue drains, so two macrotask ticks) before asserting.
+          await new Promise((resolve) => setImmediate(resolve));
+          await new Promise((resolve) => setImmediate(resolve));
+          expect(ctx.auth.appId).toBe('app-4561');
+          expect(ctx.auth.appKeyId).toBe('key-4561');
+          expect(ctx.credentialStatus).toBe('authenticated');
+          expect(stampCalls).toBe(1);
+          expect(unhandled).toEqual([]);
+        } finally {
+          process.off('unhandledRejection', onUnhandled);
+        }
       });
 
       it('a non-Prisma error wearing code P2024 is NOT classified — the class is closed to Prisma (LOCAL mutant)', async () => {
