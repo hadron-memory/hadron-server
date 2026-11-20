@@ -1774,7 +1774,7 @@ const syncGraphFromGithubAsSystem = async (
           where: { id: graph.id },
           data: {
             lastSyncedAt: recordedAt, syncStatus: 'OK', syncError: null,
-            lastSyncReport: committedSyncReport(reportEntries, recordedAt, skippedInvalidLoc.length > 0),
+            lastSyncReport: committedSyncReport(reportEntries, recordedAt, skippedInvalidLoc.length),
             ...(correctionCheckCompleted ? { readBranchCorrected: true } : {}),
           },
         });
