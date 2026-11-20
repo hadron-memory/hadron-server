@@ -982,8 +982,8 @@ CREATE INDEX IF NOT EXISTS "assets_uploaded_by_staged_idx"      ON "assets"   US
 -- otherwise accept a NULL that production refuses. The migrations stay the authority: no migration or production DDL change,
 -- and no default changes (an empty array stays an empty array, never NULL).
 --
--- A NULL row can only exist in a long-lived dev database. The nine columns below get the same default the migration gives
--- the column, so the ALTER cannot fail on them; no row is dropped and no column skipped.
+-- A NULL row can only exist in a long-lived dev database. The eight columns below get the same default the migration gives
+-- the column, so the ALTER cannot fail on them (tickers and apps get theirs, not an empty array); no row is dropped and no column skipped.
 UPDATE agents SET surfaces = ARRAY[]::text[] WHERE surfaces IS NULL;
 UPDATE apps SET surfaces = ARRAY['chat']::text[] WHERE surfaces IS NULL;
 UPDATE agent_tasks SET unresolved_finding_ids = ARRAY[]::text[] WHERE unresolved_finding_ids IS NULL;
