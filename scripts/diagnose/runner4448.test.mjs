@@ -204,11 +204,15 @@ for (const mode of ['noop', 'wrongworkload', 'extraline']) {
 test('a failed load record check (no usable host node) is reported as a check failure, not a rejected record', () => {
   const f = fixture('cap');
   try {
-    writeFileSync(join(f.dir, 'bin', 'node'), `#!/bin/bash\nif [ "\${1:-}" = --input-type=module ]; then exit 9; fi\nexec '${process.execPath}' "$@"\n`, { mode: 0o755 });
-    const r = f.run();
-    expect(r.status).toBe(7);
-    expect(r.stderr).toContain('could not run the load record check on this host (node exit 9)');
-    expect(r.stderr).not.toContain('printed no valid load record');
+    // #4608 BLIND delta: exit 1 too (a crashing node) is a failed check, never a rejected record.
+    for (const code of ['9', '1']) {
+      writeFileSync(join(f.dir, 'bin', 'node'), `#!/bin/bash\nif [ "\${1:-}" = --input-type=module ]; then exit ${code}; fi\nexec '${process.execPath}' "$@"\n`, { mode: 0o755 });
+      const r = f.run();
+      expect(r.status).toBe(7);
+      expect(r.stderr).toContain(`could not run the load record check on this host (node exit ${code})`);
+      expect(r.stderr).not.toContain('printed no valid load record');
+      rmSync(join(f.dir, 'state'), { recursive: true, force: true }); rmSync(join(f.dir, 'down'), { force: true });
+    }
   } finally { f.clean(); }
 });
 

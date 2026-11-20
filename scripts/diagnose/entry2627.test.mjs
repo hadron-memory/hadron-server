@@ -107,11 +107,10 @@ test('an import whose argv[1] is load.mjs itself does not run the driver', () =>
   });
 });
 
-test('isMainModule takes Node\'s import.meta.main when it is a boolean, and falls back to real paths otherwise', async () => {
+test('isMainModule is exactly Node\'s import.meta.main: no argv[1] fallback (#4608 BLIND delta)', async () => {
   const { isMainModule } = await import('./load.mjs');
-  const self = pathToFileURL(join(here, 'load.mjs')).href;
-  expect(isMainModule(self, join(here, 'load.mjs'), false)).toBe(false);
-  expect(isMainModule(self, '/nonexistent', true)).toBe(true);
-  expect(isMainModule(self, join(here, 'load.mjs'), undefined)).toBe(true);
-  expect(isMainModule(self, undefined, undefined)).toBe(false);
+  expect(isMainModule(true)).toBe(true);
+  expect(isMainModule(false)).toBe(false);
+  // A Node without import.meta.main: not main, so the CLI prints no record and the runner refuses the run.
+  expect(isMainModule(undefined)).toBe(false);
 });
