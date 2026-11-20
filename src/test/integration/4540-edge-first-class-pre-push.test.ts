@@ -125,6 +125,32 @@ describe('#4540 edge-first-class pre-push transition', () => {
     });
   });
 
+  it('preserves an existing memory column when only loc needs adding, including unnamed edges', async () => {
+    await scratch(async (c) => {
+      await legacy(c);
+      await c.query(`ALTER TABLE edges RENAME COLUMN label TO name;
+        ALTER TABLE edges ALTER COLUMN name DROP NOT NULL;
+        ALTER TABLE edges ADD COLUMN memory_id text NOT NULL DEFAULT 'retained-memory';
+        INSERT INTO edges(id,source_id,target_id,name) VALUES ('e','s1','t',NULL)`);
+      await prePush(c);
+      expect((await c.query('SELECT memory_id, loc, name FROM edges')).rows).toEqual([
+        { memory_id: 'retained-memory', loc: deriveEdgeLoc('from:root', null, 'to:leaf'), name: null },
+      ]);
+    });
+  });
+
+  it('preserves an existing authored loc when only memory needs adding', async () => {
+    await scratch(async (c) => {
+      await legacy(c);
+      await c.query(`ALTER TABLE edges ADD COLUMN loc text NOT NULL DEFAULT 'person:authored';
+        INSERT INTO edges(id,source_id,target_id,label) VALUES ('e','s1','t','rel')`);
+      await prePush(c);
+      expect((await c.query('SELECT memory_id, loc FROM edges')).rows).toEqual([
+        { memory_id: 'source-memory', loc: 'person:authored' },
+      ]);
+    });
+  });
+
   it('is a no-op on an empty database, leaving the test-template path free to push its schema', async () => {
     await scratch(async (c) => {
       await prePush(c);
