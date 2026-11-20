@@ -4,7 +4,7 @@
  * A principal root name (a user handle OR an org name — one shared pool) is
  * 1–64 lower-case ASCII letters, digits, `.`, `_` or `-`, beginning and ending
  * with a letter or digit: urn-lib's atom grammar (`ATOM_RE`, `MAX_ATOM_LEN`
- * = 64) restricted to lower case, per the Holger ruling recorded on #4415
+ * = 64) restricted to lower case, per the ruling recorded on #4415
  * (cor:urn:010:01). `mintPrincipal` now refuses a name outside that rule with
  * a typed `RootNameInvalidError` (distinct from `RootNameTakenError`) and
  * `checkRootAvailable` agrees (a refused name is not available).
@@ -101,7 +101,7 @@ describe('mintPrincipal — #4481 refusals', () => {
         mintPrincipal(db, { kind: 'org', name }),
         name,
       );
-      // The refusal writes no row (Xanthos' binding addition).
+      // The refusal writes no row.
       expect(await db.principal.count()).toBe(0);
     });
   }
@@ -178,7 +178,7 @@ describe('checkRootAvailable — agrees with the mint (#4481)', () => {
   });
 });
 
-describe('ensureUserPrincipal — unchanged for conforming names, refuses illegal ones (#4481 gate addition)', () => {
+describe('ensureUserPrincipal — unchanged for conforming names, refuses illegal ones', () => {
   it('a conforming handle still mints and links (existing behavior)', async () => {
     const user = await db.user.create({
       data: { id: generateId(), handle: 'conforming-1', roles: ['READER'] },
