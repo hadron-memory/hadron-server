@@ -118,4 +118,14 @@ describe('hadron_run_task memory hint — URN forms (#4345)', () => {
     expect(a).not.toContain('Body of Foreign');
     expect(a.replace(legacy, '<H>')).toBe(b.replace(missing, '<H>'));
   });
+
+  it('a legacy URN claimed by a readable and an unreadable memory resolves to the readable one', async () => {
+    // Ambiguity is judged inside the caller's readable set, so an unreadable
+    // co-claimant neither blocks the match nor shows through as a refusal.
+    await db.memory.update({ where: { id: alpha.id }, data: { legacyUrn: 'dup-org:dup' } });
+    await db.urnAlias.create({
+      data: { id: generateId(), urn: 'dup-org:dup', entityType: 'MEMORY', entityId: foreign.id, reason: 'RENAME' },
+    });
+    expect(await run(asAdmin(), 'urn:memory:dup-org:dup')).toContain('Body of Alpha');
+  });
 });
