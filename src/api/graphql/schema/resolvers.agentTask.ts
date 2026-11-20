@@ -3300,16 +3300,16 @@ export const agentTaskQueries = {
    * #2212 A3 (hrn:node:hadronmemory.com:specs:cor:api:120:04): agentTasks as a page, `{ items, total, hasMore }`. The same
    * App read gate (cor:agt:050:21: an App the caller does not participate in answers APP_NOT_FOUND, like an absent one), the
    * same filter (agentTaskListWhere) and the same total order; `total` is a count over that identical filter, so it never
-   * counts a task the list would not show. limit 0 is count-only; an omitted limit pages at 20 (an externalIds batch keeps
-   * the list's rule); over 200 is served as 200.
+   * counts a task the list would not show. Sized like every pageArgs field: an omitted limit pages at 20, 0 is count-only,
+   * over 200 is served as 200. Unlike agentTasks, an externalIds batch with no limit gets no special size: hasMore says
+   * whether more of the batch remains (admission charges exactly this page, PAGE_ARGS_FIELDS).
    */
   agentTasksPage: async (_: unknown, args: ListArgs, ctx: Context) =>
     withReadableApp(ctx, args.appRef, async (c, app) => {
     const where = await agentTaskListWhere(c, app, args);
     const { take, skip } = pageArgs(args);
-    const size = agentTaskListTake(args, take);
     const [items, total] = await Promise.all([
-      size === 0 ? Promise.resolve([]) : c.db.agentTask.findMany({ omit: { resultFindings: true }, where, orderBy: AGENT_TASK_LIST_ORDER, take: size, skip }),
+      take === 0 ? Promise.resolve([]) : c.db.agentTask.findMany({ omit: { resultFindings: true }, where, orderBy: AGENT_TASK_LIST_ORDER, take, skip }),
       c.db.agentTask.count({ where }),
     ]);
     return pageEnvelope(items, total, skip);

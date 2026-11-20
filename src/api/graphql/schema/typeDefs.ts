@@ -9461,8 +9461,9 @@ export const typeDefs = `#graphql
     means on agentTasks, and the order is the same (newest first, then id). total counts the tasks the same filter matches,
     never a task the caller cannot read: the App read gate (hrn:node:hadronmemory.com:specs:cor:agt:050:21) runs first, and
     an App you do not participate in answers APP_NOT_FOUND exactly like an absent one, never an empty page. hasMore is
-    whether tasks remain past this page; pass offset + items length to continue. limit defaults to 20 (an externalIds batch
-    with no limit keeps agentTasks' rule), 0 returns only total, and over 200 is served as 200.
+    whether tasks remain past this page; pass offset + items length to continue. limit defaults to 20, 0 returns only total,
+    and over 200 is served as 200. Unlike agentTasks, an externalIds batch with no limit is not widened to 200: it pages at
+    20 like any filter, and hasMore says whether more of the batch remains.
     """
     agentTasksPage(
       appRef: ID!

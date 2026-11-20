@@ -111,6 +111,19 @@ describe('#2212 A3 agentTasksPage', () => {
     expect(p.items.map((i) => i.title).sort()).toEqual(['mine-1', 'mine-2']);
   });
 
+  it('an externalIds batch with no limit pages at 20 like any filter, and hasMore carries the rest (no widening to 200)', async () => {
+    for (let i = 0; i < 23; i++) await task(`x${i}`, { externalId: `ext-${i}` });
+    const ids = Array.from({ length: 23 }, (_, i) => `ext-${i}`);
+    const first = await page({ externalIds: ids });
+    expect(first.items).toHaveLength(20);
+    expect(first).toMatchObject({ total: 23, hasMore: true });
+    const rest = await page({ externalIds: ids, offset: 20 });
+    expect(rest.items).toHaveLength(3);
+    expect(rest.hasMore).toBe(false);
+    // The legacy list keeps its own rule: the whole batch at once.
+    expect(await list({ externalIds: ids })).toHaveLength(23);
+  });
+
   it('limit 0 is count-only; a past-the-end offset is an empty page with the real total', async () => {
     for (let i = 0; i < 3; i++) await task(`c${i}`);
     expect(await page({ limit: 0 })).toEqual({ items: [], total: 3, hasMore: true });
