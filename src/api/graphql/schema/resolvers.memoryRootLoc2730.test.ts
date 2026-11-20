@@ -97,6 +97,7 @@ for (const door of ['createMemory', 'createAppMemory', 'createMemoryInApp']) {
     for (const [label, name] of admitted) {
       it(`still creates a memory and root for ${label}`, async () => {
         const memory = await d().create(name);
+        expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({ organizationId: org.id });
         expect(await db.node.findMany({ where: { memoryId: memory.id } })).toMatchObject([{ loc: name }]);
       });
     }

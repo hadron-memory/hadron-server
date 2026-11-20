@@ -39,7 +39,7 @@ describe.each([
   });
   it('still creates the memory and its root on success', async () => {
     const made = await create();
-    expect(await db.memory.findUniqueOrThrow({ where: { id: made.id } })).toMatchObject({ name: expect.stringContaining('2728') });
+    expect(await db.memory.findUniqueOrThrow({ where: { id: made.id } })).toMatchObject({ name: expect.stringContaining('2728'), organizationId: org.id });
     expect(await db.node.count({ where: { memoryId: made.id } })).toBe(1);
   });
 });

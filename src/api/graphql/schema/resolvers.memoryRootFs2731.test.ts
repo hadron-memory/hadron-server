@@ -71,6 +71,7 @@ for (const door of ['memory', 'installed', 'app'] as const) describe(`database r
     expect(await db.memory.count()).toBe(before);
     expect(await db.node.count()).toBe(0);
     const made = await create();
+    expect(await db.memory.findUniqueOrThrow({ where: { id: made.id } })).toMatchObject({ organizationId: org.id });
     expect(await db.memory.count()).toBe(before + 1);
     expect(await db.node.count({ where: { memoryId: made.id } })).toBe(1);
     expect(existsSync(yaml(`Root-${door}`))).toBe(false);

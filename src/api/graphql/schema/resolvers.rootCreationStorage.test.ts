@@ -87,9 +87,10 @@ for (const door of ['personal', 'organization', 'app', 'installed'] as const) de
   it.each(['Ordinary', 'own:legal:multi', 'a::b', 'other-storage.test', 'other-storage.test:notes', 'other-storage.test:notes:deep'])('keeps filesystem byte-identical for legal name %s', async name => {
     const before = snapshot();
     const memory = await create(door, name);
-    expect(memory).toMatchObject({ name });
+    const organizationId = door === 'personal' ? null : org.id;
+    expect(memory).toMatchObject({ name, organizationId });
     expect(memory.urn.startsWith(`${door === 'personal' ? 'storage-person' : org.urn}:`)).toBe(true);
-    expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({ name });
+    expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({ name, organizationId });
     expect(await db.node.findMany({ where: { memoryId: memory.id } })).toMatchObject([{ loc: name, name: name.split(':').at(-1), description: 'Root node for this memory.' }]);
     expect(snapshot()).toEqual(before);
     noParticipants();
