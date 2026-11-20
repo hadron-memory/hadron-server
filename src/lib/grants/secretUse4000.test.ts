@@ -2,6 +2,7 @@ import { composeAppSecretUrnV2 } from '@hadron-memory/urn-lib-js';
 /** S5 (#4000): the complete, signed secret.use parameter set at grant creation. */
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
+import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { PLATFORM_ACTIONS, upsertPlatformActions } from './actions.js';
@@ -49,6 +50,16 @@ describe('secret.use grant terms (#4000)', () => {
     }));
     expect(await refusal(appGrant(w.appId))).toBe('OK');
     expect(await refusal(appGrant(w.app2Id))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+  });
+  it('creates an App-held request through the manager API and preserves the auto-delete hold', async () => {
+    await db.orgMember.create({ data: { organizationId: w.orgId, userId: w.userId, role: 'ADMIN' } });
+    const ctx: Context = { db, userId: w.userId, roles: [] };
+    const input = { appRef: w.appId, holderKind: 'APP' as const, holderRef: w.appId, action: 'secret.use', values: values(), reason: 'r' };
+    const result = await resolvers.Mutation.createGrant({}, { input }, ctx);
+    const row = await db.grant.findUniqueOrThrow({ where: { id: result.id } });
+    expect(row).toMatchObject({ granteeAppId: w.appId, action: 'secret.use', activatedAt: null });
+    await expect(resolvers.Mutation.createGrant({}, { input: { ...input, values: { ...values(), 'auto-delete': 'delete' } } }, ctx))
+      .rejects.toMatchObject({ extensions: { code: 'SECRET_AUTO_DELETE_NOT_AVAILABLE' } });
   });
   it('does not admit a generic secret as an inject client', async () => {
     const generic = generateId();
