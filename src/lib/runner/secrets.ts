@@ -151,7 +151,7 @@ export function assertSecretUseBinding(rawUrl: string, signedPrefix: string, met
 
 /** Ensure a signed header names the payload's auth channel and is never model-controlled (#4000). */
 export function assertSecretUseHeader(header: string, value: unknown, headers: Record<string, string>): void {
-  // RFC 9110 tchar: reject control bytes and delimiters before this name reaches an HTTP implementation.
+  // Validate against the capability auth channel before this name reaches an HTTP implementation.
   if (!isSecretUseHeaderName(header) || !isWebFetchAuth(value)) throw new Error('Invalid secret use header binding.');
   const derived = value.type === 'header' ? value.name : 'authorization';
   if (!isSecretUseHeaderName(derived) || derived.toLowerCase() !== header.toLowerCase() ||
