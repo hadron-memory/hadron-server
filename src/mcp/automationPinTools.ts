@@ -1,7 +1,7 @@
 /** Thin MCP parity for #1719's generic preview/re-adopt operation. */
 import { z } from 'zod';
 import { toolErrorResult } from './toolError.js';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { HadronMcpServer as McpServer } from './hadronMcpServer.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { automationPinQueries, automationPinMutations } from '../api/graphql/schema/resolvers.automationPin.js';

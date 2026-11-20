@@ -65,6 +65,13 @@ export interface AuthContext {
    */
   oauthScopes?: string[];
   /**
+   * #2605: the OAuth client the presented `hdr_user_` key was issued to (`UserApiKey.issuedVia` is
+   * `oauth:<client_id>` for OAuth issuance, and a key minted by such a key inherits it). Absent for a portal or
+   * legacy key, a JWT and an App key. Identifies the client APPLICATION, for keying that client's stored MCP
+   * selection (`selectionClientKey`); it is never an authorization input.
+   */
+  oauthClientId?: string;
+  /**
    * Set when the request authenticated with an impersonation JWT: `userId` is
    * the TARGET user, `roles` is `[]`, and this carries the session + the
    * admin actor + the single org the session may see into. Read surfaces
@@ -528,7 +535,15 @@ async function resolveUserApiKey(
     ...(userApiKey.oauthScopes.length > 0
       ? { oauthScopes: userApiKey.oauthScopes }
       : {}),
+    ...(oauthClientIdOf(userApiKey.issuedVia) ? { oauthClientId: oauthClientIdOf(userApiKey.issuedVia) } : {}),
   };
+}
+
+/** The `<client_id>` of an `oauth:<client_id>` issuance identity, or undefined for any other. */
+function oauthClientIdOf(issuedVia: string | null): string | undefined {
+  if (!issuedVia?.startsWith('oauth:')) return undefined;
+  const clientId = issuedVia.slice('oauth:'.length);
+  return clientId.length > 0 ? clientId : undefined;
 }
 
 /**
