@@ -61,7 +61,7 @@ it('an own-transaction database failure creates no filesystem residue', async ()
   expect(existsSync(join(fixture.root, 'missing2731'))).toBe(false);
 });
 for (const door of ['memory', 'installed', 'app'] as const) describe(`database rollback ${door}`, () => {
-  const create = () => door === 'memory' ? M.createMemory({}, { name: `Root-${door}`, orgId: org.id }, ctx())
+  const create = () => door === 'memory' ? M.createMemory({}, { name: `Root-${door}`, orgRef: org.id }, ctx())
     : door === 'app' ? M.createAppMemory({}, { name: `Root-${door}`, appRef: app.id }, ctx())
     : M.createMemoryInApp({}, { name: `Root-${door}`, appRef: app.id, agentRef: agent.id, memoryClass: 'knowledge' }, ctx());
   it('root failure rolls back its memory and a successful retry creates one root', async () => {

@@ -49,7 +49,7 @@ async function create(door: Door, name: string, denied = false) {
   fixture.observing = true;
   try {
     if (door === 'personal') return await M.createMemory({}, { name, memoryClass: 'personal' }, ctx);
-    if (door === 'organization') return await M.createMemory({}, { name, orgId: org.id }, ctx);
+    if (door === 'organization') return await M.createMemory({}, { name, orgRef: org.id }, ctx);
     if (door === 'app') return await M.createAppMemory({}, { name, appRef: app.id }, ctx);
     return await M.createMemoryInApp({}, { name, appRef: app.id, agentRef: agent.id, memoryClass: 'app' }, ctx);
   } finally { fixture.observing = false; }
