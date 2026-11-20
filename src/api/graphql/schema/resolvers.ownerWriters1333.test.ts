@@ -361,7 +361,11 @@ describe('the App, its AppAgent link and its Agent are held while the write deci
       // Readiness races the transaction itself, so a transaction that fails before judging surfaces at once, not by timeout.
       await within(Promise.race([judgedFirst, writing.then(() => { throw new Error('write ended before judging'); })]), 5_000);
       op = start().then(() => { settled = true; });
-      await waitForLockWaiters(db, 1, 5_000);
+      // The change itself is raced against the lock-wait: a database error from it surfaces as ITSELF at once, and a
+      // change that finishes without ever waiting is a failure. The observer is attached now so a fast rejection is never unhandled.
+      const early = op.then(() => { throw new Error('the competing change finished without waiting on the held lock'); });
+      early.catch(() => undefined);
+      await Promise.race([waitForLockWaiters(db, 1, 5_000), early]);
       expect(settled).toBe(false);
     } catch (e) {
       failure = e;
@@ -376,6 +380,14 @@ describe('the App, its AppAgent link and its Agent are held while the write deci
     }
     if (failure !== undefined) throw failure;
   }
+
+  it('the race helper surfaces a fast failure of the competing change as itself, and rejects a change that never waited', async () => {
+    const a = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
+    await expect(raceHeldJudgement(a, () => Promise.reject(new Error('boom from the competing change')))).rejects.toThrow('boom from the competing change');
+    await expect(raceHeldJudgement(a, () => Promise.resolve())).rejects.toThrow('finished without waiting');
+    // Nothing is left holding a lock: an ordinary change goes straight through afterwards.
+    await db.app.update({ where: { id: a }, data: { name: 'after-the-helper' } });
+  }, 30_000);
 
   it('an uninstall waits for a write that already judged the App qualified, then the next write is refused', async () => {
     const a = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
@@ -400,8 +412,6 @@ describe('the App, its AppAgent link and its Agent are held while the write deci
 
 describe('the live headless path: hadron_update_node under the real run principal (Peter, #125592)', () => {
   const ENTRY = () => `${org.urn}:mem:flow:entry`;
-  /** The refusal text of the last liveRun, so a test can tell the write gate's refusal from any other FORBIDDEN. */
-  let refusedMessage = '';
 
   /** The App's own team space (class app) with an OWNER-role rule: the one org memory a userless run reads by itself. */
   async function teamSpace(appId: string, loc: string) {
@@ -414,7 +424,7 @@ describe('the live headless path: hadron_update_node under the real run principa
   }
 
   /** A userless SCHEDULE run of `runApp`, with the write grant on `vault`, editing `loc` in `target`'s team space. */
-  async function liveRun(runApp: string, target: { id: string; urn: string }, loc: string, grant = true) {
+  async function liveRunFull(runApp: string, target: { id: string; urn: string }, loc: string, grant = true): Promise<{ code: string; message: string }> {
     if (grant) await db.appMemoryWriteGrant.create({ data: { appId: runApp, memoryId: target.id, prefix: 'vault', grantedBy: user.owner! } });
     const schedule = await db.agentSchedule.create({
       data: { id: generateId(), organizationId: org.id, appId: runApp, name: 'S', cron: '* * * * *', entryNodeUrn: ENTRY() },
@@ -430,14 +440,15 @@ describe('the live headless path: hadron_update_node under the real run principa
       await makeProdRunDeps(db).callScript!(run as never, {
         tool: 'hadron_update_node', args: { urn: `hrn:node:${target.urn}:${loc}`, content: 'after' },
       } as never, { onToolCall: async () => true, log: vi.fn(), nodeUrn: ENTRY() } as never);
-      return 'OK';
+      return { code: 'OK', message: '' };
     } catch (e) {
       // admitAndExecuteTool wraps a handler's refusal as ToolExecutionError; the typed code rides its cause.
       const inner = ((e as { cause?: unknown }).cause ?? e) as { extensions?: { code?: unknown }; message?: string };
-      refusedMessage = String(inner.message);
-      return inner.extensions?.code ? String(inner.extensions.code) : String(inner.message);
+      return { code: inner.extensions?.code ? String(inner.extensions.code) : String(inner.message), message: String(inner.message) };
     }
   }
+  const liveRun = async (runApp: string, target: { id: string; urn: string }, loc: string, grant = true) =>
+    (await liveRunFull(runApp, target, loc, grant)).code;
   /** The same dispatch for a READ of the node, as the control that the principal can read the target. */
   async function readRun(runApp: string, target: { id: string; urn: string }, loc: string) {
     const schedule = await db.agentSchedule.create({
@@ -491,12 +502,13 @@ describe('the live headless path: hadron_update_node under the real run principa
     const space = await teamSpace(publisher, 'vault:own');
     // Control: the same principal reads the same node (the space is readable), so the refusal below is the write gate.
     expect(await readRun(publisher, space, 'vault:own')).toBe('OK');
-    const refused = await liveRun(publisher, space, 'vault:own', false);
-    expect(refused).not.toBe('OK');
-    expect(refused).not.toBe(REFUSED);
-    expect(refused).toBe('FORBIDDEN');
-    // The write gate's own refusal, not an unrelated FORBIDDEN: the same principal read this node above.
-    expect(refusedMessage).toContain('no write access to this memory');
+    const refused = await liveRunFull(publisher, space, 'vault:own', false);
+    expect(refused.code).not.toBe('OK');
+    expect(refused.code).not.toBe(REFUSED);
+    expect(refused.code).toBe('FORBIDDEN');
+    // The write gate's own refusal, not an unrelated FORBIDDEN: the same principal read this node above, and both
+    // assertions come from the same invocation.
+    expect(refused.message).toContain('no write access to this memory');
     expect(await content(space.id, 'vault:own')).toBe('before');
   });
 
