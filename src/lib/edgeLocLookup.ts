@@ -17,13 +17,16 @@ import { deriveEdgeLoc, deriveEdgeLocAlternates, compareMigratedSuffix, migrated
  *
  * Never writes, never rewrites a loc, and reads nothing for a name with a single spelling.
  *
- * The selection is made BEFORE the caller's upsert, and this module does not serialize the two. What is guaranteed:
- * every caller's upsert is atomic on (loc, memory) and followed, in the same transaction, by the occupant check (live,
- * same source, target, name), so a different edge that took the selected loc is refused rather than overwritten, and
- * the two spellings are distinct locs, so nothing here can raise a unique violation. What is NOT: a writer that lands
- * between the selection and the upsert can still leave a twin (a runtime-spelling row appearing after a migrated one
- * was chosen, or the chosen row disappearing so the upsert creates one at the migrated loc). That is the window two
- * concurrent syncs of one relationship always had for the runtime spelling; it loses no data and merges nothing.
+ * The selection is made BEFORE the caller's upsert and this module does not serialize the two, so state exactly what
+ * that allows. Two writers that BOTH go through this seam cannot twin each other: a seam writer picks the runtime
+ * spelling only when no same-edge row holds the migrated one, and never creates the migrated spelling (a fresh edge is
+ * always the runtime spelling). Both writers therefore address the same loc and meet on the (loc, memory) unique, and
+ * each caller's `update: {}` upsert is followed, in the same transaction, by the occupant check (live, same source,
+ * target, name), which refuses a different edge at that loc rather than overwriting it. A twin needs a writer that is
+ * NOT on this seam: the fresh-edge create paths (createEdge in GraphQL and MCP, inline edges, merge, subtree move,
+ * extract), which only ever write the runtime spelling and are out of scope of #4583, or a hard delete of the chosen
+ * row between the selection and the upsert (the upsert then creates it at the migrated loc). Neither loses data or
+ * raises a unique violation from this code, and nothing is merged.
  */
 export async function derivedEdgeLocForUpsert(
   db: Pick<PrismaClient, 'edge'>,
