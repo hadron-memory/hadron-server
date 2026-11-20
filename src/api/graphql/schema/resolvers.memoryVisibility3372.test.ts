@@ -141,7 +141,7 @@ describe('#3372 controls and access precedence', () => {
 
   it.each(['personal', 'private'].flatMap(memoryClass => ['PUBLIC', 'ORGANIZATION'].map(visibility => ({ memoryClass, visibility }))))(
     'createMemory still coerces $memoryClass/$visibility to null', async ({ memoryClass, visibility }) => {
-      const result = await M.createMemory({}, { orgId, name: `created-${memoryClass}-${visibility}`, memoryClass, visibility }, ctx());
+      const result = await M.createMemory({}, { orgRef: orgId, name: `created-${memoryClass}-${visibility}`, memoryClass, visibility }, ctx());
       expect(result).toMatchObject({ class: memoryClass, visibility: null, userId: ownerId });
     },
   );

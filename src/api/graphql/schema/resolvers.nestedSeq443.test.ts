@@ -15,7 +15,7 @@ beforeEach(async () => {
  const org = await db.organization.create({ data: { id: generateId(), name: 'seq443', urn: 'seq443' } });
  const user = await db.user.create({ data: { githubId: 443, githubUsername: 'seq443', roles: ['ADMIN'] } }); adminId=user.id;
  await db.orgMember.create({ data: { organizationId: org.id, userId: adminId, role: 'ADMIN' } });
- const memory=await resolvers.Mutation.createMemory(null,{orgId:org.id,name:'seq443'},ctx()); memoryId=memory.id;
+ const memory=await resolvers.Mutation.createMemory(null,{orgRef:org.id,name:'seq443'},ctx()); memoryId=memory.id;
  await db.node.create({ data: { id:generateId(),memoryId,loc:'parent:a',name:'a',seq:1 } });
 });
 afterEach(() => vi.restoreAllMocks());

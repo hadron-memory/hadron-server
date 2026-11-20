@@ -35,7 +35,7 @@ beforeEach(async () => {
   orgId = org.id;
   admin = await db.user.create({ data: { githubId: 183801, githubUsername: 'rev-admin', handle: 'rev-admin', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'rev-approvals' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'rev-approvals' }, as());
 });
 
 describe('revisionApprovalOf (#1838, R7)', () => {
@@ -135,7 +135,7 @@ describe('revisionApprovalOf (#1838, R7)', () => {
     const n = await mk('r:8');
     await approve(n.id);
     await edit(n.id, 'changed');
-    const other = await resolvers.Mutation.createMemory(null, { orgId, name: 'other-capture' }, as());
+    const other = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'other-capture' }, as());
     await db.nodeRevision.updateMany({ where: { nodeId: n.id, revNo: 1 }, data: { memoryId: other.id } });
     await db.nodeRevision.create({
       data: { id: generateId(), nodeId: n.id, memoryId: memory.id, loc: 'r:8', name: 'Title r:8', abstract: 'Abstract r:8', content: 'v1', tags: [], revNo: 5 },
@@ -203,7 +203,7 @@ describe('entering an encrypted memory ends approvals (#1838, cor:dmo:120:04)', 
   });
 
   it('E-A: in-place encryption runs the seam for the memory nodes, tombstones and snapshots', async () => {
-    const enc = await resolvers.Mutation.createMemory(null, { orgId, name: 'enc-seam', memoryClass: 'private' }, as());
+    const enc = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'enc-seam', memoryClass: 'private' }, as());
     const n = await db.node.create({ data: { id: generateId(), memoryId: enc.id, loc: 'e:3', name: 'S', content: 'body' } });
     const gone = await db.node.create({ data: { id: generateId(), memoryId: enc.id, loc: 'e:4', name: 'T', content: 'body2' } });
     await resolvers.Mutation.approveNode(null, { nodeRef: n.id }, as());
@@ -211,7 +211,7 @@ describe('entering an encrypted memory ends approvals (#1838, cor:dmo:120:04)', 
     await resolvers.Mutation.approveNode(null, { nodeRef: gone.id }, as());
     await resolvers.Mutation.deleteNode(null, { nodeRef: gone.id }, as());
     const dataKey = Buffer.alloc(32, 9).toString('base64');
-    await resolvers.Mutation.encryptMemory(null, { memoryId: enc.id, dataKey }, as());
+    await resolvers.Mutation.encryptMemory(null, { memoryRef: enc.id, dataKey }, as());
     for (const id of [n.id, gone.id]) {
       const row = await db.node.findUniqueOrThrow({ where: { id } });
       expect(row.approvalHash).toBeNull();
@@ -291,7 +291,7 @@ describe('anonymous promotion ends approvals in its flip transaction (#1838, QA 
     const spy = vi.spyOn(memoryMutations, 'encryptMemory').mockRejectedValue(new Error('interrupted'));
     try {
       await expect(withTestOperationKey(key, app.id, () =>
-        resolvers.Mutation.linkMemoryToUser({}, { memoryId: anon.id, externalUserId: 'promo-user' }, { db, appId: app.id, roles: [] }),
+        resolvers.Mutation.linkMemoryToUser({}, { memoryRef: anon.id, externalUserId: 'promo-user' }, { db, appId: app.id, roles: [] }),
       )).rejects.toThrow('interrupted');
     } finally { spy.mockRestore(); }
     expect((await db.memory.findUniqueOrThrow({ where: { id: anon.id } })).isEncrypted).toBe(true);
@@ -307,7 +307,7 @@ describe('anonymous promotion ends approvals in its flip transaction (#1838, QA 
 
 describe('entry clears snapshots captured elsewhere for a node now resident (#1838, blind P2)', () => {
   it('approve in A, metadata edit, move to B, encrypt B: A-captured hashes are cleared too', async () => {
-    const b = await resolvers.Mutation.createMemory(null, { orgId, name: 'move-target', memoryClass: 'private' }, as());
+    const b = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'move-target', memoryClass: 'private' }, as());
     const n = await mk('m:1');
     await approve(n.id);
     await touchMeta(n.id, ['x']); // snapshot of rev 1 captured in A carries the record

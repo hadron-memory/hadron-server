@@ -109,7 +109,7 @@ describe('createNode seam', () => {
 });
 
 describe.each([
-  ['createMemory', () => M.createMemory({}, { name: 'RollMem2731', orgId: org.id }, ctx()), 'RollMem2731'],
+  ['createMemory', () => M.createMemory({}, { name: 'RollMem2731', orgRef: org.id }, ctx()), 'RollMem2731'],
   ['createMemoryInApp', () => M.createMemoryInApp({}, { appRef: app.id, agentRef: agent.id, memoryClass: 'knowledge', name: 'RollApp2731' }, ctx()), 'RollApp2731'],
   ['createAppMemory', () => M.createAppMemory({}, { appRef: app.id, name: 'RollAppMem2731' }, ctx()), 'RollAppMem2731'],
 ])('%s', (_n, create, rootLoc) => {

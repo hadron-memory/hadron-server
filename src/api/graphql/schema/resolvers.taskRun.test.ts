@@ -85,7 +85,7 @@ beforeEach(async () => {
   // even though the request `nodeRef`/`taskRef` above stays the legacy `::` form.
   taskEntryUrnV2 = emitNodeUrnV2(taskMemory.urn, 'tasks:distill');
   // A target memory the admin can write imports into.
-  const target = await resolvers.Mutation.createMemory({}, { orgId, name: 'tr-import' }, adminCtx());
+  const target = await resolvers.Mutation.createMemory({}, { orgRef: orgId, name: 'tr-import' }, adminCtx());
   targetMemoryId = target.id;
   targetMemoryUrn = target.urn;
 });

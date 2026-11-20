@@ -108,7 +108,7 @@ beforeEach(async () => {
   const mkMem = async (name: string): Promise<Mem> => {
     const created = (await resolvers.Mutation.createMemory(
       {},
-      { orgId: org.id, name },
+      { orgRef: org.id, name },
       ctx,
     )) as { id: string };
     return db.memory.findUniqueOrThrow({

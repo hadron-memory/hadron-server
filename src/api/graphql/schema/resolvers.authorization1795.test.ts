@@ -52,7 +52,7 @@ beforeEach(async () => {
   await db.node.create({ data: { id: generateId(), memoryId: memories.definition, loc: 'conversations:default:start', name: 'Start', content: 'Hello' } });
   await serveEveryAgent(db); // #2712: the chat is served the Agent's boot prompt
   // Provision through the shipped path, not a synthetic ownership shortcut.
-  await resolvers.Mutation.startChat({}, { agentId }, ctx('owner'));
+  await resolvers.Mutation.startChat({}, { agentRef: agentId }, ctx('owner'));
   memories.holding = (await db.memory.findFirstOrThrow({ where: { userMemoryOfAgentId: agentId, createdBy: users.owner } })).id;
   expect(await db.memory.findUniqueOrThrow({ where: { id: memories.holding } })).toMatchObject({ class: 'knowledge', appId: null, ownerUserId: null, userId: null });
   for (const memoryId of Object.values(memories)) {

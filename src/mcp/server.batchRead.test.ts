@@ -77,14 +77,14 @@ beforeEach(async () => {
 
   const memory = await resolvers.Mutation.createMemory(
     {},
-    { orgId: org.id, name: 'batchmem' },
+    { orgRef: org.id, name: 'batchmem' },
     { db, roles: ['ADMIN'], userId: admin.id } as Context,
   );
   // A personal memory owned by user2 — ADMIN does NOT bypass personal
   // ownership, so it is the clean "denied" case for the partial-success test.
   const pmem = await resolvers.Mutation.createMemory(
     {},
-    { orgId: org.id, name: 'pmem', memoryClass: 'personal' },
+    { orgRef: org.id, name: 'pmem', memoryClass: 'personal' },
     { db, roles: ['READER'], userId: user2.id } as Context,
   );
 
