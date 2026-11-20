@@ -39,6 +39,9 @@ describe('secret.use grant terms (#4000)', () => {
       expect(await refusal(grant({ ...values(), [key]: value }))).toBe('GRANT_VALUES_INVALID');
     }
   });
+  it('refuses the delete mark until its lifecycle is built in S6', async () => {
+    expect(await refusal(grant({ ...values(), 'auto-delete': 'delete' }))).toBe('SECRET_AUTO_DELETE_NOT_AVAILABLE');
+  });
   it('allows this App as holder, while refusing a different App holder', async () => {
     const appGrant = (id: string) => db.$transaction((tx) => createPendingGrant(tx, {
       appId: w.appId, requester: { userId: w.userId, workerId: null, sessionId: null }, holder: { kind: 'app', id },
