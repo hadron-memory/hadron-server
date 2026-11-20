@@ -2837,7 +2837,9 @@ export const typeDefs = `#graphql
     #4427 — true when the caller may answer or take back an answer right now: one of the question\'s deciders, acting as
     themselves (a person in a session bound to no worker or agent, no App key or run, no impersonation), still among the
     log\'s deciders and able to write its memory, on a question that is not withdrawn, tampered or unverifiable
-    (hrn:node:hadronmemory.com:specs:cor:dmo:140:05).
+    (hrn:node:hadronmemory.com:specs:cor:dmo:140:05). It is the capability to submit a new answer: it is false once the
+    answer history is full (the last entry is kept for taking an answer back), and it does not say that an answer stands to
+    take back (retractQuestionAnswer refuses QUESTION_NOT_ANSWERED otherwise).
     """
     viewerMayAnswer: Boolean!
     "Account merges the stored user ids follow: the record keeps the merged-away id (#1715)."

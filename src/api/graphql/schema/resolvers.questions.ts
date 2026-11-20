@@ -439,6 +439,15 @@ async function lockLogShared(tx: Tx, target: { memoryId: string; loc: string }, 
   return { row, data: parseLogData(row) };
 }
 
+/**
+ * The locked question must still sit under the locked log: its parent loc is the log's loc. {@link lockLogShared}
+ * found the log by the question's loc BEFORE the question row was locked, so this closes the gap for every door that
+ * judges a decider against the log (answer, take back, amend, withdraw).
+ */
+function requireInLog(question: { loc: string }, log: { row: { loc: string } }, ref: string): void {
+  if (question.loc.slice(0, question.loc.lastIndexOf(':')) !== log.row.loc) throw logMissing(ref);
+}
+
 function logContentOf(name: string, data: QuestionLogData) {
   return {
     content: renderQuestionLog(name, data),
@@ -857,6 +866,7 @@ export const questionMutations = {
     await withAuthorizedMemoryTx(ctx, target.memoryId, [], (txCtx) => requireQuestionWrite(txCtx, target.memoryId), async (tx, txCtx) => {
       const log = await lockLogShared(tx, target, args.ref);
       const row = await lockQuestion(tx, target.id, target.memoryId, args.ref, args.expectedRevision);
+      requireInLog(row, log, args.ref);
       const [view] = await evaluateRows(tx, [row]);
       const current = requireWritable(view);
       const decider = (await actingDecider(txCtx, tx, current, log.data, target.memoryId)).ok;
@@ -946,6 +956,7 @@ export const questionMutations = {
     await withAuthorizedMemoryTx(ctx, target.memoryId, [], (txCtx) => requireQuestionWrite(txCtx, target.memoryId), async (tx, txCtx) => {
       const log = await lockLogShared(tx, target, args.ref);
       const row = await lockQuestion(tx, target.id, target.memoryId, args.ref, args.expectedRevision);
+      requireInLog(row, log, args.ref);
       const [view] = await evaluateRows(tx, [row]);
       const current = requireWritable(view);
       const decider = (await actingDecider(txCtx, tx, current, log.data, target.memoryId)).ok;
@@ -1442,14 +1453,17 @@ async function answerAct(
   await withAuthorizedMemoryTx(ctx, target.memoryId, [], (txCtx) => requireQuestionWrite(txCtx, target.memoryId), async (tx, txCtx) => {
     const log = await lockLogShared(tx, target, ref);
     const row = await lockQuestion(tx, target.id, target.memoryId, ref, expectedRevision);
+    requireInLog(row, log, ref);
     const [view] = await evaluateRows(tx, [row]);
     const current = requireWritable(view);
     const check = await actingDecider(txCtx, tx, current, log.data, target.memoryId);
     if (!check.ok) throw questionError(check.code, check.message, { questionCode: current.code });
     const act = decide(current, txCtx.userId as string);
     if (!act) return;
-    if (current.answers.length >= MAX_ANSWERS) {
-      invalidQuestion([{ pointer: '/input', message: `this question has reached its limit of ${MAX_ANSWERS} answer entries` }]);
+    // The last slot is kept for the take-back: an answer may not fill the history, so a standing answer can always be retracted.
+    const limit = act.entry.kind === 'retraction' ? MAX_ANSWERS : MAX_ANSWERS - 1;
+    if (current.answers.length >= limit) {
+      invalidQuestion([{ pointer: act.entry.kind === 'retraction' ? '/expectedRevision' : '/input', message: `this question has reached its limit of ${MAX_ANSWERS} answer entries${act.entry.kind === 'answer' ? ' (the last is kept for taking an answer back)' : ''}` }]);
     }
     const next: QuestionData = structuredClone(current);
     next.answers.push(act.entry);
@@ -1571,7 +1585,7 @@ export const questionFieldResolvers = {
       const state = v.evaluation.state;
       if (!v.shown || !v.evaluation.question || BLOCKED_STATES.has(state)) return false;
       // At the entry limit answerAct refuses every new entry (retraction included), so no one may answer.
-      if (v.shown.answers.length >= MAX_ANSWERS) return false;
+      if (v.shown.answers.length >= MAX_ANSWERS - 1) return false;
       const found = await logOfQuestion(ctx.db, v.row);
       if (!found) return false;
       // A corrupt or unsupported log payload is "no", not a null in the non-null field; a database error still surfaces.

@@ -401,42 +401,61 @@ describe('#4532 blind review: approved re-answer, merged decider, a missing log'
   });
 });
 
+
+/**
+ * Hold a row-level lock in a transaction on its own connection. `ready` resolves with that backend's pid once the lock is
+ * held, and REJECTS if the transaction fails first; `finish()` releases it and resolves only if the transaction committed.
+ */
+type HeldTx = Pick<typeof db, '$queryRaw' | 'node'>;
+function holdTx(work: (tx: HeldTx) => Promise<void>) {
+  let release!: () => void;
+  const held = new Promise<void>((r) => { release = r; });
+  let ready!: (pid: number) => void;
+  let fail!: (e: unknown) => void;
+  const readyP = new Promise<number>((res, rej) => { ready = res; fail = rej; });
+  const done = db.$transaction(async (tx) => {
+    const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int AS pid`;
+    await work(tx);
+    ready(pid);
+    await held;
+  }, { timeout: 30_000 });
+  done.catch((e) => fail(e));
+  return { ready: readyP, finish: async () => { release(); await done; } };
+}
+
+/** Wait (bounded) until some backend is blocked BY `holderPid`, i.e. the answer is truly waiting on the fixture's lock. */
+async function waitBlockedBy(holderPid: number, isSettled: () => boolean): Promise<boolean> {
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline && !isSettled()) {
+    const rows = await db.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${holderPid}::int = ANY(pg_blocking_pids(pid))`;
+    if ((rows[0]?.n ?? 0) > 0) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
+}
+
 describe('#4427 acceptance 14: the log FOR SHARE fence, with two real connections', () => {
   it('an answer waits behind a concurrent change of the log deciders, then sees the new list and refuses', async () => {
     const log = await createLog();
     const q = await ask(log.row.id);
-    let release!: () => void;
-    const held = new Promise<void>((r) => { release = r; });
-    let locked!: () => void;
-    const lockedIn = new Promise<void>((r) => { locked = r; });
     // Connection 1: holds the log FOR NO KEY UPDATE (what setQuestionLogDeciders takes) and removes the decider.
-    const changer = db.$transaction(async (tx) => {
+    const changer = holdTx(async (tx) => {
       await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${log.row.id} FOR NO KEY UPDATE`;
       const row = await tx.node.findUniqueOrThrow({ where: { id: log.row.id } });
       const data = { ...(row.data as Record<string, unknown>), defaultDeciders: [admin.id], eligibleDeciders: [] };
       await tx.node.update({ where: { id: log.row.id }, data: { data: data as never } });
-      locked();
-      await held;
-    }, { timeout: 30_000 });
-    await lockedIn;
-    // Connection 2: the answer. It must block on the log row, not read the old list.
+    });
+    const holderPid = await changer.ready;
+    // Connection 2: the answer. It must block on the log row, behind the changer's backend, not read the old list.
     let settled = false;
     const attempt = codeOf(answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq)).then((c) => { settled = true; return c; });
+    let blocked = false;
     try {
-      // Evidence of blocking, not a sleep: another backend is waiting on a lock held by the changer, and the answer has not settled.
-      const deadline = Date.now() + 20_000;
-      let waiting = 0;
-      while (Date.now() < deadline && waiting === 0 && !settled) {
-        const rows = await db.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`;
-        waiting = rows[0]?.n ?? 0;
-        if (waiting === 0) await new Promise((r) => setTimeout(r, 50));
-      }
-      expect(settled).toBe(false);
-      expect(waiting).toBeGreaterThan(0);
+      blocked = await waitBlockedBy(holderPid, () => settled);
     } finally {
-      release();
-      await changer.catch(() => undefined);
+      await changer.finish();
     }
+    expect(blocked).toBe(true);
     expect(await attempt).toBe('QUESTION_NOT_DECIDER');
     expect((await dataOf(q.row.id)).answers).toHaveLength(0);
   });
@@ -493,15 +512,15 @@ describe('#4532 review pins: the via pointer, and each blocked-state guard alone
 describe('#4532 blind round 4: the capability at the entry limit, a corrupt log, and a log at another loc', () => {
   const viewFor = async (id: string, ctx: Context) => D.viewerMayAnswer({ row: await rowOf(id), shown: await dataOf(id), evaluation: { state: 'OPEN', question: await dataOf(id) } }, {}, ctx);
 
-  it('viewerMayAnswer is false for an eligible decider once the question holds MAX_ANSWERS entries, and true one below', async () => {
+  it('viewerMayAnswer is false for an eligible decider once only the take-back slot is left, and true one slot earlier', async () => {
     const q = await ask((await createLog()).row.id);
     const answers = (n: number) => Array.from({ length: n }, (_, i) => ({ key: i % 2 ? 'yes' : 'no', at: '2026-01-01T00:00:00.000Z', by: { userId: holger.id, workerId: null, appId: null } }));
     const withAnswers = async (n: number) => {
       const data = await dataOf(q.row.id);
       return D.viewerMayAnswer({ row: await rowOf(q.row.id), shown: { ...data, answers: answers(n) }, evaluation: { state: 'OPEN', question: { ...data, answers: answers(n) } } }, {}, as(holger.id));
     };
-    expect(await withAnswers(MAX_ANSWERS - 1)).toBe(true);
-    expect(await withAnswers(MAX_ANSWERS)).toBe(false);
+    expect(await withAnswers(MAX_ANSWERS - 2)).toBe(true);
+    expect(await withAnswers(MAX_ANSWERS - 1)).toBe(false);
   });
 
   it('a corrupt log payload reads as false, not as an error in the non-null field', async () => {
@@ -515,34 +534,62 @@ describe('#4532 blind round 4: the capability at the entry limit, a corrupt log,
   it('a log moved while the answer waits on its lock is refused as a missing log, not authorized against the old row', async () => {
     const log = await createLog();
     const q = await ask(log.row.id);
-    let release!: () => void;
-    const held = new Promise<void>((r) => { release = r; });
-    let locked!: () => void;
-    const lockedIn = new Promise<void>((r) => { locked = r; });
     // The mover holds the log lock and changes its loc; the answer already found the parent at the OLD loc.
-    const mover = db.$transaction(async (tx) => {
+    const mover = holdTx(async (tx) => {
       await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${log.row.id} FOR NO KEY UPDATE`;
       await tx.node.update({ where: { id: log.row.id }, data: { loc: `${log.row.loc}-moved` } });
-      locked();
-      await held;
-    }, { timeout: 30_000 });
-    await lockedIn;
+    });
+    const holderPid = await mover.ready;
     let settled = false;
     const attempt = codeOf(answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq)).then((c) => { settled = true; return c; });
+    let blocked = false;
     try {
-      const deadline = Date.now() + 20_000;
-      let waiting = 0;
-      while (Date.now() < deadline && waiting === 0 && !settled) {
-        const rows = await db.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`;
-        waiting = rows[0]?.n ?? 0;
-        if (waiting === 0) await new Promise((r) => setTimeout(r, 50));
-      }
-      expect(settled).toBe(false);
+      blocked = await waitBlockedBy(holderPid, () => settled);
     } finally {
-      release();
-      await mover.catch(() => undefined);
+      await mover.finish();
     }
+    expect(blocked).toBe(true);
     expect(await attempt).toBe('QUESTION_LOG_NOT_FOUND');
     expect((await dataOf(q.row.id)).answers).toHaveLength(0);
+  });
+
+  it('a question moved under another log while the answer waits is refused, not judged by the old log', async () => {
+    const logA = await createLog();
+    const q = await ask(logA.row.id);
+    const row = await rowOf(q.row.id);
+    // Hold the QUESTION row and move it to another parent loc; the answer's log lookup and lock already passed for log A.
+    const mover = holdTx(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${q.row.id} FOR UPDATE`;
+      await tx.node.update({ where: { id: q.row.id }, data: { loc: `${row.loc.slice(0, row.loc.lastIndexOf(':'))}-elsewhere:${row.loc.slice(row.loc.lastIndexOf(':') + 1)}` } });
+    });
+    const holderPid = await mover.ready;
+    let settled = false;
+    const attempt = codeOf(answer(q.row.id, { optionKey: 'yes' }, q.row.revSeq)).then((c) => { settled = true; return c; });
+    let blocked = false;
+    try {
+      blocked = await waitBlockedBy(holderPid, () => settled);
+    } finally {
+      await mover.finish();
+    }
+    expect(blocked).toBe(true);
+    expect(['QUESTION_LOG_NOT_FOUND', 'NODE_WRITE_CONFLICT']).toContain(await attempt);
+    expect((await dataOf(q.row.id)).answers).toHaveLength(0);
+  });
+
+  it('the last history slot is kept for the take-back: an answer cannot fill the history, and the standing answer can be retracted', async () => {
+    const q = await ask((await createLog()).row.id);
+    const entry: AnswerEntry = { kind: 'answer', key: 'yes', text: null, reason: null, by: holger.id, at: '2026-11-01T00:00:00.000Z', via: 'api' };
+    await seedEntries(q.row.id, Array.from({ length: MAX_ANSWERS - 2 }, (_, i) => ({ ...entry, key: i % 2 ? 'no' : 'yes' })));
+    let r = (await rowOf(q.row.id)).revSeq;
+    await answer(q.row.id, { optionKey: 'no', reason: 'fills up to the reserved slot' }, r);
+    expect((await dataOf(q.row.id)).answers).toHaveLength(MAX_ANSWERS - 1);
+    r = (await rowOf(q.row.id)).revSeq;
+    const refused = await errorOf(answer(q.row.id, { optionKey: 'yes', reason: 'would fill the history' }, r));
+    expect(refused.extensions.code).toBe('QUESTION_INVALID');
+    expect((refused.extensions.pointers as Array<{ pointer: string }>)[0].pointer).toBe('/input');
+    await retract(q.row.id, r);
+    const after = await dataOf(q.row.id);
+    expect(after.answers).toHaveLength(MAX_ANSWERS);
+    expect(after.answers[after.answers.length - 1].kind).toBe('retraction');
   });
 });
