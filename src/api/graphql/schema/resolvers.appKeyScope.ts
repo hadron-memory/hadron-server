@@ -18,7 +18,7 @@ import type { Context } from './resolvers.helpers.js';
 import { actorManagesApp, inTaskWriteTx, loadApp, requireWritable, resolveTaskActor, taskError } from './resolvers.agentTask.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { requirePersonOnlyAct, type PersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
-import { APP_KEY_SCOPES, isAppKeyScope, type AppKeyScopeName } from '../../../lib/appKeyScopes/scopes.js';
+import { APP_KEY_SCOPES, APP_KEY_SCOPE_CATALOGUE, isAppKeyScope, type AppKeyScopeName } from '../../../lib/appKeyScopes/scopes.js';
 import { generateId } from '../../../lib/id.js';
 import { HOST_ID_PATTERN } from '../../../lib/agentTasks/hosts.js';
 import { appKeyHostUses } from './resolvers.hostOperation.js';
@@ -143,5 +143,18 @@ export const appKeyScopeFieldResolvers = {
   },
   AppKeyScope: {
     grantedBy: (s: { grantedByUserId: string }) => s.grantedByUserId,
+  },
+};
+
+/**
+ * #4489: the closed scope list as data (hrn:node:hadronmemory.com:specs:cor:aut:010:03). Static platform metadata, no
+ * tenant data, so any signed-in caller (a person or an App key) may read it; an anonymous caller may not.
+ */
+export const appKeyScopeQueries = {
+  appKeyScopeCatalogue: async (_: unknown, __: unknown, ctx: Context) => {
+    if (!ctx.userId && !ctx.appKeyId) {
+      throw new GraphQLError('Authentication required', { extensions: { code: 'UNAUTHENTICATED' } });
+    }
+    return APP_KEY_SCOPES.map((scope) => ({ scope, ...APP_KEY_SCOPE_CATALOGUE[scope] }));
   },
 };
