@@ -9327,6 +9327,14 @@ export const typeDefs = `#graphql
     "#1709 — the App's host registrations, liveness derived now (hrn:node:hadronmemory.com:specs:cor:agt:070:01). Whoever reads the App's tasks and events, the App's own key included."
     hostRegistrations(appRef: String!): [HostRegistration!]!
     """
+    #2213 S3 — \`hostRegistrations\` as a page: the same App gate and refusals, the same rows in \`hostId\` order with
+    their workers in \`workerId\` order, and the real total (hrn:node:hadronmemory.com:specs:cor:api:120:04). A consumer
+    that decides on the set follows the pages to the end; \`hostRegistrations\` remains the complete set. A host key's
+    read is recorded as one use counting the items returned. \`limit\` defaults to 20, 0 returns the count only, a
+    negative limit is 0 and a limit over 200 is served as 200 (never refused). \`offset\` below 0 is 0.
+    """
+    hostRegistrationsPage(appRef: String!, limit: Int, offset: Int): HostRegistrationPage!
+    """
     #4224 (S3 of #4229) — for each worker one host runs: whether its agent process should be running, and why. A
     host's sweep reads this once per pass and compares it with what it sees. While the App's hostSetupSource is HOST
     (the default), a host's workers are the ones its registration lists (hrn:node:hadronmemory.com:specs:cor:agt:070:01),
@@ -10316,6 +10324,13 @@ export const typeDefs = `#graphql
 
     "#772 — the caller's placed dashboard widgets, ordered by position. Empty for a non-user (App-key) caller."
     dashboardWidgets: [DashboardWidget!]!
+    """
+    #2213 S3 — \`dashboardWidgets\` as a page: the same owner scope and \`position\` order (id breaks ties), with the
+    real total (hrn:node:hadronmemory.com:specs:cor:api:120:04). Empty for a non-user or impersonated caller. A consumer
+    that decides on the set follows the pages to the end; \`dashboardWidgets\` remains the complete set. Sizes as
+    \`tickersPage\`.
+    """
+    dashboardWidgetsPage(limit: Int, offset: Int): DashboardWidgetPage!
     "#797 — data for each of the caller's PLACED widgets, in position order, one entry per placement built from its own config. Empty for a non-user caller."
     dashboardWidgetData: [DashboardWidgetData!]!
 
@@ -12774,8 +12789,24 @@ export const typeDefs = `#graphql
 
     Identical to updateNode otherwise, selectors included ('id' XOR 'memoryId' +
     'loc'); it never creates and never moves.
+
+    #1291 — 'mergeExports: true' makes the WHOLE 'input.properties' bag a PATCH
+    (not only 'exports') instead of a replacement: named top-level keys are replaced whole, except 'exports', which
+    merges per host and per field ('null' removes a host); unnamed keys stay.
+    It is the merge 'updateNodeProperties' applies, run under the node's lock on
+    the row read after it, so two concurrent patches to different hosts both
+    land. The gate, task and schema validation judge the MERGED result;
+    'expectedRevision' still applies; who may write is unchanged. 'properties'
+    must then be an object (anything else is BAD_USER_INPUT). Omit or pass false
+    for today's whole-bag replace. Only this door has it.
     """
-    updateTaskNode(input: UpdateNodeInput!): Node!
+    updateTaskNode(
+      input: UpdateNodeInput!
+      """
+      Treat the whole 'input.properties' as a patch (unnamed keys kept; 'exports' merged per host and field) instead of replacing the bag. Default false.
+      """
+      mergeExports: Boolean
+    ): Node!
 
     """
     Update an existing node. Identify it by 'id' (PK or fully-qualified node
@@ -16728,6 +16759,20 @@ export const typeDefs = `#graphql
   "#2213 — one page of an org's exchange connections."
   type ExchangeConnectionPage {
     items: [ExchangeConnection!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2213 S3 — one page of an App's host registrations."
+  type HostRegistrationPage {
+    items: [HostRegistration!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2213 S3 — one page of the caller's placed dashboard widgets."
+  type DashboardWidgetPage {
+    items: [DashboardWidget!]!
     total: Int!
     hasMore: Boolean!
   }
