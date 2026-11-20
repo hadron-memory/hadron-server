@@ -128,4 +128,14 @@ describe('hadron_run_task memory hint — URN forms (#4345)', () => {
     });
     expect(await run(asAdmin(), 'urn:memory:dup-org:dup')).toContain('Body of Alpha');
   });
+
+  it('a legacy URN that two readable memories claim is refused, not guessed', async () => {
+    await db.memory.update({ where: { id: alpha.id }, data: { legacyUrn: 'amb-org:amb' } });
+    await db.urnAlias.create({
+      data: { id: generateId(), urn: 'amb-org:amb', entityType: 'MEMORY', entityId: foreign.id, reason: 'RENAME' },
+    });
+    const text = await run(asAdmin(), 'urn:memory:amb-org:amb');
+    expect(text).toContain('No memory matching "urn:memory:amb-org:amb"');
+    expect(text).not.toContain('Body of');
+  });
 });
