@@ -13080,7 +13080,7 @@ const taskUpdateArgs = {
   mergeExports: z
     .boolean()
     .optional()
-    .describe('Merge instead of replace (#1291). When true, `properties` is a PATCH: named keys are replaced whole, except `exports`, which merges per host and per field (null removes a host); keys you do not name are kept, and the merge is atomic against concurrent edits. `properties` must then be an object. Omit or false: `properties` replaces the whole bag, as before.'),
+    .describe('Merge instead of replace (#1291). When true, the WHOLE `properties` is a PATCH, not only `exports`: named keys are replaced whole, except `exports`, which merges per host and per field (null removes a host); keys you do not name are kept, and the merge is atomic against concurrent edits. `properties` must then be an object. Omit or false: `properties` replaces the whole bag, as before.'),
   expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A mismatch refuses atomically with [node_write_conflict].'),
   isRunnable: z
     .boolean()

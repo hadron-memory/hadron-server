@@ -2152,27 +2152,25 @@ async function mergePropertiesAndWrite(a: {
 }) {
   const { fields, ctx } = a;
   const patch = fields.properties;
+  const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, a.targetMemoryId);
+  const gate = () => requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, resolvedMemoryId);
+  if (a.hasId) await concealUnreadableNodeDenial(ctx, resolvedMemoryId, () => nodeNotFoundError(a.ref), gate);
+  else await concealUnreadableDenial(ctx, resolvedMemoryId, a.ref, gate);
+  // Judged AFTER access, so a caller who may not write cannot tell a malformed patch from a well-formed one.
   if (patch == null || typeof patch !== 'object' || Array.isArray(patch)) {
     throw new GraphQLError(`${a.op}: with mergeExports, \`properties\` must be a JSON object patch.`, {
       extensions: { code: 'BAD_USER_INPUT', field: 'properties' },
     });
   }
-  const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, a.targetMemoryId);
-  const gate = () => requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, resolvedMemoryId);
-  if (a.hasId) await concealUnreadableNodeDenial(ctx, resolvedMemoryId, () => nodeNotFoundError(a.ref), gate);
-  else await concealUnreadableDenial(ctx, resolvedMemoryId, a.ref, gate);
 
   const nodeId =
     a.targetNodeId ??
     (await ctx.db.node.findFirst({ where: { memoryId: resolvedMemoryId, loc: a.targetLoc, deletedAt: null }, select: { id: true } }))?.id;
   if (!nodeId) {
-    // No such node: the plain write answers it exactly as it does without the option.
-    return writeNodeCore({ ...fields, memoryId: a.targetMemoryId, loc: a.targetLoc }, ctx, 'update', {
-      authoring: authoringFromRequest(ctx, fields.authoredWith),
-      guardRevSeq: a.expectedRevision ?? undefined,
-      ownsKind: a.ownsKind,
-      governedContext: a.governedContext,
-      concealUnreadable: { entity: a.hasId ? 'node' : 'memory', ref: a.ref },
+    // A merge needs a stored base, so a missing node is the same refusal the plain update gives. Falling through to the
+    // plain write would replace the whole bag of a node created in the gap (#4599 BLIND P2).
+    throw new GraphQLError(`Node not found: "${a.ref}"`, {
+      extensions: { code: 'NODE_NOT_FOUND', loc: a.targetLoc, memoryId: resolvedMemoryId },
     });
   }
 
@@ -2180,8 +2178,11 @@ async function mergePropertiesAndWrite(a: {
   const written = await ctx.db.$transaction(async (lockTx) => {
     await lockInstallAuthorityFirst(lockTx, ctx, resolvedMemoryId);
     await lockTx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${nodeId}))`;
-    const fresh = await lockTx.node.findUnique({ where: { id: nodeId }, select: { loc: true, properties: true } });
-    if (!fresh) {
+    const fresh = await lockTx.node.findUnique({ where: { id: nodeId }, select: { loc: true, memoryId: true, deletedAt: true, properties: true } });
+    // A loc selector names whatever lives at (memory, loc) NOW: a node that moved or was deleted while this call waited
+    // for the lock is no longer the one named, so it is refused, never followed to its new loc (#4599 BLIND P2).
+    // An id selector is anchored on the PK, as the plain door is.
+    if (!fresh || (!a.hasId && (fresh.deletedAt || fresh.loc !== a.targetLoc || fresh.memoryId !== resolvedMemoryId))) {
       throw new GraphQLError(`Node not found: "${a.ref}"`, { extensions: { code: 'NODE_NOT_FOUND', ref: a.ref } });
     }
     const merged = mergePropertiesPatch(fresh.properties, patch as Record<string, unknown>);

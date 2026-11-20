@@ -12760,8 +12760,8 @@ export const typeDefs = `#graphql
     Identical to updateNode otherwise, selectors included ('id' XOR 'memoryId' +
     'loc'); it never creates and never moves.
 
-    #1291 — 'mergeExports: true' makes 'input.properties' a PATCH instead of the
-    whole bag: named top-level keys are replaced whole, except 'exports', which
+    #1291 — 'mergeExports: true' makes the WHOLE 'input.properties' bag a PATCH
+    (not only 'exports') instead of a replacement: named top-level keys are replaced whole, except 'exports', which
     merges per host and per field ('null' removes a host); unnamed keys stay.
     It is the merge 'updateNodeProperties' applies, run under the node's lock on
     the row read after it, so two concurrent patches to different hosts both
@@ -12773,7 +12773,7 @@ export const typeDefs = `#graphql
     updateTaskNode(
       input: UpdateNodeInput!
       """
-      Merge 'input.properties' (including 'exports', per host and field) instead of replacing the bag. Default false.
+      Treat the whole 'input.properties' as a patch (unnamed keys kept; 'exports' merged per host and field) instead of replacing the bag. Default false.
       """
       mergeExports: Boolean
     ): Node!

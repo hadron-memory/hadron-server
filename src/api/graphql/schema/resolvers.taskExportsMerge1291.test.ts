@@ -136,11 +136,82 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
   });
 
   it('a caller without write access is refused identically with the option on or off, and nothing changes', async () => {
-    const off = await M.updateTaskNode({}, { input: { id: taskId, properties: { exports: { codexSkill: codex } } } }, outsider()).catch((e) => e);
-    const on = await merge({ exports: { codexSkill: codex } }, {}, outsider()).catch((e) => e);
+    const off = await M.updateTaskNode({}, { input: { id: taskId, properties: { exports: { codexSkill: codex } } } }, outsider()).then(() => null, (e) => e);
+    const on = await merge({ exports: { codexSkill: codex } }, {}, outsider()).then(() => null, (e) => e);
+    expect(off).not.toBeNull();
+    expect(on).not.toBeNull();
     expect(on.extensions?.code).toBe(off.extensions?.code);
     expect(on.message).toBe(off.message);
     expect(await props()).toEqual({ keep: 'me', exports: { claudeSkill: claude } });
+  });
+
+  it('a malformed patch from a caller without write access is refused as any patch is (BLIND P2), by id and by loc', async () => {
+    const asId = (properties: unknown) => merge(properties, {}, outsider()).then(() => null, (e) => e);
+    const asLoc = (properties: unknown) =>
+      M.updateTaskNode({}, { input: { memoryId: memId, loc: 'tasks:t1', properties }, mergeExports: true }, outsider()).then(() => null, (e) => e);
+    for (const call of [asId, asLoc]) {
+      const good = await call({ exports: {} });
+      const bad = await call(null);
+      expect(good).not.toBeNull();
+      expect(bad).not.toBeNull();
+      expect(bad.extensions?.code).toBe(good.extensions?.code);
+      expect(bad.extensions?.code).not.toBe('BAD_USER_INPUT');
+      expect(bad.message).toBe(good.message);
+    }
+  });
+
+  it('a loc selector naming no node is NODE_NOT_FOUND and creates nothing (BLIND P2)', async () => {
+    await expect(
+      M.updateTaskNode({}, { input: { memoryId: memId, loc: 'tasks:nope', properties: { a: 1 } }, mergeExports: true }, admin()),
+    ).rejects.toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
+    expect(await db.node.count({ where: { memoryId: memId, loc: 'tasks:nope' } })).toBe(0);
+  });
+
+  it('a node created at a missing loc in the gap is not overwritten by the patch (BLIND P2)', async () => {
+    const real = db.node.findFirst.bind(db.node);
+    let raced = false;
+    const spy = vi.spyOn(db.node, 'findFirst').mockImplementation(((args: any) => {
+      const out = real(args);
+      if (!raced && args?.where?.loc === 'tasks:gap') {
+        raced = true;
+        return out.then(async (found: unknown) => {
+          await M.createTaskNode({}, { input: { memoryId: memId, loc: 'tasks:gap', name: 'Gap', isRunnable: true, properties: { x: 1 } } }, admin());
+          return found;
+        });
+      }
+      return out;
+    }) as never);
+    try {
+      await expect(
+        M.updateTaskNode({}, { input: { memoryId: memId, loc: 'tasks:gap', properties: { a: 1 } }, mergeExports: true }, admin()),
+      ).rejects.toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(raced).toBe(true);
+    const gap = await db.node.findFirstOrThrow({ where: { memoryId: memId, loc: 'tasks:gap' } });
+    expect(gap.properties).toEqual({ x: 1 });
+  });
+
+  it('a loc-selected merge does not follow a node that moved while it waited for the lock (BLIND P2)', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let locked!: () => void;
+    const gotLock = new Promise<void>((r) => (locked = r));
+    const holder = db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${taskId}))`;
+      locked();
+      await held;
+      await tx.node.update({ where: { id: taskId }, data: { loc: 'tasks:moved' } });
+    }, { timeout: 20_000 });
+    await gotLock;
+    const attempt = M.updateTaskNode({}, { input: { memoryId: memId, loc: 'tasks:t1', properties: { exports: { codexSkill: codex } } }, mergeExports: true }, admin())
+      .then(() => 'wrote', (e) => `refused:${e.extensions?.code}`);
+    await new Promise((r) => setTimeout(r, 500));
+    release();
+    await holder;
+    expect(await attempt).toBe('refused:NODE_NOT_FOUND');
+    expect((await props()).exports.codexSkill).toBeUndefined();
   });
 
   it('refuses a caller without write access BEFORE taking the node lock (nothing of the stored bag is read for them)', async () => {
@@ -200,6 +271,9 @@ describe('the option lives on updateTaskNode only (#1291)', () => {
     const rev = await M.createReviewNode({}, { input: { memoryId: memId, loc: 'rev:r1', name: 'R', role: 'review', properties: { a: 1, b: 2 } } }, admin());
     await M.updateReviewNode({}, { input: { id: rev.id, properties: { a: 9 } }, mergeExports: true }, admin());
     expect((await db.node.findUniqueOrThrow({ where: { id: rev.id } })).properties).toEqual({ a: 9 });
+    const spec = await M.createSpecNode({}, { input: { memoryId: memId, loc: 'spec:s1', name: 'S', role: 'spec', data: { version: '0.0.1' }, properties: { a: 1, b: 2 } } }, admin());
+    await M.updateSpecNode({}, { input: { id: spec.id, properties: { a: 9 } }, mergeExports: true }, admin());
+    expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).properties).toEqual({ a: 9 });
   });
 });
 
