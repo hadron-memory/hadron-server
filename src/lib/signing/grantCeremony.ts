@@ -42,6 +42,7 @@ import { generateId } from '../id.js';
 import { passkeyRpId, signingCeremonyOrigins, SigningNotConfiguredError } from './config.js';
 import { effectiveRequestState } from './requests.js';
 import { GrantSigningRefusal } from './grantRequests.js';
+import { autoDeleteLimitRefusal } from '../secrets/autoDelete.js';
 import * as grantLocks from './grantActivationLocks.js';
 import { CeremonyRefused } from './signingCeremony.js';
 
@@ -401,6 +402,9 @@ async function lockAndJudge(tx: Prisma.TransactionClient, txCtx: Context, loc: L
   if (!(await grantLocks.lockGrantForSigning(tx, loc.request.grantId, loc.appId))) throw new CeremonyRefused();
   const g = await readGrant(tx, loc.request.grantId, loc.appId);
   if (!g) throw new CeremonyRefused();
+  // #4001/#4594: historical pending rows must also obey the finite deletion rule at activation.
+  const limit = autoDeleteLimitRefusal(['secret.reveal', 'secret.use'].includes(g.action) && (g.action_values as Record<string, unknown>)?.['auto-delete'] === 'delete', g.expires_at, g.max_uses);
+  if (limit) throw new GrantSigningRefusal('SECRET_AUTO_DELETE_NEEDS_LIMIT', limit.message);
   const [request] = await tx.$queryRaw<Array<{ id: string; grant_id: string; version: number; terms_hash: string; payload_version: string; state: string; expires_at: Date }>>`
     SELECT id, grant_id, version, terms_hash, payload_version, state, expires_at FROM grant_signing_requests WHERE id = ${a.requestId} FOR UPDATE`;
   if (!request || request.grant_id !== g.id) throw new CeremonyRefused();

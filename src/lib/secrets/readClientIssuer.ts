@@ -29,9 +29,17 @@ export interface SecretIssuance {
   asWriter: boolean;
 }
 
-export async function requireSecretReadClientIssuer(ctx: Context, secretId: string): Promise<SecretIssuance> {
-  const userId = await requirePersonOnlyAct(ctx, 'secret.issue-read-client', authorizationDenied);
-  return judgeSecretReadClientIssuer(ctx, userId, secretId);
+/** S6 preserves S3's issuer set; only the marked request's refusal code differs. */
+export async function requireSecretReadClientIssuer(ctx: Context, secretId: string, autoDelete = false): Promise<SecretIssuance> {
+  try {
+    const userId = await requirePersonOnlyAct(ctx, 'secret.issue-read-client', authorizationDenied);
+    return await judgeSecretReadClientIssuer(ctx, userId, secretId);
+  } catch (error) {
+    if (autoDelete && error instanceof GraphQLError && ['FORBIDDEN', SECRET_READ_CLIENT_SUPERSEDED].includes(String(error.extensions?.code))) {
+      throw new GraphQLError('You may not set an auto-delete mark for this secret.', { extensions: { code: 'SECRET_AUTO_DELETE_NOT_ALLOWED' } });
+    }
+    throw error;
+  }
 }
 
 /**

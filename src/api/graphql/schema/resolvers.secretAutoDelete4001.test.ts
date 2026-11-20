@@ -1,4 +1,5 @@
 /** #4001 S6: real passkey activation, reads and shared sweep against a private test DB. */
+import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -12,6 +13,7 @@ import { insertSoftPasskey, softPasskey } from '../../../test/softPasskey.js';
 import { createGrantSigningRequestInTransaction } from '../../../lib/signing/grantRequests.js';
 import { openGrantProofCeremony, proveForGrantSigning, currentGrantSigningChallenge, completeGrantSigning } from '../../../lib/signing/grantCeremony.js';
 import { secretSweepTick } from '../../../jobs/secretSweep.js';
+import * as deletion from '../../../lib/secrets/autoDelete.js';
 import * as secretValues from '../../../lib/secrets/appSecrets.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -41,7 +43,12 @@ async function client(mark = 'delete', maxUses: number | null = 1, expiresAt: Da
   const grantId = await db.$transaction(tx => createPendingGrant(tx, { appId, requester: { userId: ownerId, workerId: null, sessionId: null },
     holder: { kind: 'worker', id: workerId }, action: 'secret.reveal', values: { secret: secretId, 'auto-delete': mark },
     maxUses, expiresAt, reason: 'S6 acceptance', canReadMemory: async () => false }));
-  if (signed) {
+  if (signed) await sign(grantId);
+  if (!signed) await db.secretReadClient.create({ data: { id: generateId(), appId, grantId, secretId, secretName: 'tok', issuerUserId: ownerId, selfIssued: false } });
+  const row = await db.secretReadClient.findUnique({ where: { grantId } });
+  return { grantId, clientId: row?.id ?? '' };
+}
+async function sign(grantId: string) {
     const key = softPasskey(); await insertSoftPasskey(db, ownerId, key, { rpId: 'example.test' });
     const request = await db.$transaction(tx => createGrantSigningRequestInTransaction(tx, grantId, { appId, requester: { userId: ownerId, appId: null, workerId: null, sessionId: null } }));
     const requestId = request.id;
@@ -54,9 +61,6 @@ async function client(mark = 'delete', maxUses: number | null = 1, expiresAt: Da
     const nonce = hash(proved.sessionNonce);
     const challenge = await currentGrantSigningChallenge(db, { requestId, browserNonceHash: nonce, rpId: 'example.test' });
     await completeGrantSigning(db, { requestId, ceremonyId: challenge.ceremonyId, browserNonceHash: nonce, credentialId: key.credentialId, assertion: assertion(challenge.challenge, 2) });
-  }
-  const row = await db.secretReadClient.findUnique({ where: { grantId } });
-  return { grantId, clientId: row?.id ?? '' };
 }
 const exists = () => db.secret.count({ where: { id: secretId } });
 const deletedEvents = () => db.secretEvent.count({ where: { secretId, kind: 'DELETE' } });
@@ -136,4 +140,42 @@ it('a signed mark deletes a protected secret without a change request and never 
   expect(replacement.id).not.toBe(secretId);
   await secretSweepTick(db); expect(await failure(reveal(a.clientId))).toBe('SECRET_DELETED');
   expect(await db.secret.count({ where: { id: replacement.id } })).toBe(1);
+});
+
+it('failure after deletion rolls back the deletion, siblings, spend and all success events', async () => {
+  const a = await client(); const sibling = await client('keep', 3);
+  const original = deletion.deleteLockedAppSecret;
+  const fail = vi.spyOn(deletion, 'deleteLockedAppSecret').mockImplementation(async (...args) => {
+    await original(...args); throw new Error('deliberate failure after deletion');
+  });
+  try { await expect(reveal(a.clientId)).rejects.toThrow('deliberate failure after deletion'); }
+  finally { fail.mockRestore(); }
+  expect(await exists()).toBe(1); expect(await db.secretVersion.count({ where: { secretId } })).toBe(2);
+  expect((await db.grant.findUniqueOrThrow({ where: { id: a.grantId } })).useCount).toBe(0);
+  expect((await db.secretReadClient.findUniqueOrThrow({ where: { id: sibling.clientId } })).endedAt).toBeNull();
+  expect(await deletedEvents()).toBe(0);
+});
+it('rejects a stranger marking a real or missing secret with the same ruled refusal', async () => {
+  const outsider = await db.user.create({ data: { handle: `outsider-${generateId()}` } });
+  for (const ref of [secretId, generateId()]) {
+    const p = resolvers.Mutation.issueSecretReadClient({}, { input: { secretRef: ref, holderKind: 'WORKER', holderRef: workerId, autoDelete: true, maxReads: 1, reason: 'no' } }, { ...ctx(), userId: outsider.id });
+    expect(await failure(p)).toBe('SECRET_AUTO_DELETE_NOT_ALLOWED');
+  }
+  expect(await db.grant.count()).toBe(0);
+});
+
+it('rechecks a historical unbounded pending mark at signing without consuming or activating it', async () => {
+  const grantId = generateId();
+  const constraint = readFileSync(new URL('../../../../prisma/secret-auto-delete-invariants.sql', import.meta.url), 'utf8');
+  // Model the old generic door before the new NOT VALID CHECK existed; every signature/activation guard stays enabled.
+  await db.$transaction(async tx => {
+    await tx.$executeRawUnsafe('ALTER TABLE grants DROP CONSTRAINT chk_secret_auto_delete_limit');
+    await tx.grant.create({ data: { id: grantId, appId, workerId, requestedByUserId: ownerId,
+      action: 'secret.reveal', values: { secret: secretId, 'auto-delete': 'delete' }, reason: 'historical pending mark' } });
+    for (const statement of constraint.replace(/^--.*$/gm, '').split(';').map(x => x.trim()).filter(Boolean)) await tx.$executeRawUnsafe(statement);
+  });
+  await expect(sign(grantId)).rejects.toMatchObject({ code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT' });
+  expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).activatedAt).toBeNull();
+  expect(await db.grantSignature.count({ where: { grantId } })).toBe(0);
+  expect(await db.secretReadClient.count({ where: { grantId } })).toBe(0);
 });
