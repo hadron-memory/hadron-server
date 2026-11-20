@@ -19,11 +19,16 @@ describe('#4508 — findQualifiedCitations', () => {
   it('returns the citation without its prefix, with its line', () => {
     expect(findQualifiedCitations(`a\n see (${P}cor:agt:130:04).\n`)).toEqual([{ line: 2, citation: 'cor:agt:130:04' }]);
   });
-  it('reads the legacy urn:node: scheme and a range by its head', () => {
+  it('reads the legacy urn:node: scheme and a range by its head AND its tail', () => {
     expect(findQualifiedCitations(`urn:node:hadronmemory.com:specs:cor:agt:050:01 ${P}cor:agt:050:14–:17`)).toEqual([
       { line: 1, citation: 'cor:agt:050:01' },
       { line: 1, citation: 'cor:agt:050:14' },
+      { line: 1, citation: 'cor:agt:050:17' },
     ]);
+  });
+  it('a range whose tail is not written is reported missing', () => {
+    const snap = new Set(['cor:agt:050:14']);
+    expect(missingFromSnapshot(findQualifiedCitations(`${P}cor:agt:050:14–:17`), snap).map((m) => m.citation)).toEqual(['cor:agt:050:17']);
   });
   it('ignores a bare citation and a qualified one into another memory', () => {
     expect(findQualifiedCitations('cor:agt:130:06 hrn:node:example.org:other:cor:agt:130:06')).toEqual([]);
@@ -55,11 +60,11 @@ describe('#4508 — buildSnapshot (the refresh)', () => {
     { citation: 'cor', updatedAt: '2026-01-01T00:00:00Z' },
     { citation: 'cor:agt', updatedAt: '2026-01-01T00:00:00Z' },
     { citation: 'cor:agt:130:04', updatedAt: '2026-11-05T00:00:00Z' },
-    { citation: 'cor:spc:020:06', updatedAt: '2026-11-06T00:00:00Z' },
+    { citation: 'cor:xyz:999:01', updatedAt: '2026-11-06T00:00:00Z' },
     { citation: 'cor:agt:130:03', updatedAt: '2026-11-01T00:00:00Z' },
   ];
   it('keeps written rules only: no parents, no placeholders (a reserved citation must fail like a missing one)', () => {
-    const text = buildSnapshot(list, { placeholders: [{ citation: 'cor:spc:020:06' }] }, '2026-11-20');
+    const text = buildSnapshot(list, { placeholders: [{ citation: 'cor:xyz:999:01' }] }, '2026-11-20');
     expect([...parseSnapshot(text)].sort()).toEqual(['cor:agt:130:03', 'cor:agt:130:04']);
     expect(text).toMatch(/run 2026-11-20; newest node updatedAt 2026-11-06T00:00:00Z; 2 citations; 1 placeholder/);
   });
@@ -78,6 +83,8 @@ describe('#4508 — the committed gate, end to end', () => {
     const snap = parseSnapshot(readFileSync(join(root, 'scripts/sdl-spec-citations-snapshot.txt'), 'utf8'));
     expect(snap.has('cor:agt:130:04')).toBe(true);
     expect(snap.has('cor:agt:130:06')).toBe(false);
+    // cor:spc:020:06 and :11 are the written rules ABOUT placeholders (not placeholders): they belong in the inventory.
+    expect(snap.has('cor:spc:020:06') && snap.has('cor:spc:020:11')).toBe(true);
     expect(missingFromSnapshot(findQualifiedCitations(readFileSync(join(root, typedefsRel), 'utf8')), snap)).toEqual([]);
   });
 

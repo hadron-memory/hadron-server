@@ -115,7 +115,9 @@ export function findBareCitations(source) {
 /**
  * Every fully qualified citation into the specs corpus in `source`:
  * `{ line, citation }`, 1-based lines, the citation WITHOUT its URN prefix.
- * A range (`…:14–:17`) cites its head. Qualified citations into another
+ * A range (`…:14–:17`) returns its head AND its tail (`…:17`), so a range that
+ * ends on a rule that is not written fails; the rules between the two are not
+ * checked (a gap there is not an error). Qualified citations into another
  * memory are not returned.
  */
 export function findQualifiedCitations(source) {
@@ -125,6 +127,8 @@ export function findQualifiedCitations(source) {
       if (!isQualified(line, m.index) || !isWholeSpecCitation(line, m.index + m[0].length)) continue;
       if (!SPECS_MEMORY_PREFIX.test(line.slice(0, m.index))) continue;
       out.push({ line: i + 1, citation: m[0] });
+      const tail = /^[–-]:(\d{2})(?!\d)/.exec(line.slice(m.index + m[0].length));
+      if (tail) out.push({ line: i + 1, citation: m[0].replace(/:\d{2}$/, `:${tail[1]}`) });
     }
   }
   return out;

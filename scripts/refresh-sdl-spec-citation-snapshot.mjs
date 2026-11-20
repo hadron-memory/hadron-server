@@ -20,7 +20,7 @@
  *
  * Every node `hadron spec list` returns whose loc is a whole citation
  * (`cor:<module>:<feature>:<rule>…`), EXCEPT the placeholders
- * `hadron spec describe` reports (reserved citations, `cor:spc:020:06` and `:11` per the corpus rules): a reserved citation
+ * `hadron spec describe` reports (reserved citations: a status the server sets; the corpus rules ABOUT them, `cor:spc:020:06` and `:11`, are written specs and stay in): a reserved citation
  * is not a written spec and must fail like a missing one. Superseded nodes stay
  * in (they are written). If either command fails, or `describe` does not carry
  * a `placeholders` list, this script FAILS and leaves the file alone: an
