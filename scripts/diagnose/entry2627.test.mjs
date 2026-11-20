@@ -7,7 +7,7 @@
 // and the no-op output refusal (the last in runner4448.test.mjs, beside the runner fixture it needs).
 import { test, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -115,19 +115,31 @@ test('isMainModule is exactly Node\'s import.meta.main: no argv[1] fallback (#46
   expect(isMainModule(undefined)).toBe(false);
 });
 
-// #4608 BLIND delta P3: an unsupported runtime is never silent: a named line on stderr and a non-zero exit code.
-test('on a Node without import.meta.main the module says so and sets a non-zero exit code, without exiting', async () => {
-  const { flagUnsupportedRuntime, UNSUPPORTED_NODE } = await import('./load.mjs');
-  const written = [];
-  const proc = { stderr: { write: (t) => { written.push(t); return true; } }, exitCode: undefined };
-  expect(flagUnsupportedRuntime(undefined, proc)).toBe(true);
-  expect(written).toEqual([`${UNSUPPORTED_NODE}\n`]);
-  expect(proc.exitCode).toBe(2);
-  for (const main of [true, false]) {
-    const quiet = { stderr: { write: () => { throw new Error('must not write'); } }, exitCode: undefined };
-    expect(flagUnsupportedRuntime(main, quiet)).toBe(false);
-    expect(quiet.exitCode).toBeUndefined();
-  }
+// Bruce's ruling on #4608 (chat #125985): on a Node without import.meta.main, BOTH a direct run and an import refuse,
+// loudly and the same way. import.meta.main is stubbed undefined in a scratch copy of the real module.
+test('with import.meta.main undefined, a direct run and an import both refuse with the named Node requirement', async () => {
+  const { UNSUPPORTED_NODE, requireImportMetaMain } = await import('./load.mjs');
+  expect(() => requireImportMetaMain(undefined)).toThrow(UNSUPPORTED_NODE);
+  expect(() => requireImportMetaMain(true)).not.toThrow();
+  expect(() => requireImportMetaMain(false)).not.toThrow();
+  const dir = mkdtempSync(join(tmpdir(), 'diag-2627-old-'));
+  try {
+    const src = readFileSync(join(here, 'load.mjs'), 'utf8');
+    // Only the code form '(import.meta.main)' is stubbed: the guard call and the entry check.
+    expect(src.split('(import.meta.main)').length - 1).toBe(2);
+    writeFileSync(join(dir, 'load.mjs'), src.split('(import.meta.main)').join('(undefined)'));
+    copyFileSync(join(here, 'sampler.mjs'), join(dir, 'sampler.mjs'));
+    const direct = spawnSync(process.execPath, [join(dir, 'load.mjs'), 'http://127.0.0.1:1', 'idle', '0'], { env, encoding: 'utf8', timeout: 20_000 });
+    expect(direct.status).not.toBe(0);
+    expect(direct.stdout).toBe('');
+    expect(direct.stderr).toContain(UNSUPPORTED_NODE);
+    const imported = spawnSync(process.execPath, ['--input-type=module', '-e',
+      `try { await import(${JSON.stringify(pathToFileURL(join(dir, 'load.mjs')).href)}); console.log('imported'); } catch (e) { console.error(String(e.message)); process.exit(4); }`],
+    { env, encoding: 'utf8', timeout: 20_000 });
+    expect(imported.status).toBe(4);
+    expect(imported.stdout).toBe('');
+    expect(imported.stderr).toContain(UNSUPPORTED_NODE);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('on this (supported) Node, a direct run and an import print no runtime warning', () => {
