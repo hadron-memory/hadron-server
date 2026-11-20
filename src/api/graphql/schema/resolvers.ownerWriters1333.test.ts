@@ -348,54 +348,60 @@ describe('the App, its AppAgent link and its Agent are held while the write deci
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     let judged!: () => void;
-    let failedBeforeJudged!: (e: unknown) => void;
-    const judgedFirst = new Promise<void>((res, rej) => { judged = res; failedBeforeJudged = rej; });
+    const judgedFirst = new Promise<void>((res) => { judged = res; });
     const writing = db.$transaction(async (tx) => {
-      try {
-        expect(await appCarriesOwnersAgent(tx as never, appId, owner())).toBe(true);
-        judged();
-      } catch (e) { failedBeforeJudged(e); throw e; }
+      expect(await appCarriesOwnersAgent(tx as never, appId, owner())).toBe(true);
+      judged();
       await gate;
-    }, { timeout: 15_000 });
-    writing.catch(() => undefined);
+    }, { timeout: 8_000 });
     let settled = false;
     let op: Promise<unknown> | undefined;
+    let failure: unknown;
     try {
-      await within(judgedFirst, 10_000);
+      // Readiness races the transaction itself, so a transaction that fails before judging surfaces at once, not by timeout.
+      await within(Promise.race([judgedFirst, writing.then(() => { throw new Error('write ended before judging'); })]), 5_000);
       op = start().then(() => { settled = true; });
-      op.catch(() => undefined);
-      await waitForLockWaiters(db);
+      await waitForLockWaiters(db, 1, 5_000);
       expect(settled).toBe(false);
+    } catch (e) {
+      failure = e;
     } finally {
       release();
-      await writing;
-      if (op) await op;
+      // Drain both operations whatever happened, then rethrow the FIRST failure, never a later cleanup one.
+      const done = await Promise.allSettled([writing, ...(op ? [op] : [])]);
+      if (failure === undefined) {
+        const bad = done.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
+        if (bad) failure = bad.reason;
+      }
     }
+    if (failure !== undefined) throw failure;
   }
 
   it('an uninstall waits for a write that already judged the App qualified, then the next write is refused', async () => {
     const a = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
     await raceHeldJudgement(a, () => db.app.update({ where: { id: a }, data: { uninstalledAt: new Date() } }));
     expect(await refusal(principalOf(a))).toBe(REFUSED);
-  });
+  }, 30_000);
 
   it('an AppAgent unlink waits for a write that already judged the App qualified', async () => {
     const own = await agent(org.id, null);
     const a = await app({ orgId: org.id, agents: [own] });
     await raceHeldJudgement(a, () => db.appAgent.delete({ where: { appId_agentId: { appId: a, agentId: own } } }));
     expect(await refusal(principalOf(a))).toBe(REFUSED);
-  });
+  }, 30_000);
 
   it('an Agent deletion waits for a write that already judged the App qualified', async () => {
     const own = await agent(org.id, null);
     const a = await app({ orgId: org.id, agents: [own] });
     await raceHeldJudgement(a, () => db.agent.update({ where: { id: own }, data: { deletedAt: new Date() } }));
     expect(await refusal(principalOf(a))).toBe(REFUSED);
-  });
+  }, 30_000);
 });
 
 describe('the live headless path: hadron_update_node under the real run principal (Peter, #125592)', () => {
   const ENTRY = () => `${org.urn}:mem:flow:entry`;
+  /** The refusal text of the last liveRun, so a test can tell the write gate's refusal from any other FORBIDDEN. */
+  let refusedMessage = '';
 
   /** The App's own team space (class app) with an OWNER-role rule: the one org memory a userless run reads by itself. */
   async function teamSpace(appId: string, loc: string) {
@@ -428,6 +434,7 @@ describe('the live headless path: hadron_update_node under the real run principa
     } catch (e) {
       // admitAndExecuteTool wraps a handler's refusal as ToolExecutionError; the typed code rides its cause.
       const inner = ((e as { cause?: unknown }).cause ?? e) as { extensions?: { code?: unknown }; message?: string };
+      refusedMessage = String(inner.message);
       return inner.extensions?.code ? String(inner.extensions.code) : String(inner.message);
     }
   }
@@ -488,6 +495,8 @@ describe('the live headless path: hadron_update_node under the real run principa
     expect(refused).not.toBe('OK');
     expect(refused).not.toBe(REFUSED);
     expect(refused).toBe('FORBIDDEN');
+    // The write gate's own refusal, not an unrelated FORBIDDEN: the same principal read this node above.
+    expect(refusedMessage).toContain('no write access to this memory');
     expect(await content(space.id, 'vault:own')).toBe('before');
   });
 
