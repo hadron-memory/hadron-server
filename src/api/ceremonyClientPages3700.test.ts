@@ -42,9 +42,9 @@ async function load(path: string, answers: Array<{ status?: number; body?: unkno
   const html = await get(path);
   const { document, window } = parseHTML(html);
   const queue = structuredClone(answers); // the script mutates the options it is given
-  const calls: Array<{ path: string; body: unknown }> = [];
-  const fetchFake = async (path: string, init?: { body?: string }) => {
-    calls.push({ path, body: init?.body ? JSON.parse(init.body) : undefined });
+  const calls: Array<{ path: string; method?: string; body: unknown }> = [];
+  const fetchFake = async (path: string, init?: { body?: string; method?: string }) => {
+    calls.push({ path, method: init?.method, body: init?.body ? JSON.parse(init.body) : undefined });
     const a = queue.shift() ?? { status: 500 }; const status = a.status ?? 200; return { ok: status < 300, status, json: async () => a.body };
   };
   const assertion = { rawId: new Uint8Array([1]), response: { authenticatorData: new Uint8Array([1]), clientDataJSON: new Uint8Array([1]), signature: new Uint8Array([1]) } };
@@ -98,6 +98,22 @@ describe('R3 (BLIND P2): a second attempt cannot move the pending account check'
     document.getElementById('stop-account')!.dispatchEvent(new (document.defaultView as any).Event('click'));
     await flush();
     expect(document.getElementById('status-first')!.textContent).toContain('Stopped');
+  });
+
+  it('a new attempt after stop is accepted and runs its own requests', async () => {
+    const { document, click, calls } = await load('/passkeys/register', [
+      { body: { ceremonyId: 'c1', challenge: 'AA' } }, { body: options }, { body: {} },
+      { body: { ceremonyId: 'c2', challenge: 'AA' } }, { body: options }]);
+    click('add-first');
+    await flush();
+    document.getElementById('stop-account')!.dispatchEvent(new (document.defaultView as any).Event('click'));
+    await flush();
+    const before = calls.length;
+    click('add-later');
+    await flush();
+    expect(calls.length).toBeGreaterThan(before);
+    expect(calls.slice(before)[0]).toMatchObject({ path: '/passkeys/register/challenge', method: 'POST' });
+    expect(document.getElementById('add-later')!.nextElementSibling).toBe(document.getElementById('account-check'));
   });
 });
 
@@ -214,7 +230,8 @@ describe('R6: success states say what happens next, in text', () => {
     await flush();
     (document.querySelector('#passkey-list button') as unknown as { dispatchEvent(e: unknown): void }).dispatchEvent(new (document.defaultView as any).Event('click'));
     await flush();
-    expect(calls.at(-1)).toEqual({ path: '/passkeys/revoke/finish', body: { ceremonyId: 'cer-1', credentialId: 'cred-a' } });
+    expect(calls.at(-1)).toEqual({ path: '/passkeys/revoke/finish', method: 'POST', body: { ceremonyId: 'cer-1', credentialId: 'cred-a' } });
+    expect(calls.every((c) => c.method === 'POST')).toBe(true);
     expect(unconsumed()).toBe(0);
     expect(document.getElementById('status-revoke')!.textContent).toBe('Not removed. Start again.');
     expect(document.querySelectorAll('#passkey-list li').length).toBe(1);
