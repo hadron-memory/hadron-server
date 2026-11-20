@@ -33,10 +33,11 @@ import { deriveEdgeLoc, deriveEdgeLocAlternates, compareMigratedSuffix, migrated
  * createEdge in GraphQL and MCP, inline edges, merge, subtree move, extract), which only ever writes the runtime
  * spelling and is out of scope of #4583, can leave one the same way.
  *
- * In every case no data is lost, nothing is merged, and this code raises no unique violation. Serializing the
- * selection through the upsert (an advisory lock per relationship) was declined: the seam's callers handle several
- * relationships per transaction in differing orders, so a late-taken lock risks a lock-order deadlock, a worse failure
- * than the duplicate.
+ * What the selection itself does in these races: it is a read and writes nothing, so the outcome is the duplicate edge
+ * described above, not a lost or merged one. (What the caller's own upsert does under contention is that caller's
+ * concern and is not claimed here.) Serializing the selection through the upsert (an advisory lock per relationship)
+ * was declined: the seam's callers handle several relationships per transaction in differing orders, so a late-taken
+ * lock risks a lock-order deadlock, a worse failure than the duplicate.
  */
 export async function derivedEdgeLocForUpsert(
   db: Pick<PrismaClient, 'edge'>,
