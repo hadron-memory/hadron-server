@@ -672,6 +672,24 @@ describe('resolveAuthContext', () => {
         }
       });
 
+      it('#4555: warm-unreachable classification uses the code, independent of the message', async () => {
+        for (const [code, message] of [
+          ['P1001', 'an unrelated database failure'],
+          ['P2002', "Can't reach database server at `db:5432`"],
+        ]) {
+          const original = new Prisma.PrismaClientKnownRequestError(message, { code, clientVersion: '6.19.2' });
+          const err = await refuse(() => resolveAuthContextWithStatus(makeReq(`Bearer ${USER_KEY}`), busyDb(() => original).db));
+          if (code === 'P1001') {
+            expect(err).toBeInstanceOf(AuthStoreBusyError);
+            expect((err as AuthStoreBusyError).cause).toBe(original);
+            expect((err as AuthStoreBusyError).extensions.reason).toBe('STORE_UNREACHABLE');
+          } else {
+            expect(err).toBe(original);
+            expect(err).not.toBeInstanceOf(AuthStoreBusyError);
+          }
+        }
+      });
+
       it('#4504 (QA round): the warm-pool typed refusal is DETERMINISTIC — the same injected fault serializes identically every call', async () => {
         // #4519 (BLIND P3-5), relabeled: this unit leg cannot assert "identical across key
         // shapes" on its own — a raw (unconverted) error is also identical across key shapes.
@@ -798,8 +816,8 @@ describe('resolveAuthContext', () => {
           },
         } as unknown as typeof db;
         const ctx = await resolveAuthContextWithStatus(makeReq(`Bearer ${USER_KEY}`), stampingDb);
-        // One microtask tick: let the rejected stamp's promise chain (and its swallow) settle
-        // before asserting, so an unhandled rejection would surface here, not in a later test.
+        // One setImmediate (a macrotask) lets this rejection's promise chain settle.
+        // This pins the observed stamp outcome; it is not a general unhandled-rejection monitor.
         await new Promise((resolve) => setImmediate(resolve));
         expect(ctx.auth.userId).toBe('user-4504');
         expect(ctx.credentialStatus).toBe('authenticated');
