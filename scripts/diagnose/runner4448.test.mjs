@@ -44,7 +44,8 @@ esac\n`);
     esac
     printf '%s\\n' '${LOAD_LINE}'; case "$MODE" in fail|failkept) exit 5;; esac;;
    *memory.max*) echo 6442450944;;
-   *diagnose-samples.jsonl*) printf '{"kind":"sample","at":%s}\\n' "$(date +%s%3N)"; [ "$MODE" != failkept ] || printf '%s\\n' '${LOAD_LINE}';;
+   *diagnose-samples.jsonl*) [ "\${FIXTURE_NO_CONFIG:-}" = 1 ] || printf '{"kind":"config","sampleMs":%s}\\n' "\${FIXTURE_SAMPLE_MS:-1000}"
+    printf '{"kind":"sample","at":%s}\\n' "$(( $(date +%s%3N) - \${FIXTURE_SAMPLE_AGE_MS:-0} ))"; [ "$MODE" != failkept ] || printf '%s\\n' '${LOAD_LINE}';;
    *credentials.json*) echo synthetic-private-key;;
    *pg_stat_activity*) echo 2;;
    *health*) while [ "$1" != app ]; do shift; done; shift; NODE_OPTIONS="--import $FIXTURE/health.mjs" "$@";;
@@ -180,6 +181,22 @@ test('exit 0 with no load line is an invalid run, not a pass', () => {
     expect(r.stderr).toContain('printed no load line');
     expect(readFileSync(join(f.dir, 'down'), 'utf8')).toBe('down\n');
   } finally { f.clean(); }
+});
+
+// #2624: the freshness slack is two periods of the interval the preload RECORDED, not a fixed 2000 ms. A last sample
+// 3 s old passes at a recorded 2500 ms (slack 5 s) and is stale at the 1000 ms default (slack 2 s); 6 s old is stale
+// even at 2500 ms (the control); a run whose samples record no supported interval is refused.
+test('the freshness slack derives from the recorded sampling interval, with stale controls', () => {
+  const runWith = (extra) => { const f = fixture('cap'); try { Object.assign(f.env, extra); return f.run(); } finally { f.clean(); } };
+  expect(runWith({ FIXTURE_SAMPLE_MS: '2500', FIXTURE_SAMPLE_AGE_MS: '3000' }).status).toBe(0);
+  expect(runWith({ FIXTURE_SAMPLE_AGE_MS: '3000' }).status).toBe(5);
+  expect(runWith({ FIXTURE_SAMPLE_MS: '2500', FIXTURE_SAMPLE_AGE_MS: '6000' }).status).toBe(5);
+  const unrecorded = runWith({ FIXTURE_NO_CONFIG: '1' });
+  expect(unrecorded.status).toBe(5);
+  expect(unrecorded.stderr).toContain('diagnosis samples carry no supported sampling interval');
+  const unsupported = runWith({ FIXTURE_SAMPLE_MS: '50000' });
+  expect(unsupported.status).toBe(5);
+  expect(unsupported.stderr).toContain('diagnosis samples carry no supported sampling interval');
 });
 
 // #4453 P3 #15: the in-container prerequisites are checked before the settle window, not after.
