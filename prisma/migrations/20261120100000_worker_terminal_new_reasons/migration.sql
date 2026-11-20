@@ -2,7 +2,9 @@
 -- terminal) and multiple_terminals (more than one agent terminal bound to the worker). Both ride locked, as
 -- unrecognized does: the stored status is unchanged and no terminal-status event follows (that event is not
 -- built, cor:agt:050:11 slice S1c). Only the reason list of the worker-terminal shape CHECK widens, admitting
--- every row the old one admitted, so re-adding it cannot refuse on existing data (nothing to raise HDPRF for).
+-- every row the old one admitted, so re-adding it cannot refuse on existing data (this migration refuses
+-- nothing, and must not name the refusal SQLSTATE in a comment: refused-migration-boot.test.ts scans every
+-- migration whose body carries that token and then rejects its bare CASE ... END tokens as transaction enders).
 -- Based on 20261115260000_relaunch_failure_codes's definition (the last migration that redefined it); the
 -- canonical copy test databases and CI read is prisma/host-operation-invariants.sql.
 

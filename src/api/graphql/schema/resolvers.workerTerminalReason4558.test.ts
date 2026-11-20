@@ -156,6 +156,8 @@ describe('#4558 a locked report with a new reason decides nothing, exactly as un
       avail: await db.workerAvailability.findUnique({ where: { workerId: id } }),
       events: await db.agentTeamEvent.count({ where: { subjectWorkerId: id } }),
     });
+    // The setup itself writes team events (a host registered); the pin is that the REPORTS add none.
+    const eventsBefore = await db.agentTeamEvent.count();
     // The control: unrecognized, an existing locked reason.
     const beforeKit = await read(kit.id);
     await send(orca1, [rep(kit.id, { status: 'locked', reason: 'unrecognized', checkedAt: NOW() })]);
@@ -171,6 +173,6 @@ describe('#4558 a locked report with a new reason decides nothing, exactly as un
     // The stored status is locked and the reasons round-trip (the report IS stored; it just decides nothing).
     expect(await stored(kit.id)).toMatchObject({ status: 'locked', reason: 'no_screen' });
     expect(await stored(ada.id)).toMatchObject({ status: 'locked', reason: 'multiple_terminals' });
-    expect(await db.agentTeamEvent.count()).toBe(0);
+    expect(await db.agentTeamEvent.count()).toBe(eventsBefore);
   });
 });
