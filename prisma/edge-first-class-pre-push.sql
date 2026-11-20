@@ -6,6 +6,7 @@
 -- a fresh database is left for db push. Historical label values become name before deriving loc.
 -- Prisma's push then installs the modeled indexes, FK, description and is_runnable fields.
 DO $edge_first_class$
+DECLARE collision_ids text;
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.tables
@@ -95,6 +96,26 @@ UPDATE "edges" e
  WHERE r."id" = e."id";
 
 ALTER TABLE "edges" ALTER COLUMN "loc" SET NOT NULL;
+  END IF;
+
+  -- A numeric suffix can itself equal another edge's natural base (target locs
+  -- may contain colons). Refuse inside this DO so rename/backfills roll back;
+  -- do not commit required columns and strand the next push on its UNIQUE index.
+  SELECT string_agg(id, ', ' ORDER BY id) INTO collision_ids
+    FROM (
+      SELECT e.id
+        FROM edges e
+        JOIN (
+          SELECT memory_id, loc FROM edges
+          GROUP BY memory_id, loc HAVING count(*) > 1
+        ) duplicates USING (memory_id, loc)
+       ORDER BY e.id LIMIT 20
+    ) offenders;
+  IF collision_ids IS NOT NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23505',
+      MESSAGE = 'edge loc collision; conflicting edge ids (up to 20): ' || collision_ids,
+      HINT = 'No edge transition was committed. Resolve the ambiguous legacy labels or endpoint locs, then rerun db:dev-setup.';
   END IF;
 END
 $edge_first_class$;
