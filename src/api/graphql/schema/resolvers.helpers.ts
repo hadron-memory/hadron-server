@@ -3334,6 +3334,12 @@ export async function resolveMemoryRefForMemberGate(
  * P2-1). A blank ref or a relative URN depends only on the input's shape, never on
  * existence, so it propagates as `BAD_USER_INPUT` / `URN_NOT_QUALIFIED`
  * (cor:api:140:01).
+ *
+ * The folded set is CLOSED: `resolveMemoryRef` (src/lib/entityRef/memoryRef.ts) throws
+ * only `MemoryNotFoundError` (unknown or soft-deleted), `AmbiguousLegacyUrnError`
+ * (`resolveLegacyAlias`, more than one live legacy match) and the shape errors
+ * (`UrnNotQualifiedError`, `UrnParseError`), never a `GraphQLError` for a miss. The
+ * class of each is pinned in resolvers.memoryShareRefs4137.test.ts (#4761 blind P2-1).
  */
 export async function resolveMemoryRefConcealed(
   ctx: Context,

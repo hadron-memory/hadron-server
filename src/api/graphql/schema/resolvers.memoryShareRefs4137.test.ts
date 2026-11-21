@@ -20,6 +20,12 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { GraphQLError } from 'graphql';
+import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
+import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import { AmbiguousLegacyUrnError, AmbiguousUserRefError, UserNotFoundError } from '../../../lib/entityRef/errors.js';
+import { UrnNotQualifiedError } from '../../../lib/urn.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -366,5 +372,45 @@ describe('deleteMemoryShare: the grantee is not an oracle for a non-principal (#
 
   it('the principal still gets NOT_FOUND for a ghost (they already know the memory exists)', async () => {
     expect(JSON.parse(refusal(await del('ghost-user-s1', owner.id)))[0].c).toBe('NOT_FOUND');
+  });
+});
+
+// #4761 blind P2-1 (Jack): the FORBIDDEN fold rests on `instanceof` checks, so the
+// proof that nothing existence-dependent escapes it is the CLASS each resolver throws
+// for each kind of miss. Pinned here at the resolver, with real rows, so the closed
+// taxonomy is a test and not a reading of two source files. None of them is a raw
+// GraphQLError (the one shape the folds would let through to a non-principal).
+describe('the resolver error taxonomy behind the concealment folds (#4137 blind P2-1)', () => {
+  const AMB = 'tax-org:tax-mem';
+  const cls = async (f: () => Promise<unknown>) => {
+    try { await f(); } catch (e) { return e as Error; }
+    throw new Error('expected a refusal');
+  };
+
+  it('resolveMemoryRef: unknown, soft-deleted and ambiguous-legacy misses are typed classes, never a GraphQLError', async () => {
+    const unknown = await cls(() => resolveMemoryRef(db, 'cnonexistentnonexistent12'));
+    expect(unknown).toBeInstanceOf(MemoryNotFoundError);
+    const gone = await db.memory.update({ where: { id: personal.id }, data: { deletedAt: new Date() } });
+    expect(await cls(() => resolveMemoryRef(db, gone.id))).toBeInstanceOf(MemoryNotFoundError);
+    await db.memory.update({ where: { id: group.id }, data: { legacyUrn: AMB } });
+    await db.memory.update({ where: { id: personal.id }, data: { deletedAt: null, legacyUrn: AMB } });
+    const ambiguous = await cls(() => resolveMemoryRef(db, AMB));
+    expect(ambiguous).toBeInstanceOf(AmbiguousLegacyUrnError);
+    for (const e of [unknown, ambiguous]) expect(e).not.toBeInstanceOf(GraphQLError);
+  });
+
+  it('resolveMemoryRef: a relative URN is a shape error (URN_NOT_QUALIFIED), the only class that propagates before the gate', async () => {
+    expect(await cls(() => resolveMemoryRef(db, 'onesegment'))).toBeInstanceOf(UrnNotQualifiedError);
+  });
+
+  it('resolveUserRefOrEmail: an unknown user and a case-colliding email are typed classes, never a GraphQLError', async () => {
+    const unknown = await cls(() => resolveUserRefOrEmail(db, 'ghost-user-s1'));
+    expect(unknown).toBeInstanceOf(UserNotFoundError);
+    const lower = `taxo-${generateId().slice(-6)}@example.com`;
+    await db.user.create({ data: { id: generateId(), handle: `t1-${generateId().slice(-6)}`, email: lower, roles: ['READER'] } });
+    await db.user.create({ data: { id: generateId(), handle: `t2-${generateId().slice(-6)}`, email: lower.toUpperCase(), roles: ['READER'] } });
+    const ambiguous = await cls(() => resolveUserRefOrEmail(db, lower.replace('taxo', 'Taxo')));
+    expect(ambiguous).toBeInstanceOf(AmbiguousUserRefError);
+    for (const e of [unknown, ambiguous]) expect(e).not.toBeInstanceOf(GraphQLError);
   });
 });
