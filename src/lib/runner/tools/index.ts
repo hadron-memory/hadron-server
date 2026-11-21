@@ -23,6 +23,7 @@ import { TEAM_CHAT_TOOLS } from './teamChatTools.js';
 import { GITHUB_TOOLS } from './githubTools.js';
 import { CONTENT_VALIDATION_TOOLS } from './contentValidationTools.js';
 import { GRANT_TOOLS } from './grantTools.js';
+import { signingSurfacePolicy } from '../../signing/surface.js';
 
 export { AuthorFailError };
 export { hadronReadNode, hadronCreateNode, hadronUpdateNode } from './nodeTools.js';
@@ -41,7 +42,7 @@ export { teamChatRead } from './teamChatTools.js';
 export { hadronTeamSnapshot } from './teamSnapshotTools.js';
 export { githubIssueSnapshot } from './githubTools.js';
 export { hadronRecordContentValidation } from './contentValidationTools.js';
-export { hadronListGrants } from './grantTools.js';
+export { hadronListGrants, hadronCreateGrant } from './grantTools.js';
 export type { RunToolDef, RunToolContext };
 
 /** The author's printf — lands on the hop's trail element (D-TL-2). */
@@ -86,6 +87,9 @@ export const hadronFail: RunToolDef = {
 /** Injected on every tools-hop (D14's always-on set; final membership here). */
 export const ALWAYS_ON_TOOLS: readonly RunToolDef[] = [hadronLog, hadronFail];
 
+/** Run tools that exist only while signing is on (`signingSurfacePolicy().signing`, read per call). */
+const SIGNING_GATED_TOOLS: ReadonlySet<string> = new Set(['hadron_create_grant']);
+
 const REGISTRY = new Map<string, RunToolDef>(
   [
     ...ALWAYS_ON_TOOLS,
@@ -118,11 +122,13 @@ export function resolveRunTools(names: readonly string[]): {
   tools: RunToolDef[];
   unknown: string[];
 } {
-  const unknown = names.filter((n) => !REGISTRY.has(n));
+  // #3753: a tool that makes a grant request exists only where signing is on, as the GraphQL and MCP doors do (no request where it could not be signed).
+  const known = (n: string) => REGISTRY.has(n) && (!SIGNING_GATED_TOOLS.has(n) || signingSurfacePolicy().signing);
+  const unknown = names.filter((n) => !known(n));
   const picked = new Map<string, RunToolDef>();
   for (const t of ALWAYS_ON_TOOLS) picked.set(t.name, t);
   for (const n of names) {
-    const def = REGISTRY.get(n);
+    const def = known(n) ? REGISTRY.get(n) : undefined;
     if (def) picked.set(n, def);
   }
   return { tools: [...picked.values()], unknown };
