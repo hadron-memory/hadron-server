@@ -132,6 +132,10 @@ describe('R3 (BLIND P2): a second attempt cannot move the pending account check'
     expect(document.getElementById('status-later')!.textContent).toContain('Finish or stop the passkey you are adding first');
     expect(document.getElementById('status-first')!.textContent).toBe('');
     expect(document.getElementById('add-first')!.nextElementSibling).toBe(document.getElementById('account-check'));
+    // Uma P3: once the first attempt is stopped, the ignored click's message goes with it.
+    document.getElementById('stop-account')!.dispatchEvent(new (document.defaultView as any).Event('click'));
+    await flush();
+    expect(document.getElementById('status-later')!.textContent).toBe('');
   });
 
   it('a new attempt after stop is accepted and runs its own requests', async () => {
@@ -195,18 +199,20 @@ describe('#4621 items 1-3: removal dates, the empty list, <time>', () => {
     const t = [...box.querySelectorAll('time')].find((x: any) => x.getAttribute('datetime') === '2026-10-05T10:00:00.000Z') as any;
     expect(t).toBeTruthy();
     expect(t.parentNode.textContent).toContain('Removed ');
+    // BLIND P2: no locale-specific text; the visible removal line (outside any details) holds the exact instant.
+    expect(t.closest('details')).toBeNull();
   });
 
   it('item 1: a passkey removed by its email link shows the removal line too, not only inside the details', async () => {
     const box = await open(await at({ ...base1, revokedAt: '2026-10-05T10:00:00Z', cancel: { at: '2026-10-05T10:00:00Z', ip: null, userAgent: null } }));
     const li = box.querySelector('li')!;
-    const outside = [...li.children].filter((c: any) => c.tagName !== 'DETAILS').map((c: any) => c.textContent).join(' ');
-    expect(outside).toMatch(/Removed [A-Z][a-z]{2} \d/);
+    const line = [...li.children].find((c: any) => c.tagName === 'DIV' && c.textContent.startsWith('Removed ')) as any;
+    expect(line.querySelector('time').getAttribute('datetime')).toBe('2026-10-05T10:00:00.000Z');
   });
 
   it('item 2: no removable passkey says so, with or without removed rows', async () => {
     const none = await load('/passkeys/revoke', [{ body: { ceremonyId: 'c', challenge: 'AA' } }, { body: { passkeys: [] } }]);
-    expect((await open(none)).textContent).toContain('No passkey here can be removed.');
+    expect((await open(none)).textContent).toContain('You have no passkeys to remove.');
     const proverOnly = await at({ ...base1, revokedAt: null, prover: true, cancel: null });
     expect((await open(proverOnly)).textContent).toContain('No passkey here can be removed.');
     const some = await at({ ...base1, revokedAt: null, cancel: null });
@@ -214,10 +220,26 @@ describe('#4621 items 1-3: removal dates, the empty list, <time>', () => {
   });
 
   it('item 3: every date is a <time datetime> holding the ISO instant', async () => {
-    const box = await open(await at({ ...base1, revokedAt: '2026-10-05T10:00:00Z', cancel: { at: '2026-10-05T10:00:00Z', ip: '203.0.113.9', userAgent: 'T/1' } }));
-    const times = [...box.querySelectorAll('time')] as any[];
-    expect(times.length).toBe(3); // added, removed line, details
-    for (const t of times) expect(t.getAttribute('datetime')).toMatch(/^2026-10-0[15]T10:00:00\.000Z$/);
+    const box = await open(await at({ ...base1, revokedAt: '2026-10-05T10:00:00Z', cancel: { at: '2026-10-06T11:00:00Z', ip: '203.0.113.9', userAgent: 'T/1' } }));
+    // BLIND P3: three distinct instants, each in its own element.
+    const iso = (el: any) => el.querySelector('time').getAttribute('datetime');
+    const li = box.querySelector('li')!;
+    const divs = [...li.children].filter((c: any) => c.tagName === 'DIV') as any[];
+    expect(iso(divs.find((d) => d.textContent.startsWith('Added ')))).toBe('2026-10-01T10:00:00.000Z');
+    expect(iso(divs.find((d) => d.textContent.startsWith('Removed ')))).toBe('2026-10-05T10:00:00.000Z');
+    expect(iso(li.querySelector('details p'))).toBe('2026-10-06T11:00:00.000Z');
+    expect(box.querySelectorAll('time').length).toBe(3);
+  });
+
+  it('a malformed or missing timestamp renders as plain text and the rest of the list still renders (BLIND P2)', async () => {
+    const box = await open(await at({ ...base1, registeredAt: 'not a date', revokedAt: null, cancel: null }));
+    expect(box.textContent).toContain('Added an unknown date');
+    expect(box.querySelectorAll('time').length).toBe(0);
+    expect(box.querySelectorAll('button').length).toBe(1); // the row still has its Remove button
+    const w = await load('/passkeys/window/end', [{ body: { label: 'Laptop', registeredAt: null, method: 'github' } }]);
+    w.click('end-window');
+    await flush();
+    expect(w.document.getElementById('window-passkey')!.textContent).toContain('added on an unknown date');
   });
 
   it('item 3: the end-window preview wraps its date in <time datetime> too', async () => {

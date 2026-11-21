@@ -238,9 +238,10 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
       say(out, (done.kind === 'first'
         ? 'Passkey added. Anything it signs stays pending for its cooling-off window. We emailed you a link to remove it if this wasn\'t you.'
         : 'Passkey added. We emailed you a notice.') + nextStep);
+      say(out === 'status-later' ? 'status-first' : 'status-later', ''); // an ignored click's message does not outlive the attempt
       if (done.kind === 'first' && main.dataset.next === 'sign-in' && $('continue-signin')) $('continue-signin').hidden = false;
       registering = false;
-    }).catch(function (e) { registering = false; say(out, e && e.message && e.message !== 'refused' ? e.message : 'That didn\'t work. Start again.'); });
+    }).catch(function (e) { registering = false; say(out === 'status-later' ? 'status-first' : 'status-later', ''); say(out, e && e.message && e.message !== 'refused' ? e.message : 'That didn\'t work. Start again.'); });
   };
   // #1631 PR3: the revocation page.
   var revokeCeremony = null;
@@ -249,13 +250,18 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
   };
   var el = function (tag, text, cls) { var e = document.createElement(tag); if (text) e.textContent = text; if (cls) e.className = cls; return e; };
   // #4621 item 3: a date is a <time datetime> holding the ISO instant; the text stays the local, minute-precision form.
-  var timeEl = function (v) { var t = el('time', fmtDate(v)); t.setAttribute('datetime', new Date(v).toISOString()); return t; };
-  // A line of plain text with dates in it: parts are strings or ISO dates marked { date: v }.
-  var line = function (tag, parts, cls) {
-    var e = el(tag, '', cls);
+  // BLIND P2 (George): a missing or malformed timestamp renders as plain text, never a RangeError that aborts the list.
+  var timeEl = function (v) {
+    var d = new Date(v);
+    if (v == null || isNaN(d.getTime())) return document.createTextNode('an unknown date');
+    var t = el('time', fmtDate(v)); t.setAttribute('datetime', d.toISOString()); return t;
+  };
+  // Append text and dates to an element: each part is a string or a date marked { date: v }.
+  var appendTextAndDates = function (e, parts) {
     parts.forEach(function (x) { e.appendChild(typeof x === 'string' ? document.createTextNode(x) : timeEl(x.date)); });
     return e;
   };
+  var line = function (tag, parts, cls) { return appendTextAndDates(el(tag, '', cls), parts); };
   var row = function (p) {
     var li = el('li');
     var removed = !!p.revokedAt;
@@ -294,7 +300,7 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
     var removedOrProver = passkeys.filter(function (p) { return p.revokedAt || p.prover; });
     var group = function (items) { var ul = el('ul'); items.forEach(function (p) { ul.appendChild(row(p)); }); return ul; };
     // #4621 item 2: say so when nothing here can be removed.
-    if (removable.length) box.appendChild(group(removable)); else box.appendChild(el('p', 'No passkey here can be removed.', 'hint'));
+    if (removable.length) box.appendChild(group(removable)); else box.appendChild(el('p', passkeys.length ? 'No passkey here can be removed.' : 'You have no passkeys to remove.', 'hint'));
     if (removedOrProver.length) { box.appendChild(el('h3', 'Removed, or used to prove it is you')); box.appendChild(group(removedOrProver)); }
   };
   // The identity-provider confirmation is spent (or was refused) at start: offer the providers again (Uma #2230 P2-1).
@@ -337,8 +343,7 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
       var w = $('window-passkey'); var b = $('confirm-window');
       var how = { github: 'GitHub', google: 'Google', apple: 'Apple', email: 'an email link' }[p.method] || 'another method';
       w.textContent = '';
-      [ 'The passkey "' + p.label + '" was added on ', { date: p.registeredAt }, ' after confirming with ' + how + '. Ending its cooling-off window makes anything it signed count as signed by you, so continue only if you added it.' ]
-        .forEach(function (x) { w.appendChild(typeof x === 'string' ? document.createTextNode(x) : timeEl(x.date)); });
+      appendTextAndDates(w, [ 'The passkey "' + p.label + '" was added on ', { date: p.registeredAt }, ' after confirming with ' + how + '. Ending its cooling-off window makes anything it signed count as signed by you, so continue only if you added it.' ]);
       var n = $('not-mine-window');
       w.hidden = false; b.hidden = false; n.hidden = false; w.focus();
       // Uma P2-4: the case this preview exists to catch.
