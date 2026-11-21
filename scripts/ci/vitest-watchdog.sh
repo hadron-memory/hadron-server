@@ -16,7 +16,9 @@
 #        no new PID appears, which also holds a descendant that left the group but is still a child.
 #      Nothing is matched by name, and nothing outside those two handles is touched (the step's own sampler is a
 #      sibling: the step's EXIT trap ends it after this script returns, so it dies last);
-#   3. checks that nothing it signalled is still running (a zombie is not running), and prints
+#   3. checks what it can observe: that no member of the command's process group and none of the walked PIDs is still
+#      running (a zombie is not running). It does not prove a process it never found has ended (see the residuals).
+#      It prints
 #      "[watchdog] vitest exceeded N min; killed", or, if something is, "...; kill NOT verified, still running: <pids>";
 #      either way it exits 124 (GNU timeout's code for "the time ran out"), which vitest itself does not use, so a
 #      watchdog kill is distinguishable from a test failure (exit 1).
