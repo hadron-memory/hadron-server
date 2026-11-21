@@ -3153,7 +3153,7 @@ export const nodeMutations = {
         if (!row.role && row.isRunnable !== true) continue;
         if (await roleWritersRefusal(ctx.db, ctx, row.memoryId, {
           priorRole: row.role, nextRole: row.role, priorRunnable: row.isRunnable, nextRunnable: row.isRunnable,
-        })) {
+        }, { lock: false })) {
           skipCounts.governed += 1;
           scannedNodes.splice(i, 1);
         }
@@ -5091,7 +5091,7 @@ export const nodeMutations = {
         const refusal = await roleWritersRefusal(ctx.db, ctx, node.memoryId, {
           priorRole: node.role, nextRole: restoredRole === undefined ? node.role : restoredRole,
           priorRunnable: node.isRunnable, nextRunnable: restored.isRunnable,
-        });
+        }, { lock: false });
         if (refusal) throw refusal;
       }
 

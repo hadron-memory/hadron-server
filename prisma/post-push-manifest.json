@@ -2812,6 +2812,42 @@
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
+      "name": "coordinator_cadence_episodes_event_id_key",
+      "kind": "unique-constraint",
+      "file": "unique-constraint-invariants.sql",
+      "why": "Table-level UNIQUE constraint defined in raw SQL; not expressible in the Prisma schema as written."
+    },
+    {
+      "name": "dark_worker_episodes_event_id_key",
+      "kind": "unique-constraint",
+      "file": "unique-constraint-invariants.sql",
+      "why": "Table-level UNIQUE constraint defined in raw SQL; not expressible in the Prisma schema as written."
+    },
+    {
+      "name": "host_sweep_episodes_event_id_key",
+      "kind": "unique-constraint",
+      "file": "unique-constraint-invariants.sql",
+      "why": "Table-level UNIQUE constraint defined in raw SQL; not expressible in the Prisma schema as written."
+    },
+    {
+      "name": "post_limit_episodes_event_id_key",
+      "kind": "unique-constraint",
+      "file": "unique-constraint-invariants.sql",
+      "why": "Table-level UNIQUE constraint defined in raw SQL; not expressible in the Prisma schema as written."
+    },
+    {
+      "name": "rate_limit_buckets_field_class_dimension_subject_window_sta_key",
+      "kind": "unique-constraint",
+      "file": "unique-constraint-invariants.sql",
+      "why": "Table-level UNIQUE constraint defined in raw SQL; not expressible in the Prisma schema as written."
+    },
+    {
+      "name": "start_failing_episodes_event_id_key",
+      "kind": "unique-constraint",
+      "file": "unique-constraint-invariants.sql",
+      "why": "Table-level UNIQUE constraint defined in raw SQL; not expressible in the Prisma schema as written."
+    },
+    {
       "name": "agent_task_counters_project_uniq",
       "kind": "unique-index",
       "file": "agent-task-number-backfill.sql",
