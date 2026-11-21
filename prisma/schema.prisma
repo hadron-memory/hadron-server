@@ -3693,7 +3693,7 @@ model McpServer {
   @@map("mcp_servers")
 }
 
-/// One named secret in the platform's secret store, owned by a user, an organization, an App or a memory. A run
+/// One named secret in the platform's secret store, owned by a user, an organization or an App. A run
 /// or a tool that needs a credential names the secret, and the server resolves and decrypts it for that use.
 ///
 /// Relationships: the owner is (`ownerType`, `ownerId`), deliberately without a foreign key. Whether a caller
@@ -3701,13 +3701,13 @@ model McpServer {
 /// App-owned secret keeps its value in SecretVersion rows.
 ///
 /// Behaviour:
-/// - Resolution: a bare name is looked up from the most specific owner to the least: memory, then App, then
-///   user, then organization. The name is unique per owner.
+/// - Resolution: a bare name is looked up from the most specific owner to the least: user, then organization.
+///   App secrets are outside that cascade (`cor:sec:020:01`). The name is unique per owner.
 /// - `kind` says what the secret is: `generic` is opaque; `webfetch-auth` is typed, with `metadata`
 ///   `{ type, urlPrefix }`, and is used only for requests under that URL prefix.
 /// - `metadata` is the part that is not secret and may be shown: a reader can see that a secret exists and where
 ///   it applies. `valueEncrypted` is never selected into a read.
-/// - For a user, organization or memory secret the value is in `valueEncrypted`, and a rotation overwrites it.
+/// - For a user or organization secret the value is in `valueEncrypted`, and a rotation overwrites it.
 ///   For an App secret that column is null and the value is the newest SecretVersion (`chk_secret_app_value`).
 ///   `protected` has a meaning only for App secrets.
 /// - Deleting is a hard delete; a run that still names the secret fails visibly.
@@ -3715,7 +3715,7 @@ model McpServer {
 /// Background: #677, #3997.
 model Secret {
   id             String   @id @default(cuid())
-  ownerType      String   @map("owner_type") // 'user' | 'org' | 'app' | 'memory'
+  ownerType      String   @map("owner_type") // 'user' | 'org' | 'app'
   ownerId        String   @map("owner_id")
   /// Cascade-resolution key; unique per owner; lowercase [a-z0-9-], max 64.
   name           String
