@@ -25,9 +25,10 @@ let parent: { id: string };
 let child: { id: string };
 let admin: { id: string };
 
-type Row = { departed: boolean; stamp: string | null };
+type Row = { departed: boolean; stamp: string | null; cause: string | null };
 const row = async (id: string): Promise<Row> => (await db.$queryRaw<Row[]>(Prisma.sql`
-  SELECT holder_departed_at IS NOT NULL AS departed, (to_jsonb(g)->>'holder_departed_at') AS stamp FROM grants g WHERE id = ${id}`))[0]!;
+  SELECT holder_departed_at IS NOT NULL AS departed, (to_jsonb(g)->>'holder_departed_at') AS stamp,
+  (to_jsonb(g)->>'holder_departure_reason') AS cause FROM grants g WHERE id = ${id}`))[0]!;
 const held = (agentId: string, appId: string, over: Record<string, unknown> = {}) =>
   insertGrantUnguarded(w, { user_id: null, agent_id: agentId, app_id: appId, activated_at: HOUR_AGO, ...over } as never);
 const install = (appId: string, agentId: string) => db.appAgent.create({ data: { appId, agentId } });
@@ -63,6 +64,8 @@ describe('#4179 hard-deleted importing parent: the imported agent\'s grants end 
     await hardDelete(parent.id);
     expect((await row(live)).departed).toBe(true);
     expect((await row(pending)).departed).toBe(true);
+    // #4180 (Byron LOCAL F1): this door records its own cause, the importer's hard delete.
+    expect([(await row(live)).cause, (await row(pending)).cause]).toEqual(['AGENT_IMPORTER_DELETED', 'AGENT_IMPORTER_DELETED']);
     for (const id of [otherApp, worker, person]) expect((await row(id)).departed, id).toBe(false);
   });
 

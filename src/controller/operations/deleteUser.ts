@@ -483,7 +483,7 @@ async function runDeletionTxn(
       //    foreign-key action, so this is explicit; the Agents, Workers and Apps erased above ended theirs by the delete triggers.
       //  - Grants this person ISSUED stay as they were, with the issuer link gone and the reason kept (`:08`); one row can be both.
       // Last among the writes that lock grant rows, so the grant row lock is the last lock this transaction takes.
-      await endHeldGrants(tx, 'user', targetUserId);
+      await endHeldGrants(tx, 'user', targetUserId, 'USER_ERASED');
       // #3998: secret_read_clients.issuer_user_id stays sealed history; client authorization reads this current grant link.
       await tx.$executeRaw`UPDATE grants SET issuer_user_id = NULL WHERE issuer_user_id = ${targetUserId}`;
       // #3813 / cor:acl:140:08, ruling 0265: a requester's link dies in this same erasure transaction.
