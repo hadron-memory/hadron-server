@@ -4,6 +4,8 @@ import { GraphQLError } from 'graphql';
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { visibleChange, type ChangeRequest } from '../../../lib/secrets/changeRequests.js';
 import { signingSurfacePolicy } from '../../../lib/signing/surface.js';
+import { admitOperationRate } from '../../../lib/rateLimit/index.js';
+import { appRateIdentity } from './resolvers.secret.js';
 const absent = () => new GraphQLError('Secret change request not found.', { extensions: { code: 'NOT_FOUND' } });
 async function person(ctx: Context) {
  if (!signingSurfacePolicy().signing || ctx.appKeyId) throw absent();
@@ -21,6 +23,8 @@ export const secretChangeQueries = {
 };
 export const secretChangeMutations = {
  withdrawSecretChangeRequest: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+  // #4717 item 5: admitted like every sibling secret write, before anything is read; a refused withdraw changes nothing.
+  await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
   const userId = await person(ctx);
   return ctx.db.$transaction(async(tx) => {
    const [r] = await tx.$queryRaw<ChangeRequest[]>`SELECT id,state,expires_at FROM secret_change_requests WHERE id=${id} AND requester_id=${userId} FOR UPDATE`;
