@@ -445,6 +445,25 @@ describe('#3998: signing a secret.reveal grant creates its read client', () => {
   });
 });
 
+describe('#4000: signing a secret.use grant', () => {
+  it('shows the complete binding and creates one App-held read client at activation', async () => {
+    const secret = await db.secret.create({ data: { ownerType: 'app', ownerId: appId, name: 'use-token', kind: 'webfetch-auth' } as never });
+    const id = generateId();
+    await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, grantee_app_id, action, action_values, reason, max_uses, created_at, updated_at)
+      VALUES ($1, $2, $2, 'secret.use', $3::jsonb, 'use it', 3, (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
+    id, appId, JSON.stringify({ secret: secret.id, 'auto-delete': 'keep', 'binding-prefix': 'https://api.example.test/v1', 'binding-header': 'Authorization' }));
+    const req = await openRequest(id);
+    const proof = await prove(req.id, admin);
+    expect(proof.json.canSign).toBe(true);
+    expect(proof.json.view.summary).toContain('https://api.example.test/v1 with header Authorization');
+    const result = await post(req.id, 'complete', signingBody(proof, admin), proof.cookie);
+    expect(result.status).toBe(200);
+    const rows = await db.secretReadClient.findMany({ where: { grantId: id } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ issuerUserId: admin.id, selfIssued: false, secretId: secret.id, appId });
+  });
+});
+
 describe('refusals at completion are judged before any write', () => {
   async function expectNothingWritten(g: string, reqId: string, userId: string, counterBefore: number) {
     expect((await grantRow(g)).activated_at).toBeNull();

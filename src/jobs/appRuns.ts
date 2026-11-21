@@ -29,6 +29,8 @@ import { generateId } from '../lib/id.js';
 import { toNaiveUtc } from '../lib/sessionActivity.js';
 import { getBusClient } from '../lib/bus/index.js';
 import { evaluatePolicyChain, parsePolicyLink, type PolicyAction } from '@hadron-memory/access-control';
+import { parseRunPolicySnapshot } from '../lib/runner/runPolicy.js';
+export { parseRunPolicySnapshot } from '../lib/runner/runPolicy.js';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import { emitNodeUrnV2 } from '../lib/urnEmit.js';
 import { resolveAiConfigWithFallback, NoAiConfigAvailableError } from '../lib/aiConfig.js';
@@ -1299,21 +1301,6 @@ async function executeAppRunInner(
     // Unexpected infra error: record, don't crash the listener.
     return fail(err instanceof AutomationPinError ? err.code : 'INTERNAL', String((err as Error)?.message ?? err), err instanceof AutomationPinError ? err.reason : undefined);
   } finally { deps.releaseAutomationProof?.(run); }
-}
-
-/**
- * Parse an AppRun.policy snapshot into chain links. Two stored shapes:
- * `{chain: [link, ...]}` (#510 — the full conjunctive snapshot) and the
- * pre-#510 single-link object (runs minted before the deploy). Anything
- * unparseable yields `[null]` — an absent link, which the evaluator treats
- * as no restriction (PR-512 review: comment matched to behavior).
- */
-export function parseRunPolicySnapshot(raw: unknown): Array<{ allow: string[] } | null> {
-  if (raw != null && typeof raw === 'object' && !Array.isArray(raw)) {
-    const chain = (raw as { chain?: unknown }).chain;
-    if (Array.isArray(chain)) return chain.map((l) => parsePolicyLink(l));
-  }
-  return [parsePolicyLink(raw)];
 }
 
 /**

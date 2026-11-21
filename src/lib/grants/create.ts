@@ -1,3 +1,6 @@
+import { isSecretUseHeaderName, isSecretUsePrefix } from '../secrets/useBinding.js';
+import { currentAppSecretValue, lockSecretRow } from '../secrets/appSecrets.js';
+import { assertSecretUseHeader } from '../runner/secrets.js';
 /**
  * #3690 PR 2 (Grants S2a create; cor:acl:140:05 Create, :03 pending, :01, :02; rulings 0099, 0253, 0255 items 6 and 20): the ONE
  * writer of a grant row. It makes a PENDING grant and nothing else: there is no input for activation, a verifier, a signature,
@@ -45,7 +48,8 @@ export type GrantCreateCode =
   | 'GRANT_ACTION_UNKNOWN'
   | 'GRANT_VALUES_INVALID'
   | 'GRANT_TERMS_INVALID'
-  | 'SECRET_AUTO_DELETE_NEEDS_LIMIT';
+  | 'SECRET_AUTO_DELETE_NEEDS_LIMIT'
+  | 'SECRET_AUTO_DELETE_NOT_AVAILABLE';
 
 const MESSAGES: Record<GrantCreateCode, string> = {
   SECRET_AUTO_DELETE_NEEDS_LIMIT: 'An auto-delete mark needs a window or a read budget.',
@@ -54,6 +58,7 @@ const MESSAGES: Record<GrantCreateCode, string> = {
   GRANT_ACTION_UNKNOWN: 'That action is not registered.',
   GRANT_VALUES_INVALID: 'The values do not match the action\'s declared parameters.',
   GRANT_TERMS_INVALID: 'The grant\'s terms cannot be recorded.',
+  SECRET_AUTO_DELETE_NOT_AVAILABLE: 'Auto-delete on a read client is not available yet.',
 };
 
 /** A refusal of a create. The text is fixed for each refusal case: it never carries a submitted value or an id. */
@@ -104,6 +109,8 @@ function valueMatchesType(type: string, value: unknown): boolean {
   // #3998 (cor:acl:140:09, secret forms): a secret id is ONE stored id, never a list or the wildcard; the mark is one of two tokens, exactly.
   if (type === 'secret-ref') return typeof value === 'string' && NODE_ID_RE.test(value);
   if (type === 'secret-mark') return value === 'keep' || value === 'delete';
+  if (type === 'https-prefix') return isSecretUsePrefix(value);
+  if (type === 'header-name') return isSecretUseHeaderName(value);
   if (type !== 'node-ref') return false;
   const one = (v: unknown) => v === '*' || (typeof v === 'string' && NODE_ID_RE.test(v));
   return Array.isArray(value) ? value.every(one) : one(value);
@@ -159,6 +166,10 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
     // Held by the agent in this App: installed, licensed and not deleted here, judged on the locked state.
     const agents = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM agents WHERE id = ${holder.id} AND deleted_at IS NULL FOR SHARE`;
     if (agents.length === 0 || !(await isAgentInstalledAndLicensed(tx, appId, holder.id))) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
+  } else if (holder.kind === 'app' && args.action === 'secret.use' && !me && holder.id === appId) {
+    // Only this App's run may consume an App-held use grant; keep the holder alive until insertion.
+    const apps = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM apps WHERE id = ${holder.id} AND deleted_at IS NULL FOR SHARE`;
+    if (apps.length === 0) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
   } else if (holder.kind === 'user' && args.action === SECRET_REVEAL_ACTION) {
     // #3998: a PERSON holds a secret.reveal grant (the one action that reads its secret on a server-hosted passkey page). Live,
     // locked FOR SHARE so an erasure that comes next waits and ends the new row through endHeldGrants. No other action has a person holder.
@@ -188,6 +199,11 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
     if (p.refusesWildcard && v === '*') throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} refuses a wildcard`);
   }
 
+  // S6 owns deletion; never create a use grant whose signed delete promise cannot yet be honored.
+  if (action.name === 'secret.use' && (values as Record<string, unknown>)['auto-delete'] === 'delete') {
+    throw new GrantCreateRefusal('SECRET_AUTO_DELETE_NOT_AVAILABLE');
+  }
+
   // V86 (#4067, ruling 0265, cor:acl:140:07): a grant may name only a node its REQUESTER can read. The signer shows every node as its
   // canonical URN, so an id that resolves to nothing could never be signed. A missing, deleted or unreadable node is the SAME refusal
   // (same code, same detail as a malformed id), so this is no existence oracle. Judged before the insert: a refusal stores nothing.
@@ -208,8 +224,18 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   // other-App, org, user or inject-only secret is the same refusal as a malformed id, so this is no existence oracle.
   for (const p of declared) {
     if (p.type !== 'secret-ref') continue;
-    const secret = await tx.secret.findFirst({ where: { id: (values as Record<string, unknown>)[p.name] as string, ownerType: 'app', ownerId: appId }, select: { kind: true } });
-    if (!secret || !isModelReadableKind(secret.kind)) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    const secretId = (values as Record<string, unknown>)[p.name] as string;
+    if (action.name === 'secret.use' && !(await lockSecretRow(tx, secretId))) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    const secret = await tx.secret.findFirst({ where: { id: secretId, ownerType: 'app', ownerId: appId }, select: { kind: true } });
+    if (!secret || (action.name === 'secret.use' ? secret.kind !== 'webfetch-auth' : !isModelReadableKind(secret.kind))) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    if (action.name === 'secret.use') {
+      try {
+        const value = await currentAppSecretValue(tx, { id: secretId, ownerId: appId });
+        assertSecretUseHeader((values as Record<string, unknown>)['binding-header'] as string, value, {});
+      } catch {
+        throw new GrantCreateRefusal('GRANT_VALUES_INVALID', 'Invalid secret use binding');
+      }
+    }
   }
 
   // Count Unicode code points like task findings, with a UTF-16 fast bound so counting work is bounded.
@@ -244,10 +270,11 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   const userId = holder.kind === 'user' ? holder.id : null;
   const agentId = holder.kind === 'agent' ? holder.id : null;
   const workerId = holder.kind === 'worker' ? holder.id : null;
+  const granteeAppId = holder.kind === 'app' ? holder.id : null;
   await tx.$executeRaw`
-    INSERT INTO grants (id, app_id, user_id, agent_id, worker_id, requested_by_user_id, requested_by_worker_id, requested_by_session_id,
+    INSERT INTO grants (id, app_id, user_id, agent_id, worker_id, grantee_app_id, requested_by_user_id, requested_by_worker_id, requested_by_session_id,
                         action, action_values, starts_at, expires_at, max_uses, reason, created_at, updated_at)
-    VALUES (${id}, ${appId}, ${userId}, ${agentId}, ${workerId}, ${requester.userId}, ${requester.workerId}, ${requester.sessionId},
+    VALUES (${id}, ${appId}, ${userId}, ${agentId}, ${workerId}, ${granteeAppId}, ${requester.userId}, ${requester.workerId}, ${requester.sessionId},
             ${action.name}, ${JSON.stringify(values)}::jsonb, ${startsAt?.toISOString() ?? null}::timestamptz AT TIME ZONE 'UTC', ${expiresAt?.toISOString() ?? null}::timestamptz AT TIME ZONE 'UTC', ${maxUses}, ${args.reason},
             (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`;
   return id;

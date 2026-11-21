@@ -914,7 +914,7 @@ export const appRunMutations = {
   },
 
   /**
-   * Mint comm.outbound tickets into the org ledger (cor:acl:050:04 tier 2).
+   * Mint tickets into the org ledger (hrn:node:hadronmemory.com:specs:cor:acl:050:04).
    * Org-ADMIN only; `note` keeps the ledger legible ("where did they go?").
    */
   mintActionTickets: async (
@@ -945,8 +945,8 @@ export const appRunMutations = {
       }
       appId = app.id;
     }
-    if (input.action !== 'comm.outbound') {
-      throw new GraphQLError('v1 tickets exist for the comm.outbound action class only (cor:acl:050:04).', {
+    if (input.action !== 'comm.outbound' && input.action !== 'secret.use') {
+      throw new GraphQLError('Unknown ticket action class.', {
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }

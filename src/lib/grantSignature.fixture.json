@@ -547,6 +547,37 @@
       "challengeBase64url": "Np00xlxGFB90K71b4iNpqLgOF9bp1cA4fNzFnlwZCd0"
     },
     {
+      "name": "secret-use-binding",
+      "note": "secret.use: signed secret, mark, HTTPS prefix and header",
+      "grantId": "cm3k9x2b00002ab12cd34ef57",
+      "recordVersion": 1,
+      "requestId": "Q2hhbGxlbmdlUmVxdWVzdA",
+      "terms": {
+        "appId": "cm3k9x2a00001ab12cd34ef56",
+        "holder": {
+          "kind": "agent",
+          "id": "01a05c157fe171208eef57f6ddb9b701"
+        },
+        "action": "secret.use",
+        "values": {
+          "secret": "cm3k9x2b00002ab12cd34ef57",
+          "auto-delete": "keep",
+          "binding-prefix": "https://api.example.test/v1",
+          "binding-header": "Authorization"
+        },
+        "startsAt": null,
+        "expiresAt": "2026-12-31T23:59:59.000Z",
+        "maxUses": null,
+        "reason": "Run the nightly digest."
+      },
+      "termsUtf8": "hadron-grant-terms-v1\napp cm3k9x2a00001ab12cd34ef56\nholder agent 01a05c157fe171208eef57f6ddb9b701\naction secret.use\nvalues {\"auto-delete\":\"keep\",\"binding-header\":\"Authorization\",\"binding-prefix\":\"https://api.example.test/v1\",\"secret\":\"cm3k9x2b00002ab12cd34ef57\"}\nstarts none\nexpires 2026-12-31T23:59:59.000Z\nmax-uses none\nreason \"Run the nightly digest.\"\n",
+      "termsHash": "e774369cd06b5bccaefe347e1782283cbb1f1a904f3e7a6317c795350bbf0b7c",
+      "payloadUtf8": "hadron-grant-signature-v1\ngrant cm3k9x2b00002ab12cd34ef57\nversion 1\nterms-hash e774369cd06b5bccaefe347e1782283cbb1f1a904f3e7a6317c795350bbf0b7c\nrequest Q2hhbGxlbmdlUmVxdWVzdA\n",
+      "canonical": "aGFkcm9uLWdyYW50LXNpZ25hdHVyZS12MQpncmFudCBjbTNrOXgyYjAwMDAyYWIxMmNkMzRlZjU3CnZlcnNpb24gMQp0ZXJtcy1oYXNoIGU3NzQzNjljZDA2YjViY2NhZWZlMzQ3ZTE3ODIyODNjYmIxZjFhOTA0ZjNlN2E2MzE3Yzc5NTM1MGJiZjBiN2MKcmVxdWVzdCBRMmhoYkd4bGJtZGxVbVZ4ZFdWemRBCg==",
+      "challengeHex": "8ff7815733a4565da2f1f1aeac3fcc570b686a7bb2cfcbbf9db6e597f91900d9",
+      "challengeBase64url": "j_eBVzOkVl2i8fGurD_MVwtoanuyz8u_nbbll_kZANk"
+    },
+    {
       "name": "reason-surrounding-space",
       "note": "leading and trailing spaces kept as stored",
       "grantId": "cm3k9x2b00002ab12cd34ef57",
