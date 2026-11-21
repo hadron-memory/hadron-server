@@ -49,8 +49,7 @@ import { personalOrgAgentTextAllowed } from './personalOrgAgentInstall.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isAgentInstalledAndLicensed } from '../appAgent.js';
 import { isActiveAgentSubscription } from '../agentSubscription.js';
-import { validateSessionBinding } from '../../middleware/auth.js';
-import { isSessionSupersededError } from '../sessionSuperseded.js';
+import { loadSessionBinding } from '../sessionBinding.js';
 import { isRunPrincipal } from './runPrincipal.js';
 
 /**
@@ -85,7 +84,7 @@ export async function sessionScopedMemoryIds(
   // #3401 D1 (cor:aut:020:02, only an active session binds): an MCP transport keeps the session it was opened
   // with, so a reach computed from that id alone would outlive the session. Every call re-validates it through the
   // ONE binding check (not ended, not past its hard expiry, not dormant, this App's), never a copy of it. A dead
-  // session reaches nothing; a superseded one answers the same, since a read refusal must not differ (D4).
+  // session reaches nothing, whatever ended it, since a read refusal must not differ (D4).
   if (!(await liveBinding(db, appId, sessionId))) return [];
   const app = await db.app.findUnique({
     where: { id: appId },
@@ -192,14 +191,13 @@ export async function sessionScopedMemoryIds(
   return ids;
 }
 
-/** The pure App-key leg of the one binding check; a typed supersession is a dead session here. */
+/**
+ * The pure App-key leg of the one binding check (`loadSessionBinding`, the body of `validateSessionBinding`). An
+ * ended session is dead here whatever its end reason; the middleware's typed supersession refusal is for a request
+ * that NAMES a session, not for a read gate, whose refusal must stay the unknown-memory answer (D4).
+ */
 async function liveBinding(db: PrismaClient, appId: string, sessionId: string): Promise<boolean> {
-  try {
-    return (await validateSessionBinding(db, { appId }, sessionId)) !== null;
-  } catch (error) {
-    if (isSessionSupersededError(error)) return false;
-    throw error;
-  }
+  return (await loadSessionBinding(db, { appId }, sessionId)).binding !== null;
 }
 
 /**
