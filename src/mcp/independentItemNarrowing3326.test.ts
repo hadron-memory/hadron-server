@@ -14,6 +14,7 @@ import { independentUserItemAccess } from '../lib/auth/independentUserItemAccess
 
 const MANY = 30; // org memories the user can read and write independently, none of them an item
 const PUBLICS = 10; // PUBLIC knowledge memories, readable by everyone
+const SUBSCRIBED = 5; // PUBLIC memories subscribed to the user's org at CONTRIBUTOR, readable and writable that way
 
 async function fixture() {
   const org = await db.organization.create({ data: { name: 'Pins3326', urn: `pins-${generateId().toLowerCase()}.example` } });
@@ -28,6 +29,11 @@ async function fixture() {
   const unreachable = await knowledge(`${other.urn}:item-unreachable`, other.id);
   for (let i = 0; i < MANY; i++) await knowledge(`${org.urn}:bulk-${i}`, org.id);
   for (let i = 0; i < PUBLICS; i++) await knowledge(`${other.urn}:public-${i}`, other.id, 'PUBLIC');
+  // Subscribed to the user's org at CONTRIBUTOR: independently writable through the subscription arm, none an item.
+  for (let i = 0; i < SUBSCRIBED; i++) {
+    const m = await knowledge(`${other.urn}:subscribed-${i}`, other.id, 'PUBLIC');
+    await db.memorySubscription.create({ data: { organizationId: org.id, memoryId: m.id, role: 'CONTRIBUTOR' } });
+  }
   await db.agentMemoryItem.createMany({ data: [reachable, unreachable].map(m => ({ agentId: agent.id, memoryId: m.id, role: 'read-write' })) });
   const { app } = await createDbAppWithKey(db, 'first', org.id);
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
@@ -49,13 +55,13 @@ async function memoryRows<T>(run: () => Promise<T>) {
 
 describe('#3326 bounded work (rows and queries, not time)', () => {
   it('many independently readable memories, two candidate items: the independent set is bounded to the candidates', async () => {
-    expect(MANY + PUBLICS).toBe(40);
+    expect(MANY + PUBLICS + SUBSCRIBED).toBe(45);
     const { result, rows } = await memoryRows(() => getAppMemoryAccess(db, f.app.id, { callerUserId: f.user.id }));
     // Behavior: the reachable item folds, the unreachable one does not, the system memory is the Agent's own.
     expect(result.get(f.reachable.id)).toBe('READ_WRITE');
     expect(result.has(f.unreachable.id)).toBe(false);
-    // Work: the 40 unrelated readable memories are never loaded. Today's main loads all of them (rows >= 40).
-    expect(rows).toBeLessThanOrEqual(8);
+    // Work: the 45 unrelated readable memories are never loaded. Today's main loads all of them (rows >= 40).
+    expect(rows).toBe(3); // measured on this fixture; main loads every unrelated readable memory too (73 rows before the 5 subscribed ones)
   });
 
   it('no item: no independent lookup at all, and an empty candidate list issues no query', async () => {
@@ -71,7 +77,15 @@ describe('#3326 bounded work (rows and queries, not time)', () => {
 describe('#3326 the narrowed answer is the full answer restricted to the candidates', () => {
   it('equals the complete computation for exactly the candidate ids, with no other key', async () => {
     const owned = await db.memory.create({ data: { urn: `${f.org.urn}:owned`, name: 'owned', class: 'knowledge', ownerUserId: f.user.id, visibility: 'ORGANIZATION' } });
+    // Reachable through the owner arm and through a managed Agent's system memory, yet NOT candidates: they must not appear.
+    const strayOwned = await db.memory.create({ data: { urn: `${f.org.urn}:stray-owned`, name: 'stray owned', class: 'knowledge', ownerUserId: f.user.id, visibility: 'ORGANIZATION' } });
+    const third = await db.organization.create({ data: { name: 'Third3326', urn: `third-${generateId().toLowerCase()}.example` } });
+    await db.orgMember.create({ data: { userId: f.user.id, organizationId: third.id, role: 'ADMIN' } });
+    const strayMemory = await db.memory.create({ data: { urn: `${third.urn}:system`, name: 'stray system', class: 'system', organizationId: third.id } });
+    await db.agent.create({ data: { urn: `${third.urn}:agent`, name: 'stray agent', organizationId: third.id, systemMemoryId: strayMemory.id } });
     const full = await independentUserItemAccess(db, f.user.id);
+    expect(full.has(strayOwned.id)).toBe(true);
+    expect(full.has(strayMemory.id)).toBe(true);
     expect(full.size).toBeGreaterThan(MANY);
     const candidates = [f.reachable.id, f.unreachable.id, owned.id, generateId()];
     const narrowed = await independentUserItemAccess(db, f.user.id, candidates);
