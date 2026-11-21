@@ -283,3 +283,57 @@ describe('member mutations take memoryRef / userRef only (#4137)', () => {
       expect(refusal(asOwner)).toMatch(/qualif/i);
   });
 });
+
+// #4761 §10 P2-1 (Riana): `Memory.legacyUrn` is non-unique by design, so a legacy
+// URN can name two rows and `resolveMemoryRef` throws AmbiguousLegacyUrnError. That
+// is an answer that depends on existence, and it must not reach a non-principal as
+// anything but the gate's uniform FORBIDDEN (cor:api:140:02), the same bytes an
+// unknown ref gets. The share mutations took a PK only on main, so this PR
+// introduces the surface; the member gate already had it.
+describe('an ambiguous legacy memory URN is concealed like an unknown ref (#4137 §10)', () => {
+  const AMBIGUOUS = 'amb-org:amb-mem';
+  const member = (memoryRef: string, userId: string, op: 'add' | 'upd' | 'rm') =>
+    run(
+      op === 'rm'
+        ? `mutation { removeMemoryMember(memoryRef: ${JSON.stringify(memoryRef)}, userRef: ${JSON.stringify(grantee.handle)}) { memoryId } }`
+        : `mutation { ${op === 'add' ? 'addMemoryMember' : 'updateMemoryMemberRole'}(memoryRef: ${JSON.stringify(memoryRef)}, userRef: ${JSON.stringify(grantee.handle)}, role: reader) { memoryMember { role } } }`,
+      userId,
+    );
+
+  beforeEach(async () => {
+    // Two live rows carrying the same legacy URN: the one ref resolves to neither.
+    await db.memory.update({ where: { id: personal.id }, data: { legacyUrn: AMBIGUOUS } });
+    await db.memory.update({ where: { id: group.id }, data: { legacyUrn: AMBIGUOUS } });
+  });
+
+  it('createMemoryShare and updateMemoryShareRole: a non-principal gets the unknown-ref FORBIDDEN', async () => {
+    for (const op of [createShare, updateShare]) {
+      const unknown = refusal(await op('cnonexistentnonexistent12', grantee.handle, stranger.id));
+      const ambiguous = refusal(await op(AMBIGUOUS, grantee.handle, stranger.id));
+      expect(JSON.parse(unknown)[0].c).toBe('FORBIDDEN');
+      expect(ambiguous).toBe(unknown);
+    }
+    expect(await db.memoryShare.count()).toBe(0);
+  });
+
+  it('the member mutations: a non-owner gets the unknown-ref FORBIDDEN', async () => {
+    for (const op of ['add', 'upd', 'rm'] as const) {
+      const unknown = refusal(await member('cnonexistentnonexistent12', stranger.id, op));
+      const ambiguous = refusal(await member(AMBIGUOUS, stranger.id, op));
+      expect(JSON.parse(unknown)[0].c).toBe('FORBIDDEN');
+      expect(ambiguous).toBe(unknown);
+    }
+  });
+
+  it('removeMemoryMember: a non-owner naming an ambiguous (case-colliding) email gets the unknown-user FORBIDDEN', async () => {
+    const lower = `collide-${generateId().slice(-6)}@example.com`;
+    await db.user.create({ data: { id: generateId(), handle: `c1-${generateId().slice(-6)}`, email: lower, roles: ['READER'] } });
+    await db.user.create({ data: { id: generateId(), handle: `c2-${generateId().slice(-6)}`, email: lower.toUpperCase(), roles: ['READER'] } });
+    const mixed = lower.replace('collide', 'Collide');
+    const rm = (userRef: string) =>
+      run(`mutation { removeMemoryMember(memoryRef: ${JSON.stringify(group.id)}, userRef: ${JSON.stringify(userRef)}) { memoryId } }`, stranger.id);
+    const unknown = refusal(await rm('ghost-user-s1'));
+    expect(JSON.parse(unknown)[0].c).toBe('FORBIDDEN');
+    expect(refusal(await rm(mixed))).toBe(unknown);
+  });
+});
