@@ -101,32 +101,39 @@ describe('#4490 condition 2: a state and a role, never capacity', () => {
 });
 
 describe('#4490 condition 3: the same check joinApp makes', () => {
-  // Each row runs BOTH the read and the real joinApp on a fresh joiner. OPEN must be exactly the rows joinApp accepts, with
-  // the role it grants; CLOSED exactly the rows it refuses.
-  const rows: Array<[string, Record<string, unknown>, (() => Promise<unknown>) | null]> = [
-    ['open', OPEN, null],
-    ['schema default', { maxMembers: 'unlimited', memberRoles: ['owner'] }, null],
-    ['owner as selfJoinRole', { memberRoles: ['owner', 'member'], selfJoinRole: 'owner' }, null],
-    ['unoffered selfJoinRole', { memberRoles: ['owner', 'member'], selfJoinRole: 'guest' }, null],
-    ['open, App at capacity (the gate admits, capacity refuses)', { maxMembers: '1', memberRoles: ['owner', 'member'], selfJoinRole: 'member' }, null],
+  // Each row runs BOTH the read and the real joinApp, as the same kind of caller, and pins the EXACT outcome of each. OPEN must be
+  // exactly the rows joinApp accepts, with the role it grants; CLOSED exactly the rows it refuses, each with its own typed error;
+  // MEMBER the idempotent re-join. The one row where the read is OPEN and joinApp still refuses is a full App: capacity is deliberately
+  // not part of the answer (condition 2), and the refusal there must be the capacity error and nothing else.
+  type Row = { label: string; policy: Record<string, unknown>; setup?: () => Promise<void>; asMember?: boolean;
+    read: { state: string; role: string | null }; join: { ok: true; role: string } | { ok: false; code: string } };
+  const closedPolicy = { maxMembers: 'unlimited', memberRoles: ['owner'] };
+  const rows: Row[] = [
+    { label: 'open', policy: OPEN, read: { state: 'OPEN', role: 'member' }, join: { ok: true, role: 'member' } },
+    { label: 'schema default', policy: closedPolicy, read: { state: 'CLOSED', role: null }, join: { ok: false, code: 'SelfJoinNotAllowedError' } },
+    { label: 'owner as selfJoinRole', policy: { memberRoles: ['owner', 'member'], selfJoinRole: 'owner' }, read: { state: 'CLOSED', role: null }, join: { ok: false, code: 'SelfJoinNotAllowedError' } },
+    { label: 'unoffered selfJoinRole', policy: { memberRoles: ['owner', 'member'], selfJoinRole: 'guest' }, read: { state: 'CLOSED', role: null }, join: { ok: false, code: 'SelfJoinNotAllowedError' } },
+    { label: 'open, App at capacity (the gate admits, capacity refuses)', policy: { maxMembers: '1', memberRoles: ['owner', 'member'], selfJoinRole: 'member' },
+      read: { state: 'OPEN', role: 'member' }, join: { ok: false, code: 'MaxMembersExceededError' } },
+    { label: 'no installed Agent', policy: OPEN, setup: async () => { await db.appAgent.deleteMany({ where: { appId: app.id } }); },
+      read: { state: 'CLOSED', role: null }, join: { ok: false, code: 'SelfJoinNotAllowedError' } },
+    { label: 'uninstalled App (joinApp refuses it before the gate)', policy: OPEN, setup: async () => { await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } }); },
+      read: { state: 'CLOSED', role: null }, join: { ok: false, code: 'AppUninstalledError' } },
+    { label: 'already a member (the idempotent re-join, whatever the policy says)', policy: closedPolicy, asMember: true,
+      read: { state: 'MEMBER', role: null }, join: { ok: true, role: 'member' } },
   ];
-  it.each(rows)('%s: the read and joinApp agree', async (_label, policy) => {
-    await setPolicy(policy);
-    const seen = await read(orgViewer.id);
-    const joiner = await mkUser();
-    await db.orgMember.create({ data: { organizationId: org.id, userId: joiner.id, role: 'READER' } });
-    const joined = await M.joinApp(null, { appRef: app.id }, as(joiner.id)).then(() => ({ ok: true }), (e: any) => ({ ok: false, code: e.extensions?.code }));
-    const row = await db.appMember.findUnique({ where: { appId_userId: { appId: app.id, userId: joiner.id } } });
-    if (seen.state === 'OPEN') {
-      // OPEN says the self-join GATE admits, with this role. Capacity is deliberately not part of the answer (condition 2), so an
-      // OPEN App that is full is refused by joinApp for capacity ONLY, never by the gate.
-      if (joined.ok) expect(row?.role).toBe(seen.role);
-      else expect(joined).toMatchObject({ code: 'MaxMembersExceededError' });
-    } else {
-      expect(seen.state).toBe('CLOSED');
-      expect(joined).toMatchObject({ ok: false, code: 'SelfJoinNotAllowedError' });
-      expect(row).toBeNull();
-    }
+  it.each(rows)('$label: the read and joinApp agree, exactly', async (row) => {
+    await setPolicy(row.policy);
+    await row.setup?.();
+    const caller = row.asMember ? participant : await mkUser();
+    // every caller must be able to read the App, as the read is for those who can
+    await db.orgMember.upsert({ where: { organizationId_userId: { organizationId: org.id, userId: caller.id } }, update: {}, create: { organizationId: org.id, userId: caller.id, role: 'READER' } });
+    const seen = await read(caller.id);
+    expect(seen).toEqual(row.read);
+    const joined = await M.joinApp(null, { appRef: app.id }, as(caller.id)).then(() => ({ ok: true as const }), (e: any) => ({ ok: false as const, code: e.extensions?.code }));
+    const memberRow = await db.appMember.findUnique({ where: { appId_userId: { appId: app.id, userId: caller.id } } });
+    if (row.join.ok) { expect(joined).toEqual({ ok: true }); expect(memberRow?.role).toBe(row.join.role); }
+    else { expect(joined).toEqual({ ok: false, code: row.join.code }); expect(memberRow).toBeNull(); }
   });
   it('the decision is the exported resolveSelfJoinRole, not a second copy', async () => {
     const { resolveSelfJoinRole } = await import('../../../controller/operations/joinApp.js');
@@ -177,6 +184,16 @@ describe('#4490 condition 1: an App the caller cannot see answers exactly as tod
     expect(await field(row, {}, impersonated)).toBeNull();
     expect(await field(row, {}, run)).toBeNull();
     expect(await field(row, {}, as(orgViewer.id))).toEqual({ state: 'OPEN', role: 'member' }); // the positive control
+  });
+  it('the field does not trust a narrower parent row: an uninstalled App reads CLOSED even when the parent carries no lifecycle columns', async () => {
+    // A route that reaches App with a narrower select leaves uninstalledAt / deletedAt undefined. Reading undefined as "installed"
+    // would answer OPEN where joinApp refuses; the field re-reads the App by id instead of trusting what the parent carries.
+    await setPolicy(OPEN);
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    const narrow = { id: app.id, organizationId: org.id, ownerUserId: null };
+    expect(await (resolvers as any).App.selfJoin(narrow, {}, as(orgViewer.id))).toEqual({ state: 'CLOSED', role: null });
+    await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
+    expect(await (resolvers as any).App.selfJoin(narrow, {}, as(orgViewer.id))).toBeNull(); // a deleted App is not reachable here either
   });
   it('a soft-deleted App is not found, as before', async () => {
     await setPolicy(OPEN);
