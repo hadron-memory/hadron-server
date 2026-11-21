@@ -1,4 +1,4 @@
-import { encryptChatEngineStateWithKey } from '../../../lib/chatRootEngineState.js';
+import { encryptChatEngineStateWithKey, engineStateIncomplete } from '../../../lib/chatRootEngineState.js';
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../../../integrations/github/syncNotAttempted.js';
@@ -2405,9 +2405,22 @@ export const memoryMutations = {
           // #3501: promotion also converts operational state on tombstoned roots.
           // Memory FOR UPDATE is held; node locks are deterministic, as in the content pass.
           const engineRoots = await tx.chatRootEngineState.findMany({ where: { chatRoot: { memoryId: resolvedMemoryId } }, select: { chatRootNodeId: true }, orderBy: { chatRootNodeId: 'asc' } });
+          // #3575 (ruling 0227): an unauthenticated engine envelope refuses the WHOLE promotion. Every row is scanned so the
+          // refusal carries an exact count and the ids (ruling 0228); the throw rolls back every node, state, identity,
+          // alias and expiry change in this transaction (progressCommitted:false). A root that moved out of this memory
+          // is skipped after the locked membership recheck.
+          const blockedRoots: string[] = [];
           for (const engine of engineRoots) {
             await tx.$queryRaw`SELECT id FROM nodes WHERE id=${engine.chatRootNodeId} FOR UPDATE`;
-            await encryptChatEngineStateWithKey(tx, engine.chatRootNodeId, key);
+            const owner = await tx.node.findUnique({ where: { id: engine.chatRootNodeId }, select: { memoryId: true } });
+            if (!owner || owner.memoryId !== resolvedMemoryId) continue;
+            if ((await encryptChatEngineStateWithKey(tx, engine.chatRootNodeId, key)) === 'blocked') blockedRoots.push(engine.chatRootNodeId);
+          }
+          if (blockedRoots.length) {
+            throw engineStateIncomplete({
+              memoryId: resolvedMemoryId, operation: 'PROMOTE_ANONYMOUS_MEMORY', blockedRootIds: blockedRoots,
+              scanFinished: true, progressCommitted: false,
+            });
           }
           // #1079 (PR #1080 third review, Codex P2) — linking an anonymous
           // memory to a user REPLACES its urn, which is a rename by any other
@@ -2704,8 +2717,15 @@ export const memoryMutations = {
         return current;
       };
       const BATCH = 200; // bound memory per pass (PR-514 review, Gemini)
+      // #3575 (ruling 0225): a chat-engine row whose envelope fails authentication is preserved and REPORTED, never repaired,
+      // and it never stops the conversion of healthy rows (including the blocked root's own node fields). `blockedRoots` is
+      // the last traversed pass's set; the count is exact only when a pass converted nothing (a clean traversal).
+      let blockedRoots = new Set<string>();
+      let engineScanFinished = false;
+      let conversionProgress = false;
       for (let pass = 0; pass < 5; pass++) {
         let converted = 0;
+        const blockedThisPass = new Set<string>();
         // Paginate by id to keep memory bounded for large graphs.
         let cursor: string | undefined;
         for (;;) {
@@ -2778,7 +2798,9 @@ export const memoryMutations = {
                 }
               }
 
-              const engineConverted = await encryptChatEngineStateWithKey(tx, current.id, key);
+              const engineResult = await encryptChatEngineStateWithKey(tx, current.id, key);
+              if (engineResult === 'blocked') blockedThisPass.add(current.id);
+              const engineConverted = engineResult === 'converted';
               const plaintextContent = current.content != null && !isAuthenticatedStringEnvelope(current.content, key);
               const plaintextAbstract = current.abstract != null && !isAuthenticatedStringEnvelope(current.abstract, key);
               const plaintextData = current.data != null && !isAuthenticatedDataEnvelope(current.data, key);
@@ -2801,7 +2823,9 @@ export const memoryMutations = {
           }
           if (nodes.length < BATCH) break;
         }
-        if (converted === 0) break; // clean pass — converged
+        blockedRoots = blockedThisPass;
+        if (converted > 0) conversionProgress = true;
+        if (converted === 0) { engineScanFinished = true; break; } // clean pass — converged
         if (pass === 4) {
           console.error(
             `[encryptMemory] memory ${resolvedMemoryId} did not converge after 5 passes — investigate`,
@@ -2876,7 +2900,7 @@ export const memoryMutations = {
               });
               return true;
             });
-            if (didConvert) convertedRevisions += 1;
+            if (didConvert) { convertedRevisions += 1; conversionProgress = true; }
           }
           if (revisions.length < BATCH) break;
         }
@@ -2891,6 +2915,15 @@ export const memoryMutations = {
       if (!revisionConverged) {
         throw new GraphQLError('Encrypted revision history did not converge; retry completion.', {
           extensions: { code: 'ENCRYPTION_INCOMPLETE', memoryId: resolvedMemoryId },
+        });
+      }
+      // #3575: never Memory success while a blocked engine row is known to remain. The bounded work above has committed;
+      // completion (and the approvals it ends) waits for a state with no unauthenticated envelope. Existing errors
+      // (authority, wrong key, database, history convergence) keep their own precedence: they are thrown above.
+      if (blockedRoots.size > 0) {
+        throw engineStateIncomplete({
+          memoryId: resolvedMemoryId, operation: 'ENCRYPT_MEMORY', blockedRootIds: blockedRoots,
+          scanFinished: engineScanFinished, progressCommitted: conversionProgress,
         });
       }
       return ctx.db.$transaction(async (tx) => {
