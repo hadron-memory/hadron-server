@@ -30,6 +30,13 @@ export function syncRunLockKey(memoryId: string): string {
  */
 export async function acquireSyncRunLock(memoryId: string): Promise<() => Promise<void>> {
   const client = new Client({ connectionString: process.env.DATABASE_URL });
+  // #4719 SEC10 F1: pg emits an idle-connection error if the database drops this connection while the sync runs; an
+  // unhandled EventEmitter error would exit the server process (mirrorCheckoutLock.ts has the same listener). A lost
+  // connection releases the lock with it, so the row then reads as abandoned, which is what it would be if this
+  // process died: the reconciliation may set it to PENDING, and the sync's own final status write still lands after.
+  client.on('error', (error) => {
+    console.error('[git-sync] sync-run lock connection lost', { message: error.message });
+  });
   await client.connect();
   try {
     await client.query('SELECT pg_advisory_lock_shared(hashtext($1))', [syncRunLockKey(memoryId)]);
