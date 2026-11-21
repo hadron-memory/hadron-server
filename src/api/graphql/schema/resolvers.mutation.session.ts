@@ -43,6 +43,8 @@ import {
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { isAppGateRefusal } from '../../../lib/auth/workerRead.js';
 import { serveBindInTransaction, resolveReadableWorkerRef, resolveWorkerIdByNameGated, resolveWorkerBindCandidatesByName, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
@@ -2174,8 +2176,8 @@ export const sessionMutations = {
 
     startAgentSession: async (
       _: unknown,
-      { agentId, externalUserId, sessionTimeoutSeconds }: {
-        agentId: string;
+      { agentRef, externalUserId, sessionTimeoutSeconds }: {
+        agentRef: string;
         externalUserId?: string;
         sessionTimeoutSeconds?: number;
       },
@@ -2195,6 +2197,18 @@ export const sessionMutations = {
         // IS NULL) cannot operate any agent.
         // 023-app-shape Phase 2b: App↔Agent goes through AppAgent. Check
         // that the requested Agent is installed in the calling App.
+        // #4141: `agentRef` is a PK or a URN. A relative URN is a shape refusal (propagates, after the App-key
+        // gate above); everything that names no live Agent (unknown, soft-deleted, ambiguous legacy) folds into the
+        // SAME refusal an uninstalled Agent gets, so the answer carries no Agent id (cor:api:140:02). Only a
+        // resolver miss folds: a database fault propagates. The RESOLVED id feeds every use below.
+        let agentId: string;
+        try {
+          ({ id: agentId } = await resolveAgentRef(tx, agentRef));
+        } catch (error) {
+          if (error instanceof UrnNotQualifiedError) throw error;
+          if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
+          throw forbiddenError('Forbidden: App is not allowed to operate this agent');
+        }
         if (!(await isAgentInstalledForAppOperation(tx, app.id, agentId))) {
           throw forbiddenError('Forbidden: App is not allowed to operate this agent');
         }

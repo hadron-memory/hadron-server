@@ -10,13 +10,14 @@ import { cleanDb } from '../../../test/helpers.js';
 import { testRunAgentId } from '../../../test/runAgent.js';
 import { generateId } from '../../../lib/id.js';
 import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
+import { formatGraphQLError } from '../formatError.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 
-const server = new ApolloServer<Context>({ typeDefs, resolvers });
+const server = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
 let orgId: string;
 let appId: string;
 let appUrn: string;
@@ -89,7 +90,7 @@ describe('#4141 cancelAppRun(ref:)', () => {
   });
 
   it('a non-admin keeps FORBIDDEN, identical for a PK and a URN, and the run is untouched', async () => {
-    const ctx = { userId: readerId, roles: [] as string[] };
+    const ctx = { userId: readerId, roles: [] as Context['roles'] };
     const byPk = await cancel(runId, ctx);
     const byUrn = await cancel(composeAppRunUrn(appUrn, runId), ctx);
     expect(code(byPk)).toBe('FORBIDDEN');
@@ -107,10 +108,10 @@ describe('#4141 cancelAppRun(ref:)', () => {
 
   it('cancelling a terminal run is the same no-op return', async () => {
     const done = await newRun();
-    await db.appRun.update({ where: { id: done }, data: { status: 'SUCCEEDED' } });
+    await db.appRun.update({ where: { id: done }, data: { status: 'COMPLETED' } });
     const out = await cancel(composeAppRunUrn(appUrn, done));
     expect(out.errors).toBeUndefined();
-    expect((out.data as any).cancelAppRun.status).toBe('SUCCEEDED');
+    expect((out.data as any).cancelAppRun.status).toBe('COMPLETED');
   });
 
   it('the old `id` argument no longer validates', async () => {
@@ -166,10 +167,10 @@ describe('#4141 startAgentSession(agentRef:)', () => {
   });
 
   it('a relative URN is a shape refusal, after the App-key gate', async () => {
-    const out = await start('refs4141:agent');
+    const out = await start('agent');
     expect(code(out)).not.toBe('FORBIDDEN');
     expect(out.errors?.length).toBe(1);
-    const noKey = await start('refs4141:agent', false);
+    const noKey = await start('agent', false);
     expect(message(noKey)).toBe('Forbidden: App Key required');
   });
 

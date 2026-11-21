@@ -150,7 +150,17 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // wake path (`dueWakes` / the CLI's `hadron team wakes`); the explicit
 // `markOwnTeamChatRead` mark and every wake/mark/resume rule it shared a module
 // with are unchanged.
-export const HADRON_SERVER_VERSION = '0.24.0';
+//
+// 0.25.0 — BREAKING, entity refs S5 (#4141, partial: `appRuns(parentRunId)` follows): two GraphQL
+// arguments renamed, no aliases. `cancelAppRun(id)` -> `cancelAppRun(ref)` and
+// `startAgentSession(agentId)` -> `startAgentSession(agentRef)`; each takes an id OR a URN (hrn:apprun /
+// hrn:agent). A client still sending the old name gets "Unknown argument" and the whole operation is
+// refused until it upgrades; `startAgentSession` is an App-key operation, so external integrators and SDK
+// callers are affected, not only the first-party clients. Refusals are unchanged: `cancelAppRun` keeps
+// NOT_FOUND "Run not found." and FORBIDDEN for a non-admin, with a ref that cannot name a run now
+// BAD_USER_INPUT; `startAgentSession` answers an unknown, deleted or uninstalled Agent with the one existing
+// FORBIDDEN, and a relative URN as URN_NOT_QUALIFIED.
+export const HADRON_SERVER_VERSION = '0.25.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
