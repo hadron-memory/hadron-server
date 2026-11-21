@@ -9,7 +9,7 @@
  * (010:05's Built line, Proposed), so the descriptions say "built as", not law. The mirror case (`protected: true` on a protected secret)
  * stays as built.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
@@ -27,8 +27,9 @@ const member = async () => {
   return id;
 };
 
+afterEach(() => { vi.unstubAllEnvs(); });
 beforeEach(async () => {
-  process.env.SECRET_ROOT_KEY = '22'.repeat(32); process.env.PASSKEY_SIGNING_ENABLED = 'true';
+  vi.stubEnv('SECRET_ROOT_KEY', '22'.repeat(32)); vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
   await cleanDb(db); await upsertPlatformActions(db);
   userId = (await db.user.create({ data: { email: `${generateId()}@s4.test` } })).id;
   appId = (await db.app.create({ data: { ownerUserId: userId, name: 'S4 noop', urn: `${generateId().toLowerCase()}:s4n` } })).id;
@@ -54,7 +55,7 @@ describe('#4749 updateSecret(protected: false) on an UNPROTECTED secret asks for
   it('alone: a silent no-op, nothing staged, no event, the secret returned unchanged', async () => {
     const before = await db.secret.findUniqueOrThrow({ where: { id: secretId } });
     const out = await resolvers.Mutation.updateSecret({}, { ref: secretId, protected: false }, ctx());
-    expect(out).toMatchObject({ id: secretId, protected: false });
+    expect(out).toMatchObject({ id: secretId, name: 'canary', kind: 'generic', protected: false, metadata: before.metadata });
     expect(await db.secretChangeRequest.count()).toBe(0);
     expect(await eventKinds()).toEqual(['STORE']);
     const after = await db.secret.findUniqueOrThrow({ where: { id: secretId } });
@@ -71,6 +72,29 @@ describe('#4749 updateSecret(protected: false) on an UNPROTECTED secret asks for
     expect(unprotected.message).toBe(protectedOne.message);
     expect(unprotected.extensions.code).toBe('FORBIDDEN');
     expect(await db.secretChangeRequest.count()).toBe(0);
+  });
+});
+
+describe('#4749 an explicit GraphQL null asks for no protection change, like an omitted argument', () => {
+  it('protected: null alone on an unprotected or a protected secret is refused as an empty update, nothing staged', async () => {
+    for (const isProtected of [false, true]) {
+      await db.secret.update({ where: { id: secretId }, data: { protected: isProtected } });
+      const e = await error(resolvers.Mutation.updateSecret({}, { ref: secretId, protected: null as never }, ctx()));
+      expect(e.extensions.code, `protected=${isProtected}`).toBe('BAD_USER_INPUT');
+    }
+    expect(await db.secretChangeRequest.count()).toBe(0);
+  });
+
+  it('protected: null with metadata on an unprotected secret is an ordinary update, nothing staged', async () => {
+    await resolvers.Mutation.updateSecret({}, { ref: secretId, protected: null as never, metadata: { note: 'n' } }, ctx());
+    expect(await db.secretChangeRequest.count()).toBe(0);
+    expect(await eventKinds()).toEqual(['STORE', 'METADATA']);
+  });
+
+  it('protected: null with a value on a PROTECTED secret still stages (a protected secret changes only through the ceremony)', async () => {
+    await db.secret.update({ where: { id: secretId }, data: { protected: true } });
+    const e = await error(resolvers.Mutation.updateSecret({}, { ref: secretId, protected: null as never, value: 'v2' }, ctx()));
+    expect(e.extensions).toMatchObject({ code: 'SECRET_PROTECTED_NEEDS_PASSKEY', requestId: expect.any(String) });
   });
 });
 
