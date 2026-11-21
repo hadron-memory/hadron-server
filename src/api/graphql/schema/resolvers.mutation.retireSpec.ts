@@ -191,7 +191,11 @@ export async function retireSpecDoor(input: RetireSpecInput, ctx: Context) {
       form: input.form, withdrawn, date, reason: input.reason ?? null, summary: input.summary ?? null,
       storedAbstract: plain.abstract ?? null, successor: succ,
     });
-    if (abstract.length > ABSTRACT_MAX_LENGTH) throw new NodeAbstractTooLongError(abstract.length);
+    if (abstract.length > ABSTRACT_MAX_LENGTH) {
+      // The shared typed envelope, as updateNode answers it: a bare class is masked as INTERNAL_SERVER_ERROR on the wire.
+      const tooLong = new NodeAbstractTooLongError(abstract.length);
+      throw new GraphQLError(tooLong.message, { extensions: tooLong.extensionFields() });
+    }
     const banner = retirementBanner({ form: input.form, withdrawn, date, reason: input.reason ?? null, successor: succ });
     const tags = withSupersededTag(deserializeTags(locked.tags as string | string[]) as string[]);
 

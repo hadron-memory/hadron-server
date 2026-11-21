@@ -7689,6 +7689,8 @@ export function createMcpServerInstance(
             (edge ? `\nsuperseded-by edge: ${edge.loc} (id: ${edge.id})` : ''),
         );
       } catch (e) {
+        // The typed over-cap refusal reads as the same prose hadron_update_node gives (no code prefix, no server fault).
+        if ((e as { extensions?: { code?: string } }).extensions?.code === 'NodeAbstractTooLongError') return refusalResult((e as Error).message);
         return toolErrorResult(e, () => {
           const code = (e as { extensions?: { code?: string } }).extensions?.code;
           return code ? `[${String(code).toLowerCase()}] ${(e as Error).message}` : `Error: ${(e as Error).message}`;
