@@ -170,7 +170,7 @@ jobs:
         # timeout-minutes below; vitest-watchdog.test.mjs pins that, and that the budget is under it. The budget
         # counts from the step's first lines (WATCHDOG_STEP_STARTED_AT, whole seconds since boot: the monotonic clock
         # the watchdog reads too; a failed read fails the step), so the sampler setup and the psql probe come out of
-        # it, and the probe is bounded to 2 min (KILL 10 s after its TERM) so it cannot hold the watchdog back (#4647 BLIND P2).
+        # it, and the probe is bounded to 130 s at most (TERM at 120 s, KILL 10 s later) so it cannot hold the watchdog back (#4647 BLIND P2).
         timeout-minutes: 45
         env:
           HADRON_TEST_MAX_WORKERS: '3'
