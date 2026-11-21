@@ -147,6 +147,60 @@ it('a signed mark deletes a protected secret without a change request and never 
   expect(await db.secret.count({ where: { id: replacement.id } })).toBe(1);
 });
 
+it('post-push retains distinct S4 own-worker and S6 auto-delete trigger bindings', async () => {
+  const guards = await db.$queryRaw<Array<{
+    name: string;
+    table_name: string;
+    function_name: string;
+  }>>`SELECT t.tgname AS name,c.relname AS table_name,p.proname AS function_name
+    FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_proc p ON p.oid=t.tgfoid
+    WHERE n.nspname=current_schema() AND t.tgname IN ('secret_auto_delete_limit','secret_client_own_worker_immutable') ORDER BY t.tgname`;
+  expect(guards).toEqual([
+    { name: 'secret_auto_delete_limit', table_name: 'grants', function_name: 'hadron_guard_secret_auto_delete_limit' },
+    { name: 'secret_client_own_worker_immutable', table_name: 'secret_read_clients', function_name: 'hadron_secret_client_own_worker_immutable' },
+  ]);
+});
+// cor:sec:070:01 Exceptions (Proposed): protected secrets retain signed auto-delete.
+it.each(['last-read', 'window-end'] as const)('cor:sec:070:01 Proposed exception: protected auto-delete at %s is signed, audited and clears staged requests', async (mode) => {
+  await db.secret.update({ where: { id: secretId }, data: { protected: true } });
+  expect((await db.secret.findUniqueOrThrow({ where: { id: secretId } })).protected).toBe(true);
+  const a = await resolvers.Mutation.issueSecretReadClient({}, { input: { secretRef: secretId, holderKind: 'WORKER', holderRef: workerId, autoDelete: true,
+      maxReads: mode === 'last-read' ? 1 : null, expiresAt: mode === 'window-end' ? (await dbDeadline(10)).toISOString() : null, reason: 'protected auto-delete exception' } }, ctx());
+  await sign(a.grantId);
+  const staged = await resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'staged-uncommitted' }, ctx()).then(() => {
+    throw new Error('staging refusal expected');
+  }, (e: unknown) => {
+    expect(e).toMatchObject({ extensions: { code: 'SECRET_PROTECTED_NEEDS_PASSKEY' } });
+    return (e as {
+    extensions: {
+      requestId: string;
+    };
+  }).extensions.requestId;
+  });
+  expect(staged).toEqual(expect.any(String));
+  const [before] = await db.$queryRaw<Array<{
+    staged: boolean;
+  }>>`SELECT staged_value_encrypted IS NOT NULL AS staged FROM secret_change_requests WHERE id=${staged}`;
+  expect(before.staged).toBe(true);
+  expect(await db.secretChangeRequest.count({ where: { secretId, operation: 'DELETE' } })).toBe(0);
+  if (mode === 'last-read')
+    expect(await reveal(a.clientId)).toMatchObject({ value: JSON.stringify('s6-latest'), readsLeft: 0 });
+  else {
+    await expired(a.grantId);
+    await secretSweepTick(db);
+  }
+  expect(await exists()).toBe(0);
+  expect(await db.secretVersion.count({ where: { secretId } })).toBe(0);
+  expect(await db.secretEvent.findMany({ where: { secretId, kind: 'DELETE' } })).toMatchObject([{ versionNo: 2 }]);
+  expect(await deletedEvents()).toBe(1);
+  const [ended] = await db.$queryRaw<Array<{
+    state: string;
+    cleared: boolean;
+  }>>`SELECT state, staged_value_encrypted IS NULL AS cleared FROM secret_change_requests WHERE id=${staged}`;
+  expect(ended).toEqual({ state: 'stale', cleared: true });
+  expect(await db.secretChangeRequest.count({ where: { secretId, operation: 'DELETE' } })).toBe(0);
+}, 30_000);
+
 it('failure after deletion rolls back the deletion, siblings, spend and all success events', async () => {
   const a = await client(); const sibling = await client('keep', 3);
   const original = deletion.deleteLockedAppSecret;
@@ -184,7 +238,7 @@ it('rechecks a historical unbounded pending mark at signing without consuming or
   expect(await db.secretReadClient.count({ where: { grantId } })).toBe(0);
 });
 
-it('lets a historical unbounded pending mark be revoked without allowing it to be reactivated', async () => {
+it('lets a historical unbounded pending mark be revoked, and the revocation cannot be undone', async () => {
   const grantId = generateId();
   await db.$transaction(async tx => {
     await tx.$executeRawUnsafe('DROP TRIGGER secret_auto_delete_limit ON grants');
@@ -194,7 +248,7 @@ it('lets a historical unbounded pending mark be revoked without allowing it to b
   });
   await expect(resolvers.Mutation.revokeGrant({}, { ref: grantId }, ctx())).resolves.toMatchObject({ id: grantId });
   expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).revokedAt).not.toBeNull();
-  await expect(db.grant.update({ where: { id: grantId }, data: { revokedAt: null, revokedBy: null } })).rejects.toThrow(/append-only|constraint/i);
+  await expect(db.grant.update({ where: { id: grantId }, data: { revokedAt: null, revokedBy: null } })).rejects.toThrow(/grants are append-only/);
 });
 
 it('keeps historical unbounded marks maintainable on withdrawal and holder departure', async () => {
@@ -211,7 +265,7 @@ it('keeps historical unbounded marks maintainable on withdrawal and holder depar
   expect((await db.grant.findUniqueOrThrow({ where: { id: ids[0] } })).withdrawnAt).not.toBeNull();
   await db.$transaction(async tx => {
     await tx.worker.update({ where: { id: workerId }, data: { retiredAt: new Date() } });
-    await endHeldGrants(tx, 'worker', workerId);
+    await endHeldGrants(tx, 'worker', workerId, 'WORKER_RETIRED');
   });
   expect((await db.grant.findUniqueOrThrow({ where: { id: ids[1] } })).holderDepartedAt).not.toBeNull();
 });

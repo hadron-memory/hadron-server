@@ -258,7 +258,7 @@
   ],
   [
    "hadron_update_node",
-   "81628bdb42c5602b36a2873a159ef39432cdef64335fde2a4fdbe23a13fc0d3b"
+   "737b77466341917e2d9d4a843b799d6b4606f9238f9fa279909f5f6fe6409125"
   ],
   [
    "hadron_create_task",
@@ -275,6 +275,10 @@
   [
    "hadron_update_review",
    "8c35cddc3c87106fdaf8adcb134889f9080334bef76df6b9f87e5f433d9f0fd0"
+  ],
+  [
+   "hadron_retire_spec",
+   "45ef0627e4cec3ba4b0df6340252844968db6a4f97d9c7aa70a3b57029030359"
   ],
   [
    "hadron_update_node_data",
@@ -616,7 +620,7 @@
   ],
   [
    "hadron_update_node",
-   "81628bdb42c5602b36a2873a159ef39432cdef64335fde2a4fdbe23a13fc0d3b"
+   "737b77466341917e2d9d4a843b799d6b4606f9238f9fa279909f5f6fe6409125"
   ],
   [
    "hadron_create_task",
@@ -633,6 +637,10 @@
   [
    "hadron_update_review",
    "8c35cddc3c87106fdaf8adcb134889f9080334bef76df6b9f87e5f433d9f0fd0"
+  ],
+  [
+   "hadron_retire_spec",
+   "45ef0627e4cec3ba4b0df6340252844968db6a4f97d9c7aa70a3b57029030359"
   ],
   [
    "hadron_update_node_data",
@@ -974,7 +982,7 @@
   ],
   [
    "hadron_update_node",
-   "81628bdb42c5602b36a2873a159ef39432cdef64335fde2a4fdbe23a13fc0d3b"
+   "737b77466341917e2d9d4a843b799d6b4606f9238f9fa279909f5f6fe6409125"
   ],
   [
    "hadron_create_task",
@@ -991,6 +999,10 @@
   [
    "hadron_update_review",
    "8c35cddc3c87106fdaf8adcb134889f9080334bef76df6b9f87e5f433d9f0fd0"
+  ],
+  [
+   "hadron_retire_spec",
+   "45ef0627e4cec3ba4b0df6340252844968db6a4f97d9c7aa70a3b57029030359"
   ],
   [
    "hadron_update_node_data",
@@ -1332,7 +1344,7 @@
   ],
   [
    "hadron_update_node",
-   "81628bdb42c5602b36a2873a159ef39432cdef64335fde2a4fdbe23a13fc0d3b"
+   "737b77466341917e2d9d4a843b799d6b4606f9238f9fa279909f5f6fe6409125"
   ],
   [
    "hadron_create_task",
@@ -1349,6 +1361,10 @@
   [
    "hadron_update_review",
    "8c35cddc3c87106fdaf8adcb134889f9080334bef76df6b9f87e5f433d9f0fd0"
+  ],
+  [
+   "hadron_retire_spec",
+   "45ef0627e4cec3ba4b0df6340252844968db6a4f97d9c7aa70a3b57029030359"
   ],
   [
    "hadron_update_node_data",

@@ -845,6 +845,9 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #1632: signing requests, append-only signature records, the content-change
 -- marker. One source, shared verbatim with migration 20261013160000_signing_requests.
 \ir signing-invariants.sql
+-- #4337 (#434 Slice C): stamp_signing_keys.id as the migration's identity (db push builds a sequence default; pinned by
+-- src/test/migrations/stampKeyIdentity4337.test.ts and scripts/db/migration-replay.ts).
+\ir stamp-key-identity-invariants.sql
 
 -- #3996 (S1 of #3991): per-App data keys. One source, shared verbatim with migration 20261112150000_secret_app_keys.
 \ir secret-app-keys-invariants.sql
@@ -995,6 +998,77 @@ CREATE INDEX IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"
 -- verbatim with migration 20261109200000_grant_signing (after grant-invariants.sql: the tables it guards reference grants).
 \ir grant-signing-invariants.sql
 
+-- #3999: staged values are request-bound; terminal requests retain no ciphertext.
+CREATE TABLE IF NOT EXISTS secret_change_requests (
+ id text PRIMARY KEY,
+ app_id text NOT NULL REFERENCES apps(id) ON DELETE CASCADE ON UPDATE CASCADE,
+ secret_id text,
+ secret_name text NOT NULL,
+ secret_kind text NOT NULL,
+ metadata jsonb NOT NULL,
+ operation text NOT NULL,
+ requester_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE,
+ state text NOT NULL DEFAULT 'open',
+ snapshot text NOT NULL,
+ staged_value_encrypted text,
+ key_version integer,
+ size_bytes integer,
+ protected_result boolean,
+ write_version boolean NOT NULL DEFAULT true,
+ created_at timestamp(3) NOT NULL DEFAULT (clock_timestamp() AT TIME ZONE 'UTC'),
+ expires_at timestamp(3) NOT NULL,
+ ended_at timestamp(3)
+);
+ALTER TABLE secret_change_requests DROP CONSTRAINT IF EXISTS chk_secret_change_shape;
+ALTER TABLE secret_change_requests ADD CONSTRAINT chk_secret_change_shape CHECK (
+ operation IN ('STORE','DELETE','SET_PROTECTED','CLEAR_PROTECTED') AND
+ state IN ('open','completed','declined','expired','withdrawn','stale') AND
+ ((staged_value_encrypted IS NOT NULL) = (operation = 'STORE' AND write_version AND state = 'open')) AND
+ ((staged_value_encrypted IS NULL) OR (key_version IS NOT NULL AND size_bytes IS NOT NULL)) AND
+ ((state = 'open') = (ended_at IS NULL))
+);
+CREATE INDEX IF NOT EXISTS secret_change_requests_secret_open ON secret_change_requests(app_id,secret_name,state);
+CREATE INDEX IF NOT EXISTS secret_change_requests_expiry ON secret_change_requests(expires_at) WHERE state = 'open';
+CREATE OR REPLACE FUNCTION hadron_guard_secret_change_request() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP = 'UPDATE' THEN
+  IF OLD.state <> 'open' OR
+    (NEW.id,NEW.app_id,NEW.secret_id,NEW.secret_name,NEW.secret_kind,NEW.metadata,NEW.operation,NEW.requester_id,NEW.snapshot,NEW.created_at,NEW.expires_at,NEW.key_version,NEW.size_bytes,NEW.protected_result,NEW.write_version)
+    IS DISTINCT FROM
+    (OLD.id,OLD.app_id,OLD.secret_id,OLD.secret_name,OLD.secret_kind,OLD.metadata,OLD.operation,OLD.requester_id,OLD.snapshot,OLD.created_at,OLD.expires_at,OLD.key_version,OLD.size_bytes,OLD.protected_result,OLD.write_version)
+  THEN RAISE EXCEPTION 'secret change request immutable'; END IF;
+  IF NEW.state = 'open' AND NEW.staged_value_encrypted IS DISTINCT FROM OLD.staged_value_encrypted
+  THEN RAISE EXCEPTION 'secret change request immutable'; END IF;
+ END IF;
+ IF NEW.state <> 'open' THEN NEW.staged_value_encrypted := NULL; END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS secret_change_requests_guard ON secret_change_requests;
+CREATE TRIGGER secret_change_requests_guard BEFORE INSERT OR UPDATE ON secret_change_requests
+ FOR EACH ROW EXECUTE FUNCTION hadron_guard_secret_change_request();
+-- External deletion (App deletion, auto-delete) must not leave staged copies behind.
+CREATE OR REPLACE FUNCTION hadron_end_deleted_secret_changes() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ UPDATE secret_change_requests SET state='stale',ended_at=(clock_timestamp() AT TIME ZONE 'UTC')
+ WHERE secret_id=OLD.id AND state='open';
+ RETURN OLD;
+END $$;
+DROP TRIGGER IF EXISTS secret_changes_secret_deleted ON secrets;
+CREATE TRIGGER secret_changes_secret_deleted AFTER DELETE ON secrets FOR EACH ROW EXECUTE FUNCTION hadron_end_deleted_secret_changes();
+CREATE OR REPLACE FUNCTION hadron_clear_deleted_app_changes() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL THEN DELETE FROM secret_change_requests WHERE app_id=NEW.id; END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS secret_changes_app_deleted ON apps;
+CREATE TRIGGER secret_changes_app_deleted AFTER UPDATE OF deleted_at ON apps FOR EACH ROW EXECUTE FUNCTION hadron_clear_deleted_app_changes();
+
+-- Any committed secret mutation invalidates earlier proposals, including same-millisecond changes.
+ALTER TABLE secrets ADD COLUMN IF NOT EXISTS change_revision integer NOT NULL DEFAULT 0;
+CREATE OR REPLACE FUNCTION hadron_secret_change_revision() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.change_revision := OLD.change_revision + 1; RETURN NEW; END $$;
+DROP TRIGGER IF EXISTS secret_change_revision ON secrets;
+CREATE TRIGGER secret_change_revision BEFORE UPDATE ON secrets FOR EACH ROW EXECUTE FUNCTION hadron_secret_change_revision();
 -- #3689 (#3910 F1): app_runs.agent_id is NOT NULL in the database but optional in schema.prisma, so a build serving the
 -- old nullable column after an HDPRF-refused migration (#3770) can still read the retained agentless runs. `db push`
 -- therefore leaves it nullable; this restores the guarantee the 20261117500000_app_run_agent_required migration states.
@@ -1048,5 +1122,7 @@ ALTER TABLE rate_limit_manifests ALTER COLUMN key_ids SET NOT NULL;
 ALTER TABLE tickers ALTER COLUMN reasons SET NOT NULL;
 ALTER TABLE user_api_keys ALTER COLUMN oauth_scopes SET NOT NULL;
 
+-- S4 R22, after S3 client guards.
+\ir secret-read-client-own-worker.sql
 -- #4001: finite auto-delete terms, after the grants and read-client invariants.
 \ir secret-auto-delete-invariants.sql

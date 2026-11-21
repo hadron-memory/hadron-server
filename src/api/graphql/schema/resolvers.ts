@@ -45,6 +45,7 @@ import { mcpQueries } from './resolvers.query.mcp.js';
 import { webPollMutations, webPollQueries } from './resolvers.webPoll.js';
 import { homeAssistantQueries } from './resolvers.query.homeAssistant.js';
 import { resendSenderQueries } from './resolvers.query.resendSender.js';
+import { secretChangeQueries, secretChangeMutations } from './resolvers.secretChanges.js';
 import { secretMutations, secretQueries } from './resolvers.secret.js';
 import {
   impersonationMutations,
@@ -89,7 +90,6 @@ import { agentTickerTemplateFieldResolvers, agentTickerTemplateMutations, agentT
 import { deliverySettingsQueries, deliverySettingsMutations } from './resolvers.deliverySettings.js';
 import { appPropertiesMutations, appPropertiesTypeResolvers } from './resolvers.appProperties.js';
 import { chatbotAiConfigMutations, chatbotAiConfigQueries, chatbotAiConfigTypeResolvers } from './resolvers.chatbotAiConfig.js';
-import { untrackedTaskItemMutations, untrackedTaskItemQueries } from './resolvers.untrackedTaskItems.js';
 import { wakeMutations, wakeQueries } from './resolvers.wake.js';
 import { stopSignalMutations, stopSignalQueries } from './resolvers.stopSignal.js';
 import { deliveryBatchMutations, deliveryBatchQueries } from './resolvers.deliveryBatch.js';
@@ -118,6 +118,7 @@ import { signingFieldResolvers, signingMutations, signingQueries } from './resol
 import { commentFieldResolvers, commentMutations, commentQueries } from './resolvers.comments.js';
 import { questionFieldResolvers, questionMutations, questionQueries } from './resolvers.questions.js';
 import { specDocumentQueries } from './resolvers.specDocument.js';
+import { retireSpecMutations } from './resolvers.mutation.retireSpec.js';
 import {
   specCorpusMintMutations,
   specCorpusMutations,
@@ -227,7 +228,6 @@ export const resolvers = {
     ...teamWorkQueries,
     ...agentTaskQueries,
     ...prProtocolQueries,
-    ...untrackedTaskItemQueries,
     ...tickerQueries,
     ...agentTickerTemplateQueries,
     ...modelGroupQueries,
@@ -263,6 +263,7 @@ export const resolvers = {
     ...homeAssistantQueries,
     ...resendSenderQueries,
     ...secretQueries,
+    ...secretChangeQueries,
     ...dashboardQueries,
     ...appRunQueries,
     ...automationPinQueries,
@@ -317,7 +318,6 @@ export const resolvers = {
     ...appPropertiesMutations,
     ...chatbotAiConfigMutations,
     ...runTeamSnapshotMutations,
-    ...untrackedTaskItemMutations,
     ...stopSignalMutations,
     ...wakeMutations,
     ...deliveryBatchMutations,
@@ -331,6 +331,7 @@ export const resolvers = {
     ...memoryConfigTemplateMutations,
     ...memoryConfigApplyMutations,
     ...specCorpusMutations,
+    ...retireSpecMutations,
     ...specCorpusRenumberMutations,
     ...specCorpusMintMutations,
     ...nodeApprovalMutations,
@@ -354,6 +355,7 @@ export const resolvers = {
     ...homeAssistantMutations,
     ...resendSenderMutations,
     ...secretMutations,
+    ...secretChangeMutations,
     ...impersonationMutations,
   },
 };

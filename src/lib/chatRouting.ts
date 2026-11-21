@@ -111,7 +111,13 @@ export interface ChatRoutingResult {
   conversationHandoff: string | null;
   conversationCompleted: string | null;
   detourReturned: boolean;
+  /** A concurrent turn moved the chat (conversation or stage) after the decision's origin was read: no edit applied. */
   routingSkipped: boolean;
+  /**
+   * The named stage the turn asked for that the origin's stage list does not have. Absent when routingSkipped:
+   * applyChatRoutingDecision rebuilds the result from unchanged(), deliberately, because the rejection was judged against a
+   * stage list the chat has since left (#4099). Retaining it would be a behaviour change that needs a ruling, not a docs edit.
+   */
   rejectedNextStage?: string;
 }
 export interface ChatRoutingDecision {
@@ -270,7 +276,11 @@ export async function decideChatRouting(input: {
   return decision;
 }
 
-/** D6: call ONLY on the fresh root under updateChatRootData's existing lock. Judge the whole origin before any edit. */
+/**
+ * D6: call ONLY on the fresh root under updateChatRootData's existing lock. Judge the whole origin before any edit.
+ * A stale origin (conversation OR stage differs) drops the whole batch and returns a rebuilt result: every origin-dependent
+ * claim, rejectedNextStage included, is cleared and routingSkipped says why.
+ */
 export function applyChatRoutingDecision(fresh: Record<string, unknown>, decision: ChatRoutingDecision): ChatRoutingResult {
   if (fresh.conversationName !== decision.origin.conversationName || fresh.stageName !== decision.origin.stageName) {
     return { ...unchanged(), routingSkipped: true };

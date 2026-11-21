@@ -556,8 +556,12 @@ describe('POST /oauth/token — DB failure containment', () => {
     // async rejections; the try/catch keeps the failure local to
     // the request.
     const { rawCode, verifier, authCodeId } = await seedAuthCode();
+    // #419 adds a separate shared-rate admission before the claim. Let that
+    // transaction commit so this pin still injects failure at CLAIM+MINT.
+    const realTransaction = db.$transaction.bind(db);
     const spy = vi
       .spyOn(db, '$transaction')
+      .mockImplementationOnce(realTransaction)
       .mockRejectedValueOnce(new Error('simulated DB outage'));
     try {
       const res = await postToken(defaultFields(rawCode, verifier));

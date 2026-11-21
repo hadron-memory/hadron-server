@@ -27,6 +27,15 @@ import type {
 import type { ApolloServerPlugin } from '@apollo/server';
 import type { ImpersonationContext } from '../../lib/auth/impersonation.js';
 
+/**
+ * The ONE predicate for "this request is a read-only impersonation session". The mutation plugin below refuses on it,
+ * and `Memory.canWrite` (#606) answers false on it: sharing it keeps the field's promise ("a write would be allowed") in
+ * step with what this plugin actually refuses.
+ */
+export function isReadOnlyImpersonation(ctx: { impersonation?: unknown } | null | undefined): boolean {
+  return Boolean(ctx?.impersonation);
+}
+
 const ALLOWED_MUTATION_FIELDS = new Set(['stopImpersonation', '__typename']);
 
 /**
@@ -103,7 +112,7 @@ export const impersonationReadOnlyPlugin: ApolloServerPlugin<{
   async requestDidStart() {
     return {
       async didResolveOperation({ operation, document, contextValue }) {
-        if (!contextValue.impersonation) return;
+        if (!isReadOnlyImpersonation(contextValue)) return;
         const op = operation as OperationDefinitionNode | undefined;
         if (!op || op.operation !== 'mutation') return;
         const fields = topLevelFieldNames(op.selectionSet, fragmentMap(document));

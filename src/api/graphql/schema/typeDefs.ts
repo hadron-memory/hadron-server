@@ -2221,7 +2221,7 @@ export const typeDefs = `#graphql
     NOT_APPLICABLE
     "Never approved."
     NOT_APPROVED
-    "The approval covers the current text: it was recorded at the revision in NodeApproval.revision, which can be older than Node.revision when only metadata (tags, properties, role, description, alias, loc, edges) changed since."
+    "The approval covers the current text: it was recorded at the revision in NodeApproval.revision, which can be older than Node.revision when only metadata (tags, properties, role, description, alias, loc) changed since."
     APPROVED
     "Approved once, then the title, abstract or content changed (or the text no longer hashes to the approval, see verifyNode's TAMPERED)."
     SUPERSEDED
@@ -3207,8 +3207,25 @@ export const typeDefs = `#graphql
     id: ID!
     name: String!
     urn: String!
+    """
+    #2309 — the portal link that opens this App: <FRONTEND_URL>/app/u/<the urn field above>, built from the SAME
+    rendered urn the field returns, so the two cannot diverge. It reads nothing of its own: it derives from a value the
+    caller already sees, so a caller who cannot read the App never reaches it. NULL when the deployment has no portal
+    origin (FRONTEND_URL unset or malformed), when the urn cannot be rendered (emission threw and the raw stored value
+    was served, which is not a canonical link), or when the urn holds a character a link cannot carry. Never a
+    guessed host.
+    """
+    portalUrl: String
     "#2171 (R211): the member roles this App offers: the union over its installed Agents, primary first."
     availableMemberRoles: [String!]!
+    """
+    #4490 (hrn:node:hadronmemory.com:specs:cor:api:140:02, no existence oracle): whether the caller could join this App
+    themselves, computed by the SAME check joinApp makes. Null for a caller who cannot read the App by app(ref:) (whichever
+    route reached it), for an App key, an impersonated session or a run, and for a request with no user: an App the caller
+    cannot see answers exactly as before. A caller who is already a member reads MEMBER with no role, so an open and a closed
+    App read identically to them.
+    """
+    selfJoin: AppSelfJoin
     "#2138: when the whole team was paused (setTeamPause), or null. Separate from every worker's own pause."
     teamPausedAt: DateTime
     "#4224 (S3 of #4229): the App's sweep switch (setAppSweepMode). OFF by default."
@@ -3229,9 +3246,8 @@ export const typeDefs = `#graphql
     #3125 S1 (hrn:node:hadronmemory.com:specs:cor:dmo:050:02, hrn:node:hadronmemory.com:specs:cor:dmo:050:20): the App's
     own JSON object, written whole by whoever manages it (setAppProperties). Readable by whoever may read the App by
     app(ref:) (an org member, or the user-owner) and by whoever manages it; null for anyone else, an App key included,
-    whichever field reached the App. Never put a secret here. The platform reads only the taskIntegrations key
-    (hrn:node:hadronmemory.com:specs:cor:agt:120:01), where each team lead reads as its worker URN; every other key is
-    the team's, returned as written. Null = no properties.
+    whichever field reached the App. Never put a secret here. The platform reads no key of it: every key is
+    the team's, returned as stored. Null = no properties.
     """
     properties: JSON
     "#3125 S1: the revision setAppProperties checks expectedRevision against. 0 until the first changing write; each changing write adds 1. Null for a caller who may not read properties."
@@ -3728,6 +3744,27 @@ export const typeDefs = `#graphql
 
   type MemoryProvisioning {
     appMemory: AppMemoryKind!
+  }
+
+  """
+  #4490: where an App stands for the caller on joining it themselves (joinApp). OPEN: joinApp would accept the caller as the
+  role in AppSelfJoin.role. CLOSED: it would refuse (the App has not opted in, is uninstalled, or has nothing installed).
+  MEMBER: the caller is already a member, whatever the App's policy says.
+  """
+  enum AppSelfJoinState {
+    OPEN
+    CLOSED
+    MEMBER
+  }
+
+  """
+  #4490: the answer to "would joinApp accept me", and nothing else. Never the App's maxMembers or member count, and never any
+  other field of the Agent's installation policy.
+  """
+  type AppSelfJoin {
+    state: AppSelfJoinState!
+    "The role a joiner would get: set only when state is OPEN, null otherwise."
+    role: String
   }
 
   type InstallationPolicy {
@@ -4307,6 +4344,15 @@ export const typeDefs = `#graphql
     served raw and logged, so a bare, unprefixed value is a possible read.
     """
     urn: String!
+    """
+    #2309 — the portal link that opens this Memory: <FRONTEND_URL>/app/u/<the urn field above>, built from the SAME
+    rendered urn the field returns, so the two cannot diverge. It reads nothing of its own: it derives from a value the
+    caller already sees, so a caller who cannot read the Memory never reaches it. NULL when the deployment has no portal
+    origin (FRONTEND_URL unset or malformed), when the urn cannot be rendered (emission threw and the raw stored value
+    was served, which is not a canonical link), or when the urn holds a character a link cannot carry. Never a
+    guessed host.
+    """
+    portalUrl: String
     name: String!
     shortDescription: String
     description: String
@@ -4389,6 +4435,16 @@ export const typeDefs = `#graphql
     On each new revision the oldest overflow is pruned. Default 10; minimum 1.
     """
     maxRevCount: Int!
+    """
+    #606 — whether the CALLER may write to this memory: true exactly when a write to it would be allowed for the request's own principal
+    (user, App key or run): not refused by the memory write gate, and never true in a read-only impersonation session,
+    where every mutation is refused. It says nothing about
+    other users, and a Memory is only reachable here when the caller may already read it. Lets a write-target
+    picker filter without one effectiveAccess call per memory (the server still runs the gate once per distinct
+    memory per request). Null means the answer could not be determined (an unexpected failure, logged
+    server-side), never "cannot write"; it is nullable so one failing memory cannot null a whole list.
+    """
+    canWrite: Boolean
     """
     #1447/#1448, derived per node since #1591 — DRAFT while none of this
     memory's live nodes is minted, MINTED once any is. Draft rights are per
@@ -4882,6 +4938,15 @@ export const typeDefs = `#graphql
     id: ID!
     organizationId: String
     urn: String!
+    """
+    #2309 — the portal link that opens this Agent: <FRONTEND_URL>/app/u/<the urn field above>, built from the SAME
+    rendered urn the field returns, so the two cannot diverge. It reads nothing of its own: it derives from a value the
+    caller already sees, so a caller who cannot read the Agent never reaches it. NULL when the deployment has no portal
+    origin (FRONTEND_URL unset or malformed), when the urn cannot be rendered (emission threw and the raw stored value
+    was served, which is not a canonical link), or when the urn holds a character a link cannot carry. Never a
+    guessed host.
+    """
+    portalUrl: String
     name: String!
     description: String
     """
@@ -5985,6 +6050,31 @@ export const typeDefs = `#graphql
     assume the outer query authorized them (#552 / #983).
     """
     previousSession: WorkerContinuitySession
+    """
+    #1054 — the author RECORDED in the handoff: who held the worker when the session named by the
+    handoff's envelope ran. It is what the envelope claims, not proof of who wrote the node: any
+    writer of the handoff node can set the envelope's session id (to one of this worker's own
+    sessions), so it is a hint for a reader, never an authentication. Null when \`handoff\` is
+    null. For a handoff with no session envelope (hand-written) it is an author with nothing known.
+    """
+    handoffAuthor: WorkerContinuityAuthor
+  }
+
+  """
+  #1054 — the person behind a handoff, as identity only. The handle is identity
+  (hrn:node:hadronmemory.com:specs:cor:acl:070:01), visible to any signed-in caller who can read
+  the worker. A display name, if ever added, would follow the same rule's gate (self, admin or
+  co-member; null, never an error).
+  """
+  type WorkerContinuityAuthor {
+    "The handle of the user who held the worker when the session the envelope names ran: as recorded, not authenticated (see handoffAuthor). Null only when the author is unknown or erased."
+    userHandle: String
+    """
+    The session the handoff's envelope names as its writer: the id alone, never the Session, and
+    null unless that session is one of this worker's own non-deleted sessions (same sanitization as
+    previousSession). Recorded, not authenticated: see handoffAuthor.
+    """
+    sessionId: ID
   }
 
   """
@@ -6391,6 +6481,20 @@ export const typeDefs = `#graphql
     inputSchema: JSON
   }
 
+  """Requester-only state, never the value or ciphertext. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+  type SecretChangeRequest {
+    """The change request id."""
+    id: ID!
+    """The effective state, with expiry judged on the server clock."""
+    state: String!
+    """The requested operation."""
+    operation: String!
+    """Creation time."""
+    createdAt: DateTime!
+    """Expiry time."""
+    expiresAt: DateTime!
+  }
+
   """
   One named, owner-scoped secret — the general secret store (#677).
   Polymorphic owner (user | org | app). The value is encrypted at rest and
@@ -6406,10 +6510,10 @@ export const typeDefs = `#graphql
   input IssueSecretReadClientInput {
     "The App secret, by id or URN."
     secretRef: ID!
-    "WORKER: a live worker of the App (holderRef is its id). USER: the issuer themself (holderRef omitted). AGENT and APP are refused (GRANT_HOLDER_NOT_ALLOWED): a read client is held by a person or a worker."
+    "WORKER: a live worker of the App (holderRef is its id). AGENT: an agent installed and licensed in the App (holderRef is its id); its live workers in the App read through the client (hrn:node:hadronmemory.com:specs:cor:sec:060:02). USER: a live App participant (holderRef is their id, omitted for the issuer); a protected secret requires a different person. APP is refused (GRANT_HOLDER_NOT_ALLOWED): an App holds no reveal path, and an App holder for use is not supported."
     holderKind: GrantHolderKind!
     holderRef: ID
-    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refused (SECRET_AUTO_DELETE_NOT_AVAILABLE) until the deletion is available."
+    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refusals, in the order they are judged: holderKind APP (GRANT_HOLDER_NOT_ALLOWED); an unreadable startsAt or expiresAt (BAD_USER_INPUT); a marked request without a window or a read budget (SECRET_AUTO_DELETE_NEEDS_LIMIT); a caller who is neither an App manager nor the writer of the secret's current version (SECRET_AUTO_DELETE_NOT_ALLOWED, where an unmarked request would get FORBIDDEN or SECRET_READ_CLIENT_SUPERSEDED)."
     autoDelete: Boolean! = false
     startsAt: DateTime
     expiresAt: DateTime
@@ -6422,6 +6526,8 @@ export const typeDefs = `#graphql
     grantId: ID!
     secretName: String!
     selfIssued: Boolean!
+    "The worker holder was held by the actual signer at issuance (R22); null for a pending or legacy client, sealed once captured."
+    issuedToOwnWorker: Boolean
   }
 
   type SecretReadClientsPage {
@@ -6443,6 +6549,8 @@ export const typeDefs = `#graphql
     secretId: ID!
     secretName: String!
     selfIssued: Boolean!
+    "The worker holder was held by the actual signer at issuance (R22); null for a pending or legacy client, sealed once captured."
+    issuedToOwnWorker: Boolean
     "Null while live, else one of SECRET_DELETED, PROTECTED, REVOKED, PENDING, SPENT, EXPIRED, NOT_STARTED, ISSUER_GONE (nothing else ended it) or ENDED. A stored end wins; otherwise the grant's own state, in the order the reveal door answers."
     endReason: String
     "#4545 (hrn:node:hadronmemory.com:specs:cor:sec:060:02): the server-hosted page where the person who holds this client reveals the value with a passkey: the server origin plus /secret-reveal/<clientId>, with no token. Copy it verbatim; never compose it. Returned only to that person holder in their own session. Null for a client a worker holds, and for a worker session, an App key or anyone viewing a client they do not hold."
@@ -6508,7 +6616,7 @@ export const typeDefs = `#graphql
     secretId: ID!
     secretName: String!
     versionNo: Int
-    "STORE | VERSION | METADATA | DELETE | PURGE (a superseded version removed by retention or the kept-versions cap)."
+    "STORE | VERSION | METADATA | DELETE | PROTECT | UNPROTECT | REVEAL | PURGE (a superseded version removed by retention or the kept-versions cap)."
     kind: String!
     outcome: String!
     actorUserId: String
@@ -6846,6 +6954,40 @@ export const typeDefs = `#graphql
     name: String!
   }
 
+  "#3429 - the two ways to retire a spec."
+  enum RetireSpecForm {
+    "Retire a spec that has no successor."
+    RESCIND
+    "Retire a spec in favour of a successor that already exists, in the same memory."
+    SUPERSEDE
+  }
+
+  "#3429 - the input of retireSpec."
+  input RetireSpecInput {
+    "The spec: its node id or URN."
+    ref: ID!
+    form: RetireSpecForm!
+    "RESCIND only (default false): word it as a draft that never took effect. A SUPERSEDE with true is BAD_USER_INPUT."
+    withdrawn: Boolean
+    "SUPERSEDE only, required: the existing successor's node id or URN. Given with RESCIND is BAD_USER_INPUT."
+    successorRef: ID
+    "Required: the spec's revision as the caller read it. A mismatch is NODE_WRITE_CONFLICT and nothing is written."
+    expectedRevision: Int!
+    "Required (not blank) with RESCIND, optional with SUPERSEDE."
+    reason: String
+    "Required (not blank) with RESCIND; with SUPERSEDE it defaults to the spec's stored abstract."
+    summary: String
+    authoredWith: AuthoredWithInput
+  }
+
+  "#3429 - what retireSpec did."
+  type RetireSpecResult {
+    "The retired spec, at its new revision."
+    node: Node!
+    "The superseded-by edge a SUPERSEDE inserted; null for a RESCIND."
+    successorEdge: Edge
+  }
+
   """
   #1328 — an authoring attestation. The writer states which task it worked from
   and that task's current revision (Node.revSeq). The server compares both with
@@ -7040,9 +7182,11 @@ export const typeDefs = `#graphql
     """
     Optional optimistic-concurrency precondition (#937). When supplied, the
     update is applied only while the node's current live revision still equals
-    this positive 32-bit integer. A mismatch refuses atomically with
-    NODE_WRITE_CONFLICT; omitting it or passing null preserves last-write-wins
-    compatibility.
+    this positive 32-bit integer. A stale token is refused atomically with
+    NODE_WRITE_CONFLICT and no edges are applied. An inline-edge-only write
+    checks a current token without consuming it: the node's revision does not
+    advance and the same token remains valid. Omitting it or passing null
+    preserves last-write-wins compatibility.
     Read the baseline from Node.revision.
     """
     expectedRevision: Int
@@ -7082,8 +7226,9 @@ export const typeDefs = `#graphql
     """
     Why this change was made — recorded on the revision-history snapshot
     (NodeRevision.revLabel, #620; historically it squatted in editedBy),
-    mirroring hadron_update_node's reason arg so CLI and MCP edits leave
-    equally-traceable history.
+    mirroring hadron_update_node's reason arg. An inline-edge-only write
+    appends no revision, so it creates no history row on which to record this
+    reason.
     """
     reason: String
   }
@@ -7611,6 +7756,42 @@ export const typeDefs = `#graphql
   }
 
   """
+  #4180 (hrn:node:hadronmemory.com:specs:cor:acl:140:03, Holger R5): why a grant's holder went. Cause codes, not words: how each is shown is still open in the spec, so the copy may change without these values changing. The set is open to additions; a client must treat an unknown value as a departure it cannot name. Not the end reasons of a secret read client (SECRET_DELETED, PROTECTED), which are not holder departures.
+  """
+  enum GrantHolderDepartureReason {
+    "The person's account was erased."
+    USER_ERASED
+    "The person removed themselves from the organization that owns the grant's App."
+    ORG_LEFT
+    "The person was removed from the organization that owns the grant's App by someone else."
+    ORG_REMOVED
+    "The worker was retired."
+    WORKER_RETIRED
+    "The worker was deleted."
+    WORKER_DELETED
+    "The agent was deleted."
+    AGENT_DELETED
+    "The agent was uninstalled from the grant's App."
+    AGENT_UNINSTALLED
+    "The agent was installed only through an importing agent, and that agent was uninstalled from the grant's App."
+    AGENT_IMPORTER_UNINSTALLED
+    "The agent was installed only through an importing agent, and that agent was deleted (hard delete; #4179)."
+    AGENT_IMPORTER_DELETED
+    "The import that installed the agent in the grant's App was removed."
+    AGENT_IMPORT_REMOVED
+    "The organization's licence to the agent was revoked, which ended its installation in the grant's App."
+    AGENT_LICENSE_REVOKED
+    "The organization's licence to the agent expired, which ended its installation in the grant's App (recorded by the lapse sweep, #4178)."
+    AGENT_LICENSE_EXPIRED
+    "An organization the agent's installation in the grant's App depended on (the App's or the agent's own) was deleted (recorded by the lapse sweep, #4178)."
+    ORG_DELETED
+    "The grantee App was deleted."
+    APP_DELETED
+    "The holder went before causes were kept, so none was recorded. Not a guess at one."
+    REASON_NOT_RECORDED
+  }
+
+  """
   A grant (#3789, hrn:node:hadronmemory.com:specs:cor:acl:140:05): ids and scalars only, so no other entity's field resolvers are reachable
   through it. Its stored facts as stored, and allows and state, which are computed (#4173).
   """
@@ -7648,6 +7829,8 @@ export const typeDefs = `#graphql
     revokedByUserId: ID
     "#3711 (V56): when the holder went (a person erased, a worker retired, an agent or App deleted); a fact, not a state. Only the App's manager reads it (appGrants); every other read answers null."
     holderDepartedAt: DateTime
+    "#4180 (hrn:node:hadronmemory.com:specs:cor:acl:140:03, Holger R5): why the holder went, as a cause with no wording; null unless the holder ended the grant (state HOLDER_GONE). REASON_NOT_RECORDED for a departure stamped before causes were kept, never a guess. Every read of the grant carries it."
+    holderDepartureReason: GrantHolderDepartureReason
     "Whether the grant allows its action right now, judged on the database clock by the one live function (activated, not revoked, holder not gone, App not deleted, started, not expired, not spent). A fact about this instant, never a lifecycle name."
     allows: Boolean!
     "#4173: the lifecycle state (hrn:node:hadronmemory.com:specs:cor:acl:140:03), the same on every surface that returns the grant."
@@ -9268,8 +9451,23 @@ export const typeDefs = `#graphql
     that holds or ever held host:operate reads its own live host only (hrn:node:hadronmemory.com:specs:cor:agt:070:04); any other hostId
     answers HOST_NOT_FOUND, exactly as a host the App does not have. A host key's read is a recorded use
     (hrn:node:hadronmemory.com:specs:cor:agt:070:07). Reads only: nothing is started, stopped or changed.
+    #4260: the optional worker selector (a worker id or an exact name) narrows the rows this answer returns to the
+    workers of this host it names, for a host's per-worker re-reads — AT MOST ONE ROW: the id form is exactly one
+    (ids are unique), and the name form is at most one because a worker's name is unique per App,
+    case-insensitively (workers_app_name_uniq, a functional unique on (app_id, lower(name)) that Prisma's schema
+    cannot express — prisma/post-push.sql and migration 20260814130000); the name match itself is exact-case, so
+    a differently-cased selector selects nothing. Worker names are stored trimmed (the cast path trims a name
+    before storing it; there is no rename) and a non-empty selector is trimmed the same way, so an exact name
+    comparison always reaches a stored name. A null, empty or whitespace-only worker is treated as omitted — the
+    full host list returns. An exact id match takes precedence over a name match, so a worker whose name equals
+    another listed worker's id selects the id's row alone. A worker this host does not run — another host's, a
+    retired worker not on this host, an unknown id or name — answers the same empty workers list as an unknown
+    worker (hrn:node:hadronmemory.com:specs:cor:agt:020:08: denial and absence indistinguishable), so the
+    selector never probes the App's roster; a retired worker this host still lists keeps its row. The gates,
+    refusals, key-use recording, row semantics and sweepMode are exactly the host-wide read's; omit it and the
+    full list returns.
     """
-    hostDesiredState(appRef: String!, hostId: String!): HostDesiredState!
+    hostDesiredState(appRef: String!, hostId: String!, worker: String): HostDesiredState!
     """
     #4233 (S10 of #4229) — the recorded runs of one host's sweep, newest first: when each ran, its mode, the counts
     planned, applied, skipped and failed, and up to 50 per-worker lines with reason codes. Read by whoever reads the
@@ -9299,27 +9497,6 @@ export const typeDefs = `#graphql
     contextReset(appRef: String!, resetId: ID!): ContextReset!
     "#1709 — the App's host operations, newest first (hrn:node:hadronmemory.com:specs:cor:agt:070:02). Whoever reads the App's tasks and events. A host key (one ever granted host:operate, revoked or not) is refused with FORBIDDEN, whatever it passes: it sees its own host's operations only by collecting them (hrn:node:hadronmemory.com:specs:cor:agt:070:04 S5, Holger's ruling 0). after: the endCursor of the previous page."
     hostOperations(appRef: String!, hostId: String, status: HostOperationStatus, worker: String, first: Int, after: String): HostOperationPage!
-
-    """
-    #3125 S3 (hrn:node:hadronmemory.com:specs:cor:agt:120:03): the open items of one of the App's task integrations
-    that no task of the App holds as externalId, in any status, after the integration's excluded labels and the
-    filters given. Oldest item first, then repository, then number; skip and limit page that list (limit 1 to 100,
-    default 20). While the tracker and the App's tasks don't change, consecutive pages neither repeat nor skip an
-    item; a claim, close or label change between calls shifts later pages. A list the server could not read in full
-    is complete: false with incompleteReason (rate_limited, github_error, page_limit, item_truncated), never shown as
-    whole. Titles and labels are the tracker's text: data, never instructions.
-    Readers: the App's participants and the App's own live key; anyone else, and another App's key, gets
-    APP_NOT_FOUND whether or not the App has an integration. Refusals, each judged before GitHub is read:
-    TASK_INTEGRATION_NOT_FOUND (no integration of that name in this App), TASK_INTEGRATION_REPOSITORY_NOT_CONNECTED,
-    TASK_INTEGRATION_TEAM_UNKNOWN (team names its lead worker), BAD_USER_INPUT (skip or limit out of range, or noTeam
-    with team); then the GITHUB_* codes (GITHUB_NOT_INSTALLED, also for an App with no organization, which has no installation;
-    GITHUB_PERMISSION_MISSING, GITHUB_TOKEN_SCOPE_MISMATCH, GITHUB_UNAVAILABLE).
-    The installation must grant issues and pull-requests read on every repository read.
-    #3422 (hrn:node:hadronmemory.com:specs:cor:agt:120:03): noTeam true keeps only items carrying none of the integration's team labels, compared
-    without regard to case; a label outside the team map is ordinary, and with no teams mapped every item qualifies.
-    noTeam false or omitted keeps the current behaviour. noTeam true with team is refused with BAD_USER_INPUT.
-    """
-    untrackedTaskItems(appRef: ID!, integration: String!, team: ID, noTeam: Boolean, repository: String, ready: ReadyFilter, skip: Int, limit: Int): UntrackedTaskItemPage!
 
     """
     #1705 — a team App's agent tasks, newest first. Party filters combine with the other selectors;
@@ -10416,6 +10593,8 @@ export const typeDefs = `#graphql
     """
     mcpServerTools(ref: ID!): [McpServerTool!]
 
+    """Your own change request; null for every other caller. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+    secretChangeRequest(id: ID!): SecretChangeRequest
     """
     Fetch one secret's inspectable half (never the value). Null when the
     row does not exist OR the caller is not entitled to its owner scope —
@@ -11951,26 +12130,6 @@ export const typeDefs = `#graphql
     BAD_USER_INPUT at the second position. Named people and tasks not asking for a match keep their meaning.
     """
     createAgentTasks(appRef: ID!, tasks: [CreateAgentTasksItemInput!]!, distinctAssignees: Boolean): [AgentTask!]!
-    """
-    #3125 S3 (hrn:node:hadronmemory.com:specs:cor:agt:120:03): claim up to limit (1 to 10, default 1) of the items
-    untrackedTaskItems would list with the same filters, in its order. Each claim is a root task owned by and assigned
-    to the caller, created STARTED with startedAt set, externalId and source the item's URL, an ISSUE reference to it,
-    and the item's title (control characters removed, clipped to the title cap); it records task.created,
-    task.assigned and task.started. Each claim commits on its own. An item another caller claimed first is skipped,
-    so concurrent callers get disjoint sets. A refusal mid-walk stops it and is returned with the claims already
-    made: incompleteReason claim_refused with its code in refusalCode (claim_failed, refusalCode null, for an
-    unexpected failure after a claim). A person or a worker claims for themselves and names no assignee or owner
-    (BAD_USER_INPUT if it does). #3132: the App's own key names the assignee (TASK_ASSIGNEE_REQUIRED) and the owner
-    (TASK_OWNER_REQUIRED), each a worker of the App or a person who participates in it (TASK_ASSIGNEE_INVALID /
-    TASK_OWNER_INVALID, as createAgentTask), all judged before any GitHub call; the task is started on the assignee's
-    behalf, and its events name the key as actorAppKeyId and the assignee as their subject. A claim is the only task
-    write an App key makes. A key request carrying a session is APP_KEY_SESSION_BOUND. Other refusals as
-    untrackedTaskItems.
-    #3422: noTeam as on untrackedTaskItems, applied before the claim walks the list: true claims only items carrying
-    none of the integration's team labels, false or omitted keeps the current behaviour, and with team it is refused
-    with BAD_USER_INPUT before GitHub is read and before any task is created.
-    """
-    claimUntrackedTaskItems(appRef: ID!, integration: String!, team: ID, noTeam: Boolean, repository: String, ready: ReadyFilter, limit: Int, assignee: AgentTaskPartyInput, owner: AgentTaskPartyInput): ClaimUntrackedTaskItemsResult!
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:01) — assigner authority; priority1..5, default1. #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
     setAgentTaskPriority(taskRef: ID!, priority: Int!, instruction: ActInstructionInput): AgentTask!
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:02) — add a same-App blocker to a backlog/pending task, refusing cycles serially. Assigner authority. #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
@@ -12057,12 +12216,9 @@ export const typeDefs = `#graphql
     session on an instruction (a worker with none, an App key, a run and an impersonation are refused). Never put a secret here. When expectedRevision is sent it must equal
     App.propertiesRevision. A write that changes nothing changes no revision and records no event; a changing write
     records app.properties-changed naming the changed top-level keys, never values. Bounds: 16 KiB of JSON, 64 levels.
-    The taskIntegrations key (hrn:node:hadronmemory.com:specs:cor:agt:120:01) is validated: a list of
-    { name, provider: "github", repositories: ["owner/name"], readyLabel?, excludeLabels?, teams?: [{ lead, label }] },
-    where lead is a worker of this App (URN, id or name). Refusals: FORBIDDEN, PROPERTIES_NOT_AN_OBJECT,
+    No key is validated or read by the platform (#4085 retired the taskIntegrations key's validation, hrn:node:hadronmemory.com:specs:cor:agt:120:01). Refusals: FORBIDDEN, PROPERTIES_NOT_AN_OBJECT,
     PROPERTIES_TOO_LARGE, PROPERTIES_KEY_RESERVED (a key named __proto__ at any depth, which cannot be stored; names the
-    path), TASK_INTEGRATION_INVALID (names the JSON path,
-    never the value), APP_PROPERTIES_CONFLICT.
+    path), APP_PROPERTIES_CONFLICT.
     #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
     setAppProperties(appRef: String!, properties: JSON, expectedRevision: Int, instruction: ActInstructionInput): App!
@@ -12596,6 +12752,22 @@ export const typeDefs = `#graphql
     NodeLocConflictError at a live loc. memoryRef accepts the memory's ID or URN.
     """
     reserveSpecCitation(memoryRef: ID!, loc: String!, name: String): Node!
+    """
+    #3429 (hrn:node:hadronmemory.com:specs:cor:spc:010:02, rulings 0212-0214, 0218-0220) - retire a spec in ONE transaction: either RESCIND it (no
+    successor) or SUPERSEDE it by a successor that already exists in the SAME memory. Under the spec memory's channel
+    key, the spec's loc key and its row lock, it refuses a spec that is already retired or already has a
+    superseded-by* link (live edge or non-deleted pending edge), and for a supersede an unreadable, missing, deleted,
+    self, other-memory, retired or already-linked successor. Then it writes the superseded tag, the banner under the
+    title and the retirement abstract (composed by the server, so the text is the same on every surface), through the
+    same writer updateSpecNode uses (same authority, authoring check and one revision), and for a supersede inserts
+    the one superseded-by edge. Nothing is written on any refusal. expectedRevision is REQUIRED: a stale read is
+    NODE_WRITE_CONFLICT. A refused spec or successor you cannot read answers NODE_NOT_FOUND; an unusable readable
+    successor and every state conflict answer NODE_WRITE_CONFLICT with no edge identity. A composed abstract over the
+    2000-character cap is NodeAbstractTooLongError. The door adds no authority. A raw createEdge or updateEdge of a
+    superseded-by* edge outside the door is not a lifecycle verb, and a snapshot restore that commits after a
+    retirement can un-retire the spec (hadron-server#3587).
+    """
+    retireSpec(input: RetireSpecInput!): RetireSpecResult!
     """
     #1178 — allocate the next citation under parentLoc and reserve it as a
     placeholder, in one transaction: mint-or-refuse, so a client never reads
@@ -13737,6 +13909,17 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
 
+    \`orgRef\` takes an organization's ID or fully-qualified URN and is compared on
+    the RESOLVED organization id, not on the text passed. Naming the memory's own
+    organization (by ID or URN) is a no-op. Naming any other organization answers
+    USE_TRANSFER_MEMORY_OWNERSHIP: use \`transferMemoryOwnership\` to change a
+    memory's owner. For a caller who may manage the memory, an organization that
+    does not exist answers ORGANIZATION_NOT_FOUND. A caller who cannot read the
+    memory gets its concealed MEMORY_NOT_FOUND first, and a caller who can read
+    it but may not manage it gets the ordinary authorization denial; neither
+    reaches the organization lookup. An empty string \`orgRef: ""\` also
+    answers USE_TRANSFER_MEMORY_OWNERSHIP.
+
     Spec 033 FR-026: enabling \`vectorIndexEnabled\` on an \`isEncrypted\` memory
     requires \`acknowledgeVectorInversionRisk: true\` in the same call. Without
     the flag, an \`EncryptedVectorIndexNotAcknowledgedError\` is thrown carrying
@@ -14179,6 +14362,7 @@ export const typeDefs = `#graphql
       name: String!
       kind: String!
       metadata: JSON
+      protected: Boolean
       value: JSON!
     ): Secret!
 
@@ -14190,7 +14374,12 @@ export const typeDefs = `#graphql
     the cascade and flow config reference the name; create a new name
     instead. The effective (metadata, value) pair is re-validated per kind.
     """
-    updateSecret(ref: ID!, metadata: JSON, value: JSON): Secret!
+    updateSecret(ref: ID!, metadata: JSON, value: JSON, protected: Boolean): Secret!
+    """Open a protection change for your own passkey ceremony. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+    setSecretProtected(ref: ID!, protected: Boolean!): Secret!
+    """Withdraw your own open change request and clear its staged value. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+    withdrawSecretChangeRequest(id: ID!): Boolean!
+
 
     "Hard-delete a secret, every version with it; referencing runs fail their resolution loud (or fall through the cascade) afterwards. An unprotected App secret is deleted by its creator or whoever manages the App, each as a person."
     deleteSecret(ref: ID!): Boolean!
@@ -15978,6 +16167,11 @@ export const typeDefs = `#graphql
     interrupted completion allows the strict owner or owning App key to call
     encryptMemory with the existing key. A registered holding cannot be linked again.
 
+    An encrypted promotion refuses WHOLE when a chat-engine state's envelope
+    fails authentication: ENCRYPTION_INCOMPLETE with operation
+    PROMOTE_ANONYMOUS_MEMORY, progressCommitted false and the same extensions
+    as encryptMemory, and nothing is committed.
+
     Accepts the entity's ID or URN.
     """
     linkMemoryToUser(memoryRef: ID!, externalUserId: String!): Memory!
@@ -15991,6 +16185,18 @@ export const typeDefs = `#graphql
     matching verifier; impersonation and sibling Apps grant no authority. Live and
     historical node fields are converted in bounded locked passes. One-way
     without the key: the server cannot recover the content.
+
+    A chat-engine state whose stored envelope fails authentication is never
+    treated as plaintext and is never repaired. The conversion still converts
+    everything healthy (including that chat root's own node fields), then
+    answers ENCRYPTION_INCOMPLETE and never a Memory: the message is fixed, and
+    the extensions carry operation ENCRYPT_MEMORY, phase CHAT_ENGINE_STATE,
+    reason UNAUTHENTICATED_ENVELOPE, blockedEngineStateCount (exact, or null
+    when the scan did not finish), blockedEngineStateRootIds (the chat roots'
+    node ids, ascending, at most 100), progressCommitted (whether this call
+    converted anything) and retryable false. A retry with the same key repeats
+    the refusal while the envelope remains. No name, content, path or key
+    material is ever in the error.
 
     The secret travels beside the operation, never in it (hrn:node:hadronmemory.com:specs:cor:sec:040:04, #1796).
     The strict owner sends exactly one of dataKey or passphrase in an x-hadron-memory-keys entry
@@ -16045,7 +16251,7 @@ export const typeDefs = `#graphql
     displayMessage: String!
     stageTransitioned: Boolean!
     newStageName: String
-    "The stage name the turn asked for that is not one of the conversation's stages (hrn:node:hadronmemory.com:specs:cor:cht:030:02). The chat did not move; the turn is recorded. Null when the name was accepted or none was given."
+    "The stage name the turn asked for that is not one of the conversation's stages (hrn:node:hadronmemory.com:specs:cor:cht:030:02). The chat did not move; the turn is recorded. Null when the name was accepted or none was given, and null when routingSkipped: the rejection was judged against a stage list the chat has since left."
     rejectedNextStage: String
     conversationHandoff: String
     chatEnded: Boolean!
@@ -16053,7 +16259,7 @@ export const typeDefs = `#graphql
     conversationCompleted: String
     "Whether this turn returned the chat from a detour to the conversation and stage the most recent active detour left. False when a completion rule fired instead, or routing was skipped. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
     detourReturned: Boolean!
-    "Routing edits were skipped because a concurrent turn moved the chat from the decision's origin. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
+    "Routing edits were skipped because a concurrent turn moved the chat from the decision's origin (its conversation or its stage). The turn's routing claims are cleared with them: completion, handoff, stage transition, detour return and rejectedNextStage all read as unset. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
     routingSkipped: Boolean!
     onTrack: Boolean!
     offTrackReason: String
@@ -16091,46 +16297,6 @@ export const typeDefs = `#graphql
     locked: Boolean!
     lockedBy: String
     expiresAt: DateTime
-  }
-
-  "#3125 S3: the caller's ready filter against the integration's readyLabel (ANY by default). ONLY on an integration with no readyLabel lists nothing."
-  enum ReadyFilter {
-    ONLY
-    EXCLUDE
-    ANY
-  }
-
-  "#3125 S3: one open, untracked item of a task integration. title and labels are the tracker's text."
-  type UntrackedTaskItem {
-    "The item's canonical URL: the externalId a claim records."
-    externalId: String!
-    "The connected repository, lower-cased."
-    repository: String!
-    number: Int!
-    title: String!
-    url: String!
-    labels: [String!]!
-    createdAt: DateTime!
-    updatedAt: DateTime!
-    "True when a pull request that closes the item has merged: listed for a close check, not dropped."
-    linkedPullRequestMerged: Boolean!
-  }
-
-  "#3125 S3: one page of untrackedTaskItems. total counts the whole filtered list as read: when complete is false, only what the read reached."
-  type UntrackedTaskItemPage {
-    items: [UntrackedTaskItem!]!
-    total: Int!
-    complete: Boolean!
-    incompleteReason: String
-  }
-
-  "#3125 S3: what claimUntrackedTaskItems created, in claim order."
-  type ClaimUntrackedTaskItemsResult {
-    tasks: [AgentTask!]!
-    complete: Boolean!
-    incompleteReason: String
-    "The stable code of the refusal that stopped the walk; null unless incompleteReason is claim_refused."
-    refusalCode: String
   }
 
   # ── #1705 Agent tasks (Task Management T1, epic #1704; hrn:node:hadronmemory.com:specs:cor:agt:050) ──────

@@ -14,7 +14,7 @@ import { verifyAssertionOverChallenge, type AssertionParts, type VerifierCredent
  * `SECRET_REVEAL` is the person read-client page's one-step ceremony (#3998, `lib/secrets/personReveal.ts`); never bound.
  * `GRANT_SIGN_PROOF` and `GRANT_SIGN` are the grant signing ceremony's (#3649 slice C, `lib/signing/grantCeremony.ts`).
  */
-export type CeremonyPurpose = 'SIGN_IN' | 'STEP_UP_ONLY' | 'REGISTER' | 'REVOKE' | 'SIGN_PROOF' | 'SIGN' | 'GRANT_SIGN_PROOF' | 'GRANT_SIGN' | 'SECRET_REVEAL';
+export type CeremonyPurpose = 'SIGN_IN' | 'STEP_UP_ONLY' | 'REGISTER' | 'REVOKE' | 'SIGN_PROOF' | 'SIGN' | 'GRANT_SIGN_PROOF' | 'GRANT_SIGN' | 'SECRET_CHANGE_PROOF' | 'SECRET_CHANGE' | 'SECRET_REVEAL';
 
 /** Open a ceremony for the browser identified by `browserNonceHash`. */
 export async function createCeremony(
