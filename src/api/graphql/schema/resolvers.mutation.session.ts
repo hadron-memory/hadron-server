@@ -1,3 +1,4 @@
+import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
 import { edgeRunOrder } from '../../../lib/edgeOrder.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
@@ -2581,6 +2582,9 @@ export const sessionMutations = {
       const locToId = new Map<string, string>();
       await ctx.db.$transaction(
         async (tx) => {
+          // #1213: this owning restore can recreate snapshot roles and tombstone live signals.
+          // Join the bounded system-memory handshake before any loc or node-row lock/read.
+          await lockMemoryForChannelChange(tx, sysMemId);
           await lockAncestorsForCreateMany(
             tx,
             sysMemId,
@@ -2599,9 +2603,9 @@ export const sessionMutations = {
           // cor:agt:040:10), not written below, and a snapshot's copy of one is ignored.
           //
           // #4313: every statement of this step leaves compiled rows out BY TYPE, in its own WHERE. It used to leave
-          // them out by the ids of an earlier read, so a compile that committed between that read and this one (the
-          // transaction is READ COMMITTED and shares no lock with a compile) was tombstoned, or had its edges
-          // retired. No statement here depends on what an earlier one saw of compiled rows.
+          // them out by ids from an earlier read. Before S2 coordinated restore and compile, a compile between
+          // those reads could be tombstoned or lose its edges. Direct writes outside the memory-key protocol can
+          // still interleave, so no statement here depends on an earlier snapshot of compiled rows.
           const notCompiled = { nodeType: { not: COMPILED_BOOT_PROMPT_NODE_TYPE } };
           const live = await tx.node.findMany({
             where: { memoryId: sysMemId, deletedAt: null, ...notCompiled, NOT: { loc: { startsWith: 'revisions' } } },

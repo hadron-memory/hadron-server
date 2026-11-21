@@ -1356,8 +1356,9 @@ enum NodeContentValidationReporterKind {
 ///   - `reference`: pointers to external sources or to other memories, such as papers, URLs and asset references.
 ///   - `system`: an agent's internal configuration, such as conversation designs, stages and topics; usually in
 ///     an Agent's system memory and hidden from end-user search.
-///   `comment` is reserved by the platform for governed feedback (see CommentMeta). The platform also uses
-///   further values of its own, for example `task` and `compiled-boot-prompt`.
+///   `comment` is reserved by the platform for governed feedback (see CommentMeta). The platform also writes
+///   `task`, `chat-message` and `compiled-boot-prompt`. The one list of every value the platform names is
+///   `NODE_TYPES` in `src/lib/nodeTypes.ts` (#909); this comment and the MCP tool descriptions cite it.
 /// - `objectType` names the collection the node is an instance of, in a memory that declares a schema.
 /// - `role` says what the node is for. It is an open string; a small closed subset of its values routes writes
 ///   to that kind's own path. No platform behaviour depends on any other value, apart from the role rules a
