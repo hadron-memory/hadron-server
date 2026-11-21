@@ -126,7 +126,8 @@ type AppMemoryAccessOptions = {
   /** #2190: filled, per memory, with the Agents whose fold granted it (install order). */
   provenance?: Map<string, AgentProvenance[]>;
 };
-type ItemUserAccessLoader = () => Promise<ReadonlyMap<string, string>>;
+/** #3326: given the item memory ids about to be judged, the user's own level for those ids (absent = none). */
+type ItemUserAccessLoader = (candidateIds: readonly string[]) => Promise<ReadonlyMap<string, string>>;
 
 /** Direct authority callers default to credential-only without a user; known users receive the independent item ceiling. */
 export async function getAppMemoryAccess(
@@ -135,7 +136,7 @@ export async function getAppMemoryAccess(
   opts: AppMemoryAccessOptions & { loadItemUserAccess?: ItemUserAccessLoader } = {},
 ): Promise<Map<string, string>> {
   const loadItemUserAccess = opts.loadItemUserAccess ?? (opts.callerUserId
-    ? () => independentUserItemAccess(db, opts.callerUserId!)
+    ? (candidateIds: readonly string[]) => independentUserItemAccess(db, opts.callerUserId!, candidateIds)
     : undefined);
   return buildAppMemoryMap(db, appId, { ...opts, credentialOnly: opts.credentialOnly ?? !opts.callerUserId }, loadItemUserAccess);
 }
@@ -180,9 +181,12 @@ async function buildAppMemoryMap(
   const liveSystemIds = new Set(liveSystemRows.map((row) => row.id));
   // No item can contribute without a licensed live Agent carrying one. Keep
   // system/team-only reads on their existing query budget (#3048/#2608).
+  // #3326: and only the memories those items name are judged, never everything the user can reach.
+  const candidateItemIds = [...new Set(agents
+    .filter(agent => licensedAgentIds.has(agent.id))
+    .flatMap(agent => agent.memoryItems.map(item => item.memoryId)))];
   const itemUserAccess = loadItemUserAccess
-    ? (agents.some(agent => licensedAgentIds.has(agent.id) && agent.memoryItems.length > 0)
-      ? await loadItemUserAccess() : new Map<string, string>())
+    ? (candidateItemIds.length > 0 ? await loadItemUserAccess(candidateItemIds) : new Map<string, string>())
     : undefined;
   const access = new Map<string, string>();
   for (const install of appInstalls) {
@@ -497,9 +501,19 @@ export async function getPrincipalAppMemoryAccess(
   // #3280/#3305 / cor:dmo:050:09: neither a run nor a session gains item
   // authority through App membership. Compute the same independent-user
   // ceiling once, including when an unselected user folds several Apps.
-  let independentItems: Promise<Map<string, string>> | undefined;
-  const loadItemUserAccess = principal.userId
-    ? () => independentItems ??= independentUserItemAccess(db, principal.userId!)
+  // #3326: per call and per memory, so overlapping candidates across several Apps are judged once and nothing
+  // outlives this request: the next one reads the user's authority afresh (cor:acl:020:01).
+  const independentLevels = new Map<string, Promise<string | null>>();
+  const loadItemUserAccess: ItemUserAccessLoader | undefined = principal.userId
+    ? async (candidateIds) => {
+      const missing = candidateIds.filter(id => !independentLevels.has(id));
+      if (missing.length > 0) {
+        const batch = independentUserItemAccess(db, principal.userId!, missing);
+        for (const id of missing) independentLevels.set(id, batch.then(levels => levels.get(id) ?? null));
+      }
+      const levels = await Promise.all(candidateIds.map(id => independentLevels.get(id)!));
+      return new Map(candidateIds.flatMap((id, i) => levels[i] ? [[id, levels[i]!] as const] : []));
+    }
     : undefined;
 
   if (principal.appId) {
