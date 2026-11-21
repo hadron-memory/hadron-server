@@ -254,6 +254,21 @@ describe('#3819 slice 1 — episodes and the alarm (cor:agt:060:14, :15)', () =>
     expect(await open()).toHaveLength(1);
   });
 
+  it('a no-worker raise re-judges in its transaction: a match committed since the pass read raises nothing', async () => {
+    const { raiseSaturation } = await saturation();
+    await outcome(SERVER_MID, 'NO_WORKER', 2);
+    await outcome(SERVER_MID, 'MATCHED', 1);
+    expect(await raiseSaturation(db, appId, { family: 'claude', tier: 'mid', role: 'server-engineer' }, 'no-worker', new Date())).toBeNull();
+    expect(await alarms()).toEqual([]);
+  });
+
+  it('a raise for an App uninstalled since the pass listed it opens nothing (the apps FOR SHARE fence)', async () => {
+    const { raiseSaturation } = await saturation();
+    await db.app.update({ where: { id: appId }, data: { uninstalledAt: new Date() } });
+    expect(await raiseSaturation(db, appId, { family: 'claude', tier: 'mid', role: 'server-engineer' }, 'none-eligible', new Date())).toBeNull();
+    expect(await episodes()).toEqual([]);
+  });
+
   it('S5: two concurrent evaluator passes record one alarm', async () => {
     await outcome(SERVER_MID, 'NO_WORKER', 1);
     const now = new Date();
@@ -372,7 +387,7 @@ describe('#3819 slice 1 — episodes and the alarm (cor:agt:060:14, :15)', () =>
   it('the roster audience reads the alarm in the App\'s event stream', async () => {
     await outcome(SERVER_MID, 'NO_WORKER', 1);
     await evaluate();
-    const page = await Q.agentTeamEvents({}, { appRef: appId, alarmsOnly: true }, ctx());
+    const page = await Q.agentTeamEvents({}, { appRef: appId, alarmsOnly: true, newestFirst: true }, ctx());
     const events = Array.isArray(page) ? page : page.events ?? page.items;
     expect(events.map((e: any) => e.type)).toContain(TYPE);
   });
