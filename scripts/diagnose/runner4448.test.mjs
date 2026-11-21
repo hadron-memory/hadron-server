@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const LOAD_LINE = '{"kind":"load","workload":"held","cap":100,"startAt":0,"endAt":0,"ok":101,"probe":{"method":"tools/list","requests":7,"errors":0,"minMs":1,"p50Ms":1,"p95Ms":1,"p99Ms":1,"maxMs":1}}';
+const LOAD_LINE = '{"kind":"load","workload":"held","cap":100,"startAt":0,"endAt":0,"ok":101,"capRefused":0,"other":0,"closeOk":0,"closeFailed":0,"missingSession":0,"probe":{"method":"tools/list","requests":7,"errors":0,"minMs":1,"p50Ms":1,"p95Ms":1,"p99Ms":1,"maxMs":1}}';
 
 function fixture(mode) {
   const dir = mkdtempSync(join(tmpdir(), 'gloria-run4448-'));
@@ -43,6 +43,9 @@ esac\n`);
     case "$MODE" in
      timeout) exit 124;;
      empty) exit 0;;
+     noop) printf '%s\\n' '{"kind":"other"}'; exit 0;;
+     extraline) printf '%s\\n' '${LOAD_LINE}' '{"kind":"other"}'; exit 0;;
+     wrongworkload) printf '%s\\n' '${LOAD_LINE.replace('"workload":"held"', '"workload":"idle"')}'; exit 0;;
     esac
     printf '%s\\n' '${LOAD_LINE}'; case "$MODE" in fail|failkept) exit 5;; esac;;
    *memory.max*) echo 6442450944;;
@@ -184,6 +187,37 @@ test('exit 0 with no load line is an invalid run, not a pass', () => {
     expect(r.status).toBe(7);
     expect(r.stderr).toContain('printed no load line');
     expect(readFileSync(join(f.dir, 'down'), 'utf8')).toBe('down\n');
+  } finally { f.clean(); }
+});
+
+// #2627: exit 0 with output that is not a valid load record for the requested workload is an invalid run, refused
+// before any sample capture; only a positive record is accepted.
+for (const mode of ['noop', 'wrongworkload', 'extraline']) {
+  test(`exit 0 with output that is not this workload's load record is refused (${mode})`, () => {
+    const f = fixture(mode);
+    try {
+      const r = f.run();
+      expect(r.status).toBe(7);
+      expect(r.stderr).toContain('printed no valid load record for held');
+      expect(existsSync(join(f.dir, 'sleeps')) ? readFileSync(join(f.dir, 'sleeps'), 'utf8').split('\n').filter(Boolean).length : 0).toBe(1);
+      expect(readFileSync(join(f.dir, 'down'), 'utf8')).toBe('down\n');
+    } finally { f.clean(); }
+  });
+}
+
+// #4608 BLIND F2: a host that cannot run the check is named as such, not reported as a bad record.
+test('a failed load record check (no usable host node) is reported as a check failure, not a rejected record', () => {
+  const f = fixture('cap');
+  try {
+    // #4608 BLIND delta: exit 1 too (a crashing node) is a failed check, never a rejected record.
+    for (const code of ['9', '1']) {
+      writeFileSync(join(f.dir, 'bin', 'node'), `#!/bin/bash\nif [ "\${1:-}" = --input-type=module ]; then exit ${code}; fi\nexec '${process.execPath}' "$@"\n`, { mode: 0o755 });
+      const r = f.run();
+      expect(r.status).toBe(7);
+      expect(r.stderr).toContain(`could not run the load record check on this host (node exit ${code})`);
+      expect(r.stderr).not.toContain('printed no valid load record');
+      rmSync(join(f.dir, 'state'), { recursive: true, force: true }); rmSync(join(f.dir, 'down'), { force: true });
+    }
   } finally { f.clean(); }
 });
 

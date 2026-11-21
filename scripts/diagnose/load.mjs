@@ -1,6 +1,16 @@
-import {realpathSync} from 'node:fs';
-import {pathToFileURL} from 'node:url';
 import { assertSecretFree } from './sampler.mjs';
+
+export const UNSUPPORTED_NODE = 'load.mjs needs Node 22.18+ or 24.2+ (this Node has no import.meta.main); refusing to load';
+/**
+ * Bruce's ruling on #4608 (chat #125985): on a Node without import.meta.main, a launch cannot be told from an import, so
+ * BOTH refuse, loudly and the same way. The guard runs once, at module load, and throws: a direct run exits non-zero with
+ * this message, and an import rejects with it (run.sh's record check turns that into "could not run the load record
+ * check"). On every declared runtime (.nvmrc v22.22.0, the e2e image node:22.22.0, CI node 22) it does nothing.
+ */
+export function requireImportMetaMain(nodeMain) {
+  if (typeof nodeMain !== 'boolean') throw new Error(UNSUPPORTED_NODE);
+}
+requireImportMetaMain(import.meta.main);   // first, before anything else runs
 // Load driver for #2589. One principal (HADRON_DIAG_KEY from the env, never printed).
 // Workloads: churn (W1/W2: initialize with no Mcp-Session-Id, never closed), closed (C1: DELETE after),
 // idle (C2), held (C3: N sessions held open). Output is counts only.
@@ -10,7 +20,9 @@ const INIT = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVe
 
 // `cap` is the server's per-principal session cap; held opens cap + 1 so it always probes eviction.
 export function parseWorkload(name, cap = 25) {
-  const w = { churn: { perMin: 40, close: false }, closed: { perMin: 40, close: true }, idle: { perMin: 0, close: false }, held: { perMin: 0, close: false, hold: cap + 1 } }[name];
+  const all = { churn: { perMin: 40, close: false }, closed: { perMin: 40, close: true }, idle: { perMin: 0, close: false }, held: { perMin: 0, close: false, hold: cap + 1 } };
+  // #4608 LOCAL F1: own keys only, so an inherited name (constructor, toString, __proto__) is unknown, not a workload.
+  const w = Object.hasOwn(all, name) ? all[name] : undefined;
   if (!w) throw new Error(`unknown workload: ${name}`);
   return w;
 }
@@ -96,7 +108,37 @@ export function workloadValid(workload, c) {
     && (workload !== 'closed' || (c.capRefused === 0 && c.closeOk === c.ok));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+/**
+ * #2627: whether this module is the process's main script: exactly Node's own import.meta.main (Node 22.18+ and 24.2+;
+ * the e2e image is 22.22). It is true for a direct, symlinked, spaced or --preserve-symlinks-main launch, and false for
+ * any import, whatever argv[1] holds (#4608 BLIND F1). There is no argv[1] fallback: argv[1] cannot tell
+ * `node load.mjs` from `node -e 'import("load.mjs")' load.mjs` (#4608 BLIND delta). On a Node without import.meta.main
+ * this module refuses to load at all, for a launch and an import alike (the guard at the top), so it never passes.
+ */
+export function isMainModule(nodeMain) {
+  return nodeMain === true;
+}
+
+
+const COUNT_KEYS = ['ok', 'capRefused', 'other', 'closeOk', 'closeFailed', 'missingSession'];
+/**
+ * #2627: positive evidence that the driver ran the requested workload. `text` is the generator's whole stdout and
+ * must be exactly one load record: kind 'load', this workload, every count a non-negative integer, numeric startAt
+ * and endAt, and counts that pass workloadValid. Anything else, including empty or no-op output, is not a load.
+ */
+export function loadRecordOk(text, workload) {
+  const lines = String(text).trim().split('\n');
+  if (lines.length !== 1) return false;
+  let r;
+  try { r = JSON.parse(lines[0]); } catch { return false; }
+  if (!r || typeof r !== 'object' || Array.isArray(r) || r.kind !== 'load' || r.workload !== workload) return false;
+  try { parseWorkload(workload); } catch { return false; }
+  if (!COUNT_KEYS.every((k) => Number.isInteger(r[k]) && r[k] >= 0)) return false;
+  if (!Number.isFinite(r.startAt) || !Number.isFinite(r.endAt)) return false;
+  return workloadValid(workload, r);
+}
+
+if (isMainModule(import.meta.main)) {
   const [base, workload, durS] = process.argv.slice(2);
   const key = process.env.HADRON_DIAG_KEY;
   if (!key) { console.error('HADRON_DIAG_KEY is required'); process.exit(2); }
