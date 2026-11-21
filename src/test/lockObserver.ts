@@ -14,6 +14,15 @@
  *   vitest's generic test timeout.
  */
 import type { Client } from 'pg';
+import type { PrismaClient } from '../generated/prisma/index.js';
+
+/** A raw `pg` client, or the Prisma client (#4751: the edge-only suites observe through `db`). */
+export type LockObserver = Client | PrismaClient;
+
+async function rows<R>(observer: LockObserver, text: string): Promise<R[]> {
+  if ('$queryRawUnsafe' in observer) return observer.$queryRawUnsafe<R[]>(text);
+  return (await observer.query(text)).rows as R[];
+}
 
 export interface Deadline {
   /** The total budget, for the message. */
@@ -58,14 +67,14 @@ export async function backendPid(c: Client): Promise<number> {
  * `"no backend matching <query> blocked by [<pids>] within <dl.ms> ms"` when `dl` runs out.
  */
 export async function waitBlocked(
-  observer: Client, dl: Deadline, expect: { query: RegExp; blockedBy: number[] },
+  observer: LockObserver, dl: Deadline, expect: { query: RegExp; blockedBy: number[] },
 ): Promise<Waiting> {
   for (;;) {
-    await observer.query('SELECT pg_stat_clear_snapshot()');
-    const r = await observer.query<{ pid: number; query: string; blockers: number[] }>(
+    await rows(observer, 'SELECT 1 AS ok FROM (SELECT pg_stat_clear_snapshot()) AS s');
+    const r = await rows<{ pid: number; query: string; blockers: number[] }>(observer,
       `SELECT pid, query, pg_blocking_pids(pid) AS blockers FROM pg_stat_activity
         WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'`);
-    const hit = r.rows.find((x) => expect.query.test(x.query) && x.blockers.some((b) => expect.blockedBy.includes(b)));
+    const hit = r.find((x) => expect.query.test(x.query) && x.blockers.some((b) => expect.blockedBy.includes(b)));
     if (hit) return hit;
     if (dl.left() === 0) {
       throw new Error(`no backend matching ${expect.query} blocked by [${expect.blockedBy.join(', ')}] within ${dl.ms} ms`);

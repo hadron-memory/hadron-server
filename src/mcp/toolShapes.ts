@@ -310,7 +310,7 @@ export const SHAPE_HADRON_CREATE_NODE = {
 export const SHAPE_HADRON_UPDATE_NODE = {
   authoredWith: AUTHORED_WITH_ARG,
   urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports"'),
-  expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A stale token refuses atomically with [node_write_conflict] and no edges are applied. An inline-edge-only write checks a current token without consuming it: the node\'s revision does not advance and the same token remains valid. Omit for backward-compatible last-write-wins behavior.'),
+  expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A stale token is refused atomically with [node_write_conflict] and no edges are applied. An inline-edge-only write checks a current token without consuming it: the node\'s revision does not advance and the same token remains valid. Omit for backward-compatible last-write-wins behavior.'),
   name: z.string().optional().describe('New node name'),
   nodeType: z.string().optional().describe(`Node classification (free-form; canonical values: ${ORDINARY_NODE_TYPES_TEXT}; the platform also writes ${PLATFORM_DEFINED_NODE_TYPES_TEXT}). Changing nodeType does NOT change isRunnable or properties (e.g. claudeSkill). Running is gated by isRunnable, not nodeType.`),
   objectType: z.string().optional().describe('#725 — collection this node belongs to (e.g. "competitor" / "insight"), orthogonal to nodeType. On a schema-governed memory it must name a declared collection and the resulting properties are validated against it. Omit to preserve.'),

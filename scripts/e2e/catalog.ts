@@ -3,11 +3,15 @@ import { readFileSync } from 'node:fs';
 
 export const orgs = ['e2e-alpha', 'e2e-beta'];
 export { workerNames } from '../../src/test/e2eWorkerNames.js';
+import { e2eFlowFixturesEnabled } from '../../src/test/e2eScriptFlow.js';
 // Golden access expectations: system is excluded from the ordinary memory list;
 // group requires MemoryMember, and strict-owner memories belong to the admin.
 // App team records require participation; worker records require management
 // or holding that worker. These are record-list expectations, not node grants.
-const sharedMemories = (org: string) => ['knowledge', 'specs'].map(slug => `${org}:${slug}`);
+// #4753: the script-flow memory (a PUBLIC knowledge memory, #4624) exists only on a stack started with E2E_RUN_WORKER=true, and
+// then every user who sees the org's shared memories sees it, so it joins this list exactly then (read in the container, as the seed does).
+const sharedMemories = (org: string) =>
+  [...['knowledge', 'specs'], ...(e2eFlowFixturesEnabled() ? ['flows'] : [])].map(slug => `${org}:${slug}`);
 const managedMemories = (org: string) => [
   ...sharedMemories(org), ...['group', 'app', 'coordinator-working', 'qa-engineer-working'].map(slug => `${org}:${slug}`),
 ];
