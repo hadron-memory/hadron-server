@@ -68,14 +68,29 @@ async function encryptedHistoryMayReference(db: Reader, worker: { id: string }, 
 }
 
 /**
- * #2024 (S8): the tickers casting generated for this worker that nothing has used since: live, owned by the worker,
+ * #2024 (S8): the tickers casting generated for this worker that nothing has used since: owned by the worker,
  * never acknowledged by it, never edited since the cast (`edited_at`, #2429), and subscribed to by no one else. They are the cast's own bookkeeping, not history, so
  * they neither count as references nor stand in the way of removing a miscast worker (they are removed with it).
+ * #4312 (cor:dmo:050:11): a ticker soft-deleted BY RETIREMENT still counts as pristine. Retirement stamps both with one
+ * value (`retireWorker` passes `retiredAt` to `endGeneratedTickersForWorker`); the window is `[retired_at, retired_at + 1
+ * minute)` because rows retired before that change carry two nearby JS stamps from one transaction (the upper bound keeps a
+ * delete made long after retirement out; the lower bound a delete made before it). So retirement's own
+ * INVARIANT the window rests on (it is an inference, not a recorded fact): nothing but retirement can stamp
+ * `tickers.deleted_at` on a generated ticker of a RETIRED worker inside `[retired_at, retired_at + 1 minute)`. Writers of
+ * `tickers.deleted_at` today: `endGeneratedTickersForWorker` (retirement, with `retired_at` as the stamp; casting replacement,
+ * on a worker that is not retired) and `deleteTicker` (`resolvers.ticker.ts`, which refuses an already-deleted ticker, and
+ * retirement has deleted every generated one, so it cannot re-stamp one after retirement; before retirement it lands
+ * below the lower bound). There is no restore, re-cast or janitor path. A new writer of `deleted_at`, or a path that
+ * un-retires a worker, MUST revisit this predicate (an explicit discriminator column is the durable form, #4312 follow-up).
+ * So retirement's own
+ * bookkeeping cannot make a retired, never-used casting undeletable, while a ticker deleted before the retirement stays
+ * history (#2024), and an edit (`edited_at`), a delivered tick or another worker's subscription still refuse.
  */
-export async function pristineGeneratedTickerIds(db: Reader, workerId: string): Promise<string[]> {
+export async function removableGeneratedTickerIds(db: Reader, workerId: string): Promise<string[]> {
   const rows = await db.$queryRaw<Array<{ id: string }>>`
     SELECT t.id FROM tickers t
-    WHERE t.generated_for_worker_id = ${workerId} AND t.owner_worker_id = ${workerId} AND t.deleted_at IS NULL AND t.edited_at IS NULL
+    WHERE t.generated_for_worker_id = ${workerId} AND t.owner_worker_id = ${workerId} AND t.edited_at IS NULL
+      AND (t.deleted_at IS NULL OR EXISTS (SELECT 1 FROM workers w WHERE w.id = ${workerId} AND w.retired_at IS NOT NULL AND t.deleted_at >= w.retired_at AND t.deleted_at < w.retired_at + INTERVAL '1 minute'))
       AND NOT EXISTS (SELECT 1 FROM worker_delivery_ticks d WHERE d.ticker_id = t.id)
       AND NOT EXISTS (SELECT 1 FROM ticker_subscriptions s WHERE s.ticker_id = t.id AND s.worker_id <> ${workerId})`;
   return rows.map((r) => r.id);
@@ -83,7 +98,7 @@ export async function pristineGeneratedTickerIds(db: Reader, workerId: string): 
 
 /** Remove the pristine generated tickers (their subscriptions go with them). Call inside the verified-empty repair. */
 export async function deletePristineGeneratedTickers(tx: Prisma.TransactionClient, workerId: string): Promise<void> {
-  const ids = await pristineGeneratedTickerIds(tx, workerId);
+  const ids = await removableGeneratedTickerIds(tx, workerId);
   if (ids.length) await tx.ticker.deleteMany({ where: { id: { in: ids } } });
 }
 
@@ -95,7 +110,7 @@ export async function miscastHasReferences(db: Reader, worker: { id: string; mem
   // Tool/transcript location alone is binding metadata; recorded work is use.
   if (sessions.some((s) => s.prNumber !== null || s.summary !== null || s.plan !== null || s.outcome !== null || s.outcomeRef !== null || s.outcomeMeta !== null
     || [s.inputTokens, s.outputTokens, s.turnCount, s.errorCount].some((n) => n !== null && n !== 0) || s.launchOperationId !== null)) return true;
-  const pristine = await pristineGeneratedTickerIds(db, worker.id);
+  const pristine = await removableGeneratedTickerIds(db, worker.id);
   for (const ref of workerReferenceInventory) {
     if (ref.model === 'Session') continue; // empty ended bindings are disposable
     // #3690 (cor:acl:140:03, ruling 0255 item 3): HOLDING a grant is not use of the worker; a holder that goes ends its grant, so the
