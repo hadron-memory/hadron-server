@@ -6,15 +6,17 @@
 //   1. a hang: the dump (the [watchdog] process list and a final [sampler] block) is printed BEFORE the kill, then the
 //      fixed "exceeded N min; killed" line, then the distinguishable exit 124; every process of the command's tree is
 //      gone, killed by PID;
+//   1b. a process forked while the tree is being collected is stopped and killed too, with its own late child
+//      (#4647 LOCAL F1, Jane): the tree is re-collected and stopped until no new PID appears, then killed;
 //   2. the kill is scoped: a process outside the command's tree survives, and nothing is matched by name;
 //   3. inside the budget the command's own exit code comes back unchanged (0, 1 and another code);
-//   4. the budget refuses a non-integer, empty, zero, negative or not-below-the-step-timeout value before the command
-//      runs, with a fixed message;
+//   4. the budget refuses a non-integer, empty, zero, negative, oversized (#4647 LOCAL F2: no bash wrap-around) or
+//      not-below-the-step-timeout value before the command runs, with a fixed message;
 //   5. the 45 has one source: the step's WATCHDOG_STEP_TIMEOUT_MINUTES must equal its timeout-minutes in test.yml, and
 //      WATCHDOG_MINUTES must be below it, so the two cannot drift apart unnoticed.
 import { test, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -50,6 +52,36 @@ test('a hang: dump first, then the kill, then the fixed line and exit 124; the w
   for (const pid of recorded) expect(alive(pid), `pid ${pid} survived`).toBe(false);
 }));
 
+test('a child forked while the tree is collected, and the grandchild it forks after the next scan, are both killed', () => withDir((dir) => {
+  // #4647 LOCAL F1 (Jane): the ps snapshot and the STOP are not atomic. This shim lets the real table be captured, THEN
+  // lets a process fork, on the first two tree scans: a child the first scan misses, and a grandchild that child forks
+  // after the second scan. Only the scheduling window is chosen; the processes, PIDs and kills are real.
+  const realPs = spawnSync('bash', ['-c', 'command -v ps'], { encoding: 'utf8' }).stdout.trim();
+  const bin = join(dir, 'bin'); mkdirSync(bin);
+  writeFileSync(join(bin, 'ps'), `#!/usr/bin/env bash
+out=$(${realPs} "$@")
+if [ "$*" = "-eo pid=,ppid=" ]; then
+  n=$(( $(cat ${dir}/calls 2>/dev/null || echo 0) + 1 )); echo "$n" > ${dir}/calls
+  if [ "$n" -le 2 ]; then
+    t=${dir}/child; [ "$n" = 2 ] && t=${dir}/grandchild
+    touch ${dir}/spawn$n
+    for _ in $(seq 500); do [ -s "$t" ] && break; sleep 0.01; done
+  fi
+fi
+printf '%s\n' "$out"
+`);
+  chmodSync(join(bin, 'ps'), 0o755);
+  const waitFor = (f) => `until [ -e ${f} ]; do sleep 0.01; done`;
+  const child = `${waitFor(join(dir, 'spawn2'))}; sleep 300 & echo $! > ${join(dir, 'grandchild')}; wait`;
+  const root = `${waitFor(join(dir, 'spawn1'))}; bash -c '${child}' & echo $! > ${join(dir, 'child')}; sleep 300`;
+  const r = watch(root, { minutes: '1', extraEnv: { PATH: `${bin}:${process.env.PATH}` } });
+  const late = ['child', 'grandchild'].map((f) => Number(readFileSync(join(dir, f), 'utf8').trim()));
+  try {
+    expect(r.status, r.stderr).toBe(124);
+    for (const pid of late) expect(alive(pid), `late pid ${pid} survived`).toBe(false);
+  } finally { for (const pid of late) spawnSync('kill', ['-KILL', String(pid)]); }
+}));
+
 test('the kill is scoped to the command\'s own tree: an outside process with the same name survives', () => {
   const outside = spawnSync('bash', ['-c', 'sleep 300 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' });
   const pid = Number(outside.stdout.trim());
@@ -73,7 +105,7 @@ test('inside the budget the command\'s own exit code comes back unchanged, with 
 
 test('a bad budget refuses before the command runs, with a fixed message', () => withDir((dir) => {
   const ran = join(dir, 'ran');
-  for (const [minutes, stepTimeout] of [['', '45'], ['abc', '45'], ['0', '45'], ['-5', '45'], ['1.5', '45'], ['045x', '45'], ['45', '45'], ['50', '45'], ['40', ''], ['40', 'x']]) {
+  for (const [minutes, stepTimeout] of [['', '45'], ['abc', '45'], ['0', '45'], ['-5', '45'], ['1.5', '45'], ['045x', '45'], ['45', '45'], ['50', '45'], ['40', ''], ['40', 'x'], ['18446744073709551617', '45'], ['40', '18446744073709551657']]) {
     const r = watch(`touch ${ran}`, { minutes, stepTimeout });
     expect(r.status, `${minutes}/${stepTimeout}`).toBe(2);
     expect(r.stderr, `${minutes}/${stepTimeout}`).toContain('[watchdog] WATCHDOG_MINUTES must be a positive integer below WATCHDOG_STEP_TIMEOUT_MINUTES (the step\'s timeout-minutes); refusing');
