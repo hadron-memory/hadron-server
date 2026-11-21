@@ -979,18 +979,83 @@ describe('CLI entry and single instance', () => {
     expect(existsSync(join(dir, 'ticker-wake', 'lock'))).toBe(false); // released
   });
 
-  it('refuses to start while another live ticker-wake holds the lock', async () => {
-    const holder = spawn('node', ['-e', 'setTimeout(() => {}, 20000)', 'ticker-wake'], { stdio: 'ignore' });
+  // #4297 (UNCONFIRMED hosted sighting: the next assertion received exit 0, expected 1): the holder is a SYNTHETIC process with
+  // verifiable identity, confirmed ready before the lock decision, and its PID / start time / cmdline / state are snapshotted
+  // before and after `main` runs. A failure message carries both snapshots, so a recurrence says whether the holder was
+  // alive and recognizable at the decision (a product lock-semantics question) or not (a setup/timing question).
+  type HolderSnapshot = { pid: number | undefined; alive: boolean; state: string; startTicks: string; cmdline: string };
+  const snapshotOf = (pid: number | undefined): HolderSnapshot => {
+    if (!pid) return { pid, alive: false, state: 'no-pid', startTicks: '', cmdline: '' };
+    let cmdline = ''; let state = 'unreadable'; let startTicks = '';
+    try { cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim(); } catch (e) { cmdline = `ERR ${(e as NodeJS.ErrnoException).code}`; }
     try {
-      const stateDir = join(dir, 'ticker-wake');
-      mkdirSync(stateDir, { recursive: true });
-      writeFileSync(join(stateDir, 'lock'), String(holder.pid));
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const after = stat.slice(stat.lastIndexOf(')') + 2).split(' '); // fields from 3 on; field 3 is the state, field 22 the start time
+      state = after[0] ?? 'unreadable'; startTicks = after[19] ?? '';
+    } catch { /* gone */ }
+    return { pid, alive: state !== 'unreadable' && state !== 'Z' && state !== 'X', state, startTicks, cmdline };
+  };
+  async function startLockHolder(marker: string): Promise<{ pid: number; stop: () => void }> {
+    const holder = spawn('node', ['-e', "process.stdout.write('ready\\n'); setTimeout(() => {}, 20000)", marker], { stdio: ['ignore', 'pipe', 'ignore'] });
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error(`holder never reported ready: ${JSON.stringify(snapshotOf(holder.pid))}`)), 10_000);
+      holder.once('error', (e) => { clearTimeout(t); reject(e); });
+      holder.stdout!.once('data', () => { clearTimeout(t); resolve(); });
+    });
+    return { pid: holder.pid!, stop: () => { holder.kill(); } };
+  }
+  const writeLockFor = (pid: number): void => {
+    const stateDir = join(dir, 'ticker-wake');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'lock'), String(pid));
+  };
+
+  it('refuses to start while another live ticker-wake holds the lock', async () => {
+    const holder = await startLockHolder('ticker-wake');
+    try {
+      writeLockFor(holder.pid);
       f.wakes = [wake('w-ada', 'Ada', [TICK])];
-      expect(await main(['once'], deps())).toBe(1);
+      const before = snapshotOf(holder.pid);
+      // the fixture itself is verified: a live, recognizable ticker-wake process with a start time
+      expect(before.alive, JSON.stringify(before)).toBe(true);
+      expect(before.cmdline, JSON.stringify(before)).toContain('ticker-wake');
+      expect(before.startTicks, JSON.stringify(before)).toMatch(/^\d+$/);
+      const code = await main(['once'], deps());
+      const after = snapshotOf(holder.pid);
+      const where = `holder before=${JSON.stringify(before)} after=${JSON.stringify(after)}`;
+      expect(code, where).toBe(1);
+      expect(after, where).toEqual(before); // the same process, still alive, at the decision
       expect(log()).toContain('holds');
       expect(f.sent).toEqual([]);
       expect(f.pages).toBe(0);
-    } finally { holder.kill(); }
+    } finally { holder.stop(); }
+  });
+
+  it('refuses every time: ten fresh live holders in a row, none reads as stale', async () => {
+    for (let i = 0; i < 10; i++) {
+      const holder = await startLockHolder('ticker-wake');
+      try {
+        writeLockFor(holder.pid);
+        const before = snapshotOf(holder.pid);
+        const code = await main(['once'], deps());
+        expect(code, `attempt ${i}: ${JSON.stringify(before)}`).toBe(1);
+      } finally { holder.stop(); rmSync(join(dir, 'ticker-wake', 'lock'), { force: true }); }
+    }
+    expect(f.sent).toEqual([]);
+    expect(f.pages).toBe(0);
+  });
+
+  it('a live process that is NOT a ticker-wake (a reused pid) does not hold the lock', async () => {
+    const other = await startLockHolder('some-other-tool');
+    try {
+      writeLockFor(other.pid);
+      f.wakes = [];
+      const snap = snapshotOf(other.pid);
+      expect(snap.alive, JSON.stringify(snap)).toBe(true);
+      expect(snap.cmdline, JSON.stringify(snap)).not.toContain('ticker-wake');
+      expect(await main(['once'], deps())).toBe(0); // recognized by cmdline only: an unrelated live pid is stale
+      expect(existsSync(join(dir, 'ticker-wake', 'lock'))).toBe(false); // taken over and released
+    } finally { other.stop(); }
   });
 
   it('a stale lock (dead pid) is taken over and released', async () => {
