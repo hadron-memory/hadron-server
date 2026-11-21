@@ -10,6 +10,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import { GraphQLError } from 'graphql';
+import { drainNodeUsage } from '../../../lib/usageRecorder.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -229,8 +230,8 @@ describe('GraphQL runTask mutation (#542 — nodeRef)', () => {
       ctx,
     );
 
-    // Fire-and-forget usage event — give it a moment to settle.
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Fire-and-forget usage event — wait for its tracked write, not a clock (#643).
+    await drainNodeUsage(db);
 
     const event = await db.usageEvent.findFirst({
       where: { type: 'action-run', nodeLoc: 'tasks:deploy' },
@@ -240,8 +241,8 @@ describe('GraphQL runTask mutation (#542 — nodeRef)', () => {
   });
 
   // #643 — the event is inserted inline and fire-and-forget, so a fixed sleep
-  // before the read races a loaded shard. Delay the insert past the old 100 ms
-  // window to make that race deterministic.
+  // before the read raced a loaded shard. Delay the insert past the old 100 ms
+  // window: the read must wait on drainNodeUsage, not a clock.
   it('records a usage event even when the insert settles late (#643)', async () => {
     const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
     const create = db.usageEvent.create.bind(db.usageEvent) as (args: unknown) => Promise<unknown>;
@@ -254,7 +255,7 @@ describe('GraphQL runTask mutation (#542 — nodeRef)', () => {
         ctx,
       );
 
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await drainNodeUsage(db);
 
       const event = await db.usageEvent.findFirst({
         where: { type: 'action-run', nodeLoc: 'tasks:deploy' },
