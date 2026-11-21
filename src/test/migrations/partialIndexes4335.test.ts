@@ -33,6 +33,10 @@ describe('#4335 the two partial indexes carry the migration definition on push +
  * makes every later `db push` try to create it again ("already exists"), which neither a single push nor the replay
  * catches. Comments are stripped first, so the explanatory comments that name the indexes do not count.
  */
+/** The declarations that must not come back; one pattern each, shared by the live check and its probe (#4691 BLIND F4). */
+const MEMORIES_USER_ID_INDEX = /@@index\s*\(\s*\[\s*userId\s*\]/;
+const USERS_EXTERNAL_UNIQUE = /@@unique\s*\(\s*\[\s*externalAppId\s*,\s*externalId\s*\]/;
+
 describe('#4335 schema.prisma does not declare the two partial indexes', () => {
   const schema = readFileSync(new URL('../../../prisma/schema.prisma', import.meta.url), 'utf8')
     .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
@@ -43,17 +47,17 @@ describe('#4335 schema.prisma does not declare the two partial indexes', () => {
   };
 
   it('the declaration patterns match across whitespace and newlines (#4672 BLIND delta F2)', () => {
-    expect('@@index(\n    [userId])').toMatch(/@@index\s*\(\s*\[\s*userId\s*\]/);
-    expect('@@unique( [\n externalAppId ,\n externalId ] )').toMatch(/@@unique\s*\(\s*\[\s*externalAppId\s*,\s*externalId\s*\]/);
+    expect('@@index(\n    [userId])').toMatch(MEMORIES_USER_ID_INDEX);
+    expect('@@unique( [\n externalAppId ,\n externalId ] )').toMatch(USERS_EXTERNAL_UNIQUE);
   });
 
   it('Memory declares no plain index on userId alone', () => {
-    expect(model('Memory')).not.toMatch(/@@index\s*\(\s*\[\s*userId\s*\]/);
+    expect(model('Memory')).not.toMatch(MEMORIES_USER_ID_INDEX);
     expect(model('Memory')).toMatch(/^\s*userId\s/m);
   });
 
   it('User declares no unique on (externalAppId, externalId)', () => {
-    expect(model('User')).not.toMatch(/@@unique\s*\(\s*\[\s*externalAppId\s*,\s*externalId\s*\]/);
+    expect(model('User')).not.toMatch(USERS_EXTERNAL_UNIQUE);
     expect(model('User')).toMatch(/^\s*externalAppId\s/m);
   });
 });

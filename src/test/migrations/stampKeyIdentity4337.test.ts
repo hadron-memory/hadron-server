@@ -24,12 +24,8 @@ describe('#4337 stamp_signing_keys.id is the migration identity on push + post-p
   });
 });
 
-/** The #4337 conversion block, as written in prisma/stamp-key-identity-invariants.sql (its one DO block). */
-const SIGNING = readFileSync(new URL('../../../prisma/stamp-key-identity-invariants.sql', import.meta.url), 'utf8');
-const BLOCK = (() => {
-  const from = SIGNING.indexOf('DO $$', SIGNING.indexOf('-- #4337 (#434 Slice C)'));
-  return SIGNING.slice(from, SIGNING.indexOf('END $$;', from) + 'END $$;'.length);
-})();
+/** prisma/stamp-key-identity-invariants.sql as a whole, exactly what post-push's `\\ir` runs (#4691 BLIND F5). */
+const IDENTITY_SQL = readFileSync(new URL('../../../prisma/stamp-key-identity-invariants.sql', import.meta.url), 'utf8');
 
 /**
  * A throwaway database holding `stamp_signing_keys` as `db push` builds it (a sequence default on `id`), after `setup`
@@ -72,7 +68,7 @@ const column = async (pg: Client) => (await pg.query<{ identity: string; has_def
 describe('#4337 the conversion block in prisma/stamp-key-identity-invariants.sql', () => {
   it('converts push\'s sequence column, continues above the highest id, and accepts an explicit id', async () => {
     await withPushBuiltTable(`INSERT INTO stamp_signing_keys (key_material) VALUES ('a'), ('b'), ('c')`, async (pg) => {
-      await pg.query(BLOCK);
+      await pg.query(IDENTITY_SQL);
       expect(await column(pg)).toEqual({ identity: 'd', has_default: false });
       expect((await pg.query(`SELECT to_regclass('stamp_signing_keys_id_seq') IS NOT NULL AS seq`)).rows[0].seq).toBe(true);
       // The identity continues above the 3 existing rows.
@@ -87,9 +83,9 @@ describe('#4337 the conversion block in prisma/stamp-key-identity-invariants.sql
 
   it('on an empty table starts at 1, and a re-run leaves the identity untouched', async () => {
     await withPushBuiltTable('SELECT 1', async (pg) => {
-      await pg.query(BLOCK);
+      await pg.query(IDENTITY_SQL);
       const seq = (await pg.query(`SELECT 'stamp_signing_keys_id_seq'::regclass::oid::text AS oid`)).rows[0].oid;
-      await pg.query(BLOCK);
+      await pg.query(IDENTITY_SQL);
       expect((await pg.query(`SELECT 'stamp_signing_keys_id_seq'::regclass::oid::text AS oid`)).rows[0].oid).toBe(seq);
       expect((await pg.query(`INSERT INTO stamp_signing_keys (key_material) VALUES ('a') RETURNING id`)).rows[0].id).toBe(1);
     });
@@ -97,7 +93,7 @@ describe('#4337 the conversion block in prisma/stamp-key-identity-invariants.sql
 
   it('with only zero or negative ids (explicit ones), starts at 1 instead of failing (#4691 LOCAL F1)', async () => {
     await withPushBuiltTable(`INSERT INTO stamp_signing_keys (id, key_material) VALUES (0, 'z'), (-3, 'n')`, async (pg) => {
-      await pg.query(BLOCK);
+      await pg.query(IDENTITY_SQL);
       expect(await column(pg)).toEqual({ identity: 'd', has_default: false });
       expect((await pg.query(`INSERT INTO stamp_signing_keys (key_material) VALUES ('a') RETURNING id`)).rows[0].id).toBe(1);
     });
@@ -107,10 +103,11 @@ describe('#4337 the conversion block in prisma/stamp-key-identity-invariants.sql
     ['an ALWAYS identity', `ALTER TABLE stamp_signing_keys ALTER COLUMN id DROP DEFAULT; DROP SEQUENCE stamp_signing_keys_id_seq;
       ALTER TABLE stamp_signing_keys ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY`, /GENERATED ALWAYS/],
     ['another default', `ALTER TABLE stamp_signing_keys ALTER COLUMN id SET DEFAULT 7`, /has default 7, not push's sequence/],
+    ['push\'s default backed by a sequence the column does not own', `ALTER SEQUENCE stamp_signing_keys_id_seq OWNED BY NONE`, /not owned by stamp_signing_keys.id/],
   ])('refuses, changing nothing, for %s', async (_label, setup, refusal) => {
     await withPushBuiltTable(setup, async (pg) => {
       const before = await column(pg);
-      await expect(pg.query(BLOCK)).rejects.toThrow(refusal);
+      await expect(pg.query(IDENTITY_SQL)).rejects.toThrow(refusal);
       expect(await column(pg)).toEqual(before);
     });
   }, 60_000);
