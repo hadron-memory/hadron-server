@@ -40,7 +40,7 @@ describe('resolveRefArg (unit)', () => {
   });
 
   it('rejects supplying neither', async () => {
-    await expect(resolveRefArg(db, ok, { label: 'org' })).rejects.toThrow(/A org is required/);
+    await expect(resolveRefArg(db, ok, { label: 'org' })).rejects.toThrow(/orgRef is required/);
   });
 
   it('maps an entity NotFound to a uniform NOT_FOUND', async () => {

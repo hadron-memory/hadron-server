@@ -2727,7 +2727,7 @@ export const typeDefs = `#graphql
     "#4428 — who this question is routed to: the explicit assignee, else the holder of the worker that asked, else null. Worked out at read, never stored. Routing only: any decider may answer."
     effectiveAssigneeId: ID
     effectiveAssignee: CommentActorRef
-    "The asker\'s agent task this question blocks. Always null until slice S7."
+    "#4431 — the asker\'s agent task this question blocks (askQuestion\'s taskRef), or null. An answer to it records question.answered on that task and wakes the task\'s current assignee (hrn:node:hadronmemory.com:specs:cor:agt:050:11). amendQuestion never changes it."
     taskId: ID
     deciderIds: [ID!]!
     deciders: [CommentActorRef!]!
@@ -2866,6 +2866,8 @@ export const typeDefs = `#graphql
     yesno: Boolean
     recommendation: QuestionRecommendationInput
     noRecommendation: QuestionNoRecommendationInput
+    "#4431 — the agent task this question blocks, by id or handle (a bare handle is in the App of the log\'s memory). Only a worker may name one, and only its own open task (pending or started) in the App the log\'s memory belongs to; anything else is QUESTION_INVALID at /taskRef, with one message whatever the reason. An answer then records question.answered on the task and wakes its current assignee; a take-back records question.answer-retracted and wakes nobody (hrn:node:hadronmemory.com:specs:cor:agt:050:11)."
+    taskRef: ID
   }
 
   "#4426 — a change to the question. An omitted field is unchanged; for background, whyNow, assignee, neededBy and defaultAction an explicit null clears it. Answers never change here."
@@ -11832,9 +11834,9 @@ export const typeDefs = `#graphql
     setReviewSchedule(taskRef: ID!, slots: [String!]!): PrProtocolResult!
     "#3448 — the assignee freezes a full 40-hex head on a task with a pull_request reference (hrn:node:hadronmemory.com:specs:cor:agt:050:08). Any child seat's newest negative verdict at that SHA, including a superseded seat or dropped slot, refuses REVIEW_SEAT_NOT_SUPERSEDABLE: returning to an old head cannot erase a finding."
     freezePullRequestHead(taskRef: ID!, head: String!): PrProtocolResult!
-    "#3448 — seat owner-chain binds a direct child to a scheduled slot at the frozen head. A current seat's CHANGES_REQUESTED, FAIL or REFUSED at this head prevents replacement, with or without supersedes, and a negative seat cannot move slots (REVIEW_SEAT_NOT_SUPERSEDABLE). A seat task is assigned once (REVIEW_SEAT_ALREADY_ASSIGNED); a replacement must name the current sibling in supersedes (REVIEW_SEAT_SUPERSEDES_REQUIRED). Checks and write hold the build row FOR UPDATE."
+    "#3448 — Order: schedule, freeze, seat, verdict, finish; a seat binds only while its own task is live. A native negative verdict at a head blocks every slot there; the head must move. TASK_ENDED and REVIEW_SEAT_UNASSIGNED name the remedy (a signed PR receipt at the exact head is the record); REVIEW_HEAD_MISMATCH says to bind at the frozen head. Seat owner-chain binds a direct child to a scheduled slot at the frozen head. A current seat's CHANGES_REQUESTED, FAIL or REFUSED at this head prevents replacement, with or without supersedes, and a negative seat cannot move slots (REVIEW_SEAT_NOT_SUPERSEDABLE). A seat task is assigned once (REVIEW_SEAT_ALREADY_ASSIGNED); a replacement must name the current sibling in supersedes (REVIEW_SEAT_SUPERSEDES_REQUIRED). Checks and write hold the build row FOR UPDATE."
     assignReviewSeat(taskRef: ID!, slot: String!, head: String!, supersedes: ID): PrProtocolResult!
-    "#3448 — STARTED seat's assignee records a verdict at its assigned head, without finishing it (hrn:node:hadronmemory.com:specs:cor:agt:050:08). REVIEW_SEAT_UNASSIGNED or REVIEW_HEAD_MISMATCH writes nothing. A different actor cannot overwrite a same-head negative verdict (REVIEW_SEAT_NOT_SUPERSEDABLE); its original actor may re-rate. #4235: the review.verdict event also carries reviewerFamily, reviewerModel and modelReportedAt, copied from the recording worker's session (its self-report, not verified), null where none is recorded or a person records it; no argument sets them and readiness never reads them (hrn:node:hadronmemory.com:specs:cor:agt:130:02)."
+    "#3448 — Order: schedule, freeze, seat, verdict, finish; a verdict is recorded only on a live, bound seat. TASK_ENDED and REVIEW_SEAT_UNASSIGNED name the remedy (a signed PR receipt at the exact head is the record); REVIEW_HEAD_MISMATCH says to use the assigned head. STARTED seat's assignee records a verdict at its assigned head, without finishing it (hrn:node:hadronmemory.com:specs:cor:agt:050:08). REVIEW_SEAT_UNASSIGNED or REVIEW_HEAD_MISMATCH writes nothing. A different actor cannot overwrite a same-head negative verdict (REVIEW_SEAT_NOT_SUPERSEDABLE); its original actor may re-rate. #4235: the review.verdict event also carries reviewerFamily, reviewerModel and modelReportedAt, copied from the recording worker's session (its self-report, not verified), null where none is recorded or a person records it; no argument sets them and readiness never reads them (hrn:node:hadronmemory.com:specs:cor:agt:130:02)."
     recordReviewVerdict(taskRef: ID!, head: String!, verdict: ReviewVerdict!, node: String, receipt: String): PrProtocolResult!
     "#3448 — build assignee records pr.ready only when every current scheduled seat is finished with APPROVE, PASS or CARRY at the frozen head. Its verdict actor must differ from both the build's current assignee and the newest pr.frozen actor; Worker/person identity stays distinct from holder credentials. PR_NOT_READY carries failing slots; event facts only, never opaque properties (hrn:node:hadronmemory.com:specs:cor:agt:050:28)."
     recordReadyCall(taskRef: ID!, head: String!): PrProtocolResult!
@@ -13561,7 +13563,7 @@ export const typeDefs = `#graphql
     # #4142 (S6 chunk F): the deprecated orgId/userId aliases dropped; both
     # survivors resolve id / slug / URN (user: id / email / handle / URN).
     """
-    Accepts the entity's ID or URN (orgRef). A user who is already a live member is refused with CONFLICT.
+    orgRef and userRef accept what their argument descriptions list: an id, a slug or URN, and for a user also an email or handle. A user who is already a live member is refused with CONFLICT.
     """
     addOrgMember(
       "#764 — the organization as an id / slug / hrn:org:<slug> URN."
@@ -13571,7 +13573,7 @@ export const typeDefs = `#graphql
       role: Role!
     ): OrgMember!
     """
-    Accepts the entity's ID or URN (orgRef). Refused with NOT_FOUND when the user is not a live member, and with CONFLICT when it would demote the organization's last live owner.
+    orgRef and userRef accept what their argument descriptions list: an id, a slug or URN, and for a user also an email or handle. Refused with NOT_FOUND when the user is not a live member, and with CONFLICT when it would demote the organization's last live owner.
     """
     updateOrgMember(
       "#764 — the organization as an id / slug / hrn:org:<slug> URN."
@@ -13581,7 +13583,7 @@ export const typeDefs = `#graphql
       role: Role!
     ): OrgMember!
     """
-    Accepts the entity's ID or URN (orgRef). Refused with NOT_FOUND when the user never held a membership, and with CONFLICT when it would remove the last live owner; removing an already-revoked member succeeds again.
+    orgRef and userRef accept what their argument descriptions list: an id, a slug or URN, and for a user also an email or handle. Refused with NOT_FOUND when the user never held a membership, and with CONFLICT when it would remove the last live owner; removing an already-revoked member succeeds again.
     """
     removeOrgMember(
       "#764 — the organization as an id / slug / hrn:org:<slug> URN."
@@ -15923,7 +15925,7 @@ export const typeDefs = `#graphql
     org. Side effect: empty personal Memory of (user, agent) is hard-
     deleted; non-empty is retained with userMemoryOfAgentId preserved.
 
-    Accepts the entity's ID or URN (agentId).
+    userRef and agentRef accept what their argument descriptions list (the user as an id, email, handle or URN; the Agent as an id or URN).
     """
     revokeAgentSubscription(
       "#764 — the user as an id / email / handle / hrn:user:<handle> URN."
@@ -16398,6 +16400,8 @@ export const typeDefs = `#graphql
     ALARM
     "#1709 — the task was cancelled and asks its assignee to end its session (hrn:node:hadronmemory.com:specs:cor:agt:050:10). Due while that session is open and the platform has not yet ended it through a host."
     END_SESSION
+    "#4431 — a question that blocks the task was answered (a question.answered event on the task); the nudge names the task, never the answer. Due to the task's current assignee until delivered or that worker acts on the task (hrn:node:hadronmemory.com:specs:cor:agt:050:11). A take-back wakes nobody."
+    ANSWERED
   }
 
   "#1708 — the task a TASK reason is for: shown only to a caller who may read the App's tasks (hrn:node:hadronmemory.com:specs:cor:agt:050:21)."
@@ -16413,6 +16417,8 @@ export const typeDefs = `#graphql
     title: String!
     "The task's handle, e.g. AT3.405: an alias for the id, printed first in the nudge (hrn:node:hadronmemory.com:specs:cor:agt:050:01)."
     handle: String!
+    "#4431 — for ANSWERED, the code of the question that was answered (e.g. QA3), for the nudge: a question this task asked was answered: <code>. Never the answer. Null for every other event (hrn:node:hadronmemory.com:specs:cor:agt:050:11)."
+    questionCode: String
     "A stable label for the reason, e.g. TASK:<id>:assigned."
     ref: String!
   }
@@ -17420,7 +17426,7 @@ export const typeDefs = `#graphql
   type AgentTeamEvent {
     id: ID!
     appId: ID!
-    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.coordinator-cadence (#2763: task-less, subjectWorker is the coordinator that stopped assigning); alarm.stale-sweep (#4233: task-less and workerless: a host of an App in sweep mode OBSERVE or APPLY whose last run the server recorded more than five minutes ago (the server's clock, not the host's; a switch-on of the mode restarts the clock); payload.hostId names the host, the alarm goes to the App's managers and ends when the host records its next run); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02)."
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.coordinator-cadence (#2763: task-less, subjectWorker is the coordinator that stopped assigning); alarm.stale-sweep (#4233: task-less and workerless: a host of an App in sweep mode OBSERVE or APPLY whose last run the server recorded more than five minutes ago (the server's clock, not the host's; a switch-on of the mode restarts the clock); payload.hostId names the host, the alarm goes to the App's managers and ends when the host records its next run); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02); question.answered, question.answer-retracted (#4431: a question that blocks the task was answered, or its answer taken back; payload is questionId, code, revision and state only, never the answer; only question.answered wakes the task\'s assignee)."
     type: String!
     taskId: ID
     "The task's stored handle (hrn:node:hadronmemory.com:specs:cor:agt:050:01, Proposed). Null when taskId is null or the task no longer exists; never invented."

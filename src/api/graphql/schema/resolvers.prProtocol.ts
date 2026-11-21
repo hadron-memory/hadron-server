@@ -7,7 +7,7 @@
  */
 import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
-import { mutateTask, mayDirectTask, isAssignee, notAssignee, refuseEnded, withReadableTask, resolveTaskRef, taskError, taskNotFound, actorManagesApp, recordInstructedManagerAct, type TaskRow, type TaskActor, type TaskApp } from './resolvers.agentTask.js';
+import { mutateTask, mayDirectTask, isAssignee, notAssignee, refuseEnded, SEAT_RECEIPT_REMEDY, withReadableTask, resolveTaskRef, taskError, taskNotFound, actorManagesApp, recordInstructedManagerAct, type TaskRow, type TaskActor, type TaskApp } from './resolvers.agentTask.js';
 import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
@@ -21,6 +21,7 @@ import { currentActor } from '../../../lib/requestActor.js';
 import { resolveActionAnswer } from '../../../lib/actionRegister/answer.js';
 import type { PublicTickAction } from '../../../lib/tickers/tickActions.js';
 
+const RECEIPT_IF_UNBINDABLE = 'post the verdict as a signed PR receipt at the exact head, which is then the record.';
 const badInput = (text: string) => taskError('BAD_USER_INPUT', text);
 const ATOM = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$/;
 const validSlot = (value: unknown): value is string => typeof value === 'string' && value.length <= 64 && value.split(':').every(atom => ATOM.test(atom));
@@ -64,9 +65,9 @@ async function taskEvents(tx: Prisma.TransactionClient, ids: string[]): Promise<
     ORDER BY e.task_id, e.type, e.created_at DESC, e.id DESC`;
   return rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || b.id.localeCompare(a.id));
 }
-function frozen(events: Event[], taskId: string, head: string, code = 'PR_HEAD_NOT_FROZEN'): string {
+function frozen(events: Event[], taskId: string, head: string, code = 'PR_HEAD_NOT_FROZEN', remedy = ''): string {
   const value = data(latest(events, 'pr.frozen', taskId)).head;
-  if (value !== head) throw taskError(code, 'This is not the build task\'s frozen head.');
+  if (value !== head) throw taskError(code, `This is not the build task's frozen head.${remedy ? ` ${remedy}` : ''}`);
   return value as string;
 }
 function scheduled(events: Event[], taskId: string): string[] {
@@ -322,13 +323,13 @@ export const prProtocolMutations = {
   assignReviewSeat: async (_: unknown, args: { taskRef: string; slot: string; head: string; supersedes?: string | null }, ctx: Context) => {
     const task = await mutateTask(ctx, args.taskRef, async (tx, row, actor, app, c) => {
       await ownerChain(tx, c, app, actor, row);
-      refuseEnded(row);
-      if (!row.parentTaskId) throw taskError('REVIEW_SEAT_UNASSIGNED', 'A seat must be a child of the build task.');
+      refuseEnded(row, `A seat binds only while its task is live. ${SEAT_RECEIPT_REMEDY}`);
+      if (!row.parentTaskId) throw taskError('REVIEW_SEAT_UNASSIGNED', `A seat must be a child of the build task. ${SEAT_RECEIPT_REMEDY}`);
       await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id = ${row.parentTaskId} AND app_id = ${app.id} FOR UPDATE`;
       if (!await tx.agentTask.count({ where: { id: row.parentTaskId, appId: app.id } })) throw taskError('TASK_NOT_FOUND', 'Build task not found.');
       const head = headValue(args.head), slot = slotValue(args.slot);
       const buildEvents = await taskEvents(tx, [row.parentTaskId]);
-      frozen(buildEvents, row.parentTaskId, head, 'REVIEW_HEAD_MISMATCH');
+      frozen(buildEvents, row.parentTaskId, head, 'REVIEW_HEAD_MISMATCH', `Bind at the build task's frozen head (pr freeze records it). If the seat truly cannot bind, ${RECEIPT_IF_UNBINDABLE}`);
       if (!scheduled(buildEvents, row.parentTaskId).includes(slot)) throw taskError('REVIEW_SLOT_UNKNOWN', 'The slot is not scheduled.');
       const siblings = await tx.agentTask.findMany({ where: { appId: app.id, parentTaskId: row.parentTaskId }, select: { id: true } });
       const history = await taskEvents(tx, siblings.map(s => s.id));
@@ -362,12 +363,12 @@ export const prProtocolMutations = {
   recordReviewVerdict: async (_: unknown, args: { taskRef: string; head: string; verdict: ReviewVerdict; node?: string | null; receipt?: string | null }, ctx: Context) => {
     const task = await mutateTask(ctx, args.taskRef, async (tx, row, actor, _app, c) => {
       assignee(actor, row);
-      refuseEnded(row);
+      refuseEnded(row, `A verdict is recorded only on a live seat. ${SEAT_RECEIPT_REMEDY}`);
       if (row.status !== 'started') throw taskError('TASK_INVALID_TRANSITION', 'A verdict is recorded only on a STARTED seat.');
       const assigned = data(latest(await taskEvents(tx, [row.id]), 'review.seat.assigned', row.id));
-      if (typeof assigned.slot !== 'string') throw taskError('REVIEW_SEAT_UNASSIGNED', 'The task has no assigned review seat.');
+      if (typeof assigned.slot !== 'string') throw taskError('REVIEW_SEAT_UNASSIGNED', `The task has no assigned review seat: it was never bound with pr seat. ${SEAT_RECEIPT_REMEDY}`);
       const head = headValue(args.head);
-      if (head !== assigned.head) throw taskError('REVIEW_HEAD_MISMATCH', 'The verdict head differs from the assigned head.');
+      if (head !== assigned.head) throw taskError('REVIEW_HEAD_MISMATCH', `The verdict head differs from the assigned head. Record at the head the seat was bound to. If the seat truly cannot record, ${RECEIPT_IF_UNBINDABLE}`);
       const prior = await verdictAtHead(tx, row.appId, row.id, head);
       if (prior && ['CHANGES_REQUESTED', 'FAIL', 'REFUSED'].includes(String(data(prior).verdict))
         && !sameEventActor(prior, { workerId: currentActor().workerId, userId: c.userId ?? null })) {
