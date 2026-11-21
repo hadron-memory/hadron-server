@@ -20,7 +20,12 @@ import { setVectorSmallScopeRowsForTests as __smallScope } from '../../../servic
 import { beforeEach as __be, afterEach as __ae } from 'vitest';
 // #2772: these pins are about the ITERATIVE index scan; their small fixtures would otherwise be ranked exactly
 // (a scope under the small-scope bound never walks the global HNSW index, BLIND/SEC findings at b07e0311).
-__be(() => __smallScope(0));
+__be(() => {
+  __smallScope(0);
+  // These pins are about WHICH page comes back, not the budget: a loaded CI shard must not turn a slow walk into an
+  // early stop. The early-stop pin below sets its own value.
+  process.env.VECTOR_SEARCH_TIMEOUT_MS = '60000';
+});
 __ae(() => __smallScope(null));
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
