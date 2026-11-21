@@ -10,7 +10,7 @@
  * definition, so only this migration runs.
  *
  * Pins:
- *   1. An erased (soft-deleted) requester and a requester with no users row at all: the link is null after the
+ *   1. An erased requester (deleteUser's scrub: soft-deleted, `deleted-` handle, no email) and one with no users row: the link is null after the
  *      migration, and both public reads (grant(ref), grants list) return null.
  *   2. Everything else on the row (version, holder, terms, reason, state, updated_at, every column) is unchanged, the
  *      signatures are unchanged and still verify (CURRENT), and an open signing request on a pending row stays open.
@@ -20,6 +20,10 @@
  *      is untouched.
  *   5. Idempotence: a second run changes nothing; terminal rows (revoked, departed, expired) are cleared too; an
  *      already-null requester stays null.
+ *   6. Only an ERASURE clears (blind P2 on #4701): a soft-deleted requester without deleteUser's erasure scrub and
+ *      without a merge record keeps its link; the real deleteUser leaves exactly the shape the migration matches.
+ *   7. Merge-source edges: two merge-source grants give the exact count-only message (no ids); a merge source whose
+ *      users row was hard-deleted has lost its user_merges row (ON DELETE CASCADE) and clears as a no-row requester.
  */
 import { readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -38,6 +42,7 @@ import { newSigningRequestId } from '../../../lib/signing/requests.js';
 import { clearSignatureVerifyCache } from '../../../lib/signing/verify.js';
 import { insertSoftPasskey, softPasskey } from '../../../test/softPasskey.js';
 import { closeServerIfStarted, createServerOnCleanDb } from '../../../test/startServerFixture.js';
+import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -145,10 +150,21 @@ async function signedGrant(requester: string): Promise<string> {
   return g;
 }
 
-/** A person erased by an image older than #3847: the users row is soft-deleted, the grant link left set. */
+/**
+ * A person erased by an image older than #3847: the users row carries deleteUser's erasure scrub (the
+ * `deleted-<hex>` handle, no email, soft-deleted), and the grant link is left set. deleteUser (#800) is the only
+ * erasure writer, so this is the shape every historical erasure has; pin 6 checks it against the real deleteUser.
+ */
 async function erasedUser(): Promise<string> {
-  return (await db.user.create({ data: { handle: `erased-${generateId()}`, deletedAt: new Date(), deletedBy: 'system:erasure' } })).id;
+  return (await db.user.create({ data: { handle: `deleted-${randomBytes(6).toString('hex')}`, email: null, deletedAt: new Date(), deletedBy: w.userId } })).id;
 }
+
+/** A soft-deleted users row that is neither an erasure nor a merge source (no erasure scrub, no user_merges row). */
+async function otherSoftDeletedUser(): Promise<string> {
+  return (await db.user.create({ data: { handle: `held-${generateId()}`, email: `held-${generateId()}@example.test`, deletedAt: new Date(), deletedBy: w.userId } })).id;
+}
+
+const REFUSAL = (n: number) => `#3852: ${n} grant(s) name an account-merge source as requester; nothing was cleared`;
 
 /** A recorded account merge (cor:api:010:02): the source row soft-deleted, the user_merges row naming it. */
 async function mergedPair(): Promise<{ source: string; target: string }> {
@@ -164,30 +180,49 @@ function withNulled(before: Awaited<ReturnType<typeof snapshot>>, ids: string[])
 }
 
 describe('#3852 historical erased requesters', () => {
-  it('pins 1-3: clears an erased and a no-row requester (storage and both reads); every other byte, signatures and an open request stay; a live requester stays', async () => {
-    const erased = await erasedUser();
-    const soft = await signedGrant(erased);
+  it('pin 1: an erased and a no-row requester are cleared, in storage and in both public reads', async () => {
+    const soft = await signedGrant(await erasedUser());
     const noRow = await signedGrant(`gone-${generateId()}`);
-    const live = await signedGrant(w.userId);
-    const pending = await insertGrant(w, { user_id: null, worker_id: w.workerId, requested_by_user_id: erased });
-    const open = await openRequest(pending);
     for (const g of [soft, noRow]) {
       for (const row of await readBoth(g)) expect(row.requestedByUserId).not.toBeNull();
     }
+
+    expect(await runMigration()).toBeNull();
+    clearSignatureVerifyCache();
+
+    for (const g of [soft, noRow]) {
+      expect(await requesterOf(g)).toBeNull();
+      for (const row of await readBoth(g)) expect(row.requestedByUserId).toBeNull();
+    }
+  });
+
+  it('pin 2: every other byte stays, signatures still verify, and an open signing request on a pending row stays open', async () => {
+    const erased = await erasedUser();
+    const soft = await signedGrant(erased);
+    const pending = await insertGrant(w, { user_id: null, worker_id: w.workerId, requested_by_user_id: erased });
+    const open = await openRequest(pending);
     const before = await snapshot();
 
     expect(await runMigration()).toBeNull();
     clearSignatureVerifyCache();
 
-    expect(await snapshot()).toEqual(withNulled(before, [soft, noRow, pending]));
-    for (const g of [soft, noRow]) {
-      for (const row of await readBoth(g)) {
-        expect(row).toMatchObject({ requestedByUserId: null, issuerUserId: w.user2Id, verifiedBy: w.user2Id, allows: true, reason: 'because',
-          signatureStatus: { state: 'CURRENT', integrityProblems: 0 } });
-      }
+    expect(await snapshot()).toEqual(withNulled(before, [soft, pending]));
+    for (const row of await readBoth(soft)) {
+      expect(row).toMatchObject({ requestedByUserId: null, issuerUserId: w.user2Id, verifiedBy: w.user2Id, allows: true, reason: 'because',
+        signatureStatus: { state: 'CURRENT', integrityProblems: 0 } });
     }
     expect(await db.grantSigningRequest.findUniqueOrThrow({ where: { id: open } })).toMatchObject({ state: 'open', version: 1 });
     expect(await db.grant.findUniqueOrThrow({ where: { id: pending } })).toMatchObject({ version: 1, activatedAt: null, requestedByUserId: null });
+  });
+
+  it('pin 3: a live requester is unchanged', async () => {
+    const live = await signedGrant(w.userId);
+    const before = await snapshot();
+
+    expect(await runMigration()).toBeNull();
+    clearSignatureVerifyCache();
+
+    expect(await snapshot()).toEqual(before);
     for (const row of await readBoth(live)) expect(row).toMatchObject({ requestedByUserId: w.userId, signatureStatus: { state: 'CURRENT', integrityProblems: 0 } });
   });
 });
@@ -201,8 +236,10 @@ describe('#3852 account-merge sources (cor:api:010:02)', () => {
 
     const err = await runMigration();
     expect(err?.code).toBe('HDPRF');
-    expect(err?.message).toMatch(/\b1 grant/);
+    expect(err?.message).toBe(REFUSAL(1));
     expect(err?.message).not.toContain(source);
+    expect(err?.message).not.toContain(viaSource);
+    expect(err?.message).not.toContain(erasedRow);
     expect(await snapshot()).toEqual(before);
     expect(await requesterOf(viaSource)).toBe(source);
     expect(await requesterOf(erasedRow)).not.toBeNull();
@@ -217,6 +254,54 @@ describe('#3852 account-merge sources (cor:api:010:02)', () => {
     expect(await runMigration()).toBeNull();
     expect(await snapshot()).toEqual(withNulled(before, [erasedRow]));
     expect(await requesterOf(moved)).toBe(target);
+  });
+});
+
+describe('#3852 what counts as an erasure (blind P2 on #4701)', () => {
+  it('pin 6: a soft-deleted requester that is neither an erasure nor a merge source keeps its link', async () => {
+    const other = await insertGrant(w, { user_id: null, worker_id: w.workerId, requested_by_user_id: await otherSoftDeletedUser() });
+    const erasedRow = await insertGrant(w, { user_id: null, worker_id: w.workerId, requested_by_user_id: await erasedUser() });
+    const before = await snapshot();
+
+    expect(await runMigration()).toBeNull();
+    expect(await snapshot()).toEqual(withNulled(before, [erasedRow]));
+  });
+
+  it('pin 6: the real deleteUser leaves the shape the migration clears', async () => {
+    await deleteUserAccount(db, { targetUserId: w.user2Id, actorUserId: w.user2Id });
+    const [row] = await db.$queryRawUnsafe<Array<{ erased: boolean }>>(
+      `SELECT (deleted_at IS NOT NULL AND email IS NULL AND handle LIKE 'deleted-%') AS erased FROM users WHERE id = $1`, w.user2Id);
+    expect(row.erased).toBe(true);
+    const migration = readFileSync(MIGRATION, 'utf8');
+    expect(migration).toContain(`u.deleted_at IS NOT NULL AND u.email IS NULL AND u.handle LIKE 'deleted-%'`);
+  });
+});
+
+describe('#3852 merge-source edge cases (blind P3 on #4701)', () => {
+  it('pin 7: two merge-source grants report the exact count, ids absent, nothing written', async () => {
+    const a = await mergedPair();
+    const b = await mergedPair();
+    const g1 = await insertGrant(w, { user_id: null, worker_id: w.workerId, requested_by_user_id: a.source });
+    const g2 = await insertGrant(w, { user_id: null, worker_id: w.workerId, requested_by_user_id: b.source });
+    await insertGrant(w, { user_id: null, worker_id: w.workerId, requested_by_user_id: await erasedUser() });
+    const before = await snapshot();
+
+    const err = await runMigration();
+    expect(err?.code).toBe('HDPRF');
+    expect(err?.message).toBe(REFUSAL(2));
+    for (const id of [a.source, b.source, g1, g2]) expect(err?.message).not.toContain(id);
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it('pin 7: a merge source whose users row was hard-deleted has no merge record left and clears as a no-row requester', async () => {
+    const { source } = await mergedPair();
+    const g = await insertGrant(w, { user_id: null, worker_id: w.workerId, requested_by_user_id: source });
+    await exec('DELETE FROM users WHERE id = $1', source);
+    expect(await db.userMerge.count({ where: { sourceUserId: source } })).toBe(0);
+    const before = await snapshot();
+
+    expect(await runMigration()).toBeNull();
+    expect(await snapshot()).toEqual(withNulled(before, [g]));
   });
 });
 
