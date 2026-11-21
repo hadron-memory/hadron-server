@@ -25,4 +25,4 @@ if (report.refused) console.error(`refused: ${report.refused}`);
 for (const r of report.results) console.log(`${r.passed ? 'PASS' : 'FAIL'} ${r.name}`);
 for (const f of report.failures) console.error(`  ${f}`);
 console.log(report.passed ? 'conforming' : 'NOT conforming');
-process.exit(report.passed ? 0 : 1);
+process.exitCode = report.passed ? 0 : 1;

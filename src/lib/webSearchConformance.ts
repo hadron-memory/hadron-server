@@ -30,6 +30,9 @@ import { WEB_SEARCH_CONTRACT_VERSION, contractVersionMismatch } from './webSearc
  * defined in `webSearchClient` and shared with `webSearch`). The fixtures define v1 only: when
  * the contract bumps, the new version brings its own set.
  *
+ * An answer with an empty `results` list conforms (no result is no violation);
+ * the fixtures prove the envelope, not that a tool finds anything.
+ *
  * Not in this slice: the org-scoped trust-tier registry (S2, held on its
  * ruling) and any credential. The runner sends none.
  */

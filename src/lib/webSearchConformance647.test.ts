@@ -200,6 +200,16 @@ describe('#647 S1 web-search@1 conformance fixtures', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('REFUSES an answer carrying another contract version at request time, and accepts an absent one', async () => {
+    vi.stubEnv('WEBSEARCH_TOOL_URL', 'http://tool.test:8080');
+    vi.stubGlobal('fetch', conformingFetch((b) => ({ ...b, contractVersion: 'web-search@2' })));
+    const err = await webSearch({ query: 'hadron' }).catch((e) => e);
+    expect((err as GraphQLError).extensions.code).toBe('WEBSEARCH_TOOL_CONTRACT_MISMATCH');
+    expect((err as GraphQLError).message).toMatch(/web-search@2/);
+    vi.stubGlobal('fetch', conformingFetch(({ contractVersion: _v, ...rest }) => rest));
+    await expect(webSearch({ query: 'hadron' })).resolves.toMatchObject({ source: 'external' });
+  });
+
   it('still searches when the configured declared version matches, or is unset', async () => {
     vi.stubEnv('WEBSEARCH_TOOL_URL', 'http://tool.test:8080');
     vi.stubEnv('WEBSEARCH_TOOL_CONTRACT_VERSION', undefined);
