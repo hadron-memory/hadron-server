@@ -43,7 +43,7 @@ const M = resolvers.Mutation as {
 };
 
 interface Fixture {
-  org: { id: string };
+  org: { id: string; urn: string };
   agent: { id: string };
   app: { id: string };
   admin: { id: string };
@@ -54,6 +54,7 @@ interface Fixture {
 async function buildFixture(memoryClass: 'personal' | 'private' = 'personal'): Promise<Fixture> {
   const org = await db.organization.create({
     data: { id: generateId(), name: 'rev4716', urn: `rev4716-${generateId()}` },
+    select: { id: true, urn: true },
   });
   const agent = await db.agent.create({
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:agent`, name: 'agent' },
