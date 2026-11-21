@@ -159,9 +159,18 @@ jobs:
         # - the fork count pinned at 3, vitest's default on these 4-vCPU runners (CPUs - 1), so a changed runner size
         #   can't silently change it. A trial of 2 (Hugo's rule: pin 3 if any shard's median grew more than 30%) grew
         #   shard 4's median by 39%, while healthy shards peaked at 3.7 GB used of 16 GB at 2 forks.
+        # #4646: the 45 min step timeout never fired on the lost runners (they were gone 48-53 min in), and GitHub
+        # keeps no log for a lost job. So a watchdog (scripts/ci/vitest-watchdog.sh) ends the run itself at
+        # WATCHDOG_MINUTES while the VM is alive: a process list and a final [sampler] block to stdout, then the
+        # suite's own process tree killed by PID, then exit 124, so the step fails with its log kept. Inside the
+        # budget it returns vitest's own exit code. LIMIT: if the VM freezes outright before the budget, no dump
+        # appears, which is itself the finding (#4278 stays open). WATCHDOG_STEP_TIMEOUT_MINUTES must equal
+        # timeout-minutes below; vitest-watchdog.test.mjs pins that, and that the budget is under it.
         timeout-minutes: 45
         env:
           HADRON_TEST_MAX_WORKERS: '3'
+          WATCHDOG_MINUTES: '40'
+          WATCHDOG_STEP_TIMEOUT_MINUTES: '45'
         run: |
           echo "[sampler] nproc=$(nproc)"
           (
@@ -175,7 +184,7 @@ jobs:
           sampler=$!
           trap 'kill "$sampler" 2>/dev/null || true' EXIT
           psql "$DATABASE_URL" -Atc "SELECT 'cluster: ' || version()"
-          pnpm test --shard=${{ matrix.shard }}/${{ env.SHARD_TOTAL }}
+          scripts/ci/vitest-watchdog.sh -- pnpm test --shard=${{ matrix.shard }}/${{ env.SHARD_TOTAL }}
 
       # #4487: the pg16 floor lane also runs the file holding #4476's version-dependent pins, whichever shard owns it:
       # here the PG17-only pins skip and the no-GUC guard path is the live executor (the PG17 lanes run the rest).
