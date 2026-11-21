@@ -62,6 +62,10 @@ import { loadLastGapEnd } from './stallGap.js';
 import { ASSIGNED_EVENT_TYPES, ASSIGNEE_CLEARED_EVENT_TYPES, PASSIVE_EVENT_TYPES, appendAlarmEvent, type AlarmChain, type AlarmEventType, type TaskParty } from './events.js';
 import { markStalled } from './availability.js';
 import { appManagerUserIds } from '../auth/appManagement.js';
+import { isSerializationFailure } from './serializationFailure.js';
+
+// #3539: the predicate moved to a leaf so postLimit does not reach this module; the old name stays exported from here.
+export { isSerializationFailure };
 
 export const STALL_RULES = ['not-started', 'no-progress', 'owner-unreactive', 'unassignable', 'finish-by'] as const;
 export type StallRule = (typeof STALL_RULES)[number];
@@ -704,17 +708,6 @@ export async function raiseStallAlarm(
     }
     return eventId;
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-}
-
-/**
- * A serialization failure: Prisma reports P2034 for the transaction, or
- * P2010 with SQLSTATE 40001 when a raw statement hits it.
- */
-export function isSerializationFailure(e: unknown): boolean {
-  if (!(e instanceof Prisma.PrismaClientKnownRequestError)) return false;
-  if (e.code === 'P2034') return true;
-  const meta = e.meta as { code?: unknown } | undefined;
-  return e.code === 'P2010' && meta?.code === '40001';
 }
 
 /** Tasks per evaluation page: the inputs are loaded per page, not per task. */
