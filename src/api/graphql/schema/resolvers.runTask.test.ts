@@ -238,4 +238,31 @@ describe('GraphQL runTask mutation (#542 — nodeRef)', () => {
     expect(event).toBeDefined();
     expect(event?.type).toBe('action-run');
   });
+
+  // #643 — the event is inserted inline and fire-and-forget, so a fixed sleep
+  // before the read races a loaded shard. Delay the insert past the old 100 ms
+  // window to make that race deterministic.
+  it('records a usage event even when the insert settles late (#643)', async () => {
+    const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
+    const create = db.usageEvent.create.bind(db.usageEvent) as (args: unknown) => Promise<unknown>;
+    const spy = vi.spyOn(db.usageEvent, 'create').mockImplementation(((args: unknown) =>
+      new Promise((resolve) => setTimeout(resolve, 300)).then(() => create(args))) as never);
+    try {
+      await resolvers.Mutation.runTask(
+        {},
+        { nodeRef: nodeUrnOf(fx.alpha, 'tasks:deploy') },
+        ctx,
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const event = await db.usageEvent.findFirst({
+        where: { type: 'action-run', nodeLoc: 'tasks:deploy' },
+      });
+      expect(spy).toHaveBeenCalled();
+      expect(event?.type).toBe('action-run');
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
