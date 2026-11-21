@@ -81,13 +81,17 @@ type ProjectionMemory = Prisma.MemoryGetPayload<{ select: typeof PROJECTION_MEMO
  * function the write doors call, judged live at read, derived and never stored, so the mark goes when the memory
  * qualifies again. Where the memory is concealed (`memoryUrn` null) both are null: a reason would describe a memory the
  * caller may not know exists. A revoked row is not marked: `revokedAt` already says it does nothing.
+ *
+ * #4734 (ruling 0222 extended to write grants, cor:agt:010:01:18): `prefix` and `registerNodeUrn` name content inside the
+ * memory (a node path, a node URN), so where the memory is concealed they are withheld with the URN: a row never shows
+ * either without its `memoryUrn`. A viewer who may see the memory keeps all three.
  */
 export function project(row: GrantRow, memory: ProjectionMemory | null, app: AppRow, viewerId: string | undefined) {
   const visible = memory !== null && (!isStrictOwnerClass(memory.class) || isStrictOwner({ userId: viewerId }, memory.userId));
   const refusal = visible && row.revokedAt === null ? grantTargetRefusal(app, memory!) : null;
   return {
     id: row.id, appId: row.appId, memoryUrn: visible ? safeCanonicalUrn('memory', memory!.urn) : null,
-    prefix: row.prefix, registerNodeUrn: row.registerNodeUrn, grantedBy: row.grantedBy,
+    prefix: visible ? row.prefix : null, registerNodeUrn: visible ? row.registerNodeUrn : null, grantedBy: row.grantedBy,
     createdAt: row.createdAt, revokedAt: row.revokedAt, revokedBy: row.revokedBy,
     notEffective: visible ? refusal !== null : null, notEffectiveReason: refusal,
   };

@@ -8,6 +8,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { GRANT_MEMORY_SELECT } from '../../../lib/appWriteGrant.js';
+import { buildSchema, defaultFieldResolver, graphql } from 'graphql';
+import { typeDefs } from './typeDefs.js';
 import { resolvers } from './resolvers.js';
 import { project } from './resolvers.appWriteGrant.js';
 
@@ -66,6 +68,26 @@ describe('#4734 a concealed write-grant target shows neither prefix nor register
     const row = await rowOn(f, f.personal.id);
     const { memory, app } = await projectionInputs(f, f.personal.id);
     expect(project(row, memory, app, f.peer.id)).toMatchObject({ id: row.id, appId: f.app.id, grantedBy: f.owner.id, createdAt: row.createdAt });
+  });
+});
+
+describe('#4734 through the real GraphQL schema (prefix is nullable, so a null reaches the client instead of an error)', () => {
+  const schema = buildSchema(typeDefs);
+  const fieldResolver = (p: any, a: any, c: any, i: any) =>
+    typeof (resolvers as any)[i.parentType.name]?.[i.fieldName] === 'function' ? (resolvers as any)[i.parentType.name][i.fieldName](p, a, c, i) : defaultFieldResolver(p, a, c, i);
+  const exec = (source: string, variableValues: Record<string, unknown>, contextValue: unknown) => graphql({ schema, source, variableValues, contextValue, fieldResolver });
+
+  it('revoke by a manager who cannot see the memory answers null/null/null with no errors; the owner still gets all three', async () => {
+    const f = await fixture();
+    const concealed = await rowOn(f, f.personal.id);
+    const mine = await rowOn(f, f.personal.id, { prefix: 'other:plans' });
+    const q = 'mutation($id: ID!){ revokeAppMemoryWriteGrant(id: $id){ id memoryUrn prefix registerNodeUrn } }';
+    const peer = await exec(q, { id: concealed.id }, as(f.peer));
+    expect(peer.errors).toBeUndefined();
+    expect(peer.data!.revokeAppMemoryWriteGrant).toEqual({ id: concealed.id, memoryUrn: null, prefix: null, registerNodeUrn: null });
+    const own = await exec(q, { id: mine.id }, as(f.owner));
+    expect(own.errors).toBeUndefined();
+    expect(own.data!.revokeAppMemoryWriteGrant).toMatchObject({ prefix: 'other:plans', registerNodeUrn: REGISTER });
   });
 });
 
