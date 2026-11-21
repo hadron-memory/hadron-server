@@ -8,7 +8,7 @@ import { hadronReadNode, hadronCreateNode } from '../lib/runner/tools/nodeTools.
 import { loadFlowNode } from '../lib/runner/loadFlowNode.js';
 import { makeProdRunDeps } from '../jobs/appRunDeps.js';
 import { hadronStoreFile } from '../lib/runner/tools/storeTools.js';
-import { putObject } from '../integrations/r2/client.js';
+import { putObject } from '../integrations/objectstore/index.js';
 import { createTestableMcpServer } from './server.js';
 import { canReadMemory, canWriteToMemory, getMemoryAccess, getPrincipalAppMemoryAccess } from './access-control.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
@@ -17,7 +17,7 @@ import type { RunToolContext } from '../lib/runner/tools/types.js';
 import { testRunAgentId } from '../test/runAgent.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
-vi.mock('../integrations/r2/client.js', () => ({ putObject: vi.fn(), deleteObject: vi.fn() }));
+vi.mock('../integrations/objectstore/index.js', () => ({ putObject: vi.fn(), deleteObject: vi.fn() }));
 const M = resolvers.Mutation as any;
 const Q = resolvers.Query as any;
 const LOC = 'docs:entry';

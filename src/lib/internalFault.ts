@@ -8,7 +8,7 @@
 import { randomUUID } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import { respondSessionSuperseded } from './sessionSuperseded.js';
-import { isAuthStoreBusyError } from './authStoreBusy.js';
+import { authStoreBusyMessage, isAuthStoreBusyError } from './authStoreBusy.js';
 import { currentRequestId } from './requestContext.js';
 
 export const INTERNAL_ERROR_CODE = 'INTERNAL_SERVER_ERROR';
@@ -87,14 +87,14 @@ export function respondAuthStoreBusy(res: Response, error: unknown): boolean {
   const requestId = typeof res.locals?.requestId === 'string' ? res.locals.requestId : faultRequestId();
   logInternalFault('http', 'auth-store-busy', requestId, error);
   if (res.headersSent) return false; // Delegate to Express's final handler, as #3818 does.
-  // The class fixes the prose per reason (#4504: POOL_WAIT and STORE_UNREACHABLE each carry
-  // their own), and `reason` is one of the two by construction — isAuthStoreBusyError just
-  // proved the class (BLIND P3: no redundant re-validation of what the type already states).
+  // Normalize at the boundary: instanceof proves the class, not that a subclass or late
+  // mutation kept its extensions intact. The default matches authStoreBusyMessage's fixed prose.
+  const reason = error.extensions.reason === 'STORE_UNREACHABLE' ? 'STORE_UNREACHABLE' : 'POOL_WAIT';
   res.status(503).json({
-    error: error.message,
+    error: authStoreBusyMessage(reason),
     code: 'AUTH_STORE_BUSY',
     retryable: true,
-    reason: error.extensions.reason,
+    reason,
     requestId,
   });
   return true;

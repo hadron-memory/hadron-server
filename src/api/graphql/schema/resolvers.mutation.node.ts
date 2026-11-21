@@ -28,6 +28,7 @@ import {
   assertRoleDeclaredForWrite,
   lockMemoryConfigShared,
   mergedGovernedState,
+  mayChangeGovernance,
   governedKindsOf,
   GOVERNED_KINDS,
   type GovernedKind,
@@ -316,6 +317,8 @@ async function writeNodeCoreRaw(
     transaction?: {
       tx: Prisma.TransactionClient;
       pooledDb: Context['db'];
+      /** #1213: complete set acquired by an outer caller BEFORE its loc/node locks; core may only re-enter it. */
+      coordinationMemories?: readonly string[];
       /** Response advice belongs to the outer request; authorization still uses txCtx. */
       requestContext?: Context;
       afterCommit: (effect: () => void) => void;
@@ -1063,12 +1066,20 @@ async function writeNodeCoreRaw(
         loc: edge.targetLoc,
         memoryId: edge.targetMemoryId,
       })) ?? [];
-      async function lockInlineEdgeMemories(tx: Prisma.TransactionClient): Promise<void> {
-        if (resolvedEdges === null) return;
-        await lockEdgeEndpointMemories(tx, [
-          input.memoryId,
-          ...inlineEdgeTargets.map((target) => target.memoryId),
-        ]);
+      // #1213: preserve the existing inline-edge reason, unioned with the INPUT-triggered own-memory reason.
+      // No existing-row snapshot participates in this decision. The authority prefix in inWriteTransaction stays first.
+      const participatesInGovernance = mayChangeGovernance(mode, input, opts?.ownsKind);
+      async function lockWriteMemories(tx: Prisma.TransactionClient): Promise<void> {
+        if (resolvedEdges === null && !participatesInGovernance) return;
+        const memoryIds = [input.memoryId, ...inlineEdgeTargets.map((target) => target.memoryId)];
+        const declared = opts?.transaction?.coordinationMemories;
+        if (declared && memoryIds.some(id => !declared.includes(id))) {
+          // An endpoint moved after the outer preflight. Never append a key after the caller's loc/node locks.
+          throw new GraphQLError('An inline edge target moved while the write waited; re-read and retry.', {
+            extensions: { code: 'NODE_WRITE_CONFLICT' },
+          });
+        }
+        await lockEdgeEndpointMemories(tx, memoryIds);
       }
       // #2040 — include tags are checked and their derived edges synced in the
       // writer's own transaction, on the plaintext the caller supplied. A
@@ -1319,7 +1330,7 @@ async function writeNodeCoreRaw(
               extensions: { code: 'NODE_WRITE_CONFLICT', loc: input.loc, memoryId: input.memoryId },
             });
           const result = await inWriteTransaction(async (tx) => {
-            await lockInlineEdgeMemories(tx);
+            await lockWriteMemories(tx);
             await lockLocForWrite(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
               op: 'update',
@@ -1567,7 +1578,7 @@ async function writeNodeCoreRaw(
           node = await inWriteTransaction(async (tx) => {
             // #443: a second root allocation in one transaction is refused before ANY lock of its own is taken.
             if (input.seq == null && !input.loc.includes(':')) await assertRootAllocationAllowed(tx, input.memoryId);
-            await lockInlineEdgeMemories(tx);
+            await lockWriteMemories(tx);
             await lockAncestorsForCreate(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
             });
@@ -2024,7 +2035,16 @@ async function updateNodeCore(
   input: UpdateNodeInput,
   ctx: Context,
   op: string,
-  opts?: { ownsKind?: GovernedKind; governedContext?: GovernedContext } & Pick<Parameters<typeof writeNodeCore>[3], 'transaction'>,
+  opts?: {
+    ownsKind?: GovernedKind;
+    governedContext?: GovernedContext;
+    /**
+     * #1291 — `properties` is a PATCH, merged by `mergePropertiesPatch` (`exports` per host and field, `null` removes a
+     * host, unnamed keys untouched) under the node lock on the row read after it. Set only by the task door's own
+     * `mergeExports` argument; every other door and the generic `updateNode` leave it unset and replace the whole bag.
+     */
+    mergeProperties?: boolean;
+  } & Pick<Parameters<typeof writeNodeCore>[3], 'transaction'>,
 ) {
   const { id, memoryId, loc, expectedRevision, ...fields } = input;
   // GraphQL guarantees a signed 32-bit integer on the wire, but resolver tests
@@ -2091,6 +2111,15 @@ async function updateNodeCore(
     targetLoc = loc as string;
   }
 
+  // #1291: the merge reads the stored bag, so it is judged and written in one locked transaction of its own.
+  if (opts?.mergeProperties && fields.properties !== undefined) {
+    return mergePropertiesAndWrite({
+      fields, ctx, expectedRevision, op, targetNodeId, targetMemoryId, targetLoc, hasId,
+      ref: hasId ? (id as string) : (memoryId as string),
+      ownsKind: opts.ownsKind, governedContext: opts.governedContext,
+    });
+  }
+
   // The PK anchors the write on the id-selector path so a concurrent
   // move (which frees the loc for reuse) can't make the loc-keyed
   // write hit a different node.
@@ -2105,6 +2134,136 @@ async function updateNodeCore(
       entity: hasId ? 'node' : 'memory',
       ref: hasId ? (id as string) : (memoryId as string),
     },
+  });
+}
+
+/** #1213: resolve the complete writer memory set before a caller-owned node/loc lock, using the same read gate as inline writes. */
+async function nodeWriteCoordinationMemories(ctx: Context, memoryId: string, input: Pick<UpdateNodeInput, 'role' | 'isRunnable' | 'edges'>,
+  ownsKind?: GovernedKind): Promise<string[]> {
+  if (!mayChangeGovernance('update', input, ownsKind) && input.edges === undefined) return [];
+  const ids = new Set([memoryId]);
+  for (const edge of input.edges ?? []) {
+    let id: string;
+    try {
+      ({ id } = await resolveNodeRefForCaller(ctx, edge.targetId, memoryId));
+    } catch (err) {
+      // The transaction-entry scope pass must preserve the shared inline-edge refusal shape.
+      if (err instanceof NodeNotFoundError) {
+        throw new GraphQLError(`Edge target not found: "${err.ref}"`, {
+          extensions: { code: err.name, ref: err.ref },
+        });
+      }
+      throw err;
+    }
+    const target = await ctx.db.node.findUnique({ where: { id }, select: { memoryId: true } });
+    if (!target || !(await isMemoryReadableCached(ctx, target.memoryId))) {
+      throw new GraphQLError(`Edge target not found: "${edge.targetId}"`, {
+        extensions: { code: 'NODE_NOT_FOUND', ref: edge.targetId },
+      });
+    }
+    ids.add(target.memoryId);
+  }
+  return [...ids];
+}
+
+/**
+ * #1291 — the merge half of `updateTaskNode(mergeExports: true)`.
+ *
+ * Mirrors `updateNodePropertiesWith`: the patch is merged by `mergePropertiesPatch` on the row read AFTER the node's
+ * advisory lock, in the same transaction as the write, so two concurrent patches to different hosts (or fields of one
+ * host) both land and no snapshot a caller or an earlier read produced is ever the base. The write is the door's own
+ * `writeNodeCore` call, so the governed-kind gate, task and schema validation (on the MERGED result), revision, audit
+ * and `expectedRevision` are the door's, unchanged; ownership of the kind is the door's `ownsKind`, never the caller's.
+ * Access is checked before the stored bag is read, through the same classifiers the write core uses, so a refusal is
+ * identical with the option on or off.
+ */
+async function mergePropertiesAndWrite(a: {
+  fields: Omit<UpdateNodeInput, 'id' | 'memoryId' | 'loc' | 'expectedRevision'>;
+  ctx: Context;
+  expectedRevision: number | null | undefined;
+  op: string;
+  targetNodeId: string | undefined;
+  targetMemoryId: string;
+  targetLoc: string;
+  hasId: boolean;
+  ref: string;
+  ownsKind: GovernedKind | undefined;
+  governedContext: GovernedContext | undefined;
+}) {
+  const { fields, ctx } = a;
+  const patch = fields.properties;
+  const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, a.targetMemoryId);
+  // The destination a userless App run's write grant is judged against: the same one writeNodeCore names for this
+  // update (none when the write carries inline edges or an include tag, which reach beyond a prefix, #2484). Without it
+  // an App writer the plain door admits would be refused here (#4599 LOCAL P2).
+  const carriesIncludeTag = typeof fields.content === 'string' && fields.content.includes('{{>');
+  const grantDestination: WriteDestination | undefined =
+    fields.edges === undefined && !carriesIncludeTag ? { loc: a.targetLoc, verb: 'update' } : undefined;
+  const gate = () => requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, resolvedMemoryId, grantDestination);
+  if (a.hasId) await concealUnreadableNodeDenial(ctx, resolvedMemoryId, () => nodeNotFoundError(a.ref), gate);
+  else await concealUnreadableDenial(ctx, resolvedMemoryId, a.ref, gate);
+  // Judged AFTER access, so a caller who may not write cannot tell a malformed patch from a well-formed one.
+  if (patch == null || typeof patch !== 'object' || Array.isArray(patch)) {
+    throw new GraphQLError(`${a.op}: with mergeExports, \`properties\` must be a JSON object patch.`, {
+      extensions: { code: 'BAD_USER_INPUT', field: 'properties' },
+    });
+  }
+
+  const notFound = () =>
+    new GraphQLError(`Node not found: "${a.ref}"`, {
+      extensions: { code: 'NODE_NOT_FOUND', ...(a.hasId ? { ref: a.ref } : { loc: a.targetLoc, memoryId: resolvedMemoryId }) },
+    });
+  // An id selector is anchored on the PK, as the plain door is: one attempt. A loc selector names whatever lives at
+  // (memory, loc) NOW, so the id it resolved to before the lock can be stale when the lock is granted (the node moved
+  // or was deleted, and another may have taken its loc): it re-resolves and tries again rather than follow the moved
+  // node or refuse while a node sits at the loc (#4599 BLIND P2). Bounded, then a retryable conflict.
+  const MAX_ATTEMPTS = a.hasId ? 1 : 3;
+  const STALE = Symbol('stale-loc-resolution');
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    // A merge needs a stored base, so a missing node is the same refusal the plain update gives. Falling through to the
+    // plain write would replace the whole bag of a node created in the gap (#4599 BLIND P2).
+    const nodeId =
+      a.targetNodeId ??
+      (await ctx.db.node.findFirst({ where: { memoryId: resolvedMemoryId, loc: a.targetLoc, deletedAt: null }, select: { id: true } }))?.id;
+    if (!nodeId) throw notFound();
+
+    const coordinationMemories = await nodeWriteCoordinationMemories(ctx, resolvedMemoryId, fields, a.ownsKind);
+    const effects: Array<() => void> = [];
+    let written: Awaited<ReturnType<typeof writeNodeCore>>;
+    try {
+      written = await ctx.db.$transaction(async (lockTx) => {
+        await lockInstallAuthorityFirst(lockTx, ctx, resolvedMemoryId);
+        await lockMemoriesForChannelChange(lockTx, coordinationMemories);
+        await lockTx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${nodeId}))`;
+        const fresh = await lockTx.node.findUnique({ where: { id: nodeId }, select: { loc: true, memoryId: true, deletedAt: true, properties: true } });
+        // Physically deleted while this waited: an id selector is gone, a loc selector re-resolves (a replacement may sit there).
+        if (!fresh) throw a.hasId ? notFound() : STALE;
+        if (!a.hasId && (fresh.deletedAt || fresh.loc !== a.targetLoc || fresh.memoryId !== resolvedMemoryId)) throw STALE;
+        const merged = mergePropertiesPatch(fresh.properties, patch as Record<string, unknown>);
+        return writeNodeCore(
+          { ...fields, properties: merged, memoryId: resolvedMemoryId, loc: fresh.loc },
+          withoutRequestCaches(ctx, lockTx),
+          'update',
+          {
+            authoring: authoringFromRequest(ctx, fields.authoredWith),
+            targetNodeId: nodeId,
+            guardRevSeq: a.expectedRevision ?? undefined,
+            ownsKind: a.ownsKind,
+            governedContext: a.governedContext,
+            concealUnreadable: { entity: a.hasId ? 'node' : 'memory', ref: a.ref },
+            transaction: { tx: lockTx, pooledDb: ctx.db, coordinationMemories, afterCommit: (effect) => effects.push(effect) },
+          },
+        );
+      });
+    } catch (e) {
+      if (e === STALE) continue;
+      throw e;
+    }
+    for (const effect of effects) effect();
+    return written;
+  }
+  throw new GraphQLError(`${a.op}: the node at "${a.targetLoc}" kept changing while the merge waited; retry.`, {
+    extensions: { code: 'NODE_WRITE_CONFLICT', loc: a.targetLoc, memoryId: resolvedMemoryId },
   });
 }
 
@@ -2383,6 +2542,8 @@ export const nodeMoveOps = {
             if (planOnly) await tx.$executeRaw`SET TRANSACTION READ ONLY`;
             // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
             if (!planOnly) await lockInstallAuthoritiesFirst(tx, ctx, [source.memoryId, destMemoryId]);
+            // #1213: moving stored signals is an owning operation, even when no input signal is present.
+            if (!planOnly) await lockMemoriesForChannelChange(tx, [source.memoryId, destMemoryId]);
             const txCtx = await nodeDoorTxContext(ctx, tx, [source.memoryId, destMemoryId], planOnly);
             for (const memoryId of new Set([source.memoryId, destMemoryId])) {
               await concealUnreadableNodeDenial(txCtx, memoryId, () => nodeNotFoundError(sourceRef), () => requireMemoryWriteAccess(txCtx, memoryId));
@@ -2621,8 +2782,14 @@ export const nodeMutations = {
         ],
         [
           entry.doors.update,
-          async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) =>
-            updateNodeCore(input, ctx, entry.doors.update, { ownsKind: entry.kind, governedContext: 'node-write' }),
+          async (_: unknown, { input, mergeExports }: { input: UpdateNodeInput; mergeExports?: boolean | null }, ctx: Context) =>
+            updateNodeCore(input, ctx, entry.doors.update, {
+              ownsKind: entry.kind,
+              governedContext: 'node-write',
+              // #1291: only the task door declares the argument in the SDL; the others never see one, and this
+              // keeps a direct call from smuggling it onto a different kind's door.
+              ...(entry.kind === 'task' && mergeExports === true ? { mergeProperties: true } : {}),
+            }),
         ],
       ]),
     ),
@@ -2997,7 +3164,7 @@ export const nodeMutations = {
         if (!row.role && row.isRunnable !== true) continue;
         if (await roleWritersRefusal(ctx.db, ctx, row.memoryId, {
           priorRole: row.role, nextRole: row.role, priorRunnable: row.isRunnable, nextRunnable: row.isRunnable,
-        })) {
+        }, { lock: false })) {
           skipCounts.governed += 1;
           scannedNodes.splice(i, 1);
         }
@@ -4111,106 +4278,118 @@ export const nodeMutations = {
           extensions: { code: 'NODE_NOT_FOUND', ref: sourceRef },
         });
       }
-      // A raw writer may have changed the source's content while leaving its
-      // old task/human stamp. Reconcile under the source row lock and copy the
-      // resulting state; the clone's own fingerprint would otherwise certify
-      // the stale stamp permanently. A concurrent move or delete is a miss in
-      // the memory this caller was authorized to read.
-      const source = await ctx.db.$transaction(async (tx) => {
-        if ((await ensureCurrentNodeRevisionInTransaction(tx, selectedSource.id, {
-          expectedMemoryId: selectedSource.memoryId,
-        })) == null) return null;
-        const current = await tx.node.findUnique({ where: { id: selectedSource.id } });
-        return current && !current.deletedAt && current.loc === selectedSource.loc ? current : null;
-      });
-      if (!source) {
-        throw new GraphQLError(`Node not found: "${sourceRef}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: sourceRef },
-        });
-      }
-      const { destMemoryId, destLoc } = await resolveRelocationTarget(
-        ctx, source, targetUrn, targetMemoryRef,
-      );
-      // #1450 (@codex P1, PR #1452) — a placeholder has nothing to copy, and
-      // writeNodeCore strips the flag, so a clone would be an ordinary blank
-      // node claiming the citation. Reserve the citation at the destination.
-      if (source.isPlaceholder) {
-        throw new GraphQLError(
-          `Cannot clone placeholder "${source.loc}": it has no spec to copy. Reserve the citation where you need it instead.`,
-          { extensions: { code: 'SPEC_PLACEHOLDER_NOT_COPYABLE', loc: source.loc } },
-        );
-      }
+      const { destMemoryId, destLoc } = await resolveRelocationTarget(ctx, selectedSource, targetUrn, targetMemoryRef);
+      const effects: Array<() => void> = [];
+      const written = await ctx.db.$transaction(async tx => {
+        await lockInstallAuthoritiesFirst(tx, ctx, [selectedSource.memoryId, destMemoryId]);
+        await lockMemoriesForChannelChange(tx, [selectedSource.memoryId, destMemoryId]);
+        const txCtx = await nodeDoorTxContext(ctx, tx, [selectedSource.memoryId, destMemoryId]);
+        if (!(await canReadMemory(txCtx.db, txCtx, selectedSource.memoryId))) {
+          throw nodeNotFoundError(sourceRef);
+        }
+        // A raw writer may have changed the source's content while leaving its
+        // old task/human stamp. Reconcile under the source row lock and copy the
+        // resulting state; the clone's own fingerprint would otherwise certify
+        // the stale stamp permanently. A concurrent move or delete is a miss in
+        // the memory this caller was authorized to read.
+        const source = await (async () => {
+          if ((await ensureCurrentNodeRevisionInTransaction(tx, selectedSource.id, {
+            expectedMemoryId: selectedSource.memoryId,
+          })) == null) return null;
+          const current = await tx.node.findUnique({ where: { id: selectedSource.id } });
+          return current && !current.deletedAt && current.loc === selectedSource.loc ? current : null;
+        })();
+        if (!source) {
+          throw new GraphQLError(`Node not found: "${sourceRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND', ref: sourceRef },
+          });
+        }
 
-      // Decrypt the source with the SOURCE memory key so writeNodeCore can
-      // re-encrypt the plaintext for the DESTINATION memory. Only content/
-      // abstract are encrypted at rest.
-      const srcEnc = await getMemoryEncryptionInfo(ctx.db, source.memoryId);
-      const srcPlain = { ...source };
-      if (srcEnc.isEncrypted) {
-        if (!sessionKeyCache.getByMemoryId(srcEnc.id)) {
+        // #1450 (@codex P1, PR #1452) — a placeholder has nothing to copy, and
+        // writeNodeCore strips the flag, so a clone would be an ordinary blank
+        // node claiming the citation. Reserve the citation at the destination.
+        if (source.isPlaceholder) {
           throw new GraphQLError(
-            `SESSION_EXPIRED: memory ${srcEnc.id} is encrypted but no active session key is available.`,
-            { extensions: { code: 'SESSION_EXPIRED', memoryId: srcEnc.id } },
+            `Cannot clone placeholder "${source.loc}": it has no spec to copy. Reserve the citation where you need it instead.`,
+            { extensions: { code: 'SPEC_PLACEHOLDER_NOT_COPYABLE', loc: source.loc } },
           );
         }
-        decryptNodeFields(srcPlain, srcEnc);
-      }
 
-      // Outgoing edges that naturally resolve in the destination memory.
-      const outgoing = await ctx.db.edge.findMany({
-        where: { sourceId: source.id, deletedAt: null, target: { deletedAt: null } },
-        include: { target: { select: { loc: true } } },
+        // Decrypt the source with the SOURCE memory key so writeNodeCore can
+        // re-encrypt the plaintext for the DESTINATION memory. Only content/
+        // abstract are encrypted at rest.
+        const srcEnc = await getMemoryEncryptionInfo(tx, source.memoryId);
+        const srcPlain = { ...source };
+        if (srcEnc.isEncrypted) {
+          if (!sessionKeyCache.getByMemoryId(srcEnc.id)) {
+            throw new GraphQLError(
+              `SESSION_EXPIRED: memory ${srcEnc.id} is encrypted but no active session key is available.`,
+              { extensions: { code: 'SESSION_EXPIRED', memoryId: srcEnc.id } },
+            );
+          }
+          decryptNodeFields(srcPlain, srcEnc);
+        }
+
+        // Outgoing edges that naturally resolve in the destination memory.
+        const outgoing = await tx.edge.findMany({
+          where: { sourceId: source.id, deletedAt: null, target: { deletedAt: null } },
+          include: { target: { select: { loc: true } } },
+        });
+        const edges: NodeEdgeInput[] = [];
+        for (const e of outgoing) {
+          const destTarget = await tx.node.findFirst({
+            where: { loc: e.target.loc, memoryId: destMemoryId, deletedAt: null },
+            select: { id: true },
+          });
+          if (!destTarget) continue; // target doesn't exist at the destination — skip
+          edges.push({
+            targetId: destTarget.id,
+            name: e.name,
+            description: e.description,
+            isRunnable: e.isRunnable,
+          });
+        }
+
+        const input: NodeInput = {
+          memoryId: destMemoryId,
+          loc: destLoc,
+          name: srcPlain.name,
+          nodeType: srcPlain.nodeType,
+          isLink: srcPlain.isLink,
+          objectType: srcPlain.objectType ?? undefined, // #725 — carry the collection through a clone
+          // Keep the complete governed signal set together. The ordinary
+          // writeNodeCore gate still refuses governed results from this generic
+          // clone path; it must never succeed by silently dropping a signal.
+          ...carryGovernedSignals(srcPlain),
+          alias: srcPlain.alias ?? undefined,
+          description: srcPlain.description ?? undefined,
+          abstract: srcPlain.abstract ?? undefined,
+          content: srcPlain.content ?? undefined,
+          data: (srcPlain.data as Record<string, unknown> | null) ?? undefined,
+          tags: deserializeTags(srcPlain.tags),
+          properties: (srcPlain.properties as Record<string, unknown> | null) ?? undefined,
+          llmModel: srcPlain.llmModel ?? undefined,
+          aiAgent: srcPlain.aiAgent ?? undefined,
+          seq: srcPlain.seq ?? undefined,
+          edges,
+        };
+        // #1061 — a clone is both: the source's content was returned to this
+        // caller (a read of the SOURCE memory, which may differ from the
+        // destination's) and writeNodeCore records the write of the new node.
+        effects.push(() => recordNodeRead(ctx.db, toUsageNodeRef(source), ctx));
+        // The generic write refuses governed signals, while open roles and all
+        // other authored fields are copied. A stale abstract is re-fingerprinted
+        // by writeNodeCore, so only that case changes the copied authored state.
+        const copiedAuthorship = (
+          srcPlain.abstract == null ||
+          srcPlain.abstractOriginHash === computeContentHash(srcPlain.content)
+        ) ? carryNodeAuthorship(source) : clearNodeAuthorship();
+        return writeNodeCore(input, txCtx, 'create', { authoring: { kind: 'carry' }, copiedAuthorship, copiesSeq: true,
+          transaction: { tx, pooledDb: ctx.db, coordinationMemories: [selectedSource.memoryId, destMemoryId], afterCommit: effect => effects.push(effect) },
+        });
       });
-      const edges: NodeEdgeInput[] = [];
-      for (const e of outgoing) {
-        const destTarget = await ctx.db.node.findFirst({
-          where: { loc: e.target.loc, memoryId: destMemoryId, deletedAt: null },
-          select: { id: true },
-        });
-        if (!destTarget) continue; // target doesn't exist at the destination — skip
-        edges.push({
-          targetId: destTarget.id,
-          name: e.name,
-          description: e.description,
-          isRunnable: e.isRunnable,
-        });
-      }
-
-      const input: NodeInput = {
-        memoryId: destMemoryId,
-        loc: destLoc,
-        name: srcPlain.name,
-        nodeType: srcPlain.nodeType,
-        isLink: srcPlain.isLink,
-        objectType: srcPlain.objectType ?? undefined, // #725 — carry the collection through a clone
-        // Keep the complete governed signal set together. The ordinary
-        // writeNodeCore gate still refuses governed results from this generic
-        // clone path; it must never succeed by silently dropping a signal.
-        ...carryGovernedSignals(srcPlain),
-        alias: srcPlain.alias ?? undefined,
-        description: srcPlain.description ?? undefined,
-        abstract: srcPlain.abstract ?? undefined,
-        content: srcPlain.content ?? undefined,
-        data: (srcPlain.data as Record<string, unknown> | null) ?? undefined,
-        tags: deserializeTags(srcPlain.tags),
-        properties: (srcPlain.properties as Record<string, unknown> | null) ?? undefined,
-        llmModel: srcPlain.llmModel ?? undefined,
-        aiAgent: srcPlain.aiAgent ?? undefined,
-        seq: srcPlain.seq ?? undefined,
-        edges,
-      };
-      // #1061 — a clone is both: the source's content was returned to this
-      // caller (a read of the SOURCE memory, which may differ from the
-      // destination's) and writeNodeCore records the write of the new node.
-      recordNodeRead(ctx.db, toUsageNodeRef(source), ctx);
-      // The generic write refuses governed signals, while open roles and all
-      // other authored fields are copied. A stale abstract is re-fingerprinted
-      // by writeNodeCore, so only that case changes the copied authored state.
-      const copiedAuthorship = (
-        srcPlain.abstract == null ||
-        srcPlain.abstractOriginHash === computeContentHash(srcPlain.content)
-      ) ? carryNodeAuthorship(source) : clearNodeAuthorship();
-      return writeNodeCore(input, ctx, 'create', { authoring: { kind: 'carry' }, copiedAuthorship, copiesSeq: true });
+      for (const effect of effects) effect();
+      return written;
     },
 
     // Fold a source node into a target node, returning the updated target.
@@ -4458,6 +4637,8 @@ export const nodeMutations = {
       let pendingSourceMemories: string[] = []; // #449
       await mapDeadlockToWriteConflict(target.memoryId, () => ctx.db.$transaction(async (tx) => {
         await lockInstallAuthoritiesFirst(tx, ctx, [...authedMemories]);
+        // #1213: an owning merge joins regardless of its earlier signal snapshots.
+        await lockMemoriesForChannelChange(tx, [...authedMemories]);
         const txCtx = await nodeDoorTxContext(ctx, tx, [...authedMemories]);
         for (const memoryId of writeMemories) {
           await concealUnreadableNodeDenial(txCtx, memoryId, () => nodeNotFoundError(rawTarget), () => requireMemoryWriteAccess(txCtx, memoryId));
@@ -4921,7 +5102,7 @@ export const nodeMutations = {
         const refusal = await roleWritersRefusal(ctx.db, ctx, node.memoryId, {
           priorRole: node.role, nextRole: restoredRole === undefined ? node.role : restoredRole,
           priorRunnable: node.isRunnable, nextRunnable: restored.isRunnable,
-        });
+        }, { lock: false });
         if (refusal) throw refusal;
       }
 
@@ -4939,6 +5120,8 @@ export const nodeMutations = {
       // never sequences restore + N deletes and can't half-apply on a crash.
       const { restored, restoredPlaintext, destinationEncrypted, previousContent } = await ctx.db.$transaction(async (tx) => {
         await lockInstallAuthoritiesFirst(tx, ctx, [node.memoryId, sourceMemoryId]);
+        // #1213: restore is an owning operation even when the stored snapshot omits signals.
+        await lockMemoriesForChannelChange(tx, [node.memoryId, sourceMemoryId]);
         const txCtx = await nodeDoorTxContext(ctx, tx, [node.memoryId, sourceMemoryId]);
         await concealUnreadableNodeDenial(txCtx, node.memoryId, notFound, () => requireMemoryWriteAccess(txCtx, node.memoryId));
         if (!(await isMemoryReadableCached(txCtx, node.memoryId)) || !(await isMemoryReadableCached(txCtx, sourceMemoryId))) throw notFound();

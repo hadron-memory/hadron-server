@@ -45,6 +45,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.agentTaskExternalIdChanges", // #4084: clampListTake with a floor of 1, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.agentTaskList", // #2421: limit applies only when symptom is present; default 3, cap 3.
   "Query.agentTasks",
+  "Query.agentTasksPage", // #2212 A3: pageArgs, default 20, cap 200 (PAGE_ARGS_FIELDS).
   "Query.agentTeamEvents",
   "Query.agentTeamEventsPage", // #3933: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.agentWebhooks",
@@ -72,6 +73,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.connectionGrants",
   "Query.creditLedgerEntries",
   "Query.dashboardWidgetPresetsPage",
+  "Query.dashboardWidgetsPage", // #2213 S3: pageArgs, default 20, cap 200; in PAGE_ARGS_FIELDS.
   "Query.deliveryBatches",
   "Query.driveFiles",
   "Query.dueWakes",
@@ -86,6 +88,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.heldWorkers",
   "Query.homeAssistantInstances",
   "Query.hostOperations",
+  "Query.hostRegistrationsPage", // #2213 S3: pageArgs, default 20, cap 200; in PAGE_ARGS_FIELDS.
   "Query.hostSweepRuns",
   "Query.impersonationSessions",
   "Query.marketplaceAgents",
@@ -126,8 +129,6 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.slackConnections",
   "Query.specBacklinksPage", // #3222 (#2213 S3): pageArgs, default 20, cap 200; in PAGE_ARGS_FIELDS.
   "Query.specUnresolvedReferencesPage", // #3222: as specBacklinksPage.
-  "Query.teamAttentionPage",
-  "Query.teamAttentionPreviewPage",
   "Query.teamChatMessages",
   "Query.teamChatSearch", // #2299: as channelMessageSearch.
   "Query.teamRoles",
@@ -142,6 +143,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.webPolls", // #4123: bounded compatibility list.
   "Query.webPollsPage", // #4123: default20/cap100.
   "Query.workers",
+  "Secret.readClients", // #3998 B+C: pageArgs default 20, cap 200; common omitted bound 100 is conservative.
   "Secret.versions", // #3997: pageArgs default 20, cap 200; below the common 100, so omission overestimates.
   "ServedPrompt.currentLint", // #2048: default 50, cap 100; shared pageLintWarnings.
   "ServedPrompt.provenance",

@@ -1,22 +1,26 @@
 /**
- * #3998 (S3 of #3991, cor:sec:060): the reveal. A WORKER bound to the request, holding an active, live `secret.reveal` grant,
- * reads the value of the App secret the grant names, once per call, spending exactly one use. A person holder reveals only on the
- * server-hosted passkey page (a later slice): this door is never open to a person, an App key, a run or an impersonation.
+ * #3998 (S3 of #3991, cor:sec:060): the reveal. A WORKER bound to the request, holding an active, live `secret.reveal` grant
+ * (its own, or its role agent's: #4434), reads the value of the App secret the grant names, once per call, spending exactly one
+ * use. A person holder reveals only on the server-hosted passkey page (a later slice): this door is never open to a person, an
+ * App key, a run or an impersonation.
  *
  * Everything is judged under the secret row's lock and the grant row's lock, on the database clock, and the use and the audit
  * event commit before the value leaves this function. A client id that is unknown, belongs to another holder or another App is
  * the one uniform SECRET_READ_CLIENT_NOT_FOUND, so a client id is no existence oracle. Past that, the refusal names the state.
  */
+import { deleteLockedAppSecret } from './autoDelete.js';
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.js';
 import { withAuthorizedTx } from '../../api/graphql/schema/authorizedTx.js';
 import { boundWorkerId } from '../bootPrompt.js';
 import { readGrantForUpdate } from '../grants/live.js';
+import { grantReachesWorker } from '../grants/reach.js';
 import { isModelReadableKind } from '../secrets.js';
 import { currentAppSecretValue, lockSecretRow, recordSecretEvent, secretActorOf } from './appSecrets.js';
 import { judgeSecretReadClientIssuer, SECRET_READ_CLIENT_SUPERSEDED } from './readClientIssuer.js';
 import { isAppParticipant } from '../auth/appParticipantRead.js';
+import { isRunPrincipal } from '../auth/runPrincipal.js';
 import { authorizationDenied } from '../auth/authorizationDenied.js';
 
 export const SECRET_READ_CLIENT_NOT_FOUND = 'SECRET_READ_CLIENT_NOT_FOUND';
@@ -46,7 +50,7 @@ export interface RevealResult { value: string; secretName: string; readsLeft: nu
 /** The GraphQL door: a bound worker only. A person, an App key, a run and an impersonation get the uniform answer. */
 export async function revealWithReadClient(ctx: Context, clientId: string): Promise<RevealResult> {
   const workerId = boundWorkerId();
-  if (!workerId || !ctx.userId || ctx.impersonation) throw notFound();
+  if (!workerId || !ctx.userId || ctx.appKeyId || ctx.impersonation || isRunPrincipal(ctx)) throw notFound();
   return revealAs(ctx, clientId, { kind: 'worker', workerId });
 }
 
@@ -84,8 +88,12 @@ async function revealAs(ctx: Context, clientId: string, holder: Holder): Promise
     if (!client) throw notFound();
     const grant = await tx.grant.findUnique({ where: { id: client.grantId }, select: { workerId: true, userId: true, agentId: true, action: true, appId: true, issuerUserId: true } });
     if (!grant || grant.action !== 'secret.reveal' || grant.appId !== client.appId) throw notFound();
+    // A worker reads under a grant naming it, or under its role agent's grant (cor:sec:060:02 R5, cor:acl:140:06): the agent branch asks the
+    // shared reach rule, in this transaction, so a retired worker, another App's installation, a base agent's extension and an agent no
+    // longer installed or licensed here all fall out of it (#4434). A grant to a person or an App names no worker or agent and reaches nobody.
     const heldBy = holder.kind === 'worker'
       ? grant.workerId === holder.workerId
+        || await grantReachesWorker(tx, client.grantId, holder.workerId)
       : grant.userId === holder.userId && grant.workerId === null && grant.agentId === null;
     // From here the client is a real one in this App for this action: every refusal below, a wrong holder's too, is recorded.
     known = { ownerId: client.appId, secretId: client.secretId, secretName: client.secretName };
@@ -125,6 +133,11 @@ async function revealAs(ctx: Context, clientId: string, holder: Holder): Promise
     await recordSecretEvent(tx, { ownerId: secret.ownerId, secretId: secret.id, secretName: secret.name, kind: 'REVEAL', versionNo: newest?.versionNo ?? null, actor });
     const value = await currentAppSecretValue(tx, { id: secret.id, ownerId: secret.ownerId });
     const after = await tx.grant.findUniqueOrThrow({ where: { id: client.grantId }, select: { maxUses: true, useCount: true } });
+    const terms = await tx.grant.findUniqueOrThrow({ where: { id: client.grantId }, select: { values: true, signatureId: true } });
+    if (terms.signatureId && (terms.values as Record<string, unknown>)['auto-delete'] === 'delete'
+        && after.maxUses !== null && after.useCount >= after.maxUses) {
+      await deleteLockedAppSecret(tx, secret);
+    }
     return { value: JSON.stringify(value), secretName: secret.name, readsLeft: after.maxUses === null ? null : after.maxUses - after.useCount };
   });
   } catch (e) {

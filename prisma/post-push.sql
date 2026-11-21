@@ -425,6 +425,29 @@ ON CONFLICT (name) DO NOTHING;
 -- the plain unique index on `name` is uniqueness across case. Until #4400 only the writers' lower-casing kept
 -- `Example` out beside `example`. Placed after the backfills above, which write lower(...) names.
 -- Synced with the 20261117900000_principals_name_lower_check migration.
+-- #4411: the migration refuses on a mixed-case row (SQLSTATE HDPRF) rather than lower-casing it, which could merge
+-- two owners' roots. This copy gives a development database the same guard, naming the rows and what to do, instead
+-- of failing below on a raw check violation. The sentinel comments are what principalNameLower4411.test.ts runs.
+-- #4411 preflight chk_principals_name_lower: begin
+DO $$
+DECLARE
+  offending_count bigint;
+  offending_rows_summary text;
+BEGIN
+  SELECT count(*) INTO offending_count FROM principals WHERE name <> lower(name);
+  IF offending_count > 0 THEN
+    -- A row "shares its root" when any OTHER row has the same lower(name): a lower-case twin, or another mixed-case
+    -- spelling (`Legacy.Example` beside `LEGACY.EXAMPLE`), so lower-casing it alone would collide.
+    SELECT string_agg(format('%L (%s, %s%s)', p.name, p.kind, p.status,
+             CASE WHEN EXISTS (SELECT 1 FROM principals t WHERE lower(t.name) = lower(p.name) AND t.id <> p.id)
+                  THEN ', shares its root with another row' ELSE '' END), ', ' ORDER BY p.name)
+      INTO offending_rows_summary
+      FROM (SELECT id, name, kind, status FROM principals WHERE name <> lower(name) ORDER BY name LIMIT 20) p;
+    RAISE EXCEPTION 'principals.name: % principal row(s) are not lower case, so chk_principals_name_lower cannot be added (hadron-server#4400; this guard: #4411). For a row that shares its root with no other row, lower-case it and the owning users.handle / organizations.urn; for rows that share a root, decide which owner keeps it and rename or delete the others, then lower-case the kept row (if it is still mixed case) together with its owning users.handle / organizations.urn, or the next run refuses again. Then re-run pnpm db:dev-setup. Rows (first 20): %', offending_count, offending_rows_summary
+      USING ERRCODE = 'HDPRF';
+  END IF;
+END $$;
+-- #4411 preflight chk_principals_name_lower: end
 ALTER TABLE principals
   DROP CONSTRAINT IF EXISTS chk_principals_name_lower;
 ALTER TABLE principals
@@ -822,9 +845,28 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #1632: signing requests, append-only signature records, the content-change
 -- marker. One source, shared verbatim with migration 20261013160000_signing_requests.
 \ir signing-invariants.sql
+-- #4337 (#434 Slice C): stamp_signing_keys.id as the migration's identity (db push builds a sequence default; pinned by
+-- src/test/migrations/stampKeyIdentity4337.test.ts and scripts/db/migration-replay.ts).
+\ir stamp-key-identity-invariants.sql
 
 -- #3996 (S1 of #3991): per-App data keys. One source, shared verbatim with migration 20261112150000_secret_app_keys.
 \ir secret-app-keys-invariants.sql
+
+-- #4003 (S8 of #3991): the secrets root's key-check value. One source, shared verbatim with migration
+-- 20261120090000_secret_root_check.
+\ir secret-rotation-invariants.sql
+
+-- #4332 (#434 Slice C): the rate-limit CHECKs migration 20261031220000_shared_rate_limiter declares inline (pinned by
+-- src/lib/rateLimit/rateLimitChecks4332.test.ts and scripts/db/migration-replay.ts).
+\ir rate-limit-invariants.sql
+
+-- #4333 (#434 Slice C): the six UNIQUE constraints the migrations create, promoted from the same-name unique indexes
+-- db push leaves (pinned by src/test/migrations/uniqueConstraints4333.test.ts and scripts/db/migration-replay.ts).
+\ir unique-constraint-invariants.sql
+
+-- #4335 (#434 Slice C): the two indexes migration 20260519180903_baseline_init builds partial, which db push builds full
+-- (pinned by src/test/migrations/partialIndexes4335.test.ts and scripts/db/migration-replay.ts).
+\ir partial-index-invariants.sql
 
 -- #1885: an Agent extends at most one base Agent; no cycles, at most 4 in a
 -- chain. One source, shared verbatim with migration 20261014120000_agent_base
@@ -976,3 +1018,38 @@ CREATE INDEX IF NOT EXISTS "memories_urn_migration_pending_idx" ON "memories" US
 CREATE UNIQUE INDEX IF NOT EXISTS "apps_urn_active_uniq"        ON "apps"     USING btree (urn) WHERE (uninstalled_at IS NULL);
 CREATE INDEX IF NOT EXISTS "assets_staged_uploaded_at_idx"      ON "assets"   USING btree (uploaded_at) WHERE (memory_id IS NULL);
 CREATE INDEX IF NOT EXISTS "assets_uploaded_by_staged_idx"      ON "assets"   USING btree (uploaded_by, uploaded_at DESC) WHERE (memory_id IS NULL);
+
+-- #4336 (#434 Slice C): eleven text[] columns the migrations declare NOT NULL but `db push` renders nullable (Prisma's
+-- schema language models a list field as a plain array, which push emits without NOT NULL). Dev and test databases would
+-- otherwise accept a NULL that production refuses. The migrations stay the authority: no migration or production DDL change,
+-- and no default changes (an empty array stays an empty array, never NULL).
+--
+-- A NULL row can only exist in a long-lived dev database. The six columns below get the same default the migration gives
+-- the column, so the ALTER cannot fail on them (tickers and apps get theirs, not an empty array); no row is dropped and no column skipped.
+UPDATE agents SET surfaces = ARRAY[]::text[] WHERE surfaces IS NULL;
+UPDATE apps SET surfaces = ARRAY['chat']::text[] WHERE surfaces IS NULL;
+UPDATE agent_tasks SET unresolved_finding_ids = ARRAY[]::text[] WHERE unresolved_finding_ids IS NULL;
+UPDATE app_wake_reservations SET absorbed_keys = ARRAY[]::text[] WHERE absorbed_keys IS NULL;
+UPDATE host_registration_workers SET worktrees = ARRAY[]::text[] WHERE worktrees IS NULL;
+UPDATE tickers SET reasons = ARRAY['read-team-channel']::text[] WHERE reasons IS NULL;
+-- home_assistant_instances.op_allowlist and mcp_servers.tool_allowlist are NOT backfilled either: haOpAllowed and mcpToolAllowed read an
+-- empty list as "no restriction" (src/lib/homeAssistant.ts, src/lib/mcpServers.ts), so inventing '{}' for a NULL would silently widen an
+-- allowlist to allow-all. A NULL there makes the ALTER fail loudly instead.
+-- rate_limit_manifests.key_ids has no neutral default (a manifest without keys is not a manifest): a NULL row makes the ALTER fail.
+-- user_api_keys.oauth_scopes and auth_codes.oauth_scopes are deliberately NOT backfilled: cor:aut:010:02 rule 3 reads an empty
+-- set as "unscoped: the user's full authority", so inventing '{}' for a NULL would silently widen a credential. A NULL there
+-- makes the ALTER fail loudly instead, and the row is the developer's to inspect.
+ALTER TABLE agents ALTER COLUMN surfaces SET NOT NULL;
+ALTER TABLE apps ALTER COLUMN surfaces SET NOT NULL;
+ALTER TABLE agent_tasks ALTER COLUMN unresolved_finding_ids SET NOT NULL;
+ALTER TABLE app_wake_reservations ALTER COLUMN absorbed_keys SET NOT NULL;
+ALTER TABLE auth_codes ALTER COLUMN oauth_scopes SET NOT NULL;
+ALTER TABLE home_assistant_instances ALTER COLUMN op_allowlist SET NOT NULL;
+ALTER TABLE host_registration_workers ALTER COLUMN worktrees SET NOT NULL;
+ALTER TABLE mcp_servers ALTER COLUMN tool_allowlist SET NOT NULL;
+ALTER TABLE rate_limit_manifests ALTER COLUMN key_ids SET NOT NULL;
+ALTER TABLE tickers ALTER COLUMN reasons SET NOT NULL;
+ALTER TABLE user_api_keys ALTER COLUMN oauth_scopes SET NOT NULL;
+
+-- #4001: finite auto-delete terms, after the grants and read-client invariants.
+\ir secret-auto-delete-invariants.sql

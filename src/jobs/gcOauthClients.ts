@@ -21,6 +21,7 @@
 
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { OAUTH_CLIENT_GC_GRACE_MS } from '../lib/oauthClientLifetime.js';
+import { isProcessEntry } from './isProcessEntry.js';
 
 export { OAUTH_CLIENT_GC_GRACE_MS };
 
@@ -106,7 +107,7 @@ export function startOauthClientGcLoop(
   }, initialDelayMs);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isProcessEntry(import.meta.url)) {
   const { db } = await import('../integrations/db/client.js');
   const apply = process.argv.includes('--apply') ? true : undefined;
   console.log(JSON.stringify(await gcOauthClients(db, { apply })));

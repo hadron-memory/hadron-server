@@ -13,6 +13,7 @@ import { STORE_TOOLS } from './storeTools.js';
 import { WEB_TOOLS } from './webTools.js';
 import { WEB_POLL_TOOLS } from './webPollTools.js';
 import { SEARCH_TOOLS } from './searchTools.js';
+import { MEMORY_SEARCH_TOOLS } from './memorySearchTools.js';
 import { SMS_TOOLS } from './smsTools.js';
 import { EMAIL_TOOLS } from './emailTools.js';
 import { SECRET_TOOLS } from './secretTools.js';
@@ -21,6 +22,7 @@ import { TASK_TOOLS } from './taskTools.js';
 import { TEAM_CHAT_TOOLS } from './teamChatTools.js';
 import { GITHUB_TOOLS } from './githubTools.js';
 import { CONTENT_VALIDATION_TOOLS } from './contentValidationTools.js';
+import { GRANT_TOOLS } from './grantTools.js';
 
 export { AuthorFailError };
 export { hadronReadNode, hadronCreateNode, hadronUpdateNode } from './nodeTools.js';
@@ -29,6 +31,7 @@ export { hadronStoreFile } from './storeTools.js';
 export { webFetch, webRequest } from './webTools.js';
 export { webPollStart, webPollCancel, webPollList } from './webPollTools.js';
 export { webSearchTool } from './searchTools.js';
+export { hadronFindNodes } from './memorySearchTools.js';
 export { hadronSendSms } from './smsTools.js';
 export { hadronSendEmail } from './emailTools.js';
 export { hadronReadSecret } from './secretTools.js';
@@ -38,6 +41,7 @@ export { teamChatRead } from './teamChatTools.js';
 export { hadronTeamSnapshot } from './teamSnapshotTools.js';
 export { githubIssueSnapshot } from './githubTools.js';
 export { hadronRecordContentValidation } from './contentValidationTools.js';
+export { hadronListGrants } from './grantTools.js';
 export type { RunToolDef, RunToolContext };
 
 /** The author's printf — lands on the hop's trail element (D-TL-2). */
@@ -91,6 +95,7 @@ const REGISTRY = new Map<string, RunToolDef>(
     ...WEB_TOOLS,
     ...WEB_POLL_TOOLS,
     ...SEARCH_TOOLS,
+    ...MEMORY_SEARCH_TOOLS,
     ...SMS_TOOLS,
     ...EMAIL_TOOLS,
     ...SECRET_TOOLS,
@@ -100,6 +105,7 @@ const REGISTRY = new Map<string, RunToolDef>(
     ...GITHUB_TOOLS,
     ...TEAM_SNAPSHOT_TOOLS,
     ...CONTENT_VALIDATION_TOOLS,
+    ...GRANT_TOOLS,
   ].map((t) => [t.name, t]),
 );
 

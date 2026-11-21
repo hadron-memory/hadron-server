@@ -3,7 +3,7 @@
  * a thrown fault answers the generic envelope with the request id (body and X-Request-Id header agree), the detail
  * reaches only the log, and a framework refusal (malformed JSON, 400) keeps its status.
  */
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -30,7 +30,8 @@ beforeAll(async () => {
       new Prisma.PrismaClientKnownRequestError('Timed out fetching a new connection from the pool.', {
         code: 'P2024',
         clientVersion: '6.19.2',
-      } as never),
+      }),
+      'POOL_WAIT',
     ));
   });
   // #4504: the unreachable arm, same forwarding shape.
@@ -44,6 +45,24 @@ beforeAll(async () => {
       'STORE_UNREACHABLE',
     ));
   });
+  // #4519 (BLIND P3-4, the boundary pin): a typed error whose `.message` was TAMPERED to carry
+  // driver text — constructor drift, a subclass with its own prose, a late mutation — must still
+  // answer the reason's fixed prose. The boundary renders from the reason, never from the message.
+  app.get('/auth-store-busy-tampered/:variant', (req, _res, next) => {
+    const reasons: unknown[] = ['STORE_UNREACHABLE', 'POOL_WAIT', undefined, 'driver-secret', { detail: 'driver-secret' }];
+    const reason = reasons[Number(req.params.variant)];
+    const tampered = new AuthStoreBusyError(
+      new Prisma.PrismaClientInitializationError(
+        "Can't reach database server at `10.9.8.7:5432`",
+        '6.19.2',
+        'P1001',
+      ),
+      'STORE_UNREACHABLE',
+    );
+    tampered.message = "Can't reach database server at `10.9.8.7:5432`";
+    tampered.extensions.reason = reason;
+    next(tampered);
+  });
   // #4504 (Bradley P3, the double-log check): headers already gone out when the fault
   // surfaces — the carve-out must log ONCE and delegate, never answer, never log again.
   app.get('/auth-store-busy-headers-sent', (_req, res, next) => {
@@ -53,13 +72,15 @@ beforeAll(async () => {
       new Prisma.PrismaClientKnownRequestError('Timed out fetching a new connection from the pool.', {
         code: 'P2024',
         clientVersion: '6.19.2',
-      } as never),
+      }),
+      'POOL_WAIT',
     ));
   });
   app.use(internalFaultErrorHandler);
   await new Promise<void>((resolve) => { server = app.listen(0, resolve); });
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
+afterEach(() => vi.restoreAllMocks());
 afterAll(() => new Promise<void>((resolve) => { server.close(() => resolve()); }));
 
 describe('plain HTTP internal faults (#1789)', () => {
@@ -143,15 +164,44 @@ describe('plain HTTP internal faults (#1789)', () => {
     log.mockRestore();
   });
 
+  it.each([
+    [0, 'STORE_UNREACHABLE', AUTH_STORE_UNREACHABLE_MESSAGE],
+    [1, 'POOL_WAIT', AUTH_STORE_BUSY_MESSAGE],
+    [2, 'POOL_WAIT', AUTH_STORE_BUSY_MESSAGE],
+    [3, 'POOL_WAIT', AUTH_STORE_BUSY_MESSAGE],
+    [4, 'POOL_WAIT', AUTH_STORE_BUSY_MESSAGE],
+  ])('#4555: tampered variant %s keeps every wire field fixed', async (variant, reason, message) => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await fetch(base + '/auth-store-busy-tampered/' + variant);
+    const text = await res.text();
+    expect(res.status).toBe(503);
+    expect(JSON.parse(text)).toEqual({
+      error: message, code: 'AUTH_STORE_BUSY', retryable: true, reason,
+      requestId: res.headers.get('x-request-id'),
+    });
+    expect(text).not.toMatch(/driver-secret|Can't reach|P1001|10\.9\.8\.7|INTERNAL_SERVER_ERROR/);
+    // logInternalFault's declared envelope is {requestId, site, error}; only its error retains detail.
+    expect(log).toHaveBeenCalledExactlyOnceWith('[http] internal_fault', expect.objectContaining({
+      requestId: res.headers.get('x-request-id'), site: 'auth-store-busy',
+      error: expect.any(AuthStoreBusyError),
+    }));
+    const logged = log.mock.calls[0][1] as { error: AuthStoreBusyError };
+    expect(logged.error.message).toMatch(/Can't reach database server/);
+  });
+
   it('#4504 (Bradley P3, double-log check): headers already sent → the fault logs EXACTLY once and the handler delegates, never answers', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     // With headers gone out, Express's final handler closes the connection; the fetch may
     // resolve with the partial body or reject on the truncated socket — either is the
     // delegation we assert. The pin is the log count.
-    await fetch(base + '/auth-store-busy-headers-sent').catch(() => undefined);
+    const res = await fetch(base + '/auth-store-busy-headers-sent').catch(() => undefined);
+    // #4519 (BLIND P3-6): drain the body on the resolve path — an undrained response keeps its
+    // socket held in the keep-alive pool, and afterAll's server.close() then waits on it.
+    if (res) await res.text().catch(() => undefined);
     const faultCalls = log.mock.calls.filter((c) => String(c[0]).includes('internal_fault'));
     expect(faultCalls).toHaveLength(1);
-    expect(faultCalls[0][1]).toEqual(expect.objectContaining({ site: 'auth-store-busy' }));
+    // logInternalFault's declared envelope carries the site and original typed error.
+    expect(faultCalls[0][1]).toEqual(expect.objectContaining({ site: 'auth-store-busy', error: expect.any(AuthStoreBusyError) }));
     log.mockRestore();
   });
 });

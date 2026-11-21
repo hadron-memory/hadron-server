@@ -37,7 +37,8 @@ services:
       # #4058: registration rides signing (signingSurfacePolicy); with it on, an email link still signs the person in
       # (#4339: sign-in never depends on a passkey), which the seed pins. Export E2E_PASSKEY_REGISTRATION_ENABLED=true on `stack.sh up`.
       PASSKEY_REGISTRATION_ENABLED: ${E2E_PASSKEY_REGISTRATION_ENABLED:-}
-      DISABLE_RUN_WORKER: 'true'
+      # #4624: off unless `stack.sh up` ran with E2E_RUN_WORKER=true (stack.sh maps it; anything else leaves this `true`).
+      DISABLE_RUN_WORKER: ${E2E_DISABLE_RUN_WORKER:-true}
       DISABLE_SCHEDULER: 'true'
       GRAPHS_PATH: /var/lib/hadron/graphs
     ports:

@@ -47,7 +47,9 @@ pnpm install
 
 Create an empty database on your PostgreSQL server. The role you connect with needs to be
 able to create tables and, for the `vector` extension, to create extensions (a superuser
-or the database owner on most installs):
+or the database owner on most installs; the extension is untrusted, so a plain `CREATEDB`
+role is not enough). If your role lacks either, run the `createdb` line as a privileged
+role and make your role the database owner:
 
 ```bash
 createdb hadron
@@ -70,6 +72,16 @@ optional for a first run. The server refuses to start without the last one.
 | `RATE_LIMIT_KEYRING` | A one-key JSON keyring for the rate limiter. `.env.example` has a commented example of its shape; this command generates a complete line: `node -e "console.log('RATE_LIMIT_KEYRING=' + JSON.stringify({current:'dev1',keys:{dev1:require('crypto').randomBytes(32).toString('hex')}}))"` and paste it into `.env` as printed |
 
 `.env` is ignored by git. Never commit it, and never paste its contents into an issue.
+
+Keep the same `RATE_LIMIT_KEYRING` for as long as you keep that database. The first boot records
+the key's fingerprint in the database, and a different key under the same id is then refused at
+boot with `RateConfigurationError` (rotate with the two-key overlap described in `.env.example`,
+or start from a new database). A first boot on an empty database serves `/health` and `/ready`
+with only `DATABASE_URL` and `RATE_LIMIT_KEYRING` set, but set `JWT_SECRET` and
+`HADRON_ENCRYPTION_KEY` before real use: `NODE_ENV=production` refuses to boot without a
+`JWT_SECRET` of at least 32 bytes, and `HADRON_ENCRYPTION_KEY` encrypts secrets at rest. A
+database that already holds data from before migration `20261019090000_worker_signature` needs
+the fix tracked in #4524 first.
 
 **4. Create the schema**
 

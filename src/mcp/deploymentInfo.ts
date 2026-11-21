@@ -132,11 +132,25 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 //      already-migrated client whose variables declare `$o: String` or
 //      `String!` now fails VARIABLE VALIDATION on those nine — retyping the
 //      variables to `ID!` is part of the migration, not optional.
+//  Naming rule (#4357 P3-B, in the words of cor:api:140:01 and the ref-param-naming
+//  convention): `ref` when the field names one entity and it is obvious which,
+//  `<entity>Ref` otherwise, so `deleteMemory(ref)` beside `encryptMemory(memoryRef)`
+//  is within the rule. For codegen users (P3-D): `userRef: ID!` takes an id, an
+//  email, a handle or an hrn:user URN.
 // `replaceSubtree.memoryId` is DELIBERATELY unchanged (legacy `String!`): the
 // field exists only so legacy callers reach REPLACE_SUBTREE_RETIRED instead
 // of an unknown-argument error (#4219 blind P2-A).
 // (Chunk A, the memory reads, follows #4136.)
-export const HADRON_SERVER_VERSION = '0.23.0';
+//
+// 0.24.0 — BREAKING (#2027 S11): the attention API is RETIRED. The GraphQL fields
+// `teamAttention` / `teamAttentionPage` / `teamAttentionPreviewPage` /
+// `teamAttentionSwitchoverPreview` and the `confirmTeamAttentionSwitchover`
+// mutation are gone, and with them the `hadron_team_attention*` MCP tools
+// (already wire-disabled by #3082). A router still polling must move to the
+// wake path (`dueWakes` / the CLI's `hadron team wakes`); the explicit
+// `markOwnTeamChatRead` mark and every wake/mark/resume rule it shared a module
+// with are unchanged.
+export const HADRON_SERVER_VERSION = '0.24.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

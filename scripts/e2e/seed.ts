@@ -5,7 +5,8 @@ import { PrismaClient } from '../../src/generated/prisma/index.js';
 import { computeApprovalHash } from '../../src/lib/approvalHash.js';
 import { ensureCurrentNodeRevisionInTransaction } from '../../src/lib/nodeRevisionSnapshot.js';
 import { resolveServedBootPrompt } from '../../src/lib/bootPrompt/serve.js';
-import { seedE2eStockAgents, E2E_BOOT_PROMPT } from '../../src/test/e2eBootPrompt.js';
+import { seedE2eScriptFlow, e2eFlowNodeUrn, E2E_SCRIPT_GRANT_PREFIX, E2E_SCRIPT_WRITE_ENTRY, E2E_SCRIPT_REFUSED_ENTRY } from '../../src/test/e2eScriptFlow.js';
+import { seedE2eStockAgents, seedE2eInstallRegister, e2eRegisterGaps, E2E_BOOT_PROMPT, E2E_STOCK_ROLES } from '../../src/test/e2eBootPrompt.js';
 
 // Separate from the narrative dev seed: every principal has global READER
 // except the org-less platform-admin fixture, so org-role journeys exercise
@@ -88,10 +89,14 @@ async function seed() {
     // The stock Agents, their workers and their served boot prompts (#2712: no literal prompt and no serving switch any
     // more, so a stock Agent binds only with an approved compiled prompt). Shared with src/test/e2eBootPrompt.test.ts.
     await seedE2eStockAgents(db, { org, organizationId, appId, systemMemoryId: memoryIds.system, appMemoryId: memoryIds.app, id, approvedAt: date });
+    // #4624: the script-node fixture flows, run only when the stack was started with E2E_RUN_WORKER=true (README).
+    await seedE2eScriptFlow(db, { org, organizationId, appId, agentId: id(`${org}:coordinator`), grantedBy: owner, id });
     const root = await node(memoryIds.app, 'chats:team', { nodeType: 'chat', data: { lastSeq: 0 } });
     const channel = await db.channel.create({ data: { id: id(`${org}:channel`), memoryId: memoryIds.app,
       loc: 'chats:team', name: 'Team', chatRootNodeId: root.id } });
     await db.app.update({ where: { id: appId }, data: { defaultChannelId: channel.id } });
+    // #4506: the install-default register rows a real install writes, so register-gated paths (chat mark-read) work.
+    await seedE2eInstallRegister(db, appId);
     await node(memoryIds.app, 'tasks:check-stack', { nodeType: 'task', isRunnable: true,
       content: 'Read the welcome fixture and report which disposable organization it belongs to.' });
     const specsId = id(`${org}:specs`);
@@ -162,6 +167,9 @@ async function check() {
       assert.equal(served.content, E2E_BOOT_PROMPT);
       assert.equal(served.pointerLevel, 'AGENT');
     }
+    // #4506: one live App-owned register row per installed Agent, not merely a non-empty register.
+    assert.deepEqual(await e2eRegisterGaps(db, id(`${org}:team`)), []);
+    assert.equal(await db.registerEntry.count({ where: { appId: id(`${org}:team`), deletedAt: null, installDefault: true } }), E2E_STOCK_ROLES.length);
     assert.equal(await db.appKey.count({ where: { appId: id(`${org}:team`) } }), 1);
     const specs = await db.node.findMany({ where: { memoryId: id(`${org}:specs`) } });
     assert.equal(specs.length, 2);
@@ -172,6 +180,14 @@ async function check() {
       assert.equal(n.approvalHash, n.mintedHash);
     }
     assert.equal(await db.nodeRoleRule.count({ where: { configId: id(`${org}:config`), writers: 'ADMIN', locked: true } }), 1);
+    // #4624: both script entry flows exist and the App holds exactly one live write grant, on the one prefix the write flow targets.
+    for (const entry of [E2E_SCRIPT_WRITE_ENTRY, E2E_SCRIPT_REFUSED_ENTRY]) {
+      const flow = await db.node.findFirstOrThrow({ where: { memoryId: id(`${org}:flows`), loc: entry } });
+      assert.equal((flow.data as { script: { call: { tool: string } } }).script.call.tool, 'hadron_create_node');
+      assert(e2eFlowNodeUrn(org, entry).endsWith(`:${entry}`));
+    }
+    const grants = await db.appMemoryWriteGrant.findMany({ where: { appId: id(`${org}:team`), revokedAt: null } });
+    assert.deepEqual(grants.map(g => g.prefix).sort(), [E2E_SCRIPT_GRANT_PREFIX]);
   }
   for (const cls of ['personal', 'private']) {
     const memory = await db.memory.findUniqueOrThrow({ where: { id: id(`personal-owner:${cls}`) } });

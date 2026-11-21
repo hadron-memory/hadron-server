@@ -29,9 +29,17 @@ export interface SecretIssuance {
   asWriter: boolean;
 }
 
-export async function requireSecretReadClientIssuer(ctx: Context, secretId: string): Promise<SecretIssuance> {
-  const userId = await requirePersonOnlyAct(ctx, 'secret.issue-read-client', authorizationDenied);
-  return judgeSecretReadClientIssuer(ctx, userId, secretId);
+/** S6 preserves S3's issuer set; only the marked request's refusal code differs. */
+export async function requireSecretReadClientIssuer(ctx: Context, secretId: string, autoDelete = false): Promise<SecretIssuance> {
+  try {
+    const userId = await requirePersonOnlyAct(ctx, 'secret.issue-read-client', authorizationDenied);
+    return await judgeSecretReadClientIssuer(ctx, userId, secretId);
+  } catch (error) {
+    if (autoDelete && error instanceof GraphQLError && ['FORBIDDEN', SECRET_READ_CLIENT_SUPERSEDED].includes(String(error.extensions?.code))) {
+      throw new GraphQLError('You may not set an auto-delete mark for this secret.', { extensions: { code: 'SECRET_AUTO_DELETE_NOT_ALLOWED' } });
+    }
+    throw error;
+  }
 }
 
 /**
@@ -49,6 +57,7 @@ export async function judgeSecretReadClientIssuer(ctx: Context, userId: string, 
     select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
   });
   if (!app || app.deletedAt || app.uninstalledAt) throw authorizationDenied();
+  if (app.organizationId && !(await tx.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } }))) throw authorizationDenied();
   const base = { secretId: secret.id, secretName: secret.name, appId: app.id, userId };
 
   // No platform arm: judge the manager predicate without the caller's platform roles (Q26).
@@ -61,8 +70,14 @@ export async function judgeSecretReadClientIssuer(ctx: Context, userId: string, 
   });
   if (newest && newest.writtenByUserId === userId && newest.writtenByWorkerId === null) return { ...base, asWriter: true };
 
+  // A former writer is told SUPERSEDED. Their version row may be gone (the retention purge, #4003), so their own STORE or
+  // VERSION event also proves it: events outlive a purged version for the App's whole life (R25). A worker's write has no
+  // person writer (Q21), so an event carrying a worker proves nothing for its driver, exactly as a version row would not.
   const wroteEarlier = await tx.secretVersion.findFirst({
     where: { secretId: secret.id, writtenByUserId: userId, writtenByWorkerId: null }, select: { id: true },
+  }) ?? await tx.secretEvent.findFirst({
+    where: { secretId: secret.id, ownerType: 'app', kind: { in: ['STORE', 'VERSION'] }, outcome: 'OK', actorUserId: userId, workerId: null },
+    select: { id: true },
   });
   if (wroteEarlier) {
     throw new GraphQLError('A newer version of this secret has been written since yours.', { extensions: { code: SECRET_READ_CLIENT_SUPERSEDED } });

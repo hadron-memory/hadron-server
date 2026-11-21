@@ -367,7 +367,7 @@ describe('the hazard #835 exists to remove', () => {
     }
   }, 20_000);
 
-  it('locks endpoint ancestors and retries promotion after an ancestor move', async () => {
+  it('serializes promotion on the memory handshake and retries after an ancestor move', async () => {
     const { organizationId } = await db.memory.findUniqueOrThrow({
       where: { id: memId },
       select: { organizationId: true },
@@ -393,7 +393,9 @@ describe('the hazard #835 exists to remove', () => {
     let signalEdgeRelease!: () => void;
     const edgeHeld = new Promise<void>((resolve) => { signalEdgeHeld = resolve; });
     const edgeRelease = new Promise<void>((resolve) => { signalEdgeRelease = resolve; });
+    let edgeHolderPid = -1;
     const edgeHolder = db.$transaction(async (tx) => {
+      edgeHolderPid = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid;
       await tx.$queryRaw`SELECT id FROM edges WHERE id = ${blockingEdge.id} FOR UPDATE`;
       signalEdgeHeld();
       await edgeRelease;
@@ -401,38 +403,53 @@ describe('the hazard #835 exists to remove', () => {
 
     let signalMemoryHeld!: () => void;
     let signalMemoryRelease!: () => void;
-    const memoryHeld = new Promise<void>((resolve) => { signalMemoryHeld = resolve; });
-    const memoryRelease = new Promise<void>((resolve) => { signalMemoryRelease = resolve; });
-    const memoryHolder = db.$transaction(async (tx) => {
+    const memoryHeld = new Promise<void>(resolve => { signalMemoryHeld = resolve; });
+    const memoryRelease = new Promise<void>(resolve => { signalMemoryRelease = resolve; });
+    let memoryHolderPid = -1;
+    const memoryHolder = db.$transaction(async tx => {
+      memoryHolderPid = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid;
       await lockMemoryForChannelChange(tx, memId);
-      signalMemoryHeld();
-      await memoryRelease;
+      signalMemoryHeld(); await memoryRelease;
     }, { timeout: 20_000 });
-
+    let moving: Promise<string> | undefined;
+    let creating: Promise<string> | undefined;
     await Promise.all([edgeHeld, memoryHeld]);
-    const creating = call('hadron_create_node', {
-      urn: `${memUrn.replace(':', '::')}::future-moved-target`,
-      name: 'future moved target',
-    });
     try {
-      await waitForChannelMemoryLockWaiters(memId, 1);
-
-      // Move the SOURCE'S ANCESTOR, not the endpoint itself. The move holds
-      // `review`, rebases `review:item`, snapshots its outgoing edges, then
-      // blocks on the pre-existing edge row. Exact-loc-only promotion could
-      // now insert from the old snapshot and escape the move's edge carry-over.
-      const moving = call('hadron_move_node', {
-        urn: `urn:node:${memUrn}:review`,
-        targetUrn: `urn:node:${movedMemory.urn}:moved:review`,
+      // #1213: queue the owning move FIRST on C, then create the target while the move has
+      // no memory-row fence yet. Its deferred promotion queues SECOND on C. Releasing the
+      // synthetic holder lets the real move retain C while waiting on the held edge row.
+      const [{ key }] = await db.$queryRaw<Array<{ key: number }>>`SELECT hashtext(${'channel-host:' + memId}) AS key`;
+      const memoryWaiters = () => db.$queryRaw<Array<{ pid: number }>>`
+        SELECT pid FROM pg_locks WHERE locktype='advisory' AND NOT granted
+          AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+          AND classid=${key < 0 ? 4294967295 : 0}::bigint::oid AND objid=${key >>> 0}::bigint::oid AND objsubid=1`;
+      moving = call('hadron_move_node', {
+        urn: `urn:node:${memUrn}:review`, targetUrn: `urn:node:${movedMemory.urn}:moved:review`,
       });
-      await waitForLockWaitersOfType(db, 'transactionid', 1);
-
-      signalMemoryRelease();
-      await memoryHolder;
-      // The promotion must now wait on the ancestor key held by the move. This
-      // assertion mutation-tests the fix: exact endpoint locks produce no
-      // advisory waiter and the test times out here.
-      await waitForLockWaitersOfType(db, 'advisory', 1);
+      let movingPid = -1;
+      await vi.waitFor(async () => {
+        const waits = await memoryWaiters(); expect(waits).toHaveLength(1); movingPid = waits[0].pid;
+        const [{ blocked }] = await db.$queryRaw<Array<{ blocked: boolean }>>`
+          SELECT ${memoryHolderPid}=ANY(pg_blocking_pids(${movingPid}::int)) AS blocked`;
+        expect(blocked).toBe(true);
+      }, { timeout: 8000, interval: 10 });
+      creating = call('hadron_create_node', {
+        urn: `${memUrn.replace(':', '::')}::future-moved-target`, name: 'future moved target',
+      });
+      let promotionPid = -1;
+      await vi.waitFor(async () => {
+        const waits = await memoryWaiters(); expect(waits).toHaveLength(2);
+        promotionPid = waits.find(row => row.pid !== movingPid)!.pid;
+        expect(await db.node.count({ where: { memoryId: memId, loc: 'future-moved-target', deletedAt: null } })).toBe(1);
+      }, { timeout: 8000, interval: 10 });
+      signalMemoryRelease(); await memoryHolder;
+      await vi.waitFor(async () => {
+        const [{ edgeWait, promotionWait }] = await db.$queryRaw<Array<{ edgeWait: boolean; promotionWait: boolean }>>`
+          SELECT ${edgeHolderPid}=ANY(pg_blocking_pids(${movingPid}::int)) AS "edgeWait",
+            ${movingPid}=ANY(pg_blocking_pids(${promotionPid}::int)) AS "promotionWait"`;
+        expect(edgeWait).toBe(true); expect(promotionWait).toBe(true);
+        expect((await memoryWaiters()).map(row => row.pid)).toEqual([promotionPid]);
+      }, { timeout: 8000, interval: 10 });
 
       signalEdgeRelease();
       await edgeHolder;
@@ -452,12 +469,10 @@ describe('the hazard #835 exists to remove', () => {
     } finally {
       signalMemoryRelease();
       signalEdgeRelease();
-      await Promise.all([
-        memoryHolder.catch(() => undefined),
-        edgeHolder.catch(() => undefined),
-      ]);
+      const results = await Promise.allSettled([memoryHolder, edgeHolder, ...(moving ? [moving] : []), ...(creating ? [creating] : [])]);
+      for (const result of results) if (result.status === 'rejected') throw result.reason;
     }
-  }, 20_000);
+  }, 40_000);
 
   it('keeps a successful create and its PendingEdge when move retries exhaust', async () => {
     const { organizationId } = await db.memory.findUniqueOrThrow({
@@ -570,10 +585,11 @@ describe('the hazard #835 exists to remove', () => {
 
 /**
  * Source of the `hadron_update_edge` parameter shape. Since #2260 shapes live at module scope in server.ts
- * (`SHAPE_HADRON_UPDATE_EDGE`), built once per process, not inline in the `server.tool` call.
+ * (`SHAPE_HADRON_UPDATE_EDGE`), built once per process, not inline in the `server.tool` call. Since #236 they live in
+ * toolShapes.ts.
  */
 function updateEdgeShapeSource(): string {
-  const src = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+  const src = readFileSync(new URL('./toolShapes.ts', import.meta.url), 'utf8');
   const start = src.indexOf('const SHAPE_HADRON_UPDATE_EDGE = ');
   expect(start).toBeGreaterThan(-1);
   return src.slice(start, src.indexOf('\n};', start));
@@ -734,7 +750,8 @@ describe('the destructive semantics are legible at the callsite (#835 item 2)', 
   // the source text — the same audit-by-regex shape used elsewhere in the repo
   // for schema-text guarantees.
   const serverSource = () =>
-    readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+    readFileSync(new URL('./server.ts', import.meta.url), 'utf8')
+    + readFileSync(new URL('./toolShapes.ts', import.meta.url), 'utf8');
 
   it('hadron_update_node advertises that `edges` REPLACES, not merges', () => {
     // Pre-#835 the warning lived only on the SAFE tool (hadron_create_edge

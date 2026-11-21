@@ -105,6 +105,7 @@ import {
   assetUrn,
   resolveAppTeamSpaceMemoryIds,
   getAccessibleMemoryIds,
+  canWriteMemoryRecord,
   sessionScopeFilter,
   CONTENT_RAW_DEFAULT,
   PAGE_ARGS_DEFAULT,
@@ -1726,6 +1727,17 @@ export const typeResolvers = {
       (await corpusMintStateOf(ctx.db, m.id)).mintedAt,
     corpusState: async (m: { id: string }, _: unknown, ctx: Context) =>
       (await corpusMintStateOf(ctx.db, m.id)).state,
+    // #606: whether a write would be allowed for THIS caller: the memory write gate's answer, and false under read-only
+    // impersonation (resolvers.helpers canWriteMemoryRecord).
+    // A failure that is not the gate's refusal answers null (unknown), logged, so one memory cannot null a list.
+    canWrite: async (m: { id: string }, _: unknown, ctx: Context) => {
+      try {
+        return await canWriteMemoryRecord(ctx, m.id);
+      } catch (err) {
+        console.warn(`[Memory.canWrite] write gate failed for memory ${m.id}; answering null:`, err);
+        return null;
+      }
+    },
     // A Memory reader may be external to its owning org. The nested object
     // exposes org policy and relations, so apply organization(ref:)'s gate.
     organization: (g: { organizationId: string | null }, _: unknown, ctx: Context) =>
@@ -1919,6 +1931,13 @@ export const typeResolvers = {
     },
   },
   App: {
+    /**
+     * #4464 stage 1: the App's own role is deprecated — the field answers the
+     * constant READER whatever the row stores, and no writer persists a
+     * caller-supplied value anymore. Legacy stored values are untouched until
+     * the last stage drops the column.
+     */
+    role: () => 'READER',
     /** #2171 (R211): the union reader every admission decides with. */
     availableMemberRoles: async (a: { id: string }, _: unknown, ctx: Context) =>
       (await loadOfferedMemberRoles(ctx.db, a.id)).roles,

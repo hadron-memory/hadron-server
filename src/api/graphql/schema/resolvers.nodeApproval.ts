@@ -35,6 +35,7 @@ import {
   type NodeIntegrityResult,
 } from '../../../lib/nodeApproval.js';
 import { bootPromptApprovalGate } from '../../../lib/bootPromptApproval.js';
+import { questionApprovalGate } from './resolvers.questions.js';
 
 /**
  * #1591 — the approval policy: may this caller approve nodes of this memory?
@@ -226,6 +227,7 @@ export const nodeApprovalMutations = {
           memoryId, approver: editorFromAuth(ctx), key, expectedRevision: revision,
           bootPromptGate: await bootPromptApprovalGate(txCtx, memoryId),
           workerSessionMayUseBatch: !!ctx.userId && !ctx.appKeyId,
+          questionGate: questionApprovalGate(txCtx),
         }),
       );
       return receiptOf(ctx, node);

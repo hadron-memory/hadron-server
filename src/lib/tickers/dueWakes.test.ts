@@ -20,7 +20,6 @@ import { computeDueWakes } from './dueWakes.js';
 import { isSessionDormant, isWorkerDormant } from '../sessionActivity.js';
 import { wakeStampsFor } from './postStamp.js';
 import { signWakeProof, verifyWakeProof } from './wakeProof.js';
-import { teamAttentionPage } from '../teamAttention.js';
 
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -142,6 +141,19 @@ describe('never due: retired, paused, dormant', () => {
     const page = await due(ctx(manager.id));
     expect(ids(page)).toEqual([liam.id]);
     expect(page.wakes[0].reasons.map((r: any) => r.kind)).toEqual(['TICK']);
+  });
+
+  it('routes a merely lapsed worker but not the same dormant worker (#4507)', async () => {
+    const recent = new Date(Date.now() - 30 * 60 * 60 * 1000);
+    const session = await db.session.create({ data: { id: generateId(), appId: app.id, userId: holderA.id, workerId: liam.id, agentId: agent.id, type: 'DEVELOPER', startedAt: recent, updatedAt: recent } });
+    await say(channel, 'attention', mention('liam'));
+    const read = () => computeDueWakes({ ctx: ctx(holderA.id), app: { id: app.id, organizationId: org.id, ownerUserId: null }, reader: { manager: false, userId: holderA.id }, requester: { userId: holderA.id }, preview: true });
+    expect((await read()).wakes.map((wake) => wake.workerId)).toEqual([liam.id]);
+    const old = new Date(Date.now() - 91 * DAY);
+    await db.session.update({ where: { id: session.id }, data: { startedAt: old, updatedAt: old } });
+    expect((await read()).wakes.map((wake) => wake.workerId)).toEqual([]);
+    await db.session.update({ where: { id: session.id }, data: { startedAt: recent, updatedAt: recent } });
+    expect((await read()).wakes.map((wake) => wake.workerId)).toEqual([liam.id]);
   });
 
   it('a dormant worker is never due; its mentions are counted where a router sees them', async () => {
@@ -736,32 +748,6 @@ describe('post-time stamps (N3)', () => {
     await teamChatMutations.createTeamChatMessage({}, { appRef: app.id, body: 'broadcastWakes: true @all', replyToSeq: null, sessionRef: null }, ctx(holderB.id));
     const forged = await db.node.findMany({ where: { messageChannelId: channel.id, nodeType: 'chat-message' }, orderBy: { seq: 'desc' }, take: 1 });
     expect((forged[0]!.data as any).broadcastWakes).toBeUndefined();
-  });
-});
-
-describe('differential against the v1 router (teamAttentionPage)', () => {
-  it('with every worker on one ALL ticker and IMMEDIATE mentions, dueWakes names the workers v1 names', async () => {
-    const nova = await mkWorker('Nova', { heldByUserId: holderA.id, heldAt: new Date() });
-    await db.worker.update({ where: { id: rook.id }, data: { heldByUserId: holderA.id } });
-    await db.registerEntry.updateMany({ where: { attendeeWorkerId: rook.id }, data: { mentionOnly: true } });
-    const t = await mkTicker();
-    for (const w of [liam, rook, nova]) {
-      await subscribe(t.id, w.id);
-      await db.session.create({ data: { id: generateId(), appId: app.id, userId: holderA.id, workerId: w.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() } });
-    }
-    await say(channel, 'plain');
-    await say(channel, 'for nova', mention('nova'));
-    await say(channel, 'own', { authorWorkerId: liam.id });
-    const v1: string[] = [];
-    for (let page: string | null = null, guard = 0; guard < 50; guard++) {
-      const r: any = await teamAttentionPage(ctx(holderA.id, { roles: ['READER'] }), app.id, { since: null, page });
-      v1.push(...r.items.map((i: any) => i.worker));
-      if (r.scanComplete || !r.nextPage) break;
-      page = r.nextPage;
-    }
-    const v2 = ids(await due(ctx(holderA.id)));
-    expect([...new Set(v1)].sort()).toEqual(v2);
-    expect(v2).toEqual([liam.id, nova.id].sort()); // Rook is mention-only and nothing mentioned it
   });
 });
 

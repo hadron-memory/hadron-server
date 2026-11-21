@@ -104,26 +104,32 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
 };
 
 /**
- * Args that legitimately stay `<entity>Id` because they are genuine PKs, per
- * the convention ("output fields, DB columns, resolved locals" → `<entity>Id`).
+ * Args that legitimately stay `<entity>Id` because they are genuine PKs or external-system labels, per
+ * the convention ("output fields, DB columns, resolved locals" → `<entity>Id`). Each entry names ONE field
+ * (`field.arg`), so `appId` is allowed on `updateOrgGithubApp` and still flagged anywhere else (#4357 P3-8:
+ * `appId` is also a Hadron entity name; a global allowance would have waved a stray `joinApp.appId` through).
  */
 const ALLOWED_ID_ARGS = new Set([
   // startChat.userId: a PK compare-and-set against the session's user, not an
   // entity the caller names (#4142 S6 ruling A). S4 (#4140) already renamed
   // systemMemoryId away, so it no longer appears here.
-  'userId',
+  'startChat.userId',
   // #4142 (S6): external-system / label args the stray regex catches by
   // spelling, not Hadron entity PK refs.
   // linkGithubApp.installationId: a GitHub App INSTALLATION id (external
   // system, an Int) — pairs with orgRef, which names the Hadron org.
-  'installationId',
+  'linkGithubApp.installationId',
   // updateOrgGithubApp.appId: the GitHub App's own numeric id (external
   // system), not a Hadron App ref — the Hadron org is named by orgRef.
-  'appId',
+  'updateOrgGithubApp.appId',
   // linkMemoryToUser.externalUserId: the external identity's label at the
   // App's IdP; the Hadron memory is named by memoryRef.
-  'externalUserId',
+  'linkMemoryToUser.externalUserId',
 ]);
+
+/** The legacy-`Id` check, one (field, arg) at a time, against a per-field allow-list. */
+const isStrayLegacyIdArg = (field: string, arg: string, allowed: ReadonlySet<string> = ALLOWED_ID_ARGS): boolean =>
+  /^(id|.*Id)$/.test(arg) && !allowed.has(`${field}.${arg}`);
 
 const mutationFields = () => {
   const schema = buildSchema(typeDefs);
@@ -150,8 +156,7 @@ describe('#789 — SDL ref-argument names match the resolvers', () => {
     const offenders: string[] = [];
     for (const name of Object.keys(EXPECTED_REF_ARGS)) {
       for (const arg of fields[name]?.args ?? []) {
-        const isLegacy = /^(id|.*Id)$/.test(arg.name) && !ALLOWED_ID_ARGS.has(arg.name);
-        if (isLegacy) offenders.push(`${name}.${arg.name}`);
+        if (isStrayLegacyIdArg(name, arg.name)) offenders.push(`${name}.${arg.name}`);
       }
     }
     // `createApp.agentId` was exactly this — SDL saying Id while the resolver
@@ -159,3 +164,17 @@ describe('#789 — SDL ref-argument names match the resolvers', () => {
     expect(offenders).toEqual([]);
   });
 });
+
+describe('#4357 P3-8 — the legacy-Id allowance is per field', () => {
+  it('allows each documented arg on its own field only', () => {
+    expect(isStrayLegacyIdArg('updateOrgGithubApp', 'appId')).toBe(false);
+    expect(isStrayLegacyIdArg('startChat', 'userId')).toBe(false);
+  });
+  it('still flags the same spelling on any other field (appId is a Hadron entity name too)', () => {
+    expect(isStrayLegacyIdArg('joinApp', 'appId')).toBe(true);
+    expect(isStrayLegacyIdArg('leaveApp', 'appId')).toBe(true);
+    expect(isStrayLegacyIdArg('createMemory', 'userId')).toBe(true);
+    expect(isStrayLegacyIdArg('syncMemory', 'id')).toBe(true);
+  });
+});
+

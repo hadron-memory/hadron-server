@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const LOAD_LINE = '{"kind":"load","workload":"held","cap":100,"startAt":0,"endAt":0,"ok":101,"probe":{"method":"tools/list","requests":7,"errors":0,"minMs":1,"p50Ms":1,"p95Ms":1,"p99Ms":1,"maxMs":1}}';
+const LOAD_LINE = '{"kind":"load","workload":"held","cap":100,"startAt":0,"endAt":0,"ok":101,"capRefused":0,"other":0,"closeOk":0,"closeFailed":0,"missingSession":0,"probe":{"method":"tools/list","requests":7,"errors":0,"minMs":1,"p50Ms":1,"p95Ms":1,"p99Ms":1,"maxMs":1}}';
 
 function fixture(mode) {
   const dir = mkdtempSync(join(tmpdir(), 'gloria-run4448-'));
@@ -30,6 +30,8 @@ esac\n`);
   // A recording sleep: the settle gate is observable as the number of sleeps of the settle length.
   put('sleep', `printf '%s\\n' "$1" >> "$FIXTURE/sleeps"\n`);
   put('node', `exec '${process.execPath}' "$@"\n`);
+  // #4609 BLIND F4: a fixed clock when FIXTURE_NOW_MS is set, so a sample's age is exact, not read-time dependent.
+  put('date', `if [ -n "\${FIXTURE_NOW_MS:-}" ] && [ "\${1:-}" = +%s%3N ]; then echo "$FIXTURE_NOW_MS"; else exec /usr/bin/date "$@"; fi\n`);
   put('incus', `case "$1" in
  list) [ ! -e "$FIXTURE/instance" ] || echo hadron-e2e-fixture;;
  config) cat "$FIXTURE/instance";;
@@ -41,10 +43,16 @@ esac\n`);
     case "$MODE" in
      timeout) exit 124;;
      empty) exit 0;;
+     noop) printf '%s\\n' '{"kind":"other"}'; exit 0;;
+     extraline) printf '%s\\n' '${LOAD_LINE}' '{"kind":"other"}'; exit 0;;
+     wrongworkload) printf '%s\\n' '${LOAD_LINE.replace('"workload":"held"', '"workload":"idle"')}'; exit 0;;
     esac
     printf '%s\\n' '${LOAD_LINE}'; case "$MODE" in fail|failkept) exit 5;; esac;;
    *memory.max*) echo 6442450944;;
-   *diagnose-samples.jsonl*) printf '{"kind":"sample","at":%s}\\n' "$(date +%s%3N)"; [ "$MODE" != failkept ] || printf '%s\\n' '${LOAD_LINE}';;
+   *diagnose-samples.jsonl*) ms="\${FIXTURE_SAMPLE_MS:-1000}"
+    if [ -n "\${FIXTURE_SWITCH_TO_MS:-}" ]; then if [ -e "$FIXTURE/read-once" ]; then ms=$FIXTURE_SWITCH_TO_MS; else : > "$FIXTURE/read-once"; fi; fi
+    [ "\${FIXTURE_NO_CONFIG:-}" = 1 ] || printf '{"kind":"config","sampleMs":%s}\\n' "$ms"
+    printf '{"kind":"sample","at":%s}\\n' "$(( $(date +%s%3N) - \${FIXTURE_SAMPLE_AGE_MS:-0} ))"; [ "$MODE" != failkept ] || printf '%s\\n' '${LOAD_LINE}';;
    *credentials.json*) echo synthetic-private-key;;
    *pg_stat_activity*) echo 2;;
    *health*) while [ "$1" != app ]; do shift; done; shift; NODE_OPTIONS="--import $FIXTURE/health.mjs" "$@";;
@@ -179,6 +187,70 @@ test('exit 0 with no load line is an invalid run, not a pass', () => {
     expect(r.status).toBe(7);
     expect(r.stderr).toContain('printed no load line');
     expect(readFileSync(join(f.dir, 'down'), 'utf8')).toBe('down\n');
+  } finally { f.clean(); }
+});
+
+// #2627: exit 0 with output that is not a valid load record for the requested workload is an invalid run, refused
+// before any sample capture; only a positive record is accepted.
+for (const mode of ['noop', 'wrongworkload', 'extraline']) {
+  test(`exit 0 with output that is not this workload's load record is refused (${mode})`, () => {
+    const f = fixture(mode);
+    try {
+      const r = f.run();
+      expect(r.status).toBe(7);
+      expect(r.stderr).toContain('printed no valid load record for held');
+      expect(existsSync(join(f.dir, 'sleeps')) ? readFileSync(join(f.dir, 'sleeps'), 'utf8').split('\n').filter(Boolean).length : 0).toBe(1);
+      expect(readFileSync(join(f.dir, 'down'), 'utf8')).toBe('down\n');
+    } finally { f.clean(); }
+  });
+}
+
+// #4608 BLIND F2: a host that cannot run the check is named as such, not reported as a bad record.
+test('a failed load record check (no usable host node) is reported as a check failure, not a rejected record', () => {
+  const f = fixture('cap');
+  try {
+    // #4608 BLIND delta: exit 1 too (a crashing node) is a failed check, never a rejected record.
+    for (const code of ['9', '1']) {
+      writeFileSync(join(f.dir, 'bin', 'node'), `#!/bin/bash\nif [ "\${1:-}" = --input-type=module ]; then exit ${code}; fi\nexec '${process.execPath}' "$@"\n`, { mode: 0o755 });
+      const r = f.run();
+      expect(r.status).toBe(7);
+      expect(r.stderr).toContain(`could not run the load record check on this host (node exit ${code})`);
+      expect(r.stderr).not.toContain('printed no valid load record');
+      rmSync(join(f.dir, 'state'), { recursive: true, force: true }); rmSync(join(f.dir, 'down'), { force: true });
+    }
+  } finally { f.clean(); }
+});
+
+// #2624: the freshness slack is two periods of the interval the preload RECORDED, not a fixed 2000 ms. A last sample
+// 3 s old passes at a recorded 2500 ms (slack 5 s) and is stale at the 1000 ms default (slack 2 s); 6 s old is stale
+// even at 2500 ms (the control); a run whose samples record no supported interval is refused.
+test('the freshness slack derives from the recorded sampling interval, with stale controls (fixed clock)', () => {
+  const NOW = '2000000000000';
+  const runWith = (extra) => { const f = fixture('cap'); try { Object.assign(f.env, { FIXTURE_NOW_MS: NOW }, extra); const r = f.run(); return { ...r, out: existsSync(join(f.dir, 'samples')) ? readFileSync(join(f.dir, 'samples'), 'utf8') : '' }; } finally { f.clean(); } };
+  expect(runWith({ FIXTURE_SAMPLE_MS: '2500', FIXTURE_SAMPLE_AGE_MS: '4000' }).status).toBe(0);
+  expect(runWith({ FIXTURE_SAMPLE_AGE_MS: '4000' }).status).toBe(5);
+  expect(runWith({ FIXTURE_SAMPLE_MS: '2500', FIXTURE_SAMPLE_AGE_MS: '6000' }).status).toBe(5);
+  const unrecorded = runWith({ FIXTURE_NO_CONFIG: '1' });
+  expect(unrecorded.status).toBe(5);
+  expect(unrecorded.stderr).toContain('diagnosis samples carry no supported sampling interval');
+  const unsupported = runWith({ FIXTURE_SAMPLE_MS: '50000' });
+  expect(unsupported.status).toBe(5);
+  expect(unsupported.stderr).toContain('diagnosis samples carry no supported sampling interval');
+});
+
+// #4609 BLIND F1: the interval that judges freshness is the one in the file that is published. Here the first read of
+// the container's samples records 2500 ms and every later one 1000 ms; a sample 4000 ms old is fresh only at 2500 ms.
+test('freshness is judged by the interval recorded in the published copy, never by an earlier read', () => {
+  const f = fixture('cap');
+  try {
+    Object.assign(f.env, { FIXTURE_NOW_MS: '2000000000000', FIXTURE_SAMPLE_MS: '2500', FIXTURE_SWITCH_TO_MS: '1000', FIXTURE_SAMPLE_AGE_MS: '4000' });
+    const r = f.run();
+    const out = existsSync(join(f.dir, 'samples')) ? readFileSync(join(f.dir, 'samples'), 'utf8') : '';
+    const published = out.split('\n').filter((l) => l.includes('"kind":"config"')).map((l) => JSON.parse(l).sampleMs);
+    // The first copy (2500 ms, sample 4000 ms old) is valid and fresh, so the run succeeds on it and publishes it
+    // (#4609 BLIND delta F2: a retry that fell through to the stale 1000 ms copy would fail here).
+    expect(r.status, r.stderr).toBe(0);
+    expect(published).toEqual([2500]);
   } finally { f.clean(); }
 });
 

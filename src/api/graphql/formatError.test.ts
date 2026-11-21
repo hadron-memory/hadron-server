@@ -100,10 +100,10 @@ describe('AuthStoreBusyError → AUTH_STORE_BUSY (#4471)', () => {
     new Prisma.PrismaClientKnownRequestError('Timed out fetching a new connection from the pool.', {
       code: 'P2024',
       clientVersion: '6.19.2',
-    } as never);
+    });
 
   it('thrown straight from the auth middleware: the typed extensions survive the boundary', () => {
-    const typed = new AuthStoreBusyError(p2024());
+    const typed = new AuthStoreBusyError(p2024(), 'POOL_WAIT');
     const out = formatGraphQLError({ message: typed.message, extensions: { code: 'AUTH_STORE_BUSY' } }, typed);
     expect(out.extensions?.code).toBe('AUTH_STORE_BUSY');
     expect(out.extensions?.retryable).toBe(true);
@@ -112,7 +112,7 @@ describe('AuthStoreBusyError → AUTH_STORE_BUSY (#4471)', () => {
   });
 
   it('Apollo-genericized (the context-failure wrap): the mapping restores the typed code and strips the prefix', () => {
-    const typed = new AuthStoreBusyError(p2024());
+    const typed = new AuthStoreBusyError(p2024(), 'POOL_WAIT');
     // Apollo's actual wrapper for a context-builder throw: its own GraphQLError — the
     // prefixed message, the default code, the thrown error on .originalError. Built with
     // wrap()'s shape plus the real prefix (the live round trip is pinned in
@@ -201,20 +201,20 @@ describe('isExpectedClientError — mapped and silenced are DIFFERENT questions'
     expect(format(err as Error).extensions?.code).not.toBe('INTERNAL_SERVER_ERROR');
   });
 
-  // @Holger's call, 2026-09-06: ship the wire half of #918, keep the Sentry
-  // noise. The load-bearing case is ASSET_BYTES_GONE — a row whose object is
-  // missing is real server-state inconsistency, and silencing it here would
-  // remove the only alarm without adding one where the inconsistency is
-  // actually discovered (#1140). So these are mapped and still REPORTED.
+  // #1140 residual (the "when this lands" step of @Holger's 2026-09-06 split): the wire half of #918 shipped then, and
+  // the Sentry half waited for an alarm where a missing object is DISCOVERED. That alarm now exists: the bytes-missing
+  // sweep (src/jobs/sweepAssetBytes.ts, slice B) and the restore path raise `asset.bytes_missing`. So every asset
+  // refusal, ASSET_BYTES_GONE included, is mapped for the wire AND silenced in the formatter's Sentry stream.
   it.each([
     ['NOT_FOUND', new AssetUploadError('NOT_FOUND', 'x')],
     ['MALWARE_BLOCKED', new AssetUploadError('MALWARE_BLOCKED', 'x')],
     ['ASSET_BYTES_GONE', new AssetUploadError('ASSET_BYTES_GONE', 'x')],
-  ])('AssetUploadError %s is mapped for the wire but NOT silenced', (code, err) => {
-    // The wire half — this is the #918 fix and it must hold.
+  ])('AssetUploadError %s is mapped for the wire AND classified as an expected client error, which src/server.ts skips in Sentry (#1140)', (code, err) => {
+    // The wire half: the #918 fix, unchanged; the code still reaches the caller.
     expect(format(err as Error).extensions?.code).toBe(code);
-    // The Sentry half — deliberately unchanged from before #924.
-    expect(isExpectedClientError(err)).toBe(false);
+    // The Sentry half: the plugin in src/server.ts skips exactly the errors isExpectedClientError accepts, so nothing is sent;
+    // the discovery-side alarm reports a missing object instead (sweepAssetBytes.test.ts, restoreAsset.test.ts).
+    expect(isExpectedClientError(err)).toBe(true);
   });
 
   it('a genuine fault is NOT expected — it still reaches Sentry', () => {

@@ -27,16 +27,6 @@
     "SpecDocumentEntry": "value",
     "RegisterViewRow": "value",
     "ChannelReadState": "value",
-    "TeamAttentionChannel": "value",
-    "TeamAttentionWorker": "value",
-    "TeamAttentionResult": "envelope",
-    "TeamAttentionSwitchoverChannel": "value",
-    "TeamAttentionSwitchoverWorker": "value",
-    "TeamAttentionSwitchoverPreview": "envelope",
-    "TeamAttentionPageItem": "value",
-    "TeamAttentionPage": "envelope",
-    "TeamAttentionPreviewPage": "envelope",
-    "TeamAttentionSwitchoverResult": "envelope",
     "OwnTeamChatReadState": "value",
     "RegisterDefaults": "value",
     "GlobalSearchHit": "value",
@@ -238,6 +228,7 @@
     "SummarizationRequest": "value",
     "ChatResponseResult": "envelope",
     "RevisionResult": "envelope",
+    "AgentRevision": "value",
     "EditorLockResult": "envelope",
     "UntrackedTaskItem": "value",
     "UntrackedTaskItemPage": "envelope",
@@ -271,6 +262,7 @@
     "UsageEventPage": "envelope",
     "ExchangeConnectionPage": "envelope",
     "DashboardWidgetPresetPage": "envelope",
+    "DashboardWidgetPage": "envelope",
     "AppKeyPage": "envelope",
     "UserApiKeyPage": "envelope",
     "AgentSubscriptionPage": "envelope",
@@ -288,6 +280,7 @@
     "AgentTeamAlarmSchedule": "value",
     "HostRegistrationWorker": "value",
     "HostOperationPage": "envelope",
+    "HostRegistrationPage": "envelope",
     "HostSetup": "envelope",
     "HostRegistrationRefusal": "value",
     "ContextResetStep": "value",
@@ -780,6 +773,12 @@
       "resolver": "src/api/graphql/schema/resolvers.channel.ts::readableMemoryWhere",
       "target": "Channel"
     },
+    "AgentTaskPage.items": {
+      "class": "parent-implies-child",
+      "audience": "callers who passed the App's task gate (participant or the App's live key via withReadableApp); Query.agentTasksPage reads through the same agentTaskListWhere as Query.agentTasks, and task reads are App-wide for that audience",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AgentTask"
+    },
     "ChatPage.items": {
       "class": "self-gated",
       "resolver": "src/api/graphql/schema/resolvers.query.chat.ts::myChatsScope",
@@ -890,6 +889,18 @@
       "resolver": "src/api/graphql/schema/resolvers.metering.ts::requireOrgRole",
       "target": "CreditLedgerEntry"
     },
+    "DashboardWidgetPage.items": {
+      "class": "parent-implies-child",
+      "audience": "only the caller's own placed widgets (userId = ctx.userId); non-users and impersonation get an empty page",
+      "resolver": "src/api/graphql/schema/resolvers.dashboard.ts::dashboardWidgetsPage",
+      "target": "DashboardWidget"
+    },
+    "HostRegistrationPage.items": {
+      "class": "parent-implies-child",
+      "audience": "hostRegistrationsPage gated by withReadableApp, as hostRegistrations: App participants plus the App's own key",
+      "resolver": "src/api/graphql/schema/resolvers.hostOperation.ts::withReadableApp",
+      "target": "HostRegistration"
+    },
     "DashboardWidgetPresetPage.items": {
       "class": "parent-implies-child",
       "audience": "only the caller's own presets (userId = ctx.userId); non-users and impersonation get an empty page",
@@ -922,6 +933,16 @@
       "target": "QuestionRef"
     },
     "Question.deciders": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "Question.assignee": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "Question.effectiveAssignee": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "CommentActorRef"
@@ -1869,6 +1890,18 @@
       "resolver": "src/api/graphql/schema/resolvers.secret.ts::canSeeSecretOwner",
       "target": "Secret"
     },
+    "Secret.readClients": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.secret.ts::readClients",
+      "gate": "readClientPage",
+      "target": "SecretReadClientsPage"
+    },
+    "SecretReadClientsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "readClientPage filters current issuers or App managers before paging, refuses App keys, runs, impersonation and deleted scopes, and exposes full client ids only to current issuers or holders; metadata only",
+      "resolver": "src/lib/secrets/readClientList.ts::readClientPage",
+      "target": "SecretReadClient"
+    },
     "Secret.versions": {
       "class": "parent-implies-child",
       "audience": "the callers Query.secret admits for the parent (canSeeSecretOwner); a page of an App secret's versions, paged per parent (cor:api:120:04)",
@@ -2264,6 +2297,8 @@
       "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
       "target": "AgentTaskExternalIdChange"
     },
+    "RetireSpecResult.node": {"class": "parent-implies-child", "audience": "the caller who may write the spec's memory: retireSpecDoor conceals an unreadable spec as NODE_NOT_FOUND and requires write access before any read, and writeNodeCore holds the response to the memory's read audience (concealWriteBeyondRead)", "resolver": "src/api/graphql/schema/resolvers.mutation.retireSpec.ts::retireSpecDoor", "target": "Node"},
+    "RetireSpecResult.successorEdge": {"class": "parent-implies-child", "audience": "the same writer: the edge is the one the door inserted from the spec to a successor the caller can read (item 3, isMemoryReadableCached), in the spec's own memory; Edge.source and Edge.target keep their own field gates", "resolver": "src/api/graphql/schema/resolvers.mutation.retireSpec.ts::retireSpecDoor", "target": "Edge"},
     "WebPollsPage.items": {
       "class": "parent-implies-child",
       "audience": "Same org ADMIN and tool.web_poll policy authorization as the existing webPolls list, with org-bound redacted rows.",
