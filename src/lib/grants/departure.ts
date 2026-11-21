@@ -40,24 +40,13 @@ export const DEPARTURE_REASONS = {
 export type DepartureReason<K extends GrantHolderKind = GrantHolderKind> = (typeof DEPARTURE_REASONS)[K][number];
 export type AgentDepartureReason = DepartureReason<'agent'>;
 /**
- * #4180 (BLIND P2, Antonio): the cause a door records yields to what already happened to the holder. A door that ends the grants of an
- * agent that is already deleted (a soft delete whose grants were never stamped, for instance rows older than the deleting door) records
- * AGENT_DELETED, not the install loss it was judging; a person already erased records USER_ERASED, not the org leave. Without this the
- * guard's evidence clauses would refuse the stamp and roll back the whole uninstall, import removal, licence revoke or removal.
+ * #4180 (Antonio BLIND P2, N1): the cause a door records yields to what already happened to the holder (an agent already deleted
+ * records AGENT_DELETED, a person already erased USER_ERASED), through the SQL function the guard itself uses to judge a cause
+ * (hadron_fit_departure_cause over hadron_departure_cause_fits, prisma/grant-invariants.sql). One statement of the evidence, so a door
+ * and the guard cannot drift, and a door never rolls back on a cause the guard would refuse.
  */
-function causeFitting(kind: GrantHolderKind, reason: Prisma.Sql, mayYield: boolean): Prisma.Sql {
-  // `mayYield` is false when the door's own cause already IS the holder's deletion (AGENT_DELETED, USER_ERASED): nothing to yield to.
-  if (!mayYield) return reason;
-  if (kind === 'agent') {
-    return Prisma.sql`(CASE WHEN EXISTS (SELECT 1 FROM agents fa WHERE fa.id = grants.agent_id AND fa.deleted_at IS NULL)
-      THEN ${reason} ELSE 'AGENT_DELETED' END)`;
-  }
-  if (kind === 'user') {
-    return Prisma.sql`(CASE WHEN EXISTS (SELECT 1 FROM users fu WHERE fu.id = grants.user_id AND fu.deleted_at IS NULL)
-      THEN ${reason} ELSE 'USER_ERASED' END)`;
-  }
-  return reason;
-}
+const fittedCause = (reason: Prisma.Sql): Prisma.Sql =>
+  Prisma.sql`hadron_fit_departure_cause(${reason}, grants.user_id, grants.worker_id, grants.agent_id)`;
 
 /** The read-side value for a departed grant with no recorded cause (stamped before #4180): a fact, never a guessed cause. */
 export const REASON_NOT_RECORDED = 'REASON_NOT_RECORDED';
@@ -103,7 +92,7 @@ export async function endHeldGrants<K extends GrantHolderKind>(
     ORDER BY id FOR UPDATE`);
   return tx.$executeRaw(Prisma.sql`
     UPDATE grants SET holder_departed_at = ${GRANT_DB_NOW}, updated_at = ${GRANT_DB_NOW},
-      holder_departure_reason = ${causeFitting(kind, Prisma.sql`${reason}`, reason !== 'AGENT_DELETED' && reason !== 'USER_ERASED')}
+      holder_departure_reason = ${fittedCause(Prisma.sql`${reason}::text`)}
     WHERE ${column} = ${holderId} AND holder_departed_at IS NULL AND revoked_at IS NULL
       AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id) ${inScope}
       AND NOT ${ALREADY_ENDED}`);
@@ -133,9 +122,9 @@ export async function endAgentGrantsAtApps(
     ORDER BY id FOR UPDATE`);
   return tx.$executeRaw(Prisma.sql`
     UPDATE grants SET holder_departed_at = ${GRANT_DB_NOW}, updated_at = ${GRANT_DB_NOW},
-      holder_departure_reason = ${causeFitting('agent', Prisma.sql`(SELECT p.reason FROM unnest(${appIds}::text[], ${agentIds}::text[], ${reasons}::text[])
+      holder_departure_reason = ${fittedCause(Prisma.sql`(SELECT p.reason FROM unnest(${appIds}::text[], ${agentIds}::text[], ${reasons}::text[])
           WITH ORDINALITY AS p(app_id, agent_id, reason, n)
-        WHERE p.app_id = grants.app_id AND p.agent_id = grants.agent_id ORDER BY p.n LIMIT 1)`, true)}
+        WHERE p.app_id = grants.app_id AND p.agent_id = grants.agent_id ORDER BY p.n LIMIT 1)`)}
     WHERE ${inPairs} AND holder_departed_at IS NULL AND revoked_at IS NULL
       AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
       AND NOT ${ALREADY_ENDED}`);

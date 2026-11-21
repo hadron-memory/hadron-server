@@ -70,6 +70,15 @@ describe('#4180: the cause is a fact of the departure, set with the stamp and ne
     expect(await cause(id)).toBeNull();
   });
 
+  it('the CHECK\'s per-kind arms: a person\'s grant takes no App, worker or agent cause (Rodolfo SEC10 P3)', async () => {
+    const id = await active({ user_id: w.user2Id });
+    await db.user.update({ where: { id: w.user2Id }, data: { deletedAt: new Date() } });
+    // APP_DELETED passes every evidence clause (it names no person), so only chk_grants_shape's user arm refuses it.
+    await refused(exec(`${STAMP}, holder_departure_reason = 'APP_DELETED' WHERE id = $1`, id), CHECK);
+    await refused(exec(`${STAMP}, holder_departure_reason = 'AGENT_IMPORTER_DELETED' WHERE id = $1`, id), EITHER);
+    expect(await cause(id)).toBeNull();
+  });
+
   it('a cause must agree with what happened to the holder: a retired worker is not DELETED, an erased person did not LEAVE', async () => {
     const worker = await active({ user_id: null, worker_id: w.workerId });
     await retire();

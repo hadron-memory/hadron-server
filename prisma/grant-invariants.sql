@@ -89,6 +89,39 @@ LANGUAGE sql STABLE AS $$
                     ELSE ia.organization_id = ap.organization_id END)
 $$;
 
+-- #4180 (Antonio N1): ONE statement of whether a departure cause agrees with what happened to the holder. The guard refuses a
+-- cause that does not fit; every stamping door and trigger records through hadron_fit_departure_cause, which uses this same
+-- function, so the two can never drift. A person who LEFT or was REMOVED is still a live account, an ERASED one is not; a retired
+-- worker's row is still there, a DELETED one's is gone; a DELETED agent is gone or soft-deleted, one that lost its installation is
+-- not. (The kind is chk_grants_shape's; a grantee App's only cause is APP_DELETED.)
+CREATE OR REPLACE FUNCTION hadron_departure_cause_fits(p_reason text, p_user_id text, p_worker_id text, p_agent_id text) RETURNS boolean
+LANGUAGE sql STABLE AS $$
+  SELECT CASE
+    WHEN p_reason IN ('ORG_LEFT', 'ORG_REMOVED')
+      THEN EXISTS (SELECT 1 FROM users u WHERE u.id = p_user_id AND u.deleted_at IS NULL)
+    WHEN p_reason = 'USER_ERASED'
+      THEN NOT EXISTS (SELECT 1 FROM users u WHERE u.id = p_user_id AND u.deleted_at IS NULL)
+    WHEN p_reason = 'WORKER_RETIRED' THEN EXISTS (SELECT 1 FROM workers k WHERE k.id = p_worker_id)
+    WHEN p_reason = 'WORKER_DELETED' THEN NOT EXISTS (SELECT 1 FROM workers k WHERE k.id = p_worker_id)
+    WHEN p_reason = 'AGENT_DELETED'
+      THEN NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = p_agent_id AND a.deleted_at IS NULL)
+    WHEN p_reason IN ('AGENT_UNINSTALLED', 'AGENT_IMPORTER_UNINSTALLED', 'AGENT_IMPORTER_DELETED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED')
+      THEN EXISTS (SELECT 1 FROM agents a WHERE a.id = p_agent_id AND a.deleted_at IS NULL)
+    ELSE TRUE END
+$$;
+-- #4180 (Antonio BLIND P2): the cause a door records yields to what already happened to the holder. A door ending the grants of an
+-- agent that is already deleted (unstamped rows) records AGENT_DELETED, not the install loss it judged; a person already erased
+-- records USER_ERASED; a retired worker whose row is gone records WORKER_DELETED. Without the yield the guard would refuse the
+-- stamp and roll the whole door back.
+CREATE OR REPLACE FUNCTION hadron_fit_departure_cause(p_reason text, p_user_id text, p_worker_id text, p_agent_id text) RETURNS text
+LANGUAGE sql STABLE AS $$
+  SELECT CASE
+    WHEN p_reason IS NULL OR hadron_departure_cause_fits(p_reason, p_user_id, p_worker_id, p_agent_id) THEN p_reason
+    WHEN p_user_id IS NOT NULL THEN 'USER_ERASED'
+    WHEN p_worker_id IS NOT NULL THEN 'WORKER_DELETED'
+    WHEN p_agent_id IS NOT NULL THEN 'AGENT_DELETED'
+    ELSE p_reason END
+$$;
 CREATE OR REPLACE FUNCTION hadron_guard_grant() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -217,20 +250,10 @@ BEGIN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
   END IF;
   -- #4180: the cause is written only in the statement that stamps the departure (the first end's cause stands: never changed, cleared
-  -- or added later), and it must agree with what happened to the holder: a person who LEFT or was REMOVED is still a live account,
-  -- an ERASED one is not; a retired worker's row is still there, a DELETED one's is gone; a DELETED agent is gone or soft-deleted, one
-  -- that lost its installation is not. (The kind is chk_grants_shape's; a grantee App's only cause is APP_DELETED.)
+  -- or added later), and it must agree with what happened to the holder (hadron_departure_cause_fits, the one statement of it).
   IF NEW.holder_departure_reason IS DISTINCT FROM OLD.holder_departure_reason AND (
        OLD.holder_departure_reason IS NOT NULL OR OLD.holder_departed_at IS NOT NULL OR NEW.holder_departed_at IS NULL
-    OR (NEW.holder_departure_reason IN ('ORG_LEFT', 'ORG_REMOVED')
-        AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = OLD.user_id AND u.deleted_at IS NULL))
-    OR (NEW.holder_departure_reason = 'USER_ERASED' AND EXISTS (SELECT 1 FROM users u WHERE u.id = OLD.user_id AND u.deleted_at IS NULL))
-    OR (NEW.holder_departure_reason = 'WORKER_RETIRED' AND NOT EXISTS (SELECT 1 FROM workers k WHERE k.id = OLD.worker_id))
-    OR (NEW.holder_departure_reason = 'WORKER_DELETED' AND EXISTS (SELECT 1 FROM workers k WHERE k.id = OLD.worker_id))
-    OR (NEW.holder_departure_reason = 'AGENT_DELETED' AND EXISTS (SELECT 1 FROM agents a WHERE a.id = OLD.agent_id AND a.deleted_at IS NULL))
-    OR (NEW.holder_departure_reason IN ('AGENT_UNINSTALLED', 'AGENT_IMPORTER_UNINSTALLED', 'AGENT_IMPORTER_DELETED', 'AGENT_IMPORT_REMOVED',
-                                        'AGENT_LICENSE_REVOKED')
-        AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = OLD.agent_id AND a.deleted_at IS NULL))) THEN
+    OR NOT hadron_departure_cause_fits(NEW.holder_departure_reason, OLD.user_id, OLD.worker_id, OLD.agent_id)) THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
   END IF;
   IF OLD.holder_departed_at IS NOT NULL AND NEW.user_id IS DISTINCT FROM OLD.user_id THEN
@@ -279,7 +302,7 @@ BEGIN
         AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id) ORDER BY id FOR UPDATE', TG_ARGV[0]) USING OLD.id;
   EXECUTE format(
     'UPDATE grants SET holder_departed_at = (clock_timestamp() AT TIME ZONE ''UTC''), updated_at = (clock_timestamp() AT TIME ZONE ''UTC''),
-        holder_departure_reason = $2
+        holder_departure_reason = hadron_fit_departure_cause($2, grants.user_id, grants.worker_id, grants.agent_id)
       WHERE %I = $1 AND holder_departed_at IS NULL AND revoked_at IS NULL
         AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
         AND NOT (activated_at IS NOT NULL AND ((expires_at IS NOT NULL AND expires_at <= (clock_timestamp() AT TIME ZONE ''UTC''))
@@ -340,8 +363,7 @@ BEGIN
    ORDER BY id FOR UPDATE;
   -- #4180: the cause is the importer's hard delete; an imported agent that is itself already deleted records that instead.
   UPDATE grants SET holder_departed_at = (clock_timestamp() AT TIME ZONE 'UTC'), updated_at = (clock_timestamp() AT TIME ZONE 'UTC'),
-       holder_departure_reason = CASE WHEN EXISTS (SELECT 1 FROM agents ia WHERE ia.id = grants.agent_id AND ia.deleted_at IS NULL)
-                                      THEN 'AGENT_IMPORTER_DELETED' ELSE 'AGENT_DELETED' END
+       holder_departure_reason = hadron_fit_departure_cause('AGENT_IMPORTER_DELETED', NULL, NULL, grants.agent_id)
    WHERE agent_id = OLD.imported_agent_id AND holder_departed_at IS NULL AND revoked_at IS NULL
      AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
      AND NOT hadron_agent_installed_in_app(grants.app_id, grants.agent_id)
