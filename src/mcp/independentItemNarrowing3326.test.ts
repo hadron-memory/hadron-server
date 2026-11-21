@@ -5,7 +5,7 @@
  * Fixture: a user who is a live org CONTRIBUTOR (so a great many org memories are independently readable and writable),
  * an Agent that carries exactly TWO items, one org memory the user reaches and one it does not.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
@@ -44,6 +44,7 @@ async function fixture() {
 }
 let f: Awaited<ReturnType<typeof fixture>>;
 beforeEach(async () => { await cleanDb(db); f = await fixture(); });
+afterEach(() => { vi.restoreAllMocks(); }); // a failed assertion must not leak a spy into the next test
 
 /** Rows returned by every memory.findMany issued while `run` executes, plus how many queries issued them. */
 async function memoryRows<T>(run: () => Promise<T>) {
@@ -64,6 +65,7 @@ describe('#3326 bounded work (rows and queries, not time)', () => {
     expect(result.has(f.unreachable.id)).toBe(false);
     // Work: none of the 45 unrelated readable memories is ever loaded (main loads all of them), and the rest stays small.
     expect(f.unrelatedIds).toHaveLength(MANY + PUBLICS + SUBSCRIBED);
+    expect(ids.has(f.reachable.id)).toBe(true); // the check below is not vacuous: rows do carry ids, and the candidate is among them
     expect(f.unrelatedIds.filter(id => ids.has(id))).toEqual([]);
     expect(rows).toBeLessThanOrEqual(6);
   });
@@ -76,9 +78,8 @@ describe('#3326 bounded work (rows and queries, not time)', () => {
     const empty = await memoryRows(() => independentUserItemAccess(db, f.user.id, []));
     expect(empty.result.size).toBe(0);
     expect(empty.queries).toBe(0);
-    expect(members).not.toHaveBeenCalled(); // the early return comes before any membership or Agent lookup
+    expect(members).not.toHaveBeenCalled(); // no membership or Agent lookup was made for an empty list
     expect(agents).not.toHaveBeenCalled();
-    members.mockRestore(); agents.mockRestore();
     expect(none.rows).toBeLessThanOrEqual(2); // the live system memory lookup only
   });
 });
@@ -135,9 +136,12 @@ describe('#3326 several Apps: per-memory reuse never confuses one memory\'s leve
     const pub = await db.memory.create({ data: { urn: `${f.other.urn}:item-public`, name: 'public item', class: 'knowledge', organizationId: f.other.id, visibility: 'PUBLIC' } });
     const system2 = await db.memory.create({ data: { urn: `${f.org.urn}:system2`, name: 'system2', class: 'system', organizationId: f.org.id } });
     const agent2 = await db.agent.create({ data: { urn: `${f.org.urn}:agent2`, name: 'agent2', organizationId: f.org.id, systemMemoryId: system2.id } });
-    // The PUBLIC item (the user's own level: READ_ONLY) is listed FIRST in both Agents, and the org item (READ_WRITE) after it,
-    // so a store that gave every candidate the batch's first answer would NARROW the writable memory to READ_ONLY: a false
-    // refusal for a caller who may write it. The unreachable item rides along in App 1 and must stay absent.
+    // What this test pins: the levels across two Apps with overlapping items stay each memory's own, the unreachable item stays
+    // absent, and an unsubscribed PUBLIC item is never widened (the tenant already caps it at READ_ONLY, so the next test, not this
+    // one, is where a wrong-level store is caught in both directions). The Apps' maps merge by MAXIMUM level (READ_WRITE wins
+    // over READ_ONLY, as getPrincipalAppMemoryAccess documents), so a store error that only NARROWS one App's answer is masked
+    // by the other App's correct one: that is why the second test lists the two memories in opposite order in the two Agents and
+    // is built so a first-answer store WIDENS the read-only memory, which the merge cannot hide.
     await db.agentMemoryItem.deleteMany({ where: { agentId: f.agent.id } });
     for (const m of [pub, f.reachable, f.unreachable]) await db.agentMemoryItem.create({ data: { agentId: f.agent.id, memoryId: m.id, role: 'read-write' } });
     for (const m of [pub, f.reachable]) await db.agentMemoryItem.create({ data: { agentId: agent2.id, memoryId: m.id, role: 'read-write' } });
