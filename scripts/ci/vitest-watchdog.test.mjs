@@ -45,7 +45,7 @@ function watch(command, { minutes = '3', stepTimeout = '45', extraEnv = {}, time
 }
 /** The process's state letter from /proc, or null when it no longer exists. */
 const state = (pid) => { try { return readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /, '')[0]; } catch { return null; } };
-/** Executing (a zombie has ended; only its parent has not reaped it yet). */
+/** Not yet ended: running, sleeping or stopped, but not a zombie (a zombie has ended; only its parent has not reaped it). */
 const running = (pid) => { const s = state(pid); return s !== null && s !== 'Z'; };
 /** Gone, allowing a bounded moment for an orphan to be reaped (#4647 BLIND P2: `kill -0` succeeds on a zombie). */
 const gone = (pid) => { for (let i = 0; i < 50 && running(pid); i++) spawnSync('sleep', ['0.1']); return !running(pid); };
@@ -57,6 +57,8 @@ const shim = (dir, name, body) => {
   writeFileSync(join(bin, name), `#!/usr/bin/env bash\n${body}\n`); chmodSync(join(bin, name), 0o755);
   return `${bin}:${process.env.PATH}`;
 };
+/** Whole seconds since boot: the watchdog's monotonic clock. */
+const uptime = () => Math.floor(Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]));
 const cleanup = (pids) => { for (const pid of pids) spawnSync('kill', ['-KILL', String(pid)]); };
 
 test('a hang: dump while the command still runs, then the kill, the fixed line and exit 124; the whole tree is gone', () => withDir((dir) => {
@@ -178,6 +180,53 @@ exec ${realPs} "$@"`);
   } finally { cleanup([pid]); }
 }));
 
+test('a verification scan that fails is never reported as a verified kill (BLIND delta P1)', () => withDir((dir) => {
+  const root = join(dir, 'root');
+  const PATH = shim(dir, 'ps', `[ "$*" = "-eo pid=,pgid=,stat=" ] && exit 1
+exec ${realPs} "$@"`);
+  const r = watch(`echo $$ > ${root}; sleep 300`, { minutes: '1', extraEnv: { PATH } });
+  const pid = pidsIn(root)[0];
+  try {
+    expect(r.status, r.stderr).toBe(124);
+    expect(r.stdout).toContain('[watchdog] vitest exceeded 1 min; kill NOT verified, the process table could not be read');
+    expect(r.stdout).not.toContain('; killed');
+    expect(gone(pid)).toBe(true);   // the group KILL still went out
+  } finally { cleanup([pid]); }
+}));
+
+test('a tree scan that fails still kills the group, and the kill is reported unverified (BLIND delta P1)', () => withDir((dir) => {
+  const root = join(dir, 'root');
+  const PATH = shim(dir, 'ps', `[ "$*" = "-eo pid=,ppid=" ] && exit 1
+exec ${realPs} "$@"`);
+  const r = watch(`echo $$ > ${root}; sleep 300 & wait`, { minutes: '1', extraEnv: { PATH } });
+  const pid = pidsIn(root)[0];
+  try {
+    expect(r.status, r.stderr).toBe(124);
+    expect(r.stdout).toContain('[watchdog] vitest exceeded 1 min; kill NOT verified, a process scan failed');
+    expect(gone(pid)).toBe(true);
+  } finally { cleanup([pid]); }
+}));
+
+test('a slow scan that never settles cannot hold the KILL past the cleanup bound (BLIND delta P2)', () => withDir((dir) => {
+  const root = join(dir, 'root');
+  // Each tree scan takes 0.6 s and shows one more child the watchdog has not stopped yet (an unused PID above the
+  // kernel's limit, so no real process is signalled). Without the elapsed bound the loop runs its 50 rounds (30 s+).
+  const PATH = shim(dir, 'ps', `if [ "$*" = "-eo pid=,ppid=" ]; then
+  n=$(( $(cat ${dir}/calls 2>/dev/null || echo 0) + 1 )); echo "$n" > ${dir}/calls
+  sleep 0.6; ${realPs} "$@"; echo "$(( 4194400 + n )) $(cat ${root})"; exit 0
+fi
+exec ${realPs} "$@"`);
+  const t0 = Date.now();
+  const r = watch(`echo $$ > ${root}; sleep 300`, { minutes: '1', extraEnv: { PATH } });
+  const pid = pidsIn(root)[0];
+  try {
+    expect(r.status, r.stderr).toBe(124);
+    expect(Date.now() - t0).toBeLessThan(20_000);   // the bound is 5 s with the test unit
+    expect(Number(readFileSync(join(dir, 'calls'), 'utf8'))).toBeLessThan(15);
+    expect(gone(pid)).toBe(true);
+  } finally { cleanup([pid]); }
+}));
+
 test('a TERM to the watchdog (the step cancelled) still ends the command', () => withDir((dir) => {
   const root = join(dir, 'root');
   const env = { ...baseEnv(), WATCHDOG_MINUTES: '30', WATCHDOG_STEP_TIMEOUT_MINUTES: '45', WATCHDOG_SECONDS_PER_MINUTE: '1' };
@@ -201,13 +250,14 @@ test('a bad setting refuses before the command runs, with a fixed message naming
   const ran = join(dir, 'ran');
   const budget = '[watchdog] WATCHDOG_MINUTES must be a positive integer below WATCHDOG_STEP_TIMEOUT_MINUTES (the step\'s timeout-minutes); refusing';
   const unit = '[watchdog] WATCHDOG_SECONDS_PER_MINUTE must be a positive integer of at most four digits (tests only); refusing';
-  const start = '[watchdog] WATCHDOG_STEP_STARTED_AT must be the step\'s start in epoch seconds, not after now; refusing';
-  const now = Math.floor(Date.now() / 1000);
+  const start = '[watchdog] WATCHDOG_STEP_STARTED_AT must be the step\'s start in whole seconds since boot (/proc/uptime), not after now; refusing';
+  const now = uptime();
   const cases = [
     ...[['', '45'], ['abc', '45'], ['0', '45'], ['-5', '45'], ['1.5', '45'], ['045x', '45'], ['45', '45'], ['50', '45'], ['40', ''], ['40', 'x'],
       ['18446744073709551617', '45'], ['40', '18446744073709551657']].map(([minutes, stepTimeout]) => [{ minutes, stepTimeout }, budget]),
     ...['0', 'x', '18446744073709551617'].map((u) => [{ minutes: '40', extraEnv: { WATCHDOG_SECONDS_PER_MINUTE: u } }, unit]),
-    ...['x', '0', '-1', String(now + 3600), '18446744073709551617'].map((t) => [{ minutes: '40', extraEnv: { WATCHDOG_STEP_STARTED_AT: t } }, start]),
+    // '' is a failed read at step entry: refused, never taken as "start now" (BLIND delta P2).
+    ...['x', '', ' ', '-1', '1.5', String(now + 3600), '18446744073709551617'].map((t) => [{ minutes: '40', extraEnv: { WATCHDOG_STEP_STARTED_AT: t } }, start]),
   ];
   for (const [opts, message] of cases) {
     const label = JSON.stringify(opts);
@@ -224,7 +274,7 @@ test('a bad setting refuses before the command runs, with a fixed message naming
 test('the budget counts from WATCHDOG_STEP_STARTED_AT: time the step spent before the watchdog comes out of it', () => {
   const t0 = Date.now();
   // The step started 100 s ago with a 20 s budget: already spent, so the watchdog fires on its first check.
-  const r = watch('sleep 300', { minutes: '20', extraEnv: { WATCHDOG_STEP_STARTED_AT: String(Math.floor(Date.now() / 1000) - 100) } });
+  const r = watch('sleep 300', { minutes: '20', extraEnv: { WATCHDOG_STEP_STARTED_AT: String(Math.max(0, uptime() - 100)) } });
   expect(r.status, r.stderr).toBe(124);
   expect(Date.now() - t0).toBeLessThan(15_000);
 });
@@ -234,7 +284,10 @@ test('the step runs the watchdog from its own start, and its step-timeout settin
   const step = wf.jobs['test-shard'].steps.find((s) => typeof s.name === 'string' && s.name.startsWith('Run vitest suite'));
   expect(step, 'the Run vitest suite step').toBeTruthy();
   expect(step.run).toMatch(/scripts\/ci\/vitest-watchdog\.sh -- pnpm test --shard=/);
-  expect(step.run.split('\n')[0]).toBe('export WATCHDOG_STEP_STARTED_AT=$(date +%s)');
+  // Two lines, so a failed read fails the step (bash -e) instead of exporting an empty start; the watchdog refuses an
+  // empty one anyway. The probe before the watchdog is bounded.
+  expect(step.run.split('\n').slice(0, 2)).toEqual(['read -r up _ < /proc/uptime', 'export WATCHDOG_STEP_STARTED_AT=${up%.*}']);
+  expect(step.run).toMatch(/^timeout 120 psql /m);
   expect(String(step.env.WATCHDOG_STEP_TIMEOUT_MINUTES)).toBe(String(step['timeout-minutes']));
   const minutes = Number(step.env.WATCHDOG_MINUTES);
   expect(Number.isInteger(minutes) && minutes > 0 && minutes < step['timeout-minutes']).toBe(true);
