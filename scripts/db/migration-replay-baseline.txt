@@ -14,6 +14,3 @@
 # the difference.
 #
 # Recorded at origin/main 4954deaf (Bradley, 2026-11-17; spike https://github.com/hadron-memory/hadron-server/issues/434#issuecomment-6949698384).
-
-# IDENTITY on the migration path, a sequence default after db push: #4337
-changed col:stamp_signing_keys.id e941ccdc021b547f
