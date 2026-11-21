@@ -5,6 +5,7 @@ import { runAsActor } from '../requestActor.js';
 import { createGrantSigningRequestInTransaction } from '../signing/grantRequests.js';
 import { openGrantProofCeremony, proveForGrantSigning, currentGrantSigningChallenge, completeGrantSigning } from '../signing/grantCeremony.js';
 import { ApolloServer } from '@apollo/server';
+import { buildSchema, type GraphQLObjectType } from 'graphql';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { formatGraphQLError } from '../../api/graphql/formatError.js';
 /** #3999 real database and real software-passkey assertions, no production or provider calls. */
@@ -341,6 +342,46 @@ describe('#3999 proof rotation',()=>{
   const p2=await proof(second,key,{},p1.nonce);
   await expect(complete(first,p1)).rejects.toThrow();expect((await row(first)).state).toBe('open');
   await complete(second,p2);expect((await row(second)).state).toBe('completed');
+ });
+});
+
+describe('#3999 explicit validation and event boundaries',()=>{
+ it('documents both protection event kinds on the public schema',()=>{
+  const event=buildSchema(typeDefs).getType('SecretEvent') as GraphQLObjectType;
+  expect(event.getFields().kind.description).toMatch(/\bPROTECT\b/);expect(event.getFields().kind.description).toMatch(/\bUNPROTECT\b/);
+ });
+ it.each([false,true])('refuses an oversized UTF-8 update before any write (protected=%s)',async protectedValue=>{
+  await db.secret.update({where:{id:secretId},data:{protected:protectedValue}});
+  const before=await db.secretChangeRequest.count();
+  const e=await error(resolvers.Mutation.updateSecret({}, {ref:secretId,value:'é'.repeat(16_400)},ctx()));
+  expect(e.extensions?.code).toBe('BAD_USER_INPUT');
+  expect(await db.secretChangeRequest.count()).toBe(before);expect(await db.secretVersion.count({where:{secretId}})).toBe(1);
+  expect(await currentAppSecretValue(db as never,{id:secretId,ownerId:appId})).toBe('original');
+ });
+ it('exposes both protection event kinds through the real GraphQL event read surface',async()=>{
+  await db.secret.update({where:{id:secretId},data:{protected:false}});
+  for(const protectedValue of [true,false]){
+   const id=(await error(resolvers.Mutation.setSecretProtected({}, {ref:secretId,protected:protectedValue},ctx()))).extensions.requestId;
+   await complete(id,await proof(id));
+  }
+  const api=new ApolloServer<Context>({typeDefs,resolvers});
+  try{
+   await api.start();const result=await api.executeOperation({query:'query($ref:ID!){secretEvents(ref:$ref){items{kind}}}',variables:{ref:secretId}},{contextValue:ctx()});
+   expect(result.body.kind).toBe('single');if(result.body.kind!=='single')throw new Error('single response required');
+   expect(result.body.singleResult.errors).toBeUndefined();
+   const data=result.body.singleResult.data as {secretEvents:{items:Array<{kind:string}>}};
+   expect(data.secretEvents.items.map(e=>e.kind)).toEqual(expect.arrayContaining(['PROTECT','UNPROTECT']));
+  }finally{await api.stop();}
+ });
+ it.each([true,false])('activates and reveals a protected worker grant with person holder NULL (own=%s)',async own=>{
+  const agent=await db.agent.create({data:{name:'protected-agent',urn:`${generateId()}:protected`,ownerUserId:userId}});
+  const worker=await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,name:'protected-worker',slug:'protected-worker',appId,agentId:agent.id,...(own?{heldByUserId:userId,heldAt:new Date()}:{})}});
+  const c=await resolvers.Mutation.issueSecretReadClient({}, {input:{secretRef:secretId,holderKind:'WORKER',holderRef:worker.id,reason:'protected worker boundary'}},ctx());
+  const grant=await db.grant.findUniqueOrThrow({where:{id:c.grantId}});expect(grant.userId).toBeNull();expect(grant.workerId).toBe(worker.id);
+  await (await prepareClientActivation(c.grantId))();expect((await db.grant.findUniqueOrThrow({where:{id:c.grantId}})).activatedAt).not.toBeNull();
+  const revealed=await runAsActor({workerId:worker.id,agentId:null},()=>resolvers.Mutation.revealSecret({}, {clientId:c.clientId},ctx()));
+  expect(revealed.value).toBe(JSON.stringify('original'));
+  expect((await db.secretReadClient.findUniqueOrThrow({where:{id:c.clientId}})).issuedToOwnWorker).toBe(own);
  });
 });
 
