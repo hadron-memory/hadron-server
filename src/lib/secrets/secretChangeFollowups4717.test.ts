@@ -139,6 +139,14 @@ describe('#4717 item 4: the change-request objects apply by either path, in eith
 });
 
 describe('#4717 item 5: withdraw is rate-admitted', () => {
+  it('an admitted withdraw under an enforcing policy ends the request and clears its staged value', async () => {
+    await db.secret.update({ where: { id: secretId }, data: { protected: true } });
+    const id = await staged(resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'staged' }, ctx()));
+    await db.rateLimitPolicy.update({ where: { fieldClass: 'WRITES' }, data: { principalLimit: 1000, enforcementMode: 'ENFORCING' } });
+    expect(await resolvers.Mutation.withdrawSecretChangeRequest({}, { id }, ctx())).toBe(true);
+    expect((await row(id)).state).toBe('withdrawn');
+    expect((await row(id)).staged_value_encrypted).toBeNull();
+  });
   it('a rate-refused withdraw leaves the request open with its staged value', async () => {
     await db.secret.update({ where: { id: secretId }, data: { protected: true } });
     const id = await staged(resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'staged' }, ctx()));
@@ -171,6 +179,16 @@ describe('#4717 item 8: clearing protection on an unprotected secret is a no-op'
 });
 
 describe('#4717 item 9: the aggregate cap is judged before the per-requester cap', () => {
+  it('each cap alone answers its own code', async () => {
+    await db.secret.update({ where: { id: secretId }, data: { protected: true } });
+    const others = [await member(), await member()].map((u) => ({ ...ctx(), userId: u }));
+    // Requester cap alone: the caller holds 2 of 2, the secret 2 of 5.
+    for (const caller of [ctx(), ctx()]) await staged(resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'staged' }, caller));
+    expect((await error(resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'third' }, ctx()))).extensions?.code).toBe('SECRET_CHANGE_REQUESTER_LIMIT');
+    // Aggregate cap alone: the secret holds 5 of 5, this caller 1 of 2.
+    for (const caller of [others[0], others[0], others[1]]) await staged(resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'staged' }, caller));
+    expect((await error(resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'sixth' }, others[1]))).extensions?.code).toBe('SECRET_CHANGE_REQUEST_LIMIT');
+  });
   it('a caller at both limits gets SECRET_CHANGE_REQUEST_LIMIT', async () => {
     expect(MAX_OPEN_SECRET_CHANGES).toBe(5); expect(MAX_OPEN_SECRET_CHANGES_PER_REQUESTER).toBe(2);
     await db.secret.update({ where: { id: secretId }, data: { protected: true } });

@@ -145,8 +145,14 @@ function unknownOwnerType(_ownerType: never): never {
 
 import { loadLiveApp, appMember, appManager, requireAppMember, appAnchors } from '../../../lib/secrets/access.js';
 
-function appRateIdentity(ctx: Context) {
+/** The WRITES rate identity every App secret write admits under, shared with withdrawSecretChangeRequest (#4717 item 5). */
+export function appRateIdentity(ctx: Context) {
   return ctx.limiterIdentity ?? transportRateIdentity(ctx as never);
+}
+
+/** The one duplicate-name refusal, for an ordinary create and a protected create refused at staging (#4717 item 3). */
+function secretNameTaken(name: string): GraphQLError {
+  return badInput(`A secret named "${name}" already exists at this scope.`);
 }
 
 /**
@@ -278,7 +284,7 @@ export const secretMutations = {
       });
     } catch (err) {
       if ((err as { code?: string } | null)?.code === 'P2002') {
-        throw badInput(`A secret named "${name}" already exists at this scope.`);
+        throw secretNameTaken(name);
       }
       throw err;
     }
@@ -366,7 +372,7 @@ async function createAppSecret(ctx: Context, appId: string, name: string, args: 
           // #4717 item 3 (cor:sec:070:02): a taken name refuses at staging with the duplicate-name refusal, and nothing is
           // staged. Completion still rejudges the name, so one taken after staging ends the request stale.
           if (await tx.secret.findUnique({ where: { ownerType_ownerId_name: { ownerType: 'app', ownerId: appId, name } }, select: { id: true } })) {
-            throw badInput(`A secret named "${name}" already exists at this scope.`);
+            throw secretNameTaken(name);
           }
           return stageSecretChange(tx, ctx, { appId, secretId: null, name, kind: args.kind,
             metadata: metadata as never, operation: 'STORE', snapshot: 'absent', valueJson, sizeBytes });
@@ -386,7 +392,7 @@ async function createAppSecret(ctx: Context, appId: string, name: string, args: 
     ));
   } catch (err) {
     if (isSecretNameConflict(err)) {
-      throw badInput(`A secret named "${name}" already exists at this scope.`);
+      throw secretNameTaken(name);
     }
     throw err;
   }

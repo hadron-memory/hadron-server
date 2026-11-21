@@ -143,6 +143,7 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
     if(!secret)secret=await tx.secret.create({data:{ownerType:'app',ownerId:r.app_id,name:r.secret_name,kind:r.secret_kind,metadata:r.metadata as Prisma.InputJsonValue,valueEncrypted:null,protected:true,createdBy:r.requester_id}});
     const versionNo=r.write_version?await addAppSecretVersion(tx,secret,plaintext!.toString('utf8'),r.size_bytes!,actor):newest?.versionNo??null;
     await tx.secret.update({where:{id:secret.id},data:{metadata:r.metadata as Prisma.InputJsonValue,updatedBy:r.requester_id,...(r.protected_result===null?{}:{protected:r.protected_result})}});
+    // before === null only for a protected create (the sole STORE staged with secret_id null), whose row is born protected.
     const protectedAfter = r.protected_result ?? before?.protected ?? true;
     const protectionChanged = (before?.protected ?? false) !== protectedAfter;
     const protectionOnly = !r.write_version && protectionChanged && before !== null && isDeepStrictEqual(r.metadata, before.metadata);
