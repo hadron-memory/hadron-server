@@ -159,7 +159,8 @@
   "hadron_whoami",
   "hadron_withdraw_question",
   "hadron_worker_availability_set",
-  "hadron_worker_wake_settings"
+  "hadron_worker_wake_settings",
+  "hadron_retire_spec"
  ],
  "userWithApp": [
   "hadron_ack_wakes",
@@ -321,7 +322,8 @@
   "hadron_whoami",
   "hadron_withdraw_question",
   "hadron_worker_availability_set",
-  "hadron_worker_wake_settings"
+  "hadron_worker_wake_settings",
+  "hadron_retire_spec"
  ],
  "appKeyOnly": [
   "hadron_ack_wakes",
@@ -479,7 +481,8 @@
   "hadron_whoami",
   "hadron_withdraw_question",
   "hadron_worker_availability_set",
-  "hadron_worker_wake_settings"
+  "hadron_worker_wake_settings",
+  "hadron_retire_spec"
  ],
  "impersonation": [
   "hadron_ack_wakes",
@@ -637,6 +640,7 @@
   "hadron_whoami",
   "hadron_withdraw_question",
   "hadron_worker_availability_set",
-  "hadron_worker_wake_settings"
+  "hadron_worker_wake_settings",
+  "hadron_retire_spec"
  ]
 }

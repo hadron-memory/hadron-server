@@ -2,7 +2,7 @@
  * #4471 BLIND P2-1 — the 503 asserted through REAL Apollo, not the mapping in isolation.
  *
  * The unit tests in formatError.test.ts prove the mapping restores the typed code; this pin
- * builds the server exactly as server.ts does (expressMiddleware from @apollo/server/express4,
+ * builds the server exactly as server.ts does (expressMiddleware from @as-integrations/express4,
  * `formatError: formatGraphQLError`) and throws the typed fault from the CONTEXT BUILDER — the
  * middleware's real surface, where Apollo would otherwise wrap it as an untyped
  * INTERNAL_SERVER_ERROR over a context-failure 500. What must reach the wire: HTTP 503 (the
@@ -18,7 +18,7 @@ import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { ApolloServer } from '@apollo/server';
-import { expressMiddleware } from '@apollo/server/express4';
+import { expressMiddleware } from '@as-integrations/express4';
 import { Prisma } from '../../generated/prisma/index.js';
 import {
   AUTH_STORE_BUSY_MESSAGE,
