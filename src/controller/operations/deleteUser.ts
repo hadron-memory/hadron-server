@@ -9,7 +9,7 @@ import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
 import { softDeleteOrganizationCore } from './softDeleteOrganization.js';
 import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } from '../../lib/auth/revokeOrgInvitations.js';
 import { AuthoritySnapshotStale, lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
-import { retryOnSerializationFailure } from '../../lib/serializableRetry.js';
+import { retryOnDeadlock, retryOnSerializationFailure } from '../../lib/serializableRetry.js';
 import { assertNoMintedCorpusCascade } from '../../lib/mintedSpecPermanence.js';
 import { endHeldGrants } from '../../lib/grants/departure.js';
 import {
@@ -127,19 +127,27 @@ export async function deleteUserAccount(
   db: PrismaClient,
   { targetUserId, actorUserId, reason }: DeleteUserAccountArgs,
 ): Promise<void> {
-  // One immutable op id per call, minted OUTSIDE the retry so a serialization retry reuses it.
+  // One immutable op id per call, minted OUTSIDE both retries so a serialization or deadlock retry reuses it.
   const auditId = generateId();
   // Resolve org domains before opening the SERIALIZABLE transaction so every
   // authority anchor precedes its row locks. A fresh cross-connection check
   // after the anchors retries with the complete set if membership changed.
   // The shared retry includes jitter for both P2034 and stale snapshots.
-  const { toolConnections, assetKeys } = await retryOnSerializationFailure(async () => {
+  //
+  // #4690 (#3851's finding): two concurrent erasures of people whose grants are crossed deadlock in the grant writes
+  // (the issuer and requester UPDATEs and endHeldGrants all lock grant rows), and Postgres aborts one with 40P01. A
+  // deadlock aborts the WHOLE transaction and nothing here has an effect outside the database before commit, so the
+  // attempt is re-run: retryOnDeadlock wraps the scope read and the transaction, so every attempt re-reads the
+  // membership scope, takes its locks again and re-judges under them (a target the winner already erased refuses
+  // "User not found", never erases twice). It is nested inside the serialization retry, so isSerializationFailure is
+  // not widened for any other caller (#4318).
+  const { toolConnections, assetKeys } = await retryOnSerializationFailure(() => retryOnDeadlock(async () => {
     const membershipScope = (await db.orgMember.findMany({
       where: { userId: targetUserId, deletedAt: null },
       select: { organizationId: true },
     })).map((m) => m.organizationId).sort();
     return runDeletionTxn(db, targetUserId, actorUserId, membershipScope, reason === undefined ? null : { auditId, reason });
-  });
+  }));
   // Provider-sidecar teardown AFTER the commit: the tools hold their own
   // copy of the OAuth credential + change subscriptions, so deleting the
   // core ExchangeConnection rows alone would leave those live. Outside

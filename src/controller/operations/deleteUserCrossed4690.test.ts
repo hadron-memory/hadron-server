@@ -128,8 +128,11 @@ describe('#4690 crossed erasures deadlock: the aborted erasure is re-run, not su
     expect(raw ? { code: raw.e.code, sqlstate: (raw.e.meta as { code?: string } | undefined)?.code } : null).toBeNull();
     expect(ra).toEqual({ ok: true });
     expect(rb).toEqual({ ok: true });
-    // Exactly one of the two was aborted by the deadlock detector and opened a second transaction.
-    expect([ca.counter.transactions, cb.counter.transactions].sort()).toEqual([1, 2]);
+    // One of the two ran once; the deadlock victim re-ran its transaction (a serialization retry may follow it, since it
+    // re-reads what the winner just committed under SERIALIZABLE).
+    const attempts = [ca.counter.transactions, cb.counter.transactions].sort((x, y) => x - y);
+    expect(attempts[0]).toBe(1);
+    expect(attempts[1]).toBeGreaterThanOrEqual(2);
     const users = await db.user.findMany({ where: { id: { in: [A.id, B.id] } }, select: { deletedAt: true } });
     expect(users.every((u) => u.deletedAt !== null)).toBe(true);
     const after = await grantState([G1, G2]);
@@ -150,7 +153,7 @@ describe('#4690 crossed erasures deadlock: the aborted erasure is re-run, not su
       () => deleteUserAccount(cb.db, { targetUserId: B.id, actorUserId: B.id }), G1, G2);
     expect(ra).toEqual({ ok: true });
     expect(rb).toEqual({ ok: true });
-    expect(ca.counter.transactions + cb.counter.transactions).toBe(3);
+    expect(ca.counter.transactions + cb.counter.transactions).toBeGreaterThanOrEqual(3);
     expect(await db.userDeletionAudit.count({ where: { targetUserId: A.id } })).toBe(1);
   });
 
