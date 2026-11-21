@@ -17,7 +17,7 @@ import { mountHealthRoutes, type ReadinessSource, type StartupState } from './he
 
 const repo = new URL('../../', import.meta.url);
 const servers: Server[] = [];
-afterEach(() => { for (const s of servers.splice(0)) s.close(); });
+afterEach(async () => { await Promise.all(servers.splice(0).map(s => new Promise<void>(resolve => s.close(() => resolve())))); });
 
 async function serve(readiness: ReadinessSource): Promise<number> {
   const app = express();
@@ -38,8 +38,8 @@ function healthcheckProgram(port: number): string {
   expect(m[1]).toContain('http://127.0.0.1:4100/ready');
   return m[1].replace('http://127.0.0.1:4100/', `http://127.0.0.1:${port}/`);
 }
-const exitOf = (program: string) => new Promise<number | null>(resolve => {
-  spawn(process.execPath, ['-e', program], { stdio: 'ignore' }).on('close', resolve);
+const exitOf = (program: string) => new Promise<number | null>((resolve, reject) => {
+  spawn(process.execPath, ['-e', program], { stdio: 'ignore' }).on('error', reject).on('close', resolve);
 });
 
 /** The literal stack.sh's check_published requires of the published /ready body. */
