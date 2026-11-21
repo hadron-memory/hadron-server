@@ -37,7 +37,7 @@
 
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { db as defaultDb } from '../integrations/db/client.js';
-import { headObject, isObjectStoreConfigured } from '../integrations/r2/client.js';
+import { headObject, isObjectStoreConfigured } from '../integrations/objectstore/index.js';
 import { logAssetEvent } from '../lib/asset/audit.js';
 import {
   reportAssetBytesMissing,

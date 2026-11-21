@@ -36,7 +36,7 @@
  */
 
 import type { Asset, PrismaClient } from '../../generated/prisma/index.js';
-import { deleteObject, mintGetUrl } from '../../integrations/r2/client.js';
+import { deleteObject, mintGetUrl } from '../../integrations/objectstore/index.js';
 import { scanUrl } from '../scanClient.js';
 import { logAssetEvent } from './audit.js';
 

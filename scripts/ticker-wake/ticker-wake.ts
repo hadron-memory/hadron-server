@@ -396,9 +396,12 @@ function priorReceiverGone(p: Ambiguous, inventory: ReturnType<typeof terminalIn
   const prefix = `${p.handle}#`;
   const incarnation = p.receiver.startsWith(prefix) ? p.receiver.slice(prefix.length) : '';
   if (!inventory.complete || !p.handle || !incarnation || incarnation.includes('#')) return false;
-  const sameHandle = inventory.terminals.find((t) => t.handle === p.handle) as any;
-  return !sameHandle || (typeof sameHandle.incarnationId === 'string' && sameHandle.incarnationId !== ''
-    && sameHandle.incarnationId !== incarnation && typeof sameHandle.worktreePath === 'string' && sameHandle.worktreePath !== '');
+  // #2362: nothing established by source or owner evidence that an incarnation keeps one handle, so a row under ANY handle that
+  // names it, or whose incarnation is unknown, could be the old one: the receipt stays held. Absence needs every row known and different.
+  const rows = inventory.terminals as any[];
+  if (rows.some((t) => typeof t.incarnationId !== 'string' || t.incarnationId === '' || t.incarnationId === incarnation)) return false;
+  const sameHandle = rows.find((t) => t.handle === p.handle);
+  return !sameHandle || (typeof sameHandle.worktreePath === 'string' && sameHandle.worktreePath !== '');
 }
 
 /**

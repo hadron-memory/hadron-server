@@ -27,7 +27,7 @@ const mintGetUrlMock = vi.hoisted(() =>
   vi.fn().mockResolvedValue('https://bucket/presigned-get'),
 );
 
-vi.mock('../../integrations/r2/client.js', () => ({
+vi.mock('../../integrations/objectstore/index.js', () => ({
   headObject: headObjectMock,
   deleteObject: deleteObjectMock,
   readObjectPrefix: readObjectPrefixMock,

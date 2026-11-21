@@ -463,7 +463,7 @@ describe('#1468 — cascades: App reclaim, account erasure, anonymous expiry', (
     expect(await db.memory.findUnique({ where: { id: owned.id } })).toBeNull();
   });
 
-  it('anonymous-memory expiry never sweeps a stamped corpus', async () => {
+  it('anonymous-memory expiry sweeps an expired memory whether or not it is stamped (#1613, cor:dmo:120:09)', async () => {
     const { cleanupAnonymousMemories } = await import('../../../jobs/cleanupAnonymousMemories.js');
     const a = await agent('anon-host');
     const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Anon', urn: `${org.urn}:anon` } });
@@ -474,11 +474,11 @@ describe('#1468 — cascades: App reclaim, account erasure, anonymous expiry', (
         name: slug, class: 'app', anonymousExpiresAt: expired, corpusMintedAt: stamped ? new Date() : null,
       },
     });
-    const kept = await mk('anon-stamped', true);
-    const swept = await mk('anon-plain', false);
-    await cleanupAnonymousMemories(db);
-    expect(await db.memory.findUnique({ where: { id: kept.id } })).not.toBeNull();
-    expect(await db.memory.findUnique({ where: { id: swept.id } })).toBeNull();
+    const stamped = await mk('anon-stamped', true);
+    const plain = await mk('anon-plain', false);
+    expect(await cleanupAnonymousMemories(db)).toBe(2);
+    expect(await db.memory.findUnique({ where: { id: stamped.id } })).toBeNull();
+    expect(await db.memory.findUnique({ where: { id: plain.id } })).toBeNull();
   });
 });
 

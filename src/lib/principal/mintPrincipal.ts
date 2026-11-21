@@ -63,24 +63,38 @@ export class RootNameTakenError extends Error {
  */
 const ROOT_NAME_RE = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/;
 
-/** True iff `name` (its lower-cased form) is a legal principal root name (#4481). */
-export function isValidRootName(name: string): boolean {
+/**
+ * True iff `name` is a legal principal root name AS STORED (#4481). A pure grammar test: it does NOT lower-case, so
+ * `isValidStoredRootName('Example')` is false. Callers judge the stored form; the mint and the probe lower-case
+ * first (#4516 F4).
+ */
+export function isValidStoredRootName(name: string): boolean {
   return name.length <= MAX_ATOM_LEN && ROOT_NAME_RE.test(name);
 }
 
+/** The #4415 rule in words, its bound derived from `MAX_ATOM_LEN` so the text cannot drift from the lib (#4516 F7). */
+export const ROOT_NAME_RULE_TEXT =
+  `a root name is 1–${MAX_ATOM_LEN} lower-case ASCII letters, digits, ".", "_" or "-", ` +
+  'beginning and ending with a letter or digit.';
+
+/** The longest refused name echoed back in a message; the rest is elided (#4516 F7). */
+const MAX_ECHOED_NAME_LEN = 80;
+
+/** A refused name as it may appear in a message: bounded, then quoted and escaped. */
+export function echoRootName(name: string): string {
+  const shown = name.length > MAX_ECHOED_NAME_LEN ? `${name.slice(0, MAX_ECHOED_NAME_LEN)}…` : name;
+  return JSON.stringify(shown);
+}
+
 /**
- * Thrown when a root name is outside the #4415 rule (see `isValidRootName`) —
+ * Thrown when a root name is outside the #4415 rule (see `isValidStoredRootName`) —
  * DISTINCT from {@link RootNameTakenError}: an illegal name is refused however
  * free it is, and a legal one is refused however taken. The GraphQL boundary
  * maps it to the `ROOT_NAME_INVALID` typed refusal.
  */
 export class RootNameInvalidError extends Error {
   constructor(public readonly rootName: string, options?: { cause?: unknown }) {
-    super(
-      `Root name "${rootName}" is not a legal root name: a root name is 1–64 ` +
-        `lower-case ASCII letters, digits, ".", "_" or "-", beginning and ending with a letter or digit.`,
-      options,
-    );
+    super(`Root name ${echoRootName(rootName)} is not a legal root name: ${ROOT_NAME_RULE_TEXT}`, options);
     this.name = 'RootNameInvalidError';
   }
 }
@@ -143,32 +157,36 @@ function isNameLowerCheckViolation(err: unknown): boolean {
   return false;
 }
 
+/** Why a probe answered as it did: free to mint, outside the #4415 rule, or claimed (reserved word or any row). */
+export type RootAvailability = 'free' | 'invalid' | 'taken';
+
 /**
  * The single availability seam (federation hook, D-2026-07-15-003). Today it
  * consults the local pool; a federated server later swaps this for a call to the
  * global name registry (#701) without touching any callsite. Returns true when
- * `name` (lowercased) is free to mint.
+ * `name` (lowercased) is free to mint, with the reason otherwise (#4516 F5): `'invalid'` for a name the rule
+ * refuses (however free), `'taken'` for a reserved word or a claimed row.
  */
-export async function checkRootAvailable(db: PrincipalDb, name: string): Promise<boolean> {
+export async function checkRootAvailable(db: PrincipalDb, name: string): Promise<RootAvailability> {
   const lower = name.toLowerCase();
   // #4481: a name outside the #4415 rule is not available to mint — the probe
   // and the mint must agree, or an availability check would green-light a mint
   // that then refuses.
-  if (!isValidRootName(lower)) return false;
-  if (RESERVED_ROOT_NAMES.has(lower)) return false;
+  if (!isValidStoredRootName(lower)) return 'invalid';
+  if (RESERVED_ROOT_NAMES.has(lower)) return 'taken';
   // `name` is a plain @unique and always stored lowercased, so this findUnique
   // is index-backed (no seq scan) and spans every status (a tombstone counts).
   const existing = await db.principal.findUnique({
     where: { name: lower },
     select: { id: true },
   });
-  return existing === null;
+  return existing === null ? 'free' : 'taken';
 }
 
 /**
  * Mint a principal for `name` under `kind`, returning the new principal id to
  * wire onto the owning user/org. Throws `RootNameInvalidError` if the name is
- * outside the #4415 root-name rule (see `isValidRootName`) or the database's
+ * outside the #4415 root-name rule (see `isValidStoredRootName`) or the database's
  * `chk_principals_name_lower` refuses it (#4411), and
  * `RootNameTakenError` if it is taken (reserved word, active, or tombstoned) —
  * the DB unique is the atomic backstop even under a concurrent race. Runs
@@ -183,7 +201,7 @@ export async function mintPrincipal(
   // — the pool's own backstop, independent of the callers' validation. Checked
   // after lower-casing so the rule governs the name AS STORED (`Example` is
   // fine; `İ` is not, because its stored form leaves ASCII).
-  if (!isValidRootName(name)) throw new RootNameInvalidError(name);
+  if (!isValidStoredRootName(name)) throw new RootNameInvalidError(name);
   if (RESERVED_ROOT_NAMES.has(name)) throw new RootNameTakenError(name);
   try {
     const principal = await db.principal.create({
@@ -196,7 +214,7 @@ export async function mintPrincipal(
       throw new RootNameTakenError(name);
     }
     // #4411: the database refused the name as not lower case. Unreachable while the writer lower-cases and
-    // `isValidRootName` admits only lower-case ASCII (both above); it is the backstop for a name on which
+    // `isValidStoredRootName` admits only lower-case ASCII (both above); it is the backstop for a name on which
     // JavaScript `toLowerCase()` and Postgres `lower()` disagree, surfaced as the same typed refusal as the rule
     // (one code for one cause, cor:urn:010:01) instead of a raw database error.
     // The database error is kept as `cause`: reaching this line means the writer and the CHECK disagree, a

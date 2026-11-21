@@ -11,7 +11,7 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { mintGetUrl } from '../../integrations/r2/client.js';
+import { mintGetUrl } from '../../integrations/objectstore/index.js';
 import { canReadMemory } from '../../mcp/access-control.js';
 import { logAssetEvent } from '../../lib/asset/audit.js';
 import { decryptStorageKey } from '../../lib/asset/encryption.js';
