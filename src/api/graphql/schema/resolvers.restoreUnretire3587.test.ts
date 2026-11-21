@@ -217,7 +217,7 @@ describe('#3587 concurrency (two real connections)', () => {
     expect((await rowOf('specs:r')).tags).toEqual(['superseded']);
   }, 30_000);
 
-  it('P3 (ancestor): the restore holds the ancestor key first, so a retirement through the loc key waits for it and then proceeds, no deadlock', async () => {
+  it('P3 (ancestor key held first, not a retirement): a bare holder of the ancestor key makes the restore queue, then it proceeds, no deadlock; the B-first retirement is P3b', async () => {
     await mk('specs:p', mintedFields);
     await mk('specs:p:child');
     const rev = await save();
@@ -241,6 +241,33 @@ describe('#3587 concurrency (two real connections)', () => {
     await db.node.updateMany({ where: { memoryId, loc: 'specs:p' }, data: { tags: ['superseded'] } });
   }, 30_000);
 
+  it('P3b (ancestor topology, B-first retirement): B holds key(specs:p) and the row and retires it; the restore waits on the ADVISORY key, then refuses with nothing written (gate D1)', async () => {
+    await mk('specs:p', mintedFields);
+    await mk('specs:p:child');
+    const rev = await save();
+    const revs = await revCount();
+    let release!: () => void;
+    const hold = new Promise<void>((r) => { release = r; });
+    let bPid = 0;
+    const b = db.$transaction(async (tx) => {
+      bPid = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${'specs:p'}))`;
+      await tx.$queryRaw`SELECT id FROM nodes WHERE memory_id = ${memoryId} AND loc = 'specs:p' FOR UPDATE`;
+      await tx.node.updateMany({ where: { memoryId, loc: 'specs:p' }, data: { tags: ['superseded'] } });
+      await hold;
+    }, { timeout: 20_000 });
+    await waitFor(async () => bPid > 0 && (await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_locks WHERE pid = ${bPid}::int AND locktype = 'advisory'`)[0].n > 0n, 'B key');
+    const a = restore(rev).then(() => null, (e: any) => e);
+    await waitFor(async () => (await db.$queryRaw<Array<{ n: bigint }>>`
+      SELECT count(*) AS n FROM pg_locks WHERE NOT granted AND locktype = 'advisory' AND ${bPid}::int = ANY(pg_blocking_pids(pid))`)[0].n > 0n, 'restore to wait on the advisory key');
+    release();
+    await b;
+    const e = await a;
+    expect(e?.extensions?.code).toBe('RESTORE_WOULD_UNRETIRE_SPEC');
+    expect(await revCount()).toBe(revs);
+    expect((await rowOf('specs:p')).tags).toEqual(['superseded']);
+  }, 30_000);
+
   it('P4: two restores and a standalone createRevision on one Agent take distinct slots, none aborts', async () => {
     await mk('specs:q');
     const rev = await save();
@@ -251,4 +278,14 @@ describe('#3587 concurrency (two real connections)', () => {
     expect(slots).toHaveLength(revs + 3);
     expect(new Set(slots.map((s) => s.loc)).size).toBe(revs + 3);
   }, 30_000);
+});
+
+describe('#3587 snapshot-side tag match', () => {
+  it('a snapshot holding only Superseded / superseded-by does not keep the tag, so restoring it over a live retirement is refused', async () => {
+    await mk('specs:s', { ...mintedFields, tags: ['Superseded', 'superseded-by'] });
+    const rev = await save();
+    await db.node.updateMany({ where: { memoryId, loc: 'specs:s' }, data: { tags: ['superseded'] } });
+    const e = await refusal(restore(rev));
+    expect(e?.extensions?.code).toBe('RESTORE_WOULD_UNRETIRE_SPEC');
+  });
 });
