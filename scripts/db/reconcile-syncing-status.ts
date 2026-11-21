@@ -41,8 +41,12 @@ export async function main(argv: readonly string[], io: ReconcileSyncingToolIo):
       ? `${TAG} ok candidates=${r.candidates} reconciled=${r.reconciled} held=${r.held} ineligible=${r.ineligible} uncovered=${r.uncovered}`
       : `${TAG} dry_run candidates=${r.candidates} uncovered=${r.uncovered} (pass --apply to reconcile)`);
     return 0;
-  } catch {
-    io.log(`${TAG}.failed`);
+  } catch (error) {
+    // #4719 BLIND P2-1: name the failure so a failed connect can be told from a failed query, but print only the
+    // error's class and its code (Prisma's Pnnnn, or a SQLSTATE), never its message, which can carry the URL.
+    const name = error instanceof Error ? error.constructor.name : typeof error;
+    const code = (error as { code?: unknown; errorCode?: unknown } | null)?.code ?? (error as { errorCode?: unknown } | null)?.errorCode;
+    io.log(`${TAG}.failed error=${/^\w+$/.test(name) ? name : 'unknown'}${typeof code === 'string' && /^\w+$/.test(code) ? ` code=${code}` : ''}`);
     return 1;
   } finally {
     await db.$disconnect();
@@ -50,5 +54,9 @@ export async function main(argv: readonly string[], io: ReconcileSyncingToolIo):
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  main(process.argv.slice(2), { env: process.env, log: (line) => console.log(line) }).then((code) => process.exit(code));
+  // #4719 BLIND P3-2: exitCode rather than exit(), so buffered output is not cut off; a rejection outside main's own
+  // catch (the log or the disconnect) still ends with exit 1 and a failure line.
+  main(process.argv.slice(2), { env: process.env, log: (line) => console.log(line) })
+    .then((code) => { process.exitCode = code; })
+    .catch(() => { console.log(`${TAG}.failed error=unknown`); process.exitCode = 1; });
 }

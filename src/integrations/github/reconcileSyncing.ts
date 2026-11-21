@@ -26,7 +26,10 @@ export interface ReconcileSyncingResult {
   candidates: number;
   /** Rows set to PENDING (apply only). */
   reconciled: number;
-  /** Candidates skipped because a sync held their run lock (apply only). */
+  /**
+   * Candidates skipped because their run lock was held (apply only): a running sync, or another reconciliation working
+   * the same row at that moment (#4719 BLIND P3-3). Either way the row was not written; re-running is safe.
+   */
   held: number;
   /** Candidates that no longer matched when re-checked under the lock (apply only). */
   ineligible: number;
