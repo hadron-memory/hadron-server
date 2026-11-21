@@ -13,6 +13,7 @@ import { GraphQLError } from 'graphql';
 import { composeGrantUrn } from '../../entityRef/grantRef.js';
 import { listGrantsForRunAgent, type GrantView } from '../../grants/read.js';
 import { isRunPrincipal } from '../../auth/runPrincipal.js';
+import { createGrantForRun } from '../../../api/graphql/schema/resolvers.grantCreate.js';
 import type { RunToolDef } from './types.js';
 
 const DEFAULT_LIMIT = 20;
@@ -64,4 +65,51 @@ export const hadronListGrants: RunToolDef = {
   },
 };
 
-export const GRANT_TOOLS: readonly RunToolDef[] = [hadronListGrants];
+/** Keys that try to name who holds the grant. A run asks for its own agent's grant only, so each is the holder refusal, before any read. */
+const HOLDER_LIKE_KEYS = new Set(['holder', 'holderKind', 'holderRef', 'agent', 'agentId', 'agentRef', 'worker', 'workerId', 'workerRef', 'user', 'userId', 'userRef', 'app', 'appId', 'appRef', 'role', 'roleAgent']);
+const CREATE_KEYS = new Set(['action', 'values', 'reason', 'startsAt', 'expiresAt', 'maxUses']);
+const createCode = (c: string, message: string) => new GraphQLError(message, { extensions: { code: c } });
+
+/**
+ * #3753 (Grants S2c; cor:acl:140:05 S5, rulings 0253 item 4 and 0255 item 21): `hadron_create_grant`, the run tool by which a headless run asks for a
+ * grant held by its OWN agent in its OWN App. The grant is born PENDING and waits for a person to sign it: nothing here activates it, and a run cannot
+ * request a signature. Authority comes from the run row, never from input: the holder and the App are not arguments, and a key naming one is refused
+ * before any read with the holder refusal, so a holder that exists answers exactly like one that does not. The shared create core (src/lib/grants/create.ts)
+ * does the writing; the GraphQL `createGrant` and MCP never reach this arm (a person's call stays the person's, S9). The row records the run
+ * (`requested_by_run_id`), not the person it acts for. Cost 1, gated as `tool.hadron_create_grant`. Registered only where signing is on (resolveRunTools).
+ * Duplicate-pending is Holger's open call (cor:acl:140:01): a run that asks twice makes two pending rows.
+ */
+export const hadronCreateGrant: RunToolDef = {
+  name: 'hadron_create_grant', cost: 1,
+  description: 'Ask for a grant for THIS agent in THIS App. The grant is created PENDING: it allows nothing until a person signs it, and you cannot sign it. ' +
+    'Name the action, its values (exactly the action\'s declared parameters), and a reason that tells the signer why. Optionally give startsAt, expiresAt (ISO date-times) and maxUses. ' +
+    'You cannot name another holder or App. Never put a secret in values or reason. Costs one action.',
+  inputSchema: { type: 'object', additionalProperties: false, required: ['action', 'values', 'reason'], properties: {
+    action: { type: 'string', description: 'A registered grant action, e.g. schedule.create.' },
+    values: { type: 'object', description: 'The action\'s declared parameters, each with a value.' },
+    reason: { type: 'string', description: 'Why the grant is needed, shown to the person who signs.' },
+    startsAt: { type: 'string', description: 'ISO date-time the grant starts.' },
+    expiresAt: { type: 'string', description: 'ISO date-time the grant expires.' },
+    maxUses: { type: 'integer', minimum: 1, description: 'The most times the grant may be used.' },
+  } },
+  execute: async (ctx, args) => {
+    const { run, principal } = ctx;
+    // Before any read: a key that names a holder or App is the holder refusal; any other unknown key is refused too.
+    const keys = Object.keys(args);
+    if (keys.some((k) => HOLDER_LIKE_KEYS.has(k))) throw createCode('GRANT_HOLDER_NOT_ALLOWED', 'A grant can be asked for only for a worker of the App or an agent installed in it (a worker session: only itself or its role agent).');
+    if (keys.some((k) => !CREATE_KEYS.has(k))) throw createCode('GRANT_TERMS_INVALID', 'The grant\'s terms cannot be recorded.');
+    if (typeof args.action !== 'string') throw createCode('GRANT_ACTION_UNKNOWN', 'That action is not registered.');
+    if (typeof args.reason !== 'string') throw createCode('GRANT_TERMS_INVALID', 'The grant\'s terms cannot be recorded.');
+    if (args.maxUses !== undefined && args.maxUses !== null && (typeof args.maxUses !== 'number' || !Number.isSafeInteger(args.maxUses))) throw createCode('GRANT_TERMS_INVALID', 'The grant\'s terms cannot be recorded.');
+    const { id } = await createGrantForRun(principal, run, {
+      action: args.action, values: args.values, reason: args.reason,
+      startsAt: typeof args.startsAt === 'string' ? args.startsAt : null, expiresAt: typeof args.expiresAt === 'string' ? args.expiresAt : null,
+      maxUses: typeof args.maxUses === 'number' ? args.maxUses : null,
+    });
+    // The values are never logged.
+    ctx.log(`requested grant ${id} for ${args.action}`);
+    return { id, status: 'pending', note: 'The grant is pending: it allows nothing until a person signs it.' };
+  },
+};
+
+export const GRANT_TOOLS: readonly RunToolDef[] = [hadronListGrants, hadronCreateGrant];
