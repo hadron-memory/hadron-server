@@ -1763,70 +1763,36 @@ export const nodeQueries = {
       const effectiveMode = mode ?? 'hybrid';
       const lexFields = (fields ?? undefined) as LexicalField[] | undefined;
       const model = isEmbeddingConfigured() ? getEmbeddingClient().model : null;
-      // A selective structured filter can drop many ranked candidates, so over-fetch
-      // from the retrieval layer to keep the page full after post-filtering + offset.
+      // The keyword leg of a hybrid search over-fetches when structured filters are present. #2772 (ruling 0150,
+      // cor:api:090:04): there is NO cap on this, and the vector leg has no candidate window at all: the structured
+      // filters, the memory scope and the caller's exclusions run INSIDE the vector statement (provider `filter`),
+      // so the ranking it returns is the true filtered, access-scoped ranking and any offset is a true page.
       const hasStructuredFilters = !!(
         f.nodeType || nodeTypes || f.objectType || f.isRunnable != null || f.hasOpenThreads != null || f.role != null || f.tags?.length || f.locPrefix || f.childrenOf != null ||
         f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where || f.approvalState || f.minted != null
       );
       const page = off + finalLimit;
-      const VECTOR_FETCH_CAP = 2000;
-      const fetchN = hasStructuredFilters ? Math.min(page * 5, VECTOR_FETCH_CAP) : page;
+      // The keyword leg of a hybrid over-fetches (its filters apply after the ranking window); the VECTOR leg does
+      // not: its filters ride in the ranking statement, so it asks for exactly the page (`runVector` below).
+      // Offset has no ceiling by design (#437: lowering it would silently return an earlier page); the work is
+      // bounded instead by ONE request-wide budget (VECTOR_SEARCH_TIMEOUT_MS, `rankUnderBudget`) and limit <= 200.
+      // The KEYWORD leg keeps main's 2000 ceiling on its over-fetch (ruling 0150 lifted the cap for the vector leg only).
+      const KEYWORD_FETCH_CAP = 2000;
+      const fetchN = hasStructuredFilters ? Math.min(page * 5, KEYWORD_FETCH_CAP) : page;
 
       /**
-       * The ids among `ids` that pass every structured filter and `where`, in
-       * the caller's scope — the same predicate `buildResult` and the chunk
-       * branch apply on hydration.
+       * #2772 — one vector or hybrid-vector search under the work budget (VECTOR_SEARCH_TIMEOUT_MS). The provider
+       * returns the true filtered ranking; when it had to stop early the flag is carried to the envelope
+       * (`degraded: stopped_early`, plus `reason` when the page is empty), never a short page that looks complete.
        */
-      const eligibleIds = async (ids: string[]): Promise<Set<string>> => {
-        let candidates = ids;
-        if (f.where != null) {
-          candidates = await provider.filterWhere({
-            db: ctx.db, ids, memoryIds: scopeIds, where: f.where, includeDeleted: !!f.includeDeleted,
-            tombstoneMemoryIds: recoverableIds,
-          });
-        }
-        const rows = childrenOnly(await ctx.db.node.findMany({
-          where: { id: { in: candidates }, memoryId: { in: scopeIds }, ...structuredWhere },
-          select: { id: true, loc: true },
-        }));
-        return new Set(rows.map((r) => r.id));
-      };
-
-      /**
-       * #1345 review (@codex P2): a vector candidate window is selected WITHOUT
-       * the structured filters (the ANN scan is index-driven), so a fixed
-       * over-fetch could leave the page empty when the matches rank past it —
-       * `limit: 1` returned nothing when the five nearest nodes had other roles.
-       * With filters present, widen the window (x4, to the same cap) until the
-       * filtered, floored hits fill the page, or the provider reports its raw
-       * candidate window exhausted.
-       * Past the cap a page can still be short; it is never wrong.
-       *
-       * #2836 review (Atilla P2): the check runs on EVERY vector search, not
-       * only with explicit filters. Without a nodeType the unqualified-search
-       * default exclusion (system, chat-message) still drops hits at hydration,
-       * and an older chat-message vector can fill an unfiltered window. The
-       * first window keeps its size (`fetchN`); it widens only when short.
-       */
-      const widenVectorWindow = async <T extends { nodeId: string; score: number }>(
-        search: (limit: number, onWindow: (w: { exhausted: boolean }) => void) => Promise<T[]>,
-      ): Promise<T[]> => {
-        let limit = fetchN;
-        for (;;) {
-          // Exhaustion comes from the PROVIDER's raw window, never from the
-          // result size: node search dedupes chunk vectors to nodes, so a short
-          // or unchanged hit count can be duplicates with more of the index
-          // unread (@codex + @copilot, #1345 rounds 3-4). Unreported ⇒ not
-          // exhausted, so an unknown provider widens to the cap.
-          let exhausted = false;
-          const hits = await search(limit, (w) => { exhausted = w.exhausted; });
-          if (limit >= VECTOR_FETCH_CAP || exhausted) return hits;
-          const floored = scoreFloor == null ? hits : hits.filter((h) => h.score >= scoreFloor);
-          const ok = await eligibleIds([...new Set(floored.map((h) => h.nodeId))]);
-          if (floored.filter((h) => ok.has(h.nodeId)).length >= page) return hits;
-          limit = Math.min(limit * 4, VECTOR_FETCH_CAP);
-        }
+      let vectorStoppedEarly = false;
+      const runVector = async <T extends { nodeId: string; score: number }>(
+        search: (limit: number, onWindow: (w: { exhausted: boolean; stoppedEarly?: boolean }) => void) => Promise<T[]>,
+      ): Promise<T[]> => search(page, (w) => { if (w.stoppedEarly) vectorStoppedEarly = true; });
+      /** The envelope's (reason, degraded) for a vector-ranked result that may have stopped early. */
+      const stoppedEnvelope = (hitCount: number, degraded: string | null, builtReason: string | null = null): { reason: string | null; degraded: string | null } => {
+        if (!vectorStoppedEarly) return { reason: builtReason, degraded };
+        return { reason: hitCount === 0 ? 'stopped_early' : builtReason, degraded: [degraded, 'stopped_early'].filter(Boolean).join(',') };
       };
 
       // Hydrate a ranked (nodeId, score) list into hits: enforce the structured
@@ -1872,15 +1838,18 @@ export const nodeQueries = {
         // JSONB), mirroring the SQL ORDER BY the browse/lexical paths use; missing
         // values sort last, loc breaks ties. Like the enum sort here, it orders
         // only the retrieved candidates — not the whole corpus.
+        // #2772 (gate ruling, option B): `offset`/`limit` are taken by RELEVANCE, and a property or
+        // non-relevance `sort` orders only that page. With no fixed window there is no "window" to sort.
         const propComparator = sortProperty ? makePropertySortComparator(sortProperty) : null;
-        const ordered = rows.slice().sort((a, b) => {
+        const byRank = rows.slice().sort((a, b) => (rankOrder.get(a.id) ?? 0) - (rankOrder.get(b.id) ?? 0));
+        const pageByRank = byRank.slice(off, off + finalLimit);
+        const pageRows = pageByRank.sort((a, b) => {
           if (propComparator) return propComparator(a, b);
           if (sort === 'loc') return a.loc.localeCompare(b.loc);
           if (sort === 'seq') return (a.seq ?? 0) - (b.seq ?? 0);
           if (sort === 'updatedAt') return b.updatedAt.getTime() - a.updatedAt.getTime();
           return (rankOrder.get(a.id) ?? 0) - (rankOrder.get(b.id) ?? 0); // relevance (default)
         });
-        const pageRows = ordered.slice(off, off + finalLimit);
         const hits = pageRows.map((n) => ({
           node: n,
           score: scoreById.get(n.id) ?? null,
@@ -2122,8 +2091,8 @@ export const nodeQueries = {
         // #497 — apply the minScore floor to the scored passages too (PR-569
         // review, Codex): filter before paging so a floor drops sub-threshold
         // chunks rather than silently returning them.
-        const rawChunks = await widenVectorWindow((limit, onWindow) =>
-          provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow, contentScope, hasOpenThreads: f.hasOpenThreads, syntheticCommentMemoryIds }),
+        const rawChunks = await runVector((limit, onWindow) =>
+          provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow, contentScope, hasOpenThreads: f.hasOpenThreads, syntheticCommentMemoryIds, filter: sqlFilter, includeDeleted: !!f.includeDeleted, excludeNodeIds: inheritance.excludeNodeIds }),
         );
         const scoredChunks = scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor);
         const candidateParentIds = [...new Set(scoredChunks.map((c) => c.nodeId))];
@@ -2197,16 +2166,19 @@ export const nodeQueries = {
               score: c.score,
             };
           });
-        return { hits: [], passages, total: null, reason: null, degraded: null };
+        const chunkEnv = stoppedEnvelope(passages.length, null);
+        return { hits: [], passages, total: null, reason: chunkEnv.reason, degraded: chunkEnv.degraded };
       }
 
-      const vecHits = await widenVectorWindow((limit, onWindow) =>
-        provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow, contentScope, hasOpenThreads: f.hasOpenThreads, syntheticCommentMemoryIds }),
+      const vecHits = await runVector((limit, onWindow) =>
+        provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow, contentScope, hasOpenThreads: f.hasOpenThreads, syntheticCommentMemoryIds, filter: sqlFilter, includeDeleted: !!f.includeDeleted, excludeNodeIds: inheritance.excludeNodeIds }),
       );
 
       if (effectiveMode === 'vector') {
         const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
-        return await buildResult(vecHits.map((h) => ({ nodeId: h.nodeId, score: h.score })), simById, null, null);
+        const built = await buildResult(vecHits.map((h) => ({ nodeId: h.nodeId, score: h.score })), simById, null, null);
+        const env = stoppedEnvelope(built.hits.length, built.degraded, built.reason);
+        return { ...built, reason: env.reason, degraded: env.degraded };
       }
 
       // hybrid — fuse keyword + vector by RRF (keyword already relevance-ranked by FTS).
@@ -2218,12 +2190,14 @@ export const nodeQueries = {
       const kwRanked = await runKeywordRanked();
       const fused = composeHybridRanking(kwRanked, vecHits, Math.max(fetchN, vecHits.length));
       const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
-      return await buildResult(
+      const builtHybrid = await buildResult(
         fused.map((r) => ({ nodeId: r.nodeId, score: r.score })),
         simById,
         null,
         mergeDegraded(null),
       );
+      const hybridEnv = stoppedEnvelope(builtHybrid.hits.length, builtHybrid.degraded, builtHybrid.reason);
+      return { ...builtHybrid, reason: hybridEnv.reason, degraded: hybridEnv.degraded };
       };
 
       // ── Spec 049 Phase 3 — a scope named in the call (D-2026-09-13-002) ──

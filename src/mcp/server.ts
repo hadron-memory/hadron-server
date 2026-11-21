@@ -4936,6 +4936,12 @@ export function createMcpServerInstance(
           `${scopePrefix}Note: this memory has no vector index — enable it on the memory to use mode:vector. [no_vector_index]\n\nFound 0 node(s).`,
         );
       }
+      if (result.reason === 'stopped_early') {
+        // #2772 (cor:api:090:04): the vector work budget ended the search before it found a page; never a silent empty.
+        return textResult(
+          `${scopePrefix}Note: the search stopped early (the vector work budget ran out, or the offset+limit window passed 20000 rows, before a page was found); narrow the filters or lower the offset. [stopped_early]\n\nFound 0 node(s).`,
+        );
+      }
       if (result.reason === 'embedding_unavailable') {
         // findNodes collapses "no endpoint configured" and "embed() failed" into
         // one code, so the note names both causes (the pre-delegation surface
@@ -4949,6 +4955,11 @@ export function createMcpServerInstance(
       // comparing the whole string.
       const degradedFlags = new Set((result.degraded ?? '').split(',').filter(Boolean));
       const noteLines: string[] = [];
+      if (degradedFlags.has('stopped_early')) {
+        noteLines.push(
+          'Note: the search stopped early (the vector work budget ran out, or the offset+limit window was cut at 20000 rows), so this page may be shorter than the true page. [degraded:stopped_early]',
+        );
+      }
       if (degradedFlags.has('no_vector_index')) {
         noteLines.push(
           'Note: vector half unavailable (no vector index); showing keyword results only. [degraded:no_vector_index]',
