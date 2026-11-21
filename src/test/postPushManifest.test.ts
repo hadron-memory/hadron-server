@@ -807,3 +807,76 @@ describe('#434 slice B: the generator enforces full-row freshness (spawn)', () =
     }
   });
 });
+
+describe('#4704: a catalog-resolved DROP creates no object; every CREATE-shaped dynamic string still refuses', () => {
+  const run = (payloads: string) => classify({ sql: 'DO $do$ … $do$;', payloads });
+  const refuses = (payloads: string) => run(payloads).filter((c) => 'unrecognized' in c);
+  const wrap = (stmt: string) => `BEGIN ${stmt} END`;
+
+  it('classifies the accepted DROP shapes as non-objects', () => {
+    for (const stmt of [
+      "EXECUTE format('DROP SEQUENCE %s', owned_seq::regclass);",
+      "EXECUTE format('DROP SEQUENCE IF EXISTS %s', owned_seq::regclass);",
+      "EXECUTE format('DROP INDEX %s', idx::regclass);",
+      "EXECUTE format('DROP INDEX IF EXISTS %s', pg_get_serial_sequence('t', 'id')::regclass);",
+      "EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', rel::regclass, cname);",
+      "EXECUTE format('ALTER TABLE %s DROP CONSTRAINT IF EXISTS %I', rel::regclass, cname);",
+      "EXECUTE\n  format('DROP SEQUENCE %s',\n    owned_seq::regclass)\n;",
+    ]) {
+      expect(run(wrap(stmt)), stmt).toEqual([]);
+    }
+  });
+
+  it('still refuses every CREATE-shaped dynamic string', () => {
+    for (const stmt of [
+      "EXECUTE format('CREATE INDEX %I ON t (c)', n);",
+      "EXECUTE format('CREATE SEQUENCE %s', s::regclass);",
+      "EXECUTE format('ALTER TABLE %s ADD CONSTRAINT %I CHECK (c > 0)', rel::regclass, n);",
+      "EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I; CREATE INDEX i ON t (c)', rel::regclass, n);",
+      "EXECUTE format('DROP SEQUENCE %s; CREATE INDEX i ON t (c)', s::regclass);",
+    ]) {
+      expect(refuses(wrap(stmt)).length, stmt).toBeGreaterThan(0);
+    }
+  });
+
+  it('refuses a %s that is not a regclass value, since %s pastes its argument unquoted', () => {
+    for (const stmt of [
+      "EXECUTE format('DROP SEQUENCE %s', 'x; CREATE INDEX i ON t (c)');",
+      "EXECUTE format('DROP SEQUENCE %s', seq_name);",
+      "EXECUTE format('DROP SEQUENCE %s', a || b::regclass);",
+      "EXECUTE format('DROP SEQUENCE %s', f(a) || g(b)::regclass);",
+      "EXECUTE format('DROP SEQUENCE %s', (SELECT n FROM t)::regclass);",
+      "EXECUTE format('DROP SEQUENCE %s', 'public.s'::regclass);", // a literal cast is safe but stays outside the narrow shape: teach it if needed
+      "EXECUTE format('DROP SEQUENCE %s', s::regclass::text || ';');",
+      "EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', rel_text, cname);",
+    ]) {
+      expect(refuses(wrap(stmt)).length, stmt).toBeGreaterThan(0);
+    }
+  });
+
+  it('refuses a shape outside the closed list, or one with anything around the call', () => {
+    for (const stmt of [
+      "EXECUTE format('DROP TABLE %s', t::regclass);",
+      "EXECUTE format('DROP FUNCTION %s', f::regclass);",
+      "EXECUTE format('DROP SEQUENCE %s CASCADE', s::regclass);",
+      "EXECUTE format('DROP SEQUENCE %s', s::regclass, extra);",
+      "EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', rel::regclass);",
+      "EXECUTE format('DROP SEQUENCE %s', s::regclass) USING 1;",
+      "EXECUTE format('DROP SEQUENCE %s', s::regclass) || ' ; CREATE INDEX i ON t (c)';",
+      "EXECUTE 'x ' || format('DROP SEQUENCE %s', s::regclass);",
+      "EXECUTE format(E'DROP SEQUENCE %s', s::regclass);",
+      "EXECUTE format('DROP SEQUENCE ' || '%s', s::regclass);",
+    ]) {
+      expect(refuses(wrap(stmt)).length, stmt).toBeGreaterThan(0);
+    }
+  });
+
+  it('one refused call refuses the block even beside an accepted one', () => {
+    expect(refuses(wrap("EXECUTE format('DROP SEQUENCE %s', s::regclass); EXECUTE format('CREATE INDEX %I ON t (c)', n);"))).toHaveLength(1);
+  });
+
+  it('does not count a commented-out DROP or let one mask a live CREATE', () => {
+    expect(run(wrap("-- EXECUTE format('DROP SEQUENCE %s', s::regclass);\n PERFORM 1;"))).toEqual([]);
+    expect(refuses(wrap("/* EXECUTE format('DROP SEQUENCE %s', s::regclass); */ EXECUTE format('CREATE INDEX %I ON t (c)', n);"))).toHaveLength(1);
+  });
+});

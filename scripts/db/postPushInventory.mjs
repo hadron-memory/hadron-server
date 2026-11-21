@@ -587,6 +587,44 @@ function balancedClose(text, openAt) {
   return -1;
 }
 
+/**
+ * #4704: the ONE dynamic-DDL shape a DO block may run, because it can create no object: a DROP whose target is
+ * resolved from the catalog at run time. Exactly `EXECUTE format('<template>', <args>);` with a plain single-quoted
+ * template (no E-string, no concatenation, no USING) from this closed list:
+ *   DROP SEQUENCE|INDEX [IF EXISTS] %s                    one arg, `<name or call>::regclass`
+ *   ALTER TABLE %s DROP CONSTRAINT [IF EXISTS] %I         arg 1 `<name or call>::regclass`, arg 2 any (%I quotes it)
+ * `%s` pastes its argument unquoted, so it is only allowed an argument that IS a regclass value: a bare (qualified)
+ * name or one function call, cast to regclass, whose text is its schema-qualified, quoted name and cannot carry a
+ * second statement. A `%s` fed anything else (a literal, a concatenation, a text variable) stays unrecognized, as does
+ * every other template, so no CREATE can hide here. Returns the length of the matched span, or 0 when it is not this
+ * shape (the caller leaves the EXECUTE standing and the block refuses).
+ */
+function matchCatalogDrop(text, m) {
+  const openAt = m.index + m[0].length - 1;
+  const closeAt = balancedClose(text, openAt); // the index OF the matching `)`
+  if (closeAt === -1) return 0;
+  const tail = text.slice(closeAt + 1).match(/^\s*;/);
+  if (!tail) return 0;
+  const inside = text.slice(openAt + 1, closeAt);
+  const parts = splitTopLevel(inside).map((x) => x.trim());
+  const tmpl = parts[0]?.match(/^'((?:[^']|'')*)'$/s);
+  if (!tmpl) return 0;
+  const template = tmpl[1].replace(/\s+/g, ' ').trim();
+  const args = parts.slice(1);
+  const REGCLASS_ARG = /^[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)*\s*(?:\(.*\))?\s*::\s*regclass$/s;
+  const isRegclass = (a) => {
+    if (!REGCLASS_ARG.test(a)) return false;
+    const call = a.indexOf('(');
+    if (call === -1) return true;
+    return balancedClose(a, call) === a.search(/\)\s*::\s*regclass$/); // the call's own parens end right before the cast
+  };
+  let ok = false;
+  if (/^DROP (?:SEQUENCE|INDEX) (?:IF EXISTS )?%s$/i.test(template)) ok = args.length === 1 && isRegclass(args[0]);
+  else if (/^ALTER TABLE %s DROP CONSTRAINT (?:IF EXISTS )?%I$/i.test(template)) ok = args.length === 2 && isRegclass(args[0]) && args[1] !== '';
+  if (!ok) return 0; // %I quotes its argument and %s only takes a regclass value, so no argument text can reach the statement as SQL
+  return closeAt + 1 + tail[0].length - m.index;
+}
+
 /** Cut a trailing `-- comment` off a psql meta-command line (outside quoted arguments). */
 function stripMetaComment(raw) {
   let inS = false;
@@ -769,6 +807,14 @@ export function classify(stmt) {
       if (glued || /(^|;)\s*DO\b/i.test(inner)) out.push({ unrecognized: sql });
       else out.push(...classify({ sql: inner }));
       remainder = remainder.replace(m[0], ' ');
+    }
+    // #4704: a catalog-resolved DROP creates no object, so it classifies as [] and leaves the remainder. It is matched
+    // on the comment-stripped body so a commented-out one cannot count, and it is cut out of the remainder only when
+    // matchCatalogDrop accepted the WHOLE call: anything else (a CREATE template, a `%s` with a literal, USING, a
+    // trailing concatenation) stays standing and the check below refuses the block.
+    for (const m of body.matchAll(/\bEXECUTE\s+format\s*\(/gi)) {
+      const span = matchCatalogDrop(body, m);
+      if (span > 0) remainder = remainder.replace(body.slice(m.index, m.index + span), ' ');
     }
     // Any EXECUTE still standing in the remainder after both extraction
     // loops is a shape the extractor cannot capture — format(…), a variable,
