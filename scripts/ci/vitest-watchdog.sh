@@ -36,13 +36,29 @@
 # each; the stop-and-scan loop ends one test "minute" (60 s in CI) after it starts, with at most one more scan (12 s),
 # and the KILL is always sent; verification polls for at most 15 s more, each poll bounded. About 2.5 minutes.
 #
-# THE LIMITS: a descendant that both leaves the command's group (its own setsid) and is reparented away before any scan
-# sees it is outside both handles and outside the survivor check, so it can outlive a "killed" line; vitest and its
-# workers never leave the group, and only a cgroup boundary would close this (#4647 BLIND delta, accepted). And this
-# fires only if the VM is still scheduling processes at the budget. If the next loss is the VM
+# THE KILL NEVER WIDENS (the gate's condition, Peter's ruling on #4647, team chat #128652). Only two handles are ever
+# signalled: the command's own process group (its number cannot be reused while any member is alive) and PIDs found by
+# walking ppid down from the command. A walked PID gets the KILL only if it is still stopped at that moment, so a PID
+# that died after its STOP and was reused by an outside process (which this watchdog never stopped) is left alone.
+#
+# ACCEPTED RESIDUALS (same ruling). Each one fails toward "no kill", never toward signalling an outside PID; the step's
+# 45-minute timeout is the backstop, and the line printed says the kill was not verified wherever the watchdog can see
+# it:
+#   1. a descendant that both leaves the group (its own setsid) and is reparented away before any scan sees it is in
+#      neither handle: it is not signalled and can outlive a "killed" line. Only a cgroup would close this; vitest and
+#      its workers never leave the group.
+#   2. awk, sort or comm failing after ps succeeded: the walk yields fewer PIDs (at worst the command alone), never a
+#      PID the table did not show as a descendant, so fewer processes are stopped and killed.
+#   3. a stall inside a scan after the table is read: the KILL waits for that scan (only ps is bounded inside it); the
+#      group is already stopped, so nothing in it runs meanwhile.
+#   4. the step's own preflight before the watchdog starts (nproc): unbounded, but it signals nothing.
+#
+# AND THE VM: this fires only if the VM is still scheduling processes at the budget. If the next loss is the VM
 # freezing outright, no dump appears, and that absence is itself the finding for #4278.
 #
 # WATCHDOG_SECONDS_PER_MINUTE (default 60) exists only for the tests, so a "minute" can be one second; CI never sets it.
+# WATCHDOG_UPTIME_FILE (default /proc/uptime) also exists only for the tests, to make the clock unreadable; CI never
+# sets it.
 set -u
 
 refuse() { echo "[watchdog] $1; refusing" >&2; exit 2; }
@@ -58,8 +74,12 @@ started=${WATCHDOG_STEP_STARTED_AT-}
 (( minutes < step )) || refuse "$budget_msg"
 [[ "$unit" =~ ^[1-9][0-9]{0,3}$ ]] || refuse "WATCHDOG_SECONDS_PER_MINUTE must be a positive integer of at most four digits (tests only)"
 # Whole seconds since boot: monotonic, and the same clock the step read at its entry.
-now_s() { local up _rest; read -r up _rest < /proc/uptime || return 1; echo "${up%.*}"; }
-now=$(now_s) || { echo "[watchdog] cannot read /proc/uptime; refusing" >&2; exit 2; }
+clock=${WATCHDOG_UPTIME_FILE:-/proc/uptime}
+now_s() {
+  local up _rest; read -r up _rest < "$clock" 2>/dev/null || return 1
+  up=${up%.*}; [[ "$up" =~ ^[0-9]{1,12}$ ]] || return 1; echo "$(( 10#$up ))"
+}
+now=$(now_s) || { echo "[watchdog] cannot read the clock ($clock); refusing" >&2; exit 2; }
 if [ -n "${WATCHDOG_STEP_STARTED_AT+set}" ]; then
   # Twelve digits at most, and not in the future: a start the clock has not reached yet would lengthen the budget.
   [[ "$started" =~ ^[0-9]{1,12}$ ]] && (( 10#$started <= now )) \
@@ -99,9 +119,11 @@ scan_failed=""
 end_command() {
   kill -STOP -- "-$cmd" 2>/dev/null
   # One "minute" (60 s in CI), and never under 5 s: the clock has whole seconds and a test "minute" is one.
-  local new cur stop_by=$(( $(now_s) + (unit < 5 ? 5 : unit) ))
+  # A clock that cannot be read ends the loop at once; the KILL below still goes out (#4647 BLIND delta 3).
+  local new cur t stop_by=0
+  t=$(now_s) && stop_by=$(( t + (unit < 5 ? 5 : unit) ))
   for _ in $(seq 50); do
-    (( $(now_s) < stop_by )) || break
+    t=$(now_s) && (( t < stop_by )) || break
     cur=$(tree "$cmd") || { scan_failed=1; break; }
     new=$(comm -13 <(sort -u <<< "$pids") <(sort -u <<< "$cur"))
     [ -n "$new" ] || break
@@ -110,8 +132,16 @@ end_command() {
     pids=$(printf '%s\n%s\n' "$pids" "$new" | awk 'NF' | sort -u)
   done
   kill -KILL -- "-$cmd" 2>/dev/null
+  # Only walked PIDs that are still stopped: one that is not was either resumed by someone else or is no longer the
+  # process this watchdog stopped (a reused PID). Leaving it fails toward "no kill", and verification reports it.
+  local p line state still=""
+  for p in $pids; do
+    line=$(< "/proc/$p/stat") 2>/dev/null || continue
+    state=${line##*) }; state=${state%% *}   # after the LAST ")": the command name may contain one
+    [[ "$state" == [Tt] ]] && still="$still $p"
+  done
   # shellcheck disable=SC2086
-  kill -KILL $pids 2>/dev/null
+  [ -n "$still" ] && kill -KILL $still 2>/dev/null
 }
 
 # What is still running (not a zombie) in the command's group or among the PIDs it signalled, one PID per line. Fails
@@ -125,28 +155,39 @@ setsid "$@" &
 cmd=$!
 trap 'end_command; exit 143' TERM INT
 while kill -0 "$cmd" 2>/dev/null; do
-  if (( $(now_s) >= deadline )); then
-    echo "[watchdog] budget of ${minutes} min reached; process tree before the kill:"
+  # A clock read that fails after launch is not "the budget is not reached yet": the watchdog says so and ends the
+  # command the same way, so it can never stop watching silently (#4647 BLIND delta 3).
+  lost_clock=""
+  t=$(now_s) || lost_clock=1
+  if [ -n "$lost_clock" ] || (( t >= deadline )); then
+    if [ -n "$lost_clock" ]; then
+      why="watchdog lost its clock"; echo "[watchdog] cannot read the clock ($clock); process tree before the kill:"
+    else
+      why="vitest exceeded ${minutes} min"; echo "[watchdog] budget of ${minutes} min reached; process tree before the kill:"
+    fi
     bounded ps -eo pid,ppid,pgid,rss,etime,comm
     echo "[sampler] $(date -u +%FT%TZ) (final, from the watchdog)"
     bounded free -m; bounded df -h /; bounded ps -eo rss,comm --sort=-rss | head -5
     end_command
     # No wait on the command: a process stuck in the kernel would hold it. A zombie counts as ended, so the check
     # needs no reaping; it polls, bounded, until nothing it signalled is running or the table cannot be read.
-    left="" verified="" verify_by=$(( $(now_s) + 15 ))
+    left="" verified="" verify_by=0 polls=0
+    t=$(now_s) && verify_by=$(( t + 15 ))
     while :; do
       if left=$(survivors); then [ -z "$left" ] && { verified=1; break; }; else left=""; fi
-      (( $(now_s) < verify_by )) || break
+      # 15 s by the clock, or 30 polls when the clock cannot be read.
+      polls=$(( polls + 1 )); (( polls < 30 )) || break
+      if t=$(now_s); then (( t < verify_by )) || break; fi
       sleep 0.5
     done
     if [ -n "$scan_failed" ]; then
-      echo "[watchdog] vitest exceeded ${minutes} min; kill NOT verified, a process scan failed"
+      echo "[watchdog] ${why}; kill NOT verified, a process scan failed"
     elif [ -n "$verified" ]; then
-      echo "[watchdog] vitest exceeded ${minutes} min; killed"
+      echo "[watchdog] ${why}; killed"
     elif [ -n "$left" ]; then
-      echo "[watchdog] vitest exceeded ${minutes} min; kill NOT verified, still running: $(tr '\n' ' ' <<< "$left")"
+      echo "[watchdog] ${why}; kill NOT verified, still running: $(tr '\n' ' ' <<< "$left")"
     else
-      echo "[watchdog] vitest exceeded ${minutes} min; kill NOT verified, the process table could not be read"
+      echo "[watchdog] ${why}; kill NOT verified, the process table could not be read"
     fi
     exit 124
   fi

@@ -170,7 +170,7 @@ jobs:
         # timeout-minutes below; vitest-watchdog.test.mjs pins that, and that the budget is under it. The budget
         # counts from the step's first lines (WATCHDOG_STEP_STARTED_AT, whole seconds since boot: the monotonic clock
         # the watchdog reads too; a failed read fails the step), so the sampler setup and the psql probe come out of
-        # it, and the probe is bounded to 2 min so it cannot hold the watchdog back (#4647 BLIND P2).
+        # it, and the probe is bounded to 2 min (KILL 10 s after its TERM) so it cannot hold the watchdog back (#4647 BLIND P2).
         timeout-minutes: 45
         env:
           HADRON_TEST_MAX_WORKERS: '3'
@@ -190,7 +190,7 @@ jobs:
           ) &
           sampler=$!
           trap 'kill "$sampler" 2>/dev/null || true' EXIT
-          timeout 120 psql "$DATABASE_URL" -Atc "SELECT 'cluster: ' || version()"
+          timeout -k 10 120 psql "$DATABASE_URL" -Atc "SELECT 'cluster: ' || version()"
           scripts/ci/vitest-watchdog.sh -- pnpm test --shard=${{ matrix.shard }}/${{ env.SHARD_TOTAL }}
 
       # #4487: the pg16 floor lane also runs the file holding #4476's version-dependent pins, whichever shard owns it:
