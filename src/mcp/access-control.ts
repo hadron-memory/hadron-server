@@ -502,8 +502,6 @@ export async function getPrincipalAppMemoryAccess(
   // authority through App membership. Compute the same independent-user
   // ceiling once, including when an unselected user folds several Apps.
   // #3326: per call and per memory, so overlapping candidates across several Apps are judged once and nothing
-  // (an unselected user folding N Apps with DISTINCT items now runs the four narrow queries per batch, where the
-  // complete set ran them once for all; each batch is bounded by its candidates, which is the trade this issue asks for)
   // outlives this request: the next one reads the user's authority afresh (cor:acl:020:01).
   const independentLevels = new Map<string, Promise<string | null>>();
   const loadItemUserAccess: ItemUserAccessLoader | undefined = principal.userId

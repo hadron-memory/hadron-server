@@ -135,17 +135,45 @@ describe('#3326 several Apps: per-memory reuse never confuses one memory\'s leve
     const pub = await db.memory.create({ data: { urn: `${f.other.urn}:item-public`, name: 'public item', class: 'knowledge', organizationId: f.other.id, visibility: 'PUBLIC' } });
     const system2 = await db.memory.create({ data: { urn: `${f.org.urn}:system2`, name: 'system2', class: 'system', organizationId: f.org.id } });
     const agent2 = await db.agent.create({ data: { urn: `${f.org.urn}:agent2`, name: 'agent2', organizationId: f.org.id, systemMemoryId: system2.id } });
-    // The unreachable item is listed FIRST (items are created in this order), so a store that keyed every candidate by the
-    // batch's first answer would drop the reachable one; App 2's Agent overlaps App 1 on the reachable item and adds one more.
+    // The PUBLIC item (the user's own level: READ_ONLY) is listed FIRST in both Agents, and the org item (READ_WRITE) after it,
+    // so a store that gave every candidate the batch's first answer would NARROW the writable memory to READ_ONLY: a false
+    // refusal for a caller who may write it. The unreachable item rides along in App 1 and must stay absent.
     await db.agentMemoryItem.deleteMany({ where: { agentId: f.agent.id } });
-    for (const m of [f.unreachable, f.reachable, pub]) await db.agentMemoryItem.create({ data: { agentId: f.agent.id, memoryId: m.id, role: 'read-write' } });
-    for (const m of [f.reachable, pub]) await db.agentMemoryItem.create({ data: { agentId: agent2.id, memoryId: m.id, role: 'read-write' } });
+    for (const m of [pub, f.reachable, f.unreachable]) await db.agentMemoryItem.create({ data: { agentId: f.agent.id, memoryId: m.id, role: 'read-write' } });
+    for (const m of [pub, f.reachable]) await db.agentMemoryItem.create({ data: { agentId: agent2.id, memoryId: m.id, role: 'read-write' } });
     const { app: app2 } = await createDbAppWithKey(db, 'second', f.org.id);
     await db.appAgent.create({ data: { appId: app2.id, agentId: agent2.id } });
     await db.appMember.create({ data: { appId: app2.id, userId: f.user.id, role: 'member' } });
     const access = await getPrincipalAppMemoryAccess(db, { userId: f.user.id });
-    expect(access.get(f.reachable.id)).toBe('READ_WRITE'); // the contributor writes the org memory
+    expect(access.get(f.reachable.id)).toBe('READ_WRITE'); // the contributor writes the org memory: its own level, not the first memory's
     expect(access.get(pub.id)).toBe('READ_ONLY'); // PUBLIC without a subscription is only read, even under a read-write item
     expect(access.has(f.unreachable.id)).toBe(false);
   });
+
+  it('two memories with different independent levels never take each other\'s level, in either order', async () => {
+    // The user only READS the Agent's own org (reader) but WRITES a second org (contributor) whose memory the Agent's org is
+    // subscribed to at CONTRIBUTOR, so BOTH items are capped at READ_WRITE by the tenant and only the user's own level
+    // tells them apart: m1 READ_ONLY, m2 READ_WRITE. A store that gave every candidate the batch's first answer would narrow
+    // m2 or widen m1, whichever the database lists first.
+    await db.orgMember.updateMany({ where: { userId: f.user.id, organizationId: f.org.id }, data: { role: 'READER' } });
+    const org2 = await db.organization.create({ data: { name: 'Second3326', urn: `second-${generateId().toLowerCase()}.example` } });
+    await db.orgMember.create({ data: { userId: f.user.id, organizationId: org2.id, role: 'CONTRIBUTOR' } });
+    const m2 = await db.memory.create({ data: { urn: `${org2.urn}:item-m2`, name: 'm2', class: 'knowledge', organizationId: org2.id, visibility: 'ORGANIZATION' } });
+    await db.memorySubscription.create({ data: { organizationId: f.org.id, memoryId: m2.id, role: 'CONTRIBUTOR' } });
+    const system2 = await db.memory.create({ data: { urn: `${f.org.urn}:system2b`, name: 'system2b', class: 'system', organizationId: f.org.id } });
+    const agent2 = await db.agent.create({ data: { urn: `${f.org.urn}:agent2b`, name: 'agent2b', organizationId: f.org.id, systemMemoryId: system2.id } });
+    await db.agentMemoryItem.deleteMany({ where: { agentId: f.agent.id } });
+    for (const m of [f.reachable, m2]) await db.agentMemoryItem.create({ data: { agentId: f.agent.id, memoryId: m.id, role: 'read-write' } });
+    for (const m of [m2, f.reachable]) await db.agentMemoryItem.create({ data: { agentId: agent2.id, memoryId: m.id, role: 'read-write' } });
+    const { app: app2 } = await createDbAppWithKey(db, 'second-b', f.org.id);
+    await db.appAgent.create({ data: { appId: app2.id, agentId: agent2.id } });
+    await db.appMember.create({ data: { appId: app2.id, userId: f.user.id, role: 'member' } });
+    const independent = await independentUserItemAccess(db, f.user.id, [f.reachable.id, m2.id]);
+    expect(independent.get(f.reachable.id)).toBe('READ_ONLY');
+    expect(independent.get(m2.id)).toBe('READ_WRITE');
+    const access = await getPrincipalAppMemoryAccess(db, { userId: f.user.id });
+    expect(access.get(f.reachable.id)).toBe('READ_ONLY');
+    expect(access.get(m2.id)).toBe('READ_WRITE');
+  });
 });
+
