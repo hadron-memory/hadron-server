@@ -59,17 +59,14 @@ describe('#4085 the retired names survive nowhere else (string-level residue, wh
     'untrackedTaskItems',
     'claimUntrackedTaskItems',
     'UntrackedTaskItem',
-    'TASK_INTEGRATION_INVALID',
-    'TASK_INTEGRATION_NOT_FOUND',
-    'TASK_INTEGRATION_REPOSITORY_NOT_CONNECTED',
-    'TASK_INTEGRATION_TEAM_UNKNOWN',
+    'TASK_INTEGRATION_',
   ];
   const walk = (dir: string, out: string[] = []): string[] => {
     for (const e of readdirSync(dir)) {
       if (e === 'node_modules' || e === 'generated' || e === '.git' || e === 'migrations') continue;
       const f = join(dir, e);
       if (statSync(f).isDirectory()) walk(f, out);
-      else if (/\.(ts|tsx|mjs|js|json|sql|md|graphql|sh)$/.test(e)) out.push(f);
+      else if (/\.(ts|tsx|mjs|js|json|sql|graphql|sh|prisma|ya?ml)$/.test(e)) out.push(f);
     }
     return out;
   };
@@ -87,9 +84,4 @@ describe('#4085 the retired names survive nowhere else (string-level residue, wh
     expect(hits).toEqual([]);
   });
 });
-
-// Coverage that outlives the deleted untrackedTaskClaims3132.test.ts (#4085):
-//  - an App key is refused on every task-domain mutation (cor:agt:050:23): resolvers.agentTaskAppKey1755.test.ts,
-//    'every task-domain write is refused for a key', which walks every agent-task mutation by name;
-//  - a second create with a live externalId is TASK_EXTERNAL_ID_TAKEN (cor:agt:120:02):
-//    resolvers.agentTaskExternalId3125.test.ts and resolvers.agentTaskExternalIdActive4217.test.ts.
+// The key-refusal and externalId invariants that the deleted test also pinned run in taskInvariantsKept4085.test.ts.
