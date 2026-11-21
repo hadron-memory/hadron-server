@@ -1,12 +1,13 @@
 // Object-store client wrapper (AWS S3 SDK against any S3-compatible
-// API). Asset bytes live here.
+// API) — the `s3` provider implementation under the provider-neutral
+// `objectstore/` scaffold (#905). Asset bytes live here.
 //
 // **Provider: Hetzner Object Storage** (Holger's call, 2026-08-06) —
 // the same provider the hourly Postgres backups already use, so assets
-// do not introduce a second storage vendor. The module and directory
-// are still named `r2` for the Cloudflare R2 deployment this was first
-// written for; the CODE is provider-neutral and the name is the only
-// R2-specific thing left. MinIO covers local dev.
+// do not introduce a second storage vendor. The code serves any
+// S3-compatible API; MinIO covers local dev. Call sites import the
+// scaffold (`objectstore/index.js`), never this module — CI enforces
+// that boundary.
 //
 // Configuration is `ASSET_STORAGE_*` — named for what the bucket HOLDS
 // rather than who provides it, so moving providers needs no rename:

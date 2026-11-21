@@ -861,6 +861,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- db push leaves (pinned by src/test/migrations/uniqueConstraints4333.test.ts and scripts/db/migration-replay.ts).
 \ir unique-constraint-invariants.sql
 
+-- #4335 (#434 Slice C): the two indexes migration 20260519180903_baseline_init builds partial, which db push builds full
+-- (pinned by src/test/migrations/partialIndexes4335.test.ts and scripts/db/migration-replay.ts).
+\ir partial-index-invariants.sql
+
 -- #1885: an Agent extends at most one base Agent; no cycles, at most 4 in a
 -- chain. One source, shared verbatim with migration 20261014120000_agent_base
 -- (pinned by src/api/graphql/schema/resolvers.agentBase1885.test.ts).

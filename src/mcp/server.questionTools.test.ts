@@ -152,6 +152,16 @@ describe('#4430 amend: null clears the fields the resolver clears (Baloo note)',
     for (const k of ['background', 'whyNow', 'neededBy', 'defaultAction', 'assignee']) expect(() => s.toolParamSchema('hadron_amend_question', k).parse(null)).not.toThrow();
     for (const k of ['title', 'priority', 'options']) expect(() => s.toolParamSchema('hadron_amend_question', k).parse(null)).toThrow();
   });
+
+  it('a non-null title amended through MCP is the stored title on the next read (Beckett P2 on #4644)', async () => {
+    const { text, urn } = await workerAsks({ ...ASK, background: 'Kept context' });
+    const amended = await asWorker(() => mcp(holder.id).callToolText('hadron_amend_question', { ref: urn, expectedRevision: revOf(text), reason: 'reword', title: 'Ship it now?' }));
+    expect(code(amended), amended).toBe('NO_ERROR');
+    const stored = (await dataOf(urn)).data;
+    expect(stored.title).toBe('Ship it now?');
+    expect(stored.title).not.toBe(ASK.title);
+    expect(stored.background).toBe('Kept context'); // an omitted field is untouched
+  });
 });
 
 describe('#4430 refusals keep the resolver\'s code and write nothing', () => {
