@@ -104,12 +104,15 @@ describe('#4749 what stays as built', () => {
     const e = await error(resolvers.Mutation.updateSecret({}, { ref: secretId, protected: false }, ctx()));
     expect(e.extensions).toMatchObject({ code: 'SECRET_PROTECTED_NEEDS_PASSKEY', requestId: expect.any(String) });
     expect(await db.secretChangeRequest.count()).toBe(1);
+    // and it still carries the change it asks for: clearing protection (a request that dropped it would clear nothing)
+    expect((await db.secretChangeRequest.findFirstOrThrow()).protectedResult).toBe(false);
   });
 
   it('protected: true on an unprotected secret still stages (it asks for a real change)', async () => {
     const e = await error(resolvers.Mutation.updateSecret({}, { ref: secretId, protected: true }, ctx()));
     expect(e.extensions).toMatchObject({ code: 'SECRET_PROTECTED_NEEDS_PASSKEY', requestId: expect.any(String) });
     expect(await db.secretChangeRequest.count()).toBe(1);
+    expect((await db.secretChangeRequest.findFirstOrThrow()).protectedResult).toBe(true);
   });
 
   it('an update with no protected flag on an unprotected secret is ordinary, as before', async () => {
