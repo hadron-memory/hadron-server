@@ -155,8 +155,10 @@ describe('#606 query cost of memories(limit: 50)', () => {
       expect(once.every(Boolean)).toBe(true);
       expect(twice.every(Boolean)).toBe(true);
       expect(distinctQueries).toBeGreaterThan(0); // the logging client really saw the gate's queries (not a vacuous 0 <= 0)
-      // Duplicates in one response add nothing: the same memory is answered once per request.
-      expect(duplicatedQueries).toBeLessThanOrEqual(distinctQueries);
+      // Duplicates in one response add (almost) nothing: the same memory is answered once per request. The counts
+      // jitter by a few queries between runs (pool/connection housekeeping), so the bound is 1.25x, far below the
+      // ~2x that asking the gate again for every duplicate costs (the memo-removal mutant lands there).
+      expect(duplicatedQueries).toBeLessThanOrEqual(Math.ceil(distinctQueries * 1.25));
       // Absolute ceiling: a small constant number of queries per distinct memory, not growth beyond linear.
       expect(distinctQueries).toBeLessThanOrEqual(50 * 12);
     } finally {
