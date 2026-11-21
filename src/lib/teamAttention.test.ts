@@ -2,6 +2,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 /** #1353 — loss-safe compact attention, worker-owned reads and switchover. */
 
 import { buildSchema, parse, validate } from 'graphql';
+import { readFileSync } from 'node:fs';
 import { typeDefs } from '../api/graphql/schema/typeDefs.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
@@ -527,7 +528,12 @@ describe('worker session reads and mark-read (resolver level; was the MCP parity
     expect(await db.worker.findUnique({ where: { id: worker.id }, select: { heldByUserId: true } })).toEqual({ heldByUserId: user.id });
     await post('unread');
     const args = { appRef: app.id, sessionRef: sessionId, channelRef: channel.id, seq: 1 };
-    const impersonation = { orgId: org.id, actorUserId: otherUser.id, sessionId: generateId(), expiresAt: new Date(Date.now() + 60_000) };
+    const impersonationSessionId = '00000000000000000000000000004507';
+    const impersonation = { orgId: org.id, actorUserId: otherUser.id, sessionId: impersonationSessionId, expiresAt: new Date(Date.now() + 60_000) };
+    // Pin the specific resolvePilotApp guard as well as the observable refusal below.
+    const source = readFileSync(new URL('./teamAttention.ts', import.meta.url), 'utf8');
+    const pilotGuard = source.slice(source.indexOf('async function resolvePilotApp('), source.indexOf('let id:', source.indexOf('async function resolvePilotApp(')));
+    expect(pilotGuard).toMatch(/if\s*\(\s*!ctx\.userId\s*\|\|\s*ctx\.impersonation\s*\)\s*fail\([^\n]*'FORBIDDEN'/);
     await expect(M.markOwnTeamChatRead({}, args, userCtx({ impersonation })))
       .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
