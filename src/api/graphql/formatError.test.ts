@@ -209,10 +209,11 @@ describe('isExpectedClientError — mapped and silenced are DIFFERENT questions'
     ['NOT_FOUND', new AssetUploadError('NOT_FOUND', 'x')],
     ['MALWARE_BLOCKED', new AssetUploadError('MALWARE_BLOCKED', 'x')],
     ['ASSET_BYTES_GONE', new AssetUploadError('ASSET_BYTES_GONE', 'x')],
-  ])('AssetUploadError %s is mapped for the wire AND silenced in Sentry (#1140)', (code, err) => {
+  ])('AssetUploadError %s is mapped for the wire AND classified as an expected client error, which src/server.ts skips in Sentry (#1140)', (code, err) => {
     // The wire half: the #918 fix, unchanged; the code still reaches the caller.
     expect(format(err as Error).extensions?.code).toBe(code);
-    // The Sentry half: nothing is sent; the discovery-side alarm (#1140 slice B) reports a missing object instead.
+    // The Sentry half: the plugin in src/server.ts skips exactly the errors isExpectedClientError accepts, so nothing is sent;
+    // the discovery-side alarm reports a missing object instead (sweepAssetBytes.test.ts, restoreAsset.test.ts).
     expect(isExpectedClientError(err)).toBe(true);
   });
 
