@@ -250,19 +250,20 @@ export async function lockAppInstallations(
     WHERE parent_agent_id=ANY(${rowIds}::text[])
       AND (${agentIds === undefined} OR imported_agent_id=ANY(${targets}::text[]))
     ORDER BY parent_agent_id,imported_agent_id FOR SHARE`;
-  // #4715: a DEPARTURE judge (agentInstallDeparture, the lapse sweep) fences the agents it names, FOR NO KEY UPDATE, in this same
-  // statement and place (apps, app_agents, agent_imports, then agents; no new order). createGrant and the insert guard hold the
+  // #4715: a DEPARTURE judge (agentInstallDeparture, the lapse sweep) fences the agents it names, FOR NO KEY UPDATE, at the place
+  // the agents are locked (apps, app_agents, agent_imports, then agents; no new order). createGrant and the insert guard hold the
   // agent row FOR SHARE, so a create whose guarded insert is uncommitted makes the judge wait and then see its grant, and a
   // create that comes after waits and reads the install gone. The named agents are locked even with no witness left (an
-  // uninstalled agent has no app_agents row, so the witness-derived set below would not contain it). One statement for the whole
-  // set: never SHARE then NO KEY UPDATE on the same row, which two judges could deadlock on.
-  const fence = opts.fenceAgents && agentIds ? agentIds : [];
+  // uninstalled agent has no app_agents row, so the witness-derived set would not contain it). Only the NAMED agents are
+  // strengthened: the witnesses (a parent, an imported agent) stay FOR SHARE, so two judges over the same parents do not
+  // conflict on them. The named set goes first and is never locked SHARE before NO KEY UPDATE (two judges would deadlock on the upgrade).
+  const fence = opts.fenceAgents && agentIds ? [...new Set(agentIds)].sort() : [];
   const ids = [
-    ...new Set([...rowIds, ...edges.map((edge) => edge.imported_agent_id), ...fence]),
-  ].sort();
-  if (!ids.length) return [];
-  if (fence.length) await tx.$queryRaw`SELECT id FROM agents WHERE id = ANY(${ids}) ORDER BY id FOR NO KEY UPDATE`;
-  else await tx.$queryRaw`SELECT id FROM agents WHERE id = ANY(${ids}) ORDER BY id FOR SHARE`;
+    ...new Set([...rowIds, ...edges.map((edge) => edge.imported_agent_id)]),
+  ].filter((id) => !fence.includes(id)).sort();
+  if (!ids.length && !fence.length) return [];
+  if (fence.length) await tx.$queryRaw`SELECT id FROM agents WHERE id = ANY(${fence}) ORDER BY id FOR NO KEY UPDATE`;
+  if (ids.length) await tx.$queryRaw`SELECT id FROM agents WHERE id = ANY(${ids}) ORDER BY id FOR SHARE`;
   // No witness introduced after the fences can contribute to the decision.
   // Re-read only these exact held rows/edges after all waits and lifecycle locks.
   const installs = await listUnfilteredAppInstallations(tx, appId, undefined, {
