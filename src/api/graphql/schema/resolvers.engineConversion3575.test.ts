@@ -330,7 +330,7 @@ describe('#4724 pins for the conversion edge cases #4710 deferred', () => {
       await db.node.create({ data: { id: generateId(), memoryId, loc: `fresh:${fresh++}`, name: 'fresh', nodeType: 'record', content: 'PLAIN', data: {} } });
     }, args => !args.cursor);
     try {
-      const err = await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey: keyText(generateDataKey()) }, { ...ctx, db: churning } as Context).catch(e => e);
+      const err = await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey: keyText(generateDataKey()) }, { ...ctx, db: churning } as Context).catch((e: any) => e);
       expect(fresh).toBe(5);
       expect(err.extensions).toMatchObject({ code: 'ENCRYPTION_INCOMPLETE', phase: 'CHAT_ENGINE_STATE', blockedEngineStateCount: null, blockedEngineStateRootIds: [blocked[0]!.id], progressCommitted: true });
     } finally { error.mockRestore(); }
@@ -357,7 +357,7 @@ describe('#4724 pins for the conversion edge cases #4710 deferred', () => {
     const churning = withPassHook('nodeRevision', async () => {
       await db.nodeRevision.create({ data: { nodeId: anyNode!.id, memoryId, loc: anyNode!.loc, name: 'x', content: 'PLAIN-HISTORY', revNo: revNo++ } });
     }, args => !args.where?.id);
-    const err = await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey: keyText(key) }, { ...ctx, db: churning } as Context).catch(e => e);
+    const err = await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey: keyText(key) }, { ...ctx, db: churning } as Context).catch((e: any) => e);
     expect(err.extensions).toEqual({ code: 'ENCRYPTION_INCOMPLETE', memoryId });
     expect(revNo).toBe(20_005);
   });
