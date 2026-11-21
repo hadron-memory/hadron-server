@@ -162,7 +162,7 @@ it.each(['foreign', 'encrypted', 'own'] as const)('does not let effective inheri
   expect(JSON.stringify(out)).not.toContain('base-must-not-escape');
 });
 
-it.each(['encrypted', 'foreign', 'deleted', 'moved'] as const)('suppresses a hit whose %s fence changes after the engine read', async kind => {
+it.each(['encrypted', 'foreign', 'deleted', 'moved', 'node-deleted'] as const)('suppresses a hit whose %s fence changes after the engine read', async kind => {
   const c = await context(true);
   const target = await db.node.findFirstOrThrow({ where: { memoryId: memories.attached.id } });
   const original = Q.findNodes;
@@ -170,6 +170,7 @@ it.each(['encrypted', 'foreign', 'deleted', 'moved'] as const)('suppresses a hit
     const found = await original(...args);
     expect(found.hits.map((h: any) => h.node.id)).toContain(target.id);
     if (kind === 'moved') await db.node.update({ where: { id: target.id }, data: { memoryId: memories.subscribed.id } });
+    else if (kind === 'node-deleted') await db.node.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
     else await db.memory.update({ where: { id: memories.attached.id }, data: kind === 'encrypted' ? { isEncrypted: true }
       : kind === 'foreign' ? { organizationId: otherOrgId } : { deletedAt: new Date() } });
     return found;
@@ -197,7 +198,7 @@ it.each([[25, 1], [225, 1], [25, 15], [225, 15]])('returns requested child match
   const child = await db.memory.create({ data: { id: generateId(), urn: 'search632-a.example:crowd-child', name: 'child', class: 'system', organizationId: orgId } });
   const parent = await db.agent.create({ data: { id: generateId(), urn: 'search632-b.example:crowd-agent', name: 'base agent', organizationId: otherOrgId, visibility: 'PUBLIC', systemMemoryId: base.id } });
   await db.agent.update({ where: { id: agentId }, data: { extendsAgentId: parent.id, systemMemoryId: child.id } });
-  const locals = [];
+  const locals: Array<{ id: string; loc: string }> = [];
   for (let i = 0; i < childCount; i++) locals.push(await node(child.id, `weak-child-${i}`, { name: 'weak child', content: 'crowd632', description: null, abstract: null }));
   for (let i = 0; i < baseCount; i++) await node(base.id, `strong-${i}`, { name: 'crowd632 '.repeat(20), content: 'crowd632 '.repeat(100), description: null, abstract: null });
   const c = await context(false);
