@@ -14,8 +14,7 @@
  * into restricted-scope verification (#581/#583). Never merge the two.
  */
 import { getProjectBaseUrl } from '../../lib/baseUrl.js';
-
-const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
+import { buildGoogleAuthUrl } from '../googleAuthUrl.js';
 
 const SCOPES = [
   'openid',
@@ -48,23 +47,10 @@ export function getGmailRedirectUri(): string {
 }
 
 /**
- * Build the URL to redirect the user to Google consent. The optional account hint (#2948, ruling
- * 0155) becomes Google's `login_hint` — appended LAST so a hint-less URL is byte-identical to the
- * pre-#2948 one. A hint only: the callback still records the account Google authenticated.
+ * Build the URL to redirect the user to Google consent: this provider's client id, redirect URI and scopes through the shared
+ * builder (#4684), which appends the optional account hint (#2948, ruling 0155) as `login_hint`, LAST. A hint only: the callback
+ * still records the account Google authenticated.
  */
 export function buildGmailAuthUrl(state: string, loginHint?: string): string {
-  const params = new URLSearchParams({
-    client_id: getClientId(),
-    response_type: 'code',
-    redirect_uri: getGmailRedirectUri(),
-    scope: SCOPES.join(' '),
-    state,
-    // Both are load-bearing: without offline+consent Google returns NO
-    // refresh token and the tool's /connections call fails with a typed
-    // validation_error.
-    access_type: 'offline',
-    prompt: 'consent',
-  });
-  if (loginHint !== undefined) params.set('login_hint', loginHint);
-  return `${AUTH_ENDPOINT}?${params.toString()}`;
+  return buildGoogleAuthUrl({ clientId: getClientId(), redirectUri: getGmailRedirectUri(), scopes: SCOPES, state, loginHint });
 }
