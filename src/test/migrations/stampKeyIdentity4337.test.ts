@@ -91,6 +91,23 @@ describe('#4337 the conversion block in prisma/stamp-key-identity-invariants.sql
     });
   }, 60_000);
 
+  it('continues above the old sequence\'s high-water mark, never reusing an issued id (#4691 BLIND F1 at 566cd50d)', async () => {
+    // Ids 1-5 were issued; 4 and 5 were deleted, so max(id) is 3 but the sequence already handed out 5.
+    await withPushBuiltTable(`INSERT INTO stamp_signing_keys (key_material) VALUES ('a'), ('b'), ('c'), ('d'), ('e');
+      DELETE FROM stamp_signing_keys WHERE id > 3`, async (pg) => {
+      await pg.query(IDENTITY_SQL);
+      expect((await pg.query(`INSERT INTO stamp_signing_keys (key_material) VALUES ('f') RETURNING id`)).rows[0].id).toBe(6);
+    });
+  }, 60_000);
+
+  it('continues above an explicit id higher than the sequence ever issued', async () => {
+    await withPushBuiltTable(`INSERT INTO stamp_signing_keys (key_material) VALUES ('a');
+      INSERT INTO stamp_signing_keys (id, key_material) VALUES (50, 'x')`, async (pg) => {
+      await pg.query(IDENTITY_SQL);
+      expect((await pg.query(`INSERT INTO stamp_signing_keys (key_material) VALUES ('b') RETURNING id`)).rows[0].id).toBe(51);
+    });
+  }, 60_000);
+
   it('with only zero or negative ids (explicit ones), starts at 1 instead of failing (#4691 LOCAL F1)', async () => {
     await withPushBuiltTable(`INSERT INTO stamp_signing_keys (id, key_material) VALUES (0, 'z'), (-3, 'n')`, async (pg) => {
       await pg.query(IDENTITY_SQL);
