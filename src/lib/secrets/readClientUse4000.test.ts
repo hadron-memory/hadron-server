@@ -264,6 +264,14 @@ describe('transactional secret.use (#4000)', () => {
     expect((await db.appRun.findUniqueOrThrow({ where: { id: runs[5].run.id } })).budgetActions).toBe(1);
     expect(await db.actionTicket.count({ where: { organizationId: orgId, action: 'secret.use', consumedAt: { not: null } } })).toBe(5);
   });
+  it('treats a null action budget as unlimited, as a null token budget is, and still counts the action spent', async () => {
+    await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
+    await db.appRun.update({ where: { id: runCtx.run.id }, data: { budgetActions: null, budgetTokens: null } });
+    await expect(prepare()).resolves.toMatchObject({ auth: { type: 'bearer' } });
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: runCtx.run.id } });
+    expect(after.budgetActions).toBeNull();
+    expect(after.actionsSpent).toBe(1);
+  });
   it('commits exactly one grant use and one matching ticket before returning auth', async () => {
     await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
     await expect(prepare()).resolves.toMatchObject({ auth: { type: 'bearer', token: 'synthetic-canary' } });
@@ -271,6 +279,6 @@ describe('transactional secret.use (#4000)', () => {
     expect(await db.grantEvent.count({ where: { grantId, action: 'USE' } })).toBe(1);
     expect((await db.appRun.findUniqueOrThrow({ where: { id: runCtx.run.id } })).budgetActions).toBe(2);
     expect(await db.actionTicket.count({ where: { organizationId: orgId, action: 'secret.use', consumedByRunId: runCtx.run.id } })).toBe(1);
-    await expect(prepare()).rejects.toBeDefined();
+    await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_SPENT' } });
   });
 });

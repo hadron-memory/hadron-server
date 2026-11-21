@@ -154,6 +154,9 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   // The holder. A worker session: itself or its role agent. A manager (no `me`): any live worker of this App, or an agent installed
   // and licensed in it (#3711, cor:acl:140:05; ruling 0253 item 4). Anything else, and anything outside this App, is the one refusal.
   if (holder.kind === 'worker') {
+    // A use grant is consumed only by a run of its agent or App (readClientReveal prepareSecretUse); a worker holder could never consume it,
+    // so signing one would mint a live read client nothing can read. Refused here, not left to fail at use.
+    if (args.action === 'secret.use') throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
     if (me && holder.id !== me.id) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
     // Carry 1 (#3792, Ralion): the insert guard checks that a worker holder EXISTS, not that it belongs to this App.
     const held = await tx.$queryRaw<WorkerRow[]>`SELECT id, app_id, agent_id, retired_at FROM workers WHERE id = ${holder.id} FOR SHARE`;
@@ -225,6 +228,10 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   for (const p of declared) {
     if (p.type !== 'secret-ref') continue;
     const secretId = (values as Record<string, unknown>)[p.name] as string;
+    // Judge ownership before locking, so a secret of another App is never locked on a requester's say-so.
+    if (action.name === 'secret.use' && !(await tx.secret.findFirst({ where: { id: secretId, ownerType: 'app', ownerId: appId }, select: { id: true } }))) {
+      throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    }
     if (action.name === 'secret.use' && !(await lockSecretRow(tx, secretId))) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
     const secret = await tx.secret.findFirst({ where: { id: secretId, ownerType: 'app', ownerId: appId }, select: { kind: true } });
     if (!secret || (action.name === 'secret.use' ? secret.kind !== 'webfetch-auth' : !isModelReadableKind(secret.kind))) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);

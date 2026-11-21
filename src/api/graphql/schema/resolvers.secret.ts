@@ -544,7 +544,7 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
         const issuance = await requireSecretReadClientIssuer({ ...txCtx, db: tx } as Context, found.id, input.autoDelete);
         const holder = input.holderKind === 'USER'
           ? { kind: 'user' as const, id: input.holderRef || userId }
-          : input.holderKind === 'APP' ? { kind: 'app' as const, id: input.holderRef ?? '' }
+          : input.holderKind === 'APP' ? { kind: 'app' as const, id: input.holderRef || app.id }
           : { kind: input.holderKind === 'AGENT' ? 'agent' as const : 'worker' as const, id: input.holderRef ?? '' };
         if (holder.kind === 'user' && !(await appMember({db:tx, userId:holder.id, roles:[]} as unknown as Context, app.id))) {
           throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A person holder must participate in this App.');

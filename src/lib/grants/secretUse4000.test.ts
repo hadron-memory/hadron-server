@@ -22,7 +22,7 @@ beforeEach(async () => {
 afterAll(async () => { await cleanDb(db); await dropTestActions(); await db.$executeRawUnsafe(`DELETE FROM actions WHERE name IN ('secret.reveal', 'secret.use')`); });
 const values = () => ({ secret: secretId, 'auto-delete': 'keep', 'binding-prefix': 'https://api.example.test/v1', 'binding-header': 'Authorization' });
 const grant = (v: unknown) => db.$transaction((tx) => createPendingGrant(tx, {
-  appId: w.appId, requester: { userId: w.userId, workerId: null, sessionId: null }, holder: { kind: 'worker', id: w.workerId },
+  appId: w.appId, requester: { userId: w.userId, workerId: null, sessionId: null }, holder: { kind: 'app', id: w.appId },
   action: 'secret.use', values: v, reason: 'r', canReadMemory: async () => true,
 }));
 const refusal = (p: Promise<unknown>) => p.then(() => 'OK', (e) => e instanceof GrantCreateRefusal ? e.code : String(e));
@@ -65,6 +65,19 @@ describe('secret.use grant terms (#4000)', () => {
     expect(row).toMatchObject({ granteeAppId: w.appId, action: 'secret.use', activatedAt: null });
     await expect(resolvers.Mutation.createGrant({}, { input: { ...input, values: { ...values(), 'auto-delete': 'delete' } } }, ctx))
       .rejects.toMatchObject({ extensions: { code: 'SECRET_AUTO_DELETE_NOT_AVAILABLE' } });
+  });
+  it('refuses a worker holder: a use grant nothing could consume is never created', async () => {
+    const workerGrant = () => db.$transaction((tx) => createPendingGrant(tx, {
+      appId: w.appId, requester: { userId: w.userId, workerId: null, sessionId: null }, holder: { kind: 'worker', id: w.workerId },
+      action: 'secret.use', values: values(), reason: 'r', canReadMemory: async () => true,
+    }));
+    expect(await refusal(workerGrant())).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    expect(await db.grant.count({ where: { action: 'secret.use', workerId: w.workerId } })).toBe(0);
+  });
+  it('refuses another App\'s secret without locking or revealing it', async () => {
+    const other = generateId();
+    await db.$executeRaw`INSERT INTO secrets (id, owner_type, owner_id, name, kind, updated_at) VALUES (${other}, 'app', ${w.app2Id}, 'api', 'webfetch-auth', now())`;
+    expect(await refusal(grant({ ...values(), secret: other }))).toBe('GRANT_VALUES_INVALID');
   });
   it('does not admit a generic secret as an inject client', async () => {
     const generic = generateId();

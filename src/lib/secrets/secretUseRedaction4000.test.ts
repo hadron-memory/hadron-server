@@ -21,6 +21,13 @@ describe('secret.use result redaction', () => {
     expect(out).not.toContain('123456789');
   });
 
+  it('redacts the URL-encoded form in lowercase hex too', () => {
+    const secret = 'tok/en+value=';
+    const lower = encodeURIComponent(secret).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase());
+    expect(lower).not.toBe(encodeURIComponent(secret));
+    expect(JSON.stringify(redactSecretUse({ url: `?t=${lower}` }, { type: 'bearer', token: secret }))).not.toContain(lower);
+  });
+
   it('does not expose a credential that occurs inside the ordinary marker', () => {
     const out = JSON.stringify(redactSecretUse({ body: 'A' }, { type: 'bearer', token: 'A' }));
     expect(out).not.toContain('A');

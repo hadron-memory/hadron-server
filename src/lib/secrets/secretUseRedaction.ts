@@ -11,7 +11,7 @@ export function redactSecretUse(value: unknown, auth: WebFetchAuth): unknown {
     variants.add(JSON.stringify(secret).slice(1, -1));
     variants.add(Buffer.from(secret).toString('base64'));
     variants.add(new URLSearchParams({ v: secret }).toString().slice(2));
-    try { variants.add(encodeURIComponent(secret)); } catch { /* a lone surrogate has no URI encoding */ }
+    try { const enc = encodeURIComponent(secret); variants.add(enc); variants.add(enc.replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase())); } catch { /* a lone surrogate has no URI encoding */ }
   }
   const needles = [...variants].filter(Boolean).sort((a, b) => b.length - a.length);
   // A credential can itself be a substring of the normal marker. Pick a character outside every needle in that case.
