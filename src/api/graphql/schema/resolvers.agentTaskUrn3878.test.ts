@@ -18,6 +18,9 @@ import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
+// The run arm's team-read decision (cor:agt:050:23), made switchable so the pin compares the arm with Query.agentTask.
+const runGrant = vi.hoisted(() => ({ value: false }));
+vi.mock('../../../lib/auth/runTeamRead.js', () => ({ runMayReadTeam: vi.fn(async () => runGrant.value) }));
 
 const M = resolvers.Mutation as any;
 const Q = resolvers.Query as any;
@@ -127,6 +130,21 @@ describe('#3878 resolveUrn agenttask arm', () => {
     expect(await resolve((await urnOf(onY))!, keyCtx(appY, keyY))).toMatchObject({ kind: 'agenttask', id: onY.id });
   });
 
+  it('a headless run in the App answers exactly as Query.agentTask does, granted or not', async () => {
+    const { nested, onY } = await seed();
+    const runCtx: Context = { db, appId: appX.id, organizationId: org.id, clientId: 'run:r1', roles: [] };
+    for (const granted of [true, false]) {
+      runGrant.value = granted;
+      const direct = await Q.agentTask({}, { id: nested.id }, runCtx);
+      const byUrn = await resolve(`hrn:agenttask:${org.urn}:x:at1.1`, runCtx);
+      expect(direct?.id ?? null).toBe(granted ? nested.id : null);
+      expect(byUrn?.id ?? null).toBe(granted ? nested.id : null);
+      expect(await resolve(`hrn:agenttask:${org.urn}:y:at0.1`, runCtx), 'another App').toBeNull();
+    }
+    runGrant.value = false;
+    expect(onY.appId).toBe(appY.id);
+  });
+
   it('a URN through the App\'s rename alias resolves to the same task', async () => {
     const { nested } = await seed();
     const renamed = `renamed-${generateId().slice(0, 8)}.test:old`;
@@ -153,6 +171,16 @@ describe('#3878 resolveUrn agenttask arm', () => {
       [`${good}#data`, as(alice)],                                      // no fragment on a task
     ];
     for (const [urn, c] of nulls) expect(await resolve(urn, c), urn).toBeNull();
+  });
+
+  it('a legacy App whose urn is not the <root>:<slug> pair emits no URN, and no wider-arity spelling resolves its tasks', async () => {
+    const legacy = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'L', urn: `${org.urn}:x:extra` } });
+    await db.appMember.create({ data: { appId: legacy.id, userId: alice.id, role: 'member' } });
+    const t: any = await M.createAgentTask({}, { input: { appRef: legacy.id, title: 'legacy' } }, as(alice));
+    // Positive control: the task is readable to alice by id, so the null below is the arity rule, not the gate.
+    expect((await Q.agentTask({}, { id: t.id }, as(alice)))?.id).toBe(t.id);
+    expect(await urnOf(t)).toBeNull();
+    expect(await resolve(`hrn:agenttask:${org.urn}:x:extra:at0.1`, as(alice))).toBeNull();
   });
 
   it('an outsider gets the same null for a real task and a nonexistent one', async () => {

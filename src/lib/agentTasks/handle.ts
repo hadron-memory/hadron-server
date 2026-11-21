@@ -6,10 +6,13 @@
  *
  * Two spellings, both parsed here and nowhere else:
  *   bare       AT3.405                                (the caller's own App decides which)
- *   qualified  hrn:agenttask:<app-urn>:AT3.405        (<app-urn> is the App's `<root>:<app-slug>`, App.urn)
- * The qualified grammar is proposed to the URN owner in the PR. Anything else is NOT a handle, and falls through to
- * the existing id path (which answers an unknown id).
+ *   qualified  hrn:agenttask:<app-urn>:at3.405        (<app-urn> is the App's `<root>:<app-slug>`, App.urn)
+ * The qualified spelling is the task's URN (cor:urn:010:01): emitted with the handle in lower case (#3878, ruling
+ * 0278), read in either case. Anything else is NOT a handle, and falls through to the existing id path (which answers
+ * an unknown id).
  */
+
+import { composeAgentTaskUrnV2, UrnParseError } from '../urn.js';
 
 /** The largest number a segment can carry: the Postgres bigint ceiling. A longer or larger number is not a handle. */
 const MAX_TASK_NUMBER = 9223372036854775807n;
@@ -51,5 +54,22 @@ export const composeTaskHandle = (parentHandle: string | null, n: bigint | numbe
 /** Segments in a stored handle: 1 for a project. */
 export const handleDepth = (handle: string): number => handle.split('.').length;
 
-/** The qualified spelling: names the App by what its URN carries, so a line that crosses Apps stays unambiguous. */
-export const qualifiedTaskHandle = (appUrn: string, handle: string): string => `hrn:agenttask:${appUrn}:${handle}`;
+/**
+ * #3878 (hrn:node:hadronmemory.com:specs:cor:urn:010:01, the Agent task row; ruling 0278): the task's URN,
+ * `hrn:agenttask:<root>:<app-slug>:<handle>`, COMPUTED from the App's stored bare `<root>:<slug>` urn and the stored
+ * handle (no column), and EMITTED WITH THE HANDLE IN LOWER CASE (`…:at3.405`). Input stays case-insensitive
+ * ({@link parseTaskHandle} upper-cases), and the displayed handle stays `AT3.405`. The App part is emitted as stored:
+ * App references are matched as written (resolveAppRef), so folding it would emit an address that may not resolve.
+ *
+ * The one emission of this URN: `AgentTask.urn`, the MCP task read and every hint that shows the qualified form use it,
+ * so no two spellings disagree. Throws `UrnParseError` when the App urn is not the `<root>:<slug>` pair the fixed
+ * arity needs (composeAgentTaskUrnV2 checks the atoms and the arity), so a caller that conceals turns that into null.
+ */
+export function agentTaskUrn(appUrn: string, handle: string): string {
+  const firstColon = appUrn.indexOf(':');
+  if (firstColon === -1) throw new UrnParseError(appUrn, 'invalid-segment-shape');
+  return composeAgentTaskUrnV2(appUrn.slice(0, firstColon), appUrn.slice(firstColon + 1), handle.toLowerCase());
+}
+
+/** The qualified spelling: names the App by what its URN carries, so a line that crosses Apps stays unambiguous. #3878: it is the task's URN. */
+export const qualifiedTaskHandle = agentTaskUrn;
