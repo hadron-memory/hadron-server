@@ -2561,6 +2561,36 @@ describe('#2275 dead-receiver replacement', () => {
     expect(f.sent).toHaveLength(1); expect(f.acked).toEqual([]);
     expect(stored()['w-ada'].receiver).toBe('term_a#inc-1');
   });
+  // #2362: the producer contract for re-handling an incarnation is not established by source or owner evidence, so a listed row
+  // naming the old incarnation under ANY handle keeps the receipt held; only a complete census of known, different identities proves absence.
+  it('holds when the old incarnation is listed under a different handle (alias)', async () => {
+    const prior = seed();
+    f.extraTerminals = [{ handle: 'term_alias', incarnationId: 'inc-old', worktreePath: dir, connected: false, writable: false }];
+    await go();
+    expect(f.sent).toEqual([]); expect(f.retries).toEqual([]); expect(f.acked).toEqual([]);
+    expect(stored()['w-ada']).toEqual(prior);
+  });
+  it('holds a reused handle when the old incarnation is also listed under another handle', async () => {
+    const prior = seed({ ...old(), handle: 'term_a', receiver: 'term_a#inc-old' });
+    f.extraTerminals = [{ handle: 'term_alias', incarnationId: 'inc-old', worktreePath: dir, connected: true, writable: true }];
+    await go();
+    expect(f.sent).toEqual([]); expect(f.acked).toEqual([]);
+    expect(stored()['w-ada']).toEqual(prior);
+  });
+  it('holds when another handle lists a row whose incarnation is unknown', async () => {
+    const prior = seed();
+    f.extraTerminals = [{ handle: 'term_x', worktreePath: dir, connected: true, writable: true }];
+    await go();
+    expect(f.sent).toEqual([]); expect(f.acked).toEqual([]);
+    expect(stored()['w-ada']).toEqual(prior);
+  });
+  it('still replaces when every other listed row has a known, different incarnation (exact absence)', async () => {
+    seed();
+    f.extraTerminals = [{ handle: 'term_x', incarnationId: 'inc-other', worktreePath: dir, connected: true, writable: true }];
+    await go();
+    expect(f.sent).toHaveLength(1); expect(f.acked).toEqual([]);
+    expect(stored()['w-ada']).toMatchObject({ receiver: 'term_a#inc-1' });
+  });
   for (const kind of ['failed', 'partial', 'unknown-old', 'unknown-current', 'unknown-row'] as const) {
     it(`holds replacement on ${kind} inventory/identity`, async () => {
       const prior = seed();
