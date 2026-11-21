@@ -42,7 +42,7 @@ async function fixture() {
     data: { memoryId: pub.id, loc: 'docs:hub', name: 'hub', nodeType: 'record', content: 'hub body' },
   });
   const inc = await db.node.create({
-    data: { memoryId: pub.id, loc: 'docs:inc', name: 'inc', nodeType: 'record', content: 'before {{> ' + `${orgVisible.urn}:${LOC}` + '}} after' },
+    data: { memoryId: pub.id, loc: 'docs:inc', name: 'inc', content: 'before {{> ' + `hrn:node:${orgVisible.urn}:${LOC}` + '}} after' },
   });
   await db.edge.create({
     data: { id: generateId(), memoryId: pub.id, sourceId: hub.id, targetId: orgVisible.nodeId, loc: 'docs:hub:link:orgvis', name: 'link', priority: 1 },
@@ -63,7 +63,11 @@ async function fixture() {
   const stranger = await db.user.create({ data: { id: generateId(), githubId: 41390, githubUsername: 'stranger4139' } });
   const strangerCtx = { db, roles: ['READER'], userId: stranger.id } as Context;
   const adminCtx = { db, roles: ['ADMIN'], userId: generateId() } as Context;
-  return { orgB, pub, orgVisible, appScoped, hub, inc, sibling, gone, runPrincipal, keyPrincipal, strangerCtx, adminCtx };
+  // A real member of the owning org: reads BOTH the PUBLIC memory and the org-visible one (the positive control).
+  const owner = await db.user.create({ data: { id: generateId(), githubId: 41391, githubUsername: 'owner4139' } });
+  await db.orgMember.create({ data: { id: generateId(), organizationId: orgB.id, userId: owner.id, role: 'OWNER' } });
+  const ownerCtx = { db, roles: ['READER'], userId: owner.id } as Context;
+  return { ownerCtx, orgB, pub, orgVisible, appScoped, hub, inc, sibling, gone, runPrincipal, keyPrincipal, strangerCtx, adminCtx };
 }
 async function rejection(p: Promise<unknown>) {
   try { await p; return null; } catch (err) {
@@ -142,14 +146,32 @@ describe('#4139 nodeExport(ref:)', () => {
         expect(out.data).toContain('docs:sibling');
         expect(out.data).not.toContain(f.orgVisible.nodeId);
         expect(out.data).not.toContain('docs:entry');
+        expect(out.data).not.toContain(f.orgVisible.urn);
         expect(out.data).not.toContain('secret orgvis');
       }
     });
+    it('a list-gated user (not only a userless principal) loses an edge into a memory they cannot read; a reader of both keeps it (blind P3-A)', async () => {
+      const out = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:hub'), format: 'JSON' }, f.strangerCtx);
+      expect(out.data).toContain('docs:sibling');
+      expect(out.data).not.toContain(f.orgVisible.nodeId);
+    });
+    it('an org member reads and exports BOTH memories through the shared gate, so the fail-closed helper does not deny a normal in-list reader (blind P2-C)', async () => {
+      for (const [m, text] of [[f.pub, 'secret pub'], [f.orgVisible, 'secret orgvis']] as const) {
+        expect(await Q.node({}, { ref: urn(m) }, f.ownerCtx)).not.toBeNull();
+        expect((await Q.nodeExport({}, { ref: urn(m) }, f.ownerCtx)).data).toContain(text);
+      }
+    });
     it('a reader who CAN read the target memory still sees the edge', async () => {
-      const out = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:hub'), format: 'JSON' }, f.adminCtx);
+      const out = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:hub'), format: 'JSON' }, f.ownerCtx);
       expect(out.data).toContain(f.orgVisible.nodeId);
     });
     it.each(['keyPrincipal', 'runPrincipal'] as const)('%s: an include tag into an unreadable memory does not export that memory\'s text (full:false resolves, full:true keeps the tag)', async who => {
+      // Positive controls (blind P2-A): a reader of both memories DOES get the text on full:false, and the raw tag on full:true,
+      // so the negatives below cannot pass because the tag never resolves or full is mapped differently.
+      const control = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:inc'), format: 'MD', full: false }, f.ownerCtx);
+      expect(control.data).toContain('secret orgvis');
+      const rawControl = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:inc'), format: 'MD', full: true }, f.ownerCtx);
+      expect(rawControl.data).toContain('{{> ');
       const resolved = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:inc'), format: 'MD', full: false }, f[who]);
       expect(resolved.data).not.toContain('secret orgvis');
       // full:true is the restore export: the author's own text, tag included, and still no target text.
@@ -158,10 +180,13 @@ describe('#4139 nodeExport(ref:)', () => {
     });
     it.each(['keyPrincipal', 'runPrincipal'] as const)('%s: the export records the same read usage event node(ref:) does (none lost, none to another memory)', async who => {
       const count = (memoryId: string) => db.usageEvent.count({ where: { memoryId } });
+      const scope = { memoryId: { in: [f.pub.id, f.orgVisible.id] } };
+      await drainNodeUsage(db);
+      await db.usageEvent.deleteMany({ where: scope });
       await Q.node({}, { ref: urn(f.pub) }, f[who]);
       await drainNodeUsage(db);
       const viaNode = await count(f.pub.id);
-      await db.usageEvent.deleteMany({});
+      await db.usageEvent.deleteMany({ where: scope });
       await Q.nodeExport({}, { ref: urn(f.pub) }, f[who]);
       await drainNodeUsage(db);
       expect(viaNode).toBeGreaterThan(0);
