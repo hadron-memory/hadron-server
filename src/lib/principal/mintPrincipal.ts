@@ -88,16 +88,28 @@ export class RootNameInvalidError extends Error {
 type PrincipalDb = Pick<PrismaClient, 'principal'>;
 
 /**
- * The #4400 CHECK that keeps every stored root name lower case (`name = lower(name)`), matched by its quoted name
- * alone: the words around it ("violates check constraint") follow the server's `lc_messages` and are not matched, so
- * a translated message still maps (#4547 BLIND P2). The name must be the LAST quoted identifier of the primary
- * message, where Postgres puts the constraint (`… violates check constraint "<name>"`); words after it are
- * allowed (some locales end with a verb), another quote is not (#4641 BLIND note). A different CHECK on a
- * relation literally named like this one quotes it earlier, in the relation position, and must not match (#4617).
- * The quotes are optionally backslash-escaped: the engine renders
- * a model write's Postgres error with inner quotes as `\"`, a raw statement's `meta.message` plainly.
+ * The #4400 CHECK that keeps every stored root name lower case (`name = lower(name)`), matched by its quoted name in
+ * the constraint position of the primary message (#4547 BLIND P2, #4641 BLIND P2).
+ *
+ * No structured field is available to match instead: a model write's `PostgresError` carries code, message,
+ * severity, detail, column and hint (no constraint name), and a P2010's `meta` carries only `code` and `message`.
+ * So the message text is read, and only its positions are relied on.
+ *
+ * Evidence. The msgid is `new row for relation "%s" violates check constraint "%s"`. The server's own
+ * `postgres-17.mo` catalogs (de es fr id it ja ka ko pl pt_BR ru sv tr uk zh_CN zh_TW) translate it with the relation
+ * first and the constraint second in every one, so the constraint is the LAST quoted identifier. What varies is the
+ * quote character (de » «; es, fr and id « »; the rest ASCII), spaces inside the quotes (fr, id), words between the
+ * identifiers (ko, tr) and after the constraint (ja, ko, tr, ...). Spanish also quotes the literal word «check»
+ * before the constraint. The pattern therefore accepts either quote family around the name, optionally with
+ * spaces, then anything that holds no further quote. A different CHECK on a relation literally named like this one
+ * quotes the name earlier, as the relation, and so does not match. Every catalog message is pinned in
+ * `principalNameLower4411.test.ts`. A server the catalogs do not cover, or a quote style they do not use, falls
+ * closed to the raw error.
+ *
+ * The quotes may be backslash-escaped: the engine renders a model write's Postgres error with inner ASCII quotes
+ * as `\"`; a raw statement's `meta.message` is plain.
  */
-const NAME_LOWER_CHECK_RE = /\\?"chk_principals_name_lower\\?"[^"]*$/;
+const NAME_LOWER_CHECK_RE = /\\?["«»]\s*chk_principals_name_lower\s*\\?["«»][^"«»]*$/;
 
 /**
  * The PRIMARY fields of the Postgres error inside a model write's message, as the query engine renders it:
