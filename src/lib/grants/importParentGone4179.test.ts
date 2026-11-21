@@ -11,11 +11,12 @@
  * Red on main: there is no trigger on agent_imports, so every "stamped" case below leaves the row live.
  */
 import { beforeEach, afterAll, describe, expect, it } from 'vitest';
+import { Client } from 'pg';
 import { Prisma } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
-import { DB_NOW, dropTestActions, grantValues, insertGrantUnguarded, raw, seedWorld, type World } from './grantFixtures3668.js';
+import { DB_NOW, dropTestActions, grantInsertSql, grantValues, insertGrantUnguarded, raw, seedWorld, type World } from './grantFixtures3668.js';
 
 const HOUR_AGO = raw(`${DB_NOW} - interval '1 hour'`);
 
@@ -108,6 +109,29 @@ describe('#4179 hard-deleted importing parent: the imported agent\'s grants end 
       expect((await row(live)).departed).toBe(true);
     } finally {
       await db.$executeRawUnsafe(`UPDATE actions SET max_uses = NULL, lifetime_seconds = NULL WHERE name = $1`, action);
+    }
+  });
+
+  it('a CONCURRENT agent-grant create (agent row FOR SHARE, insert uncommitted) is fenced: the delete waits, then judges the committed grant and stamps it', async () => {
+    await install(w.appId, parent.id); await importEdge(parent.id, child.id);
+    const a = new Client({ connectionString: process.env.DATABASE_URL });
+    await a.connect();
+    let deleted = false;
+    try {
+      await a.query('BEGIN');
+      // What createGrant does for an agent holder: the agent row FOR SHARE, the install read, then the guarded insert.
+      await a.query('SELECT id FROM agents WHERE id = $1 AND deleted_at IS NULL FOR SHARE', [child.id]);
+      const ins = grantInsertSql(w, { user_id: null, agent_id: child.id, app_id: w.appId } as never);
+      await a.query(ins.text, ins.params);
+      const del = hardDelete(parent.id).then(() => { deleted = true; });
+      await new Promise((r) => setTimeout(r, 400));
+      expect(deleted, 'the delete must wait for the create, not judge around it').toBe(false);
+      await a.query('COMMIT');
+      await del;
+      expect((await row(ins.id)).departed, 'the committed grant of the now-uninstalled agent is stamped').toBe(true);
+    } finally {
+      await a.query('ROLLBACK').catch(() => undefined);
+      await a.end();
     }
   });
 

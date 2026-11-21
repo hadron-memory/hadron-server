@@ -299,6 +299,11 @@ BEGIN
   IF EXISTS (SELECT 1 FROM agents WHERE id = OLD.parent_agent_id) THEN
     RETURN NULL;
   END IF;
+  -- Fence a CONCURRENT agent-grant create (SEC10, #4697): create and the insert guard hold this agent row FOR SHARE, so taking it
+  -- FOR NO KEY UPDATE first waits for an uncommitted create to commit, and the next statement (a fresh READ COMMITTED snapshot)
+  -- then sees that grant. Same order as create: the agent row, then the grants. FOR NO KEY UPDATE leaves foreign-key checks
+  -- (FOR KEY SHARE) alone. The #4172 code doors share this gap (agents FOR SHARE only): a follow-up, not widened here.
+  PERFORM 1 FROM agents WHERE id = OLD.imported_agent_id FOR NO KEY UPDATE;
   PERFORM 1 FROM grants
    WHERE agent_id = OLD.imported_agent_id AND holder_departed_at IS NULL AND revoked_at IS NULL
      AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
