@@ -259,15 +259,17 @@ describe('#4260 the gates, refusals and recording are the host-wide read\'s', ()
   });
 
   it('a host key\'s selector read is recorded as a use, hit, miss or refused', async () => {
-    const before = await db.hostKeyUse.count({ where: { appKeyId: orca1.id, action: 'read' } });
+    // Order-independent (BLIND P3): usedAt does not uniquely order the writes — two uses can share a timestamp —
+    // so the three new rows are identified by id against a before-snapshot and compared as a set.
+    const before = await db.hostKeyUse.findMany({ where: { appKeyId: orca1.id, action: 'read' }, select: { id: true } });
+    const beforeIds = new Set(before.map((u) => u.id));
     await state('orca1', kit.id, keyCtx(orca1)); // Hit: one row.
     await state('orca1', zoe.id, keyCtx(orca1)); // Miss: zero rows, still a read of the host's own list.
     await refusal(state('orca2', zoe.id, keyCtx(orca1))); // Refused: another host.
-    const uses = await db.hostKeyUse.findMany({ where: { appKeyId: orca1.id, action: 'read' }, orderBy: { usedAt: 'asc' } });
-    expect(uses.length - before).toBe(3);
-    expect(uses.slice(-3).map((x) => [x.hostId, x.count, x.refusedCode])).toEqual([
-      ['orca1', 1, null], ['orca1', 0, null], ['orca1', null, 'HOST_NOT_FOUND'],
-    ]);
+    const uses = await db.hostKeyUse.findMany({ where: { appKeyId: orca1.id, action: 'read' } });
+    expect(uses.length).toBe(beforeIds.size + 3);
+    const fresh = uses.filter((u) => !beforeIds.has(u.id)).map((u) => [u.hostId, u.count, u.refusedCode]);
+    expect([...fresh].sort()).toEqual([[ 'orca1', 0, null ], [ 'orca1', 1, null ], [ 'orca1', null, 'HOST_NOT_FOUND' ]].sort());
   });
 });
 
