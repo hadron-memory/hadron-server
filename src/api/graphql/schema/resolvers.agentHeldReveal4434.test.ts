@@ -204,7 +204,7 @@ describe('#4434 reach and departure on the reveal door', () => {
     // (the grants guard accepts the departure stamp only with that cause present).
     await db.$transaction(async (tx) => {
       await tx.agent.update({ where: { id: roleAgentId }, data: { deletedAt: new Date() } });
-      await endHeldGrants(tx, 'agent', roleAgentId);
+      await endHeldGrants(tx, 'agent', roleAgentId, 'AGENT_DELETED');
     });
     for (const who of [w1, w2]) expect(await code(reveal(who, r.clientId))).toBe('SECRET_READ_CLIENT_NOT_FOUND'); // reach already sees the agent gone
     const g = await db.grant.findUniqueOrThrow({ where: { id: r.grantId } });
@@ -227,7 +227,7 @@ describe('#4434 reach and departure on the reveal door', () => {
       }
       expect(parked).toBeGreaterThan(0);
       await tx.agent.update({ where: { id: roleAgentId }, data: { deletedAt: new Date() } });
-      await endHeldGrants(tx, 'agent', roleAgentId);
+      await endHeldGrants(tx, 'agent', roleAgentId, 'AGENT_DELETED');
     });
     // REVOKED is the grant row's own verdict (a departed holder): the reach read ran while the agent still looked live, so only the
     // locked grant row can have refused it. That is the serialization point the reach read relies on.

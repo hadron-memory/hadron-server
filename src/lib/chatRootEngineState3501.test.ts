@@ -305,7 +305,8 @@ it('1a encrypted FIRST unchanged-mirror turn strips legacy state without ciphert
 it('11/13: conversion never nests an undecryptable existing envelope as fresh plaintext', async () => {
   const { encryptChatEngineStateWithKey } = await import('./chatRootEngineState.js');
   const row = await db.chatRootEngineState.create({ data: { chatRootNodeId: root.id, state: { __enc: 'tampered' } } });
-  await expect(db.$transaction(tx => encryptChatEngineStateWithKey(tx, root.id, generateDataKey()))).rejects.toMatchObject({ extensions: { code: 'CHAT_STATE_INVALID' } });
+  // #3575 (ruling 0225): classified, not thrown; the caller reports it. The row is still preserved byte for byte.
+  expect(await db.$transaction(tx => encryptChatEngineStateWithKey(tx, root.id, generateDataKey()))).toBe('blocked');
   expect(await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).toEqual(row);
 });
 it('14: exact loc and id cannot substitute a root from outside the gated memory', async () => {
@@ -414,7 +415,7 @@ it.each([{ stageName: '\t', unknown: 'keep opaque' }, ['malformed', 'shape'], 42
   expect(stored).toHaveProperty('__enc');
   sessionKeyCache.set(generateId(), root.memoryId, key);
   expect(decryptNodeFields({ data: stored }, { id: root.memoryId, isEncrypted: true }).data).toEqual(state);
-  expect(await db.$transaction(tx => encryptChatEngineStateWithKey(tx, root.id, key))).toBe(false);
+  expect(await db.$transaction(tx => encryptChatEngineStateWithKey(tx, root.id, key))).toBe('unchanged');
 });
 
 it('security: real encryptMemory completes past malformed engine state and encrypts later content', async () => {

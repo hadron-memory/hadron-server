@@ -86,6 +86,7 @@ import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import type { WriteDestination } from '../../../lib/appWriteGrant.js';
 import { assertLinkAllowedForPublicAgent, isExcludedFromCoveredSet } from '../../../lib/agentPublicCongruence.js';
 import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
+import { isReadOnlyImpersonation } from '../impersonationReadOnlyPlugin.js';
 import { GraphQLError } from 'graphql';
 import { isLifecycleActive, type LifecycleLike } from '@hadron-memory/access-control';
 import {
@@ -3049,14 +3050,71 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
 }
 
 /**
+ * #606 — the non-throwing twin of `requireMemoryWriteAccess`: "would a write to this memory be refused for this caller?"
+ * It RUNS the gate and maps only its own refusal to false, so it cannot drift from it (no branch is copied here). Any
+ * other failure (a DB error, a missing row) propagates from here instead of reading as "cannot write"; the
+ * `Memory.canWrite` field turns it into null (unknown) so one memory cannot null a list. A caller with no
+ * identity at all (no user, no App) cannot write, which is the gate's own unauthenticated answer.
+ *
+ * NOT the raw gate answer: it answers the `Memory.canWrite` FIELD, so it is false for any read-only impersonation
+ * session even where `requireMemoryWriteAccess` alone would allow the target. A caller that needs the gate's own
+ * answer calls the gate. Its only caller is the field resolver.
+ *
+ * Memoised per request context: a list of N memories asks the gate once per distinct memory, and a memory that
+ * appears twice in one response (list item and a nested copy) is answered once. The memo lives only on the request's
+ * context object, so it is never shared across principals or requests.
+ */
+const memoryCanWriteMemo = new WeakMap<object, Map<string, Promise<boolean>>>();
+export function canWriteMemoryRecord(ctx: Context, memoryId: string): Promise<boolean> {
+  // A read-only impersonation session refuses every mutation but stopImpersonation (impersonationReadOnlyPlugin), so
+  // no write to any memory would be allowed: the gate alone would say true, which is not what the field promises.
+  if (isReadOnlyImpersonation(ctx)) return Promise.resolve(false);
+  let perRequest = memoryCanWriteMemo.get(ctx);
+  if (!perRequest) {
+    perRequest = new Map();
+    memoryCanWriteMemo.set(ctx, perRequest);
+  }
+  let answer = perRequest.get(memoryId);
+  if (!answer) {
+    answer = requireMemoryWriteAccess(ctx, memoryId).then(
+      () => true,
+      (err: unknown) => {
+        if (isMemoryWriteRefusal(err)) return false;
+        throw err;
+      },
+    );
+    const memo = perRequest;
+    memo.set(memoryId, answer);
+    // A thrown (non-refusal) answer must not be remembered as the memory's answer.
+    answer.catch(() => memo.delete(memoryId));
+  }
+  return answer;
+}
+
+/**
+ * #606 — the errors `memoryWriteForbidden()` made. Classification is by IDENTITY (this set), never by the denial's
+ * prose, so rewording the message cannot turn a refusal into a failure; every refusal the gate throws comes from
+ * `memoryWriteForbidden()`.
+ */
+const memoryWriteRefusals = new WeakSet<object>();
+
+/** True for the gate's own write refusal (made by `memoryWriteForbidden`) and for its no-identity answer. */
+export function isMemoryWriteRefusal(err: unknown): boolean {
+  if (!(err instanceof GraphQLError)) return false;
+  return memoryWriteRefusals.has(err) || err.extensions?.code === 'UNAUTHENTICATED';
+}
+
+/**
  * The shared memory-write denial. Keep the established prose and GraphQL
  * partial-response transport, but make the authorization classification
  * explicit so Apollo does not report an ordinary denial as a server fault.
  */
 export function memoryWriteForbidden(): GraphQLError {
-  return new GraphQLError('Forbidden: no write access to this memory', {
+  const err = new GraphQLError('Forbidden: no write access to this memory', {
     extensions: { code: 'FORBIDDEN' },
   });
+  memoryWriteRefusals.add(err);
+  return err;
 }
 
 export const MEMORY_INCLUDE = {

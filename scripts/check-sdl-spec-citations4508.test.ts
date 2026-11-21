@@ -84,7 +84,8 @@ describe('#4508 — the committed gate, end to end', () => {
     expect(snap.has('cor:agt:130:04')).toBe(true);
     expect(snap.has('cor:agt:130:06')).toBe(false);
     // cor:spc:020:06 and :11 are the written rules ABOUT placeholders (not placeholders): they belong in the inventory.
-    expect(snap.has('cor:spc:020:06') && snap.has('cor:spc:020:11')).toBe(true);
+    expect(snap.has('cor:spc:020:06')).toBe(true);
+    expect(snap.has('cor:spc:020:11')).toBe(true);
     expect(missingFromSnapshot(findQualifiedCitations(readFileSync(join(root, typedefsRel), 'utf8')), snap)).toEqual([]);
   });
 
