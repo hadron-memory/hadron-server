@@ -225,14 +225,30 @@ describe('#3539 the serialization predicate keeps its exact truth table', () => 
 });
 
 describe('#3539 darkAlarmChain still runs on the exact client it is given', () => {
-  it('queries and reads managers through the passed client and nothing else', async () => {
-    const { darkAlarmChain } = await import('./alarmChain.js');
+  const app = { id: 'app', organizationId: null, ownerUserId: 'owner-user' };
+  const stub = (rows: { id: string }[]) => {
     const calls: string[] = [];
     const client = {
-      $queryRaw: async () => { calls.push('raw'); return []; },
+      $queryRaw: async () => { calls.push('line'); return rows; },
+      appMember: { findMany: async () => { calls.push('owners'); return [{ userId: 'member-owner' }]; } },
+      orgMember: { findMany: async () => { calls.push('admins'); return []; } },
     };
-    // An empty live line falls back to the App's managers, read through the SAME client (a second client would not be this stub).
-    await darkAlarmChain(client as never, { id: 'app', organizationId: null, ownerUserId: 'owner' }, 'w').catch(() => undefined);
-    expect(calls[0]).toBe('raw');
+    return { client, calls };
+  };
+
+  it('an empty live line reads the line AND the managers through the passed client, managers via manager', async () => {
+    const { darkAlarmChain } = await import('./alarmChain.js');
+    const { client, calls } = stub([]);
+    expect(await darkAlarmChain(client as never, app, 'w')).toEqual([
+      { userId: 'owner-user', via: 'manager' }, { userId: 'member-owner', via: 'manager' },
+    ]);
+    expect(calls).toEqual(['line', 'owners']);
+  });
+
+  it('a non-empty line is returned nearest first, drops the worker itself and duplicates, and adds NO manager', async () => {
+    const { darkAlarmChain } = await import('./alarmChain.js');
+    const { client, calls } = stub([{ id: 'head' }, { id: 'w' }, { id: 'head' }, { id: 'top' }]);
+    expect(await darkAlarmChain(client as never, app, 'w')).toEqual([{ workerId: 'head' }, { workerId: 'top' }]);
+    expect(calls).toEqual(['line']);
   });
 });
