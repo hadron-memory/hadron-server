@@ -24,8 +24,7 @@ export const LOC_MAX_TOTAL_LENGTH = 512;
  * `validateLoc` itself.
  *
  * Throws only what it maps; anything else `validateLoc` throws propagates.
- */
-/**
+ *
  * Error-shape change (the CHECKED arm (b) of the #4461 gate, already gated, not reopened): a bad loc used to surface
  * as `InvalidLocError` with `loc`/`segment` extensions at some sites; it is now `BAD_USER_INPUT` with `field` and
  * `reason` at all of them. Portal follow-up hadron-portal#2323 reads both shapes.

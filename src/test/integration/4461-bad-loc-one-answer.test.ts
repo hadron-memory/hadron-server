@@ -20,6 +20,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { signJwt } from '../../auth/jwt.js';
 import { generateId } from '../../lib/id.js';
+import { validateLoc } from '../../lib/validateLoc.js';
 
 let server: Server;
 let baseUrl: string;
@@ -177,6 +178,22 @@ describe('#4461 — every other site answers the same', () => {
     const body = (await res.json()) as { errors?: unknown; data?: { createEdge: { loc: string } } };
     expect(body.errors).toBeUndefined();
     expect(body.data!.createEdge.loc.length).toBeGreaterThan(512);
+  });
+  it('createEdge WITHOUT a loc: a name with a space and ":" is slugified, so the derived loc is valid (no charset check needed)', async () => {
+    const a = await db.node.create({ data: { id: generateId(), memoryId, loc: 'n1-a', name: 'a', nodeType: 'info' } });
+    const b = await db.node.create({ data: { id: generateId(), memoryId, loc: 'n1-b', name: 'b', nodeType: 'info' } });
+    const res = await fetch(`${baseUrl}/graphql`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${jwt}` },
+      body: JSON.stringify({
+        query: `mutation($s: ID!, $t: ID!) { createEdge(sourceRef: $s, targetRef: $t, name: "has space:and colon") { id loc } }`,
+        variables: { s: a.id, t: b.id },
+      }),
+    });
+    const body = (await res.json()) as { errors?: unknown; data?: { createEdge: { loc: string } } };
+    expect(body.errors).toBeUndefined();
+    expect(body.data!.createEdge.loc).toBe('n1-a:has-space-and-colon:n1-b');
+    expect(() => validateLoc(body.data!.createEdge.loc)).not.toThrow();
   });
   it('a caller-supplied edge loc: 512 accepted, 513 refused too-long', async () => {
     const mkLoc = (n: number) => Array.from({ length: Math.ceil(n / 11) }, (_, i) => `q${String(i).padStart(9, '0')}`).join(':').slice(0, n).replace(/[^A-Za-z0-9]+$/, 'z');
