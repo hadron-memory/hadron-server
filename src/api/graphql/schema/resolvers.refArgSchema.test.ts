@@ -32,8 +32,7 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   addMemoryToAgent: ['agentRef', 'memoryRef'],
   updateAgentMemoryRole: ['agentRef', 'memoryRef'],
   removeMemoryFromAgent: ['agentRef', 'memoryRef'],
-  // #4138 (S2): the node-revision mutations take a revision ref (URN or PK). Query.nodeRevision joins once #4136 (S0)
-  // extends this guard to Query fields.
+  // #4138 (S2): the node-revision mutations take a revision ref (URN or PK); Query.nodeRevision is in EXPECTED_QUERY_REF_ARGS.
   restoreNodeRevision: ['nodeRevRef'],
   deleteNodeRevision: ['nodeRevRef'],
   updateNodeRevision: ['nodeRevRef'],
@@ -120,6 +119,7 @@ const EXPECTED_QUERY_REF_ARGS: Record<string, string[]> = {
   agent: ['ref'],
   appRun: ['ref'],
   nodeRevisions: ['nodeRef'],
+  nodeRevision: ['nodeRevRef'], // #4138 (S2)
   appRuns: ['appRef', 'orgRef'],
 };
 
