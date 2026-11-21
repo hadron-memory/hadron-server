@@ -25,7 +25,7 @@ import type { AuthContext } from '../../middleware/auth.js';
 import { resolveAgentRef } from '../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../lib/entityRef/memoryRef.js';
 import { UrnNotQualifiedError } from '../../lib/urn.js';
-import { mintPutUrl } from '../../integrations/r2/client.js';
+import { mintPutUrl } from '../../integrations/objectstore/index.js';
 // Lives in retention.ts because the orphan reaper derives its
 // minimum-age threshold from it — an object younger than a presigned
 // PUT's lifetime may still be an upload in flight.

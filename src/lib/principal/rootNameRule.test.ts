@@ -20,7 +20,7 @@
  * and leaves `ensure*Principal`'s behavior for conforming names unchanged.
  * The error-to-GraphQL mapper's own pins live in `rootNameErrors.test.ts`.
  *
- * #4515 added the direct `isValidRootName` table, the adjacent-separator,
+ * #4515 added the direct `isValidStoredRootName` table, the adjacent-separator,
  * trailing-newline and Kelvin-sign pins at both the mint and the probe, the
  * `ensureOrgPrincipal` contract, and the real-class taken-name path.
  */
@@ -28,12 +28,13 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
+import { isHandleTaken } from '../userHandle.js';
 import {
   mintPrincipal,
   checkRootAvailable,
   ensureUserPrincipal,
   ensureOrgPrincipal,
-  isValidRootName,
+  isValidStoredRootName,
   RootNameTakenError,
 } from './mintPrincipal.js';
 
@@ -67,7 +68,7 @@ async function expectTypedRefusal(
   // The refusal names the name AS STORED (post-lower-casing): for `İ` the
   // message carries `i̇`, its lower-cased form — the rule governs the stored
   // name, and the message shows what was refused about it.
-  expect((settled as Error).message).toContain(name.toLowerCase());
+  expect((settled as Error).message).toContain(JSON.stringify(name.toLowerCase()));
 }
 
 /** Every #4481 refusal, with the guard each one exists to kill (see mutants). */
@@ -143,7 +144,7 @@ describe('mintPrincipal — #4481 accepted edges (guard against over-tightening)
   it('accepts a 64-character name (MAX_ATOM_LEN exactly)', async () => {
     const name = 'a'.repeat(63) + '9'; // legal start AND end
     await mintPrincipal(db, { kind: 'org', name });
-    expect(await checkRootAvailable(db, name)).toBe(false); // it is now taken
+    expect(await checkRootAvailable(db, name)).toBe('taken'); // it is now taken
   });
 
   it('accepts `a.b_c-d` and `a1` — every separator and digits in the middle', async () => {
@@ -161,20 +162,20 @@ describe('mintPrincipal — #4481 accepted edges (guard against over-tightening)
 });
 
 describe('checkRootAvailable — agrees with the mint (#4481)', () => {
-  it('returns false for every refused name (the probe and the mint are one rule)', async () => {
+  it("returns 'invalid' for every refused name (the probe and the mint are one rule)", async () => {
     for (const { name } of REFUSALS) {
       expect(
         await checkRootAvailable(db, name),
         `checkRootAvailable("${name === '' ? '(empty)' : name}")`,
-      ).toBe(false);
+      ).toBe('invalid');
     }
     // Nothing was minted by the probe.
     expect(await db.principal.count()).toBe(0);
   });
 
   it('still returns true for a free conforming name (the probe is not over-tight)', async () => {
-    expect(await checkRootAvailable(db, 'a.b_c-d')).toBe(true);
-    expect(await checkRootAvailable(db, 'Example')).toBe(true); // probes the stored form
+    expect(await checkRootAvailable(db, 'a.b_c-d')).toBe('free');
+    expect(await checkRootAvailable(db, 'Example')).toBe('free'); // probes the stored form
   });
 });
 
@@ -206,7 +207,28 @@ describe('ensureUserPrincipal — unchanged for conforming names, refuses illega
   });
 });
 
-describe('isValidRootName — the rule itself, direct table (#4515)', () => {
+describe('#4516 F5: the probe reports WHY (free | invalid | taken); isHandleTaken stays boolean', () => {
+  it("an invalid name is 'invalid', never 'taken' (mutant: reason collapsed back)", async () => {
+    expect(await checkRootAvailable(db, 'ünï')).toBe('invalid');
+    expect(await checkRootAvailable(db, 'a'.repeat(65))).toBe('invalid');
+  });
+
+  it("holds 'free' and 'taken' for the real cases, a reserved word included", async () => {
+    expect(await checkRootAvailable(db, 'holger')).toBe('free');
+    await mintPrincipal(db, { kind: 'user', name: 'holger' });
+    expect(await checkRootAvailable(db, 'holger')).toBe('taken');
+    expect(await checkRootAvailable(db, 'hadron')).toBe('taken');
+  });
+
+  it('isHandleTaken: boolean, true for a claimed AND an invalid name, false only for a free one', async () => {
+    expect(await isHandleTaken(db, 'holger')).toBe(false);
+    expect(await isHandleTaken(db, 'ünï')).toBe(true);
+    await mintPrincipal(db, { kind: 'user', name: 'holger' });
+    expect(await isHandleTaken(db, 'holger')).toBe(true);
+  });
+});
+
+describe('isValidStoredRootName — the rule itself, direct table (#4515)', () => {
   // The mint and the probe lower-case before validating, so a test that goes
   // through them cannot tell a lower-case-only rule from one that also admits
   // upper case. Judge the predicate directly.
@@ -217,30 +239,37 @@ describe('isValidRootName — the rule itself, direct table (#4515)', () => {
   ];
   for (const name of ACCEPTED) {
     it(`accepts ${JSON.stringify(name.length > 12 ? `${name.slice(0, 4)}…${name.length}ch` : name)}`, () => {
-      expect(isValidRootName(name)).toBe(true);
+      expect(isValidStoredRootName(name)).toBe(true);
     });
   }
   for (const name of REFUSED) {
     it(`refuses ${JSON.stringify(name.length > 12 ? `${name.slice(0, 4)}…${name.length}ch` : name)}`, () => {
-      expect(isValidRootName(name)).toBe(false);
+      expect(isValidStoredRootName(name)).toBe(false);
     });
   }
 });
 
+describe('#4516 F4: the predicate is pure over the stored form', () => {
+  it('does not lower-case inside (mutant: lower-casing in the predicate)', () => {
+    expect(isValidStoredRootName('Example')).toBe(false);
+    expect(isValidStoredRootName('example')).toBe(true);
+  });
+});
+
 describe('root-name edges at BOTH the mint and the probe (#4515)', () => {
   it('`a..b` is legal: adjacent interior separators are part of the atom grammar', async () => {
-    expect(await checkRootAvailable(db, 'a..b')).toBe(true);
+    expect(await checkRootAvailable(db, 'a..b')).toBe('free');
     const { id } = await mintPrincipal(db, { kind: 'org', name: 'a..b' });
     expect((await db.principal.findUniqueOrThrow({ where: { id } })).name).toBe('a..b');
-    expect(await checkRootAvailable(db, 'a..b')).toBe(false); // now taken, not refused
+    expect(await checkRootAvailable(db, 'a..b')).toBe('taken'); // now taken, not refused
   });
 
   it("a trailing newline `'a\\n'` is refused: `$` must not tolerate it", async () => {
-    expect(await checkRootAvailable(db, 'a\n')).toBe(false);
+    expect(await checkRootAvailable(db, 'a\n')).toBe('invalid');
     await expectTypedRefusal(mintPrincipal(db, { kind: 'org', name: 'a\n' }), 'a\n');
     expect(await db.principal.count()).toBe(0);
     // And the legal neighbour is untouched, so the refusal is the newline's.
-    expect(await checkRootAvailable(db, 'a')).toBe(true);
+    expect(await checkRootAvailable(db, 'a')).toBe('free');
   });
 
   it('the Kelvin sign (U+212A) is accepted: its stored form is the ASCII `k`', async () => {
@@ -248,10 +277,10 @@ describe('root-name edges at BOTH the mint and the probe (#4515)', () => {
     // A guard moved above the lower-casing would refuse this name.
     const kelvin = 'K';
     expect(kelvin.toLowerCase()).toBe('k');
-    expect(await checkRootAvailable(db, kelvin)).toBe(true);
+    expect(await checkRootAvailable(db, kelvin)).toBe('free');
     const { id } = await mintPrincipal(db, { kind: 'org', name: kelvin });
     expect((await db.principal.findUniqueOrThrow({ where: { id } })).name).toBe('k');
-    expect(await checkRootAvailable(db, 'k')).toBe(false); // the same root, now taken
+    expect(await checkRootAvailable(db, 'k')).toBe('taken'); // the same root, now taken
   });
 });
 
