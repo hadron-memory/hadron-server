@@ -69,6 +69,12 @@ export function grantValues(w: World, over: Record<string, Val> = {}): Record<st
   };
 }
 
+/** The INSERT text, params and id of a grant row, for a caller that runs it on its own connection (a two-connection test). */
+export function grantInsertSql(w: World, over: Record<string, Val> = {}): { text: string; params: unknown[]; id: string } {
+  const values = grantValues(w, over);
+  return { ...build('grants', values), id: values.id as string };
+}
+
 /** Insert one grant row exactly as given: the database guards run. */
 export async function insertGrant(w: World, over: Record<string, Val> = {}): Promise<string> {
   const values = grantValues(w, over);

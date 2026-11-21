@@ -845,6 +845,9 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #1632: signing requests, append-only signature records, the content-change
 -- marker. One source, shared verbatim with migration 20261013160000_signing_requests.
 \ir signing-invariants.sql
+-- #4337 (#434 Slice C): stamp_signing_keys.id as the migration's identity (db push builds a sequence default; pinned by
+-- src/test/migrations/stampKeyIdentity4337.test.ts and scripts/db/migration-replay.ts).
+\ir stamp-key-identity-invariants.sql
 
 -- #3996 (S1 of #3991): per-App data keys. One source, shared verbatim with migration 20261112150000_secret_app_keys.
 \ir secret-app-keys-invariants.sql

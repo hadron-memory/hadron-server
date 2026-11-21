@@ -1,7 +1,8 @@
 /**
- * #3998 (S3 of #3991, cor:sec:060): the reveal. A WORKER bound to the request, holding an active, live `secret.reveal` grant,
- * reads the value of the App secret the grant names, once per call, spending exactly one use. A person holder reveals only on the
- * server-hosted passkey page (a later slice): this door is never open to a person, an App key, a run or an impersonation.
+ * #3998 (S3 of #3991, cor:sec:060): the reveal. A WORKER bound to the request, holding an active, live `secret.reveal` grant
+ * (its own, or its role agent's: #4434), reads the value of the App secret the grant names, once per call, spending exactly one
+ * use. A person holder reveals only on the server-hosted passkey page (a later slice): this door is never open to a person, an
+ * App key, a run or an impersonation.
  *
  * Everything is judged under the secret row's lock and the grant row's lock, on the database clock, and the use and the audit
  * event commit before the value leaves this function. A client id that is unknown, belongs to another holder or another App is
@@ -14,6 +15,7 @@ import type { Context } from '../../api/graphql/schema/resolvers.js';
 import { withAuthorizedTx } from '../../api/graphql/schema/authorizedTx.js';
 import { boundWorkerId } from '../bootPrompt.js';
 import { readGrantForUpdate } from '../grants/live.js';
+import { grantReachesWorker } from '../grants/reach.js';
 import { isModelReadableKind } from '../secrets.js';
 import { currentAppSecretValue, lockSecretRow, recordSecretEvent, secretActorOf } from './appSecrets.js';
 import { judgeSecretReadClientIssuer, SECRET_READ_CLIENT_SUPERSEDED } from './readClientIssuer.js';
@@ -86,8 +88,12 @@ async function revealAs(ctx: Context, clientId: string, holder: Holder): Promise
     if (!client) throw notFound();
     const grant = await tx.grant.findUnique({ where: { id: client.grantId }, select: { workerId: true, userId: true, agentId: true, action: true, appId: true, issuerUserId: true } });
     if (!grant || grant.action !== 'secret.reveal' || grant.appId !== client.appId) throw notFound();
+    // A worker reads under a grant naming it, or under its role agent's grant (cor:sec:060:02 R5, cor:acl:140:06): the agent branch asks the
+    // shared reach rule, in this transaction, so a retired worker, another App's installation, a base agent's extension and an agent no
+    // longer installed or licensed here all fall out of it (#4434). A grant to a person or an App names no worker or agent and reaches nobody.
     const heldBy = holder.kind === 'worker'
       ? grant.workerId === holder.workerId
+        || await grantReachesWorker(tx, client.grantId, holder.workerId)
       : grant.userId === holder.userId && grant.workerId === null && grant.agentId === null;
     // From here the client is a real one in this App for this action: every refusal below, a wrong holder's too, is recorded.
     known = { ownerId: client.appId, secretId: client.secretId, secretName: client.secretName };
