@@ -9856,11 +9856,14 @@ export const typeDefs = `#graphql
       "hadron node import". Requires MD or JSON; sections is ignored.
     full: false returns a PRESENTATION render of the selected sections
       (default: all); not guaranteed round-trippable.
-    Auth: same node-read gate as node(ref:). (HTML/PDF + asUrl delivery land
+    ref: the node's PK or URN (hrn:node:hadronmemory.com:specs:cor:api:140). Auth: the same node-read gate as
+    node(ref:), including read-only PUBLIC knowledge for an App key or userless
+    run (hrn:node:hadronmemory.com:specs:cor:acl:010:01). A node the caller can't read, a missing ref and a
+    soft-deleted node all refuse as NODE_NOT_FOUND. (HTML/PDF + asUrl delivery land
     later; the result shape is forward-compatible.)
     """
     nodeExport(
-      id: ID!
+      ref: ID!
       format: NodeExportFormat = MD
       full: Boolean = true
       sections: [NodeExportSection!]
