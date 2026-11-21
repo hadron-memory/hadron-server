@@ -76,6 +76,13 @@ describe('#4312 retire, then worker rm, with ticker templates', () => {
     expect(await refusal(rm(worker.id))).toBe('WORKER_IN_USE');
   });
 
+  it('control: a generated ticker deleted BEFORE the retirement is history and still refuses (#2024)', async () => {
+    const { worker, ticker } = await cast('Early');
+    await db.ticker.update({ where: { id: ticker.id }, data: { deletedAt: new Date(Date.now() - 60_000) } });
+    await retire(worker.id);
+    expect(await refusal(rm(worker.id))).toBe('WORKER_IN_USE');
+  });
+
   it('control: a sibling worker with live tickers is unaffected by another worker retiring', async () => {
     const a = await cast('A');
     const b = await cast('B');
