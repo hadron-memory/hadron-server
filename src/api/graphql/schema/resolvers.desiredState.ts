@@ -8,11 +8,11 @@
  * hosts the App has (the cor:agt:070:04 rule that a host sees only its own; the sentence that adds this read to
  * that rule is drafted in S5, #4226). A host key's read is a recorded use (cor:agt:070:07).
  *
- * #4260: the query takes an optional `worker` selector (a worker id or exact name) that narrows the answer to that
- * one row of the host's own list; null, empty or whitespace-only is omitted, and an exact id match wins over a
- * name match. A worker the host does not run — another host's, a retired worker not on this
- * host, an unknown id or name — answers the same empty workers list as an unknown worker (cor:agt:020:08), so the
- * selector is no App-roster probe; the gates, refusals and key-use recording are exactly the host-wide read's.
+ * #4260: the query takes an optional `worker` selector (a worker id or exact name) that narrows the rows
+ * returned to the workers of this host it names — at most one row, by id or by name (the full contract, its
+ * one-row basis and the cor:agt:020:08 concealment of not-run and unknown workers are stated in the SDL and
+ * loadHostDesiredState's doc). Null, empty or whitespace-only is omitted, and an exact id match wins over a name
+ * match. The gates, refusals and key-use recording are exactly the host-wide read's.
  *
  * WHO WRITES the marker and the mode: whoever manages the App, as themselves or through their held worker's
  * instruction (cor:dmo:050:12), like the team pause. No App key writes either.
@@ -45,8 +45,8 @@ const hostNotFound = (hostId: string): GraphQLError =>
 
 export const desiredStateQueries = {
   /** The desired state of every worker one host runs (see the file header for who reads it). The optional #4260
-   *  worker selector narrows the answer to that worker's row of the host's own list, answered empty for a worker
-   *  this host does not run exactly as for an unknown one (see loadHostDesiredState). */
+   *  worker selector narrows the rows returned to the workers of this host it names — at most one row, by id or
+   *  by name (contract and concealment: the SDL and loadHostDesiredState). */
   hostDesiredState: (_: unknown, a: { appRef: string; hostId: string; worker?: string | null }, ctx: Context) =>
     recordingRefusal(ctx, 'read', null, async () => {
       const hostId = typeof a.hostId === 'string' ? a.hostId.trim() : '';
