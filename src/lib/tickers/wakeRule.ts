@@ -57,7 +57,7 @@ export type TaskWakeReason = {
   title: string;
   /** #2553: the task's handle, printed first in the nudge. */
   handle: string;
-  /** #4431: for ANSWERED, the code of the question answered, named by the nudge (cor:agt:050:34 draft). Never the answer. */
+  /** #4431: for ANSWERED, the code of the question answered, named by the nudge (cor:agt:050:35). Never the answer. */
   questionCode?: string;
 };
 

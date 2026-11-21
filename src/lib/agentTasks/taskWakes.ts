@@ -12,7 +12,7 @@
  * | task.assigned / .reassigned / assignment.matched | the new assignee (the task's LATEST assignment only) | ASSIGNED / REASSIGNED / MATCHED |
  * | a child's task.finished / .cancelled    | the child's owner (050:16 r2) AND the parent's assignee (#4234, G7) | CHILD_FINISHED / CHILD_CANCELLED |
  * | an unacknowledged alarm                 | its currently-woken chain position, a worker (050:19) | ALARM |
- * | question.answered (#4431), on a task the question blocks | the task's CURRENT assignee (Vera's draft cor:agt:050:34) | ANSWERED |
+ * | question.answered (#4431), on a task the question blocks | the task's CURRENT assignee (cor:agt:050:35) | ANSWERED |
  * | task.session-end-requested (#1709), when someone else ended the task, or (#4223) the task was reassigned away from the asked worker, or (#4265) that worker handed it back | the asked worker, while that session is open and the request unresolved (050:10) | END_SESSION |
  *
  * A wake for an event stays due until a wake proof naming it is acknowledged
@@ -207,7 +207,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
         AND (e.chain -> s.idx ->> 'workerId') IN (${ids})
         AND ${liveApp('e')}
         AND ${undelivered("(e.chain -> s.idx ->> 'workerId')", 'e.id', 's.idx')}`),
-    // #4431 (Questions S7, Vera's draft cor:agt:050:34): an answer to a question that blocks an open task wakes the
+    // #4431 (Questions S7, cor:agt:050:35): an answer to a question that blocks an open task wakes the
     // task's CURRENT assignee (so a task reassigned before the answer wakes its new one), until delivered or that worker
     // acts on the task since. Only an answer: a take-back (question.answer-retracted) is history and wakes nobody. Each
     // answer is its own event, so a re-answer wakes again. The nudge names the task; the event carries no answer.
