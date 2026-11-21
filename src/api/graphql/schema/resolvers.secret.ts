@@ -20,6 +20,8 @@ import { requireProtectedSecretHolder } from '../../../lib/secrets/protection.js
  * An App secret keeps NO value on its row: every store adds a version (src/lib/secrets/appSecrets.ts). The
  * memory-owned scope stays superseded (#696, D-2026-07-15-006).
  */
+import { autoDeleteLimitRefusal, deleteLockedAppSecret } from '../../../lib/secrets/autoDelete.js';
+export { autoDeleteLimitRefusal } from '../../../lib/secrets/autoDelete.js';
 import { GraphQLError } from 'graphql';
 import { assertOneRevealPerOperation, type RevealOperationInfo } from '../../../lib/secrets/revealOperationGuard.js';
 import { pageArgs, pageEnvelope, type Context } from './resolvers.helpers.js';
@@ -462,11 +464,7 @@ async function deleteAppSecret(ctx: Context, found: SecretRow) {
         return stageSecretChange(tx, ctx, { appId: secret.ownerId, secretId: secret.id, name: secret.name, kind: secret.kind,
           metadata: secret.metadata, operation: 'DELETE', snapshot: changeSnapshot(secret, latest?.versionNo ?? 0) });
       }
-      const newest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
-      await recordSecretEvent(tx, { ownerId: secret.ownerId, secretId: secret.id, secretName: secret.name, kind: 'DELETE', versionNo: newest?.versionNo ?? null, actor });
-      await tx.$executeRaw`UPDATE secret_read_clients SET end_reason = 'SECRET_DELETED', ended_at = (clock_timestamp() AT TIME ZONE 'UTC')
-         WHERE secret_id = ${secret.id} AND ended_at IS NULL`;
-      await tx.secret.delete({ where: { id: secret.id } });
+      await deleteLockedAppSecret(tx, secret, actor);
       return true;
     },
   );
@@ -500,16 +498,6 @@ function asTime(v: Date | string | null | undefined): Date | null {
   return d;
 }
 
-/** The auto-delete limit rule, as a pure function so it is tested while the NOT_AVAILABLE guard shadows it (#4443, Bridget P2 1). */
-export function autoDeleteLimitRefusal(
-  autoDelete: boolean, expiresAt: Date | null, maxUses: number | null,
-): { code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT'; message: string } | null {
-  if (autoDelete && !expiresAt && maxUses === null) {
-    return { code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT', message: 'An auto-delete mark needs a window or a read budget.' };
-  }
-  return null;
-}
-
 /**
  * Issue a read client (cor:sec:060:01): the pending `secret.reveal` grant and its client row, in ONE transaction. Only a person
  * acting as themselves, who manages the App or wrote the current version (`requireSecretReadClientIssuer`, judged under the
@@ -527,29 +515,24 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
   const startsAt = asTime(input.startsAt);
   const expiresAt = asTime(input.expiresAt);
   const maxUses = input.maxReads ?? null;
-  // The "delete" mark is signed but nothing consumes it until S6 (#4001): a person must not sign a retention term the server does not
-  // keep. Judged FIRST, so a caller is not walked through adding a limit only to be refused after it (#4443 item 6). S6's first act is
-  // to remove this guard; the limit rule (`autoDeleteLimitRefusal`, pinned by its own test now) then applies unchanged.
-  if (input.autoDelete) {
-    throw readClientRefusal('SECRET_AUTO_DELETE_NOT_AVAILABLE', 'Auto-delete on a read client is not available yet.');
-  }
   const limitRefusal = autoDeleteLimitRefusal(input.autoDelete, expiresAt, maxUses);
   if (limitRefusal) throw readClientRefusal(limitRefusal.code, limitRefusal.message);
   const found = await findSecretByRef(ctx, input.secretRef);
-  if (!found || found.ownerType !== 'app') throw authorizationDenied();
+  const denied = () => input.autoDelete ? readClientRefusal('SECRET_AUTO_DELETE_NOT_ALLOWED', 'You may not set an auto-delete mark for this secret.') : authorizationDenied();
+  if (!found || found.ownerType !== 'app') throw denied();
   const app = await loadLiveApp(ctx, found.ownerId);
-  if (!app) throw authorizationDenied();
+  if (!app) throw denied();
   try {
     return await withAuthorizedTx(
       ctx,
       appAnchors(app),
       async (txCtx) => {
         if (!(await lockSecretRow(txCtx.db as never, found.id))) throw authorizationDenied();
-        await requireSecretReadClientIssuer(txCtx, found.id);
+        await requireSecretReadClientIssuer(txCtx, found.id, input.autoDelete);
       },
       async (tx, txCtx) => {
         const userId = txCtx.userId as string;
-        const issuance = await requireSecretReadClientIssuer({ ...txCtx, db: tx } as Context, found.id);
+        const issuance = await requireSecretReadClientIssuer({ ...txCtx, db: tx } as Context, found.id, input.autoDelete);
         const holder = input.holderKind === 'USER'
           ? { kind: 'user' as const, id: input.holderRef || userId }
           : { kind: 'worker' as const, id: input.holderRef ?? '' };

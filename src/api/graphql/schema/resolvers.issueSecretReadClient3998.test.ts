@@ -53,16 +53,14 @@ describe('#3998 issueSecretReadClient', () => {
     expect(await db.grant.count()).toBe(0);
   });
 
-  it('an auto-delete mark is refused until S6 consumes it (#4001), with or without a limit, and nothing is written', async () => {
-    // NOT_AVAILABLE is judged first (#4443 item 6): a caller is not told to add a limit only to be refused after adding one. Signed but
-    // not consumed: refused with a typed code, nothing written. S6 removes this guard; the NEEDS_LIMIT rule is pinned by the pure-function test below.
-    expect(await code(issue(ownerId, { autoDelete: true }))).toBe('SECRET_AUTO_DELETE_NOT_AVAILABLE');
-    expect(await code(issue(ownerId, { autoDelete: true, maxReads: 1 }))).toBe('SECRET_AUTO_DELETE_NOT_AVAILABLE');
+  it('S6 admits a bounded mark and refuses an unbounded mark without writing', async () => {
+    expect(await code(issue(ownerId, { autoDelete: true }))).toBe('SECRET_AUTO_DELETE_NEEDS_LIMIT');
     expect(await db.grant.count()).toBe(0);
     expect(await db.secretReadClient.count()).toBe(0);
+    expect(await code(issue(ownerId, { autoDelete: true, maxReads: 1 }))).toBe('OK');
   });
 
-  it('the limit rule is pinned now, while NOT_AVAILABLE shadows it: S6 turns it on with a test already in place', () => {
+  it('the S6 finite-limit rule distinguishes marked and unmarked terms', () => {
     const NEEDS = { code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT' };
     expect(autoDeleteLimitRefusal(true, null, null)).toMatchObject(NEEDS);
     expect(autoDeleteLimitRefusal(true, new Date(), null)).toBeNull();
@@ -111,8 +109,8 @@ describe('#3998 issueSecretReadClient', () => {
     const cases: Array<[string, Record<string, unknown>, string]> = [
       ['agent holder', { holderKind: 'AGENT', holderRef: generateId() }, 'GRANT_HOLDER_NOT_ALLOWED'],
       ['app holder', { holderKind: 'APP' }, 'GRANT_HOLDER_NOT_ALLOWED'],
-      ['auto-delete without a limit', { autoDelete: true }, 'SECRET_AUTO_DELETE_NOT_AVAILABLE'],
-      ['auto-delete with a limit', { autoDelete: true, maxReads: 1 }, 'SECRET_AUTO_DELETE_NOT_AVAILABLE'],
+      ['auto-delete without a limit', { autoDelete: true }, 'SECRET_AUTO_DELETE_NEEDS_LIMIT'],
+      ['auto-delete with a limit', { autoDelete: true, maxReads: 1 }, 'SECRET_AUTO_DELETE_NOT_ALLOWED'],
       ['bad time', { expiresAt: 'not-a-date' }, 'BAD_USER_INPUT'],
       ['plain', {}, 'FORBIDDEN'],
     ];

@@ -238,6 +238,7 @@
     "SummarizationRequest": "value",
     "ChatResponseResult": "envelope",
     "RevisionResult": "envelope",
+    "AgentRevision": "value",
     "EditorLockResult": "envelope",
     "UntrackedTaskItem": "value",
     "UntrackedTaskItemPage": "envelope",
@@ -271,6 +272,7 @@
     "UsageEventPage": "envelope",
     "ExchangeConnectionPage": "envelope",
     "DashboardWidgetPresetPage": "envelope",
+    "DashboardWidgetPage": "envelope",
     "AppKeyPage": "envelope",
     "UserApiKeyPage": "envelope",
     "AgentSubscriptionPage": "envelope",
@@ -288,6 +290,7 @@
     "AgentTeamAlarmSchedule": "value",
     "HostRegistrationWorker": "value",
     "HostOperationPage": "envelope",
+    "HostRegistrationPage": "envelope",
     "HostSetup": "envelope",
     "HostRegistrationRefusal": "value",
     "ContextResetStep": "value",
@@ -780,6 +783,12 @@
       "resolver": "src/api/graphql/schema/resolvers.channel.ts::readableMemoryWhere",
       "target": "Channel"
     },
+    "AgentTaskPage.items": {
+      "class": "parent-implies-child",
+      "audience": "callers who passed the App's task gate (participant or the App's live key via withReadableApp); Query.agentTasksPage reads through the same agentTaskListWhere as Query.agentTasks, and task reads are App-wide for that audience",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AgentTask"
+    },
     "ChatPage.items": {
       "class": "self-gated",
       "resolver": "src/api/graphql/schema/resolvers.query.chat.ts::myChatsScope",
@@ -889,6 +898,18 @@
       "audience": "org ADMIN of the named org or platform admin (requireOrgRole ADMIN); the org's own ledger; scalars only",
       "resolver": "src/api/graphql/schema/resolvers.metering.ts::requireOrgRole",
       "target": "CreditLedgerEntry"
+    },
+    "DashboardWidgetPage.items": {
+      "class": "parent-implies-child",
+      "audience": "only the caller's own placed widgets (userId = ctx.userId); non-users and impersonation get an empty page",
+      "resolver": "src/api/graphql/schema/resolvers.dashboard.ts::dashboardWidgetsPage",
+      "target": "DashboardWidget"
+    },
+    "HostRegistrationPage.items": {
+      "class": "parent-implies-child",
+      "audience": "hostRegistrationsPage gated by withReadableApp, as hostRegistrations: App participants plus the App's own key",
+      "resolver": "src/api/graphql/schema/resolvers.hostOperation.ts::withReadableApp",
+      "target": "HostRegistration"
     },
     "DashboardWidgetPresetPage.items": {
       "class": "parent-implies-child",

@@ -8,6 +8,7 @@ import { requireProtectedSecretHolder } from './protection.js';
  * event commit before the value leaves this function. A client id that is unknown, belongs to another holder or another App is
  * the one uniform SECRET_READ_CLIENT_NOT_FOUND, so a client id is no existence oracle. Past that, the refusal names the state.
  */
+import { deleteLockedAppSecret } from './autoDelete.js';
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.js';
@@ -128,6 +129,11 @@ async function revealAs(ctx: Context, clientId: string, holder: Holder): Promise
     await recordSecretEvent(tx, { ownerId: secret.ownerId, secretId: secret.id, secretName: secret.name, kind: 'REVEAL', versionNo: newest?.versionNo ?? null, actor });
     const value = await currentAppSecretValue(tx, { id: secret.id, ownerId: secret.ownerId });
     const after = await tx.grant.findUniqueOrThrow({ where: { id: client.grantId }, select: { maxUses: true, useCount: true } });
+    const terms = await tx.grant.findUniqueOrThrow({ where: { id: client.grantId }, select: { values: true, signatureId: true } });
+    if (terms.signatureId && (terms.values as Record<string, unknown>)['auto-delete'] === 'delete'
+        && after.maxUses !== null && after.useCount >= after.maxUses) {
+      await deleteLockedAppSecret(tx, secret);
+    }
     return { value: JSON.stringify(value), secretName: secret.name, readsLeft: after.maxUses === null ? null : after.maxUses - after.useCount };
   });
   } catch (e) {

@@ -1932,7 +1932,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   {
     const off = secretSweepDisabledReason();
     if (off === null) startSecretSweepLoop(db);
-    else if (off !== 'NODE_ENV=test') console.warn(`secret_sweep.disabled reason=${off}`);
+    else if (off !== 'NODE_ENV=test') console.warn(`secret_sweep.disabled reason=${off} window_end_auto_delete=off`);
   }
 
   // #3122: transient passkey/signing ceremonies; independent of feature flags so old rows still retire.

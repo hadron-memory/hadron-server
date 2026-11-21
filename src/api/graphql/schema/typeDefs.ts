@@ -2682,6 +2682,18 @@ export const typeDefs = `#graphql
     API
   }
 
+  "#4427 — an answer: an option, free text, or both. Never pre-selected; the caller names one."
+  input AnswerQuestionInput {
+    "One of the question\'s option keys. Optional when text is given."
+    optionKey: String
+    "Free text: alone, or a note beside the chosen option."
+    text: String
+    "Why this answer replaces an earlier one. Always optional; blank counts as not given."
+    reason: String
+    "Where the answer was given, as the client states it (a claim). Default API."
+    via: QuestionAnswerVia
+  }
+
   "#1641 — a reference: exactly one of an external ref (hadron-server#1640, team:6783), a node id or URN, or a spec citation."
   type QuestionRef {
     ref: String
@@ -2821,6 +2833,15 @@ export const typeDefs = `#graphql
     deciders: [CommentActorRef!]!
     "True when the caller is a decider, including through an account merged into theirs (#1715)."
     viewerIsDecider: Boolean!
+    """
+    #4427 — true when the caller may answer or take back an answer right now: one of the question\'s deciders, acting as
+    themselves (a person in a session bound to no worker or agent, no App key or run, no impersonation), still among the
+    log\'s deciders and able to write its memory, on a question that is not withdrawn, tampered or unverifiable
+    (hrn:node:hadronmemory.com:specs:cor:dmo:140:05). It is the capability to submit a new answer: it is false once the
+    answer history is full (the last entry is kept for taking an answer back), and it does not say that an answer stands to
+    take back (retractQuestionAnswer refuses QUESTION_NOT_ANSWERED otherwise).
+    """
+    viewerMayAnswer: Boolean!
     "Account merges the stored user ids follow: the record keeps the merged-away id (#1715)."
     identityMerges: [QuestionIdentityMerge!]!
     askedBy: QuestionActor!
@@ -9342,6 +9363,14 @@ export const typeDefs = `#graphql
     "#1709 — the App's host registrations, liveness derived now (hrn:node:hadronmemory.com:specs:cor:agt:070:01). Whoever reads the App's tasks and events, the App's own key included."
     hostRegistrations(appRef: String!): [HostRegistration!]!
     """
+    #2213 S3 — \`hostRegistrations\` as a page: the same App gate and refusals, the same rows in \`hostId\` order with
+    their workers in \`workerId\` order, and the real total (hrn:node:hadronmemory.com:specs:cor:api:120:04). A consumer
+    that decides on the set follows the pages to the end; \`hostRegistrations\` remains the complete set. A host key's
+    read is recorded as one use counting the items returned. \`limit\` defaults to 20, 0 returns the count only, a
+    negative limit is 0 and a limit over 200 is served as 200 (never refused). \`offset\` below 0 is 0.
+    """
+    hostRegistrationsPage(appRef: String!, limit: Int, offset: Int): HostRegistrationPage!
+    """
     #4224 (S3 of #4229) — for each worker one host runs: whether its agent process should be running, and why. A
     host's sweep reads this once per pass and compares it with what it sees. While the App's hostSetupSource is HOST
     (the default), a host's workers are the ones its registration lists (hrn:node:hadronmemory.com:specs:cor:agt:070:01),
@@ -9473,6 +9502,67 @@ export const typeDefs = `#graphql
       limit: Int
       offset: Int
     ): [AgentTask!]!
+
+    """
+    #2212 A3 (hrn:node:hadronmemory.com:specs:cor:api:120:04): agentTasks as a page. The filters are agentTasks' own (one
+    shared filter), and the order is the same (newest first, then id); only the paging differs, as below. total counts the tasks the same filter matches,
+    never a task the caller cannot read: the App read gate (hrn:node:hadronmemory.com:specs:cor:agt:050:21) runs first, and
+    an App you do not participate in answers APP_NOT_FOUND exactly like an absent one, never an empty page. hasMore is
+    whether tasks remain past this page; pass offset + items length to continue. limit defaults to 20, 0 returns only total,
+    and over 200 is served as 200. Unlike agentTasks, an externalIds batch with no limit is not widened to 200: it pages at
+    20 like any filter, and hasMore says whether more of the batch remains.
+    items and total are read in one snapshot, so total and hasMore always describe the rows served.
+    """
+    agentTasksPage(
+      appRef: ID!
+      status: [AgentTaskStatus!]
+      owner: AgentTaskPartyInput
+      assignee: AgentTaskPartyInput
+      creator: AgentTaskPartyInput
+      tag: String
+      "Match at least one tag. Empty arrays do not narrow the list."
+      tagsAny: [String!]
+      "Match every tag. Empty arrays do not narrow the list."
+      tagsAll: [String!]
+      "Exact opaque source value, without interpretation or prefix matching."
+      source: String
+      "#3125 S2, #4217: the tasks with exactly this externalId (compared as written, 1 to 512 characters, else BAD_USER_INPUT): at most one ACTIVE task (backlog, pending or started) holds it, and any number of finished or cancelled tasks that held it before it. Newest first, so a caller that wants the live one picks the active one. Runs inside the App read gate, so it only finds this App's tasks."
+      externalId: String
+      """
+      #4084 (hrn:node:hadronmemory.com:specs:cor:agt:120:02): the tasks holding any of these external ids, each compared
+      exactly as written, with agentTasks' checks (1 to 100 ids, each 1 to 512 characters; one bad entry refuses the whole
+      list with BAD_USER_INPUT naming its position, never its text; an empty list is BAD_USER_INPUT). Paged like every other
+      filter here: an omitted limit is 20, never widened to the batch; hasMore says whether more of the batch remains.
+      """
+      externalIds: [String!]
+      "#2649: tasks carrying a reference with exactly this target, and this kind when given; the label is ignored. Runs inside the App read gate."
+      reference: AgentTaskReferenceFilter
+      "#2663: true narrows to finished tasks with at least one undisposed finding; false/omitted do not narrow. Existing App read scope, before paging (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
+      unresolvedFindings: Boolean
+      "Case-insensitive substring of the title or description, 1 to 200 characters after trimming (else BAD_USER_INPUT). Percent, underscore and backslash match literally. ANDed with every other filter."
+      text: String
+      "True: overdue on the server clock (the database clock). Two arms: a pending task, not started, whose start-by has passed; or a pending or started task whose finish-by has passed and which has not ended. An ended (finished or cancelled) task and a backlog task are never overdue, and neither is a task with neither time. Blocking is ignored. False: all other tasks. Not an alarm: listing raises nothing."
+      overdue: Boolean
+      "Inclusive creation-time lower bound."
+      createdAfter: DateTime
+      "Inclusive creation-time upper bound."
+      createdBefore: DateTime
+      "Inclusive start-time lower bound; tasks with no start time never match."
+      startedAfter: DateTime
+      "Inclusive start-time upper bound; tasks with no start time never match."
+      startedBefore: DateTime
+      "Inclusive finish-time lower bound; tasks with no finish time never match."
+      finishedAfter: DateTime
+      "Inclusive finish-time upper bound; tasks with no finish time never match."
+      finishedBefore: DateTime
+      parentTaskId: ID
+      rootsOnly: Boolean
+      queued: Boolean
+      "True: only single-shot match failures; false: unmarked tasks. Does not change who may read."
+      matchFailed: Boolean
+      limit: Int
+      offset: Int
+    ): AgentTaskPage!
 
     """
     #1705 — a task and every task below it, the root first, then by depth and
@@ -10044,7 +10134,7 @@ export const typeDefs = `#graphql
     verifyNode(nodeRef: ID!): NodeIntegrityCheck!
     "#1632 — one signing request; null when unknown or when its node is not readable to the caller."
     signingRequest(id: ID!): SigningRequest
-    "#3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — one grant signing request; null when unknown or when its grant is not readable to the caller: a bound worker session in its own App, or a person acting as themselves who manages the grant's live, installed App (as appGrants reads it)."
+    "#3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — one grant signing request; null when unknown or when its grant is not readable to the caller: a bound worker session in its own App, a person acting as themselves who manages the grant's live, installed App (as appGrants reads it), or (#4544, hrn:node:hadronmemory.com:specs:cor:sec:060:01) the person who issued the secret read client the grant backs, while an App participant."
     grantSigningRequest(id: ID!): GrantSigningRequest
     "#1591 — the tamper check over every live node of a memory (ID or fully-qualified URN)."
     verifyMemoryNodes(memoryRef: String!): MemoryIntegrityReport!
@@ -10331,6 +10421,13 @@ export const typeDefs = `#graphql
 
     "#772 — the caller's placed dashboard widgets, ordered by position. Empty for a non-user (App-key) caller."
     dashboardWidgets: [DashboardWidget!]!
+    """
+    #2213 S3 — \`dashboardWidgets\` as a page: the same owner scope and \`position\` order (id breaks ties), with the
+    real total (hrn:node:hadronmemory.com:specs:cor:api:120:04). Empty for a non-user or impersonated caller. A consumer
+    that decides on the set follows the pages to the end; \`dashboardWidgets\` remains the complete set. Sizes as
+    \`tickersPage\`.
+    """
+    dashboardWidgetsPage(limit: Int, offset: Int): DashboardWidgetPage!
     "#797 — data for each of the caller's PLACED widgets, in position order, one entry per placement built from its own config. Empty for a non-user caller."
     dashboardWidgetData: [DashboardWidgetData!]!
 
@@ -10609,6 +10706,14 @@ export const typeDefs = `#graphql
     'ref' accepts the entity's ID or URN.
     """
     agent(ref: ID!): Agent
+
+    """
+    An Agent's revisions, newest first, with the slot limit, the highest slot used and the saves left (#4488).
+    Read by whoever may restore a revision: the Agent's manager.
+
+    Accepts the entity's ID or URN.
+    """
+    agentRevisions(agentRef: ID!): AgentRevisionList!
     """
     #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15) - an Agent's tasks, across its base chain:
     every runnable node in its effective system memory, and every task the
@@ -12783,8 +12888,24 @@ export const typeDefs = `#graphql
 
     Identical to updateNode otherwise, selectors included ('id' XOR 'memoryId' +
     'loc'); it never creates and never moves.
+
+    #1291 — 'mergeExports: true' makes the WHOLE 'input.properties' bag a PATCH
+    (not only 'exports') instead of a replacement: named top-level keys are replaced whole, except 'exports', which
+    merges per host and per field ('null' removes a host); unnamed keys stay.
+    It is the merge 'updateNodeProperties' applies, run under the node's lock on
+    the row read after it, so two concurrent patches to different hosts both
+    land. The gate, task and schema validation judge the MERGED result;
+    'expectedRevision' still applies; who may write is unchanged. 'properties'
+    must then be an object (anything else is BAD_USER_INPUT). Omit or pass false
+    for today's whole-bag replace. Only this door has it.
     """
-    updateTaskNode(input: UpdateNodeInput!): Node!
+    updateTaskNode(
+      input: UpdateNodeInput!
+      """
+      Treat the whole 'input.properties' as a patch (unnamed keys kept; 'exports' merged per host and field) instead of replacing the bag. Default false.
+      """
+      mergeExports: Boolean
+    ): Node!
 
     """
     Update an existing node. Identify it by 'id' (PK or fully-qualified node
@@ -12986,7 +13107,7 @@ export const typeDefs = `#graphql
     "#1632 — withdraw an open signing request. Only the requester account, from any of its sessions (#10397). Refusals (hrn:node:hadronmemory.com:specs:cor:dmo:130:03, Holger #10430): SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
     withdrawSigningRequest(id: ID!): SigningRequest!
     """
-    #3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — ask for one pending grant to be signed. Two callers may ask: a bound worker session in its own App, or a person acting as themselves who manages the grant's live, installed App (as appGrants reads it); workers never sign. No signer is named: whoever signs must be able to issue it. The request pins the grant's version and terms hash. Refusals: FORBIDDEN while impersonating; GRANT_NOT_FOUND (unknown and unreadable alike); GRANT_NOT_PENDING (activated, revoked, or its holder gone; no state is named); GRANT_EXPIRED (past its expiry, so it can never be signed); GRANT_TERMS_UNREPRESENTABLE (extensions.reason). No call takes an assertion: the signer signs on the server-hosted ceremony page.
+    #3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — ask for one pending grant to be signed. Three callers may ask: a bound worker session in its own App, a person acting as themselves who manages the grant's live, installed App (as appGrants reads it), or (#4544, hrn:node:hadronmemory.com:specs:cor:sec:060:01) the person who issued the secret read client the grant backs, while an App participant, so a writer who does not manage the App can finish the hand-off; workers never sign. No signer is named: whoever signs must be able to issue it. The request pins the grant's version and terms hash. Refusals: FORBIDDEN while impersonating; GRANT_NOT_FOUND (unknown and unreadable alike); GRANT_NOT_PENDING (activated, revoked, or its holder gone; no state is named); GRANT_EXPIRED (past its expiry, so it can never be signed); GRANT_TERMS_UNREPRESENTABLE (extensions.reason). No call takes an assertion: the signer signs on the server-hosted ceremony page.
     """
     requestGrantSignature(grantRef: ID!): GrantSigningRequest!
     """
@@ -13057,6 +13178,21 @@ export const typeDefs = `#graphql
     amendQuestion(ref: ID!, input: AmendQuestionInput!, expectedRevision: Int!, reason: String!): Question!
     "#1641 — withdraw a question (terminal; the code stays consumed): the asker or a decider, a decider once answered, whatever its state."
     withdrawQuestion(ref: ID!, reason: String!, expectedRevision: Int!): Question!
+    """
+    #4427 — answer a question, or answer it again. One of its deciders, acting as themselves: never a worker or agent
+    session, an App key, a run or an impersonated session (hrn:node:hadronmemory.com:specs:cor:dmo:140:05). Appends an answer
+    entry; earlier entries stay, and an answered, approved or signed question can always be answered again on the same node.
+    expectedRevision is required: the answer covers exactly the revision the decider saw (Question.revSeq). The identical
+    answer again with no reason writes nothing. Refusals: QUESTION_NOT_DECIDER, QUESTION_IMPERSONATION_REFUSED,
+    QUESTION_UNKNOWN_OPTION, QUESTION_WITHDRAWN, QUESTION_INVALID, QUESTION_NOT_FOUND, QUESTION_FORBIDDEN, QUESTION_LOG_NOT_FOUND,
+    NODE_WRITE_CONFLICT.
+    """
+    answerQuestion(ref: ID!, input: AnswerQuestionInput!, expectedRevision: Int!): Question!
+    """
+    #4427 — take the standing answer back: the question is OPEN again and the answer stays in its history. Same callers
+    and refusals as answerQuestion, plus QUESTION_NOT_ANSWERED when no answer stands.
+    """
+    retractQuestionAnswer(ref: ID!, expectedRevision: Int!, reason: String, via: QuestionAnswerVia): Question!
     "#1641 — a platform admin hard-deletes a question that was never answered (or one stranded in the pre-#4426 format), recorded on its log (QUESTION_ANSWERED otherwise). The code stays consumed."
     purgeUnansweredQuestion(ref: ID!, reason: String!): Boolean!
 
@@ -14809,6 +14945,16 @@ export const typeDefs = `#graphql
     """
     restoreRevision(agentRef: ID!, revisionLoc: String!): RevisionResult!
 
+    """
+    Delete one of an Agent's revisions by loc (#4488). Same gate as restoreRevision: the Agent's manager.
+    Refuses, before any write, the published (pinned) revision (REVISION_PUBLISHED) and the Agent's only
+    revision (REVISION_ONLY). A deleted revision leaves the list and can no longer be restored; its slot
+    number is not reused, so a delete does not free a slot (see agentRevisions).
+
+    Accepts the entity's ID or URN.
+    """
+    deleteAgentRevision(agentRef: ID!, revisionLoc: String!): RevisionResult!
+
     # Editor lock (org ADMIN)
     """
     Acquire (or renew) the editor lock for an Agent's system memory.
@@ -16079,6 +16225,27 @@ export const typeDefs = `#graphql
     offTrackReason: String
   }
 
+  "One revision in an Agent's list. #4488"
+  type AgentRevision {
+    revisionLoc: String!
+    label: String!
+    "True for the revision the Agent is pinned to (publishRevision)."
+    published: Boolean!
+    description: String
+    createdAt: DateTime!
+  }
+
+  """
+  An Agent's revisions, newest first, with the slot facts. Slot numbers are never reused: the next save takes
+  1 + the highest ever used, deleted revisions included, so a delete does not raise slotsRemaining. #4488
+  """
+  type AgentRevisionList {
+    revisions: [AgentRevision!]!
+    slotLimit: Float!
+    highestSlotUsed: Float!
+    slotsRemaining: Float!
+  }
+
   type RevisionResult {
     revisionLoc: String!
     label: String!
@@ -16674,6 +16841,13 @@ export const typeDefs = `#graphql
     hasMore: Boolean!
   }
 
+  "#2212 A3 — one page of an App's agent tasks, counted over the same filter and read gate."
+  type AgentTaskPage {
+    items: [AgentTask!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
   "#2212 A3 — one page of the caller's chats with an Agent, counted over the same chats."
   type ChatPage {
     items: [Chat!]!
@@ -16712,6 +16886,20 @@ export const typeDefs = `#graphql
   "#2213 — one page of an org's exchange connections."
   type ExchangeConnectionPage {
     items: [ExchangeConnection!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2213 S3 — one page of an App's host registrations."
+  type HostRegistrationPage {
+    items: [HostRegistration!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2213 S3 — one page of the caller's placed dashboard widgets."
+  type DashboardWidgetPage {
+    items: [DashboardWidget!]!
     total: Int!
     hasMore: Boolean!
   }

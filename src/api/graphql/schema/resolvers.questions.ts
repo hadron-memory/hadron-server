@@ -51,7 +51,8 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, EntityNotFoundError } from '../../../lib/entityRef/errors.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
-import { currentActor } from '../../../lib/requestActor.js';
+import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
 import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
@@ -70,7 +71,10 @@ import {
   QUESTION_CODEC,
   QUESTION_LOG_CODEC,
   LEGACY_DECISION_CODEC,
+  LONG_TEXT_MAX,
+  MAX_ANSWERS,
   MAX_DECIDERS,
+  SHORT_TEXT_MAX,
   amendInputSchema,
   askInputSchema,
   checkQuestion,
@@ -79,6 +83,7 @@ import {
   questionDataSchema,
   questionLogDataSchema,
   invalidQuestion,
+  optionKey as optionKeySchema,
   optionsOf,
   parseOrRefuse,
   type AnswerEntry,
@@ -183,6 +188,46 @@ async function isDecider(ctx: Context, d: Pick<QuestionData, 'deciders'>): Promi
   if (ctx.impersonation || !ctx.userId) return false;
   const ids = await callerIdentities(ctx);
   return d.deciders.some((id) => ids.has(id));
+}
+
+/** The outcome of {@link actingDecider}: either the caller may act as a decider, or the typed refusal to throw. */
+type DeciderCheck = { ok: true } | { ok: false; code: 'QUESTION_NOT_DECIDER' | 'QUESTION_IMPERSONATION_REFUSED'; message: string };
+
+/** One fixed message for the three checks that read the question, the log and the caller's access, so the refusal names none of them. */
+const NOT_A_DECIDER_NOW = 'Only one of this question\'s deciders, acting as themselves, can do that.';
+const NOT_A_PERSON = 'A worker or agent session cannot answer a question; answer as yourself, in a session bound to no worker.';
+
+/**
+ * #4427 (cor:dmo:140:05) — whether the caller may act as a decider of `question` right now: the ONE gate
+ * for every act reserved for a decider (answer, take an answer back, and the decider arms of amend and
+ * withdraw). Never a worker, an Agent, an App key or a run; never under impersonation; and the person
+ * must still be named by the question, still be among the log's default or eligible deciders (through
+ * the merge-aware survivors), and be able to write the log's memory NOW as themselves with no role bypass.
+ * Read-only: `db` is the transaction's client for a write, `ctx.db` for the read side.
+ */
+async function actingDecider(
+  ctx: Context,
+  db: Tx | Context['db'],
+  question: Pick<QuestionData, 'deciders'>,
+  log: Pick<QuestionLogData, 'defaultDeciders' | 'eligibleDeciders'>,
+  memoryId: string,
+): Promise<DeciderCheck> {
+  const refuse = (message: string): DeciderCheck => ({ ok: false, code: 'QUESTION_NOT_DECIDER', message });
+  if (ctx.impersonation) return { ok: false, code: 'QUESTION_IMPERSONATION_REFUSED', message: 'Questions cannot be written under impersonation.' };
+  // A person is behind the request, and no App key or headless run stands in for them. `appKeyId`, not
+  // `appId`, decides: a person's own active-App selection sets `appId` too (appKeyCaller).
+  if (!ctx.userId || ctx.appKeyId || isRunPrincipal(ctx)) return refuse(NOT_A_PERSON);
+  const actor = currentActor();
+  if (actor.workerId != null || actor.agentId != null || currentActorAmbiguity() != null) return refuse(NOT_A_PERSON);
+  const ids = await callerIdentities(ctx);
+  const named = question.deciders.find((id) => ids.has(id));
+  if (!named) return refuse(NOT_A_DECIDER_NOW);
+  const [now] = await survivors(db, [named]);
+  const onLog = new Set(await survivors(db, [...log.defaultDeciders, ...log.eligibleDeciders]));
+  if (!onLog.has(now)) return refuse(NOT_A_DECIDER_NOW);
+  // As that user, no platform-role bypass: the same predicate assertDecidersEligible applies.
+  if (!(await canWriteToMemory(db as unknown as Context['db'], { userId: ctx.userId, roles: [] }, memoryId))) return refuse(NOT_A_DECIDER_NOW);
+  return { ok: true };
 }
 
 /**
@@ -372,7 +417,35 @@ async function logOfQuestion(db: Pick<Tx, 'node'>, question: { memoryId: string;
     where: { loc_memoryId: { loc: question.loc.slice(0, cut), memoryId: question.memoryId } },
     select: LOG_ROW_SELECT,
   });
-  return row && row.role === QUESTION_LOG_ROLE ? row : null;
+  return row && !row.deletedAt && row.role === QUESTION_LOG_ROLE ? row : null;
+}
+
+/**
+ * #4427 — the question's log, locked `FOR SHARE` and read live, for a door that judges a decider against it
+ * (answer, take back, and the decider arms of amend and withdraw). Lock order, the file's rule: the
+ * edge-endpoint key, then the LOG row, then the QUESTION row ({@link lockQuestion}), never the reverse. A
+ * concurrent change of the log's deciders (`FOR NO KEY UPDATE`) therefore waits for the act, or the act
+ * sees the new list; a decider removed a moment ago cannot slip an answer in.
+ */
+async function lockLogShared(tx: Tx, target: { memoryId: string; loc: string }, ref: string): Promise<{ row: LogRow; data: QuestionLogData }> {
+  const found = await logOfQuestion(tx, target);
+  if (!found) throw logMissing(ref);
+  await lockEdgeEndpointMemories(tx, [target.memoryId]);
+  await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${found.id} FOR SHARE`;
+  const row = await tx.node.findUnique({ where: { id: found.id }, select: LOG_ROW_SELECT });
+  // The parent was found by loc BEFORE the lock; a log moved or replaced in between must not pass on its id alone,
+  // so the row is checked at the loc the question's own loc names, under the lock.
+  if (!row || row.deletedAt || row.memoryId !== target.memoryId || row.role !== QUESTION_LOG_ROLE || row.loc !== target.loc.slice(0, target.loc.lastIndexOf(':'))) throw logMissing(ref);
+  return { row, data: parseLogData(row) };
+}
+
+/**
+ * The locked question must still sit under the locked log: its parent loc is the log's loc. {@link lockLogShared}
+ * found the log by the question's loc BEFORE the question row was locked, so this closes the gap for every door that
+ * judges a decider against the log (answer, take back, amend, withdraw).
+ */
+function requireInLog(question: { loc: string }, log: { row: { loc: string } }, ref: string): void {
+  if (question.loc.slice(0, question.loc.lastIndexOf(':')) !== log.row.loc) throw logMissing(ref);
 }
 
 function logContentOf(name: string, data: QuestionLogData) {
@@ -432,20 +505,23 @@ async function evaluateRows(db: Pick<Tx, 'nodeRevision'>, rows: QuestionRow[]): 
   });
 }
 
+/** The states no door writes to: corrupt evidence, and withdrawn. One set, read by {@link requireWritable} and `viewerMayAnswer`. */
+const BLOCKED_STATES: ReadonlySet<string> = new Set(['TAMPERED', 'UNVERIFIABLE', 'WITHDRAWN']);
+
 /**
  * Refuse a door write on a question whose state forbids it: corrupt evidence
  * first (§5.5 precedence), then the terminal states.
  */
 function requireWritable(view: QuestionView): QuestionData {
   const { state, question } = view.evaluation;
-  if (state === 'TAMPERED' || state === 'UNVERIFIABLE' || !question) {
+  if (!question || BLOCKED_STATES.has(state)) {
+    if (question && state === 'WITHDRAWN') throw questionError('QUESTION_WITHDRAWN', `${question.code} was withdrawn.`, { questionCode: question.code });
     throw questionError(
       'QUESTION_INVALID',
       `This question is ${state} and cannot be changed through the question operations; run verifyQuestion for the findings.`,
       { state },
     );
   }
-  if (state === 'WITHDRAWN') throw questionError('QUESTION_WITHDRAWN', `${question.code} was withdrawn.`, { questionCode: question.code });
   return question;
 }
 
@@ -788,10 +864,12 @@ export const questionMutations = {
     const actor = actorOf(ctx);
     const effects: Array<() => void> = [];
     await withAuthorizedMemoryTx(ctx, target.memoryId, [], (txCtx) => requireQuestionWrite(txCtx, target.memoryId), async (tx, txCtx) => {
+      const log = await lockLogShared(tx, target, args.ref);
       const row = await lockQuestion(tx, target.id, target.memoryId, args.ref, args.expectedRevision);
+      requireInLog(row, log, args.ref);
       const [view] = await evaluateRows(tx, [row]);
       const current = requireWritable(view);
-      const decider = await isDecider(txCtx, current);
+      const decider = (await actingDecider(txCtx, tx, current, log.data, target.memoryId)).ok;
       const answered = everAnswered(current);
       if (answered && !decider) {
         throw questionError('QUESTION_NOT_DECIDER', `${current.code} has an answer, so only one of its deciders may amend it.`, { questionCode: current.code });
@@ -876,10 +954,12 @@ export const questionMutations = {
     await requireQuestionWrite(ctx, target.memoryId);
     const effects: Array<() => void> = [];
     await withAuthorizedMemoryTx(ctx, target.memoryId, [], (txCtx) => requireQuestionWrite(txCtx, target.memoryId), async (tx, txCtx) => {
+      const log = await lockLogShared(tx, target, args.ref);
       const row = await lockQuestion(tx, target.id, target.memoryId, args.ref, args.expectedRevision);
+      requireInLog(row, log, args.ref);
       const [view] = await evaluateRows(tx, [row]);
       const current = requireWritable(view);
-      const decider = await isDecider(txCtx, current);
+      const decider = (await actingDecider(txCtx, tx, current, log.data, target.memoryId)).ok;
       if (everAnswered(current) ? !decider : !(decider || (await isAsker(txCtx, current)))) {
         throw questionError(
           everAnswered(current) ? 'QUESTION_NOT_DECIDER' : 'QUESTION_NOT_ASKER',
@@ -902,6 +982,53 @@ export const questionMutations = {
     }, { timeout: 60_000 });
     for (const effect of effects) effect();
     return loadQuestionView(ctx, target.id);
+  },
+
+  /**
+   * #4427 (cor:dmo:140:05, :09) — answer a question, or answer it again. One of its deciders, acting as
+   * themselves (see {@link actingDecider}); appends an answer entry, earlier entries stay, and a question that
+   * is already answered, approved or signed can always be answered again on the same node. The answer covers
+   * exactly the revision the decider saw (`expectedRevision`, required). The identical answer again with no
+   * reason writes nothing; the revision label never carries the free text.
+   */
+  answerQuestion: async (
+    _: unknown,
+    args: { ref: string; input: { optionKey?: string | null; text?: string | null; reason?: string | null; via?: string | null }; expectedRevision: number },
+    ctx: Context,
+  ): Promise<QuestionView> => {
+    refuseImpersonation(ctx);
+    const given = parseAnswerInput(args.input);
+    return answerAct(ctx, args.ref, args.expectedRevision, (current, by) => {
+      if (given.optionKey != null && !current.options.some((o) => o.key === given.optionKey)) {
+        throw questionError('QUESTION_UNKNOWN_OPTION', `${current.code} has no option "${given.optionKey}".`, { optionKey: given.optionKey, questionCode: current.code });
+      }
+      const standing = currentAnswer(current);
+      if (standing && standing.key === given.optionKey && standing.text === given.text && given.reason == null) return null;
+      const entry: AnswerEntry = { kind: 'answer', key: given.optionKey, text: given.text, reason: given.reason, by, at: new Date().toISOString(), via: given.via };
+      const label = `answer ${given.optionKey ?? '(text)'}${given.reason ? `: ${given.reason}` : ''}`.slice(0, REASON_MAX);
+      return { entry, label };
+    });
+  },
+
+  /**
+   * #4427 — take the standing answer back: the question is OPEN again and the answer stays in its history as
+   * a retraction entry. Same callers and gate as {@link answerQuestion}; QUESTION_NOT_ANSWERED when no answer stands.
+   */
+  retractQuestionAnswer: async (
+    _: unknown,
+    args: { ref: string; expectedRevision: number; reason?: string | null; via?: string | null },
+    ctx: Context,
+  ): Promise<QuestionView> => {
+    refuseImpersonation(ctx);
+    const reason = shortOrNull(args.reason, '/reason');
+    const via = answerVia(args.via);
+    return answerAct(ctx, args.ref, args.expectedRevision, (current, by) => {
+      if (currentAnswer(current) == null) {
+        throw questionError('QUESTION_NOT_ANSWERED', `${current.code} has no standing answer to take back.`, { questionCode: current.code });
+      }
+      const entry: AnswerEntry = { kind: 'retraction', key: null, text: null, reason, by, at: new Date().toISOString(), via };
+      return { entry, label: `take back answer${reason ? `: ${reason}` : ''}`.slice(0, REASON_MAX) };
+    });
   },
 
   /**
@@ -1269,6 +1396,105 @@ export const questionQueries = {
   },
 };
 
+// ─── Answer doors (#4427) ────────────────────────────────────────────────────
+
+/** A raw field of a door call: absent, or a string. The doors are reached through GraphQL, whose types guarantee this; a direct caller that bypasses coercion gets the typed refusal, never a TypeError. */
+function stringOrAbsent(value: unknown, pointer: string): string | null {
+  if (value == null) return null;
+  if (typeof value !== 'string') invalidQuestion([{ pointer, message: 'must be a string' }]);
+  return value as string;
+}
+
+const ANSWER_VIA = new Set(['portal', 'cli', 'mcp', 'api']);
+
+/** Where the answer was given, as the caller states it (a claim, never authority); the default is the API. */
+function answerVia(via: unknown, pointer = '/via'): AnswerEntry['via'] {
+  const v = (stringOrAbsent(via, pointer) ?? 'API').toLowerCase();
+  if (!ANSWER_VIA.has(v)) invalidQuestion([{ pointer, message: 'must be one of PORTAL, CLI, MCP, API' }]);
+  return v as AnswerEntry['via'];
+}
+
+/** A reason: at most {@link SHORT_TEXT_MAX} characters, line endings normalised; blank counts as not given. */
+function shortOrNull(value: unknown, pointer: string): string | null {
+  const raw = stringOrAbsent(value, pointer);
+  if (raw == null) return null;
+  const v = raw.replace(/\r\n?/g, '\n');
+  if (v.length > SHORT_TEXT_MAX) invalidQuestion([{ pointer, message: `at most ${SHORT_TEXT_MAX} characters` }]);
+  return v.trim().length === 0 ? null : v;
+}
+
+function parseAnswerInput(raw: unknown): {
+  optionKey: string | null; text: string | null; reason: string | null; via: AnswerEntry['via'];
+} {
+  if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) invalidQuestion([{ pointer: '/input', message: 'must be an object' }]);
+  const input = raw as Record<string, unknown>;
+  const key = stringOrAbsent(input.optionKey, '/input/optionKey');
+  let optionKey: string | null = null;
+  if (key != null) {
+    const parsed = optionKeySchema.safeParse(key);
+    if (!parsed.success) invalidQuestion([{ pointer: '/input/optionKey', message: parsed.error.issues[0]?.message ?? 'not an option key' }]);
+    optionKey = key;
+  }
+  let text: string | null = null;
+  const rawText = stringOrAbsent(input.text, '/input/text');
+  if (rawText != null) {
+    const v = rawText.replace(/\r\n?/g, '\n');
+    if (v.length > LONG_TEXT_MAX) invalidQuestion([{ pointer: '/input/text', message: `at most ${LONG_TEXT_MAX} characters` }]);
+    text = v.trim().length === 0 ? null : v;
+  }
+  if (optionKey == null && text == null) invalidQuestion([{ pointer: '/input', message: 'an answer names an option or gives text' }]);
+  return { optionKey, text, reason: shortOrNull(input.reason, '/input/reason'), via: answerVia(input.via, '/input/via') };
+}
+
+/**
+ * The transaction both answer doors share (#4427): resolve the question under the ordinary read gate (an
+ * unreadable one is QUESTION_NOT_FOUND), then, in the file's lock order, the log `FOR SHARE`, the question
+ * `FOR UPDATE` (stale `expectedRevision` is NODE_WRITE_CONFLICT), a writable state, the acting-decider gate,
+ * and only then `decide`: it refuses or returns the entry to append (null writes nothing). The append goes
+ * through the one governed door, exactly as amendQuestion does.
+ */
+async function answerAct(
+  ctx: Context,
+  ref: string,
+  expectedRevision: number,
+  decide: (current: QuestionData, by: string) => { entry: AnswerEntry; label: string } | null,
+): Promise<QuestionView> {
+  const target = await resolveGovernedNode(ctx, ref, QUESTION_ROLE, questionMissing);
+  await requireQuestionWrite(ctx, target.memoryId);
+  const effects: Array<() => void> = [];
+  await withAuthorizedMemoryTx(ctx, target.memoryId, [], (txCtx) => requireQuestionWrite(txCtx, target.memoryId), async (tx, txCtx) => {
+    const log = await lockLogShared(tx, target, ref);
+    const row = await lockQuestion(tx, target.id, target.memoryId, ref, expectedRevision);
+    requireInLog(row, log, ref);
+    const [view] = await evaluateRows(tx, [row]);
+    const current = requireWritable(view);
+    const check = await actingDecider(txCtx, tx, current, log.data, target.memoryId);
+    if (!check.ok) throw questionError(check.code, check.message, { questionCode: current.code });
+    const act = decide(current, txCtx.userId as string);
+    if (!act) return;
+    // The last slot is kept for the take-back: an answer may not fill the history, so a standing answer can always be retracted.
+    const limit = act.entry.kind === 'retraction' ? MAX_ANSWERS : MAX_ANSWERS - 1;
+    if (current.answers.length >= limit) {
+      invalidQuestion([{ pointer: act.entry.kind === 'retraction' ? '/expectedRevision' : '/input', message: act.entry.kind === 'answer' ? `this question has reached its limit of ${MAX_ANSWERS} answer entries (the last is kept for taking an answer back)` : `this question's answer history is full (${MAX_ANSWERS} entries), so its standing answer cannot be taken back` }]);
+    }
+    const next: QuestionData = structuredClone(current);
+    next.answers.push(act.entry);
+    next.status = statusHint(next);
+    const final = await finalize(tx, next);
+    await writeNodeCore(
+      { memoryId: target.memoryId, loc: row.loc, ...renderedFields(final), reason: act.label },
+      txCtx,
+      'update',
+      { authoring: { kind: 'platform', record: 'question' },
+        targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'question', governedContext: 'node-write',
+        transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
+      },
+    );
+  }, { timeout: 60_000 });
+  for (const effect of effects) effect();
+  return loadQuestionView(ctx, target.id);
+}
+
 // ─── Field resolvers ─────────────────────────────────────────────────────────
 
 const ENUM = (v: string) => v.toUpperCase().replace(/-/g, '_');
@@ -1366,6 +1592,19 @@ export const questionFieldResolvers = {
     deciderIds: (v: QuestionView) => v.shown?.deciders ?? [],
     deciders: (v: QuestionView, _: unknown, ctx: Context) => users(ctx, v.shown?.deciders ?? []),
     viewerIsDecider: async (v: QuestionView, _: unknown, ctx: Context) => !!v.shown && (await isDecider(ctx, v.shown)),
+    viewerMayAnswer: async (v: QuestionView, _: unknown, ctx: Context) => {
+      // The same gate as the doors, on the read client; a state no door writes to is never answerable.
+      const state = v.evaluation.state;
+      if (!v.shown || !v.evaluation.question || BLOCKED_STATES.has(state)) return false;
+      // At the entry limit answerAct refuses every new entry (retraction included), so no one may answer.
+      if (v.shown.answers.length >= MAX_ANSWERS - 1) return false;
+      const found = await logOfQuestion(ctx.db, v.row);
+      if (!found) return false;
+      // A corrupt or unsupported log payload is "no", not a null in the non-null field; a database error still surfaces.
+      const parsed = questionLogDataSchema.safeParse(found.data);
+      if (!parsed.success) return false;
+      return (await actingDecider(ctx, ctx.db, v.shown, parsed.data, v.row.memoryId)).ok;
+    },
     identityMerges: (v: QuestionView, _: unknown, ctx: Context) => identityMergesOf(ctx, v.shown),
     askedBy: (v: QuestionView, _: unknown, ctx: Context) => actorOut(ctx, v.shown?.askedBy ?? { userId: null, workerId: null, appId: null }),
     askedAt: (v: QuestionView) => v.shown?.askedAt ?? null,
