@@ -9,6 +9,7 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGi
 const M = resolvers.Mutation as Record<string, (...args: any[]) => Promise<any>>;
 const H = 'a'.repeat(40), H2 = 'b'.repeat(40);
 const REMEDY = 'Post the verdict as a signed PR receipt at the exact head, which is the record when a seat cannot bind.';
+const UNBINDABLE = 'post the verdict as a signed PR receipt at the exact head, which is then the record.';
 let owner: any, author: any, reviewer: any, app: any, build: any;
 const ctx = (userId: string) => ({ db, userId, roles: ['READER' as const] });
 const refused = (code: string, message: string) => ({ extensions: { code }, message });
@@ -38,7 +39,7 @@ describe('#4494 refusal texts name the remedy (rows 1-7)', () => {
   it('row 1: a new seat under an ended build task', async () => {
     await readyBuild(); await finishTask(build.id, author.id);
     await expect(child(build.id)).rejects.toMatchObject(refused('TASK_ENDED',
-      `This task is finished; an ended task never moves again. A child task such as a review seat cannot be created under an ended build task. ${REMEDY}`));
+      `This task is finished; an ended task never moves again. A child task cannot be created under an ended parent. If it was meant as a review seat, post the verdict as a signed PR receipt at the exact head, which is the record when a seat cannot bind.`));
   });
   it('row 2: pr seat on a seat that has itself ended', async () => {
     await readyBuild(); const t = await child(build.id); await finishTask(t.id, reviewer.id);
@@ -64,12 +65,12 @@ describe('#4494 refusal texts name the remedy (rows 1-7)', () => {
     const other = await M.createAgentTask!({}, { input: { appRef: app.id, title: 'Not frozen', source: 'synthetic', assignee: { user: author.id } } }, ctx(owner.id));
     const t = await child(other.id);
     await expect(seatCmd(t.id)).rejects.toMatchObject(refused('REVIEW_HEAD_MISMATCH',
-      `This is not the build task's frozen head. ${REMEDY}`));
+      `This is not the build task's frozen head. Bind at the build task's frozen head (pr freeze records it). If the seat truly cannot bind, ${UNBINDABLE}`));
   });
   it('row 7: pr verdict at a head other than the assigned one', async () => {
     await readyBuild(); const t = await child(build.id); await seatCmd(t.id); await M.startAgentTask!({}, { taskId: t.id }, ctx(reviewer.id));
     await expect(verdictCmd(t.id, H2)).rejects.toMatchObject(refused('REVIEW_HEAD_MISMATCH',
-      `The verdict head differs from the assigned head. ${REMEDY}`));
+      `The verdict head differs from the assigned head. Record at the head the seat was bound to. If the seat truly cannot record, ${UNBINDABLE}`));
   });
   it('the unchanged outcomes: a live seat at the frozen head still binds and records', async () => {
     await readyBuild(); const t = await child(build.id); await seatCmd(t.id); await M.startAgentTask!({}, { taskId: t.id }, ctx(reviewer.id));
