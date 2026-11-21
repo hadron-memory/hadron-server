@@ -1147,6 +1147,28 @@ function aiConfigWarnOnce(ctx: Context): (msg: string) => void {
   };
 }
 
+/**
+ * #2309: the portal link of a Memory, Agent or App, built from the SAME rendered urn the `urn` field returns (never the stored column,
+ * which is the bare, possibly legacy single-colon or v1 double-colon form). The urn field serves the RAW stored value when emission
+ * throws (`safeCanonicalUrn`), and a raw value can itself start with `hrn:` (a stored `hrn:app:acme.com:::`), so the prefix does not
+ * tell emission from fallback. This calls the strict emitter the field's wrapper calls and answers null when it throws: only a
+ * successfully emitted canonical urn is a link. An unset or malformed portal origin is null too.
+ *
+ * Why the two cannot drift: for memory, agent and app `safeCanonicalUrn` delegates to `safeEntityUrnV2`, which is
+ * `try { emitEntityUrnV2 } catch { raw stored value }`. This function calls the same `emitEntityUrnV2`, so the emitted string is
+ * identical; the ONLY difference is the catch arm (the field serves the raw value, the link serves null).
+ *
+ * `portalUrlForUrn`'s `[/?#\\s]` guard is therefore unreachable from here: `emitEntityUrnV2` already throws on a space, `?`, `#`, `/` and `\`
+ * in a stored value, so such a value takes the catch arm above before the guard sees it. The guard stays as defence in depth for
+ * callers that pass an unvalidated urn (`bestEffortFlatNodeUrn`); `portalUrl.test.ts` pins it directly.
+ */
+function portalUrlOfEntity(kind: 'memory' | 'agent' | 'app', stored: string | null | undefined): string | null {
+  if (!stored) return null;
+  let rendered: string;
+  try { rendered = emitEntityUrnV2(kind, stored); } catch { return null; }
+  return portalUrlForUrn(rendered);
+}
+
 export const typeResolvers = {
   ...servedPromptTypeResolvers,
   AiServiceConfig: {
@@ -1929,6 +1951,7 @@ export const typeResolvers = {
       if (!urn) throw new Error('Memory URN is required but not found (partial query?)');
       return safeCanonicalUrn('memory', urn);
     },
+    portalUrl: (g: { urn?: string | null }) => portalUrlOfEntity('memory', g.urn),
   },
   App: {
     /**
@@ -2175,6 +2198,7 @@ export const typeResolvers = {
       if (!a.urn) throw new Error('App URN is required but not found (partial query?)');
       return safeCanonicalUrn('app', a.urn);
     },
+    portalUrl: (a: { urn?: string | null }) => portalUrlOfEntity('app', a.urn),
   },
   // 023-app-shape US1: the App↔Agent N:M join.
   AppAgent: {
@@ -2885,6 +2909,7 @@ export const typeResolvers = {
       if (!a.urn) throw new Error('Agent URN is required but not found (partial query?)');
       return safeCanonicalUrn('agent', a.urn);
     },
+    portalUrl: (a: { urn?: string | null }) => portalUrlOfEntity('agent', a.urn),
   },
   UsageEvent: {
     actionArgs: (event: { actionArgs: unknown }) => deserializeJson(event.actionArgs),
