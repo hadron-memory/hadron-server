@@ -202,6 +202,19 @@ describe('#4490 condition 1: an App the caller cannot see answers exactly as tod
     await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
     expect(await (resolvers as any).App.selfJoin(narrow, {}, as(orgViewer.id))).toBeNull(); // a deleted App is not reachable here either
   });
+  it('a soft-deleted App answers as a nonexistent one, whatever the parent row carries (the guard on a NEW access-surface read)', async () => {
+    // Peter/Bob/Rook: a soft-deleted App must not answer differently from a missing one. The parent row below is deliberately STALE
+    // (it still says the App is live), so only the field's own fresh read can refuse it, whichever route reached the App.
+    await setPolicy(OPEN);
+    const stale = await db.app.findUniqueOrThrow({ where: { id: app.id } });
+    await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
+    const field = (resolvers as any).App.selfJoin;
+    expect(await field(stale, {}, as(orgViewer.id))).toBeNull();
+    expect(await field({ id: generateId(), organizationId: org.id, ownerUserId: null }, {}, as(orgViewer.id))).toBeNull(); // the nonexistent control
+    // the positive control: the same call on the live App answers, so the null above is the guard and not the fixture
+    await db.app.update({ where: { id: app.id }, data: { deletedAt: null } });
+    expect(await field(stale, {}, as(orgViewer.id))).toEqual({ state: 'OPEN', role: 'member' });
+  });
   it('a soft-deleted App is not found, as before', async () => {
     await setPolicy(OPEN);
     await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
