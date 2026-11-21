@@ -1,6 +1,7 @@
 /**
- * #3125 S1 — `App.properties`, `setAppProperties` and the task-integration namespace (cor:dmo:050:02, cor:dmo:050:20,
- * cor:agt:120:01; V33, V34, V43, V44, V47; Ask 5).
+ * #3125 S1 — `App.properties` and `setAppProperties` (cor:dmo:050:02, cor:dmo:050:20; V33, V34, V43, V44, V47; Ask 5).
+ * #4085 retired the task-integration namespace (cor:agt:120:01): `taskIntegrations` is an ordinary key, stored and read
+ * back as written, never validated or rewritten.
  */
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -13,7 +14,6 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
-import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -24,7 +24,7 @@ const A = (resolvers as any).App ?? {};
 
 let orgId: string, appId: string, appUrn: string, otherAppId: string, personalAppId: string, agentId: string;
 let manager: { id: string }, owner: { id: string }, member: { id: string }, outsider: { id: string }, personalOwner: { id: string };
-let ada: { id: string; slug: string }, marco: { id: string; slug: string }, foreignWorker: { id: string; slug: string }, retired: { id: string };
+let ada: { id: string; slug: string };
 
 const ctx = (userId?: string, extra: Partial<Context> = {}): Context => ({ db, userId, roles: ['READER'], ...extra });
 const set = (properties: unknown, c = ctx(manager.id), appRef = appId, expectedRevision?: number) =>
@@ -43,6 +43,7 @@ async function refused(p: Promise<unknown>, code: string, path?: string) {
   return e as Error;
 }
 
+/** The shape the retired namespace validated. It is an arbitrary value now. */
 const integration = (over: Record<string, unknown> = {}) => ({
   name: 'github', provider: 'github',
   repositories: ['Hadron-Memory/Hadron-Server', 'hadron-memory/hadron-cli'],
@@ -65,12 +66,9 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId, userId: owner.id, role: 'owner' } });
   await db.appMember.create({ data: { appId, userId: member.id, role: 'member' } });
   agentId = (await db.agent.create({ data: { name: 'Agent', urn: `${org.urn}:agent`, organizationId: orgId } })).id;
-  const worker = (app: string, name: string, slug: string, extra: Record<string, unknown> = {}) =>
-    db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app, agentId, name, slug, heldByUserId: manager.id, heldAt: new Date(), ...extra }, select: { id: true, slug: true } });
+  const worker = (app: string, name: string, slug: string) =>
+    db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app, agentId, name, slug, heldByUserId: manager.id, heldAt: new Date() }, select: { id: true, slug: true } });
   ada = await worker(appId, 'Ada', 'ada');
-  marco = await worker(appId, 'Marco', 'marco');
-  retired = await worker(appId, 'Old', 'old', { retiredAt: new Date() });
-  foreignWorker = await worker(otherAppId, 'Ada', 'ada');
 });
 
 describe('#3125 S1 SDL', () => {
@@ -86,25 +84,15 @@ describe('#3125 S1 SDL', () => {
 });
 
 describe('#3125 S1 round trip (V34)', () => {
-  it('a manager writes an object, a reader of the App reads it back, and null clears it', async () => {
-    const value = { notes: { tone: 'dry' }, [`taskIntegrations`]: [integration()] };
+  it('a manager writes an object, a reader of the App reads it back as written, and null clears it', async () => {
+    const value = { notes: { tone: 'dry' }, taskIntegrations: [integration()] };
     const out = await set(value);
     expect(out.id).toBe(appId);
     const { properties, revision } = await read();
     expect(revision).toBe(1);
-    expect(properties).toEqual({
-      notes: { tone: 'dry' },
-      taskIntegrations: [{
-        name: 'github', provider: 'github',
-        repositories: ['hadron-memory/hadron-server', 'hadron-memory/hadron-cli'],
-        readyLabel: 'cleared', excludeLabels: ['wontfix', 'Epic'],
-        teams: [{ lead: composeWorkerUrn(appUrn, 'ada'), label: 'team-ada' }],
-      }],
-    });
-    // Stored by worker id, so a rename never breaks the team map.
-    expect((await stored()).properties).toMatchObject({ taskIntegrations: [{ teams: [{ lead: ada.id }] }] });
-    await db.worker.update({ where: { id: ada.id }, data: { name: 'Ada Lovelace' } });
-    expect((await read()).properties).toMatchObject({ taskIntegrations: [{ teams: [{ lead: composeWorkerUrn(appUrn, 'ada') }] }] });
+    // #4085: taskIntegrations is no longer normalised: repositories keep their case and a lead stays the text sent.
+    expect(properties).toEqual(value);
+    expect((await stored()).properties).toEqual(value);
     await set(null);
     expect(await read()).toEqual({ properties: null, revision: 2 });
     expect(await stored()).toEqual({ properties: null, propertiesRevision: 2 });
@@ -114,13 +102,6 @@ describe('#3125 S1 round trip (V34)', () => {
     await set({ a: 1 }, ctx(owner.id));
     await set({ a: 2 }, ctx(manager.id));
     expect((await stored()).properties).toEqual({ a: 2 });
-  });
-
-  it('a lead may be named by URN, id or name', async () => {
-    for (const lead of [composeWorkerUrn(appUrn, 'marco'), marco.id, 'Marco']) {
-      await set({ taskIntegrations: [integration({ teams: [{ lead, label: 'team-marco' }] })] });
-      expect((await stored()).properties).toMatchObject({ taskIntegrations: [{ teams: [{ lead: marco.id }] }] });
-    }
   });
 });
 
@@ -164,40 +145,19 @@ describe('#3125 S1 validation (V44, V47)', () => {
   });
 
   it.each([
-    ['an unknown provider', { provider: 'gitlab' }, 'taskIntegrations[0].provider'],
-    ['a bad name', { name: 'Has Space' }, 'taskIntegrations[0].name'],
-    ['no repositories', { repositories: [] }, 'taskIntegrations[0].repositories'],
-    ['a malformed repository', { repositories: ['secret-value'] }, 'taskIntegrations[0].repositories[0]'],
-    ['a repository listed twice in another case', { repositories: ['a/b', 'A/B'] }, 'taskIntegrations[0].repositories[1]'],
-    ['a Cf character in a label', { readyLabel: 'clea\u200Bred' }, 'taskIntegrations[0].readyLabel'],
-    ['a control character in a label', { excludeLabels: ['ok', 'bad\nlabel'] }, 'taskIntegrations[0].excludeLabels[1]'],
-    ['an over-long label', { readyLabel: 'x'.repeat(101) }, 'taskIntegrations[0].readyLabel'],
-    ['an unknown field', { token: 'secret-value' }, 'taskIntegrations[0]'],
-    ['an unknown lead', { teams: [{ lead: 'Nobody', label: 'team-x' }] }, 'taskIntegrations[0].teams[0].lead'],
-    ['a lead listed twice', { teams: [{ lead: 'Ada', label: 'a' }, { lead: 'ada', label: 'b' }] }, 'taskIntegrations[0].teams[1].lead'],
-  ])('%s is refused with the path, never the value, and nothing is written', async (_what, over, path) => {
-    const e = await refused(set({ taskIntegrations: [integration(over)] }), 'TASK_INTEGRATION_INVALID', path);
-    expect(e.message).not.toContain('secret-value');
-    expect(e.message).not.toContain('\u200B');
-    expect(await stored()).toEqual({ properties: null, propertiesRevision: 0 });
-    expect(await events()).toEqual([]);
-  });
-
-  it('a duplicate integration name is refused', async () => {
-    await refused(set({ taskIntegrations: [integration(), integration()] }), 'TASK_INTEGRATION_INVALID', 'taskIntegrations[1].name');
-  });
-
-  it('another App\'s worker, a retired worker and an unknown worker answer the same refusal', async () => {
-    const messages: string[] = [];
-    for (const lead of [composeWorkerUrn(`${appUrn.split(':')[0]}:other`, 'ada'), foreignWorker.id, retired.id, 'Nobody', 'hrn:worker:nowhere.example:x:y']) {
-      const e = await refused(set({ taskIntegrations: [integration({ teams: [{ lead, label: 't' }] })] }), 'TASK_INTEGRATION_INVALID', 'taskIntegrations[0].teams[0].lead');
-      messages.push(e.message);
-    }
-    expect(new Set(messages).size).toBe(1);
+    ['a list of malformed integrations', [{ name: 'BAD NAME', provider: 'nope' }]],
+    ['a string', 'x'],
+    ['a list with a duplicate name', [integration(), integration()]],
+    ['an unknown lead and an unknown provider', [integration({ provider: 'gitlab', teams: [{ lead: 'Nobody', label: 'team-x' }] })]],
+    ['a label with an invisible format character', [integration({ readyLabel: 'clea\u200Bred' })]],
+  ])('#4085: taskIntegrations as %s is an ordinary value, stored as written and never refused', async (_what, value) => {
+    await set({ taskIntegrations: value });
+    expect(await stored()).toEqual({ properties: { taskIntegrations: value }, propertiesRevision: 1 });
+    expect((await read()).properties).toEqual({ taskIntegrations: value });
   });
 });
 
-describe('#3176 (rulings:0071 = B): an App with no organization holds task integrations like any other', () => {
+describe('#3176 (rulings:0071 = B): an App with no organization holds properties like any other', () => {
   const { teams: _teams, ...noTeams } = integration();
 
   it('its owner writes taskIntegrations next to other keys; it is stored and the revision bumps', async () => {
@@ -206,11 +166,6 @@ describe('#3176 (rulings:0071 = B): an App with no organization holds task integ
     const row = await stored(personalAppId);
     expect(row.propertiesRevision).toBe(2);
     expect(row.properties).toMatchObject({ notes: 2, taskIntegrations: [{ name: 'github', provider: 'github' }] });
-  });
-
-  it('an invalid integration on an org-less App is still TASK_INTEGRATION_INVALID, naming the path', async () => {
-    await refused(set({ taskIntegrations: [{ ...noTeams, provider: 'gitlab' }] }, ctx(personalOwner.id), personalAppId), 'TASK_INTEGRATION_INVALID', 'taskIntegrations[0].provider');
-    expect(await stored(personalAppId)).toEqual({ properties: null, propertiesRevision: 0 });
   });
 
   it('a non-manager of an org-less App gets the gate refusal first, whatever the object holds', async () => {
@@ -298,7 +253,7 @@ describe('#3125 S1 audit event (V43)', () => {
   });
 
   it('a refused write records nothing', async () => {
-    await refused(set({ taskIntegrations: 'x' }), 'TASK_INTEGRATION_INVALID');
+    await refused(set('x'), 'PROPERTIES_NOT_AN_OBJECT');
     await refused(set({ a: 1 }, ctx(member.id)), 'FORBIDDEN');
     await set({ a: 1 });
     await refused(set({ a: 2 }, ctx(manager.id), appId, 0), 'APP_PROPERTIES_CONFLICT');
@@ -319,28 +274,16 @@ describe('#3125 S1 database invariant', () => {
   });
 });
 
-describe('#3125 S1 size cap after normalisation (PR #3131 local P2)', () => {
-  it('an object within 16 KiB as sent but over it once leads become worker ids is refused, and nothing is written', async () => {
-    const value: Record<string, unknown> = {
-      pad: '',
-      taskIntegrations: [integration({ teams: [{ lead: 'Ada', label: 'a' }, { lead: 'Marco', label: 'm' }] })],
-    };
+describe('#3125 S1 size cap (#4085: measured on the object as sent, since nothing is rewritten on the way in)', () => {
+  it('an object of exactly 16 KiB carrying taskIntegrations is stored, and one byte more is refused with nothing written', async () => {
+    const value: Record<string, unknown> = { pad: '', taskIntegrations: [integration()] };
     value.pad = 'x'.repeat(APP_PROPERTIES_MAX_BYTES - Buffer.byteLength(canonicalJson(value), 'utf8'));
     expect(Buffer.byteLength(canonicalJson(value), 'utf8')).toBe(APP_PROPERTIES_MAX_BYTES);
     expect(() => checkAppPropertiesShape(value)).not.toThrow();
-    await refused(set(value), 'PROPERTIES_TOO_LARGE', '');
-    expect(await stored()).toEqual({ properties: null, propertiesRevision: 0 });
-    expect(await events()).toEqual([]);
-  });
-
-  it('the same object with leads sent as worker ids (no growth) at exactly 16 KiB is stored', async () => {
-    const value: Record<string, unknown> = {
-      pad: '',
-      taskIntegrations: [integration({ repositories: ['hadron-memory/hadron-server'], teams: [{ lead: ada.id, label: 'a' }, { lead: marco.id, label: 'm' }] })],
-    };
-    value.pad = 'x'.repeat(APP_PROPERTIES_MAX_BYTES - Buffer.byteLength(canonicalJson(value), 'utf8'));
     await set(value);
-    expect((await stored()).propertiesRevision).toBe(1);
+    expect(await stored()).toEqual({ properties: value, propertiesRevision: 1 });
+    await refused(set({ ...value, pad: `${value.pad}x` }, ctx(manager.id), appId, 1), 'PROPERTIES_TOO_LARGE', '');
+    expect(await stored()).toEqual({ properties: value, propertiesRevision: 1 });
   });
 });
 
