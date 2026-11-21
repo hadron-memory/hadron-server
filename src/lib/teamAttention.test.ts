@@ -1,7 +1,6 @@
 import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 /** #1353 — loss-safe compact attention, worker-owned reads and switchover. */
 
-import { createHmac } from 'node:crypto';
 import { buildSchema, parse, validate } from 'graphql';
 import { typeDefs } from '../api/graphql/schema/typeDefs.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -11,7 +10,6 @@ import { generateId } from './id.js';
 import { ensureChannelWithRoot } from './channels.js';
 import { appendChatMessage } from './chatRoot.js';
 import { getMemoryEncryptionInfo } from './nodeCrypto.js';
-import { generateDataKey } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.js';
@@ -40,11 +38,6 @@ let channel: { id: string; memoryId: string; loc: string; chatRootNodeId: string
 let worker: { id: string; name: string };
 let sessionId: string;
 
-
-// ── #1384 v2 migration shims ─────────────────────────────────────────────────
-// The v1 doors answer UPGRADE_REQUIRED now; these helpers drain the paged
-// doors to completion and regroup results into the v1 shapes the legacy
-// assertions below speak, so the behavioral matrix keeps running unchanged.
 
 const userCtx = (extra: Partial<Context> = {}): Context => ({ db, userId: user.id, roles: ['READER'], ...extra }) as Context;
 
@@ -523,6 +516,15 @@ describe('worker session reads and mark-read (resolver level; was the MCP parity
     // a deleted org's App exactly like an absent one.
     const error = await M.markOwnTeamChatRead({}, { appRef: app.id, sessionRef: sessionId, channelRef: channel.id, seq: 1 }, userCtx()).catch((e: unknown) => e);
     expect(error).toMatchObject({ message: 'App not found.', extensions: { code: 'APP_NOT_FOUND' } });
+  });
+
+  it('refuses markOwnTeamChatRead while impersonating even within the App organization (#4507)', async () => {
+    await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: user.id, heldAt: new Date() } });
+    const args = { appRef: app.id, sessionRef: sessionId, channelRef: channel.id, seq: 0 };
+    await expect(M.markOwnTeamChatRead({}, args, userCtx())).resolves.toBeDefined();
+    const impersonation = { orgId: org.id, actorUserId: otherUser.id, sessionId: generateId(), expiresAt: new Date(Date.now() + 60_000) };
+    await expect(M.markOwnTeamChatRead({}, args, userCtx({ impersonation })))
+      .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
   });
 
   it('conceals an existing App from a non-participant exactly like an absent App (the pilot door)', async () => {

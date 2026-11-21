@@ -37,6 +37,10 @@ const RETIRED_TYPES = [
   'TeamAttentionSwitchoverResult',
 ] as const;
 
+function containsIdentifier(source: string, name: string): boolean {
+  return new RegExp(`\\b${name}\\b`).test(source);
+}
+
 /** The #3082 source-pin pattern: strip comment lines, then match — a retirement
  * note in a comment must not read as a live registration. */
 function sourceWithoutComments(path: string): string {
@@ -48,6 +52,10 @@ function sourceWithoutComments(path: string): string {
 }
 
 describe('#2027 S11: the attention API is retired', () => {
+  it('recognizes a retired identifier but not a longer near-miss', () => {
+    expect(containsIdentifier('export const teamAttentionPage = 1', 'teamAttentionPage')).toBe(true);
+    expect(containsIdentifier('export const teamAttentionPageSize = 1', 'teamAttentionPage')).toBe(false);
+  });
   it('the GraphQL schema has no attention query, mutation or output type', () => {
     const schema = buildSchema(typeDefs);
     const queries = Object.keys(schema.getQueryType()!.getFields());
@@ -65,7 +73,7 @@ describe('#2027 S11: the attention API is retired', () => {
 
   it('no MCP tool registration names hadron_team_attention* (deleted, not just #3082-disabled)', () => {
     const src = sourceWithoutComments('../../../mcp/server.ts');
-    expect(src).not.toContain('hadron_team_attention');
+    expect(src).not.toMatch(/\bhadron_team_attention(?:_[a-z0-9]+)*\b/);
   });
 
   it('the paged-attention scan codec and the poll entry points are deleted', () => {
@@ -78,7 +86,7 @@ describe('#2027 S11: the attention API is retired', () => {
       'previewTeamAttentionSwitchover',
       'confirmTeamAttentionSwitchover',
     ]) {
-      expect(lib, gone).not.toContain(gone);
+      expect(containsIdentifier(lib, gone), gone).toBe(false);
     }
   });
 });

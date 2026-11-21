@@ -143,6 +143,17 @@ describe('never due: retired, paused, dormant', () => {
     expect(page.wakes[0].reasons.map((r: any) => r.kind)).toEqual(['TICK']);
   });
 
+  it('routes a merely lapsed worker but not the same dormant worker (#4507)', async () => {
+    const recent = new Date(Date.now() - 30 * 60 * 60 * 1000);
+    const session = await db.session.create({ data: { id: generateId(), appId: app.id, userId: holderA.id, workerId: liam.id, agentId: agent.id, type: 'DEVELOPER', startedAt: recent, updatedAt: recent } });
+    await say(channel, 'attention', mention('liam'));
+    const read = () => computeDueWakes({ ctx: ctx(holderA.id), app: { id: app.id, organizationId: org.id, ownerUserId: null }, reader: { manager: false, userId: holderA.id }, requester: { userId: holderA.id }, preview: true });
+    expect((await read()).wakes.map((wake) => wake.workerId)).toEqual([liam.id]);
+    const old = new Date(Date.now() - 100 * DAY);
+    await db.session.update({ where: { id: session.id }, data: { startedAt: old, updatedAt: old } });
+    expect((await read()).wakes.map((wake) => wake.workerId)).toEqual([]);
+  });
+
   it('a dormant worker is never due; its mentions are counted where a router sees them', async () => {
     await db.session.create({ data: { id: generateId(), appId: app.id, userId: holderA.id, workerId: liam.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date(Date.now() - 100 * DAY), updatedAt: new Date(Date.now() - 100 * DAY), endedAt: new Date(Date.now() - 100 * DAY) } });
     await say(channel, 'hi', mention('liam'));

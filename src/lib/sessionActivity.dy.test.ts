@@ -18,7 +18,7 @@ import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { resolvers } from '../api/graphql/schema/resolvers.js';
 import { isSessionDormant, isSessionLive, loadLastEventBySession, usageEventCountsAsActivity } from './sessionActivity.js';
 import { attributedRequestActivity, recordNodeUsage } from './usageRecorder.js';
-import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx, resumableOwnWorkerIds } from './teamAttention.js';
+import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx } from './teamAttention.js';
 import { sessionKeyReleasedHint } from './sessionKeyCache.js';
 import { decryptNodeFields } from './nodeCrypto.js';
 
@@ -250,17 +250,6 @@ describe('DY-5: a DORMANT session is past every agent act', () => {
     const s = await session({ idleMs: 91 * D, userId: null });
     expect(await attributedRequestActivity(db, { appId: app.id }, s.id)).toBe(false);
     expect(await live(s.id)).toBe(false);
-  });
-
-  it('routing drops a dormant worker but keeps a merely lapsed one', async () => {
-    await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: holder.id, heldAt: new Date() } });
-    await db.appMember.create({ data: { appId: app.id, userId: holder.id, role: 'member' } });
-    const s = await session({ idleMs: 30 * H, userId: holder.id });
-    const now = new Date();
-    expect([...await resumableOwnWorkerIds(userCtx(holder.id), { userId: holder.id, appId: app.id, now })]).toEqual([worker.id]);
-    const old = new Date(Date.now() - 91 * D);
-    await db.session.update({ where: { id: s.id }, data: { startedAt: old, updatedAt: old } });
-    expect([...await resumableOwnWorkerIds(userCtx(holder.id), { userId: holder.id, appId: app.id, now })]).toEqual([]);
   });
 
   it('updateApp refuses a non-positive threshold', async () => {
