@@ -1,3 +1,4 @@
+import { buildAuthRateAdmission } from './auth/authRate.js';
 import { isSessionSupersededError, respondSessionSuperseded } from './lib/sessionSuperseded.js';
 import { assertRateReadiness, checkRateConfiguration, cleanupRateBuckets } from './lib/rateLimit/index.js';
 import { assertEventKeysLocal } from './lib/agentTasks/eventKeyRebase.js';
@@ -214,6 +215,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // configured keyring refuses boot without echoing secret values.
   readTeamRecordKeys();
   const app = express();
+  const authRate = buildAuthRateAdmission(db);
+  const userAuthRate = buildAuthRateAdmission(db, 'rest', 'bearer');
 
   // Trust-proxy for spec 025-oauth-for-mcp (FR-006). Express must know
   // which upstream proxies it can trust so `req.protocol` resolves to
@@ -394,7 +397,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     return claim.pending;
   };
 
-  app.get('/auth/github', async (req, res) => {
+  app.get('/auth/github', authRate, async (req, res) => {
     const redirect = (req.query.redirect as string) || '/';
 
     // Option-C: optional `return_to` query param routes the post-
@@ -447,7 +450,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     res.redirect(buildAuthUrl(state));
   });
 
-  app.get('/auth/github/callback', async (req, res) => {
+  app.get('/auth/github/callback', authRate, async (req, res) => {
     const { code, state } = req.query as { code?: string; state?: string };
 
     if (!code || !state) {
@@ -594,7 +597,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // for one provider can never be replayed against the other's callback.
   // ---------------------------------------------------------------------------
 
-  app.get('/auth/google', async (req, res) => {
+  app.get('/auth/google', authRate, async (req, res) => {
     // Fail loud and early when the deployment doesn't carry the Google OAuth
     // client — a 302 built with an undefined client_id would send the user to
     // a Google error page instead.
@@ -640,7 +643,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     res.redirect(buildGoogleAuthUrl(state, nonce));
   });
 
-  app.get('/auth/google/callback', async (req, res) => {
+  app.get('/auth/google/callback', authRate, async (req, res) => {
     const { code, state } = req.query as { code?: string; state?: string };
 
     if (!code || !state) {
@@ -747,7 +750,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // minted for one provider can never be replayed against another's callback.
   // ---------------------------------------------------------------------------
 
-  app.get('/auth/apple', async (req, res) => {
+  app.get('/auth/apple', authRate, async (req, res) => {
     // All four vars are required together (client id for the authorize URL,
     // team id + key id + private key for the token-call client secret) — a
     // half-configured deployment must fail loud here, not 500 mid-callback.
@@ -800,7 +803,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // would always fail. Don't "fix" this into cookies. The route-scoped
   // urlencoded parser is needed because the app only mounts JSON parsers
   // globally.
-  app.post('/auth/apple/callback', express.urlencoded({ extended: false }), async (req, res) => {
+  app.post('/auth/apple/callback', authRate, express.urlencoded({ extended: false }), async (req, res) => {
     // typeof guards, not a cast: repeated form fields (`code=a&code=b`) parse
     // to arrays, which would slip past a bare truthiness check and 500 inside
     // the exchange. Non-string shapes collapse to the same 400 as absent
@@ -971,7 +974,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     },
   );
 
-  app.get('/auth/email/verify', async (req, res) => {
+  app.get('/auth/email/verify', authRate, async (req, res) => {
     const { token, redirect: redirectParam, return_to: returnToRaw } = req.query as {
       token?: string;
       redirect?: string;
@@ -1122,7 +1125,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // cookie on the portal origin. The JWT never rides in a browser-visible URL.
   // `clientState` (GitHub flow) is the raw browser nonce the portal read from
   // its HttpOnly cookie; the code's stored hash must match (session fixation).
-  app.post('/auth/session', async (req, res) => {
+  app.post('/auth/session', authRate, async (req, res) => {
     const body = (req.body ?? {}) as { code?: unknown; clientState?: unknown };
     const code = typeof body.code === 'string' ? body.code : '';
     const clientState = typeof body.clientState === 'string' ? body.clientState : undefined;
@@ -1160,7 +1163,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     res.json({ token: jwt, redirect: redeemed.redirect, isNew: redeemed.isNew });
   });
 
-  app.get('/auth/me', async (req, res) => {
+  app.get('/auth/me', userAuthRate, async (req, res) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) {
       res.status(401).json({ error: 'No token provided' });

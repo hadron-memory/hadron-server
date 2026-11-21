@@ -5,6 +5,7 @@ import { db } from '../integrations/db/client.js';
 import { createServerOnCleanDb, closeServerIfStarted } from '../test/startServerFixture.js';
 import { withinOneRateWindow, RATE_WINDOW_TEST_TIMEOUT_MS } from '../test/rateWindow.js';
 import { signJwt } from './jwt.js';
+import { issueLoginCode } from './authHandoff.js';
 
 // Every new mounted charge point, including the connect confirmation POST that consumes a nonce.
 const routes: Array<[string, string]> = [
@@ -76,6 +77,19 @@ describe('#419 auth-route admission', () => {
     } finally { app.set('trust proxy', ['203.0.113.0/24']); }
   }, RATE_WINDOW_TEST_TIMEOUT_MS);
 
+  it('OAuth consent charges its verified cookie even when an unrelated invalid Bearer header is supplied', async () => {
+    app.set('trust proxy', true);
+    try {
+      const user = await db.user.create({ data: { handle: 'auth-rate-cookie-419', roles: ['READER'] } });
+      const token = await signJwt({ sub: user.id, roles: ['READER'] });
+      await db.rateLimitPolicy.update({ where: { fieldClass: 'CREDENTIALS' }, data: { principalLimit: 1, ipLimit: 100 } });
+      const headers = { Cookie: `hadron_token=${token}`, Authorization: 'Bearer unrelated-invalid' };
+      expect((await request('GET', '/oauth/authorize', { ...headers, 'X-Forwarded-For': '198.51.100.20' })).status).not.toBe(429);
+      expect((await request('GET', '/oauth/authorize', { ...headers, 'X-Forwarded-For': '198.51.100.21' })).status).toBe(429);
+      expect(await db.rateLimitBucket.count({ where: { dimension: 'principal' } })).toBe(1);
+    } finally { app.set('trust proxy', ['203.0.113.0/24']); }
+  }, RATE_WINDOW_TEST_TIMEOUT_MS);
+
   it('keeps LOG_ONLY counting over-limit attempts without refusing', async () => {
     await db.rateLimitPolicy.update({ where: { fieldClass: 'CREDENTIALS' }, data: { enforcementMode: 'LOG_ONLY' } });
     expect((await request('GET', '/auth/me')).status).toBe(401);
@@ -94,6 +108,72 @@ describe('#419 auth-route admission', () => {
       expect(JSON.stringify(body)).not.toContain('private store detail');
       vi.restoreAllMocks();
     }
+  }, RATE_WINDOW_TEST_TIMEOUT_MS);
+
+  it('forged, expired and deleted-account JWTs cannot spend a claimed principal budget', async () => {
+    const user = await db.user.create({ data: { handle: 'auth-rate-invalid-419', roles: ['READER'] } });
+    const valid = await signJwt({ sub: user.id, roles: ['READER'] });
+    const forged = valid.slice(0, valid.lastIndexOf('.') + 1) + 'A'.repeat(43);
+    const expired = await signJwt({ sub: user.id, roles: ['READER'] }, { expiresIn: -1 });
+    await db.rateLimitPolicy.update({ where: { fieldClass: 'CREDENTIALS' }, data: { ipLimit: 100 } });
+    for (const token of [forged, expired]) {
+      expect((await request('GET', '/auth/me', { Authorization: `Bearer ${token}` })).status).not.toBe(200);
+    }
+    expect(await db.rateLimitBucket.count({ where: { dimension: 'principal' } })).toBe(0);
+    await db.user.update({ where: { id: user.id }, data: { deletedAt: new Date() } });
+    expect((await request('GET', '/auth/me', { Authorization: `Bearer ${valid}` })).status).not.toBe(200);
+    expect(await db.rateLimitBucket.count({ where: { dimension: 'principal' } })).toBe(0);
+    expect((await db.rateLimitBucket.findMany({ where: { dimension: 'ip' } })).map(r => r.used)).toEqual([3n]);
+  }, RATE_WINDOW_TEST_TIMEOUT_MS);
+
+  it('unexpected identity/read faults are not swallowed as invalid credentials', async () => {
+    const user = await db.user.create({ data: { handle: 'auth-rate-fault-419', roles: ['READER'] } });
+    const token = await signJwt({ sub: user.id, roles: ['READER'] });
+    vi.spyOn(db.user, 'findFirst').mockRejectedValueOnce(new Error('private identity detail'));
+    const r = await request('GET', '/auth/me', { Authorization: `Bearer ${token}` });
+    expect(r.status).toBe(500);
+    expect(JSON.stringify(await r.json())).not.toContain('private identity detail');
+    expect(await db.rateLimitBucket.count()).toBe(0);
+  }, RATE_WINDOW_TEST_TIMEOUT_MS);
+
+  it('a refused handoff leaves one-use evidence intact, then an admitted retry redeems once', async () => {
+    const user = await db.user.create({ data: { handle: 'auth-rate-handoff-419', roles: ['READER'] } });
+    const code = await issueLoginCode({ userId: user.id, redirect: '/app', isNew: false, clientState: 'browser419' });
+    await request('GET', '/auth/me');
+    const before = await db.authHandoffCode.findMany({ where: { userId: user.id } });
+    const post = () => fetch(base + '/auth/session', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, clientState: 'browser419' }) });
+    expect((await post()).status).toBe(429);
+    expect(await db.authHandoffCode.findMany({ where: { userId: user.id } })).toEqual(before);
+    await db.rateLimitPolicy.update({ where: { fieldClass: 'CREDENTIALS' }, data: { ipLimit: 100 } });
+    const accepted = await post(); expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toMatchObject({ token: expect.any(String), redirect: '/app' });
+    expect((await post()).status).toBe(400);
+  }, RATE_WINDOW_TEST_TIMEOUT_MS);
+
+  it('concurrent routes share one atomic remaining allowance and IPv6 /56 cannot split it', async () => {
+    app.set('trust proxy', true);
+    try {
+      const replies = await Promise.all([
+        request('GET', '/auth/me', { 'X-Forwarded-For': '2001:db8:abcd:1200::1' }),
+        request('POST', '/auth/session', { 'X-Forwarded-For': '2001:db8:abcd:12ff::2' }),
+      ]);
+      expect(replies.map(r => r.status).sort()).toEqual(expect.arrayContaining([429]));
+      expect(replies.filter(r => r.status !== 429)).toHaveLength(1);
+      expect((await db.rateLimitBucket.findMany({ where: { dimension: 'ip' } })).map(r => r.used)).toEqual([1n]);
+    } finally { app.set('trust proxy', ['203.0.113.0/24']); }
+  }, RATE_WINDOW_TEST_TIMEOUT_MS);
+
+  it('different unrecognized handoff inputs have the same throttled refusal, without echoing evidence', async () => {
+    await request('GET', '/auth/me');
+    const bodies = [];
+    for (const code of ['unknown-evidence', 'expired-evidence', 'foreign-evidence']) {
+      const r = await fetch(base + '/auth/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
+      expect(r.status).toBe(429);
+      const b = await r.json() as Record<string, unknown>; expect(JSON.stringify(b)).not.toContain(code);
+      bodies.push({ ...b, retryAfterSeconds: 0 });
+    }
+    expect(bodies[1]).toEqual(bodies[0]); expect(bodies[2]).toEqual(bodies[0]);
   }, RATE_WINDOW_TEST_TIMEOUT_MS);
 
   it('does not add a shared charge to the already limited email/code/DCR routes or discovery', async () => {
