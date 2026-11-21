@@ -30,7 +30,7 @@ const HOLDER_COLUMN: Record<GrantHolderKind, string> = { user: 'user_id', agent:
  * (#4163, cor:acl:140:03: a used or timed-out boot-prompt grant), has already ended and is never stamped departed. Read with the
  * database clock, after the row locks. ONE fragment for every departure door, so the doors cannot drift.
  */
-const ALREADY_ENDED = Prisma.sql`(activated_at IS NOT NULL AND ((expires_at IS NOT NULL AND expires_at <= ${GRANT_DB_NOW})
+export const ALREADY_ENDED = Prisma.sql`(activated_at IS NOT NULL AND ((expires_at IS NOT NULL AND expires_at <= ${GRANT_DB_NOW})
         OR (max_uses IS NOT NULL AND use_count >= max_uses)
         OR EXISTS (SELECT 1 FROM actions x WHERE x.name = grants.action
           AND ((x.max_uses IS NOT NULL AND grants.use_count >= x.max_uses)

@@ -174,18 +174,30 @@ describe('#4178 item (c) stays out', () => {
 });
 
 describe('#4178 batching', () => {
-  it('pairs that are still installed do not starve a lapsed pair behind them (batchSize 1)', async () => {
+  it('pairs that are still installed do not starve a lapsed pair behind them (batchSize 1; ids are time-ordered, so the lapsed one is created LAST and sorts last)', async () => {
     const stillInstalled: string[] = [];
     for (let i = 0; i < 3; i++) {
       const a = await mkAgent(`fine${i}`);
       await db.appAgent.create({ data: { appId, agentId: a } });
       stillInstalled.push(await grant({ agent_id: a }));
     }
-    await licence({ expiresAt: past() });
-    const lapsed = await grant({ agent_id: agentId });
+    const late = await mkAgent('late');
+    await db.agentOrgGrant.create({ data: { orgId, agentId: late, activatedAt: new Date(Date.now() - 86_400_000), expiresAt: past() } });
+    await db.agentImport.create({
+      data: { parentAgentId: parentId, importedAgentId: late, position: 5, agentOrgGrantOrgId: orgId, agentOrgGrantAgentId: late },
+    });
+    const lapsed = await grant({ agent_id: late });
     const out = await sweepLapsedAgentGrants(db, { batchSize: 1, maxPages: 20 });
     expect(out.grantsEnded).toBe(1);
     expect(await departedAt(lapsed)).not.toBeNull();
     for (const id of stillInstalled) expect(await departedAt(id)).toBeNull();
+  });
+
+  it('a pair whose grants have all ended is not a candidate: it is never judged, so it cannot fill a page every run', async () => {
+    await licence({ expiresAt: past() });
+    await grant({ agent_id: agentId }, { expires_at: raw(`${DB_NOW} - interval '1 minute'`) });
+    await grant({ agent_id: agentId }, { max_uses: 1, use_count: 1 });
+    const out = await sweepLapsedAgentGrants(db);
+    expect(out.pairsJudged).toBe(0);
   });
 });
