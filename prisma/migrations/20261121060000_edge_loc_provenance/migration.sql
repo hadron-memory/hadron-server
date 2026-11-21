@@ -28,6 +28,9 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql IMMUTABLE;
 
+-- Needs PostgreSQL 15 or later for the `\U00010000-\U0010FFFF` regex escape below (CI and production run 17). The 64 cap
+-- cannot differ between SQL and TS for an astral name: the out-of-charset replacement runs first, so the capped string is
+-- already ASCII in both (each astral character became one or two `-`, never a longer run).
 -- An edge is DERIVED iff its loc decodes as `<source loc>:<name atom>:<target loc>` with the edge's own name, from any
 -- endpoint generation: the sanitized name is one INTERIOR atom of the loc. A loc that does not decode is authored. This
 -- is the shape, never a comparison against the current endpoints, so a derived loc made stale by an earlier move is

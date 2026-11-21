@@ -30,7 +30,7 @@ import { join, dirname } from 'path';
 import { GRAPHS_PATH } from '../../config.js';
 import { pathUnderGraphsRoot } from '../localFs/pathUnderGraphsRoot.js';
 import { InvalidNodeNameError, loadGraphFromFs, type UnreadableFile } from '../localFs/loadGraphFromFs.js';
-import { deriveEdgeLoc, rekeyDerivedEdgeLoc } from '../../lib/edgeLoc.js';
+import { deriveEdgeLoc, isAuthoredLoc, rekeyDerivedEdgeLoc } from '../../lib/edgeLoc.js';
 import { derivedEdgeLocForUpsert } from '../../lib/edgeLocLookup.js';
 import { validateEdgeCondition } from '../../lib/edge-conditions/validator.js';
 import { entryConditionOf, validateEntryCondition } from '../../lib/edge-conditions/entryCondition.js';
@@ -1758,7 +1758,7 @@ const syncGraphFromGithubAsSystem = async (
                   sourceId: p.sourceId,
                   targetId: p.targetId,
                   loc: pLoc,
-                  locAuthored: p.loc != null, // #2947: a loc the pending edge carried was supplied
+                  locAuthored: isAuthoredLoc(p.loc), // #2947: a loc the pending edge carried was supplied
                   name: p.name,
                   description: p.description,
                   ...(p.data != null ? { data: p.data as Prisma.InputJsonValue } : {}),

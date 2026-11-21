@@ -148,6 +148,15 @@ export function rekeyDerivedEdgeLoc(
 }
 
 /**
+ * #2947 — did the caller SUPPLY a loc? One predicate for every writer that records `Edge.locAuthored`, so an empty
+ * string is the same answer everywhere: not supplied, so derived. (A caller that omits the loc and one that sends `''`
+ * both get the derivation; neither authored anything.)
+ */
+export function isAuthoredLoc(loc: string | null | undefined): loc is string {
+  return loc != null && loc !== '';
+}
+
+/**
  * #2947 (Xabat's backfill rule): whether an edge's `loc` decodes as the derivation grammar
  * `<source loc>:<name atom>:<target loc>` with the edge's OWN name, from any endpoint generation. The sanitized name is
  * one INTERIOR atom of the loc, in either spelling (the runtime one and the historical code-point one, #4583). It is

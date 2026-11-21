@@ -77,7 +77,7 @@ import {
   InvalidLocError,
 } from '../../../lib/validateLoc.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
-import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
+import { deriveEdgeLoc, isAuthoredLoc } from '../../../lib/edgeLoc.js';
 import {
   liveEdgeEndpointSet,
   lockEdgeEndpointMemories,
@@ -1147,7 +1147,7 @@ async function writeNodeCoreRaw(
               targetId: edge.targetNodeId,
               loc: edge.loc ?? deriveEdgeLoc(writtenNode.loc, edge.name, edge.targetLoc),
               // #2947: a loc the caller supplied is AUTHORED, even when it equals the derivation.
-              locAuthored: edge.loc != null && edge.loc !== '',
+              locAuthored: isAuthoredLoc(edge.loc),
               name: edge.name,
               description: edge.description,
               isRunnable: edge.isRunnable,
@@ -3982,7 +3982,7 @@ export const nodeMutations = {
               targetId: locked.target.id,
               loc: edgeLoc,
               // #2947: authored iff the caller supplied the loc (even one equal to the derivation).
-              locAuthored: loc != null && loc !== '',
+              locAuthored: isAuthoredLoc(loc),
               name: name ?? null,
               description: description ?? null,
               isRunnable: isRunnable ?? null,
@@ -4139,7 +4139,7 @@ export const nodeMutations = {
           data: {
             ...(name !== undefined ? { name: name ?? null } : {}),
             // #2947: a caller-supplied loc is authored from now on.
-            ...(loc != null && loc !== '' ? { loc, locAuthored: true } : {}),
+            ...(isAuthoredLoc(loc) ? { loc, locAuthored: true } : {}),
             ...(description !== undefined ? { description: description ?? null } : {}),
             ...(isRunnable !== undefined ? { isRunnable: isRunnable ?? null } : {}),
             ...(condition !== undefined ? { condition: (condition ?? null) as InputJsonValue } : {}),

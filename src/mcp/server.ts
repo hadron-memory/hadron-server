@@ -110,7 +110,7 @@ import type { NodeWhere } from '../lib/retrieval/nodeWhere.js';
 import { NodeSchemaViolation } from '../lib/validateNodeAgainstSchema.js';
 import { normalizeObjectType, normalizeRole, validateNodeSchemaOnWrite } from '../lib/enforceNodeSchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
-import { deriveEdgeLoc } from '../lib/edgeLoc.js';
+import { deriveEdgeLoc, isAuthoredLoc } from '../lib/edgeLoc.js';
 import { retireSpecDoor } from '../api/graphql/schema/resolvers.mutation.retireSpec.js';
 import { archiveTombstone, discoverArchivePlan, validateArchivePlan, withArchivePlanRetries, ArchivePlanExhaustedError } from '../lib/tombstoneArchive.js';
 import { deletePendingEdgesTargetingNodes, promotePendingEdgeForTarget, reconcilePendingEdgeCounts } from '../lib/pendingEdgePromotion.js';
@@ -1041,7 +1041,7 @@ export async function addEdge(args: {
         targetId: locked.target.id,
         loc: edgeLoc,
         // #2947: authored iff the caller supplied the loc (even one equal to the derivation).
-        locAuthored: authoredLoc != null && authoredLoc !== '',
+        locAuthored: isAuthoredLoc(authoredLoc),
         name,
         description,
         isRunnable,
@@ -1221,7 +1221,7 @@ async function replaceOutgoingEdgesInTransaction(
         sourceId: args.sourceNodeId,
         targetId: e.targetNodeId,
         loc: e.loc ?? deriveEdgeLoc(args.sourceLoc, e.name, e.targetLoc),
-        locAuthored: e.loc != null && e.loc !== '', // #2947
+        locAuthored: isAuthoredLoc(e.loc), // #2947
         name: e.name,
         description: e.description,
         isRunnable: e.isRunnable,

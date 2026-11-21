@@ -3,6 +3,7 @@ import { db as defaultDb } from '../integrations/db/client.js';
 import { derivedEdgeLocForUpsert } from './edgeLocLookup.js';
 import { lockEdgeEndpointMemories } from './edgeEndpointLock.js';
 import { generateId } from './id.js';
+import { isAuthoredLoc } from './edgeLoc.js';
 import { acquireLockSet, ancestorLocs } from './nodeSubtreeLock.js';
 
 class PendingEdgePromotionPreflightStale extends Error {}
@@ -318,7 +319,7 @@ export async function promotePendingEdgeForTarget(
               sourceId: currentSource.id,
               targetId: currentTarget.id,
               loc: pEdgeLoc,
-              locAuthored: currentPending.loc != null, // #2947: a loc the pending edge carried was supplied
+              locAuthored: isAuthoredLoc(currentPending.loc), // #2947: a loc the pending edge carried was supplied
               name: currentPending.name,
               description: currentPending.description,
               ...(currentPending.data != null

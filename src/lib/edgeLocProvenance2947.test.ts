@@ -8,11 +8,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
-import { deriveEdgeLoc, edgeLocDecodesAsDerived } from './edgeLoc.js';
+import { deriveEdgeLoc, edgeLocDecodesAsDerived, isAuthoredLoc } from './edgeLoc.js';
 import { resolveEdgeRef } from './entityRef/edgeRef.js';
 import { safeEdgeUrnV2 } from './urnEmit.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from '../mcp/server.js';
+import { cloneMemoryGraph } from '../controller/operations/cloneMemory.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../integrations/github/mirrorNodeMove.js', () => ({ mirrorNodeMoveToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -63,9 +64,16 @@ describe('#2947 provenance is recorded by every writer', () => {
     expect(await flag(e.id)).toBe(true);
   });
 
-  it('cloneMemory carries the source edge\'s flag; the DB default for a writer that does not say is authored', async () => {
-    const a = await node(mem.id, 'a'); const c = await node(mem.id, 'c');
-    const raw = await db.edge.create({ data: { id: generateId(), memoryId: mem.id, sourceId: a.id, targetId: c.id, loc: 'unsaid', name: 'x' } });
+  it('cloneMemory carries each edge\'s recorded flag to the clone (one derived, one authored); the DB default is authored', async () => {
+    const a = await node(mem.id, 'a'); const c = await node(mem.id, 'c'); const z = await node(mem.id, 'z');
+    const derived = await resolvers.Mutation.createEdge(null, { sourceRef: a.id, targetRef: c.id, name: 'uses' } as never, ctx()) as { id: string };
+    const authored = await resolvers.Mutation.createEdge(null, { sourceRef: a.id, targetRef: z.id, name: 'own', loc: 'authored-1' } as never, ctx()) as { id: string };
+    expect(await flag(derived.id)).toBe(false);
+    expect(await flag(authored.id)).toBe(true);
+    const clone = await cloneMemoryGraph(db, { sourceMemoryId: mem.id, name: 'clone', newUrn: `${mem.urn}-clone`, targetOrganizationId: (await db.memory.findUniqueOrThrow({ where: { id: mem.id } })).organizationId!, ownerUserId: null, groupOwnerUserId: null, actorId: mover.id, copierReadableMemoryIds: null });
+    const cloned = await db.edge.findMany({ where: { memoryId: clone.memoryId }, select: { name: true, locAuthored: true } });
+    expect(cloned.sort((x, y) => (x.name ?? '').localeCompare(y.name ?? ''))).toEqual([{ name: 'own', locAuthored: true }, { name: 'uses', locAuthored: false }]);
+    const raw = await db.edge.create({ data: { id: generateId(), memoryId: mem.id, sourceId: c.id, targetId: z.id, loc: 'unsaid', name: 'x' } });
     expect(raw.locAuthored).toBe(true);
   });
 });
@@ -175,5 +183,39 @@ describe('#2947 the backfill SQL and the application agree on the classification
     expect(want.get('authored: too few atoms')).toBe(false);
     expect(want.get('authored: different name')).toBe(false);
     expect(deriveEdgeLoc('a', 'uses', 'c')).toBe('a:uses:c');
+  });
+});
+
+describe('#2947 a cross-memory move and a comment thread (governed COMMENT_ANCHOR edge)', () => {
+  it('the anchor edge follows its thread to the destination memory with its id-derived loc untouched; the move reports no rebase for it', async () => {
+    const a = await node(mem.id, 'a');
+    const comment = await resolvers.Mutation.createComment({}, { targetRef: a.id, body: 'a thread' } as never, ctx()) as { id: string };
+    const anchor = await db.edge.findFirstOrThrow({ where: { sourceId: comment.id, governedKind: 'COMMENT_ANCHOR' } });
+    expect(anchor.memoryId).toBe(mem.id);
+    const result = await resolvers.Mutation.moveNode(null, { sourceRef: a.id, targetUrn: nodeUrn(other, 'a') } as never, ctx()) as unknown as { moveEdgeUrnChanges: Array<{ edgeId: string }> };
+    const after = await db.edge.findUniqueOrThrow({ where: { id: anchor.id } });
+    expect(after.memoryId).toBe(other.id);
+    expect(after.loc).toBe(anchor.loc);
+    expect(after.deletedAt).toBeNull();
+    // The comment's own source is the thread node, never a moved node, so rebaseMovedEdges never sees it (main's old
+    // non-INCLUDE arm matched no real row either); its home moves with the thread in the carry step, as on main.
+    expect(result.moveEdgeUrnChanges.map((c) => c.edgeId)).not.toContain(anchor.id);
+  });
+});
+
+describe('#2947 one predicate says whether a loc was supplied', () => {
+  it('null, undefined and the empty string are not supplied; any text is', () => {
+    expect([null, undefined, '', 'x', ' '].map(isAuthoredLoc)).toEqual([false, false, false, true, true]);
+  });
+});
+
+describe('#2947 alias chains: a URN changed by two moves still resolves from the first', () => {
+  it('a to b to c: the URN from before the first move and the one between both resolve to the edge', async () => {
+    const a = await node(mem.id, 'a'); const t = await node(mem.id, 't');
+    const e = await resolvers.Mutation.createEdge(null, { sourceRef: a.id, targetRef: t.id, name: 'uses' } as never, ctx()) as { id: string };
+    await resolvers.Mutation.moveNode(null, { sourceRef: a.id, targetUrn: nodeUrn(mem, 'b') } as never, ctx());
+    await resolvers.Mutation.moveNode(null, { sourceRef: a.id, targetUrn: nodeUrn(mem, 'c') } as never, ctx());
+    expect((await db.edge.findUniqueOrThrow({ where: { id: e.id } })).loc).toBe('c:uses:t');
+    for (const old of ['a:uses:t', 'b:uses:t', 'c:uses:t']) expect(await resolveEdgeRef(db, safeEdgeUrnV2(mem.urn, old))).toEqual({ id: e.id });
   });
 });
