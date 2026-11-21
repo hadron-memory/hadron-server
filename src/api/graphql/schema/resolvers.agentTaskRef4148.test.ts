@@ -14,6 +14,12 @@
  * regenerated from this SDL). Inside this repo none remain. Ship order (F3; precedent 0274): notices, then this server,
  * then the companions, which may fall back to the old name only on the GraphQL validation error. ticker-wake's behaviour
  * under the skew is documented beside its queries (scripts/ticker-wake/ticker-wake.ts).
+ *
+ * Ruling on the hard break (Bruce, coordinator, team chat #135369, on Billie's BLIND F3): the ordered hard break is the
+ * standing precedent 0274 (notices, then the server, then the companions; old-name fallback only on the validation error,
+ * never by version), already applied to entity-refs S1-S3 (#134801). Accepted for this PR, so no deprecated old-name
+ * aliases. The deploy timing stays a release call (Holger's hold); the installed CLI and portal call sites break at the
+ * server deploy until their companions ship, by that accepted design.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
