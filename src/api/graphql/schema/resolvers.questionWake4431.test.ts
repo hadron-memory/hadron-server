@@ -126,6 +126,13 @@ describe('#4431 §1: a worker links a question to its own open task', () => {
     }
   });
 
+  it('a person with no worker cannot link even a task assigned to them (no worker never equals a null worker assignee)', async () => {
+    const mine = await mkTask({ assigneeWorkerId: null, assigneeUserId: holder.id });
+    const e = await errorOf(ask({ taskRef: mine.id }, null));
+    expect(e?.extensions.code).toBe('QUESTION_INVALID');
+    expect(e?.extensions.pointers).toEqual([{ pointer: '/taskRef', message: LINK_MESSAGE }]);
+  });
+
   it('amendQuestion cannot change the link', async () => {
     const t = await mkTask();
     const q = await ask({});
@@ -195,6 +202,15 @@ describe('#4431 §3: the answer wakes the task\'s current assignee', () => {
     expect(await wakesOf(asker.id)).toHaveLength(1);
     await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type: 'task.progress', actorWorkerId: asker.id, actorUserId: holder.id, createdAt: new Date(Date.now() + 1000) } });
     expect(await wakesOf(asker.id, new Date(Date.now() + 2 * MIN))).toEqual([]);
+  });
+
+  it('a task that ends after the answer stops waking its assignee', async () => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    await answer(q.row.id, q.row.revSeq);
+    expect(await wakesOf(asker.id)).toHaveLength(1);
+    await db.agentTask.update({ where: { id: t.id }, data: { status: 'cancelled', cancelledAt: new Date() } });
+    expect(await wakesOf(asker.id)).toEqual([]);
   });
 
   it('a re-answer is a new event and wakes again', async () => {

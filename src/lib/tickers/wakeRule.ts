@@ -53,7 +53,7 @@ export type TaskWakeReason = {
   taskId: string;
   eventId: string;
   chainIndex: number;
-  event: 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINISHED' | 'CHILD_CANCELLED' | 'ALARM' | 'END_SESSION';
+  event: 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINISHED' | 'CHILD_CANCELLED' | 'ALARM' | 'END_SESSION' | 'ANSWERED';
   title: string;
   /** #2553: the task's handle, printed first in the nudge. */
   handle: string;
