@@ -16,6 +16,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
 
 let org: { id: string; urn: string };
 let memory: { id: string; urn: string };
@@ -84,11 +85,20 @@ describe('deleteNodeRevision (#617)', () => {
     ).rejects.toThrow('Node revision not found');
   });
 
-  it('denies a non-member (no write access)', async () => {
-    await expect(
-      resolvers.Mutation.deleteNodeRevision(null, { nodeRevRef: v2.id }, outsiderCtx()),
-    ).rejects.toThrow('Forbidden');
-    // No row was deleted.
+  it('conceals an existing revision from a non-reader as a missing one (#4138: guessable URN, no existence oracle)', async () => {
+    const real = composeNodeRevUrn(memory.urn, node.loc, 2);
+    const missing = composeNodeRevUrn(memory.urn, node.loc, 99);
+    const call = async (ref: string) => {
+      try { await resolvers.Mutation.deleteNodeRevision(null, { nodeRevRef: ref }, outsiderCtx()); return null; }
+      catch (e) { const g = e as { message: string; extensions?: Record<string, unknown> }; return { m: g.message, c: g.extensions?.code }; }
+    };
+    const a = await call(real);
+    const b = await call(missing);
+    expect(a).toEqual({ m: 'Node revision not found', c: 'NOT_FOUND' });
+    expect(a?.m).toBe(b?.m);
+    expect(a?.c).toBe(b?.c);
+    // The by-id form is concealed the same way, and no row was deleted.
+    expect(await call(v2.id)).toEqual(a);
     expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(3);
   });
 });

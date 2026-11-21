@@ -5366,6 +5366,11 @@ export const nodeMutations = {
       if (!revision) throw notFound();
       const node = await ctx.db.node.findUnique({ where: { id: revision.nodeId } });
       if (!node) throw notFound(); // a hard delete racing this lookup is a missing revision too, not a raw P2025
+      // #4138: the revision URN is guessable (loc + number), so a caller who cannot READ the memory (or the
+      // memory the snapshot was captured in) gets the same not-found as a missing ref, as the other three doors
+      // do. FORBIDDEN stays for a reader who cannot write (the preflight below).
+      const accessible = await getAccessibleMemoryIds(ctx);
+      if (!accessible.includes(node.memoryId) || !accessible.includes(revision.memoryId ?? node.memoryId)) throw notFound();
       await nodeDoorWritePreflight(ctx, node.memoryId, notFound);
       // #1641 §3.2 — a question's history is its audit trail. Unlocked: no
       // write ever turns an existing node into a question or back.

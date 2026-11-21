@@ -160,9 +160,9 @@ describe('unknown ≡ unreadable ≡ soft-deleted node ≡ soft-deleted memory (
     }
   });
 
-  it('deleteNodeRevision keeps its gate: a tombstoned node still takes the cleanup, an unreadable memory answers Forbidden', async () => {
-    const forbidden = await run(`mutation { deleteNodeRevision(nodeRevRef: "${urn1}") }`, outsiderCtx());
-    expect(forbidden.errors?.[0]?.message).toMatch(/Forbidden/);
+  it('deleteNodeRevision keeps its gate: a tombstoned node still takes the cleanup, an unreadable memory answers not-found (Rook P2, guessable URN)', async () => {
+    const concealed = await run(`mutation { deleteNodeRevision(nodeRevRef: "${urn1}") }`, outsiderCtx());
+    expect(code(concealed)).toBe(NOT_FOUND);
     expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(2);
     await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date() } });
     // A URN into a tombstoned node is a missing ref (cor:api:140:00: the resolver excludes soft-deleted rows); the PK keeps
