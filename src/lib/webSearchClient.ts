@@ -74,14 +74,14 @@ import { GraphQLError } from 'graphql';
 export const WEB_SEARCH_CONTRACT_VERSION = 'web-search@1' as const;
 
 /**
- * The refusal line for a tool declaring a contract version other than the one
+ * The mismatch text for a tool declaring a contract version other than the one
  * this core speaks, or `undefined` when the declaration is absent or matches
- * (#647 S1). Absent is accepted: the declaration is opt-in per deployment, and
+ * (so a returned string means REFUSE; #647 S1). Absent is accepted: the declaration is opt-in per deployment, and
  * the conformance set still checks the response-side `contractVersion`. Shared
  * by `webSearch` (declared via `WEBSEARCH_TOOL_CONTRACT_VERSION`) and the
  * conformance runner, so both refuse the same tools for the same reason.
  */
-export function refuseUndeclaredVersion(declared: string | undefined): string | undefined {
+export function contractVersionMismatch(declared: string | undefined): string | undefined {
   const d = declared?.trim();
   if (!d || d === WEB_SEARCH_CONTRACT_VERSION) return undefined;
   return `The search tool declares ${d}; this core speaks ${WEB_SEARCH_CONTRACT_VERSION}. Refused before any request.`;
@@ -210,7 +210,7 @@ export async function webSearch(input: WebSearchInput): Promise<WebSearchRespons
   const { baseUrl, token } = toolConfig();
   // #647 S1: a tool declaring another contract version cannot read a v1 query.
   // Refuse before sourcing the credential, so nothing is sent anywhere.
-  const mismatch = refuseUndeclaredVersion(process.env.WEBSEARCH_TOOL_CONTRACT_VERSION);
+  const mismatch = contractVersionMismatch(process.env.WEBSEARCH_TOOL_CONTRACT_VERSION);
   if (mismatch) throw new GraphQLError(mismatch, { extensions: { code: 'WEBSEARCH_TOOL_CONTRACT_MISMATCH' } });
   const { provider, auth } = providerCredentialFromEnv();
 

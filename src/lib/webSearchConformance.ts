@@ -1,4 +1,4 @@
-import { WEB_SEARCH_CONTRACT_VERSION, refuseUndeclaredVersion } from './webSearchClient.js';
+import { WEB_SEARCH_CONTRACT_VERSION, contractVersionMismatch } from './webSearchClient.js';
 
 /**
  * The core-owned conformance fixture set for `web-search@1` (#647 S1,
@@ -12,6 +12,12 @@ import { WEB_SEARCH_CONTRACT_VERSION, refuseUndeclaredVersion } from './webSearc
  * tool and a third-party one are judged by identical rules. It never branches
  * on which provider or tool answered.
  *
+ * This set is a PROMOTION check an operator runs before pointing a deployment
+ * at a tool; nothing at request time re-runs it. Enforcing it per tool instance
+ * needs the trust-tier registry (S2, held on its ruling), not this slice.
+ * The unknown-`providerOptions` fixture proves the tool ACCEPTS the key and
+ * still answers a valid envelope; it cannot prove the key changed nothing.
+ *
  * What a fixture checks is only what the spec makes durable: the result shape
  * (title, url, snippet, 1-based contiguous rank), the `source: 'external'` tag,
  * `count` honored as an upper bound, and unknown `providerOptions` safely
@@ -20,7 +26,7 @@ import { WEB_SEARCH_CONTRACT_VERSION, refuseUndeclaredVersion } from './webSearc
  *
  * Versioning: a tool declares the version it satisfies. A declaration other
  * than `WEB_SEARCH_CONTRACT_VERSION` is refused BEFORE any request, so a
- * v2-only tool is never sent a v1 query it cannot read (`refuseUndeclaredVersion`,
+ * v2-only tool is never sent a v1 query it cannot read (`contractVersionMismatch`,
  * defined in `webSearchClient` and shared with `webSearch`). The fixtures define v1 only: when
  * the contract bumps, the new version brings its own set.
  *
@@ -59,7 +65,7 @@ export const WEB_SEARCH_CONFORMANCE_FIXTURES: readonly WebSearchConformanceFixtu
   },
   {
     name: 'unknown-providerOptions-are-ignored',
-    rule: 'cor:web:020:01 opaque options bag: MUST be safely ignored when unknown',
+    rule: 'cor:web:020:01 opaque options bag: an unknown key is accepted (not refused) and the answer stays a valid envelope',
     request: { query: 'hadron conformance', providerOptions: { 'conformance.unknown-option': true } },
   },
 ];
@@ -129,7 +135,7 @@ export interface RunWebSearchConformanceOptions {
  * fixture (a tool that cannot answer does not conform), never thrown.
  */
 export async function runWebSearchConformance(opts: RunWebSearchConformanceOptions): Promise<WebSearchConformanceReport> {
-  const refused = refuseUndeclaredVersion(opts.declaredVersion);
+  const refused = contractVersionMismatch(opts.declaredVersion);
   if (refused) return { passed: false, refused, failures: [refused], results: [] };
 
   const doFetch = opts.fetch ?? fetch;
@@ -161,9 +167,11 @@ export async function runWebSearchConformance(opts: RunWebSearchConformanceOptio
           payload && typeof payload === 'object' && typeof (payload as { error?: unknown }).error === 'string'
             ? ` (${(payload as { error: string }).error})`
             : '';
-        // An unknown providerOptions key must not make the tool refuse: name the rule.
+        // Only a 400/422 on the unknown-option fixture is read as "refused the
+        // option"; any other status (401, 429, 500...) is reported as itself.
+        const optionRefused = fixture.request.providerOptions !== undefined && (res.status === 400 || res.status === 422);
         failures.push(
-          fixture.request.providerOptions
+          optionRefused
             ? `providerOptions: the tool refused an unknown option with HTTP ${res.status}${code}; it must safely ignore it`
             : `status: HTTP ${res.status}${code}, expected 200`,
         );

@@ -49,8 +49,7 @@ describe('#647 S1 web-search@1 conformance fixtures', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
-    delete process.env.WEBSEARCH_TOOL_URL;
-    delete process.env.WEBSEARCH_TOOL_CONTRACT_VERSION;
+    vi.unstubAllEnvs();
   });
 
   it('ships a non-empty, uniquely named fixture set', () => {
@@ -131,6 +130,43 @@ describe('#647 S1 web-search@1 conformance fixtures', () => {
     expect(report.failures.join('\n')).toMatch(/providerOptions/);
   });
 
+  it('sends POST with the bearer token and the exact refinement fields', async () => {
+    const f = conformingFetch();
+    await runWebSearchConformance({ baseUrl: 'http://tool.test:8080/', token: 'tok', fetch: f as unknown as typeof fetch });
+    for (const [url, init] of f.mock.calls) {
+      expect(url).toBe('http://tool.test:8080/ops/search');
+      expect(init!.method).toBe('POST');
+      expect(init!.headers).toMatchObject({ authorization: 'Bearer tok', 'content-type': 'application/json' });
+    }
+    const bodies = f.mock.calls.map((c) => JSON.parse(c[1]!.body as string) as Record<string, unknown>);
+    expect(bodies.some((b) => b.freshness === 'week' && b.locale === 'en-US')).toBe(true);
+    expect(bodies.some((b) => b.count === 2)).toBe(true);
+  });
+
+  it('reports a 500 on the unknown-option fixture as its status, NOT as an option refusal', async () => {
+    const f = vi.fn(async (_u: string | URL | Request, init?: RequestInit) => {
+      const req = JSON.parse(init!.body as string) as Req;
+      if (req.providerOptions) return { ok: false, status: 500, json: async () => ({ error: 'upstream_unreachable' }) } as unknown as Response;
+      return { ok: true, status: 200, json: async () => ({ results: [result(1)], contractVersion: WEB_SEARCH_CONTRACT_VERSION, source: 'external' }) } as unknown as Response;
+    }) as unknown as ReturnType<typeof conformingFetch>;
+    const report = await run(f);
+    expect(report.passed).toBe(false);
+    const text = report.failures.join('\n');
+    expect(text).toMatch(/status: HTTP 500 \(upstream_unreachable\)/);
+    expect(text).not.toMatch(/refused an unknown option/);
+  });
+
+  it('records a rejected request and a non-JSON answer as failures of that fixture, not throws', async () => {
+    const down = vi.fn(async () => { throw new TypeError('connection refused'); }) as unknown as ReturnType<typeof conformingFetch>;
+    const r1 = await run(down);
+    expect(r1.passed).toBe(false);
+    expect(r1.failures.join('\n')).toMatch(/request: failed/);
+    const junk = vi.fn(async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('bad json'); } })) as unknown as ReturnType<typeof conformingFetch>;
+    const r2 = await run(junk);
+    expect(r2.passed).toBe(false);
+    expect(r2.failures.join('\n')).toMatch(/not valid JSON/);
+  });
+
   it('REFUSES a tool declaring another contract version in the runner, before any request', async () => {
     const f = conformingFetch();
     const report = await run(f, 'web-search@2');
@@ -140,8 +176,8 @@ describe('#647 S1 web-search@1 conformance fixtures', () => {
   });
 
   it('REFUSES a configured tool declaring another contract version in webSearch, before any request', async () => {
-    process.env.WEBSEARCH_TOOL_URL = 'http://tool.test:8080';
-    process.env.WEBSEARCH_TOOL_CONTRACT_VERSION = 'web-search@2';
+    vi.stubEnv('WEBSEARCH_TOOL_URL', 'http://tool.test:8080');
+    vi.stubEnv('WEBSEARCH_TOOL_CONTRACT_VERSION', 'web-search@2');
     const fetchMock = conformingFetch();
     vi.stubGlobal('fetch', fetchMock);
     const err = await webSearch({ query: 'hadron' }).catch((e) => e);
@@ -152,11 +188,12 @@ describe('#647 S1 web-search@1 conformance fixtures', () => {
   });
 
   it('still searches when the configured declared version matches, or is unset', async () => {
-    process.env.WEBSEARCH_TOOL_URL = 'http://tool.test:8080';
+    vi.stubEnv('WEBSEARCH_TOOL_URL', 'http://tool.test:8080');
+    vi.stubEnv('WEBSEARCH_TOOL_CONTRACT_VERSION', '');
     const fetchMock = conformingFetch();
     vi.stubGlobal('fetch', fetchMock);
     await webSearch({ query: 'hadron' });
-    process.env.WEBSEARCH_TOOL_CONTRACT_VERSION = WEB_SEARCH_CONTRACT_VERSION;
+    vi.stubEnv('WEBSEARCH_TOOL_CONTRACT_VERSION', WEB_SEARCH_CONTRACT_VERSION);
     await webSearch({ query: 'hadron' });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
