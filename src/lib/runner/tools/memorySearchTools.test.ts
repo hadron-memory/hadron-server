@@ -1,6 +1,6 @@
 /** #632: memory retrieval is a distinct opt-in, free run capability, not web_search. */
 import { describe, expect, it, vi } from 'vitest';
-import { evaluatePolicyChain, parsePolicyLink } from '@hadron-memory/access-control';
+import { evaluatePolicyChain, parsePolicyLink, type PolicyAction } from '@hadron-memory/access-control';
 import { admitAndExecuteTool, ToolDeniedError } from '../toolAdmission.js';
 import { resolveRunTools } from './index.js';
 
@@ -50,7 +50,7 @@ describe('#632 defensive argument/principal validation', () => {
 
 it('cost-zero search is still denied by the real per-call policy gate before execution', async () => {
   const policy = parsePolicyLink({ allow: ['tool.web_search'] });
-  const gate = vi.fn(async (action: string, _cost: number) => evaluatePolicyChain(action, [policy]));
+  const gate = vi.fn(async (action: string, _cost: number) => evaluatePolicyChain(action as PolicyAction, [policy]));
   const record = vi.fn();
   await expect(admitAndExecuteTool(tool(), { query: 'must not search' }, { toolCtx: stub(), onToolCall: gate, record }))
     .rejects.toBeInstanceOf(ToolDeniedError);
