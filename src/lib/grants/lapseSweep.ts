@@ -21,7 +21,7 @@
  * NOT covered, disclosed: (c) an App's own soft delete (its grants go with the App) and `uninstalledAt` (#4167) are out of scope and
  * excluded from the candidates; a lapse CURED between two sweeps (a licence renewed, an org restored) is not caught here, because
  * main has no write door that moves a licence's expiry forward or restores an organization (`ensureAgentOrgGrant` leaves an existing
- * row untouched, a revoke is final; no resolver or operation sets an organization's `deletedAt` back to null; checked by grep when this was written). An out-of-band restore (raw SQL, a support tool) that lands between a lapse and the next sweep would have its
+ * row untouched, a revoke is final; no resolver or operation sets an organization's `deletedAt` back to null; checked by grep of the resolvers and operations on 2026-11-21, `origin/main` at the #4179 merge). An out-of-band restore (raw SQL, a support tool) that lands between a lapse and the next sweep would have its
  * grants ended anyway, and the stamp is permanent: that is the cost of the gap and the reason a future door must call the sweep first. A future door that does must call {@link sweepLapsedAgentGrants} (or judge its pairs with
  * `endGrantsOfAgentsNoLongerInstalled`) BEFORE its own write. This sweeper also does not remove register rows (#4172's uninstall door
  * does): the grants are the whole of this issue. The cause code of a lapse waits on #4180 (recorded reasons).
@@ -56,7 +56,10 @@ export async function sweepLapsedAgentGrants(
     batchSize?: number;
     maxPages?: number;
     after?: LapseSweepCursor | null;
-    /** Called after EVERY committed page with the resume point (null at the end), so a caller keeps its cursor even when a later page throws. */
+    /**
+     * Called after EVERY committed page with the resume point (null at the end), so a caller keeps its cursor even when a later page
+     * throws. It must not throw: it runs inside the sweep, after the page has committed, and a throw would abort the run.
+     */
     onPage?: (cursor: LapseSweepCursor | null) => void;
   } = {},
 ): Promise<LapseSweepOutcome> {

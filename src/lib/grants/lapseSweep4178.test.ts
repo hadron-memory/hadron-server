@@ -255,14 +255,15 @@ describe('#4178 a run that throws keeps its progress', () => {
     }
     let calls = 0;
     const flaky = new Proxy(db, {
-      get(target, prop, receiver) {
+      get(target, prop) {
         if (prop === '$transaction') {
           return (...args: unknown[]) => {
             if (++calls === 2) return Promise.reject(new Error('page 2 failed'));
-            return (target.$transaction as (...a: unknown[]) => unknown)(...args);
+            return Reflect.apply(target.$transaction as (...a: unknown[]) => unknown, target, args);
           };
         }
-        return Reflect.get(target, prop, receiver);
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
       },
     }) as typeof db;
     let saved = null as Awaited<ReturnType<typeof sweepLapsedAgentGrants>>['cursor'];
