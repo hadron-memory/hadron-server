@@ -3,7 +3,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
-import * as rootFs from '../../../integrations/localFs/saveNodeToFs.js';
+import * as rootLocks from '../../../lib/nodeSubtreeLock.js';
 
 // #2728: createMemory and createMemoryInApp create the root node INSIDE the Memory's transaction (the #2670
 // capability), so a root failure rolls the Memory back and a retry cannot mint a second one.
@@ -11,7 +11,7 @@ afterEach(() => vi.restoreAllMocks());
 const M = resolvers.Mutation as any;
 let org: any, admin: any, app: any, agent: any;
 const ctx = (): Context => ({ db, userId: admin.id, roles: ['READER'] });
-const inject = () => vi.spyOn(rootFs, 'saveNodeToFs').mockResolvedValueOnce({ error: 'injected root failure' });
+const inject = () => vi.spyOn(rootLocks, 'lockLocForWrite').mockRejectedValueOnce(new Error('injected root failure'));
 const createMemory = () => M.createMemory({}, { name: 'Notes2728', orgRef: org.id }, ctx());
 const inApp = () => M.createMemoryInApp({}, { appRef: app.id, agentRef: agent.id, memoryClass: 'knowledge', name: 'AppNotes2728' }, ctx());
 const counts = async () => ({ memories: await db.memory.count(), nodes: await db.node.count() });
@@ -39,7 +39,7 @@ describe.each([
   });
   it('still creates the memory and its root on success', async () => {
     const made = await create();
-    expect(await db.memory.findUniqueOrThrow({ where: { id: made.id } })).toMatchObject({ name: expect.stringContaining('2728') });
+    expect(await db.memory.findUniqueOrThrow({ where: { id: made.id } })).toMatchObject({ name: expect.stringContaining('2728'), organizationId: org.id });
     expect(await db.node.count({ where: { memoryId: made.id } })).toBe(1);
   });
 });

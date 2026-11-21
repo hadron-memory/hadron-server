@@ -10,6 +10,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import { GraphQLError } from 'graphql';
+import { drainNodeUsage } from '../../../lib/usageRecorder.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -229,13 +230,40 @@ describe('GraphQL runTask mutation (#542 — nodeRef)', () => {
       ctx,
     );
 
-    // Fire-and-forget usage event — give it a moment to settle.
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Fire-and-forget usage event — wait for its tracked write, not a clock (#643).
+    await drainNodeUsage(db);
 
     const event = await db.usageEvent.findFirst({
       where: { type: 'action-run', nodeLoc: 'tasks:deploy' },
     });
     expect(event).toBeDefined();
     expect(event?.type).toBe('action-run');
+  });
+
+  // #643 — the event is inserted inline and fire-and-forget, so a fixed sleep
+  // before the read raced a loaded shard. Delay the insert past the old 100 ms
+  // window: the read must wait on drainNodeUsage, not a clock.
+  it('records a usage event even when the insert settles late (#643)', async () => {
+    const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
+    const create = db.usageEvent.create.bind(db.usageEvent) as (args: unknown) => Promise<unknown>;
+    const spy = vi.spyOn(db.usageEvent, 'create').mockImplementation(((args: unknown) =>
+      new Promise((resolve) => setTimeout(resolve, 300)).then(() => create(args))) as never);
+    try {
+      await resolvers.Mutation.runTask(
+        {},
+        { nodeRef: nodeUrnOf(fx.alpha, 'tasks:deploy') },
+        ctx,
+      );
+
+      await drainNodeUsage(db);
+
+      const event = await db.usageEvent.findFirst({
+        where: { type: 'action-run', nodeLoc: 'tasks:deploy' },
+      });
+      expect(spy).toHaveBeenCalled();
+      expect(event?.type).toBe('action-run');
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

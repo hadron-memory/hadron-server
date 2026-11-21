@@ -194,7 +194,7 @@ function applyDecryption<T extends Partial<EncryptedNodeFields>>(
  * caller — resolvers should call this once per request per memory.
  */
 export async function getMemoryEncryptionInfo(
-  db: PrismaClient,
+  db: Pick<PrismaClient, 'memory'>,
   memoryId: string,
 ): Promise<MemoryEncryptionInfo> {
   const mem = await db.memory.findUniqueOrThrow({

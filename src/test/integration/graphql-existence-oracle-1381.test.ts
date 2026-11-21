@@ -366,12 +366,12 @@ const PROBES: Probe[] = [
   },
   {
     name: 'setMemorySourceToken(ref:)',
-    query: `mutation($r: ID!) { setMemorySourceToken(ref: $r, token: "t") { ref: id } }`,
+    query: `mutation($r: ID!) { setMemorySourceToken(ref: $r, token: "t") { id } }`,
     on: 'memId', vars: (r) => ({ r }), missingCode: 'MEMORY_NOT_FOUND',
   },
   {
     name: 'syncMemory(ref:)',
-    query: `mutation($r: ID!) { syncMemory(ref: $r) { ref: id } }`,
+    query: `mutation($r: ID!) { syncMemory(ref: $r) { id } }`,
     on: 'memId', vars: (r) => ({ r }), missingCode: 'MEMORY_NOT_FOUND',
   },
   {
@@ -476,17 +476,23 @@ describe('#1381 — controls: what concealment must not change', () => {
     expect(await sideEffects()).toEqual(before);
   });
 
-  it('deleteMemorySubscription: a MALFORMED orgRef on a hidden memory answers as the missing memory', async () => {
-    // Both-or-neither is caller input: a missing memory refuses before the org
-    // is parsed, so a hidden one must not answer BAD_USER_INPUT instead.
-    // (#4142 S6 dropped the orgId alias, so the malformed value rides orgRef
-    // itself — the memory-first order this pins is unchanged.)
-    const q = `mutation($r: ID!, $o: ID!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`;
-    const existing = await gql('outsider', q, { r: target.memUrn!.existing, o: 'not-a-qualified-urn' });
-    const missing = await gql('outsider', q, { r: target.memUrn!.missing, o: 'not-a-qualified-urn' });
-    expect(code(missing)).toBe('NOT_FOUND');
-    expect(wire(existing, target.memUrn!.existing)).toBe(wire(missing, target.memUrn!.missing));
-  });
+  // #4357 P3-3: each probe is shown to REACH the parse-failure arm (a caller who can open the memory sees URN_NOT_QUALIFIED for it; the earlier `not-a-qualified-urn` was a valid slug that only answered NOT_FOUND),
+  // so the hidden-memory answer below is the oracle guard and not a duplicate of a missing-orgRef probe.
+  for (const malformed of ['hrn:org:', 'hrn:mem:acme:x', 'hrn:node:acme:x:y']) {
+    it(`deleteMemorySubscription: a MALFORMED orgRef (${JSON.stringify(malformed)}) on a hidden memory answers as the missing memory`, async () => {
+      // Both-or-neither is caller input: a missing memory refuses before the org
+      // is parsed, so a hidden one must not answer BAD_USER_INPUT instead.
+      // (#4142 S6 dropped the orgId alias, so the malformed value rides orgRef
+      // itself — the memory-first order this pins is unchanged.)
+      const q = `mutation($r: ID!, $o: ID!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`;
+      const visible = await gql('reader', q, { r: target.memUrn!.existing, o: malformed });
+      expect(code(visible), 'precondition: the probe reaches the malformed-ref arm (UrnNotQualifiedError)').toBe('URN_NOT_QUALIFIED');
+      const existing = await gql('outsider', q, { r: target.memUrn!.existing, o: malformed });
+      const missing = await gql('outsider', q, { r: target.memUrn!.missing, o: malformed });
+      expect(code(missing)).toBe('NOT_FOUND');
+      expect(wire(existing, target.memUrn!.existing)).toBe(wire(missing, target.memUrn!.missing));
+    });
+  }
 
   it('deleteMemorySubscription: an AMBIGUOUS org alias on a hidden memory answers as the missing memory', async () => {
     // Two live orgs claiming one legacy URN make resolveOrgRef throw

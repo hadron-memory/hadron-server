@@ -36,7 +36,7 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { deleteObject } from '../../integrations/r2/client.js';
+import { deleteObject } from '../../integrations/objectstore/index.js';
 import { decryptStorageKey } from '../../lib/asset/encryption.js';
 import { sessionKeyCache } from '../../lib/sessionKeyCache.js';
 import { logAssetEvent } from './audit.js';
