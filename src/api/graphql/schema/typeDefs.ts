@@ -2727,7 +2727,7 @@ export const typeDefs = `#graphql
     "#4428 — who this question is routed to: the explicit assignee, else the holder of the worker that asked, else null. Worked out at read, never stored. Routing only: any decider may answer."
     effectiveAssigneeId: ID
     effectiveAssignee: CommentActorRef
-    "The asker\'s agent task this question blocks. Always null until slice S7."
+    "#4431 — the asker\'s agent task this question blocks (askQuestion\'s taskRef), or null. An answer to it records question.answered on that task and wakes the task\'s current assignee (hrn:node:hadronmemory.com:specs:cor:agt:050:11). amendQuestion never changes it."
     taskId: ID
     deciderIds: [ID!]!
     deciders: [CommentActorRef!]!
@@ -2866,6 +2866,8 @@ export const typeDefs = `#graphql
     yesno: Boolean
     recommendation: QuestionRecommendationInput
     noRecommendation: QuestionNoRecommendationInput
+    "#4431 — the agent task this question blocks, by id or handle (a bare handle is in the App of the log\'s memory). Only a worker may name one, and only its own open task (pending or started) in the App the log\'s memory belongs to; anything else is QUESTION_INVALID at /taskRef, with one message whatever the reason. An answer then records question.answered on the task and wakes its current assignee; a take-back records question.answer-retracted and wakes nobody (hrn:node:hadronmemory.com:specs:cor:agt:050:11)."
+    taskRef: ID
   }
 
   "#4426 — a change to the question. An omitted field is unchanged; for background, whyNow, assignee, neededBy and defaultAction an explicit null clears it. Answers never change here."
@@ -16398,6 +16400,8 @@ export const typeDefs = `#graphql
     ALARM
     "#1709 — the task was cancelled and asks its assignee to end its session (hrn:node:hadronmemory.com:specs:cor:agt:050:10). Due while that session is open and the platform has not yet ended it through a host."
     END_SESSION
+    "#4431 — a question that blocks the task was answered (a question.answered event on the task); the nudge names the task, never the answer. Due to the task's current assignee until delivered or that worker acts on the task (hrn:node:hadronmemory.com:specs:cor:agt:050:11). A take-back wakes nobody."
+    ANSWERED
   }
 
   "#1708 — the task a TASK reason is for: shown only to a caller who may read the App's tasks (hrn:node:hadronmemory.com:specs:cor:agt:050:21)."
@@ -16413,6 +16417,8 @@ export const typeDefs = `#graphql
     title: String!
     "The task's handle, e.g. AT3.405: an alias for the id, printed first in the nudge (hrn:node:hadronmemory.com:specs:cor:agt:050:01)."
     handle: String!
+    "#4431 — for ANSWERED, the code of the question that was answered (e.g. QA3), for the nudge: a question this task asked was answered: <code>. Never the answer. Null for every other event (hrn:node:hadronmemory.com:specs:cor:agt:050:11)."
+    questionCode: String
     "A stable label for the reason, e.g. TASK:<id>:assigned."
     ref: String!
   }
@@ -17420,7 +17426,7 @@ export const typeDefs = `#graphql
   type AgentTeamEvent {
     id: ID!
     appId: ID!
-    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.coordinator-cadence (#2763: task-less, subjectWorker is the coordinator that stopped assigning); alarm.stale-sweep (#4233: task-less and workerless: a host of an App in sweep mode OBSERVE or APPLY whose last run the server recorded more than five minutes ago (the server's clock, not the host's; a switch-on of the mode restarts the clock); payload.hostId names the host, the alarm goes to the App's managers and ends when the host records its next run); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02)."
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.coordinator-cadence (#2763: task-less, subjectWorker is the coordinator that stopped assigning); alarm.stale-sweep (#4233: task-less and workerless: a host of an App in sweep mode OBSERVE or APPLY whose last run the server recorded more than five minutes ago (the server's clock, not the host's; a switch-on of the mode restarts the clock); payload.hostId names the host, the alarm goes to the App's managers and ends when the host records its next run); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02); question.answered, question.answer-retracted (#4431: a question that blocks the task was answered, or its answer taken back; payload is questionId, code, revision and state only, never the answer; only question.answered wakes the task\'s assignee)."
     type: String!
     taskId: ID
     "The task's stored handle (hrn:node:hadronmemory.com:specs:cor:agt:050:01, Proposed). Null when taskId is null or the task no longer exists; never invented."
