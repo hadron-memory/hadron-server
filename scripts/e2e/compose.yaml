@@ -49,8 +49,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # #3021: readiness, not liveness. /ready is 200 only once the first startup has succeeded and the database answers
+    # (503 starting / startup_failed / stopping / database_unavailable otherwise; cor:api:270:01). /health stays 200
+    # while a failed first startup leaves the process alive, so it must not gate `compose up --wait`.
     healthcheck:
-      test: [CMD, node, -e, "fetch('http://127.0.0.1:4100/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:4100/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 3s
       timeout: 5s
       retries: 60

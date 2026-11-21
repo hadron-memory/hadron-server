@@ -2,6 +2,7 @@ import { deleteLockedAppSecret } from './autoDelete.js';
 import { lockProtectionClients, endProtectionClients } from './protection.js';
 /** #3999; cor:sec:070:02. Separate proof and change assertions; the requester, browser and immutable request bind both. */
 import { createHash, randomBytes } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
@@ -129,7 +130,9 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
    await deleteLockedAppSecret(tx,secret,actor);return null;
   }
   if(r.operation==='STORE'){
-   const wasProtected = secret?.protected;
+   // #4717 items 1-2 (cor:sec:010:05): a create starts unprotected in the trail and ends protected, so it records PROTECT;
+   // a protection change that leaves the metadata as it was records only the protection event, never a METADATA event.
+   const before = secret ? { protected: secret.protected, metadata: secret.metadata } : null;
    let plaintext: Buffer | null = null;
    if(r.write_version){
     if(!r.staged_value_encrypted || r.key_version===null || r.size_bytes===null)throw refuse();
@@ -140,10 +143,12 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
     if(!secret)secret=await tx.secret.create({data:{ownerType:'app',ownerId:r.app_id,name:r.secret_name,kind:r.secret_kind,metadata:r.metadata as Prisma.InputJsonValue,valueEncrypted:null,protected:true,createdBy:r.requester_id}});
     const versionNo=r.write_version?await addAppSecretVersion(tx,secret,plaintext!.toString('utf8'),r.size_bytes!,actor):newest?.versionNo??null;
     await tx.secret.update({where:{id:secret.id},data:{metadata:r.metadata as Prisma.InputJsonValue,updatedBy:r.requester_id,...(r.protected_result===null?{}:{protected:r.protected_result})}});
-    await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:!r.write_version?'METADATA':newest?'VERSION':'STORE',versionNo,actor});
-    if (wasProtected !== undefined && r.protected_result !== null && r.protected_result !== wasProtected) {
-     await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:r.protected_result?'PROTECT':'UNPROTECT',actor});
-    }
+    // before === null only for a protected create (the sole STORE staged with secret_id null), whose row is born protected.
+    const protectedAfter = r.protected_result ?? before?.protected ?? true;
+    const protectionChanged = (before?.protected ?? false) !== protectedAfter;
+    const protectionOnly = !r.write_version && protectionChanged && before !== null && isDeepStrictEqual(r.metadata, before.metadata);
+    if (!protectionOnly) await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:!r.write_version?'METADATA':newest?'VERSION':'STORE',versionNo,actor});
+    if (protectionChanged) await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:protectedAfter?'PROTECT':'UNPROTECT',actor});
    }finally{plaintext?.fill(0);}
   }else{
    if(!secret)throw refuse();

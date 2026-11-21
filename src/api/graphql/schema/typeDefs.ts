@@ -158,8 +158,8 @@ export const typeDefs = `#graphql
   by as (text|number|datetime|boolean). number/datetime route through the same DB
   guards, so a missing or unparseable value sorts LAST regardless of direction;
   loc ascending breaks ties for stable pagination. Overrides the sort enum when
-  present. On vector/hybrid modes it re-orders the retrieved candidate window (the
-  ranking runs against the vector index, not the JSONB), like the sort enum does.
+  present. On vector/hybrid modes offset/limit are taken by relevance and this orders only
+  that page (#2772, hrn:node:hadronmemory.com:specs:cor:api:090:04), like the sort enum does.
   """
   input NodePropertySort {
     "Path of object keys into the column, e.g. ['stage']."
@@ -250,7 +250,7 @@ export const typeDefs = `#graphql
     both nodeType and nodeTypes (an empty string counts as set), more than 20 entries (counted
     before duplicates are dropped), and a list containing "comment" (search comments with nodeType
     or contentScope). Exact total where the mode already has one; vector and hybrid keep total
-    null and their bounded, widening candidate window. Applies to findNodes and appNodes.
+    null and have no candidate cap (the filters run inside the vector query); the one bound is on the page itself: an offset + limit window past 20000 rows is cut there and reports stopped_early. Applies to findNodes and appNodes.
     """
     nodeTypes: [String!]
     """
@@ -341,7 +341,9 @@ export const typeDefs = `#graphql
     multi-term keyword query matched nothing under AND, so it was retried as
     OR and these hits match ANY term), scope_narrowed (spec 049: the scope
     this search ran under lists memories you cannot read; they were dropped
-    and \`scope.droppedCount\` says how many).
+    and \`scope.droppedCount\` says how many), stopped_early (#2772: a vector
+    or hybrid search ran out of its work budget before the page was complete;
+    \`reason\` is also stopped_early when the page is empty).
     """
     degraded: String
     "Spec 049 (D-2026-09-13-002): what this search was produced under. Null when no scope applied (the pre-049 accessible set, optionally org-narrowed)."
@@ -3291,8 +3293,9 @@ export const typeDefs = `#graphql
     installed; \`appAgents\` lists every install, an entry whose \`agent\` is null
     being an installed Agent withheld from this caller.
 
-    A caller who reaches a user-owned App only as an owner-role member gets null on
-    both for a different reason: WITHHELD (#2089). Render it as unknown.
+    null can also mean WITHHELD from this caller (#2089): an impersonated caller, or a
+    caller who reaches the App only by another route. A current owner-role member of a
+    user-owned App reads them as the owning user does (ruling 0260, #3765).
     """
     agentId: ID
     agent: Agent
@@ -3316,9 +3319,9 @@ export const typeDefs = `#graphql
     installedAgentUrn: String
     trainingMode: Boolean!
     surfaces: [String!]!
-    "The App's members. null means WITHHELD from this caller (#2089): a user-owned App's owner-role member reaches the App record but not its roster. Never read null as an empty roster. The App's owning user, and callers of an org-owned App, get the real list (a real empty list included)."
+    "The App's members. null means WITHHELD from this caller (#2089): an impersonated caller, or one who reaches a user-owned App only by an outer-object route. Never read null as an empty roster. The App's owning user, a current owner-role member of a user-owned App (ruling 0260, #3765), and callers of an org-owned App get the real list (a real empty list included)."
     members: [AppMember!]
-    "Member count. null means WITHHELD from this caller (#2089), never zero; the real count (a real 0 included) for callers who may see the roster."
+    "Member count. null means WITHHELD from this caller (#2089), never zero; the real count (a real 0 included) for callers who may see the roster, a current owner-role member of a user-owned App among them (ruling 0260, #3765)."
     memberCount: Int
     """
     The App's SHARED app-class memory (#965) — the team space the shared/team
@@ -3345,7 +3348,7 @@ export const typeDefs = `#graphql
     aiProvider: String
     "null can mean WITHHELD from this caller (#2089), not only that it is not configured."
     aiModel: String
-    "Whether an AI API key is configured for this App. null means WITHHELD from this caller (#2089): only the owning user of a user-owned App holds its AI configuration. Never read null as false; a real false means no key."
+    "Whether an AI API key is configured for this App. null means WITHHELD from this caller (#2089): only the owning user of a user-owned App holds its AI configuration, an owner-role member of it included (the one carve-out hrn:node:hadronmemory.com:specs:cor:dmo:050:12 states; ruling 0260). Never read null as false; a real false means no key."
     hasAiApiKey: Boolean
     expiresAt: DateTime
     # App-original fields
@@ -3372,9 +3375,10 @@ export const typeDefs = `#graphql
     write an AppAgent row. One App credential
     routes to all of them via the URN supplied in the request.
 
-    null means WITHHELD from this caller (#2089): a user-owned App's
-    owner-role member does not see its installation roster. Never read null as
-    no installed Agents.
+    null means WITHHELD from this caller (#2089): an impersonated caller, or one who
+    reaches a user-owned App only by an outer-object route. A current owner-role member
+    of a user-owned App reads the roster as the owning user does (ruling 0260, #3765).
+    Never read null as no installed Agents.
     """
     appAgents: [AppAgent!]
     """
@@ -3387,7 +3391,8 @@ export const typeDefs = `#graphql
     \`appAgents\`: served installation creation time, then Agent id. When any
     installed Agent is withheld, every entry shares the App date, so order is by id.
 
-    null means WITHHELD from this caller (#2089), never no Agents.
+    null means WITHHELD from this caller (#2089), never no Agents. A current owner-role member
+    of a user-owned App reads the list as the owning user does (ruling 0260, #3765).
     """
     agents: [Agent!]
     "Key inventory, only for whoever manages the App as themselves, never through a worker session, instructed or not: a nested field carries no instruction, so an instructed worker lists through appKeys / appKeysPage (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6)."

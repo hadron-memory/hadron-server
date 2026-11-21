@@ -110,12 +110,9 @@ const sites = [
     run: (ctxDb: Context['db']) =>
       resolvers.Mutation.startChat({}, { agentRef: agentId }, { db: ctxDb, roles: ['ADMIN'], userId: admin.id }),
   },
-  {
-    name: 'createRevision (revisions parent)',
-    parentLoc: 'revisions',
-    run: (ctxDb: Context['db']) =>
-      resolvers.Mutation.createRevision({}, { agentRef: agentId }, { db: ctxDb, roles: ['ADMIN'], userId: admin.id }),
-  },
+  // #3587: the `revisions` parent ensure (createRevision and the restore's auto-save) is now INSERT ... ON CONFLICT DO NOTHING
+  // inside the revision transaction, where a caught unique violation would abort it; resolvers.restoreUnretire3587.test.ts
+  // (P4) pins the concurrent create instead.
 ] as const;
 
 describe('#2476 parent-node ensure: only the (loc, memory_id) race is swallowed', () => {

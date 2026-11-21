@@ -145,8 +145,14 @@ function unknownOwnerType(_ownerType: never): never {
 
 import { loadLiveApp, appMember, appManager, requireAppMember, appAnchors } from '../../../lib/secrets/access.js';
 
-function appRateIdentity(ctx: Context) {
+/** The WRITES rate identity every App secret write admits under, shared with withdrawSecretChangeRequest (#4717 item 5). */
+export function appRateIdentity(ctx: Context) {
   return ctx.limiterIdentity ?? transportRateIdentity(ctx as never);
+}
+
+/** The one duplicate-name refusal, for an ordinary create and a protected create refused at staging (#4717 item 3). */
+function secretNameTaken(name: string): GraphQLError {
+  return badInput(`A secret named "${name}" already exists at this scope.`);
 }
 
 /**
@@ -237,6 +243,9 @@ export const secretMutations = {
       if (!(await lockSecretRow(tx, found.id))) throw notFound();
       const secret = await tx.secret.findUniqueOrThrow({ where: { id: found.id } });
       if (protect && secret.protected) throw badInput('Secret is already protected.');
+      // #4717 item 8 (cor:sec:070:01): clearing protection that is not on changes nothing, so it stages no request and
+      // spends no slot. Only whoever manages the App reaches this line (judged above), so no one else learns the state.
+      if (!protect && !secret.protected) return secret;
       const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
       return stageSecretChange(tx, ctx, { appId: secret.ownerId, secretId: secret.id, name: secret.name, kind: secret.kind,
         metadata: secret.metadata, operation: protect ? 'SET_PROTECTED' : 'CLEAR_PROTECTED', snapshot: changeSnapshot(secret, latest?.versionNo ?? 0) });
@@ -275,7 +284,7 @@ export const secretMutations = {
       });
     } catch (err) {
       if ((err as { code?: string } | null)?.code === 'P2002') {
-        throw badInput(`A secret named "${name}" already exists at this scope.`);
+        throw secretNameTaken(name);
       }
       throw err;
     }
@@ -359,8 +368,15 @@ async function createAppSecret(ctx: Context, appId: string, name: string, args: 
           throw badInput('name must be lowercase [a-z0-9-], start alphanumeric, max 64 chars.');
         }
         const { metadata, valueJson, sizeBytes } = validateSecretPayload(args.kind, args.metadata, args.value);
-        if (args.protected) return stageSecretChange(tx, ctx, { appId, secretId: null, name, kind: args.kind,
-          metadata: metadata as never, operation: 'STORE', snapshot: 'absent', valueJson, sizeBytes });
+        if (args.protected) {
+          // #4717 item 3 (cor:sec:070:02): a taken name refuses at staging with the duplicate-name refusal, and nothing is
+          // staged. Completion still rejudges the name, so one taken after staging ends the request stale.
+          if (await tx.secret.findUnique({ where: { ownerType_ownerId_name: { ownerType: 'app', ownerId: appId, name } }, select: { id: true } })) {
+            throw secretNameTaken(name);
+          }
+          return stageSecretChange(tx, ctx, { appId, secretId: null, name, kind: args.kind,
+            metadata: metadata as never, operation: 'STORE', snapshot: 'absent', valueJson, sizeBytes });
+        }
         await assertAppSecretRoom(tx, appId);
         const secret = await tx.secret.create({
           data: {
@@ -376,7 +392,7 @@ async function createAppSecret(ctx: Context, appId: string, name: string, args: 
     ));
   } catch (err) {
     if (isSecretNameConflict(err)) {
-      throw badInput(`A secret named "${name}" already exists at this scope.`);
+      throw secretNameTaken(name);
     }
     throw err;
   }

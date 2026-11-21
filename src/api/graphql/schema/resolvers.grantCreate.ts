@@ -18,7 +18,8 @@ import { manageRefusal, resolveGrantManager } from './resolvers.grantManage.js';
 import { GrantManageRefusal } from '../../../lib/grants/manage.js';
 import { getGrantForManager } from '../../../lib/grants/read.js';
 import { lockAppManagerMemberships, managesApp } from '../../../lib/auth/appManagement.js';
-import { createPendingGrant, GrantCreateRefusal } from '../../../lib/grants/create.js';
+import { createPendingGrant, GrantCreateRefusal, GrantRunGone } from '../../../lib/grants/create.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { getGrantForWorker } from '../../../lib/grants/read.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
@@ -162,3 +163,70 @@ async function createAsManager(ctx: Context, input: CreateGrantInput) {
 }
 
 const notManager = () => manageRefusal(new GrantManageRefusal('GRANT_NOT_MANAGER'));
+
+export interface RunGrantInput {
+  action: string;
+  values: unknown;
+  reason: string;
+  startsAt?: Date | string | null;
+  expiresAt?: Date | string | null;
+  maxUses?: number | null;
+}
+
+/**
+ * #3753 (Grants S2c; cor:acl:140:05 S5, ruling 0255 item 21): a headless run names its agent and asks for a PENDING grant held by that
+ * agent in the run's own App. The run tool's one door onto the shared create core; never the GraphQL `createGrant`, which refuses a run
+ * principal on every arm (a run carries its on-behalf-of person, who may manage the App, and the person's calls stay the person's, S9).
+ *
+ * The holder and the App come from the run row, never from input. The principal must be THIS run's; every way it is not, an App or run
+ * that is gone, an agentless run, or a run that finished, is the one concealing APP_NOT_FOUND (the createRootTaskForRun answer). An agent
+ * that is deleted, uninstalled or unlicensed is the holder refusal, so it reads like naming any holder the run may not have. The agent
+ * is anchored with the App, its org and owner; the core then locks the run row FOR SHARE and judges it, and the install, before the insert.
+ */
+export async function createGrantForRun(principal: Context, run: { id: string; appId: string; agentId: string | null }, input: RunGrantInput): Promise<{ id: string }> {
+  const gone = () => new GraphQLError('App not found.', { extensions: { code: 'APP_NOT_FOUND' } });
+  if (!isRunPrincipal(principal) || principal.appId !== run.appId || principal.clientId !== `run:${run.id}`) throw gone();
+  const agentId = run.agentId;
+  if (!agentId) throw gone();
+  const startsAt = asDate(input.startsAt);
+  const expiresAt = asDate(input.expiresAt);
+  const app = await principal.db.app.findUnique({ where: { id: run.appId }, select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true } });
+  if (!app || app.deletedAt) throw gone();
+  const holderGone = () => refusal(new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED'));
+  if (!(await principal.db.agent.findFirst({ where: { id: agentId, deletedAt: null }, select: { id: true } }))) throw holderGone();
+  const anchors: AuthorityAnchor[] = [
+    { kind: 'app', id: app.id },
+    ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+    ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+    { kind: 'agent', id: agentId },
+  ];
+  try {
+    const id = await withAuthorizedTx(
+      principal, anchors,
+      async () => { /* the run itself is judged by the core under these locks */ },
+      (tx, txCtx) => createPendingGrant(tx, {
+        canReadMemory: (memoryId) => isMemoryReadableCached(txCtx, memoryId),
+        appId: app.id,
+        requester: { runId: run.id, agentId },
+        holder: { kind: 'agent', id: agentId },
+        heldAgentAnchor: agentId,
+        action: input.action, values: input.values, startsAt, expiresAt, maxUses: input.maxUses ?? null, reason: input.reason,
+      }),
+    );
+    return { id };
+  } catch (error) {
+    if (error instanceof GrantCreateRefusal) throw refusal(error);
+    if (error instanceof GrantRunGone) throw gone();
+    if ((error instanceof GraphQLError && error.extensions?.code === 'FORBIDDEN') || (error instanceof Error && error.message === 'Forbidden')) {
+      // An anchor refused under the lock: the agent was deleted first (the holder refusal), or the App, org or owner went (concealed).
+      // Re-read each anchor: a Forbidden while every anchor is still live is NOT an anchor refusal and propagates unchanged.
+      const agent = await principal.db.agent.findFirst({ where: { id: agentId, deletedAt: null }, select: { id: true } });
+      if (!agent) throw holderGone();
+      const liveApp = await principal.db.app.findFirst({ where: { id: app.id, deletedAt: null }, select: { id: true } });
+      const liveOrg = !app.organizationId || (await principal.db.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } }));
+      const liveOwner = !app.ownerUserId || (await principal.db.user.findFirst({ where: { id: app.ownerUserId, deletedAt: null }, select: { id: true } }));
+      if (!liveApp || !liveOrg || !liveOwner) throw gone();
+    }
+    throw error;
+  }
+}

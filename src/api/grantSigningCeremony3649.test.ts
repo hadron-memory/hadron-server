@@ -232,13 +232,24 @@ describe('C9 + C5: the proof shows the server-built terms only to someone who ma
     const p = await prove((await openRequest(g)).id, admin);
     expect(p.json.outcome).toBe('open');
     expect(p.json.view.requesterReason).toBe(REASON);
-    expect(p.json.view.reasonAuthor).toEqual({ name: 'gs-reason-author', via: 'gs-worker' });
+    expect(p.json.view.reasonAuthor).toEqual({ name: 'gs-reason-author', via: 'gs-worker', run: false });
     expect(p.json.view.requester).toEqual({ name: 'gs-requester', via: null });
   });
 
   it('a grant with no requester link (an erased requester) names no author', async () => {
     const p = await prove((await openRequest(await insertGrant())).id, admin);
-    expect(p.json.view.reasonAuthor).toEqual({ name: null, via: null });
+    expect(p.json.view.reasonAuthor).toEqual({ name: null, via: null, run: false });
+  });
+
+  // #3753 (Abigail's P2 on #4769): a grant a RUN asked for has no person or worker link, which is not an erased person. The view says a run asked.
+  it('a grant a run asked for is attributed to a run, never to a deleted user', async () => {
+    const g = generateId();
+    await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, requested_by_run_id, action, action_values, reason, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, 'schedule.create', $5::jsonb, $6, (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
+    g, appId, workerId, generateId(), JSON.stringify({ entryNode: entryNodeId }), REASON);
+    const p = await prove((await openRequest(g)).id, admin);
+    expect(p.json.outcome).toBe('open');
+    expect(p.json.view.reasonAuthor).toEqual({ name: null, via: null, run: true });
   });
 
   it('a grant naming several nodes shows each as its URN and may be signed', async () => {
