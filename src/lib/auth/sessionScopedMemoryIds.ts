@@ -49,6 +49,20 @@ import { personalOrgAgentTextAllowed } from './personalOrgAgentInstall.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isAgentInstalledAndLicensed } from '../appAgent.js';
 import { isActiveAgentSubscription } from '../agentSubscription.js';
+import { loadSessionBinding } from '../sessionBinding.js';
+import { isRunPrincipal } from './runPrincipal.js';
+
+/**
+ * Who is asking, beyond the App and the session (#3401, ruling 0203): an impersonation reaches nothing through a
+ * session, and a run principal never reaches a private memory (#1719 R5a), even when it carries an App and a session.
+ * The ARGUMENT is required, so a call site has to decide what to pass; the fields are optional because the principal
+ * types (`AuthContext`, the GraphQL `Context`) declare them optional. Production callers pass the principal itself,
+ * never a hand-built object; `{}` is a plain App key with neither term (tests).
+ */
+export interface SessionScopeCaller {
+  clientId?: string | null;
+  impersonation?: unknown;
+}
 
 /**
  * Memory ids an App key may reach while operating inside `sessionId`.
@@ -57,14 +71,23 @@ import { isActiveAgentSubscription } from '../agentSubscription.js';
  * @param appId   The AUTHENTICATED App (a credential, never a selection — the
  *                caller must have established that `sessionId` belongs to this
  *                App, which `src/middleware/auth.ts` does at bind time).
- * @param sessionId The active session.
+ * @param sessionId The session the caller is bound to. It is re-validated on every call (#3401 D1).
+ * @param caller  The rest of the principal (see {@link SessionScopeCaller}).
  * @returns The admissible ids — possibly empty, never null.
  */
 export async function sessionScopedMemoryIds(
   db: PrismaClient,
   appId: string,
   sessionId: string,
+  caller: SessionScopeCaller,
 ): Promise<string[]> {
+  // #3401 D3: "the call isn't impersonating" is a term of the ruling (0203), not left to construction.
+  if (caller.impersonation) return [];
+  // #3401 D1 (cor:aut:020:02, only an active session binds): an MCP transport keeps the session it was opened
+  // with, so a reach computed from that id alone would outlive the session. Every call re-validates it through the
+  // ONE binding check (not ended, not past its hard expiry, not dormant, this App's), never a copy of it. A dead
+  // session reaches nothing, whatever ended it, since a read refusal must not differ (D4).
+  if (!(await liveBinding(db, appId, sessionId))) return [];
   const app = await db.app.findUnique({
     where: { id: appId },
     select: {
@@ -130,17 +153,23 @@ export async function sessionScopedMemoryIds(
         (mem.userMemoryOfAgentId !== null && mem.workerOf.length === 0))) {
     // AgentMemoryItem is global to an Agent. An App B session cannot use it
     // (or the agent-own pointer) to read App A's knowledge or scratch memory.
-    // Keep the existing personal/private reuse path: startAgentSession itself
-    // reuses those rows by (agent, user), even when their appId names another
-    // App. The owner + subscription check below still applies.
-    const foreignAppScoped = mem.appId !== null && mem.appId !== appId &&
-      mem.class !== 'personal' && mem.class !== 'private';
+    // Personal/private rows skip this filter only to meet the stricter App AND
+    // Agent match below (#3401 D2); the owner + subscription check still applies.
+    const strictClass = mem.class === 'personal' || mem.class === 'private';
+    const foreignAppScoped = mem.appId !== null && mem.appId !== appId && !strictClass;
     const tiedToApp = mem.appId === appId;
     const isAgentsOwnMemory =
       !foreignAppScoped && session.agentId !== null && mem.userMemoryOfAgentId === session.agentId;
+    // #3401 D2 (ruling 0203 + its NULL-app FIT): a personal or private memory is reached only when the session's
+    // App AND Agent are the memory's. A NULL app_id matches no App (no installed-agent chain to line up, and
+    // admitting it would hand the row to every App installing that Agent), and a foreign App's row is the
+    // (app_id, user_id) isolation of spec 008. Either term alone is not enough for these two classes.
+    const admitted = strictClass ? mem.appId !== null && tiedToApp && isAgentsOwnMemory : tiedToApp || isAgentsOwnMemory;
+    // #1719 R5a: a run principal never reaches a private memory, whatever it carries.
+    const runBarred = mem.class === 'private' && isRunPrincipal(caller);
     // #1376: every caller is a userless key, for which an AgentMemoryItem is never a grant
     // (cor:dmo:050:09), so an item-linked memory is not admitted here.
-    if ((tiedToApp || isAgentsOwnMemory) && (await identityMemoryLicensed(db, session, mem))) {
+    if (admitted && !runBarred && (await identityMemoryLicensed(db, session, mem))) {
       ids.push(mem.id);
     }
   }
@@ -162,6 +191,15 @@ export async function sessionScopedMemoryIds(
   }
 
   return ids;
+}
+
+/**
+ * The pure App-key leg of the one binding check (`loadSessionBinding`, the body of `validateSessionBinding`). An
+ * ended session is dead here whatever its end reason; the middleware's typed supersession refusal is for a request
+ * that NAMES a session, not for a read gate, whose refusal must stay the unknown-memory answer (D4).
+ */
+async function liveBinding(db: PrismaClient, appId: string, sessionId: string): Promise<boolean> {
+  return (await loadSessionBinding(db, { appId }, sessionId)).binding !== null;
 }
 
 /**

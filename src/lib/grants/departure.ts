@@ -34,7 +34,8 @@ export type GrantHolderKind = 'user' | 'agent' | 'worker' | 'app';
 export const DEPARTURE_REASONS = {
   user: ['USER_ERASED', 'ORG_LEFT', 'ORG_REMOVED'],
   worker: ['WORKER_RETIRED', 'WORKER_DELETED'],
-  agent: ['AGENT_DELETED', 'AGENT_UNINSTALLED', 'AGENT_IMPORTER_UNINSTALLED', 'AGENT_IMPORTER_DELETED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED'],
+  agent: ['AGENT_DELETED', 'AGENT_UNINSTALLED', 'AGENT_IMPORTER_UNINSTALLED', 'AGENT_IMPORTER_DELETED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED',
+    'AGENT_LICENSE_EXPIRED', 'ORG_DELETED'],
   app: ['APP_DELETED'],
 } as const;
 export type DepartureReason<K extends GrantHolderKind = GrantHolderKind> = (typeof DEPARTURE_REASONS)[K][number];

@@ -181,9 +181,9 @@ describe('reads did not move', () => {
     const own = await db.session.create({ data: { id: generateId(), appId, agentId, userId: ownerId } });
     const outsider = await db.session.create({ data: { id: generateId(), appId, agentId, userId: outsiderId } });
     const nobody = await db.session.create({ data: { id: generateId(), appId, agentId, userId: null } });
-    expect(await sessionScopedMemoryIds(db, appId, own.id)).toContain(systemMemoryId);
-    expect(await sessionScopedMemoryIds(db, appId, outsider.id)).not.toContain(systemMemoryId);
-    expect(await sessionScopedMemoryIds(db, appId, nobody.id)).not.toContain(systemMemoryId);
+    expect(await sessionScopedMemoryIds(db, appId, own.id, {})).toContain(systemMemoryId);
+    expect(await sessionScopedMemoryIds(db, appId, outsider.id, {})).not.toContain(systemMemoryId);
+    expect(await sessionScopedMemoryIds(db, appId, nobody.id, {})).not.toContain(systemMemoryId);
   });
 });
 

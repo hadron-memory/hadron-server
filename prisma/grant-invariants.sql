@@ -1,5 +1,5 @@
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (today 20261121120000_grant_holder_departure_reason) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (today 20261121150000_grant_lapse_departure_causes) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because
@@ -52,7 +52,8 @@ ALTER TABLE grants ADD CONSTRAINT chk_grants_shape CHECK (
      (user_id IS NOT NULL AND holder_departure_reason IN ('USER_ERASED', 'ORG_LEFT', 'ORG_REMOVED'))
      OR (worker_id IS NOT NULL AND holder_departure_reason IN ('WORKER_RETIRED', 'WORKER_DELETED'))
      OR (agent_id IS NOT NULL AND holder_departure_reason IN ('AGENT_DELETED', 'AGENT_UNINSTALLED', 'AGENT_IMPORTER_UNINSTALLED',
-                                                              'AGENT_IMPORTER_DELETED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED'))
+                                                              'AGENT_IMPORTER_DELETED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED',
+                                                              'AGENT_LICENSE_EXPIRED', 'ORG_DELETED'))
      OR (grantee_app_id IS NOT NULL AND holder_departure_reason = 'APP_DELETED'))))
 );
 -- True when `old_id` was merged into `new_id` (a recorded merge), the only proof a person link may move on.
@@ -105,7 +106,8 @@ LANGUAGE sql STABLE AS $$
     WHEN p_reason = 'WORKER_DELETED' THEN NOT EXISTS (SELECT 1 FROM workers k WHERE k.id = p_worker_id)
     WHEN p_reason = 'AGENT_DELETED'
       THEN NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = p_agent_id AND a.deleted_at IS NULL)
-    WHEN p_reason IN ('AGENT_UNINSTALLED', 'AGENT_IMPORTER_UNINSTALLED', 'AGENT_IMPORTER_DELETED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED')
+    WHEN p_reason IN ('AGENT_UNINSTALLED', 'AGENT_IMPORTER_UNINSTALLED', 'AGENT_IMPORTER_DELETED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED',
+                      'AGENT_LICENSE_EXPIRED', 'ORG_DELETED')
       THEN EXISTS (SELECT 1 FROM agents a WHERE a.id = p_agent_id AND a.deleted_at IS NULL)
     ELSE TRUE END
 $$;

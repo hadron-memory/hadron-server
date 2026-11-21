@@ -24,11 +24,46 @@
  * row untouched, a revoke is final; no resolver or operation sets an organization's `deletedAt` back to null; checked by grep of the resolvers and operations on 2026-11-21, `origin/main` at the #4179 merge). An out-of-band restore (raw SQL, a support tool) that lands between a lapse and the next sweep would have its
  * grants ended anyway, and the stamp is permanent: that is the cost of the gap and the reason a future door must call the sweep first. A future door that does must call {@link sweepLapsedAgentGrants} (or judge its pairs with
  * `endGrantsOfAgentsNoLongerInstalled`) BEFORE its own write. This sweeper also does not remove register rows (#4172's uninstall door
- * does): the grants are the whole of this issue. The cause code of a lapse waits on #4180 (recorded reasons).
+ * does): the grants are the whole of this issue. Each departure records its cause (#4180): see {@link lapseCauses}.
  */
 import { Prisma as P, type PrismaClient } from '../../generated/prisma/index.js';
 import { lockAppInstallations, resolveAppInstallation } from '../appInstallations.js';
-import { ALREADY_ENDED, endAgentGrantsAtApps } from './departure.js';
+import { ALREADY_ENDED, endAgentGrantsAtApps, type AgentDepartureReason } from './departure.js';
+import { GRANT_DB_NOW } from './live.js';
+
+/**
+ * #4180 (Bruce's ruling on #4706 x #4696, option B): the cause each departed pair records, read from the evidence of the lapse in the
+ * sweep's own transaction, after the installation locks, on the database clock. One statement, in this order:
+ *   * ORG_DELETED: the App's organization or the agent's own one is soft-deleted (either ends a derived installation; it outranks a
+ *     lapsed licence in the same pair, since the organization's deletion takes its licences with it);
+ *   * AGENT_LICENSE_REVOKED: the App's organization's licence to the agent (agent_org_grants) is revoked (the act outranks the clock);
+ *   * AGENT_LICENSE_EXPIRED: that licence is past its expiry;
+ *   * otherwise AGENT_UNINSTALLED, the plain loss of the installation: the pair has no installation and none of the lapse evidence
+ *     above (for example a licence never activated, or an installation witness removed by a path with no door of its own). Disclosed
+ *     on #4706's fix PR as the one fallback.
+ * The recorded cause still yields to what already happened to the holder (an agent already deleted records AGENT_DELETED), through
+ * the one fit in {@link endAgentGrantsAtApps}.
+ */
+async function lapseCauses(
+  tx: P.TransactionClient,
+  pairs: ReadonlyArray<{ appId: string; agentId: string }>,
+): Promise<Array<{ appId: string; agentId: string; reason: AgentDepartureReason }>> {
+  if (pairs.length === 0) return [];
+  const rows: Array<{ app_id: string; agent_id: string; reason: AgentDepartureReason }> = await tx.$queryRaw(P.sql`
+    SELECT p.app_id, p.agent_id,
+      CASE WHEN o.deleted_at IS NOT NULL OR ao.deleted_at IS NOT NULL THEN 'ORG_DELETED'
+           WHEN g.revoked_at IS NOT NULL THEN 'AGENT_LICENSE_REVOKED'
+           WHEN g.expires_at IS NOT NULL AND g.expires_at <= ${GRANT_DB_NOW} THEN 'AGENT_LICENSE_EXPIRED'
+           ELSE 'AGENT_UNINSTALLED' END AS reason
+    FROM unnest(${pairs.map((p) => p.appId)}::text[], ${pairs.map((p) => p.agentId)}::text[]) AS p(app_id, agent_id)
+    LEFT JOIN apps a ON a.id = p.app_id
+    LEFT JOIN organizations o ON o.id = a.organization_id
+    LEFT JOIN agents ag ON ag.id = p.agent_id
+    LEFT JOIN organizations ao ON ao.id = ag.organization_id
+    LEFT JOIN agent_org_grants g ON g.org_id = a.organization_id AND g.agent_id = p.agent_id`);
+  const byPair = new Map(rows.map((r) => [`${r.app_id}\u0000${r.agent_id}`, r.reason]));
+  return pairs.map((p) => ({ ...p, reason: byPair.get(`${p.appId}\u0000${p.agentId}`) ?? 'AGENT_UNINSTALLED' }));
+}
 
 
 export type LapseSweepCursor = { appId: string; agentId: string };
@@ -89,7 +124,7 @@ export async function sweepLapsedAgentGrants(
           if (!(await resolveAppInstallation(tx, appId, agentId))) gone.push({ appId, agentId });
         }
       }
-      return { gone, ended: await endAgentGrantsAtApps(tx, gone) };
+      return { gone, ended: await endAgentGrantsAtApps(tx, await lapseCauses(tx, gone)) };
     }, { timeout: 60_000 });
     out.pairsJudged += pairs.length;
     out.pairsDeparted += departed.gone.length;
