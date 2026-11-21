@@ -178,6 +178,22 @@ describe('derivedEdgeLocForUpsert — the lookup seam (#4583)', () => {
     return { graph, source, target, args, edge };
   }
 
+  it('#4637 reproduces one twin when the selected migrated row is deleted before the upsert', async () => {
+    const { graph, source, target, args, edge } = await fixture();
+    const original = await edge('root:a-b:leaf', 'a😀b');
+    const selected = await derivedEdgeLocForUpsert(db, args('a😀b'));
+    expect(selected).toBe('root:a-b:leaf');
+    await db.edge.delete({ where: { id: original.id } });
+    const later = await derivedEdgeLocForUpsert(db, args('a😀b'));
+    expect(later).toBe('root:a--b:leaf');
+    const create = (loc: string) => ({ id: generateId(), memoryId: graph.id, sourceId: source.id, targetId: target.id, name: 'a😀b', loc });
+    for (const loc of [later, selected]) {
+      await db.edge.upsert({ where: { loc_memoryId: { loc, memoryId: graph.id } }, create: create(loc), update: {} });
+    }
+    const rows = await db.edge.findMany({ where: { memoryId: graph.id, sourceId: source.id, targetId: target.id, name: 'a😀b' }, select: { loc: true } });
+    expect(rows.map((row) => row.loc).sort()).toEqual(['root:a--b:leaf', 'root:a-b:leaf']);
+  });
+
   it('a name with no alternate never reads the database', async () => {
     const findMany = vi.fn();
     const loc = await derivedEdgeLocForUpsert({ edge: { findMany } } as never, {
@@ -420,6 +436,10 @@ describe('the census script (#4583, read only)', () => {
     const [s11, t11] = await Promise.all(['s11', 't11'].map(node));
     await edge(s11, t11, 's11:a-b:t11', 'a😀b'); // migrated spelling ...
     await edge(s11, t11, 's11:a--b:t11', 'a🙂b'); // ... and a runtime spelling of a DIFFERENT astral name (same atom): NOT a twin
+    const [s12, t12] = await Promise.all(['s12', 't12'].map(node));
+    await edge(s12, t12, 's12:a-b:t12:2', 'a😀b'); // suffixed migrated edge
+    await edge(s12, t12, 's12:a--b:t12', 'other'); // its runtime spelling belongs to another edge
+    await edge(s8, t8, 's8:a--b:t8', 'other'); // invalid :1 is not a migrated candidate, even when the runtime loc is occupied
     await edge(s1, t2, 's1:plain:t2', 'plain'); // not divergent: ignored
     const before = await db.edge.count();
     const rows = await db.$transaction(async (tx) => {
@@ -428,13 +448,13 @@ describe('the census script (#4583, read only)', () => {
     });
     const r = Object.fromEntries(Object.entries(rows[0]).map(([k, v]) => [k, Number(v)]));
     expect(r).toEqual({
-      divergent_edges: 15,
+      divergent_edges: 16,
       migrated_spelling: 5, // s1, s3 (migrated half), s5, the soft-deleted s2 edge, and s11
       runtime_spelling: 5, // s2, s3 (runtime half), s6, s10 (runtime half), s11
-      migrated_suffixed: 2, // s7, s10
+      migrated_suffixed: 3, // s7, s10, s12
       neither: 3, // s4, and the rejected suffixes s8 (`:1`) and s9 (`:02`)
       twin_pairs: 2, // s3 (plain migrated + runtime) and s10 (suffixed migrated + runtime); s11 is NOT one: other name
-      runtime_loc_taken_by_another: 2, // s5 and s11 (the other astral name owns it)
+      runtime_loc_taken_by_another: 3, // s5, s11 and suffixed s12; invalid s8 does not count
       migrated_loc_taken_by_another: 2, // s6 and s11 (the other astral name owns it) (the positive case: a broken predicate that always answered 0 fails here)
     });
     expect(await db.edge.count()).toBe(before);

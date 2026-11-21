@@ -1,5 +1,5 @@
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (20261118100000_grant_use_count_bound) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (today 20261121100000_grant_import_parent_gone) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because
@@ -270,6 +270,56 @@ FOR EACH ROW EXECUTE FUNCTION hadron_grant_holder_gone('worker_id');
 DROP TRIGGER IF EXISTS apps_grant_holder_gone ON apps;
 CREATE TRIGGER apps_grant_holder_gone AFTER DELETE ON apps
 FOR EACH ROW EXECUTE FUNCTION hadron_grant_holder_gone('grantee_app_id');
+
+-- #4179 (cor:acl:140:03, Holger R2): a HARD delete of an IMPORTING PARENT agent cascades its agent_imports edges away
+-- (parent_agent_id is ON DELETE CASCADE), and an imported agent left with no effective installation in an App has gone for its
+-- grants there. Stamped here, in the deleting transaction, because it is a write door: the soft deletes and the code doors
+-- stamp through src/lib/grants/agentInstallDeparture.ts, a hard delete fires only this trigger.
+--   * Only when the PARENT row is gone. An ordinary edge removal (removeAgentImport, the parent still exists) is judged by its
+--     own door under the installation locks (#4172 D2); a raw edge delete with a live parent ends nothing.
+--   * hadron_agent_installed_in_app is #4172's effective-installation check: ANY route left (the child's own row, another
+--     importing parent under a usable licence) keeps the grant. Only AGENT-held rows, only ones not already ended (revoked,
+--     departed, expired, spent or past the action's limits: the first end stands), only ones whose own App still exists.
+--   * Lock first, judge second (two statements, as hadron_grant_holder_gone): a grant that expired, or an install that
+--     committed, while this delete waited for the row lock is judged on the state AFTER the lock. The grant row lock is the LAST
+--     lock THIS TRIGGER takes (src/lib/grants/departure.ts, LOCK ORDER). Inside a multi-table cascade, later cascades of the same
+--     delete can still lock other rows after it, so a code door that holds an installation lock and then wants a grant row can
+--     deadlock with this delete. Postgres detects that and aborts one transaction whole (no partial stamp, no wrong data): the
+--     delete or the door retries. No installation lock is taken here: a concurrent reinstall linearizes after the departure, and
+--     a reinstall revives nothing (the stamp never clears), as for every door.
+--   * Why only parent_agent_id: it is the ONE cascading foreign key on agent_imports (imported_agent_id and the agent_org_grants
+--     key are ON DELETE RESTRICT, so those deletes refuse instead of removing an edge). A new cascading key would need a case here.
+CREATE OR REPLACE FUNCTION hadron_grant_import_parent_gone() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM agents WHERE id = OLD.parent_agent_id) THEN
+    RETURN NULL;
+  END IF;
+  -- Fence a CONCURRENT agent-grant create (SEC10, #4697): create and the insert guard hold this agent row FOR SHARE, so taking it
+  -- FOR NO KEY UPDATE first waits for an uncommitted create to commit, and the next statement (a fresh READ COMMITTED snapshot)
+  -- then sees that grant. Same order as create: the agent row, then the grants. FOR NO KEY UPDATE leaves foreign-key checks
+  -- (FOR KEY SHARE) alone. The #4172 code doors share this gap (agents FOR SHARE only): a follow-up, not widened here.
+  PERFORM 1 FROM agents WHERE id = OLD.imported_agent_id FOR NO KEY UPDATE;
+  PERFORM 1 FROM grants
+   WHERE agent_id = OLD.imported_agent_id AND holder_departed_at IS NULL AND revoked_at IS NULL
+     AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
+     AND NOT hadron_agent_installed_in_app(grants.app_id, grants.agent_id)
+   ORDER BY id FOR UPDATE;
+  UPDATE grants SET holder_departed_at = (clock_timestamp() AT TIME ZONE 'UTC'), updated_at = (clock_timestamp() AT TIME ZONE 'UTC')
+   WHERE agent_id = OLD.imported_agent_id AND holder_departed_at IS NULL AND revoked_at IS NULL
+     AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
+     AND NOT hadron_agent_installed_in_app(grants.app_id, grants.agent_id)
+     AND NOT (activated_at IS NOT NULL AND ((expires_at IS NOT NULL AND expires_at <= (clock_timestamp() AT TIME ZONE 'UTC'))
+       OR (max_uses IS NOT NULL AND use_count >= max_uses)
+       OR EXISTS (SELECT 1 FROM actions x WHERE x.name = grants.action
+            AND ((x.max_uses IS NOT NULL AND grants.use_count >= x.max_uses)
+              OR (x.lifetime_seconds IS NOT NULL
+                  AND grants.activated_at + make_interval(secs => x.lifetime_seconds) <= (clock_timestamp() AT TIME ZONE 'UTC'))))));
+  RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS agent_imports_grant_parent_gone ON agent_imports;
+CREATE TRIGGER agent_imports_grant_parent_gone AFTER DELETE ON agent_imports
+FOR EACH ROW EXECUTE FUNCTION hadron_grant_import_parent_gone();
 
 -- GRANT EVENTS. Each event is bound to its grant's App at insert: the grant must exist and be in the event's App (#3690;
 -- the event's own app_id carries the cascade, so an event naming another App's grant would outlive, or be deleted with, the wrong one).

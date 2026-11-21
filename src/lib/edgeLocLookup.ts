@@ -40,6 +40,13 @@ import { deriveEdgeLoc, deriveEdgeLocAlternates, compareMigratedSuffix, migrated
  * concern and is not claimed here.) Serializing the selection through the upsert (an advisory lock per relationship)
  * was declined: the seam's callers handle several relationships per transaction in differing orders, so a late-taken
  * lock risks a lock-order deadlock, a worse failure than the duplicate.
+ *
+ * Re-assessed in #4637 (returning the selected row's identity and retrying the selection), measured at main: the window
+ * is one upsert statement (p50 1.3 ms locally), the upsert at an existing row takes no row lock, and the writers not
+ * serialized with the callers (which hold the memory channel key) are a hard deleteEdge and an endpoint re-key. Re-reading
+ * the row before the write only moves the same gap by one statement; closing it takes a lock held to commit (FOR KEY
+ * SHARE), which is a separately gated design with a writer-versus-multi-row-re-key deadlock surface, not a retry loop
+ * here. The limitation stands. Evidence: hrn:node:hadronmemory.com:hadron-server:findings:edge-loc-lookup-stale-migrated-loc-race-disposition
  */
 export async function derivedEdgeLocForUpsert(
   db: Pick<PrismaClient, 'edge'>,
