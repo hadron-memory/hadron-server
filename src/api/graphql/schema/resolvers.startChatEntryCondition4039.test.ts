@@ -149,12 +149,15 @@ for (const path of ['live', 'snapshot'] as const) describe(`#4039 unnamed start 
 
   it('S4 (Q12), fallback only: every ordered condition fails and there is no setup: the fallback conversation opens', async () => {
     const never = { '==': [1, 2] };
-    await seed([...conv('one', { seq: 1, condition: never }), ...conv('fb', { flags: { isFallback: true } })], path);
+    // `fb` carries the same failing condition and seq as in the counterfactual twin below: the ONLY difference between the two is the
+    // isFallback flag (a flagged conversation is never in the condition scan, so its failing condition is not evaluated).
+    await seed([...conv('one', { seq: 1, condition: never }), ...conv('fb', { seq: 2, condition: never, flags: { isFallback: true } })], path);
     expect(await opened(alice.id)).toBe('fb');
   });
 
-  // The counterfactual twin of the pin above: the same agent, but `fb` is an ordinary conversation behind a failing condition (no
-  // isFallback flag). Nothing is then eligible, so the start is refused: the flag, not the shape of `fb`, is what makes it open.
+  // The counterfactual twin of the pin above, identical in every field but one: `fb` has the same seq and failing condition and LACKS the
+  // isFallback flag. It is then an ordinary conversation whose condition fails, nothing is eligible, and the start is refused: the flag
+  // alone is what makes the conversation above open.
   it('S4 (Q12), fallback only, counterfactual: without the fallback flag the same conversation is not opened', async () => {
     const never = { '==': [1, 2] };
     await seed([...conv('one', { seq: 1, condition: never }), ...conv('fb', { seq: 2, condition: never })], path);
@@ -239,7 +242,7 @@ describe('#4039 refusals judged before any write', () => {
     // user reads it by memory (sessionKeyCache.getByMemoryId). That is the contract this pin relies on, not a cross-session leak.
     sessionKeyCache.set(generateId(), memory.id, key);
     await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
-    const facts = { users: { [alice.id]: { name: 'Ann' } } };
+    const facts = { users: { [alice.id]: { name: 'Ann-4087-secret' } } };
     const ciphertext = encryptNodeFields({ data: facts }, info).data as never;
     await db.node.upsert({
       where: { loc_memoryId: { loc: 'data', memoryId: memory.id } },
@@ -249,7 +252,7 @@ describe('#4039 refusals judged before any write', () => {
     // The stored facts really are ciphertext: neither the name nor the user id is readable in the row, so only a decrypting read can
     // answer the start below (a plaintext row would make this pin pass without exercising decryption).
     const stored = JSON.stringify((await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'data', memoryId: memory.id } } })).data);
-    expect(stored).not.toContain('Ann');
+    expect(stored).not.toContain('Ann-4087-secret');
     expect(stored).not.toContain(alice.id);
     // The name is saved, so `recent` opens: only a decrypted read of the facts can say so (bob, with no facts, gets `welcome`).
     expect(await opened(alice.id)).toBe('recent');
