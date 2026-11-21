@@ -1,7 +1,8 @@
 /**
  * #3998 (S3 of #3991, cor:sec:060): the reveal. A WORKER bound to the request, holding an active, live `secret.reveal` grant
- * (its own, or its role agent's: #4434), reads the value of the App secret the grant names, once per call, spending exactly one use. A person holder reveals only on the
- * server-hosted passkey page (a later slice): this door is never open to a person, an App key, a run or an impersonation.
+ * (its own, or its role agent's: #4434), reads the value of the App secret the grant names, once per call, spending exactly one
+ * use. A person holder reveals only on the server-hosted passkey page (a later slice): this door is never open to a person, an
+ * App key, a run or an impersonation.
  *
  * Everything is judged under the secret row's lock and the grant row's lock, on the database clock, and the use and the audit
  * event commit before the value leaves this function. A client id that is unknown, belongs to another holder or another App is

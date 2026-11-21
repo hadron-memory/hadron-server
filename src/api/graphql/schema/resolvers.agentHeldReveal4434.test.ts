@@ -3,7 +3,7 @@
  * live workers in the client's App. Everything else about the read stays as S3 built it (one use per read, USE + REVEAL events, the
  * uniform not-found, a refused read on a known client recorded).
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -32,6 +32,13 @@ async function activate(id: string) {
 }
 const issue = (holderKind: 'AGENT' | 'APP' | 'USER' | 'WORKER', holderRef: string | null, maxReads = 3): Promise<any> =>
   resolvers.Mutation.issueSecretReadClient({}, { input: { secretRef: secretId, holderKind, holderRef, autoDelete: false, maxReads, reason: 'need it' } }, ctxOf(ownerId));
+
+const savedEnv = { enc: process.env.HADRON_ENCRYPTION_KEY, root: process.env.SECRET_ROOT_KEY };
+afterEach(() => {
+  for (const [k, v] of [['HADRON_ENCRYPTION_KEY', savedEnv.enc], ['SECRET_ROOT_KEY', savedEnv.root]] as const) {
+    if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+});
 
 beforeEach(async () => {
   process.env.HADRON_ENCRYPTION_KEY = '11'.repeat(32);
@@ -134,7 +141,13 @@ describe('#4434 agent-held secret.reveal', () => {
       const workerIssue = issue('WORKER', w1);
       workerIssueDone = await settled(workerIssue, 5000);
       expect((await workerIssue)?.clientId).toBeTruthy(); // the control must have SUCCEEDED, not merely settled
-      waited = await settled(agentIssue, 1000);
+      // Parked on a lock, observed in the database (not inferred from a timeout, which a slow issue would also satisfy).
+      let parked = 0;
+      for (let i = 0; i < 100 && parked === 0; i++) {
+        await new Promise((res) => setTimeout(res, 50));
+        parked = Number((await tx.$queryRaw<Array<{ n: bigint }>>`SELECT count(*)::bigint AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)[0].n);
+      }
+      waited = parked === 0;
     }, { timeout: 30000 });
     expect(workerIssueDone).toBe(true);
     expect(waited).toBe(false);
