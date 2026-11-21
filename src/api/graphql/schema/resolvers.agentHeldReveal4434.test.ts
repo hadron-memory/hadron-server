@@ -11,6 +11,7 @@ import { PLATFORM_ACTIONS, upsertPlatformActions } from '../../../lib/grants/act
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { grantTermsBytes } from '../../../lib/grants/terms.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -167,5 +168,58 @@ describe('#4434 agent-held secret.reveal', () => {
     await activate(r.grantId);
     expect(await code(reveal(w1, r.clientId))).toBe('SECRET_READ_CLIENT_NOT_FOUND');
     expect((await db.grant.findUniqueOrThrow({ where: { id: r.grantId } })).useCount).toBe(0);
+  });
+});
+
+// BLIND review of #4679 at 98bee1b6 (F1, F2, F6): the reach read is not the only judge of a read. The grant ROW is the serialization point,
+// because every departure writes holder_departed_at on it under its lock and the reveal takes the same row FOR UPDATE and refuses a grant
+// that is no longer live.
+describe('#4434 reach and departure on the reveal door', () => {
+  it('a WORKER-held grant is unusable by a sibling worker of the same agent (the agent branch must not widen it)', async () => {
+    const r = await issue('WORKER', w1);
+    await activate(r.grantId);
+    expect(await code(reveal(w2, r.clientId))).toBe('SECRET_READ_CLIENT_NOT_FOUND');
+    expect((await db.grant.findUniqueOrThrow({ where: { id: r.grantId } })).useCount).toBe(0);
+    expect(await code(reveal(w1, r.clientId))).toBe('OK');
+    expect((await db.grant.findUniqueOrThrow({ where: { id: r.grantId } })).useCount).toBe(1);
+  });
+
+  it('refuses every worker once the holder agent is deleted after the issue, and spends nothing', async () => {
+    const r = await issue('AGENT', roleAgentId);
+    await activate(r.grantId);
+    // deleteAgent itself refuses an agent with live workers and installs, so run the departure it performs: the soft delete, then endHeldGrants
+    // (the grants guard accepts the departure stamp only with that cause present).
+    await db.$transaction(async (tx) => {
+      await tx.agent.update({ where: { id: roleAgentId }, data: { deletedAt: new Date() } });
+      await endHeldGrants(tx, 'agent', roleAgentId);
+    });
+    for (const who of [w1, w2]) expect(await code(reveal(who, r.clientId))).toBe('SECRET_READ_CLIENT_NOT_FOUND'); // reach already sees the agent gone
+    const g = await db.grant.findUniqueOrThrow({ where: { id: r.grantId } });
+    expect(g.useCount).toBe(0);
+    expect(g.holderDepartedAt).not.toBeNull();
+  });
+
+  it('a departure that holds the grant row first wins: a reveal started while it is held waits, then refuses and spends nothing', async () => {
+    const r = await issue('AGENT', roleAgentId);
+    await activate(r.grantId);
+    let pending: Promise<string> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM grants WHERE id = ${r.grantId} FOR UPDATE`;
+      pending = code(reveal(w1, r.clientId));
+      // Prove the reveal is parked on a lock (not merely slow) before the departure commits.
+      let parked = 0;
+      for (let i = 0; i < 100 && parked === 0; i++) {
+        await new Promise((res) => setTimeout(res, 50));
+        parked = Number((await tx.$queryRaw<Array<{ n: bigint }>>`SELECT count(*)::bigint AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)[0].n);
+      }
+      expect(parked).toBeGreaterThan(0);
+      await tx.agent.update({ where: { id: roleAgentId }, data: { deletedAt: new Date() } });
+      await endHeldGrants(tx, 'agent', roleAgentId);
+    });
+    // REVOKED is the grant row's own verdict (a departed holder): the reach read ran while the agent still looked live, so only the
+    // locked grant row can have refused it. That is the serialization point the reach read relies on.
+    expect(await pending).toBe('SECRET_READ_CLIENT_REVOKED');
+    expect((await db.grant.findUniqueOrThrow({ where: { id: r.grantId } })).useCount).toBe(0);
+    expect(await db.grantEvent.count({ where: { grantId: r.grantId, action: 'USE' } })).toBe(0);
   });
 });
