@@ -245,10 +245,8 @@ async function lockInstallStructure(tx: Prisma.TransactionClient, appId: string,
 }
 
 /**
- * Lock agent rows in ONE pass, in the DATABASE's id order, each row once at its own strength: `fence` ids FOR NO KEY UPDATE, the rest
- * FOR SHARE. The order comes from `ORDER BY id` in the database, not a JS sort: the two disagree under a non-C collation, and every
- * other multi-row lock in the repository takes its order from the database. A row is never SHARE then NO KEY UPDATE (two
- * transactions would deadlock on the upgrade). Ids that name no row lock nothing.
+ * Lock agent rows in one pass in the database's id order (`ORDER BY id`, not a JS sort: the two differ under a non-C collation), each
+ * row once at its own strength: `fence` ids FOR NO KEY UPDATE, the rest FOR SHARE. A row is never SHARE then NO KEY UPDATE.
  */
 async function lockAgentRows(tx: Prisma.TransactionClient, witnesses: ReadonlySet<string>, fence: ReadonlySet<string>) {
   const all = [...new Set([...witnesses, ...fence])];
@@ -265,13 +263,10 @@ async function lockAgentRows(tx: Prisma.TransactionClient, witnesses: ReadonlySe
 }
 
 /**
- * #4715: the locks a DEPARTURE judge (agentInstallDeparture, the lapse sweep) takes over every App it judges. All the Apps'
- * structural locks first (in App id order, as before), then the agents of ALL the Apps in one global pass: the agents it names FOR
- * NO KEY UPDATE, the witnesses (a parent, an imported agent) FOR SHARE. createGrant and the insert guard hold the agent row FOR SHARE,
- * so a create whose guarded insert is uncommitted makes the judge wait and then see its grant, and a create that comes after waits and
- * reads the install gone. The named agents are locked even with no witness left (an uninstalled agent has no app_agents row, so
- * the witness-derived set would not contain it). One global pass, not one per App (BLIND P2s on #4795): per-App passes are each
- * sorted, but two transactions that reach the same agents through different Apps would take them in opposite orders.
+ * The locks a departure judge (agentInstallDeparture, the lapse sweep) takes over every App it judges (#4715): every App's structure
+ * first, then the agents of all the Apps in ONE pass, the agents it names FOR NO KEY UPDATE and the witnesses FOR SHARE. createGrant and
+ * the insert guard hold the agent row FOR SHARE, so a create in flight is waited for and then seen, and a create after the judge waits
+ * and reads the install gone. A named agent is locked even with no witness left (an uninstalled agent has no app_agents row).
  */
 export async function lockAppInstallationsFenced(tx: Prisma.TransactionClient, byApp: ReadonlyMap<string, readonly string[]>): Promise<void> {
   const witnesses = new Set<string>();
@@ -294,8 +289,7 @@ export async function lockAppInstallationsFenced(tx: Prisma.TransactionClient, b
  * join or an import conflicts with these row locks. Re-read after waits, under
  * READ COMMITTED, so a remover that won cannot leave stale derived authority.
  * Call before content/Worker writes, with the caller's authority anchors held.
- * `fenceAgents` (#4715, a departure door's own early lock, so the later judge never upgrades the row): the named agents are taken
- * FOR NO KEY UPDATE, as lockAppInstallationsFenced does.
+ * `fenceAgents`: take the named agents FOR NO KEY UPDATE (see lockAppInstallationsFenced); it needs a non-empty `agentIds`.
  */
 export async function lockAppInstallations(
   tx: Prisma.TransactionClient,
@@ -303,7 +297,7 @@ export async function lockAppInstallations(
   agentIds?: string[],
   opts: { fenceAgents?: boolean } = {},
 ): Promise<AppInstallation[]> {
-  if (opts.fenceAgents && agentIds === undefined) throw new Error('lockAppInstallations: fenceAgents needs the agents to fence');
+  if (opts.fenceAgents && !agentIds?.length) throw new Error('lockAppInstallations: fenceAgents needs the agents to fence');
   const { rowIds, edges } = await lockInstallStructure(tx, appId, agentIds);
   const witnesses = new Set([...rowIds, ...edges.map((edge) => edge.imported_agent_id)]);
   await lockAgentRows(tx, witnesses, new Set(opts.fenceAgents && agentIds ? agentIds : []));

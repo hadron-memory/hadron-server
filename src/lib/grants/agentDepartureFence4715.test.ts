@@ -199,8 +199,17 @@ describe('#4715 the judge locks the agents in ONE id-ordered pass, each row at i
     expect(log).toEqual([['NKU', first], ['SHARE', middle], ['NKU', last]]);
   });
 
-  it('fenceAgents without the agents to fence is refused, not silently a SHARE lock', async () => {
+  it('fenceAgents without agents to fence (none, or an empty list) is refused before any lock, not silently a SHARE lock', async () => {
     await expect(db.$transaction((tx) => lockAppInstallations(tx, appId, undefined, { fenceAgents: true }))).rejects.toThrow(/fenceAgents needs the agents/);
+    await expect(db.$transaction((tx) => lockAppInstallations(tx, appId, [], { fenceAgents: true }))).rejects.toThrow(/fenceAgents needs the agents/);
+  });
+
+  it('a fenced id that names no agent row (or a soft-deleted one) is harmless: nothing to lock, the judge still completes', async () => {
+    const gone = await mkAgent('gone');
+    await db.agent.update({ where: { id: gone }, data: { deletedAt: new Date() } });
+    const rec = lockRecorder();
+    await rec.spyDb.$transaction((tx) => lockAppInstallationsFenced(tx as never, new Map([[appId, ['no-such-agent', gone]]])));
+    expect(rec.log.map(([, mode, id]) => `${mode}:${id}`)).toEqual([`NKU:${gone}`]);
   });
 });
 
@@ -249,5 +258,33 @@ describe('#4715 the judge takes its agents in ONE pass across all Apps, in the d
     const rec = lockRecorder();
     await rec.spyDb.$transaction((tx) => lockAppInstallationsFenced(tx as never, byApp));
     expect(rec.log.map(([, mode, id]) => `${mode}:${id}`)).toEqual(dbOrder.map((id) => `NKU:${id}`));
+  });
+});
+
+describe('#4715 two judges that reach the same agents through different Apps do not deadlock (Peter, Bindi)', () => {
+  const waiting = async () => Number((await db.$queryRaw<Array<{ n: bigint }>>`
+    SELECT count(*) AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`)[0]!.n);
+  const waitForWaiters = async (n: number) => {
+    for (let i = 0; i < 100; i++) { if ((await waiting()) >= n) return; await new Promise((r) => setTimeout(r, 50)); }
+    throw new Error(`expected ${n} transactions waiting on a lock`);
+  };
+
+  it('tx1 names the later agent in the first App and the earlier one in the second; tx2 names both in the second: both finish', async () => {
+    const app2 = (await db.app.create({ data: { id: generateId(), name: 'F App 2', urn: 'f4715.example:app2', organizationId: orgId } })).id;
+    const a1 = await mkAgent('cross-1'); const a2 = await mkAgent('cross-2');
+    const [lo, hi] = (await db.$queryRaw<Array<{ id: string }>>`SELECT id FROM agents WHERE id = ANY(${[a1, a2]}) ORDER BY id`).map((r) => r.id) as [string, string];
+    const [first, second] = (await db.$queryRaw<Array<{ id: string }>>`SELECT id FROM apps WHERE id = ANY(${[appId, app2]}) ORDER BY id`).map((r) => r.id) as [string, string];
+    // a third connection holds the EARLIER agent, so both judges queue behind it, tx2 first, with nothing else taken in the new order
+    const h = await connect();
+    await h.query('BEGIN');
+    await h.query('SELECT id FROM agents WHERE id = $1 FOR NO KEY UPDATE', [lo]);
+    const tx2 = db.$transaction((tx) => lockAppInstallationsFenced(tx, new Map([[second, [lo, hi]]])), { timeout: 20_000 });
+    await waitForWaiters(1);
+    // App by App, tx1 would take `hi` (in the first App) and only then queue for `lo`: tx2 gets `lo`, wants `hi`, and the two cycle.
+    const tx1 = db.$transaction((tx) => lockAppInstallationsFenced(tx, new Map([[first, [hi]], [second, [lo]]])), { timeout: 20_000 });
+    await waitForWaiters(2);
+    await h.query('COMMIT');
+    const settled = await Promise.allSettled([tx1, tx2]);
+    expect(settled.map((r) => r.status), JSON.stringify(settled.map((r) => (r as PromiseRejectedResult).reason?.message?.slice(0, 120)))).toEqual(['fulfilled', 'fulfilled']);
   });
 });
