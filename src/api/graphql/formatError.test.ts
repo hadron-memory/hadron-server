@@ -201,20 +201,19 @@ describe('isExpectedClientError — mapped and silenced are DIFFERENT questions'
     expect(format(err as Error).extensions?.code).not.toBe('INTERNAL_SERVER_ERROR');
   });
 
-  // @Holger's call, 2026-09-06: ship the wire half of #918, keep the Sentry
-  // noise. The load-bearing case is ASSET_BYTES_GONE — a row whose object is
-  // missing is real server-state inconsistency, and silencing it here would
-  // remove the only alarm without adding one where the inconsistency is
-  // actually discovered (#1140). So these are mapped and still REPORTED.
+  // #1140 residual (the "when this lands" step of @Holger's 2026-09-06 split): the wire half of #918 shipped then, and
+  // the Sentry half waited for an alarm where a missing object is DISCOVERED. That alarm now exists: the bytes-missing
+  // sweep (src/jobs/sweepAssetBytes.ts, slice B) and the restore path raise `asset.bytes_missing`. So every asset
+  // refusal, ASSET_BYTES_GONE included, is mapped for the wire AND silenced in the formatter's Sentry stream.
   it.each([
     ['NOT_FOUND', new AssetUploadError('NOT_FOUND', 'x')],
     ['MALWARE_BLOCKED', new AssetUploadError('MALWARE_BLOCKED', 'x')],
     ['ASSET_BYTES_GONE', new AssetUploadError('ASSET_BYTES_GONE', 'x')],
-  ])('AssetUploadError %s is mapped for the wire but NOT silenced', (code, err) => {
-    // The wire half — this is the #918 fix and it must hold.
+  ])('AssetUploadError %s is mapped for the wire AND silenced in Sentry (#1140)', (code, err) => {
+    // The wire half: the #918 fix, unchanged; the code still reaches the caller.
     expect(format(err as Error).extensions?.code).toBe(code);
-    // The Sentry half — deliberately unchanged from before #924.
-    expect(isExpectedClientError(err)).toBe(false);
+    // The Sentry half: nothing is sent; the discovery-side alarm (#1140 slice B) reports a missing object instead.
+    expect(isExpectedClientError(err)).toBe(true);
   });
 
   it('a genuine fault is NOT expected — it still reaches Sentry', () => {
