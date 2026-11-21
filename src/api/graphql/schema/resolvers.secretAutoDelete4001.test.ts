@@ -149,8 +149,8 @@ it('a signed mark deletes a protected secret without a change request and never 
 
 it('post-push retains distinct S4 own-worker and S6 auto-delete trigger bindings',async()=>{
   const guards=await db.$queryRaw<Array<{name:string;table_name:string;function_name:string}>>`SELECT t.tgname AS name,c.relname AS table_name,p.proname AS function_name
-    FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_proc p ON p.oid=t.tgfoid
-    WHERE t.tgname IN ('secret_auto_delete_limit','secret_client_own_worker_immutable') ORDER BY t.tgname`;
+    FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_proc p ON p.oid=t.tgfoid
+    WHERE n.nspname=current_schema() AND t.tgname IN ('secret_auto_delete_limit','secret_client_own_worker_immutable') ORDER BY t.tgname`;
   expect(guards).toEqual([
     {name:'secret_auto_delete_limit',table_name:'grants',function_name:'hadron_guard_secret_auto_delete_limit'},
     {name:'secret_client_own_worker_immutable',table_name:'secret_read_clients',function_name:'hadron_secret_client_own_worker_immutable'},
@@ -164,7 +164,7 @@ it.each(['last-read','window-end'] as const)('cor:sec:070:01 Exceptions: protect
   const a=await resolvers.Mutation.issueSecretReadClient({}, {input:{secretRef:secretId,holderKind:'WORKER',holderRef:workerId,autoDelete:true,
     maxReads:mode==='last-read'?1:null,expiresAt:mode==='window-end'?(await dbDeadline(10)).toISOString():null,reason:'protected auto-delete exception'}},ctx());
   await sign(a.grantId);
-  const staged=await resolvers.Mutation.updateSecret({}, {ref:secretId,value:'staged-uncommitted'},ctx()).then(()=>{throw new Error('staging refusal expected');},e=>e.extensions?.requestId);
+  const staged=await resolvers.Mutation.updateSecret({}, {ref:secretId,value:'staged-uncommitted'},ctx()).then(()=>{throw new Error('staging refusal expected');},(e:unknown)=>{expect(e).toMatchObject({extensions:{code:'SECRET_PROTECTED_NEEDS_PASSKEY'}});return (e as {extensions:{requestId:string}}).extensions.requestId;});
   expect(staged).toEqual(expect.any(String));
   const [before]=await db.$queryRaw<Array<{staged:boolean}>>`SELECT staged_value_encrypted IS NOT NULL AS staged FROM secret_change_requests WHERE id=${staged}`;expect(before.staged).toBe(true);
   expect(await db.secretChangeRequest.count({where:{secretId,operation:'DELETE'}})).toBe(0);

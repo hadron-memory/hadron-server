@@ -1,3 +1,4 @@
+import { deleteLockedAppSecret } from './autoDelete.js';
 import { lockProtectionClients, endProtectionClients } from './protection.js';
 /** #3999; cor:sec:070:02. Separate proof and change assertions; the requester, browser and immutable request bind both. */
 import { createHash, randomBytes } from 'node:crypto';
@@ -123,10 +124,9 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
   if(r.operation==='DELETE'){
    if(!secret)throw refuse();
    if (secret.createdBy !== ctx.userId && !(await appManager(ctx, r.app_id))) throw refuse();
-   await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:'DELETE',actor});
    // Mark completion before deletion; keep the terminal request for requester polling, with no staged value.
    await tx.$executeRaw`UPDATE secret_change_requests SET state='completed',ended_at=(${now.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE id=${r.id}`;
-   await tx.secret.delete({where:{id:secret.id}});return null;
+   await deleteLockedAppSecret(tx,secret,actor);return null;
   }
   if(r.operation==='STORE'){
    const wasProtected = secret?.protected;
