@@ -5,7 +5,7 @@ import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
 import type { Context } from './resolvers.js';
-import type { Prisma } from '../../../generated/prisma/index.js';
+import { Prisma } from '../../../generated/prisma/index.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 let memoryId: string;
@@ -488,4 +488,54 @@ it('real PG: MCP move waits on its source memory key before overwriting the dest
     } finally { spy.mockRestore(); }
   });
   expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).memoryId).toBe(target.id);
+}, 20000);
+
+
+it('real PG: Agent snapshot restore waits on its memory key before tombstones or role restoration', async () => {
+  const { resolvers } = await import('./resolvers.js');
+  const { lockMemoriesForChannelChange } = await import('../../../lib/channels.js');
+  const orgId = (await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).organizationId!;
+  const agent = await resolvers.Mutation.createAgent({}, { orgId, name: 'restore-s2', visibility: 'PERSONAL' }, ctx());
+  memoryId = agent.systemMemoryId!;
+  nodeId = (await db.node.create({ data: { id: generateId(), memoryId, loc: 'current', name: 'current', content: 'before' } })).id;
+  const revisionLoc = 'revisions:rev-1';
+  await db.node.create({ data: { id: generateId(), memoryId, loc: revisionLoc, name: 'revision', nodeType: 'system',
+    data: { label: 'rev-1', snapshot: { nodes: [{ loc: 'restored:review', name: 'review', nodeType: 'info', role: 'review', content: 'restored' }], edges: [] } },
+  } });
+  const held = latch<{ pid: number; key: number }>(); const release = latch();
+  const holder = db.$transaction(async tx => {
+    await lockMemoriesForChannelChange(tx, [memoryId]);
+    held.resolve((await tx.$queryRaw<Array<{ pid: number; key: number }>>`SELECT pg_backend_pid() AS pid, hashtext(${'channel-host:' + memoryId}) AS key`)[0]);
+    await release.promise;
+  }, { timeout: 15000 });
+  void holder.catch(held.reject); const holderDone = Promise.allSettled([holder]);
+  // Observe every owned transaction, including the auto-save. Attribute the wait by the exact held
+  // key/holder, not by assuming the first transaction is the one doing the destructive restore.
+  const pids: number[] = []; const transact = db.$transaction.bind(db);
+  const observed = new Proxy(db, { get(target, prop, receiver) {
+    if (prop !== '$transaction') return Reflect.get(target, prop, receiver);
+    return (work: (tx: Prisma.TransactionClient) => Promise<unknown>, options?: { timeout?: number; maxWait?: number }) =>
+      transact(async tx => { pids.push((await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid); return work(tx); }, options);
+  } });
+  let done: Promise<PromiseSettledResult<unknown>[]> | undefined;
+  try {
+    const owner = await held.promise;
+    done = Promise.allSettled([resolvers.Mutation.restoreRevision({}, { agentRef: agent.id, revisionLoc }, { ...ctx(), db: observed })]);
+    await vi.waitFor(async () => {
+      expect(pids.length).toBeGreaterThan(0);
+      const waiting = await db.$queryRaw<Array<{ pid: number }>>`
+        SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND NOT granted
+          AND pid IN (${Prisma.join(pids)})
+          AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+          AND classid = ${owner.key < 0 ? 4294967295 : 0}::bigint::oid
+          AND objid = ${owner.key >>> 0}::bigint::oid AND objsubid = 1
+          AND ${owner.pid} = ANY(pg_blocking_pids(pid))`;
+      expect(waiting, 'the actual restore must wait on C before touching live rows').toHaveLength(1);
+    }, { timeout: 5000, interval: 20 });
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).deletedAt).toBeNull();
+    expect(await db.node.findFirst({ where: { memoryId, loc: 'restored:review' } })).toBeNull();
+  } finally {
+    release.resolve(); await settledSuccess([...(await holderDone), ...(done ? await done : [])]);
+  }
+  expect(await db.node.findFirstOrThrow({ where: { memoryId, loc: 'restored:review' } })).toMatchObject({ role: 'review', content: 'restored', deletedAt: null });
 }, 20000);
