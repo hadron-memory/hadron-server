@@ -381,22 +381,19 @@ describe('#3429 the door waits for a writer that holds its locks (acceptance 3, 
     expect(await outcome).toBe('NODE_WRITE_CONFLICT');
   });
 
-  it('a promotion holding the spec loc key (the exact key pendingEdgePromotion takes): the door waits for it', async () => {
-    const x = await spec('h:loc:x'); const y = await spec('h:loc:y');
-    const promo = await holding(async (t) => {
-      await acquireLockSet(t, [{ memoryId: mem.id, loc: 'h:loc:x' }]);
-      await t.edge.create({ data: { id: generateId(), memoryId: mem.id, sourceId: x.id, targetId: y.id, loc: 'h-loc', name: 'superseded-by' } });
-    });
+  it('a writer holding only the spec loc key (the exact key pendingEdgePromotion takes): the door waits for it', async () => {
+    const x = await spec('h:loc:x');
+    const promo = await holding(async (t) => { await acquireLockSet(t, [{ memoryId: mem.id, loc: 'h:loc:x' }]); });
     const door = rescind(x.id);
-    const outcome = codeOf(door);
     expect(await stillPending(door), 'the door must wait on the spec loc key').toBe(true);
     promo.release(); await promo.done;
-    expect(await outcome).toBe('NODE_WRITE_CONFLICT');
+    expect((await door).node.tags).toContain('superseded');
   });
 
   it('the door in flight (spec row held): a standalone createEdge waits on the source FOR SHARE, then succeeds (the stated limit)', async () => {
     const x = await spec('h:edge:x'); const y = await spec('h:edge:y');
-    const holder = await holding(async (t) => { await t.$queryRaw`SELECT id FROM nodes WHERE id = ${x.id} FOR UPDATE`; });
+    // FOR NO KEY UPDATE does not conflict with the insert's own FK key-share, only with assertEdgeSourceWritersById's FOR SHARE.
+    const holder = await holding(async (t) => { await t.$queryRaw`SELECT id FROM nodes WHERE id = ${x.id} FOR NO KEY UPDATE`; });
     const writer = resolvers.Mutation.createEdge(null, { sourceRef: x.id, targetRef: y.id, name: 'superseded-by-after' } as never, as(admin.id));
     expect(await stillPending(writer), 'createEdge must wait on the source row').toBe(true);
     holder.release(); await holder.done;
@@ -419,5 +416,29 @@ describe('#3429 other writers, committed first, make the door refuse (acceptance
     if (linked > 0) expect(await codeOf(rescind(x.id))).toBe('NODE_WRITE_CONFLICT');
     void y;
     expect(linked, 'the inline write must land for this pin to mean anything').toBeGreaterThan(0);
+  });
+});
+
+describe('#3429 survivors of the first mutant sweep', () => {
+  it('a non-deleted PENDING edge whose label only STARTS WITH superseded-by also counts (prefix, not exact)', async () => {
+    const x = await spec('s:p:x');
+    await db.pendingEdge.create({ data: { id: generateId(), sourceId: x.id, name: 'superseded-by-later', targetId: 'unresolved:q' } as never });
+    expect(await codeOf(rescind(x.id))).toBe('NODE_WRITE_CONFLICT');
+  });
+
+  it('an unreadable successor answers NODE_NOT_FOUND, ahead of the other-memory conflict (item 3 over item 5)', async () => {
+    const x = await spec('s:u:x');
+    const foreignOrg = await db.organization.create({ data: { id: generateId(), name: 'Foreign', urn: 'foreign.example' } });
+    const hidden = await db.memory.create({ data: { id: generateId(), organizationId: foreignOrg.id, urn: 'foreign.example:hidden', name: 'hidden', class: 'knowledge', visibility: 'ORGANIZATION' } });
+    const hiddenNode = await db.node.create({ data: { id: generateId(), memoryId: hidden.id, loc: 'h:1', name: 'h', content: 'x' } });
+    const before = await snap(x.id);
+    expect(await codeOf(supersede(x.id, hiddenNode.id))).toBe('NODE_NOT_FOUND');
+    expect(await snap(x.id)).toBe(before);
+  });
+
+  it('a stale expectedRevision answers NODE_WRITE_CONFLICT ahead of the cap (item 4 over item 6)', async () => {
+    const x = await spec('s:r:x', { abstract: 'a'.repeat(1990) });
+    const y = await spec('s:r:y');
+    expect(await codeOf(retire({ ref: x.id, form: 'SUPERSEDE', successorRef: y.id, expectedRevision: (await rev(x.id)) + 3 }))).toBe('NODE_WRITE_CONFLICT');
   });
 });
