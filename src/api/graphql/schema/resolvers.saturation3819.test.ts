@@ -264,13 +264,14 @@ describe('#3819 slice 1 — episodes and the alarm (cor:agt:060:14, :15)', () =>
   it('the database refuses a second OPEN episode for one combination, and admits one after the first ended', async () => {
     const { raiseSaturation } = await saturation();
     const combo = { family: 'claude', tier: '', role: '' };
-    const id = await raiseSaturation(db, appId, { family: 'claude', tier: null, role: null }, 'no-worker', new Date());
+    const id = await raiseSaturation(db, appId, { family: 'claude', tier: null, role: null }, 'none-eligible', new Date());
     expect(id).not.toBeNull();
     const eventId = generateId();
     await db.$executeRaw`INSERT INTO agent_team_events (id, app_id, type, severity, chain, payload) VALUES (${eventId}, ${appId}, ${TYPE}, 'alarm', '[]'::jsonb, '{}'::jsonb)`;
     await expect(db.$executeRaw`INSERT INTO saturation_episodes (id, app_id, family, tier, role, event_id, opened_at)
-      VALUES (${generateId()}, ${appId}, ${combo.family}, ${combo.tier}, ${combo.role}, ${eventId}, now())`).rejects.toThrow(/saturation_episodes_one_open/);
+      VALUES (${generateId()}, ${appId}, ${combo.family}, ${combo.tier}, ${combo.role}, ${eventId}, now())`).rejects.toThrow(/23505[\s\S]*Key \(app_id, family, tier, role\)/);
     await db.$executeRaw`UPDATE saturation_episodes SET ended_at = opened_at WHERE app_id = ${appId}`;
+    // The refused insert above did not commit, so its event is free to carry the next episode.
     await db.$executeRaw`INSERT INTO saturation_episodes (id, app_id, family, tier, role, event_id, opened_at)
       VALUES (${generateId()}, ${appId}, ${combo.family}, ${combo.tier}, ${combo.role}, ${eventId}, now())`;
     expect(await open()).toHaveLength(1);
@@ -315,7 +316,7 @@ describe('#3819 slice 1 — episodes and the alarm (cor:agt:060:14, :15)', () =>
     await outcome({ role: 'qa-engineer' }, 'NO_WORKER', 1);
     await evaluate();
     const payloads = (await alarms()).map((a) => a.payload as Record<string, unknown>);
-    expect(payloads.map((p) => [p.family, p.tier, p.role]).sort()).toEqual([['claude', null, 'server-engineer'], [null, null, 'qa-engineer']]);
+    expect(payloads.map((p) => [p.family, p.tier, p.role]).sort((a, b) => String(a[2]).localeCompare(String(b[2])))).toEqual([[null, null, 'qa-engineer'], ['claude', null, 'server-engineer']]);
     expect((await open()).map(key).sort()).toEqual([['', '', 'qa-engineer'], ['claude', '', 'server-engineer']]);
   });
 
@@ -385,7 +386,7 @@ describe('#3819 slice 1 — acknowledgement (cor:agt:060:16, cor:agt:050:24)', (
     return alarm;
   }
   const rowOf = async (id: string) => {
-    const [row] = await db.$queryRaw<Record<string, unknown>[]>`SELECT * FROM agent_team_events WHERE id = ${id}`;
+    const [{ row }] = await db.$queryRaw<{ row: Record<string, unknown> }[]>`SELECT to_jsonb(e) AS row FROM agent_team_events e WHERE id = ${id}`;
     return row;
   };
   const withoutAck = (row: Record<string, unknown>) => {
