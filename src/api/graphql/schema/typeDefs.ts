@@ -4392,6 +4392,16 @@ export const typeDefs = `#graphql
     """
     maxRevCount: Int!
     """
+    #606 — whether the CALLER may write to this memory: true exactly when a write to it would be allowed for the request's own principal
+    (user, App key or run): not refused by the memory write gate, and never true in a read-only impersonation session,
+    where every mutation is refused. It says nothing about
+    other users, and a Memory is only reachable here when the caller may already read it. Lets a write-target
+    picker filter without one effectiveAccess call per memory (the server still runs the gate once per distinct
+    memory per request). Null means the answer could not be determined (an unexpected failure, logged
+    server-side), never "cannot write"; it is nullable so one failing memory cannot null a whole list.
+    """
+    canWrite: Boolean
+    """
     #1447/#1448, derived per node since #1591 — DRAFT while none of this
     memory's live nodes is minted, MINTED once any is. Draft rights are per
     node: an unminted node can be renumbered, moved without a URN alias, and
@@ -6408,10 +6418,10 @@ export const typeDefs = `#graphql
   input IssueSecretReadClientInput {
     "The App secret, by id or URN."
     secretRef: ID!
-    "WORKER: a live worker of the App (holderRef is its id). USER: the issuer themself (holderRef omitted). AGENT and APP are refused (GRANT_HOLDER_NOT_ALLOWED): a read client is held by a person or a worker."
+    "WORKER: a live worker of the App (holderRef is its id). AGENT: an agent installed and licensed in the App (holderRef is its id); its live workers in the App read through the client (hrn:node:hadronmemory.com:specs:cor:sec:060:02). USER: the issuer themself (holderRef omitted). APP is refused (GRANT_HOLDER_NOT_ALLOWED): an App holds no reveal path."
     holderKind: GrantHolderKind!
     holderRef: ID
-    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refused (SECRET_AUTO_DELETE_NOT_AVAILABLE) until the deletion is available."
+    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refusals, in the order they are judged: holderKind APP (GRANT_HOLDER_NOT_ALLOWED); an unreadable startsAt or expiresAt (BAD_USER_INPUT); a marked request without a window or a read budget (SECRET_AUTO_DELETE_NEEDS_LIMIT); a caller who is neither an App manager nor the writer of the secret's current version (SECRET_AUTO_DELETE_NOT_ALLOWED, where an unmarked request would get FORBIDDEN or SECRET_READ_CLIENT_SUPERSEDED)."
     autoDelete: Boolean! = false
     startsAt: DateTime
     expiresAt: DateTime
@@ -13788,6 +13798,17 @@ export const typeDefs = `#graphql
     Update a Memory.
 
     Accepts the entity's ID or URN.
+
+    \`orgRef\` takes an organization's ID or fully-qualified URN and is compared on
+    the RESOLVED organization id, not on the text passed. Naming the memory's own
+    organization (by ID or URN) is a no-op. Naming any other organization answers
+    USE_TRANSFER_MEMORY_OWNERSHIP: use \`transferMemoryOwnership\` to change a
+    memory's owner. For a caller who may manage the memory, an organization that
+    does not exist answers ORGANIZATION_NOT_FOUND. A caller who cannot read the
+    memory gets its concealed MEMORY_NOT_FOUND first, and a caller who can read
+    it but may not manage it gets the ordinary authorization denial; neither
+    reaches the organization lookup. An empty string \`orgRef: ""\` also
+    answers USE_TRANSFER_MEMORY_OWNERSHIP.
 
     Spec 033 FR-026: enabling \`vectorIndexEnabled\` on an \`isEncrypted\` memory
     requires \`acknowledgeVectorInversionRisk: true\` in the same call. Without

@@ -9313,6 +9313,44 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     );
   }
 
+  // #4345: match a memory-URN hint against the readable candidates. Parsed by the
+  // shared URN parser (never a hand-stripped `hrn:mem:`), so legacy spellings
+  // work; a legacy reference also resolves through the stored `legacy_urn` /
+  // alias map (cor:urn:010:02), restricted to the candidate ids.
+  async function matchRunTaskMemoryUrn(
+    mems: RunTaskMem[],
+    hint: string,
+  ): Promise<RunTaskMem | null> {
+    let parsed: ReturnType<typeof parseUrnInput>;
+    try {
+      parsed = parseUrnInput(hint.trim());
+    } catch {
+      return null;
+    }
+    if (parsed.type !== 'memory') return null;
+    const lookup = normalizeUrnForLookup(parsed.value);
+    const direct = mems.find((m) => normalizeUrnForLookup(m.urn) === lookup);
+    if (direct) return direct;
+    const ids = new Set(mems.map((m) => m.id));
+    const [legacyRows, aliasRows] = await Promise.all([
+      db.memory.findMany({
+        where: { legacyUrn: lookup, id: { in: [...ids] }, deletedAt: null },
+        select: { id: true },
+        take: 2,
+      }),
+      findLiveUrnAliasTargets(db, 'MEMORY', lookup, (cands) =>
+        db.memory.findMany({
+          where: { id: { in: cands.filter((c) => ids.has(c)) }, deletedAt: null },
+          select: { id: true },
+        }),
+      ),
+    ]);
+    const targets = dedupeById(legacyRows, aliasRows);
+    // Ambiguous (or absent) alias: not a match — fall back to loose ranking.
+    if (targets.length !== 1) return null;
+    return mems.find((m) => m.id === targets[0].id) ?? null;
+  }
+
   // Resolve the target memory from a loose hint, the active memory, or a pick.
   async function resolveRunTaskMemory(
     hint: string,
@@ -9326,6 +9364,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     const asRankable = (m: RunTaskMem) => ({ ...m, alias: null, loc: m.urn, description: null });
 
     if (hint) {
+      // #4345 (cor:api:020:01 "loose name or URN"): a memory URN hint (canonical
+      // `hrn:mem:`, legacy `urn:memory:`, flat or `::`) names exactly one memory,
+      // judged against the READABLE candidate set only — never a direct lookup —
+      // so an unreadable URN and a non-existent one fall through to the same
+      // `No memory matching` answer (cor:api:140:03).
+      const byUrn = await matchRunTaskMemoryUrn(mems, hint);
+      if (byUrn) return { memory: byUrn };
       const matches = rankByHint(mems.map(asRankable), hint);
       if (matches.length === 1) return { memory: matches[0] };
       if (matches.length === 0) {
