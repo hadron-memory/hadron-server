@@ -23,7 +23,7 @@ import { test as vitestTest, expect } from 'vitest';
 
 // Each pin waits on real processes and a budget of a few seconds; vitest's 5 s default is too short.
 const test = (name, fn) => vitestTest(name, fn, 60_000);
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -227,6 +227,67 @@ exec ${realPs} "$@"`);
   } finally { cleanup([pid]); }
 }));
 
+test('a clock that cannot be read at start refuses before the command runs', () => withDir((dir) => {
+  const ran = join(dir, 'ran');
+  const r = watch(`touch ${ran}`, { minutes: '20', extraEnv: { WATCHDOG_UPTIME_FILE: join(dir, 'no-such-clock') } });
+  expect(r.status).toBe(2);
+  expect(r.stderr).toContain(`[watchdog] cannot read the clock (${join(dir, 'no-such-clock')}); refusing`);
+  expect(existsSync(ran)).toBe(false);
+}));
+
+test('a clock lost after launch ends the command, says so, and never stops watching silently (BLIND delta 3)', () => withDir((dir) => {
+  const root = join(dir, 'root');
+  const clock = join(dir, 'uptime');
+  writeFileSync(clock, `${uptime()}.00 0.00\n`);   // a frozen clock: the 20 s budget is never reached by it
+  const t0 = Date.now();
+  // The command itself takes the clock away after it starts.
+  const r = watch(`echo $$ > ${root}; sleep 1.5; rm ${clock}; sleep 300`, { minutes: '20', extraEnv: { WATCHDOG_UPTIME_FILE: clock } });
+  const pid = pidsIn(root)[0];
+  try {
+    expect(r.status, r.stderr).toBe(124);
+    const out = r.stdout;
+    const dump = out.indexOf(`[watchdog] cannot read the clock (${clock}); process tree before the kill:`);
+    expect(dump).toBeGreaterThanOrEqual(0);
+    expect(out.indexOf('[sampler]', dump)).toBeGreaterThan(dump);
+    expect(out).toContain('[watchdog] watchdog lost its clock; killed');
+    expect(Date.now() - t0).toBeLessThan(30_000);
+    expect(gone(pid)).toBe(true);
+  } finally { cleanup([pid]); }
+}));
+
+test('with the clock lost, verification of a survivor still ends, after a bounded number of polls', () => withDir((dir) => {
+  const root = join(dir, 'root');
+  const clock = join(dir, 'uptime');
+  writeFileSync(clock, `${uptime()}.00 0.00\n`);
+  // The survivor check always sees one never-ending member of the group, and no clock is left to bound it.
+  const PATH = shim(dir, 'ps', `if [ "$*" = "-eo pid=,pgid=,stat=" ]; then ${realPs} "$@"; echo "4194999 $(cat ${root}) S"; exit 0; fi
+exec ${realPs} "$@"`);
+  const t0 = Date.now();
+  const r = watch(`echo $$ > ${root}; sleep 1.5; rm ${clock}; sleep 300`, { minutes: '20', extraEnv: { WATCHDOG_UPTIME_FILE: clock, PATH } });
+  const pid = pidsIn(root)[0];
+  try {
+    expect(r.status, r.stderr).toBe(124);
+    expect(r.stdout).toContain('[watchdog] watchdog lost its clock; kill NOT verified, still running: 4194999');
+    expect(Date.now() - t0).toBeLessThan(45_000);
+  } finally { cleanup([pid]); }
+}));
+
+test('a walked PID that is no longer stopped at the KILL is left alone and reported, never killed blind (gate, #128652)', () => withDir((dir) => {
+  // The kill must never widen: a walked PID gets the KILL only if it is still stopped, because one that is running was
+  // resumed by someone else or is a reused PID. Here an outside helper keeps resuming a child that left the group (so
+  // only the walk reaches it); the watchdog must leave it running and say the kill was not verified.
+  const own = join(dir, 'own');
+  const helper = spawn('bash', ['-c', `until [ -s ${own} ]; do sleep 0.01; done; c=$(cat ${own}); while kill -CONT "$c" 2>/dev/null; do :; done`], { stdio: 'ignore' });
+  // The child's output goes nowhere, so the survivor holds no pipe to this test open.
+  const r = watch(`setsid sleep 300 >/dev/null 2>&1 & echo $! > ${own}; sleep 300`, { minutes: '1' });
+  const pid = pidsIn(own)[0];
+  try {
+    expect(r.status, r.stderr).toBe(124);
+    expect(r.stdout).toMatch(new RegExp(`kill NOT verified, still running: .*\\b${pid}\\b`));
+    expect(running(pid), 'a PID that was not stopped at the KILL was killed').toBe(true);
+  } finally { cleanup([pid]); helper.kill('SIGKILL'); }
+}));
+
 test('a TERM to the watchdog (the step cancelled) still ends the command', () => withDir((dir) => {
   const root = join(dir, 'root');
   const env = { ...baseEnv(), WATCHDOG_MINUTES: '30', WATCHDOG_STEP_TIMEOUT_MINUTES: '45', WATCHDOG_SECONDS_PER_MINUTE: '1' };
@@ -287,9 +348,11 @@ test('the step runs the watchdog from its own start, and its step-timeout settin
   // Two lines, so a failed read fails the step (bash -e) instead of exporting an empty start; the watchdog refuses an
   // empty one anyway. The probe before the watchdog is bounded.
   expect(step.run.split('\n').slice(0, 2)).toEqual(['read -r up _ < /proc/uptime', 'export WATCHDOG_STEP_STARTED_AT=${up%.*}']);
-  expect(step.run).toMatch(/^timeout 120 psql /m);
+  expect(step.run).toMatch(/^timeout -k 10 120 psql /m);   // a hard deadline: KILL 10 s after the TERM
   expect(String(step.env.WATCHDOG_STEP_TIMEOUT_MINUTES)).toBe(String(step['timeout-minutes']));
   const minutes = Number(step.env.WATCHDOG_MINUTES);
   expect(Number.isInteger(minutes) && minutes > 0 && minutes < step['timeout-minutes']).toBe(true);
   expect(step.env.WATCHDOG_SECONDS_PER_MINUTE).toBeUndefined();   // the test unit never reaches CI
+  expect(step.env.WATCHDOG_UPTIME_FILE).toBeUndefined();          // nor the test clock
+  expect(step.run).not.toMatch(/WATCHDOG_(SECONDS_PER_MINUTE|UPTIME_FILE)/);
 });
