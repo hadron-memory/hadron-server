@@ -39,7 +39,7 @@ type F = Awaited<ReturnType<typeof fixture>>;
 
 const rowOn = (f: F, memoryId: string, extra: Record<string, unknown> = {}) =>
   db.appMemoryWriteGrant.create({ data: { appId: f.app.id, memoryId, prefix: PREFIX, registerNodeUrn: REGISTER, grantedBy: f.owner.id, ...extra } });
-const as = (u: { id: string }) => ({ db, userId: u.id, roles: [] as never[] });
+const actingAs = (u: { id: string }) => ({ db, userId: u.id, roles: [] as never[] });
 const projectionInputs = async (f: F, memoryId: string) => ({
   memory: await db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { ...GRANT_MEMORY_SELECT, urn: true } }),
   app: await db.app.findUniqueOrThrow({ where: { id: f.app.id }, select: { id: true, organizationId: true, ownerUserId: true } }),
@@ -49,12 +49,12 @@ describe('#4734 a concealed write-grant target shows neither prefix nor register
   it('revoke by an App manager who cannot see the owner\'s personal memory: row listed, URN, prefix and register URN all null', async () => {
     const f = await fixture();
     const row = await rowOn(f, f.personal.id);
-    const r = await M.revokeAppMemoryWriteGrant({}, { id: row.id }, as(f.peer));
+    const r = await M.revokeAppMemoryWriteGrant({}, { id: row.id }, actingAs(f.peer));
     expect(r).toMatchObject({ id: row.id, memoryUrn: null, prefix: null, registerNodeUrn: null });
     expect(r.revokedAt).toBeInstanceOf(Date);
   });
 
-  it('the projection withholds both whatever the grant holds: a prefixed grant with a register URN, and one with neither', async () => {
+  it('the projection withholds the prefix whether or not the grant cites a register URN (and the register URN when it does)', async () => {
     const f = await fixture();
     const { memory, app } = await projectionInputs(f, f.personal.id);
     const full = await rowOn(f, f.personal.id);
@@ -71,6 +71,52 @@ describe('#4734 a concealed write-grant target shows neither prefix nor register
   });
 });
 
+describe('#4734 every concealed shape and door, not only revoke', () => {
+  const listAs = (f: F, u: { id: string }, includeRevoked: boolean) =>
+    Q.appMemoryWriteGrants({}, { appRef: f.app.id, includeRevoked }, actingAs(u)) as Promise<any[]>;
+
+  it('the list as a concealed viewer returns no row at all, live or revoked, with includeRevoked on and off', async () => {
+    const f = await fixture();
+    await rowOn(f, f.personal.id);
+    await rowOn(f, f.personal.id, { prefix: 'old:plans', revokedAt: new Date(), revokedBy: f.owner.id });
+    expect(await listAs(f, f.peer, false)).toEqual([]);
+    expect(await listAs(f, f.peer, true)).toEqual([]);
+    expect((await listAs(f, f.owner, true)).map((g) => [g.prefix, g.registerNodeUrn !== null])).toEqual(expect.arrayContaining([[PREFIX, true], ['old:plans', true]]));
+  });
+
+  it('a null memory (no row to show) gives null/null/null, and a revoked concealed row too', async () => {
+    const f = await fixture();
+    const live = await rowOn(f, f.personal.id);
+    const { app } = await projectionInputs(f, f.personal.id);
+    expect(project(live, null, app, f.peer.id)).toMatchObject({ memoryUrn: null, prefix: null, registerNodeUrn: null });
+    const revoked = { ...live, revokedAt: new Date(), revokedBy: f.owner.id };
+    const { memory } = await projectionInputs(f, f.personal.id);
+    expect(project(revoked, memory, app, f.peer.id)).toMatchObject({ memoryUrn: null, prefix: null, registerNodeUrn: null, revokedBy: f.owner.id });
+  });
+
+  it('a private-class memory is concealed from a non-owner exactly as a personal one, and shown to its owner', async () => {
+    const f = await fixture();
+    const priv = await db.memory.create({ data: { name: 'priv', urn: 'concealed4734.test:priv', class: 'private', userId: f.owner.id, organizationId: f.org.id } as never });
+    const row = await rowOn(f, priv.id);
+    const { memory, app } = await projectionInputs(f, priv.id);
+    expect(project(row, memory, app, f.peer.id)).toMatchObject({ memoryUrn: null, prefix: null, registerNodeUrn: null });
+    expect(project(row, memory, app, f.owner.id)).toMatchObject({ prefix: PREFIX, registerNodeUrn: REGISTER });
+  });
+
+  it('the prefix and register URN follow the computed URN: neither is ever present while the URN is null, for every viewer and class', async () => {
+    const f = await fixture();
+    const row = await rowOn(f, f.personal.id);
+    const { memory, app } = await projectionInputs(f, f.personal.id);
+    for (const viewer of [f.owner.id, f.peer.id, undefined]) {
+      for (const m of [memory, null]) {
+        const out = project(row, m, app, viewer);
+        if (out.memoryUrn === null) expect([out.prefix, out.registerNodeUrn]).toEqual([null, null]);
+        else expect([out.prefix, out.registerNodeUrn]).toEqual([PREFIX, REGISTER]);
+      }
+    }
+  });
+});
+
 describe('#4734 through the real GraphQL schema (prefix is nullable, so a null reaches the client instead of an error)', () => {
   const schema = buildSchema(typeDefs);
   const fieldResolver = (p: any, a: any, c: any, i: any) =>
@@ -82,12 +128,12 @@ describe('#4734 through the real GraphQL schema (prefix is nullable, so a null r
     const concealed = await rowOn(f, f.personal.id);
     const mine = await rowOn(f, f.personal.id, { prefix: 'other:plans' });
     const q = 'mutation($id: ID!){ revokeAppMemoryWriteGrant(id: $id){ id memoryUrn prefix registerNodeUrn } }';
-    const peer = await exec(q, { id: concealed.id }, as(f.peer));
-    expect(peer.errors).toBeUndefined();
-    expect(peer.data!.revokeAppMemoryWriteGrant).toEqual({ id: concealed.id, memoryUrn: null, prefix: null, registerNodeUrn: null });
-    const own = await exec(q, { id: mine.id }, as(f.owner));
-    expect(own.errors).toBeUndefined();
-    expect(own.data!.revokeAppMemoryWriteGrant).toMatchObject({ prefix: 'other:plans', registerNodeUrn: REGISTER });
+    const asPeer = await exec(q, { id: concealed.id }, actingAs(f.peer));
+    expect(asPeer.errors).toBeUndefined();
+    expect(asPeer.data!.revokeAppMemoryWriteGrant).toEqual({ id: concealed.id, memoryUrn: null, prefix: null, registerNodeUrn: null });
+    const asOwner = await exec(q, { id: mine.id }, actingAs(f.owner));
+    expect(asOwner.errors).toBeUndefined();
+    expect(asOwner.data!.revokeAppMemoryWriteGrant).toMatchObject({ prefix: 'other:plans', registerNodeUrn: REGISTER });
   });
 });
 
@@ -95,11 +141,11 @@ describe('#4734 CONTROLS: a viewer who may see the memory keeps URN, prefix and 
   it('the memory\'s own owner: revoke and list both show all three', async () => {
     const f = await fixture();
     const row = await rowOn(f, f.personal.id);
-    const listed = await Q.appMemoryWriteGrants({}, { appRef: f.app.id, includeRevoked: false }, as(f.owner)) as any[];
+    const listed = await Q.appMemoryWriteGrants({}, { appRef: f.app.id, includeRevoked: false }, actingAs(f.owner)) as any[];
     expect(listed).toHaveLength(1);
     expect(listed[0]).toMatchObject({ prefix: PREFIX, registerNodeUrn: REGISTER });
     expect(listed[0].memoryUrn).not.toBeNull();
-    const r = await M.revokeAppMemoryWriteGrant({}, { id: row.id }, as(f.owner));
+    const r = await M.revokeAppMemoryWriteGrant({}, { id: row.id }, actingAs(f.owner));
     expect(r).toMatchObject({ prefix: PREFIX, registerNodeUrn: REGISTER });
     expect(r.memoryUrn).not.toBeNull();
   });
@@ -107,15 +153,15 @@ describe('#4734 CONTROLS: a viewer who may see the memory keeps URN, prefix and 
   it('a shared (org) memory: a peer App manager sees all three through list and the projection', async () => {
     const f = await fixture();
     await rowOn(f, f.shared.id);
-    const listed = await Q.appMemoryWriteGrants({}, { appRef: f.app.id, includeRevoked: false }, as(f.peer)) as any[];
+    const listed = await Q.appMemoryWriteGrants({}, { appRef: f.app.id, includeRevoked: false }, actingAs(f.peer)) as any[];
     expect(listed).toHaveLength(1);
     expect(listed[0]).toMatchObject({ prefix: PREFIX, registerNodeUrn: REGISTER });
     expect(listed[0].memoryUrn).not.toBeNull();
   });
 
-  it('give returns all three to the owner of a personal memory, and a grant with no register URN shows null for it', async () => {
+  it('give on a shared memory returns the URN and the prefix, and a grant that cites no register URN shows null for that field', async () => {
     const f = await fixture();
-    const made = await M.setAppMemoryWriteGrant({}, { appRef: f.app.id, memoryRef: f.shared.urn, prefix: 'notes:plans' }, as(f.owner));
+    const made = await M.setAppMemoryWriteGrant({}, { appRef: f.app.id, memoryRef: f.shared.urn, prefix: 'notes:plans' }, actingAs(f.owner));
     expect(made.prefix).toBe('notes:plans');
     expect(made.registerNodeUrn ?? null).toBeNull();
     expect(made.memoryUrn).not.toBeNull();
