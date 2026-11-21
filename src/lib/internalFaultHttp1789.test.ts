@@ -17,12 +17,12 @@ let server: Server;
 let base = '';
 
 /** #4592 F3: the tampered-reason fixtures, ONE named table shared by the route that plants each reason and the assertions on the wire. */
-const TAMPERED_CASES: Array<{ name: string; reason: unknown; wireReason: 'STORE_UNREACHABLE' | 'POOL_WAIT'; message: string }> = [
-  { name: 'unreachable', reason: 'STORE_UNREACHABLE', wireReason: 'STORE_UNREACHABLE', message: AUTH_STORE_UNREACHABLE_MESSAGE },
-  { name: 'pool-wait', reason: 'POOL_WAIT', wireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE },
-  { name: 'absent', reason: undefined, wireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE },
-  { name: 'driver-text', reason: 'driver-secret', wireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE },
-  { name: 'object', reason: { detail: 'driver-secret' }, wireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE },
+const TAMPERED_CASES: Array<{ name: string; planted: unknown; expectedWireReason: 'STORE_UNREACHABLE' | 'POOL_WAIT'; message: string }> = [
+  { name: 'unreachable', planted: 'STORE_UNREACHABLE', expectedWireReason: 'STORE_UNREACHABLE', message: AUTH_STORE_UNREACHABLE_MESSAGE },
+  { name: 'pool-wait', planted: 'POOL_WAIT', expectedWireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE },
+  { name: 'absent', planted: undefined, expectedWireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE },
+  { name: 'driver-text', planted: 'driver-secret', expectedWireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE },
+  { name: 'object', planted: { detail: 'driver-secret' }, expectedWireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE },
 ];
 
 beforeAll(async () => {
@@ -70,7 +70,7 @@ beforeAll(async () => {
       'STORE_UNREACHABLE',
     );
     tampered.message = "Can't reach database server at `10.9.8.7:5432`";
-    tampered.extensions.reason = fixture.reason;
+    tampered.extensions.reason = fixture.planted;
     next(tampered);
   });
   // #4504 (Bradley P3, the double-log check): headers already gone out when the fault
@@ -90,6 +90,8 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => { server = app.listen(0, resolve); });
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
+// #4592 F5: the ONE spy cleanup for this file. Every test's console.error spy is restored here after the test, which is why the
+// per-test `log.mockRestore()` calls are gone: without it the spy's calls would accumulate and later assertions could pass on stale calls.
 afterEach(() => vi.restoreAllMocks());
 afterAll(() => new Promise<void>((resolve) => { server.close(() => resolve()); }));
 
@@ -171,13 +173,20 @@ describe('plain HTTP internal faults (#1789)', () => {
     expect(text).not.toMatch(/P1001|Can't reach|127\.0\.0\.1|INTERNAL_SERVER_ERROR/);
   });
 
-  it.each(TAMPERED_CASES)('#4555: tampered variant $name keeps every wire field fixed', async ({ name: variant, wireReason: reason, message }) => {
+  it('#4592 F3: an unknown tampered variant name is a 404 and is never logged as an internal fault', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const res = await fetch(base + '/auth-store-busy-tampered/' + variant);
+    const res = await fetch(base + '/auth-store-busy-tampered/not-a-fixture');
+    expect(res.status).toBe(404);
+    expect(log.mock.calls.filter((c) => c[0] === '[http] internal_fault')).toHaveLength(0);
+  });
+
+  it.each(TAMPERED_CASES)('#4555: tampered variant $name keeps every wire field fixed', async ({ name, expectedWireReason, message }) => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await fetch(base + '/auth-store-busy-tampered/' + name);
     const text = await res.text();
     expect(res.status).toBe(503);
     expect(JSON.parse(text)).toEqual({
-      error: message, code: 'AUTH_STORE_BUSY', retryable: true, reason,
+      error: message, code: 'AUTH_STORE_BUSY', retryable: true, reason: expectedWireReason,
       requestId: res.headers.get('x-request-id'),
     });
     expect(text).not.toMatch(/driver-secret|Can't reach|P1001|10\.9\.8\.7|INTERNAL_SERVER_ERROR/);
