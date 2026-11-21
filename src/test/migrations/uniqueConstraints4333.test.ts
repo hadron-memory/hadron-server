@@ -98,6 +98,18 @@ describe('#4333 prisma/unique-constraint-invariants.sql from the push-only state
     });
   }, 60_000);
 
+  it('refuses a same-name constraint with another definition, changing nothing (#4638 LOCAL delta F2)', async () => {
+    await withPushOnlyDb({}, async (pg) => {
+      await pg.query('DROP INDEX start_failing_episodes_event_id_key');
+      await pg.query('ALTER TABLE start_failing_episodes ADD CONSTRAINT start_failing_episodes_event_id_key UNIQUE (id, event_id)');
+      const first = await indexOid(pg, 'coordinator_cadence_episodes_event_id_key');
+      await expect(pg.query(FILE)).rejects.toThrow(/start_failing_episodes\.start_failing_episodes_event_id_key exists as UNIQUE \(id, event_id\), not UNIQUE \(event_id\)/);
+      await pg.query('ROLLBACK');
+      expect(await indexOid(pg, 'coordinator_cadence_episodes_event_id_key')).toBe(first);
+      expect(await uniqueConstraints(pg)).toBe(1);
+    });
+  }, 60_000);
+
   it.each([
     ['other columns', 'rate_limit_buckets_field_class_dimension_subject_window_sta_key', '(id, field_class)'],
     ['NULLS NOT DISTINCT', 'host_sweep_episodes_event_id_key', '(event_id) NULLS NOT DISTINCT'],
