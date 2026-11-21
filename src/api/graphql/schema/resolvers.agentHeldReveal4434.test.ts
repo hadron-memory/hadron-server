@@ -130,7 +130,9 @@ describe('#4434 agent-held secret.reveal', () => {
     await db.$transaction(async (tx) => {
       await lockAuthorityAnchors(tx, [{ kind: 'agent', id: roleAgentId }], 'exclusive');
       agentIssue = issue('AGENT', roleAgentId);
-      workerIssueDone = await settled(issue('WORKER', w1), 5000);
+      const workerIssue = issue('WORKER', w1);
+      workerIssueDone = await settled(workerIssue, 5000);
+      expect((await workerIssue)?.clientId).toBeTruthy(); // the control must have SUCCEEDED, not merely settled
       waited = await settled(agentIssue, 1000);
     }, { timeout: 30000 });
     expect(workerIssueDone).toBe(true);
