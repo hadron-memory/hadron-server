@@ -18,11 +18,14 @@ export const ORDINARY_NODE_TYPES = [
   'system',
 ] as const;
 
-/** Kinds the platform itself writes, beyond the ordinary eight. */
-export const PLATFORM_NODE_TYPES = ['task', 'comment', 'chat-message', 'compiled-boot-prompt'] as const;
+/**
+ * Kinds the platform itself writes or reserves, beyond the ordinary eight: values that carry platform-defined
+ * meaning. NODE_TYPES (ordinary + these) is the full vocabulary the platform names.
+ */
+export const PLATFORM_DEFINED_NODE_TYPES = ['task', 'comment', 'chat-message', 'compiled-boot-prompt'] as const;
 
 /** Every node type the platform names. */
-export const NODE_TYPES = [...ORDINARY_NODE_TYPES, ...PLATFORM_NODE_TYPES] as const;
+export const NODE_TYPES = [...ORDINARY_NODE_TYPES, ...PLATFORM_DEFINED_NODE_TYPES] as const;
 
 export type NodeTypeName = (typeof NODE_TYPES)[number];
 
@@ -35,4 +38,4 @@ export const ORDINARY_NODE_TYPES_TEXT = ORDINARY_NODE_TYPES.map((t) =>
 ).join(', ');
 
 /** The platform-written kinds, as printed in the MCP tool descriptions. */
-export const PLATFORM_NODE_TYPES_TEXT = PLATFORM_NODE_TYPES.join(', ');
+export const PLATFORM_DEFINED_NODE_TYPES_TEXT = PLATFORM_DEFINED_NODE_TYPES.join(', ');

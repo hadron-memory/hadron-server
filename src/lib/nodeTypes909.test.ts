@@ -5,7 +5,7 @@ import {
   NODE_TYPES,
   ORDINARY_NODE_TYPES,
   ORDINARY_NODE_TYPES_TEXT,
-  PLATFORM_NODE_TYPES,
+  PLATFORM_DEFINED_NODE_TYPES,
 } from './nodeTypes.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE } from './bootPrompt.js';
 
@@ -16,7 +16,7 @@ describe('#909 slice (a): one canonical node-type list', () => {
     expect([...ORDINARY_NODE_TYPES]).toEqual([
       'abstract', 'chat', 'data', 'info', 'prompt', 'record', 'reference', 'system',
     ]);
-    expect([...PLATFORM_NODE_TYPES]).toEqual(['task', 'comment', 'chat-message', 'compiled-boot-prompt']);
+    expect([...PLATFORM_DEFINED_NODE_TYPES]).toEqual(['task', 'comment', 'chat-message', 'compiled-boot-prompt']);
     expect(NODE_TYPES).toHaveLength(12);
     expect(new Set(NODE_TYPES).size).toBe(NODE_TYPES.length);
   });
@@ -34,13 +34,24 @@ describe('#909 slice (a): one canonical node-type list', () => {
     expect(server.match(/canonical values: \$\{ORDINARY_NODE_TYPES_TEXT\}/g)).toHaveLength(2);
   });
 
-  it('is cited by the schema comment, which names every platform kind', () => {
+  it('is cited by the schema comment, which documents exactly these values (both directions)', () => {
     const schema = read('../../prisma/schema.prisma');
-    expect(schema).toContain('src/lib/nodeTypes.ts');
-    for (const t of NODE_TYPES) expect(schema).toContain(`\`${t}\``);
+    const start = schema.indexOf("/// - `nodeType` is the platform's kind.");
+    const end = schema.indexOf('/// - `objectType`', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const block = schema.slice(start, end);
+    expect(block).toContain('src/lib/nodeTypes.ts');
+    const documented = new Set<string>();
+    for (const m of block.matchAll(/^\/\/\/ {3}- `([\w-]+)`/gm)) documented.add(m[1]);
+    documented.add('comment');
+    const also = block.match(/also writes\s+([\s\S]*?)\. The one list/);
+    expect(also).not.toBeNull();
+    for (const m of also![1].matchAll(/`([\w-]+)`/g)) documented.add(m[1]);
+    expect([...documented].sort()).toEqual([...NODE_TYPES].sort());
   });
 
-  it('adds no validation: an unknown nodeType is still not a member', () => {
+  it('does not list a custom value such as transcript among the platform names', () => {
     expect((NODE_TYPES as readonly string[]).includes('transcript')).toBe(false);
   });
 });
