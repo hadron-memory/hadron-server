@@ -74,7 +74,7 @@ describe('secret.use grant terms (#4000)', () => {
     expect(await refusal(workerGrant())).toBe('GRANT_HOLDER_NOT_ALLOWED');
     expect(await db.grant.count({ where: { action: 'secret.use', workerId: w.workerId } })).toBe(0);
   });
-  it('refuses another App\'s secret without locking or revealing it', async () => {
+  it('refuses another App\'s secret with the same refusal as a malformed id', async () => {
     const other = generateId();
     await db.$executeRaw`INSERT INTO secrets (id, owner_type, owner_id, name, kind, updated_at) VALUES (${other}, 'app', ${w.app2Id}, 'api', 'webfetch-auth', now())`;
     expect(await refusal(grant({ ...values(), secret: other }))).toBe('GRANT_VALUES_INVALID');

@@ -34,6 +34,12 @@ describe('secret.use result redaction', () => {
     expect(lower).not.toBe(encodeURIComponent(secret));
     expect(JSON.stringify(redactSecretUse({ url: `?t=${lower}` }, { type: 'bearer', token: secret }))).not.toContain(lower);
   });
+  it('redacts the form-encoded (URLSearchParams, + for a space) form in lowercase hex too', () => {
+    const secret = 'tok en/value';
+    const lower = new URLSearchParams({ v: secret }).toString().slice(2).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase());
+    expect(lower).toBe('tok+en%2fvalue');
+    expect(JSON.stringify(redactSecretUse({ url: `?t=${lower}` }, { type: 'bearer', token: secret }))).not.toContain(lower);
+  });
 
   it('does not expose a credential that occurs inside the ordinary marker', () => {
     const out = JSON.stringify(redactSecretUse({ body: 'A' }, { type: 'bearer', token: 'A' }));

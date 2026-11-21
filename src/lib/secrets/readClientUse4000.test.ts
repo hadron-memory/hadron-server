@@ -272,7 +272,7 @@ describe('transactional secret.use (#4000)', () => {
   it('re-judges the issuer at each use: an issuer who no longer qualifies injects nothing (U12)', async () => {
     await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
     await db.orgMember.deleteMany({ where: { organizationId: orgId, userId: ownerId } });
-    await expect(prepare()).rejects.toBeDefined();
+    await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     await spentNothing();
   });
   it('spends only a ticket of this App or an org-wide one, never another App\'s ticket in the same org (T2)', async () => {
