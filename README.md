@@ -53,6 +53,7 @@ lines as a privileged role, make your role the database owner, then continue as 
 ```bash
 createdb hadron
 psql -d hadron -c 'CREATE EXTENSION IF NOT EXISTS vector'
+psql -d hadron -c 'ALTER DATABASE hadron OWNER TO YOUR_USER'   # skip if you ran the lines above as YOUR_USER
 ```
 
 (If your role is a superuser, run them as that role. Step 4 also runs `CREATE EXTENSION IF NOT
@@ -139,7 +140,7 @@ sign-in routes you have not configured simply refuse requests.
 pnpm test
 ```
 
-You need a local PostgreSQL with pgvector installed and a role that may create databases. No setup
+You need a local PostgreSQL with pgvector installed and a superuser role (the test run creates the `vector` extension in its template database, which an ordinary role cannot do). No setup
 step is needed: the test run builds a template database from an empty one for the schema in
 your checkout and clones it for each worker, and it never touches the database named in
 your `.env`. If you have little memory or share the machine, limit the workers with
