@@ -4062,6 +4062,7 @@ model App {
   startFailingEpisodes    StartFailingEpisode[]
   hostSweepRuns           HostSweepRun[]
   hostSweepEpisodes       HostSweepEpisode[]
+  saturationEpisodes      SaturationEpisode[]
   automationAdoptionEvents AutomationAdoptionEvent[]
   /// #2484 — this App's prefix-scoped write grants for its userless runs, and their append-only history.
   memoryWriteGrants       AppMemoryWriteGrant[]
@@ -7583,7 +7584,7 @@ model AgentTaskCounter {
 ///   sealed record of who acted and what it concerned, and a foreign-key action would have to update the row.
 /// - An alarm has AgentTeamAlarmSchedule rows (who it wakes, and when) and at most one AlarmEscalationEnd.
 /// - An alarm that is about no task has one episode row that points at it: DarkWorkerEpisode,
-///   CoordinatorCadenceEpisode, PostLimitEpisode, StartFailingEpisode or HostSweepEpisode.
+///   CoordinatorCadenceEpisode, PostLimitEpisode, StartFailingEpisode, HostSweepEpisode or SaturationEpisode.
 /// - WorkerDeliveryTaskEvent rows record the delivery of an event to a worker.
 ///
 /// Behaviour:
@@ -7658,6 +7659,7 @@ model AgentTeamEvent {
   postLimitEpisode PostLimitEpisode?
   startFailingEpisode StartFailingEpisode?
   hostSweepEpisode HostSweepEpisode?
+  saturationEpisode SaturationEpisode?
   /// #3934 (V77): the recorded end of this alarm's escalation, written once by the evaluator pass or the acknowledgement.
   escalationEnd AlarmEscalationEnd?
 
@@ -8063,6 +8065,49 @@ model HostSweepEpisode {
 
   @@index([appId, endedAt])
   @@map("host_sweep_episodes")
+}
+
+/// One period during which a family/tier/role combination of an App is saturated: the platform could not
+/// give work of that combination to anyone. #3819 slice 1.
+///
+/// Episode pattern: an alarm is an AgentTeamEvent, which is append-only, and an alarm about no task cannot be
+/// de-duplicated by that table's unique index. So each period during which the condition holds is one row
+/// here, with at most one open row per (App, family, tier, role), inserted in the same transaction as the
+/// alarm. That makes it one alarm per episode across passes and instances, and gives the alarm an end.
+///
+/// Relationships: belongs to an App and is deleted with it. `event` is the alarm raised with the episode (an
+/// AgentTeamEvent of type `alarm.saturation`, with no task, no subject worker and an empty chain), one to one.
+/// `family`, `tier` and `role` are the combination as AgentMatchOutcome keys it: a dimension a task left open
+/// is the empty string (so the composite key has no NULL), and the role is lower case.
+///
+/// Behaviour:
+/// - The stall evaluator's pass (`evaluateSaturation`, src/lib/agentTasks/saturation.ts, every minute) opens an
+///   episode for a combination that is saturated and has none open (partial unique index in
+///   prisma/saturation-invariants.sql). Saturated, windowless: the combination's latest match outcome is no
+///   worker and under 168 hours old (by its decision time, on the database clock), or it has at least one
+///   worker that is not retired and none eligible (a paused family, every worker unavailable).
+/// - The same pass ends it when neither holds: a match recorded against the combination, an eligible worker
+///   gained while the latest outcome is not no worker, the no-worker outcome reaching 168 hours (whether or not
+///   the matcher purged its row), or its last worker retired. Also when the App is deleted or uninstalled.
+/// - Acknowledging the alarm does not end the episode (hrn:node:hadronmemory.com:specs:cor:agt:060:16). The alarm has no chain, so it wakes
+///   nobody and no AlarmEscalationEnd is recorded for it.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:060:15. Background: #3819.
+model SaturationEpisode {
+  id       String    @id @default(cuid())
+  appId    String    @map("app_id")
+  family   String
+  tier     String
+  role     String
+  eventId  String    @unique @map("event_id")
+  openedAt DateTime  @map("opened_at")
+  endedAt  DateTime? @map("ended_at")
+
+  app   App            @relation(fields: [appId], references: [id], onDelete: Cascade)
+  event AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([appId, endedAt])
+  @@map("saturation_episodes")
 }
 
 /// Whether one worker is available for work, and if not, why and until when. It is one of the inputs to
