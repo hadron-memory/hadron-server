@@ -1024,7 +1024,10 @@ describe('CLI entry and single instance', () => {
       const after = snapshotOf(holder.pid);
       const where = `holder before=${JSON.stringify(before)} after=${JSON.stringify(after)}`;
       expect(code, where).toBe(1);
-      expect(after, where).toEqual(before); // the same process, still alive, at the decision
+      // the same process, still alive, at the decision. `state` is excluded on purpose: R (running) vs S (sleeping) flips
+      // under load (hosted CI saw it, run 44871947484), while pid, start ticks and cmdline are the process's identity.
+      const identity = (h: HolderSnapshot) => ({ pid: h.pid, alive: h.alive, startTicks: h.startTicks, cmdline: h.cmdline });
+      expect(identity(after), where).toEqual(identity(before));
       expect(log()).toContain('holds');
       expect(f.sent).toEqual([]);
       expect(f.pages).toBe(0);
