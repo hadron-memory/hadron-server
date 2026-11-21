@@ -745,6 +745,8 @@ export function classify(stmt) {
       // delta3 B2).
       // #4337: exactly `ALTER [COLUMN] <col> ADD GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY`, with no sequence
       // options, names one object: that column's identity (its sequence is the identity's own, never named apart).
+      // The row records only `table.column`: a change between BY DEFAULT and ALWAYS makes no manifest diff, as with the other
+      // kinds, which record a name and not a definition (#4714 F12).
       // Every other ADD GENERATED spelling (sequence options, anything trailing) still refuses.
       if ((am = action.match(new RegExp(`^ALTER (?:COLUMN )?${IDENT}\\s+ADD GENERATED (?:ALWAYS|BY DEFAULT) AS IDENTITY$`, 'i')))) {
         out.push({ kind: 'identity-column', name: `${table}.${unquote(am[1] ?? am[2])}` });
