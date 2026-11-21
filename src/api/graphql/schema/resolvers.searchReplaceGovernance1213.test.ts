@@ -165,3 +165,28 @@ describe('#1213 S3 authorized-manager interleavings', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: ordinaryId } })).content).toBe('beta');
   }, 20000);
 });
+
+// #1213 S3 (Abigail's BLIND F1): a dry run returns before the locked write, so it sees only the selection-time skip.
+describe('#1213 S3 dry run reads governed state at planning, like selection', () => {
+  const preview = () => resolvers.Mutation.searchReplaceInNodes({}, { input: { ...input(), dryRun: true } }, ctx());
+  it.each(['review', 'task'] as const)('governed before the preview (%s): the preview skips it, and the real run agrees', async signal => {
+    await promote(ctx(), signal);
+    const dry = await preview();
+    expect(dry).toMatchObject({ dryRun: true, nodesSkipped: 1, nodesChanged: 1, skipCounts: { governed: 1, protectedAddress: 0 } });
+    expect((dry as { results: Array<{ nodeId: string }> }).results.map(x => x.nodeId)).toEqual([ordinaryId]);
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).content).toBe('alpha');
+    const real = await replace(ctx());
+    expect(real).toMatchObject({ dryRun: false, nodesSkipped: 1, nodesChanged: 1, skipCounts: { governed: 1, protectedAddress: 0 } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).content).toBe('alpha');
+  });
+  it.each(['review', 'task'] as const)('governed after the preview (%s): the preview is a planning-time snapshot that listed it; the later real run skips it (here at its own selection; a flip racing the write is skipped under the lock, pinned by the interleavings above)', async signal => {
+    const dry = await preview();
+    expect(dry).toMatchObject({ dryRun: true, nodesSkipped: 0, nodesChanged: 2, skipCounts: { governed: 0, protectedAddress: 0 } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).content).toBe('alpha');
+    await promote(ctx(), signal);
+    const real = await replace(ctx());
+    expect(real).toMatchObject({ dryRun: false, nodesSkipped: 1, nodesChanged: 1, skipCounts: { governed: 1, protectedAddress: 0 } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).content).toBe('alpha');
+    expect((await db.node.findUniqueOrThrow({ where: { id: ordinaryId } })).content).toBe('beta');
+  });
+});
