@@ -35,4 +35,14 @@ describe('#3571 the sync-run lock connection', () => {
       errors.mockRestore();
     }
   });
+
+  it('refuses without DATABASE_URL instead of falling back to PG* variables or localhost (#4719 BLIND F2)', async () => {
+    const saved = process.env.DATABASE_URL;
+    delete process.env.DATABASE_URL;
+    try {
+      await expect(acquireSyncRunLock('no-url')).rejects.toThrow(/DATABASE_URL is not set/);
+    } finally {
+      process.env.DATABASE_URL = saved;
+    }
+  });
 });
