@@ -89,6 +89,8 @@ describe('#647 S1 web-search@1 conformance fixtures', () => {
     expect(report.passed).toBe(false);
     expect(report.failures.length).toBeGreaterThan(0);
     expect(report.failures.join('\n')).toMatch(/rank/);
+    // The dropped field is reported as missing, not as a wrong position.
+    expect(report.failures.join('\n')).toMatch(/rank: missing or not an integer/);
   });
 
   it("FAILS a stub that drops the source: 'external' tag, and names it", async () => {
