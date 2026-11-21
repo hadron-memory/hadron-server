@@ -1,8 +1,8 @@
 import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 /** #1353 — loss-safe compact attention, worker-owned reads and switchover. */
 
-import { createHmac } from 'node:crypto';
 import { buildSchema, parse, validate } from 'graphql';
+import { readFileSync } from 'node:fs';
 import { typeDefs } from '../api/graphql/schema/typeDefs.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
@@ -11,7 +11,6 @@ import { generateId } from './id.js';
 import { ensureChannelWithRoot } from './channels.js';
 import { appendChatMessage } from './chatRoot.js';
 import { getMemoryEncryptionInfo } from './nodeCrypto.js';
-import { generateDataKey } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.js';
@@ -40,11 +39,6 @@ let channel: { id: string; memoryId: string; loc: string; chatRootNodeId: string
 let worker: { id: string; name: string };
 let sessionId: string;
 
-
-// ── #1384 v2 migration shims ─────────────────────────────────────────────────
-// The v1 doors answer UPGRADE_REQUIRED now; these helpers drain the paged
-// doors to completion and regroup results into the v1 shapes the legacy
-// assertions below speak, so the behavioral matrix keeps running unchanged.
 
 const userCtx = (extra: Partial<Context> = {}): Context => ({ db, userId: user.id, roles: ['READER'], ...extra }) as Context;
 
@@ -523,6 +517,28 @@ describe('worker session reads and mark-read (resolver level; was the MCP parity
     // a deleted org's App exactly like an absent one.
     const error = await M.markOwnTeamChatRead({}, { appRef: app.id, sessionRef: sessionId, channelRef: channel.id, seq: 1 }, userCtx()).catch((e: unknown) => e);
     expect(error).toMatchObject({ message: 'App not found.', extensions: { code: 'APP_NOT_FOUND' } });
+  });
+
+  it('refuses markOwnTeamChatRead while impersonating even within the App organization (#4507)', async () => {
+    await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: user.id, heldAt: new Date() } });
+    // Both actor and subject are org ADMIN; the subject is an App admin and holds the worker. This exercises resolvePilotApp's impersonation guard.
+    expect(await db.orgMember.findFirst({ where: { organizationId: org.id, userId: otherUser.id }, select: { role: true } })).toEqual({ role: 'ADMIN' });
+    expect(await db.orgMember.findFirst({ where: { organizationId: org.id, userId: user.id }, select: { role: true } })).toEqual({ role: 'ADMIN' });
+    expect(await db.appMember.findFirst({ where: { appId: app.id, userId: user.id }, select: { role: true } })).toEqual({ role: 'admin' });
+    expect(await db.worker.findUnique({ where: { id: worker.id }, select: { heldByUserId: true } })).toEqual({ heldByUserId: user.id });
+    await post('unread');
+    const args = { appRef: app.id, sessionRef: sessionId, channelRef: channel.id, seq: 1 };
+    const impersonationSessionId = '00000000000000000000000000004507';
+    const impersonation = { orgId: org.id, actorUserId: otherUser.id, sessionId: impersonationSessionId, expiresAt: new Date(Date.now() + 60_000) };
+    // Pin the specific resolvePilotApp guard as well as the observable refusal below.
+    const source = readFileSync(new URL('./teamAttention.ts', import.meta.url), 'utf8');
+    const pilotGuard = source.slice(source.indexOf('async function resolvePilotApp('), source.indexOf('let id:', source.indexOf('async function resolvePilotApp(')));
+    expect(pilotGuard).toMatch(/if\s*\(\s*!ctx\.userId\s*\|\|\s*ctx\.impersonation\s*\)\s*fail\([^\n]*'FORBIDDEN'/);
+    await expect(M.markOwnTeamChatRead({}, args, userCtx({ impersonation })))
+      .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    await expect(M.markOwnTeamChatRead({}, args, userCtx())).resolves.toBeDefined();
+    expect(await seenSeq(worker.id, channel.id)).toBe(1);
   });
 
   it('conceals an existing App from a non-participant exactly like an absent App (the pilot door)', async () => {

@@ -4,7 +4,6 @@ import { resolve, join } from 'node:path';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import * as rootHelpers from './resolvers.helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { saveNodeToFs } from '../../../integrations/localFs/saveNodeToFs.js';
 
@@ -54,7 +53,7 @@ for (const door of ['personal', 'app', 'installed']) {
     it.each(['a..b', 'x.y', 'Has Space', 'ünï', String.raw`back\slash`])('preserves ordinary input %s', async name => {
       const memory = await create(door, name);
       expect(await db.node.findMany({ where: { memoryId: memory.id } })).toMatchObject([{ loc: name }]);
-      expect(existsSync(join(projection.root, ...name.split(':'), '.node', 'node.yaml'))).toBe(true);
+      expect(existsSync(join(projection.root, ...name.split(':'), '.node', 'node.yaml'))).toBe(false);
     });
   });
 }
@@ -68,19 +67,10 @@ describe('projection writer boundary', () => {
   });
 });
 
-it('writer refusal alone preserves containment and root rollback', async () => {
-  // This suppresses only input validation to isolate the filesystem fence; authorization gates remain live.
-  const input = vi.spyOn(rootHelpers, 'assertMemoryRootLoc').mockImplementation(() => undefined);
-  try {
-    await expect(create('personal', '..:residue')).rejects.toThrow(
-      'Failed to save node to filesystem: Invalid projection path',
-    );
-    expect(input).toHaveBeenCalledWith('..:residue');
-    expect(existsSync(resolve(projection.root, '..', 'residue'))).toBe(false);
-    // Main now includes #2728: a root write refusal rolls the Memory transaction back.
-    expect(await db.memory.count()).toBe(0);
-    expect(await db.node.count()).toBe(0);
-  } finally { input.mockRestore(); }
+it('ordinary creation does not use the standalone projection writer', async () => {
+  const made = await create('personal', 'Ordinary root');
+  expect(await db.node.count({ where: { memoryId: made.id } })).toBe(1);
+  expect(readdirSync(projection.root)).toEqual([]);
 });
 
 it.each(['other', 'level/graphs-neighbor'])('refuses an absolute direct destination (%s)', async sibling => {

@@ -13,6 +13,7 @@ import { STORE_TOOLS } from './storeTools.js';
 import { WEB_TOOLS } from './webTools.js';
 import { WEB_POLL_TOOLS } from './webPollTools.js';
 import { SEARCH_TOOLS } from './searchTools.js';
+import { MEMORY_SEARCH_TOOLS } from './memorySearchTools.js';
 import { SMS_TOOLS } from './smsTools.js';
 import { EMAIL_TOOLS } from './emailTools.js';
 import { SECRET_TOOLS } from './secretTools.js';
@@ -30,6 +31,7 @@ export { hadronStoreFile } from './storeTools.js';
 export { webFetch, webRequest } from './webTools.js';
 export { webPollStart, webPollCancel, webPollList } from './webPollTools.js';
 export { webSearchTool } from './searchTools.js';
+export { hadronFindNodes } from './memorySearchTools.js';
 export { hadronSendSms } from './smsTools.js';
 export { hadronSendEmail } from './emailTools.js';
 export { hadronReadSecret } from './secretTools.js';
@@ -93,6 +95,7 @@ const REGISTRY = new Map<string, RunToolDef>(
     ...WEB_TOOLS,
     ...WEB_POLL_TOOLS,
     ...SEARCH_TOOLS,
+    ...MEMORY_SEARCH_TOOLS,
     ...SMS_TOOLS,
     ...EMAIL_TOOLS,
     ...SECRET_TOOLS,

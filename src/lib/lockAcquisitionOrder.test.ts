@@ -187,7 +187,10 @@ function recordingCtx(): { ctx: Context; keys: ActualKey[] } {
             get(t, p, r) {
               if (p !== '$executeRaw') return Reflect.get(t, p, r);
               return async (strings: TemplateStringsArray, ...values: unknown[]) => {
-                if (LOCK_RE.test(strings.join(''))) {
+                // This observer judges the two-int (memory, loc) namespace only. #1213 adds the
+                // independent one-bigint channel-host handshake before it; hashing an absent second
+                // argument would fabricate a loc key and compare two unrelated namespace orders.
+                if (LOCK_RE.test(strings.join('')) && values.length === 2) {
                   const [m, l] = values;
                   const actual = typeof m === 'number' && typeof l === 'number'
                     ? { h1: m, h2: l }
@@ -233,6 +236,20 @@ function firstAcquisitionsOrdered(keys: ActualKey[]): boolean {
   }
   return true;
 }
+
+it('the loc-order observer excludes the independent one-argument memory-key namespace (#1213)', async () => {
+  const { lockMemoriesForChannelChange } = await import('./channels.js');
+  const { ctx: c, keys } = recordingCtx();
+  await c.db.$transaction(async tx => {
+    await lockMemoriesForChannelChange(tx, [memory.id]);
+    await acquireLockSet(tx, [{ memoryId: memory.id, loc: 'a' }, { memoryId: memory.id, loc: 'b' }]);
+  });
+  const expected = await db.$queryRaw<ActualKey[]>`
+    SELECT hashtext(${memory.id}) AS h1, hashtext(loc) AS h2
+    FROM (VALUES ('a'), ('b')) AS paths(loc) ORDER BY h1, h2`;
+  expect(keys).toEqual(expected);
+  expect(firstAcquisitionsOrdered(keys)).toBe(true);
+});
 
 describe('the real operations acquire in the global order (#1187)', () => {
   const mk = (loc: string) =>
