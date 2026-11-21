@@ -95,6 +95,14 @@ describe('#4337 the conversion block in prisma/stamp-key-identity-invariants.sql
     });
   }, 60_000);
 
+  it('with only zero or negative ids (explicit ones), starts at 1 instead of failing (#4691 LOCAL F1)', async () => {
+    await withPushBuiltTable(`INSERT INTO stamp_signing_keys (id, key_material) VALUES (0, 'z'), (-3, 'n')`, async (pg) => {
+      await pg.query(BLOCK);
+      expect(await column(pg)).toEqual({ identity: 'd', has_default: false });
+      expect((await pg.query(`INSERT INTO stamp_signing_keys (key_material) VALUES ('a') RETURNING id`)).rows[0].id).toBe(1);
+    });
+  }, 60_000);
+
   it.each([
     ['an ALWAYS identity', `ALTER TABLE stamp_signing_keys ALTER COLUMN id DROP DEFAULT; DROP SEQUENCE stamp_signing_keys_id_seq;
       ALTER TABLE stamp_signing_keys ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY`, /GENERATED ALWAYS/],
