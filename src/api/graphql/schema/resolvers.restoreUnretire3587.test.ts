@@ -268,6 +268,31 @@ describe('#3587 concurrency (two real connections)', () => {
     expect((await rowOf('specs:p')).tags).toEqual(['superseded']);
   }, 30_000);
 
+  it('P4b (D6): a save waiting longer than Prisma\'s 5 s default behind a holder of the revisions key still succeeds with a distinct slot (35 s bound)', async () => {
+    await mk('specs:w');
+    await save();
+    const revs = await revCount();
+    let release!: () => void;
+    const hold = new Promise<void>((r) => { release = r; });
+    let hPid = 0;
+    const holder = db.$transaction(async (tx) => {
+      hPid = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${'revisions'}))`;
+      await hold;
+    }, { timeout: 20_000 });
+    await waitFor(async () => hPid > 0, 'holder');
+    const startedAt = Date.now();
+    const waiting = M.createRevision({}, { agentRef: agentId }, ctx).then((r) => r, (e: any) => e);
+    await waitFor(async () => (await db.$queryRaw<Array<{ n: bigint }>>`
+      SELECT count(*) AS n FROM pg_locks WHERE NOT granted AND locktype = 'advisory' AND ${hPid}::int = ANY(pg_blocking_pids(pid))`)[0].n > 0n, 'the save to wait on the revisions key');
+    await new Promise((r) => setTimeout(r, Math.max(0, 5_800 - (Date.now() - startedAt))));
+    release();
+    await holder;
+    const res: any = await waiting;
+    expect(res instanceof Error ? res.message : 'ok').toBe('ok');
+    expect(await revCount()).toBe(revs + 1);
+  }, 40_000);
+
   it('P4: two restores and a standalone createRevision on one Agent take distinct slots, none aborts', async () => {
     await mk('specs:q');
     const rev = await save();
@@ -287,5 +312,16 @@ describe('#3587 snapshot-side tag match', () => {
     await db.node.updateMany({ where: { memoryId, loc: 'specs:s' }, data: { tags: ['superseded'] } });
     const e = await refusal(restore(rev));
     expect(e?.extensions?.code).toBe('RESTORE_WOULD_UNRETIRE_SPEC');
+  });
+});
+
+describe('#3587 compiled boot prompt carve-out', () => {
+  it('a minted, retired compiled boot prompt is not a retirement the guard judges: restoring a snapshot that lacks the tag succeeds and leaves the row byte-identical (cor:agt:040:12)', async () => {
+    await mk('specs:cb', { nodeType: 'compiled-boot-prompt', role: 'boot-prompt', ...mintedFields });
+    const rev = await save();
+    await db.node.updateMany({ where: { memoryId, loc: 'specs:cb' }, data: { tags: ['superseded'] } });
+    const before = await rowOf('specs:cb');
+    await restore(rev);
+    expect(await rowOf('specs:cb')).toEqual(before);
   });
 });
