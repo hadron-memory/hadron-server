@@ -184,7 +184,10 @@ jobs:
           probe_line=$(pnpm -s tsx scripts/db/migration-replay.ts --print | grep '^added idx:replay_probe_idx ' || true)
           [ -n "$probe_line" ] || { echo "::error::--print did not list the seeded probe index"; exit 1; }
           { cat baseline.bak; echo "$probe_line"; } > scripts/db/migration-replay-baseline.txt
-          pnpm -s tsx scripts/db/migration-replay.ts > out.txt 2>&1 || { echo "::error::a difference the baseline lists failed the check"; cat out.txt; exit 1; }
+          # Control 'a listed difference passes' (#4714 F13): the baseline lists the probe's difference, so the check must pass.
+          pnpm -s tsx scripts/db/migration-replay.ts > out.txt 2>&1 || { echo "::error::control 'a listed difference passes': a difference the baseline lists failed the check"; cat out.txt; exit 1; }
+          echo "control 'a listed difference passes': exit 0 as expected"
+          rm -f out.txt
           cp baseline.bak scripts/db/migration-replay-baseline.txt
           expect_red 'removed baseline line' 'NEW DRIFT (not in the baseline): added idx:replay_probe_idx'
           rm -rf "$probe"
@@ -211,3 +214,5 @@ jobs:
           unset MIGRATION_REPLAY_BASE_BASELINE MIGRATION_REPLAY_ALLOW_GROWTH
           cp baseline.bak scripts/db/migration-replay-baseline.txt
           rm -rf "$probe"
+          # The controls leave no output file behind (#4714 F13).
+          rm -f out.txt

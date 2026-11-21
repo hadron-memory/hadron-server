@@ -29,14 +29,18 @@ describe('#4335 the two partial indexes carry the migration definition on push +
 });
 
 /**
- * #4672 QA F1: the two indexes must stay undeclared in schema.prisma. Prisma cannot see a partial index, so a declaration
+ * The declarations that must not come back; one pattern each, shared by the live check and its probes (#4691 BLIND F4).
+ * Both accept Prisma's other spellings: the named `fields:` argument and a field argument such as `userId(sort: Asc)`
+ * (#4714 F8). A composite that merely starts with the same field does not match.
+ */
+const MEMORIES_USER_ID_INDEX = /@@index\s*\(\s*(?:fields\s*:\s*)?\[\s*userId\s*(?:\([^)]*\))?\s*\]/;
+const USERS_EXTERNAL_UNIQUE = /@@unique\s*\(\s*(?:fields\s*:\s*)?\[\s*externalAppId\s*(?:\([^)]*\))?\s*,\s*externalId\s*(?:\([^)]*\))?\s*\]/;
+
+/**
+ * (#4672 QA F1) The two indexes must stay undeclared in schema.prisma. Prisma cannot see a partial index, so a declaration
  * makes every later `db push` try to create it again ("already exists"), which neither a single push nor the replay
  * catches. Comments are stripped first, so the explanatory comments that name the indexes do not count.
  */
-/** The declarations that must not come back; one pattern each, shared by the live check and its probe (#4691 BLIND F4). */
-const MEMORIES_USER_ID_INDEX = /@@index\s*\(\s*\[\s*userId\s*\]/;
-const USERS_EXTERNAL_UNIQUE = /@@unique\s*\(\s*\[\s*externalAppId\s*,\s*externalId\s*\]/;
-
 describe('#4335 schema.prisma does not declare the two partial indexes', () => {
   const schema = readFileSync(new URL('../../../prisma/schema.prisma', import.meta.url), 'utf8')
     .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
@@ -151,8 +155,12 @@ describe('#4335 prisma/partial-index-invariants.sql', () => {
     });
   }, 60_000);
 
-  it('repairs an unusable memories index that has the migration definition (#4672 QA delta F1)', async () => {
+  // Needs a superuser: it writes pg_index directly (a failed concurrent build cannot be forced on a plain btree over text).
+  // Skipped with that reason for a role that cannot (#4714 F11); the test databases run as one (CLAUDE.md, Local Postgres).
+  it('repairs an unusable memories index that has the migration definition (#4672 QA delta F1)', async (ctx) => {
     await withLegacyFullIndexes(async (pg) => {
+      const { rolsuper } = (await pg.query('SELECT rolsuper FROM pg_roles WHERE rolname = current_user')).rows[0];
+      if (!rolsuper) ctx.skip('UPDATE pg_index needs a superuser role');
       await pg.query(FILE);
       const before = await state(pg, 'memories_user_id_idx');
       // A failed concurrent build cannot be forced on a plain btree over text, so mark it unusable as one would leave it.
