@@ -9630,7 +9630,7 @@ export const typeDefs = `#graphql
       finishedAfter: DateTime
       "Inclusive finish-time upper bound; tasks with no finish time never match."
       finishedBefore: DateTime
-      parentTaskId: ID
+      parentTaskRef: ID
       rootsOnly: Boolean
       queued: Boolean
       "True: only single-shot match failures; false: unmarked tasks. Does not change who may read."

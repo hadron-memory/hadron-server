@@ -43,6 +43,21 @@ type EventRow = Record<string, any> & { id: string; type: string; createdAt: Dat
 type Party = { kind: 'WORKER' | 'USER'; id: string; name: string | null; urn: string | null } | null;
 
 type Resolver<A, R> = (parent: unknown, args: A, ctx: Context) => Promise<R>;
+/**
+ * #4148 (S7): the MCP task tools keep their parameter names (golden #2260), while the GraphQL arguments behind them are now
+ * refs. These map one to the other, so a tool's filter or target is never silently dropped (hadron_task_list,
+ * hadron_team_events, hadron_task_assign and hadron_task_reassign; Riana's §10 P3 found the last two). Exported so they are pinned directly:
+ * the tools themselves are switched off (#3082 R4, no test path back), and would rely on this mapping when switched on.
+ */
+export function mcpTaskListArgs<T extends Record<string, unknown> & { parentTaskId?: unknown }>(args: T): Omit<T, 'parentTaskId'> & { parentTaskRef?: unknown } {
+  const { parentTaskId, ...rest } = args;
+  return parentTaskId === undefined ? rest : { ...rest, parentTaskRef: parentTaskId };
+}
+export function mcpTaskRefArgs<T extends Record<string, unknown> & { taskId?: unknown }>(args: T): Omit<T, 'taskId'> & { taskRef?: unknown } {
+  const { taskId, ...rest } = args;
+  return taskId === undefined ? rest : { ...rest, taskRef: taskId };
+}
+
 const Q = resolvers.Query as unknown as {
   agentTask: Resolver<{ ref: string }, TaskRow | null>;
   agentTasks: Resolver<Record<string, unknown>, TaskRow[]>;
@@ -424,7 +439,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       'already has an assignee is moved with hadron_task_reassign.',
     SHAPE_HADRON_TASK_ASSIGN,
     async ({ session, ...args }) =>
-      write('hadron_task_assign', session, 'Assigned', (ctx) => M.assignAgentTask({}, args, ctx)),
+      write('hadron_task_assign', session, 'Assigned', (ctx) => M.assignAgentTask({}, mcpTaskRefArgs(args), ctx)),
   );
 
   off(
@@ -432,7 +447,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'Move a task to another assignee: the task\'s owner, or whoever manages the App (cor:agt:050:09). A started task stays started; the former assignee can no longer move it.',
     SHAPE_HADRON_TASK_REASSIGN,
     async ({ session, ...args }) =>
-      write('hadron_task_reassign', session, 'Reassigned', (ctx) => M.reassignAgentTask({}, args, ctx)),
+      write('hadron_task_reassign', session, 'Reassigned', (ctx) => M.reassignAgentTask({}, mcpTaskRefArgs(args), ctx)),
   );
 
   off(
@@ -509,10 +524,9 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'hadron_task_list',
     'List a team App\'s agent tasks, newest first. Filters combine with AND. Readers: the App\'s participants (cor:agt:050:21).',
     SHAPE_HADRON_TASK_LIST,
-    async ({ session, parentTaskId, ...args }) =>
+    async ({ session, ...args }) =>
       read(session, async (ctx) => {
-        // #4148 (S7): the tool keeps its MCP parameter name (golden #2260); the GraphQL argument is parentTaskRef.
-        const rows = await Q.agentTasks({}, { ...args, ...(parentTaskId === undefined ? {} : { parentTaskRef: parentTaskId }) }, ctx);
+        const rows = await Q.agentTasks({}, mcpTaskListArgs(args), ctx);
         if (!rows.length) return textResult('No tasks match.');
         return textResult((await Promise.all(rows.map((t) => renderTask(t, ctx)))).join('\n'));
       }),
@@ -522,10 +536,9 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'hadron_team_events',
     'Read a team App\'s event stream (cor:agt:050:11), oldest first. To read the next page, pass after: the id of the last event you read (events sharing a timestamp are never skipped). Events carry ids, counts and outcome words, never message text. task.warning, task.edited and task.properties-changed are passive history (never wake, suppress a wake or count as activity); payload is {code}, changed field names only, or (task.properties-changed) the size and SHA-256 of the canonical JSON of the old and new properties, never their content.',
     SHAPE_HADRON_TEAM_EVENTS,
-    async ({ session, taskId, ...args }) =>
+    async ({ session, ...args }) =>
       read(session, async (ctx) => {
-        // #4148 (S7): the tool keeps its MCP parameter name (golden #2260); the GraphQL argument is taskRef.
-        const rows = await Q.agentTeamEvents({}, { ...args, ...(taskId === undefined ? {} : { taskRef: taskId }) }, ctx);
+        const rows = await Q.agentTeamEvents({}, mcpTaskRefArgs(args), ctx);
         if (!rows.length) return textResult('No events match.');
         const lines = await Promise.all(rows.map((e) => renderEvent(e, ctx)));
         const pageSize = args.limit ?? 20;

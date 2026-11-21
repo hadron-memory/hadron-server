@@ -15,7 +15,9 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { settleTeamEventHorizon, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
 
+useTeamEventHorizonTimeout(); // the events cases wait on the commit-safe horizon (#4316)
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
 const M = resolvers.Mutation as any;
@@ -93,6 +95,19 @@ describe('#4148 list filters take refs and keep concealment parity', () => {
       expect(r.data).toEqual({ agentTasks: [] });
     }
   });
+  it('agentTasksPage(parentTaskRef:) pages the children by PK, bare handle and handle URN; unresolvable is empty; old name rejected (Bridget LOCAL P2-1)', async () => {
+    // agentTasksPage shares agentTasks' ListArgs, so it must take the same argument or its filter is silently ignored.
+    for (const ref of Object.values(await forms(parent))) {
+      const r = await run('query($a:ID!,$p:ID){agentTasksPage(appRef:$a,parentTaskRef:$p){items{id}}}', { a: app.id, p: ref });
+      expect(r.errors, ref).toBeUndefined();
+      expect(r.data).toEqual({ agentTasksPage: { items: [{ id: child.id }] } });
+    }
+    const none = await run('query($a:ID!,$p:ID){agentTasksPage(appRef:$a,parentTaskRef:$p){items{id}}}', { a: app.id, p: 'AT999' });
+    expect(none.errors).toBeUndefined();
+    expect(none.data).toEqual({ agentTasksPage: { items: [] } });
+    const old = await run('query($a:ID!,$p:ID){agentTasksPage(appRef:$a,parentTaskId:$p){items{id}}}', { a: app.id, p: parent.id });
+    expect(old.errors?.map(e => e.message).join('\n')).toMatch(/Unknown argument "parentTaskId" on field "Query\.agentTasksPage"/);
+  });
   it('agentTasks rejects the old argument name `parentTaskId`', async () => {
     const r = await run('query($a:ID!,$p:ID){agentTasks(appRef:$a,parentTaskId:$p){id}}', { a: app.id, p: parent.id });
     expect(r.errors?.map(e => e.message).join('\n')).toMatch(/Unknown argument "parentTaskId" on field "Query\.agentTasks"/);
@@ -100,6 +115,7 @@ describe('#4148 list filters take refs and keep concealment parity', () => {
   it.each(['agentTeamEvents', 'agentTeamEventsPage'])('%s(taskRef:) filters by PK, bare handle and handle URN; unresolvable is empty; old name rejected', async field => {
     const sel = field === 'agentTeamEvents' ? '{taskId}' : '{events{taskId}}';
     const rows = (d: any) => (field === 'agentTeamEvents' ? d[field] : d[field].events) as Array<{ taskId: string }>;
+    await settleTeamEventHorizon(db); // the forward feed is commit-safe: wait until the fixture's events are past the horizon
     for (const ref of Object.values(await forms(child))) {
       const r = await run(`query($a:ID!,$t:ID){${field}(appRef:$a,taskRef:$t)${sel}}`, { a: app.id, t: ref });
       expect(r.errors, ref).toBeUndefined();

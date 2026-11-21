@@ -131,6 +131,7 @@ const EXPECTED_QUERY_REF_ARGS: Record<string, string[]> = {
   // #4148 (S7): the agent-task family (gate pin 1: `ref` for the field's own subject, `parentTaskRef` / `taskRef`).
   agentTask: ['ref'],
   agentTasks: ['appRef', 'parentTaskRef'],
+  agentTasksPage: ['appRef', 'parentTaskRef'], // shares agentTasks' ListArgs (Bridget's LOCAL P2-1)
   agentTeamEvents: ['appRef', 'taskRef'],
   agentTeamEventsPage: ['appRef', 'taskRef'],
 };
@@ -164,6 +165,7 @@ const ALLOWED_ID_ARGS = new Set([
   // #4148 (S7): agentTasks.externalId is an external-system label (an outside item's id, e.g. an issue URL; cor:agt:120:02),
   // not a Hadron entity reference, so it keeps its name per the convention ("external-system labels" stay `<x>Id`).
   'Query.agentTasks.externalId',
+  'Query.agentTasksPage.externalId',
 ]);
 
 /** The legacy-`Id` check, one (field, arg) at a time, against a per-field allow-list. */
