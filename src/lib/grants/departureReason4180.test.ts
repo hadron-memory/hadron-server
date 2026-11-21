@@ -67,6 +67,8 @@ describe('#4180: the cause is a fact of the departure, set with the stamp and ne
     }
     await refused(exec(`${STAMP}, holder_departure_reason = 'GUESSED' WHERE id = $1`, id), CHECK);
     await refused(exec(`${STAMP}, holder_departure_reason = 'APP_DELETED' WHERE id = $1`, id), CHECK);
+    // #4180: the two lapse causes are an agent's only (cause_fits requires a live agent, and the CHECK the agent kind).
+    for (const agentOnly of ['ORG_DELETED', 'AGENT_LICENSE_EXPIRED']) await refused(exec(`${STAMP}, holder_departure_reason = $2 WHERE id = $1`, id, agentOnly), EITHER);
     expect(await cause(id)).toBeNull();
   });
 
@@ -114,10 +116,16 @@ describe('#4180: the cause is a fact of the departure, set with the stamp and ne
     await refused(exec(`${STAMP}, holder_departure_reason = 'AGENT_DELETED' WHERE id = $1`, uninstalled));
     await exec(`${STAMP}, holder_departure_reason = 'AGENT_UNINSTALLED' WHERE id = $1`, uninstalled);
     expect(await cause(uninstalled)).toBe('AGENT_UNINSTALLED');
+    // #4180 (the #4696 lapse sweep's two causes): admitted for a live agent, like every other install loss.
+    for (const lapse of ['AGENT_LICENSE_EXPIRED', 'ORG_DELETED']) {
+      const g = await active({ user_id: null, agent_id: w.agentId });
+      await exec(`${STAMP}, holder_departure_reason = $2 WHERE id = $1`, g, lapse);
+      expect(await cause(g)).toBe(lapse);
+    }
     // A soft-deleted agent: deleted, not uninstalled, whichever install-loss code is offered.
     const deleted = await active({ user_id: null, agent_id: w.agentId });
     await db.agent.update({ where: { id: w.agentId }, data: { deletedAt: new Date() } });
-    for (const wrong of ['AGENT_UNINSTALLED', 'AGENT_IMPORTER_UNINSTALLED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED']) {
+    for (const wrong of ['AGENT_UNINSTALLED', 'AGENT_IMPORTER_UNINSTALLED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED', 'AGENT_LICENSE_EXPIRED', 'ORG_DELETED']) {
       await refused(exec(`${STAMP}, holder_departure_reason = $2 WHERE id = $1`, deleted, wrong));
     }
     await exec(`${STAMP}, holder_departure_reason = 'AGENT_DELETED' WHERE id = $1`, deleted);
@@ -137,7 +145,7 @@ describe('#4180 (BLIND P2, Antonio): a door\'s cause yields to what already happ
   it('an install-loss door ending an agent that is ALREADY deleted (unstamped rows) records AGENT_DELETED and commits', async () => {
     const id = await active({ user_id: null, agent_id: w.agentId });
     await db.agent.update({ where: { id: w.agentId }, data: { deletedAt: new Date() } }); // deleted, its grant never stamped
-    for (const reason of ['AGENT_UNINSTALLED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED'] as const) {
+    for (const reason of ['AGENT_UNINSTALLED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED', 'AGENT_LICENSE_EXPIRED', 'ORG_DELETED'] as const) {
       const other = await active({ user_id: null, agent_id: w.agentId });
       const { ended } = await db.$transaction((tx) => endGrantsOfAgentsNoLongerInstalled(tx, [{ appId: w.appId, agentId: w.agentId }], null, reason));
       expect(ended).toBeGreaterThanOrEqual(1);
