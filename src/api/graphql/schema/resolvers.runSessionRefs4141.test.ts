@@ -3,6 +3,9 @@
  * Contract: the CHECKED comment on #4141 (6882200629). Refusals stay byte-identical to today's; a URN reaches the same
  * gates a PK does, and only the RESOLVED id is ever written or compared.
  */
+import { AmbiguousLegacyUrnError, AppRunNotFoundError } from '../../../lib/entityRef/errors.js';
+import * as agentRefModule from '../../../lib/entityRef/agentRef.js';
+import * as appRunRefModule from '../../../lib/entityRef/appRunRef.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
@@ -120,6 +123,46 @@ describe('#4141 cancelAppRun(ref:)', () => {
     expect((await db.appRun.findUniqueOrThrow({ where: { id: runId } })).status).toBe('RUNNING');
   });
 
+  it('an ambiguous legacy ref (two live holders) is byte-identical to an unknown ref, and the run is untouched', async () => {
+    const apps = await Promise.all(['a', 'b'].map((n) => db.app.create({ data: { organizationId: orgId, urn: `refs4141:amb-${n}`, name: n, legacyUrn: 'refs4141:legacy-app' } })));
+    expect(apps.length).toBe(2);
+    const unknown = await cancel(`hrn:apprun:refs4141:no-such-app:${runId}`);
+    const ambiguous = await cancel(`hrn:apprun:refs4141:legacy-app:${runId}`);
+    expect(code(ambiguous)).toBe('NOT_FOUND');
+    expect(JSON.stringify(ambiguous.errors)).toBe(JSON.stringify(unknown.errors));
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: runId } })).status).toBe('RUNNING');
+  });
+
+  it('a resolver that throws AmbiguousLegacyUrnError folds to the same NOT_FOUND', async () => {
+    const spy = vi.spyOn(appRunRefModule, 'resolveAppRunRef').mockRejectedValueOnce(new AmbiguousLegacyUrnError('x', ['a', 'b']));
+    try {
+      const out = await cancel(composeAppRunUrn(appUrn, runId));
+      expect(code(out)).toBe('NOT_FOUND');
+      expect(message(out)).toBe('Run not found.');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('a database fault inside the resolver propagates, the run stays RUNNING', async () => {
+    const spy = vi.spyOn(appRunRefModule, 'resolveAppRunRef').mockRejectedValueOnce(new Error('boom: connection lost'));
+    try {
+      const out = await cancel(composeAppRunUrn(appUrn, runId));
+      expect(code(out)).toBe('INTERNAL_SERVER_ERROR');
+      expect(message(out)).not.toBe('Run not found.');
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: runId } })).status).toBe('RUNNING');
+  });
+
+  it('a URN whose App segment names another App than the run is NOT_FOUND and cancels nothing', async () => {
+    const other = await db.app.create({ data: { organizationId: orgId, urn: 'refs4141:other-app', name: 'Other' } });
+    const out = await cancel(composeAppRunUrn(other.urn, runId));
+    expect(code(out)).toBe('NOT_FOUND');
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: runId } })).status).toBe('RUNNING');
+  });
+
   it('a database fault while resolving propagates; it is not a "Run not found."', async () => {
     const spy = vi.spyOn(db.appRun, 'findUnique').mockRejectedValueOnce(new Error('boom: connection lost'));
     try {
@@ -168,10 +211,54 @@ describe('#4141 startAgentSession(agentRef:)', () => {
 
   it('a relative URN is a shape refusal, after the App-key gate', async () => {
     const out = await start('agent');
-    expect(code(out)).not.toBe('FORBIDDEN');
+    expect(code(out)).toBe('URN_NOT_QUALIFIED');
     expect(out.errors?.length).toBe(1);
     const noKey = await start('agent', false);
     expect(message(noKey)).toBe('Forbidden: App Key required');
+  });
+
+  it('a malformed or wrong-type ref is the unqualified-URN shape refusal, never the install refusal or a write', async () => {
+    const before = await db.session.count();
+    for (const ref of ['hrn:agent:::', 'not a ref', `hrn:node:refs4141:agent:${agentId}`]) {
+      const out = await start(ref);
+      expect(code(out), ref).toBe('URN_NOT_QUALIFIED');
+      expect(out.errors?.length, ref).toBe(1);
+    }
+    expect(await db.session.count()).toBe(before);
+  });
+
+  it('an ambiguous legacy ref is the same refusal as an unknown ref, and writes no session', async () => {
+    for (const n of ['a', 'b']) await db.agent.create({ data: { organizationId: orgId, urn: `refs4141:amb-${n}`, name: n, type: 'CHATBOT', legacyUrn: 'refs4141:legacy-agent' } });
+    const unknown = await start('hrn:agent:refs4141:nobody');
+    const before = await db.session.count();
+    const ambiguous = await start('hrn:agent:refs4141:legacy-agent');
+    expect(code(ambiguous)).toBe('FORBIDDEN');
+    expect(JSON.stringify(ambiguous.errors)).toBe(JSON.stringify(unknown.errors));
+    expect(await db.session.count()).toBe(before);
+  });
+
+  it('a resolver that throws AmbiguousLegacyUrnError folds to the install refusal', async () => {
+    const spy = vi.spyOn(agentRefModule, 'resolveAgentRef').mockRejectedValueOnce(new AmbiguousLegacyUrnError('x', ['a', 'b']));
+    try {
+      const out = await start(agentId);
+      expect(code(out)).toBe('FORBIDDEN');
+      expect(message(out)).toBe('Forbidden: App is not allowed to operate this agent');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('a database fault inside the resolver propagates, and no session is written', async () => {
+    const before = await db.session.count();
+    const spy = vi.spyOn(agentRefModule, 'resolveAgentRef').mockRejectedValueOnce(new Error('boom: connection lost'));
+    try {
+      const out = await start(agentId);
+      expect(code(out)).toBe('INTERNAL_SERVER_ERROR');
+      expect(message(out)).not.toBe('Forbidden: App is not allowed to operate this agent');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await db.session.count()).toBe(before);
   });
 
   it('the missing App-key gate is unchanged for a valid ref', async () => {
