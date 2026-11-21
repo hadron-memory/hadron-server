@@ -217,9 +217,11 @@ describe('#1674 review cycle (Jane)', () => {
     }
   });
 
-  // #3000: 25 sequential mutations plus a re-embed sweep make this case slow under shared-host load (it timed out solo at the 5s
-  // default; 10/10 at 30s: slow, not blocked). A per-case limit in the #2085/#2107 style, never a global `testTimeout` (#2003 ruling).
-  it('P2-2: comment vectors that outrank all content never take the CONTENT window', { timeout: 20_000 }, async () => {
+  // #3000: 25 sequential mutations plus a re-embed sweep make this case slow under shared-host load: it timed out solo at the 5s
+  // default, and ten full-file runs at a 30s budget all passed (30s is the budget those passes were run under, not a measured
+  // duration; solo it takes about 1.5s), so it is slow, not blocked. The limit is that validated 30s bound, per case, in the
+  // #2085/#2107 style and never a global `testTimeout` (#2003 ruling; channelIncarnation2181.test.ts also uses 30_000).
+  it('P2-2: comment vectors that outrank all content never take the CONTENT window', { timeout: 30_000 }, async () => {
     await db.memory.update({ where: { id: memory.id }, data: { vectorIndexEnabled: true } });
     // Now COMMENTS embed exactly onto the query and content only partly.
     setEmbeddingClientForTests(vecFor((t) => (t.includes('feedback') || t === 'retention' ? oneHot(1) : near())));
