@@ -11,7 +11,6 @@ import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { questionDataSchema, MAX_ANSWERS, type AnswerEntry, type QuestionData } from '../../../lib/questions/codec.js';
 import { questionName, renderQuestion, renderQuestionAbstract } from '../../../lib/questions/render.js';
-import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { approvedMergeProof } from '../../../test/mergeConsent.js';
 import { ApolloServer } from '@apollo/server';
 import { formatGraphQLError } from '../formatError.js';
@@ -63,14 +62,8 @@ async function seedEntries(id: string, entries: AnswerEntry[]): Promise<void> {
   } });
 }
 
-/** Stands in for the approval door, which questions do not have yet (approveNode answers QUESTION_NOT_APPROVABLE): holger approved the standing revision. */
-async function approveAsHolger(id: string): Promise<void> {
-  const r = await rowOf(id);
-  await db.node.update({ where: { id }, data: {
-    approvedBy: holger.id, approvedRevNo: r.revSeq, approvedAt: new Date(),
-    approvalHash: computeApprovalHash({ title: r.name, abstract: r.abstract, content: r.content }),
-  } });
-}
+/** holger, a decider, approves the standing revision through the real door (#4429). */
+const approveAsHolger = (id: string) => M.approveNode(null, { nodeRef: id }, as(holger.id));
 
 beforeEach(async () => {
   await cleanDb(db);
