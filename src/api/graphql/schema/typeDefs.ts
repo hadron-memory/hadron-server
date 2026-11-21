@@ -16051,6 +16051,11 @@ export const typeDefs = `#graphql
     interrupted completion allows the strict owner or owning App key to call
     encryptMemory with the existing key. A registered holding cannot be linked again.
 
+    An encrypted promotion refuses WHOLE when a chat-engine state's envelope
+    fails authentication: ENCRYPTION_INCOMPLETE with operation
+    PROMOTE_ANONYMOUS_MEMORY, progressCommitted false and the same extensions
+    as encryptMemory, and nothing is committed.
+
     Accepts the entity's ID or URN.
     """
     linkMemoryToUser(memoryRef: ID!, externalUserId: String!): Memory!
@@ -16064,6 +16069,18 @@ export const typeDefs = `#graphql
     matching verifier; impersonation and sibling Apps grant no authority. Live and
     historical node fields are converted in bounded locked passes. One-way
     without the key: the server cannot recover the content.
+
+    A chat-engine state whose stored envelope fails authentication is never
+    treated as plaintext and is never repaired. The conversion still converts
+    everything healthy (including that chat root's own node fields), then
+    answers ENCRYPTION_INCOMPLETE and never a Memory: the message is fixed, and
+    the extensions carry operation ENCRYPT_MEMORY, phase CHAT_ENGINE_STATE,
+    reason UNAUTHENTICATED_ENVELOPE, blockedEngineStateCount (exact, or null
+    when the scan did not finish), blockedEngineStateRootIds (the chat roots'
+    node ids, ascending, at most 100), progressCommitted (whether this call
+    converted anything) and retryable false. A retry with the same key repeats
+    the refusal while the envelope remains. No name, content, path or key
+    material is ever in the error.
 
     The secret travels beside the operation, never in it (hrn:node:hadronmemory.com:specs:cor:sec:040:04, #1796).
     The strict owner sends exactly one of dataKey or passphrase in an x-hadron-memory-keys entry
