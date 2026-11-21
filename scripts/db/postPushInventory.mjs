@@ -36,6 +36,7 @@ export const OBJECT_KINDS = [
   'foreign-key-constraint',
   'unique-constraint',
   'generated-column',
+  'identity-column',
   'function',
   'trigger',
   'table',
@@ -701,6 +702,13 @@ export function classify(stmt) {
       // identifier containing spaces, so the object word between ALTER and ADD
       // cannot be captured by \S+ — anchor on the verb pair alone (delta2 A5,
       // delta3 B2).
+      // #4337: exactly `ALTER [COLUMN] <col> ADD GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY`, with no sequence
+      // options, names one object: that column's identity (its sequence is the identity's own, never named apart).
+      // Every other ADD GENERATED spelling (sequence options, anything trailing) still refuses.
+      if ((am = action.match(new RegExp(`^ALTER (?:COLUMN )?${IDENT}\\s+ADD GENERATED (?:ALWAYS|BY DEFAULT) AS IDENTITY$`, 'i')))) {
+        out.push({ kind: 'identity-column', name: `${table}.${unquote(am[1] ?? am[2])}` });
+        continue;
+      }
       if (/^ALTER\b.*\bADD\s+GENERATED\b/i.test(action)) {
         out.push({ unrecognized: sql });
         continue;

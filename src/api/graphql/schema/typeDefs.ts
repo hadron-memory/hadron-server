@@ -6406,10 +6406,10 @@ export const typeDefs = `#graphql
   input IssueSecretReadClientInput {
     "The App secret, by id or URN."
     secretRef: ID!
-    "WORKER: a live worker of the App (holderRef is its id). USER: the issuer themself (holderRef omitted). AGENT and APP are refused (GRANT_HOLDER_NOT_ALLOWED): a read client is held by a person or a worker."
+    "WORKER: a live worker of the App (holderRef is its id). AGENT: an agent installed and licensed in the App (holderRef is its id); its live workers in the App read through the client (hrn:node:hadronmemory.com:specs:cor:sec:060:02). USER: the issuer themself (holderRef omitted). APP is refused (GRANT_HOLDER_NOT_ALLOWED): an App holds no reveal path."
     holderKind: GrantHolderKind!
     holderRef: ID
-    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refused (SECRET_AUTO_DELETE_NOT_AVAILABLE) until the deletion is available."
+    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refusals, in the order they are judged: holderKind APP (GRANT_HOLDER_NOT_ALLOWED); an unreadable startsAt or expiresAt (BAD_USER_INPUT); a marked request without a window or a read budget (SECRET_AUTO_DELETE_NEEDS_LIMIT); a caller who is neither an App manager nor the writer of the secret's current version (SECRET_AUTO_DELETE_NOT_ALLOWED, where an unmarked request would get FORBIDDEN or SECRET_READ_CLIENT_SUPERSEDED)."
     autoDelete: Boolean! = false
     startsAt: DateTime
     expiresAt: DateTime
@@ -7664,6 +7664,8 @@ export const typeDefs = `#graphql
     AGENT_UNINSTALLED
     "The agent was installed only through an importing agent, and that agent was uninstalled from the grant's App."
     AGENT_IMPORTER_UNINSTALLED
+    "The agent was installed only through an importing agent, and that agent was deleted (hard delete; #4179)."
+    AGENT_IMPORTER_DELETED
     "The import that installed the agent in the grant's App was removed."
     AGENT_IMPORT_REMOVED
     "The organization's licence to the agent was revoked, which ended its installation in the grant's App."
@@ -13818,6 +13820,17 @@ export const typeDefs = `#graphql
     Update a Memory.
 
     Accepts the entity's ID or URN.
+
+    \`orgRef\` takes an organization's ID or fully-qualified URN and is compared on
+    the RESOLVED organization id, not on the text passed. Naming the memory's own
+    organization (by ID or URN) is a no-op. Naming any other organization answers
+    USE_TRANSFER_MEMORY_OWNERSHIP: use \`transferMemoryOwnership\` to change a
+    memory's owner. For a caller who may manage the memory, an organization that
+    does not exist answers ORGANIZATION_NOT_FOUND. A caller who cannot read the
+    memory gets its concealed MEMORY_NOT_FOUND first, and a caller who can read
+    it but may not manage it gets the ordinary authorization denial; neither
+    reaches the organization lookup. An empty string \`orgRef: ""\` also
+    answers USE_TRANSFER_MEMORY_OWNERSHIP.
 
     Spec 033 FR-026: enabling \`vectorIndexEnabled\` on an \`isEncrypted\` memory
     requires \`acknowledgeVectorInversionRisk: true\` in the same call. Without

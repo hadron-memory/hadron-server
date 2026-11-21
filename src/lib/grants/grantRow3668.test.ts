@@ -19,9 +19,13 @@ const query = <T>(sql: string, ...params: unknown[]) => db.$queryRawUnsafe<T[]>(
 describe('prisma/grant-invariants.sql parity', () => {
   it('the newest migration to carry it ends with a byte-identical copy, and post-push includes the file', () => {
     const sql = readFileSync(new URL('../../../prisma/grant-invariants.sql', import.meta.url), 'utf8');
-    // #4180: the departure-reason migration carries the full canonical guard (everything #3998's use-count-bound migration carried,
-    // plus the departure cause), after its column.
-    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d === '20261121120000_grant_holder_departure_reason');
+    // #4179 / #4180: the newest migration carries the full canonical file (everything #3998's use-count-bound migration carried, plus
+    // the agent_imports AFTER DELETE trigger), after it.
+    // The newest migration whose file contains the canonical file's first line is the carrier; a later one that carries it moves this.
+    const migrations = new URL('../../../prisma/migrations/', import.meta.url);
+    const first = sql.split('\n')[0]!;
+    const dir = readdirSync(migrations).sort().reverse()
+      .find((d) => { try { return readFileSync(new URL(`${d}/migration.sql`, migrations), 'utf8').includes(first); } catch { return false; } });
     expect(dir).toBeTruthy();
     expect(readFileSync(new URL(`../../../prisma/migrations/${dir}/migration.sql`, import.meta.url), 'utf8').endsWith(sql)).toBe(true);
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir grant-invariants.sql');

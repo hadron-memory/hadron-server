@@ -8,7 +8,7 @@
  * `deleteAgent` and `deleteApp`.
  *
  * Two doors end a LIVE holder's grants in a SCOPE without deleting the holder (Holger rulings A, epic #1975): #4171, a person
- * leaving the organization that owns the App (`endHeldGrants(tx, 'user', id, { organizationId })`), and #4172, an agent left
+ * leaving the organization that owns the App (`endHeldGrants(tx, 'user', id, 'ORG_LEFT' | 'ORG_REMOVED', { organizationId })`), and #4172, an agent left
  * with no effective installation in an App ({@link endAgentGrantsAtApps}). Rejoining or reinstalling revives nothing: the stamp
  * is never cleared (the database guard refuses it), so a new grant must be issued and signed.
  *
@@ -34,7 +34,7 @@ export type GrantHolderKind = 'user' | 'agent' | 'worker' | 'app';
 export const DEPARTURE_REASONS = {
   user: ['USER_ERASED', 'ORG_LEFT', 'ORG_REMOVED'],
   worker: ['WORKER_RETIRED', 'WORKER_DELETED'],
-  agent: ['AGENT_DELETED', 'AGENT_UNINSTALLED', 'AGENT_IMPORTER_UNINSTALLED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED'],
+  agent: ['AGENT_DELETED', 'AGENT_UNINSTALLED', 'AGENT_IMPORTER_UNINSTALLED', 'AGENT_IMPORTER_DELETED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED'],
   app: ['APP_DELETED'],
 } as const;
 export type DepartureReason<K extends GrantHolderKind = GrantHolderKind> = (typeof DEPARTURE_REASONS)[K][number];
@@ -45,12 +45,14 @@ export type AgentDepartureReason = DepartureReason<'agent'>;
  * AGENT_DELETED, not the install loss it was judging; a person already erased records USER_ERASED, not the org leave. Without this the
  * guard's evidence clauses would refuse the stamp and roll back the whole uninstall, import removal, licence revoke or removal.
  */
-function causeFitting(kind: GrantHolderKind, reason: Prisma.Sql, plain: string): Prisma.Sql {
-  if (kind === 'agent' && plain !== 'AGENT_DELETED') {
+function causeFitting(kind: GrantHolderKind, reason: Prisma.Sql, mayYield: boolean): Prisma.Sql {
+  // `mayYield` is false when the door's own cause already IS the holder's deletion (AGENT_DELETED, USER_ERASED): nothing to yield to.
+  if (!mayYield) return reason;
+  if (kind === 'agent') {
     return Prisma.sql`(CASE WHEN EXISTS (SELECT 1 FROM agents fa WHERE fa.id = grants.agent_id AND fa.deleted_at IS NULL)
       THEN ${reason} ELSE 'AGENT_DELETED' END)`;
   }
-  if (kind === 'user' && plain !== 'USER_ERASED') {
+  if (kind === 'user') {
     return Prisma.sql`(CASE WHEN EXISTS (SELECT 1 FROM users fu WHERE fu.id = grants.user_id AND fu.deleted_at IS NULL)
       THEN ${reason} ELSE 'USER_ERASED' END)`;
   }
@@ -68,7 +70,7 @@ const HOLDER_COLUMN: Record<GrantHolderKind, string> = { user: 'user_id', agent:
  * (#4163, cor:acl:140:03: a used or timed-out boot-prompt grant), has already ended and is never stamped departed. Read with the
  * database clock, after the row locks. ONE fragment for every departure door, so the doors cannot drift.
  */
-const ALREADY_ENDED = Prisma.sql`(activated_at IS NOT NULL AND ((expires_at IS NOT NULL AND expires_at <= ${GRANT_DB_NOW})
+export const ALREADY_ENDED = Prisma.sql`(activated_at IS NOT NULL AND ((expires_at IS NOT NULL AND expires_at <= ${GRANT_DB_NOW})
         OR (max_uses IS NOT NULL AND use_count >= max_uses)
         OR EXISTS (SELECT 1 FROM actions x WHERE x.name = grants.action
           AND ((x.max_uses IS NOT NULL AND grants.use_count >= x.max_uses)
@@ -101,7 +103,7 @@ export async function endHeldGrants<K extends GrantHolderKind>(
     ORDER BY id FOR UPDATE`);
   return tx.$executeRaw(Prisma.sql`
     UPDATE grants SET holder_departed_at = ${GRANT_DB_NOW}, updated_at = ${GRANT_DB_NOW},
-      holder_departure_reason = ${causeFitting(kind, Prisma.sql`${reason}`, reason)}
+      holder_departure_reason = ${causeFitting(kind, Prisma.sql`${reason}`, reason !== 'AGENT_DELETED' && reason !== 'USER_ERASED')}
     WHERE ${column} = ${holderId} AND holder_departed_at IS NULL AND revoked_at IS NULL
       AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id) ${inScope}
       AND NOT ${ALREADY_ENDED}`);
@@ -133,7 +135,7 @@ export async function endAgentGrantsAtApps(
     UPDATE grants SET holder_departed_at = ${GRANT_DB_NOW}, updated_at = ${GRANT_DB_NOW},
       holder_departure_reason = ${causeFitting('agent', Prisma.sql`(SELECT p.reason FROM unnest(${appIds}::text[], ${agentIds}::text[], ${reasons}::text[])
           WITH ORDINALITY AS p(app_id, agent_id, reason, n)
-        WHERE p.app_id = grants.app_id AND p.agent_id = grants.agent_id ORDER BY p.n LIMIT 1)`, 'AGENT_UNINSTALLED')}
+        WHERE p.app_id = grants.app_id AND p.agent_id = grants.agent_id ORDER BY p.n LIMIT 1)`, true)}
     WHERE ${inPairs} AND holder_departed_at IS NULL AND revoked_at IS NULL
       AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
       AND NOT ${ALREADY_ENDED}`);
