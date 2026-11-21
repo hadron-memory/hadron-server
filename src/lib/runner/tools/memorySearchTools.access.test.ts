@@ -162,7 +162,7 @@ it.each(['foreign', 'encrypted', 'own'] as const)('does not let effective inheri
   expect(JSON.stringify(out)).not.toContain('base-must-not-escape');
 });
 
-it.each(['encrypted', 'foreign', 'deleted', 'moved', 'node-deleted'] as const)('suppresses a hit whose %s fence changes after the engine read', async kind => {
+it.each(['encrypted', 'foreign', 'deleted', 'moved', 'relocated', 'node-deleted'] as const)('suppresses a hit whose %s fence changes after the engine read', async kind => {
   const c = await context(true);
   const target = await db.node.findFirstOrThrow({ where: { memoryId: memories.attached.id } });
   const original = Q.findNodes;
@@ -170,6 +170,7 @@ it.each(['encrypted', 'foreign', 'deleted', 'moved', 'node-deleted'] as const)('
     const found = await original(...args);
     expect(found.hits.map((h: any) => h.node.id)).toContain(target.id);
     if (kind === 'moved') await db.node.update({ where: { id: target.id }, data: { memoryId: memories.subscribed.id } });
+    else if (kind === 'relocated') await db.node.update({ where: { id: target.id }, data: { loc: 'relocated-after-ranking' } });
     else if (kind === 'node-deleted') await db.node.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
     else await db.memory.update({ where: { id: memories.attached.id }, data: kind === 'encrypted' ? { isEncrypted: true }
       : kind === 'foreign' ? { organizationId: otherOrgId } : { deletedAt: new Date() } });
@@ -253,4 +254,23 @@ it('does not turn a first-page engine refusal into an empty successful result', 
   const spy = vi.spyOn(Q, 'findNodes').mockRejectedValue(refusal);
   try { await expect(call(c)).rejects.toBe(refusal); expect(spy).toHaveBeenCalledTimes(1); }
   finally { spy.mockRestore(); }
+});
+
+
+it('deduplicates a repeated cross-page id without consuming the output limit', async () => {
+  const c = await context(false);
+  const local = await db.node.findFirstOrThrow({ where: { memoryId: memories.app.id } });
+  const otherLocal = await node(memories.app.id, 'second-local');
+  const excluded = await db.node.findFirstOrThrow({ where: { memoryId: memories.others.id } });
+  const spy = vi.spyOn(Q, 'findNodes')
+    .mockResolvedValueOnce({ hits: [local, excluded, excluded].map(node => ({ node, score: 1 })) })
+    .mockResolvedValueOnce({ hits: [local, otherLocal].map(node => ({ node, score: 1 })) });
+  try {
+    const out = await call(c, { limit: 3 });
+    expect(out).toEqual({ hits: [
+      expect.objectContaining({ urn: emitNodeUrnV2(memories.app.urn, local.loc) }),
+      expect.objectContaining({ urn: emitNodeUrnV2(memories.app.urn, otherLocal.loc) }),
+    ] });
+    expect(spy).toHaveBeenCalledTimes(2);
+  } finally { spy.mockRestore(); }
 });
