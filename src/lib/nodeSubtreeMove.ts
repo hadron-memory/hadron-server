@@ -754,11 +754,29 @@ export async function moveNodeSubtree(
     });
   }
 
+  const carriedThreadEdgeChanges: EdgeUrnChange[] = [];
   if (carriedComments.length > 0) {
     // The threads follow (their locs are id-derived, so they cannot collide).
     const ids = carriedComments.map((c) => c.nodeId);
     await tx.node.updateMany({ where: { id: { in: ids } }, data: { memoryId: destMemoryId } });
+    // #2947 (ruling 0162, Vera's read of 2026-11-21): the thread's governed edges (a COMMENT_ANCHOR) keep their id-derived
+    // loc, but their URN names the memory, so the old URN keeps resolving through an EDGE alias like any other edge.
+    const threadEdges = await tx.edge.findMany({
+      where: { sourceId: { in: ids }, governedKind: { not: null }, memoryId: { not: destMemoryId } },
+      select: { id: true, loc: true, memoryId: true },
+    });
     await tx.edge.updateMany({ where: { sourceId: { in: ids }, governedKind: { not: null } }, data: { memoryId: destMemoryId } });
+    for (const e of threadEdges) {
+      const previousUrn = safeEdgeUrnV2(memoryUrns.get(e.memoryId) ?? memoryUrns.get(srcMemoryId)!, e.loc);
+      const urn = safeEdgeUrnV2(memoryUrns.get(destMemoryId)!, e.loc);
+      if (previousUrn === urn) continue;
+      await recordUrnRename(tx, {
+        entityType: 'EDGE', entityId: e.id,
+        oldUrn: previousUrn.slice('hrn:edge:'.length), newUrn: urn.slice('hrn:edge:'.length),
+        createdBy: editor.userId ?? editor.info ?? null,
+      });
+      carriedThreadEdgeChanges.push({ edgeId: e.id, previousUrn, urn });
+    }
   }
 
   if (!crossMemory) {
@@ -821,9 +839,12 @@ export async function moveNodeSubtree(
   }
 
   // #2947: the edge pass, shared with the same-memory path above.
-  result.edgeUrnChanges = await rebaseMovedEdges(tx, {
-    movedIds, newLocById, srcMemoryId, destMemoryId, crossMemory, memoryUrns, createdBy: editor.userId ?? editor.info ?? null,
-  });
+  result.edgeUrnChanges = [
+    ...carriedThreadEdgeChanges,
+    ...(await rebaseMovedEdges(tx, {
+      movedIds, newLocById, srcMemoryId, destMemoryId, crossMemory, memoryUrns, createdBy: editor.userId ?? editor.info ?? null,
+    })),
+  ];
   return result;
 }
 
@@ -847,7 +868,9 @@ export interface EdgeUrnChange {
  *  - An AUTHORED edge keeps its loc on every move (0154). The one exception is a cross-memory move of its SOURCE, which
  *    carries it into the destination memory (its memory atom changes): it keeps the loc, and a loc the destination already
  *    holds gets a numbered suffix (0161). Authored edges claim their locs before derived ones do.
- *  - A governed edge (INCLUDE, COMMENT_*) is never touched here: its loc is id-derived.
+ *  - A governed edge (INCLUDE, COMMENT_*) is never touched here: its loc is id-derived. (A carried thread's COMMENT_ANCHOR
+ *    gets its EDGE alias in the carried-comments step of the move, 0162.)
+ *  - A boundary edge whose only moved endpoint is its TARGET, moved to another memory than the edge's own, is not rebased.
  *  - Every edge whose URN changes keeps its old URN as an EDGE alias (0162), derived or authored.
  *
  * The recorded flag is the only thing that tells derived from authored; nothing is inferred from the loc at move time.
@@ -894,6 +917,10 @@ async function rebaseMovedEdges(
       if (carried) plans.push({ id: e.id, name: e.name, oldMemoryId: e.memoryId, oldLoc: e.loc, memoryId, base: e.loc, authored: true });
       continue;
     }
+    // Ruling of 2026-11-21 (Holger, "don't rebase"): a boundary edge whose only moved endpoint is its TARGET, moved into a
+    // memory other than the edge's own, keeps its stored loc: a rebased loc would hand source-memory readers the
+    // destination's loc past the endpoint gate.
+    if (a.crossMemory && !a.movedIds.has(e.sourceId) && e.memoryId !== a.destMemoryId) continue;
     const src = locOf(e.sourceId); const tgt = locOf(e.targetId);
     if (src == null || tgt == null) continue; // an endpoint vanished: leave the edge as it is
     const base = deriveEdgeLoc(src, e.name, tgt);

@@ -129,7 +129,7 @@ describe('#2947 the move names the edge URNs it changed (GraphQL and MCP share o
 
 describe('#2947 the backfill SQL and the application agree on the classification of the same rows', () => {
   const sql = (() => {
-    const text = readFileSync(new URL('../../prisma/migrations/20261121060000_edge_loc_provenance/migration.sql', import.meta.url), 'utf8');
+    const text = readFileSync(new URL('../../prisma/migrations/20261121110000_edge_loc_provenance/migration.sql', import.meta.url), 'utf8');
     return text.slice(text.indexOf('-- BACKFILL-BEGIN'), text.indexOf('-- BACKFILL-END'));
   })();
 
@@ -187,19 +187,23 @@ describe('#2947 the backfill SQL and the application agree on the classification
 });
 
 describe('#2947 a cross-memory move and a comment thread (governed COMMENT_ANCHOR edge)', () => {
-  it('the anchor edge follows its thread to the destination memory with its id-derived loc untouched; the move reports no rebase for it', async () => {
+  it('the anchor edge follows its thread to the destination memory with its id-derived loc untouched, and its old URN keeps resolving (ruling 0162)', async () => {
     const a = await node(mem.id, 'a');
     const comment = await resolvers.Mutation.createComment({}, { targetRef: a.id, body: 'a thread' } as never, ctx()) as { id: string };
     const anchor = await db.edge.findFirstOrThrow({ where: { sourceId: comment.id, governedKind: 'COMMENT_ANCHOR' } });
     expect(anchor.memoryId).toBe(mem.id);
-    const result = await resolvers.Mutation.moveNode(null, { sourceRef: a.id, targetUrn: nodeUrn(other, 'a') } as never, ctx()) as unknown as { moveEdgeUrnChanges: Array<{ edgeId: string }> };
+    const oldUrn = safeEdgeUrnV2(mem.urn, anchor.loc);
+    const newUrn = safeEdgeUrnV2(other.urn, anchor.loc);
+    const result = await resolvers.Mutation.moveNode(null, { sourceRef: a.id, targetUrn: nodeUrn(other, 'a') } as never, ctx()) as unknown as { moveEdgeUrnChanges: Array<{ edgeId: string; previousUrn: string; urn: string }> };
     const after = await db.edge.findUniqueOrThrow({ where: { id: anchor.id } });
     expect(after.memoryId).toBe(other.id);
     expect(after.loc).toBe(anchor.loc);
     expect(after.deletedAt).toBeNull();
-    // The comment's own source is the thread node, never a moved node, so rebaseMovedEdges never sees it (main's old
-    // non-INCLUDE arm matched no real row either); its home moves with the thread in the carry step, as on main.
-    expect(result.moveEdgeUrnChanges.map((c) => c.edgeId)).not.toContain(anchor.id);
+    // Its loc is id-derived and untouched (governed edges are never rebased), but its URN names the memory, so it is
+    // reported and aliased like every edge whose URN a move changes.
+    expect(result.moveEdgeUrnChanges.filter((c) => c.edgeId === anchor.id)).toEqual([{ edgeId: anchor.id, previousUrn: oldUrn, urn: newUrn }]);
+    expect(await resolveEdgeRef(db, oldUrn)).toEqual({ id: anchor.id });
+    expect(await resolveEdgeRef(db, newUrn)).toEqual({ id: anchor.id });
   });
 });
 

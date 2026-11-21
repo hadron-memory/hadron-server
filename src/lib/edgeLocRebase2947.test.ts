@@ -82,11 +82,16 @@ describe('#2947 derived locs rebase on a move (ask 1)', () => {
     const b = await edgeNow(boundary.id);
     expect(b.memoryId).toBe(mem.id);                      // source stayed
     expect(b.loc).toBe('s:sees:t');
-    // Same loc text above because the leaf locs are unchanged; now rename on the way over.
+    // Now rename on the way over. Holger's ruling of 2026-11-21 ("don't rebase"): the edge's own memory is not the
+    // target's new memory, so the stored loc stays; a rebased loc would hand source-memory readers the destination's loc
+    // (and an existence oracle for a guessed one) past the endpoint gate.
     const x = await node(mem.id, 'x'); const y = await node(mem.id, 'y');
     const e = await link(x, y, 'to');
     await move(y, 'y2', mem, other);
-    expect((await edgeNow(e.id)).loc).toBe('x:to:y2');
+    const kept = await edgeNow(e.id);
+    expect(kept.loc).toBe('x:to:y');
+    expect(kept.memoryId).toBe(mem.id);
+    expect(kept.loc).not.toContain('y2');
   });
 
   it('a rebase onto a slot already held by a live or soft-deleted edge succeeds with a numbered suffix', async () => {

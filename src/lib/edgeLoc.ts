@@ -161,7 +161,7 @@ export function isAuthoredLoc(loc: string | null | undefined): loc is string {
  * `<source loc>:<name atom>:<target loc>` with the edge's OWN name, from any endpoint generation. The sanitized name is
  * one INTERIOR atom of the loc, in either spelling (the runtime one and the historical code-point one, #4583). It is
  * the SHAPE, never a comparison against the current endpoints, so a derived loc a pre-build move left stale still
- * decodes. The migration `20261121060000_edge_loc_provenance` classifies existing rows with the SQL twin of this
+ * decodes. The migration `20261121110000_edge_loc_provenance` classifies existing rows with the SQL twin of this
  * function (a parity test runs both on the same rows). It is used for that one backfill and its test, never at move time:
  * a move reads the recorded `Edge.locAuthored` flag.
  */
