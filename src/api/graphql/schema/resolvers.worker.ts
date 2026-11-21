@@ -3764,7 +3764,9 @@ export const workerFieldResolvers = {
       const user = session?.userId
         ? await ctx.db.user.findFirst({ where: { id: session.userId, deletedAt: null }, select: { handle: true } })
         : null;
-      return { userHandle: user?.handle ?? null, sessionId };
+      // sessionId is returned only for a session found among this worker's own live sessions (same
+      // sanitization as previousSession): an unverified envelope id is never echoed as fact.
+      return { userHandle: user?.handle ?? null, sessionId: session ? sessionId : null };
     },
   },
 };

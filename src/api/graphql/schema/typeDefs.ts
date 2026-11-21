@@ -6038,7 +6038,13 @@ export const typeDefs = `#graphql
   type WorkerContinuityAuthor {
     "The handle of the user who held the worker when the writing session ran. Null only when the author is unknown or erased."
     userHandle: String
-    "The session that wrote the handoff: the id alone, never the Session (same sanitization as previousSession)."
+    """
+    The session the handoff's envelope names as its writer: the id alone, never the Session, and
+    null unless that session is one of this worker's own live sessions (same sanitization as
+    previousSession). The envelope is written by the session that holds the worker, so this is the
+    author as RECORDED in the handoff: a later holder of the same worker could name an earlier
+    holder's session. Not an authentication of who wrote the node.
+    """
     sessionId: ID
   }
 

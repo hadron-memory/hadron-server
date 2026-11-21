@@ -133,7 +133,17 @@ describe('#1054 — WorkerContinuity.handoffAuthor', () => {
     const r = await post(await keyFor('holderB'), Q, { w: workerId, a: appId });
     expect(r.errors).toBeUndefined();
     expect(JSON.stringify(r.data)).not.toContain(`ha1054-holderA-${n}`);
-    expect(r.data.worker.continuity.handoffAuthor.userHandle).toBeNull();
+    expect(r.data.worker.continuity.handoffAuthor).toEqual({ userHandle: null, sessionId: null });
+  });
+
+  it('a non-string envelope session id is an author with nothing known, never an error', async () => {
+    for (const bad of [{ $ne: 'x' }, 42, ['a'], null, true]) {
+      await db.node.deleteMany({ where: { memoryId: workMemoryId } });
+      await handoff('handoffs:0001', { sessionId: bad });
+      const r = await post(await keyFor('holderB'), Q, { w: workerId, a: appId });
+      expect(r.errors).toBeUndefined();
+      expect(r.data.worker.continuity.handoffAuthor).toEqual({ userHandle: null, sessionId: null });
+    }
   });
 
   it('a soft-deleted writing session gives a null handle and no error', async () => {
@@ -142,7 +152,7 @@ describe('#1054 — WorkerContinuity.handoffAuthor', () => {
     await handoff('handoffs:0001', { sessionId: sid });
     const r = await post(await keyFor('holderB'), Q, { w: workerId, a: appId });
     expect(r.errors).toBeUndefined();
-    expect(r.data.worker.continuity.handoffAuthor).toEqual({ userHandle: null, sessionId: sid });
+    expect(r.data.worker.continuity.handoffAuthor).toEqual({ userHandle: null, sessionId: null });
   });
 
   it('a hand-written handoff (no session envelope) gives an author with nothing known', async () => {
