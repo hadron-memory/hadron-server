@@ -12909,11 +12909,21 @@ export const typeDefs = `#graphql
     approval hash of its title/abstract/content. Pass revision to approve only
     if it is still the one you read (REVISION_MISMATCH otherwise). A memory
     writer may approve ordinary nodes, the author included; placed boot prompts
-    also require their dedicated manager-as-self gate. Comments and
-    question-family nodes are refused. Idempotent: an approved
-    revision keeps its existing approval. Refuses NODE_IS_PLACEHOLDER, and
-    ENCRYPTED_MEMORY_NOT_APPLICABLE on any encrypted memory, even with a
-    cached session key.
+    also require their dedicated manager-as-self gate. Comments are refused. A
+    question (#4429, hrn:node:hadronmemory.com:specs:cor:dmo:140:05) is approved
+    one at a time, and only by one of its deciders acting as themselves (a person
+    in a session bound to no worker or agent, no App key or run, no impersonation,
+    still among the log's deciders and able to write the memory): otherwise
+    QUESTION_NOT_DECIDER or QUESTION_IMPERSONATION_REFUSED. It needs an answer to
+    approve (QUESTION_NOT_ANSWERED on an open one), and refuses QUESTION_WITHDRAWN
+    and, for a tampered or unverifiable one, QUESTION_INVALID. Any tier may be
+    approved; the approval writes no new revision, and the tier decides what it
+    counts for (the signed tier never reaches DECIDED on an approval). A question
+    log is never approved (QUESTION_LOG_NOT_APPROVABLE), and approveMemoryNodes
+    skips every question and log. Idempotent: an approved revision keeps its
+    existing approval, and a repeat still checks the caller. Refuses
+    NODE_IS_PLACEHOLDER, and ENCRYPTED_MEMORY_NOT_APPLICABLE on any encrypted
+    memory, even with a cached session key.
     """
     approveNode(nodeRef: ID!, revision: Int): NodeApprovalReceipt!
     """

@@ -172,6 +172,12 @@ export async function approveNodeInTransaction(
      * and no App key, the same shape the batch COMPILE requires. Absent means false, so a caller that does not say never lifts.
      */
     workerSessionMayUseBatch?: boolean;
+    /**
+     * #1641 S5 (#4429) — approving a question: the caller's decider check, run on the locked row. Absent (bulk approval, any
+     * caller that does not say): a question is refused. The gate sits before the revision check and before the "approval still
+     * holds" early return, so an already approved revision still asks who is calling. It throws its own typed errors.
+     */
+    questionGate?: (tx: Prisma.TransactionClient, node: { id: string; memoryId: string }) => Promise<void>;
   },
 ): Promise<{ node: NodeApprovalRow; approvedNow: boolean }> {
   // #2043 (R30, cor:agt:040:18) — judged on the LOCKED row, before the revision
@@ -204,15 +210,17 @@ export async function approveNodeInTransaction(
   });
   if (!locked) throw new NodeApprovalRefusal('NODE_NOT_FOUND', 'Node not found');
   const { updatedAt, nodeType, role, ...node } = locked;
-  // #1641 §6.1a — a log holds settings, not a question, and is never approved
-  // (Baloo P3-4). A question is approved only by one of its deciders, through
-  // the per-node predicate that lands with answering (slice S2); until then no
-  // path approves one, so a memory writer cannot pre-stamp a question.
+  // #1641 §6.1a — a log holds settings, not a question, and is never approved (Baloo P3-4). A question is approved one at a
+  // time, by one of its deciders, through the gate the caller passes (#4429): with no gate (bulk approval) it is refused, so a
+  // memory writer cannot pre-stamp a question.
   if (role === QUESTION_LOG_ROLE) {
     throw new NodeApprovalRefusal('QUESTION_LOG_NOT_APPROVABLE', 'A question log holds settings, not a question; it is never approved.');
   }
   if (isQuestionFamilyRole(role)) {
-    throw new NodeApprovalRefusal('QUESTION_NOT_APPROVABLE', 'A question is approved only by one of its deciders, which is not available yet.');
+    if (!opts.questionGate) {
+      throw new NodeApprovalRefusal('QUESTION_NOT_APPROVABLE', 'A question is approved one at a time, by one of its deciders.');
+    }
+    await opts.questionGate(tx, { id: nodeId, memoryId: opts.memoryId });
   }
   // #1607 (cor:dmo:110:06) — a comment is never approved. Refused before the
   // revision check, so the answer does not depend on which revision was named.
