@@ -748,6 +748,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_saturation_episodes_shape",
+      "kind": "check-constraint",
+      "file": "saturation-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_schedule_run_budgets_positive",
       "kind": "check-constraint",
       "file": "trigger-run-budget-invariants.sql",
@@ -1924,6 +1930,12 @@
       "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
+      "name": "saturation_episodes_app_id_ended_at_idx",
+      "kind": "index",
+      "file": "saturation-invariants.sql",
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
       "name": "secret_change_requests_expiry",
       "kind": "index",
       "file": "post-push.sql",
@@ -2023,6 +2035,12 @@
       "name": "post_limit_episodes",
       "kind": "table",
       "file": "post-limit-invariants.sql",
+      "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
+    },
+    {
+      "name": "saturation_episodes",
+      "kind": "table",
+      "file": "saturation-invariants.sql",
       "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
     },
     {
@@ -3181,6 +3199,18 @@
       "name": "register_entries_org_channel_worker_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
+      "name": "saturation_episodes_event_id_key",
+      "kind": "unique-index",
+      "file": "saturation-invariants.sql",
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
+      "name": "saturation_episodes_one_open_uniq",
+      "kind": "unique-index",
+      "file": "saturation-invariants.sql",
       "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {

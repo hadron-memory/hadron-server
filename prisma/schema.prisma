@@ -8084,7 +8084,7 @@ model HostSweepEpisode {
 /// - The same pass ends it when neither holds: a match recorded against the combination, an eligible worker
 ///   gained while the latest outcome is not no worker, the no-worker outcome reaching 168 hours (whether or not
 ///   the matcher purged its row), or its last worker retired. Also when the App is deleted or uninstalled.
-/// - Acknowledging the alarm does not end the episode (cor:agt:060:16). The alarm has no chain, so it wakes
+/// - Acknowledging the alarm does not end the episode (hrn:node:hadronmemory.com:specs:cor:agt:060:16). The alarm has no chain, so it wakes
 ///   nobody and no AlarmEscalationEnd is recorded for it.
 ///
 /// Rule: hrn:node:hadronmemory.com:specs:cor:agt:060:15. Background: #3819.
