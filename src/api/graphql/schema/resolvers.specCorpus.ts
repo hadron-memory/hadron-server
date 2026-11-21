@@ -1138,7 +1138,9 @@ export const specCorpusRenumberMutations = {
     ctx: Context,
   ): Promise<SpecRenumberResultOut> => {
     const corpus = await loadScannableCorpus(ctx, memoryRef);
-    validateLocOrThrow(fromLoc, 'fromLoc');
+    // #4461: `fromLoc` names an EXISTING node (looked up below, a miss is NODE_NOT_FOUND), so it is not capped: an
+    // existing over-cap spec must still be renumberable. Only `toLoc`, what the caller writes, is held to the
+    // contract; descendants are not re-capped (the gate is the contract unification, not a new subtree cap).
     validateLocOrThrow(toLoc, 'toLoc');
     if (fromLoc === toLoc || toLoc.startsWith(`${fromLoc}:`)) {
       throw new GraphQLError(`Cannot renumber "${fromLoc}" to "${toLoc}": the target is the spec itself or inside its subtree.`, {

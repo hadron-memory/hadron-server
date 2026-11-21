@@ -161,6 +161,55 @@ describe('#4461 — every other site answers the same', () => {
     );
     expectOneAnswer(err, 'destLoc', 'invalid-charset');
   });
+  it('createEdge WITHOUT a loc: a derived loc over the cap is accepted (two ~300-char node locs), as on main', async () => {
+    const long = (c: string) => Array.from({ length: 6 }, (_, i) => `${c}${'x'.repeat(40)}${i}`).join(':'); // ~250
+    const a = await db.node.create({ data: { id: generateId(), memoryId, loc: `${long('a')}`, name: 'a', nodeType: 'info' } });
+    const b = await db.node.create({ data: { id: generateId(), memoryId, loc: `${long('b')}`, name: 'b', nodeType: 'info' } });
+    expect(a.loc.length + b.loc.length).toBeGreaterThan(450);
+    const res = await fetch(`${baseUrl}/graphql`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${jwt}` },
+      body: JSON.stringify({
+        query: `mutation($s: ID!, $t: ID!) { createEdge(sourceRef: $s, targetRef: $t, name: "rel") { id loc } }`,
+        variables: { s: a.id, t: b.id },
+      }),
+    });
+    const body = (await res.json()) as { errors?: unknown; data?: { createEdge: { loc: string } } };
+    expect(body.errors).toBeUndefined();
+    expect(body.data!.createEdge.loc.length).toBeGreaterThan(512);
+  });
+  it('a caller-supplied edge loc: 512 accepted, 513 refused too-long', async () => {
+    const mkLoc = (n: number) => Array.from({ length: Math.ceil(n / 11) }, (_, i) => `q${String(i).padStart(9, '0')}`).join(':').slice(0, n).replace(/[^A-Za-z0-9]+$/, 'z');
+    const ok = mkLoc(512);
+    const over = mkLoc(513).padEnd(513, 'z');
+    const q = `mutation($s: ID!, $t: ID!, $l: String) { createEdge(sourceRef: $s, targetRef: $t, loc: $l) { id } }`;
+    const err = await graphqlError(q, { s: srcNodeId, t: tgtNodeId, l: over });
+    expectOneAnswer(err, 'loc', 'too-long');
+    const res = await fetch(`${baseUrl}/graphql`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${jwt}` },
+      body: JSON.stringify({ query: q, variables: { s: srcNodeId, t: tgtNodeId, l: ok } }),
+    });
+    const body = (await res.json()) as { errors?: Array<{ message: string }> };
+    expect(body.errors, JSON.stringify(body.errors)).toBeUndefined();
+  });
+  it('moveNode with targetMemoryRef: an existing over-cap node still moves unchanged', async () => {
+    const loc = Array.from({ length: 70 }, (_, i) => `m${i}xxxx`).join(':'); // > 512, valid atoms
+    expect(loc.length).toBeGreaterThan(512);
+    const n = await db.node.create({ data: { id: generateId(), memoryId, loc, name: 'big', nodeType: 'info' } });
+    const dest = await db.memory.findFirstOrThrow({ where: { id: memoryId } });
+    const mem2 = await db.memory.create({ data: { id: generateId(), organizationId: dest.organizationId, urn: `${dest.urn}-2`, name: 'bl-mem2', class: 'knowledge', createdBy: dest.createdBy } });
+    const res = await fetch(`${baseUrl}/graphql`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${jwt}` },
+      body: JSON.stringify({
+        query: `mutation($s: ID!, $m: ID) { moveNode(sourceRef: $s, targetMemoryRef: $m) { id } }`,
+        variables: { s: n.id, m: mem2.id },
+      }),
+    });
+    const body = (await res.json()) as { errors?: Array<{ message: string }> };
+    expect(body.errors, JSON.stringify(body.errors)).toBeUndefined();
+  });
   it('createQuestionLog', async () => {
     const err = await graphqlError(
       `mutation($m: ID!, $l: String!) { createQuestionLog(memoryRef: $m, loc: $l, defaultDeciders: []) { id } }`,

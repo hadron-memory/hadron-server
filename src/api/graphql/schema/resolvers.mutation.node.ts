@@ -1966,13 +1966,16 @@ async function resolveRelocationTarget(
   if (hasUrn) {
     const { memoryUrn, loc } = splitWholeNodeUrn(targetUrn as string);
     destLoc = loc;
+    // #4461: only what the caller SUPPLIES is checked. Descendants are not re-capped (the gate is the contract
+    // unification at the write sites, not a new cap on a subtree), and with `targetMemoryRef` the loc is the source's
+    // own, so an existing over-cap node stays movable unchanged.
+    validateLocOrThrow(destLoc, 'destLoc');
     // #1381: the destination is written, so it conceals as it resolves.
     ({ id: destMemoryId } = await resolveMemoryRefForWrite(ctx, memoryUrn));
   } else {
     ({ id: destMemoryId } = await resolveMemoryRefForWrite(ctx, targetMemoryRef as string));
     destLoc = source.loc;
   }
-  validateLocOrThrow(destLoc, 'destLoc');
   return { destMemoryId, destLoc };
 }
 
@@ -3887,8 +3890,12 @@ export const nodeMutations = {
       // after the gates above and before the loc derives from `name` or anything is written. `loc` and `condition`
       // already refuse with their own typed codes.
       assertStorableText({ name, loc, description, data, condition });
-      const edgeLoc = loc != null && loc !== '' ? loc : deriveEdgeLoc(src.loc, name ?? null, tgt.loc);
-      validateLocOrThrow(edgeLoc, 'loc');
+      // #4461: only a CALLER-SUPPLIED loc is held to the contract (incl. the total cap). A derived loc is
+      // `<src>:<name>:<tgt>` from two already-valid node locs, so it can exceed the cap through no fault of the
+      // caller's input; refusing it as field `loc` would blame a field never sent (as on main, it is accepted).
+      const callerLoc = loc != null && loc !== '';
+      if (callerLoc) validateLocOrThrow(loc, 'loc');
+      const edgeLoc = callerLoc ? loc : deriveEdgeLoc(src.loc, name ?? null, tgt.loc);
       const edge = await ctx.db.$transaction(async (tx) => {
         await lockInstallAuthoritiesFirst(tx, ctx, [src.memoryId, tgt.memoryId]);
         const locked = await lockLiveEdgeEndpoints(

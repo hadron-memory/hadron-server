@@ -25,6 +25,15 @@ export const LOC_MAX_TOTAL_LENGTH = 512;
  *
  * Throws only what it maps; anything else `validateLoc` throws propagates.
  */
+/**
+ * Error-shape change (the CHECKED arm (b) of the #4461 gate, already gated, not reopened): a bad loc used to surface
+ * as `InvalidLocError` with `loc`/`segment` extensions at some sites; it is now `BAD_USER_INPUT` with `field` and
+ * `reason` at all of them. Portal follow-up hadron-portal#2323 reads both shapes.
+ *
+ * Reason typing: `InvalidLocError.reason` is the closed union `'empty' | 'invalid-charset' | 'too-long'`
+ * (validateLoc.ts), and `REASON_TEXT` below is a `Record` over exactly that union, so a new reason fails to compile
+ * here until it has text.
+ */
 export function validateLocOrThrow(loc: string, field: string): void {
   if (loc.length > LOC_MAX_TOTAL_LENGTH) throw badLoc(field, 'too-long');
   try {
