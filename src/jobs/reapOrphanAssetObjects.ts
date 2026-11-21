@@ -65,7 +65,7 @@ import {
   deleteObject,
   isObjectStoreConfigured,
   listObjectsPage,
-} from '../integrations/r2/client.js';
+} from '../integrations/objectstore/index.js';
 import { logAssetEvent } from '../lib/asset/audit.js';
 import { ORPHAN_MIN_AGE_MS } from '../lib/asset/retention.js';
 import { isStagingKey, parseObjectIdFromKey } from '../lib/asset/storageKey.js';

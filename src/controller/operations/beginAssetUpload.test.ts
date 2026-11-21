@@ -15,7 +15,7 @@ import {
   AssetUploadError,
 } from './beginAssetUpload.js';
 
-vi.mock('../../integrations/r2/client.js', () => ({
+vi.mock('../../integrations/objectstore/index.js', () => ({
   mintPutUrl: vi.fn().mockResolvedValue('https://r2.example/presigned-put'),
   headObject: vi.fn(),
   deleteObject: vi.fn().mockResolvedValue(undefined),

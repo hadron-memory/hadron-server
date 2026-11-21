@@ -25,7 +25,7 @@ const authFor = (userId: string): AuthContext => ({ userId, roles: [], clientId:
 const appKeyAuth = (): AuthContext => ({ appId, roles: [], clientId: `app:${appId}` });
 const callAs = (auth: AuthContext, args: Record<string, unknown>): Promise<string> =>
   createTestableMcpServer(auth).callToolText('hadron_create_memory', args);
-// The tool names the organization `org`; the mutation takes it as `orgId`.
+// The tool names the organization `org`; the mutation takes it as `orgRef`.
 const mutate = (ctx: Context, { org, ...rest }: Record<string, unknown>) =>
   (resolvers.Mutation as any).createMemory({}, { ...rest, ...(org ? { orgRef: org } : {}) }, ctx);
 const rejection = async (p: Promise<unknown>): Promise<string> => {

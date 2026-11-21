@@ -74,7 +74,10 @@ export const ASSIGNEE_CLEARED_EVENT_TYPES = ['task.handed-back'] as const satisf
 /** Passive history must be excluded from EVERY later-event/activity predicate when a kind is added here. */
 // #4286: a defect link (review.defect-linked) is a QA fact about the task, not its assignee acting on it, so it never
 // clears an assignment or child-end wake (taskWakes.ts).
-export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed', 'task.external-id-released', 'review.defect-linked'] as const;
+// #4431: an answer to a question that blocks the task, or its take-back, is a fact about the task (a decider acted on the
+// question), never its assignee acting on the task, so neither clears a wake or counts as progress (Vera's draft of
+// cor:agt:050:11).
+export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed', 'task.external-id-released', 'review.defect-linked', 'question.answered', 'question.answer-retracted'] as const;
 /** #2609: only facts already readable by every team-event reader. Assignee state and future codes are excluded. */
 export const RECORDED_TASK_WARNING_CODES = ['task.create.no-source', 'task.finish.open-children'] as const;
 export type RecordedTaskWarningCode = (typeof RECORDED_TASK_WARNING_CODES)[number];
@@ -130,6 +133,12 @@ export type TaskEventPayload =
    */
   | { type: 'review.defect-linked'; defect: string; introducedAtHead: string | null }
   /**
+   * #4431 (Questions S7): a question that blocks this task was answered, or its answer taken back. Ids, the code,
+   * the question's revision after the write and its derived state after it: never the answer's option, text or
+   * reason (cor:agt:050:11). Only `question.answered` wakes the task's assignee.
+   */
+  | { type: 'question.answered' | 'question.answer-retracted'; questionId: string; code: string; revision: number; state: string }
+  /**
    * #4084 (cor:agt:120:02, V87 Proposed): the external id a release cleared. The id is readable to every reader of the
    * team's events already (it is on the task, under the same read gate, cor:agt:050:21), so naming it discloses nothing
    * new; the team's reconcile pass needs it, because the task no longer holds it.
@@ -166,6 +175,9 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
     case 'review.scheduled': return { slots: e.slots };
     case 'pr.frozen': return { head: e.head, pullRequest: e.pullRequest };
     case 'review.defect-linked': return { defect: e.defect, introducedAtHead: e.introducedAtHead };
+    case 'question.answered':
+    case 'question.answer-retracted':
+      return { questionId: e.questionId, code: e.code, revision: e.revision, state: e.state };
     case 'review.seat.assigned': return { slot: e.slot, head: e.head, supersedes: e.supersedes };
     case 'review.verdict': return {
       slot: e.slot, head: e.head, verdict: e.verdict, node: e.node, receipt: e.receipt,
