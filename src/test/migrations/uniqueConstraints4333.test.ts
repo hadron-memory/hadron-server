@@ -9,6 +9,8 @@ import { readFileSync } from 'node:fs';
 import { Client } from 'pg';
 import { describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
+import { generateId } from '../../lib/id.js';
+import { maintenanceUrl, withDbName } from '../dbWorkers.js';
 import { cleanDb } from '../helpers.js';
 
 const CONSTRAINTS: Array<[table: string, name: string, columns: string]> = [
@@ -42,59 +44,73 @@ describe('#4333 the six migration UNIQUE constraints exist on push + post-push',
     const [row] = await db.$queryRaw<Array<{ used: bigint }>>`SELECT used FROM rate_limit_buckets WHERE field_class = 'pin4333'`;
     expect(Number(row.used)).toBe(2);
   });
+});
 
-  /**
-   * #4638 BLIND F2: the real file, through the simple-query protocol exactly as written (BEGIN/COMMIT and the DO blocks),
-   * from the push-only state: promoted in place on the first run (the index's OID is kept), then left untouched on a
-   * re-run (same OID), with a foreign key that depends on the backing index surviving the re-run.
-   */
-  it('promotes push\'s index in place, and a re-run with a dependent foreign key changes nothing', async () => {
-    const file = readFileSync(new URL('../../../prisma/unique-constraint-invariants.sql', import.meta.url), 'utf8');
-    const pg = new Client({ connectionString: process.env.DATABASE_URL });
+const FILE = readFileSync(new URL('../../../prisma/unique-constraint-invariants.sql', import.meta.url), 'utf8');
+const cols = (name: string) => CONSTRAINTS.find((c) => c[1] === name)![2].replace(/^UNIQUE /, '');
+
+/**
+ * #4638 BLIND delta F2: every schema change runs in a throwaway database (created here, dropped WITH (FORCE) in finally,
+ * whatever failed), never the worker database. It holds only the six tables, each as `db push` leaves it: the columns
+ * and a same-name unique index, no constraint. `indexes` overrides one table's index definition (the columns part).
+ */
+async function withPushOnlyDb(indexes: Record<string, string>, body: (pg: Client) => Promise<void>): Promise<void> {
+  const name = `uc4333_${generateId().toLowerCase()}`;
+  const admin = new Client({ connectionString: maintenanceUrl() });
+  await admin.connect();
+  let pg: Client | undefined;
+  try {
+    await admin.query(`CREATE DATABASE "${name}" TEMPLATE template0`);
+    pg = new Client({ connectionString: withDbName(maintenanceUrl(), name) });
     await pg.connect();
-    const indexOid = async (name: string) =>
-      (await pg.query<{ oid: string }>(`SELECT to_regclass(quote_ident(current_schema()) || '.' || quote_ident($1))::oid::text AS oid`, [name])).rows[0].oid;
-    const constraints = async () =>
-      Number((await pg.query<{ n: string }>(`SELECT count(*) AS n FROM pg_constraint WHERE contype = 'u' AND conname = ANY($1)`, [CONSTRAINTS.map((c) => c[1])])).rows[0].n);
-    try {
-      // Back to what db push leaves: a same-name unique index and no constraint.
-      for (const [table, name] of CONSTRAINTS) {
-        const cols = (CONSTRAINTS.find((c) => c[1] === name)![2]).replace(/^UNIQUE /, '');
-        await pg.query(`ALTER TABLE ${table} DROP CONSTRAINT ${name}`);
-        await pg.query(`CREATE UNIQUE INDEX ${name} ON ${table} ${cols}`);
-      }
-      expect(await constraints()).toBe(0);
-      const pushIndex = await indexOid('coordinator_cadence_episodes_event_id_key');
+    for (const [table, index] of CONSTRAINTS) {
+      await pg.query(table === 'rate_limit_buckets'
+        ? `CREATE TABLE ${table} (id text PRIMARY KEY, field_class text NOT NULL, dimension text NOT NULL, subject text NOT NULL, window_start timestamp(3) NOT NULL)`
+        : `CREATE TABLE ${table} (id text PRIMARY KEY, event_id text NOT NULL)`);
+      await pg.query(`CREATE UNIQUE INDEX ${index} ON ${table} ${indexes[index] ?? cols(index)}`);
+    }
+    await body(pg);
+  } finally {
+    await pg?.end().catch(() => undefined);
+    await admin.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
+    await admin.end();
+  }
+}
 
-      await pg.query(file);
-      expect(await constraints()).toBe(CONSTRAINTS.length);
-      expect(await indexOid('coordinator_cadence_episodes_event_id_key')).toBe(pushIndex);
+const indexOid = async (pg: Client, name: string) => (await pg.query<{ oid: string }>('SELECT to_regclass($1)::oid::text AS oid', [name])).rows[0].oid;
+const uniqueConstraints = async (pg: Client) =>
+  Number((await pg.query<{ n: string }>(`SELECT count(*) AS n FROM pg_constraint WHERE contype = 'u' AND conname = ANY($1)`, [CONSTRAINTS.map((c) => c[1])])).rows[0].n);
+
+/** The real file, through the simple-query protocol exactly as written (BEGIN/COMMIT and the DO blocks). */
+describe('#4333 prisma/unique-constraint-invariants.sql from the push-only state', () => {
+  it('promotes each index in place, and a re-run with a dependent foreign key changes nothing (#4638 BLIND F1, F2)', async () => {
+    await withPushOnlyDb({}, async (pg) => {
+      const before = await indexOid(pg, 'coordinator_cadence_episodes_event_id_key');
+      await pg.query(FILE);
+      expect(await uniqueConstraints(pg)).toBe(CONSTRAINTS.length);
+      expect(await indexOid(pg, 'coordinator_cadence_episodes_event_id_key')).toBe(before);
 
       await pg.query('CREATE TABLE pin4333_ref (event_id text REFERENCES coordinator_cadence_episodes (event_id))');
-      await pg.query(file);
-      expect(await constraints()).toBe(CONSTRAINTS.length);
-      expect(await indexOid('coordinator_cadence_episodes_event_id_key')).toBe(pushIndex);
-      const fk = await pg.query(`SELECT 1 FROM pg_constraint WHERE contype = 'f' AND conrelid = 'pin4333_ref'::regclass`);
-      expect(fk.rowCount).toBe(1);
-    } finally {
-      await pg.query('DROP TABLE IF EXISTS pin4333_ref');
-      await pg.end();
-    }
-  });
+      await pg.query(FILE);
+      expect(await uniqueConstraints(pg)).toBe(CONSTRAINTS.length);
+      expect(await indexOid(pg, 'coordinator_cadence_episodes_event_id_key')).toBe(before);
+      expect((await pg.query(`SELECT 1 FROM pg_constraint WHERE contype = 'f' AND conrelid = 'pin4333_ref'::regclass`)).rowCount).toBe(1);
+    });
+  }, 60_000);
 
-  it('refuses, changing nothing, when a same-name index is on other columns', async () => {
-    const file = readFileSync(new URL('../../../prisma/unique-constraint-invariants.sql', import.meta.url), 'utf8');
-    const pg = new Client({ connectionString: process.env.DATABASE_URL });
-    await pg.connect();
-    try {
-      await pg.query('ALTER TABLE rate_limit_buckets DROP CONSTRAINT rate_limit_buckets_field_class_dimension_subject_window_sta_key');
-      await pg.query('CREATE UNIQUE INDEX rate_limit_buckets_field_class_dimension_subject_window_sta_key ON rate_limit_buckets (id, field_class)');
-      await expect(pg.query(file)).rejects.toThrow(/not a plain unique index on \(field_class, dimension, subject, window_start\)/);
+  it.each([
+    ['other columns', 'rate_limit_buckets_field_class_dimension_subject_window_sta_key', '(id, field_class)'],
+    ['NULLS NOT DISTINCT', 'host_sweep_episodes_event_id_key', '(event_id) NULLS NOT DISTINCT'],
+    ['a DESC column', 'post_limit_episodes_event_id_key', '(event_id DESC)'],
+    ['a predicate', 'dark_worker_episodes_event_id_key', '(event_id) WHERE event_id <> \'\''],
+  ])('refuses an index with %s and rolls back every earlier promotion (#4638 BLIND delta F1, F3)', async (_label, name, definition) => {
+    await withPushOnlyDb({ [name]: definition }, async (pg) => {
+      // The FIRST block's index is eligible: it would be promoted before the refusing block runs.
+      const first = await indexOid(pg, 'coordinator_cadence_episodes_event_id_key');
+      await expect(pg.query(FILE)).rejects.toThrow(new RegExp(`index ${name} is not the plain unique index`));
       await pg.query('ROLLBACK');
-    } finally {
-      await pg.query('DROP INDEX IF EXISTS rate_limit_buckets_field_class_dimension_subject_window_sta_key');
-      await pg.query('ALTER TABLE rate_limit_buckets ADD CONSTRAINT rate_limit_buckets_field_class_dimension_subject_window_sta_key UNIQUE (field_class, dimension, subject, window_start)');
-      await pg.end();
-    }
-  });
+      expect(await indexOid(pg, 'coordinator_cadence_episodes_event_id_key')).toBe(first);
+      expect(await uniqueConstraints(pg)).toBe(0);
+    });
+  }, 60_000);
 });
