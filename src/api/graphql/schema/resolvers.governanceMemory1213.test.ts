@@ -539,3 +539,15 @@ it('real PG: Agent snapshot restore waits on its memory key before tombstones or
   }
   expect(await db.node.findFirstOrThrow({ where: { memoryId, loc: 'restored:review' } })).toMatchObject({ role: 'review', content: 'restored', deletedAt: null });
 }, 20000);
+
+it.each([false, true])('task export missing edge keeps the shared refusal shape (mergeExports=%s)', async mergeExports => {
+  const { resolvers } = await import('./resolvers.js');
+  const before = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+  await expect(resolvers.Mutation.updateTaskNode({}, {
+    input: { id: nodeId, properties: { exports: {} }, edges: [{ targetId: 'tasks:nope' }] }, mergeExports,
+  }, ctx())).rejects.toMatchObject({
+    message: 'Edge target not found: "tasks:nope"',
+    extensions: { code: 'NodeNotFoundError', ref: 'tasks:nope' },
+  });
+  expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toEqual(before);
+});
