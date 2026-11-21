@@ -6,6 +6,7 @@
  *      v1 double-colon row (never the stored spelling);
  *   3  an unset or malformed origin is null; no localhost guess;
  *   4  a stored value whose emission throws (the raw bare value is served as `urn`) is null, not a link;
+ *   4b an unrenderable stored value that itself starts with `hrn:` (the raw fallback looks canonical) is null too (LOCAL P2 on #4654);
  *   5  a urn holding a character a link cannot carry is null; an empty or missing urn is null, never an empty string;
  *   6  a viewer who cannot read the object never reaches the field (the existing read gate answers first; the field reads nothing itself).
  */
@@ -62,6 +63,17 @@ describe.each(KINDS)('#2309 %s.portalUrl', (kind) => {
       const stored = 'acme.com:::';
       expect((field(kind, 'urn')({ urn: stored }) as string).startsWith('hrn:')).toBe(false); // the fixture is the distinct condition
       expect(field(kind, 'portalUrl')({ urn: stored })).toBeNull();
+    } finally { warn.mockRestore(); }
+  });
+
+  it('is null when the unrenderable stored value itself starts with hrn: (the raw fallback looks canonical, LOCAL P2 on #4654)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      for (const stored of ['hrn:app:acme.com:::', 'hrn:mem:acme.com:::', 'hrn:agent:acme.com:::']) {
+        // The fixture is the distinct condition: the urn field serves the raw value, which starts with the canonical prefix.
+        expect(field(kind, 'urn')({ urn: stored })).toBe(stored);
+        expect(field(kind, 'portalUrl')({ urn: stored }), stored).toBeNull();
+      }
     } finally { warn.mockRestore(); }
   });
 

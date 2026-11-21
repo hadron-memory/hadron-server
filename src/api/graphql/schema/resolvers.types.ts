@@ -1148,13 +1148,16 @@ function aiConfigWarnOnce(ctx: Context): (msg: string) => void {
 
 /**
  * #2309: the portal link of a Memory, Agent or App, built from the SAME rendered urn the `urn` field returns (never the stored column,
- * which is the bare, possibly legacy single-colon or v1 double-colon form). A rendered value that is not a canonical `hrn:` URN (emission
- * threw and the raw bare value was served) is not a link, so it answers null, as does an unset or malformed portal origin.
+ * which is the bare, possibly legacy single-colon or v1 double-colon form). The urn field serves the RAW stored value when emission
+ * throws (`safeCanonicalUrn`), and a raw value can itself start with `hrn:` (a stored `hrn:app:acme.com:::`), so the prefix does not
+ * tell emission from fallback. This calls the strict emitter the field's wrapper calls and answers null when it throws: only a
+ * successfully emitted canonical urn is a link. An unset or malformed portal origin is null too.
  */
 function portalUrlOfEntity(kind: 'memory' | 'agent' | 'app', stored: string | null | undefined): string | null {
   if (!stored) return null;
-  const rendered = safeCanonicalUrn(kind, stored);
-  return rendered.startsWith('hrn:') ? portalUrlForUrn(rendered) : null;
+  let rendered: string;
+  try { rendered = emitEntityUrnV2(kind, stored); } catch { return null; }
+  return portalUrlForUrn(rendered);
 }
 
 export const typeResolvers = {
