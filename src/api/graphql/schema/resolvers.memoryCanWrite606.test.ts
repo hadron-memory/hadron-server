@@ -132,35 +132,46 @@ describe('#606 Memory.canWrite equals the write gate (matrix)', () => {
   });
 });
 
+// Prisma delivers 'query' events asynchronously, after the statement resolves: wait for them before reading a count,
+// or a late event lands in the next run's window.
+const flushQueryEvents = () => new Promise<void>((r) => setTimeout(r, 400));
+
 describe('#606 query cost of memories(limit: 50)', () => {
-  it('stays linear with a small constant per memory and does not repeat for a duplicate', async () => {
+  it('runs the gate a small constant number of queries per distinct memory and not again for a duplicate', async () => {
     const logged = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL, log: [{ emit: 'event', level: 'query' }] });
-    let n = 0;
-    (logged as any).$on('query', () => { n += 1; });
+    // Count the gate's queries PER MEMORY (a query counts for a memory when its bound parameters carry that id), not
+    // the database total: the total jitters with pool/connection housekeeping, a per-memory count does not.
+    let perId = new Map<string, number>();
+    let watched: string[] = [];
+    (logged as any).$on('query', (e: { params: string }) => {
+      for (const id of watched) if (e.params.includes(id)) perId.set(id, (perId.get(id) ?? 0) + 1);
+    });
     try {
       const ids: string[] = [];
       for (let i = 0; i < 50; i += 1) {
         const m = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `cw-org:bulk-${i}`, name: `bulk-${i}`, class: 'knowledge' } });
         ids.push(m.id);
       }
+      watched = ids;
       const fresh = () => ({ db: logged, userId: u.contributor.id, roles: ['READER'] }) as unknown as Context;
       // A: each distinct memory once. B: every memory twice, on one fresh request context.
-      n = 0;
+      perId = new Map();
       const once = await Promise.all(ids.map((id) => M.canWrite({ id }, {}, fresh())));
-      const distinctQueries = n;
-      n = 0;
+      await flushQueryEvents();
+      const countsA = perId;
+      perId = new Map();
       const cB = fresh();
       const twice = await Promise.all([...ids, ...ids].map((id) => M.canWrite({ id }, {}, cB)));
-      const duplicatedQueries = n;
+      await flushQueryEvents();
+      const countsB = perId;
       expect(once.every(Boolean)).toBe(true);
       expect(twice.every(Boolean)).toBe(true);
-      expect(distinctQueries).toBeGreaterThan(0); // the logging client really saw the gate's queries (not a vacuous 0 <= 0)
-      // Duplicates in one response add (almost) nothing: the same memory is answered once per request. The counts
-      // jitter by a few queries between runs (pool/connection housekeeping), so the bound is 1.25x, far below the
-      // ~2x that asking the gate again for every duplicate costs (the memo-removal mutant lands there).
-      expect(duplicatedQueries).toBeLessThanOrEqual(Math.ceil(distinctQueries * 1.25));
-      // Absolute ceiling: a small constant number of queries per distinct memory, not growth beyond linear.
-      expect(distinctQueries).toBeLessThanOrEqual(50 * 12);
+      for (const id of ids) {
+        const one = countsA.get(id) ?? 0;
+        expect(one).toBeGreaterThan(0); // the logging client really saw the gate's queries for this memory (not vacuous)
+        expect(one).toBeLessThanOrEqual(12); // a small constant per distinct memory
+        expect(countsB.get(id)).toBe(one); // the duplicate asked the gate nothing more: exactly the same queries
+      }
     } finally {
       await logged.$disconnect();
     }
