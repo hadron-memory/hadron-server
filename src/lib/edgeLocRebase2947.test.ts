@@ -102,7 +102,34 @@ describe('#2947 derived locs rebase on a move (ask 1)', () => {
     const kept = await edgeNow(e.id);
     expect(kept.loc).toBe(before.loc);
     expect(kept.memoryId).toBe(mem.id);
-    expect(kept.loc).not.toContain('y2');
+    expect(await aliases(e.id)).toEqual([]);                // a kept loc in an unchanged memory changes no URN: no alias
+  });
+
+  it("a target moving INTO the edge's own memory still rebases it (the guard fires only when the edge's memory is not the target's new memory; #4711 E7)", async () => {
+    const x = await node(mem.id, 'x'); const y = await node(other.id, 'y');
+    const e = await link(x, y, 'to');                      // source in mem, target in other
+    await move(y, 'y2', other, mem);                       // the target lands in the edge's memory
+    const now = await edgeNow(e.id);
+    expect(now.loc).toBe('x:to:y2');
+    expect(now.memoryId).toBe(mem.id);
+  });
+
+  it("a kept boundary loc holds its slot: recreating the target is refused typed, a same-memory rebase onto it takes a numbered suffix (#4711 E1)", async () => {
+    const x = await node(mem.id, 'x'); const y = await node(mem.id, 'y');
+    const e = await link(x, y, 'to');
+    await move(y, 'y', mem, other);                        // target leaves; the boundary edge keeps x:to:y in mem
+    expect((await edgeNow(e.id)).loc).toBe('x:to:y');
+    // (a) a new y in mem linked from x derives the SAME loc: the unique (loc, memoryId) refuses it with the typed
+    // message (the caller can supply a loc), never a silent second edge that looks like the first one's target.
+    const y2 = await node(mem.id, 'y');
+    await expect(link(x, y2, 'to')).rejects.toThrow(/Edge loc "x:to:y" is already occupied/);
+    // (b) a same-memory rename that rebases onto the held slot gets the numbered suffix, like any collision (0161).
+    const z = await node(mem.id, 'z');
+    const ez = await link(x, z, 'to');
+    await move(y2, 'y9');                                  // free the node slot `y` in mem
+    await move(z, 'y');                                    // z takes the name; its edge rebases onto the held slot
+    expect((await edgeNow(e.id)).loc).toBe('x:to:y');      // the kept edge is untouched
+    expect((await edgeNow(ez.id)).loc).toBe('x:to:y:2');
   });
 
   it('a same-memory edge still rebases when its target moves (the guard fires only for a boundary edge)', async () => {
