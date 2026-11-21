@@ -3339,13 +3339,14 @@ export async function resolveMemoryRefConcealed(
   ctx: Context,
   ref: string,
   forbidden: () => GraphQLError,
+  options?: { includeDeleted?: boolean },
 ): Promise<string> {
   const chosen = ref?.trim();
   if (!chosen) {
     throw new GraphQLError('memoryRef is required.', { extensions: { code: 'BAD_USER_INPUT' } });
   }
   try {
-    return (await resolveMemoryRef(ctx.db, chosen)).id;
+    return (await resolveMemoryRef(ctx.db, chosen, options)).id;
   } catch (e) {
     if (e instanceof MemoryNotFoundError || e instanceof AmbiguousLegacyUrnError) throw forbidden();
     throw e;

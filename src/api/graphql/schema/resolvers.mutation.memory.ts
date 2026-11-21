@@ -3030,15 +3030,11 @@ export const memoryMutations = {
       // reasoning leaveApp applies to a dead App). It does NOT widen the
       // principal path: isMemorySharePrincipal still reports false for a
       // soft-deleted memory, so the owner-side FORBIDDEN is unchanged.
-      let resolvedMemoryId: string | null = null;
-      try {
-        resolvedMemoryId = (
-          await resolveMemoryRef(ctx.db, memoryRef, { includeDeleted: true })
-        ).id;
-      } catch (e) {
-        if (!(e instanceof MemoryNotFoundError)) throw e;
-      }
-      if (resolvedMemoryId === null) throw memoryShareForbidden();
+      // #4137 (Celine QA): through the shared concealing resolution, so an ambiguous
+      // legacy URN folds like an unknown ref instead of escaping as its own error.
+      const resolvedMemoryId = await resolveMemoryRefConcealed(
+        ctx, memoryRef, memoryShareForbidden, { includeDeleted: true },
+      );
       // The authority answer is needed BEFORE the grantee is resolved, because
       // a non-principal must fail identically whether or not the named grantee
       // exists — otherwise the NOT_FOUND-vs-FORBIDDEN difference becomes a
