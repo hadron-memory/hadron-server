@@ -94,6 +94,24 @@ describe('#2947 derived locs rebase on a move (ask 1)', () => {
     expect(kept.loc).not.toContain('y2');
   });
 
+  it("an edge that is ALREADY cross-memory keeps its loc when its target moves within the target's own memory (ruling of 2026-11-21)", async () => {
+    const x = await node(mem.id, 'x'); const y = await node(other.id, 'y');
+    const e = await link(x, y, 'to');                     // source in mem, target in other
+    const before = await edgeNow(e.id);
+    await move(y, 'y2', other, other);                     // a SAME-memory move inside the target's memory
+    const kept = await edgeNow(e.id);
+    expect(kept.loc).toBe(before.loc);
+    expect(kept.memoryId).toBe(mem.id);
+    expect(kept.loc).not.toContain('y2');
+  });
+
+  it('a same-memory edge still rebases when its target moves (the guard fires only for a boundary edge)', async () => {
+    const x = await node(mem.id, 'x'); const y = await node(mem.id, 'y');
+    const e = await link(x, y, 'to');
+    await move(y, 'y2');
+    expect((await edgeNow(e.id)).loc).toBe('x:to:y2');
+  });
+
   it('a rebase onto a slot already held by a live or soft-deleted edge succeeds with a numbered suffix', async () => {
     const a = await node(mem.id, 'a'); const c = await node(mem.id, 'c'); const q = await node(mem.id, 'q');
     const e = await link(a, c, 'uses');

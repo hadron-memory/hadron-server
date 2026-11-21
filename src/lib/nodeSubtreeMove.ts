@@ -870,7 +870,8 @@ export interface EdgeUrnChange {
  *    holds gets a numbered suffix (0161). Authored edges claim their locs before derived ones do.
  *  - A governed edge (INCLUDE, COMMENT_*) is never touched here: its loc is id-derived. (A carried thread's COMMENT_ANCHOR
  *    gets its EDGE alias in the carried-comments step of the move, 0162.)
- *  - A boundary edge whose only moved endpoint is its TARGET, moved to another memory than the edge's own, is not rebased.
+ *  - A boundary edge whose only moved endpoint is its TARGET, landing in a memory other than the edge's own, is not
+ *    rebased, whether the move is cross-memory or a same-memory move inside the target's memory.
  *  - Every edge whose URN changes keeps its old URN as an EDGE alias (0162), derived or authored.
  *
  * The recorded flag is the only thing that tells derived from authored; nothing is inferred from the loc at move time.
@@ -917,10 +918,11 @@ async function rebaseMovedEdges(
       if (carried) plans.push({ id: e.id, name: e.name, oldMemoryId: e.memoryId, oldLoc: e.loc, memoryId, base: e.loc, authored: true });
       continue;
     }
-    // Ruling of 2026-11-21 (Holger, "don't rebase"): a boundary edge whose only moved endpoint is its TARGET, moved into a
+    // Ruling of 2026-11-21 (Holger, "don't rebase"): a boundary edge whose only moved endpoint is its TARGET, landing in a
     // memory other than the edge's own, keeps its stored loc: a rebased loc would hand source-memory readers the
-    // destination's loc past the endpoint gate.
-    if (a.crossMemory && !a.movedIds.has(e.sourceId) && e.memoryId !== a.destMemoryId) continue;
+    // target's new loc past the endpoint gate. Whatever the move's kind: an edge that is already cross-memory (source in
+    // A, target in B) whose target moves WITHIN B is a same-memory move and is covered too (Rook, SEC10).
+    if (!a.movedIds.has(e.sourceId) && e.memoryId !== a.destMemoryId) continue;
     const src = locOf(e.sourceId); const tgt = locOf(e.targetId);
     if (src == null || tgt == null) continue; // an endpoint vanished: leave the edge as it is
     const base = deriveEdgeLoc(src, e.name, tgt);
