@@ -10,6 +10,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { upsertPlatformActions } from './actions.js';
 import { sweepLapsedAgentGrants } from './lapseSweep.js';
+import { startGrantLapseSweepLoop } from '../../jobs/sweepGrantLapse.js';
 import { deriveGrantState } from './state.js';
 import { DB_NOW, insertGrantUnguarded, raw, type World } from './grantFixtures3668.js';
 
@@ -212,3 +213,47 @@ describe('#4178 batching', () => {
     expect(out.pairsJudged).toBe(0);
   });
 });
+
+describe('#4178 resume across runs', () => {
+  it('a healthy prefix longer than one run\'s reach does not starve the pair behind it: each run resumes after the last one', async () => {
+    for (let i = 0; i < 3; i++) {
+      const a = await mkAgent(`fine${i}`);
+      await db.appAgent.create({ data: { appId, agentId: a } });
+      await grant({ agent_id: a });
+    }
+    const late = await mkAgent('late');
+    await db.agentOrgGrant.create({ data: { orgId, agentId: late, activatedAt: new Date(Date.now() - 86_400_000), expiresAt: past() } });
+    await db.agentImport.create({
+      data: { parentAgentId: parentId, importedAgentId: late, position: 5, agentOrgGrantOrgId: orgId, agentOrgGrantAgentId: late },
+    });
+    const lapsed = await grant({ agent_id: late });
+    // One run reaches only two pairs (batchSize 1, maxPages 2): run 1 and 2 see only healthy pairs; without a resume point every run would stop there.
+    let after = null as Awaited<ReturnType<typeof sweepLapsedAgentGrants>>['cursor'];
+    let guard = 0;
+    while (guard++ < 6) {
+      const out = await sweepLapsedAgentGrants(db, { batchSize: 1, maxPages: 2, after });
+      after = out.cursor;
+      if (await departedAt(lapsed)) break;
+    }
+    expect(await departedAt(lapsed)).not.toBeNull();
+    expect(guard).toBeLessThanOrEqual(3);
+  });
+
+  it('a run that reaches the end hands back a null cursor, so the next one starts over', async () => {
+    const out = await sweepLapsedAgentGrants(db);
+    expect(out.cursor).toBeNull();
+  });
+});
+
+describe('#4178 the loop wrapper', () => {
+  it('startGrantLapseSweepLoop runs a pass after its initial delay and stamps the lapsed grant', async () => {
+    await licence({ expiresAt: past() });
+    const g = await grant({ agent_id: agentId });
+    const timer = startGrantLapseSweepLoop(db, { initialDelayMs: 10, intervalMs: 3_600_000 });
+    try {
+      for (let i = 0; i < 100 && !(await departedAt(g)); i++) await new Promise((r) => setTimeout(r, 50));
+      expect(await departedAt(g)).not.toBeNull();
+    } finally { clearTimeout(timer); }
+  });
+});
+

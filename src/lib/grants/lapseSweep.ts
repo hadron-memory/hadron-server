@@ -32,25 +32,33 @@ import { lockAppInstallations, resolveAppInstallation } from '../appInstallation
 import { ALREADY_ENDED, endAgentGrantsAtApps } from './departure.js';
 
 
-export interface LapseSweepOutcome { pairsJudged: number; pairsDeparted: number; grantsEnded: number }
+export type LapseSweepCursor = { appId: string; agentId: string };
+
+export interface LapseSweepOutcome {
+  pairsJudged: number;
+  pairsDeparted: number;
+  grantsEnded: number;
+  /** Where the next run resumes (the last pair judged), or null when this run reached the end of the candidates and the next starts over. */
+  cursor: LapseSweepCursor | null;
+}
 
 /** Small pages keep each transaction's installation and grant locks short: the doors wait on the same locks (#4178 BLIND). 80 x 50 = 4000 pairs per run. */
 const DEFAULT_BATCH = 50;
 const DEFAULT_MAX_PAGES = 80;
 
 /**
- * One run, in keyset pages over the distinct (App, agent) pairs that hold a not-yet-ended agent grant in a live App, so a pair that
+ * One run, in keyset pages (from `opts.after`, else the start) over the distinct (App, agent) pairs that hold a not-yet-ended agent grant in a live App, so a pair that
  * is still installed (the common case) is judged once per run and never starves one behind it. Each page is ONE transaction:
  * installation locks per App in id order, then one sorted grant lock phase last.
  */
 export async function sweepLapsedAgentGrants(
   db: PrismaClient,
-  opts: { batchSize?: number; maxPages?: number } = {},
+  opts: { batchSize?: number; maxPages?: number; after?: LapseSweepCursor | null } = {},
 ): Promise<LapseSweepOutcome> {
   const batchSize = opts.batchSize ?? DEFAULT_BATCH;
   const maxPages = opts.maxPages ?? DEFAULT_MAX_PAGES;
-  const out: LapseSweepOutcome = { pairsJudged: 0, pairsDeparted: 0, grantsEnded: 0 };
-  let cursor: { appId: string; agentId: string } | null = null;
+  const out: LapseSweepOutcome = { pairsJudged: 0, pairsDeparted: 0, grantsEnded: 0, cursor: null };
+  let cursor: LapseSweepCursor | null = opts.after ?? null;
   for (let page = 0; page < maxPages; page++) {
     const after: P.Sql = cursor ? P.sql`AND (grants.app_id, grants.agent_id) > (${cursor.appId}, ${cursor.agentId})` : P.empty;
     // A grant that has already ended (expired, spent, past its action's limits) is not a candidate: it keeps its first end, and
@@ -62,7 +70,7 @@ export async function sweepLapsedAgentGrants(
         AND EXISTS (SELECT 1 FROM apps ap WHERE ap.id = grants.app_id AND ap.deleted_at IS NULL AND ap.uninstalled_at IS NULL)
         ${after}
       ORDER BY grants.app_id, grants.agent_id LIMIT ${batchSize}`);
-    if (pairs.length === 0) break;
+    if (pairs.length === 0) { out.cursor = null; break; }
     const byApp = new Map<string, string[]>();
     for (const p of pairs) byApp.set(p.app_id, [...(byApp.get(p.app_id) ?? []), p.agent_id]);
     const departed = await db.$transaction(async (tx) => {
@@ -80,6 +88,9 @@ export async function sweepLapsedAgentGrants(
     out.grantsEnded += departed.ended;
     const last = pairs[pairs.length - 1];
     cursor = { appId: last.app_id, agentId: last.agent_id };
+    // Resume point for the NEXT run: a run that stops at its page cap leaves the cursor where it stopped, so a healthy prefix longer
+    // than one run's reach cannot starve the pairs behind it; a run that reaches the end leaves null and the next one starts over.
+    out.cursor = pairs.length < batchSize ? null : cursor;
     if (pairs.length < batchSize) break;
   }
   return out;
