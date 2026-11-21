@@ -68,6 +68,8 @@ export const hadronListGrants: RunToolDef = {
 
 /** Keys that try to name who holds the grant. A run asks for its own agent's grant only, so each is the holder refusal, before any read. */
 const HOLDER_LIKE_KEYS = new Set(['holder', 'holderKind', 'holderRef', 'agent', 'agentId', 'agentRef', 'worker', 'workerId', 'workerRef', 'user', 'userId', 'userRef', 'app', 'appId', 'appRef', 'role', 'roleAgent']);
+/** An ISO 8601 date-time with a zone (the schema says ISO date-times); `new Date` alone also takes loose strings such as "1". */
+const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
 const CREATE_KEYS = new Set(['action', 'values', 'reason', 'startsAt', 'expiresAt', 'maxUses']);
 const createCode = (c: string, message: string) => new GraphQLError(message, { extensions: { code: c } });
 
@@ -102,12 +104,12 @@ export const hadronCreateGrant: RunToolDef = {
     if (typeof args.action !== 'string') throw createCode('GRANT_ACTION_UNKNOWN', 'That action is not registered.');
     if (typeof args.reason !== 'string') throw createCode('GRANT_TERMS_INVALID', 'The grant\'s terms cannot be recorded.');
     // Signing off: the tool does not exist (resolveRunTools), and a run resolved while it was on does not keep it (read per call, here too).
-    if (!signingSurfacePolicy().signing) throw createCode('GRANT_TERMS_INVALID', 'The grant\'s terms cannot be recorded.');
+    if (!signingSurfacePolicy().signing) throw createCode('GRANT_SIGNING_UNAVAILABLE', 'Grants cannot be requested here: signing is not available. Do not retry.');
     // Every term the caller GIVES must be well formed: a malformed bound is refused, never read as absent (it would widen the grant).
     const given = (v: unknown) => v !== undefined && v !== null;
     if (given(args.maxUses) && (typeof args.maxUses !== 'number' || !Number.isSafeInteger(args.maxUses) || args.maxUses < 1)) throw createCode('GRANT_TERMS_INVALID', 'The grant\'s terms cannot be recorded.');
     for (const t of [args.startsAt, args.expiresAt]) {
-      if (given(t) && (typeof t !== 'string' || Number.isNaN(new Date(t).getTime()))) throw createCode('GRANT_TERMS_INVALID', 'The grant\'s terms cannot be recorded.');
+      if (given(t) && (typeof t !== 'string' || !ISO_DATE_TIME.test(t) || Number.isNaN(new Date(t).getTime()))) throw createCode('GRANT_TERMS_INVALID', 'The grant\'s terms cannot be recorded.');
     }
     const { id } = await createGrantForRun(principal, run, {
       action: args.action, values: args.values, reason: args.reason,

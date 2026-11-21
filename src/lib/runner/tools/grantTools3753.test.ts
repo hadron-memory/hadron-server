@@ -169,13 +169,15 @@ describe('hadron_create_grant (#3753)', () => {
     expect(await rows()).toHaveLength(0);
   });
 
-  it('B16: an entry node that does not exist or is in another org gets the same answer', async () => {
+  it('B16: an entry node that does not exist, is in another org, or is in a same-org memory the run cannot read gets the same answer', async () => {
     const run = await mintRun(w.appId, w.agentId);
     const org = await db.organization.create({ data: { name: 'f', urn: `f-${generateId().slice(0, 6)}.test` } });
     const memory = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:kb`, name: 'kb', class: 'knowledge', visibility: 'ORGANIZATION' } as never });
     const foreign = (await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'n0', name: 'n0', nodeType: 'info', content: 'x' } as never })).id;
     const answers = new Set<string>();
-    for (const node of [generateId(), foreign]) {
+    const hidden = await db.memory.create({ data: { id: generateId(), organizationId: w.orgId, urn: `${w.orgUrn}:hid-${generateId().slice(0, 6)}`, name: 'hid', class: 'personal', userId: w.user2Id } as never });
+    const unreadable = (await db.node.create({ data: { id: generateId(), memoryId: hidden.id, loc: 'h0', name: 'h0', nodeType: 'info', content: 'x' } as never })).id;
+    for (const node of [generateId(), foreign, unreadable]) {
       try { await ask(run, { values: { entryNode: node } }); throw new Error('no refusal'); } catch (e) { answers.add(`${(e as GraphQLError).extensions?.code}|${(e as GraphQLError).message}`); }
     }
     expect(answers.size).toBe(1);
@@ -222,21 +224,23 @@ describe('hadron_create_grant (#3753)', () => {
 
   it('signing gate at execute: a run resolved while signing was on writes nothing once it is off', async () => {
     const run = await mintRun(w.appId, w.agentId);
-    vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'false');
-    expect(await refused(ask(run))).toBe('GRANT_TERMS_INVALID');
-    vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
+    try {
+      vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'false');
+      expect(await refused(ask(run))).toBe('GRANT_SIGNING_UNAVAILABLE');
+    } finally { vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true'); }
     expect(await rows()).toHaveLength(0);
   });
 
   it('a term the caller gives that is malformed is refused, never read as absent (it would widen the grant)', async () => {
     const run = await mintRun(w.appId, w.agentId);
-    for (const bad of [{ startsAt: 5 }, { expiresAt: {} }, { expiresAt: 'not a date' }, { startsAt: 'x' }, { expiresAt: true }, { maxUses: 0 }, { maxUses: -1 }, { maxUses: 1.5 }, { maxUses: '3' }]) {
+    for (const bad of [{ startsAt: 5 }, { expiresAt: {} }, { expiresAt: 'not a date' }, { startsAt: 'x' }, { startsAt: '1' }, { expiresAt: '2030-01-01' }, { expiresAt: true }, { maxUses: 0 }, { maxUses: -1 }, { maxUses: 1.5 }, { maxUses: '3' }]) {
       expect(await refused(ask(run, bad)), JSON.stringify(bad)).toBe('GRANT_TERMS_INVALID');
     }
     expect(await rows()).toHaveLength(0);
-    await ask(run, { expiresAt: new Date(Date.now() + 86400000).toISOString(), maxUses: 2 });
+    const at = new Date(Date.now() + 86400000).toISOString();
+    await ask(run, { expiresAt: at, maxUses: 2 });
     expect((await rows())[0]).toMatchObject({ max_uses: 2 });
-    expect((await rows())[0].expires_at).not.toBeNull();
+    expect(new Date(`${(await rows())[0].expires_at.toISOString().replace(/Z$/, '')}Z`).toISOString()).toBe(at);
   });
 
   it('B14 (structural only): no non-run caller reaches the run arm: the tool refuses any principal that is not THIS run (isRunPrincipal and clientId run:<runId>), and its schema has no holder, App or activation key', async () => {
