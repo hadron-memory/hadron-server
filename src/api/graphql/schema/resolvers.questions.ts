@@ -525,6 +525,31 @@ function requireWritable(view: QuestionView): QuestionData {
   return question;
 }
 
+/**
+ * #4429 (S5) — the gate `approveNode` runs inside the approval transaction on a question, on the already locked row.
+ * A question is approved by one of its deciders only: the same {@link actingDecider} the answer doors use, on a question
+ * that has an answer to approve. Refusals are typed (`QUESTION_WITHDRAWN`, `QUESTION_INVALID` for a state no door writes to,
+ * `QUESTION_NOT_DECIDER`, `QUESTION_IMPERSONATION_REFUSED`, `QUESTION_NOT_ANSWERED`) and nothing is stamped. Any tier may be
+ * approved (spec cor:dmo:140:05); the evaluation decides what the approval counts for (cor:dmo:140:08).
+ *
+ * Lock order: the question row is already held by the approval, so this reads the log with a plain read and never locks it
+ * ("a log lock is never taken while a question row is held").
+ */
+export function questionApprovalGate(txCtx: Context): (tx: Tx, node: { id: string; memoryId: string }) => Promise<void> {
+  return async (tx, node) => {
+    const row = await tx.node.findUniqueOrThrow({ where: { id: node.id }, select: QUESTION_ROW_SELECT });
+    const [view] = await evaluateRows(tx, [row]);
+    const current = requireWritable(view);
+    const log = await logOfQuestion(tx, row);
+    if (!log) throw logMissing(node.id);
+    const check = await actingDecider(txCtx, tx, current, parseLogData(log), node.memoryId);
+    if (!check.ok) throw questionError(check.code, check.message, { questionCode: current.code });
+    if (view.evaluation.state === 'OPEN') {
+      throw questionError('QUESTION_NOT_ANSWERED', `${current.code} has no standing answer to approve.`, { questionCode: current.code });
+    }
+  };
+}
+
 /** The derived, never-authoritative property projection for filters (§5.3). */
 function propertiesOf(d: QuestionData): Record<string, unknown> {
   const standing = currentAnswer(d);

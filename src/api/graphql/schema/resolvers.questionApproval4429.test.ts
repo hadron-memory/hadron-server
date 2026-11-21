@@ -145,16 +145,14 @@ describe('approveNode on a question: the refusals stamp nothing (#4429 acceptanc
 
   it('a decider under impersonation is refused', async () => {
     const { id } = await answered({ tier: 'APPROVED' });
-    const code = await codeOf(approve(id, undefined, as(holger.id, { impersonation: { actorUserId: admin.id } } as never)));
-    expect(['QUESTION_IMPERSONATION_REFUSED', 'FORBIDDEN']).toContain(code);
+    expect(await codeOf(approve(id, undefined, as(holger.id, { impersonation: { actorUserId: admin.id } } as never)))).toBe('QUESTION_IMPERSONATION_REFUSED');
     await unstamped(id);
   });
 
-  it('a decider who lost write access is refused', async () => {
+  it('a decider who lost write access is FORBIDDEN, from the generic approval gate (mayApproveNodes) that runs before the question gate', async () => {
     const { id } = await answered({ tier: 'APPROVED' });
     await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: holger.id } }, data: { role: 'READER' } });
-    const code = await codeOf(approve(id));
-    expect(code).not.toBe('NO_ERROR');
+    expect(await codeOf(approve(id))).toBe('FORBIDDEN');
     await unstamped(id);
   });
 
