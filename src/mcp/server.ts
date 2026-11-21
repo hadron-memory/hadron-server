@@ -7683,7 +7683,7 @@ export function createMcpServerInstance(
           doorCtx(),
         );
         const node = out.node as { id: string; revSeq?: number };
-        const edge = out.successorEdge as { id: string; loc: string } | null;
+        const edge = out.successorEdge;
         return textResult(
           `spec retired (${form}): ${ref} (id: ${node.id}${node.revSeq != null ? `, revision: ${node.revSeq}` : ''})` +
             (edge ? `\nsuperseded-by edge: ${edge.loc} (id: ${edge.id})` : ''),

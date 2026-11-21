@@ -11,15 +11,24 @@ export function oneLine(text: string): string {
   return text.trim().replace(/\s+/g, ' ');
 }
 
+/**
+ * Caller text goes into the banner as TEXT, never as Markdown or HTML: a reason such as `<!--` could swallow the fixed
+ * warning in a renderer that allows raw HTML, and `*` or `[x](url)` could restyle or link it. Angle brackets and the
+ * ampersand become entities, and the Markdown inline specials are backslash-escaped. Text with none of them is unchanged.
+ */
+export function escapeMarkdownText(text: string): string {
+  return text.replace(/[&<>\\`*_\[\]~|]/g, (c) => (c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : `\\${c}`));
+}
+
 const TAIL = '**Do not apply.** Retained as a tombstone; the citation is never renumbered.';
 
 /** The banner placed under the title, as one line of blockquote. */
 export function retirementBanner(a: {
   form: RetireForm; withdrawn: boolean; date: string; reason: string | null; successor: { loc: string; name: string } | null;
 }): string {
-  const reason = a.reason ? oneLine(a.reason) : '';
+  const reason = a.reason ? escapeMarkdownText(oneLine(a.reason)) : '';
   if (a.form === 'SUPERSEDE') {
-    const by = a.successor ? ` by ${a.successor.loc} (${oneLine(a.successor.name)})` : '';
+    const by = a.successor ? ` by ${a.successor.loc} (${escapeMarkdownText(oneLine(a.successor.name))})` : '';
     return `> **⚠️ Superseded** (${a.date}${reason ? `, ${reason}` : ''})${by}. ${TAIL}`;
   }
   return a.withdrawn

@@ -551,3 +551,19 @@ describe('#3429 no second connection is requested while the transaction holds it
     expect(outer, 'a model read on the pooled client while the transaction held its connection').toEqual([]);
   });
 });
+
+describe('#3429 access lost while the door waits for its locks (blind, unresolved item 1)', () => {
+  it('the door judges access again on its transaction: a caller who lost it gets NODE_NOT_FOUND, not a state refusal', async () => {
+    const x = await spec('rv:x');
+    await rescind(x.id);                       // so a state refusal (NODE_WRITE_CONFLICT) is what a caller WITH access would get
+    const holder = await holding(async (t) => { await t.$queryRaw`SELECT id FROM nodes WHERE id = ${x.id} FOR UPDATE`; });
+    const door = retire({ ref: x.id, form: 'RESCIND', expectedRevision: await rev(x.id), reason: 'r', summary: 's' });
+    const outcome = codeOf(door);
+    try {
+      await waitForLockWaiters(db, 1);
+      await db.orgMember.deleteMany({ where: { userId: admin.id } });
+    } finally { holder.release(); }
+    await holder.done;
+    expect(await outcome).toBe('NODE_NOT_FOUND');
+  });
+});

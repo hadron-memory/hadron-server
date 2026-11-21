@@ -40,6 +40,9 @@ import {
   withoutRequestCaches,
 } from './resolvers.helpers.js';
 
+/** The edge a supersede inserts, as the door selects it. */
+export type RetiredEdge = Prisma.EdgeGetPayload<{ include: { source: true; target: true } }>;
+
 export interface RetireSpecInput {
   ref: string;
   form: RetireForm;
@@ -133,6 +136,11 @@ export async function retireSpecDoor(input: RetireSpecInput, ctx: Context) {
     await tx.$queryRaw`SELECT id FROM memories WHERE id = ${pre.memoryId} FOR SHARE`;
     await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${specId} FOR UPDATE`;
     const txCtx = withoutRequestCaches(ctx, tx);
+    // Access can change while this waited for the locks: judge it again on the transaction, before any state-dependent
+    // refusal, so a caller who lost access learns nothing from the refusals below.
+    await concealUnreadableNodeDenial(txCtx, pre.memoryId, () => nodeNotFoundError(ref), () =>
+      requireMemoryWriteAccess({ ...txCtx, installWritePreflight: true }, pre.memoryId),
+    );
 
     // The predicates are judged on the LOCKED row.
     const locked = await tx.node.findUnique({ where: { id: specId } });
@@ -177,7 +185,7 @@ export async function retireSpecDoor(input: RetireSpecInput, ctx: Context) {
     }
 
     // Item 6: compose, then measure, only after the successor is known to be readable and usable.
-    const enc = await getMemoryEncryptionInfo(ctx.db, pre.memoryId);
+    const enc = await getMemoryEncryptionInfo(txCtx.db, pre.memoryId);
     if (enc.isEncrypted && !sessionKeyCache.getByMemoryId(enc.id)) {
       throw new GraphQLError(`SESSION_EXPIRED: memory ${enc.id} is encrypted but no active session key is available.`, {
         extensions: { code: 'SESSION_EXPIRED', memoryId: enc.id },
@@ -216,7 +224,7 @@ export async function retireSpecDoor(input: RetireSpecInput, ctx: Context) {
       },
     );
 
-    let edge: unknown = null;
+    let edge: RetiredEdge | null = null;
     if (successor) {
       // The edge writer's own source check, then the one insert, in this transaction. A loc a soft-deleted edge still
       // holds is numbered past, as the unique index covers every row.
@@ -239,9 +247,7 @@ export async function retireSpecDoor(input: RetireSpecInput, ctx: Context) {
     return { written, edge };
   });
   for (const effect of effects) effect();
-  if (done.edge) {
-    await mirrorEdgeSourceAfterCommit(ctx.db, (done.edge as { source: { id: string; memoryId: string; ownerRepo: string | null } }).source, ctx.clientId);
-  }
+  if (done.edge) await mirrorEdgeSourceAfterCommit(ctx.db, done.edge.source, ctx.clientId);
   return { node: done.written, successorEdge: done.edge };
 }
 
