@@ -78,7 +78,7 @@ describe('#3326 bounded work (rows and queries, not time)', () => {
     const empty = await memoryRows(() => independentUserItemAccess(db, f.user.id, []));
     expect(empty.result.size).toBe(0);
     expect(empty.queries).toBe(0);
-    expect(members).not.toHaveBeenCalled(); // no membership or Agent lookup was made for an empty list
+    expect(members).not.toHaveBeenCalled(); // no findMany call on either was made for an empty list
     expect(agents).not.toHaveBeenCalled();
     expect(none.rows).toBeLessThanOrEqual(2); // the live system memory lookup only
   });
@@ -137,11 +137,11 @@ describe('#3326 several Apps: per-memory reuse never confuses one memory\'s leve
     const system2 = await db.memory.create({ data: { urn: `${f.org.urn}:system2`, name: 'system2', class: 'system', organizationId: f.org.id } });
     const agent2 = await db.agent.create({ data: { urn: `${f.org.urn}:agent2`, name: 'agent2', organizationId: f.org.id, systemMemoryId: system2.id } });
     // What this test pins: the levels across two Apps with overlapping items stay each memory's own, the unreachable item stays
-    // absent, and an unsubscribed PUBLIC item is never widened (the tenant already caps it at READ_ONLY, so the next test, not this
-    // one, is where a wrong-level store is caught in both directions). The Apps' maps merge by MAXIMUM level (READ_WRITE wins
-    // over READ_ONLY, as getPrincipalAppMemoryAccess documents), so a store error that only NARROWS one App's answer is masked
-    // by the other App's correct one: that is why the second test lists the two memories in opposite order in the two Agents and
-    // is built so a first-answer store WIDENS the read-only memory, which the merge cannot hide.
+    // absent, and an unsubscribed PUBLIC item is never widened. It does NOT reliably catch a wrong-level store: the Agents' items
+    // are created pub-first, but the lookup has no ORDER BY, so the order a batch is judged in is the database's. Only if the
+    // database lists pub first would a first-answer store narrow the writable memory in both Apps (which the merge below cannot
+    // mask); if it lists the writable one first, widening pub is masked by the tenant, which already caps an unsubscribed PUBLIC
+    // memory at READ_ONLY. The next test is the one built to fail on a wrong store whatever the order is.
     await db.agentMemoryItem.deleteMany({ where: { agentId: f.agent.id } });
     for (const m of [pub, f.reachable, f.unreachable]) await db.agentMemoryItem.create({ data: { agentId: f.agent.id, memoryId: m.id, role: 'read-write' } });
     for (const m of [pub, f.reachable]) await db.agentMemoryItem.create({ data: { agentId: agent2.id, memoryId: m.id, role: 'read-write' } });
@@ -154,11 +154,14 @@ describe('#3326 several Apps: per-memory reuse never confuses one memory\'s leve
     expect(access.has(f.unreachable.id)).toBe(false);
   });
 
-  it('two memories with different independent levels never take each other\'s level, in either order', async () => {
+  it('two memories with different independent levels never take each other\'s level, whichever order the database lists them in', async () => {
     // The user only READS the Agent's own org (reader) but WRITES a second org (contributor) whose memory the Agent's org is
     // subscribed to at CONTRIBUTOR, so BOTH items are capped at READ_WRITE by the tenant and only the user's own level
-    // tells them apart: m1 READ_ONLY, m2 READ_WRITE. A store that gave every candidate the batch's first answer would narrow
-    // m2 or widen m1, whichever the database lists first.
+    // tells them apart: m1 READ_ONLY, m2 READ_WRITE. The two Apps' maps merge by MAXIMUM level, so a store error that
+    // NARROWS m2 in only one App would be masked by the other App's correct answer; what makes this catch it anyway is that
+    // a first-answer store gives EVERY candidate of a batch ONE level: if both Apps judge m1 first, m2 is narrowed in both
+    // (nothing masks it); if either judges m2 first, m1 is WIDENED to READ_WRITE there, and the maximum keeps it. The Agents
+    // list the two in opposite order, but the result does not depend on the order the database actually returns.
     await db.orgMember.updateMany({ where: { userId: f.user.id, organizationId: f.org.id }, data: { role: 'READER' } });
     const org2 = await db.organization.create({ data: { name: 'Second3326', urn: `second-${generateId().toLowerCase()}.example` } });
     await db.orgMember.create({ data: { userId: f.user.id, organizationId: org2.id, role: 'CONTRIBUTOR' } });
