@@ -4,12 +4,12 @@
  * (a dropped field would return decoys; a post-filter would return a short page). Plus: a literal `$1` inside a bound
  * `where` value must not corrupt the placeholder re-parse in vectorFilterSql.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { getRetrievalProvider } from '../../lib/retrieval/postgres.js';
-import { setVectorSmallScopeRowsForTests, setVectorWindowRowsMaxForTests } from './vectors.js';
+import { setVectorSmallScopeRowsForTests, setVectorWindowRowsMaxForTests, VECTOR_TX_MAX_WAIT_MS } from './vectors.js';
 
 const DIM = 768;
 const vec = (x: number) => { const v = new Array(DIM).fill(0); v[1] = 1; v[2] = x; return `'[${v.join(',')}]'::vector`; };
@@ -127,5 +127,16 @@ describe('BLIND P2 (#4665): the cut is a loss only when the window was filled; t
   it('includeDeleted ranks the tombstone only in a recoverable memory', async () => {
     expect((await withDeleted([])).map((h: any) => h.nodeId)).not.toContain(deletedId);
     expect((await withDeleted([mem])).map((h: any) => h.nodeId)).toContain(deletedId);
+  });
+});
+
+describe('BLIND P2-3 (#4665, Bridget P3-1): a vector transaction never waits longer than VECTOR_TX_MAX_WAIT_MS for a connection', () => {
+  it('every transaction of a search asks Prisma for maxWait <= the cap and <= the budget left', async () => {
+    const seen: number[] = [];
+    const real = db.$transaction.bind(db);
+    const spy = vi.spyOn(db, '$transaction').mockImplementation(((fn: unknown, o?: { maxWait?: number }) => { seen.push(o?.maxWait ?? Infinity); return (real as any)(fn, o); }) as any);
+    try { await search({}); } finally { spy.mockRestore(); }
+    expect(seen.length).toBeGreaterThan(0);
+    for (const w of seen) expect(w).toBeLessThanOrEqual(VECTOR_TX_MAX_WAIT_MS);
   });
 });
