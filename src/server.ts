@@ -175,10 +175,12 @@ const GITHUB_WEBHOOK_PATH = '/github/webhook';
 // BEING MAPPED IS NOT BEING SKIPPED (@copilot, PR #924). `isExpectedClientError`
 // consults one shared list with `formatError` — so no second hand-kept
 // `instanceof` chain lives here — but each entry declares `silenceInSentry`
-// separately. The asset refusals are mapped for the wire and deliberately still
-// REPORTED, because ASSET_BYTES_GONE is real server-state inconsistency and
-// this is currently its only alarm (#1140). Do not read the list as "everything
-// formatError touches is silent here"; read the flag.
+// separately. For example, the asset refusals were for a while mapped for the
+// wire but still REPORTED, because ASSET_BYTES_GONE (a missing object) had no
+// other alarm; since #1140 the bytes-missing sweep and the restore path raise
+// `asset.bytes_missing` where it is discovered, so they are silenced here now.
+// Do not read the list as "everything formatError touches is silent here";
+// read the flag.
 const sentryApolloPlugin: ApolloServerPlugin<BaseContext> = {
   async requestDidStart() {
     return {

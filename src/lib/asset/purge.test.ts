@@ -27,7 +27,7 @@ import { deleteUserAccount } from '../../controller/operations/deleteUser.js';
 
 const deleteObjectMock = vi.hoisted(() => vi.fn());
 
-vi.mock('../../integrations/r2/client.js', () => ({
+vi.mock('../../integrations/objectstore/index.js', () => ({
   deleteObject: deleteObjectMock,
 }));
 
