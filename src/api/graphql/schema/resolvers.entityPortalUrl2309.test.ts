@@ -98,26 +98,37 @@ describe('#2309 read gate, through the GraphQL executor', () => {
     const app = await db.app.create({ data: { name: 'PuApp', urn: 'pu-org.example:pu-app', organizationId: org.id } });
     const agent = await db.agent.create({ data: { id: generateId(), name: 'PuAgent', urn: 'pu-org.example:pu-agent', organizationId: org.id, visibility: 'ORGANIZATION' } });
     const server = new ApolloServer<Context>({ typeDefs, resolvers: resolvers as never });
-    const run = async (q: string, ref: string, userId: string) => {
+    await server.start();
+    type Result = { data?: Record<string, { urn: string; portalUrl: string | null } | null> | null; errors?: Array<{ message: string; path?: unknown; extensions?: { code?: string } }> };
+    const run = async (q: string, ref: string, userId: string): Promise<Result> => {
       const r = await server.executeOperation({ query: q, variables: { ref } }, { contextValue: as(userId) });
       expect(r.body.kind).toBe('single');
-      return (r.body as { singleResult: { data?: Record<string, { urn: string; portalUrl: string | null } | null> | null; errors?: Array<{ message: string }> } }).singleResult;
+      return (r.body as { singleResult: Result }).singleResult;
     };
-    const cases: Array<[string, string, string]> = [
-      ['memory', 'Memory', mem.id], ['app', 'App', app.id], ['agent', 'Agent', agent.id],
+    // The existing gates' own answers for a caller who cannot read, pinned exactly: memory(ref:) and agent(ref:) answer an
+    // explicit null with no error; app(ref:) refuses FORBIDDEN at its own path. Any other failure (a database error, an
+    // internal error) fails the pin.
+    const cases: Array<[string, string, string, 'null' | 'forbidden']> = [
+      ['memory', 'Memory', mem.id, 'null'], ['app', 'App', app.id, 'forbidden'], ['agent', 'Agent', agent.id, 'null'],
     ];
-    for (const [q, kind, ref] of cases) {
-      const query = `query($ref: ID!){ ${q}(ref: $ref){ urn portalUrl } }`;
-      const seen = await run(query, ref, member.id);
-      expect(seen.errors, kind).toBeUndefined();
-      const row = seen.data![q]!;
-      expect(row.urn.startsWith('hrn:'), kind).toBe(true);
-      expect(row.portalUrl, kind).toBe(`${ORIGIN}/app/u/${row.urn}`);
-      const denied = await run(query, ref, outsider.id);
-      // Whatever the existing gate answers (null or a refusal), it is never a row, so never a link.
-      expect(denied.data?.[q] ?? null, kind).toBeNull();
-      expect(JSON.stringify(denied), kind).not.toContain('/app/u/');
-      expect(JSON.stringify(denied), kind).not.toContain('SequelizeDatabaseError');
-    }
+    try {
+      for (const [q, kind, ref, denial] of cases) {
+        const query = `query($ref: ID!){ ${q}(ref: $ref){ urn portalUrl } }`;
+        const seen = await run(query, ref, member.id);
+        expect(seen.errors, kind).toBeUndefined();
+        const row = seen.data![q]!;
+        expect(row.urn.startsWith('hrn:'), kind).toBe(true);
+        expect(row.portalUrl, kind).toBe(`${ORIGIN}/app/u/${row.urn}`);
+        const denied = await run(query, ref, outsider.id);
+        expect(denied.data, kind).toEqual({ [q]: null });
+        if (denial === 'null') expect(denied.errors, kind).toBeUndefined();
+        else {
+          expect(denied.errors, kind).toHaveLength(1);
+          expect(denied.errors![0].message, kind).toBe('Forbidden');
+          expect(denied.errors![0].extensions?.code, kind).toBe('FORBIDDEN');
+          expect(denied.errors![0].path, kind).toEqual([q]);
+        }
+      }
+    } finally { await server.stop(); }
   });
 });
