@@ -58,7 +58,7 @@ import {
   handoffSessionId,
 } from '../../../lib/workerHandoff.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
-import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
+import { deriveEdgeLoc, edgeLocDecodesAsDerived } from '../../../lib/edgeLoc.js';
 import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge.js';
@@ -2741,6 +2741,9 @@ export const sessionMutations = {
               const edgeFields = {
                 sourceId,
                 targetId,
+                // #2947: a snapshot carries no provenance flag, so a restored edge is classified exactly as the migration
+                // backfill classifies one: derived iff its loc decodes as the derivation of its own name; no loc is derived.
+                locAuthored: e.loc != null && !edgeLocDecodesAsDerived(edgeLoc, edgeName),
                 name: edgeName,
                 description: (e.description as string | null) ?? null,
                 isRunnable: (e.isRunnable as boolean | null) ?? null,

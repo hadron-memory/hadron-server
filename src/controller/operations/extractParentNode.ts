@@ -411,6 +411,7 @@ export async function extractParentNodeGraph(
           sourceId: idMap.get(e.sourceId)!,
           targetId: idMap.get(e.targetId)!,
           loc,
+          locAuthored: false, // #2947: the copy's loc is derived from its own rebased endpoints
           name: e.name,
           description: e.description,
           isRunnable: e.isRunnable,
