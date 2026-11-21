@@ -35,9 +35,12 @@ const script = join(here, 'vitest-watchdog.sh');
 const repo = join(here, '..', '..');
 const realPs = spawnSync('bash', ['-c', 'command -v ps'], { encoding: 'utf8' }).stdout.trim();
 
+/** This process's environment without any WATCHDOG_* setting: under CI the suite itself runs inside the watched step,
+ *  which exports WATCHDOG_STEP_STARTED_AT and the budget, and a pin must set every setting it means to test. */
+const baseEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('WATCHDOG_')));
 /** Run the watchdog around `command` (a bash -c body) with a budget in test "minutes" (seconds). */
 function watch(command, { minutes = '3', stepTimeout = '45', extraEnv = {}, timeout = 60_000 } = {}) {
-  const env = { ...process.env, WATCHDOG_MINUTES: minutes, WATCHDOG_STEP_TIMEOUT_MINUTES: stepTimeout, WATCHDOG_SECONDS_PER_MINUTE: '1', ...extraEnv };
+  const env = { ...baseEnv(), WATCHDOG_MINUTES: minutes, WATCHDOG_STEP_TIMEOUT_MINUTES: stepTimeout, WATCHDOG_SECONDS_PER_MINUTE: '1', ...extraEnv };
   return spawnSync('bash', [script, '--', 'bash', '-c', command], { env, encoding: 'utf8', timeout });
 }
 /** The process's state letter from /proc, or null when it no longer exists. */
@@ -177,7 +180,7 @@ exec ${realPs} "$@"`);
 
 test('a TERM to the watchdog (the step cancelled) still ends the command', () => withDir((dir) => {
   const root = join(dir, 'root');
-  const env = { ...process.env, WATCHDOG_MINUTES: '30', WATCHDOG_STEP_TIMEOUT_MINUTES: '45', WATCHDOG_SECONDS_PER_MINUTE: '1' };
+  const env = { ...baseEnv(), WATCHDOG_MINUTES: '30', WATCHDOG_STEP_TIMEOUT_MINUTES: '45', WATCHDOG_SECONDS_PER_MINUTE: '1' };
   const r = spawnSync('bash', ['-c', `bash ${script} -- bash -c 'echo $$ > ${root}; sleep 300' & w=$!; until [ -s ${root} ]; do sleep 0.05; done; kill -TERM $w; wait $w`], { env, encoding: 'utf8', timeout: 30_000 });
   const pid = pidsIn(root)[0];
   try {
