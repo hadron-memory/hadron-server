@@ -93,20 +93,25 @@ describe('#4400 the migration refuses on data instead of guessing', () => {
   // merged, so the migration may already be applied somewhere: its bytes are not edited for a test sentinel.
   const doBlocks = [...sql.matchAll(/\bDO\s+(\$\w*\$)[\s\S]*?\1\s*;/gi)].map((m) => m[0]);
   const preflights = doBlocks.filter((b) => b.includes("'HDPRF'"));
-  const preflight = preflights[0] ?? '';
+  // #4617 item 4: no empty-string fallback; the dependent tests below stop at once unless there is exactly one.
+  const onePreflight = (): string => {
+    expect(preflights, 'the migration must hold exactly one DO block raising HDPRF').toHaveLength(1);
+    return preflights[0];
+  };
 
   it('carries exactly one HDPRF preflight block', () => {
     expect(preflights, 'the migration must hold exactly one DO block raising HDPRF').toHaveLength(1);
-    expect(preflight).toContain("name <> lower(name)");
+    expect(onePreflight()).toContain("name <> lower(name)");
   });
 
   it('extracts the preflight block it runs (a renamed marker must not make the tests below vacuous)', () => {
     expect(doBlocks.length).toBeGreaterThanOrEqual(1);
     expect(preflights).toHaveLength(1);
-    expect(preflight).toContain('HDPRF');
+    expect(onePreflight()).toContain('HDPRF');
   });
 
   it('raises SQLSTATE HDPRF when a mixed-case row exists', async () => {
+    const guard = onePreflight(); // outside the try below: a wrong block count fails here, by name (#4641 LOCAL P3)
     let state = 'NO ERROR';
     await db.$transaction(async (tx) => {
       // A database from before the constraint: drop it inside this transaction only, then roll everything back.
@@ -114,7 +119,7 @@ describe('#4400 the migration refuses on data instead of guessing', () => {
       await tx.$executeRaw`INSERT INTO principals (id, name, kind, status, created_at, updated_at)
         VALUES (${generateId()}, 'Legacy.Example', 'org', 'released', now(), now())`;
       await tx.$executeRawUnsafe('SAVEPOINT before_preflight');
-      try { await tx.$executeRawUnsafe(preflight); } catch (e) {
+      try { await tx.$executeRawUnsafe(guard); } catch (e) {
         state = JSON.stringify((e as { meta?: unknown }).meta ?? {}) + String((e as { message?: string }).message);
       }
       await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT before_preflight');
@@ -145,6 +150,6 @@ describe('#4400 the migration refuses on data instead of guessing', () => {
   it('passes on a pool that is already lower case', async () => {
     await mintPrincipal(db, { kind: 'org', name: 'Clean.Example' });
     // The DO block raises HDPRF on a mixed-case row; completing without raising is the assertion.
-    await db.$executeRawUnsafe(preflight);
+    await db.$executeRawUnsafe(onePreflight());
   });
 });

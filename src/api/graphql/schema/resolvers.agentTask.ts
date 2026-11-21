@@ -1348,9 +1348,15 @@ async function partyWorkerForLock(ctx: Context, appId: string, input: PartyInput
   return ref ? resolveTaskWorkerId(ctx, appId, ref) : null;
 }
 
-export function refuseEnded(task: TaskRow): void {
+/**
+ * #4494: the remedy a refused review-seat or verdict call names. Text only: the codes and every accept/refuse outcome are unchanged.
+ * A seat binds only while its task is live (schedule, freeze, seat, verdict, finish); when it cannot bind, the signed PR receipt at the exact head is the record.
+ */
+export const SEAT_RECEIPT_REMEDY = 'Post the verdict as a signed PR receipt at the exact head, which is the record when a seat cannot bind.';
+
+export function refuseEnded(task: TaskRow, remedy?: string): void {
   if (ENDED.includes(task.status)) {
-    throw taskError('TASK_ENDED', `This task is ${task.status}; an ended task never moves again.`, {
+    throw taskError('TASK_ENDED', `This task is ${task.status}; an ended task never moves again.${remedy ? ` ${remedy}` : ''}`, {
       taskId: task.id, status: task.status,
     });
   }
@@ -1995,7 +2001,9 @@ async function applyTaskCreate(
     if (!isAssignee(actor, parent)) {
       throw notAssignee(actor, "Only the parent task's assignee creates its child tasks.", { taskId: parentRef });
     }
-    refuseEnded(parent);
+    // #4494: only a PR build task (one carrying a pull_request reference) gets the review-seat remedy; any other ended parent keeps the generic refusal.
+    const isPrBuild = storedTaskReferences(parent.references).some(r => r.kind === 'pull_request');
+    refuseEnded(parent, isPrBuild ? `A child task cannot be created under an ended build task. If it was meant as a review seat, ${SEAT_RECEIPT_REMEDY.charAt(0).toLowerCase()}${SEAT_RECEIPT_REMEDY.slice(1)}` : undefined);
   }
   if (p.clone) {
     // The source is revalidated under the write: one that is gone refuses like an unknown task, never a foreign-key error.

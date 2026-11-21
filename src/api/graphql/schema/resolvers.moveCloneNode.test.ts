@@ -13,6 +13,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
+import { PrismaClient } from '../../../generated/prisma/index.js';
 import { cleanDb, createDbOrgAndGraph, createDbNode } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -856,3 +857,23 @@ describe('cloneNode (#564)', () => {
       .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 });
+
+
+it('#1213 clone uses only its owning connection with a pool of one, including outgoing-edge reads', async () => {
+  const source = await createDbNode(db, { memoryId: memA.id, loc: 'pool-one-source', content: 'copy on one connection' });
+  const sourceTarget = await createDbNode(db, { memoryId: memA.id, loc: 'pool-one-target' });
+  const destTarget = await createDbNode(db, { memoryId: memB.id, loc: 'pool-one-target' });
+  await edge(source.id, sourceTarget.id, memA.id, 'pool-one-edge');
+  const url = new URL(process.env.DATABASE_URL!); // Vitest's private worker clone, never the developer DB
+  url.searchParams.set('connection_limit', '1');
+  url.searchParams.set('pool_timeout', '1');
+  const small = new PrismaClient({ datasourceUrl: url.toString() });
+  try {
+    const copied = await M.cloneNode({}, { sourceRef: source.id, targetMemoryRef: memB.id }, { ...asUser(), db: small });
+    expect(copied).toMatchObject({ memoryId: memB.id, loc: source.loc, content: source.content });
+    const outgoing = await small.edge.findMany({ where: { sourceId: copied.id, deletedAt: null } });
+    expect(outgoing).toHaveLength(1);
+    expect(outgoing[0]).toMatchObject({ targetId: destTarget.id, memoryId: memB.id, name: 'rel' });
+    expect((await small.node.findUniqueOrThrow({ where: { id: source.id } })).memoryId).toBe(memA.id);
+  } finally { await small.$disconnect(); }
+}, 15_000);

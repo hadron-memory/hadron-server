@@ -4,14 +4,14 @@
     {
       "name": "memories_user_id_idx",
       "kind": "partial-index",
-      "why": "Partial index (WHERE clause) in the baseline migration; Prisma schema language cannot express a WHERE on an index, so the diff wants to 'fix' it into non-partial form on every run.",
-      "line": "CREATE INDEX \"memories_user_id_idx\" ON \"memories\"(\"user_id\");"
+      "why": "Transitional (#4335): the migrations build this index partial, which Prisma cannot see, so schema.prisma no longer declares it and prisma/partial-index-invariants.sql owns it. A database built by db push of a schema that still declared it full (main before #4335, as the smoke lane's baseline is for #4335's own PR) still has the full index, which the diff proposes to drop; post-push replaces it. Unmatched once no such baseline remains: prune with #4337.",
+      "line": "DROP INDEX \"memories_user_id_idx\";"
     },
     {
       "name": "users_external_app_id_external_id_key",
       "kind": "partial-index",
-      "why": "Partial unique index in the baseline migration; same Prisma limitation as memories_user_id_idx — the diff wants to drop the partiality it cannot model.",
-      "line": "CREATE UNIQUE INDEX \"users_external_app_id_external_id_key\" ON \"users\"(\"external_app_id\", \"external_id\");"
+      "why": "Transitional (#4335): the migrations build this index partial, which Prisma cannot see, so schema.prisma no longer declares it and prisma/partial-index-invariants.sql owns it. A database built by db push of a schema that still declared it full (main before #4335, as the smoke lane's baseline is for #4335's own PR) still has the full index, which the diff proposes to drop; post-push replaces it. Unmatched once no such baseline remains: prune with #4337.",
+      "line": "DROP INDEX \"users_external_app_id_external_id_key\";"
     },
     {
       "name": "node_embeddings_embedding_hnsw",
@@ -1792,6 +1792,12 @@
       "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
+      "name": "memories_user_id_idx",
+      "kind": "index",
+      "file": "partial-index-invariants.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
       "name": "node_embeddings_embedding_hnsw",
       "kind": "index",
       "file": "post-push.sql",
@@ -2812,6 +2818,42 @@
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
+      "name": "coordinator_cadence_episodes_event_id_key",
+      "kind": "unique-constraint",
+      "file": "unique-constraint-invariants.sql",
+      "why": "Table-level UNIQUE constraint defined in raw SQL; not expressible in the Prisma schema as written."
+    },
+    {
+      "name": "dark_worker_episodes_event_id_key",
+      "kind": "unique-constraint",
+      "file": "unique-constraint-invariants.sql",
+      "why": "Table-level UNIQUE constraint defined in raw SQL; not expressible in the Prisma schema as written."
+    },
+    {
+      "name": "host_sweep_episodes_event_id_key",
+      "kind": "unique-constraint",
+      "file": "unique-constraint-invariants.sql",
+      "why": "Table-level UNIQUE constraint defined in raw SQL; not expressible in the Prisma schema as written."
+    },
+    {
+      "name": "post_limit_episodes_event_id_key",
+      "kind": "unique-constraint",
+      "file": "unique-constraint-invariants.sql",
+      "why": "Table-level UNIQUE constraint defined in raw SQL; not expressible in the Prisma schema as written."
+    },
+    {
+      "name": "rate_limit_buckets_field_class_dimension_subject_window_sta_key",
+      "kind": "unique-constraint",
+      "file": "unique-constraint-invariants.sql",
+      "why": "Table-level UNIQUE constraint defined in raw SQL; not expressible in the Prisma schema as written."
+    },
+    {
+      "name": "start_failing_episodes_event_id_key",
+      "kind": "unique-constraint",
+      "file": "unique-constraint-invariants.sql",
+      "why": "Table-level UNIQUE constraint defined in raw SQL; not expressible in the Prisma schema as written."
+    },
+    {
       "name": "agent_task_counters_project_uniq",
       "kind": "unique-index",
       "file": "agent-task-number-backfill.sql",
@@ -3121,6 +3163,12 @@
       "name": "tickers_generated_live_uniq",
       "kind": "unique-index",
       "file": "ticker-generated-live-unique.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "users_external_app_id_external_id_key",
+      "kind": "unique-index",
+      "file": "partial-index-invariants.sql",
       "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {

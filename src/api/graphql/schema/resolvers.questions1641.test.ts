@@ -657,12 +657,12 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
     expect(await codeOf(M.encryptMemory(null, { memoryRef: priv.id, dataKey }, as(holger.id)))).toBe('QUESTION_LOG_ENCRYPTED');
   });
 
-  it('approval: a log is never approvable, a question not yet (S2), and bulk approval skips both with a receipt', async () => {
+  it('approval: a log is never approvable, an unanswered question is QUESTION_NOT_ANSWERED (#4429), and bulk approval skips both with a receipt', async () => {
     const log = await createLog();
     const d = await ask(log.row.id);
     await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'ordinary', name: 'Ordinary', content: 'x' } });
     expect(await codeOf(M.approveNode(null, { nodeRef: log.row.id }, as(holger.id)))).toBe('QUESTION_LOG_NOT_APPROVABLE');
-    expect(await codeOf(M.approveNode(null, { nodeRef: d.row.id }, as(holger.id)))).toBe('QUESTION_NOT_APPROVABLE');
+    expect(await codeOf(M.approveNode(null, { nodeRef: d.row.id }, as(holger.id)))).toBe('QUESTION_NOT_ANSWERED');
     const bulk = await M.approveMemoryNodes(null, { memoryRef: memory.id }, as());
     expect(bulk).toMatchObject({ skippedQuestionCount: 2, skippedQuestions: ['questions', 'questions:QA'] });
     expect(bulk.approved.map((r: { loc: string }) => r.loc)).toContain('ordinary');
@@ -684,7 +684,7 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
       await messageOf(M.deleteNodeRevision(null, { revisionId: rev.id }, as())),
     ];
     expect(msgs[0]).toBe('A question log holds settings, not a question; it is never approved.');
-    expect(msgs[1]).toBe('A question is approved only by one of its deciders, which is not available yet.');
+    expect(msgs[1]).toBe(`${(d.row.data as { code: string }).code} has no standing answer to approve.`);
     expect(msgs[2]).toContain("Clearing a question's history");
     expect(msgs[3]).toContain("Deleting a question's revision");
     for (const m of msgs) expect(m).not.toMatch(/\bdecisions?\b/i);

@@ -122,7 +122,9 @@ describe('#3543 no attempt', () => {
       expect(response.status).toBe(200);
       await vi.waitFor(() => expect(sync).toHaveBeenCalledTimes(1));
       expect(await finished).toMatchObject({ notAttemptedReason: 'NO_INSTALLATION' });
-      expect(error).not.toHaveBeenCalled(); expect(warn).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+      // #4593: Apollo 5 logs one deprecation notice for status400ForVariableCoercionErrors:false when createServer builds the server; it is not a sync log.
+      expect(warn.mock.calls.filter(([m]) => !String(m).includes('status400ForVariableCoercionErrors'))).toEqual([]);
       expect(await snapshot()).toEqual(before);
       expect(getInstallationToken).not.toHaveBeenCalled();
     } finally { await new Promise<void>((resolve, reject) => http.close(e => e ? reject(e) : resolve())); }

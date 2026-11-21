@@ -144,6 +144,79 @@ describe('#4411 item 1: mintPrincipal maps a chk_principals_name_lower violation
     expect(await mintWith(otherRaw)).toBe(otherRaw);
   });
 
+  it('leaves a different check untyped when this name sits in the RELATION position (#4617 item 2)', async () => {
+    // A different CHECK on a relation literally named chk_principals_name_lower: the name is quoted, but as the
+    // relation, not as the constraint that refused.
+    const real = await realViolation();
+    const other = unknownWith(withPrimaryMessage(real.message,
+      'new row for relation \\"chk_principals_name_lower\\" violates check constraint \\"chk_other\\"'));
+    expect(other.message).toMatch(/code: "23514"/);
+    expect(await mintWith(other)).toBe(other);
+    const otherRaw = rawWith('23514',
+      'new row for relation "chk_principals_name_lower" violates check constraint "chk_other"');
+    expect(await mintWith(otherRaw)).toBe(otherRaw);
+    // The true violation still maps, in both shapes, with the relation also named as the constraint's table.
+    expect(await mintWith(rawWith('23514',
+      'new row for relation "principals" violates check constraint "chk_principals_name_lower"')))
+      .toBeInstanceOf(RootNameInvalidError);
+    expect(await mintWith(unknownWith(withPrimaryMessage(real.message,
+      'new row for relation \\"principals\\" violates check constraint \\"chk_principals_name_lower\\"'))))
+      .toBeInstanceOf(RootNameInvalidError);
+  });
+
+  it('maps a translation that puts words after the constraint name (#4641 BLIND note)', async () => {
+    // Some locales end the primary message with a verb after the quoted constraint; it is still the LAST quoted name.
+    const real = await realViolation();
+    const ja = 'リレーション"principals"の新しい行は検査制約"chk_principals_name_lower"に違反しています';
+    expect(await mintWith(rawWith('23514', ja))).toBeInstanceOf(RootNameInvalidError);
+    expect(await mintWith(unknownWith(withPrimaryMessage(real.message, ja.replaceAll('"', '\\"')))))
+      .toBeInstanceOf(RootNameInvalidError);
+    // and the relation-position case with a trailing verb stays untyped
+    const other = rawWith('23514', 'リレーション"chk_principals_name_lower"の新しい行は検査制約"chk_other"に違反しています');
+    expect(await mintWith(other)).toBe(other);
+  });
+
+  /**
+   * #4641 BLIND P2 evidence. msgid `new row for relation "%s" violates check constraint "%s"`, with the msgstr of
+   * every locale in the server's own `postgres-17.mo` catalogs (read from /usr/share/locale/<loc>/LC_MESSAGES). In
+   * all sixteen the relation comes first and the constraint second, so the constraint is the LAST quoted
+   * identifier; the quote characters differ (de » «, es/fr/id « », others ASCII), and some put words after it.
+   */
+  const CATALOG: Record<string, string> = {
+    de: 'neue Zeile für Relation »%s« verletzt Check-Constraint »%s«',
+    es: 'el nuevo registro para la relación «%s» viola la restricción «check» «%s»',
+    fr: 'la nouvelle ligne de la relation « %s » viole la contrainte de vérification « %s »',
+    id: 'baris baru untuk relasi « %s » melanggar pemeriksaan constraint « %s »',
+    it: 'la nuova riga per la relazione "%s" viola il vincolo di controllo "%s"',
+    ja: 'リレーション"%s"の新しい行は検査制約"%s"に違反しています',
+    ka: 'ახალი მწკრივი ურთიერთობისთვის "%s" არღვევს შემოწმების შეზღუდვას "%s"',
+    ko: '새 자료가 "%s" 릴레이션의 "%s" 체크 제약 조건을 위반했습니다',
+    pl: 'nowy rekord dla relacji "%s" narusza ograniczenie sprawdzające "%s"',
+    pt_BR: 'a nova linha da relação "%s" viola a restrição de verificação "%s"',
+    ru: 'новая строка в отношении "%s" нарушает ограничение-проверку "%s"',
+    sv: 'ny rad för relation "%s" bryter mot check-villkor "%s"',
+    tr: '"%s" tablosuna girilen yeni satır "%s" check kısıtlamasını ihlal ediyor',
+    uk: 'новий рядок для відношення "%s" порушує перевірне обмеження перевірку "%s"',
+    zh_CN: '关系 "%s" 的新行违反检查约束 "%s"',
+    zh_TW: '關聯 "%s" 的新資料列違反檢查限制 "%s"',
+  };
+  const fill = (msgstr: string, relation: string, constraint: string): string =>
+    msgstr.replace('%s', relation).replace('%s', constraint);
+
+  it.each(Object.entries(CATALOG))('maps the %s catalog message, and not its relation-position decoy', async (_loc, msgstr) => {
+    const real = await realViolation();
+    const ours = fill(msgstr, 'principals', 'chk_principals_name_lower');
+    const decoy = fill(msgstr, 'chk_principals_name_lower', 'chk_other');
+    // The raw shape, plainly; the engine shape with ASCII quotes backslash-escaped, as the engine renders them.
+    expect(await mintWith(rawWith('23514', ours))).toBeInstanceOf(RootNameInvalidError);
+    expect(await mintWith(unknownWith(withPrimaryMessage(real.message, ours.replaceAll('"', '\\"')))))
+      .toBeInstanceOf(RootNameInvalidError);
+    const decoyRaw = rawWith('23514', decoy);
+    expect(await mintWith(decoyRaw)).toBe(decoyRaw);
+    const decoyEngine = unknownWith(withPrimaryMessage(real.message, decoy.replaceAll('"', '\\"')));
+    expect(await mintWith(decoyEngine)).toBe(decoyEngine);
+  });
+
   it('leaves an error naming this constraint under another SQLSTATE untyped', async () => {
     const real = await realViolation();
     const notCheck = unknownWith(real.message.replace(/code: (\\?)"23514(\\?)"/, 'code: $1"23505$2"'));
@@ -217,6 +290,19 @@ describe('#4411 item 2: post-push.sql refuses a mixed-case principal row with an
     expect(said).toMatch(/'LEGACY\.EXAMPLE' \([^)]*shares its root with another row\)/);
     expect(said).toMatch(/'Legacy\.Example' \([^)]*shares its root with another row\)/);
     expect(said).not.toMatch(/'Lonely\.Example' \([^)]*shares its root/);
+  });
+
+  it('pins the threshold: exactly one mixed-case row is refused (#4617 item 3)', async () => {
+    const said = await runOnLegacy([{ name: 'Solo.Example' }]);
+    expect(said).toContain('HDPRF');
+    expect(said).toContain('1 principal row(s)');
+    expect(said).toContain('Solo.Example');
+  });
+
+  it('tells the owner of a collision group to lower-case the kept row with its handle or urn (#4617 item 1)', async () => {
+    const said = await runOnLegacy([{ name: 'legacy.example' }, { name: 'Legacy.Example' }]);
+    expect(said).toMatch(/rename or delete the others, then lower-case the kept row/);
+    expect(said).toMatch(/kept row[^.]*users\.handle[^.]*organizations\.urn/);
   });
 
   it('passes on a pool that is already lower case', async () => {
