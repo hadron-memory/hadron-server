@@ -24,7 +24,7 @@ async function context(withUser: boolean): Promise<RunToolContext> {
   return { db, run, principal: runContext(db, run), log: vi.fn() };
 }
 async function call(c: RunToolContext, args: Record<string, unknown> = {}) {
-  return hadronFindNodes.execute(c, { query: queryText, ...args }) as Promise<{ hits: Hit[] }>;
+  return hadronFindNodes.execute(c, { query: queryText, ...args }) as Promise<{ hits: Hit[]; truncated?: true }>;
 }
 async function node(memoryId: string, loc: string, extra: Record<string, unknown> = {}) {
   return db.node.create({ data: { id: generateId(), memoryId, loc, name: `orchard ${loc}`, content: 'orchard body', ...extra } });
@@ -213,4 +213,44 @@ it.each([[25, 1], [225, 1], [25, 15], [225, 15]])('returns requested child match
     expect(JSON.stringify(out)).not.toContain('strong-');
     expect(spy.mock.calls.map(args => args[1].offset)).toEqual(baseCount > 200 ? [0, 10, 210] : [0, 10]);
   } finally { spy.mockRestore(); }
+});
+
+
+it('caps inherited-page scanning at five engine calls and signals an incomplete result', async () => {
+  const c = await context(false);
+  const local = await db.node.findFirstOrThrow({ where: { memoryId: memories.app.id } });
+  const excluded = await db.node.findFirstOrThrow({ where: { memoryId: memories.others.id } });
+  const spy = vi.spyOn(Q, 'findNodes').mockImplementation(async (_root, args) => ({
+    hits: Array.from({ length: args.offset > 603 ? 0 : args.limit }, (_, i) => ({ node: args.offset === 0 && i === 0 ? local : excluded, score: 1 })),
+  }));
+  try {
+    const out = await call(c, { limit: 3 });
+    expect(out.hits.map(hit => hit.urn)).toEqual([emitNodeUrnV2(memories.app.urn, local.loc)]);
+    expect(out.truncated).toBe(true);
+    expect(spy).toHaveBeenCalledTimes(5);
+    expect(spy.mock.calls.map(args => args[1].offset)).toEqual([0, 3, 203, 403, 603]);
+  } finally { spy.mockRestore(); }
+});
+
+it('preserves already-fenced hits with an incomplete signal if a later engine page rejects', async () => {
+  const c = await context(false);
+  const local = await db.node.findFirstOrThrow({ where: { memoryId: memories.app.id } });
+  const excluded = await db.node.findFirstOrThrow({ where: { memoryId: memories.others.id } });
+  const spy = vi.spyOn(Q, 'findNodes')
+    .mockResolvedValueOnce({ hits: [{ node: local, score: 1 }, { node: excluded, score: 1 }] })
+    .mockRejectedValue(new Error('private late-page failure'));
+  try {
+    const out = await call(c, { limit: 2 });
+    expect(out).toMatchObject({ truncated: true, hits: [{ urn: emitNodeUrnV2(memories.app.urn, local.loc) }] });
+    expect(JSON.stringify(out)).not.toContain('private late-page failure');
+    expect(spy).toHaveBeenCalledTimes(2);
+  } finally { spy.mockRestore(); }
+});
+
+it('does not turn a first-page engine refusal into an empty successful result', async () => {
+  const c = await context(false);
+  const refusal = new Error('first-page refusal');
+  const spy = vi.spyOn(Q, 'findNodes').mockRejectedValue(refusal);
+  try { await expect(call(c)).rejects.toBe(refusal); expect(spy).toHaveBeenCalledTimes(1); }
+  finally { spy.mockRestore(); }
 });
