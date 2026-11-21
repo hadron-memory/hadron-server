@@ -21,7 +21,11 @@ describe('prisma/grant-invariants.sql parity', () => {
     const sql = readFileSync(new URL('../../../prisma/grant-invariants.sql', import.meta.url), 'utf8');
     // #4179: the import-parent-gone migration carries the full canonical file (everything #3998's use-count-bound migration carried, plus
     // the agent_imports AFTER DELETE trigger), after it.
-    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d === '20261121100000_grant_import_parent_gone');
+    // The newest migration whose file contains the canonical file's first line is the carrier; a later one that carries it moves this.
+    const migrations = new URL('../../../prisma/migrations/', import.meta.url);
+    const first = sql.split('\n')[0]!;
+    const dir = readdirSync(migrations).sort().reverse()
+      .find((d) => { try { return readFileSync(new URL(`${d}/migration.sql`, migrations), 'utf8').includes(first); } catch { return false; } });
     expect(dir).toBeTruthy();
     expect(readFileSync(new URL(`../../../prisma/migrations/${dir}/migration.sql`, import.meta.url), 'utf8').endsWith(sql)).toBe(true);
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir grant-invariants.sql');

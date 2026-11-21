@@ -3,7 +3,7 @@
 -- agent_imports_grant_parent_gone, which end an imported agent's grants when its importing parent is hard-deleted. Everything else is a
 -- CREATE OR REPLACE / DROP-then-CREATE of the same text. The previous image runs against this schema unchanged.
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (20261118100000_grant_use_count_bound) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (today 20261121100000_grant_import_parent_gone) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because

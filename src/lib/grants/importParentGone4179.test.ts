@@ -15,7 +15,7 @@ import { Prisma } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
-import { DB_NOW, dropTestActions, insertGrantUnguarded, raw, seedWorld, type World } from './grantFixtures3668.js';
+import { DB_NOW, dropTestActions, grantValues, insertGrantUnguarded, raw, seedWorld, type World } from './grantFixtures3668.js';
 
 const HOUR_AGO = raw(`${DB_NOW} - interval '1 hour'`);
 
@@ -93,6 +93,22 @@ describe('#4179 hard-deleted importing parent: the imported agent\'s grants end 
     for (const id of [revoked, expired, spent]) expect((await row(id)).departed, id).toBe(false);
     expect(await row(departed)).toEqual(before);
     expect((await row(live)).departed).toBe(true);
+  });
+
+  it('the first end stands for the ACTION\'s own limits too: past its lifetime or at its use cap is not stamped (the third arm of the predicate)', async () => {
+    await install(w.appId, parent.id); await importEdge(parent.id, child.id);
+    const action = grantValues(w).action as string;
+    await db.$executeRawUnsafe(`UPDATE actions SET max_uses = 2, lifetime_seconds = 3600 WHERE name = $1`, action);
+    try {
+      const pastLifetime = await held(child.id, w.appId, { activated_at: raw(`${DB_NOW} - interval '2 hours'`), use_count: 0 });
+      const atCap = await held(child.id, w.appId, { activated_at: raw(`${DB_NOW} - interval '1 minute'`), use_count: 2 });
+      const live = await held(child.id, w.appId, { activated_at: raw(`${DB_NOW} - interval '1 minute'`), use_count: 1 });
+      await hardDelete(parent.id);
+      for (const id of [pastLifetime, atCap]) expect((await row(id)).departed, id).toBe(false);
+      expect((await row(live)).departed).toBe(true);
+    } finally {
+      await db.$executeRawUnsafe(`UPDATE actions SET max_uses = NULL, lifetime_seconds = NULL WHERE name = $1`, action);
+    }
   });
 
   it('an ordinary edge removal (the parent still exists) is not this trigger: no stamp from the raw delete', async () => {

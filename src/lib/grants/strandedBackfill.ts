@@ -24,7 +24,7 @@
  *  - A grant that ended on its own (expired, spent, past its action's limits) or was revoked between the real departure and the run is
  *    left alone: its first end stands, so it is not re-stamped and it carries no departure.
  *  - `skippedInstalled` is part of the dry run the production register grant reviews: if it is non-zero it goes to the §10 seat and to
- *    Holger before the apply (Victor, #4697 FIT note). Old grants of a reinstalled agent may still read live; that residual against R2 is
+ *    Holger before the apply (Victor, the #4179 FIT note). Old grants of a reinstalled agent may still read live; that residual against R2 is
  *    accepted for this PR.
  *  - Once #4180 lands, backfilled rows carry its "reason not recorded" value (a follow-up on that issue, not built here).
  * Running it in production needs its own register grant (CLAUDE.md, "Production database"); this file only ships the tool.

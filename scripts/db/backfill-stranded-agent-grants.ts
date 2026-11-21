@@ -38,8 +38,11 @@ export async function main(argv: readonly string[], io: BackfillToolIo): Promise
       + `behind_dated_licence_revocation=${r.behindDatedLicenceRevocation} skipped_installed=${r.skippedInstalled}`
       + (r.applied ? '' : ' (pass --apply <register grant ref> to end them)'));
     return 0;
-  } catch {
-    io.log(`${TAG}.failed`);
+  } catch (err) {
+    // Name the Prisma/pg code, never the message: it can carry the URL or SQL. Batches already committed stay stamped, so a rerun
+    // resumes (the stamp is once); the dry run's candidates count says how many remain.
+    const code = typeof (err as { code?: unknown })?.code === 'string' ? (err as { code: string }).code : 'unknown';
+    io.log(`${TAG}.failed code=${code} (batches already applied stay stamped; rerun to resume)`);
     return 1;
   } finally {
     await db.$disconnect().catch(() => undefined);
