@@ -2001,7 +2001,9 @@ async function applyTaskCreate(
     if (!isAssignee(actor, parent)) {
       throw notAssignee(actor, "Only the parent task's assignee creates its child tasks.", { taskId: parentRef });
     }
-    refuseEnded(parent, `A child task cannot be created under an ended parent. If it was meant as a review seat, ${SEAT_RECEIPT_REMEDY.charAt(0).toLowerCase()}${SEAT_RECEIPT_REMEDY.slice(1)}`);
+    // #4494: only a PR build task (one carrying a pull_request reference) gets the review-seat remedy; any other ended parent keeps the generic refusal.
+    const isPrBuild = storedTaskReferences(parent.references).some(r => r.kind === 'pull_request');
+    refuseEnded(parent, isPrBuild ? `A review seat cannot be created under an ended build task. ${SEAT_RECEIPT_REMEDY}` : undefined);
   }
   if (p.clone) {
     // The source is revalidated under the write: one that is gone refuses like an unknown task, never a foreign-key error.
