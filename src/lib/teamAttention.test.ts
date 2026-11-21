@@ -520,6 +520,11 @@ describe('worker session reads and mark-read (resolver level; was the MCP parity
 
   it('refuses markOwnTeamChatRead while impersonating even within the App organization (#4507)', async () => {
     await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: user.id, heldAt: new Date() } });
+    // Both actor and subject are org ADMIN; the subject is an App admin and holds the worker. This exercises resolvePilotApp's impersonation guard.
+    expect(await db.orgMember.findFirst({ where: { organizationId: org.id, userId: otherUser.id }, select: { role: true } })).toEqual({ role: 'ADMIN' });
+    expect(await db.orgMember.findFirst({ where: { organizationId: org.id, userId: user.id }, select: { role: true } })).toEqual({ role: 'ADMIN' });
+    expect(await db.appMember.findFirst({ where: { appId: app.id, userId: user.id }, select: { role: true } })).toEqual({ role: 'admin' });
+    expect(await db.worker.findUnique({ where: { id: worker.id }, select: { heldByUserId: true } })).toEqual({ heldByUserId: user.id });
     await post('unread');
     const args = { appRef: app.id, sessionRef: sessionId, channelRef: channel.id, seq: 1 };
     const impersonation = { orgId: org.id, actorUserId: otherUser.id, sessionId: generateId(), expiresAt: new Date(Date.now() + 60_000) };
