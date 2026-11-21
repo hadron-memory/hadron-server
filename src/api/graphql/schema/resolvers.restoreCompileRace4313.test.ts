@@ -142,7 +142,8 @@ function ctxInterleaving(at: HookPoint, during: () => Promise<unknown>) {
       if (prop !== '$transaction') return Reflect.get(target, prop, receiver);
       return (fn: unknown, opts: unknown) => {
         if (typeof fn !== 'function') return (target as any).$transaction(fn, opts);
-        const isRestore = ++state.transactions === 2;
+        // #3587: the auto-save is written inside the restore's own transaction, so the restore is the FIRST one.
+        const isRestore = ++state.transactions === 1;
         let calls = 0;
         return (target as any).$transaction((tx: any) => {
           if (!isRestore) return (fn as any)(tx);
@@ -173,9 +174,12 @@ function ctxInterleaving(at: HookPoint, during: () => Promise<unknown>) {
   return { ctx: { ...base, db: proxyDb } as Context, state };
 }
 
+// The restore's node reads before the live read: the auto-save's snapshot read and its slot read (#3587).
+const RESTORE_LIVE_READ = 3;
+
 describe('#4313: a compile that commits while a restore runs is left as it is', () => {
   const points: Array<[string, HookPoint]> = [
-    ['after the restore\'s first node read', { model: 'node', op: 'findMany', nth: 1 }],
+    ['after the restore\'s first node read', { model: 'node', op: 'findMany', nth: RESTORE_LIVE_READ }],
     ['after the tombstone statement', { model: 'node', op: 'updateMany', nth: 1 }],
     ['after the edge-retire statement', { model: 'edge', op: 'updateMany', nth: 1 }],
   ];
@@ -194,7 +198,7 @@ describe('#4313: a compile that commits while a restore runs is left as it is', 
   it('the hook reaches the restore: with no compile at all the restore still tombstones what the snapshot lacks', async () => {
     const rev = await save();
     const extra = await mk('notes:later', { content: 'added after the snapshot' });
-    const { ctx, state } = ctxInterleaving({ model: 'node', op: 'findMany', nth: 1 }, async () => undefined);
+    const { ctx, state } = ctxInterleaving({ model: 'node', op: 'findMany', nth: RESTORE_LIVE_READ }, async () => undefined);
     await M.restoreRevision({}, { agentRef: agent.id, revisionLoc: rev.revisionLoc }, ctx);
     expect(state.fired).toBe(true);
     expect((await db.node.findUniqueOrThrow({ where: { id: extra.id } })).deletedAt).not.toBeNull();
