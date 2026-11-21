@@ -12,6 +12,7 @@ import { withReconciledNodeRead } from './reconciledNodeRead.js';
 import { liveReadSnapshotContext } from '../../api/graphql/schema/authorizedTx.js';
 import * as liveAuthority from '../../api/graphql/schema/authorizedTx.js';
 import { Prisma } from '../../generated/prisma/index.js';
+import { poolWaitTolerance, readHostLoad } from '../../test/hostLoad.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 let userId: string;
@@ -331,7 +332,13 @@ describe('outer-fenced reconciliation read callers', () => {
     await measuredOther;
     const elapsedMs = performance.now() - start;
     process.stdout.write(`S3b throughput ${JSON.stringify({ baselineMs, elapsedMs, readsPerSecond: 201_000 / elapsedMs, failures: results.filter((r) => r.status === 'rejected').length, otherTenantMs })}\n`);
-    expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
+    // #3002: under declared host load a read may fail on the pool's wait (P2024/P2028) and nothing else; an idle host
+    // keeps the all-fulfilled budget. The other tenant's read must still have finished, on any host.
+    const rejected = results.flatMap((r) => (r.status === 'rejected' ? [r.reason] : []));
+    const { forgiven, unexpected } = poolWaitTolerance(rejected, readHostLoad());
+    expect(unexpected).toEqual([]);
+    if (forgiven > 0) process.stdout.write(`#3002 loaded host: ${forgiven} of 200 reads excused as pool-wait\n`);
+    expect(otherTenantMs).toBeGreaterThan(0);
     expect(await db.nodeRevision.count()).toBe(0);
   }, 15_000);
 

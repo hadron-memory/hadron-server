@@ -11,7 +11,7 @@ scripts/e2e/stack.sh down charles
 
 `up` builds this checkout, creates an empty Postgres 17/pgvector database,
 uses `pre-push.sql` → Prisma schema push → `post-push.sql`, seeds it and waits
-for server health. The seed verifies the HNSW index, generated `nodes.tsv`
+for server readiness (`GET /ready`, #3021: a stack whose first startup failed never counts as up; `/health` stays liveness only). The seed verifies the HNSW index, generated `nodes.tsv`
 and ownership/class CHECK constraints. It refuses a populated DB. To reset,
 use `down` then `up`; restarting an initialized stack refuses explicitly before
 Prisma or signing-key generation. The guard checks the public schema used by
@@ -175,7 +175,7 @@ has one `hdr_app_*` credential. Existing fixture IDs and content are determinist
 allocate their own user IDs (and fresh-user handle).
 Credentials are freshly random on every new stack.
 
-`up` prints raw credentials **once at the end** after health and inventory
+`up` prints raw credentials **once at the end** after readiness and inventory
 checks. Only hashes are stored in DB, with raw values in a stack-scoped
 credential volume for check scripts. Seed and application logs do not print
 the raw credentials. Capture the final output privately if needed; `down`
@@ -250,7 +250,7 @@ Use a separate browser profile, or log out between identities. The fixture proxy
 Consequently, every peer that can reach the disposable Incus QA bridge can use
 these synthetic logins; loopback publication does not isolate that private bridge.
 Use this stack only for disposable synthetic data, never on a public interface.
-The server and internal proxy are supervised together; published health and login
+The server and internal proxy are supervised together; published readiness (`/ready`) and login
 are verified before credentials are printed and again by `check`. `check` tests the handoff redemption, authenticated API identities and MCP
 initialize/tools discovery for a user and an App key; independent QA must also exercise the
 rendered portal and concurrent stacks before calling the issue done.
