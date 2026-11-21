@@ -308,6 +308,13 @@ export function hnswEfSearchFor(candidateK: number): number {
   return Math.min(Math.max(Math.trunc(candidateK), 40), 1000);
 }
 
+/**
+ * #2772 — the deepest page (offset + limit, in nodes) whose order the HNSW index can stand behind: pgvector's
+ * `hnsw.ef_search` maximum. A page that reaches past it is ranked by the exact statement instead of
+ * returning the index's approximate order (ruling 0150, cor:api:090:04 "the true page").
+ */
+export const VECTOR_INDEX_ORDER_WINDOW = 1000;
+
 /** #2772: default statement budget for one vector or hybrid vector statement. */
 export const VECTOR_SEARCH_DEFAULT_TIMEOUT_MS = 5000;
 
@@ -437,7 +444,14 @@ async function rankUnderBudget<R>(
       for (;;) {
         const rows = await withVectorBudget(db, k, true, (tx) => o.ann(tx, k));
         best = rows;
-        if (o.distinctCount(rows) >= o.need) return { rows, exhausted: false, stopped: false };
+        if (o.distinctCount(rows) >= o.need) {
+          if (o.need <= VECTOR_INDEX_ORDER_WINDOW) return { rows, exhausted: false, stopped: false };
+          // Past the index's widest horizon the order of a FULL page is the index's approximate order, which
+          // nothing in the statement can check (the count only catches a scan that ends short). Ruling 0150
+          // asks for the true page, so rank it exactly; the cost grows with the offset (see the PR's EXPLAIN).
+          best = await withVectorBudget(db, 40, false, (tx) => o.exact(tx));
+          return { rows: best, exhausted: o.distinctCount(best) < o.need, stopped: false };
+        }
         if (rows.length < k) break; // short: the whole set, or an index walk that ended early (checked below)
         k *= 4;
       }
@@ -554,7 +568,7 @@ export async function vectorSearchNodes(
         SELECT ne.node_id, ne.embedding <=> ${qvec}::vector AS distance
         ${eligibleFrom}
       )
-      SELECT node_id, MIN(distance) AS distance FROM cand GROUP BY node_id ORDER BY distance ASC LIMIT ${k}`,
+      SELECT node_id, MIN(distance) AS distance FROM cand GROUP BY node_id ORDER BY distance ASC, node_id ASC LIMIT ${k}`,
     count: async (tx) => Number((await tx.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n ${eligibleFrom}`)[0]?.n ?? 0),
   });
   const best = new Map<string, number>();
