@@ -198,8 +198,8 @@ describe('#3401 refusals answer as an unknown memory on both surfaces', () => {
     it(`${cls}: an impersonating context carrying the App and session (D3)`, async () => {
       const mem = await sessionMemory({ cls });
       const sid = await session(mem.id);
-      const impersonation = { sessionId: generateId(), actorUserId: leo, organizationId: org.id };
-      await expectRefused(keyAuth(sid, { impersonation } as Partial<AuthContext>), mem);
+      const impersonation = { sessionId: generateId(), actorUserId: leo, orgId: org.id, expiresAt: new Date(Date.now() + 3_600_000) };
+      await expectRefused(keyAuth(sid, { impersonation }), mem);
     });
   }
 

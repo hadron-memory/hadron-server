@@ -57,7 +57,7 @@ describe('#3401 D3: the MCP gate\'s own run and impersonation terms', () => {
   });
 
   it('an impersonating context never takes the session arm', async () => {
-    const imp = auth({ impersonation: { sessionId: generateId(), actorUserId: generateId(), organizationId: generateId() } } as Partial<AuthContext>);
+    const imp = auth({ impersonation: { sessionId: generateId(), actorUserId: generateId(), orgId: generateId(), expiresAt: new Date(Date.now() + 3_600_000) } });
     expect(await canReadMemory(db, imp, memoryId)).toBe(false);
     expect((await filterReadableMemoryIds(db, imp, [memoryId])).has(memoryId)).toBe(false);
   });
