@@ -331,14 +331,16 @@ describe('#3429 authoring (acceptance 4)', () => {
     const task = await db.node.create({ data: { id: generateId(), memoryId: mem.id, loc: 'author-task', name: 'Author task', isRunnable: true, content: 'how' } });
     const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: mem.id } });
     await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'spec', authorTaskId: task.id, authorTaskRequired: true } });
-    const viaUpdate = await codeOf(resolvers.Mutation.updateSpecNode(null, { input: { id: x.id, abstract: 'zzz', expectedRevision: await rev(x.id) } } as never, as(admin.id)));
-    expect(viaUpdate, 'the fixture must actually govern: updateSpecNode has to refuse').toMatch(/^AUTHORING_ATTESTATION_/);
+    // Snapshots FIRST, so a write updateSpecNode makes before it refuses would show.
     const before = await snap(x.id);
     const beforeY = await snap(y.id);
+    const viaUpdate = await codeOf(resolvers.Mutation.updateSpecNode(null, { input: { id: x.id, abstract: 'zzz', expectedRevision: await rev(x.id) } } as never, as(admin.id)));
+    expect(viaUpdate, 'the fixture must actually govern: updateSpecNode has to refuse').toBe('AUTHORING_ATTESTATION_MISSING');
+    expect(await snap(x.id)).toBe(before);
     const viaDoor = await codeOf(retire({ ref: x.id, form: 'RESCIND', expectedRevision: await rev(x.id), reason: 'r', summary: 's' }));
     const viaSupersede = await codeOf(retire({ ref: x.id, form: 'SUPERSEDE', successorRef: y.id, expectedRevision: await rev(x.id) }));
-    expect(viaDoor).toBe(viaUpdate);
-    expect(viaSupersede).toBe(viaUpdate);
+    expect(viaDoor).toBe('AUTHORING_ATTESTATION_MISSING');
+    expect(viaSupersede).toBe('AUTHORING_ATTESTATION_MISSING');
     expect(await snap(x.id)).toBe(before);
     expect(await snap(y.id)).toBe(beforeY);
   });
@@ -393,11 +395,12 @@ describe('#3429 the door waits for a writer that holds its locks (acceptance 3, 
     const x = await spec('h:loc:x');
     const promo = await holding(async (t) => { await acquireLockSet(t, [{ memoryId: mem.id, loc: 'h:loc:x' }]); });
     const door = rescind(x.id);
-    await waitForLockWaiters(db, 1);
-    // The loc key comes BEFORE the row lock (writeNodeCore's order): while the door waits on it, it holds no row lock yet.
-    // (writeNodeCore re-takes the key later, so only this probe tells the early key from the late one.)
-    await expect(db.$transaction(async (t) => { await t.$queryRaw`SELECT id FROM nodes WHERE id = ${x.id} FOR UPDATE NOWAIT`; })).resolves.toBeUndefined();
-    promo.release(); await promo.done;
+    try {
+      await waitForLockWaiters(db, 1);
+      // The loc key comes BEFORE the row lock (writeNodeCore's order): while the door waits on it, it holds no row lock yet.
+      // (writeNodeCore re-takes the key later, so only this probe tells the early key from the late one.)
+      await expect(db.$transaction(async (t) => { await t.$queryRaw`SELECT id FROM nodes WHERE id = ${x.id} FOR UPDATE NOWAIT`; })).resolves.toBeUndefined();
+    } finally { promo.release(); await promo.done.catch(() => undefined); }
     expect((await door).node.tags).toContain('superseded');
   });
 
@@ -494,12 +497,20 @@ describe('#3429 rollback after the node write (blind P3)', () => {
   it('an edge insert that fails AFTER the spec write leaves the node, its revisions and its edges exactly as before', async () => {
     const x = await spec('rb:x'); const y = await spec('rb:y');
     const before = await snap(x.id);
-    await db.$executeRawUnsafe(`CREATE FUNCTION pg_temp.x() RETURNS void LANGUAGE sql AS 'select 1'`).catch(() => undefined);
-    await db.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION fail_retire_edge_3429() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RAISE EXCEPTION 'forced failure after the node write'; END $f$`);
-    await db.$executeRawUnsafe(`CREATE TRIGGER fail_retire_edge_3429 BEFORE INSERT ON edges FOR EACH ROW WHEN (NEW.name = 'superseded-by') EXECUTE FUNCTION fail_retire_edge_3429()`);
     try {
-      const failed = await codeOf(supersede(x.id, y.id));
-      expect(failed).not.toBe('NO_ERROR');
+      await db.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION fail_retire_edge_3429() RETURNS trigger LANGUAGE plpgsql AS $f$
+        BEGIN
+          -- Fails only when the retirement UPDATE of the SOURCE is already visible in this transaction.
+          IF EXISTS (SELECT 1 FROM nodes WHERE id = NEW.source_id AND tags::text LIKE '%superseded%') THEN
+            RAISE EXCEPTION 'forced failure after the node write';
+          END IF;
+          RAISE EXCEPTION 'trigger fired BEFORE the node write';
+        END $f$`);
+      await db.$executeRawUnsafe(`CREATE TRIGGER fail_retire_edge_3429 BEFORE INSERT ON edges FOR EACH ROW WHEN (NEW.name = 'superseded-by') EXECUTE FUNCTION fail_retire_edge_3429()`);
+      let message = '';
+      try { await supersede(x.id, y.id); } catch (e) { message = String((e as Error).message); }
+      expect(message).toContain('forced failure after the node write');
+      expect(message).not.toContain('BEFORE the node write');
       expect(await snap(x.id)).toBe(before);
     } finally {
       await db.$executeRawUnsafe('DROP TRIGGER IF EXISTS fail_retire_edge_3429 ON edges');
@@ -521,6 +532,17 @@ describe('#3429 the banner cannot be changed by the text put in it (blind P2)', 
     expect(banner).toContain('\\*this\\*');
     expect(banner).toContain('\\[x\\]');
     expect(banner).toContain('&amp; more');
+    expect(banner).toContain('**Do not apply.** Retained as a tombstone; the citation is never renumbered.');
+  });
+
+  it('a stored successor LOC with Markdown or HTML characters is escaped too (blind P2: location interpolated verbatim)', async () => {
+    const x = await spec('md:loc');
+    // Stored by an older writer; the loc validator would refuse it today (the logs show `tasks:unsafe-->source`).
+    const hostile = await db.node.create({ data: { id: generateId(), memoryId: mem.id, loc: 'md:h<!--x*y_z', name: 'Plain name', role: 'spec', content: 'c', abstract: 'a' } });
+    const out = await supersede(x.id, hostile.id);
+    const banner = (out.node.content ?? '').split('\n').find((l) => l.startsWith('> '))!;
+    expect(banner).not.toContain('<!--');
+    expect(banner).toContain('md:h&lt;!--x\\*y\\_z');
     expect(banner).toContain('**Do not apply.** Retained as a tombstone; the citation is never renumbered.');
   });
 
