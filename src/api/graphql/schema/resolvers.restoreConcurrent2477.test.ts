@@ -37,62 +37,80 @@ beforeEach(async () => {
 });
 
 describe('#2477 missing-loc concurrent restore', () => {
-  it('restores both requests after both read the same absent node', async () => {
+  it('queues restores on the memory key before the missing-loc read and both succeed', async () => {
     expect(await db.node.count({ where: { memoryId, loc: { in: ['alpha', 'beta'] } } })).toBe(0);
 
     let releaseAutoSaves!: () => void;
     const autoSavesDone = new Promise<void>(resolve => { releaseAutoSaves = resolve; });
-    let releaseMissingReads!: () => void;
-    const missingReadsDone = new Promise<void>(resolve => { releaseMissingReads = resolve; });
+    const [{ key: memoryKey }] = await db.$queryRaw<Array<{ key: number }>>`SELECT hashtext(${'channel-host:' + memoryId}) AS key`;
+    let observedQueuedPeer = false;
     const missingReads: Array<{ request: number; absent: boolean }> = [];
-    const stages = new Map<Context['db'], { request: number; autoSaving: boolean; sawPrior: boolean }>();
+    const stages = new Map<Context['db'], { request: number; autoSaving: boolean; sawPrior: boolean; pid: number | null }>();
     let completedAutoSaves = 0;
     let safetyReleaseExpired = false;
     // Escape hatch only: expiry must fail outside resolver error normalization,
-    // even when it lets both restores finish successfully. Always release both
-    // barriers so a broken fixture cannot strand its peer until the 30s timeout.
+    // even when it lets both restores finish successfully. The read observer
+    // has its own bounded poll; always release the auto-save barrier on expiry.
     const releaseTimer = setTimeout(() => {
       safetyReleaseExpired = true;
       releaseAutoSaves();
-      releaseMissingReads();
     }, 10_000);
 
     const requestContexts = [0, 1].map(request => {
-      const stage = { request, autoSaving: true, sawPrior: false };
+      const stage = { request, autoSaving: true, sawPrior: false, pid: null as number | null };
       const requestDb = new Proxy(db, {
         get(target, property) {
           if (property !== '$transaction') return Reflect.get(target, property, target);
           return async (run: (tx: Prisma.TransactionClient) => Promise<unknown>, options?: { timeout?: number; maxWait?: number }) => {
             if (stage.autoSaving) return db.$transaction(run, options);
-            return db.$transaction(tx => run(new Proxy(tx, {
-              get(transaction, key) {
-                if (key !== 'node') return Reflect.get(transaction, key, transaction);
-                return new Proxy(transaction.node, {
-                  get(nodes, operation) {
-                    if (operation !== 'findUnique') return Reflect.get(nodes, operation, nodes);
-                    return async (...args: Parameters<typeof nodes.findUnique>) => {
-                      const result = await Reflect.apply(nodes.findUnique, nodes, args);
-                      const query = args[0];
-                      // Hook contract: first post-auto-save transactional alpha
-                      // findUnique for THIS memory, with select.id === true.
-                      // A changed call shape needs an explicit fixture update;
-                      // do not broaden this to an unrelated read or invent null.
-                      if (!stage.sawPrior && query?.where.loc_memoryId?.loc === 'alpha'
-                        && query.where.loc_memoryId.memoryId === memoryId && query.select?.id === true) {
-                        stage.sawPrior = true;
-                        missingReads.push({ request, absent: result === null });
-                        if (missingReads.length === 2) releaseMissingReads();
-                        // Hold the REAL prior-read result, not a fabricated null.
-                        // Both restores now take the absent-row branch even if
-                        // their writes subsequently run one after the other.
-                        await missingReadsDone;
-                      }
-                      return result;
-                    };
-                  },
-                });
-              },
-            })), options);
+            return db.$transaction(async tx => {
+              stage.pid = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid;
+              return run(new Proxy(tx, {
+                get(transaction, key) {
+                  if (key !== 'node') return Reflect.get(transaction, key, transaction);
+                  return new Proxy(transaction.node, {
+                    get(nodes, operation) {
+                      if (operation !== 'findUnique') return Reflect.get(nodes, operation, nodes);
+                      return async (...args: Parameters<typeof nodes.findUnique>) => {
+                        const result = await Reflect.apply(nodes.findUnique, nodes, args);
+                        const query = args[0];
+                        // Hook contract: first post-auto-save transactional alpha
+                        // findUnique for THIS memory, with select.id === true.
+                        // A changed call shape needs an explicit fixture update;
+                        // do not broaden this to an unrelated read or invent null.
+                        if (!stage.sawPrior && query?.where.loc_memoryId?.loc === 'alpha'
+                          && query.where.loc_memoryId.memoryId === memoryId && query.select?.id === true) {
+                          stage.sawPrior = true;
+                          missingReads.push({ request, absent: result === null });
+                          if (missingReads.length === 1) {
+                            // S2 serializes these owning writers before any node read.
+                            // Prove the peer is waiting on THIS key and this holder,
+                            // rather than waiting for a second absent read that cannot occur.
+                            const deadline = Date.now() + 5_000;
+                            while (Date.now() < deadline) {
+                              const peer = [...stages.values()].find(value => value.request !== request);
+                              if (peer?.pid) {
+                                const [row] = await db.$queryRaw<Array<{ waiting: boolean }>>`SELECT EXISTS (
+                                  SELECT 1 FROM pg_locks WHERE pid = ${peer.pid}::int
+                                  AND locktype = 'advisory' AND NOT granted
+                                  AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                                  AND classid = ${memoryKey < 0 ? 4294967295 : 0}::bigint::oid
+                                  AND objid = ${memoryKey >>> 0}::bigint::oid AND objsubid = 1
+                                  AND ${stage.pid}::int = ANY(pg_blocking_pids(${peer.pid}::int))) AS waiting`;
+                                if (row.waiting) { observedQueuedPeer = true; break; }
+                              }
+                              await new Promise(resolve => setTimeout(resolve, 10));
+                            }
+                            if (!observedQueuedPeer) throw new Error('Peer restore did not queue on the exact memory key before its node read');
+                          }
+                        }
+                        return result;
+                      };
+                    },
+                  });
+                },
+              }));
+            }, options);
           };
         },
       });
@@ -117,7 +135,6 @@ describe('#2477 missing-loc concurrent restore', () => {
         return result;
       } catch (error) {
         releaseAutoSaves();
-        releaseMissingReads();
         throw error;
       }
     });
@@ -148,9 +165,9 @@ describe('#2477 missing-loc concurrent restore', () => {
       }
       expect(completedAutoSaves).toBe(2);
       expect(autoSave).toHaveBeenCalledTimes(2);
-      expect(missingReads.sort((a, b) => a.request - b.request)).toEqual([
-        { request: 0, absent: true }, { request: 1, absent: true },
-      ]);
+      expect(observedQueuedPeer).toBe(true);
+      expect(missingReads.map(read => read.absent)).toEqual([true, false]);
+      expect(new Set(missingReads.map(read => read.request)).size).toBe(2);
       // Pin existing successful behavior, not an unspecified refusal contract.
       // ANY rejection fails, including generic or nested/wrapped P2002 errors.
       const rejections = results.flatMap(result => result.status === 'rejected' ? [{
@@ -175,7 +192,6 @@ describe('#2477 missing-loc concurrent restore', () => {
     } finally {
       clearTimeout(releaseTimer);
       releaseAutoSaves();
-      releaseMissingReads();
       autoSave.mockRestore();
     }
   }, 20_000);
