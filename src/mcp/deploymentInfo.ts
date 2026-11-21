@@ -150,7 +150,15 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // wake path (`dueWakes` / the CLI's `hadron team wakes`); the explicit
 // `markOwnTeamChatRead` mark and every wake/mark/resume rule it shared a module
 // with are unchanged.
-export const HADRON_SERVER_VERSION = '0.24.0';
+//
+// 0.26.0 — BREAKING, entity refs S5 (#4141, the third field; stacks after 0.25.0, which renamed `cancelAppRun` and
+// `startAgentSession`): the GraphQL argument `appRuns(parentRunId)` is renamed `appRuns(parentRunRef)`, no alias, and
+// takes a run id OR an hrn:apprun URN. A client still sending `parentRunId` gets "Unknown argument" and the whole
+// query is refused until it upgrades. The filter keeps its tri-state (omitted = no filter, null = top-level runs,
+// a ref = that run's children). A ref naming no run in scope (unknown, outside the org, ambiguous legacy) is the
+// exactly empty page, not an error; a ref that cannot name a run is BAD_USER_INPUT. The org READER gate still runs
+// first, so a non-member sees the App NOT_FOUND whatever the ref.
+export const HADRON_SERVER_VERSION = '0.26.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
