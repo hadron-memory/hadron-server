@@ -206,7 +206,7 @@ describe('encrypted merge and restore, and a section save', () => {
     await update('v3 plain');
     const revision = (revNo: number) => db.nodeRevision.findFirstOrThrow({ where: { nodeId: node.id, revNo } });
     const restore = (revisionId: string) =>
-      run('mutation($id:ID!){restoreNodeRevision(revisionId:$id){id content}}', { id: revisionId });
+      run('mutation($id:String!){restoreNodeRevision(nodeRevRef: $id){id content}}', { id: revisionId });
 
     const unpinned = await restore((await revision(1)).id);
     expect(unpinned.errors).toBeUndefined();

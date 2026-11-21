@@ -209,7 +209,7 @@ describe('mergeNodes and restoreNodeRevision (#2040)', () => {
     await update('b', '{{> a}}');
     const a = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'a' } });
     const v1 = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: a.id, content: 'v1 {{> b}}' } });
-    expect(await code(M.restoreNodeRevision(null, { revisionId: v1.id }, as()))).toBe('INCLUDE_CYCLE');
+    expect(await code(M.restoreNodeRevision(null, { nodeRevRef: v1.id }, as()))).toBe('INCLUDE_CYCLE');
     expect((await db.node.findUniqueOrThrow({ where: { id: a.id } })).content).toBe('v2 plain');
   });
 });

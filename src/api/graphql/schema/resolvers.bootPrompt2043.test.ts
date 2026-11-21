@@ -99,7 +99,7 @@ describe('guard A: a generic write never touches a compiled node (#2043)', () =>
     const c = await compiled();
     await withCompileWrite(() => resolvers.Mutation.updateNode(null, { input: { id: c.id, content: 'second compile' } }, ctx()));
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: c.id } });
-    expect(await codeOf(resolvers.Mutation.restoreNodeRevision(null, { revisionId: rev.id }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
+    expect(await codeOf(resolvers.Mutation.restoreNodeRevision(null, { nodeRevRef: rev.id }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
   });
 
   it('the compile seam writes and revises a compiled node', async () => {

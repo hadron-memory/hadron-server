@@ -96,8 +96,10 @@ import {
   NodeNotFoundError,
   NodeAbstractTooLongError,
   EdgeNotFoundError,
+  NodeRevisionNotFoundError,
 } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { resolveNodeRevRef } from '../../../lib/entityRef/nodeRevRef.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveEdgeRef } from '../../../lib/entityRef/edgeRef.js';
@@ -2701,6 +2703,22 @@ export async function findCallerInstallMemory(ctx: Context, install: InstallTarg
   return row;
 }
 
+/**
+ * #4138 (cor:api:140:00): the node-revision mutations take `nodeRevRef` (a revision URN or PK). An unknown or
+ * malformed ref is the surface's own `notFound()`, the same typed NOT_FOUND an unknown PK always got; every gate
+ * then runs on the resolved revision.
+ */
+async function resolveRevisionIdOrNotFound(
+  ctx: Context, nodeRevRef: string, notFound: () => GraphQLError,
+): Promise<string> {
+  try {
+    return (await resolveNodeRevRef(ctx.db, nodeRevRef)).id;
+  } catch (err) {
+    if (err instanceof NodeRevisionNotFoundError) throw notFound();
+    throw err;
+  }
+}
+
 export const nodeMutations = {
     // Create a single node (spec 039 Phase 0 D1/D4). Create-only: a live
     // node at (memoryId, loc) rejects with NodeLocConflictError; a
@@ -4997,12 +5015,13 @@ export const nodeMutations = {
 
     restoreNodeRevision: async (
       _: unknown,
-      { revisionId, truncate = false }: { revisionId: string; truncate?: boolean },
+      { nodeRevRef, truncate = false }: { nodeRevRef: string; truncate?: boolean },
       ctx: Context,
     ) => {
       const notFound = () => new GraphQLError('Node revision not found', {
-        extensions: { code: 'NOT_FOUND', revisionId },
+        extensions: { code: 'NOT_FOUND', nodeRevRef },
       });
+      const revisionId = await resolveRevisionIdOrNotFound(ctx, nodeRevRef, notFound);
       // Resolve only provenance before the read gate: a moved node's snapshot
       // still belongs to its source memory, including when that memory is private.
       const revisionRef = await ctx.db.nodeRevision.findUnique({
@@ -5331,8 +5350,9 @@ export const nodeMutations = {
     // #617 — delete a single snapshot. Write-gated on the node's CURRENT memory
     // (as restoreNodeRevision) — the memory you own the live node in, even if the
     // snapshot was captured in another memory before a move.
-    deleteNodeRevision: async (_: unknown, { revisionId }: { revisionId: string }, ctx: Context) => {
-      const notFound = () => new GraphQLError('Node revision not found', { extensions: { code: 'NOT_FOUND', revisionId } });
+    deleteNodeRevision: async (_: unknown, { nodeRevRef }: { nodeRevRef: string }, ctx: Context) => {
+      const notFound = () => new GraphQLError('Node revision not found', { extensions: { code: 'NOT_FOUND', nodeRevRef } });
+      const revisionId = await resolveRevisionIdOrNotFound(ctx, nodeRevRef, notFound);
       // #3329: a revision whose node's memory is soft-deleted is answered as missing, in the same single lookup,
       // before any access gate (no FORBIDDEN-vs-NOT_FOUND oracle). withNodeHistoryWrite re-checks under lock.
       const revision = await ctx.db.nodeRevision.findFirst({ where: { id: revisionId, node: { memory: { deletedAt: null } } } });
@@ -5360,13 +5380,14 @@ export const nodeMutations = {
     // miss is the same NOT_FOUND (no existence disclosure).
     updateNodeRevision: async (
       _: unknown,
-      { revisionId, revLabel }: { revisionId: string; revLabel?: string | null },
+      { nodeRevRef, revLabel }: { nodeRevRef: string; revLabel?: string | null },
       ctx: Context,
     ) => {
       const notFound = () =>
         new GraphQLError('Node revision not found', {
-          extensions: { code: 'NOT_FOUND', revisionId },
+          extensions: { code: 'NOT_FOUND', nodeRevRef },
         });
+      const revisionId = await resolveRevisionIdOrNotFound(ctx, nodeRevRef, notFound);
       const revision = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
       if (!revision) throw notFound();
       const node = await ctx.db.node.findUnique({

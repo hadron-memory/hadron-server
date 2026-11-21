@@ -37,9 +37,9 @@ const doors: Array<[string, (f: F, ctx: Context) => Promise<unknown>]> = [
  ['updateEdge', (f,c) => M.updateEdge({}, { edgeRef: f.edge.id, name: 'after' }, c)],
  ['deleteEdge', (f,c) => M.deleteEdge({}, { edgeRef: f.edge.id }, c)],
  ['mergeNodes', (f,c) => M.mergeNodes({}, { input: { source: f.node.id, target: f.target.id, include: ['CONTENT'] } }, c)],
- ['restoreNodeRevision', (f,c) => M.restoreNodeRevision({}, { revisionId: f.revision.id }, c)],
- ['deleteNodeRevision', (f,c) => M.deleteNodeRevision({}, { revisionId: f.revision.id }, c)],
- ['updateNodeRevision', (f,c) => M.updateNodeRevision({}, { revisionId: f.revision.id, revLabel: 'after' }, c)],
+ ['restoreNodeRevision', (f,c) => M.restoreNodeRevision({}, { nodeRevRef: f.revision.id }, c)],
+ ['deleteNodeRevision', (f,c) => M.deleteNodeRevision({}, { nodeRevRef: f.revision.id }, c)],
+ ['updateNodeRevision', (f,c) => M.updateNodeRevision({}, { nodeRevRef: f.revision.id, revLabel: 'after' }, c)],
  ['clearNodeHistory', (f,c) => M.clearNodeHistory({}, { nodeRef: f.node.id }, c)],
 ];
 async function snapshot(f: F) {
@@ -202,7 +202,7 @@ it.each(['deleteNodeRevision','updateNodeRevision','clearNodeHistory'] as const)
   };
   const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
  }});
- const args=door==='clearNodeHistory'?{nodeRef:f.node.id}:{revisionId:f.revision.id,revLabel:'unauthorized'};
+ const args=door==='clearNodeHistory'?{nodeRef:f.node.id}:{nodeRevRef: f.revision.id,revLabel:'unauthorized'};
  await expect(M[door]({},args,{...context(f.admin.id),db:wrapped})).rejects.toMatchObject({extensions:{code:'NODE_NOT_FOUND'}});
  expect(moved).toBe(true);expect(await db.nodeRevision.findMany({where:{nodeId:f.node.id},orderBy:{id:'asc'}})).toEqual(before);
 });
