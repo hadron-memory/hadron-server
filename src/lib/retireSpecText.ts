@@ -28,7 +28,7 @@ export function retirementBanner(a: {
 }): string {
   const reason = a.reason ? escapeMarkdownText(oneLine(a.reason)) : '';
   if (a.form === 'SUPERSEDE') {
-    const by = a.successor ? ` by ${a.successor.loc} (${escapeMarkdownText(oneLine(a.successor.name))})` : '';
+    const by = a.successor ? ` by ${escapeMarkdownText(a.successor.loc)} (${escapeMarkdownText(oneLine(a.successor.name))})` : '';
     return `> **⚠️ Superseded** (${a.date}${reason ? `, ${reason}` : ''})${by}. ${TAIL}`;
   }
   return a.withdrawn
