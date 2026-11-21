@@ -818,7 +818,7 @@ describe('#4704: a catalog-resolved DROP creates no object; every CREATE-shaped 
       "EXECUTE pg_catalog.format('DROP SEQUENCE %s', owned_seq::regclass);",
       "EXECUTE pg_catalog.format('DROP SEQUENCE IF EXISTS %s', owned_seq::regclass);",
       "EXECUTE pg_catalog.format('DROP INDEX %s', idx::regclass);",
-      "EXECUTE pg_catalog.format('DROP INDEX IF EXISTS %s', pg_get_serial_sequence('t', 'id')::regclass);",
+      "EXECUTE pg_catalog.format('DROP INDEX IF EXISTS %s', to_regclass('idx_name')::regclass);",
       "EXECUTE pg_catalog.format('ALTER TABLE %s DROP CONSTRAINT %I', rel::regclass, cname);",
       "EXECUTE pg_catalog.format('ALTER TABLE %s DROP CONSTRAINT IF EXISTS %I', rel::regclass, cname);",
       "EXECUTE\n  pg_catalog.format('DROP SEQUENCE %s',\n    owned_seq::regclass)\n;",
@@ -877,17 +877,53 @@ describe('#4704: a catalog-resolved DROP creates no object; every CREATE-shaped 
     expect(refuses(wrap("EXECUTE pg_catalog.format('DROP SEQUENCE %s', s::regclass); EXECUTE pg_catalog.format('CREATE INDEX %I ON t (c)', n);"))).toHaveLength(1);
   });
 
-  it('does not count a commented-out DROP or let one mask a live CREATE', () => {
-    expect(run(wrap("-- EXECUTE pg_catalog.format('DROP SEQUENCE %s', s::regclass);\n PERFORM 1;"))).toEqual([]);
-    expect(refuses(wrap("/* EXECUTE pg_catalog.format('DROP SEQUENCE %s', s::regclass); */ EXECUTE pg_catalog.format('CREATE INDEX %I ON t (c)', n);"))).toHaveLength(1);
-  });
 
-  it('blanks each accepted call at its own position: two identical calls both pass, a neighbour is never swallowed', () => {
+  it('two identical accepted calls both pass', () => {
     const call = "EXECUTE pg_catalog.format('DROP SEQUENCE %s', s::regclass);";
     expect(run(wrap(`${call} ${call}`))).toEqual([]);
+  });
+
+  it('an accepted call beside static DDL swallows nothing: the neighbour is still inventoried', () => {
+    const call = "EXECUTE pg_catalog.format('DROP SEQUENCE %s', s::regclass);";
     expect(run(wrap(`${call} EXECUTE $ddl$CREATE INDEX nb_idx ON t (c)$ddl$; ${call}`))).toEqual([{ kind: 'index', name: 'nb_idx' }]);
-    // the span's text inside a string literal elsewhere is not cut: the literal stays a plain string and the block refuses on its own CREATE
-    expect(refuses(wrap(`${call} v := '${call.replace(/'/g, "''")}'; EXECUTE format('CREATE INDEX %I ON t (c)', n);`)).length).toBeGreaterThan(0);
+  });
+
+  it('a ( ) , or -- inside a string in the arguments does not end the call early: the CREATE after it still refuses', () => {
+    // If the closing paren were found inside the string, the span would stop short and the rest would be read as code; if it ran long, it
+    // would blank the CREATE that follows. Each variant below must classify the DROP alone as accepted AND leave the CREATE refused.
+    for (const arg of ["to_regclass('a)b')::regclass", "to_regclass('a,b')::regclass", "to_regclass('a--b')::regclass", "to_regclass('a;b')::regclass", "to_regclass('it''s)')::regclass", "to_regclass(E'a\\')b')::regclass"]) {
+      const drop = `EXECUTE pg_catalog.format('DROP SEQUENCE %s', ${arg});`;
+      expect(run(wrap(drop)), `${arg} alone`).toEqual([]);
+      expect(refuses(wrap(`${drop} EXECUTE pg_catalog.format('CREATE INDEX %I ON t (c)', n);`)).length, `${arg} then a CREATE`).toBeGreaterThan(0);
+      expect(run(wrap(`${drop} EXECUTE $ddl$CREATE INDEX after_idx ON t (c)$ddl$;`)), `${arg} then static DDL`).toEqual([{ kind: 'index', name: 'after_idx' }]);
+    }
+  });
+
+  it('refuses a dollar quote anywhere in the call, which the paren and comma scanners do not read', () => {
+    for (const stmt of [
+      "EXECUTE pg_catalog.format('DROP SEQUENCE %s', to_regclass($q$)$q$)::regclass); EXECUTE 'CREATE INDEX x ON t (c)'; --$q$)::regclass);",
+      "EXECUTE pg_catalog.format('DROP SEQUENCE %s', to_regclass($$a$$)::regclass);",
+    ]) {
+      expect(refuses(wrap(stmt)).length, stmt).toBeGreaterThan(0);
+    }
+  });
+
+  it('keeps keywords case-insensitive but the placeholders exact (Postgres rejects %S and %i)', () => {
+    expect(run(wrap("EXECUTE pg_catalog.format('drop sequence if exists %s', s::regclass);"))).toEqual([]);
+    expect(run(wrap("EXECUTE PG_CATALOG.FORMAT('DROP SEQUENCE %s', s::REGCLASS);"))).toEqual([]);
+    expect(run(wrap("EXECUTE pg_catalog.format('DROP SEQUENCE %s', s::pg_catalog.regclass);"))).toEqual([]);
+    for (const stmt of [
+      "EXECUTE pg_catalog.format('DROP SEQUENCE %S', s::regclass);",
+      "EXECUTE pg_catalog.format('ALTER TABLE %s DROP CONSTRAINT %i', rel::regclass, c);",
+    ]) {
+      expect(refuses(wrap(stmt)).length, stmt).toBeGreaterThan(0);
+    }
+  });
+
+  it('does not count a commented-out CREATE-shaped call, and a comment never masks a live one', () => {
+    expect(run(wrap("-- EXECUTE pg_catalog.format('CREATE INDEX %I ON t (c)', n);\n PERFORM 1;"))).toEqual([]);
+    expect(run(wrap("/* EXECUTE pg_catalog.format('CREATE INDEX %I ON t (c)', n); */ PERFORM 1;"))).toEqual([]);
+    expect(refuses(wrap("/* EXECUTE pg_catalog.format('DROP SEQUENCE %s', s::regclass); */ EXECUTE pg_catalog.format('CREATE INDEX %I ON t (c)', n);")).length).toBeGreaterThan(0);
   });
 
   it('the real stamp migration classifies clean, with its catalog-derived DROP beside the static DDL', () => {
