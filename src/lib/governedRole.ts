@@ -376,6 +376,16 @@ export interface GovernedState {
 }
 
 /**
+ * #1213 S2: input-driven participation in the bounded memory handshake, not an authorization decision.
+ * Evaluate after role normalization and kind-generated signals, before any loc/node locks. Explicit null/false
+ * clearing participates; omitted signals on an ordinary update preserve state and need no new governance key.
+ * GovernedState and the completeness pin must grow together whenever another field can produce governance.
+ */
+export function mayChangeGovernance(mode: string, input: GovernedState, ownsKind?: GovernedKind): boolean {
+  return mode !== 'update' || ownsKind !== undefined || input.role !== undefined || input.isRunnable !== undefined;
+}
+
+/**
  * Which governed kinds a resulting node matches. Usually zero; a node may match
  * more than one (a runnable review is both).
  */

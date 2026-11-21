@@ -272,13 +272,24 @@ describe('LOCAL delta 2 P2 on d1168457 (Beckett): the stale absent-target probe'
     await db.node.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
     // The probe is the real interleaving's initial answer: the tombstone appeared AFTER it. Only the first
     // lookup of the target loc is stale; every later read (the authoritative one under the lock) is real.
-    const real = db.node.findUnique.bind(db.node);
+    // #1213: clone source reconciliation and destination core now share the owning transaction.
+    // Observe that real transaction client; the pooled delegate is no longer the destination probe.
+    const transact = db.$transaction.bind(db);
     let stale = true;
-    const spy = vi.spyOn(db.node, 'findUnique').mockImplementation(((args: any) => {
-      const key = args?.where?.loc_memoryId;
-      if (stale && key?.loc === target.loc && key?.memoryId === memory.id) { stale = false; return Promise.resolve(null) as any; }
-      return real(args);
-    }) as any);
+    const spy = vi.spyOn(db, '$transaction').mockImplementation(((work: any, options: any) => {
+      if (typeof work !== 'function') return transact(work, options);
+      return transact(async tx => work(new Proxy(tx, { get(client, property, receiver) {
+        if (property !== 'node') return Reflect.get(client, property, receiver);
+        return new Proxy(tx.node, { get(delegate, method, delegateReceiver) {
+          if (method !== 'findUnique') return Reflect.get(delegate, method, delegateReceiver);
+          return (args: any) => {
+            const key = args?.where?.loc_memoryId;
+            if (stale && key?.loc === target.loc && key?.memoryId === memory.id) { stale = false; return Promise.resolve(null); }
+            return tx.node.findUnique(args);
+          };
+        } });
+      } })), options);
+    }) as never);
     try {
       expect((await errorOf(M.cloneNode(null, { sourceRef: src.id, targetUrn: urn(target.loc) }, as()))).extensions.code).toBe('SEQ_PROTECTED');
       expect(stale).toBe(false);
