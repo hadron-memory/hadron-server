@@ -182,7 +182,9 @@ describe('#4604 F4: a mutation result reports what the next read reports', () =>
     const read = async (id: string) => D.effectiveAssigneeId(await Q.question(null, { ref: id }, as(reader.id)), {}, as());
     expect(D.effectiveAssigneeId(asked, {}, as())).toBe(holger.id);
     expect(D.effectiveAssigneeId(asked, {}, as())).toBe(await read(asked.row.id));
-    const amended = await asWorker('worker-ada', () => M.amendQuestion(null, { ref: asked.row.id, patch: { title: 'Ship it?' }, reason: 'reword', expectedRevision: 1 }, as(writer.id)));
+    const amended = await asWorker('worker-ada', () => M.amendQuestion(null, { ref: asked.row.id, input: { title: 'Ship it?' }, reason: 'reword', expectedRevision: 1 }, as(writer.id)));
+    // Beckett's BLIND delta on #4644: the resolver's argument is input; a misnamed key amended nothing and went unseen.
+    expect(D.title(amended, {}, as())).toBe('Ship it?');
     expect(D.effectiveAssigneeId(amended, {}, as())).toBe(holger.id);
     expect(await read(asked.row.id)).toBe(holger.id);
     expect(await D.effectiveAssignee(amended, {}, as(reader.id))).toMatchObject({ id: holger.id });

@@ -15,6 +15,8 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { questionDataSchema } from '../../../lib/questions/codec.js';
 import { pendingTaskWakes } from '../../../lib/agentTasks/taskWakes.js';
 import { resolvers, type Context } from './resolvers.js';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from './typeDefs.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 
@@ -183,11 +185,13 @@ describe('#4431 §2: one event on the task per answer and per take-back, in the 
     const t = await mkTask();
     const q = await ask({ taskRef: t.id });
     // Beckett P3 on #4644: fail the append itself, which runs after the question's node write in the same transaction.
-    await db.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION test_4431_refuse_answer_event() RETURNS trigger LANGUAGE plpgsql AS $$
-      BEGIN IF NEW.type = 'question.answered' THEN RAISE EXCEPTION 'test 4431: event append refused'; END IF; RETURN NEW; END $$`);
-    await db.$executeRawUnsafe(`CREATE TRIGGER test_4431_refuse_answer_event BEFORE INSERT ON agent_team_events FOR EACH ROW EXECUTE FUNCTION test_4431_refuse_answer_event()`);
+    // The setup is inside the cleanup scope, and the refusal must be the trigger's own, so the insert was reached.
     try {
-      expect(await errorOf(answer(q.row.id, q.row.revSeq))).not.toBeNull();
+      await db.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION test_4431_refuse_answer_event() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.type = 'question.answered' THEN RAISE EXCEPTION 'test 4431: event append refused'; END IF; RETURN NEW; END $$`);
+      await db.$executeRawUnsafe(`CREATE TRIGGER test_4431_refuse_answer_event BEFORE INSERT ON agent_team_events FOR EACH ROW EXECUTE FUNCTION test_4431_refuse_answer_event()`);
+      const e = await errorOf(answer(q.row.id, q.row.revSeq));
+      expect(String((e as Error | null)?.message)).toContain('test 4431: event append refused');
     } finally {
       await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_4431_refuse_answer_event ON agent_team_events`);
       await db.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_4431_refuse_answer_event()`);
@@ -216,27 +220,34 @@ describe('#4431 §2: one event on the task per answer and per take-back, in the 
 async function whileTaskLocked<T>(taskId: string, end: Record<string, unknown>, act: () => Promise<T>): Promise<T> {
   let release!: () => void;
   const gate = new Promise<void>((r) => { release = r; });
-  let locked!: () => void;
-  const isLocked = new Promise<void>((r) => { locked = r; });
+  let locked!: (pid: number) => void;
+  const holderPid = new Promise<number>((r) => { locked = r; });
   const holder = db.$transaction(async (tx) => {
+    const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
     await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id = ${taskId} FOR UPDATE`;
-    locked();
+    locked(pid);
     await gate;
     await tx.agentTask.update({ where: { id: taskId }, data: end });
   }, { timeout: 30_000 });
-  await isLocked;
+  const pid = await holderPid;
   let settled = false;
   const acting = act().finally(() => { settled = true; });
   acting.catch(() => undefined); // judged below; never an unhandled rejection
-  // Wait until the act is blocked on a lock, or has finished without blocking (the unguarded case).
-  for (let i = 0; i < 100 && !settled; i++) {
-    const [{ n }] = await db.$queryRaw<Array<{ n: number }>>`
-      SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`;
-    if (n > 0) break;
-    await new Promise((r) => setTimeout(r, 50));
+  // Beckett P3 on #4644: the evidence is a backend blocked by THIS holder, not any lock wait in the database.
+  let blocked = false;
+  try {
+    for (let i = 0; i < 200 && !settled && !blocked; i++) {
+      const [{ n }] = await db.$queryRaw<Array<{ n: number }>>`
+        SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`;
+      blocked = n > 0;
+      if (!blocked) await new Promise((r) => setTimeout(r, 25));
+    }
+  } finally {
+    release();
+    await holder;
   }
-  release();
-  await holder;
+  // Without the share lock the act never waits on the holder: that is the defect these pins catch.
+  expect(blocked, 'the act waited on the task row lock').toBe(true);
   return acting;
 }
 const FINISH = () => ({ status: 'finished', finishedAt: new Date(), resultOutcome: 'done' });
@@ -312,17 +323,29 @@ describe('#4431 §3: the answer wakes the task\'s current assignee', () => {
     const t = await mkTask();
     const q = await ask({ taskRef: t.id });
     await answer(q.row.id, q.row.revSeq);
-    const Q = resolvers.Query as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
-    const read = () => Q.dueWakes(null, { appRef: app.id, workerRefs: [asker.id] }, as(admin.id));
-    const page = await read();
-    const wake = page.wakes.find((w: any) => w.worker.id === asker.id);
-    const reason = wake?.reasons.find((r: any) => r.kind === 'TASK');
-    // Dara's P2 on #4644: the nudge names the question's code (draft cor:agt:050:34: "the task and the question's code").
-    expect(reason?.task).toMatchObject({ event: 'ANSWERED', id: t.id, handle: t.handle, questionCode: D.code(q, {}, as(holder.id)), ref: `TASK:${t.id}:answered` });
-    expect(JSON.stringify(reason)).not.toContain('pg');
-    await M.acknowledgeWakes(null, { proofs: [wake.proof] }, as(admin.id));
-    const again = await read();
-    expect((again.wakes.find((w: any) => w.worker.id === asker.id)?.reasons ?? []).filter((r: any) => r.kind === 'TASK')).toEqual([]);
+    // Beckett P3 on #4644: through the executable schema, so the new field is resolved and serialised as clients see it.
+    const api = new ApolloServer<Context>({ typeDefs, resolvers });
+    await api.start();
+    try {
+      const exec = async (query: string, variables: Record<string, unknown>) => {
+        const res = await api.executeOperation({ query, variables }, { contextValue: as(admin.id) });
+        if (res.body.kind !== 'single') throw new Error('single response required');
+        expect(res.body.singleResult.errors).toBeUndefined();
+        return res.body.singleResult.data as any;
+      };
+      const READ = `query($app: String!, $w: [String!]) { dueWakes(appRef: $app, workerRefs: $w) {
+        wakes { proof worker { id } reasons { kind task { id event handle questionCode ref } } } } }`;
+      const page = (await exec(READ, { app: app.id, w: [asker.id] })).dueWakes;
+      const wake = page.wakes.find((w: any) => w.worker.id === asker.id);
+      const reason = wake?.reasons.find((r: any) => r.kind === 'TASK');
+      // Dara's P2 on #4644: the nudge names the question's code (draft cor:agt:050:34: "the task and the question's code").
+      expect(reason?.task).toEqual({ id: t.id, event: 'ANSWERED', handle: t.handle, questionCode: D.code(q, {}, as(holder.id)), ref: `TASK:${t.id}:answered` });
+      await exec(`mutation($p: [String!]!) { acknowledgeWakes(proofs: $p) { __typename } }`, { p: [wake.proof] });
+      const again = (await exec(READ, { app: app.id, w: [asker.id] })).dueWakes;
+      expect((again.wakes.find((w: any) => w.worker.id === asker.id)?.reasons ?? []).filter((r: any) => r.kind === 'TASK')).toEqual([]);
+    } finally {
+      await api.stop();
+    }
   });
 
   it('a re-answer is a new event and wakes again', async () => {
