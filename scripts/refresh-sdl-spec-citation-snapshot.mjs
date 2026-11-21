@@ -77,6 +77,17 @@ function hadronJson(...args) {
 
 function main() {
   const check = process.argv.includes('--check');
+  let current = '';
+  let exists = true;
+  try { current = readFileSync(SNAPSHOT_FILE, 'utf8'); } catch (e) {
+    if (e?.code !== 'ENOENT') throw e;
+    exists = false; // first run
+  }
+  // A missing file is knowable without the CLI or a token, so say so before asking either for anything.
+  if (check && !exists) {
+    console.error(`✗ snapshot file is missing (${SNAPSHOT_FILE}); run node scripts/refresh-sdl-spec-citation-snapshot.mjs to create it`);
+    process.exit(1);
+  }
   let text;
   try {
     text = buildSnapshot(hadronJson('list'), hadronJson('describe'), new Date().toISOString().slice(0, 10));
@@ -86,17 +97,7 @@ function main() {
   }
   // The header's date and newest-updatedAt move on their own; compare the citations only.
   const body = (t) => t.split('\n').filter((l) => l && !l.startsWith('#')).join('\n');
-  let current = '';
-  let exists = true;
-  try { current = readFileSync(SNAPSHOT_FILE, 'utf8'); } catch (e) {
-    if (e?.code !== 'ENOENT') throw e;
-    exists = false; // first run
-  }
   if (check) {
-    if (!exists) {
-      console.error(`✗ snapshot file is missing (${SNAPSHOT_FILE}); run node scripts/refresh-sdl-spec-citation-snapshot.mjs to create it`);
-      process.exit(1);
-    }
     if (body(current) === body(text)) { console.log('✓ snapshot matches the corpus'); return; }
     console.error('✗ snapshot differs from the corpus; run node scripts/refresh-sdl-spec-citation-snapshot.mjs');
     process.exit(1);

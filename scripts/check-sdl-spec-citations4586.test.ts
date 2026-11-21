@@ -58,6 +58,7 @@ describe('#4586 — range tails', () => {
     ['spaced en dash', `${P}cor:agt:050:14 – :17`],
     ['em dash', `${P}cor:agt:050:14—:17`],
     ['hyphen', `${P}cor:agt:050:14-:17`],
+    ['minus sign', `${P}cor:agt:050:14−:17`],
   ])('reads %s', (_n, s) => {
     expect(cites(s)).toEqual(['cor:agt:050:14', 'cor:agt:050:17']);
     expect(findRangeTailProblems(s)).toEqual([]);
@@ -74,7 +75,6 @@ describe('#4586 — range tails', () => {
     ['letters glued to the tail', `${P}cor:agt:050:14–:17abc`],
     ['a tail with no colon (en dash)', `${P}cor:agt:050:14–17`],
     ['a tail with no colon (hyphen)', `${P}cor:agt:050:14-17`],
-    ['a minus sign range', `${P}cor:agt:050:14−:17`],
   ])('reports an unparseable tail instead of skipping it: %s', (_n, s) => {
     const problems = findRangeTailProblems(`x\n${s}`);
     expect(problems).toHaveLength(1);

@@ -84,7 +84,7 @@ export const SPECS_MEMORY = 'hadronmemory.com:specs';
  * own start, so a URN nested inside another token never counts. Case-sensitive, like the portal gate's
  * `isQualified` (`startsWith('hrn:node:')`): an upper-case scheme is not qualified at all.
  */
-const SPECS_TOKEN_PREFIX = new RegExp(String.raw`^(?:hrn|urn):node:${SPECS_MEMORY.replace(/\./g, '\\.')}:$`);
+const SPECS_TOKEN_PREFIX = new RegExp(String.raw`^(?:hrn|urn):node:${SPECS_MEMORY.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:$`);
 
 /** hadron-portal scripts/check-bare-loc-citations.mjs `SPEC_CITATION`, verbatim. */
 export const SPEC_CITATION = String.raw`cor:[a-z]{3}:\d{3}(?::\d{2})*`;
@@ -135,18 +135,21 @@ export function escapeAnnotationData(message) {
 }
 
 /** A range tail: a dash (hyphen, en or em), optional spaces, then `:` and a rule number. */
-const TAIL_START = /^\s*[–—-]\s*:/;
-const TAIL = /^\s*[–—-]\s*:(\d{2})(?!\d)/;
+const DASH = '[–—−-]';
+/** A dash then `:`, or a dash then a digit with no space (`…:14-17`): either way it is a range, never prose. */
+const TAIL_START = new RegExp(String.raw`^(?:\s*${DASH}\s*:|${DASH}\d)`);
+/** The tail must end at a token boundary: `:17:02` and `:17abc` are NOT a read of `:17`. */
+const TAIL = new RegExp(String.raw`^\s*${DASH}\s*:(\d{2})(?![\w]|:\d)`);
 
 /**
- * One scan for both exports. `citations` is every fully qualified citation into the specs corpus
+ * One scan for both exports (`main()` calls this once). `citations` is every fully qualified citation into the specs corpus
  * (without its URN prefix); `problems` is every range tail that could not be read.
  * A range (`…:14–:17`, spaced or em-dashed, chained `…:14–:17–:19`) returns its head AND each tail, so a
  * range that ends on a rule that is not written fails; the rules between are not checked (a gap there is
  * not an error). A tail that is not `:` plus exactly two digits, or that hangs off a head with no rule
  * number, is a PROBLEM and is never skipped silently. A citation repeated on one line is returned once.
  */
-function scanQualified(source) {
+export function scanQualified(source) {
   const citations = [];
   const problems = [];
   for (const [i, line] of source.split('\n').entries()) {
@@ -309,8 +312,9 @@ function main() {
   }
 
   const source = readFileSync(TYPEDEFS, 'utf8');
-  const missing = missingFromSnapshot(findQualifiedCitations(source), snapshot);
-  const badTails = findRangeTailProblems(source);
+  const scanned = scanQualified(source);
+  const missing = missingFromSnapshot(scanned.citations, snapshot);
+  const badTails = scanned.problems;
   const found = findBareCitations(source);
   const added = onAddedLines(found, addedLines(diff));
   const { over, lowerable } = compareWithBaseline(found, baseline);
@@ -343,9 +347,12 @@ function main() {
   }
   for (const m of missing) {
     console.error(
-      `::error file=${TYPEDEFS_PATH},line=${m.line}::spec citation ${m.citation} names no written spec in ${SNAPSHOT_PATH}. ` +
-        'Check the citation against the corpus (`hadron spec get <citation> -m hadronmemory.com:specs`). If the rule was written after the ' +
-        'snapshot, refresh it: node scripts/refresh-sdl-spec-citation-snapshot.mjs. A placeholder does not count as written.',
+      `::error file=${TYPEDEFS_PATH},line=${m.line}::` +
+        escapeAnnotationData(
+          `spec citation ${m.citation} names no written spec in ${SNAPSHOT_PATH}. ` +
+            'Check the citation against the corpus (`hadron spec get <citation> -m hadronmemory.com:specs`). If the rule was written after the ' +
+            'snapshot, refresh it: node scripts/refresh-sdl-spec-citation-snapshot.mjs. A placeholder does not count as written.',
+        ),
     );
   }
   if (added.length || over.length || missing.length || badTails.length) {
