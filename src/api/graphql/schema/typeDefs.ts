@@ -3230,7 +3230,7 @@ export const typeDefs = `#graphql
     own JSON object, written whole by whoever manages it (setAppProperties). Readable by whoever may read the App by
     app(ref:) (an org member, or the user-owner) and by whoever manages it; null for anyone else, an App key included,
     whichever field reached the App. Never put a secret here. The platform reads no key of it: every key is
-    the team's, returned as written. Null = no properties.
+    the team's, returned as stored. Null = no properties.
     """
     properties: JSON
     "#3125 S1: the revision setAppProperties checks expectedRevision against. 0 until the first changing write; each changing write adds 1. Null for a caller who may not read properties."

@@ -69,7 +69,6 @@ beforeEach(async () => {
   const worker = (app: string, name: string, slug: string) =>
     db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app, agentId, name, slug, heldByUserId: manager.id, heldAt: new Date() }, select: { id: true, slug: true } });
   ada = await worker(appId, 'Ada', 'ada');
-  await worker(otherAppId, 'Ada', 'ada');
 });
 
 describe('#3125 S1 SDL', () => {
