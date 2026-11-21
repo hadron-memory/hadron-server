@@ -1,3 +1,5 @@
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { requireProtectedSecretHolder } from '../../../lib/secrets/protection.js';
 /**
  * General-secret-store GraphQL surface (#677) — the write path backing the
  * v1 CLI (`hadron secret create/ls/rm`) plus the inspectable read surface.
@@ -25,7 +27,6 @@ import { assertOneRevealPerOperation, type RevealOperationInfo } from '../../../
 import { pageArgs, pageEnvelope, type Context } from './resolvers.helpers.js';
 import {
   clampListTake,
-  isAppParticipant,
   isOrgMemberOrAdmin,
   requireOrgRole,
 } from './resolvers.helpers.js';
@@ -41,13 +42,12 @@ import {
   SECRET_OWNER_TYPES,
   validateAndEncryptSecret,
   validateSecretPayload,
+  validateUnchangedSecretMetadata,
   type SecretOwnerType,
 } from '../../../lib/secrets.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
-import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
-import { managesApp } from '../../../lib/auth/appManagement.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { admitOperationRate } from '../../../lib/rateLimit/index.js';
@@ -55,11 +55,11 @@ import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import {
   addAppSecretVersion,
   assertAppSecretRoom,
-  currentAppSecretValue,
   lockSecretRow,
   recordSecretEvent,
   secretActorOf,
 } from '../../../lib/secrets/appSecrets.js';
+import { stageSecretChange, changeSnapshot, needsPasskey, deliverStaged } from '../../../lib/secrets/changeRequests.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { createPendingGrant, GrantCreateRefusal } from '../../../lib/grants/create.js';
 import { requireSecretReadClientIssuer } from '../../../lib/secrets/readClientIssuer.js';
@@ -143,52 +143,7 @@ function unknownOwnerType(_ownerType: never): never {
   throw forbiddenError();
 }
 
-type AppSecretRow = { id: string; organizationId: string | null; ownerUserId: string | null };
-
-/** The App when it is live (not deleted, not uninstalled); null otherwise. */
-async function loadLiveApp(ctx: Context, appId: string): Promise<AppSecretRow | null> {
-  const app = await ctx.db.app.findUnique({
-    where: { id: appId },
-    select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
-  });
-  if (!app || app.deletedAt || app.uninstalledAt) return null;
-  if (app.organizationId && !(await ctx.db.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } }))) return null;
-  return app;
-}
-
-/**
- * The caller as a MEMBER of a live App (cor:sec:020:02): a person acting as themselves who participates in the App. An
- * App key (no user), an impersonated session and a run are not members and see and change nothing. Returns the App row,
- * or null. A bound worker session is its driving person's session, so it passes when that person is a member.
- */
-async function appMember(ctx: Context, appId: string): Promise<AppSecretRow | null> {
-  if (!ctx.userId || ctx.appKeyId || ctx.impersonation || isRunPrincipal(ctx)) return null;
-  const app = await loadLiveApp(ctx, appId);
-  if (!app) return null;
-  return (await isAppParticipant(ctx, app)) ? app : null;
-}
-
-async function requireAppMember(ctx: Context, appId: string): Promise<AppSecretRow> {
-  const app = await appMember(ctx, appId);
-  if (!app) throw authorizationDenied();
-  return app;
-}
-
-/** Whoever manages the live App, as a person acting as themselves (cor:dmo:050:12). */
-async function appManager(ctx: Context, appId: string): Promise<AppSecretRow | null> {
-  if (!ctx.userId || ctx.appKeyId || ctx.impersonation || isRunPrincipal(ctx)) return null;
-  const app = await loadLiveApp(ctx, appId);
-  if (!app) return null;
-  return (await managesApp(ctx, app)) ? app : null;
-}
-
-/** The authority anchors an App secret write depends on: the App, and its organization when it has one. */
-function appAnchors(app: AppSecretRow) {
-  return [
-    { kind: 'app' as const, id: app.id },
-    ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
-  ];
-}
+import { loadLiveApp, appMember, appManager, requireAppMember, appAnchors } from '../../../lib/secrets/access.js';
 
 function appRateIdentity(ctx: Context) {
   return ctx.limiterIdentity ?? transportRateIdentity(ctx as never);
@@ -250,6 +205,7 @@ async function canSeeSecretOwner(
 }
 
 export interface CreateSecretArgs {
+  protected?: boolean;
   ownerType: string;
   ownerRef?: string | null;
   name: string;
@@ -259,12 +215,33 @@ export interface CreateSecretArgs {
 }
 
 export interface UpdateSecretArgs {
+  protected?: boolean;
   ref: string;
   metadata?: Record<string, unknown> | null;
   value?: unknown;
 }
 
 export const secretMutations = {
+  /** cor:sec:070:01-02: every protection transition requires the requester's own passkey. */
+  setSecretProtected: async (_: unknown, { ref, protected: protect }: { ref: string; protected: boolean }, ctx: Context) => {
+    await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
+    const found = await findSecretByRef(ctx, ref);
+    if (!found || found.ownerType !== 'app' || !(await canSeeSecretOwner(ctx, 'app', found.ownerId))) throw notFound();
+    const app = await loadLiveApp(ctx, found.ownerId);
+    if (!app) throw notFound();
+    return deliverStaged(await withAuthorizedTx<SecretRow | GraphQLError>(ctx, appAnchors(app), async (txCtx) => {
+      await requirePersonOnlyAct(txCtx, 'secret.change', needsPasskey);
+      if (protect) await requireAppMember(txCtx, found.ownerId);
+      else if (!(await appManager(txCtx, found.ownerId))) throw forbiddenError();
+    }, async (tx) => {
+      if (!(await lockSecretRow(tx, found.id))) throw notFound();
+      const secret = await tx.secret.findUniqueOrThrow({ where: { id: found.id } });
+      if (protect && secret.protected) throw badInput('Secret is already protected.');
+      const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
+      return stageSecretChange(tx, ctx, { appId: secret.ownerId, secretId: secret.id, name: secret.name, kind: secret.kind,
+        metadata: secret.metadata, operation: protect ? 'SET_PROTECTED' : 'CLEAR_PROTECTED', snapshot: changeSnapshot(secret, latest?.versionNo ?? 0) });
+    }));
+  },
   /** Issue a read client for an App secret: a pending reveal grant and its client, made together (cor:sec:060:01). */
   revealSecret: (_: unknown, { clientId }: { clientId: string }, ctx: Context, info?: RevealOperationInfo) => revealSecretMutation(ctx, clientId, info),
   issueSecretReadClient: (_: unknown, { input }: { input: IssueReadClientInput }, ctx: Context) => issueSecretReadClient(ctx, input),
@@ -275,6 +252,7 @@ export const secretMutations = {
     const ownerId = await resolveSecretOwnerRef(ctx, ownerType, args.ownerRef);
     const name = args.name.trim().toLowerCase();
 
+    if (args.protected && ownerType !== 'app') throw badInput('Protection is available only for App secrets.');
     if (ownerType === 'app') return createAppSecret(ctx, ownerId, name, args);
 
     await requireSecretOwnerWrite(ctx, ownerType, ownerId);
@@ -319,8 +297,9 @@ export const secretMutations = {
     }
     if (secret.ownerType === 'app') return updateAppSecret(ctx, secret, args);
     await requireSecretOwnerWrite(ctx, secret.ownerType as SecretOwnerType, secret.ownerId);
+    if (args.protected !== undefined) throw badInput('Protection is available only for App secrets.');
 
-    if (args.metadata === undefined && args.value === undefined) {
+    if (args.metadata === undefined && args.value === undefined && args.protected === undefined) {
       throw badInput('Pass metadata and/or value.');
     }
     const effectiveValue = args.value !== undefined ? args.value : decryptSecretValue(secret);
@@ -365,18 +344,13 @@ function notFound(): GraphQLError {
   return new GraphQLError('Secret not found.', { extensions: { code: 'NOT_FOUND' } });
 }
 
-/** A protected secret changes only through a person's change request (cor:sec:070:02, S4); until S4 every change refuses. */
-function protectedRefusal(): GraphQLError {
-  return new GraphQLError('This secret is protected: it changes only through a change request.', { extensions: { code: 'SECRET_PROTECTED' } });
-}
-
 async function createAppSecret(ctx: Context, appId: string, name: string, args: CreateSecretArgs) {
   await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
   const app = await loadLiveApp(ctx, appId);
   if (!app) throw authorizationDenied();
   const actor = secretActorOf(ctx);
   try {
-    return await withAuthorizedTx(
+    return deliverStaged(await withAuthorizedTx<SecretRow | GraphQLError>(
       ctx,
       appAnchors(app),
       async (txCtx) => { await requireAppMember(txCtx, appId); },
@@ -385,6 +359,8 @@ async function createAppSecret(ctx: Context, appId: string, name: string, args: 
           throw badInput('name must be lowercase [a-z0-9-], start alphanumeric, max 64 chars.');
         }
         const { metadata, valueJson, sizeBytes } = validateSecretPayload(args.kind, args.metadata, args.value);
+        if (args.protected) return stageSecretChange(tx, ctx, { appId, secretId: null, name, kind: args.kind,
+          metadata: metadata as never, operation: 'STORE', snapshot: 'absent', valueJson, sizeBytes });
         await assertAppSecretRoom(tx, appId);
         const secret = await tx.secret.create({
           data: {
@@ -397,7 +373,7 @@ async function createAppSecret(ctx: Context, appId: string, name: string, args: 
         await recordSecretEvent(tx, { ownerId: appId, secretId: secret.id, secretName: name, kind: 'STORE', versionNo, actor });
         return secret;
       },
-    );
+    ));
   } catch (err) {
     if (isSecretNameConflict(err)) {
       throw badInput(`A secret named "${name}" already exists at this scope.`);
@@ -419,27 +395,33 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
   await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
   const app = await loadLiveApp(ctx, found.ownerId);
   if (!app) throw notFound();
-  if (args.metadata === undefined && args.value === undefined) {
+  if (args.metadata === undefined && args.value === undefined && args.protected === undefined) {
     throw badInput('Pass metadata and/or value.');
   }
   const actor = secretActorOf(ctx);
-  return withAuthorizedTx(
+  const result = await withAuthorizedTx<SecretRow | GraphQLError>(
     ctx,
     appAnchors(app),
-    async (txCtx) => { await requireAppMember(txCtx, found.ownerId); },
+    async (txCtx) => {
+      await requireAppMember(txCtx, found.ownerId);
+      if (args.protected === false && !(await appManager(txCtx, found.ownerId))) throw forbiddenError();
+    },
     async (tx) => {
       // The secret row's lock serializes stores: two racing value changes end at n+1 and n+2, never a duplicate or a gap.
       if (!(await lockSecretRow(tx, found.id))) throw notFound();
       const secret = await tx.secret.findUnique({ where: { id: found.id } });
       if (!secret) throw notFound();
-      if (secret.protected) throw protectedRefusal();
-      const effectiveValue = args.value !== undefined ? args.value : await currentAppSecretValue(tx, secret);
       const effectiveMetadata = args.metadata !== undefined ? args.metadata : secret.metadata;
-      const { metadata, valueJson, sizeBytes } = validateSecretPayload(secret.kind, effectiveMetadata, effectiveValue, {
-        enforceValueSize: args.value !== undefined,
-      });
+      const payload = args.value === undefined ? null : validateSecretPayload(secret.kind, effectiveMetadata, args.value, { enforceValueSize: true });
+      const metadata = payload?.metadata ?? validateUnchangedSecretMetadata(secret.kind, effectiveMetadata, secret.metadata);
+      if (secret.protected || args.protected !== undefined) {
+        const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
+        return stageSecretChange(tx, ctx, { appId: secret.ownerId, secretId: secret.id, name: secret.name, kind: secret.kind,
+          metadata: metadata as never, operation: 'STORE', snapshot: changeSnapshot(secret, latest?.versionNo ?? 0), valueJson: payload?.valueJson, sizeBytes: payload?.sizeBytes,
+          protectedResult: args.protected, writeVersion: args.value !== undefined });
+      }
       let versionNo: number | null = null;
-      if (args.value !== undefined) versionNo = await addAppSecretVersion(tx, secret, valueJson, sizeBytes, actor);
+      if (payload) versionNo = await addAppSecretVersion(tx, secret, payload.valueJson, payload.sizeBytes, actor);
       const updated = await tx.secret.update({
         where: { id: secret.id },
         data: { metadata: metadata as never, updatedBy: ctx.userId ?? null },
@@ -451,6 +433,8 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
       return updated;
     },
   );
+  if (result instanceof GraphQLError) throw result;
+  return result;
 }
 
 /**
@@ -463,11 +447,11 @@ async function deleteAppSecret(ctx: Context, found: SecretRow) {
   const app = await loadLiveApp(ctx, found.ownerId);
   if (!app) throw notFound();
   const actor = secretActorOf(ctx);
-  return withAuthorizedTx(
+  const result = await withAuthorizedTx<boolean | GraphQLError>(
     ctx,
     appAnchors(app),
     async (txCtx) => {
-      const userId = await requirePersonOnlyAct(txCtx, 'secret.delete', () => forbiddenError());
+      const userId = await requirePersonOnlyAct(txCtx, 'secret.delete', found.protected ? needsPasskey : () => forbiddenError());
       const manager = (await appManager(txCtx, found.ownerId)) !== null;
       const creator = found.createdBy === userId && (await appMember(txCtx, found.ownerId)) !== null;
       if (!manager && !creator) throw forbiddenError();
@@ -476,11 +460,17 @@ async function deleteAppSecret(ctx: Context, found: SecretRow) {
       if (!(await lockSecretRow(tx, found.id))) throw notFound();
       const secret = await tx.secret.findUnique({ where: { id: found.id } });
       if (!secret) throw notFound();
-      if (secret.protected) throw protectedRefusal();
+      if (secret.protected) {
+        const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
+        return stageSecretChange(tx, ctx, { appId: secret.ownerId, secretId: secret.id, name: secret.name, kind: secret.kind,
+          metadata: secret.metadata, operation: 'DELETE', snapshot: changeSnapshot(secret, latest?.versionNo ?? 0) });
+      }
       await deleteLockedAppSecret(tx, secret, actor);
       return true;
     },
   );
+  if (result instanceof GraphQLError) throw result;
+  return result;
 }
 
 async function revealSecretMutation(ctx: Context, clientId: string, info?: RevealOperationInfo) {
@@ -519,9 +509,10 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
   await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
   // The refusals that depend only on the INPUT come first, before the secret is looked up: judged after it, a stranger could tell an
   // existing secret from a missing one by which refusal came back (existence oracle, Rook's partial §10 at f610b2e5).
-  // #4434: an agent holder (or an App) is not built here, and a read client nothing can read must never exist: refuse before any write.
-  if (input.holderKind === 'AGENT' || input.holderKind === 'APP') {
-    throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A read client is held by a person or a worker.');
+  // #4434: an AGENT holder is read through the role agent's live workers (cor:sec:060:02). An APP holder has no reveal path (use by its
+  // own runs is S5, #4000), and a read client nothing can read must never exist: refuse it before any write.
+  if (input.holderKind === 'APP') {
+    throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A read client is held by a person, a worker or an agent.');
   }
   const startsAt = asTime(input.startsAt);
   const expiresAt = asTime(input.expiresAt);
@@ -533,10 +524,14 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
   if (!found || found.ownerType !== 'app') throw denied();
   const app = await loadLiveApp(ctx, found.ownerId);
   if (!app) throw denied();
+  // An agent holder is anchored under its own authority anchor, after the App's (every door orders them so), only if it exists and is not
+  // deleted: an unknown id falls through to the one GRANT_HOLDER_NOT_ALLOWED inside the transaction (as createAsManager does).
+  const agentAnchor = input.holderKind === 'AGENT' && typeof input.holderRef === 'string'
+    && (await ctx.db.agent.findFirst({ where: { id: input.holderRef, deletedAt: null }, select: { id: true } })) ? input.holderRef : null;
   try {
     return await withAuthorizedTx(
       ctx,
-      appAnchors(app),
+      [...appAnchors(app), ...(agentAnchor ? [{ kind: 'agent' as const, id: agentAnchor }] : [])],
       async (txCtx) => {
         if (!(await lockSecretRow(txCtx.db as never, found.id))) throw authorizationDenied();
         await requireSecretReadClientIssuer(txCtx, found.id, input.autoDelete);
@@ -545,11 +540,12 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
         const userId = txCtx.userId as string;
         const issuance = await requireSecretReadClientIssuer({ ...txCtx, db: tx } as Context, found.id, input.autoDelete);
         const holder = input.holderKind === 'USER'
-          ? { kind: 'user' as const, id: userId }
-          : { kind: 'worker' as const, id: input.holderRef ?? '' };
-        if (input.holderKind === 'USER' && input.holderRef && input.holderRef !== userId) {
-          throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A person holds a read client only for themself.');
+          ? { kind: 'user' as const, id: input.holderRef || userId }
+          : { kind: input.holderKind === 'AGENT' ? 'agent' as const : 'worker' as const, id: input.holderRef ?? '' };
+        if (holder.kind === 'user' && !(await appMember({db:tx, userId:holder.id, roles:[]} as unknown as Context, app.id))) {
+          throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A person holder must participate in this App.');
         }
+        await requireProtectedSecretHolder(tx, found.id, userId, holder.kind === 'user' ? holder.id : null);
         const live = await tx.$queryRaw<Array<{ n: bigint }>>`
           SELECT count(*) AS n FROM secret_read_clients c JOIN grants g ON g.id = c.grant_id
            WHERE c.secret_id = ${found.id} AND c.ended_at IS NULL AND g.revoked_at IS NULL AND g.holder_departed_at IS NULL`;
@@ -559,14 +555,14 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
         const grantId = await createPendingGrant(tx, {
           appId: app.id, requester: { userId, workerId: null, sessionId: null }, holder,
           action: 'secret.reveal', values: { secret: found.id, 'auto-delete': input.autoDelete ? 'delete' : 'keep' },
-          startsAt, expiresAt, maxUses, reason: input.reason, canReadMemory: async () => false,
+          startsAt, expiresAt, maxUses, reason: input.reason, canReadMemory: async () => false, heldAgentAnchor: agentAnchor,
         });
         const clientId = generateId();
         const selfIssued = holder.kind === 'user' && holder.id === userId;
         await tx.secretReadClient.create({
           data: { id: clientId, grantId, appId: app.id, secretId: found.id, secretName: issuance.secretName, issuerUserId: userId, selfIssued },
         });
-        return { clientId, grantId, secretName: issuance.secretName, selfIssued };
+        return { clientId, grantId, secretName: issuance.secretName, selfIssued, issuedToOwnWorker:null };
       },
     );
   } catch (error) {

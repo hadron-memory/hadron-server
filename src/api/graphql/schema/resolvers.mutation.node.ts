@@ -72,10 +72,7 @@ import {
 import { parseUrnInput, splitNodeUrn } from '../../../lib/urn.js';
 import type { WriteDestination } from '../../../lib/appWriteGrant.js';
 import { splitWholeNodeUrn } from '../../../lib/splitNodeUrnTolerant.js';
-import {
-  validateLoc,
-  InvalidLocError,
-} from '../../../lib/validateLoc.js';
+import { validateLocOrThrow } from '../../../lib/validateLocOrThrow.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { deriveEdgeLoc, isAuthoredLoc } from '../../../lib/edgeLoc.js';
 import {
@@ -468,21 +465,10 @@ async function writeNodeCoreRaw(
       );
 
       // Validate loc shape at the GraphQL boundary so any caller — portal,
-      // MCP, tests, future — gets the same typed InvalidLocError instead
-      // of a downstream Prisma constraint failure leaking as INTERNAL_SERVER_ERROR.
-      // The typed-error class is the source of truth for both the code
-      // string (extensions.code = e.name) and the user-facing message,
-      // matching the pattern at line ~5010.
-      try {
-        validateLoc(input.loc);
-      } catch (e) {
-        if (e instanceof InvalidLocError) {
-          throw new GraphQLError(e.message, {
-            extensions: { code: e.name, loc: e.loc, segment: e.segment },
-          });
-        }
-        throw e;
-      }
+      // MCP, tests, future — gets the same typed answer instead of a downstream
+      // Prisma constraint failure leaking as INTERNAL_SERVER_ERROR (#4461: one
+      // shared BAD_USER_INPUT answer, field + reason, the value never echoed).
+      validateLocOrThrow(input.loc, 'loc');
 
       // #4096: caller text a NUL or unpaired surrogate would fail the write (Postgres 22021 / encoding) is a typed BAD_USER_INPUT naming the field, here at the one
       // writer every node door shares, after authorization and before any write. NOT in `mapChatSeqConflict` (see unstorableTextInput.ts).
@@ -753,16 +739,7 @@ async function writeNodeCoreRaw(
         resolvedEdges = [];
         for (const e of input.edges) {
           if (e.loc != null && e.loc !== '') {
-            try {
-              validateLoc(e.loc);
-            } catch (err) {
-              if (err instanceof InvalidLocError) {
-                throw new GraphQLError(err.message, {
-                  extensions: { code: err.name, loc: err.loc, segment: err.segment },
-                });
-              }
-              throw err;
-            }
+            validateLocOrThrow(e.loc, 'loc');
           }
           try {
             const { id: targetNodeId } = await resolveNodeRefForCaller(ctx, e.targetId, input.memoryId);
@@ -1422,10 +1399,10 @@ async function writeNodeCoreRaw(
               input.ownerRepo !== undefined && input.ownerRepo !== current.ownerRepo;
             // ownerRepo deliberately remains outside restorable node history,
             // so an unguarded ownerRepo-only update keeps its legacy
-            // revision-free behaviour. A guarded update is different: every
-            // ownerRepo change must consume the claimed token or the same
-            // expectedRevision could be reused to overwrite it (#937). The
-            // edge-only exception below does not change ownerRepo behaviour.
+            // revision-free behaviour. A guarded ownerRepo change must consume
+            // the claimed token or the same expectedRevision could be reused to
+            // overwrite it (#937). The edge-only exception below does not
+            // change ownerRepo behaviour.
             // #3497 / rulings0149+0198: inline edges are not node revision state.
             // They still reach finalizeNodeWrite, and a guarded edge-only write
             // checks its token without consuming it.
@@ -1991,21 +1968,15 @@ async function resolveRelocationTarget(
   if (hasUrn) {
     const { memoryUrn, loc } = splitWholeNodeUrn(targetUrn as string);
     destLoc = loc;
+    // #4461: only what the caller SUPPLIES is checked. Descendants are not re-capped (the gate is the contract
+    // unification at the write sites, not a new cap on a subtree), and with `targetMemoryRef` the loc is the source's
+    // own, so an existing over-cap node stays movable unchanged.
+    validateLocOrThrow(destLoc, 'destLoc');
     // #1381: the destination is written, so it conceals as it resolves.
     ({ id: destMemoryId } = await resolveMemoryRefForWrite(ctx, memoryUrn));
   } else {
     ({ id: destMemoryId } = await resolveMemoryRefForWrite(ctx, targetMemoryRef as string));
     destLoc = source.loc;
-  }
-  try {
-    validateLoc(destLoc);
-  } catch (e) {
-    if (e instanceof InvalidLocError) {
-      throw new GraphQLError(e.message, {
-        extensions: { code: e.name, loc: e.loc, segment: e.segment },
-      });
-    }
-    throw e;
   }
   return { destMemoryId, destLoc };
 }
@@ -2460,10 +2431,19 @@ async function nodeDoorWritePreflight(ctx: Context, memoryId: string, notFound: 
  * that won before the row lock refuses instead of carrying authority across
  * memories. No compiled-node guard: history pruning is deliberately allowed.
  */
-async function withNodeHistoryWrite<T>(ctx: Context, nodeId: string, memoryId: string,
+async function withNodeHistoryWrite<T>(ctx: Context, nodeId: string, memoryId: string, notFound: () => Error,
   work: (tx: Prisma.TransactionClient, txCtx: Context) => Promise<T>): Promise<T> {
   return ctx.db.$transaction(async tx => {
     await lockInstallAuthoritiesFirst(tx, ctx, [memoryId]);
+    // #3329 (ruling 0195; cor:dmo:010:04, cor:dmo:060:04): a soft-deleted memory takes no history write, whoever the
+    // caller. FOR SHARE conflicts with deleteMemory's FOR UPDATE, so a tombstone that commits after the caller's
+    // preflight is seen here and none can commit until this write does. Memory before node: #1753's order (the
+    // search-replace write and promotion lock memory rows before node rows); install authority is taken first, above,
+    // and locks only advisory anchors and app/member/agent rows, never a memories row.
+    // The refusal is the caller's own not-found, before any access gate, so it never differs from a missing target.
+    const [live] = await tx.$queryRaw<Array<{ deleted_at: Date | null }>>`
+      SELECT deleted_at FROM memories WHERE id = ${memoryId} FOR SHARE`;
+    if (!live || live.deleted_at !== null) throw notFound();
     const txCtx = await nodeDoorTxContext(ctx, tx, [memoryId]);
     await concealUnreadableNodeDenial(txCtx, memoryId, () => nodeNotFoundError(nodeId), () => requireMemoryWriteAccess(txCtx, memoryId));
     await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${nodeId} FOR UPDATE`;
@@ -3388,10 +3368,24 @@ export const nodeMutations = {
         for (const id of [...planMemory.keys()].sort()) {
           await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
         }
-        // #1331 — the writer level of each planned row's role, on the LOCKED row
-        // and the committed rulebook; a row the caller may no longer write (the
-        // rule tightened, or its role changed, since selection) is dropped.
         for (const memoryId of [...plannedEncryption.keys()].sort()) await lockMemoryConfigShared(tx, memoryId);
+        // #1213 S3 / cor:acl:130:02: the current governed kind is an unconditional
+        // skip, even for a manager allowed through that kind's own door. Drop the
+        // plan BEFORE reconciliation, revision or OCC; one unique planned id
+        // contributes one skip, however many signals it has.
+        // Why this re-read stays current through the write: it runs after the
+        // `FOR UPDATE` above on every planned row, and governedKindsOf reads only
+        // that row's own role/isRunnable. Any writer that changes either column
+        // (door, revert, import, merge, admin) must UPDATE the same row, so it
+        // waits for this transaction's commit, whatever key it holds. S2 (#4649;
+        // pins in resolvers.governanceMemory1213.test.ts, inventory in
+        // governedRole.ts mayChangeGovernance) adds the memory key so a door's
+        // own refusal is race-free too; this read does not depend on it.
+        // Selection (above, the same governedKindsOf test) already skips rows
+        // governed when the replace was planned, which is all a dry run sees: it
+        // returns before this transaction, so it never previews a row governed at
+        // planning time, and only a flip after planning makes a previewed row
+        // skip here.
         const lockedRoles = new Map((await tx.node.findMany({
           where: { id: { in: [...planMemory.keys()] } }, select: { id: true, role: true, isRunnable: true },
         })).map((r) => [r.id, r] as const));
@@ -3400,9 +3394,16 @@ export const nodeMutations = {
           const locked = lockedRoles.get(plan.raw.id);
           const role = locked?.role ?? null;
           const runnable = locked?.isRunnable ?? null;
-          if ((role || runnable === true) && await roleWritersRefusal(tx, txCtx, plan.raw.memoryId, {
-            priorRole: role, nextRole: role, priorRunnable: runnable, nextRunnable: runnable,
-          })) {
+          // governedKindsOf (imported from lib/governedRole) takes GovernedState, whose
+          // role/isRunnable are nullable like the columns: null means "no role" /
+          // "not runnable", never "unknown". A row missing from lockedRoles (deleted
+          // since planning) reads as ungoverned here and the batch is refused with
+          // NODE_WRITE_CONFLICT by the locked deletedAt check further down. The skip counter is shared with #1331's
+          // writer-level refusal on purpose: both are "governed" in skipCounts.
+          if (governedKindsOf({ role, isRunnable: runnable }).length > 0 ||
+            ((role || runnable === true) && await roleWritersRefusal(tx, txCtx, plan.raw.memoryId, {
+              priorRole: role, nextRole: role, priorRunnable: runnable, nextRunnable: runnable,
+            }))) {
             skipCounts.governed += 1;
             planMemory.delete(plan.raw.id);
             plans.splice(i, 1);
@@ -3923,15 +3924,14 @@ export const nodeMutations = {
       // after the gates above and before the loc derives from `name` or anything is written. `loc` and `condition`
       // already refuse with their own typed codes.
       assertStorableText({ name, loc, description, data, condition });
-      const edgeLoc = loc != null && loc !== '' ? loc : deriveEdgeLoc(src.loc, name ?? null, tgt.loc);
-      try {
-        validateLoc(edgeLoc);
-      } catch (e) {
-        if (e instanceof InvalidLocError) {
-          throw new GraphQLError(e.message, { extensions: { code: e.name, loc: e.loc, segment: e.segment } });
-        }
-        throw e;
-      }
+      // #4461: only a CALLER-SUPPLIED loc is held to the contract (incl. the total cap). A derived loc is
+      // `<src>:<name>:<tgt>`: two already-valid node locs and the name slugified to one valid atom of at most 64
+      // characters (`deriveEdgeLoc`), so it is valid by construction and only its TOTAL can exceed the cap, through
+      // no fault of the caller's input; refusing it as field `loc` would blame a field never sent (as on main, it is
+      // accepted).
+      const callerLoc = loc != null && loc !== '';
+      if (callerLoc) validateLocOrThrow(loc, 'loc');
+      const edgeLoc = callerLoc ? loc : deriveEdgeLoc(src.loc, name ?? null, tgt.loc);
       const edge = await ctx.db.$transaction(async (tx) => {
         await lockInstallAuthoritiesFirst(tx, ctx, [src.memoryId, tgt.memoryId]);
         const locked = await lockLiveEdgeEndpoints(
@@ -4046,15 +4046,8 @@ export const nodeMutations = {
         throwOnInvalidCondition(condition);
       }
       if (loc != null && loc !== '') {
-        assertStorableText({ loc }); // #4106: typed, and the value is never echoed (InvalidLocError's message would)
-        try {
-          validateLoc(loc);
-        } catch (e) {
-          if (e instanceof InvalidLocError) {
-            throw new GraphQLError(e.message, { extensions: { code: e.name, loc: e.loc, segment: e.segment } });
-          }
-          throw e;
-        }
+        assertStorableText({ loc }); // #4106: typed, and the value is never echoed
+        validateLocOrThrow(loc, 'loc'); // #4461: nor does this one
       }
       // Null semantics differ per arg (#263):
       // - condition/data: null CLEARS the stored value — the spec'd
@@ -5346,19 +5339,19 @@ export const nodeMutations = {
     // (as restoreNodeRevision) — the memory you own the live node in, even if the
     // snapshot was captured in another memory before a move.
     deleteNodeRevision: async (_: unknown, { revisionId }: { revisionId: string }, ctx: Context) => {
-      const revision = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
-      if (!revision) {
-        throw new GraphQLError('Node revision not found', {
-          extensions: { code: 'NOT_FOUND', revisionId },
-        });
-      }
-      const node = await ctx.db.node.findUniqueOrThrow({ where: { id: revision.nodeId } });
-      await nodeDoorWritePreflight(ctx, node.memoryId, () => new GraphQLError('Node revision not found', { extensions: { code: 'NOT_FOUND', revisionId } }));
+      const notFound = () => new GraphQLError('Node revision not found', { extensions: { code: 'NOT_FOUND', revisionId } });
+      // #3329: a revision whose node's memory is soft-deleted is answered as missing, in the same single lookup,
+      // before any access gate (no FORBIDDEN-vs-NOT_FOUND oracle). withNodeHistoryWrite re-checks under lock.
+      const revision = await ctx.db.nodeRevision.findFirst({ where: { id: revisionId, node: { memory: { deletedAt: null } } } });
+      if (!revision) throw notFound();
+      const node = await ctx.db.node.findUnique({ where: { id: revision.nodeId } });
+      if (!node) throw notFound(); // a hard delete racing this lookup is a missing revision too, not a raw P2025
+      await nodeDoorWritePreflight(ctx, node.memoryId, notFound);
       // #1641 §3.2 — a question's history is its audit trail. Unlocked: no
       // write ever turns an existing node into a question or back.
       if (isQuestionFamilyRole(node.role)) throw questionContainedError("Deleting a question's revision", [node.loc]);
       // No protected-loc gate: a revision row is history, not the address.
-      return withNodeHistoryWrite(ctx, node.id, node.memoryId, async tx => {
+      return withNodeHistoryWrite(ctx, node.id, node.memoryId, notFound, async tx => {
         await tx.nodeRevision.delete({ where: { id: revisionId } });
         return true;
       });
@@ -5394,7 +5387,7 @@ export const nodeMutations = {
         throw notFound();
       }
       await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, node.memoryId);
-      return withNodeHistoryWrite(ctx, revision.nodeId, node.memoryId, async (tx, txCtx) => {
+      return withNodeHistoryWrite(ctx, revision.nodeId, node.memoryId, notFound, async (tx, txCtx) => {
         await tx.$queryRaw`SELECT id FROM node_revisions WHERE id = ${revisionId} FOR UPDATE`;
         const current = await tx.nodeRevision.findUnique({ where: { id: revisionId } });
         const liveNode = await tx.node.findUnique({ where: { id: revision.nodeId } });
@@ -5415,6 +5408,7 @@ export const nodeMutations = {
     // #617 — delete ALL snapshots for a node, returning the count deleted. Write-
     // gated on the node's current memory. nodeRef is a PK or fully-qualified URN.
     clearNodeHistory: async (_: unknown, { nodeRef }: { nodeRef: string }, ctx: Context) => {
+      const notFound = () => new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
       let nodeId: string;
       try {
         // includeDeleted: a soft-deleted node still owns residual history an
@@ -5423,21 +5417,20 @@ export const nodeMutations = {
         // contrast the READ surfaces, which hide tombstoned history). PR #618.
         ({ id: nodeId } = await resolveNodeRefForCaller(ctx, nodeRef, undefined, { includeDeleted: true }));
       } catch (e) {
-        if (e instanceof NodeNotFoundError) {
-          throw new GraphQLError('Node not found', {
-            extensions: { code: 'NODE_NOT_FOUND', nodeRef },
-          });
-        }
+        if (e instanceof NodeNotFoundError) throw notFound();
         throw e;
       }
-      const node = await ctx.db.node.findUniqueOrThrow({
-        where: { id: nodeId },
+      // #3329: a node whose memory is soft-deleted is answered as missing (the tombstoned NODE in a LIVE memory stays
+      // reachable, above), before any access gate; withNodeHistoryWrite re-checks under lock.
+      const node = await ctx.db.node.findFirst({
+        where: { id: nodeId, memory: { deletedAt: null } },
         select: { memoryId: true, role: true, loc: true },
       });
+      if (!node) throw notFound();
       await nodeDoorWritePreflight(ctx, node.memoryId, () => nodeNotFoundError(nodeRef));
       // #1641 §3.2 — a question's history is its audit trail (as deleteNodeRevision).
       if (isQuestionFamilyRole(node.role)) throw questionContainedError("Clearing a question's history", [node.loc]);
-      return withNodeHistoryWrite(ctx, nodeId, node.memoryId, async tx => {
+      return withNodeHistoryWrite(ctx, nodeId, node.memoryId, notFound, async tx => {
         const { count } = await tx.nodeRevision.deleteMany({ where: { nodeId } });
         return count;
       });

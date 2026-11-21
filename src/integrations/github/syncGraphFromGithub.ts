@@ -1,4 +1,5 @@
 import type { SyncNotAttemptedReason } from './syncNotAttempted.js';
+import { acquireSyncRunLock } from './syncRunLock.js';
 import { committedSyncReport, failedSyncReport, type SyncReportEntry } from './syncReport.js';
 import { GitCommandError } from './execGit.js';
 import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
@@ -376,6 +377,8 @@ const syncGraphFromGithubAsSystem = async (
    */
   heldMoves?: string[];
 }> => {
+  // #3571: held from before the SYNCING stamp until after the final OK/ERROR write (released in the finally below).
+  let releaseRunLock: (() => Promise<void>) | undefined;
   try {
     const graphName = graph.urn;
 
@@ -431,6 +434,10 @@ const syncGraphFromGithubAsSystem = async (
       where: { id: graph.id }, select: { isEncrypted: true },
     });
     if (encryptionState?.isEncrypted) throw new GitSyncEncryptedMemoryError();
+
+    // #3571 (ruling 0223): take the memory's sync-run lock (shared) BEFORE stamping SYNCING, so a row reads SYNCING
+    // only while an attempt holds the lock; the reconciliation of abandoned rows skips any row whose lock is held.
+    releaseRunLock = await acquireSyncRunLock(graph.id);
 
     // Update sync status to SYNCING
     await db.memory.update({
@@ -1880,6 +1887,9 @@ const syncGraphFromGithubAsSystem = async (
           // A git failure's message is fixed and credential-free by design (execGit), so it stays a typed refusal.
           : error instanceof GitCommandError ? {} : { fault: true as const }),
     };
+  } finally {
+    // #3571: after the final status write on every path; a no-op when the attempt returned before taking it.
+    await releaseRunLock?.();
   }
 };
 

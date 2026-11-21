@@ -26,7 +26,7 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { EntityNotFoundError, AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../../lib/urn.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
+import { validateLocOrThrow } from '../../../lib/validateLocOrThrow.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { requireMemoryManageAccess, type Context } from './resolvers.helpers.js';
 
@@ -59,10 +59,7 @@ function parsePrefix(raw: string | null | undefined): string | null {
   // A blank string is a mistake, not the maximum grant: only an absent prefix means the whole memory.
   if (raw.trim() === '') throw badInput('prefix must be a loc, or omitted for the whole memory.');
   const prefix = raw.trim();
-  try { validateLoc(prefix); } catch (e) {
-    if (e instanceof InvalidLocError) throw badInput(`prefix is not a valid loc: ${e.message}`);
-    throw e;
-  }
+  validateLocOrThrow(prefix, 'prefix');
   return prefix;
 }
 

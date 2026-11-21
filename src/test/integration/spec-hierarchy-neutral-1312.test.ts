@@ -468,7 +468,7 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
     const result = await gql(key.owner!, CREATE_SPEC, {
       input: { memoryId, loc: 'bad::loc', name: 'must not exist', role: 'spec' },
     });
-    expectCode(result, 'InvalidLocError');
+    expectCode(result, 'BAD_USER_INPUT');
     expect(await db.node.findFirst({ where: { memoryId, loc: 'bad::loc' } })).toBeNull();
   });
 

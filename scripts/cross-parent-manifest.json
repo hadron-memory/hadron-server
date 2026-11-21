@@ -231,9 +231,6 @@
     "RevisionResult": "envelope",
     "AgentRevision": "value",
     "EditorLockResult": "envelope",
-    "UntrackedTaskItem": "value",
-    "UntrackedTaskItemPage": "envelope",
-    "ClaimUntrackedTaskItemsResult": "envelope",
     "AgentTaskRequirements": "value",
     "AgentTaskResult": "envelope",
     "AgentTaskFinding": "value",
@@ -785,12 +782,6 @@
       "resolver": "src/api/graphql/schema/resolvers.query.chat.ts::myChatsScope",
       "gate": "myChatsScope",
       "target": "Chat"
-    },
-    "ClaimUntrackedTaskItemsResult.tasks": {
-      "class": "parent-implies-child",
-      "audience": "the claimer passed the App's task gate (participant or the App's live key via withReadableApp); task reads are App-wide for that audience",
-      "resolver": "src/api/graphql/schema/resolvers.untrackedTaskItems.ts::withReadableApp",
-      "target": "AgentTask"
     },
     "Comment.author": {
       "class": "open",
@@ -2229,6 +2220,12 @@
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "Node"
+    },
+    "WorkerContinuity.handoffAuthor": {
+      "class": "closed-projection",
+      "projection": "WorkerContinuityAuthor",
+      "why": "userHandle (identity tier, cor:acl:070:01) and the writing session id only, never the Session or User; the session is looked up among this worker's own sessions; the parent continuity is masked unless maySeeWorkerInternals passes",
+      "target": "WorkerContinuityAuthor"
     },
     "WorkerContinuity.previousSession": {
       "class": "open",
