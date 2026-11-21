@@ -78,9 +78,11 @@ echo "→ Restoring with $($PG_RESTORE --version)"
 # a partial index, so a declaration made every db push try to create it again and
 # die with "relation … already exists"); prisma/partial-index-invariants.sql,
 # applied by post-push.sql inside dev-setup.sh below, owns both and rebuilds them
-# partial, exactly as prod has them. Dropping them here is kept as a harmless
-# reset: post-push rebuilds them. If a future schema adds another Prisma-named
-# partial index, own it in post-push the same way.
+# partial, exactly as prod has them. The drops below are name-only and commit
+# before dev-setup.sh runs, so they bypass post-push's table and definition
+# checks: on a restored prod DB they remove exactly the two partial indexes, which
+# post-push then rebuilds. If a future schema adds another Prisma-named partial
+# index, own it in post-push the same way.
 echo
 echo "→ Dropping the two partial indexes (post-push.sql rebuilds them partial below)"
 psql -U "$LOCAL_USER" -h "$LOCAL_HOST" -d "$LOCAL_DB" -v ON_ERROR_STOP=1 \
