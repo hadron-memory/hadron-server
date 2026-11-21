@@ -27,7 +27,7 @@ describe('#3571 the sync-run lock connection', () => {
       await new Promise((resolve) => setTimeout(resolve, 300));
       await expect(release()).resolves.toBeUndefined();
       expect(unhandled).toEqual([]);
-      expect(errors).toHaveBeenCalledWith('[git-sync] sync-run lock connection lost', expect.anything());
+      expect(errors).toHaveBeenCalledWith('[git-sync] sync-run lock connection lost', { code: expect.any(String) });
       // The lock went with the backend: nothing holds the key any more.
       expect(await holderPid(memoryId)).toBeUndefined();
     } finally {

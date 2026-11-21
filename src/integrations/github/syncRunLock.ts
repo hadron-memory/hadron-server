@@ -29,16 +29,22 @@ export function syncRunLockKey(memoryId: string): string {
  * the lock).
  */
 export async function acquireSyncRunLock(memoryId: string): Promise<() => Promise<void>> {
-  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  // #4719 BLIND F2: the same DATABASE_URL the Prisma client reads, and no silent fallback to PG* variables or
+  // localhost, which could put the lock on another database where it would exclude nothing. The existing
+  // mirror-checkout lock (mirrorCheckoutLock.ts) holds its session advisory lock the same way.
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) throw new Error('sync-run lock: DATABASE_URL is not set');
+  const client = new Client({ connectionString });
   // #4719 SEC10 F1: pg emits an idle-connection error if the database drops this connection while the sync runs; an
   // unhandled EventEmitter error would exit the server process (mirrorCheckoutLock.ts has the same listener). A lost
   // connection releases the lock with it, so the row then reads as abandoned, which is what it would be if this
   // process died: the reconciliation may set it to PENDING, and the sync's own final status write still lands after.
   client.on('error', (error) => {
-    console.error('[git-sync] sync-run lock connection lost', { message: error.message });
+    // Code only (#4719 BLIND F6): a driver message can name the host.
+    console.error('[git-sync] sync-run lock connection lost', { code: (error as { code?: string }).code ?? 'unknown' });
   });
-  await client.connect();
   try {
+    await client.connect();
     await client.query('SELECT pg_advisory_lock_shared(hashtext($1))', [syncRunLockKey(memoryId)]);
   } catch (error) {
     await client.end().catch(() => {});
