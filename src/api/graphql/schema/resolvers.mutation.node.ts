@@ -3384,9 +3384,12 @@ export const nodeMutations = {
         for (const id of [...planMemory.keys()].sort()) {
           await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
         }
-        // #1331 — the writer level of each planned row's role, on the LOCKED row
-        // and the committed rulebook; a row the caller may no longer write (the
-        // rule tightened, or its role changed, since selection) is dropped.
+        // #1213 S3 / cor:acl:130:02: the current governed kind is an unconditional
+        // skip, even for a manager allowed through that kind's own door. S2 signal
+        // writers retain the same memory key, so this locked re-read stays current
+        // through the write. Drop the plan BEFORE reconciliation, revision or OCC;
+        // one unique planned id contributes one skip, however many signals it has.
+        // #1331's separate writer-level rule still applies to open, non-kind roles.
         for (const memoryId of [...plannedEncryption.keys()].sort()) await lockMemoryConfigShared(tx, memoryId);
         const lockedRoles = new Map((await tx.node.findMany({
           where: { id: { in: [...planMemory.keys()] } }, select: { id: true, role: true, isRunnable: true },
@@ -3396,9 +3399,10 @@ export const nodeMutations = {
           const locked = lockedRoles.get(plan.raw.id);
           const role = locked?.role ?? null;
           const runnable = locked?.isRunnable ?? null;
-          if ((role || runnable === true) && await roleWritersRefusal(tx, txCtx, plan.raw.memoryId, {
-            priorRole: role, nextRole: role, priorRunnable: runnable, nextRunnable: runnable,
-          })) {
+          if (governedKindsOf({ role, isRunnable: runnable }).length > 0 ||
+            ((role || runnable === true) && await roleWritersRefusal(tx, txCtx, plan.raw.memoryId, {
+              priorRole: role, nextRole: role, priorRunnable: runnable, nextRunnable: runnable,
+            }))) {
             skipCounts.governed += 1;
             planMemory.delete(plan.raw.id);
             plans.splice(i, 1);

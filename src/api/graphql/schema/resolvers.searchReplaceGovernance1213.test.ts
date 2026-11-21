@@ -95,7 +95,7 @@ async function snapshot(client: Prisma.TransactionClient = db) {
 
 // The planner must finish on ordinary rows before the promoting door starts. This
 // wrapper pauses before opening the real write transaction; it fabricates no reads.
-function pausedBeforeTransaction(ready: ReturnType<typeof latch>, release: ReturnType<typeof latch>, pid: ReturnType<typeof latch<number>>) {
+function pausedBeforeTransaction(ready: ReturnType<typeof latch<void>>, release: ReturnType<typeof latch<void>>, pid: ReturnType<typeof latch<number>>) {
   const observed = contextWithPid(pid).db;
   return new Proxy(observed, { get(target, prop, receiver) {
     if (prop !== '$transaction') return Reflect.get(target, prop, receiver);
@@ -107,7 +107,8 @@ function pausedBeforeTransaction(ready: ReturnType<typeof latch>, release: Retur
 }
 
 describe('#1213 S3 authorized-manager interleavings', () => {
-  it.each(['review', 'task'] as const)('door first (%s): skip once before reconciliation/OCC; ordinary survivor commits', async signal => {
+  it.each([['review', true], ['task', true], ['review', false], ['task', false]] as const)('door first (%s, ordinary match=%s): skip once before reconciliation/OCC', async (signal, ordinaryMatches) => {
+    if (!ordinaryMatches) await db.node.update({ where: { id: ordinaryId }, data: { content: 'unmatched' } });
     const planned = latch(), enterBulk = latch(), bulkPid = latch<number>();
     const held = latch<number>(), releaseDoor = latch();
     const bulk = replace({ ...ctx(), db: pausedBeforeTransaction(planned, enterBulk, bulkPid) });
@@ -128,14 +129,14 @@ describe('#1213 S3 authorized-manager interleavings', () => {
       // The baseline was captured inside the door after its work, before commit.
       // The bulk may now run, but it may add neither reconciliation nor revisions.
       const [result] = await bulkDone;
-      expect(result.status).toBe('fulfilled');
+      expect(result.status, result.status === 'rejected' ? String(result.reason) : undefined).toBe('fulfilled');
       if (result.status !== 'fulfilled') throw result.reason;
-      expect(result.value).toMatchObject({ nodesSelected: 2, nodesSkipped: 1, nodesChanged: 1,
-        totalReplacements: 1, skipCounts: { governed: 1, protectedAddress: 0 } });
-      expect((result.value as { results: Array<{ nodeId: string }> }).results.map(x => x.nodeId)).toEqual([ordinaryId]);
-      expect(ensure.mock.calls.filter(args => args[1] === nodeId)).toEqual([]);
+      expect(result.value).toMatchObject({ nodesSelected: 2, nodesSkipped: 1, nodesChanged: ordinaryMatches ? 1 : 0,
+        totalReplacements: ordinaryMatches ? 1 : 0, skipCounts: { governed: 1, protectedAddress: 0 } });
+      expect((result.value as { results: Array<{ nodeId: string }> }).results.map(x => x.nodeId)).toEqual(ordinaryMatches ? [ordinaryId] : []);
+      expect(ensure.mock.calls.filter(args => args[1] === nodeId).length).toBe(0);
       expect(await snapshot()).toEqual(before);
-      expect((await db.node.findUniqueOrThrow({ where: { id: ordinaryId } })).content).toBe('beta');
+      expect((await db.node.findUniqueOrThrow({ where: { id: ordinaryId } })).content).toBe(ordinaryMatches ? 'beta' : 'unmatched');
     } finally {
       enterBulk.resolve(); releaseDoor.resolve();
       await Promise.all([bulkDone, ...(doorDone ? [doorDone] : [])]); ensure.mockRestore();
