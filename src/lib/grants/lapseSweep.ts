@@ -28,7 +28,7 @@
  */
 import { Prisma as P, type PrismaClient } from '../../generated/prisma/index.js';
 import { lockAppInstallations, resolveAppInstallation } from '../appInstallations.js';
-import { ALREADY_ENDED, endAgentGrantsAtApps } from './departure.js';
+import { ALREADY_ENDED, endAgentGrantsAtApps, type AgentDepartureReason } from './departure.js';
 
 
 export type LapseSweepCursor = { appId: string; agentId: string };
@@ -42,6 +42,16 @@ export interface LapseSweepOutcome {
 }
 
 /** Small pages keep each transaction's installation and grant locks short: the doors wait on the same locks (#4178 BLIND). 80 x 50 = 4000 pairs per run. */
+/**
+ * #4180 (cause codes): the cause the sweep records. Both lapses it catches (a licence that expired or was revoked behind a derived
+ * install, an organization soft-deleted under one) end the installation the org's licence gave, so the closest of the six agent
+ * causes is AGENT_LICENSE_REVOKED ("the organization's licence to the agent ... ended its installation"). The sweep does not tell the
+ * two lapses apart: no cause names a soft-deleted organization (AGENT_IMPORTER_DELETED is an importing agent's hard delete), and a
+ * finer code is #4180's owner's to add. The database fits the code to the holder (hadron_fit_departure_cause), so an agent that is
+ * already deleted still records AGENT_DELETED.
+ */
+export const LAPSE_SWEEP_REASON: AgentDepartureReason = 'AGENT_LICENSE_REVOKED';
+
 const DEFAULT_BATCH = 50;
 const DEFAULT_MAX_PAGES = 80;
 
@@ -89,7 +99,7 @@ export async function sweepLapsedAgentGrants(
           if (!(await resolveAppInstallation(tx, appId, agentId))) gone.push({ appId, agentId });
         }
       }
-      return { gone, ended: await endAgentGrantsAtApps(tx, gone) };
+      return { gone, ended: await endAgentGrantsAtApps(tx, gone.map((p) => ({ ...p, reason: LAPSE_SWEEP_REASON }))) };
     }, { timeout: 60_000 });
     out.pairsJudged += pairs.length;
     out.pairsDeparted += departed.gone.length;
