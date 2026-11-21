@@ -53,7 +53,7 @@ describe('S5 secret.use public run-tool boundary', () => {
     expect(schema.properties).not.toHaveProperty('auth');
   });
 
-  it('does not silently downgrade a missing secret client to an anonymous outbound request', async () => {
+  it('refuses a request that names a secret client and sends nothing outbound while the use path is dark (does not pin the client lookup, #4775)', async () => {
     await expect(webRequest.execute(ctx, {
       method: 'GET', url: 'https://api.example.test/v1/orders',
       secretClientId: generateId(),
@@ -62,7 +62,7 @@ describe('S5 secret.use public run-tool boundary', () => {
     expect(ctx.log).not.toHaveBeenCalled();
   });
 
-  it('does not downgrade malformed client references to an anonymous request', async () => {
+  it('refuses a request with a null, empty or non-string client reference and sends nothing outbound while the use path is dark (does not pin the client lookup, #4775)', async () => {
     for (const secretClientId of [null, '', 17]) {
       await expect(webRequest.execute(ctx, { method: 'GET', url: 'https://api.example.test/v1/orders', secretClientId }))
         .rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
