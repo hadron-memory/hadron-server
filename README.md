@@ -45,15 +45,18 @@ pnpm install
 
 **2. Create a database**
 
-Create an empty database on your PostgreSQL server. The role you connect with needs to be
-able to create tables and, for the `vector` extension, to create extensions (a superuser
-or the database owner on most installs; the extension is untrusted, so a plain `CREATEDB`
-role is not enough). If your role lacks either, run the `createdb` line as a privileged
-role and make your role the database owner:
+Create an empty database on your PostgreSQL server and install the `vector` extension in it.
+The extension is untrusted, so installing it needs a superuser; a role that can only create
+databases is not enough, and step 4 fails on it. If your role is not a superuser, run both
+lines as a privileged role, make your role the database owner, then continue as that role:
 
 ```bash
 createdb hadron
+psql -d hadron -c 'CREATE EXTENSION IF NOT EXISTS vector'
 ```
+
+(If your role is a superuser, run them as that role. Step 4 also runs `CREATE EXTENSION IF NOT
+EXISTS vector` as the role in `DATABASE_URL`, which does nothing once the extension exists.)
 
 **3. Create your `.env`**
 
@@ -136,7 +139,7 @@ sign-in routes you have not configured simply refuse requests.
 pnpm test
 ```
 
-You need a local PostgreSQL with pgvector and a role that may create databases. No setup
+You need a local PostgreSQL with pgvector installed and a role that may create databases. No setup
 step is needed: the test run builds a template database from an empty one for the schema in
 your checkout and clones it for each worker, and it never touches the database named in
 your `.env`. If you have little memory or share the machine, limit the workers with
