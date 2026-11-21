@@ -293,6 +293,9 @@ export const ALARM_EVENT_TYPES = [
   'alarm.start-failing',
   // #4233: a host whose sweep stopped reporting (S10 of #4229). Task-less and workerless; its episode lives in `host_sweep_episodes`.
   'alarm.stale-sweep',
+  // #3819 slice 1: a family/tier/role combination the platform could not give work to (cor:agt:060:14). Task-less and
+  // workerless, with an empty chain; its episode lives in `saturation_episodes`.
+  'alarm.saturation',
 ] as const;
 export type AlarmEventType = (typeof ALARM_EVENT_TYPES)[number];
 

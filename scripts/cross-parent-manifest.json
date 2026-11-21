@@ -313,6 +313,7 @@
     "GrantSignatureStatus": "value",
     "TeamUtilization": "value",
     "WorkerUtilization": "value",
+    "MatchFailure": "value",
     "WebPollsPage": "envelope",
     "SigningRequestsPage": "envelope",
     "WorkerDesiredState": "value",
