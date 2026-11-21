@@ -74,7 +74,9 @@ describe('#606 Memory.canWrite equals the write gate (matrix)', () => {
     for (const which of ['shared', 'private', 'personal'] as const) {
       it(`${label} × ${which}`, async () => {
         const id = { shared: shared.id, private: privOwnedByOwner.id, personal: personalOwnedByOwner.id }[which];
-        const expected = await gateAllows(mkCtx(), id);
+        const c0 = mkCtx();
+        // The gate's answer, except that a read-only impersonation session can write nothing at all.
+        const expected = (c0 as any).impersonation ? false : await gateAllows(c0, id);
         expect(await M.canWrite({ id }, {}, mkCtx())).toBe(expected);
       });
     }
@@ -91,6 +93,12 @@ describe('#606 Memory.canWrite equals the write gate (matrix)', () => {
     expect(await at('platform', ['OWNER'], privOwnedByOwner.id)).toBe(false);
     expect(await at('orgAdmin', ['READER'], personalOwnedByOwner.id)).toBe(false);
     expect(await M.canWrite({ id: shared.id }, {}, ctxOf({}))).toBe(false);
+  });
+
+  it('is false for every memory under read-only impersonation, even where the gate alone allows the target', async () => {
+    const c = ctxOf({ userId: u.contributor.id, roles: ['READER'], impersonation: { actorUserId: u.platform.id } } as any);
+    expect(await gateAllows(c, shared.id)).toBe(true); // the gate by itself would say yes
+    expect(await M.canWrite({ id: shared.id }, {}, c)).toBe(false);
   });
 
   it('an App key with no user answers as the gate does (canWriteToMemory)', async () => {

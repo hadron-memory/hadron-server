@@ -4388,8 +4388,9 @@ export const typeDefs = `#graphql
     """
     maxRevCount: Int!
     """
-    #606 — whether the CALLER may write to this memory: true exactly when a write to it would not be refused by the
-    memory write gate, for the request's own principal (user, impersonation, App key or run). It says nothing about
+    #606 — whether the CALLER may write to this memory: true exactly when a write to it would succeed for the request's own principal
+    (user, App key or run): not refused by the memory write gate, and never true in a read-only impersonation session,
+    where every mutation is refused. It says nothing about
     other users, and a Memory is only reachable here when the caller may already read it. Lets a write-target
     picker filter without one effectiveAccess call per memory (the server still runs the gate once per distinct
     memory per request). Null means the answer could not be determined (an unexpected failure, logged

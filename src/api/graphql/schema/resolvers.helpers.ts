@@ -3061,6 +3061,9 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
  */
 const memoryCanWriteMemo = new WeakMap<object, Map<string, Promise<boolean>>>();
 export function canWriteMemoryRecord(ctx: Context, memoryId: string): Promise<boolean> {
+  // A read-only impersonation session refuses every mutation but stopImpersonation (impersonationReadOnlyPlugin), so
+  // no write to any memory would succeed: the gate alone would say true, which is not what the field promises.
+  if (ctx.impersonation) return Promise.resolve(false);
   let perRequest = memoryCanWriteMemo.get(ctx);
   if (!perRequest) {
     perRequest = new Map();
