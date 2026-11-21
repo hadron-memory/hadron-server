@@ -6407,7 +6407,7 @@ export const typeDefs = `#graphql
     "WORKER: a live worker of the App (holderRef is its id). AGENT: an agent installed and licensed in the App (holderRef is its id); its live workers in the App read through the client (hrn:node:hadronmemory.com:specs:cor:sec:060:02). USER: the issuer themself (holderRef omitted). APP is refused (GRANT_HOLDER_NOT_ALLOWED): an App holds no reveal path."
     holderKind: GrantHolderKind!
     holderRef: ID
-    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refused (SECRET_AUTO_DELETE_NEEDS_LIMIT) without a window or a read budget, and, for a request that does state a window or a read budget, (SECRET_AUTO_DELETE_NOT_ALLOWED) to a caller who is neither an App manager nor the writer of the secret's current version (what such a caller otherwise gets as FORBIDDEN or SECRET_READ_CLIENT_SUPERSEDED). The limit is judged first, so a marked request with neither gets NEEDS_LIMIT whoever sends it."
+    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refusals, in the order they are judged: holderKind APP (GRANT_HOLDER_NOT_ALLOWED); an unreadable startsAt or expiresAt (BAD_USER_INPUT); a marked request without a window or a read budget (SECRET_AUTO_DELETE_NEEDS_LIMIT); a caller who is neither an App manager nor the writer of the secret's current version (SECRET_AUTO_DELETE_NOT_ALLOWED, where an unmarked request would get FORBIDDEN or SECRET_READ_CLIENT_SUPERSEDED)."
     autoDelete: Boolean! = false
     startsAt: DateTime
     expiresAt: DateTime
