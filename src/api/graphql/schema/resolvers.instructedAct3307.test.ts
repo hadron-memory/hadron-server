@@ -10,6 +10,7 @@ import { runAsActor, requestActorStorage } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 import { resolvers, type Context } from './resolvers.js';
+import { endSessionFirstWins } from './resolvers.mutation.session.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;
 let f: any;
@@ -315,6 +316,85 @@ it(`#3335 ${door} holds the live manager membership after ${earlierTransaction ?
  expect(observer.activePids.size).toBe(0);
  expect(await instructionEvents()).toHaveLength(1);
 }, 20000);
+
+/**
+ * #3336: pin the session row's FOR SHARE in `lockInstructedActRows` (resolvers.instruction.ts). Without it a session
+ * end could commit between the act's final re-admission and the act's commit, recording an act under a session that
+ * had just ended (cor:dmo:050:12, cor:acl:100:04). Three connections: (a) the act through the signature door, (b) a
+ * side transaction holding the App row FOR UPDATE, which the act's event insert reaches only AFTER the session lock
+ * (its foreign key to apps), so the act is parked while it holds that lock, and (c) the real session-end write on its
+ * own connection. The observer asserts by backend identity, not by timeout: (c) is in a Lock wait and (a)'s PID is in
+ * its pg_blocking_pids. Removing only the session FOR SHARE leaves (c) unblocked, and this test goes red there.
+ */
+it('#3336 an instructed act holds its session row FOR SHARE: a concurrent session end waits on the act backend', async () => {
+ let held!: () => void, release!: () => void;
+ let blockerPid!: number, actPid!: number, writerPid!: number;
+ const ready = new Promise<void>(r => { held = r; });
+ const gate = new Promise<void>(r => { release = r; });
+ const observer = observeActTransactions();
+ let side: Promise<unknown> | undefined, call: Promise<any> | undefined, writer: Promise<unknown> | undefined;
+ let actSettled = false, writerSettled = false, outcome: any;
+ const poll = async <T,>(what: string, probe: () => Promise<T | undefined>, stillWaiting: () => boolean = () => true): Promise<T> => {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+   const found = await probe();
+   if (found !== undefined) return found;
+   if (!stillWaiting()) throw new Error(`${what}: the awaited call finished before the wait was observed`);
+   if (Date.now() >= deadline) throw new Error(`${what}: not observed within 5s`);
+   await new Promise(r => setTimeout(r, 25));
+  }
+ };
+ try {
+  side = db.$transaction(async tx => {
+   const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+   blockerPid = pid;
+   await tx.$queryRaw`SELECT id FROM apps WHERE id=${f.app.id} FOR UPDATE`;
+   held(); await gate;
+  }, { timeout: 30000 });
+  void side.catch(() => {});
+  await Promise.race([ready, side.then(() => { throw new Error('blocker ended before readiness'); })]);
+
+  call = answer(calls.signature(live, bound({ db: observer.client }))).then(result => { actSettled = true; return result; });
+  // The act is parked on the side lock: its backend waits on the known blocker, past its session lock.
+  actPid = await poll('the act waiting on the side lock', async () => {
+   const pids = [...observer.activePids];
+   const rows = await db.$queryRaw<Array<{ pid: number }>>`SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND pid=ANY(${pids}::int[]) AND wait_event_type='Lock' AND ${blockerPid}=ANY(pg_blocking_pids(pid)) ORDER BY pid`;
+   return rows[0]?.pid;
+  }, () => !actSettled);
+  expect(actPid).toBeGreaterThan(0);
+  expect(actPid).not.toBe(blockerPid);
+  expect(observer.activePids.has(actPid)).toBe(true);
+
+  // The real session-end write, on its own connection, while the act holds the session row.
+  writer = endSessionFirstWins(db, f.session.id, {}).then(r => { writerSettled = true; return r; });
+  void writer.catch(() => {});
+  const witness = await poll('the session end waiting on the act backend', async () => {
+   const rows = await db.$queryRaw<Array<{ pid: number; query: string }>>`SELECT pid, query FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND ${actPid}=ANY(pg_blocking_pids(pid)) ORDER BY pid`;
+   return rows[0];
+  }, () => !writerSettled);
+  writerPid = witness.pid;
+  // The witness is a backend the lock-wait query returned: not the act, not the side blocker, and it is the session write.
+  expect(writerPid).toBeGreaterThan(0);
+  expect(writerPid).not.toBe(actPid);
+  expect(writerPid).not.toBe(blockerPid);
+  expect(witness.query).toMatch(/sessions/);
+  expect(writerSettled).toBe(false);
+  expect(actSettled).toBe(false);
+  const open = await db.session.findUniqueOrThrow({ where: { id: f.session.id }, select: { endedAt: true } });
+  expect(open.endedAt).toBeNull();
+ } finally {
+  release();
+  const results = await Promise.allSettled([side, call, writer].filter((p): p is Promise<any> => p !== undefined));
+  for (const result of results) if (result.status === 'rejected') throw result.reason;
+  if (call) outcome = await call;
+ }
+ // Released: the act commits first with its record unchanged, then the waiting session end proceeds.
+ expect(outcome.code).toBe('RESOLVED');
+ expect(await instructionEvents()).toHaveLength(1);
+ expect(observer.activePids.size).toBe(0);
+ const ended = await db.session.findUniqueOrThrow({ where: { id: f.session.id }, select: { endedAt: true } });
+ expect(ended.endedAt).not.toBeNull();
+}, 30000);
 
 for (const door of ['signature', 'agent']) it(`#3314 ${door}: a worker held in another App cannot carry its holder's target-App manager right`, async () => {
   const foreign = await db.app.create({ data: { organizationId: f.org.id, name: 'Foreign team', urn: 'instruct3307.test:foreign-team' } });
