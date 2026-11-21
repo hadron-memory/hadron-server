@@ -7,10 +7,15 @@
  *     grant that differs in exactly ONE site is put in its place. A locked query that drops that predicate admits the
  *     replacement; the real query refuses. The App site is isolated by the database instead (see its test).
  *  2. A deterministic post-plan change of the cast reporting head is refused, typed and retryable, and writes nothing.
- *  3. The preflight-to-locked Session-principal substitution pins at retire, delete, member add, member remove and
- *     delegated leaveApp (cast and preview are pinned in resolvers.staffMember3308.test.ts).
+ *  3. The preflight-to-locked Session-principal substitution pins at retire, delete, deleteWorkerPreview, member add, member
+ *     remove and delegated leaveApp (cast and preview are pinned in resolvers.staffMember3308.test.ts).
+ *
+ * #4740 (polish of the above, test-only): deleteWorkerPreview joins both matrices; the substitution pins assert the door's own
+ * refusal (code AND text), that the swap happened in the one transaction the door opened, and, for the control, that the act
+ * took effect; the grantee-site pins enforce that no door acts on the bystander; hookQuery matches one statement only.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { Prisma } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -26,7 +31,7 @@ const live = { kind: 'LIVE_CHAT', ref: 'client-chat:turn-3347' };
 const ctx = (extra: Partial<Context> = {}): Context => ({ db, userId: f.holder.id, roles: ['READER'], ...extra });
 const bound = (extra: Partial<Context> = {}) => ctx({ sessionId: f.session.id, ...extra });
 const answer = async (p: Promise<unknown>) => {
-  try { await p; return { code: 'RESOLVED' }; } catch (e: any) { return { code: e.extensions?.code, message: e.message }; }
+  try { const value = await p; return { code: 'RESOLVED', value }; } catch (e: any) { return { code: e.extensions?.code, message: e.message }; }
 };
 const calls: Record<string, (instruction?: unknown, c?: Context) => Promise<any>> = {
   cast: (instruction, c = bound()) => M.castWorker({}, { appRef: f.app.id, agentRef: f.agent.id, name: 'NewWorker', noTeam: true, instruction }, c),
@@ -36,6 +41,7 @@ const calls: Record<string, (instruction?: unknown, c?: Context) => Promise<any>
   remove: (instruction, c = bound()) => M.removeAppMember({}, { appRef: f.app.id, userRef: f.other.id, instruction }, c),
   preview: (instruction, c = bound()) => Q.castWorkerPreview({}, { appRef: f.app.id, agentRef: f.agent.id, name: 'Preview', noTeam: true, instruction }, c),
   leave: (instruction, c = bound()) => M.leaveApp({}, { appRef: f.app.id, instruction }, c),
+  deletePreview: (instruction, c = bound()) => Q.deleteWorkerPreview({}, { workerRef: f.target.id, instruction }, c),
 };
 const snapshot = async () => ({
   workers: await db.worker.findMany({ where: { appId: f.app.id }, orderBy: { id: 'asc' } }),
@@ -46,6 +52,16 @@ const snapshot = async () => ({
 const grantName = (door: string) => (door === 'add' || door === 'remove' || door === 'leave' ? 'APP_MEMBERS' : 'WORKERS_STAFF');
 const storedName = (door: string) => (grantName(door) === 'APP_MEMBERS' ? 'app.members' : 'workers.staff');
 const give = (door: string, workerId = f.worker.id) => M.grantApp({}, { appRef: f.app.id, workerRef: workerId, name: grantName(door) }, ctx());
+/**
+ * Who or what each door acts on (its target, subject or new name). The grantee-site pins put a live grant on the BYSTANDER and read a
+ * refusal as the grantee predicate alone; that holds only while no door names the bystander (a target-specific refusal could then
+ * pass for it). #4740 N7: enforced here and per test, not just assumed in a comment.
+ */
+const actsOn = (door: string): string[] => ({
+  cast: ['NewWorker', 'Casted'], preview: ['Preview'], retire: [f.target.id], delete: [f.target.id], deletePreview: [f.target.id],
+  add: [f.other.id], remove: [f.other.id], leave: [f.holder.id],
+}[door] ?? []);
+const bystanderRow = () => db.worker.findUniqueOrThrow({ where: { id: f.bystander.id } });
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -70,6 +86,16 @@ beforeEach(async () => {
 });
 
 /**
+ * True only when `sql` is ONE statement that matches `when`. A joined multi-statement string (a `;` with more SQL after it, or any
+ * inner `;`) never matches, so a pattern with `[\s\S]*` cannot be satisfied by a SECOND statement of a batch; a query that really
+ * has an inner `;` makes `fired()` stay false and the pin fail loudly (#4740 F2). Values are bound parameters, never in this text.
+ */
+const singleStatementMatches = (when: RegExp, sql: string): boolean => {
+  const body = sql.trim().replace(/;\s*$/, '');
+  return !body.includes(';') && when.test(body);
+};
+
+/**
  * A `$transaction` whose callback runs against a tx proxy that fires `hook` once, at a query matching `when`: right after
  * it (`phase: 'after'`) or immediately before it runs (`phase: 'before'`). It intercepts `$queryRaw` only and the patterns match
  * the raw SQL text, so a rewrite of that SQL (or a move to the query builder) makes `fired()` stay false and the pin fail loudly.
@@ -80,7 +106,7 @@ function hookQuery(when: RegExp, hook: (tx: any) => Promise<void>, phase: 'befor
     if (key === '$transaction') return (callback: any, options: any) => db.$transaction(async tx => callback(new Proxy(tx, { get(t, k) {
       if (k === '$queryRaw') return async (query: any, ...values: any[]) => {
         const sql = Array.isArray(query) ? query.join('?') : query.sql;
-        const hit = !fired && when.test(sql);
+        const hit = !fired && singleStatementMatches(when, sql);
         if (hit && phase === 'before') { fired = true; await hook(t); }
         const value = await (t.$queryRaw as any)(query, ...values);
         if (hit && phase === 'after') { fired = true; await hook(t); }
@@ -94,7 +120,7 @@ function hookQuery(when: RegExp, hook: (tx: any) => Promise<void>, phase: 'befor
 }
 
 describe('#3347 each locked grant predicate is isolated (name, grantee)', () => {
-  for (const door of ['cast', 'retire', 'delete', 'add', 'remove', 'preview', 'leave']) {
+  for (const door of ['cast', 'retire', 'delete', 'deletePreview', 'add', 'remove', 'preview', 'leave']) {
     for (const site of ['name', 'grantee'] as const) {
       it(`${door}: a live grant differing only in ${site} cannot stand in for the revoked one at the locked check`, async () => {
         await give(door);
@@ -111,9 +137,12 @@ describe('#3347 each locked grant predicate is isolated (name, grantee)', () => 
           } });
         }, 'before');
         const before = await snapshot();
+        const bystander = await bystanderRow();
+        expect(actsOn(door), `no door may act on the bystander (${door})`).not.toContain(f.bystander.id);
         expect((await answer(calls[door](undefined, bound({ db: client })))).code).toBe('FORBIDDEN');
         expect(fired()).toBe(true);
         expect(await snapshot()).toEqual(before);
+        expect(await bystanderRow()).toEqual(bystander);
       });
     }
   }
@@ -137,9 +166,9 @@ describe('#3347 the cast reporting head drifting after the plan is refused', () 
     const mk = (name: string) => db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: f.app.id, agentId: f.agent.id, name, slug: name.toLowerCase() } });
     const planned = await mk('Head');
     const stranger = await mk('Stranger');
-    // The hooked step is castWorker's deciding-membership lock (`app_members ... FOR SHARE`, resolvers.worker.ts ~1049). It is taken
-    // after the plan and BEFORE resolveCastTarget re-resolves the reporting head on the locked transaction (~1081), so a change made
-    // right after it is exactly the 'post-plan' change; if the order moves, `fired()` or the CAST_TARGET_CHANGED assertion fails.
+    // The hooked step is castWorker's deciding-membership lock (the `app_members ... FOR SHARE` read inside its transaction). It is
+    // taken after the plan and BEFORE `resolveCastTarget` re-resolves the reporting head on the locked transaction, so a change made
+    // right after it is exactly the 'post-plan' change; if that order moves, `fired()` or the CAST_TARGET_CHANGED assertion fails.
     const { client, fired } = hookQuery(/FROM app_members[\s\S]*FOR SHARE/, async (tx) => {
       // Post-plan, inside the locked transaction: the name now resolves to a different worker.
       await tx.worker.update({ where: { id: planned.id }, data: { name: 'HeadOld', slug: 'headold' } });
@@ -161,33 +190,132 @@ describe('#3347 preflight-to-locked Session-principal substitution (the doors ca
   // runs. A locked admission that does not compare against the preflight principal would admit the substitute. A third worker,
   // never the act's own target (deleting a worker the Session points at is refused as WORKER_IN_USE for a different reason,
   // before the principal comparison this pin is about).
+  //
+  // #4740 N3: the swap is recorded BY TRANSACTION, not as a boolean. `opened()` counts the transactions the door opened through the
+  // client and `swappedAt()` lists which of them (1-based) had the Session swapped, so a door that opened a second transaction, or a
+  // swap that landed in the wrong one, shows in the assertion instead of reading as "swapped".
   const setup = async (door: string, substitute: boolean) => {
     const third = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: f.app.id, agentId: f.agent.id, name: 'Third', slug: 'third', heldByUserId: f.holder.id } });
     await give(door); await give(door, third.id);
-    let swapped = false;
+    let opened = 0;
+    const swappedAt: number[] = [];
     const client = new Proxy(db, { get(target, key) {
-      if (key === '$transaction') return (callback: any, options: any) => db.$transaction(async tx => {
-        if (substitute) { await tx.session.update({ where: { id: f.session.id }, data: { workerId: third.id } }); swapped = true; }
-        return callback(tx);
-      }, options);
+      if (key === '$transaction') return (callback: any, options: any) => {
+        const n = ++opened;
+        return db.$transaction(async tx => {
+          if (substitute) { await tx.session.update({ where: { id: f.session.id }, data: { workerId: third.id } }); swappedAt.push(n); }
+          return callback(tx);
+        }, options);
+      };
       const value = (target as any)[key]; return typeof value === 'function' ? value.bind(target) : value;
     } });
-    return { client, swapped: () => swapped };
+    return { client, opened: () => opened, swappedAt: () => [...swappedAt] };
   };
-  for (const door of ['retire', 'delete', 'add', 'remove', 'leave']) {
+  // #4740 N1: the refusal the door answers for a swapped principal, code AND text, so another Session-sensitive check cannot satisfy
+  // the pin with a bare FORBIDDEN. The worker doors share one text; the two member-removal doors share another (cor:agt:020:00 pins
+  // only that the excluded caller is refused with nothing changed; the wording is the door's own).
+  const WORKERS = 'You are not authorized to manage workers in this App.';
+  const REMOVAL = 'Forbidden: only org admins, App owners, or the user themselves can remove members';
+  const refusal: Record<string, string> = {
+    retire: WORKERS, delete: WORKERS, deletePreview: WORKERS,
+    add: 'Forbidden: only org admins or App owners can manage members', remove: REMOVAL, leave: REMOVAL,
+  };
+  // #4740 N2: what each control's act did, as a before/after diff of the App's rows (not only RESOLVED). `deletePreview` writes
+  // nothing and returns its attestation payload; the others change exactly the rows named here.
+  const tookEffect = (door: string, before: Awaited<ReturnType<typeof snapshot>>, after: Awaited<ReturnType<typeof snapshot>>, value: any) => {
+    const worker = (rows: typeof before.workers, id: string) => rows.find((w: any) => w.id === id);
+    const member = (rows: typeof before.members, id: string) => rows.find((m: any) => m.userId === id);
+    const others = (rows: any[], key: string, skip: string) => rows.filter((r) => r[key] !== skip);
+    expect(after.events.length, `${door}: one staffing event recorded`).toBe(door === 'deletePreview' ? before.events.length : before.events.length + 1);
+    if (door === 'retire') {
+      expect(worker(before.workers, f.target.id)!.retiredAt).toBeNull();
+      expect(worker(after.workers, f.target.id)!.retiredAt).not.toBeNull();
+      expect(others(after.workers, 'id', f.target.id)).toEqual(others(before.workers, 'id', f.target.id));
+    } else if (door === 'delete') {
+      expect(worker(after.workers, f.target.id)).toBeUndefined();
+      expect(after.workers).toEqual(others(before.workers, 'id', f.target.id));
+    } else if (door === 'deletePreview') {
+      expect(value).toEqual({ workerId: f.target.id, attestationRequired: true });
+      expect(after.workers).toEqual(before.workers);
+      expect(after.members).toEqual(before.members);
+    } else if (door === 'add') {
+      expect(member(before.members, f.other.id)!.role).toBe('reader');
+      expect(member(after.members, f.other.id)!.role).toBe('member');
+    } else if (door === 'remove') {
+      expect(member(after.members, f.other.id)).toBeUndefined();
+      expect(after.members).toEqual(others(before.members, 'userId', f.other.id));
+    } else {
+      expect(member(after.members, f.holder.id)).toBeUndefined();
+      expect(after.members).toEqual(others(before.members, 'userId', f.holder.id));
+    }
+  };
+  for (const door of ['retire', 'delete', 'deletePreview', 'add', 'remove', 'leave']) {
     // The positive control: the same fixture and the same two grants, with NO substitution, is admitted. So the refusal below
     // is the principal comparison, not an earlier refusal for another reason (a sole owner leaving, a missing grant, ...).
-    it(`${door}: control without the substitution is admitted`, async () => {
-      const { client, swapped } = await setup(door, false);
-      expect((await answer(calls[door](undefined, bound({ db: client })))).code).toBe('RESOLVED');
-      expect(swapped()).toBe(false);
+    it(`${door}: control without the substitution is admitted and its act took effect`, async () => {
+      const { client, opened, swappedAt } = await setup(door, false);
+      const before = await snapshot();
+      const bystander = await bystanderRow();
+      expect(actsOn(door), `no door may act on the bystander (${door})`).not.toContain(f.bystander.id);
+      const result = await answer(calls[door](undefined, bound({ db: client })));
+      expect(result.code).toBe('RESOLVED');
+      expect(opened()).toBe(1);
+      expect(swappedAt()).toEqual([]);
+      const after = await snapshot();
+      tookEffect(door, before, after, (result as any).value);
+      // N7, observed: whatever the door did, it did nothing to the bystander (its row) and wrote no event that names it.
+      expect(await bystanderRow()).toEqual(bystander);
+      expect(JSON.stringify(after.events.slice(before.events.length))).not.toContain(f.bystander.id);
     });
     it(`${door}: a transaction-local Session substitution cannot replace the preflight worker`, async () => {
-      const { client, swapped } = await setup(door, true);
+      const { client, opened, swappedAt } = await setup(door, true);
       const before = await snapshot();
-      expect((await answer(calls[door](undefined, bound({ db: client })))).code).toBe('FORBIDDEN');
-      expect(swapped()).toBe(true); // the substitution really happened inside the transaction the door ran
+      const bystander = await bystanderRow();
+      const result = await answer(calls[door](undefined, bound({ db: client })));
+      expect(result).toEqual({ code: 'FORBIDDEN', message: refusal[door] });
+      expect(opened()).toBe(1); // the one transaction the door opened ...
+      expect(swappedAt()).toEqual([1]); // ... is the one the substitution happened in
       expect(await snapshot()).toEqual(before);
+      expect(await bystanderRow()).toEqual(bystander);
     });
   }
+});
+
+// #4740 F2: the matcher hookQuery uses is itself pinned, so a loosening (back to a bare `when.test(sql)`) turns a test red here.
+describe('#4740 hookQuery matches one statement, never a batch', () => {
+  const grants = /FROM app_grants[\s\S]*FOR SHARE/;
+  it('matches a single statement, with or without a trailing semicolon', () => {
+    expect(singleStatementMatches(grants, 'SELECT id FROM app_grants WHERE app_id = $1 FOR SHARE')).toBe(true);
+    expect(singleStatementMatches(grants, 'SELECT id FROM app_grants WHERE app_id = $1 FOR SHARE;\n')).toBe(true);
+  });
+  it('does not match a batch whose SECOND statement is the one the pattern describes', () => {
+    expect(singleStatementMatches(grants, 'SELECT 1; SELECT id FROM app_grants WHERE app_id = $1 FOR SHARE')).toBe(false);
+  });
+  it('does not match a batch whose FIRST statement is the one the pattern describes (fail loudly, not by luck)', () => {
+    expect(singleStatementMatches(grants, 'SELECT id FROM app_grants WHERE app_id = $1 FOR SHARE; SELECT 1')).toBe(false);
+  });
+  it('does not match a single statement that is not the described one', () => {
+    expect(singleStatementMatches(grants, 'SELECT id FROM app_members WHERE app_id = $1 FOR SHARE')).toBe(false);
+  });
+  it('hookQuery itself leaves its hook unfired on a batch, and fires it on the single statement', async () => {
+    // phase 'before' sets fired() and runs the hook before the query reaches Postgres, so the batch's own failure (a prepared
+    // statement cannot hold two commands) cannot hide a hook that should not have fired.
+    const batch = hookQuery(grants, async () => undefined, 'before');
+    await batch.client.$transaction(async (tx: any) => { await tx.$queryRaw(Prisma.sql`SELECT 1; SELECT id FROM app_grants FOR SHARE`).catch(() => undefined); }).catch(() => undefined);
+    expect(batch.fired()).toBe(false);
+    const single = hookQuery(grants, async () => undefined, 'before');
+    await single.client.$transaction(async (tx: any) => { await tx.$queryRaw(Prisma.sql`SELECT id FROM app_grants FOR SHARE`); });
+    expect(single.fired()).toBe(true);
+  });
+});
+
+// #4740 N7: the bystander is nobody a door acts on, for every door in either matrix.
+describe('#4740 the bystander is not acted on by any door', () => {
+  it('is distinct from every door\'s target, from the caller, the Session worker and the substitute', () => {
+    for (const door of Object.keys(calls)) expect(actsOn(door), door).not.toContain(f.bystander.id);
+    expect(new Set([f.bystander.id, f.worker.id, f.target.id, f.session.workerId]).size).toBe(3);
+    expect(f.session.workerId).toBe(f.worker.id);
+    expect(f.bystander.name).not.toBe('NewWorker');
+    expect(f.bystander.name).not.toBe('Preview');
+  });
 });
