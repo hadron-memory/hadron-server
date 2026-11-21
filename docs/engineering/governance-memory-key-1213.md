@@ -44,6 +44,8 @@ Null, false and whitespace clearing participate. No unlocked existing-row read i
 | Agent clone | Existing source key after authority anchors and before base-graph/node rows; memory-clone reentry | Existing source stamp reconciliation and copy policy |
 | `withInstallMemory`/import caller-owned core transactions | Authority prefix/materialization first; core is the first loc/node writer and acquires its set | Existing install and task-run rights |
 
+`mirrorNodeMoveToGit` is a post-commit file mirror, not another node mover: it reads the already-moved nodes and writes/removes repository files. It does not call `moveNodeSubtree` or mutate node rows. Its GraphQL/MCP callers take the complete set for the database move before invoking that effect. The inbound Git-sync writer is the separate inventory row above.
+
 The legacy filesystem controller `createNode` writes a fixed ordinary-field shape (no role/runnable payload, no revival); it cannot mint or clear governance on an existing node. Bag-only `updateNodePropertiesWith` likewise has no signal/inline-edge shape and does not acquire a new governance key. Raw administrative repairs, fixture/seed writes and erasure are not signal-authoring APIs and are outside this protocol's claims.
 
 For caller-owned task-export and clone transactions, `coordinationMemories` records the predeclared set. If an inline endpoint moves to a memory outside that set before core preflight, core refuses `NODE_WRITE_CONFLICT` rather than appending a late key after outer locks. Existing endpoint revalidation still handles a move after core preflight. No access is widened by the set calculation.
