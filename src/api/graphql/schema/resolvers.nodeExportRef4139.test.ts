@@ -13,6 +13,8 @@ import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
 import { testRunAgentId } from '../../../test/runAgent.js';
+import { drainNodeUsage } from '../../../lib/usageRecorder.js';
+import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 
 const Q = resolvers.Query as any;
 const LOC = 'docs:entry';
@@ -33,6 +35,22 @@ async function fixture() {
   };
   const pub = await memory('pub');
   const orgVisible = await memory('orgvis', { visibility: 'ORGANIZATION' });
+  const { app: otherApp } = await createDbAppWithKey(db, 'other4139', orgB.id);
+  const appScoped = await memory('appscoped', { appId: otherApp.id }); // PUBLIC knowledge, but another App's
+  // #4763 blind P2-1: a PUBLIC node with an edge and an include tag into a memory the userless caller cannot read.
+  const hub = await db.node.create({
+    data: { memoryId: pub.id, loc: 'docs:hub', name: 'hub', nodeType: 'record', content: 'hub body' },
+  });
+  const inc = await db.node.create({
+    data: { memoryId: pub.id, loc: 'docs:inc', name: 'inc', nodeType: 'record', content: 'before {{> ' + `${orgVisible.urn}:${LOC}` + '}} after' },
+  });
+  await db.edge.create({
+    data: { id: generateId(), memoryId: pub.id, sourceId: hub.id, targetId: orgVisible.nodeId, loc: 'docs:hub:link:orgvis', name: 'link', priority: 1 },
+  });
+  const sibling = await db.node.create({ data: { memoryId: pub.id, loc: 'docs:sibling', name: 'sibling', nodeType: 'record', content: 'sib' } });
+  await db.edge.create({
+    data: { id: generateId(), memoryId: pub.id, sourceId: hub.id, targetId: sibling.id, loc: 'docs:hub:link:sibling', name: 'link', priority: 2 },
+  });
   const gone = await db.node.create({ data: { memoryId: pub.id, loc: 'docs:gone', name: 'gone', content: 'x', nodeType: 'record', deletedAt: new Date() } });
   const schedule = await db.agentSchedule.create({
     data: { id: generateId(), organizationId: orgA.id, appId: app.id, name: 'S', cron: '* * * * *', entryNodeUrn: `hrn:node:${pub.urn}:${LOC}` },
@@ -45,7 +63,7 @@ async function fixture() {
   const stranger = await db.user.create({ data: { id: generateId(), githubId: 41390, githubUsername: 'stranger4139' } });
   const strangerCtx = { db, roles: ['READER'], userId: stranger.id } as Context;
   const adminCtx = { db, roles: ['ADMIN'], userId: generateId() } as Context;
-  return { orgB, pub, orgVisible, gone, runPrincipal, keyPrincipal, strangerCtx, adminCtx };
+  return { orgB, pub, orgVisible, appScoped, hub, inc, sibling, gone, runPrincipal, keyPrincipal, strangerCtx, adminCtx };
 }
 async function rejection(p: Promise<unknown>) {
   try { await p; return null; } catch (err) {
@@ -69,29 +87,33 @@ describe('#4139 nodeExport(ref:)', () => {
     expect(names).not.toContain('id');
   });
 
-  describe('RED: the widening (cor:acl:010:01) — a userless principal exports PUBLIC knowledge', () => {
+  describe('the widening (cor:acl:010:01): a userless principal exports PUBLIC knowledge', () => {
     it.each(['keyPrincipal', 'runPrincipal'] as const)('%s exports it by URN and by PK, read-only', async who => {
       for (const ref of [urn(f.pub), f.pub.nodeId]) {
         const out = await Q.nodeExport({}, { ref }, f[who]);
         expect(out.data).toContain('secret pub');
       }
     });
-    it.each(['keyPrincipal', 'runPrincipal'] as const)('%s asking for a non-public node gets the refusal an unknown ref gets (%s)', async who => {
+    it.each(['keyPrincipal', 'runPrincipal'] as const)('%s asking for a non-public node gets the refusal an unknown ref gets', async who => {
       const unknown = await rejection(Q.nodeExport({}, { ref: `hrn:node:${f.orgB.urn}:nosuchmemory:${LOC}` }, f[who]));
       const refused = await Promise.all([urn(f.orgVisible), f.orgVisible.nodeId].map(ref => rejection(Q.nodeExport({}, { ref }, f[who]))));
       expect(unknown).toMatchObject({ code: 'NODE_NOT_FOUND' });
       for (const r of refused) expect(r).toMatchObject({ code: 'NODE_NOT_FOUND', message: expect.any(String) });
-      for (const r of refused) expect(r!.message.split(':')[0]).toEqual(unknown!.message.split(':')[0]);
+      // The message is the typed error's own text for THAT ref: nothing else varies (blind P3-4).
+      const refs = [urn(f.orgVisible), f.orgVisible.nodeId];
+      refused.forEach((r, i) => expect(r!.message).toEqual(new NodeNotFoundError(refs[i]!).message));
     });
   });
 
   describe('parity with node(ref:): export refuses exactly when node(ref:) answers null', () => {
+    const nonexistentPk = generateId();
     const cases: Array<[string, () => string]> = [
       ['an unreadable node by PK', () => f.orgVisible.nodeId],
       ['an unreadable node by URN', () => urn(f.orgVisible)],
       ['an unknown ref', () => `hrn:node:${f.orgB.urn}:pub:no:such`],
       ['a soft-deleted node by URN', () => urn(f.pub, 'docs:gone')],
       ['a soft-deleted node by PK', () => f.gone.id],
+      ['a nonexistent PK', () => nonexistentPk],
     ];
     it.each(cases)('%s', async (_name, ref) => {
       expect(await Q.node({}, { ref: ref() }, f.strangerCtx)).toBeNull();
@@ -103,8 +125,48 @@ describe('#4139 nodeExport(ref:)', () => {
     });
     it('every miss shape answers one identical refusal (code and message modulo the echoed ref)', async () => {
       const out = await Promise.all(cases.map(([, ref]) => rejection(Q.nodeExport({}, { ref: ref() }, f.strangerCtx))));
-      const shapes = new Set(out.map((r) => `${r!.code}|${r!.message.split(':')[0]}`));
-      expect(shapes.size).toBe(1);
+      out.forEach((r, i) => expect(r!.message).toEqual(new NodeNotFoundError(cases[i]![1]()).message));
+      expect(new Set(out.map((r) => r!.code))).toEqual(new Set(['NODE_NOT_FOUND']));
+    });
+  });
+
+  describe('userless principals on PUBLIC knowledge: what else must not leak or break', () => {
+    it.each(['keyPrincipal', 'runPrincipal'] as const)('%s: a soft-deleted node, PUBLIC knowledge scoped to another App and a nonexistent PK all refuse as NODE_NOT_FOUND', async who => {
+      for (const ref of [urn(f.pub, 'docs:gone'), f.gone.id, urn(f.appScoped), f.appScoped.nodeId, generateId()]) {
+        expect(await rejection(Q.nodeExport({}, { ref }, f[who]))).toMatchObject({ code: 'NODE_NOT_FOUND' });
+      }
+    });
+    it.each(['keyPrincipal', 'runPrincipal'] as const)('%s: an edge into a memory it cannot read is absent, an edge into a readable one stays (JSON and MD)', async who => {
+      for (const format of ['JSON', 'MD'] as const) {
+        const out = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:hub'), format }, f[who]);
+        expect(out.data).toContain('docs:sibling');
+        expect(out.data).not.toContain(f.orgVisible.nodeId);
+        expect(out.data).not.toContain('docs:entry');
+        expect(out.data).not.toContain('secret orgvis');
+      }
+    });
+    it('a reader who CAN read the target memory still sees the edge', async () => {
+      const out = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:hub'), format: 'JSON' }, f.adminCtx);
+      expect(out.data).toContain(f.orgVisible.nodeId);
+    });
+    it.each(['keyPrincipal', 'runPrincipal'] as const)('%s: an include tag into an unreadable memory does not export that memory\'s text (full:false resolves, full:true keeps the tag)', async who => {
+      const resolved = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:inc'), format: 'MD', full: false }, f[who]);
+      expect(resolved.data).not.toContain('secret orgvis');
+      // full:true is the restore export: the author's own text, tag included, and still no target text.
+      const raw = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:inc'), format: 'MD', full: true }, f[who]);
+      expect(raw.data).not.toContain('secret orgvis');
+    });
+    it.each(['keyPrincipal', 'runPrincipal'] as const)('%s: the export records the same read usage event node(ref:) does (none lost, none to another memory)', async who => {
+      const count = (memoryId: string) => db.usageEvent.count({ where: { memoryId } });
+      await Q.node({}, { ref: urn(f.pub) }, f[who]);
+      await drainNodeUsage(db);
+      const viaNode = await count(f.pub.id);
+      await db.usageEvent.deleteMany({});
+      await Q.nodeExport({}, { ref: urn(f.pub) }, f[who]);
+      await drainNodeUsage(db);
+      expect(viaNode).toBeGreaterThan(0);
+      expect(await count(f.pub.id)).toBe(viaNode);
+      expect(await count(f.orgVisible.id)).toBe(0);
     });
   });
 

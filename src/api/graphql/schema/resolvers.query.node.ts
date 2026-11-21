@@ -441,18 +441,16 @@ export async function nodeRevisionsScope(ctx: Context, nodeRef: string) {
  * cor:dmo:150:03 "exports read like any reader"): the caller's accessible
  * memory list, plus (#3306, cor:acl:010:01) PUBLIC knowledge for a pure App key
  * or userless run, one named memory at a time. A filter without an `in` list
- * (unrestricted) admits.
+ * fails closed.
  */
 async function nodeReadMemoryAllowed(
   ctx: Context,
   access: Awaited<ReturnType<typeof memoryAccessFilter>>,
   memoryId: string,
 ): Promise<boolean> {
-  if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
-    if ((access.memoryId.in as string[]).includes(memoryId)) return true;
-  } else {
-    return true;
-  }
+  // memoryAccessFilter always returns an `in` list; any other shape fails CLOSED (#4763 blind P3-1).
+  if (!access.memoryId || typeof access.memoryId !== 'object' || !('in' in access.memoryId)) return false;
+  if ((access.memoryId.in as string[]).includes(memoryId)) return true;
   return readsPublicKnowledgeWithoutUser(ctx) && (await publicKnowledgeAmong(ctx.db, [memoryId])).has(memoryId);
 }
 
@@ -1401,6 +1399,20 @@ export const nodeQueries = {
       if (!node || node.deletedAt || !(await nodeReadMemoryAllowed(ctx, access, node.memoryId))) {
         throw new NodeNotFoundError(ref);
       }
+      // #4763 blind P2-1 / #781: an edge whose TARGET sits in another memory is shown only when the
+      // caller can read that memory (the Edge.target rule, denied ≡ absent). The export rendered raw
+      // rows, so without this a userless caller reading PUBLIC knowledge would learn the targetId and
+      // targetLoc of an edge into a memory it cannot read.
+      const edgeTargetReadable = new Map<string, boolean>([[node.memoryId, true]]);
+      const exportEdges = [];
+      for (const edge of node.outgoingEdges) {
+        const targetMemoryId = edge.target?.memoryId;
+        if (!targetMemoryId) continue;
+        if (!edgeTargetReadable.has(targetMemoryId)) {
+          edgeTargetReadable.set(targetMemoryId, await nodeReadMemoryAllowed(ctx, access, targetMemoryId));
+        }
+        if (edgeTargetReadable.get(targetMemoryId)) exportEdges.push(edge);
+      }
       await decryptNodesBatch(ctx.db, [node]);
       // #1061 — an export hands the caller the node's full content, so it is a
       // read like any other. Recorded in each SUCCESSFUL format branch below
@@ -1461,7 +1473,7 @@ export const nodeQueries = {
           isRunnable: node.isRunnable,
           data: node.data,
           properties: node.properties,
-          edges: node.outgoingEdges as unknown as EdgeForGit[],
+          edges: exportEdges as unknown as EdgeForGit[],
         },
         { format: fmt, full: full !== false, sections: sections ?? null },
       );
