@@ -287,9 +287,8 @@ async function removeAppMemberWithAdmission(
   // #764 + #816 review: appRef/userRef accept id / URN / (user) handle /
   // email. #4142 (S6 chunk F) dropped the deprecated appId/userId aliases:
   // the refs are required. Evaluate the ROLE gate BEFORE resolving the
-  // target user, so an
-  // unauthorized caller can't turn user resolution into an existence
-  // oracle. A role-authorized caller may remove anyone; everyone else may
+  // target user, so an unauthorized caller can't turn user resolution into
+  // an existence oracle. A role-authorized caller may remove anyone; everyone else may
   // remove ONLY themselves — and a self-only caller's target resolution
   // maps any miss to the same Forbidden, with the resolved id required to
   // be the caller, so an unknown handle/email is indistinguishable from a
