@@ -411,7 +411,7 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
       const secret = await tx.secret.findUnique({ where: { id: found.id } });
       if (!secret) throw notFound();
       const effectiveMetadata = args.metadata !== undefined ? args.metadata : secret.metadata;
-      const payload = args.value === undefined ? null : validateSecretPayload(secret.kind, effectiveMetadata, args.value);
+      const payload = args.value === undefined ? null : validateSecretPayload(secret.kind, effectiveMetadata, args.value, { enforceValueSize: true });
       const metadata = payload?.metadata ?? validateUnchangedSecretMetadata(secret.kind, effectiveMetadata, secret.metadata);
       if (secret.protected || args.protected !== undefined) {
         const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });

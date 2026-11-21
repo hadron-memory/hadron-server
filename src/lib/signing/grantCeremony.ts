@@ -428,7 +428,7 @@ async function lockAndJudge(tx: Prisma.TransactionClient, txCtx: Context, loc: L
   if(g.action==='secret.reveal') {
    const secretId=(g.action_values as Record<string,unknown>).secret;
    if(pre?.action!=='secret.reveal' || g.worker_id!==pre.worker_id || typeof secretId!=='string' || secretId!==(pre.action_values as Record<string,unknown>).secret) throw new CeremonyRefused();
-   await requireProtectedSecretHolder(tx,secretId,loc.signerId,g.user_id);
+   await requireProtectedSecretHolder(tx,secretId,loc.signerId,g.worker_id === null ? g.user_id : null);
   }
   // #4001/#4594: historical pending rows must also obey the finite deletion rule at activation.
   const limit = autoDeleteLimitRefusal(['secret.reveal', 'secret.use'].includes(g.action) && (g.action_values as Record<string, unknown>)?.['auto-delete'] === 'delete', g.expires_at, g.max_uses);

@@ -16,7 +16,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { insertSoftPasskey, softPasskey } from '../../test/softPasskey.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
-import { openSecretProof, proveSecretChange, completeSecretChange } from './changeCeremony.js';
+import { openSecretProof, proveSecretChange, completeSecretChange, SecretCeremonyRefused } from './changeCeremony.js';
 import { type ChangeRequest, sweepExpiredSecretChanges } from './changeRequests.js';
 import { upsertPlatformActions } from '../grants/actions.js';
 import { currentAppSecretValue } from './appSecrets.js';
@@ -231,7 +231,7 @@ describe('#3999 completion rejudges membership and unprotect authority',()=>{
   await db.appMember.create({data:{appId,userId,role:'reader'}});
   const id=await stage(),p=await proof(id);
   await db.appMember.deleteMany({where:{appId,userId}});
-  await expect(complete(id,p)).rejects.toThrow();expect((await row(id)).state).toBe('open');
+  await expect(complete(id,p)).rejects.toMatchObject({extensions:{code:'FORBIDDEN'}});expect((await row(id)).state).toBe('open');
   expect(await db.secretVersion.count({where:{secretId}})).toBe(1);expect(await currentAppSecretValue(db as never,{id:secretId,ownerId:appId})).toBe('original');
  });
  it.each(['setSecretProtected','updateSecret'] as const)('refuses a demoted manager at %s completion even while still a member',async door=>{
@@ -240,7 +240,7 @@ describe('#3999 completion rejudges membership and unprotect authority',()=>{
   const p=await proof(id);
   await db.app.update({where:{id:appId},data:{ownerUserId:owner}});
   await db.appMember.create({data:{appId,userId,role:'reader'}});
-  await expect(complete(id,p)).rejects.toThrow();expect((await row(id)).state).toBe('open');
+  await expect(complete(id,p)).rejects.toBeInstanceOf(SecretCeremonyRefused);expect((await row(id)).state).toBe('open');
   expect((await db.secret.findUniqueOrThrow({where:{id:secretId}})).protected).toBe(true);
  });
 });
