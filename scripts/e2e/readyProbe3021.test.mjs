@@ -81,3 +81,18 @@ for (const ready of [false, true]) {
     }
   });
 }
+
+// #4755 BLIND P2-2: the switch is complete. No e2e script still waits on or probes /health (comments may name it).
+test('no scripts/e2e script requests /health any more (curl or fetch)', async () => {
+  const { readdirSync } = await import('node:fs');
+  const dir = here('./');
+  const probes = [];
+  for (const name of readdirSync(dir)) {
+    if (name.endsWith('.test.mjs') || !/\.(sh|mjs|ts|ya?ml)$/.test(name)) continue;
+    readFileSync(join(dir, name), 'utf8').split('\n').forEach((line, i) => {
+      const code = line.replace(/^\s*#.*$/, '').replace(/\/\/.*$/, '');
+      if (/(curl|fetch)\b[^\n]*\/health\b/.test(code)) probes.push(`${name}:${i + 1}`);
+    });
+  }
+  assert.deepEqual(probes, []);
+});
