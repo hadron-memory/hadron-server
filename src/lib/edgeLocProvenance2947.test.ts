@@ -129,7 +129,7 @@ describe('#2947 the move names the edge URNs it changed (GraphQL and MCP share o
 
 describe('#2947 the backfill SQL and the application agree on the classification of the same rows', () => {
   const sql = (() => {
-    const text = readFileSync(new URL('../../prisma/migrations/20261121110000_edge_loc_provenance/migration.sql', import.meta.url), 'utf8');
+    const text = readFileSync(new URL('../../prisma/migrations/20261121130000_edge_loc_provenance/migration.sql', import.meta.url), 'utf8');
     return text.slice(text.indexOf('-- BACKFILL-BEGIN'), text.indexOf('-- BACKFILL-END'));
   })();
 
