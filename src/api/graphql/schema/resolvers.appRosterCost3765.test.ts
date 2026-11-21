@@ -101,7 +101,8 @@ describe('#3765 the admission adds no per-row cost class', () => {
     const overheadSmall = bossSmall.statements - ownerSmall.statements;
     const overheadLarge = bossLarge.statements - ownerLarge.statements;
     expect(overheadLarge).toBe(overheadSmall);
-    expect(overheadLarge).toBeLessThanOrEqual(21);
+    // measured: 9 (31 vs 22 statements, flat from 2 to 6 Agents); the bound is two point reads for each of the seven admitted fields
+    expect(overheadLarge).toBeLessThanOrEqual(14);
   });
 });
 
