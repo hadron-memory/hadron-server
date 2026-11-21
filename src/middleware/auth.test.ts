@@ -694,21 +694,19 @@ describe('resolveAuthContext', () => {
         }
       });
 
-      it('#4555: warm-unreachable classification uses the code, independent of the message', async () => {
-        for (const [code, message] of [
-          ['P1001', 'an unrelated database failure'],
-          ['P2002', "Can't reach database server at `db:5432`"],
-        ]) {
-          const original = new Prisma.PrismaClientKnownRequestError(message, { code, clientVersion: '6.19.2' });
-          const err = await refuse(() => resolveAuthContextWithStatus(makeReq(`Bearer ${USER_KEY}`), busyDb(() => original).db));
-          if (code === 'P1001') {
-            expect(err).toBeInstanceOf(AuthStoreBusyError);
-            expect((err as AuthStoreBusyError).cause).toBe(original);
-            expect((err as AuthStoreBusyError).extensions.reason).toBe('STORE_UNREACHABLE');
-          } else {
-            expect(err).toBe(original);
-            expect(err).not.toBeInstanceOf(AuthStoreBusyError);
-          }
+      it.each([
+        { label: 'P1001 with an unrelated message is converted', code: 'P1001', message: 'an unrelated database failure', converted: true },
+        { label: 'P2002 with the unreachable message is passed through', code: 'P2002', message: "Can't reach database server at `db:5432`", converted: false },
+      ])('#4555: warm-unreachable classification uses the code, independent of the message: $label', async ({ code, message, converted }) => {
+        const original = new Prisma.PrismaClientKnownRequestError(message, { code, clientVersion: '6.19.2' });
+        const err = await refuse(() => resolveAuthContextWithStatus(makeReq(`Bearer ${USER_KEY}`), busyDb(() => original).db));
+        if (converted) {
+          expect(err).toBeInstanceOf(AuthStoreBusyError);
+          expect((err as AuthStoreBusyError).cause).toBe(original);
+          expect((err as AuthStoreBusyError).extensions.reason).toBe('STORE_UNREACHABLE');
+        } else {
+          expect(err).toBe(original);
+          expect(err).not.toBeInstanceOf(AuthStoreBusyError);
         }
       });
 
