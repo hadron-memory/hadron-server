@@ -45,6 +45,7 @@ import { mcpQueries } from './resolvers.query.mcp.js';
 import { webPollMutations, webPollQueries } from './resolvers.webPoll.js';
 import { homeAssistantQueries } from './resolvers.query.homeAssistant.js';
 import { resendSenderQueries } from './resolvers.query.resendSender.js';
+import { secretChangeQueries, secretChangeMutations } from './resolvers.secretChanges.js';
 import { secretMutations, secretQueries } from './resolvers.secret.js';
 import {
   impersonationMutations,
@@ -262,6 +263,7 @@ export const resolvers = {
     ...homeAssistantQueries,
     ...resendSenderQueries,
     ...secretQueries,
+    ...secretChangeQueries,
     ...dashboardQueries,
     ...appRunQueries,
     ...automationPinQueries,
@@ -353,6 +355,7 @@ export const resolvers = {
     ...homeAssistantMutations,
     ...resendSenderMutations,
     ...secretMutations,
+    ...secretChangeMutations,
     ...impersonationMutations,
   },
 };

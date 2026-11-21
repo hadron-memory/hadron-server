@@ -236,3 +236,28 @@ describe('#4434 reach and departure on the reveal door', () => {
     expect(await db.grantEvent.count({ where: { grantId: r.grantId, action: 'USE' } })).toBe(0);
   });
 });
+
+describe('#3999 N3: AGENT holder on a protected secret, issuer = the person who protected it', () => {
+  beforeEach(async () => { await db.secret.update({ where: { id: secretId }, data: { protected: true } }); });
+
+  it('control: a self-issued USER client on the protected secret is refused by the two-person rule', async () => {
+    expect((await db.secret.findUniqueOrThrow({ where: { id: secretId } })).protected).toBe(true);
+    expect(await code(issue('USER', null))).toBe('SECRET_PROTECTED_TWO_PERSON_REQUIRED');
+  });
+
+  it('an AGENT client is issued; the grant names no person; its live worker reads; the issuer as a person cannot read it', async () => {
+    const r = await issue('AGENT', roleAgentId);
+    const g = await db.grant.findUniqueOrThrow({ where: { id: r.grantId } });
+    expect(g.agentId).toBe(roleAgentId); expect(g.userId).toBeNull(); expect(g.workerId).toBeNull();
+    expect(r.selfIssued).toBe(false);
+    await activate(r.grantId);
+    expect(await code(reveal(null, r.clientId))).toBe('SECRET_READ_CLIENT_NOT_FOUND');
+    expect(await code(reveal(w1, r.clientId))).toBe('OK');
+  });
+
+  it('parity: a WORKER client the issuer gives on the protected secret is issued the same way (open question 28)', async () => {
+    const r = await issue('WORKER', w1);
+    await activate(r.grantId);
+    expect(await code(reveal(w1, r.clientId))).toBe('OK');
+  });
+});

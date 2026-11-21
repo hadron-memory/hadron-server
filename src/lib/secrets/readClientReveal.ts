@@ -1,3 +1,4 @@
+import { requireProtectedSecretHolder } from './protection.js';
 /**
  * #3998 (S3 of #3991, cor:sec:060): the reveal. A WORKER bound to the request, holding an active, live `secret.reveal` grant
  * (its own, or its role agent's: #4434), reads the value of the App secret the grant names, once per call, spending exactly one
@@ -119,6 +120,7 @@ async function revealAs(ctx: Context, clientId: string, holder: Holder): Promise
     // The grant's own issuer link is the CURRENT one: it follows an account merge and is nulled by erasure. The client row's copy is sealed history.
     const issuerUserId = grant.issuerUserId;
     if (!issuerUserId) throw refusal('SECRET_READ_CLIENT_ISSUER_GONE', 'This read client has no issuer.');
+    await requireProtectedSecretHolder(tx, secret.id, issuerUserId, grant.workerId === null ? grant.userId : null);
     try {
       await judgeSecretReadClientIssuer({ ...txCtx, db: tx } as Context, issuerUserId, secret.id);
     } catch (e) {

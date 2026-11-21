@@ -6427,6 +6427,20 @@ export const typeDefs = `#graphql
     inputSchema: JSON
   }
 
+  """Requester-only state, never the value or ciphertext. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+  type SecretChangeRequest {
+    """The change request id."""
+    id: ID!
+    """The effective state, with expiry judged on the server clock."""
+    state: String!
+    """The requested operation."""
+    operation: String!
+    """Creation time."""
+    createdAt: DateTime!
+    """Expiry time."""
+    expiresAt: DateTime!
+  }
+
   """
   One named, owner-scoped secret — the general secret store (#677).
   Polymorphic owner (user | org | app). The value is encrypted at rest and
@@ -6442,7 +6456,7 @@ export const typeDefs = `#graphql
   input IssueSecretReadClientInput {
     "The App secret, by id or URN."
     secretRef: ID!
-    "WORKER: a live worker of the App (holderRef is its id). AGENT: an agent installed and licensed in the App (holderRef is its id); its live workers in the App read through the client (hrn:node:hadronmemory.com:specs:cor:sec:060:02). USER: the issuer themself (holderRef omitted). APP is refused (GRANT_HOLDER_NOT_ALLOWED): an App holds no reveal path."
+    "WORKER: a live worker of the App (holderRef is its id). AGENT: an agent installed and licensed in the App (holderRef is its id); its live workers in the App read through the client (hrn:node:hadronmemory.com:specs:cor:sec:060:02). USER: a live App participant (holderRef is their id, omitted for the issuer); a protected secret requires a different person. APP is refused (GRANT_HOLDER_NOT_ALLOWED): an App holds no reveal path, and an App holder for use is not supported."
     holderKind: GrantHolderKind!
     holderRef: ID
     "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refusals, in the order they are judged: holderKind APP (GRANT_HOLDER_NOT_ALLOWED); an unreadable startsAt or expiresAt (BAD_USER_INPUT); a marked request without a window or a read budget (SECRET_AUTO_DELETE_NEEDS_LIMIT); a caller who is neither an App manager nor the writer of the secret's current version (SECRET_AUTO_DELETE_NOT_ALLOWED, where an unmarked request would get FORBIDDEN or SECRET_READ_CLIENT_SUPERSEDED)."
@@ -6458,6 +6472,8 @@ export const typeDefs = `#graphql
     grantId: ID!
     secretName: String!
     selfIssued: Boolean!
+    "The worker holder was held by the actual signer at issuance (R22); null for a pending or legacy client, sealed once captured."
+    issuedToOwnWorker: Boolean
   }
 
   type SecretReadClientsPage {
@@ -6479,6 +6495,8 @@ export const typeDefs = `#graphql
     secretId: ID!
     secretName: String!
     selfIssued: Boolean!
+    "The worker holder was held by the actual signer at issuance (R22); null for a pending or legacy client, sealed once captured."
+    issuedToOwnWorker: Boolean
     "Null while live, else one of SECRET_DELETED, PROTECTED, REVOKED, PENDING, SPENT, EXPIRED, NOT_STARTED, ISSUER_GONE (nothing else ended it) or ENDED. A stored end wins; otherwise the grant's own state, in the order the reveal door answers."
     endReason: String
     "#4545 (hrn:node:hadronmemory.com:specs:cor:sec:060:02): the server-hosted page where the person who holds this client reveals the value with a passkey: the server origin plus /secret-reveal/<clientId>, with no token. Copy it verbatim; never compose it. Returned only to that person holder in their own session. Null for a client a worker holds, and for a worker session, an App key or anyone viewing a client they do not hold."
@@ -6544,7 +6562,7 @@ export const typeDefs = `#graphql
     secretId: ID!
     secretName: String!
     versionNo: Int
-    "STORE | VERSION | METADATA | DELETE | PURGE (a superseded version removed by retention or the kept-versions cap)."
+    "STORE | VERSION | METADATA | DELETE | PROTECT | UNPROTECT | REVEAL | PURGE (a superseded version removed by retention or the kept-versions cap)."
     kind: String!
     outcome: String!
     actorUserId: String
@@ -10480,6 +10498,8 @@ export const typeDefs = `#graphql
     """
     mcpServerTools(ref: ID!): [McpServerTool!]
 
+    """Your own change request; null for every other caller. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+    secretChangeRequest(id: ID!): SecretChangeRequest
     """
     Fetch one secret's inspectable half (never the value). Null when the
     row does not exist OR the caller is not entitled to its owner scope —
@@ -14247,6 +14267,7 @@ export const typeDefs = `#graphql
       name: String!
       kind: String!
       metadata: JSON
+      protected: Boolean
       value: JSON!
     ): Secret!
 
@@ -14258,7 +14279,12 @@ export const typeDefs = `#graphql
     the cascade and flow config reference the name; create a new name
     instead. The effective (metadata, value) pair is re-validated per kind.
     """
-    updateSecret(ref: ID!, metadata: JSON, value: JSON): Secret!
+    updateSecret(ref: ID!, metadata: JSON, value: JSON, protected: Boolean): Secret!
+    """Open a protection change for your own passkey ceremony. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+    setSecretProtected(ref: ID!, protected: Boolean!): Secret!
+    """Withdraw your own open change request and clear its staged value. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+    withdrawSecretChangeRequest(id: ID!): Boolean!
+
 
     "Hard-delete a secret, every version with it; referencing runs fail their resolution loud (or fall through the cascade) afterwards. An unprotected App secret is deleted by its creator or whoever manages the App, each as a person."
     deleteSecret(ref: ID!): Boolean!
