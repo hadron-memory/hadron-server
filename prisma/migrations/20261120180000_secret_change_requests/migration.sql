@@ -1,11 +1,16 @@
+-- #4717: this migration was edited after it merged (#4177) and was applied, so it exists in production. That is safe:
+-- `prisma migrate deploy`, the only migration command boot runs (scripts/docker-start.sh), never re-runs or checksums an
+-- applied migration (hrn:node:hadronmemory.com:dev:findings:migrate-deploy-tolerates-edited-and-missing-migrations).
+-- The edit changes only what a fresh chain executes, and there the idempotent statements create the same objects.
 -- Any committed secret mutation invalidates earlier proposals, including same-millisecond changes.
 ALTER TABLE secrets ADD COLUMN IF NOT EXISTS change_revision integer NOT NULL DEFAULT 0;
 CREATE OR REPLACE FUNCTION hadron_secret_change_revision() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN NEW.change_revision := OLD.change_revision + 1; RETURN NEW; END $$;
 DROP TRIGGER IF EXISTS secret_change_revision ON secrets;
 CREATE TRIGGER secret_change_revision BEFORE UPDATE ON secrets FOR EACH ROW EXECUTE FUNCTION hadron_secret_change_revision();
--- #3999 change-request objects. One source, shared verbatim with migration 20261120180000_secret_change_requests
--- (#4717 item 4): every statement is idempotent, so the migration and post-push.sql apply in either order, twice.
+-- #3999 change-request objects: prisma/secret-change-requests-invariants.sql, copied verbatim into migration
+-- 20261120180000_secret_change_requests and included by post-push.sql (#4717 item 4). Every statement is idempotent,
+-- so the two apply in either order, twice.
 -- #3999: staged values are request-bound; terminal requests retain no ciphertext.
 CREATE TABLE IF NOT EXISTS secret_change_requests (
  id text PRIMARY KEY,

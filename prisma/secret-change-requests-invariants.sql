@@ -1,5 +1,6 @@
--- #3999 change-request objects. One source, shared verbatim with migration 20261120180000_secret_change_requests
--- (#4717 item 4): every statement is idempotent, so the migration and post-push.sql apply in either order, twice.
+-- #3999 change-request objects: prisma/secret-change-requests-invariants.sql, copied verbatim into migration
+-- 20261120180000_secret_change_requests and included by post-push.sql (#4717 item 4). Every statement is idempotent,
+-- so the two apply in either order, twice.
 -- #3999: staged values are request-bound; terminal requests retain no ciphertext.
 CREATE TABLE IF NOT EXISTS secret_change_requests (
  id text PRIMARY KEY,
