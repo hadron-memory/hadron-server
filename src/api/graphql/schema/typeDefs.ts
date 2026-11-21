@@ -9269,7 +9269,10 @@ export const typeDefs = `#graphql
     answers HOST_NOT_FOUND, exactly as a host the App does not have. A host key's read is a recorded use
     (hrn:node:hadronmemory.com:specs:cor:agt:070:07). Reads only: nothing is started, stopped or changed.
     #4260: the optional worker selector (a worker id or an exact name) narrows the answer to that one worker's row of
-    this host's own list, for a host's per-worker re-reads. A worker this host does not run — another host's, a retired
+    this host's own list, for a host's per-worker re-reads. A null, empty or whitespace-only worker is treated as
+    omitted — the full host list returns — and a non-empty selector is trimmed of surrounding whitespace first; an
+    exact id match takes precedence over a name match, so a worker whose name equals another listed worker's id
+    selects the id's row alone. A worker this host does not run — another host's, a retired
     worker not on this host, an unknown id or name — answers the same empty workers list as an unknown worker
     (hrn:node:hadronmemory.com:specs:cor:agt:020:08: denial and absence indistinguishable), so the selector never probes the App's roster; a
     retired worker this host still lists keeps its row. The gates, refusals, key-use recording, row semantics and

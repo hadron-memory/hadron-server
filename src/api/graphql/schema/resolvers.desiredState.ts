@@ -9,7 +9,8 @@
  * that rule is drafted in S5, #4226). A host key's read is a recorded use (cor:agt:070:07).
  *
  * #4260: the query takes an optional `worker` selector (a worker id or exact name) that narrows the answer to that
- * one row of the host's own list. A worker the host does not run — another host's, a retired worker not on this
+ * one row of the host's own list; null, empty or whitespace-only is omitted, and an exact id match wins over a
+ * name match. A worker the host does not run — another host's, a retired worker not on this
  * host, an unknown id or name — answers the same empty workers list as an unknown worker (cor:agt:020:08), so the
  * selector is no App-roster probe; the gates, refusals and key-use recording are exactly the host-wide read's.
  *
