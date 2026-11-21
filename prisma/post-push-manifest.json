@@ -1252,6 +1252,12 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_grant_import_parent_gone",
+      "kind": "function",
+      "file": "grant-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_grant_link_merged",
       "kind": "function",
       "file": "grant-invariants.sql",
@@ -1981,6 +1987,12 @@
       "name": "agent_clone_audits.agent_clone_audits_immutable",
       "kind": "trigger",
       "file": "post-push.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_imports.agent_imports_grant_parent_gone",
+      "kind": "trigger",
+      "file": "grant-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
