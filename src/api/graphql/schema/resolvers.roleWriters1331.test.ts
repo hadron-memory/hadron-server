@@ -12,7 +12,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
-import { assertRoleWritersForNodes } from '../../../lib/nodeRoleWriters.js';
+import { assertRoleWritersForNodes, RoleWriterLevelError } from '../../../lib/nodeRoleWriters.js';
 import { lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
 
@@ -300,6 +300,29 @@ describe('bulk operations judge every node they carry or remove', () => {
     const moveCalls = judged.mock.calls.filter(([, , nodes, memoryIds]) =>
       nodes.some((n) => n.role === 'vault') && memoryIds.from === memoryId);
     expect(moveCalls.length).toBeGreaterThan(0);
+    // The move uses the WRITE path: the check is not asked in preview mode (the fifth argument carries no preview flag).
+    for (const call of moveCalls) expect((call[4] as { preview?: boolean } | undefined)?.preview).not.toBe(true);
+  });
+
+  it('a refusal from the source check on a move is the door\'s answer and leaves the source subtree intact (blind review, #4613)', async () => {
+    // No supported level separates a managing caller from the extraction gate, so the refusal is injected at the one place
+    // the door asks: the bulk writer-level check. The door must surface it as itself, not swallow it or carry on.
+    await rule('vault', { writers: 'OWNER' });
+    await node('keep');
+    await node('tree');
+    await node('tree:leaf', { role: 'vault' });
+    const parentRef = (await state('tree'))!.id;
+    const judged = vi.mocked(assertRoleWritersForNodes);
+    judged.mockImplementationOnce(async (_tx, _principal, nodes) => {
+      if (nodes.some((n) => n.role === 'vault')) throw new RoleWriterLevelError('vault', 'vault', 'before', 'OWNER');
+    });
+    expect(await code(resolvers.Mutation.extractParentNodeToMemory(null, {
+      parentRef, targetUrn: 'rw-org::extracted-refused', move: true,
+    }, as(admin)))).toBe(REFUSED);
+    // Nothing moved: the leaf is live in the source, and nothing landed in a new memory.
+    expect((await state('tree:leaf'))!.deletedAt).toBeNull();
+    expect((await state('tree'))!.deletedAt).toBeNull();
+    expect(await db.memory.count({ where: { urn: { contains: 'extracted-refused' } } })).toBe(0);
   });
 });
 

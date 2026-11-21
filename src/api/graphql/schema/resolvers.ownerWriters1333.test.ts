@@ -529,7 +529,7 @@ describe('the live headless path: hadron_update_node under the real run principa
 
 describe('a preview reads plainly and never queues behind the App rows (blind review F1, #4613 fresh seat)', () => {
   /** Another transaction holds the App, its link and the Agent exclusively, as an uninstall or an Agent update would. */
-  async function withRowsHeldExclusively(appId: string, body: () => Promise<void>) {
+  async function withRowsHeldExclusively<T>(appId: string, body: () => Promise<T>): Promise<T> {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     let held!: () => void;
@@ -540,28 +540,34 @@ describe('a preview reads plainly and never queues behind the App rows (blind re
       await gate;
     }, { timeout: 15_000 });
     holder.catch(() => undefined);
+    let result!: T;
     try {
       await Promise.race([heldFirst, new Promise<never>((_, rej) => setTimeout(() => rej(new Error('rows not held')), 5_000))]);
-      await body();
+      result = await body();
     } finally {
       release();
       await holder;
     }
+    return result;
   }
   const settlesWithin = async (p: Promise<unknown>, ms: number) =>
     Promise.race([p.then(() => true, () => true), new Promise<boolean>((r) => setTimeout(() => r(false), ms))]);
 
   it('a preview (lock: false) completes while another transaction holds the rows; a judgement for a write waits for them', async () => {
     const a = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
-    await withRowsHeldExclusively(a, async () => {
+    const pendingWrite = await withRowsHeldExclusively(a, async () => {
       const preview = roleWritersRefusal(db, principalOf(a) as never, memoryId, { priorRole: null, nextRole: 'vault' }, { lock: false });
       expect(await settlesWithin(preview, 3_000)).toBe(true);
       expect(await preview).toBeNull();
-      // The control: the same judgement without the preview flag queues behind the holder.
+      // The control: the same judgement without the preview flag is observed WAITING on the held lock (not merely slow),
+      // and once the holder releases it answers that the App qualifies.
       const forWrite = roleWritersRefusal(db, principalOf(a) as never, memoryId, { priorRole: null, nextRole: 'vault' });
       forWrite.catch(() => undefined);
-      expect(await settlesWithin(forWrite, 1_000)).toBe(false);
+      await waitForLockWaiters(db, 1, 5_000);
+      // Wrapped: returning the bare promise would make the body wait for it, and it waits for the holder this body releases.
+      return { forWrite };
     });
+    expect(await pendingWrite.forWrite).toBeNull();
   }, 30_000);
 
   it('assertRoleWritersForNodes in preview mode does not queue either', async () => {
