@@ -27,18 +27,20 @@ async function fixture() {
     db.memory.create({ data: { urn, name: urn, class: 'knowledge', organizationId, visibility } });
   const reachable = await knowledge(`${org.urn}:item-reachable`, org.id);
   const unreachable = await knowledge(`${other.urn}:item-unreachable`, other.id);
-  for (let i = 0; i < MANY; i++) await knowledge(`${org.urn}:bulk-${i}`, org.id);
-  for (let i = 0; i < PUBLICS; i++) await knowledge(`${other.urn}:public-${i}`, other.id, 'PUBLIC');
+  const unrelatedIds: string[] = [];
+  for (let i = 0; i < MANY; i++) unrelatedIds.push((await knowledge(`${org.urn}:bulk-${i}`, org.id)).id);
+  for (let i = 0; i < PUBLICS; i++) unrelatedIds.push((await knowledge(`${other.urn}:public-${i}`, other.id, 'PUBLIC')).id);
   // Subscribed to the user's org at CONTRIBUTOR: independently writable through the subscription arm, none an item.
   for (let i = 0; i < SUBSCRIBED; i++) {
     const m = await knowledge(`${other.urn}:subscribed-${i}`, other.id, 'PUBLIC');
+    unrelatedIds.push(m.id);
     await db.memorySubscription.create({ data: { organizationId: org.id, memoryId: m.id, role: 'CONTRIBUTOR' } });
   }
   await db.agentMemoryItem.createMany({ data: [reachable, unreachable].map(m => ({ agentId: agent.id, memoryId: m.id, role: 'read-write' })) });
   const { app } = await createDbAppWithKey(db, 'first', org.id);
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await db.appMember.create({ data: { appId: app.id, userId: user.id, role: 'member' } });
-  return { org, other, user, system, agent, reachable, unreachable, app };
+  return { org, other, user, system, agent, reachable, unreachable, app, unrelatedIds };
 }
 let f: Awaited<ReturnType<typeof fixture>>;
 beforeEach(async () => { await cleanDb(db); f = await fixture(); });
@@ -49,27 +51,34 @@ async function memoryRows<T>(run: () => Promise<T>) {
   try {
     const result = await run();
     const batches = await Promise.all(spy.mock.results.map(r => r.value as Promise<unknown[]>));
-    return { result, queries: batches.length, rows: batches.reduce((n, b) => n + b.length, 0) };
+    const ids = new Set(batches.flat().flatMap(row => (row as { id?: string }).id ? [(row as { id: string }).id] : []));
+    return { result, queries: batches.length, rows: batches.reduce((n, b) => n + b.length, 0), ids };
   } finally { spy.mockRestore(); }
 }
 
 describe('#3326 bounded work (rows and queries, not time)', () => {
   it('many independently readable memories, two candidate items: the independent set is bounded to the candidates', async () => {
-    expect(MANY + PUBLICS + SUBSCRIBED).toBe(45);
-    const { result, rows } = await memoryRows(() => getAppMemoryAccess(db, f.app.id, { callerUserId: f.user.id }));
-    // Behavior: the reachable item folds, the unreachable one does not, the system memory is the Agent's own.
+    const { result, rows, ids } = await memoryRows(() => getAppMemoryAccess(db, f.app.id, { callerUserId: f.user.id }));
+    // Behavior: the reachable item folds, the unreachable one does not.
     expect(result.get(f.reachable.id)).toBe('READ_WRITE');
     expect(result.has(f.unreachable.id)).toBe(false);
-    // Work: the 45 unrelated readable memories are never loaded. Today's main loads all of them (rows >= 40).
-    expect(rows).toBe(3); // measured on this fixture; main loads every unrelated readable memory too (73 rows before the 5 subscribed ones)
+    // Work: none of the 45 unrelated readable memories is ever loaded (main loads all of them), and the rest stays small.
+    expect(f.unrelatedIds).toHaveLength(MANY + PUBLICS + SUBSCRIBED);
+    expect(f.unrelatedIds.filter(id => ids.has(id))).toEqual([]);
+    expect(rows).toBeLessThanOrEqual(6);
   });
 
   it('no item: no independent lookup at all, and an empty candidate list issues no query', async () => {
     await db.agentMemoryItem.deleteMany({ where: { agentId: f.agent.id } });
     const none = await memoryRows(() => getAppMemoryAccess(db, f.app.id, { callerUserId: f.user.id }));
+    const members = vi.spyOn(db.orgMember, 'findMany');
+    const agents = vi.spyOn(db.agent, 'findMany');
     const empty = await memoryRows(() => independentUserItemAccess(db, f.user.id, []));
     expect(empty.result.size).toBe(0);
     expect(empty.queries).toBe(0);
+    expect(members).not.toHaveBeenCalled(); // the early return comes before any membership or Agent lookup
+    expect(agents).not.toHaveBeenCalled();
+    members.mockRestore(); agents.mockRestore();
     expect(none.rows).toBeLessThanOrEqual(2); // the live system memory lookup only
   });
 });
@@ -108,6 +117,7 @@ describe('#3326 the narrowed answer is the full answer restricted to the candida
     await db.orgMember.updateMany({ where: { userId: f.user.id }, data: { deletedAt: new Date() } });
     const revoked = await independentUserItemAccess(db, f.user.id, ids);
     expect(revoked.has(f.reachable.id)).toBe(false);
+    expect(revoked.get(sub.id)).toBe('READ_ONLY'); // PUBLIC stays readable without any membership, never writable
   });
 });
 
@@ -117,5 +127,25 @@ describe('#3326 no cross-request caching: revocation is observed on the next req
     expect((await getPrincipalAppMemoryAccess(db, principal)).get(f.reachable.id)).toBe('READ_WRITE');
     await db.orgMember.updateMany({ where: { userId: f.user.id }, data: { deletedAt: new Date() } });
     expect((await getPrincipalAppMemoryAccess(db, principal)).has(f.reachable.id)).toBe(false);
+  });
+});
+
+describe('#3326 several Apps: per-memory reuse never confuses one memory\'s level with another\'s', () => {
+  it('an unselected user folding two Apps with overlapping items gets each memory its own level', async () => {
+    const pub = await db.memory.create({ data: { urn: `${f.other.urn}:item-public`, name: 'public item', class: 'knowledge', organizationId: f.other.id, visibility: 'PUBLIC' } });
+    const system2 = await db.memory.create({ data: { urn: `${f.org.urn}:system2`, name: 'system2', class: 'system', organizationId: f.org.id } });
+    const agent2 = await db.agent.create({ data: { urn: `${f.org.urn}:agent2`, name: 'agent2', organizationId: f.org.id, systemMemoryId: system2.id } });
+    // The unreachable item is listed FIRST (items are created in this order), so a store that keyed every candidate by the
+    // batch's first answer would drop the reachable one; App 2's Agent overlaps App 1 on the reachable item and adds one more.
+    await db.agentMemoryItem.deleteMany({ where: { agentId: f.agent.id } });
+    for (const m of [f.unreachable, f.reachable, pub]) await db.agentMemoryItem.create({ data: { agentId: f.agent.id, memoryId: m.id, role: 'read-write' } });
+    for (const m of [f.reachable, pub]) await db.agentMemoryItem.create({ data: { agentId: agent2.id, memoryId: m.id, role: 'read-write' } });
+    const { app: app2 } = await createDbAppWithKey(db, 'second', f.org.id);
+    await db.appAgent.create({ data: { appId: app2.id, agentId: agent2.id } });
+    await db.appMember.create({ data: { appId: app2.id, userId: f.user.id, role: 'member' } });
+    const access = await getPrincipalAppMemoryAccess(db, { userId: f.user.id });
+    expect(access.get(f.reachable.id)).toBe('READ_WRITE'); // the contributor writes the org memory
+    expect(access.get(pub.id)).toBe('READ_ONLY'); // PUBLIC without a subscription is only read, even under a read-write item
+    expect(access.has(f.unreachable.id)).toBe(false);
   });
 });
