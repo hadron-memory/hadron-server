@@ -117,9 +117,9 @@ type AppMemoryAccessOptions = {
   memberAdmitted?: boolean;
   /**
    * Userless principals, including App keys and AppRuns, receive no item-derived authority.
-   * `getAppMemoryAccess` derives this from user presence when omitted (#3292). It is a TRUSTED
-   * low-level override (#3354): an explicit `false` without `callerUserId` keeps the pre-#3292
-   * uncapped item fold. No production caller passes it (the principal path passes `!principal.userId`),
+   * Default (#3292): when omitted, `getAppMemoryAccess` uses `!callerUserId`. An explicit value is an
+   * INTERNAL-ONLY, trusted low-level seam (#3354): an explicit `false` without `callerUserId` keeps the
+   * pre-#3292 uncapped item fold. No production caller passes it (the principal path passes `!principal.userId`),
    * and new callers must not: an item is a limit, never a grant (cor:dmo:050:09).
    */
   credentialOnly?: boolean;
