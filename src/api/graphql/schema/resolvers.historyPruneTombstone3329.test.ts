@@ -27,11 +27,13 @@ const as = (userId: string, client: typeof db = db): Context =>
 const tombstone = () => db.memory.update({ where: { id: memory.id }, data: { deletedAt: new Date() } });
 const revisionCount = () => db.nodeRevision.count({ where: { nodeId: node.id } });
 
-/** The refusal's observable shape: message, code, and the extension keys (values differ only by the echoed ref). */
+/** The refusal's observable shape: message and every extension, with only the echoed caller ref masked. */
+const ECHOED = new Set(['revisionId', 'nodeRef']);
 async function refusal(p: Promise<unknown>) {
   const err = await p.then(() => null, (e: unknown) => e as { message: string; extensions?: Record<string, unknown> });
   expect(err, 'expected a refusal').not.toBeNull();
-  return { message: err!.message, code: err!.extensions?.code, keys: Object.keys(err!.extensions ?? {}).sort() };
+  const extensions = Object.fromEntries(Object.entries(err!.extensions ?? {}).map(([k, v]) => [k, ECHOED.has(k) ? '<echoed ref>' : v]));
+  return { message: err!.message, code: err!.extensions?.code, extensions };
 }
 
 beforeEach(async () => {
@@ -72,6 +74,10 @@ describe('#3329 clearNodeHistory through a soft-deleted memory', () => {
     expect(await revisionCount()).toBe(0);
   });
 
+  it('the by-URN form used below resolves in the live memory (so its tombstone leg is not vacuous)', async () => {
+    expect(await resolvers.Mutation.clearNodeHistory(null, { nodeRef: `hrn:node:${memory.urn}:${node.loc}` }, as(contributorId))).toBe(2);
+  });
+
   it('is refused through a tombstoned memory, by id and by URN, exactly like a nonexistent node, for a writer and an outsider', async () => {
     await tombstone();
     const missing = await refusal(resolvers.Mutation.clearNodeHistory(null, { nodeRef: generateId() }, as(contributorId)));
@@ -101,10 +107,28 @@ describe('#3329 a soft delete that commits after the preflight', () => {
     expect(await revisionCount()).toBe(2);
   });
 
+  it('a contributor is refused inside the write too (its extra door preflight passes while the memory is live)', async () => {
+    const missing = await refusal(resolvers.Mutation.deleteNodeRevision(null, { revisionId: generateId() }, as(contributorId)));
+    expect(await refusal(resolvers.Mutation.deleteNodeRevision(null, { revisionId }, as(contributorId, tombstonedBeforeWrite())))).toEqual(missing);
+    expect(await revisionCount()).toBe(2);
+  });
+
   it('clearNodeHistory refuses inside the write, as not found, and deletes nothing', async () => {
     const missing = await refusal(resolvers.Mutation.clearNodeHistory(null, { nodeRef: generateId() }, as(adminId)));
     expect(await refusal(resolvers.Mutation.clearNodeHistory(null, { nodeRef: node.id }, as(adminId, tombstonedBeforeWrite())))).toEqual(missing);
     expect(await revisionCount()).toBe(2);
+  });
+});
+
+describe('#3329 the shared helper\'s third caller: updateNodeRevision (unchanged behaviour)', () => {
+  it('a label edit through a tombstoned memory is answered exactly like a nonexistent revision, for every caller', async () => {
+    await tombstone();
+    for (const user of [adminId, contributorId, outsiderId]) {
+      const missing = await refusal(resolvers.Mutation.updateNodeRevision(null, { revisionId: generateId(), revLabel: 'x' }, as(user)));
+      expect(missing.code).toBe('NOT_FOUND');
+      expect(await refusal(resolvers.Mutation.updateNodeRevision(null, { revisionId, revLabel: 'x' }, as(user)))).toEqual(missing);
+    }
+    expect((await db.nodeRevision.findUniqueOrThrow({ where: { id: revisionId } })).revLabel).toBeNull();
   });
 });
 

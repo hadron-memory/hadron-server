@@ -2464,7 +2464,9 @@ async function withNodeHistoryWrite<T>(ctx: Context, nodeId: string, memoryId: s
     await lockInstallAuthoritiesFirst(tx, ctx, [memoryId]);
     // #3329 (ruling 0195; cor:dmo:010:04, cor:dmo:060:04): a soft-deleted memory takes no history write, whoever the
     // caller. FOR SHARE conflicts with deleteMemory's FOR UPDATE, so a tombstone that commits after the caller's
-    // preflight is seen here and none can commit until this write does. Memory before node (the established order).
+    // preflight is seen here and none can commit until this write does. Memory before node: #1753's order (the
+    // search-replace write and promotion lock memory rows before node rows); install authority is taken first, above,
+    // and locks only advisory anchors and app/member/agent rows, never a memories row.
     // The refusal is the caller's own not-found, before any access gate, so it never differs from a missing target.
     const [live] = await tx.$queryRaw<Array<{ deleted_at: Date | null }>>`
       SELECT deleted_at FROM memories WHERE id = ${memoryId} FOR SHARE`;
@@ -5372,7 +5374,8 @@ export const nodeMutations = {
       // before any access gate (no FORBIDDEN-vs-NOT_FOUND oracle). withNodeHistoryWrite re-checks under lock.
       const revision = await ctx.db.nodeRevision.findFirst({ where: { id: revisionId, node: { memory: { deletedAt: null } } } });
       if (!revision) throw notFound();
-      const node = await ctx.db.node.findUniqueOrThrow({ where: { id: revision.nodeId } });
+      const node = await ctx.db.node.findUnique({ where: { id: revision.nodeId } });
+      if (!node) throw notFound(); // a hard delete racing this lookup is a missing revision too, not a raw P2025
       await nodeDoorWritePreflight(ctx, node.memoryId, notFound);
       // #1641 §3.2 — a question's history is its audit trail. Unlocked: no
       // write ever turns an existing node into a question or back.
