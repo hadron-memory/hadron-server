@@ -256,6 +256,16 @@ describe('#3401 D1: the session is re-validated on every call', () => {
     });
   }
 
+  it('control for the dormant pins: the same probes on a LIVE session do record counted activity', async () => {
+    // #4726 blind delta P2: "zero counted events" above means something only if these probes reach the
+    // recorder at all. Here the same reach() and the same flush, on a live session, leave counted events.
+    const mem = await sessionMemory({ cls: 'personal' });
+    const sid = await session(mem.id);
+    expect(await reach(keyAuth(sid), mem)).toEqual(all(true));
+    await drainNodeUsage(db);
+    expect(await db.usageEvent.count({ where: { sessionId: sid, countsAsActivity: true } })).toBeGreaterThan(0);
+  });
+
   it('the shared predicate itself answers empty for an ended session (both surfaces call it)', async () => {
     const mem = await sessionMemory({ cls: 'personal' });
     const sid = await session(mem.id);

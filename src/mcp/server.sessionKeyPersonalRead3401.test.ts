@@ -190,6 +190,9 @@ describe('#3401 D1: a retained transport loses the read the moment its session i
     // The read above records its usage heartbeat after answering, off the request path. Flush it (#4726 blind P2-2:
     // polling for dormancy raced a late write), then age the session; it is dormant in the ONE binding check.
     await drainNodeUsage(db);
+    // Control (#4726 blind delta P2): the live read went through the recorder and the flush caught it, so the
+    // "zero counted events" check below can fail.
+    expect(await db.usageEvent.count({ where: { sessionId: s.id, countsAsActivity: true } })).toBeGreaterThan(0);
     await db.usageEvent.deleteMany({ where: { sessionId: s.id } });
     await db.session.update({ where: { id: s.id }, data: { startedAt: old, updatedAt: old, expiresAt: null } });
     expect(await validateSessionBinding(db, { appId }, s.id)).toBeNull();
