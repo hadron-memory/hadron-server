@@ -229,26 +229,44 @@ async function whileTaskLocked<T>(taskId: string, end: Record<string, unknown>, 
     await gate;
     await tx.agentTask.update({ where: { id: taskId }, data: end });
   }, { timeout: 30_000 });
-  const pid = await holderPid;
-  let settled = false;
-  const acting = act().finally(() => { settled = true; });
-  acting.catch(() => undefined); // judged below; never an unhandled rejection
-  // Beckett P3 on #4644: the evidence is a backend blocked by THIS holder, not any lock wait in the database.
+  holder.catch(() => undefined); // surfaced by the await below, never an unhandled rejection
+  // Beckett P3 :232 on #4644: a holder that fails before it signals its PID rejects at once, with its own error.
+  const holderEndedEarly = holder.then(() => { throw new Error('the holder transaction ended before it held the task row'); });
+  holderEndedEarly.catch(() => undefined);
+  let acting: Promise<T> | undefined;
   let blocked = false;
   try {
+    const pid = await Promise.race([holderPid, holderEndedEarly]);
+    // Beckett P3 :240 on #4644: the evidence is the ACTING backend waiting on THIS holder. Nothing waits on the holder
+    // before the act starts, so the one backend that does afterwards, on the share lock the eligibility check takes,
+    // is the act's.
+    const waiters = () => db.$queryRaw<Array<{ pid: number; blockers: number[]; query: string }>>`
+      SELECT pid, pg_blocking_pids(pid) AS blockers, query FROM pg_stat_activity
+      WHERE pid <> pg_backend_pid() AND ${pid}::int = ANY(pg_blocking_pids(pid))`;
+    expect(await waiters(), 'nothing waits on the holder before the act').toEqual([]);
+    let settled = false;
+    acting = act().finally(() => { settled = true; });
+    acting.catch(() => undefined); // judged below; never an unhandled rejection
     for (let i = 0; i < 200 && !settled && !blocked; i++) {
-      const [{ n }] = await db.$queryRaw<Array<{ n: number }>>`
-        SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`;
-      blocked = n > 0;
-      if (!blocked) await new Promise((r) => setTimeout(r, 25));
+      const rows = await waiters();
+      if (rows.length > 0) {
+        expect(rows, 'exactly one backend, the act, waits on the holder').toHaveLength(1);
+        expect(rows[0]!.pid).not.toBe(pid);
+        expect(rows[0]!.blockers).toContain(pid);
+        expect(rows[0]!.query).toMatch(/FROM agent_tasks WHERE id = \$1 FOR SHARE/);
+        blocked = true;
+      } else await new Promise((r) => setTimeout(r, 25));
     }
   } finally {
+    // Beckett P3 :247 on #4644: on every exit, release the holder and let BOTH operations settle before teardown;
+    // the original failure (thrown in the try) still propagates.
     release();
-    await holder;
+    await Promise.allSettled([holder, ...(acting ? [acting] : [])]);
   }
+  await holder;
   // Without the share lock the act never waits on the holder: that is the defect these pins catch.
   expect(blocked, 'the act waited on the task row lock').toBe(true);
-  return acting;
+  return acting!;
 }
 const FINISH = () => ({ status: 'finished', finishedAt: new Date(), resultOutcome: 'done' });
 const CANCEL = () => ({ status: 'cancelled', cancelledAt: new Date() });
@@ -285,6 +303,13 @@ describe('#4431 §3: the answer wakes the task\'s current assignee', () => {
     expect(await wakesOf(asker.id)).toEqual([{ taskId: t.id, eventId: e!.id, event: 'ANSWERED' }]);
     expect((await pendingTaskWakes(db, [asker.id], new Date(Date.now() + MIN))).get(asker.id)?.[0]?.questionCode).toBe(D.code(q, {}, as(holder.id)));
     await db.workerDeliveryTaskEvent.create({ data: { workerId: asker.id, eventId: e!.id, chainIndex: 0, deliveredAt: new Date() } });
+    expect(await wakesOf(asker.id)).toEqual([]);
+  });
+
+  it('a question.answered recorded under ANOTHER App, naming this task, wakes nobody (Rodolfo P3 on #4644)', async () => {
+    // Nothing in the schema ties an event's App to its task's (#4202), so the wake join must.
+    const t = await mkTask();
+    await db.agentTeamEvent.create({ data: { appId: otherApp.id, taskId: t.id, type: 'question.answered', actorUserId: decider.id, payload: { questionId: generateId(), code: 'Q-1', revision: 2, state: 'DECIDED' } } });
     expect(await wakesOf(asker.id)).toEqual([]);
   });
 

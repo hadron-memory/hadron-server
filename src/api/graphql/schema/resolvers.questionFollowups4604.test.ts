@@ -185,6 +185,7 @@ describe('#4604 F4: a mutation result reports what the next read reports', () =>
     const amended = await asWorker('worker-ada', () => M.amendQuestion(null, { ref: asked.row.id, input: { title: 'Ship it?' }, reason: 'reword', expectedRevision: 1 }, as(writer.id)));
     // Beckett's BLIND delta on #4644: the resolver's argument is input; a misnamed key amended nothing and went unseen.
     expect(D.title(amended, {}, as())).toBe('Ship it?');
+    expect(D.title(await Q.question(null, { ref: asked.row.id }, as(reader.id)), {}, as())).toBe('Ship it?'); // stored, not only returned
     expect(D.effectiveAssigneeId(amended, {}, as())).toBe(holger.id);
     expect(await read(asked.row.id)).toBe(holger.id);
     expect(await D.effectiveAssignee(amended, {}, as(reader.id))).toMatchObject({ id: holger.id });
