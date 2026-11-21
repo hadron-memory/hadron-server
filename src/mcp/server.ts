@@ -90,6 +90,7 @@ import {
 import { portalUrlForUrn } from '../lib/portalUrl.js';
 import { userUrn } from '../lib/userHandle.js';
 import { registerCommentTools } from './commentTools.js';
+import { registerQuestionTools } from './questionTools.js';
 import { registerAssetTools } from './assetTools.js';
 import { registerAutomationReadGrantTools } from './automationReadGrantTools.js';
 import { signingSurfacePolicy, switchCapabilities } from '../lib/signing/surface.js';
@@ -3868,6 +3869,7 @@ export function createMcpServerInstance(
 
   // ── #1609 — comment nodes (cor:dmo:110): thin over the GraphQL comment resolvers ──
   registerCommentTools(server, { db, auth });
+  registerQuestionTools(server, { db, auth }); // #4430: Questions S6
   registerAssetTools(server, { db, auth });
   registerAutomationReadGrantTools(server, { db, auth });
   registerAutomationTeamSnapshotGrantTools(server, { db, auth });
