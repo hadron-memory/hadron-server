@@ -9,7 +9,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { getRetrievalProvider } from '../../lib/retrieval/postgres.js';
-import { setVectorSmallScopeRowsForTests, setVectorWindowRowsMaxForTests, vectorSearchNodes, vectorSearchTimeoutMs, VECTOR_ANN_MAX_K, VECTOR_TX_MAX_WAIT_MS } from './vectors.js';
+import { setVectorSmallScopeRowsForTests, setVectorWindowRowsMaxForTests, vectorSearchNodes, vectorSearchChunks, vectorSearchTimeoutMs, VECTOR_ANN_MAX_K, VECTOR_INDEX_ORDER_WINDOW, VECTOR_TX_MAX_WAIT_MS } from './vectors.js';
 
 const DIM = 768;
 const vec = (x: number) => { const v = new Array(DIM).fill(0); v[1] = 1; v[2] = x; return `'[${v.join(',')}]'::vector`; };
@@ -190,5 +190,24 @@ describe('Charles survivors (#4665): the budget is measured inside the transacti
     const run = (candidateFactor: number) => traced(0, () => vectorSearchNodes(db, { memoryIds: [mem], queryEmbedding: query(), limit: 3, candidateFactor }));
     expect(annSeen((await run(10)).sql)).toBe(true);
     expect(annSeen((await run(Math.ceil(VECTOR_ANN_MAX_K / 3) + 10)).sql)).toBe(false);
+  });
+  it('Byron P2-1: a page deeper than the index horizon issues NO ANN statement, only the exact one', async () => {
+    setVectorSmallScopeRowsForTests(0);
+    const annSeen = (sql: string[]) => sql.some((q) => q.includes('ORDER BY ne.embedding <=>'));
+    const deep = await traced(0, () => vectorSearchNodes(db, { memoryIds: [mem], queryEmbedding: query(), limit: VECTOR_INDEX_ORDER_WINDOW + 1 }));
+    expect(annSeen(deep.sql)).toBe(false);
+    expect(deep.sql.some((q) => q.includes('MATERIALIZED'))).toBe(true);
+    const shallow = await traced(0, () => vectorSearchNodes(db, { memoryIds: [mem], queryEmbedding: query(), limit: 3 }));
+    expect(annSeen(shallow.sql)).toBe(true); // control: the walk still serves a page inside the horizon
+  });
+  it('Bridget P3-1: the chunk path reports a complete result, not stopped_early, for a window past the cap over a smaller scope', async () => {
+    setVectorWindowRowsMaxForTests(50);
+    let w: any;
+    const hits = await vectorSearchChunks(db, { memoryIds: [mem], queryEmbedding: query(), limit: 60, onWindow: (x) => { w = x; } });
+    setVectorWindowRowsMaxForTests(null);
+    expect(hits.length).toBeGreaterThan(0);
+    expect(hits.length).toBeLessThan(50);
+    expect(w.stoppedEarly).toBeFalsy();
+    expect(w.exhausted).toBe(true);
   });
 });

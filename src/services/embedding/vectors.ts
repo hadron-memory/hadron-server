@@ -501,21 +501,17 @@ async function rankUnderBudget<R>(
       // index). A small scope never walks the global HNSW index (see vectorSmallScopeRows); a large one does.
       const cap = vectorSmallScopeRows();
       const eligible = await withVectorBudget(db, 40, true, (tx) => o.count(tx, cap + 1), left);
-      if (eligible > cap) {
+      // A page deeper than the index's widest horizon (VECTOR_INDEX_ORDER_WINDOW) can never be served by the walk: the order of
+      // a full page past it is the index's approximate order, so ruling 0150's true page is ranked exactly. Walking the index
+      // first would only be thrown away (BLIND round 3 P2-1), so such a page goes straight to the exact statement.
+      if (eligible > cap && o.need <= VECTOR_INDEX_ORDER_WINDOW) {
         let k = Math.max(o.k0, 1);
         for (;;) {
           // A hard ceiling on the widening: past it the exact statement decides.
           if (k > VECTOR_ANN_MAX_K) break;
           const rows = await withVectorBudget(db, k, true, (tx) => o.ann(tx, k), left);
           best = rows;
-          if (o.distinctCount(rows) >= o.need) {
-            if (o.need <= VECTOR_INDEX_ORDER_WINDOW) return { rows, exhausted: false, stopped: false };
-            // Past the index's widest horizon the order of a FULL page is the index's approximate order, which
-            // nothing in the statement can check (the count only catches a scan that ends SHORT). Ruling 0150
-            // asks for the true page, so rank it exactly; the cost grows with the offset (see the PR's EXPLAIN).
-            best = []; // not a trustworthy prefix: should the exact statement stop, no approximate rows are returned
-            break;
-          }
+          if (o.distinctCount(rows) >= o.need) return { rows, exhausted: false, stopped: false };
           if (rows.length < k) break; // the walk ended short of the set: the exact statement decides
           k *= 4;
         }
