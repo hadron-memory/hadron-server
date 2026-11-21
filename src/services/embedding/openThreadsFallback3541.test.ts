@@ -136,8 +136,10 @@ for (const [value, expectedNames, limit] of [[true, ['e1', 'e2'], 2], [false, ['
         expect(seen.annIntercepted).toBe(1);
         expect(seen.annKind).toBe(kind);
         expect(seen.annRealRows).toBeGreaterThanOrEqual(limit);
-        // The real eligible-count statement ran once and matched the fixture's independently known count.
-        expect(seen.counts).toEqual([eligible]);
+        // The real small-scope probe ran once: a count capped at (seam 0) + 1 = 1, which already exceeds the seam, so the
+        // ANN walk ran; the fixture holds `eligible` >= 1 rows.
+        expect(eligible).toBeGreaterThanOrEqual(1);
+        expect(seen.counts).toEqual([1]);
         // The MATERIALIZED exact statement ran exactly once.
         expect(seen.exactCalls).toBe(1);
         // Exact final identities, in rank order; foreign and wrong-state rows are absent.

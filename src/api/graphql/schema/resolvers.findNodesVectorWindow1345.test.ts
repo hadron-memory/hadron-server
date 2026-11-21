@@ -215,7 +215,7 @@ describe('@codex round 7 — a wider window is a deeper HNSW scan', () => {
 
   it('each vector query sets its horizon, budget and iterative scan for its own window, in its own transaction', async () => {
     const sets: string[] = [];
-    const tx = { $executeRawUnsafe: async (sql: string) => { sets.push(sql); return 0; }, $queryRaw: async () => [] };
+    const tx = { $executeRawUnsafe: async (sql: string) => { sets.push(sql); return 0; }, $queryRaw: async (strings: TemplateStringsArray) => (strings.join('?').includes('count(*)::int AS n') ? [{ n: 1 }] : []) };
     const fake = { $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx), $queryRaw: async () => [{ n: 0 }] } as any;
     const q = new Array(768).fill(0); q[1] = 1;
     setIterativeScanSupportForTests(true);

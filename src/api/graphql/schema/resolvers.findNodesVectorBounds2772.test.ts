@@ -77,10 +77,36 @@ describe('#2772 request-level bounds (BLIND P1)', () => {
     } }) as typeof db;
     const hits = await vectorSearchNodes(handle, { memoryIds: [mem], queryEmbedding: qvec(), limit: 5_000_000 });
     // `limit` is the number of ranked rows WANTED: asking for millions returns the whole ranking (70 vectors), in ONE
-    // exact statement (no ANN widening, no count) rather than a loop of ever wider scans.
+    // exact statement (a small scope: the capped count of the caller's own vectors, then the exact scan; no ANN
+    // widening) rather than a loop of ever wider scans.
     expect(hits).toHaveLength(70);
-    expect(seen).toHaveLength(1);
-    expect(seen[0]).toContain('MATERIALIZED');
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toContain('count(*)::int AS n');
+    expect(seen[1]).toContain('MATERIALIZED');
+  }, 60_000);
+
+  it('SEC P2 (Riana): a small scope never walks the global HNSW index, so other tenants\' vectors cannot shape its work', async () => {
+    const other = await createDbOrgAndGraph(db, { orgName: 'r2772b-foreign', graphName: 'r2772b/foreign' });
+    const fm = other.graph.id;
+    await db.memory.update({ where: { id: fm }, data: { vectorIndexEnabled: true, embeddingSource: 'contentChunks' } });
+    await db.node.createMany({ data: Array.from({ length: 30 }, (_, i) => ({ id: generateId(), memoryId: fm, loc: `f${i}`, name: `f${i}`, content: 'body', role: 'review' })) });
+    await db.$executeRawUnsafe(`
+      INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, chunk_index, char_start, char_end, chunk_text, embedding, created_at)
+      SELECT md5(id), id, memory_id, 'chunk', 'test', 'stub-model', ${DIM}, 0, 0, 4, 'body', ${VEC}, now() FROM nodes WHERE memory_id = '${fm}'`);
+    const seen: string[] = [];
+    const handle = new Proxy(db, { get(t, p) {
+      const v = Reflect.get(t, p);
+      if (p !== '$transaction') return typeof v === 'function' ? v.bind(t) : v;
+      return (arg: unknown, opts?: unknown) => typeof arg !== 'function' ? (t.$transaction as any)(arg, opts)
+        : (t.$transaction as any)(async (tx: any) => (arg as (x: unknown) => unknown)(new Proxy(tx, { get(tt, pp) {
+            const vv = Reflect.get(tt, pp);
+            if (pp === '$queryRaw') return (s: TemplateStringsArray, ...a: unknown[]) => { seen.push(s.join('?')); return (vv as any).call(tt, s, ...a); };
+            return typeof vv === 'function' ? vv.bind(tt) : vv;
+          } })), opts);
+    } }) as typeof db;
+    const hits = await vectorSearchNodes(handle, { memoryIds: [mem], queryEmbedding: qvec(), limit: 5 });
+    expect(hits).toHaveLength(5);
+    expect(seen.some((q) => !q.includes('MATERIALIZED') && !q.includes('count(*)::int AS n'))).toBe(false);
   }, 60_000);
 
   it('every vector transaction carries a Prisma clock past the statement budget', async () => {
