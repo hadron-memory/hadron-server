@@ -9,7 +9,7 @@
  * ends the grants of those left with none. No door stamps on a row delete without asking.
  *
  * LOCK ORDER (departure.ts): the door's anchors, then the installation locks here (App FOR SHARE, app_agents, agent_imports,
- * agents FOR SHARE, per App in id order), then the register rows, then ONE sorted grant lock phase last. Nothing is ended
+ * agents FOR NO KEY UPDATE for the agents judged (#4715: fences a concurrent agent-grant create), per App in id order), then the register rows, then ONE sorted grant lock phase last. Nothing is ended
  * inside the per-App loop. Only AGENT-held grants end; a worker's, a person's and an App's are never touched, and reinstalling
  * revives nothing (the SQL guard never lets the stamp clear).
  */
@@ -35,7 +35,7 @@ export async function endGrantsOfAgentsNoLongerInstalled(
   for (const p of unique) byApp.set(p.appId, [...(byApp.get(p.appId) ?? []), p.agentId]);
   const departed: AppAgentPair[] = [];
   for (const [appId, agentIds] of byApp) {
-    await lockAppInstallations(tx, appId, agentIds);
+    await lockAppInstallations(tx, appId, agentIds, { fenceAgents: true });
     for (const agentId of agentIds) {
       if (!(await resolveAppInstallation(tx, appId, agentId))) departed.push({ appId, agentId });
     }

@@ -119,7 +119,7 @@ export async function sweepLapsedAgentGrants(
     const departed = await db.$transaction(async (tx) => {
       const gone: Array<{ appId: string; agentId: string }> = [];
       for (const [appId, agentIds] of byApp) {
-        await lockAppInstallations(tx, appId, agentIds);
+        await lockAppInstallations(tx, appId, agentIds, { fenceAgents: true });
         for (const agentId of agentIds) {
           if (!(await resolveAppInstallation(tx, appId, agentId))) gone.push({ appId, agentId });
         }
