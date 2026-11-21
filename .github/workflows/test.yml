@@ -165,13 +165,16 @@ jobs:
         # suite's own process tree killed by PID, then exit 124, so the step fails with its log kept. Inside the
         # budget it returns vitest's own exit code. LIMIT: if the VM freezes outright before the budget, no dump
         # appears, which is itself the finding (#4278 stays open). WATCHDOG_STEP_TIMEOUT_MINUTES must equal
-        # timeout-minutes below; vitest-watchdog.test.mjs pins that, and that the budget is under it.
+        # timeout-minutes below; vitest-watchdog.test.mjs pins that, and that the budget is under it. The budget
+        # counts from the step's first line (WATCHDOG_STEP_STARTED_AT), so the sampler setup and the psql probe come
+        # out of it (#4647 BLIND P2).
         timeout-minutes: 45
         env:
           HADRON_TEST_MAX_WORKERS: '3'
           WATCHDOG_MINUTES: '40'
           WATCHDOG_STEP_TIMEOUT_MINUTES: '45'
         run: |
+          export WATCHDOG_STEP_STARTED_AT=$(date +%s)
           echo "[sampler] nproc=$(nproc)"
           (
             set +e
