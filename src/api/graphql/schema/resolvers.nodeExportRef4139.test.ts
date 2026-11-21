@@ -14,7 +14,7 @@ import { typeDefs } from './typeDefs.js';
 import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
 import { testRunAgentId } from '../../../test/runAgent.js';
 import { drainNodeUsage } from '../../../lib/usageRecorder.js';
-import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AmbiguousLegacyUrnError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 
 const Q = resolvers.Query as any;
 const LOC = 'docs:entry';
@@ -192,6 +192,33 @@ describe('#4139 nodeExport(ref:)', () => {
       expect(viaNode).toBeGreaterThan(0);
       expect(await count(f.pub.id)).toBe(viaNode);
       expect(await count(f.orgVisible.id)).toBe(0);
+    });
+  });
+
+  describe('a globally ambiguous legacy URN: nodeExport answers exactly as node(ref:) does (cor:urn:030:01/:02, Riana P3)', () => {
+    const claim = async (urn: string, nodeIds: string[]) => {
+      await db.urnAlias.createMany({ data: nodeIds.map((entityId) => ({
+        urn, entityType: 'NODE' as const, entityId, reason: 'RENAME' as const, replacedByUrn: `${urn}-new`,
+      })) });
+    };
+    it('a caller who can read NO claimant gets the NODE_NOT_FOUND an unknown ref gets, not the ambiguity', async () => {
+      const second = await db.node.create({ data: { memoryId: f.orgVisible.id, loc: 'docs:second', name: 's', content: 'x', nodeType: 'record' } });
+      const old = `${f.orgVisible.urn}:shared-old`;
+      await claim(old, [f.orgVisible.nodeId, second.id]);
+      for (const ctx of [f.strangerCtx, f.keyPrincipal, f.runPrincipal]) {
+        expect(await rejection(Q.nodeExport({}, { ref: old }, ctx))).toMatchObject({ code: 'NODE_NOT_FOUND' });
+        expect(await Q.node({}, { ref: old }, ctx)).toBeNull();
+      }
+    });
+    it('a caller who can read a claimant gets the ambiguity from BOTH surfaces, and the wire message does not name the hidden claimant', async () => {
+      const old = `${f.pub.urn}:shared-old`;
+      await claim(old, [f.sibling.id, f.orgVisible.nodeId]);
+      await expect(Q.node({}, { ref: old }, f.strangerCtx)).rejects.toBeInstanceOf(AmbiguousLegacyUrnError);
+      const refused = await Q.nodeExport({}, { ref: old }, f.strangerCtx).then(() => null, (e: unknown) => e);
+      expect(refused).toBeInstanceOf(AmbiguousLegacyUrnError);
+      // What reaches the wire is the message and the echoed ref only (formatError drops candidateNodeIds).
+      expect((refused as Error).message).not.toContain(f.orgVisible.nodeId);
+      expect((refused as AmbiguousLegacyUrnError).ref).toBe(old);
     });
   });
 
