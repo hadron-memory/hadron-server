@@ -199,7 +199,7 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
     if (p.refusesWildcard && v === '*') throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} refuses a wildcard`);
   }
 
-  // S6 owns deletion; never create a use grant whose signed delete promise cannot yet be honored.
+  // A use grant never carries the delete mark (Bill, #132508): refuse it rather than sign a delete promise a run cannot honor.
   if (action.name === 'secret.use' && (values as Record<string, unknown>)['auto-delete'] === 'delete') {
     throw new GrantCreateRefusal('SECRET_AUTO_DELETE_NOT_AVAILABLE');
   }

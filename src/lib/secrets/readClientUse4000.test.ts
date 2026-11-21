@@ -7,7 +7,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { upsertPlatformActions } from '../grants/actions.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import type { RunToolContext } from '../runner/tools/types.js';
-import { prepareSecretUse } from './readClientReveal.js';
+import { prepareSecretUse, revealForPersonHolder } from './readClientReveal.js';
 let runCtx: RunToolContext;
 let grantId: string; let clientId: string; let orgId: string; let appId: string; let ownerId: string;
 beforeEach(async () => {
@@ -154,6 +154,18 @@ describe('transactional secret.use (#4000)', () => {
     await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
     expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
     expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
+  });
+  it('does not let a secret.use client be revealed, even by the person its grant names', async () => {
+    const holder = await db.user.create({ data: { handle: `s5-reveal-${generateId()}` } });
+    await db.appMember.create({ data: { appId, userId: holder.id, role: 'READER' } });
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+      await tx.$executeRaw`UPDATE grants SET grantee_app_id = NULL, user_id = ${holder.id} WHERE id = ${grantId}`;
+      await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+    });
+    await expect(revealForPersonHolder({ db, userId: holder.id, roles: [] }, clientId))
+      .rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
   });
   it('refuses a client whose secret was altered away from the signed grant', async () => {
     await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });

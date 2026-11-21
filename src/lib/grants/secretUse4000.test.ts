@@ -45,7 +45,7 @@ describe('secret.use grant terms (#4000)', () => {
       expect(await refusal(grant({ ...values(), [key]: value }))).toBe('GRANT_VALUES_INVALID');
     }
   });
-  it('refuses the delete mark until its lifecycle is built in S6', async () => {
+  it('refuses the delete mark on a secret.use grant (SECRET_AUTO_DELETE_NOT_AVAILABLE, ruled by Bill #132508)', async () => {
     expect(await refusal(grant({ ...values(), 'auto-delete': 'delete' }))).toBe('SECRET_AUTO_DELETE_NOT_AVAILABLE');
   });
   it('allows this App as holder, while refusing a different App holder', async () => {
