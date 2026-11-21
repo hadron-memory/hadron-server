@@ -96,6 +96,14 @@ async function hasSuccessorLink(tx: Prisma.TransactionClient, nodeId: string): P
 const isRetired = (tags: unknown): boolean => (deserializeTags(tags as string | string[]) as string[]).includes('superseded');
 
 export async function retireSpecDoor(input: RetireSpecInput, ctx: Context) {
+  // #876: an impersonated session is read-only. The GraphQL plugin already blocks the mutation, but a delegate
+  // (the MCP twin, a direct call) must not depend on it, and this judges before any shape check or read, so the
+  // refusal reveals nothing about any node.
+  if (ctx.impersonation) {
+    throw new GraphQLError('This is a read-only impersonation session; mutations are disabled.', {
+      extensions: { code: 'IMPERSONATION_READ_ONLY', http: { status: 403 } },
+    });
+  }
   assertInputShape(input);
   const ref = input.ref;
 
