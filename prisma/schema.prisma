@@ -10134,7 +10134,7 @@ model Grant {
   requestedByUserId     String?   @map("requested_by_user_id")
   requestedByWorkerId   String?   @map("requested_by_worker_id")
   requestedBySessionId  String?   @map("requested_by_session_id")
-  /// #3753 (Grants S2c): the headless AppRun that asked, when a run asked (cor:acl:140:05 S5). FK-free sealed id like the other
+  /// #3753 (Grants S2c): the headless AppRun that asked, when a run asked (the S5 case of the grant Create rule). FK-free sealed id like the other
   /// requester ids: a run is not a worker or session (no #1162 fence), and the id never changes after the insert. Null on every
   /// worker- and manager-made row. There is no user here: the run's on-behalf-of person is NOT the requester (ruling 0255 item 21).
   requestedByRunId      String?   @map("requested_by_run_id")
