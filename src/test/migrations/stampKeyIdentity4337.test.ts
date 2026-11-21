@@ -104,6 +104,10 @@ describe('#4337 the conversion block in prisma/stamp-key-identity-invariants.sql
       ALTER TABLE stamp_signing_keys ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY`, /GENERATED ALWAYS/],
     ['another default', `ALTER TABLE stamp_signing_keys ALTER COLUMN id SET DEFAULT 7`, /has default 7, not push's sequence/],
     ['push\'s default backed by a sequence the column does not own', `ALTER SEQUENCE stamp_signing_keys_id_seq OWNED BY NONE`, /not owned by stamp_signing_keys.id/],
+    // #4691 BLIND delta F1: a temporary sequence of the same name shadows the schema's one, and the default is bound to
+    // it, so the default's text and the column's owned sequence name two different sequences.
+    ['a default bound to a temporary sequence that shadows the owned one', `CREATE TEMP SEQUENCE stamp_signing_keys_id_seq;
+      ALTER TABLE stamp_signing_keys ALTER COLUMN id SET DEFAULT nextval('stamp_signing_keys_id_seq')`, /not the one the column owns/],
   ])('refuses, changing nothing, for %s', async (_label, setup, refusal) => {
     await withPushBuiltTable(setup, async (pg) => {
       const before = await column(pg);
