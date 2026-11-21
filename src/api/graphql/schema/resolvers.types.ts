@@ -105,6 +105,7 @@ import {
   assetUrn,
   resolveAppTeamSpaceMemoryIds,
   getAccessibleMemoryIds,
+  canWriteMemoryRecord,
   sessionScopeFilter,
   CONTENT_RAW_DEFAULT,
   PAGE_ARGS_DEFAULT,
@@ -1726,6 +1727,8 @@ export const typeResolvers = {
       (await corpusMintStateOf(ctx.db, m.id)).mintedAt,
     corpusState: async (m: { id: string }, _: unknown, ctx: Context) =>
       (await corpusMintStateOf(ctx.db, m.id)).state,
+    // #606: the memory write gate's own answer for THIS caller (resolvers.helpers canWriteMemoryRecord).
+    canWrite: (m: { id: string }, _: unknown, ctx: Context) => canWriteMemoryRecord(ctx, m.id),
     // A Memory reader may be external to its owning org. The nested object
     // exposes org policy and relations, so apply organization(ref:)'s gate.
     organization: (g: { organizationId: string | null }, _: unknown, ctx: Context) =>

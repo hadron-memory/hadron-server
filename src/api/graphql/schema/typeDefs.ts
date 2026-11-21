@@ -4394,6 +4394,13 @@ export const typeDefs = `#graphql
     bulk-replaced, in any memory (see Node.mintStatus).
     """
     corpusState: CorpusState!
+    """
+    #606 — whether the CALLER may write to this memory: true exactly when a write to it would not be refused by the
+    memory write gate, for the request's own principal (user, impersonation, App key or run). It says nothing about
+    other users, and a Memory is only reachable here when the caller may already read it. Lets a write-target
+    picker filter without one effectiveAccess call per memory.
+    """
+    canWrite: Boolean!
     "#1448/#1591 — the latest mint time among this memory's live nodes; null while none is minted."
     corpusMintedAt: DateTime
     """

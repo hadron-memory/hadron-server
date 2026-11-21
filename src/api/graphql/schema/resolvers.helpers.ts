@@ -3049,6 +3049,45 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
 }
 
 /**
+ * #606 — the non-throwing twin of `requireMemoryWriteAccess`: "would a write to this memory be refused for this caller?"
+ * It RUNS the gate and maps only its own refusal to false, so it cannot drift from it (no branch is copied here). Any
+ * other failure (a DB error, a missing row) propagates instead of reading as "cannot write". A caller with no
+ * identity at all (no user, no App) cannot write, which is the gate's own unauthenticated answer.
+ *
+ * Memoised per request context: a list of N memories asks the gate once per distinct memory, and a memory that
+ * appears twice in one response (list item and a nested copy) is answered once. The memo lives only on the request's
+ * context object, so it is never shared across principals or requests.
+ */
+const memoryCanWriteMemo = new WeakMap<object, Map<string, Promise<boolean>>>();
+export function canWriteMemoryRecord(ctx: Context, memoryId: string): Promise<boolean> {
+  let perRequest = memoryCanWriteMemo.get(ctx);
+  if (!perRequest) {
+    perRequest = new Map();
+    memoryCanWriteMemo.set(ctx, perRequest);
+  }
+  let answer = perRequest.get(memoryId);
+  if (!answer) {
+    answer = requireMemoryWriteAccess(ctx, memoryId).then(
+      () => true,
+      (err: unknown) => {
+        if (isMemoryWriteRefusal(err)) return false;
+        throw err;
+      },
+    );
+    perRequest.set(memoryId, answer);
+    // A thrown (non-refusal) answer must not be remembered as the memory's answer.
+    answer.catch(() => perRequest!.delete(memoryId));
+  }
+  return answer;
+}
+
+function isMemoryWriteRefusal(err: unknown): boolean {
+  if (!(err instanceof GraphQLError)) return false;
+  const code = err.extensions?.code;
+  return (code === 'FORBIDDEN' && err.message === memoryWriteForbidden().message) || code === 'UNAUTHENTICATED';
+}
+
+/**
  * The shared memory-write denial. Keep the established prose and GraphQL
  * partial-response transport, but make the authorization classification
  * explicit so Apollo does not report an ordinary denial as a server fault.
