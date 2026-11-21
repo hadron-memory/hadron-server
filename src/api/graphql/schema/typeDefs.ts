@@ -13083,7 +13083,8 @@ export const typeDefs = `#graphql
     Delete a single node-revision snapshot by reference (#617, #4138): nodeRevRef is a revision URN
     (hrn:noderev:...) or a revision id, resolved per hrn:node:hadronmemory.com:specs:cor:api:140:00.
     Auth: the node's memory write access (as restoreNodeRevision). Throws NOT_FOUND for an unknown,
-    unreadable or soft-deleted reference alike.
+    malformed or unreadable reference alike (a non-reader never learns whether it exists), and for a soft-deleted memory;
+    a soft-deleted node's revision is still deletable by id (cleanup, as clearNodeHistory) and is a missing ref by URN.
     """
     deleteNodeRevision(nodeRevRef: String!): Boolean!
 

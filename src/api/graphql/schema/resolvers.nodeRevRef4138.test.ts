@@ -136,9 +136,11 @@ describe('unknown ≡ unreadable ≡ soft-deleted node ≡ soft-deleted memory (
     expect(r.errors?.[0]?.message).toBe('Node revision not found');
   });
 
-  // deleteNodeRevision keeps its own gate (#4138 "gates unchanged"): a tombstoned NODE is still cleanable history (as
-  // clearNodeHistory), and an unreadable ordinary memory answers the established Forbidden from nodeDoorWritePreflight (#2734).
-  const deleteMisses = misses.filter(([n]) => !/unreadable|soft-deleted node/.test(n));
+  // deleteNodeRevision keeps its own gate (#4138 "gates unchanged"): a tombstoned NODE's revision is still cleanable by PK
+  // (as clearNodeHistory); by URN it is a missing ref and is in the matrix below. An unreadable memory is concealed as
+  // not-found like the other doors (Rook P2: the URN is guessable), so unreadable cases ARE in this matrix.
+  const DELETE_CLEANUP_BY_PK = 'a soft-deleted node (PK)';
+  const deleteMisses = misses.filter(([n]) => n !== DELETE_CLEANUP_BY_PK);
   it.each(deleteMisses)('deleteNodeRevision refuses %s with the typed NOT_FOUND', async (_n, setup, ctx, ref) => {
     await setup();
     const r = await run(`mutation { deleteNodeRevision(nodeRevRef: "${ref()}") }`, ctx());
@@ -147,16 +149,25 @@ describe('unknown ≡ unreadable ≡ soft-deleted node ≡ soft-deleted memory (
     expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(2); // nothing was deleted
   });
 
-  it('restore and update refuse unknown and unreadable with a byte-identical error (no echo that tells them apart)', async () => {
-    const strip = (r: Awaited<ReturnType<typeof run>>) => ({ message: r.errors?.[0]?.message, code: code(r) });
-    const mk = (ref: string) => [
-      `mutation { restoreNodeRevision(nodeRevRef: "${ref}") { id } }`,
-      `mutation { updateNodeRevision(nodeRevRef: "${ref}", revLabel: "x") { id } }`,
-    ];
-    const unknownQs = mk('cnope00000000000000000000');
-    const unreadableQs = mk(rev1.id);
-    for (let i = 0; i < 2; i++) {
-      expect(strip(await run(unreadableQs[i]!, outsiderCtx()))).toEqual(strip(await run(unknownQs[i]!, adminCtx())));
+  it('all four doors answer unknown and unreadable with a byte-identical error, extensions and path included', async () => {
+    const full = (r: Awaited<ReturnType<typeof run>>) => JSON.stringify({
+      data: r.data, errors: r.errors?.map((e) => ({ message: e.message, path: e.path, extensions: e.extensions })),
+    });
+    // The ref is echoed under extensions.nodeRevRef by design (the caller's own input), so compare with the same ref.
+    for (const ref of [rev1.id, urn1]) {
+      const ops = [
+        `{ nodeRevision(nodeRevRef: "REF") { id } }`,
+        `mutation { restoreNodeRevision(nodeRevRef: "REF") { id } }`,
+        `mutation { updateNodeRevision(nodeRevRef: "REF", revLabel: "x") { id } }`,
+        `mutation { deleteNodeRevision(nodeRevRef: "REF") }`,
+      ];
+      for (const op of ops) {
+        const unreadable = full(await run(op.replace('REF', ref), outsiderCtx()));
+        // The same caller, the same ref shape, a revision that does not exist.
+        const missingRef = ref === urn1 ? composeNodeRevUrn(memory.urn, 'guide', 99) : 'cnope00000000000000000000';
+        const missing = full(await run(op.replace('REF', missingRef), outsiderCtx()));
+        expect(unreadable.split(ref).join('<ref>')).toBe(missing.split(missingRef).join('<ref>'));
+      }
     }
   });
 
@@ -188,6 +199,8 @@ describe('gates stay on the resolved revision, pinned with a URN', () => {
     // Membership reads `mem`; make `other` unreadable to this caller by removing the org-wide path for it.
     await db.memory.update({ where: { id: other.id }, data: { organizationId: (await db.organization.create({ data: { id: generateId(), name: 'o2', urn: 'o2' } })).id } });
     const ref = composeNodeRevUrn(memory.urn, 'guide', 3);
+    // The URN really resolves for a caller who can read both memories, so the refusals below are the gate, not a miss.
+    expect((await run(`{ nodeRevision(nodeRevRef: "${ref}") { id } }`, adminCtx())).data?.nodeRevision).toEqual({ id: moved.id });
     const read = await run(`{ nodeRevision(nodeRevRef: "${ref}") { id } }`, outsiderCtx());
     expect(read.data?.nodeRevision).toBeNull();
     for (const q of [
