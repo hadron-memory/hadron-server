@@ -6,7 +6,8 @@
  * answer outright, so a gate that changed under both sides at once cannot pass silently.
  */
 import { GraphQLError } from 'graphql';
-import { isReadOnlyImpersonation } from '../impersonationReadOnlyPlugin.js';
+import { isReadOnlyImpersonation, impersonationReadOnlyPlugin } from '../impersonationReadOnlyPlugin.js';
+import { parse } from 'graphql';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { PrismaClient } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
@@ -100,6 +101,29 @@ describe('#606 Memory.canWrite equals the write gate (matrix)', () => {
     const c = ctxOf({ userId: u.contributor.id, roles: ['READER'], impersonation: { actorUserId: u.platform.id } } as any);
     expect(await gateAllows(c, shared.id)).toBe(true); // the gate by itself would say yes
     expect(await M.canWrite({ id: shared.id }, {}, c)).toBe(false);
+  });
+
+  it('the mutation plugin and the field agree on what a read-only impersonation session is (they cannot diverge)', async () => {
+    const mutation = parse('mutation { createNode(urn: "x") { id } }');
+    const op = mutation.definitions[0] as any;
+    const shapes: Array<[string, Record<string, unknown>]> = [
+      ['no impersonation', {}],
+      ['impersonation object', { impersonation: { actorUserId: u.platform.id } }],
+      ['impersonation without actor field', { impersonation: { orgId: 'some-org' } }],
+      ['impersonation undefined', { impersonation: undefined }],
+      ['impersonation null', { impersonation: null }],
+    ];
+    for (const [label, extra] of shapes) {
+      const c = ctxOf({ userId: u.contributor.id, roles: ['READER'], ...extra } as any);
+      const hooks: any = await (impersonationReadOnlyPlugin as any).requestDidStart();
+      let refused = false;
+      try { await hooks.didResolveOperation({ operation: op, document: mutation, contextValue: c }); } catch (e: any) {
+        refused = e?.extensions?.code === 'IMPERSONATION_READ_ONLY';
+      }
+      // plugin refuses  <=>  the field says false for a target the gate alone allows
+      expect([label, refused]).toEqual([label, isReadOnlyImpersonation(c)]);
+      expect([label, await M.canWrite({ id: shared.id }, {}, c)]).toEqual([label, !refused]);
+    }
   });
 
   it('an App key with no user answers as the gate does (canWriteToMemory)', async () => {
