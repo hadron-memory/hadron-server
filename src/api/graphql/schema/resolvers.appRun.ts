@@ -668,10 +668,16 @@ export const appRunMutations = {
         if (input.entryNodeUrn != null) assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
         // agentRef semantics on update: undefined/'' = no change (''≡absent),
         // null = clear the agent, string = set (validated as installed).
-        const agentId =
+        let agentId =
           input.agentRef !== undefined && input.agentRef !== ''
             ? await resolveInstalledAgent(txCtx, existing.appId, input.agentRef)
             : undefined;
+        // #3911 (V71): a row the migration disabled for want of an Agent cannot be re-enabled until one is named. The
+        // edit is judged as a creation is (V70): the App's single installed Agent is recorded, else RUN_AGENT_REQUIRED
+        // (several) or BOOT_PROMPT_NOT_SET (none), before any write. A row that already names an Agent is untouched.
+        if (input.enabled === true && (agentId === undefined ? existing.agentId : agentId) == null) {
+          agentId = await resolveTriggerAgent(txCtx, existing.appId, null);
+        }
         if (input.policy != null && parsePolicyLink(input.policy) == null) {
           throw new GraphQLError('policy must be { allow: string[] }.', {
             extensions: { code: 'BAD_USER_INPUT' },
