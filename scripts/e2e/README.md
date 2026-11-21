@@ -94,7 +94,7 @@ The script-node fixture flows (the `<org>:flows` memory and the App's one write 
 its `--check` and `stack.sh check` all read the container's `DISABLE_RUN_WORKER` (`false` only for `E2E_RUN_WORKER=true`), so the default stack
 holds no flows memory and verifies green, and a worker stack holds it and verifies green too (#4753).
 
-Each org seeds a synthetic `<org>:flows` memory with two entry flows. A script node makes one run-tool call with no model hop
+On a worker stack each org seeds a synthetic `<org>:flows` memory with two entry flows. A script node makes one run-tool call with no model hop
 (`hadron_create_node`, an in-process write), so these run without any AI config. Both run through the product's own path:
 `triggerAppRun` as an org admin (name the agent, e.g. the coordinator: the App has two) resolves the principal and consent,
 and the write is authorized by the App's write grant on the `runs` prefix, not by the fixture.
