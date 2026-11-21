@@ -156,6 +156,9 @@ describe('#3558 MCP governed node: edge-only needs no attestation', () => {
    expect(await gstate()).toEqual({ ...before, edges: [{ targetId: other.id, name: 'uses' }] });
   });
 
+  // #3558: on this door the source row is locked TWICE before the token compare: server.ts's own FOR UPDATE and the one in
+  // ensureCurrentNodeRevisionInTransaction (src/lib/nodeRevisionSnapshot.ts:241). Either lock alone orders the writer, so
+  // removing one stays green by design; this pin (and the control and race pins) go red only when BOTH are removed.
   it('a writer that holds only the source row (no address lock) and commits a tracked revision makes the token stale', async () => {
    const before = await gstate();
    // The row-lock-only holder: the real revision allocator under FOR UPDATE, so the address lock cannot be what orders it.
