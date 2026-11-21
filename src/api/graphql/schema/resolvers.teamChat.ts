@@ -1219,6 +1219,7 @@ async function postToChannelRoot(
           sourceId: messageId,
           targetId: replyTarget.id,
           loc: deriveEdgeLoc(loc, 'replies-to', replyTarget.loc),
+          locAuthored: false, // #2947: derived
           name: 'replies-to',
           createdBy,
         },
