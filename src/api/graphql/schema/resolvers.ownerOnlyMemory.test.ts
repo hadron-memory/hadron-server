@@ -410,12 +410,12 @@ describe('MemoryShare boundary (U8)', () => {
   it('a personal memory can be shared; a private memory cannot', async () => {
     const personal = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'sharable', memoryClass: 'personal' } as any, asOwner());
     // personal: share accepted
-    const share = await resolvers.Mutation.createMemoryShare(null, { memoryId: personal.id, granteeId: other.id, role: 'writer' } as any, asOwner());
+    const share = await resolvers.Mutation.createMemoryShare(null, { memoryRef: personal.id, granteeRef: other.id, role: 'writer' } as any, asOwner());
     expect(share).toBeTruthy();
     // private: share rejected (class-not-shareable)
     const priv = await createPrivate('locked');
     await expect(
-      resolvers.Mutation.createMemoryShare(null, { memoryId: priv.id, granteeId: other.id, role: 'writer' } as any, asOwner()),
+      resolvers.Mutation.createMemoryShare(null, { memoryRef: priv.id, granteeRef: other.id, role: 'writer' } as any, asOwner()),
     ).rejects.toThrow();
   });
 });

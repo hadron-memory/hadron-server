@@ -3319,10 +3319,10 @@ export async function requireMemoryMemberOwner(
  */
 export async function resolveMemoryRefForMemberGate(
   ctx: Context,
-  args: { ref?: string | null; id?: string | null },
+  ref: string,
 ): Promise<string> {
   try {
-    return await resolveMemoryRefArg(ctx.db, args);
+    return await resolveRequiredMemoryRef(ctx.db, ref);
   } catch (e) {
     if (e instanceof GraphQLError && e.extensions?.code === 'NOT_FOUND') {
       throw memoryMemberForbidden();
@@ -3340,10 +3340,10 @@ export async function resolveMemoryRefForMemberGate(
  */
 export async function resolveSelfUserRefForMemberGate(
   ctx: Context,
-  args: { ref?: string | null; id?: string | null },
+  ref: string,
 ): Promise<string> {
   try {
-    return await resolveUserRefArg(ctx.db, args);
+    return await resolveRequiredUserRef(ctx.db, ref);
   } catch (e) {
     if (e instanceof GraphQLError && e.extensions?.code === 'NOT_FOUND') {
       throw memoryMemberForbidden();
