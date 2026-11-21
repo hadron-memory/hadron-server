@@ -73,6 +73,38 @@
    "9ae33556abc21a2755a2db6d1a37a8c4ae4fc8c41bf81c969b8a75c4ec220bc2"
   ],
   [
+   "hadron_list_question_logs",
+   "78a1b1aa4731e461e893d4e038845306463642c7ee619535c800ee117c5bd406"
+  ],
+  [
+   "hadron_ask_question",
+   "09b3c0b0d0c2143a3be58e2256a89c55cb975add5bd35df23c5d5c082f35057f"
+  ],
+  [
+   "hadron_get_question",
+   "68e56c8ee53562f8ed614506063cd2570d0cfde815afbe129191240a5bb043cc"
+  ],
+  [
+   "hadron_list_questions",
+   "b207469bfd715780a179327b7c10e036c2718a35ddaaa10d6aa199243ea33f69"
+  ],
+  [
+   "hadron_amend_question",
+   "d9126d34b967c8ff4d7f8a1dba010b5e1b8682e256efbe48e80b91777ddbd0c7"
+  ],
+  [
+   "hadron_withdraw_question",
+   "a44569b2bcf1ea8fd4ecb8891289cb74dd7c42f4123046f3f650c398710ba599"
+  ],
+  [
+   "hadron_answer_question",
+   "36e88bef9f3868da061978837dfa3a3ff5a7ce5f8be836aa60f61deb2ff47255"
+  ],
+  [
+   "hadron_retract_question_answer",
+   "bff7b3075f3244cee9ca1dbbd0ec369e2e665488573b913636cda6ffc586d664"
+  ],
+  [
    "hadron_set_asset_public_link",
    "4d757107b6dc076a32a4c18662460ec10442a370851a15746939e3a4f60c823a"
   ],
@@ -397,6 +429,38 @@
   [
    "hadron_reopen_comment_thread",
    "9ae33556abc21a2755a2db6d1a37a8c4ae4fc8c41bf81c969b8a75c4ec220bc2"
+  ],
+  [
+   "hadron_list_question_logs",
+   "78a1b1aa4731e461e893d4e038845306463642c7ee619535c800ee117c5bd406"
+  ],
+  [
+   "hadron_ask_question",
+   "09b3c0b0d0c2143a3be58e2256a89c55cb975add5bd35df23c5d5c082f35057f"
+  ],
+  [
+   "hadron_get_question",
+   "68e56c8ee53562f8ed614506063cd2570d0cfde815afbe129191240a5bb043cc"
+  ],
+  [
+   "hadron_list_questions",
+   "b207469bfd715780a179327b7c10e036c2718a35ddaaa10d6aa199243ea33f69"
+  ],
+  [
+   "hadron_amend_question",
+   "d9126d34b967c8ff4d7f8a1dba010b5e1b8682e256efbe48e80b91777ddbd0c7"
+  ],
+  [
+   "hadron_withdraw_question",
+   "a44569b2bcf1ea8fd4ecb8891289cb74dd7c42f4123046f3f650c398710ba599"
+  ],
+  [
+   "hadron_answer_question",
+   "36e88bef9f3868da061978837dfa3a3ff5a7ce5f8be836aa60f61deb2ff47255"
+  ],
+  [
+   "hadron_retract_question_answer",
+   "bff7b3075f3244cee9ca1dbbd0ec369e2e665488573b913636cda6ffc586d664"
   ],
   [
    "hadron_set_asset_public_link",
@@ -725,6 +789,38 @@
    "9ae33556abc21a2755a2db6d1a37a8c4ae4fc8c41bf81c969b8a75c4ec220bc2"
   ],
   [
+   "hadron_list_question_logs",
+   "78a1b1aa4731e461e893d4e038845306463642c7ee619535c800ee117c5bd406"
+  ],
+  [
+   "hadron_ask_question",
+   "09b3c0b0d0c2143a3be58e2256a89c55cb975add5bd35df23c5d5c082f35057f"
+  ],
+  [
+   "hadron_get_question",
+   "68e56c8ee53562f8ed614506063cd2570d0cfde815afbe129191240a5bb043cc"
+  ],
+  [
+   "hadron_list_questions",
+   "b207469bfd715780a179327b7c10e036c2718a35ddaaa10d6aa199243ea33f69"
+  ],
+  [
+   "hadron_amend_question",
+   "d9126d34b967c8ff4d7f8a1dba010b5e1b8682e256efbe48e80b91777ddbd0c7"
+  ],
+  [
+   "hadron_withdraw_question",
+   "a44569b2bcf1ea8fd4ecb8891289cb74dd7c42f4123046f3f650c398710ba599"
+  ],
+  [
+   "hadron_answer_question",
+   "36e88bef9f3868da061978837dfa3a3ff5a7ce5f8be836aa60f61deb2ff47255"
+  ],
+  [
+   "hadron_retract_question_answer",
+   "bff7b3075f3244cee9ca1dbbd0ec369e2e665488573b913636cda6ffc586d664"
+  ],
+  [
    "hadron_set_asset_public_link",
    "4d757107b6dc076a32a4c18662460ec10442a370851a15746939e3a4f60c823a"
   ],
@@ -1049,6 +1145,38 @@
   [
    "hadron_reopen_comment_thread",
    "9ae33556abc21a2755a2db6d1a37a8c4ae4fc8c41bf81c969b8a75c4ec220bc2"
+  ],
+  [
+   "hadron_list_question_logs",
+   "78a1b1aa4731e461e893d4e038845306463642c7ee619535c800ee117c5bd406"
+  ],
+  [
+   "hadron_ask_question",
+   "09b3c0b0d0c2143a3be58e2256a89c55cb975add5bd35df23c5d5c082f35057f"
+  ],
+  [
+   "hadron_get_question",
+   "68e56c8ee53562f8ed614506063cd2570d0cfde815afbe129191240a5bb043cc"
+  ],
+  [
+   "hadron_list_questions",
+   "b207469bfd715780a179327b7c10e036c2718a35ddaaa10d6aa199243ea33f69"
+  ],
+  [
+   "hadron_amend_question",
+   "d9126d34b967c8ff4d7f8a1dba010b5e1b8682e256efbe48e80b91777ddbd0c7"
+  ],
+  [
+   "hadron_withdraw_question",
+   "a44569b2bcf1ea8fd4ecb8891289cb74dd7c42f4123046f3f650c398710ba599"
+  ],
+  [
+   "hadron_answer_question",
+   "36e88bef9f3868da061978837dfa3a3ff5a7ce5f8be836aa60f61deb2ff47255"
+  ],
+  [
+   "hadron_retract_question_answer",
+   "bff7b3075f3244cee9ca1dbbd0ec369e2e665488573b913636cda6ffc586d664"
   ],
   [
    "hadron_set_asset_public_link",

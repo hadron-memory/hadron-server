@@ -133,6 +133,19 @@ describe('#4430 refusals keep the resolver\'s code and write nothing', () => {
   });
 });
 
+describe('#4430 impersonation: the Context carries it, so every write is refused as on GraphQL', () => {
+  it('an impersonated caller asking and answering is refused [question_impersonation_refused] and writes nothing', async () => {
+    const before = await db.node.count();
+    const imp = { impersonation: { by: admin.id, orgId: org.id } } as unknown as Partial<AuthContext>;
+    expect(code(await mcp(holder.id, imp).callToolText('hadron_ask_question', { logRef: logId, ...ASK }))).toBe('question_impersonation_refused');
+    expect(await db.node.count()).toBe(before);
+    const { text, urn } = await workerAsks();
+    expect(code(await mcp(holder.id, imp).callToolText('hadron_answer_question', { ref: urn, expectedRevision: revOf(text), optionKey: 'ship' })))
+      .toBe('question_impersonation_refused');
+    expect((await dataOf(urn)).data.answers).toHaveLength(0);
+  });
+});
+
 describe('#4430 answering: an agent never answers, a person on a plain session does', () => {
   it('the worker session of the asker is refused [question_not_decider], even though its holder decides', async () => {
     const { text, urn } = await workerAsks();
