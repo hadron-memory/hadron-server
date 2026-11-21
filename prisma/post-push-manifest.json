@@ -2,18 +2,6 @@
   "note": "Known-acceptable drift and raw-SQL object inventory for the migration smoke lane (#434). diff-whitelist: the exact `prisma migrate diff` lines the CI drift check may drop — each row names the object, its kind, and WHY the drift is acceptable; the filter (scripts/db/migrateDiffFilter.mjs) matches lines exactly, so any definition change re-surfaces as drift. This half is hand-maintained: a row whose line prisma no longer emits at all is pruned by hand on regen, and the smoke lane's own exact matching is what surfaces a changed line. post-push-owned: every durable object the prisma/post-push.sql closure creates — regenerate with scripts/db/gen-post-push-manifest.mjs; the completeness test (src/test/postPushManifest.test.ts) pins THIS half against the closure in both directions (a missing or stale row is red), and gen --check compares full rows (name, kind, file, why).",
   "diff-whitelist": [
     {
-      "name": "memories_user_id_idx",
-      "kind": "partial-index",
-      "why": "Transitional (#4335): the migrations build this index partial, which Prisma cannot see, so schema.prisma no longer declares it and prisma/partial-index-invariants.sql owns it. A database built by db push of a schema that still declared it full (main before #4335, as the smoke lane's baseline is for #4335's own PR) still has the full index, which the diff proposes to drop; post-push replaces it. Unmatched once no such baseline remains: prune with #4337.",
-      "line": "DROP INDEX \"memories_user_id_idx\";"
-    },
-    {
-      "name": "users_external_app_id_external_id_key",
-      "kind": "partial-index",
-      "why": "Transitional (#4335): the migrations build this index partial, which Prisma cannot see, so schema.prisma no longer declares it and prisma/partial-index-invariants.sql owns it. A database built by db push of a schema that still declared it full (main before #4335, as the smoke lane's baseline is for #4335's own PR) still has the full index, which the diff proposes to drop; post-push replaces it. Unmatched once no such baseline remains: prune with #4337.",
-      "line": "DROP INDEX \"users_external_app_id_external_id_key\";"
-    },
-    {
       "name": "node_embeddings_embedding_hnsw",
       "kind": "hnsw-index",
       "why": "pgvector HNSW index, created by raw SQL (post-push.sql on dev/test, the migration in prod — prod never runs post-push.sql). Prisma cannot express it, so the diff wants to DROP it; it must survive.",
@@ -1688,6 +1676,12 @@
       "kind": "generated-column",
       "file": "post-push.sql",
       "why": "STORED generated column maintained by Postgres; Prisma schema language does not model generated columns."
+    },
+    {
+      "name": "stamp_signing_keys.id",
+      "kind": "identity-column",
+      "file": "stamp-key-identity-invariants.sql",
+      "why": "Identity column the raw-SQL corpus attaches so dev and test match the migration (Prisma models it as autoincrement(), which db push builds as a sequence default)."
     },
     {
       "name": "agent_team_alarm_schedule_open_due_idx",
