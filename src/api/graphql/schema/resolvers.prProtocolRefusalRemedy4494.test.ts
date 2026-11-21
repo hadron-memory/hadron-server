@@ -39,7 +39,7 @@ describe('#4494 refusal texts name the remedy (rows 1-7)', () => {
   it('row 1: a new seat under an ended PR build task', async () => {
     await readyBuild(); await finishTask(build.id, author.id);
     await expect(child(build.id)).rejects.toMatchObject(refused('TASK_ENDED',
-      `This task is finished; an ended task never moves again. A review seat cannot be created under an ended build task. ${REMEDY}`));
+      `This task is finished; an ended task never moves again. A child task cannot be created under an ended build task. If it was meant as a review seat, post the verdict as a signed PR receipt at the exact head, which is the record when a seat cannot bind.`));
   });
   it('row 1 generic: a child under an ended ordinary task keeps the plain refusal, no PR advice', async () => {
     const plain = await M.createAgentTask!({}, { input: { appRef: app.id, title: 'Plain', source: 'synthetic', assignee: { user: author.id } } }, ctx(owner.id));
