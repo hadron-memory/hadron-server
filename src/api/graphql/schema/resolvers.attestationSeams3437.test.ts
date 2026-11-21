@@ -12,7 +12,7 @@ const hooks = vi.hoisted(() => ({ afterCheck: null as null | (() => Promise<void
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 vi.mock('../../../integrations/localFs/saveNodeToFs.js', () => ({ saveNodeToFs: vi.fn().mockResolvedValue({}) }));
-vi.mock('../../../integrations/r2/client.js', () => ({
+vi.mock('../../../integrations/objectstore/index.js', () => ({
   putObject: vi.fn().mockResolvedValue(undefined),
   deleteObject: vi.fn().mockResolvedValue(undefined),
 }));
@@ -33,7 +33,7 @@ vi.mock('../../../lib/authoringAttestation.js', async (importOriginal) => {
 });
 
 import { db } from '../../../integrations/db/client.js';
-import { deleteObject } from '../../../integrations/r2/client.js';
+import { deleteObject } from '../../../integrations/objectstore/index.js';
 import { createNode as controllerCreateNode } from '../../../controller/operations/createNode.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { parseDataKey, isCiphertext } from '../../../lib/crypto.js';

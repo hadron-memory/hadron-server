@@ -19,7 +19,7 @@ import { mountPublicAssetRoutes } from '../../api/assetPublic.js';
 import { setAssetPublicLink, canManageAssetPublicLink, PUBLIC_LINK_MEMORY_SELECT } from './publicLink.js';
 
 const mintGetUrlMock = vi.hoisted(() => vi.fn());
-vi.mock('../../integrations/r2/client.js', () => ({ mintGetUrl: mintGetUrlMock }));
+vi.mock('../../integrations/objectstore/index.js', () => ({ mintGetUrl: mintGetUrlMock }));
 
 const M = resolvers.Mutation as unknown as {
   setAssetPublicLink: (p: unknown, a: { assetRef: string; enabled: boolean }, c: Context) => Promise<{ id: string; publicLinkEnabled: boolean }>;
