@@ -112,8 +112,8 @@ BEGIN
   IF TG_OP = 'INSERT' THEN
     IF NEW.activated_at IS NOT NULL OR NEW.verification_kind IS NOT NULL OR NEW.verified_by IS NOT NULL
        OR NEW.signature_id IS NOT NULL OR NEW.revoked_by IS NOT NULL -- (revoked_at alone is refused by the pair CHECK)
-       OR NEW.use_count <> 0 OR NEW.version <> 1 OR NEW.holder_departed_at IS NOT NULL OR NEW.holder_departure_reason IS NOT NULL
-       OR NEW.withdrawn_at IS NOT NULL THEN
+       OR NEW.use_count <> 0 OR NEW.version <> 1 OR NEW.holder_departed_at IS NOT NULL OR NEW.withdrawn_at IS NOT NULL THEN
+      -- (#4180: a departure cause cannot arrive either: chk_grants_shape admits one only beside the departure stamp refused here)
       RAISE EXCEPTION 'grants must arrive pending' USING ERRCODE = '23514';
     END IF;
     -- The holder must exist and not have gone. FOR SHARE: a departure that updates the holder row waits for this row (and a

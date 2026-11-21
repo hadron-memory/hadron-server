@@ -74,6 +74,39 @@ describe('#4180: the cause is a fact of the departure, set with the stamp and ne
     expect(await cause(person)).toBe('USER_ERASED');
   });
 
+  it('the other halves: a person who only LEFT is not ERASED; a deleted worker is not RETIRED; a live agent is not DELETED, a deleted one did not lose an install', async () => {
+    // A live person with no membership in the grant App's organization: the stamp is admitted, but only as a leave.
+    const left = await active({ user_id: w.userId });
+    await db.orgMember.deleteMany({ where: { userId: w.userId, organizationId: w.orgId } });
+    await refused(exec(`${STAMP}, holder_departure_reason = 'USER_ERASED' WHERE id = $1`, left));
+    await exec(`${STAMP}, holder_departure_reason = 'ORG_REMOVED' WHERE id = $1`, left);
+    expect(await cause(left)).toBe('ORG_REMOVED');
+    // A worker whose row is gone, on a grant the delete trigger did not stamp (test-only: the trigger is off for that delete).
+    const gone = await active({ user_id: null, worker_id: w.workerId });
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE workers DISABLE TRIGGER workers_grant_holder_gone');
+      await tx.$executeRawUnsafe('DELETE FROM workers WHERE id = $1', w.workerId);
+      await tx.$executeRawUnsafe('ALTER TABLE workers ENABLE TRIGGER workers_grant_holder_gone');
+    });
+    await refused(exec(`${STAMP}, holder_departure_reason = 'WORKER_RETIRED' WHERE id = $1`, gone));
+    await exec(`${STAMP}, holder_departure_reason = 'WORKER_DELETED' WHERE id = $1`, gone);
+    expect(await cause(gone)).toBe('WORKER_DELETED');
+    // A live agent with no installation in the grant's App: it left the App, it was not deleted.
+    const uninstalled = await active({ user_id: null, agent_id: w.agentId });
+    await db.appAgent.deleteMany({ where: { agentId: w.agentId } });
+    await refused(exec(`${STAMP}, holder_departure_reason = 'AGENT_DELETED' WHERE id = $1`, uninstalled));
+    await exec(`${STAMP}, holder_departure_reason = 'AGENT_UNINSTALLED' WHERE id = $1`, uninstalled);
+    expect(await cause(uninstalled)).toBe('AGENT_UNINSTALLED');
+    // A soft-deleted agent: deleted, not uninstalled, whichever install-loss code is offered.
+    const deleted = await active({ user_id: null, agent_id: w.agentId });
+    await db.agent.update({ where: { id: w.agentId }, data: { deletedAt: new Date() } });
+    for (const wrong of ['AGENT_UNINSTALLED', 'AGENT_IMPORTER_UNINSTALLED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED']) {
+      await refused(exec(`${STAMP}, holder_departure_reason = $2 WHERE id = $1`, deleted, wrong));
+    }
+    await exec(`${STAMP}, holder_departure_reason = 'AGENT_DELETED' WHERE id = $1`, deleted);
+    expect(await cause(deleted)).toBe('AGENT_DELETED');
+  });
+
   it('endHeldGrants stamps the cause it is given, and only on grants it ends (first end stands)', async () => {
     const open = await active({ user_id: null, worker_id: w.workerId });
     const revoked = await active({ user_id: null, worker_id: w.workerId, revoked_at: raw(DB_NOW), revoked_by: w.userId });
