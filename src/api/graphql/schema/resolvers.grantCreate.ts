@@ -219,8 +219,13 @@ export async function createGrantForRun(principal: Context, run: { id: string; a
     if (error instanceof GrantRunGone) throw gone();
     if ((error instanceof GraphQLError && error.extensions?.code === 'FORBIDDEN') || (error instanceof Error && error.message === 'Forbidden')) {
       // An anchor refused under the lock: the agent was deleted first (the holder refusal), or the App, org or owner went (concealed).
+      // Re-read each anchor: a Forbidden while every anchor is still live is NOT an anchor refusal and propagates unchanged.
       const agent = await principal.db.agent.findFirst({ where: { id: agentId, deletedAt: null }, select: { id: true } });
-      throw agent ? gone() : holderGone();
+      if (!agent) throw holderGone();
+      const liveApp = await principal.db.app.findFirst({ where: { id: app.id, deletedAt: null }, select: { id: true } });
+      const liveOrg = !app.organizationId || (await principal.db.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } }));
+      const liveOwner = !app.ownerUserId || (await principal.db.user.findFirst({ where: { id: app.ownerUserId, deletedAt: null }, select: { id: true } }));
+      if (!liveApp || !liveOrg || !liveOwner) throw gone();
     }
     throw error;
   }

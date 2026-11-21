@@ -14,6 +14,7 @@ import { composeGrantUrn } from '../../entityRef/grantRef.js';
 import { listGrantsForRunAgent, type GrantView } from '../../grants/read.js';
 import { isRunPrincipal } from '../../auth/runPrincipal.js';
 import { createGrantForRun } from '../../../api/graphql/schema/resolvers.grantCreate.js';
+import { signingSurfacePolicy } from '../../signing/surface.js';
 import type { RunToolDef } from './types.js';
 
 const DEFAULT_LIMIT = 20;
@@ -100,11 +101,18 @@ export const hadronCreateGrant: RunToolDef = {
     if (keys.some((k) => !CREATE_KEYS.has(k))) throw createCode('GRANT_TERMS_INVALID', 'The grant\'s terms cannot be recorded.');
     if (typeof args.action !== 'string') throw createCode('GRANT_ACTION_UNKNOWN', 'That action is not registered.');
     if (typeof args.reason !== 'string') throw createCode('GRANT_TERMS_INVALID', 'The grant\'s terms cannot be recorded.');
-    if (args.maxUses !== undefined && args.maxUses !== null && (typeof args.maxUses !== 'number' || !Number.isSafeInteger(args.maxUses))) throw createCode('GRANT_TERMS_INVALID', 'The grant\'s terms cannot be recorded.');
+    // Signing off: the tool does not exist (resolveRunTools), and a run resolved while it was on does not keep it (read per call, here too).
+    if (!signingSurfacePolicy().signing) throw createCode('GRANT_TERMS_INVALID', 'The grant\'s terms cannot be recorded.');
+    // Every term the caller GIVES must be well formed: a malformed bound is refused, never read as absent (it would widen the grant).
+    const given = (v: unknown) => v !== undefined && v !== null;
+    if (given(args.maxUses) && (typeof args.maxUses !== 'number' || !Number.isSafeInteger(args.maxUses) || args.maxUses < 1)) throw createCode('GRANT_TERMS_INVALID', 'The grant\'s terms cannot be recorded.');
+    for (const t of [args.startsAt, args.expiresAt]) {
+      if (given(t) && (typeof t !== 'string' || Number.isNaN(new Date(t).getTime()))) throw createCode('GRANT_TERMS_INVALID', 'The grant\'s terms cannot be recorded.');
+    }
     const { id } = await createGrantForRun(principal, run, {
       action: args.action, values: args.values, reason: args.reason,
-      startsAt: typeof args.startsAt === 'string' ? args.startsAt : null, expiresAt: typeof args.expiresAt === 'string' ? args.expiresAt : null,
-      maxUses: typeof args.maxUses === 'number' ? args.maxUses : null,
+      startsAt: given(args.startsAt) ? (args.startsAt as string) : null, expiresAt: given(args.expiresAt) ? (args.expiresAt as string) : null,
+      maxUses: given(args.maxUses) ? (args.maxUses as number) : null,
     });
     // The values are never logged.
     ctx.log(`requested grant ${id} for ${args.action}`);

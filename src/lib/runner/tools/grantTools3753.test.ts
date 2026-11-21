@@ -60,7 +60,7 @@ describe('hadron_create_grant (#3753)', () => {
     expect(await events()).toHaveLength(0);
   });
 
-  it('B18: the run column is null on a worker- or manager-made row and the append-only guard refuses changing it', async () => {
+  it('B18: the run column is append-only: the guard refuses changing or clearing it', async () => {
     const run = await mintRun(w.appId, w.agentId);
     const { id } = await ask(run);
     await expect(db.$executeRawUnsafe('UPDATE grants SET requested_by_run_id = $2 WHERE id = $1', id, generateId())).rejects.toThrow();
@@ -113,7 +113,7 @@ describe('hadron_create_grant (#3753)', () => {
     expect(await events()).toHaveLength(0);
   });
 
-  it('B5: not installed, soft-deleted or unlicensed: refused with the holder code, no row', async () => {
+  it('B5: not installed or soft-deleted: refused with the holder code, no row', async () => {
     const run = await mintRun(w.appId, w.agentId);
     await db.appAgent.deleteMany({ where: { appId: w.appId, agentId: w.agentId } });
     expect(await refused(ask(run))).toBe('GRANT_HOLDER_NOT_ALLOWED');
@@ -169,7 +169,7 @@ describe('hadron_create_grant (#3753)', () => {
     expect(await rows()).toHaveLength(0);
   });
 
-  it('B16: an entry node that does not exist, is in another org, or is unreadable gets the same answer', async () => {
+  it('B16: an entry node that does not exist or is in another org gets the same answer', async () => {
     const run = await mintRun(w.appId, w.agentId);
     const org = await db.organization.create({ data: { name: 'f', urn: `f-${generateId().slice(0, 6)}.test` } });
     const memory = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:kb`, name: 'kb', class: 'knowledge', visibility: 'ORGANIZATION' } as never });
@@ -201,8 +201,7 @@ describe('hadron_create_grant (#3753)', () => {
     await expect(admitAndExecuteTool(hadronCreateGrant, { action: 'schedule.create', values: { entryNode: 'bad id' }, reason: 'secretish' }, { toolCtx: c, onToolCall: async () => true }))
       .rejects.toMatchObject({ name: 'ToolExecutionError' });
     await ask(run).then(() => undefined);
-    const log = (ctxOf(run).log as ReturnType<typeof vi.fn>);
-    expect(log).not.toHaveBeenCalled();
+    expect(c.log as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
     const c2 = ctxOf(run);
     await hadronCreateGrant.execute(c2, { action: 'schedule.create', values: entry(), reason: 'do not log me' });
     const lines = (c2.log as ReturnType<typeof vi.fn>).mock.calls.map((x) => String(x[0]));
@@ -219,6 +218,25 @@ describe('hadron_create_grant (#3753)', () => {
     expect(off.unknown).toEqual(['hadron_create_grant']);
     expect(off.tools.map((t) => t.name)).not.toContain('hadron_create_grant');
     vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
+  });
+
+  it('signing gate at execute: a run resolved while signing was on writes nothing once it is off', async () => {
+    const run = await mintRun(w.appId, w.agentId);
+    vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'false');
+    expect(await refused(ask(run))).toBe('GRANT_TERMS_INVALID');
+    vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
+    expect(await rows()).toHaveLength(0);
+  });
+
+  it('a term the caller gives that is malformed is refused, never read as absent (it would widen the grant)', async () => {
+    const run = await mintRun(w.appId, w.agentId);
+    for (const bad of [{ startsAt: 5 }, { expiresAt: {} }, { expiresAt: 'not a date' }, { startsAt: 'x' }, { expiresAt: true }, { maxUses: 0 }, { maxUses: -1 }, { maxUses: 1.5 }, { maxUses: '3' }]) {
+      expect(await refused(ask(run, bad)), JSON.stringify(bad)).toBe('GRANT_TERMS_INVALID');
+    }
+    expect(await rows()).toHaveLength(0);
+    await ask(run, { expiresAt: new Date(Date.now() + 86400000).toISOString(), maxUses: 2 });
+    expect((await rows())[0]).toMatchObject({ max_uses: 2 });
+    expect((await rows())[0].expires_at).not.toBeNull();
   });
 
   it('B14 (structural only): no non-run caller reaches the run arm: the tool refuses any principal that is not THIS run (isRunPrincipal and clientId run:<runId>), and its schema has no holder, App or activation key', async () => {
@@ -257,18 +275,6 @@ describe('hadron_create_grant (#3753)', () => {
       }
       throw new Error('the call never blocked on a lock');
     }
-    async function whileCallWaits<T>(hold: (tx: any) => Promise<void>, start: () => Promise<T>): Promise<T> {
-      let release!: () => void; const held = new Promise<void>((r) => { release = r; });
-      let locked!: () => void; const taken = new Promise<void>((r) => { locked = r; });
-      const holder = db.$transaction(async (tx) => { await hold(tx); locked(); await held; await (tx as any).__after?.(); }, { timeout: 30000 });
-      await taken;
-      const call = start();
-      call.catch(() => undefined);
-      await waitUntilBlocked();
-      release();
-      await holder;
-      return call;
-    }
 
     it('B9a: deleteAgent holds the agent anchor and commits first: the create waits, is refused (holder), writes nothing', async () => {
       const run = await mintRun(w.appId, w.agentId);
@@ -287,7 +293,7 @@ describe('hadron_create_grant (#3753)', () => {
       expect(await rows()).toHaveLength(0);
     });
 
-    it('B9b: the create commits first: the row exists pending, and the deleter (waiting on the shared anchor) then proceeds', async () => {
+    it('B9b (sequential, not a race): the create finishes first: the row exists pending, and the agent delete that follows succeeds', async () => {
       const run = await mintRun(w.appId, w.agentId);
       await ask(run);
       await db.agent.update({ where: { id: w.agentId }, data: { deletedAt: new Date() } });
