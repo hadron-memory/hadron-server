@@ -162,7 +162,7 @@ describe('#4461 — every other site answers the same', () => {
     );
     expectOneAnswer(err, 'destLoc', 'invalid-charset');
   });
-  it('createEdge WITHOUT a loc: a derived loc over the cap is accepted (two ~300-char node locs), as on main', async () => {
+  it('createEdge WITHOUT a loc: a derived loc over the cap is accepted (two ~250-char node locs; the name is slugified, so only the total can exceed the cap), as on main', async () => {
     const long = (c: string) => Array.from({ length: 6 }, (_, i) => `${c}${'x'.repeat(40)}${i}`).join(':'); // ~250
     const a = await db.node.create({ data: { id: generateId(), memoryId, loc: `${long('a')}`, name: 'a', nodeType: 'info' } });
     const b = await db.node.create({ data: { id: generateId(), memoryId, loc: `${long('b')}`, name: 'b', nodeType: 'info' } });
@@ -194,6 +194,19 @@ describe('#4461 — every other site answers the same', () => {
     expect(body.errors).toBeUndefined();
     expect(body.data!.createEdge.loc).toBe('n1-a:has-space-and-colon:n1-b');
     expect(() => validateLoc(body.data!.createEdge.loc)).not.toThrow();
+    // a name over 64 characters is cut to one valid atom, not refused
+    const long = await fetch(`${baseUrl}/graphql`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${jwt}` },
+      body: JSON.stringify({
+        query: `mutation($s: ID!, $t: ID!, $n: String) { createEdge(sourceRef: $s, targetRef: $t, name: $n) { loc } }`,
+        variables: { s: b.id, t: a.id, n: `${'w'.repeat(100)} tail` },
+      }),
+    });
+    const lb = (await long.json()) as { errors?: unknown; data?: { createEdge: { loc: string } } };
+    expect(lb.errors).toBeUndefined();
+    expect(lb.data!.createEdge.loc).toBe(`n1-b:${'w'.repeat(64)}:n1-a`);
+    expect(() => validateLoc(lb.data!.createEdge.loc)).not.toThrow();
   });
   it('a caller-supplied edge loc: 512 accepted, 513 refused too-long', async () => {
     const mkLoc = (n: number) => Array.from({ length: Math.ceil(n / 11) }, (_, i) => `q${String(i).padStart(9, '0')}`).join(':').slice(0, n).replace(/[^A-Za-z0-9]+$/, 'z');

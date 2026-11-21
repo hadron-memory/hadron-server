@@ -159,7 +159,7 @@ describe('renumberSpec (#1449)', () => {
   });
 
   it('#4461: toLoc is held to the loc contract (bad charset and over-cap refuse BAD_USER_INPUT, field toLoc, no echo)', async () => {
-    for (const [toLoc, reason] of [['pas:04 0', 'invalid-charset'], [`pas:${'a'.repeat(60)}`.padEnd(513, ':b'), 'too-long']] as const) {
+    for (const [toLoc, reason] of [['pas:04 0', 'invalid-charset'], [Array.from({ length: 10 }, (_, i) => `seg${i}${'x'.repeat(48)}`).join(':').padEnd(513, 'z'), 'too-long']] as const) {
       const err = await renumber(true, 'pas:010', toLoc).then(() => null, (e: GraphQLError) => e);
       expect(err?.extensions).toMatchObject({ code: 'BAD_USER_INPUT', field: 'toLoc', reason });
       expect(JSON.stringify([err?.message, err?.extensions])).not.toContain(toLoc);
@@ -176,10 +176,12 @@ describe('renumberSpec (#1449)', () => {
     expect(await db.node.count({ where: { memoryId: draft.id, loc: 'pas:050', deletedAt: null } })).toBe(1);
   });
 
-  it('#4461: an unknown fromLoc refuses without echoing a bad-charset value (field fromLoc)', async () => {
-    const err = await renumber(true, 'pas:01 0', 'pas:050').then(() => null, (e: GraphQLError) => e);
-    expect(err?.extensions).toMatchObject({ code: 'BAD_USER_INPUT', field: 'fromLoc', reason: 'invalid-charset' });
-    expect(JSON.stringify([err?.message, err?.extensions])).not.toContain('pas:01 0');
+  it('#4461: a bad-charset fromLoc refuses the same way at any length, without echo (field fromLoc)', async () => {
+    for (const fromLoc of ['pas:01 0', `${Array.from({ length: 15 }, () => 'a'.repeat(40)).join(':')}:b c`]) {
+      const err = await renumber(true, fromLoc, 'pas:050').then(() => null, (e: GraphQLError) => e);
+      expect(err?.extensions).toMatchObject({ code: 'BAD_USER_INPUT', field: 'fromLoc', reason: 'invalid-charset' });
+      expect(JSON.stringify([err?.message, err?.extensions])).not.toContain(fromLoc);
+    }
   });
 
   it('dry run: returns the plan and writes nothing', async () => {

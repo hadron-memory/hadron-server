@@ -3891,8 +3891,10 @@ export const nodeMutations = {
       // already refuse with their own typed codes.
       assertStorableText({ name, loc, description, data, condition });
       // #4461: only a CALLER-SUPPLIED loc is held to the contract (incl. the total cap). A derived loc is
-      // `<src>:<name>:<tgt>` from two already-valid node locs, so it can exceed the cap through no fault of the
-      // caller's input; refusing it as field `loc` would blame a field never sent (as on main, it is accepted).
+      // `<src>:<name>:<tgt>`: two already-valid node locs and the name slugified to one valid atom of at most 64
+      // characters (`deriveEdgeLoc`), so it is valid by construction and only its TOTAL can exceed the cap, through
+      // no fault of the caller's input; refusing it as field `loc` would blame a field never sent (as on main, it is
+      // accepted).
       const callerLoc = loc != null && loc !== '';
       if (callerLoc) validateLocOrThrow(loc, 'loc');
       const edgeLoc = callerLoc ? loc : deriveEdgeLoc(src.loc, name ?? null, tgt.loc);

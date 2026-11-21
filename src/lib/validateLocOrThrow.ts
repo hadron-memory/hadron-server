@@ -32,9 +32,13 @@ export const LOC_MAX_TOTAL_LENGTH = 512;
  * Reason typing: `InvalidLocError.reason` is the closed union `'empty' | 'invalid-charset' | 'too-long'`
  * (validateLoc.ts), and `REASON_TEXT` below is a `Record` over exactly that union, so a new reason fails to compile
  * here until it has text.
+ *
+ * `uncapped` skips ONLY the total-length cap, for an argument that names an EXISTING node (renumberSpec's `fromLoc`):
+ * an over-cap node stays addressable, while the charset and atom rules still refuse a malformed value the same way at
+ * any length, so a refusal never echoes one.
  */
-export function validateLocOrThrow(loc: string, field: string): void {
-  if (loc.length > LOC_MAX_TOTAL_LENGTH) throw badLoc(field, 'too-long');
+export function validateLocOrThrow(loc: string, field: string, opts?: { uncapped?: boolean }): void {
+  if (!opts?.uncapped && loc.length > LOC_MAX_TOTAL_LENGTH) throw badLoc(field, 'too-long');
   try {
     validateLoc(loc);
   } catch (e) {

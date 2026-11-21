@@ -54,7 +54,7 @@ import { NOT_QUESTION_FAMILY_WHERE } from '../../../lib/questions/index.js';
 import { unresolvedFeedbackOf, type UnresolvedFeedbackRow } from '../../../lib/comments/summary.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { SubtreeMoveMintedError } from '../../../lib/nodeSubtreeMove.js';
-import { LOC_MAX_TOTAL_LENGTH, validateLocOrThrow } from '../../../lib/validateLocOrThrow.js';
+import { validateLocOrThrow } from '../../../lib/validateLocOrThrow.js';
 import {
   SCANNED_FIELDS,
   corpusReferencePattern,
@@ -1142,9 +1142,9 @@ export const specCorpusRenumberMutations = {
     // existing over-cap spec must still be renumberable. Only `toLoc`, what the caller writes, is held to the
     // contract; descendants are not re-capped (the gate is the contract unification, not a new subtree cap).
     validateLocOrThrow(toLoc, 'toLoc');
-    // Not capped, but a value that cannot be a loc at all is refused without echo rather than echoed back in the
-    // refusals below; an over-cap one passes unchecked (it can only be an existing node, or a NODE_NOT_FOUND miss).
-    if (fromLoc.length <= LOC_MAX_TOTAL_LENGTH) validateLocOrThrow(fromLoc, 'fromLoc');
+    // Not capped (an existing over-cap spec still renumbers), but charset and atoms are checked at any length, so a
+    // malformed `fromLoc` is refused without echo rather than reaching the NODE_NOT_FOUND message below.
+    validateLocOrThrow(fromLoc, 'fromLoc', { uncapped: true });
     if (fromLoc === toLoc || toLoc.startsWith(`${fromLoc}:`)) {
       throw new GraphQLError(`Cannot renumber "${fromLoc}" to "${toLoc}": the target is the spec itself or inside its subtree.`, {
         extensions: { code: 'BAD_USER_INPUT' },
