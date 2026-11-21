@@ -120,6 +120,39 @@ describe('#3329 a soft delete that commits after the preflight', () => {
   });
 });
 
+describe('#3329 the FOR SHARE fence against a concurrent deleteMemory (Rook SEC10 P3)', () => {
+  it.each(['deleteNodeRevision', 'clearNodeHistory'] as const)('%s waits on a held memory row lock and refuses once the tombstone commits', async mutation => {
+    const missing = await refusal(mutation === 'deleteNodeRevision'
+      ? resolvers.Mutation.deleteNodeRevision(null, { revisionId: generateId() }, as(contributorId))
+      : resolvers.Mutation.clearNodeHistory(null, { nodeRef: generateId() }, as(contributorId)));
+    let release!: () => void; let locked!: () => void;
+    const gate = new Promise<void>(r => { release = r; }); const holding = new Promise<void>(r => { locked = r; });
+    // deleteMemory's shape: lock the memory row FOR UPDATE, then tombstone it, then commit.
+    const deleter = db.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memory.id} FOR UPDATE`;
+      locked(); await gate;
+      await tx.memory.update({ where: { id: memory.id }, data: { deletedAt: new Date() } });
+    }, { timeout: 15000 });
+    await holding;
+    const prune = mutation === 'deleteNodeRevision'
+      ? resolvers.Mutation.deleteNodeRevision(null, { revisionId }, as(contributorId))
+      : resolvers.Mutation.clearNodeHistory(null, { nodeRef: node.id }, as(contributorId));
+    const outcome = refusal(prune);
+    // Release once the prune is blocked on a row lock (a row-lock wait is a Lock wait in pg_stat_activity, not a
+    // relation entry in pg_locks), or after a bound well inside the prune's own 5s transaction timeout.
+    for (let i = 0; i < 40; i++) {
+      const [{ waiting }] = await db.$queryRaw<Array<{ waiting: bigint }>>`
+        SELECT count(*) AS waiting FROM pg_stat_activity
+        WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%FROM memories%FOR SHARE%'`;
+      if (Number(waiting) > 0) break;
+      await new Promise(r => setTimeout(r, 50));
+    }
+    release(); await deleter;
+    expect(await outcome).toEqual(missing);
+    expect(await revisionCount()).toBe(2);
+  }, 20000);
+});
+
 describe('#3329 the shared helper\'s third caller: updateNodeRevision (unchanged behaviour)', () => {
   it('a label edit through a tombstoned memory is answered exactly like a nonexistent revision, for every caller', async () => {
     await tombstone();
