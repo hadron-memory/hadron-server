@@ -8,16 +8,17 @@ import { signJwt } from './jwt.js';
 import { issueLoginCode } from './authHandoff.js';
 
 // Every new mounted charge point, including the connect confirmation POST that consumes a nonce.
-const routes: Array<[string, string]> = [
-  ['GET', '/auth/github'], ['GET', '/auth/github/callback'],
-  ['GET', '/auth/google'], ['GET', '/auth/google/callback'],
-  ['GET', '/auth/apple'], ['POST', '/auth/apple/callback'],
-  ['GET', '/auth/email/verify'], ['POST', '/auth/session'], ['GET', '/auth/me'],
-  ['GET', '/oauth/authorize'], ['POST', '/oauth/authorize'], ['POST', '/oauth/token'],
+type RefusalStyle = 'rest' | 'oauth';
+const routes: Array<[string, string, RefusalStyle]> = [
+  ['GET', '/auth/github', 'rest'], ['GET', '/auth/github/callback', 'rest'],
+  ['GET', '/auth/google', 'rest'], ['GET', '/auth/google/callback', 'rest'],
+  ['GET', '/auth/apple', 'rest'], ['POST', '/auth/apple/callback', 'rest'],
+  ['GET', '/auth/email/verify', 'rest'], ['POST', '/auth/session', 'rest'], ['GET', '/auth/me', 'rest'],
+  ['GET', '/oauth/authorize', 'oauth'], ['POST', '/oauth/authorize', 'oauth'], ['POST', '/oauth/token', 'oauth'],
   ...['microsoft', 'gmail', 'google-cal', 'google-drive'].flatMap(p => [
-    ['POST', `/auth/${p}/start`], ['GET', `/auth/${p}`],
-    ['POST', `/auth/${p}`], ['GET', `/auth/${p}/callback`],
-  ] as Array<[string, string]>),
+    ['POST', `/auth/${p}/start`, 'rest'], ['GET', `/auth/${p}`, 'rest'],
+    ['POST', `/auth/${p}`, 'rest'], ['GET', `/auth/${p}/callback`, 'rest'],
+  ] as Array<[string, string, RefusalStyle]>),
 ];
 let server: Server | undefined;
 let base: string;
@@ -42,7 +43,7 @@ beforeEach(async () => {
 afterAll(async () => { vi.restoreAllMocks(); await closeServerIfStarted(server); });
 
 describe('#419 auth-route admission', () => {
-  it.each(routes)('%s %s refuses before its handler once the shared IP budget is spent', async (method, path) => {
+  it.each(routes)('%s %s refuses before its handler once the shared IP budget is spent', async (method, path, style) => {
     expect((await request('GET', '/auth/me')).status).toBe(401);
     const before = await db.rateLimitBucket.findMany();
     const refused = await request(method, path);
@@ -51,8 +52,8 @@ describe('#419 auth-route admission', () => {
     expect(refused.headers.get('cache-control')).toBe('no-store');
     const body = await refused.json();
     expect(body).toMatchObject({ code: 'RATE_LIMITED', fieldClass: 'CREDENTIALS', retryAfterSeconds: expect.any(Number),
-      error: path.startsWith('/oauth/') ? 'temporarily_unavailable' : 'RATE_LIMITED' });
-    if (path.startsWith('/oauth/')) expect(body).toHaveProperty('error_description', 'Too many requests.');
+      error: style === 'oauth' ? 'temporarily_unavailable' : 'RATE_LIMITED' });
+    if (style === 'oauth') expect(body).toHaveProperty('error_description', 'Too many requests.');
     else expect(body).not.toHaveProperty('error_description');
     expect(await db.rateLimitBucket.findMany()).toEqual(before);
   }, RATE_WINDOW_TEST_TIMEOUT_MS);
@@ -96,26 +97,45 @@ describe('#419 auth-route admission', () => {
 
   it('an impersonation JWT does not charge the target principal', async () => {
     const target = await db.user.create({ data: { handle: 'auth-rate-imp-target-419', roles: ['READER'] } });
+    await db.rateLimitPolicy.update({ where: { fieldClass: 'CREDENTIALS' }, data: { principalLimit: 1, ipLimit: 100 } });
     const token = await signJwt({ sub: target.id, roles: [],
-      imp: { sid: 'not-an-auth-session', act: 'support-actor', org: 'support-org' } });
+      imp: { sid: 'support-claim-419', act: 'support-actor', org: 'support-org' } });
     const response = await request('GET', '/auth/me', { Authorization: `Bearer ${token}` });
-    // Admission must not treat a verified support token's sub as a login principal,
-    // regardless of the downstream handler's existing response to that token.
-    expect(response.status).not.toBe(429);
+    // The exact handler refusal proves verification succeeded and reached its imp branch;
+    // this route rejects every signed imp claim without looking up the support session.
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: 'Impersonation tokens are not accepted here' });
     const rows = await db.rateLimitBucket.findMany();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ dimension: 'ip', used: 1n });
+    // Same sub and roles without imp: it is authenticated and spends this target's
+    // one principal allowance, so a second ordinary request must be throttled.
+    const ordinary = await signJwt({ sub: target.id, roles: [] });
+    const auth = { Authorization: `Bearer ${ordinary}` };
+    const admitted = await request('GET', '/auth/me', auth);
+    expect(admitted.status).toBe(200);
+    expect(await admitted.json()).toMatchObject({ id: target.id });
+    expect(await db.rateLimitBucket.count({ where: { dimension: 'principal' } })).toBe(1);
+    expect((await request('GET', '/auth/me', auth)).status).toBe(429);
   }, RATE_WINDOW_TEST_TIMEOUT_MS);
 
   it('a spent Apple callback budget refuses before oversized form parsing', async () => {
+    // beforeEach installs a one-request IP budget. Spend it before the form.
     expect((await request('GET', '/auth/me')).status).toBe(401);
     const before = await db.rateLimitBucket.findMany();
-    const response = await fetch(base + '/auth/apple/callback', { method: 'POST',
+    const post = () => fetch(base + '/auth/apple/callback', { method: 'POST', redirect: 'manual',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: 'code=' + 'x'.repeat(110 * 1024) });
+    const response = await post();
     expect(response.status).toBe(429);
+    expect(Number(response.headers.get('retry-after'))).toBeGreaterThan(0);
+    expect(response.headers.get('cache-control')).toBe('no-store');
     expect(await response.json()).toMatchObject({ error: 'RATE_LIMITED', code: 'RATE_LIMITED' });
     expect(await db.rateLimitBucket.findMany()).toEqual(before);
+    // The same bytes exceed the actual mounted parser's limit when admitted;
+    // changing that limit cannot silently make the ordering test vacuous.
+    await db.rateLimitPolicy.update({ where: { fieldClass: 'CREDENTIALS' }, data: { ipLimit: 100 } });
+    expect((await post()).status).toBe(413);
   }, RATE_WINDOW_TEST_TIMEOUT_MS);
 
   it('keeps LOG_ONLY counting over-limit attempts without refusing', async () => {
