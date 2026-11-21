@@ -6,6 +6,9 @@ import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { generateId } from '../id.js';
 import { upsertPlatformActions } from '../grants/actions.js';
 import * as appKeys from './appKeys.js';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
+import { formatGraphQLError } from '../../api/graphql/formatError.js';
 
 let appId: string, secretId: string;
 let manager: Context, member: Context, other: Context, fourth: Context;
@@ -58,6 +61,27 @@ describe('#3999 requester budgets', () => {
     for (const ctx of [member, member, manager, manager, other]) staged(await store(ctx));
     expect(await store(other)).toEqual({ code: 'SECRET_CHANGE_REQUEST_LIMIT' });
     expect(await db.secretChangeRequest.count({ where: { appId, state: 'open' } })).toBe(5);
+  });
+
+  it('returns the requester limit over GraphQL without a staged request id', async () => {
+    staged(await store(member));
+    staged(await store(member));
+    const api = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
+    try {
+      await api.start();
+      const result = await api.executeOperation({
+        query: 'mutation($ref:ID!){updateSecret(ref:$ref,value:"wire-canary"){id}}',
+        variables: { ref: secretId },
+      }, { contextValue: member });
+      expect(result.body.kind).toBe('single');
+      if (result.body.kind !== 'single') throw new Error('single response required');
+      expect(result.body.singleResult.errors).toHaveLength(1);
+      expect(result.body.singleResult.errors![0].extensions).toMatchObject({ code: 'SECRET_CHANGE_REQUESTER_LIMIT' });
+      expect(result.body.singleResult.errors![0].extensions).not.toHaveProperty('requestId');
+      expect(await db.secretChangeRequest.count({ where: { appId } })).toBe(2);
+    } finally {
+      await api.stop();
+    }
   });
 
   it('does not count withdrawn or already expired requests against either limit', async () => {
@@ -122,9 +146,12 @@ describe('#3999 requester budgets', () => {
       b = create(limit === 'requester' ? member : fourth, name);
       let waited = false;
       for (let i = 0; i < 200; i++) {
-        const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_stat_activity
-          WHERE datname=current_database() AND wait_event_type='Lock' AND wait_event='advisory'
-          AND pid<>pg_backend_pid()`;
+        const lockKey = `hadron:secret-change:${appId}:${name}`;
+        const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n
+          FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid
+          WHERE a.datname=current_database() AND l.locktype='advisory' AND NOT l.granted
+          AND l.classid::bigint=((hashtext(${lockKey})::bigint >> 32) & 4294967295)
+          AND l.objid::bigint=(hashtext(${lockKey})::bigint & 4294967295) AND l.objsubid=1`;
         if (Number(n) > 0) { waited = true; break; }
         await new Promise(resolve => setTimeout(resolve, 10));
       }

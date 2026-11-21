@@ -236,6 +236,7 @@ export const secretMutations = {
     }, async (tx) => {
       if (!(await lockSecretRow(tx, found.id))) throw notFound();
       const secret = await tx.secret.findUniqueOrThrow({ where: { id: found.id } });
+      if (protect && secret.protected) throw badInput('Secret is already protected.');
       const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
       return stageSecretChange(tx, ctx, { appId: secret.ownerId, secretId: secret.id, name: secret.name, kind: secret.kind,
         metadata: secret.metadata, operation: protect ? 'SET_PROTECTED' : 'CLEAR_PROTECTED', snapshot: changeSnapshot(secret, latest?.versionNo ?? 0) });
@@ -508,9 +509,10 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
   await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
   // The refusals that depend only on the INPUT come first, before the secret is looked up: judged after it, a stranger could tell an
   // existing secret from a missing one by which refusal came back (existence oracle, Rook's partial §10 at f610b2e5).
-  // #4434: an agent holder (or an App) is not built here, and a read client nothing can read must never exist: refuse before any write.
-  if (input.holderKind === 'AGENT' || input.holderKind === 'APP') {
-    throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A read client is held by a person or a worker.');
+  // #4434: an AGENT holder is read through the role agent's live workers (cor:sec:060:02). An APP holder has no reveal path (use by its
+  // own runs is S5, #4000), and a read client nothing can read must never exist: refuse it before any write.
+  if (input.holderKind === 'APP') {
+    throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A read client is held by a person, a worker or an agent.');
   }
   const startsAt = asTime(input.startsAt);
   const expiresAt = asTime(input.expiresAt);
@@ -522,10 +524,14 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
   if (!found || found.ownerType !== 'app') throw denied();
   const app = await loadLiveApp(ctx, found.ownerId);
   if (!app) throw denied();
+  // An agent holder is anchored under its own authority anchor, after the App's (every door orders them so), only if it exists and is not
+  // deleted: an unknown id falls through to the one GRANT_HOLDER_NOT_ALLOWED inside the transaction (as createAsManager does).
+  const agentAnchor = input.holderKind === 'AGENT' && typeof input.holderRef === 'string'
+    && (await ctx.db.agent.findFirst({ where: { id: input.holderRef, deletedAt: null }, select: { id: true } })) ? input.holderRef : null;
   try {
     return await withAuthorizedTx(
       ctx,
-      appAnchors(app),
+      [...appAnchors(app), ...(agentAnchor ? [{ kind: 'agent' as const, id: agentAnchor }] : [])],
       async (txCtx) => {
         if (!(await lockSecretRow(txCtx.db as never, found.id))) throw authorizationDenied();
         await requireSecretReadClientIssuer(txCtx, found.id, input.autoDelete);
@@ -535,7 +541,7 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
         const issuance = await requireSecretReadClientIssuer({ ...txCtx, db: tx } as Context, found.id, input.autoDelete);
         const holder = input.holderKind === 'USER'
           ? { kind: 'user' as const, id: input.holderRef || userId }
-          : { kind: 'worker' as const, id: input.holderRef ?? '' };
+          : { kind: input.holderKind === 'AGENT' ? 'agent' as const : 'worker' as const, id: input.holderRef ?? '' };
         if (holder.kind === 'user' && !(await appMember({db:tx, userId:holder.id, roles:[]} as unknown as Context, app.id))) {
           throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A person holder must participate in this App.');
         }
@@ -549,7 +555,7 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
         const grantId = await createPendingGrant(tx, {
           appId: app.id, requester: { userId, workerId: null, sessionId: null }, holder,
           action: 'secret.reveal', values: { secret: found.id, 'auto-delete': input.autoDelete ? 'delete' : 'keep' },
-          startsAt, expiresAt, maxUses, reason: input.reason, canReadMemory: async () => false,
+          startsAt, expiresAt, maxUses, reason: input.reason, canReadMemory: async () => false, heldAgentAnchor: agentAnchor,
         });
         const clientId = generateId();
         const selfIssued = holder.kind === 'user' && holder.id === userId;

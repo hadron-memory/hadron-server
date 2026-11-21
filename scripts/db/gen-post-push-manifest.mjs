@@ -51,6 +51,7 @@ const KIND_WHY = {
   'foreign-key-constraint': 'Foreign key created and owned by the raw-SQL corpus, not modeled in schema.prisma as written.',
   'unique-constraint': 'Table-level UNIQUE constraint defined in raw SQL; not expressible in the Prisma schema as written.',
   'generated-column': 'STORED generated column maintained by Postgres; Prisma schema language does not model generated columns.',
+  'identity-column': 'Identity column the raw-SQL corpus attaches so dev and test match the migration (Prisma models it as autoincrement(), which db push builds as a sequence default).',
   function: 'Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely.',
   trigger: 'Trigger wiring an invariant to its table; lives outside the Prisma schema entirely.',
   table: 'Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma.',

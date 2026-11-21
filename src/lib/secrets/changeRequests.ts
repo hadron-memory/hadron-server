@@ -11,6 +11,7 @@ import { getProjectBaseUrl } from '../baseUrl.js';
 
 export const SECRET_CHANGE_TTL_SECONDS = 3600;
 export const MAX_OPEN_SECRET_CHANGES = 5;
+export const MAX_OPEN_SECRET_CHANGES_PER_REQUESTER = 2;
 export const SECRET_CHANGE_PATH = '/secret-changes';
 export type ChangeOperation = 'STORE' | 'DELETE' | 'SET_PROTECTED' | 'CLEAR_PROTECTED';
 export interface ChangeRequest {
@@ -37,9 +38,11 @@ export async function stageSecretChange(tx: Prisma.TransactionClient, ctx: Conte
  const requester = await requirePersonOnlyAct({ ...ctx, db: tx } as Context, 'secret.change', needsPasskey);
  // A protected create has no secret row to lock: its name lock also serializes ordinary creates at completion.
  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`hadron:secret-change:${a.appId}:${a.name}`}))`;
- const [{ n }] = await tx.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM secret_change_requests
+ const [{ n, requester_n }] = await tx.$queryRaw<Array<{ n: bigint; requester_n: bigint }>>`SELECT count(*) AS n,
+  count(*) FILTER (WHERE requester_id=${requester}) AS requester_n FROM secret_change_requests
   WHERE app_id=${a.appId} AND secret_name=${a.name} AND state='open' AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC')`;
  if (Number(n) >= MAX_OPEN_SECRET_CHANGES) throw new GraphQLError('Too many open secret changes.', { extensions: { code: 'SECRET_CHANGE_REQUEST_LIMIT' } });
+ if (Number(requester_n) >= MAX_OPEN_SECRET_CHANGES_PER_REQUESTER) throw new GraphQLError('Too many open secret changes for this requester.', { extensions: { code: 'SECRET_CHANGE_REQUESTER_LIMIT' } });
  const id = randomBytes(16).toString('hex');
  let ciphertext: string | null = null, keyVersion: number | null = null;
  if (a.valueJson !== undefined) {
