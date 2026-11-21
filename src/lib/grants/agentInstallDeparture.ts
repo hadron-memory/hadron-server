@@ -14,7 +14,7 @@
  * revives nothing (the SQL guard never lets the stamp clear).
  */
 import type { Prisma } from '../../generated/prisma/index.js';
-import { lockAppInstallations, resolveAppInstallation } from '../appInstallations.js';
+import { lockAppInstallationsFenced, resolveAppInstallation } from '../appInstallations.js';
 import { removeRegisterRowsForUninstall } from '../registerInstall.js';
 import { endAgentGrantsAtApps, type AgentDepartureReason } from './departure.js';
 
@@ -34,8 +34,8 @@ export async function endGrantsOfAgentsNoLongerInstalled(
   const byApp = new Map<string, string[]>();
   for (const p of unique) byApp.set(p.appId, [...(byApp.get(p.appId) ?? []), p.agentId]);
   const departed: AppAgentPair[] = [];
+  await lockAppInstallationsFenced(tx, byApp); // every App's structure, then every agent in ONE global pass (#4715)
   for (const [appId, agentIds] of byApp) {
-    await lockAppInstallations(tx, appId, agentIds, { fenceAgents: true });
     for (const agentId of agentIds) {
       if (!(await resolveAppInstallation(tx, appId, agentId))) departed.push({ appId, agentId });
     }

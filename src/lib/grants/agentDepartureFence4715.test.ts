@@ -12,7 +12,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Client } from 'pg';
 import { PrismaClient } from '../../generated/prisma/index.js';
-import { lockAppInstallations } from '../appInstallations.js';
+import { lockAppInstallations, lockAppInstallationsFenced } from '../appInstallations.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
@@ -201,5 +201,53 @@ describe('#4715 the judge locks the agents in ONE id-ordered pass, each row at i
 
   it('fenceAgents without the agents to fence is refused, not silently a SHARE lock', async () => {
     await expect(db.$transaction((tx) => lockAppInstallations(tx, appId, undefined, { fenceAgents: true }))).rejects.toThrow(/fenceAgents needs the agents/);
+  });
+});
+
+/** Every agent-row lock a transaction takes, in order: [txIndex, 'SHARE' | 'NKU', agentId]. A wrapper around `db` whose transactions log their raw statements. */
+function lockRecorder() {
+  const log: Array<[number, 'SHARE' | 'NKU', string]> = [];
+  let txCount = 0;
+  const wrapTx = (tx: any, index: number) => new Proxy(tx, {
+    get(target, prop) {
+      if (prop === '$queryRaw') {
+        return (strings: TemplateStringsArray, ...values: unknown[]) => {
+          const text = Array.isArray(strings) ? strings.join('?') : String(strings);
+          const m = /FROM agents WHERE id (?:= \?|= ANY\(\?\)).*?FOR (SHARE|NO KEY UPDATE)/s.exec(text);
+          if (m) for (const v of values.flat()) if (typeof v === 'string') log.push([index, m[1] === 'SHARE' ? 'SHARE' : 'NKU', v]);
+          return (target as any).$queryRaw(strings, ...values);
+        };
+      }
+      const v = (target as any)[prop];
+      return typeof v === 'function' ? v.bind(target) : v;
+    },
+  });
+  const spyDb = new Proxy(db, {
+    get(target, prop) {
+      if (prop === '$transaction') {
+        return (fn: any, opts?: unknown) => typeof fn === 'function'
+          ? (target as any).$transaction((tx: any) => fn(wrapTx(tx, ++txCount)), opts)
+          : (target as any).$transaction(fn, opts);
+      }
+      const v = (target as any)[prop];
+      return typeof v === 'function' ? v.bind(target) : v;
+    },
+  }) as typeof db;
+  return { log, spyDb };
+}
+
+describe('#4715 the judge takes its agents in ONE pass across all Apps, in the database\'s id order (BLIND P2s, Bindi)', () => {
+  it('two Apps whose named agents sort opposite to the Apps lock the agents in the database\'s order, not App by App', async () => {
+    const app2 = (await db.app.create({ data: { id: generateId(), name: 'F App 2', urn: 'f4715.example:app2', organizationId: orgId } })).id;
+    // ids that sort differently in the database (en_US collation ignores punctuation first) and in JavaScript (code units)
+    const x = (await db.agent.create({ data: { id: 'ag-2', name: 'x', urn: 'f4715.example:ag-2', organizationId: orgId } })).id;
+    const y = (await db.agent.create({ data: { id: 'ag1', name: 'y', urn: 'f4715.example:ag1', organizationId: orgId } })).id;
+    const dbOrder = (await db.$queryRaw<Array<{ id: string }>>`SELECT id FROM agents WHERE id = ANY(${[x, y]}) ORDER BY id`).map((r) => r.id);
+    const appOrder = (await db.$queryRaw<Array<{ id: string }>>`SELECT id FROM apps WHERE id = ANY(${[appId, app2]}) ORDER BY id`).map((r) => r.id);
+    // the first App (in the database's order) names the agent that sorts LAST, the second names the one that sorts first
+    const byApp = new Map<string, string[]>([[appOrder[0]!, [dbOrder[1]!]], [appOrder[1]!, [dbOrder[0]!]]]);
+    const rec = lockRecorder();
+    await rec.spyDb.$transaction((tx) => lockAppInstallationsFenced(tx as never, byApp));
+    expect(rec.log.map(([, mode, id]) => `${mode}:${id}`)).toEqual(dbOrder.map((id) => `NKU:${id}`));
   });
 });

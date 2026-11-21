@@ -223,18 +223,9 @@ export async function resolveUnfilteredAppInstallation(
     return { ...row, installationKind: 'ROW', importerAgentId: null };
   return (await listUnfilteredAppInstallations(db, appId, agentId))[0] ?? null;
 }
-/** Fence the deciding witness, not a preflight snapshot. Deletion of either a
- * join or an import conflicts with these row locks. Re-read after waits, under
- * READ COMMITTED, so a remover that won cannot leave stale derived authority.
- * Call before content/Worker writes, with the caller's authority anchors held.
- */
-export async function lockAppInstallations(
-  tx: Prisma.TransactionClient,
-  appId: string,
-  agentIds?: string[],
-  opts: { fenceAgents?: boolean } = {},
-): Promise<AppInstallation[]> {
-  await tx.$queryRaw`SELECT id FROM apps WHERE id=${appId} FOR SHARE`;
+/** The structural locks of one App (the App row, its app_agents rows, the import edges that name them), in the established order. */
+async function lockInstallStructure(tx: Prisma.TransactionClient, appId: string, agentIds?: string[], appLocked = false) {
+  if (!appLocked) await tx.$queryRaw`SELECT id FROM apps WHERE id=${appId} FOR SHARE`;
   const targets = agentIds ?? [];
   const rows = await tx.$queryRaw<Array<{ agent_id: string }>>`
     SELECT aa.agent_id FROM app_agents aa WHERE aa.app_id=${appId}
@@ -250,27 +241,72 @@ export async function lockAppInstallations(
     WHERE parent_agent_id=ANY(${rowIds}::text[])
       AND (${agentIds === undefined} OR imported_agent_id=ANY(${targets}::text[]))
     ORDER BY parent_agent_id,imported_agent_id FOR SHARE`;
-  // #4715: a DEPARTURE judge (agentInstallDeparture, the lapse sweep) fences the agents it names, FOR NO KEY UPDATE, at the place
-  // the agents are locked (apps, app_agents, agent_imports, then agents; no new order). createGrant and the insert guard hold the
-  // agent row FOR SHARE, so a create whose guarded insert is uncommitted makes the judge wait and then see its grant, and a
-  // create that comes after waits and reads the install gone. The named agents are locked even with no witness left (an
-  // uninstalled agent has no app_agents row, so the witness-derived set would not contain it). Only the NAMED agents are
-  // strengthened: the witnesses (a parent, an imported agent) stay FOR SHARE, so two judges over the same parents do not conflict on them.
-  // ONE pass, id order, a row at a time at its own strength (BLIND P2): the named set and the witness set are not locked as two
-  // sorted phases, since a named agent of one judge that is a witness of another would then be taken in the opposite order by the two.
-  // A row is locked once, at its strongest, so a row is never SHARE then NO KEY UPDATE (two judges would deadlock on the upgrade).
-  // `ORDER BY id` is the repository's lock order for every multi-row lock; a single pass keeps the agents in it.
-  if (opts.fenceAgents && agentIds === undefined) throw new Error('lockAppInstallations: fenceAgents needs the agents to fence');
-  const fence = new Set(opts.fenceAgents && agentIds ? agentIds : []);
-  const ids = [...new Set([...rowIds, ...edges.map((edge) => edge.imported_agent_id), ...fence])].sort();
-  if (!ids.length) return [];
-  if (fence.size === 0) await tx.$queryRaw`SELECT id FROM agents WHERE id = ANY(${ids}) ORDER BY id FOR SHARE`;
-  else {
-    for (const id of ids) {
-      if (fence.has(id)) await tx.$queryRaw`SELECT id FROM agents WHERE id = ${id} FOR NO KEY UPDATE`;
-      else await tx.$queryRaw`SELECT id FROM agents WHERE id = ${id} FOR SHARE`;
-    }
+  return { rowIds, edges };
+}
+
+/**
+ * Lock agent rows in ONE pass, in the DATABASE's id order, each row once at its own strength: `fence` ids FOR NO KEY UPDATE, the rest
+ * FOR SHARE. The order comes from `ORDER BY id` in the database, not a JS sort: the two disagree under a non-C collation, and every
+ * other multi-row lock in the repository takes its order from the database. A row is never SHARE then NO KEY UPDATE (two
+ * transactions would deadlock on the upgrade). Ids that name no row lock nothing.
+ */
+async function lockAgentRows(tx: Prisma.TransactionClient, witnesses: ReadonlySet<string>, fence: ReadonlySet<string>) {
+  const all = [...new Set([...witnesses, ...fence])];
+  if (!all.length) return;
+  if (fence.size === 0) {
+    await tx.$queryRaw`SELECT id FROM agents WHERE id = ANY(${all}) ORDER BY id FOR SHARE`;
+    return;
   }
+  const ordered = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM agents WHERE id = ANY(${all}) ORDER BY id`;
+  for (const { id } of ordered) {
+    if (fence.has(id)) await tx.$queryRaw`SELECT id FROM agents WHERE id = ${id} FOR NO KEY UPDATE`;
+    else await tx.$queryRaw`SELECT id FROM agents WHERE id = ${id} FOR SHARE`;
+  }
+}
+
+/**
+ * #4715: the locks a DEPARTURE judge (agentInstallDeparture, the lapse sweep) takes over every App it judges. All the Apps'
+ * structural locks first (in App id order, as before), then the agents of ALL the Apps in one global pass: the agents it names FOR
+ * NO KEY UPDATE, the witnesses (a parent, an imported agent) FOR SHARE. createGrant and the insert guard hold the agent row FOR SHARE,
+ * so a create whose guarded insert is uncommitted makes the judge wait and then see its grant, and a create that comes after waits and
+ * reads the install gone. The named agents are locked even with no witness left (an uninstalled agent has no app_agents row, so
+ * the witness-derived set would not contain it). One global pass, not one per App (BLIND P2s on #4795): per-App passes are each
+ * sorted, but two transactions that reach the same agents through different Apps would take them in opposite orders.
+ */
+export async function lockAppInstallationsFenced(tx: Prisma.TransactionClient, byApp: ReadonlyMap<string, readonly string[]>): Promise<void> {
+  const witnesses = new Set<string>();
+  const fence = new Set<string>();
+  const wanted = [...byApp.keys()].filter((id) => byApp.get(id)!.length > 0);
+  if (!wanted.length) return;
+  // The Apps in the database's id order, locked in one statement (an App that does not exist locks nothing and is skipped).
+  const apps = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM apps WHERE id = ANY(${wanted}) ORDER BY id FOR SHARE`;
+  for (const { id: appId } of apps) {
+    const agentIds = [...new Set(byApp.get(appId)!)];
+    const { rowIds, edges } = await lockInstallStructure(tx, appId, agentIds, true);
+    for (const id of rowIds) witnesses.add(id);
+    for (const e of edges) witnesses.add(e.imported_agent_id);
+    for (const id of agentIds) fence.add(id);
+  }
+  await lockAgentRows(tx, witnesses, fence);
+}
+
+/** Fence the deciding witness, not a preflight snapshot. Deletion of either a
+ * join or an import conflicts with these row locks. Re-read after waits, under
+ * READ COMMITTED, so a remover that won cannot leave stale derived authority.
+ * Call before content/Worker writes, with the caller's authority anchors held.
+ * `fenceAgents` (#4715, a departure door's own early lock, so the later judge never upgrades the row): the named agents are taken
+ * FOR NO KEY UPDATE, as lockAppInstallationsFenced does.
+ */
+export async function lockAppInstallations(
+  tx: Prisma.TransactionClient,
+  appId: string,
+  agentIds?: string[],
+  opts: { fenceAgents?: boolean } = {},
+): Promise<AppInstallation[]> {
+  if (opts.fenceAgents && agentIds === undefined) throw new Error('lockAppInstallations: fenceAgents needs the agents to fence');
+  const { rowIds, edges } = await lockInstallStructure(tx, appId, agentIds);
+  const witnesses = new Set([...rowIds, ...edges.map((edge) => edge.imported_agent_id)]);
+  await lockAgentRows(tx, witnesses, new Set(opts.fenceAgents && agentIds ? agentIds : []));
   // No witness introduced after the fences can contribute to the decision.
   // Re-read only these exact held rows/edges after all waits and lifecycle locks.
   const installs = await listUnfilteredAppInstallations(tx, appId, undefined, {
@@ -285,8 +321,9 @@ export async function lockAppInstallation(
   tx: Prisma.TransactionClient,
   appId: string,
   agentId: string,
+  opts: { fenceAgents?: boolean } = {},
 ): Promise<AppInstallation | null> {
-  return (await lockAppInstallations(tx, appId, [agentId]))[0] ?? null;
+  return (await lockAppInstallations(tx, appId, [agentId], opts))[0] ?? null;
 }
 
 /** Physical rows retain reinstall/reset semantics. Derived customisation lives
