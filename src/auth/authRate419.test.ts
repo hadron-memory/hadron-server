@@ -49,7 +49,11 @@ describe('#419 auth-route admission', () => {
     expect(refused.status).toBe(429);
     expect(Number(refused.headers.get('retry-after'))).toBeGreaterThan(0);
     expect(refused.headers.get('cache-control')).toBe('no-store');
-    expect(await refused.json()).toMatchObject({ code: 'RATE_LIMITED', fieldClass: 'CREDENTIALS', retryAfterSeconds: expect.any(Number) });
+    const body = await refused.json();
+    expect(body).toMatchObject({ code: 'RATE_LIMITED', fieldClass: 'CREDENTIALS', retryAfterSeconds: expect.any(Number),
+      error: path.startsWith('/oauth/') ? 'temporarily_unavailable' : 'RATE_LIMITED' });
+    if (path.startsWith('/oauth/')) expect(body).toHaveProperty('error_description', 'Too many requests.');
+    else expect(body).not.toHaveProperty('error_description');
     expect(await db.rateLimitBucket.findMany()).toEqual(before);
   }, RATE_WINDOW_TEST_TIMEOUT_MS);
 
@@ -88,6 +92,30 @@ describe('#419 auth-route admission', () => {
       expect((await request('GET', '/oauth/authorize', { ...headers, 'X-Forwarded-For': '198.51.100.21' })).status).toBe(429);
       expect(await db.rateLimitBucket.count({ where: { dimension: 'principal' } })).toBe(1);
     } finally { app.set('trust proxy', ['203.0.113.0/24']); }
+  }, RATE_WINDOW_TEST_TIMEOUT_MS);
+
+  it('an impersonation JWT does not charge the target principal', async () => {
+    const target = await db.user.create({ data: { handle: 'auth-rate-imp-target-419', roles: ['READER'] } });
+    const token = await signJwt({ sub: target.id, roles: [],
+      imp: { sid: 'not-an-auth-session', act: 'support-actor', org: 'support-org' } });
+    const response = await request('GET', '/auth/me', { Authorization: `Bearer ${token}` });
+    // Admission must not treat a verified support token's sub as a login principal,
+    // regardless of the downstream handler's existing response to that token.
+    expect(response.status).not.toBe(429);
+    const rows = await db.rateLimitBucket.findMany();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ dimension: 'ip', used: 1n });
+  }, RATE_WINDOW_TEST_TIMEOUT_MS);
+
+  it('a spent Apple callback budget refuses before oversized form parsing', async () => {
+    expect((await request('GET', '/auth/me')).status).toBe(401);
+    const before = await db.rateLimitBucket.findMany();
+    const response = await fetch(base + '/auth/apple/callback', { method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'code=' + 'x'.repeat(110 * 1024) });
+    expect(response.status).toBe(429);
+    expect(await response.json()).toMatchObject({ error: 'RATE_LIMITED', code: 'RATE_LIMITED' });
+    expect(await db.rateLimitBucket.findMany()).toEqual(before);
   }, RATE_WINDOW_TEST_TIMEOUT_MS);
 
   it('keeps LOG_ONLY counting over-limit attempts without refusing', async () => {
