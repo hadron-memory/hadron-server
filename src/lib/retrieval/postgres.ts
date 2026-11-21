@@ -8,6 +8,7 @@ import { openThreadsSql } from '../comments/openThreads.js';
  * tsquery expression (tsquery.ts). Vector search delegates to the existing
  * pgvector helpers.
  */
+import { Prisma } from '../../generated/prisma/index.js';
 import { contentScopeSql, effectiveContentScope } from '../comments/scope.js';
 import { approvalStateSql, mintedSql } from '../nodeApproval.js';
 import type {
@@ -152,6 +153,32 @@ const REGEX_FIELD_SQL: Record<string, string> = {
 };
 const REGEX_DEFAULT_FIELDS = ['name', 'alias', 'loc', 'tags', 'description', 'abstract', 'content'];
 
+/**
+ * #2772 — the structured filters (cor:api:090:02, incl. `where`), the deleted rule and the caller's exclusions as
+ * one `AND ne.node_id IN (SELECT id FROM nodes …)` fragment for the vector statement, compiled by the SAME
+ * `filterClause` the lexical legs use so the legs cannot disagree on scope. Absent filter ⇒ no fragment (the
+ * callers that pass none keep their own predicates).
+ */
+function vectorFilterSql(opts: VectorSearchOpts): Prisma.Sql | undefined {
+  // BLIND P2 (#4665): `includeDeleted` alone must still reach the statement, or the default deleted rule (applied only when
+  // no fragment exists) would hide tombstones from a caller who asked for them, while ANY other filter would show them.
+  if (!opts.filter && !opts.excludeNodeIds?.length && !opts.includeDeleted) return undefined;
+  const { params, bind } = paramBuilder();
+  const mem = opts.memoryIds.map((m) => bind(m)).join(', ');
+  const deleted = opts.includeDeleted ? '' : 'AND deleted_at IS NULL';
+  const exclude = opts.excludeNodeIds?.length ? `AND id <> ALL(${bind(opts.excludeNodeIds)}::text[])` : '';
+  const text = `AND ne.node_id IN (SELECT id FROM nodes WHERE memory_id IN (${mem}) ${deleted}${filterClause(opts.filter, bind)} ${exclude})`;
+  // Re-express the positional $n placeholders as a Prisma.Sql so the fragment composes with the tagged queries.
+  const parts = text.split(/\$(\d+)/);
+  const strings: string[] = [];
+  const values: unknown[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 0) strings.push(parts[i]!);
+    else values.push(params[Number(parts[i]) - 1]);
+  }
+  return Prisma.sql(Object.assign(strings, { raw: strings }) as unknown as TemplateStringsArray, ...values);
+}
+
 export const postgresRetrievalProvider: NodeRetrievalProvider = {
   async lexicalSearch(opts: LexicalSearchOpts): Promise<LexicalHit[]> {
     if (opts.memoryIds.length === 0) return [];
@@ -289,6 +316,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
 
   vectorSearch(opts: VectorSearchOpts): Promise<VectorHit[]> {
     return vectorSearchNodes(opts.db, {
+      filterSql: vectorFilterSql(opts),
       memoryIds: opts.memoryIds,
       queryEmbedding: opts.queryEmbedding,
       limit: opts.limit,
@@ -302,6 +330,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
 
   vectorSearchChunks(opts: VectorSearchOpts): Promise<ChunkHit[]> {
     return vectorSearchChunks(opts.db, {
+      filterSql: vectorFilterSql(opts),
       memoryIds: opts.memoryIds,
       queryEmbedding: opts.queryEmbedding,
       limit: opts.limit,

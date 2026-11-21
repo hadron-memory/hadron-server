@@ -158,8 +158,8 @@ export const typeDefs = `#graphql
   by as (text|number|datetime|boolean). number/datetime route through the same DB
   guards, so a missing or unparseable value sorts LAST regardless of direction;
   loc ascending breaks ties for stable pagination. Overrides the sort enum when
-  present. On vector/hybrid modes it re-orders the retrieved candidate window (the
-  ranking runs against the vector index, not the JSONB), like the sort enum does.
+  present. On vector/hybrid modes offset/limit are taken by relevance and this orders only
+  that page (#2772, hrn:node:hadronmemory.com:specs:cor:api:090:04), like the sort enum does.
   """
   input NodePropertySort {
     "Path of object keys into the column, e.g. ['stage']."
@@ -250,7 +250,7 @@ export const typeDefs = `#graphql
     both nodeType and nodeTypes (an empty string counts as set), more than 20 entries (counted
     before duplicates are dropped), and a list containing "comment" (search comments with nodeType
     or contentScope). Exact total where the mode already has one; vector and hybrid keep total
-    null and their bounded, widening candidate window. Applies to findNodes and appNodes.
+    null and have no candidate cap (the filters run inside the vector query); the one bound is on the page itself: an offset + limit window past 20000 rows is cut there and reports stopped_early. Applies to findNodes and appNodes.
     """
     nodeTypes: [String!]
     """
@@ -341,7 +341,9 @@ export const typeDefs = `#graphql
     multi-term keyword query matched nothing under AND, so it was retried as
     OR and these hits match ANY term), scope_narrowed (spec 049: the scope
     this search ran under lists memories you cannot read; they were dropped
-    and \`scope.droppedCount\` says how many).
+    and \`scope.droppedCount\` says how many), stopped_early (#2772: a vector
+    or hybrid search ran out of its work budget before the page was complete;
+    \`reason\` is also stopped_early when the page is empty).
     """
     degraded: String
     "Spec 049 (D-2026-09-13-002): what this search was produced under. Null when no scope applied (the pre-049 accessible set, optionally org-narrowed)."
