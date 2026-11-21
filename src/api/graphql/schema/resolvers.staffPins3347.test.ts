@@ -30,10 +30,18 @@ let f: any;
 const live = { kind: 'LIVE_CHAT', ref: 'client-chat:turn-3347' };
 const ctx = (extra: Partial<Context> = {}): Context => ({ db, userId: f.holder.id, roles: ['READER'], ...extra });
 const bound = (extra: Partial<Context> = {}) => ctx({ sessionId: f.session.id, ...extra });
-const answer = async (p: Promise<unknown>) => {
+/** What a door answered: `RESOLVED` with its value, or the refusal's code and text. (#4740 F5: `value` is typed, so no cast at the use.) */
+type Answer = { code: string | undefined; message?: string; value?: unknown };
+const answer = async (p: Promise<unknown>): Promise<Answer> => {
   try { const value = await p; return { code: 'RESOLVED', value }; } catch (e: any) { return { code: e.extensions?.code, message: e.message }; }
 };
-const calls: Record<string, (instruction?: unknown, c?: Context) => Promise<any>> = {
+/** Every door either matrix runs, and the six the substitution matrix runs (cast and preview pin theirs in resolvers.staffMember3308.test.ts).
+ *  The per-door tables below are keyed by these unions, so a door added without its entry, or a typo, is a compile error (#4740 F3). */
+const DOORS = ['cast', 'retire', 'delete', 'deletePreview', 'add', 'remove', 'preview', 'leave'] as const;
+type Door = (typeof DOORS)[number];
+const SUBSTITUTION_DOORS = ['retire', 'delete', 'deletePreview', 'add', 'remove', 'leave'] as const;
+type SubstitutionDoor = (typeof SUBSTITUTION_DOORS)[number];
+const calls: Record<Door, (instruction?: unknown, c?: Context) => Promise<any>> = {
   cast: (instruction, c = bound()) => M.castWorker({}, { appRef: f.app.id, agentRef: f.agent.id, name: 'NewWorker', noTeam: true, instruction }, c),
   retire: (instruction, c = bound()) => M.retireWorker({}, { workerRef: f.target.id, instruction }, c),
   delete: (instruction, c = bound()) => M.deleteWorker({}, { workerRef: f.target.id, confirmNoExternalAttribution: true, instruction }, c),
@@ -49,18 +57,33 @@ const snapshot = async () => ({
   events: await db.agentTeamEvent.findMany({ where: { appId: f.app.id }, orderBy: { id: 'asc' } }),
   grants: await db.appGrant.findMany({ where: { appId: f.app.id }, orderBy: { id: 'asc' } }),
 });
-const grantName = (door: string) => (door === 'add' || door === 'remove' || door === 'leave' ? 'APP_MEMBERS' : 'WORKERS_STAFF');
-const storedName = (door: string) => (grantName(door) === 'APP_MEMBERS' ? 'app.members' : 'workers.staff');
-const give = (door: string, workerId = f.worker.id) => M.grantApp({}, { appRef: f.app.id, workerRef: workerId, name: grantName(door) }, ctx());
+const grantName = (door: Door) => (door === 'add' || door === 'remove' || door === 'leave' ? 'APP_MEMBERS' : 'WORKERS_STAFF');
+const storedName = (door: Door) => (grantName(door) === 'APP_MEMBERS' ? 'app.members' : 'workers.staff');
+const give = (door: Door, workerId = f.worker.id) => M.grantApp({}, { appRef: f.app.id, workerRef: workerId, name: grantName(door) }, ctx());
 /**
- * Who or what each door acts on (its target, subject or new name). The grantee-site pins put a live grant on the BYSTANDER and read a
- * refusal as the grantee predicate alone; that holds only while no door names the bystander (a target-specific refusal could then
- * pass for it). #4740 N7: enforced here and per test, not just assumed in a comment.
+ * What each door acts on, by KIND (#4740 N7, F1). The grantee-site pins put a live grant on the BYSTANDER, a worker, and read a refusal
+ * as the grantee predicate alone; that holds only while no door names that worker. A door names a worker by id (retire, delete,
+ * deletePreview) or by NAME (cast, preview mint one), or acts on USERS (add, remove, leave), which can never be the bystander worker,
+ * so for those three the guard is the OBSERVED one in every test: the bystander's row is unchanged and no new event names it.
  */
-const actsOn = (door: string): string[] => ({
-  cast: ['NewWorker', 'Casted'], preview: ['Preview'], retire: [f.target.id], delete: [f.target.id], deletePreview: [f.target.id],
-  add: [f.other.id], remove: [f.other.id], leave: [f.holder.id],
-}[door] ?? []);
+type Acts = { workerIds: string[]; workerNames: string[]; userIds: string[] };
+const actsOn = (door: Door): Acts => {
+  const none: Acts = { workerIds: [], workerNames: [], userIds: [] };
+  const table: Record<Door, Acts> = {
+    cast: { ...none, workerNames: ['NewWorker', 'Casted'] }, preview: { ...none, workerNames: ['Preview'] },
+    retire: { ...none, workerIds: [f.target.id] }, delete: { ...none, workerIds: [f.target.id] }, deletePreview: { ...none, workerIds: [f.target.id] },
+    add: { ...none, userIds: [f.other.id] }, remove: { ...none, userIds: [f.other.id] }, leave: { ...none, userIds: [f.holder.id] },
+  };
+  return table[door];
+};
+/** The precondition, per kind: no worker id and no worker name a door uses is the bystander's. */
+const expectBystanderUntargeted = (door: Door) => {
+  const acts = actsOn(door);
+  expect(acts.workerIds, `${door} names no worker id of the bystander`).not.toContain(f.bystander.id);
+  expect(acts.workerNames, `${door} names no worker called like the bystander`).not.toContain(f.bystander.name);
+};
+/** Pairwise distinct, with the colliding ids in the message. */
+const expectDistinct = (what: string, ids: string[]) => expect(new Set(ids).size, `${what} must be pairwise distinct: ${ids.join(', ')}`).toBe(ids.length);
 const bystanderRow = () => db.worker.findUniqueOrThrow({ where: { id: f.bystander.id } });
 
 beforeEach(async () => {
@@ -120,7 +143,7 @@ function hookQuery(when: RegExp, hook: (tx: any) => Promise<void>, phase: 'befor
 }
 
 describe('#3347 each locked grant predicate is isolated (name, grantee)', () => {
-  for (const door of ['cast', 'retire', 'delete', 'deletePreview', 'add', 'remove', 'preview', 'leave']) {
+  for (const door of DOORS) {
     for (const site of ['name', 'grantee'] as const) {
       it(`${door}: a live grant differing only in ${site} cannot stand in for the revoked one at the locked check`, async () => {
         await give(door);
@@ -138,7 +161,7 @@ describe('#3347 each locked grant predicate is isolated (name, grantee)', () => 
         }, 'before');
         const before = await snapshot();
         const bystander = await bystanderRow();
-        expect(actsOn(door), `no door may act on the bystander (${door})`).not.toContain(f.bystander.id);
+        expectBystanderUntargeted(door);
         expect((await answer(calls[door](undefined, bound({ db: client })))).code).toBe('FORBIDDEN');
         expect(fired()).toBe(true);
         expect(await snapshot()).toEqual(before);
@@ -194,8 +217,10 @@ describe('#3347 preflight-to-locked Session-principal substitution (the doors ca
   // #4740 N3: the swap is recorded BY TRANSACTION, not as a boolean. `opened()` counts the transactions the door opened through the
   // client and `swappedAt()` lists which of them (1-based) had the Session swapped, so a door that opened a second transaction, or a
   // swap that landed in the wrong one, shows in the assertion instead of reading as "swapped".
-  const setup = async (door: string, substitute: boolean) => {
+  const setup = async (door: SubstitutionDoor, substitute: boolean) => {
     const third = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: f.app.id, agentId: f.agent.id, name: 'Third', slug: 'third', heldByUserId: f.holder.id } });
+    // the substitute is a worker of its own: neither the caller, the act's target nor the bystander (#4740 F1)
+    expectDistinct('the bystander, the caller, the target and the substitute', [f.bystander.id, f.worker.id, f.target.id, third.id]);
     await give(door); await give(door, third.id);
     let opened = 0;
     const swappedAt: number[] = [];
@@ -216,24 +241,23 @@ describe('#3347 preflight-to-locked Session-principal substitution (the doors ca
   // only that the excluded caller is refused with nothing changed; the wording is the door's own).
   const WORKERS = 'You are not authorized to manage workers in this App.';
   const REMOVAL = 'Forbidden: only org admins, App owners, or the user themselves can remove members';
-  const refusal: Record<string, string> = {
+  const refusal: Record<SubstitutionDoor, string> = {
     retire: WORKERS, delete: WORKERS, deletePreview: WORKERS,
     add: 'Forbidden: only org admins or App owners can manage members', remove: REMOVAL, leave: REMOVAL,
   };
   // #4740 N2: what each control's act did, as a before/after diff of the App's rows (not only RESOLVED). `deletePreview` writes
   // nothing and returns its attestation payload; the others change exactly the rows named here.
-  const tookEffect = (door: string, before: Awaited<ReturnType<typeof snapshot>>, after: Awaited<ReturnType<typeof snapshot>>, value: any) => {
+  const tookEffect = (door: SubstitutionDoor, before: Awaited<ReturnType<typeof snapshot>>, after: Awaited<ReturnType<typeof snapshot>>, value: any) => {
     const worker = (rows: typeof before.workers, id: string) => rows.find((w: any) => w.id === id);
     const member = (rows: typeof before.members, id: string) => rows.find((m: any) => m.userId === id);
-    const others = (rows: any[], key: string, skip: string) => rows.filter((r) => r[key] !== skip);
+    const others = <T,>(rows: T[], idOf: (row: T) => string, skip: string) => rows.filter((row) => idOf(row) !== skip);
     expect(after.events.length, `${door}: one staffing event recorded`).toBe(door === 'deletePreview' ? before.events.length : before.events.length + 1);
     if (door === 'retire') {
       expect(worker(before.workers, f.target.id)!.retiredAt).toBeNull();
       expect(worker(after.workers, f.target.id)!.retiredAt).not.toBeNull();
-      expect(others(after.workers, 'id', f.target.id)).toEqual(others(before.workers, 'id', f.target.id));
+      expect(others(after.workers, (w) => w.id, f.target.id)).toEqual(others(before.workers, (w) => w.id, f.target.id));
     } else if (door === 'delete') {
-      expect(worker(after.workers, f.target.id)).toBeUndefined();
-      expect(after.workers).toEqual(others(before.workers, 'id', f.target.id));
+      expect(after.workers).toEqual(others(before.workers, (w) => w.id, f.target.id)); // only the target is gone, nothing else moved
     } else if (door === 'deletePreview') {
       expect(value).toEqual({ workerId: f.target.id, attestationRequired: true });
       expect(after.workers).toEqual(before.workers);
@@ -241,30 +265,33 @@ describe('#3347 preflight-to-locked Session-principal substitution (the doors ca
     } else if (door === 'add') {
       expect(member(before.members, f.other.id)!.role).toBe('reader');
       expect(member(after.members, f.other.id)!.role).toBe('member');
+      expect(others(after.members, (m) => m.userId, f.other.id)).toEqual(others(before.members, (m) => m.userId, f.other.id)); // no other member row moved
+      expect(after.workers).toEqual(before.workers); // and no worker row
     } else if (door === 'remove') {
       expect(member(after.members, f.other.id)).toBeUndefined();
-      expect(after.members).toEqual(others(before.members, 'userId', f.other.id));
+      expect(after.members).toEqual(others(before.members, (m) => m.userId, f.other.id));
     } else {
       expect(member(after.members, f.holder.id)).toBeUndefined();
-      expect(after.members).toEqual(others(before.members, 'userId', f.holder.id));
+      expect(after.members).toEqual(others(before.members, (m) => m.userId, f.holder.id));
     }
   };
-  for (const door of ['retire', 'delete', 'deletePreview', 'add', 'remove', 'leave']) {
+  for (const door of SUBSTITUTION_DOORS) {
     // The positive control: the same fixture and the same two grants, with NO substitution, is admitted. So the refusal below
     // is the principal comparison, not an earlier refusal for another reason (a sole owner leaving, a missing grant, ...).
     it(`${door}: control without the substitution is admitted and its act took effect`, async () => {
       const { client, opened, swappedAt } = await setup(door, false);
       const before = await snapshot();
       const bystander = await bystanderRow();
-      expect(actsOn(door), `no door may act on the bystander (${door})`).not.toContain(f.bystander.id);
+      expectBystanderUntargeted(door);
       const result = await answer(calls[door](undefined, bound({ db: client })));
       expect(result.code).toBe('RESOLVED');
       expect(opened()).toBe(1);
       expect(swappedAt()).toEqual([]);
       const after = await snapshot();
-      tookEffect(door, before, after, (result as any).value);
+      tookEffect(door, before, after, result.value);
       // N7, observed: whatever the door did, it did nothing to the bystander (its row) and wrote no event that names it.
       expect(await bystanderRow()).toEqual(bystander);
+      // (new events are ordered after the old by id; ULIDs are fixed-length, so one id is never a substring of another)
       expect(JSON.stringify(after.events.slice(before.events.length))).not.toContain(f.bystander.id);
     });
     it(`${door}: a transaction-local Session substitution cannot replace the preflight worker`, async () => {
@@ -309,13 +336,16 @@ describe('#4740 hookQuery matches one statement, never a batch', () => {
   });
 });
 
-// #4740 N7: the bystander is nobody a door acts on, for every door in either matrix.
+// #4740 N7, F1: what the precondition can and cannot say. The bystander is a WORKER; the doors that name workers (by id or by name) are
+// checked per kind here and in every matrix test, the doors that act on users are guarded by the observed checks in those tests.
 describe('#4740 the bystander is not acted on by any door', () => {
-  it('is distinct from every door\'s target, from the caller, the Session worker and the substitute', () => {
-    for (const door of Object.keys(calls)) expect(actsOn(door), door).not.toContain(f.bystander.id);
-    expect(new Set([f.bystander.id, f.worker.id, f.target.id, f.session.workerId]).size).toBe(3);
-    expect(f.session.workerId).toBe(f.worker.id);
-    expect(f.bystander.name).not.toBe('NewWorker');
-    expect(f.bystander.name).not.toBe('Preview');
+  it('no door names the bystander worker by id or by name, and the caller, target and bystander are distinct workers', () => {
+    for (const door of DOORS) expectBystanderUntargeted(door);
+    expectDistinct('the bystander, the caller and the target', [f.bystander.id, f.worker.id, f.target.id]);
+    expect(f.session.workerId, 'the Session is the caller\'s').toBe(f.worker.id);
+    // every worker name a door mints is checked above; the bystander's own name is not one of them
+    const minted = DOORS.flatMap((door) => actsOn(door).workerNames);
+    expect(minted.length).toBeGreaterThan(0);
+    expect(minted).not.toContain(f.bystander.name);
   });
 });
