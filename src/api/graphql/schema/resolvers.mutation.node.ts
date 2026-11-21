@@ -1420,10 +1420,10 @@ async function writeNodeCoreRaw(
               input.ownerRepo !== undefined && input.ownerRepo !== current.ownerRepo;
             // ownerRepo deliberately remains outside restorable node history,
             // so an unguarded ownerRepo-only update keeps its legacy
-            // revision-free behaviour. A guarded update is different: every
-            // ownerRepo change must consume the claimed token or the same
-            // expectedRevision could be reused to overwrite it (#937). The
-            // edge-only exception below does not change ownerRepo behaviour.
+            // revision-free behaviour. A guarded ownerRepo change must consume
+            // the claimed token or the same expectedRevision could be reused to
+            // overwrite it (#937). The edge-only exception below does not
+            // change ownerRepo behaviour.
             // #3497 / rulings0149+0198: inline edges are not node revision state.
             // They still reach finalizeNodeWrite, and a guarded edge-only write
             // checks its token without consuming it.
