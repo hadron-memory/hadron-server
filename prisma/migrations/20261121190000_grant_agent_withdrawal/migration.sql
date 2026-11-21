@@ -1,8 +1,10 @@
 -- #4767 (Grants R6; cor:acl:140:03 item 5, ruling 0255 item 21): an agent's own withdrawal through a run records no person.
 -- chk_grants_shape's end pairing widens to "a person, or the withdrawal marker, or both — never neither":
--- (revoked_at IS NULL) = (revoked_by IS NULL AND withdrawn_at IS NULL). Every row the old CHECK admitted still passes (a
--- row with revoked_by set keeps both sides unchanged; withdrawn_at was already paired with revoked_at), so no existing row
--- is refused and no HDPRF branch is needed. The one-revoke branch of hadron_guard_grant tests OLD.revoked_at instead of
+-- a revoker only on an ended row, an end with a person or the marker (two lines: revoked_by NULL OR revoked_at NOT NULL;
+-- revoked_at NULL OR revoked_by NOT NULL OR withdrawn_at NOT NULL). Every row the old CHECK admitted still passes (a
+-- row with revoked_by set keeps both sides unchanged; withdrawn_at was already paired with revoked_at; a marker with no
+-- end was already admitted by NULL), so no existing row is refused and no HDPRF branch is needed. The one-revoke branch of
+-- hadron_guard_grant tests OLD.revoked_at instead of
 -- OLD.revoked_by, so a run-withdrawn row (revoked_by NULL) is still an ended row no statement may re-stamp. The canonical
 -- invariants follow byte for byte (grantRow3668 pins it); they re-add the CHECK and replace the guard, re-validating both,
 -- and take short locks on grants, grant_events and actions, as the carriers before this one do.
@@ -54,8 +56,12 @@ ALTER TABLE grants ADD CONSTRAINT chk_grants_shape CHECK (
   (starts_at IS NULL OR expires_at IS NULL OR starts_at < expires_at) AND
   -- #4767 (Grants R6): an end names a person, or carries the withdrawal marker, or both (a person's withdrawal) — never
   -- neither. An agent's withdrawal through a run records no person: withdrawn_at pairs with revoked_at instead; a REVOKE
-  -- still names a person (an end with neither a revoker nor the marker is refused).
-  (revoked_at IS NULL) = (revoked_by IS NULL AND withdrawn_at IS NULL) AND
+  -- still names a person (an end with neither a revoker nor the marker is refused), and a revoker only ever lands on an
+  -- ended row. A marker with no end (withdrawn_at set, revoked_at NULL) stays admitted exactly as before #4767: the
+  -- equal-timestamp line below reads such a row as NULL, a CHECK passes on NULL, and the #4001 lifecycle negative control
+  -- rides that tolerance.
+  (revoked_by IS NULL OR revoked_at IS NOT NULL) AND
+  (revoked_at IS NULL OR revoked_by IS NOT NULL OR withdrawn_at IS NOT NULL) AND
   (revoked_by IS NULL OR revoked_by <> '') AND
   (withdrawn_at IS NULL OR (withdrawn_at = revoked_at AND activated_at IS NULL)) AND
   -- #4180: a departure cause only on a departed row, and only a cause of the holder's own kind (codes carry no wording, R5).

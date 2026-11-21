@@ -77,6 +77,12 @@ describe('one App, one registered action, a reason', () => {
     await refused(insertGrantUnguarded(w, { revoked_at: raw(DB_NOW) }), /chk_grants_shape/);
     await refused(insertGrantUnguarded(w, { revoked_by: w.userId }), /chk_grants_shape/);
   });
+  // A marker with no end (withdrawn_at set, revoked_at NULL) is admitted exactly as before #4767: the equal-timestamp line
+  // reads it as NULL, a CHECK passes on NULL, and the #4001 lifecycle negative control (secretAutoDelete4001) rides that
+  // tolerance — #4767's law binds ENDS (a person or the marker), not a stray marker on a never-ended row.
+  it('a marker with no end stays admitted: withdrawn_at set with revoked_at NULL', async () => {
+    await insertGrantUnguarded(w, { withdrawn_at: raw(DB_NOW) });
+  });
   // #4767 (Grants R6): an agent's withdrawal through a run records no person — withdrawn_at pairs with revoked_at instead.
   it('a WITHDRAWAL may stamp revoked_at with revoked_by NULL (#4767); a revoke with no person still may not', async () => {
     const id = await insertGrant(w, { user_id: null, agent_id: w.agentId, requested_by_run_id: 'run_x' });

@@ -45,8 +45,12 @@ ALTER TABLE grants ADD CONSTRAINT chk_grants_shape CHECK (
   (starts_at IS NULL OR expires_at IS NULL OR starts_at < expires_at) AND
   -- #4767 (Grants R6): an end names a person, or carries the withdrawal marker, or both (a person's withdrawal) — never
   -- neither. An agent's withdrawal through a run records no person: withdrawn_at pairs with revoked_at instead; a REVOKE
-  -- still names a person (an end with neither a revoker nor the marker is refused).
-  (revoked_at IS NULL) = (revoked_by IS NULL AND withdrawn_at IS NULL) AND
+  -- still names a person (an end with neither a revoker nor the marker is refused), and a revoker only ever lands on an
+  -- ended row. A marker with no end (withdrawn_at set, revoked_at NULL) stays admitted exactly as before #4767: the
+  -- equal-timestamp line below reads such a row as NULL, a CHECK passes on NULL, and the #4001 lifecycle negative control
+  -- rides that tolerance.
+  (revoked_by IS NULL OR revoked_at IS NOT NULL) AND
+  (revoked_at IS NULL OR revoked_by IS NOT NULL OR withdrawn_at IS NOT NULL) AND
   (revoked_by IS NULL OR revoked_by <> '') AND
   (withdrawn_at IS NULL OR (withdrawn_at = revoked_at AND activated_at IS NULL)) AND
   -- #4180: a departure cause only on a departed row, and only a cause of the holder's own kind (codes carry no wording, R5).
