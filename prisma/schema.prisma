@@ -10171,7 +10171,7 @@ model Grant {
   holderDepartedAt      DateTime? @map("holder_departed_at")
   /// #4180 (Holger R5, hrn:node:hadronmemory.com:specs:cor:acl:140:03): WHY the holder went, as a cause code with no wording
   /// (USER_ERASED, ORG_LEFT, ORG_REMOVED, WORKER_RETIRED, WORKER_DELETED, AGENT_DELETED, AGENT_UNINSTALLED,
-  /// AGENT_IMPORTER_UNINSTALLED, AGENT_IMPORTER_DELETED, AGENT_IMPORT_REMOVED, AGENT_LICENSE_REVOKED, APP_DELETED). Set in the statement that stamps
+  /// AGENT_IMPORTER_UNINSTALLED, AGENT_IMPORTER_DELETED, AGENT_IMPORT_REMOVED, AGENT_LICENSE_REVOKED, AGENT_LICENSE_EXPIRED, ORG_DELETED, APP_DELETED). Set in the statement that stamps
   /// `holderDepartedAt`, never afterwards; it must fit the holder's kind and what happened to it (prisma/grant-invariants.sql).
   /// NULL on a stamped row means no cause was recorded (a departure stamped before #4180, or by the previous image); reads
   /// answer REASON_NOT_RECORDED for it, never a guess.
