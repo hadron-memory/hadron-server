@@ -101,6 +101,18 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   addOrgMember: ['orgRef', 'userRef'],
   updateOrgMember: ['orgRef', 'userRef'],
   removeOrgMember: ['orgRef', 'userRef'],
+  // #4148 (S7): the agent-task family's own-task argument is `taskRef` (gate pin 1; the family precedent).
+  updateAgentTask: ['taskRef'],
+  assignAgentTask: ['taskRef'],
+  reassignAgentTask: ['taskRef'],
+  startAgentTask: ['taskRef'],
+  recordAgentTaskProgress: ['taskRef'],
+  finishAgentTask: ['taskRef'],
+  cancelAgentTask: ['taskRef'],
+  releaseAgentTaskExternalId: ['taskRef'],
+  parkAgentTask: ['taskRef'],
+  cloneAgentTask: ['taskRef'],
+  makeAgentTaskReady: ['taskRef'],
 };
 
 /**
@@ -116,6 +128,11 @@ const EXPECTED_QUERY_REF_ARGS: Record<string, string[]> = {
   appRun: ['ref'],
   nodeRevisions: ['nodeRef'],
   appRuns: ['appRef', 'orgRef'],
+  // #4148 (S7): the agent-task family (gate pin 1: `ref` for the field's own subject, `parentTaskRef` / `taskRef`).
+  agentTask: ['ref'],
+  agentTasks: ['appRef', 'parentTaskRef'],
+  agentTeamEvents: ['appRef', 'taskRef'],
+  agentTeamEventsPage: ['appRef', 'taskRef'],
 };
 
 /**
