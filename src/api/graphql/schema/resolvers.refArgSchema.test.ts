@@ -101,6 +101,15 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   addOrgMember: ['orgRef', 'userRef'],
   updateOrgMember: ['orgRef', 'userRef'],
   removeOrgMember: ['orgRef', 'userRef'],
+  // #4136 (S0), RED on main: the Query fields that already take refs. The guard reads Mutation fields only, so each of
+  // these fails today with "Mutation.<name> is missing from the SDL".
+  node: ['ref', 'memoryRef'],
+  memory: ['ref'],
+  app: ['ref'],
+  agent: ['ref'],
+  appRun: ['ref'],
+  nodeRevisions: ['nodeRef'],
+  appRuns: ['appRef', 'orgRef'],
 };
 
 /**
