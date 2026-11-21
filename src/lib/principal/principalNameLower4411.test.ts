@@ -164,6 +164,18 @@ describe('#4411 item 1: mintPrincipal maps a chk_principals_name_lower violation
       .toBeInstanceOf(RootNameInvalidError);
   });
 
+  it('maps a translation that puts words after the constraint name (#4641 BLIND note)', async () => {
+    // Some locales end the primary message with a verb after the quoted constraint; it is still the LAST quoted name.
+    const real = await realViolation();
+    const ja = 'リレーション"principals"の新しい行は検査制約"chk_principals_name_lower"に違反しています';
+    expect(await mintWith(rawWith('23514', ja))).toBeInstanceOf(RootNameInvalidError);
+    expect(await mintWith(unknownWith(withPrimaryMessage(real.message, ja.replaceAll('"', '\\"')))))
+      .toBeInstanceOf(RootNameInvalidError);
+    // and the relation-position case with a trailing verb stays untyped
+    const other = rawWith('23514', 'リレーション"chk_principals_name_lower"の新しい行は検査制約"chk_other"に違反しています');
+    expect(await mintWith(other)).toBe(other);
+  });
+
   it('leaves an error naming this constraint under another SQLSTATE untyped', async () => {
     const real = await realViolation();
     const notCheck = unknownWith(real.message.replace(/code: (\\?)"23514(\\?)"/, 'code: $1"23505$2"'));
