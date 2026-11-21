@@ -13,6 +13,6 @@ export function isSecretUsePrefix(value: unknown): value is string {
   try {
     const url = new URL(value);
     return url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash &&
-      !/%(?:2f|5c)/i.test(url.pathname) && value === url.href;
+      !/%(?:2f|5c)/i.test(url.pathname) && value === url.href && !/[?#]$/.test(value);
   } catch { return false; }
 }

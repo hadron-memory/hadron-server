@@ -15,7 +15,7 @@ beforeEach(async () => {
   process.env.SECRET_ROOT_KEY = '22'.repeat(32);
   await cleanDb(db); w = await seedWorld(); await upsertPlatformActions(db);
   secretId = generateId();
-  await db.$executeRaw`INSERT INTO secrets (id, owner_type, owner_id, name, kind, updated_at) VALUES (${secretId}, 'app', ${w.appId}, 'api', 'webfetch-auth', now())`;
+  await db.$executeRaw`INSERT INTO secrets (id, owner_type, owner_id, name, kind, metadata, updated_at) VALUES (${secretId}, 'app', ${w.appId}, 'api', 'webfetch-auth', '{"type":"bearer","urlPrefix":"https://api.example.test/"}'::jsonb, now())`;
   const payload = JSON.stringify({ type: 'bearer', token: 'synthetic' });
   await db.$transaction((tx) => addAppSecretVersion(tx, { id: secretId, ownerId: w.appId }, payload, Buffer.byteLength(payload), { userId: w.userId, workerId: null, sessionId: null }));
 });
@@ -43,6 +43,20 @@ describe('secret.use grant terms (#4000)', () => {
       ['secret', '*'], ['secret', [secretId]],
     ] as const) {
       expect(await refusal(grant({ ...values(), [key]: value }))).toBe('GRANT_VALUES_INVALID');
+    }
+  });
+  it('refuses a binding the use path would refuse: a prefix outside the secret\'s urlPrefix, no urlPrefix, or another auth type (blind P2-1)', async () => {
+    expect(await refusal(grant({ ...values(), 'binding-prefix': 'https://other.example.test/v1' }))).toBe('GRANT_VALUES_INVALID');
+    await db.$executeRaw`UPDATE secrets SET metadata = '{"type":"bearer"}'::jsonb WHERE id = ${secretId}`;
+    expect(await refusal(grant(values()))).toBe('GRANT_VALUES_INVALID');
+    await db.$executeRaw`UPDATE secrets SET metadata = '{}'::jsonb WHERE id = ${secretId}`;
+    expect(await refusal(grant(values()))).toBe('GRANT_VALUES_INVALID');
+    await db.$executeRaw`UPDATE secrets SET metadata = '{"type":"basic","urlPrefix":"https://api.example.test/"}'::jsonb WHERE id = ${secretId}`;
+    expect(await refusal(grant(values()))).toBe('GRANT_VALUES_INVALID');
+  });
+  it('refuses a prefix that ends in a bare ? or # (blind P3-4)', async () => {
+    for (const prefix of ['https://api.example.test/v1?', 'https://api.example.test/v1#']) {
+      expect(await refusal(grant({ ...values(), 'binding-prefix': prefix }))).toBe('GRANT_VALUES_INVALID');
     }
   });
   it('refuses the delete mark on a secret.use grant (SECRET_AUTO_DELETE_NOT_AVAILABLE, ruled by Bill #132508)', async () => {

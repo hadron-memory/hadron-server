@@ -6511,6 +6511,9 @@ export const typeDefs = `#graphql
     expiresAt: DateTime!
   }
 
+  "How a secret read client is used: REVEAL hands the value to a person or worker, USE injects it by reference into a run's web request."
+  enum SecretReadClientMode { REVEAL USE }
+
   """
   One named, owner-scoped secret — the general secret store (#677).
   Polymorphic owner (user | org | app). The value is encrypted at rest and
@@ -6523,8 +6526,6 @@ export const typeDefs = `#graphql
   secret keeps its values as versions: every store adds one
   (hrn:node:hadronmemory.com:specs:cor:sec:010:03).
   """
-  enum SecretReadClientMode { REVEAL USE }
-
   input IssueSecretReadClientInput {
     "The App secret, by id or URN."
     secretRef: ID!
