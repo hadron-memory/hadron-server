@@ -5,19 +5,19 @@
  * to 400 is S2, a client-visible contract change that needs a ruling and a client read first.
  *
  * GREEN on main by design: it passes on v4 and guards that the option stays set through the bump.
- * It boots the REAL createServer and POSTs over HTTP, so a missing option in server.ts turns it red
+ * It boots the REAL createServer (through createServerOnCleanDb, #3066) and POSTs over HTTP, so a missing option in server.ts turns it red
  * under v5. The two admission pins prove the L2/L3 limits still answer 400 with their stable codes.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createServer } from '../../server.js';
+import { createServerOnCleanDb } from '../../test/startServerFixture.js';
 
 let server: Server | undefined;
 let base = '';
 
 beforeEach(async () => {
-  server = httpServer(await createServer());
+  server = httpServer(await createServerOnCleanDb());
   await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
