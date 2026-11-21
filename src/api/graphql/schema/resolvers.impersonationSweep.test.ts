@@ -111,3 +111,18 @@ describe('#876 — identity-keyed resolver modules must consider impersonation',
     }
   });
 });
+
+// #3999: the request id is a polling capability only for its person requester; no actor envelope may borrow it.
+describe('#3999 secret request query actor sweep', () => {
+  it('answers null to impersonation, App keys and on-behalf-of runs before any data lookup', async () => {
+    const { secretChangeQueries } = await import('./resolvers.secretChanges.js');
+    const previous = process.env.PASSKEY_SIGNING_ENABLED;
+    process.env.PASSKEY_SIGNING_ENABLED = 'true';
+    try {
+      for (const actor of [{ userId: 'person', impersonation: {} }, {}, { userId: 'person', clientId: 'run:synthetic' }, { userId: 'person', appKeyId: 'synthetic-key' }]) {
+        const ctx = { ...actor, db: {} } as any;
+        expect(await secretChangeQueries.secretChangeRequest({}, { id: 'known-or-missing' }, ctx)).toBeNull();
+      }
+    } finally { process.env.PASSKEY_SIGNING_ENABLED = previous; }
+  });
+});

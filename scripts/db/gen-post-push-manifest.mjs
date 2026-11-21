@@ -45,8 +45,8 @@ if (manifestFlagAt !== -1 && !MANIFEST) {
 // diff-whitelist why, where a person vouches for the specific object.
 const KIND_WHY = {
   extension: 'Postgres extension the raw-SQL corpus ensures exists (CREATE EXTENSION); not a Prisma-schema concept.',
-  index: 'Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma.',
-  'unique-index': 'Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma.',
+  index: 'Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes.',
+  'unique-index': 'Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes.',
   'check-constraint': 'CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints).',
   'foreign-key-constraint': 'Foreign key created and owned by the raw-SQL corpus, not modeled in schema.prisma as written.',
   'unique-constraint': 'Table-level UNIQUE constraint defined in raw SQL; not expressible in the Prisma schema as written.',
@@ -54,7 +54,7 @@ const KIND_WHY = {
   'identity-column': 'Identity column the raw-SQL corpus attaches so dev and test match the migration (Prisma models it as autoincrement(), which db push builds as a sequence default).',
   function: 'Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely.',
   trigger: 'Trigger wiring an invariant to its table; lives outside the Prisma schema entirely.',
-  table: 'Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it).',
+  table: 'Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma.',
   sequence: 'Sequence created by the raw-SQL corpus; no Prisma model exists for it.',
 };
 

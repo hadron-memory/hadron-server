@@ -69,8 +69,16 @@ describe('#3998 issueSecretReadClient', () => {
     expect(autoDeleteLimitRefusal(false, null, null)).toBeNull();
   });
 
-  it('a person holder is only the issuer themself', async () => {
-    expect(await code(issue(ownerId, { holderRef: memberId }))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+  it('S4 admits a different live person holder and refuses a nonmember', async () => {
+    expect(await issue(ownerId, { holderRef: memberId })).toMatchObject({selfIssued:false});
+    expect(await code(issue(ownerId, { holderRef: outsiderId }))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+  });
+
+  it.each(['former', 'deleted'])('refuses a %s person holder with the exact holder code and no writes', async state => {
+    if(state === 'former') await db.appMember.deleteMany({where:{appId,userId:memberId}});
+    else await db.user.update({where:{id:memberId},data:{deletedAt:new Date()}});
+    expect(await code(issue(ownerId,{holderRef:memberId}))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    expect(await db.grant.count()).toBe(0);expect(await db.secretReadClient.count()).toBe(0);
   });
 
   it.each(['AGENT', 'APP'])('refuses a %s holder before any write (#4434: agent-held reads are not built)', async (holderKind) => {

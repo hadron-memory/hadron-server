@@ -56,6 +56,7 @@ import { failLoginCallback, type LoginFailureReason } from './auth/login-error.t
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
 import { mountSigningCeremonyRoutes } from './api/signingCeremonyRoutes.js';
+import { mountSecretChangeCeremonyRoutes } from './api/secretChangeCeremonyRoutes.js';
 import { mountGrantSigningCeremonyRoutes } from './api/grantSigningCeremonyRoutes.js';
 import { mountSecretRevealRoutes } from './api/secretRevealRoutes.js';
 import { mountPasskeySignInRoutes } from './api/passkeySignInRoutes.js';
@@ -95,6 +96,7 @@ import { assignRequestId, bindRequestId, REQUEST_ID_HEADER } from './lib/request
 import { internalFaultErrorHandler, respondInternalFault } from './lib/internalFault.js';
 import { handleMcpRequest, handleMcpDelete, startMcpTransportSweepLoop } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
+import { startSecretChangeSweepLoop } from './jobs/sweepSecretChanges.js';
 import { startPasskeyCeremonySweepLoop } from './jobs/sweepPasskeyCeremonies.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
 import { secretSweepDisabledReason, startSecretSweepLoop } from './jobs/secretSweep.js';
@@ -1115,6 +1117,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   mountSigningCeremonyRoutes(app);
   // #3649 slice C: the grant signing ceremony, on the same switch.
   mountGrantSigningCeremonyRoutes(app);
+  mountSecretChangeCeremonyRoutes(app);
   mountSecretRevealRoutes(app);
   mountPasskeySignInRoutes(app);
   mountFreshSignInRoutes(app, { emailSendPerIpRateLimit, emailRecipientRateLimit });
@@ -1940,6 +1943,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
 
   // #3122: transient passkey/signing ceremonies; independent of feature flags so old rows still retire.
   startPasskeyCeremonySweepLoop(db);
+  startSecretChangeSweepLoop(db);
 
   // #155 — collect unused DCR OAuth clients 7 days past their expiry (soft delete). Dry run, logging
   // the count it would collect, until OAUTH_CLIENT_GC_ENABLED=true (R220).
