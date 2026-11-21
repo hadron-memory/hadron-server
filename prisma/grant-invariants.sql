@@ -1,5 +1,5 @@
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (today 20261121150000_grant_lapse_departure_causes) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (today 20261121190000_grant_agent_withdrawal) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because
@@ -16,7 +16,8 @@
 --   * it is USED (#3483, cor:acl:140:03 single-use and repeating grants): use_count goes up by exactly one, and only while the
 --     row is live on the database clock (activated, not revoked, holder not gone, App not deleted, started, not expired, below
 --     its max_uses), with nothing else moving but updated_at. The caller holds the row FOR UPDATE and writes the USE event;
---   * it ends ONCE, by revoked_at stamped together with revoked_by, or by its HOLDER going: holder_departed_at is stamped
+--   * it ends ONCE, by revoked_at stamped together with revoked_by, or — #4767 (Grants R6), an agent's own withdrawal through a
+--     run, which names no person — together with withdrawn_at (the same instant, on a row never activated), or by its HOLDER going: holder_departed_at is stamped
 --     (NULL to a time, never back) by the AFTER DELETE triggers below on every hard delete of a holder row, and by the
 --     deleting code on the soft deletes (an erased person, a retired worker, a deleted agent or App). The first end stands:
 --     a row already revoked, departed, expired or spent (an ACTIVATED row past its expiry or at its count) is not stamped (ruling 0259).
@@ -42,7 +43,10 @@ ALTER TABLE grants ADD CONSTRAINT chk_grants_shape CHECK (
   (max_uses IS NULL OR use_count <= max_uses) AND
   version >= 1 AND
   (starts_at IS NULL OR expires_at IS NULL OR starts_at < expires_at) AND
-  (revoked_at IS NULL) = (revoked_by IS NULL) AND
+  -- #4767 (Grants R6): an end names a person, or carries the withdrawal marker, or both (a person's withdrawal) — never
+  -- neither. An agent's withdrawal through a run records no person: withdrawn_at pairs with revoked_at instead; a REVOKE
+  -- still names a person (an end with neither a revoker nor the marker is refused).
+  (revoked_at IS NULL) = (revoked_by IS NULL AND withdrawn_at IS NULL) AND
   (revoked_by IS NULL OR revoked_by <> '') AND
   (withdrawn_at IS NULL OR (withdrawn_at = revoked_at AND activated_at IS NULL)) AND
   -- #4180: a departure cause only on a departed row, and only a cause of the holder's own kind (codes carry no wording, R5).
@@ -209,10 +213,10 @@ BEGIN
   IF ROW(NEW.activated_at, NEW.verification_kind, NEW.signature_id) IS DISTINCT FROM ROW(OLD.activated_at, OLD.verification_kind, OLD.signature_id) THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
   END IF;
-  -- The one revoke: stamped once, together with its revoker (the shape CHECK pairs the two).
+  -- The one revoke: stamped once, together with its revoker (the shape CHECK pairs the two). #4767: a run-withdrawn row has
+  -- revoked_by NULL, so the already-ended test is on revoked_at itself, not on the revoker the row may not carry.
   IF NEW.revoked_at IS DISTINCT FROM OLD.revoked_at THEN
-    -- (an already-revoked row has revoked_by set: the pair CHECK makes OLD.revoked_at redundant here)
-    IF NEW.revoked_at IS NULL OR OLD.revoked_by IS NOT NULL THEN
+    IF NEW.revoked_at IS NULL OR OLD.revoked_at IS NOT NULL THEN
       RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
     END IF;
   ELSIF NEW.revoked_by IS DISTINCT FROM OLD.revoked_by THEN
