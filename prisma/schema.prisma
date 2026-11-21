@@ -3702,7 +3702,8 @@ model McpServer {
 ///
 /// Behaviour:
 /// - Resolution: a bare name is looked up from the most specific owner to the least: user, then organization.
-///   App secrets are outside that cascade (`cor:sec:020:01`). The name is unique per owner.
+///   App secrets are outside that cascade (hrn:node:hadronmemory.com:specs:cor:sec:020:01). The name is unique
+///   per owner.
 /// - `kind` says what the secret is: `generic` is opaque; `webfetch-auth` is typed, with `metadata`
 ///   `{ type, urlPrefix }`, and is used only for requests under that URL prefix.
 /// - `metadata` is the part that is not secret and may be shown: a reader can see that a secret exists and where
