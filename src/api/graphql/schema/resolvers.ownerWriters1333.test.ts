@@ -356,6 +356,7 @@ describe('the App, its AppAgent link and its Agent are held while the write deci
     }, { timeout: 8_000 });
     let settled = false;
     let op: Promise<unknown> | undefined;
+    let lockWait: Promise<unknown> | undefined;
     let failure: unknown;
     try {
       // Readiness races the transaction itself, so a transaction that fails before judging surfaces at once, not by timeout.
@@ -365,14 +366,17 @@ describe('the App, its AppAgent link and its Agent are held while the write deci
       // change that finishes without ever waiting is a failure. The observer is attached now so a fast rejection is never unhandled.
       const early = op.then(() => { throw new Error('the competing change finished without waiting on the held lock'); });
       early.catch(() => undefined);
-      await Promise.race([waitForLockWaiters(db, 1, 5_000), early]);
+      lockWait = waitForLockWaiters(db, 1, 3_000);
+      lockWait.catch(() => undefined);
+      await Promise.race([lockWait, early]);
       expect(settled).toBe(false);
     } catch (e) {
       failure = e;
     } finally {
       release();
       // Drain both operations whatever happened, then rethrow the FIRST failure, never a later cleanup one.
-      const done = await Promise.allSettled([writing, ...(op ? [op] : [])]);
+      // The lock-wait poll is drained too (bounded at 3 s), so no check outlives the helper into the next invocation.
+      const done = await Promise.allSettled([writing, ...(op ? [op] : []), ...(lockWait ? [lockWait] : [])]);
       if (failure === undefined) {
         const bad = done.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
         if (bad) failure = bad.reason;
@@ -424,7 +428,7 @@ describe('the live headless path: hadron_update_node under the real run principa
   }
 
   /** A userless SCHEDULE run of `runApp`, with the write grant on `vault`, editing `loc` in `target`'s team space. */
-  async function liveRunFull(runApp: string, target: { id: string; urn: string }, loc: string, grant = true): Promise<{ code: string; message: string }> {
+  async function liveRun(runApp: string, target: { id: string; urn: string }, loc: string, grant = true): Promise<{ code: string; message: string }> {
     if (grant) await db.appMemoryWriteGrant.create({ data: { appId: runApp, memoryId: target.id, prefix: 'vault', grantedBy: user.owner! } });
     const schedule = await db.agentSchedule.create({
       data: { id: generateId(), organizationId: org.id, appId: runApp, name: 'S', cron: '* * * * *', entryNodeUrn: ENTRY() },
@@ -447,8 +451,6 @@ describe('the live headless path: hadron_update_node under the real run principa
       return { code: inner.extensions?.code ? String(inner.extensions.code) : String(inner.message), message: String(inner.message) };
     }
   }
-  const liveRun = async (runApp: string, target: { id: string; urn: string }, loc: string, grant = true) =>
-    (await liveRunFull(runApp, target, loc, grant)).code;
   /** The same dispatch for a READ of the node, as the control that the principal can read the target. */
   async function readRun(runApp: string, target: { id: string; urn: string }, loc: string) {
     const schedule = await db.agentSchedule.create({
@@ -474,14 +476,14 @@ describe('the live headless path: hadron_update_node under the real run principa
   it('publisher: a userless run edits an OWNER-role node in its own team space through the real tool', async () => {
     const publisher = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
     const space = await teamSpace(publisher, 'vault:pub');
-    expect(await liveRun(publisher, space, 'vault:pub')).toBe('OK');
+    expect((await liveRun(publisher, space, 'vault:pub')).code).toBe('OK');
     expect(await content(space.id, 'vault:pub')).toBe('after');
   });
 
   it('installer: a run whose App only carries a vendor agent is refused the level and the node is unchanged', async () => {
     const installer = await app({ orgId: org.id, agents: [await agent(vendorOrg.id, null)] });
     const space = await teamSpace(installer, 'vault:ins');
-    expect(await liveRun(installer, space, 'vault:ins')).toBe(REFUSED);
+    expect((await liveRun(installer, space, 'vault:ins')).code).toBe(REFUSED);
     expect(await content(space.id, 'vault:ins')).toBe('before');
   });
 
@@ -490,10 +492,10 @@ describe('the live headless path: hadron_update_node under the real run principa
     const space = await teamSpace(installer, 'vault:keep');
     await db.node.create({ data: { id: generateId(), memoryId: space.id, loc: 'vault:plain', name: 'note', content: 'before' } });
     // Control: the base write gate admits this run on an ungoverned node.
-    expect(await liveRun(installer, space, 'vault:plain')).toBe('OK');
+    expect((await liveRun(installer, space, 'vault:plain')).code).toBe('OK');
     expect(await content(space.id, 'vault:plain')).toBe('after');
     // The same run, same grant, same memory: the OWNER-role node is refused by the level alone.
-    expect(await liveRun(installer, space, 'vault:keep', false)).toBe(REFUSED);
+    expect((await liveRun(installer, space, 'vault:keep', false)).code).toBe(REFUSED);
     expect(await content(space.id, 'vault:keep')).toBe('before');
   });
 
@@ -502,7 +504,7 @@ describe('the live headless path: hadron_update_node under the real run principa
     const space = await teamSpace(publisher, 'vault:own');
     // Control: the same principal reads the same node (the space is readable), so the refusal below is the write gate.
     expect(await readRun(publisher, space, 'vault:own')).toBe('OK');
-    const refused = await liveRunFull(publisher, space, 'vault:own', false);
+    const refused = await liveRun(publisher, space, 'vault:own', false);
     expect(refused.code).not.toBe('OK');
     expect(refused.code).not.toBe(REFUSED);
     expect(refused.code).toBe('FORBIDDEN');
@@ -516,8 +518,8 @@ describe('the live headless path: hadron_update_node under the real run principa
     const publisher = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
     const otherApp = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
     const space = await teamSpace(otherApp, 'vault:secret');
-    const existing = await liveRun(publisher, space, 'vault:secret', false);
-    const missing = await liveRun(publisher, space, 'vault:nothing-here', false);
+    const existing = (await liveRun(publisher, space, 'vault:secret', false)).code;
+    const missing = (await liveRun(publisher, space, 'vault:nothing-here', false)).code;
     expect(existing).not.toBe('OK');
     expect(existing).not.toBe(REFUSED);
     expect(missing).toBe(existing);
