@@ -596,7 +596,7 @@ export async function vectorSearchNodes(
     // Exact ranking, but a LIMITed prefix: exhausted only when it came back
     // short (#1674 review, Jane P2-3). A caller post-filtering the page widens
     // k and re-asks.
-    opts.onWindow?.({ exhausted: !windowCut && rows.length < k, stoppedEarly: windowCut });
+    opts.onWindow?.({ exhausted: !(windowCut && rows.length >= k) && rows.length < k, stoppedEarly: windowCut && rows.length >= k });
     return rows.map((r) => ({ nodeId: r.node_id, score: 1 - Number(r.distance) }));
   }
   // CONTENT excludes comments INSIDE the candidate scan, before any limit
@@ -638,7 +638,8 @@ export async function vectorSearchNodes(
   const best = new Map<string, number>();
   for (const r of ranked.rows) if (!best.has(r.node_id)) best.set(r.node_id, Number(r.distance));
   const hits = [...best].slice(0, k).map(([nodeId, d]) => ({ nodeId, score: 1 - d }));
-  opts.onWindow?.({ exhausted: !windowCut && ranked.exhausted, stoppedEarly: ranked.stopped || windowCut });
+  const cutLost = windowCut && hits.length >= k; // the window is only a loss when it was actually filled
+  opts.onWindow?.({ exhausted: !cutLost && ranked.exhausted, stoppedEarly: ranked.stopped || cutLost });
   return hits;
 }
 
@@ -698,7 +699,7 @@ export async function vectorSearchChunks(
       WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB} ${threadSql} ${opts.filterSql ?? Prisma.empty}
       ORDER BY distance ASC
       LIMIT ${k}`;
-    opts.onWindow?.({ exhausted: !windowCut && rows.length < k, stoppedEarly: windowCut });
+    opts.onWindow?.({ exhausted: !(windowCut && rows.length >= k) && rows.length < k, stoppedEarly: windowCut && rows.length >= k });
     return rows.map((r) => ({
       nodeId: r.node_id, chunkIndex: Number(r.chunk_index), charStart: Number(r.char_start),
       charEnd: Number(r.char_end), chunkText: r.chunk_text, score: 1 - Number(r.distance),
@@ -731,7 +732,8 @@ export async function vectorSearchChunks(
       SELECT * FROM cand ORDER BY distance ASC, node_id ASC, chunk_index ASC LIMIT ${k}`,
     count: async (tx, cap) => Number((await tx.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM (SELECT 1 ${eligibleFrom} LIMIT ${cap}) capped`)[0]?.n ?? 0),
   });
-  opts.onWindow?.({ exhausted: !windowCut && ranked.exhausted, stoppedEarly: ranked.stopped || windowCut });
+  const cutLost = windowCut && ranked.rows.length >= k; // the window is only a loss when it was actually filled
+  opts.onWindow?.({ exhausted: !cutLost && ranked.exhausted, stoppedEarly: ranked.stopped || cutLost });
   return ranked.rows.slice(0, k).map((r) => ({
     nodeId: r.node_id,
     chunkIndex: Number(r.chunk_index),

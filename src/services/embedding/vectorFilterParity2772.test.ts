@@ -17,6 +17,7 @@ const query = () => { const v = new Array(DIM).fill(0); v[1] = 1; return v; };
 let mem: string;
 let decoys: string[] = [];
 let targets: string[] = [];
+let deletedId = '';
 
 beforeAll(async () => {
   await cleanDb(db);
@@ -32,7 +33,12 @@ beforeAll(async () => {
   })) });
   await db.$executeRawUnsafe(`UPDATE nodes SET updated_at = '2020-01-01' WHERE id = ANY($1::text[])`, decoys);
   await db.$executeRawUnsafe(`UPDATE nodes SET updated_at = '2030-01-01' WHERE id = ANY($1::text[])`, targets);
+  await db.$executeRawUnsafe(`UPDATE nodes SET minted_at = now(), minted_by_info = 'test', approved_at = now(), approved_by_info = 'test', approval_hash = 'h', approved_rev_no = 999 WHERE id = ANY($1::text[])`, targets);
+  deletedId = generateId();
+  await db.node.create({ data: { id: deletedId, memoryId: mem, loc: 'gone', name: 'gone', content: 'body', role: 'review', createdBy: 'u-decoy' } });
+  await db.$executeRawUnsafe(`UPDATE nodes SET deleted_at = now() WHERE id = $1`, deletedId);
   const rows: string[] = [];
+  rows.push(`('${deletedId}', ${vec(0)})`);
   decoys.forEach((id) => rows.push(`('${id}', ${vec(0)})`));
   targets.forEach((id) => rows.push(`('${id}', ${vec(0.5)})`));
   await db.$executeRawUnsafe(`
@@ -56,6 +62,8 @@ const CASES: Array<[string, Record<string, unknown>]> = [
   ['createdBy', { createdBy: 'u-tgt' }],
   ['updatedAfter', { updatedAfter: '2025-01-01T00:00:00Z' }],
   ['updatedBefore', { updatedBefore: '2025-01-01T00:00:00Z', _inverse: true }],
+  ['minted', { minted: true }],
+  ['approvalState', { approvalState: 'APPROVED' }],
   ['where', { where: { path: ['k'], eq: 'a$1b $2' } }],
 ];
 
@@ -100,5 +108,24 @@ describe('BLIND P1 (#4665): the offset+limit window is cut at the cap and says s
     await search({}, 5, (x) => { w = x; });
     setVectorWindowRowsMaxForTests(null);
     expect(w.stoppedEarly).toBeFalsy();
+  });
+});
+
+describe('BLIND P2 (#4665): the cut is a loss only when the window was filled; tombstones follow the recoverable memories', () => {
+  afterAll(() => setVectorWindowRowsMaxForTests(null));
+  it('a window past the cap over a scope smaller than the cap reports a complete result, not stopped_early', async () => {
+    setVectorWindowRowsMaxForTests(50);
+    let w: any;
+    const hits = await search({}, 60, (x) => { w = x; });
+    setVectorWindowRowsMaxForTests(null);
+    expect(hits).toHaveLength(7); // 4 decoys + 3 targets; the tombstone is not a hit
+    expect(w.stoppedEarly).toBeFalsy();
+    expect(w.exhausted).toBe(true);
+  });
+  const withDeleted = (tombstoneMemoryIds: string[]) =>
+    getRetrievalProvider().vectorSearch({ db, memoryIds: [mem], queryEmbedding: query(), limit: 20, onWindow: () => {}, includeDeleted: true, filter: { tombstoneMemoryIds }, ...{} } as any);
+  it('includeDeleted ranks the tombstone only in a recoverable memory', async () => {
+    expect((await withDeleted([])).map((h: any) => h.nodeId)).not.toContain(deletedId);
+    expect((await withDeleted([mem])).map((h: any) => h.nodeId)).toContain(deletedId);
   });
 });
