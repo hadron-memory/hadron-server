@@ -12,7 +12,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { generateExtraction, generateText, generateWithTools, LlmInvocationError, NoToolSupportError } from './index.js';
+import { generateChatRespond, generateExtraction, generateText, generateWithTools, LlmInvocationError, NoToolSupportError } from './index.js';
 import { encryptToken } from '../tokenCrypto.js';
 
 interface Captured {
@@ -29,6 +29,21 @@ const CHAT_COMPLETION = {
   model: 'GLM-5.3',
   choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
   usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+};
+
+const RESPOND_COMPLETION = {
+  ...CHAT_COMPLETION,
+  choices: [{
+    index: 0,
+    message: {
+      role: 'assistant', content: null,
+      tool_calls: [{
+        id: 'call-1', type: 'function',
+        function: { name: 'respond', arguments: JSON.stringify({ message: 'Welcome', data: { name: 'Ada' }, next_stage: null }) },
+      }],
+    },
+    finish_reason: 'tool_calls',
+  }],
 };
 
 let server: Server;
@@ -65,8 +80,15 @@ beforeAll(async () => {
       res.end(body.slice(20));
       return;
     }
+    if (path.startsWith('/chat-error/')) {
+      // A hostile endpoint may echo the Authorization header in its error.
+      // The wrapper must not expose it through message OR cause.
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: { message: `echo ${req.headers.authorization}`, type: 'invalid_request_error' } }));
+      return;
+    }
     if (path.endsWith('/chat/completions')) {
-      res.end(JSON.stringify(CHAT_COMPLETION));
+      res.end(JSON.stringify(path.startsWith('/chat-respond/') ? RESPOND_COMPLETION : CHAT_COMPLETION));
       return;
     }
     // Anything else is what a Chat-Completions-only host answers: a 4xx the
@@ -144,6 +166,99 @@ describe('#1374 — outgoing API path per provider shape', () => {
     const err = await generateText(resolved('openai'), { prompt: 'hi' }).catch((e) => e);
     expect(err).toBeInstanceOf(LlmInvocationError);
     expect(captured.map((c) => `${c.method} ${c.path}`)).toEqual(['POST /v1/responses']);
+  });
+});
+
+describe('#1418 — server-owned chat provider invocation', () => {
+  const respondTool = {
+    description: 'Respond to the user',
+    parameters: {
+      type: 'object',
+      properties: {
+        message: { type: 'string' },
+        data: { type: 'object' },
+        next_stage: { type: ['string', 'null'] },
+      },
+      required: ['message'],
+    },
+  };
+
+  it('sends history and one forced respond call through the configured guarded endpoint', async () => {
+    const out = await generateChatRespond(
+      resolved('glm', null, `${origin}/chat-respond/v4`),
+      {
+        system: 'Guide the user.\n\n',
+        messages: [{ role: 'user', content: 'Hello' }, { role: 'assistant', content: 'Hi' }],
+        respondTool,
+        maxTokens: 80,
+        timeoutMs: 1000,
+      },
+    );
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toMatchObject({ path: '/chat-respond/v4/chat/completions', auth: 'Bearer test-key' });
+    expect(captured[0].body).toMatchObject({
+      model: 'GLM-5.3',
+      messages: [
+        { role: 'system', content: 'Guide the user.' },
+        { role: 'user', content: 'Hello' },
+        { role: 'assistant', content: 'Hi' },
+      ],
+      tool_choice: { type: 'function', function: { name: 'respond' } },
+      max_tokens: 80,
+    });
+    expect(out).toEqual({
+      respond: { message: 'Welcome', data: { name: 'Ada' }, next_stage: null },
+      tokensIn: 3, tokensOut: 1, provider: 'glm', model: 'GLM-5.3',
+    });
+  });
+
+  it('uses a synthetic provider prompt for the welcome turn without a persisted user message', async () => {
+    await generateChatRespond(resolved('glm', null, `${origin}/chat-respond/v4`), {
+      messages: [], respondTool,
+    });
+    expect(captured[0].body.messages).toEqual([{ role: 'user', content: 'Please begin the conversation.' }]);
+  });
+
+  it('wraps plain text when the stage has no respond tool', async () => {
+    const out = await generateChatRespond(resolved('glm', null, `${origin}/v4`), {
+      messages: [{ role: 'user', content: 'Hello' }],
+    });
+    expect(out.respond).toEqual({ message: 'ok', data: {}, next_stage: null });
+    expect(captured[0].body).not.toHaveProperty('tools');
+  });
+
+  it('rejects an unverified compatible host before sending a tool request', async () => {
+    await expect(generateChatRespond(resolved('openai-compatible', null, `${origin}/chat-respond/v1`), {
+      messages: [{ role: 'user', content: 'Hello' }], respondTool,
+    })).rejects.toBeInstanceOf(NoToolSupportError);
+    expect(captured).toEqual([]);
+  });
+
+  it('uses chat completions for an opted-in compatible host', async () => {
+    const out = await generateChatRespond(
+      resolved('openai-compatible', { toolCalling: true }, `${origin}/chat-respond/v1`, 'CHAT_COMPLETIONS'),
+      { messages: [{ role: 'user', content: 'Hello' }], respondTool },
+    );
+    expect(captured.map((call) => call.path)).toEqual(['/chat-respond/v1/chat/completions']);
+    expect(out.respond.message).toBe('Welcome');
+  });
+
+  it('rejects a response without the forced tool call without leaking provider text', async () => {
+    await expect(generateChatRespond(resolved('glm', null, `${origin}/v4`), {
+      messages: [{ role: 'user', content: 'Hello' }], respondTool,
+    })).rejects.toThrow('Chat model did not return exactly one respond call.');
+  });
+
+  it('does not expose a provider-echoed bearer key through the error cause', async () => {
+    const err = await generateChatRespond(resolved('glm', null, `${origin}/chat-error/v4`), {
+      messages: [{ role: 'user', content: 'Hello' }], respondTool,
+    }).catch((e: unknown) => e);
+    expect(captured).toHaveLength(1);
+    expect(captured[0].auth).toBe('Bearer test-key');
+    expect(err).toBeInstanceOf(LlmInvocationError);
+    expect((err as Error).message).toBe('Chat LLM call failed (glm/GLM-5.3).');
+    expect((err as Error & { cause?: unknown }).cause).toBeUndefined();
+    expect(`${String(err)} ${String((err as Error & { cause?: unknown }).cause)} ${(err as Error).stack}`).not.toContain('test-key');
   });
 });
 
