@@ -343,6 +343,11 @@ export function pgvectorSupportsIterativeScan(version: string | null | undefined
 let iterativeScanProbe: Promise<boolean> | null = null;
 let iterativeScanOverride: boolean | null = null;
 
+/** Extra time Prisma's transaction clock gets beyond the statement budget (setup round-trips, commit). */
+export const VECTOR_TX_MARGIN_MS = 5000;
+/** The widest ANN `LIMIT` the iterative loop asks for; past it the exact statement ranks the page. */
+export const VECTOR_ANN_MAX_K = 20000;
+
 /** Test seam: force the pgvector-version answer (null restores the real probe). */
 export function setIterativeScanSupportForTests(v: boolean | null): void {
   iterativeScanOverride = v;
@@ -432,11 +437,6 @@ async function withVectorBudget<T>(
   }, { timeout: budgetMs + VECTOR_TX_MARGIN_MS, maxWait: VECTOR_TX_MARGIN_MS });
 }
 
-/** Extra time Prisma's transaction clock gets beyond the statement budget (setup round-trips, commit). */
-export const VECTOR_TX_MARGIN_MS = 5000;
-/** The widest ANN `LIMIT` the iterative loop asks for; past it the exact statement ranks the page. */
-export const VECTOR_ANN_MAX_K = 20000;
-
 let smallScopeRows = 20000;
 /**
  * A scope whose OWN eligible vectors number at most this many is ranked EXACTLY, never through the global HNSW walk.
@@ -466,7 +466,6 @@ async function rankUnderBudget<R>(
     exact: (tx: Prisma.TransactionClient) => Promise<R[]>;
     /** The caller's own eligible vectors, counted up to `cap` (never more than `cap` rows are visited). */
     count: (tx: Prisma.TransactionClient, cap: number) => Promise<number>;
-    rawLength?: (rows: R[]) => number;
   },
 ): Promise<{ rows: R[]; exhausted: boolean; stopped: boolean }> {
   let best: R[] = [];

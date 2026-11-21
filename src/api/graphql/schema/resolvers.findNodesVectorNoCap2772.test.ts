@@ -157,6 +157,17 @@ describe('#2772 deep filtered page is the true page', () => {
     expect(ids(res)).toEqual(await reference(`n.role = 'spec'`, 3, 3));
   }, 60_000);
 
+  it('hybrid: the KEYWORD leg\'s over-fetch keeps main\'s 2000 ceiling (BLIND P2-1); the vector leg has none', async () => {
+    const provider = getRetrievalProvider();
+    const spy = vi.spyOn(provider, 'lexicalSearch');
+    try {
+      await findNodes({ query: 'body', mode: 'hybrid', limit: 10, offset: 500, filter: { role: 'spec' } }); // page 510 x 5 = 2550
+      const limits = spy.mock.calls.map((c) => (c[0] as { limit: number }).limit);
+      expect(limits.length).toBeGreaterThan(0);
+      expect(Math.max(...limits)).toBe(2000);
+    } finally { spy.mockRestore(); }
+  }, 60_000);
+
   it('chunk granularity with a role filter returns the true passages', async () => {
     const want = await reference(`n.role = 'spec'`, 3, 3);
     const res = await findNodes({ query: 'q', mode: 'vector', granularity: 'chunk', limit: 3, offset: 3, filter: { role: 'spec' } });

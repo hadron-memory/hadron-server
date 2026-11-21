@@ -1776,7 +1776,9 @@ export const nodeQueries = {
       // not: its filters ride in the ranking statement, so it asks for exactly the page (`runVector` below).
       // Offset has no ceiling by design (#437: lowering it would silently return an earlier page); the work is
       // bounded instead by ONE request-wide budget (VECTOR_SEARCH_TIMEOUT_MS, `rankUnderBudget`) and limit <= 200.
-      const fetchN = hasStructuredFilters ? page * 5 : page;
+      // The KEYWORD leg keeps main's 2000 ceiling on its over-fetch (ruling 0150 lifted the cap for the vector leg only).
+      const KEYWORD_FETCH_CAP = 2000;
+      const fetchN = hasStructuredFilters ? Math.min(page * 5, KEYWORD_FETCH_CAP) : page;
 
       /**
        * #2772 — one vector or hybrid-vector search under the work budget (VECTOR_SEARCH_TIMEOUT_MS). The provider
