@@ -4573,7 +4573,7 @@ export const typeDefs = `#graphql
     "Anyone who may write the memory. Grants no new access."
     ALL
     """
-    #1333 — the owning party: the owning user, the owning organization's contributors, ADMINs and OWNERs, a platform admin, and an App PUBLISHED by the owner (active, with an installed Agent of the owning organization, or of the owning user for a user-owned memory). A share grantee, a subscriber organization and a vendor App merely installed by the owner are not in it. A headless run is judged as its App, never as the user who triggered it. ROLE_WRITER_LEVEL_REQUIRED otherwise. Never read as ALL.
+    #1333 — the owning party: the owning user, the owning organization's contributors, ADMINs and OWNERs, a platform admin, and an App that CARRIES an Agent of the owner. That last condition is a relationship read on live rows at write time, not a recorded publisher: the App is active (not uninstalled, not deleted) and has an installed Agent that is not deleted and belongs to the owning organization (or, for a user-owned memory, to the owning user). The App may be owned by another organization, and any one such Agent is enough. The App still needs write access to the memory, which the owner controls. A share grantee, a subscriber organization and an App that only carries other organizations' Agents are not in it. A headless run is judged as its App, never as the user who triggered it. ROLE_WRITER_LEVEL_REQUIRED otherwise. Never read as ALL.
     hrn:node:hadronmemory.com:specs:cor:acl:010:03
     """
     OWNER

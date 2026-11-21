@@ -60,7 +60,7 @@
  */
 
 import { GraphQLError } from 'graphql';
-import type { Prisma } from '../generated/prisma/index.js';
+import { Prisma } from '../generated/prisma/index.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { isAuthorizationDenial, requireMemoryManageAccess } from '../api/graphql/schema/resolvers.helpers.js';
 import { lockMemoryConfigShared, resolveNodeRoleRule } from './governedRole.js';
@@ -163,8 +163,12 @@ export async function appCarriesOwnersAgent(
   db: Pick<Prisma.TransactionClient, '$queryRaw'>,
   appId: string,
   owner: { organizationId: string | null; ownerUserId: string | null },
+  opts: { lock?: boolean } = {},
 ): Promise<boolean> {
   if (!owner.organizationId && !owner.ownerUserId) return false;
+  // A preview (a dry run) reads plainly: it decides nothing, so it must not queue behind an uninstall, an unlink or an
+  // Agent update. Only a judgement made for a write holds the rows.
+  const hold = opts.lock === false ? Prisma.empty : Prisma.sql`FOR SHARE OF a, aa, ag`;
   const rows = owner.organizationId
     ? await db.$queryRaw<Array<{ id: string }>>`
         SELECT a.id FROM apps a
@@ -172,19 +176,19 @@ export async function appCarriesOwnersAgent(
           JOIN agents ag ON ag.id = aa.agent_id
         WHERE a.id = ${appId} AND a.deleted_at IS NULL AND a.uninstalled_at IS NULL
           AND ag.deleted_at IS NULL AND ag.organization_id = ${owner.organizationId}
-        LIMIT 1 FOR SHARE OF a, aa, ag`
+        LIMIT 1 ${hold}`
     : await db.$queryRaw<Array<{ id: string }>>`
         SELECT a.id FROM apps a
           JOIN app_agents aa ON aa.app_id = a.id
           JOIN agents ag ON ag.id = aa.agent_id
         WHERE a.id = ${appId} AND a.deleted_at IS NULL AND a.uninstalled_at IS NULL
           AND ag.deleted_at IS NULL AND ag.owner_user_id = ${owner.ownerUserId}
-        LIMIT 1 FOR SHARE OF a, aa, ag`;
+        LIMIT 1 ${hold}`;
   return rows.length > 0;
 }
 
 /** Whether the principal is in the OWNER writer audience of `memoryId` (see the file header), judged on `db`. */
-async function inOwnerAudience(db: Db, principal: RoleWriterPrincipal, memoryId: string): Promise<boolean> {
+async function inOwnerAudience(db: Db, principal: RoleWriterPrincipal, memoryId: string, opts: { lock?: boolean } = {}): Promise<boolean> {
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
     select: { class: true, userId: true, organizationId: true, ownerUserId: true },
@@ -192,7 +196,7 @@ async function inOwnerAudience(db: Db, principal: RoleWriterPrincipal, memoryId:
   if (!memory) return false;
   // D23: a headless principal is the App service identity; the triggering user's own standing never counts.
   if (isRunPrincipal(principal) || (principal.appId && !principal.userId)) {
-    return principal.appId ? appCarriesOwnersAgent(db, principal.appId, memory) : false;
+    return principal.appId ? appCarriesOwnersAgent(db, principal.appId, memory, opts) : false;
   }
   try {
     await requireMemoryManageAccess({ ...principal, db } as unknown as Context, memory, 'CONTRIBUTOR');
@@ -214,6 +218,7 @@ export async function roleWritersRefusal(
   principal: RoleWriterPrincipal,
   memoryId: string,
   change: RoleWriterChange,
+  opts: { lock?: boolean } = {},
 ): Promise<RoleWriterLevelError | RoleWritersUnsupportedError | null> {
   const sides: Array<['before' | 'after', string]> = [];
   const before = ruleKeysOf(change.priorRole, change.priorRunnable);
@@ -242,7 +247,7 @@ export async function roleWritersRefusal(
       continue;
     }
     if (rule.writers === 'OWNER') {
-      ownerAdmitted ??= await inOwnerAudience(db, principal, memoryId);
+      ownerAdmitted ??= await inOwnerAudience(db, principal, memoryId, opts);
       if (!ownerAdmitted) return new RoleWriterLevelError(role, rule.role, side, 'OWNER');
       continue;
     }
@@ -283,7 +288,7 @@ export async function assertRoleWritersForNodes(
   }
   const check = async (memoryId: string, change: RoleWriterChange) => {
     if (opts.preview) {
-      const refusal = await roleWritersRefusal(tx, principal, memoryId, change);
+      const refusal = await roleWritersRefusal(tx, principal, memoryId, change, { lock: false });
       if (refusal) throw refusal;
     } else {
       await assertRoleWritersForWrite(tx, principal, memoryId, change);

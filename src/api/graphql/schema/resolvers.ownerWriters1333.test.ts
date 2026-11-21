@@ -18,7 +18,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { roleWritersRefusal, appCarriesOwnersAgent } from '../../../lib/nodeRoleWriters.js';
+import { roleWritersRefusal, appCarriesOwnersAgent, assertRoleWritersForNodes } from '../../../lib/nodeRoleWriters.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { makeProdRunDeps, runContext } from '../../../jobs/appRunDeps.js';
@@ -524,5 +524,67 @@ describe('the live headless path: hadron_update_node under the real run principa
     expect(existing).not.toBe(REFUSED);
     expect(missing).toBe(existing);
     expect(await content(space.id, 'vault:secret')).toBe('before');
+  });
+});
+
+describe('a preview reads plainly and never queues behind the App rows (blind review F1, #4613 fresh seat)', () => {
+  /** Another transaction holds the App, its link and the Agent exclusively, as an uninstall or an Agent update would. */
+  async function withRowsHeldExclusively(appId: string, body: () => Promise<void>) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const heldFirst = new Promise<void>((r) => { held = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT a.id FROM apps a JOIN app_agents aa ON aa.app_id = a.id JOIN agents ag ON ag.id = aa.agent_id WHERE a.id = ${appId} FOR UPDATE OF a, aa, ag`;
+      held();
+      await gate;
+    }, { timeout: 15_000 });
+    holder.catch(() => undefined);
+    try {
+      await Promise.race([heldFirst, new Promise<never>((_, rej) => setTimeout(() => rej(new Error('rows not held')), 5_000))]);
+      await body();
+    } finally {
+      release();
+      await holder;
+    }
+  }
+  const settlesWithin = async (p: Promise<unknown>, ms: number) =>
+    Promise.race([p.then(() => true, () => true), new Promise<boolean>((r) => setTimeout(() => r(false), ms))]);
+
+  it('a preview (lock: false) completes while another transaction holds the rows; a judgement for a write waits for them', async () => {
+    const a = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
+    await withRowsHeldExclusively(a, async () => {
+      const preview = roleWritersRefusal(db, principalOf(a) as never, memoryId, { priorRole: null, nextRole: 'vault' }, { lock: false });
+      expect(await settlesWithin(preview, 3_000)).toBe(true);
+      expect(await preview).toBeNull();
+      // The control: the same judgement without the preview flag queues behind the holder.
+      const forWrite = roleWritersRefusal(db, principalOf(a) as never, memoryId, { priorRole: null, nextRole: 'vault' });
+      forWrite.catch(() => undefined);
+      expect(await settlesWithin(forWrite, 1_000)).toBe(false);
+    });
+  }, 30_000);
+
+  it('assertRoleWritersForNodes in preview mode does not queue either', async () => {
+    const a = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
+    await withRowsHeldExclusively(a, async () => {
+      const preview = db.$transaction((tx) => assertRoleWritersForNodes(
+        tx, principalOf(a) as never, [{ role: 'vault' }], { from: memoryId }, { preview: true }), { timeout: 10_000 });
+      expect(await settlesWithin(preview, 3_000)).toBe(true);
+      await preview;
+    });
+  }, 30_000);
+});
+
+describe('a writer level this server does not know is refused, never read as ALL (blind review F3, #4613 fresh seat)', () => {
+  it('an unrecognized rule value at the rule-resolution boundary answers ROLE_WRITERS_UNSUPPORTED with the level', async () => {
+    // The database enum cannot hold such a value, so the rulebook is stubbed at the boundary the check reads.
+    const stub = {
+      memoryConfig: { findUnique: async () => ({ rules: [{ role: 'vault', enabled: true, writers: 'FUTURE_LEVEL' }] }) },
+      memory: { findUnique: async () => ({ class: 'knowledge', userId: null, organizationId: org.id, ownerUserId: null }) },
+      $queryRaw: async () => [],
+    };
+    const refused = await roleWritersRefusal(stub as never, { userId: user.owner!, roles: [], clientId: 'x' } as never, memoryId, { priorRole: null, nextRole: 'vault' });
+    expect(refused?.extensions.code).toBe(UNSUPPORTED);
+    expect(refused?.extensions.level).toBe('FUTURE_LEVEL');
   });
 });

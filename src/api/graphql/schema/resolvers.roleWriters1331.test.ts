@@ -12,8 +12,16 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
+import { assertRoleWritersForNodes } from '../../../lib/nodeRoleWriters.js';
 import { lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
+
+// Pass-through spy on the bulk writer-level check, so a test can tell that a door CALLED it (blind review, #4613): with the
+// OWNER level built, no supported level separates a managing caller from the extraction gate, so the call itself is the pin.
+vi.mock('../../../lib/nodeRoleWriters.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../lib/nodeRoleWriters.js')>();
+  return { ...actual, assertRoleWritersForNodes: vi.fn(actual.assertRoleWritersForNodes) };
+});
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -275,13 +283,23 @@ describe('bulk operations judge every node they carry or remove', () => {
     await node('tree');
     await node('tree:leaf', { role: 'vault' });
     const parentRef = (await state('tree'))!.id;
+    const judged = vi.mocked(assertRoleWritersForNodes);
+    judged.mockClear();
     expect(await code(resolvers.Mutation.extractParentNodeToMemory(null, {
       parentRef, targetUrn: 'rw-org::extracted-copy', move: false,
     }, as(admin)))).toBe('OK');
+    // A copy removes nothing from the source, so the source's roles are not judged for it.
+    expect(judged.mock.calls.filter(([, , nodes]) => nodes.some((n) => n.role === 'vault'))).toHaveLength(0);
+    judged.mockClear();
     expect(await code(resolvers.Mutation.extractParentNodeToMemory(null, {
       parentRef, targetUrn: 'rw-org::extracted-move', move: true,
     }, as(admin)))).toBe('OK');
     expect((await state('tree:leaf'))!.deletedAt).not.toBeNull();
+    // A move removes the subtree: the descendant's OWNER-level role is judged in the memory it LEAVES. Dropping that check
+    // changes no result for a managing admin, so the call itself is what this pin holds.
+    const moveCalls = judged.mock.calls.filter(([, , nodes, memoryIds]) =>
+      nodes.some((n) => n.role === 'vault') && memoryIds.from === memoryId);
+    expect(moveCalls.length).toBeGreaterThan(0);
   });
 });
 
