@@ -103,13 +103,13 @@ describe('revisionId is gone (hard rename, no alias)', () => {
 
 describe('unknown ≡ unreadable ≡ soft-deleted node ≡ soft-deleted memory (cor:api:140:01, :03)', () => {
   /** Each miss, as an [ensure-the-fixture-state, ctx, ref] triple. */
-  const misses: [string, () => Promise<void>, () => Context, () => string][] = [
+  const misses: [string, () => Promise<void>, () => Context, () => string, boolean?][] = [
     ['an unknown PK', async () => {}, adminCtx, () => 'cnope00000000000000000000'],
     ['an unknown URN', async () => {}, adminCtx, () => composeNodeRevUrn(memory.urn, 'guide', 99)],
     ['a malformed URN', async () => {}, adminCtx, () => 'hrn:noderev:not-a-real-urn'],
     ['an unreadable PK', async () => {}, outsiderCtx, () => rev1.id],
     ['an unreadable URN', async () => {}, outsiderCtx, () => urn1],
-    ['a soft-deleted node (PK)', async () => { await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date() } }); }, adminCtx, () => rev1.id],
+    ['a soft-deleted node (PK)', async () => { await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date() } }); }, adminCtx, () => rev1.id, true],
     ['a soft-deleted node (URN)', async () => { await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date() } }); }, adminCtx, () => urn1],
     ['a soft-deleted memory (PK)', async () => { await db.memory.update({ where: { id: memory.id }, data: { deletedAt: new Date() } }); }, adminCtx, () => rev1.id],
     ['a soft-deleted memory (URN)', async () => { await db.memory.update({ where: { id: memory.id }, data: { deletedAt: new Date() } }); }, adminCtx, () => urn1],
@@ -139,8 +139,8 @@ describe('unknown ≡ unreadable ≡ soft-deleted node ≡ soft-deleted memory (
   // deleteNodeRevision keeps its own gate (#4138 "gates unchanged"): a tombstoned NODE's revision is still cleanable by PK
   // (as clearNodeHistory); by URN it is a missing ref and is in the matrix below. An unreadable memory is concealed as
   // not-found like the other doors (Rook P2: the URN is guessable), so unreadable cases ARE in this matrix.
-  const DELETE_CLEANUP_BY_PK = 'a soft-deleted node (PK)';
-  const deleteMisses = misses.filter(([n]) => n !== DELETE_CLEANUP_BY_PK);
+  // The fifth tuple element marks that one case; nothing selects it by its display name.
+  const deleteMisses = misses.filter(([, , , , deleteCleansByPk]) => !deleteCleansByPk);
   it.each(deleteMisses)('deleteNodeRevision refuses %s with the typed NOT_FOUND', async (_n, setup, ctx, ref) => {
     await setup();
     const r = await run(`mutation { deleteNodeRevision(nodeRevRef: "${ref()}") }`, ctx());
@@ -149,24 +149,32 @@ describe('unknown ≡ unreadable ≡ soft-deleted node ≡ soft-deleted memory (
     expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(2); // nothing was deleted
   });
 
-  it('all four doors answer unknown and unreadable with a byte-identical error, extensions and path included', async () => {
-    const full = (r: Awaited<ReturnType<typeof run>>) => JSON.stringify({
-      data: r.data, errors: r.errors?.map((e) => ({ message: e.message, path: e.path, extensions: e.extensions })),
-    });
-    // The ref is echoed under extensions.nodeRevRef by design (the caller's own input), so compare with the same ref.
-    for (const ref of [rev1.id, urn1]) {
-      const ops = [
-        `{ nodeRevision(nodeRevRef: "REF") { id } }`,
-        `mutation { restoreNodeRevision(nodeRevRef: "REF") { id } }`,
-        `mutation { updateNodeRevision(nodeRevRef: "REF", revLabel: "x") { id } }`,
-        `mutation { deleteNodeRevision(nodeRevRef: "REF") }`,
-      ];
+  it('all four doors answer unknown and unreadable with a byte-identical error, extensions, path and locations included', async () => {
+    // Only the caller's own echoed ref (extensions.nodeRevRef) is normalised, after asserting it is exactly that ref;
+    // every other byte of the response is compared as is.
+    const wire = async (op: string, ref: string, ctx: Context) => {
+      const r = await run(op.replace('REF', ref), ctx);
+      return JSON.stringify({
+        data: r.data,
+        errors: r.errors?.map((e) => {
+          const { nodeRevRef, ...rest } = (e.extensions ?? {}) as Record<string, unknown>;
+          if (nodeRevRef !== undefined) expect(nodeRevRef).toBe(ref);
+          return { message: e.message, path: e.path, locations: e.locations, extensions: rest, echoedRef: nodeRevRef === undefined ? null : '<ref>' };
+        }),
+      });
+    };
+    const ops = [
+      `{ nodeRevision(nodeRevRef: "REF") { id } }`,
+      `mutation { restoreNodeRevision(nodeRevRef: "REF") { id } }`,
+      `mutation { updateNodeRevision(nodeRevRef: "REF", revLabel: "x") { id } }`,
+      `mutation { deleteNodeRevision(nodeRevRef: "REF") }`,
+    ];
+    for (const [existing, missing] of [
+      [rev1.id, 'cnope00000000000000000000'],
+      [urn1, composeNodeRevUrn(memory.urn, 'guide', 99)],
+    ] as const) {
       for (const op of ops) {
-        const unreadable = full(await run(op.replace('REF', ref), outsiderCtx()));
-        // The same caller, the same ref shape, a revision that does not exist.
-        const missingRef = ref === urn1 ? composeNodeRevUrn(memory.urn, 'guide', 99) : 'cnope00000000000000000000';
-        const missing = full(await run(op.replace('REF', missingRef), outsiderCtx()));
-        expect(unreadable.split(ref).join('<ref>')).toBe(missing.split(missingRef).join('<ref>'));
+        expect(await wire(op, existing, outsiderCtx())).toBe(await wire(op, missing, outsiderCtx()));
       }
     }
   });
@@ -196,16 +204,21 @@ describe('gates stay on the resolved revision, pinned with a URN', () => {
       data: { id: generateId(), nodeId: node.id, memoryId: other.id, loc: 'guide', revNo: 3, name: 'v3', content: 'b3' },
     });
     await db.orgMember.create({ data: { organizationId: org.id, userId: outsider.id, role: 'READER' } });
-    // Membership reads `mem`; make `other` unreadable to this caller by removing the org-wide path for it.
-    await db.memory.update({ where: { id: other.id }, data: { organizationId: (await db.organization.create({ data: { id: generateId(), name: 'o2', urn: 'o2' } })).id } });
     const ref = composeNodeRevUrn(memory.urn, 'guide', 3);
-    // The URN really resolves for a caller who can read both memories, so the refusals below are the gate, not a miss.
+    // BEFORE: this very caller reads both memories (org member), and the URN resolves to the moved revision for them
+    // and for an admin, so every refusal below is the gate acting on a revision that exists, not a miss.
+    for (const ctx of [outsiderCtx(), adminCtx()]) {
+      expect((await run(`{ nodeRevision(nodeRevRef: "${ref}") { id } }`, ctx)).data?.nodeRevision).toEqual({ id: moved.id });
+    }
+    // AFTER: `other` leaves the caller's org, so the same caller can no longer read the snapshot's source memory.
+    await db.memory.update({ where: { id: other.id }, data: { organizationId: (await db.organization.create({ data: { id: generateId(), name: 'o2', urn: 'o2' } })).id } });
     expect((await run(`{ nodeRevision(nodeRevRef: "${ref}") { id } }`, adminCtx())).data?.nodeRevision).toEqual({ id: moved.id });
     const read = await run(`{ nodeRevision(nodeRevRef: "${ref}") { id } }`, outsiderCtx());
     expect(read.data?.nodeRevision).toBeNull();
     for (const q of [
       `mutation { restoreNodeRevision(nodeRevRef: "${ref}") { id } }`,
       `mutation { updateNodeRevision(nodeRevRef: "${ref}", revLabel: "x") { id } }`,
+      `mutation { deleteNodeRevision(nodeRevRef: "${ref}") }`,
     ]) expect(code(await run(q, outsiderCtx()))).toBe(NOT_FOUND);
     expect(await db.nodeRevision.count({ where: { id: moved.id } })).toBe(1);
   });
@@ -227,11 +240,20 @@ describe('gates stay on the resolved revision, pinned with a URN', () => {
 describe('an ambiguous legacy alias in the URN is a missing revision (Byron P3, no existence-dependent answer)', () => {
   it('all four surfaces answer exactly as for an unknown ref, for an outsider and an admin', async () => {
     const other = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'other', name: 'Other', content: 'o' } });
-    await db.urnAlias.createMany({ data: [node.id, other.id].map((entityId) => ({
+    // BOTH candidates hold revision 1, so an implementation that silently picked either would resolve a real revision.
+    const otherRev1 = await db.nodeRevision.create({
+      data: { id: generateId(), nodeId: other.id, memoryId: memory.id, loc: 'other', revNo: 1, name: 'o1', content: 'other-1' },
+    });
+    const alias = (entityId: string) => ({
       urn: `${memory.urn}:shared-old`, entityType: 'NODE' as const, entityId,
       reason: 'RENAME' as const, replacedByUrn: `${memory.urn}:guide`,
-    })) });
+    });
     const ambiguous = composeNodeRevUrn(memory.urn, 'shared-old', 1);
+    // One candidate: the alias resolves, to that node's revision 1 (a reader sees it).
+    await db.urnAlias.create({ data: alias(node.id) });
+    expect((await run(`{ nodeRevision(nodeRevRef: "${ambiguous}") { id } }`, adminCtx())).data?.nodeRevision).toEqual({ id: rev1.id });
+    // Two candidates: now ambiguous, and neither revision may be returned or touched.
+    await db.urnAlias.create({ data: alias(other.id) });
     const unknown = composeNodeRevUrn(memory.urn, 'no-such-loc', 1);
     const ops = (ref: string) => [
       `{ nodeRevision(nodeRevRef: "${ref}") { id } }`,
@@ -250,5 +272,6 @@ describe('an ambiguous legacy alias in the URN is a missing revision (Byron P3, 
         expect(ra.errors?.[0]?.extensions?.code).not.toBe('AMBIGUOUS_LEGACY_URN');
       }
     }
+    expect(await db.nodeRevision.count({ where: { id: { in: [rev1.id, otherRev1.id] } } })).toBe(2);
   });
 });

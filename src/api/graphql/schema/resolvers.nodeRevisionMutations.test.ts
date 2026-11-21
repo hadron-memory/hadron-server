@@ -60,10 +60,10 @@ beforeEach(async () => {
     data: { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', name: 'v1', content: 'body-1', createdAt: T1 },
   });
   v2 = await db.nodeRevision.create({
-    data: { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', name: 'v2', content: 'body-2', createdAt: T2 },
+    data: { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', revNo: 20, name: 'v2', content: 'body-2', createdAt: T2 },
   });
   v3 = await db.nodeRevision.create({
-    data: { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', name: 'v3', content: 'body-3', createdAt: T3 },
+    data: { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', revNo: 30, name: 'v3', content: 'body-3', createdAt: T3 },
   });
 
   userMember = await db.user.create({ data: { githubId: 7201, githubUsername: 'nvm-mem', roles: ['READER'] } });
@@ -86,20 +86,36 @@ describe('deleteNodeRevision (#617)', () => {
   });
 
   it('conceals an existing revision from a non-reader as a missing one (#4138: guessable URN, no existence oracle)', async () => {
-    const real = composeNodeRevUrn(memory.urn, node.loc, 2);
-    const missing = composeNodeRevUrn(memory.urn, node.loc, 99);
-    const call = async (ref: string) => {
-      try { await resolvers.Mutation.deleteNodeRevision(null, { nodeRevRef: ref }, outsiderCtx()); return null; }
-      catch (e) { const g = e as { message: string; extensions?: Record<string, unknown> }; return { m: g.message, c: g.extensions?.code }; }
+    const existingUrn = composeNodeRevUrn(memory.urn, node.loc, 20);
+    const missingUrn = composeNodeRevUrn(memory.urn, node.loc, 99);
+    const deleteAsOutsider = async (ref: string) => {
+      try {
+        await resolvers.Mutation.deleteNodeRevision(null, { nodeRevRef: ref }, outsiderCtx());
+        return null;
+      } catch (e) {
+        const err = e as { message: string; extensions?: Record<string, unknown> };
+        return { message: err.message, code: err.extensions?.code };
+      }
     };
-    const a = await call(real);
-    const b = await call(missing);
-    expect(a).toEqual({ m: 'Node revision not found', c: 'NOT_FOUND' });
-    expect(a?.m).toBe(b?.m);
-    expect(a?.c).toBe(b?.c);
+    // The URN is real: it reads as the revision for a caller who can read the memory (so the concealment is not a miss).
+    expect((await resolvers.Query.nodeRevision(null, { nodeRevRef: existingUrn }, memberCtx()))?.id).toBe(v2.id);
+    const existingAnswer = await deleteAsOutsider(existingUrn);
+    const missingAnswer = await deleteAsOutsider(missingUrn);
+    expect(existingAnswer).toEqual({ message: 'Node revision not found', code: 'NOT_FOUND' });
+    expect(existingAnswer?.message).toBe(missingAnswer?.message);
+    expect(existingAnswer?.code).toBe(missingAnswer?.code);
     // The by-id form is concealed the same way, and no row was deleted.
-    expect(await call(v2.id)).toEqual(a);
+    expect(await deleteAsOutsider(v2.id)).toEqual(existingAnswer);
     expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(3);
+  });
+
+  it('a reader who cannot write still gets Forbidden, and the revision stays (the concealment is for non-readers only)', async () => {
+    for (const ref of [composeNodeRevUrn(memory.urn, node.loc, 20), v2.id]) {
+      await expect(
+        resolvers.Mutation.deleteNodeRevision(null, { nodeRevRef: ref }, memberCtx()),
+      ).rejects.toThrow('Forbidden');
+    }
+    expect(await db.nodeRevision.count({ where: { id: v2.id } })).toBe(1);
   });
 });
 
