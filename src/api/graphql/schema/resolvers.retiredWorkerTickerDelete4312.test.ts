@@ -83,6 +83,30 @@ describe('#4312 retire, then worker rm, with ticker templates', () => {
     expect(await refusal(rm(worker.id))).toBe('WORKER_IN_USE');
   });
 
+  it('retirement stamps the generated ticker delete and workers.retired_at with ONE value', async () => {
+    const { worker, ticker } = await cast('Stamp');
+    await retire(worker.id);
+    const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    const t = await db.ticker.findUniqueOrThrow({ where: { id: ticker.id } });
+    expect(t.deletedAt!.getTime()).toBe(w.retiredAt!.getTime());
+    expect(await rm(worker.id)).toBe(true); // the inclusive boundary (deleted_at = retired_at) is admitted
+  });
+
+  it('control: a generated ticker deleted long AFTER the retirement is history and still refuses', async () => {
+    const { worker, ticker } = await cast('Late');
+    await retire(worker.id);
+    await db.$executeRaw`UPDATE tickers SET deleted_at = (SELECT retired_at FROM workers WHERE id = ${worker.id}) + INTERVAL '1 hour' WHERE id = ${ticker.id}`;
+    expect(await refusal(rm(worker.id))).toBe('WORKER_IN_USE');
+  });
+
+  it('control: a retirement of ANOTHER worker does not excuse this one (the EXISTS is correlated to this worker)', async () => {
+    const a = await cast('Retired');
+    await retire(a.worker.id);
+    const b = await cast('Live');
+    await db.ticker.update({ where: { id: b.ticker.id }, data: { deletedAt: new Date() } }); // deleted by hand, B never retired
+    expect(await refusal(rm(b.worker.id))).toBe('WORKER_IN_USE');
+  });
+
   it('control: a sibling worker with live tickers is unaffected by another worker retiring', async () => {
     const a = await cast('A');
     const b = await cast('B');
