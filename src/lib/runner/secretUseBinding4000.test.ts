@@ -12,6 +12,12 @@ describe('secret.use signed binding (#4000)', () => {
     expect(() => check('https://api.example.test/v1/x', 'https://api.example.test/v1', 'https://api.example.test/v2')).toThrow();
     expect(() => check('https://api.example.test/v1/x', 'http://api.example.test/v1', 'https://api.example.test/')).toThrow();
   });
+  // Celine's QA P3 (#134989): a TARGET with userinfo is refused by the binding itself; nothing downstream would catch it.
+  it('refuses a target url that carries a username or password', () => {
+    for (const target of ['https://user@api.example.test/v1/x', 'https://user:pw@api.example.test/v1/x', 'https://:pw@api.example.test/v1/x']) {
+      expect(() => check(target, 'https://api.example.test/v1', 'https://api.example.test/')).toThrow(/without credentials/);
+    }
+  });
 });
 
 describe('secret.use header binding (#4000)', () => {
