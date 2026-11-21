@@ -21,7 +21,7 @@ import {
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
 import { nextRevisionNumber, RevisionSlotsExhaustedError } from '../../../lib/revisionSlot.js';
 import { isLiveSlotLoc } from '../../../lib/agentRevisions.js';
-import { lockAncestorsForCreate, lockAncestorsForCreateMany, lockNodeForDelete, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
+import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockAncestorsForCreateMany, lockNodeForDelete, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
@@ -58,7 +58,7 @@ import {
   handoffSessionId,
 } from '../../../lib/workerHandoff.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
-import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
+import { deriveEdgeLoc, edgeLocDecodesAsDerived } from '../../../lib/edgeLoc.js';
 import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge.js';
@@ -101,6 +101,7 @@ import {
   type SessionInput,
   type UsageEventInput,
 } from './resolvers.helpers.js';
+import { assertRestoreKeepsRetirement } from '../../../lib/restoreUnretireGuard.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
 import { recordSessionOutcome as recordOutcome } from '../../../lib/sessionOutcome.js';
@@ -520,6 +521,105 @@ export async function writeSessionHandoff(
     );
   }
 }
+
+// #3587: the revision snapshot read and the revision row write, split so `restoreRevision` can run both inside its
+// own transaction (the auto-save then rolls back with a refused or failed restore).
+const STANDALONE_REVISION_TX_TIMEOUT_MS = 35_000;
+
+type RevisionSnapshotRead = {
+  nodes: Array<Record<string, unknown>>;
+  edges: Array<Record<string, unknown>>;
+};
+
+/** Snapshot all non-revision nodes + edges of a system memory, through `client` (the pool or a transaction). */
+async function readRevisionSnapshot(client: Prisma.TransactionClient | Context['db'], sysMemId: string): Promise<RevisionSnapshotRead> {
+  const nodeRows = await client.node.findMany({
+    where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
+    // #4244: `role` is recorded so a boot-prompt source recreated by a restore keeps the role a compile needs.
+    select: { id: true, loc: true, name: true, nodeType: true, role: true, description: true, content: true, data: true, tags: true, seq: true },
+  });
+  const nodeIds = nodeRows.map((n) => n.id);
+  const nodes = nodeRows.map(({ id: _id, ...n }) => ({ ...n, tags: n.tags ?? [] }));
+  const edges = await client.edge.findMany({
+    // Derived INCLUDE edges (#2040) are not snapshotted: restore re-derives them from content.
+    where: { sourceId: { in: nodeIds }, deletedAt: null, governedKind: null },
+    include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
+    // #4034: the reader breaks equal-priority ties by snapshot order, so write it in the live read's order.
+    orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+  });
+  const edgeSnapshots = edges.map((e) => ({
+    sourceLoc: e.source.loc,
+    targetLoc: e.target.loc,
+    loc: e.loc,
+    name: e.name,
+    description: e.description,
+    isRunnable: e.isRunnable,
+    data: e.data,
+    // #4034 (plan D3, edgeFormat 2): a snapshot that drops these makes a pinned chat fire every conditional rule.
+    condition: e.condition ?? null,
+    priority: e.priority,
+  }));
+  return { nodes, edges: edgeSnapshots };
+}
+
+/**
+ * Ensure the `revisions` parent, allocate the next slot and insert the revision row. Inside `tx`, which must already
+ * hold the `revisions` path key (the order every `revisions:<label>` create takes it in).
+ */
+async function writeRevisionRow(
+  tx: Prisma.TransactionClient,
+  sysMemId: string,
+  snapshot: RevisionSnapshotRead,
+  description: string | undefined,
+  createdBy: string | null,
+): Promise<{ label: string; revLoc: string }> {
+  // #664/#752: revLoc is `revisions:<label>`, so a concurrent non-recursive delete of the `revisions` parent could
+  // count zero descendants and then orphan this row. Hold the ancestor-path lock across the insert (advisory before
+  // row; READ COMMITTED so the delete's count sees this post-commit).
+  // #2498: the slot is allocated INSIDE the serialized section. The `revisions` path lock is taken first and the
+  // count is read after it is granted, on READ COMMITTED's fresh statement snapshot, so concurrent saves each see
+  // the previous save's row and take distinct slots.
+  await lockPathForCreateUnder(tx, sysMemId, 'revisions');
+  // The parent ensure must not abort the transaction (#3587 D5): inside one, a unique violation aborts it whatever
+  // is caught, so this is ON CONFLICT DO NOTHING, which waits for a competing insert and then does nothing.
+  await tx.node.createMany({
+    data: [{ id: generateId(), memoryId: sysMemId, loc: 'revisions', name: 'revisions', nodeType: 'system' }],
+    skipDuplicates: true,
+  });
+  // #2507: the highest number ever used, soft-deleted and archived rows included (no deletedAt filter).
+  const slotRows = await tx.node.findMany({
+    where: { memoryId: sysMemId, loc: { startsWith: 'revisions:rev-' } },
+    select: { loc: true },
+  });
+  let revNum: number;
+  try {
+    revNum = nextRevisionNumber(slotRows.map((r) => r.loc));
+  } catch (e) {
+    if (e instanceof RevisionSlotsExhaustedError) {
+      throw new GraphQLError(e.message, { extensions: { code: 'REVISION_SLOTS_EXHAUSTED' } });
+    }
+    throw e;
+  }
+  const label = `rev-${revNum}`;
+  const revLoc = `revisions:${label}`;
+  await lockAncestorsForCreate(tx, sysMemId, revLoc);
+  await tx.node.create({
+    data: {
+      id: generateId(), memoryId: sysMemId, loc: revLoc, name: label,
+      nodeType: 'system',
+      description: description ?? `Revision ${revNum}`,
+      data: {
+        revision: revNum,
+        label,
+        published: false,
+        createdBy,
+        snapshot: { edgeFormat: CHAT_SCRIPT_EDGE_FORMAT, nodes: snapshot.nodes, edges: snapshot.edges },
+      } as InputJsonValue,
+    },
+  });
+  return { label, revLoc };
+}
+
 
 // ── #2086 / #1931 / #1948: refresh a bound session's model and family ─────────────────────────────────────────
 /** A supplied family must be a valid token; checked before any write (and, on a resume, before the claim is spent). */
@@ -2352,91 +2452,15 @@ export const sessionMutations = {
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
-      // Snapshot all non-revision nodes + edges in the system memory
-      const nodes = await ctx.db.node.findMany({
-        where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
-        // #4244: `role` is recorded so a boot-prompt source recreated by a restore keeps the role a compile needs.
-        select: { loc: true, name: true, nodeType: true, role: true, description: true, content: true, data: true, tags: true, seq: true },
-      });
-      const nodeIds = (await ctx.db.node.findMany({
-        where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
-        select: { id: true },
-      })).map((n) => n.id);
-      const edges = await ctx.db.edge.findMany({
-        // Derived INCLUDE edges (#2040) are not snapshotted: restore re-derives them from content.
-        where: { sourceId: { in: nodeIds }, deletedAt: null, governedKind: null },
-        include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
-        // #4034: the reader breaks equal-priority ties by snapshot order, so write it in the live read's order.
-        orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
-      });
-      const edgeSnapshots = edges.map((e) => ({
-        sourceLoc: e.source.loc,
-        targetLoc: e.target.loc,
-        loc: e.loc,
-        name: e.name,
-        description: e.description,
-        isRunnable: e.isRunnable,
-        data: e.data,
-        // #4034 (plan D3, edgeFormat 2): a snapshot that drops these makes a pinned chat fire every conditional rule.
-        condition: e.condition ?? null,
-        priority: e.priority,
-      }));
-
-      // Ensure revisions parent exists
-      try {
-        await ctx.db.node.upsert({
-          where: { loc_memoryId: { loc: 'revisions', memoryId: sysMemId } },
-          create: { id: generateId(), memoryId: sysMemId, loc: 'revisions', name: 'revisions', nodeType: 'system' },
-          update: {},
-        });
-      } catch (err) {
-        // #2476: only the cold-path race loss means the parent exists.
-        if (!isNodeLocUniqueViolation(err)) throw err;
-      }
-
-      // #664/#752: revLoc is `revisions:<label>`, so a concurrent non-recursive
-      // delete of the `revisions` parent could count zero descendants and then
-      // orphan this row. Hold the ancestor-path lock across the insert (advisory
-      // before row; READ COMMITTED so the delete's count sees this post-commit).
-      // #2498: the slot is allocated INSIDE the serialized section. The `revisions` path lock is
-      // taken first (the key every `revisions:<label>` create takes) and the count is read after it
-      // is granted, on READ COMMITTED's fresh statement snapshot, so concurrent saves (a restore's
-      // auto-save included) each see the previous save's row and take distinct slots.
-      const { label, revLoc } = await ctx.db.$transaction(async (tx) => {
-        await lockPathForCreateUnder(tx, sysMemId, 'revisions');
-        // #2507: the highest number ever used, soft-deleted and archived rows included (no deletedAt filter).
-        const slotRows = await tx.node.findMany({
-          where: { memoryId: sysMemId, loc: { startsWith: 'revisions:rev-' } },
-          select: { loc: true },
-        });
-        let revNum: number;
-        try {
-          revNum = nextRevisionNumber(slotRows.map((r) => r.loc));
-        } catch (e) {
-          if (e instanceof RevisionSlotsExhaustedError) {
-            throw new GraphQLError(e.message, { extensions: { code: 'REVISION_SLOTS_EXHAUSTED' } });
-          }
-          throw e;
-        }
-        const label = `rev-${revNum}`;
-        const revLoc = `revisions:${label}`;
-        await lockAncestorsForCreate(tx, sysMemId, revLoc);
-        await tx.node.create({
-          data: {
-            id: generateId(), memoryId: sysMemId, loc: revLoc, name: label,
-            nodeType: 'system',
-            description: description ?? `Revision ${revNum}`,
-            data: {
-              revision: revNum,
-              label,
-              published: false,
-              createdBy: ctx.userId ?? null,
-              snapshot: { edgeFormat: CHAT_SCRIPT_EDGE_FORMAT, nodes: nodes.map((n) => ({ ...n, tags: n.tags ?? [] })), edges: edgeSnapshots },
-            } as InputJsonValue,
-          },
-        });
-        return { label, revLoc };
-      });
+      // #3587 (D2): the snapshot is read OUTSIDE the transaction, as before, so a large system memory is not read
+      // inside the transaction's timeout. The restore's auto-save reads the same snapshot with its own `tx`.
+      const snapshotRead = await readRevisionSnapshot(ctx.db, sysMemId);
+      // #3587 (D6): a restore now holds the `revisions` key for up to its 30 s, so this save, which waits behind it,
+      // gets an explicit bound above that rather than Prisma's 5 s default.
+      const { label, revLoc } = await ctx.db.$transaction(
+        (tx) => writeRevisionRow(tx, sysMemId, snapshotRead, description, ctx.userId ?? null),
+        { timeout: STANDALONE_REVISION_TX_TIMEOUT_MS },
+      );
 
       return { revisionLoc: revLoc, label, published: false, createdAt: new Date().toISOString() };
     },
@@ -2567,8 +2591,8 @@ export const sessionMutations = {
       // #4034 (D3): only a v2 snapshot holds edge condition/priority and node seq to restore.
       const restoresScriptFields = snapshot.edgeFormat === CHAT_SCRIPT_EDGE_FORMAT;
 
-      // Auto-save current state before restoring
-      await sessionMutations.createRevision({}, { agentRef: resolvedAgentId, description: `Auto-save before restoring ${revisionLoc}` }, ctx);
+      // #3587: the auto-save before restoring is written INSIDE the restore's transaction (below), so a refused or
+      // failed restore rolls it back too and "nothing was written" holds.
 
       // Restore is ATOMIC (#752 review, Codex P1): the destructive soft-deletes
       // AND the snapshot restore run in ONE transaction, so any failure — the
@@ -2585,11 +2609,25 @@ export const sessionMutations = {
           // #1213: this owning restore can recreate snapshot roles and tombstone live signals.
           // Join the bounded system-memory handshake before any loc or node-row lock/read.
           await lockMemoryForChannelChange(tx, sysMemId);
-          await lockAncestorsForCreateMany(
-            tx,
-            sysMemId,
-            snapshot.nodes.map((n) => n.loc as string).filter((l) => typeof l === 'string' && l !== ''),
+          const snapshotLocs = snapshot.nodes.map((n) => n.loc as string).filter((l) => typeof l === 'string' && l !== '');
+          // #3587 (D1/Riana Q2): ONE complete advisory set first, in the one global order (#1214): the snapshot
+          // locs' ancestors plus the `revisions` path key the auto-save takes. No advisory key may be first taken
+          // after a row lock, so nothing below adds one; the helpers' own acquisitions only re-take these.
+          await acquireLockSet(tx, [
+            ...new Set(snapshotLocs.flatMap((l) => ancestorLocs(l))),
+            'revisions',
+          ].map((loc) => ({ memoryId: sysMemId, loc })));
+          await lockAncestorsForCreateMany(tx, sysMemId, snapshotLocs);
+          // Unlocked and before any row lock: encryption is one-way, so a stale false only over-refuses.
+          const sysMem = await tx.memory.findUnique({ where: { id: sysMemId }, select: { isEncrypted: true } });
+          // Auto-save current state before restoring, in this transaction.
+          await writeRevisionRow(
+            tx, sysMemId, await readRevisionSnapshot(tx, sysMemId), `Auto-save before restoring ${revisionLoc}`, ctx.userId ?? null,
           );
+          // #3587 (ruling 0220): the authoritative check, under the row locks and before the soft-delete.
+          await assertRestoreKeepsRetirement(tx, {
+            memoryId: sysMemId, revisionLoc, snapshotNodes: snapshot.nodes, isEncrypted: sysMem?.isEncrypted ?? false,
+          });
 
           // Delete all current non-revision nodes in the system memory.
           //
@@ -2741,6 +2779,9 @@ export const sessionMutations = {
               const edgeFields = {
                 sourceId,
                 targetId,
+                // #2947: a snapshot carries no provenance flag, so a restored edge is classified exactly as the migration
+                // backfill classifies one: derived iff its loc decodes as the derivation of its own name; no loc is derived.
+                locAuthored: e.loc != null && !edgeLocDecodesAsDerived(edgeLoc, edgeName),
                 name: edgeName,
                 description: (e.description as string | null) ?? null,
                 isRunnable: (e.isRunnable as boolean | null) ?? null,
