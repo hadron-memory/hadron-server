@@ -10,6 +10,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
 import { automationPinQueries } from './resolvers.automationPin.js';
 import { automationReadGrantMutations, automationReadGrantQueries } from './resolvers.automationReadGrant.js';
 import { projectAutomationReadGrant } from './automationReadGrantProjection.js';
@@ -24,7 +25,7 @@ async function fixture() {
   await db.orgMember.create({ data: { userId: user.id, organizationId: org.id, role: 'ADMIN' } });
   const app = await db.app.create({ data: { name: 'RG3526', urn: 'rg3526.test:app', organizationId: org.id } });
   await db.appMember.create({ data: { appId: app.id, userId: user.id, role: 'owner' } });
-  const schedule = await db.agentSchedule.create({ data: { organizationId: org.id, appId: app.id, userId: user.id, name: 'S', cron: '0 6 * * 1', entryNodeUrn: 'hrn:node:rg3526.test:flow:entry' } });
+  const schedule = await db.agentSchedule.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, userId: user.id, name: 'S', cron: '0 6 * * 1', entryNodeUrn: 'hrn:node:rg3526.test:flow:entry' } });
   const foreign = await db.organization.create({ data: { name: 'Foreign3526', urn: 'foreign3526.test' } });
   const readable = await db.memory.create({ data: { name: 'Know', urn: 'rg3526.test:know', class: 'knowledge', organizationId: org.id } });
   const hidden = await db.memory.create({ data: { name: 'Hid', urn: 'foreign3526.test:hid', class: 'knowledge', organizationId: foreign.id } });
