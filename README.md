@@ -24,13 +24,16 @@ cp .env.example .env   # edit DATABASE_URL, JWT_SECRET, HADRON_ENCRYPTION_KEY
 Starting from an empty local database (single-role, as in CLAUDE.md "Local Postgres setup"):
 
 ```bash
-createdb -h localhost -U <role> hadron_local
-psql postgresql://<role>@localhost:5432/hadron_local -c 'CREATE EXTENSION IF NOT EXISTS vector'
-export DATABASE_URL=postgresql://<role>@localhost:5432/hadron_local   # <role>: a Postgres role that can create tables
+export PGROLE=your_role   # a Postgres role that can create databases and install the `vector` extension (see below)
+createdb -h localhost -U "$PGROLE" hadron_local
+psql "postgresql://$PGROLE@localhost:5432/hadron_local" -c 'CREATE EXTENSION IF NOT EXISTS vector'
+export DATABASE_URL="postgresql://$PGROLE@localhost:5432/hadron_local"
 pnpm run db:generate                       # the Prisma client; nothing else generates it, and the seed and the server import it
 scripts/dev-setup.sh                       # push + post-push.sql from $DATABASE_URL (never a bare `db push`)
 pnpm tsx prisma/seed.ts
 ```
+
+The role needs `CREATEDB`, and installing `vector` needs superuser on most installs (the extension is untrusted). If your role lacks either, run the `createdb` and `CREATE EXTENSION` lines as a privileged role, make your role the database owner, then continue as that role.
 
 Then set `DATABASE_URL` in `.env` and add a `RATE_LIMIT_KEYRING` (required: the server refuses to
 boot without it; the shape and a generate command are in `.env.example`), and run `pnpm run dev`.
