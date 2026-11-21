@@ -1760,7 +1760,7 @@ model Edge {
   /// derived from the endpoints + name when not authored (see
   /// `src/lib/edgeLoc.ts`). Mirrors `Node.loc`.
   loc                String
-  /// #2947 (rulings 0153, 0154, cor:api:190:01): whether `loc` was AUTHORED (supplied by a caller) or DERIVED from the
+  /// #2947 (rulings 0153, 0154, hrn:node:hadronmemory.com:specs:cor:api:190:01): whether `loc` was AUTHORED (supplied by a caller) or DERIVED from the
   /// endpoints and name. RECORDED, never inferred at move time: a move rebases a derived loc and leaves an authored one
   /// as written, even when an authored loc happens to equal the derivation. `true` is the safe default: a writer that
   /// does not say is treated as authored, which a move never rewrites. The migration classified existing rows once, by
