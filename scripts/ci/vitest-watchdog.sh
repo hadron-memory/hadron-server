@@ -8,7 +8,7 @@
 # if it is still running after WATCHDOG_MINUTES, ends it ourselves while the VM is alive:
 #   1. prints a [watchdog] process list and one final [sampler] block (date, free, df, largest processes) to stdout;
 #   2. stops, then kills, the command's own process tree, by PID: the command and every descendant found by walking the
-#      ppid chain. Nothing is matched by name, and nothing outside that tree is touched (the step's own sampler is a
+#      ppid chain, re-scanned and stopped until no new descendant appears. Nothing is matched by name, and nothing outside that tree is touched (the step's own sampler is a
 #      sibling: the step's EXIT trap ends it after this script returns, so it dies last);
 #   3. prints "[watchdog] vitest exceeded N min; killed" and exits 124 (GNU timeout's code for "the time ran out"),
 #      which vitest itself does not use, so a watchdog kill is distinguishable from a test failure (exit 1).
@@ -27,9 +27,11 @@ refuse() { echo "[watchdog] WATCHDOG_MINUTES must be a positive integer below WA
 minutes=${WATCHDOG_MINUTES-}
 step=${WATCHDOG_STEP_TIMEOUT_MINUTES-}
 unit=${WATCHDOG_SECONDS_PER_MINUTE:-60}
-[[ "$minutes" =~ ^[1-9][0-9]*$ ]] || refuse
-[[ "$step" =~ ^[1-9][0-9]*$ ]] || refuse
-[[ "$unit" =~ ^[1-9][0-9]*$ ]] || refuse
+# At most four digits each (#4647 LOCAL F2): a longer digit string would wrap in bash arithmetic and pass the check
+# below as some small number. A step's timeout-minutes is at most 360, so four digits is ample.
+[[ "$minutes" =~ ^[1-9][0-9]{0,3}$ ]] || refuse
+[[ "$step" =~ ^[1-9][0-9]{0,3}$ ]] || refuse
+[[ "$unit" =~ ^[1-9][0-9]{0,3}$ ]] || refuse
 (( minutes < step )) || refuse
 [ "${1:-}" = -- ] || { echo "usage: vitest-watchdog.sh -- <command...>" >&2; exit 2; }
 shift
@@ -56,11 +58,18 @@ while kill -0 "$cmd" 2>/dev/null; do
     echo "[watchdog] budget of ${minutes} min reached; process tree before the kill:"
     ps -eo pid,ppid,rss,etime,comm
     echo "[sampler] $(date -u +%FT%TZ) (final, from the watchdog)"; free -m; df -h /; ps -eo rss,comm --sort=-rss | head -5
-    # Stop the tree first so nothing in it can spawn while it is collected, then collect again and kill all of it.
-    pids=$(tree "$cmd")
-    # shellcheck disable=SC2086
-    kill -STOP $pids 2>/dev/null
-    pids=$(tree "$cmd" | sort -u; echo "$pids") ; pids=$(sort -u <<< "$pids")
+    # Stop the tree before killing it, so nothing in it can fork while it is collected. A scan and its STOP are not
+    # atomic: a process can fork between them, and that new process can fork again (#4647 LOCAL F1, Jane). So scan
+    # and stop repeatedly until a scan finds no PID not already stopped; only then is the whole tree frozen, and it is
+    # killed. Bounded, so a tree that keeps growing faster than it is stopped still ends in a kill.
+    pids=""
+    for _ in $(seq 50); do
+      new=$(comm -13 <(sort -u <<< "$pids") <(tree "$cmd" | sort -u))
+      [ -n "$new" ] || break
+      # shellcheck disable=SC2086
+      kill -STOP $new 2>/dev/null
+      pids=$(printf '%s\n%s\n' "$pids" "$new" | awk 'NF' | sort -u)
+    done
     # shellcheck disable=SC2086
     kill -KILL $pids 2>/dev/null
     wait "$cmd" 2>/dev/null
