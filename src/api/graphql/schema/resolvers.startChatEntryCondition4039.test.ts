@@ -5,7 +5,7 @@
  * evaluated, and only then is anything provisioned. A condition that cannot be evaluated refuses with
  * `ENTRY_CONDITION_FAILED` and leaves nothing behind.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLoc } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -87,6 +87,8 @@ beforeEach(async () => {
   await serveEveryAgent(db);
 });
 
+afterEach(() => sessionKeyCache.clear()); // the cache is process-wide: a failing pin must not leak a key into the next test
+
 const startShared = (userId: string, args: Record<string, unknown> = {}) =>
   M.startChat({}, { agentRef: agentId, scope: 'shared', ...args }, ctxFor(userId));
 const opened = async (userId: string, args: Record<string, unknown> = {}) => (await startShared(userId, args)).conversationName as string;
@@ -149,6 +151,14 @@ for (const path of ['live', 'snapshot'] as const) describe(`#4039 unnamed start 
     const never = { '==': [1, 2] };
     await seed([...conv('one', { seq: 1, condition: never }), ...conv('fb', { flags: { isFallback: true } })], path);
     expect(await opened(alice.id)).toBe('fb');
+  });
+
+  // The counterfactual twin of the pin above: the same agent, but `fb` is an ordinary conversation behind a failing condition (no
+  // isFallback flag). Nothing is then eligible, so the start is refused: the flag, not the shape of `fb`, is what makes it open.
+  it('S4 (Q12), fallback only, counterfactual: without the fallback flag the same conversation is not opened', async () => {
+    const never = { '==': [1, 2] };
+    await seed([...conv('one', { seq: 1, condition: never }), ...conv('fb', { seq: 2, condition: never })], path);
+    expect((await refusal(alice.id)).code).toBe('AGENT_HAS_NO_CONVERSATIONS');
   });
 
   // Built behaviour (ruling 0127, hadron-server#3408), not a spec citation: cor:cht:020:02 says only that the start is refused, and
@@ -225,6 +235,8 @@ describe('#4039 refusals judged before any write', () => {
     const memory = (await sharedMemory())!;
     const info = { id: memory.id, isEncrypted: true };
     const key = generateDataKey();
+    // The cache is keyed by MEMORY id: the first argument only names which session holds the key (its lifetime), so a start by any
+    // user reads it by memory (sessionKeyCache.getByMemoryId). That is the contract this pin relies on, not a cross-session leak.
     sessionKeyCache.set(generateId(), memory.id, key);
     await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
     const facts = { users: { [alice.id]: { name: 'Ann' } } };
