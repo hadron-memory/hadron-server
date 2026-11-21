@@ -80,7 +80,7 @@ import { compileBootPromptMutations } from './resolvers.mutation.compileBootProm
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamSpecQueries } from './resolvers.teamSpec.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
-import { teamAttentionMutations, teamAttentionQueries } from './resolvers.teamAttention.js';
+import { teamAttentionMutations } from './resolvers.teamAttention.js';
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { agentTaskMutations, agentTaskQueries, agentTaskFieldResolvers } from './resolvers.agentTask.js';
 import { tickerMutations, tickerQueries, tickerFieldResolvers } from './resolvers.ticker.js';
@@ -224,7 +224,6 @@ export const resolvers = {
     ...appKeyScopeQueries,
     ...chatQueries,
     ...teamChatQueries,
-    ...teamAttentionQueries,
     ...teamWorkQueries,
     ...agentTaskQueries,
     ...prProtocolQueries,

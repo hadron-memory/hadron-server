@@ -860,106 +860,6 @@ export const typeDefs = `#graphql
     cursorIncarnation: Int
   }
 
-  "#1353 — compact unread metadata for one Worker/Channel pair. No message body is returned."
-  type TeamAttentionChannel {
-    channel: ID!
-    name: String!
-    unread: Int!
-    unreadMentions: Int!
-    firstUnreadSeq: Int
-    lastSeq: Int!
-  }
-
-  "#1353 — one live Worker that has relevant unread attention after the supplied token."
-  type TeamAttentionWorker {
-    worker: ID!
-    name: String!
-    urn: String
-    live: Boolean!
-    channels: [TeamAttentionChannel!]!
-  }
-
-  type TeamAttentionResult {
-    "Opaque signed snapshot. Adopt it only after every listed nudge is accepted."
-    token: String!
-    workers: [TeamAttentionWorker!]!
-  }
-
-  type TeamAttentionSwitchoverChannel {
-    channel: ID!
-    name: String!
-    fromSeq: Int!
-    throughSeq: Int!
-    unread: Int!
-    unreadMentions: Int!
-  }
-
-  type TeamAttentionSwitchoverWorker {
-    worker: ID!
-    name: String!
-    urn: String
-    channels: [TeamAttentionSwitchoverChannel!]!
-  }
-
-  type TeamAttentionSwitchoverPreview {
-    "Short-lived proof binding the exact operator, App, Workers, registers, cursors and heads shown here."
-    proof: String!
-    expiresAt: DateTime!
-    workers: [TeamAttentionSwitchoverWorker!]!
-  }
-
-  """
-  #1384 paged (v2): one bounded slice of an attention scan. Counts are exact
-  for the captured (seen, head] range of the issuing scan only, and items are
-  emitted solely from Channels that scan has exhausted.
-  """
-  type TeamAttentionPageItem {
-    worker: ID!
-    workerName: String!
-    workerUrn: String
-    channel: ID!
-    channelName: String!
-    unread: Int!
-    unreadMentions: Int!
-    firstUnreadSeq: Int
-    lastRelevantSeq: Int
-    "The frozen Channel head this item's counts are exact for."
-    lastSeq: Int!
-  }
-
-  type TeamAttentionPage {
-    items: [TeamAttentionPageItem!]!
-    "False while any Channel is unfinished or queued items remain undelivered."
-    scanComplete: Boolean!
-    "Continuation for the next pull; null on the final page."
-    nextPage: String
-    """
-    FINAL PAGE ONLY: a since-watermark token (same shape v1 issued) to adopt
-    after every listed nudge was accepted. Never present while scanComplete
-    is false.
-    """
-    adoptableSince: String
-  }
-
-  type TeamAttentionPreviewPage {
-    items: [TeamAttentionPageItem!]!
-    scanComplete: Boolean!
-    nextPage: String
-    """
-    FINAL PAGE ONLY: the short-lived switchover proof (frozen heads). An
-    incomplete preview never carries one, so a partial preview can never
-    silently discard an unscanned backlog.
-    """
-    proof: String
-    expiresAt: DateTime
-  }
-
-  type TeamAttentionSwitchoverResult {
-    applied: Boolean!
-    workersAdvanced: Int!
-    channelsAdvanced: Int!
-  }
-
   "#1353 — the exact Worker/Channel cursor advanced by markOwnTeamChatRead."
   type OwnTeamChatReadState {
     workerId: ID!
@@ -11108,53 +11008,6 @@ export const typeDefs = `#graphql
     channelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!): ChannelReadState
 
     """
-    #1353 v1 attention query, retired by #1384. This field always returns
-    UPGRADE_REQUIRED; use teamAttentionPage for bounded polling. Pass an
-    existing v1 since token to teamAttentionPage to carry its watermark
-    forward. Neither operation changes read state.
-    """
-    teamAttention(appRef: ID!, since: String): TeamAttentionResult!
-
-    """
-    #1384 paged (v2) attention poll — the bounded successor to teamAttention
-    (v1 answers UPGRADE_REQUIRED). Each call decrypts at most scanLimit rows
-    (encrypted Channels), counts plaintext Channels with bounded SQL
-    aggregates (#1779: a window of 200 seqs per scanLimit unit per Channel
-    visit, 400 per call), and emits at most limit Worker/Channel pairs; continue with page while
-    nextPage is present. The final page alone carries adoptableSince — adopt
-    it only after EVERY listed nudge was accepted; on any partial failure
-    retain the prior watermark and restart the scan (duplicates, never loss).
-    An existing v1 since token starts a scan, carrying the watermark forward.
-    Never changes read state.
-    """
-    teamAttentionPage(
-      appRef: ID!
-      since: String
-      page: String
-      limit: Int
-      scanLimit: Int
-    ): TeamAttentionPage!
-
-    """
-    #1384 paged switchover preview — same bounded scan as teamAttentionPage,
-    full-backlog accounting. The apply proof exists ONLY on the final page of
-    a completed preview; confirmTeamAttentionSwitchover (apply) is unchanged.
-    """
-    teamAttentionPreviewPage(
-      appRef: ID!
-      page: String
-      limit: Int
-      scanLimit: Int
-    ): TeamAttentionPreviewPage!
-
-    """
-    Preview the explicit baseline switchover for the operator's current live
-    Workers. Read-only: inspect the exact cursors, heads and unread counts,
-    then pass proof to confirmTeamAttentionSwitchover within ten minutes.
-    """
-    teamAttentionSwitchoverPreview(appRef: ID!): TeamAttentionSwitchoverPreview!
-
-    """
     036-ai-service-config: resolve a config name for an execution context
     and return its identity, with decrypted credentials only for a caller
     authorized to manage the selected source (successor to agentAIConfig/appAIConfig).
@@ -14888,14 +14741,6 @@ export const typeDefs = `#graphql
       """
       expectedIncarnation: Int
     ): OwnTeamChatReadState!
-
-    """
-    Explicitly confirm a previously previewed #1353 switchover. The proof is
-    actor/App/scope-bound; any live-Worker, register or cursor drift rejects
-    the whole transaction. It advances only through the heads captured by the
-    preview, so messages arriving afterward remain unread.
-    """
-    confirmTeamAttentionSwitchover(appRef: ID!, proof: String!): TeamAttentionSwitchoverResult!
 
     # Chatbot revisions (org ADMIN)
     """

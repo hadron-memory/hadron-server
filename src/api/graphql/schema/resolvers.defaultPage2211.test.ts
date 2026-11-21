@@ -4,7 +4,6 @@ import { clampGraphTake, GRAPH_PAGE_DEFAULT } from './resolvers.query.memory.js'
 import { STOP_SIGNAL_PAGE_DEFAULT } from './resolvers.stopSignal.js';
 import { DUE_WAKES_PAGE_DEFAULT } from '../../../lib/tickers/dueWakes.js';
 import { DELIVERY_BATCHES_PAGE_DEFAULT } from '../../../lib/tickers/deliveryBatch.js';
-import { PAGE_RESULT_PAIRS_DEFAULT } from '../../../lib/teamAttentionPage.js';
 import { GLOBAL_SEARCH_DEFAULT_LIMIT } from '../../../lib/global-search/index.js';
 
 // #2211 — every surface that already pages answers an omitted size with 20.
@@ -16,7 +15,6 @@ describe('#2211 default page size is 20', () => {
       STOP_SIGNAL_PAGE_DEFAULT,
       DUE_WAKES_PAGE_DEFAULT,
       DELIVERY_BATCHES_PAGE_DEFAULT,
-      PAGE_RESULT_PAIRS_DEFAULT,
       GLOBAL_SEARCH_DEFAULT_LIMIT,
     ]) {
       expect(d).toBe(20);

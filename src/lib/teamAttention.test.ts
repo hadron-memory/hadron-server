@@ -16,13 +16,7 @@ import { sessionKeyCache } from './sessionKeyCache.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.js';
 import type { AuthContext } from '../middleware/auth.js';
-import {
-  teamAttentionPage,
-  teamAttentionPreviewPage,
-  confirmTeamAttentionSwitchover,
-  getTeamAttention,
-  previewTeamAttentionSwitchover,
-} from './teamAttention.js';
+import { resumableOwnWorkerIds } from './teamAttention.js';
 
 vi.mock('./bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -51,49 +45,6 @@ let sessionId: string;
 // The v1 doors answer UPGRADE_REQUIRED now; these helpers drain the paged
 // doors to completion and regroup results into the v1 shapes the legacy
 // assertions below speak, so the behavioral matrix keeps running unchanged.
-
-async function pollPaged(ctx: Context, appRef: string, since?: string | null) {
-  const items: Array<{ worker: string; workerName: string; workerUrn: string | null; channel: string; channelName: string; unread: number; unreadMentions: number; firstUnreadSeq: number | null; lastSeq: number }> = [];
-  let page: string | null = null;
-  let token: string | null = null;
-  for (let guard = 0; guard < 200; guard++) {
-    const r = await teamAttentionPage(ctx, appRef, { since: page ? null : since ?? null, page });
-    items.push(...r.items);
-    if (r.scanComplete) { token = r.adoptableSince; break; }
-    page = r.nextPage;
-    if (!page) break;
-  }
-  const workers = new Map<string, { worker: string; name: string; urn: string | null; live: boolean; channels: Array<Record<string, unknown>> }>();
-  for (const it of items) {
-    const w = workers.get(it.worker) ?? { worker: it.worker, name: it.workerName, urn: it.workerUrn, live: true, channels: [] };
-    w.channels.push({ channel: it.channel, name: it.channelName, unread: it.unread, unreadMentions: it.unreadMentions, firstUnreadSeq: it.firstUnreadSeq, lastSeq: it.lastSeq });
-    workers.set(it.worker, w);
-  }
-  return { token, workers: [...workers.values()] };
-}
-
-async function previewPaged(ctx: Context, appRef: string) {
-  const items: Array<{ worker: string; channel: string; channelName: string; unread: number; firstUnreadSeq: number | null; lastSeq: number }> = [];
-  let page: string | null = null;
-  let proof: string | null = null;
-  let expiresAt: Date | null = null;
-  for (let guard = 0; guard < 200; guard++) {
-    const r = await teamAttentionPreviewPage(ctx, appRef, { page });
-    items.push(...r.items);
-    if (r.scanComplete) { proof = r.proof; expiresAt = r.expiresAt; break; }
-    page = r.nextPage;
-    if (!page) break;
-  }
-  const workers = new Map<string, { worker: string; channels: Array<Record<string, unknown>> }>();
-  for (const it of items) {
-    const w = workers.get(it.worker) ?? { worker: it.worker, channels: [] };
-    // v1 preview carried the target's seen cursor as fromSeq; these tests
-    // exercise fresh cursors (seen 0), which the frozen span starts from.
-    w.channels.push({ channel: it.channel, name: it.channelName, fromSeq: 0, throughSeq: it.lastSeq, unread: it.unread });
-    workers.set(it.worker, w);
-  }
-  return { proof, expiresAt, workers: [...workers.values()] };
-}
 
 const userCtx = (extra: Partial<Context> = {}): Context => ({ db, userId: user.id, roles: ['READER'], ...extra }) as Context;
 
@@ -365,273 +316,6 @@ describe('worker-owned ordinary reads', () => {
   });
 });
 
-describe('signed attention poll', () => {
-  it('domain-separates attention signatures even when the configured secret is shared', async () => {
-    process.env.TEAM_ATTENTION_TOKEN_SECRET = 'shared-test-secret';
-    const result = await pollPaged(userCtx(), app.id);
-    const [body, signature] = result.token!.split('.');
-    const rawSharedSecretSignature = createHmac('sha256', 'shared-test-secret')
-      .update(body)
-      .digest('base64url');
-
-    expect(signature).not.toBe(rawSharedSecretSignature);
-    await expect(pollPaged(userCtx(), app.id, result.token)).resolves.toMatchObject({ workers: [] });
-  });
-
-  it('conceals an existing App from a non-participant exactly like an absent App', async () => {
-    const outsider = await db.user.create({
-      data: { id: generateId(), githubId: 1353003, githubUsername: `outsider-${Date.now()}` },
-    });
-    const outsiderCtx = { db, userId: outsider.id, roles: ['READER'] } as Context;
-
-    const existing = pollPaged(outsiderCtx, app.id).catch((error) => error);
-    const absent = pollPaged(outsiderCtx, generateId()).catch((error) => error);
-    const [existingError, absentError] = await Promise.all([existing, absent]);
-
-    expect(existingError).toMatchObject({ message: 'App not found.', extensions: { code: 'APP_NOT_FOUND' } });
-    expect(absentError).toMatchObject({ message: 'App not found.', extensions: { code: 'APP_NOT_FOUND' } });
-  });
-
-  it('derives mention-only relevance and counts from the register while excluding the Worker author', async () => {
-    await db.registerEntry.updateMany({
-      where: { appId: app.id, attendeeWorkerId: worker.id },
-      data: { mentionOnly: true },
-    });
-    await post('ordinary unread');
-    await post('@dara relevant', { mentions: ['dara'] });
-    // #2020: a broadcast is a mention when the server stamped it at post time.
-    await post('@all broadcast', { mentions: ['all'], broadcastWakes: true });
-    await post('@team broadcast', { mentions: ['team'], broadcastWakes: true });
-    await post('@someone unrelated', { mentions: ['someone'] });
-    await post('@dara by Dara', { mentions: ['dara'], authorWorkerId: worker.id });
-    // Unstamped, it is ordinary unread and never a mention (cor:agt:080:08/:14).
-    await post('@all quoted', { mentions: ['all'] });
-
-    const result = await pollPaged(userCtx(), app.id);
-    expect(result.workers).toHaveLength(1);
-    expect(result.workers[0].channels).toEqual([
-      expect.objectContaining({ unread: 6, unreadMentions: 3, firstUnreadSeq: 1, lastSeq: 7 }),
-    ]);
-  });
-
-  it('excludes broadcast authors while counting multiple broadcast tokens once for another Worker', async () => {
-    const mira = await addWorker('Mira');
-    await db.registerEntry.updateMany({
-      where: { appId: app.id, channelId: channel.id },
-      data: { mentionOnly: true },
-    });
-    await post('@all @team by Dara', { mentions: ['all', 'team'], authorWorkerId: worker.id, broadcastWakes: true });
-    await post('@all @team by Mira', { mentions: ['all', 'team'], authorWorkerId: mira.id, broadcastWakes: true });
-
-    const result = await pollPaged(userCtx(), app.id);
-    expect(result.workers).toHaveLength(2);
-    expect(result.workers.find((row) => row.worker === worker.id)?.channels[0]).toMatchObject({
-      unread: 1, unreadMentions: 1, firstUnreadSeq: 2, lastSeq: 2,
-    });
-    expect(result.workers.find((row) => row.worker === mira.id)?.channels[0]).toMatchObject({
-      unread: 1, unreadMentions: 1, firstUnreadSeq: 1, lastSeq: 2,
-    });
-  });
-
-  it('pages an encrypted Channel once for multiple Workers and fails safe when the key is unavailable', async () => {
-    await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
-    sessionKeyCache.set('attention-encrypted', memory.id, generateDataKey());
-    const iris = await addWorker('Iris');
-    await db.registerEntry.updateMany({
-      where: { appId: app.id, attendeeWorkerId: worker.id, channelId: channel.id },
-      data: { mentionOnly: true },
-    });
-    await post('ordinary encrypted unread');
-    await post('@dara encrypted relevant', { mentions: ['dara'] });
-    await post('@dara encrypted by Dara', { mentions: ['dara'], authorWorkerId: worker.id });
-    // Cross the encrypted keyset-page boundary. The scan is per Channel, so
-    // this backlog is decrypted once and fanned out to both Worker predicates.
-    for (let i = 0; i < 48; i++) await post(`encrypted page filler ${i}`);
-
-    const result = await pollPaged(userCtx(), app.id);
-    expect(result.workers.find((row) => row.worker === worker.id)?.channels[0]).toMatchObject({
-      unread: 50,
-      unreadMentions: 1,
-      firstUnreadSeq: 1,
-      lastSeq: 51,
-    });
-    expect(result.workers.find((row) => row.worker === iris.id)?.channels[0]).toMatchObject({
-      unread: 51,
-      unreadMentions: 0,
-      firstUnreadSeq: 1,
-      lastSeq: 51,
-    });
-
-    sessionKeyCache.clear();
-    await expect(pollPaged(userCtx(), app.id)).rejects.toMatchObject({
-      extensions: { code: 'SESSION_EXPIRED', memoryId: memory.id },
-    });
-  });
-
-  it('retries the whole delivery set after a partial failure, while adopting the returned token suppresses it', async () => {
-    const iris = await addWorker('Iris');
-    const baseline = await pollPaged(userCtx(), app.id);
-    await post('for both workers');
-
-    const first = await pollPaged(userCtx(), app.id, baseline.token);
-    expect(first.workers.map((w) => w.worker).sort()).toEqual([iris.id, worker.id].sort());
-
-    // One nudge succeeded and one failed: retaining the old token returns the
-    // entire atomic set again. Duplicates are visible; loss is impossible.
-    const retry = await pollPaged(userCtx(), app.id, baseline.token);
-    expect(retry.workers.map((w) => w.worker).sort()).toEqual([iris.id, worker.id].sort());
-    expect((await pollPaged(userCtx(), app.id, first.token)).workers).toEqual([]);
-  });
-
-  it('handles delayed nudges, posts during polling, own posts, and a Worker first seen after the token', async () => {
-    const baseline = await pollPaged(userCtx(), app.id);
-    await post('new after the snapshot');
-    const pending = await pollPaged(userCtx(), app.id, baseline.token);
-    expect(pending.workers[0].channels[0]).toMatchObject({ unread: 1, firstUnreadSeq: 1, lastSeq: 1 });
-
-    // The Worker reads before a delayed nudge is delivered: unread state is
-    // authoritative, so the old token no longer produces a stale nudge.
-    await Q.channelMessages(
-      {},
-      { channelRef: channel.id, sinceSeq: 0, beforeSeq: null, mentionsRef: null, limit: 50, offset: 0 },
-      userCtx({ sessionId }),
-    );
-    expect((await pollPaged(userCtx(), app.id, baseline.token)).workers).toEqual([]);
-
-    const afterRead = await pollPaged(userCtx(), app.id);
-    await post('written by Dara', { authorWorkerId: worker.id });
-    expect((await pollPaged(userCtx(), app.id, afterRead.token)).workers).toEqual([]);
-
-    await post('arrived during the next poll');
-    expect((await pollPaged(userCtx(), app.id, afterRead.token)).workers).toHaveLength(1);
-
-    const newcomer = await addWorker('Newcomer');
-    const seenBeforeNewcomer = await pollPaged(userCtx(), app.id);
-    expect(seenBeforeNewcomer.workers.some((w) => w.worker === newcomer.id)).toBe(true);
-  });
-
-  it('binds tokens to the exact operator and App, and refuses the backlog-skipping shortcut', async () => {
-    const result = await pollPaged(userCtx(), app.id);
-    await expect(pollPaged({ db, userId: otherUser.id, roles: ['READER'] } as Context, app.id, result.token)).rejects.toMatchObject({ extensions: { code: 'INVALID_ATTENTION_TOKEN' } });
-    await expect(pollPaged(userCtx(), otherApp.id, result.token)).rejects.toMatchObject({ extensions: { code: 'INVALID_ATTENTION_TOKEN' } });
-    await expect(pollPaged(userCtx(), app.id, 'now')).rejects.toMatchObject({ extensions: { code: 'SWITCHOVER_CONFIRMATION_REQUIRED' } });
-  });
-});
-
-describe('explicit switchover', () => {
-  it('requires a fresh same-operator/App proof and leaves post-preview messages unread', async () => {
-    await post('backlog');
-    const preview = await previewPaged(userCtx(), app.id);
-    expect(preview.workers[0].channels[0]).toMatchObject({ fromSeq: 0, throughSeq: 1, unread: 1 });
-    await post('arrived after preview');
-
-    const applied = await confirmTeamAttentionSwitchover(userCtx(), app.id, preview.proof!);
-    expect(applied).toMatchObject({ applied: true, workersAdvanced: 1, channelsAdvanced: 1 });
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 1 });
-    const remaining = await pollPaged(userCtx(), app.id);
-    expect(remaining.workers[0].channels[0]).toMatchObject({ unread: 1, firstUnreadSeq: 2, lastSeq: 2 });
-
-    await expect(confirmTeamAttentionSwitchover({ db, userId: otherUser.id, roles: ['READER'] } as Context, app.id, preview.proof!)).rejects.toMatchObject({ extensions: { code: 'INVALID_SWITCHOVER_PROOF' } });
-    await expect(confirmTeamAttentionSwitchover(userCtx(), otherApp.id, preview.proof!)).rejects.toMatchObject({ extensions: { code: 'INVALID_SWITCHOVER_PROOF' } });
-  });
-
-  it('an App whose org is deleted after the apply entry check advances nothing (#1362 review)', async () => {
-    // The Worker attends ONLY a Channel in a memory the operator can read on
-    // its own (org visibility), so the target survives the App's removal: only
-    // the explicit App re-check can stop the apply.
-    await db.registerEntry.deleteMany({ where: { attendeeWorkerId: worker.id } });
-    const independentMemory = await db.memory.create({
-      data: {
-        id: generateId(), organizationId: org.id, urn: `${org.urn}:independent-sw`,
-        name: 'independent-sw', class: 'knowledge', visibility: 'ORGANIZATION',
-      },
-    });
-    const made = await ensureChannelWithRoot(db, {
-      memoryId: independentMemory.id, loc: 'chats:independent', name: 'independent', createdBy: user.id,
-    });
-    await db.registerEntry.create({
-      data: { id: generateId(), appId: app.id, channelId: made.channel.id, attendeeWorkerId: worker.id, role: 'WATCH' },
-    });
-    const enc = await getMemoryEncryptionInfo(db, independentMemory.id);
-    await appendChatMessage(
-      db,
-      { id: made.rootId, memoryId: independentMemory.id, loc: 'chats:independent' },
-      enc,
-      async ({ tx, seq, msgNum }) => tx.node.create({
-        data: {
-          id: generateId(), memoryId: independentMemory.id, loc: `chats:independent:messages:${msgNum}`,
-          name: msgNum, nodeType: 'chat-message', seq, messageChannelId: made.channel.id, content: 'backlog',
-        },
-      }),
-      { asChannel: true },
-    );
-    const preview = await previewPaged(userCtx(), app.id);
-    // Hold apply between its entry check and its transaction: the window in
-    // which the entry check goes stale.
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    let reachedTx!: () => void;
-    const atTx = new Promise<void>((r) => (reachedTx = r));
-    const gatedDb = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop === '$transaction') {
-          return async (...args: unknown[]) => {
-            reachedTx();
-            await gate;
-            return (target.$transaction as (...a: unknown[]) => unknown)(...args);
-          };
-        }
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-    });
-    const applying = confirmTeamAttentionSwitchover({ ...userCtx(), db: gatedDb } as Context, app.id, preview.proof!).then(
-      () => 'applied',
-      (e: { extensions?: { code?: string } }) => e.extensions?.code ?? String(e),
-    );
-    await atTx;
-    // The App's org is soft-deleted in the window. Uninstall and revoked
-    // participation already drop the register rows inside the transaction (the
-    // scope check then refuses); an org soft-delete leaves the App, its
-    // memberships and its register rows intact, so only the explicit live-App
-    // re-check stops this apply.
-    await db.organization.update({ where: { id: org.id }, data: { deletedAt: new Date() } });
-    release();
-    expect(await applying).toBe('SWITCHOVER_PROOF_STALE');
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: made.channel.id } })).toBeNull();
-  });
-
-  it('rejects cursor or live-scope drift atomically', async () => {
-    await post('backlog');
-    const preview = await previewPaged(userCtx(), app.id);
-    await db.channelReadState.create({ data: { id: generateId(), workerId: worker.id, channelId: channel.id, lastSeenSeq: 1 } });
-    await expect(confirmTeamAttentionSwitchover(userCtx(), app.id, preview.proof!)).rejects.toMatchObject({ extensions: { code: 'SWITCHOVER_PROOF_STALE' } });
-
-    await db.channelReadState.deleteMany();
-    const second = await previewPaged(userCtx(), app.id);
-    await addWorker('Scope Drift');
-    await expect(confirmTeamAttentionSwitchover(userCtx(), app.id, second.proof!)).rejects.toMatchObject({ extensions: { code: 'SWITCHOVER_PROOF_STALE' } });
-    expect(await db.channelReadState.count()).toBe(0);
-  });
-
-  it('accepts a freshly minted proof when a reused Channel head is behind its preserved cursor', async () => {
-    await db.channelReadState.create({
-      data: { id: generateId(), workerId: worker.id, channelId: channel.id, lastSeenSeq: 5 },
-    });
-    const preview = await previewPaged(userCtx(), app.id);
-    // v2 item shape carries no fromSeq (the frozen seen stays private); the
-    // point of this case is the preserved cursor sitting AHEAD of the head.
-    expect(preview.workers[0].channels[0]).toMatchObject({ throughSeq: 0, unread: 0 });
-
-    await expect(confirmTeamAttentionSwitchover(userCtx(), app.id, preview.proof!)).resolves.toMatchObject({
-      applied: true,
-      workersAdvanced: 1,
-      channelsAdvanced: 1,
-    });
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 5 });
-  });
-});
-
 // #3082: this block drove the MCP tools hadron_team_chat_read / hadron_channel_read / hadron_team_chat_mark_read, which are disabled
 // on MCP. The same rules are pinned here on the resolvers those tools delegated to (teamChatMessages, channelMessages,
 // markOwnTeamChatRead), with the Worker session presented as the request's session (ctx.sessionId), as the transport did.
@@ -835,9 +519,30 @@ describe('worker session reads and mark-read (resolver level; was the MCP parity
       .rejects.toMatchObject({ extensions: { code: 'CHANNEL_NOT_FOUND' } });
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: independent.id } }))
       .toBeNull();
-    // The pilot door answers a deleted org's App exactly like an absent one.
-    const error = await pollPaged(userCtx(), app.id).catch((e) => e);
+    // The pilot door (the explicit mark, since #2027 S11 retired the poll) answers
+    // a deleted org's App exactly like an absent one.
+    const error = await M.markOwnTeamChatRead({}, { appRef: app.id, sessionRef: sessionId, channelRef: channel.id, seq: 1 }, userCtx()).catch((e: unknown) => e);
     expect(error).toMatchObject({ message: 'App not found.', extensions: { code: 'APP_NOT_FOUND' } });
+  });
+
+  it('conceals an existing App from a non-participant exactly like an absent App (the pilot door)', async () => {
+    // The concealment half resolvePilotApp still owes its pin after S11 retired
+    // the poll that used to carry it: a LIVE App the caller is no participant of
+    // (here: another org's App, so neither the AppMember nor the org arm admits
+    // them) and a nonexistent one must be indistinguishable on the mark path too.
+    const strangerOrgId = generateId();
+    const strangerOrg = await db.organization.create({
+      data: { id: strangerOrgId, name: 'stranger', urn: `stranger-${strangerOrgId}.com` },
+    });
+    const stranger = await db.app.create({
+      data: { id: generateId(), organizationId: strangerOrg.id, name: 'Stranger', urn: `${strangerOrg.urn}:stranger` },
+    });
+    const mark = (appRef: string) =>
+      M.markOwnTeamChatRead({}, { appRef, sessionRef: sessionId, channelRef: channel.id, seq: 1 }, userCtx()).catch((e: unknown) => e);
+    const [existingError, absentError] = await Promise.all([mark(stranger.id), mark(generateId())]);
+    expect(existingError).toMatchObject({ message: 'App not found.', extensions: { code: 'APP_NOT_FOUND' } });
+    expect(absentError).toMatchObject({ message: 'App not found.', extensions: { code: 'APP_NOT_FOUND' } });
+    expect(String(existingError)).toBe(String(absentError));
   });
 
   it('a convenience read of a registered cross-App team Channel uses the Worker session pilot', async () => {
@@ -950,15 +655,15 @@ describe('#1540 — a mark-read through a live session keeps it live', () => {
       .resolves.toMatchObject({ lastSeenSeq: 1 });
   });
 
-  it('#1617 B: the name-holder\'s mark-read RESUMES a lapsed session, and the poll still routes the worker', async () => {
+  it('#1617 B: the name-holder\'s mark-read RESUMES a lapsed session, and the routing set still carries the worker', async () => {
     await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: user.id, heldAt: new Date() } });
     const t0 = (await db.session.findUniqueOrThrow({ where: { id: sessionId } })).startedAt;
     await post('@dara while you were away', { mentions: ['dara'] });
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date(t0.getTime() + 30 * H));
-    // Lapsed, but resumable: the attention poll still lists the worker, and
-    // polling it resumes nothing.
-    expect((await pollPaged(userCtx(), app.id)).workers.map((w: { worker: string }) => w.worker)).toEqual([worker.id]);
+    // Lapsed, but resumable: the routing set still carries the worker, and
+    // observing it resumes nothing.
+    expect([...(await resumableOwnWorkerIds(userCtx(), { userId: user.id, appId: app.id, now: new Date() }))]).toEqual([worker.id]);
     expect((await db.session.findUniqueOrThrow({ where: { id: sessionId } })).updatedAt!.getTime()).toBeLessThan(Date.now() - 24 * H);
     // The worker's own mark-read is the act that resumes it.
     await expect(M.markOwnTeamChatRead({}, { appRef: app.urn, sessionRef: sessionId, channelRef: channel.id, seq: 1 }, userCtx()))
