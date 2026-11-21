@@ -21,7 +21,7 @@ afterEach(() => { for (const s of servers.splice(0)) s.close(); });
 
 async function serve(readiness: ReadinessSource): Promise<number> {
   const app = express();
-  mountHealthRoutes(app, db as never, { readiness });
+  mountHealthRoutes(app, db, { readiness });
   const server = await new Promise<Server>(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
   servers.push(server);
   const address = server.address();
@@ -45,8 +45,11 @@ const exitOf = (program: string) => new Promise<number | null>(resolve => {
 /** The literal stack.sh's check_published requires of the published /ready body. */
 function stackShReadyLiteral(): string {
   const sh = readFileSync(new URL('scripts/e2e/stack.sh', repo), 'utf8');
-  expect(sh).toMatch(/curl --fail [^\n]*"\$base\/ready"\)/);
-  const m = sh.match(/\[\[ "\$body" == '([^']+)' \]\]/);
+  // Scoped to check_published's own body, so another comparison elsewhere in the file can't be matched instead.
+  const fn = sh.match(/\ncheck_published\(\) \{\n([\s\S]*?)\n\}\n/);
+  if (!fn) throw new Error('stack.sh: check_published not found');
+  expect(fn[1]).toMatch(/curl --fail [^\n]*"\$base\/ready"\)/);
+  const m = fn[1].match(/\[\[ "\$body" == '([^']+)' \]\]/);
   if (!m) throw new Error('stack.sh: check_published body literal not found');
   return m[1];
 }

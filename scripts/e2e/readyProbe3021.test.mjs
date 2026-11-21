@@ -4,7 +4,7 @@
 // against a fake server that is alive (/health 200) but not ready (/ready 503), and against a ready one.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
@@ -82,17 +82,29 @@ for (const ready of [false, true]) {
   });
 }
 
-// #4755 BLIND P2-2: the switch is complete. No e2e script still waits on or probes /health (comments may name it).
-test('no scripts/e2e script requests /health any more (curl or fetch)', async () => {
-  const { readdirSync } = await import('node:fs');
-  const dir = here('./');
+// #4755 BLIND P2-2: the switch is complete. No e2e script still requests /health with curl or fetch (comments may
+// name it). Scope: curl/fetch on a literal `/health` path token in .sh/.mjs/.ts/.yml files under scripts/e2e,
+// recursively; other clients (wget, nc, http.get) and paths built from variables are not detected.
+/** Drop a comment, but never the `//` inside a URL (`http://`): a `#` comment line, or `//` not preceded by `:`. */
+const code = (line) => line.replace(/^\s*#.*$/, '').replace(/(^|[^:])\/\/.*$/, '$1');
+const probesHealth = (line) => /\b(curl|fetch)\b[^\n]*\/health\b/.test(code(line));
+
+test('the /health probe detector sees URLs and skips comments (Joshua BLIND delta F1)', () => {
+  assert.equal(probesHealth('  body=$(curl -fsS http://127.0.0.1:4100/health)'), true);
+  assert.equal(probesHealth("fetch('http://127.0.0.1:4100/health').then(r => r.ok)"), true);
+  assert.equal(probesHealth('curl --fail "$base/health"'), true);
+  assert.equal(probesHealth('  # curl http://127.0.0.1:4100/health was the old probe'), false);
+  assert.equal(probesHealth("// fetch('/health') was the old probe"), false);
+  assert.equal(probesHealth("fetch('http://127.0.0.1:4100/ready') // not /health"), false);
+});
+
+test('no scripts/e2e script requests /health any more (curl or fetch)', () => {
+  const root = here('./');
   const probes = [];
-  for (const name of readdirSync(dir)) {
-    if (name.endsWith('.test.mjs') || !/\.(sh|mjs|ts|ya?ml)$/.test(name)) continue;
-    readFileSync(join(dir, name), 'utf8').split('\n').forEach((line, i) => {
-      const code = line.replace(/^\s*#.*$/, '').replace(/\/\/.*$/, '');
-      if (/(curl|fetch)\b[^\n]*\/health\b/.test(code)) probes.push(`${name}:${i + 1}`);
-    });
+  for (const entry of readdirSync(root, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile() || entry.name.endsWith('.test.mjs') || !/\.(sh|mjs|ts|ya?ml)$/.test(entry.name)) continue;
+    const path = join(entry.parentPath ?? entry.path, entry.name);
+    readFileSync(path, 'utf8').split('\n').forEach((line, i) => { if (probesHealth(line)) probes.push(`${path}:${i + 1}`); });
   }
   assert.deepEqual(probes, []);
 });
