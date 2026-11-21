@@ -1247,7 +1247,7 @@ export const workerMutations = {
         if (retired.count > 0) {
           // #3690 / ruling 0259 ("Retire ends grants too"): the grants this worker HOLDS end with it, in this transaction, after the
           // worker row lock (lockStaffingAct, step 5): the grant row lock is the last one taken. Only when THIS call retired it.
-          await endHeldGrants(tx, 'worker', worker.id);
+          await endHeldGrants(tx, 'worker', worker.id, 'WORKER_RETIRED');
           await appendWorkerRetiredEvent(tx, { appId: worker.appId, actor: staffingActActor(admission), instruction: staffingInstruction(admission), workerId: worker.id });
           await writeReportsTo(tx, { workerId: worker.id, appId: worker.appId, to: null, actor: staffingActActor(admission), setBy: 'retirement' });
           // #1747 / cor:agt:080:02: a retired worker's ticker subscriptions end
@@ -3727,7 +3727,46 @@ export const workerFieldResolvers = {
       const handoff = handoffRow
         ? await ctx.db.node.findUnique({ where: { id: handoffRow.id } })
         : null;
-      return { status, handoff, previousSession };
+      // #1054: the envelope's session id rides along (not in the SDL) for WorkerContinuity.handoffAuthor.
+      return {
+        status, handoff, previousSession,
+        handoffWorkerId: worker.id,
+        handoffEnvelopeSessionId: handoffRow ? handoffSessionId(handoffRow.data) : null,
+      };
+    },
+  },
+  WorkerContinuity: {
+    /**
+     * #1054 — who held the worker when the session that wrote the newest handoff ran.
+     *
+     * The handle is identity (hrn:node:hadronmemory.com:specs:cor:acl:070:01): visible to any
+     * signed-in caller who reaches this field, which is already behind the worker read gate
+     * (`continuity` masks to null on deny). Null `userHandle` only for an unknown or erased author:
+     * a session with no user, a deleted session, or a soft-deleted user. Never an error.
+     *
+     * The envelope's session id is data any writer of the handoff node can set, so the session is
+     * looked up ONLY among this worker's own sessions: a forged id can never name another worker's
+     * driver. Selected narrowly (the user id), never the Session row (#552 / #983), and the user is
+     * projected to its handle alone.
+     */
+    handoffAuthor: async (
+      c: { handoff: unknown; handoffWorkerId?: string; handoffEnvelopeSessionId?: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (!c.handoff) return null;
+      const sessionId = c.handoffEnvelopeSessionId ?? null;
+      if (!sessionId || !c.handoffWorkerId) return { userHandle: null, sessionId: null };
+      const session = await ctx.db.session.findFirst({
+        where: { id: sessionId, workerId: c.handoffWorkerId, deletedAt: null },
+        select: { id: true, userId: true },
+      });
+      const user = session?.userId
+        ? await ctx.db.user.findFirst({ where: { id: session.userId, deletedAt: null }, select: { handle: true } })
+        : null;
+      // sessionId is returned only for a session found among this worker's own non-deleted sessions (same
+      // sanitization as previousSession): an unverified envelope id is never echoed as fact.
+      return { userHandle: user?.handle ?? null, sessionId: session?.id ?? null };
     },
   },
 };

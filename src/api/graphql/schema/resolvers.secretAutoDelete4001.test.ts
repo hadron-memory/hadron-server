@@ -265,7 +265,7 @@ it('keeps historical unbounded marks maintainable on withdrawal and holder depar
   expect((await db.grant.findUniqueOrThrow({ where: { id: ids[0] } })).withdrawnAt).not.toBeNull();
   await db.$transaction(async tx => {
     await tx.worker.update({ where: { id: workerId }, data: { retiredAt: new Date() } });
-    await endHeldGrants(tx, 'worker', workerId);
+    await endHeldGrants(tx, 'worker', workerId, 'WORKER_RETIRED');
   });
   expect((await db.grant.findUniqueOrThrow({ where: { id: ids[1] } })).holderDepartedAt).not.toBeNull();
 });
