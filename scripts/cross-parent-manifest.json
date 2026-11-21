@@ -591,6 +591,12 @@
       "resolver": "src/api/graphql/schema/resolvers.types.ts::sharedMemory",
       "gate": "canReadMemoryRecord"
     },
+    "App.selfJoin": {
+      "target": "AppSelfJoin",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::selfJoin",
+      "gate": "canReadApp"
+    },
     "AppAgent.agent": {
       "target": "Agent",
       "class": "self-gated",
