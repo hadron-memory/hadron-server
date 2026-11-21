@@ -54,12 +54,14 @@ ALTER TABLE grants ADD CONSTRAINT chk_grants_shape CHECK (
   (revoked_by IS NULL OR revoked_by <> '') AND
   (withdrawn_at IS NULL OR (withdrawn_at = revoked_at AND activated_at IS NULL)) AND
   -- #4180: a departure cause only on a departed row, and only a cause of the holder's own kind (codes carry no wording, R5).
-  (holder_departure_reason IS NULL OR (holder_departed_at IS NOT NULL AND CASE
-     WHEN user_id IS NOT NULL THEN holder_departure_reason IN ('USER_ERASED', 'ORG_LEFT', 'ORG_REMOVED')
-     WHEN worker_id IS NOT NULL THEN holder_departure_reason IN ('WORKER_RETIRED', 'WORKER_DELETED')
-     WHEN agent_id IS NOT NULL THEN holder_departure_reason IN ('AGENT_DELETED', 'AGENT_UNINSTALLED', 'AGENT_IMPORTER_UNINSTALLED',
-                                                                 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED')
-     ELSE holder_departure_reason = 'APP_DELETED' END))
+  -- (No CASE here: a top-level END reads as a transaction end to scripts/db/migrationTransaction.ts; with exactly one holder,
+  -- chk_grants_exactly_one_holder, the OR of the four arms is the same rule.)
+  (holder_departure_reason IS NULL OR (holder_departed_at IS NOT NULL AND (
+     (user_id IS NOT NULL AND holder_departure_reason IN ('USER_ERASED', 'ORG_LEFT', 'ORG_REMOVED'))
+     OR (worker_id IS NOT NULL AND holder_departure_reason IN ('WORKER_RETIRED', 'WORKER_DELETED'))
+     OR (agent_id IS NOT NULL AND holder_departure_reason IN ('AGENT_DELETED', 'AGENT_UNINSTALLED', 'AGENT_IMPORTER_UNINSTALLED',
+                                                              'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED'))
+     OR (grantee_app_id IS NOT NULL AND holder_departure_reason = 'APP_DELETED'))))
 );
 -- True when `old_id` was merged into `new_id` (a recorded merge), the only proof a person link may move on.
 CREATE OR REPLACE FUNCTION hadron_grant_link_merged(old_id text, new_id text) RETURNS boolean
