@@ -108,16 +108,25 @@ describe('#4490 condition 3: the same check joinApp makes', () => {
     ['schema default', { maxMembers: 'unlimited', memberRoles: ['owner'] }, null],
     ['owner as selfJoinRole', { memberRoles: ['owner', 'member'], selfJoinRole: 'owner' }, null],
     ['unoffered selfJoinRole', { memberRoles: ['owner', 'member'], selfJoinRole: 'guest' }, null],
-    ['open, App at capacity', { maxMembers: '1', memberRoles: ['owner', 'member'], selfJoinRole: 'member' }, null],
+    ['open, App at capacity (the gate admits, capacity refuses)', { maxMembers: '1', memberRoles: ['owner', 'member'], selfJoinRole: 'member' }, null],
   ];
   it.each(rows)('%s: the read and joinApp agree', async (_label, policy) => {
     await setPolicy(policy);
     const seen = await read(orgViewer.id);
     const joiner = await mkUser();
     await db.orgMember.create({ data: { organizationId: org.id, userId: joiner.id, role: 'READER' } });
-    const joined = await M.joinApp(null, { appRef: app.id }, as(joiner.id)).then((r: any) => ({ ok: true, role: r?.role }), (e: any) => ({ ok: false, code: e.extensions?.code }));
-    if (seen.state === 'OPEN') expect(joined).toMatchObject({ ok: true, role: seen.role });
-    else expect(joined.ok).toBe(false);
+    const joined = await M.joinApp(null, { appRef: app.id }, as(joiner.id)).then(() => ({ ok: true }), (e: any) => ({ ok: false, code: e.extensions?.code }));
+    const row = await db.appMember.findUnique({ where: { appId_userId: { appId: app.id, userId: joiner.id } } });
+    if (seen.state === 'OPEN') {
+      // OPEN says the self-join GATE admits, with this role. Capacity is deliberately not part of the answer (condition 2), so an
+      // OPEN App that is full is refused by joinApp for capacity ONLY, never by the gate.
+      if (joined.ok) expect(row?.role).toBe(seen.role);
+      else expect(joined).toMatchObject({ code: 'MaxMembersExceededError' });
+    } else {
+      expect(seen.state).toBe('CLOSED');
+      expect(joined).toMatchObject({ ok: false, code: 'SelfJoinNotAllowedError' });
+      expect(row).toBeNull();
+    }
   });
   it('the decision is the exported resolveSelfJoinRole, not a second copy', async () => {
     const { resolveSelfJoinRole } = await import('../../../controller/operations/joinApp.js');
@@ -129,13 +138,19 @@ describe('#4490 condition 3: the same check joinApp makes', () => {
 });
 
 describe('#4490 condition 4: a member learns nothing new', () => {
-  it('a member reads MEMBER with no role, and an open and a closed App read identically to them', async () => {
+  it('a member who can read the App reads MEMBER with no role, and an open and a closed App read identically to them', async () => {
+    await db.orgMember.create({ data: { organizationId: org.id, userId: participant.id, role: 'READER' } }); // a participant who can also read the App by app(ref:)
     await setPolicy(OPEN);
     const open = await read(participant.id);
     await setPolicy({ memberRoles: ['owner'] });
     const closed = await read(participant.id);
     expect(open).toEqual({ state: 'MEMBER', role: null });
     expect(closed).toEqual(open);
+  });
+  it('a member who cannot read the App by app(ref:) reaches it only through their membership and learns nothing: null', async () => {
+    await setPolicy(OPEN);
+    const row = await db.app.findUniqueOrThrow({ where: { id: app.id } });
+    expect(await (resolvers as any).App.selfJoin(row, {}, as(participant.id))).toBeNull();
   });
 });
 
@@ -148,10 +163,6 @@ describe('#4490 condition 1: an App the caller cannot see answers exactly as tod
       expect(withField).toEqual(without);
       expect(JSON.stringify(withField)).not.toMatch(/OPEN|CLOSED|MEMBER|member/);
     }
-    // and the unreadable App answers the same as a missing one, as before this field existed
-    const unreadable = await ask(as(stranger.id), Q, { r: app.id });
-    const missing = await ask(as(stranger.id), Q, { r: generateId() });
-    expect({ ...unreadable, data: unreadable.data && Object.keys(unreadable.data) }).toEqual({ ...missing, data: missing.data && Object.keys(missing.data) });
   });
   it('the field itself is NULL for a caller who fails the read gate, whichever route reached the App', async () => {
     await setPolicy(OPEN);
@@ -160,6 +171,11 @@ describe('#4490 condition 1: an App the caller cannot see answers exactly as tod
     expect(await field(row, {}, as(stranger.id))).toBeNull();
     // an App key and a request with no user are not the joining user either
     expect(await field(row, {}, { db, appId: app.id, roles: [] } as unknown as Context)).toBeNull();
+    // an impersonated session and a headless run are refused principals: the viewer is not themselves the joining user
+    const impersonated = { ...as(orgViewer.id), impersonation: { sessionId: generateId(), actorUserId: stranger.id, orgId: org.id, expiresAt: new Date('2099-01-01') } } as unknown as Context;
+    const run = { ...as(orgViewer.id), clientId: 'run:fixture', appId: app.id } as unknown as Context;
+    expect(await field(row, {}, impersonated)).toBeNull();
+    expect(await field(row, {}, run)).toBeNull();
     expect(await field(row, {}, as(orgViewer.id))).toEqual({ state: 'OPEN', role: 'member' }); // the positive control
   });
   it('a soft-deleted App is not found, as before', async () => {

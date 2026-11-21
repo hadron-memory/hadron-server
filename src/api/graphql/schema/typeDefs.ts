@@ -3218,6 +3218,14 @@ export const typeDefs = `#graphql
     portalUrl: String
     "#2171 (R211): the member roles this App offers: the union over its installed Agents, primary first."
     availableMemberRoles: [String!]!
+    """
+    #4490 (hrn:node:hadronmemory.com:specs:cor:api:140:02, no existence oracle): whether the caller could join this App
+    themselves, computed by the SAME check joinApp makes. Null for a caller who cannot read the App by app(ref:) (whichever
+    route reached it), for an App key, an impersonated session or a run, and for a request with no user: an App the caller
+    cannot see answers exactly as before. A caller who is already a member reads MEMBER with no role, so an open and a closed
+    App read identically to them.
+    """
+    selfJoin: AppSelfJoin
     "#2138: when the whole team was paused (setTeamPause), or null. Separate from every worker's own pause."
     teamPausedAt: DateTime
     "#4224 (S3 of #4229): the App's sweep switch (setAppSweepMode). OFF by default."
@@ -3736,6 +3744,27 @@ export const typeDefs = `#graphql
 
   type MemoryProvisioning {
     appMemory: AppMemoryKind!
+  }
+
+  """
+  #4490: where an App stands for the caller on joining it themselves (joinApp). OPEN: joinApp would accept the caller as the
+  role in AppSelfJoin.role. CLOSED: it would refuse (the App has not opted in, is uninstalled, or has nothing installed).
+  MEMBER: the caller is already a member, whatever the App's policy says.
+  """
+  enum AppSelfJoinState {
+    OPEN
+    CLOSED
+    MEMBER
+  }
+
+  """
+  #4490: the answer to "would joinApp accept me", and nothing else. Never the App's maxMembers or member count, and never any
+  other field of the Agent's installation policy.
+  """
+  type AppSelfJoin {
+    state: AppSelfJoinState!
+    "The role a joiner would get: set only when state is OPEN, null otherwise."
+    role: String
   }
 
   type InstallationPolicy {
