@@ -119,6 +119,11 @@ describe('#2309 read gate, through the GraphQL executor', () => {
         const row = seen.data![q]!;
         expect(row.urn.startsWith('hrn:'), kind).toBe(true);
         expect(row.portalUrl, kind).toBe(`${ORIGIN}/app/u/${row.urn}`);
+        // BLIND P2 (Beatrix) on #4654: selecting portalUrl ALONE (no urn in the selection) still yields the link, because the
+        // parent row carries urn whatever the selection is (the urn field itself is `String!` and throws on a parent without it).
+        const alone = await run(`query($ref: ID!){ ${q}(ref: $ref){ portalUrl } }`, ref, member.id);
+        expect(alone.errors, kind).toBeUndefined();
+        expect(alone.data![q]!.portalUrl, kind).toBe(`${ORIGIN}/app/u/${row.urn}`);
         const denied = await run(query, ref, outsider.id);
         expect(denied.data, kind).toEqual({ [q]: null });
         expect(JSON.stringify(denied), kind).not.toContain('/app/u/'); // no link anywhere in a denied response
