@@ -250,40 +250,11 @@ export async function assertBatchMutable(
   }
   await assertNoCommentRows(tx, { memoryId: { in: [...new Set(memoryIds)] }, loc: { in: locs } }, op);
 
-  // The GOVERNED half re-reads under the MEMORY lock, and deliberately does
-  // NOT take a key per row (@copilot rounds 2 and 3, which pull in opposite
-  // directions and are both right).
-  //
-  // Round 2 was correct that the kind doors coordinate on
-  // `lockLocForWrite(memoryId, loc)`, so the memory key alone does not
-  // serialize against them. Round 3 was correct that the per-row answer is
-  // unaffordable here: `extractParentNodeGraph` passes its ENTIRE live subtree
-  // with no cap and no paging, so one advisory key per node — held until that
-  // single transaction ends — is an unbounded claim on a finite shared-memory
-  // lock table. A gate that can exhaust the lock table on a large but perfectly
-  // valid extract is not a safer gate.
-  //
-  // So this re-reads rather than trusting the caller's snapshot, which closes
-  // the window that matters in practice — a promotion committed before this
-  // transaction's read — and leaves ONE narrow window open: a promotion that
-  // commits between this read and the batch's write. That is filed rather than
-  // papered over, and closing it properly means giving the governed writers a
-  // BOUNDED shared serialization point instead of a key per row.
-  //
-  // An owning operation does not REFUSE — but it must not skip the read
-  // either (@codex P1 on PR #1230, and the finding is right). The caller's
-  // `rows` were read earlier in its transaction; the kind doors coordinate on
-  // `lockLocForWrite(memoryId, loc)`, which does not conflict with the memory
-  // key held above, and READ COMMITTED does not refresh that earlier snapshot.
-  // So a door that commits in between leaves the caller holding STALE signals
-  // — and a carry built from them copies `role: null` off a node that is now
-  // governed. With `move: true` the now-governed source is then soft-deleted,
-  // leaving only an ungoverned copy the generic surface may edit: governance
-  // laundering, introduced by the carry that exists to prevent it.
-  //
-  // So the read happens either way. What differs is the verdict: REFUSE turns
-  // a governed row into an error, CARRY hands the fresh values back for the
-  // caller to copy.
+  // #1213: every supported signal writer and owning copy/move takes this same bounded memory key
+  // before its loc/node locks. The authoritative read is therefore stable against promotion and demotion
+  // through this transaction's write. Still re-read: the planner or caller's rows may precede the key.
+  // An owning operation carries these freshly read signals rather than refusing or copying stale ones.
+  // No per-node governance key is allocated; paging/partial-merge semantics remain unchanged.
   const governed = opts.governed ?? 'refuse';
 
   if (governed === 'carry') {
