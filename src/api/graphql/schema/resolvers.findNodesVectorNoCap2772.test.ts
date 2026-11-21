@@ -191,15 +191,16 @@ describe('#2772 unfiltered deep offset', () => {
 
 describe('#2772 an early stop is flagged, never a silent short page', () => {
   it('VECTOR_SEARCH_TIMEOUT_MS=1: degraded carries stopped_early, and reason when the page is empty', async () => {
+    const before = process.env.VECTOR_SEARCH_TIMEOUT_MS; // the suite's generous value (beforeEach), not the 5000 ms default: a loaded CI shard must not trip it
     process.env.VECTOR_SEARCH_TIMEOUT_MS = '1';
     try {
       const res = await findNodes({ query: 'q', mode: 'vector', limit: 3, offset: 3, filter: { role: 'spec' } });
       expect(String(res.degraded ?? '').split(',')).toContain('stopped_early');
       if (res.hits.length === 0) expect(res.reason).toBe('stopped_early');
     } finally {
-      delete process.env.VECTOR_SEARCH_TIMEOUT_MS;
+      if (before === undefined) delete process.env.VECTOR_SEARCH_TIMEOUT_MS; else process.env.VECTOR_SEARCH_TIMEOUT_MS = before;
     }
-    // The setting does not leak: the next call (default budget) is whole.
+    // The setting does not leak: the next call (restored budget) is whole.
     const ok = await findNodes({ query: 'q', mode: 'vector', limit: 3, offset: 3, filter: { role: 'spec' } });
     expect(ids(ok)).toEqual(await reference(`n.role = 'spec'`, 3, 3));
     expect(ok.degraded ?? null).toBeNull();
