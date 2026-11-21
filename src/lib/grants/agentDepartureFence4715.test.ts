@@ -11,6 +11,8 @@
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Client } from 'pg';
+import { PrismaClient } from '../../generated/prisma/index.js';
+import { lockAppInstallations } from '../appInstallations.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
@@ -166,5 +168,38 @@ describe('#4715 the door keeps the first end of a grant its action\'s limits end
     expect(await departedAt(used)).toBeNull();
     expect(await departedAt(timedOut)).toBeNull();
     expect(await departedAt(live)).not.toBeNull();
+  });
+});
+
+describe('#4715 the judge locks the agents in ONE id-ordered pass, each row at its own strength (BLIND P2)', () => {
+  it('a named agent, a witness between two named agents and the named agents lock in id order; only the named ones are NO KEY UPDATE', async () => {
+    const lo = await mkAgent('n-lo'); const mid = await mkAgent('parent-mid'); const hi = await mkAgent('n-hi');
+    const sorted = [lo, mid, hi].sort();
+    const [first, middle, last] = sorted as [string, string, string];
+    // the middle id is the parent that imports both outer ids, installed in the App: a witness between two named agents
+    for (const child of [first, last]) {
+      await db.agentOrgGrant.create({ data: { orgId, agentId: child, activatedAt: new Date(Date.now() - 86_400_000) } });
+      await db.agentImport.create({ data: { parentAgentId: middle, importedAgentId: child, position: child === first ? 0 : 1, agentOrgGrantOrgId: orgId, agentOrgGrantAgentId: child } });
+    }
+    await db.appAgent.create({ data: { appId, agentId: middle } });
+    const log: Array<[string, string]> = [];
+    const logged = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL, log: [{ emit: 'event', level: 'query' }] });
+    let counting = false;
+    logged.$on('query', (e) => {
+      if (!counting || !/FROM agents WHERE id = \$1 FOR/.test(e.query)) return;
+      log.push([/NO KEY UPDATE/.test(e.query) ? 'NKU' : 'SHARE', (JSON.parse(e.params) as string[])[0]!]);
+    });
+    try {
+      await logged.$transaction(async (tx) => {
+        counting = true;
+        await lockAppInstallations(tx as never, appId, [first, last], { fenceAgents: true });
+        counting = false;
+      });
+    } finally { await logged.$disconnect(); }
+    expect(log).toEqual([['NKU', first], ['SHARE', middle], ['NKU', last]]);
+  });
+
+  it('fenceAgents without the agents to fence is refused, not silently a SHARE lock', async () => {
+    await expect(db.$transaction((tx) => lockAppInstallations(tx, appId, undefined, { fenceAgents: true }))).rejects.toThrow(/fenceAgents needs the agents/);
   });
 });
