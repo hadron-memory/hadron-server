@@ -39,6 +39,12 @@ beforeEach(async () => {
 describe('#2477 missing-loc concurrent restore', () => {
   it('queues restores on the memory key before the missing-loc read and both succeed', async () => {
     expect(await db.node.count({ where: { memoryId, loc: { in: ['alpha', 'beta'] } } })).toBe(0);
+    const revisionRowsBefore = await db.node.findMany({
+      where: { memoryId, loc: { startsWith: 'revisions:rev-' } },
+      select: { id: true, loc: true, data: true, deletedAt: true }, orderBy: { loc: 'asc' },
+    });
+    const autoSavedLocs: string[] = [];
+
 
     let releaseAutoSaves!: () => void;
     const autoSavesDone = new Promise<void>(resolve => { releaseAutoSaves = resolve; });
@@ -129,6 +135,7 @@ describe('#2477 missing-loc concurrent restore', () => {
       autoSaveQueue = saved.then(() => undefined, () => undefined);
       try {
         const result = await saved;
+        autoSavedLocs.push(result.revisionLoc);
         stage.autoSaving = false;
         if (++completedAutoSaves === 2) releaseAutoSaves();
         await autoSavesDone;
@@ -165,6 +172,21 @@ describe('#2477 missing-loc concurrent restore', () => {
       }
       expect(completedAutoSaves).toBe(2);
       expect(autoSave).toHaveBeenCalledTimes(2);
+      // The original contract is two successful requests, each with one real
+      // auto-save: no lost revision, duplicated save or overwritten old slot.
+      // S2 retires only the simultaneous absent-read barrier, not that property.
+      expect(autoSavedLocs).toHaveLength(2);
+      expect(new Set(autoSavedLocs).size).toBe(2);
+      const revisionRowsAfter = await db.node.findMany({
+        where: { memoryId, loc: { startsWith: 'revisions:rev-' } },
+        select: { id: true, loc: true, data: true, deletedAt: true }, orderBy: { loc: 'asc' },
+      });
+      expect(revisionRowsAfter.map(row => row.loc)).toEqual(
+        [...revisionRowsBefore.map(row => row.loc), ...autoSavedLocs].sort(),
+      );
+      for (const row of revisionRowsBefore) expect(revisionRowsAfter.find(after => after.loc === row.loc)).toEqual(row);
+      for (const loc of autoSavedLocs) expect(revisionRowsAfter.find(row => row.loc === loc)?.deletedAt).toBeNull();
+
       expect(observedQueuedPeer).toBe(true);
       expect(missingReads.map(read => read.absent)).toEqual([true, false]);
       expect(new Set(missingReads.map(read => read.request)).size).toBe(2);
