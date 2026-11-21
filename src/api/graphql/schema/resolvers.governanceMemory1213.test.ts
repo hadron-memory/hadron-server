@@ -457,7 +457,8 @@ it.each(['extract', 'merge'] as const)('%s takes its memory set before the initi
         if (key !== 'node') return Reflect.get(inner, key, recv);
         return new Proxy(tx.node, { get(delegate, method, delegateReceiver) {
           if (method !== 'findMany') return Reflect.get(delegate, method, delegateReceiver);
-          return (...args: Parameters<typeof tx.node.findMany>) => { events.push('node snapshot'); return tx.node.findMany(...args); };
+          const findMany = tx.node.findMany.bind(tx.node) as (args: unknown) => Promise<unknown>;
+          return (args: unknown) => { events.push('node snapshot'); return findMany(args); };
         } });
       },
     })), options);
@@ -476,7 +477,9 @@ it('real PG: MCP move waits on its source memory key before overwriting the dest
   const target = await destination();
   await db.node.create({ data: { memoryId: target.id, loc: 'ordinary', name: 'evicted' } });
   await assertOperationJoins(async context => {
-    const spy = vi.spyOn(db, '$transaction').mockImplementation(context.db.$transaction);
+    // Narrow the instrumentation surface rather than instantiating Prisma's full overloaded mock type.
+    const host = db as unknown as { $transaction: (work: (tx: Prisma.TransactionClient) => Promise<unknown>, options?: { timeout?: number }) => Promise<unknown> };
+    const spy = vi.spyOn(host, '$transaction').mockImplementation((work, options) => context.db.$transaction(work, options));
     try {
       const text = await createTestableMcpServer({ userId, roles: ['ADMIN'], clientId: `user:${userId}` }).callToolText('hadron_move_node', {
         urn: `hrn:node:${sourceMemory.urn}:ordinary`, targetUrn: `hrn:node:${target.urn}:ordinary`, overwrite: true,
