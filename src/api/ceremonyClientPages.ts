@@ -252,8 +252,10 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
   // #4621 item 3: a date is a <time datetime> holding the ISO instant; the text stays the local, minute-precision form.
   // BLIND P2 (George): a missing or malformed timestamp renders as plain text, never a RangeError that aborts the list.
   var timeEl = function (v) {
-    var d = new Date(v);
-    if (v == null || isNaN(d.getTime())) return document.createTextNode('an unknown date');
+    // Only a string is a timestamp here (the API sends ISO strings): anything else never reaches Date, so a malformed
+    // JSON value can neither throw at coercion nor pass as an epoch date (BLIND P2, delta).
+    var d = typeof v === 'string' ? new Date(v) : null;
+    if (!d || isNaN(d.getTime())) return document.createTextNode('an unknown date');
     var t = el('time', fmtDate(v)); t.setAttribute('datetime', d.toISOString()); return t;
   };
   // Append text and dates to an element: each part is a string or a date marked { date: v }.

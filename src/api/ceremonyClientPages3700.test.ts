@@ -138,6 +138,20 @@ describe('R3 (BLIND P2): a second attempt cannot move the pending account check'
     expect(document.getElementById('status-later')!.textContent).toBe('');
   });
 
+  it('the ignored click\'s message also clears when the first attempt succeeds (BLIND follow-up)', async () => {
+    const { document, click } = await load('/passkeys/register', [
+      { body: { ceremonyId: 'c', challenge: 'AA' } }, { body: options }, { body: { kind: 'first' } }]);
+    click('add-first');
+    await flush();
+    click('add-later');
+    await flush();
+    expect(document.getElementById('status-later')!.textContent).toContain('Finish or stop');
+    document.getElementById('confirm-account')!.dispatchEvent(new (document.defaultView as any).Event('click'));
+    await flush();
+    expect(document.getElementById('status-first')!.textContent).toContain('Passkey added');
+    expect(document.getElementById('status-later')!.textContent).toBe('');
+  });
+
   it('a new attempt after stop is accepted and runs its own requests', async () => {
     const { document, click, calls } = await load('/passkeys/register', [
       { body: { ceremonyId: 'c1', challenge: 'AA' } }, { body: options }, { body: {} },
@@ -236,6 +250,12 @@ describe('#4621 items 1-3: removal dates, the empty list, <time>', () => {
     expect(box.textContent).toContain('Added an unknown date');
     expect(box.querySelectorAll('time').length).toBe(0);
     expect(box.querySelectorAll('button').length).toBe(1); // the row still has its Remove button
+    // BLIND P2 (delta): non-string values neither throw at coercion nor pass as an epoch date.
+    for (const bad of [false, 0, { toString: null, valueOf: null }, ['2026-10-01']]) {
+      const r = await open(await at({ ...base1, registeredAt: bad, revokedAt: null, cancel: null }));
+      expect(r.textContent).toContain('Added an unknown date');
+      expect(r.querySelectorAll('time').length).toBe(0);
+    }
     const w = await load('/passkeys/window/end', [{ body: { label: 'Laptop', registeredAt: null, method: 'github' } }]);
     w.click('end-window');
     await flush();
