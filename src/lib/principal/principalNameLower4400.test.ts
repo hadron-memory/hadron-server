@@ -111,6 +111,7 @@ describe('#4400 the migration refuses on data instead of guessing', () => {
   });
 
   it('raises SQLSTATE HDPRF when a mixed-case row exists', async () => {
+    const guard = onePreflight(); // outside the try below: a wrong block count fails here, by name (#4641 LOCAL P3)
     let state = 'NO ERROR';
     await db.$transaction(async (tx) => {
       // A database from before the constraint: drop it inside this transaction only, then roll everything back.
@@ -118,7 +119,7 @@ describe('#4400 the migration refuses on data instead of guessing', () => {
       await tx.$executeRaw`INSERT INTO principals (id, name, kind, status, created_at, updated_at)
         VALUES (${generateId()}, 'Legacy.Example', 'org', 'released', now(), now())`;
       await tx.$executeRawUnsafe('SAVEPOINT before_preflight');
-      try { await tx.$executeRawUnsafe(onePreflight()); } catch (e) {
+      try { await tx.$executeRawUnsafe(guard); } catch (e) {
         state = JSON.stringify((e as { meta?: unknown }).meta ?? {}) + String((e as { message?: string }).message);
       }
       await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT before_preflight');
