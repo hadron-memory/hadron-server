@@ -200,7 +200,7 @@ export async function prepareSecretUse(
     const actual = await tx.appRun.findUnique({ where: { id: run.id }, select: { appId: true, agentId: true, organizationId: true, status: true, policy: true, budgetTokens: true, budgetActions: true } });
     if (!actual || actual.appId !== run.appId || actual.agentId !== agentId || actual.organizationId !== run.organizationId || actual.status !== 'RUNNING') throw notFound();
     if (!evaluatePolicyChain('tool.web_request', parseRunPolicySnapshot(actual.policy)) ||
-        (actual.budgetTokens !== null && actual.budgetTokens <= 0) || (actual.budgetActions !== null && actual.budgetActions < 1)) {
+        (actual.budgetTokens !== null && actual.budgetTokens <= 0) || actual.budgetActions === null || actual.budgetActions < 1) {
       throw refusal('TOOL_DENIED', 'The web request is denied.');
     }
     known = { ownerId: pre.appId, secretId: pre.secretId, secretName: pre.secretName };
@@ -240,10 +240,12 @@ export async function prepareSecretUse(
         AND (app_id = ${run.appId} OR app_id IS NULL) AND (expires_at IS NULL OR expires_at > (clock_timestamp() AT TIME ZONE 'UTC'))
       ORDER BY (app_id IS NOT NULL) DESC, created_at ASC, id ASC FOR UPDATE SKIP LOCKED LIMIT 1`;
     if (!tickets[0]) throw refusal('ACTION_TICKET_REQUIRED', 'No secret-use ticket is available.');
-    // A null action budget is unlimited, as a null token budget is: the use still counts as an action spent.
+    // A secret use is a costed action, so a NULL action budget is DENIED, as main's activationVerdict (src/jobs/appRuns.ts) denies any
+    // costed action on NULL budgetActions: failing open here would make the use path the one door that ignores it. One guarded
+    // decrement, so the where and the data cannot name different branches.
     const budget = await tx.appRun.updateMany({
-      where: { id: run.id, status: 'RUNNING', OR: [{ budgetActions: null }, { budgetActions: { gte: 1 } }] },
-      data: actual.budgetActions === null ? { actionsSpent: { increment: 1 } } : { budgetActions: { decrement: 1 }, actionsSpent: { increment: 1 } } });
+      where: { id: run.id, status: 'RUNNING', budgetActions: { gte: 1 } },
+      data: { budgetActions: { decrement: 1 }, actionsSpent: { increment: 1 } } });
     if (budget.count !== 1) throw refusal('TOOL_DENIED', 'The web request is denied.');
     await tx.$executeRaw`UPDATE action_tickets SET consumed_at = (clock_timestamp() AT TIME ZONE 'UTC'), consumed_by_run_id = ${run.id} WHERE id = ${tickets[0].id}`;
     if (!(await chargeGrantUse(tx, grant.id, run.appId))) throw refusal('SECRET_READ_CLIENT_SPENT', 'This read client is not live.');

@@ -294,13 +294,15 @@ describe('transactional secret.use (#4000)', () => {
     await expect(prepare({ ...runCtx, principal: { ...runCtx.principal, appId: generateId() } })).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
     await spentNothing();
   });
-  it('treats a null action budget as unlimited, as a null token budget is, and still counts the action spent', async () => {
+  it('refuses a run with a NULL action budget TOOL_DENIED and spends no ticket or grant use (as main\'s activationVerdict does)', async () => {
     await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
     await db.appRun.update({ where: { id: runCtx.run.id }, data: { budgetActions: null, budgetTokens: null } });
-    await expect(prepare()).resolves.toMatchObject({ auth: { type: 'bearer' } });
+    await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'TOOL_DENIED' } });
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
+    expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
     const after = await db.appRun.findUniqueOrThrow({ where: { id: runCtx.run.id } });
     expect(after.budgetActions).toBeNull();
-    expect(after.actionsSpent).toBe(1);
+    expect(after.actionsSpent).toBe(0);
   });
   it('commits exactly one grant use and one matching ticket before returning auth', async () => {
     await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
