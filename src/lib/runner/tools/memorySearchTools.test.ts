@@ -1,5 +1,7 @@
 /** #632: memory retrieval is a distinct opt-in, free run capability, not web_search. */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { evaluatePolicyChain, parsePolicyLink } from '@hadron-memory/access-control';
+import { admitAndExecuteTool, ToolDeniedError } from '../toolAdmission.js';
 import { resolveRunTools } from './index.js';
 
 function tool() {
@@ -26,4 +28,33 @@ describe('#632 run memory search registry and model surface', () => {
     expect(schema.properties).not.toHaveProperty('principal');
     expect(schema.properties).not.toHaveProperty('mode');
   });
+});
+
+const stub = () => ({ db: {} as never, run: { id: 'r', appId: 'a', organizationId: 'o', userId: null } as never,
+  principal: { db: {} as never, clientId: 'run:r', appId: 'a', organizationId: 'o' }, log: () => {} });
+describe('#632 defensive argument/principal validation', () => {
+  it.each([{}, { query: '' }, { query: '  ' }, { query: 1 }, { query: 'x', limit: NaN },
+    { query: 'x', limit: 1.5 }, { query: 'x', limit: '2' }, { query: 'x', memoryUrn: '' },
+    { query: 'x', mode: 'vector' }, { query: 'x', mode: 'hybrid' }, { query: 'x', orgId: 'foreign' },
+  ])('refuses malformed or unsupported input before touching the database: %j', async args => {
+    await expect(tool().execute(stub(), args)).rejects.toThrow(/hadron_find_nodes: expected/);
+  });
+  it('refuses a context that is not this run’s principal before touching the database', async () => {
+    for (const patch of [{ clientId: 'run:other' }, { clientId: 'app:a' }, { appId: 'other' },
+      { organizationId: 'other' }, { userId: 'other' }]) {
+      const context = stub(); context.principal = { ...context.principal, ...patch };
+      await expect(tool().execute(context, { query: 'x' })).rejects.toThrow(/invalid run principal/);
+    }
+  });
+});
+
+it('cost-zero search is still denied by the real per-call policy gate before execution', async () => {
+  const policy = parsePolicyLink({ allow: ['tool.web_search'] });
+  const gate = vi.fn(async (action: string, _cost: number) => evaluatePolicyChain(action, [policy]));
+  const record = vi.fn();
+  await expect(admitAndExecuteTool(tool(), { query: 'must not search' }, { toolCtx: stub(), onToolCall: gate, record }))
+    .rejects.toBeInstanceOf(ToolDeniedError);
+  expect(gate).toHaveBeenCalledWith('tool.hadron_find_nodes', 0);
+  expect(record).toHaveBeenCalledWith(expect.objectContaining({ name: 'hadron_find_nodes', ok: false }));
+  expect(evaluatePolicyChain('tool.hadron_find_nodes', [parsePolicyLink({ allow: ['tool.hadron_find_nodes'] })])).toBe(true);
 });
