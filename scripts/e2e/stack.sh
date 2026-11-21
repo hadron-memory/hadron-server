@@ -46,6 +46,11 @@ done
 [[ "$E2E_PORT" != "$E2E_PORTAL_PORT" ]] || { echo 'API and portal ports must differ' >&2; exit 2; }
 # #4058: the registration switch is forwarded only when the host SET it. An explicit empty value would override the
 # private env file's (Compose ranks an exported variable above --env-file even when empty) and silently test OFF.
+# #4624: the run worker is OFF unless the host asks for it with the exact value `true`, so every other value (unset, empty,
+# `1`, `TRUE`) keeps the default stack byte-identical. Only the worker is switched: DISABLE_SCHEDULER stays `true` in compose.yaml.
+E2E_DISABLE_RUN_WORKER=true
+[[ "${E2E_RUN_WORKER:-}" != true ]] || E2E_DISABLE_RUN_WORKER=false
+export E2E_DISABLE_RUN_WORKER
 compose() {
   local env_args=()
   (( private_env_active )) && env_args=(--env-file "$private_env_file")
@@ -62,6 +67,7 @@ compose() {
       E2E_PASSKEY_SIGNING_ENABLED="${E2E_PASSKEY_SIGNING_ENABLED:-}" \
       E2E_SIGNING_CEREMONY_ORIGINS="${E2E_SIGNING_CEREMONY_ORIGINS:-}" \
       E2E_PASSKEY_RP_ID="${E2E_PASSKEY_RP_ID:-}" \
+      E2E_DISABLE_RUN_WORKER="$E2E_DISABLE_RUN_WORKER" \
       ${E2E_PASSKEY_REGISTRATION_ENABLED+E2E_PASSKEY_REGISTRATION_ENABLED="$E2E_PASSKEY_REGISTRATION_ENABLED"} \
       docker compose ${env_args[@]+"${env_args[@]}"} --project-name "$project" --file /opt/hadron/scripts/e2e/compose.yaml "$@"
   fi
