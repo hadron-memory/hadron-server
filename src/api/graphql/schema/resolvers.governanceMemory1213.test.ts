@@ -443,7 +443,7 @@ it('a caller-owned transaction refuses an endpoint outside its predeclared set i
   expect(await db.edge.count({ where: { sourceId: nodeId } })).toBe(0);
 });
 
-it('extract takes its source key before the initial stored-signal snapshot, not just the later carry re-read', async () => {
+it.each(['extract', 'merge'] as const)('%s takes its memory set before the initial stored-signal snapshot, not just the later re-read', async operation => {
   const channels = await import('../../../lib/channels.js');
   const acquire = channels.lockMemoriesForChannelChange;
   const events: string[] = [];
@@ -463,7 +463,8 @@ it('extract takes its source key before the initial stored-signal snapshot, not 
     })), options);
   } });
   try {
-    await extract(observed);
+    if (operation === 'extract') await extract(observed);
+    else await mergeInto(observed, (await destination()).id);
     expect(events[0]).toBe('memory acquired');
     expect(events).toContain('node snapshot');
   } finally { spy.mockRestore(); }
