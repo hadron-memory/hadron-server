@@ -67,7 +67,7 @@ describe('#4738 an inline edge with loc "" derives its loc', () => {
   it('GraphQL: an authored loc is preserved and flagged authored (control)', async () => {
     const a = await node('a'); await node('c');
     await (resolvers.Mutation as any).updateNode({}, { input: { id: a.id, edges: [{ targetId: urn('c'), name: 'uses', loc: 'custom' }] } }, ctx());
-    const e = await db.edge.findFirstOrThrow({ where: { sourceId: a.id } });
+    const e = await db.edge.findFirstOrThrow({ where: { sourceId: a.id, deletedAt: null } });
     expect(e.loc).toBe('custom');
     expect(e.locAuthored).toBe(true);
   });
@@ -76,7 +76,7 @@ describe('#4738 an inline edge with loc "" derives its loc', () => {
     const a = await node('a'); await node('c');
     const mcp = createTestableMcpServer({ userId: user.id, roles: ['ADMIN'], clientId: `user:${user.id}` });
     await mcp.callToolText('hadron_update_node', { urn: urn('a'), edges: [{ targetUrn: urn('c'), name: 'uses', loc: 'custom' }] });
-    const e = await db.edge.findFirstOrThrow({ where: { sourceId: a.id } });
+    const e = await db.edge.findFirstOrThrow({ where: { sourceId: a.id, deletedAt: null } });
     expect(e.loc).toBe('custom');
     expect(e.locAuthored).toBe(true);
   });
