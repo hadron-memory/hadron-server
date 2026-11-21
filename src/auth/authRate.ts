@@ -35,7 +35,8 @@ async function authRateIdentity(req: Request, db: PrismaClient, source: Credenti
   return transportRateIdentity({ userId }, req.ip);
 }
 
-/** #419 auth-route adoption of #1793: one committed admission BEFORE handler effects; never
+/** #419 auth-route adoption of #1793 ("Rate-limit API fields across the GraphQL and MCP surface", the shared
+ * rate-admission core in `src/lib/rateLimit/`): one committed admission BEFORE handler effects; never
  * refund an admitted attempt when a provider fails or the client disconnects. The shared core
  * owns policy modes, windows, HMAC subjects, atomic counters and store-outage decisions.
  * This adapter changes no policy and grants no permission to activate ENFORCING.
@@ -46,8 +47,10 @@ export function buildAuthRateAdmission(
   return async (req, res, next) => {
     try {
       // Holger's #419 contract includes token refresh and /auth/me in this SAME CREDENTIALS/IP budget
-      // (approved seed: 60/IP per 900s). A NAT-heavy client can exhaust interactive-login capacity;
-      // Ada #128137 accepts that rollout risk, not activation. LOG_ONLY first; policy tuning is separate.
+      // (the approved seed is DEFAULTS.CREDENTIALS.ipLimit per DEFAULTS.CREDENTIALS.windowSeconds in
+      // src/lib/rateLimit/config.ts; the live limits are the policy rows and can be tuned). A NAT-heavy client can
+      // exhaust interactive-login capacity. Ada accepted that rollout risk in team chat (#128137); that is not a
+      // ruling to activate ENFORCING. LOG_ONLY first; policy tuning is separate.
       // Contract and risk evidence: https://hadronmemory.com/app/u/hrn:node:hadronmemory.com:hadron-server:ops:auth-rate-admission-419
       await admitRate(db, 'CREDENTIALS', await authRateIdentity(req, db, source));
       next();
@@ -57,9 +60,11 @@ export function buildAuthRateAdmission(
         else next(error);
         return;
       }
-      // Intentional #1793 contract (Holger comment6549880032, CHECKED6549891443): unreadable policy
-      // refuses closed classes in BOTH modes, even LOG_ONLY, without a cached mode. CREDENTIALS
-      // therefore returns RATE_LIMITED/Retry-After 900 during that outage; LOG_ONLY is no availability promise.
+      // Intentional #1793 contract: Holger's 2026-10-31 ruling on #1793 (issue comment 6549880032, recorded by
+      // Piona; the gate comment 6549891443 carried it). An unreadable policy row
+      // refuses fail-closed classes in BOTH modes, even LOG_ONLY, without a cached mode. CREDENTIALS
+      // therefore returns RATE_LIMITED with Retry-After set to the CREDENTIALS class window (seed
+      // DEFAULTS.CREDENTIALS.windowSeconds) during that outage; LOG_ONLY is no availability promise.
       // Accepted outage semantics: https://hadronmemory.com/app/u/hrn:node:hadronmemory.com:hadron-server:ops:auth-rate-admission-419
       const retryAfterSeconds = error.extensions.retryAfterSeconds as number;
       res.set({ 'Retry-After': String(retryAfterSeconds), 'Cache-Control': 'no-store' });
