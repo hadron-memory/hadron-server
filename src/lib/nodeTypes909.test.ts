@@ -44,7 +44,9 @@ describe('#909 slice (a): one canonical node-type list', () => {
     expect(block).toContain('src/lib/nodeTypes.ts');
     const documented = new Set<string>();
     for (const m of block.matchAll(/^\/\/\/ {3}- `([\w-]+)`/gm)) documented.add(m[1]);
-    documented.add('comment');
+    const reserved = block.match(/^\/\/\/ {3}`([\w-]+)` is reserved by the platform/m);
+    expect(reserved).not.toBeNull();
+    documented.add(reserved![1]);
     const also = block.match(/also writes\s+([\s\S]*?)\. The one list/);
     expect(also).not.toBeNull();
     for (const m of also![1].matchAll(/`([\w-]+)`/g)) documented.add(m[1]);

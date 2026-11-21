@@ -4,7 +4,8 @@ import { tagsInputSchema } from './tagsInput.js';
 
 /**
  * #236 — the MCP tool input shapes (`SHAPE_HADRON_*`) and the shared constants they carry, moved out of server.ts.
- * Pure move: the registered tool surface is byte-identical (golden `__golden__/toolSurface2260.json`).
+ * A move, with one description change: the `hadron_update_node` and `hadron_create_node` `nodeType` text now prints the
+ * canonical list (#909). The golden `__golden__/toolSurface2260.json` carries the matching hashes.
  */
 
 /**
