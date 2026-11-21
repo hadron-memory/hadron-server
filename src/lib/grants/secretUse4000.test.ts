@@ -79,6 +79,14 @@ describe('secret.use grant terms (#4000)', () => {
     await db.$executeRaw`INSERT INTO secrets (id, owner_type, owner_id, name, kind, updated_at) VALUES (${other}, 'app', ${w.app2Id}, 'api', 'webfetch-auth', now())`;
     expect(await refusal(grant({ ...values(), secret: other }))).toBe('GRANT_VALUES_INVALID');
   });
+  it('allows an App holder for secret.use only: any other action with an App holder is refused', async () => {
+    const reveal = () => db.$transaction((tx) => createPendingGrant(tx, {
+      appId: w.appId, requester: { userId: w.userId, workerId: null, sessionId: null }, holder: { kind: 'app', id: w.appId },
+      action: 'secret.reveal', values: { secret: secretId, 'auto-delete': 'keep' }, reason: 'r', canReadMemory: async () => true,
+    }));
+    expect(await refusal(reveal())).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    expect(await db.grant.count({ where: { action: 'secret.reveal', granteeAppId: w.appId } })).toBe(0);
+  });
   it('does not admit a generic secret as an inject client', async () => {
     const generic = generateId();
     await db.$executeRaw`INSERT INTO secrets (id, owner_type, owner_id, name, kind, updated_at) VALUES (${generic}, 'app', ${w.appId}, 'generic', 'generic', now())`;

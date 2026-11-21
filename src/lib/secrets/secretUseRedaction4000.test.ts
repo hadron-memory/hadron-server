@@ -21,6 +21,13 @@ describe('secret.use result redaction', () => {
     expect(out).not.toContain('123456789');
   });
 
+  it('redacts the base64 form of a bearer and of a header value', () => {
+    for (const auth of [{ type: 'bearer' as const, token: 'canary-token-1' }, { type: 'header' as const, name: 'X-Key', value: 'canary-value-2' }]) {
+      const secret = auth.type === 'bearer' ? auth.token : auth.value;
+      const b64 = Buffer.from(secret).toString('base64');
+      expect(JSON.stringify(redactSecretUse({ echoed: b64 }, auth))).not.toContain(b64);
+    }
+  });
   it('redacts the URL-encoded form in lowercase hex too', () => {
     const secret = 'tok/en+value=';
     const lower = encodeURIComponent(secret).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase());

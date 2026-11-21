@@ -264,6 +264,36 @@ describe('transactional secret.use (#4000)', () => {
     expect((await db.appRun.findUniqueOrThrow({ where: { id: runs[5].run.id } })).budgetActions).toBe(1);
     expect(await db.actionTicket.count({ where: { organizationId: orgId, action: 'secret.use', consumedAt: { not: null } } })).toBe(5);
   });
+  const spentNothing = async () => {
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
+    expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: runCtx.run.id } })).budgetActions).toBe(3);
+  };
+  it('re-judges the issuer at each use: an issuer who no longer qualifies injects nothing (U12)', async () => {
+    await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
+    await db.orgMember.deleteMany({ where: { organizationId: orgId, userId: ownerId } });
+    await expect(prepare()).rejects.toBeDefined();
+    await spentNothing();
+  });
+  it('spends only a ticket of this App or an org-wide one, never another App\'s ticket in the same org (T2)', async () => {
+    const other = await db.app.create({ data: { name: 'Other', urn: `s5-other-${generateId()}.test:app`, organizationId: orgId } });
+    await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId: other.id, action: 'secret.use', mintedBy: 'test' } });
+    await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'ACTION_TICKET_REQUIRED' } });
+    await spentNothing();
+    expect(await db.actionTicket.count({ where: { appId: other.id, consumedAt: { not: null } } })).toBe(0);
+  });
+  it('refuses a run that is no longer RUNNING (U15)', async () => {
+    await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
+    await db.appRun.update({ where: { id: runCtx.run.id }, data: { status: 'CANCELLED' } });
+    await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
+    await spentNothing();
+  });
+  it('refuses a caller whose principal is not this run, or is another App (P1)', async () => {
+    await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
+    await expect(prepare({ ...runCtx, principal: { ...runCtx.principal, clientId: `run:${generateId()}` } })).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
+    await expect(prepare({ ...runCtx, principal: { ...runCtx.principal, appId: generateId() } })).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
+    await spentNothing();
+  });
   it('treats a null action budget as unlimited, as a null token budget is, and still counts the action spent', async () => {
     await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
     await db.appRun.update({ where: { id: runCtx.run.id }, data: { budgetActions: null, budgetTokens: null } });

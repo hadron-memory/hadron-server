@@ -16,4 +16,10 @@ describe('secret use admission (#4000)', () => {
     await admitAndExecuteTool(def, { secretClientId: null }, { toolCtx: ctx, onToolCall: gate });
     expect(gate).toHaveBeenCalledExactlyOnceWith('tool.web_request', 0);
   });
+  it('charges every other tool its full cost even when the call carries a secretClientId (the zero cost is web_request only)', async () => {
+    const other: RunToolDef = { name: 'hadron_other', description: 'test', inputSchema: {}, cost: 1, execute: async () => 'ok' };
+    const gate = vi.fn(async () => true);
+    await admitAndExecuteTool(other, { secretClientId: 'synthetic' }, { toolCtx: ctx, onToolCall: gate });
+    expect(gate).toHaveBeenCalledExactlyOnceWith('tool.hadron_other', 1);
+  });
 });
