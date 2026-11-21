@@ -1,9 +1,10 @@
 /**
  * sweepGrantLapse (#4178): ends the grants of agents whose installation lapsed with no write door (a licence that expired or was
  * revoked behind a derived install, a soft-deleted organization). The rule, the stamp time and the disclosed limits are in
- * src/lib/grants/lapseSweep.ts. Every five minutes, first pass after 90 seconds. An agent with no installation has gone for its
- * grants at the first pass after the lapse, so the lag in which a grant still derives ACTIVE (nothing is exposed: the reach check
- * refuses use) is at most one interval plus one run.
+ * src/lib/grants/lapseSweep.ts. Every five minutes, first pass after 90 seconds. The lag in which a lapsed agent's grant still derives
+ * ACTIVE (nothing is exposed: the reach check refuses use) is one interval, plus the 90 s first pass after a boot; a run judges at most
+ * 4000 pairs, so a larger backlog finishes over the next runs. Like the other loops here (gcOauthClients), it returns the first timer and
+ * keeps no handle on the interval (unref'd, not stoppable): tests drive `sweepLapsedAgentGrants` directly.
  *
  * Hand-run: `pnpm tsx src/jobs/sweepGrantLapse.ts`.
  */

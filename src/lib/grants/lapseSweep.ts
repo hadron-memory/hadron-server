@@ -16,12 +16,14 @@
  * (`end <= stamp` reads EXPIRED), so a grant that expired between the lapse and the sweep still reads whichever came first: one
  * choice, one comparison, in both places. The sweep runs every five minutes (jobs/sweepGrantLapse.ts). Until it stamps, a lapsed
  * agent's grant still derives ACTIVE and `isGrantLive` says it allows; that lag is at most one cadence, and nothing is exposed in it,
- * because the reach check (`isAgentInstalledAndLicensed`, cor:acl:140:06) already refuses use to an agent with no installation.
+ * because the reach check (`isAgentInstalledAndLicensed`, cor:acl:140:06) already refuses use to an agent with no installation. The lag bound is one interval after a lapse, plus the 90 s first pass after a boot, and a run judges at most 4000 pairs: a larger backlog finishes over the next runs.
  *
  * NOT covered, disclosed: (c) an App's own soft delete (its grants go with the App) and `uninstalledAt` (#4167) are out of scope and
  * excluded from the candidates; a lapse CURED between two sweeps (a licence renewed, an org restored) is not caught here, because
  * main has no write door that moves a licence's expiry forward or restores an organization (`ensureAgentOrgGrant` leaves an existing
- * row untouched, a revoke is final). A future door that does must call {@link sweepLapsedAgentGrants} (or judge its pairs with
+ * row untouched, a revoke is final; no resolver or operation sets an organization's `deletedAt` back to null; checked by grep at
+ * `origin/main` 5dbfa8282). An out-of-band restore (raw SQL, a support tool) that lands between a lapse and the next sweep would have its
+ * grants ended anyway, and the stamp is permanent: that is the cost of the gap and the reason a future door must call the sweep first. A future door that does must call {@link sweepLapsedAgentGrants} (or judge its pairs with
  * `endGrantsOfAgentsNoLongerInstalled`) BEFORE its own write. This sweeper also does not remove register rows (#4172's uninstall door
  * does): the grants are the whole of this issue. The cause code of a lapse waits on #4180 (recorded reasons).
  */
@@ -32,8 +34,9 @@ import { ALREADY_ENDED, endAgentGrantsAtApps } from './departure.js';
 
 export interface LapseSweepOutcome { pairsJudged: number; pairsDeparted: number; grantsEnded: number }
 
-const DEFAULT_BATCH = 200;
-const DEFAULT_MAX_PAGES = 20;
+/** Small pages keep each transaction's installation and grant locks short: the doors wait on the same locks (#4178 BLIND). 80 x 50 = 4000 pairs per run. */
+const DEFAULT_BATCH = 50;
+const DEFAULT_MAX_PAGES = 80;
 
 /**
  * One run, in keyset pages over the distinct (App, agent) pairs that hold a not-yet-ended agent grant in a live App, so a pair that

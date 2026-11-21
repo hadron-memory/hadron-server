@@ -65,7 +65,7 @@ describe('#4178 the sweeper ends the grants of an agent whose derived install la
     await licence({ expiresAt: past() });
     const g = await grant({ agent_id: agentId });
     const out = await sweepLapsedAgentGrants(db);
-    expect(out.grantsEnded).toBe(1);
+    expect(out).toMatchObject({ pairsJudged: 1, pairsDeparted: 1, grantsEnded: 1 });
     expect(await departedAt(g)).not.toBeNull();
   });
 
@@ -79,7 +79,8 @@ describe('#4178 the sweeper ends the grants of an agent whose derived install la
   it('a soft-deleted ORGANIZATION: stamped', async () => {
     const g = await grant({ agent_id: agentId });
     await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
-    await sweepLapsedAgentGrants(db);
+    const out = await sweepLapsedAgentGrants(db);
+    expect(out.pairsDeparted).toBe(1);
     expect(await departedAt(g)).not.toBeNull();
   });
 
@@ -167,7 +168,12 @@ describe('#4178 item (c) stays out', () => {
     const gUninstalled = await grant({ agent_id: agentId }, {}, app3);
     await db.app.update({ where: { id: app2 }, data: { deletedAt: new Date() } });
     await db.app.update({ where: { id: app3 }, data: { uninstalledAt: new Date() } });
-    await sweepLapsedAgentGrants(db);
+    // A live control in App 1, where the same agent's licence is lapsed: the sweep did judge and stamp something, so the two
+    // expectations below are not vacuous (an early return or a crash would leave this one unstamped too).
+    const control = await grant({ agent_id: agentId });
+    const out = await sweepLapsedAgentGrants(db);
+    expect(out.pairsDeparted).toBe(1);
+    expect(await departedAt(control)).not.toBeNull();
     expect(await departedAt(gDeleted)).toBeNull();
     expect(await departedAt(gUninstalled)).toBeNull();
   });
@@ -176,8 +182,10 @@ describe('#4178 item (c) stays out', () => {
 describe('#4178 batching', () => {
   it('pairs that are still installed do not starve a lapsed pair behind them (batchSize 1; ids are time-ordered, so the lapsed one is created LAST and sorts last)', async () => {
     const stillInstalled: string[] = [];
+    const stillInstalledAgents: string[] = [];
     for (let i = 0; i < 3; i++) {
       const a = await mkAgent(`fine${i}`);
+      stillInstalledAgents.push(a);
       await db.appAgent.create({ data: { appId, agentId: a } });
       stillInstalled.push(await grant({ agent_id: a }));
     }
@@ -187,7 +195,10 @@ describe('#4178 batching', () => {
       data: { parentAgentId: parentId, importedAgentId: late, position: 5, agentOrgGrantOrgId: orgId, agentOrgGrantAgentId: late },
     });
     const lapsed = await grant({ agent_id: late });
+    // The premise of this pin: the lapsed pair sorts after every still-installed one (ids are time-ordered).
+    expect([...stillInstalledAgents, late].sort().at(-1)).toBe(late);
     const out = await sweepLapsedAgentGrants(db, { batchSize: 1, maxPages: 20 });
+    expect(out.pairsJudged).toBe(4); // the cursor walked past all three installed pairs to reach the fourth
     expect(out.grantsEnded).toBe(1);
     expect(await departedAt(lapsed)).not.toBeNull();
     for (const id of stillInstalled) expect(await departedAt(id)).toBeNull();
