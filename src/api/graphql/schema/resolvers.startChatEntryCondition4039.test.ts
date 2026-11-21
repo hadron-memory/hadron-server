@@ -228,11 +228,17 @@ describe('#4039 refusals judged before any write', () => {
     sessionKeyCache.set(generateId(), memory.id, key);
     await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
     const facts = { users: { [alice.id]: { name: 'Ann' } } };
+    const ciphertext = encryptNodeFields({ data: facts }, info).data as never;
     await db.node.upsert({
       where: { loc_memoryId: { loc: 'data', memoryId: memory.id } },
-      update: { data: encryptNodeFields({ data: facts }, info).data as never },
-      create: { id: generateId(), memoryId: memory.id, loc: 'data', name: 'data', nodeType: 'system', data: encryptNodeFields({ data: facts }, info).data as never },
+      update: { data: ciphertext },
+      create: { id: generateId(), memoryId: memory.id, loc: 'data', name: 'data', nodeType: 'system', data: ciphertext },
     });
+    // The stored facts really are ciphertext: neither the name nor the user id is readable in the row, so only a decrypting read can
+    // answer the start below (a plaintext row would make this pin pass without exercising decryption).
+    const stored = JSON.stringify((await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'data', memoryId: memory.id } } })).data);
+    expect(stored).not.toContain('Ann');
+    expect(stored).not.toContain(alice.id);
     // The name is saved, so `recent` opens: only a decrypted read of the facts can say so (bob, with no facts, gets `welcome`).
     expect(await opened(alice.id)).toBe('recent');
     expect(await opened(bob.id)).toBe('welcome');
