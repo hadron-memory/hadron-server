@@ -9,7 +9,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { getRetrievalProvider } from '../../lib/retrieval/postgres.js';
-import { setVectorSmallScopeRowsForTests, setVectorWindowRowsMaxForTests, vectorSearchNodes, VECTOR_TX_MAX_WAIT_MS } from './vectors.js';
+import { setVectorSmallScopeRowsForTests, setVectorWindowRowsMaxForTests, vectorSearchNodes, vectorSearchTimeoutMs, VECTOR_ANN_MAX_K, VECTOR_TX_MAX_WAIT_MS } from './vectors.js';
 
 const DIM = 768;
 const vec = (x: number) => { const v = new Array(DIM).fill(0); v[1] = 1; v[2] = x; return `'[${v.join(',')}]'::vector`; };
@@ -155,5 +155,40 @@ describe('BLIND P2-3 (#4665, Bridget P3-1): a vector transaction never waits lon
     try { await search({}); } finally { spy.mockRestore(); }
     expect(seen.length).toBeGreaterThan(0);
     for (const w of seen) expect(w).toBeLessThanOrEqual(VECTOR_TX_MAX_WAIT_MS);
+  });
+});
+
+describe('Charles survivors (#4665): the budget is measured inside the transaction; the ANN walk has a ceiling', () => {
+  afterAll(() => setVectorSmallScopeRowsForTests(null));
+  /** Run a search with every `$transaction` wrapped: `lag` ms pass between the call and the callback (a pool wait),
+   *  every raw statement's text is recorded, and the statement_timeout in force at the end of each callback is read. */
+  const traced = async (lag: number, run: () => Promise<unknown>) => {
+    const real = db.$transaction.bind(db);
+    const sql: string[] = []; const timeouts: number[] = [];
+    const spy = vi.spyOn(db, '$transaction').mockImplementation(((fn: (tx: any) => Promise<unknown>, o?: unknown) =>
+      (real as any)(async (tx: any) => {
+        await new Promise((r) => setTimeout(r, lag));
+        const proxy = new Proxy(tx, { get: (t, k) => k === '$queryRaw'
+          ? (strings: TemplateStringsArray, ...v: unknown[]) => { sql.push(Array.from(strings).join('?')); return t.$queryRaw(strings, ...v); }
+          : (t as any)[k] });
+        const out = await fn(proxy);
+        timeouts.push(Number((await tx.$queryRawUnsafe(`SELECT setting FROM pg_settings WHERE name = 'statement_timeout'`))[0].setting));
+        return out;
+      }, o)) as any);
+    try { await run(); } finally { spy.mockRestore(); }
+    return { sql, timeouts };
+  };
+  it('M4: time spent waiting for a connection is taken off the statement budget', async () => {
+    const { timeouts } = await traced(400, () => search({}));
+    expect(timeouts.length).toBeGreaterThan(0);
+    // the first transaction starts 400 ms after the search began, so it can never be handed the whole budget
+    expect(timeouts[0]).toBeLessThanOrEqual(vectorSearchTimeoutMs() - 350);
+  });
+  it('M10: a first horizon past VECTOR_ANN_MAX_K goes straight to the exact statement (control: a normal horizon walks the index)', async () => {
+    setVectorSmallScopeRowsForTests(0); // force the large-scope path
+    const annSeen = (sql: string[]) => sql.some((q) => q.includes('ORDER BY ne.embedding <=>'));
+    const run = (candidateFactor: number) => traced(0, () => vectorSearchNodes(db, { memoryIds: [mem], queryEmbedding: query(), limit: 3, candidateFactor }));
+    expect(annSeen((await run(10)).sql)).toBe(true);
+    expect(annSeen((await run(Math.ceil(VECTOR_ANN_MAX_K / 3) + 10)).sql)).toBe(false);
   });
 });
