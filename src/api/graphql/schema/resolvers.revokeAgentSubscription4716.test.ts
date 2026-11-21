@@ -9,12 +9,21 @@
  * cor:dmo:050:08 retains the user's memory at revocation, hard-deleting only
  * an EMPTY one; a memory that gained a node in that window is not empty.
  *
- * The interleaving pin stages the race deterministically with two connections:
- * a writer parks on the memory row `FOR UPDATE`, the resolver is fired and
- * parks behind it (on main its `memory.delete` parks — the count already ran;
- * with the guard the row lock itself parks), the writer commits a node, and
+ * The interleaving pin stages the race deterministically with two connections,
+ * and the competing writer is a REAL node writer — one plain `node.create`
+ * held uncommitted: its FK check takes FOR KEY SHARE on the memory row, which
+ * is the premise the guard depends on (real writers never lock the memory row
+ * themselves). The resolver is fired and parks behind that key share (on main
+ * its `memory.delete` parks — the count already ran, blind to the uncommitted
+ * insert; with the guard the row lock itself parks), the writer commits, and
  * only then is the resolver released. Red on main (node lost), green with the
  * guard (fresh count after the lock wait sees the node; memory retained).
+ *
+ * The isolation pin (repeatable-read default) proves the guard's transaction
+ * PINS READ COMMITTED instead of inheriting the server default: under a
+ * REPEATABLE READ default the count would reuse its pre-wait snapshot, miss
+ * the node committed during the lock wait, and the cascade would lose it —
+ * the bug this guard closes.
  *
  * The behavior pins freeze the rest of FR-029 against the guard: a still-empty
  * memory IS hard-deleted (personal and private), a live node retains it, a
@@ -32,6 +41,7 @@ import {
 } from '../../../test/helpers.js';
 import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { generateId } from '../../../lib/id.js';
+import { PrismaClient } from '../../../generated/prisma/index.js';
 import { resolvers, type Context } from './resolvers.js';
 
 const M = resolvers.Mutation as {
@@ -104,19 +114,20 @@ describe('#4716 — the interleaving: a node committed between the empty-check a
       const f = await buildFixture(memoryClass);
       const memoryId = f.memory.id;
 
-      // The competing writer parks ON the memory row and lands its node while
-      // the resolver is blocked behind it. On main the parked statement is the
-      // hard delete (the count already returned 0); with the guard it is the
-      // row lock the guard takes before counting. Either way the node commits
-      // strictly between the empty-check and the delete.
-      let bHeld!: () => void;
-      const held = new Promise<void>((resolve) => { bHeld = resolve; });
+      // The competing writer is a REAL node writer: one plain node.create,
+      // held uncommitted while the resolver is blocked behind it. The insert's
+      // FK check takes FOR KEY SHARE on the memory row — the exact premise the
+      // guard depends on (real node writers never lock the memory row
+      // themselves). On main the resolver's parked statement is the hard
+      // delete (the count already returned 0, blind to the uncommitted
+      // insert); with the guard it is the row lock the guard takes before
+      // counting. Either way the node commits strictly between the
+      // empty-check and the delete.
+      let inserted!: () => void;
+      const writerInserted = new Promise<void>((resolve) => { inserted = resolve; });
       let release!: () => void;
       const gate = new Promise<void>((resolve) => { release = resolve; });
       const writer = db.$transaction(async (tx) => {
-        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
-        bHeld();
-        await gate;
         await tx.node.create({
           data: {
             id: generateId(),
@@ -126,28 +137,92 @@ describe('#4716 — the interleaving: a node committed between the empty-check a
             content: 'committed between the empty-check and the hard delete',
           },
         });
+        inserted();
+        await gate;
       }, { timeout: 20_000 });
-      await held;
+      await writerInserted;
 
-      const call = revoke(f).then(() => ({ ok: true }), (error: unknown) => ({ ok: false, error }));
-      // Deterministic park: the resolver's memory-row statement is the only
-      // backend in this per-worker database waiting on a lock.
-      await waitForLockWaitersOfType(db, 'transactionid', 1);
-      release();
-      await writer;
-      const result = await call;
-      expect(result).toEqual({ ok: true });
+      try {
+        const call = revoke(f).then(() => ({ ok: true }), (error: unknown) => ({ ok: false, error }));
+        // Deterministic park: the resolver's memory-row statement is the only
+        // backend in this per-worker database waiting on a lock.
+        await waitForLockWaitersOfType(db, 'transactionid', 1);
+        release();
+        await writer;
+        const result = await call;
+        expect(result).toEqual({ ok: true });
 
-      // cor:dmo:050:08 — the memory gained a node, so it was not empty at
-      // delete time: both the write and the memory survive.
-      expect(await db.node.count({ where: { memoryId } })).toBe(1);
-      expect(await db.memory.findUnique({ where: { id: memoryId } })).not.toBeNull();
-      const sub = await db.agentSubscription.findUniqueOrThrow({
-        where: { userId_agentId: { userId: f.alice.id, agentId: f.agent.id } },
-      });
-      expect(sub.revokedAt).not.toBeNull();
+        // cor:dmo:050:08 — the memory gained a node, so it was not empty at
+        // delete time: both the write and the memory survive.
+        expect(await db.node.count({ where: { memoryId } })).toBe(1);
+        expect(await db.memory.findUnique({ where: { id: memoryId } })).not.toBeNull();
+        const sub = await db.agentSubscription.findUniqueOrThrow({
+          where: { userId_agentId: { userId: f.alice.id, agentId: f.agent.id } },
+        });
+        expect(sub.revokedAt).not.toBeNull();
+      } finally {
+        // Idempotent: a failed assertion must never leave the writer parked
+        // until its transaction timeout.
+        release();
+      }
     },
   );
+});
+
+describe('#4716 — the guard PINS read committed: a repeatable-read server default must not reopen the window', () => {
+  it('under a REPEATABLE READ database default the raced node still survives', async () => {
+    const f = await buildFixture();
+    const memoryId = f.memory.id;
+
+    // A deployment may set default_transaction_isolation = repeatable read;
+    // the guard must not inherit it (the count would reuse its pre-wait
+    // snapshot). ALTER DATABASE only reaches NEW connections, so the resolver
+    // runs on a fresh client whose pool opened under the RR default.
+    const dbName = (await db.$queryRaw<Array<{ db: string }>>`SELECT current_database() AS db`)[0].db;
+    await db.$executeRawUnsafe(`ALTER DATABASE "${dbName}" SET default_transaction_isolation TO 'repeatable read'`);
+    const rrDb = new PrismaClient();
+    try {
+      let inserted!: () => void;
+      const writerInserted = new Promise<void>((resolve) => { inserted = resolve; });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const writer = rrDb.$transaction(async (tx) => {
+        await tx.node.create({
+          data: {
+            id: generateId(),
+            memoryId,
+            loc: 'data:raced-write-rr',
+            name: 'raced write (RR default)',
+            content: 'committed between the empty-check and the hard delete',
+          },
+        });
+        inserted();
+        await gate;
+      }, { timeout: 20_000 });
+      await writerInserted;
+
+      const rrCtx: Context = { db: rrDb, roles: ['ADMIN'], userId: f.admin.id } as Context;
+      const call = M.revokeAgentSubscription(
+        null,
+        { userRef: f.alice.id, agentRef: f.agent.id },
+        rrCtx,
+      ).then(() => ({ ok: true }), (error: unknown) => ({ ok: false, error }));
+      try {
+        await waitForLockWaitersOfType(db, 'transactionid', 1);
+        release();
+        await writer;
+        const result = await call;
+        expect(result).toEqual({ ok: true });
+        expect(await db.node.count({ where: { memoryId } })).toBe(1);
+        expect(await db.memory.findUnique({ where: { id: memoryId } })).not.toBeNull();
+      } finally {
+        release();
+      }
+    } finally {
+      await rrDb.$disconnect();
+      await db.$executeRawUnsafe(`ALTER DATABASE "${dbName}" RESET default_transaction_isolation`);
+    }
+  });
 });
 
 describe('#4716 — FR-029 behavior pins around the guard', () => {
@@ -155,7 +230,11 @@ describe('#4716 — FR-029 behavior pins around the guard', () => {
     'a still-empty %s-class memory is hard-deleted on revocation',
     async (memoryClass) => {
       const f = await buildFixture(memoryClass);
-      await expect(revoke(f)).resolves.toBeTruthy();
+      await revoke(f);
+      const sub = await db.agentSubscription.findUniqueOrThrow({
+        where: { userId_agentId: { userId: f.alice.id, agentId: f.agent.id } },
+      });
+      expect(sub.revokedAt).not.toBeNull();
       expect(await db.memory.findUnique({ where: { id: f.memory.id } })).toBeNull();
     },
   );
@@ -218,6 +297,10 @@ describe('#4716 — FR-029 behavior pins around the guard', () => {
 
     await revoke(f); // revokes alice's subscription on f.agent, which is empty → deleted
 
+    const sub = await db.agentSubscription.findUniqueOrThrow({
+      where: { userId_agentId: { userId: f.alice.id, agentId: f.agent.id } },
+    });
+    expect(sub.revokedAt).not.toBeNull();
     expect(await db.memory.findUnique({ where: { id: f.memory.id } })).toBeNull();
     expect(await db.memory.findUnique({ where: { id: freeStanding.id } })).not.toBeNull();
     expect(await db.memory.findUnique({ where: { id: otherAgentMemory.id } })).not.toBeNull();

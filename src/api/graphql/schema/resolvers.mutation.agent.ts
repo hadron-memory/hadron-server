@@ -1729,8 +1729,12 @@ export const agentMutations = {
       // committed while we waited is seen. A memory that gained a node is not
       // empty and is retained. The predicate stays "no node rows at all" (a
       // soft-deleted node is still data to preserve) and the scope stays as it
-      // was; this transaction stays READ COMMITTED on purpose — the count must
-      // re-snapshot after the lock wait, which SERIALIZABLE would abort instead.
+      // was. The transaction's isolation is PINNED to READ COMMITTED, not left
+      // to the server default: under REPEATABLE READ the count would reuse the
+      // pre-wait snapshot, miss the node committed during the lock wait, and
+      // the cascade would lose it — the very bug this guard closes. (SERIALIZABLE
+      // would abort the shape instead of re-snapshotting; see the #664
+      // count-then-act refinement.)
       await ctx.db.$transaction(async (tx) => {
         const scoped = await tx.$queryRaw<Array<{ id: string }>>`
           SELECT id FROM memories
@@ -1745,7 +1749,10 @@ export const agentMutations = {
         if (nodes === 0) {
           await tx.memory.delete({ where: { id: scoped[0].id } });
         }
-      }, { timeout: 20_000 });
+      }, {
+        timeout: 20_000,
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+      });
 
       return updated;
     },
