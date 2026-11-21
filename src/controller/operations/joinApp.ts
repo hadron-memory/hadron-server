@@ -110,7 +110,11 @@ export async function joinApp(
   return { appId: args.appId, userId: args.userId, role: selfJoinRole };
 }
 
-async function resolveSelfJoinRole(db: PrismaClient | Prisma.TransactionClient, appId: string): Promise<string> {
+/**
+ * The ONE decision about whether an App admits self-join, and as which role. `joinApp` makes it, and so does the read-only
+ * `App.selfJoin` (#4490), so the two cannot disagree. Throws SelfJoinNotAllowedError when the App is closed.
+ */
+export async function resolveSelfJoinRole(db: PrismaClient | Prisma.TransactionClient, appId: string): Promise<string> {
   // The primary installed Agent's policy, the same Agent ensureAppMember
   // validates against (getPrimaryAgentId: oldest AppAgent). No installed
   // Agent means nothing opted in: refuse rather than reveal the orphan state.

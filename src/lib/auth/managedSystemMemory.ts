@@ -6,11 +6,12 @@ import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { lockAuthorityAnchors } from './authorityAnchors.js';
 import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 import { isRunPrincipal } from './runPrincipal.js';
+import { memoryIdFilter, type OnlyMemoryIds } from './memoryIdScope.js';
 
 export async function getManagedSystemMemoryIds(
   db: PrismaClient,
   userId: string,
-  onlyMemoryId?: string,
+  onlyMemoryId?: OnlyMemoryIds,
   restrictToOrgId?: string,
 ): Promise<string[]> {
   if (!userId) return [];
@@ -22,7 +23,7 @@ export async function getManagedSystemMemoryIds(
   const agents = await db.agent.findMany({
     where: {
       deletedAt: null,
-      systemMemoryId: onlyMemoryId ?? { not: null },
+      systemMemoryId: onlyMemoryId !== undefined ? memoryIdFilter(onlyMemoryId) : { not: null },
       OR: [
         ...(orgIds.length ? [{ organizationId: { in: orgIds }, ownerUserId: null }] : []),
         // Support impersonation is one-org only, never a user's ownership.

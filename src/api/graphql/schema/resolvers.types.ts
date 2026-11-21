@@ -17,6 +17,8 @@ import { callerIsWorkerSession } from './resolvers.instruction.js';
 import { servedPromptOwnerFields, servedPromptTypeResolvers } from './resolvers.servedPrompt.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { loadViewerManages } from './resolvers.appViewerManages.js';
+import { resolveSelfJoinRole, SelfJoinNotAllowedError } from '../../../controller/operations/joinApp.js';
+import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
 import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
@@ -92,6 +94,7 @@ import {
   defaultAiConfigOf,
   isOrgMemberOrAdmin,
   requireAppRead,
+  canReadApp,
   appChildrenWithheld,
   APP_OWNER_MEMBER_ROLE,
   userOwnedAppOwnerMemberWhere,
@@ -1964,6 +1967,33 @@ export const typeResolvers = {
     /** #2171 (R211): the union reader every admission decides with. */
     availableMemberRoles: async (a: { id: string }, _: unknown, ctx: Context) =>
       (await loadOfferedMemberRoles(ctx.db, a.id)).roles,
+    /**
+     * #4490 — would joinApp accept the caller? The decision is joinApp's own `resolveSelfJoinRole`, never a copy. The same
+     * read gate as `Query.app` (`canReadApp`) runs here too, because a nested App hands whoever reaches it the whole field
+     * surface (findings:broadening-read-gate-leaks-nested-objects): null, silently, for anyone who fails it, for a refused
+     * principal (App key, impersonation, run) and for a request with no user. A member reads MEMBER with no role.
+     */
+    selfJoin: async (a: { id: string }, _: unknown, ctx: Context) => {
+      if (!ctx.userId || isRefusedPrincipal(ctx)) return null;
+      // Re-read the App by id: a route that reaches App with a narrower select leaves the lifecycle columns undefined, and
+      // reading `undefined` as "installed" would answer OPEN where joinApp refuses (BLIND P2-2). The ownership columns the read
+      // gate needs come from the same fresh row, never from what the parent happens to carry.
+      const app = await ctx.db.app.findUnique({
+        where: { id: a.id },
+        select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
+      });
+      if (!app || app.deletedAt) return null;
+      if (!(await canReadApp(ctx, app))) return null;
+      // The shared gate decision (resolveSelfJoinRole) is joinApp's own; the rows around it are pinned one by one against the real
+      // joinApp. ONE deliberate difference: joinApp checks the lifecycle first, then the idempotent re-join, but a member is
+      // answered MEMBER before the lifecycle check (condition 4: a member learns nothing new, and MEMBER is only what they know),
+      // so a member of an uninstalled App reads MEMBER where joinApp would refuse it as uninstalled (pinned).
+      const member = await ctx.db.appMember.findUnique({ where: { appId_userId: { appId: app.id, userId: ctx.userId } }, select: { userId: true } });
+      if (member) return { state: 'MEMBER', role: null };
+      if (app.uninstalledAt) return { state: 'CLOSED', role: null };
+      try { return { state: 'OPEN', role: await resolveSelfJoinRole(ctx.db, app.id) }; }
+      catch (e) { if (e instanceof SelfJoinNotAllowedError) return { state: 'CLOSED', role: null }; throw e; } // any other failure is a real failure, never CLOSED
+    },
     /** #2109 — whether the caller manages this App; the shared managesApp predicate as a read-time fact. */
     viewerManages: (a: { id: string }, _: unknown, ctx: Context) => loadViewerManages(ctx, a.id),
     /**

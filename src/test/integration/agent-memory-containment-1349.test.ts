@@ -302,7 +302,7 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
       const session = await db.session.create({
         data: { id: generateId(), appId, agentId, memoryId: mem[target]!.id } as never,
       });
-      expect((await sessionScopedMemoryIds(db, appId, session.id)).includes(mem[target]!.id)).toBe(admitted);
+      expect((await sessionScopedMemoryIds(db, appId, session.id, {})).includes(mem[target]!.id)).toBe(admitted);
     }
   });
 
@@ -363,7 +363,7 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
       if (cls === 'personal') await db.agentSubscription.create({ data: { userId: owner.id, agentId: link.agentId, activatedAt: new Date() } });
       const session = await db.session.create({ data: { id: generateId(), appId: link.appId, agentId: link.agentId, memoryId: own.id, ...(cls === 'personal' ? { userId: owner.id } : {}) } as never });
       // the gate's input: the session's verified reach holds the provisioned memory (personal: read-only in the access map, still reachable)
-      expect(await sessionScopedMemoryIds(db, link.appId, session.id), cls).toContain(own.id);
+      expect(await sessionScopedMemoryIds(db, link.appId, session.id, {}), cls).toContain(own.id);
       if (cls === 'personal') continue;
       const response = await fetch(`${baseUrl}/graphql`, {
         method: 'POST',
@@ -490,7 +490,7 @@ describe('#2895 — optional pins from the #2885 review (refs #1376)', () => {
     });
     await db.agentSubscription.create({ data: { userId, agentId: link.agentId, activatedAt: new Date() } });
     const session = await db.session.create({ data: { id: generateId(), appId: link.appId, agentId: link.agentId, memoryId: personal.id, userId } as never });
-    expect(await sessionScopedMemoryIds(db, link.appId, session.id)).toContain(personal.id);
+    expect(await sessionScopedMemoryIds(db, link.appId, session.id, {})).toContain(personal.id);
     const before = await db.node.count({ where: { memoryId: personal.id } });
     const body = await startChatInSession(link, session.id);
     expect(body.errors, JSON.stringify(body)).toBeUndefined();
@@ -520,7 +520,7 @@ describe('#2895 — optional pins from the #2885 review (refs #1376)', () => {
     // raw-DB fixture: no API path writes a system memory into Session.memoryId
     const session = await db.session.create({ data: { id: generateId(), appId: link.appId, agentId: link.agentId, memoryId: systemId } as never });
     // reads are NOT narrowed: the session's verified reach still holds the system memory
-    expect(await sessionScopedMemoryIds(db, link.appId, session.id)).toContain(systemId);
+    expect(await sessionScopedMemoryIds(db, link.appId, session.id, {})).toContain(systemId);
     const before = await db.node.count({ where: { memoryId: systemId } });
     const refused = await startChatInSession(link, session.id);
     expect(refused.data?.startChat ?? null, JSON.stringify(refused)).toBeNull();
