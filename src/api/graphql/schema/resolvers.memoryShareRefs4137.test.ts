@@ -132,27 +132,27 @@ describe('createMemoryShare / updateMemoryShareRole take memoryRef (#4137)', () 
       `mutation { createMemoryShare(memoryId: "${personal.id}", granteeRef: "${grantee.handle}", role: reader) { memoryShare { role } } }`,
       owner.id,
     );
-    expect(refusal(withMemoryId)).toMatch(/Unknown argument "memoryId"/);
+    expect(refusal(withMemoryId)).toMatch(/Unknown argument .{1,3}memoryId/);
     const withGranteeId = await run(
       `mutation { createMemoryShare(memoryRef: "${personal.id}", granteeId: "${grantee.id}", role: reader) { memoryShare { role } } }`,
       owner.id,
     );
-    expect(refusal(withGranteeId)).toMatch(/Unknown argument "granteeId"/);
+    expect(refusal(withGranteeId)).toMatch(/Unknown argument .{1,3}granteeId/);
     const updMemoryId = await run(
       `mutation { updateMemoryShareRole(memoryId: "${personal.id}", granteeRef: "${grantee.handle}", role: reader) { memoryShare { role } } }`,
       owner.id,
     );
-    expect(refusal(updMemoryId)).toMatch(/Unknown argument "memoryId"/);
+    expect(refusal(updMemoryId)).toMatch(/Unknown argument .{1,3}memoryId/);
     const updGranteeId = await run(
       `mutation { updateMemoryShareRole(memoryRef: "${personal.id}", granteeId: "${grantee.id}", role: reader) { memoryShare { role } } }`,
       owner.id,
     );
-    expect(refusal(updGranteeId)).toMatch(/Unknown argument "granteeId"/);
+    expect(refusal(updGranteeId)).toMatch(/Unknown argument .{1,3}granteeId/);
     const delGranteeId = await run(
       `mutation { deleteMemoryShare(memoryRef: "${personal.id}", granteeId: "${grantee.id}") { memoryId } }`,
       owner.id,
     );
-    expect(refusal(delGranteeId)).toMatch(/Unknown argument "granteeId"/);
+    expect(refusal(delGranteeId)).toMatch(/Unknown argument .{1,3}granteeId/);
     expect(await shareRow()).toBeNull();
   });
 });
@@ -247,7 +247,7 @@ describe('member mutations take memoryRef / userRef only (#4137)', () => {
     ];
     for (const c of cases) {
       const r = await run(`mutation { ${c} }`, owner.id);
-      expect(refusal(r), c).toMatch(/Unknown argument "(memoryId|userId)"/);
+      expect(refusal(r), c).toMatch(/Unknown argument .{1,3}(memoryId|userId)/);
     }
     expect(await member()).toBeNull();
   });

@@ -101,6 +101,14 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   addOrgMember: ['orgRef', 'userRef'],
   updateOrgMember: ['orgRef', 'userRef'],
   removeOrgMember: ['orgRef', 'userRef'],
+  // #4137 (S1): the memory share/member mutations — memoryId, granteeId and
+  // userId gone with no alias.
+  createMemoryShare: ['memoryRef', 'granteeRef'],
+  updateMemoryShareRole: ['memoryRef', 'granteeRef'],
+  deleteMemoryShare: ['memoryRef', 'granteeRef'],
+  addMemoryMember: ['memoryRef', 'userRef'],
+  updateMemoryMemberRole: ['memoryRef', 'userRef'],
+  removeMemoryMember: ['memoryRef', 'userRef'],
 };
 
 /**

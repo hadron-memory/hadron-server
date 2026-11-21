@@ -158,7 +158,7 @@ import {
   memoryMemberForbidden,
   resolveMemoryRefForMemberGate,
   resolveSelfUserRefForMemberGate,
-  resolveUserRefArg,
+  resolveRequiredUserRef,
   resolveRequiredOrgRef,
   resolveRequiredMemoryRef,
   getAccessibleMemoryIds,
@@ -227,25 +227,19 @@ function assertValidBranches(input: {
 }
 
 /**
- * #769 — resolve the grantee of a memory-share mutation to a definite user id.
- * Prefer the new `granteeRef` (id / email / handle / `hrn:user:` URN, resolved
- * server-side against the full user table so a cross-org personal share works),
- * falling back to the deprecated `granteeId` PK for existing callers. Exactly
- * one must be supplied. A ref that resolves to no user surfaces NOT_FOUND rather
- * than the caller-facing controller error.
+ * #769 / #4137 — resolve the grantee of a memory-share mutation to a definite
+ * user id from `granteeRef` (id / email / handle / `hrn:user:` URN, resolved
+ * server-side against the full user table so a cross-org personal share
+ * works). #4137 dropped the deprecated `granteeId` alias: the ref is the only
+ * way in. A ref that resolves to no user surfaces NOT_FOUND rather than the
+ * caller-facing controller error; callers run it only AFTER the principal gate
+ * (cor:api:140:02: no user-enumeration oracle before authorization).
  */
 async function resolveGranteeId(
   ctx: Context,
-  args: { granteeRef?: string | null; granteeId?: string | null },
+  args: { granteeRef?: string | null },
 ): Promise<string> {
   const ref = args.granteeRef?.trim();
-  // Mutually exclusive: passing both is a caller mistake, and silently
-  // preferring one contradicts the schema (PR #774 review).
-  if (ref && args.granteeId) {
-    throw new GraphQLError('Pass either granteeRef or granteeId, not both.', {
-      extensions: { code: 'BAD_USER_INPUT' },
-    });
-  }
   if (ref) {
     try {
       const { id } = await resolveUserRefOrEmail(ctx.db, ref);
@@ -265,10 +259,27 @@ async function resolveGranteeId(
       throw e;
     }
   }
-  if (args.granteeId) return args.granteeId;
-  throw new GraphQLError('A grantee is required: pass granteeRef (or the deprecated granteeId).', {
+  throw new GraphQLError('granteeRef is required.', {
     extensions: { code: 'BAD_USER_INPUT' },
   });
+}
+
+/**
+ * #4137 — resolve the `memoryRef` of createMemoryShare / updateMemoryShareRole.
+ * A resolution miss (unknown or soft-deleted memory) is answered as the share
+ * surface's uniform FORBIDDEN, the same bytes a non-principal gets for a real
+ * memory, so the ref cannot probe which memories exist (cor:api:140:02).
+ * A blank ref or a relative URN depends only on the input's shape, never on
+ * existence, so it propagates before the gate (`BAD_USER_INPUT` /
+ * `URN_NOT_QUALIFIED`, cor:api:140:01).
+ */
+async function resolveShareMemoryRef(ctx: Context, memoryRef: string): Promise<string> {
+  try {
+    return await resolveRequiredMemoryRef(ctx.db, memoryRef);
+  } catch (e) {
+    if (e instanceof GraphQLError && e.extensions?.code === 'NOT_FOUND') throw memoryShareForbidden();
+    throw e;
+  }
 }
 
 /**
@@ -2940,11 +2951,10 @@ export const memoryMutations = {
     createMemoryShare: async (
       _: unknown,
       {
-        memoryId,
+        memoryRef,
         granteeRef,
-        granteeId,
         role,
-      }: { memoryId: string; granteeRef?: string | null; granteeId?: string | null; role: MemoryShareRoleType },
+      }: { memoryRef: string; granteeRef: string; role: MemoryShareRoleType },
       ctx: Context,
     ) => {
       if (!ctx.userId) {
@@ -2952,11 +2962,13 @@ export const memoryMutations = {
           extensions: { code: 'UNAUTHENTICATED' },
         });
       }
-      // Caller-authority gate FIRST, then grantee resolution — so an unauthorized
-      // caller always gets FORBIDDEN and can't use the NOT_FOUND-vs-FORBIDDEN
-      // difference as a user-enumeration oracle (mirrors createPrincipalGrant).
+      // #4137 order (cor:api:140:02): memory resolved (a miss is FORBIDDEN) →
+      // caller-authority gate → grantee resolved. An unauthorized caller always
+      // gets FORBIDDEN and can't use the NOT_FOUND-vs-FORBIDDEN difference as a
+      // memory- or user-enumeration oracle (mirrors createPrincipalGrant).
+      const memoryId = await resolveShareMemoryRef(ctx, memoryRef);
       await requireMemorySharePrincipal(ctx, memoryId);
-      const resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef, granteeId });
+      const resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef });
       try {
         const memoryShare = await withAuthorizedMemoryTx(
           ctx,
@@ -3005,8 +3017,7 @@ export const memoryMutations = {
       {
         memoryRef,
         granteeRef,
-        granteeId,
-      }: { memoryRef: string; granteeRef?: string | null; granteeId?: string | null },
+      }: { memoryRef: string; granteeRef?: string | null },
       ctx: Context,
     ) => {
       if (!ctx.userId) {
@@ -3040,13 +3051,13 @@ export const memoryMutations = {
       // user-enumeration oracle (the ordering rule createMemoryShare states).
       const isPrincipal = await isMemorySharePrincipal(ctx, resolvedMemoryId);
       // No grantee named ⇒ the caller means their own share ("leave").
-      const wantsSelf = !granteeRef?.trim() && !granteeId;
+      const wantsSelf = !granteeRef?.trim();
       let resolvedGranteeId: string;
       if (wantsSelf) {
         resolvedGranteeId = ctx.userId;
       } else {
         try {
-          resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef, granteeId });
+          resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef });
         } catch (e) {
           if (!isPrincipal) throw memoryShareForbidden();
           throw e;
@@ -3104,11 +3115,10 @@ export const memoryMutations = {
     updateMemoryShareRole: async (
       _: unknown,
       {
-        memoryId,
+        memoryRef,
         granteeRef,
-        granteeId,
         role,
-      }: { memoryId: string; granteeRef?: string | null; granteeId?: string | null; role: MemoryShareRoleType },
+      }: { memoryRef: string; granteeRef: string; role: MemoryShareRoleType },
       ctx: Context,
     ) => {
       if (!ctx.userId) {
@@ -3116,8 +3126,11 @@ export const memoryMutations = {
           extensions: { code: 'UNAUTHENTICATED' },
         });
       }
+      // #4137: same order as createMemoryShare — memory (miss = FORBIDDEN),
+      // principal gate, then the grantee.
+      const memoryId = await resolveShareMemoryRef(ctx, memoryRef);
       await requireMemorySharePrincipal(ctx, memoryId);
-      const resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef, granteeId });
+      const resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef });
       try {
         const memoryShare = await withAuthorizedMemoryTx(
           ctx,
@@ -3156,15 +3169,11 @@ export const memoryMutations = {
       _: unknown,
       {
         memoryRef,
-        memoryId,
         userRef,
-        userId,
         role,
       }: {
-        memoryRef?: string | null;
-        memoryId?: string | null;
-        userRef?: string | null;
-        userId?: string | null;
+        memoryRef: string;
+        userRef: string;
         role: MemoryMemberRoleType;
       },
       ctx: Context,
@@ -3174,9 +3183,9 @@ export const memoryMutations = {
       // run the owner gate FIRST, then resolve the user — so an unauthorized
       // caller gets FORBIDDEN and can't use NOT_FOUND to enumerate memories or
       // users (mirrors createMemoryShare; #816 review).
-      const resolvedMemoryId = await resolveMemoryRefForMemberGate(ctx, { ref: memoryRef, id: memoryId });
+      const resolvedMemoryId = await resolveMemoryRefForMemberGate(ctx, memoryRef);
       await requireMemoryMemberOwner(ctx, resolvedMemoryId);
-      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+      const resolvedUserId = await resolveRequiredUserRef(ctx.db, userRef);
       try {
         const memoryMember = await retryOnSerializationFailure(() => withAuthorizedMemoryTx(
           ctx, resolvedMemoryId, [{ kind: 'user', id: resolvedUserId }],
@@ -3223,15 +3232,11 @@ export const memoryMutations = {
       _: unknown,
       {
         memoryRef,
-        memoryId,
         userRef,
-        userId,
         role,
       }: {
-        memoryRef?: string | null;
-        memoryId?: string | null;
-        userRef?: string | null;
-        userId?: string | null;
+        memoryRef: string;
+        userRef: string;
         role: MemoryMemberRoleType;
       },
       ctx: Context,
@@ -3239,9 +3244,9 @@ export const memoryMutations = {
       // #764: resolve memory (miss → uniform member FORBIDDEN, no existence
       // oracle) + owner-gate FIRST, then resolve the user (auth before
       // revealing user existence — #816 review).
-      const resolvedMemoryId = await resolveMemoryRefForMemberGate(ctx, { ref: memoryRef, id: memoryId });
+      const resolvedMemoryId = await resolveMemoryRefForMemberGate(ctx, memoryRef);
       await requireMemoryMemberOwner(ctx, resolvedMemoryId);
-      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+      const resolvedUserId = await resolveRequiredUserRef(ctx.db, userRef);
       try {
         const memoryMember = await retryOnSerializationFailure(() => withAuthorizedMemoryTx(
           ctx, resolvedMemoryId, [{ kind: 'user', id: resolvedUserId }],
@@ -3288,14 +3293,10 @@ export const memoryMutations = {
       _: unknown,
       {
         memoryRef,
-        memoryId,
         userRef,
-        userId,
       }: {
-        memoryRef?: string | null;
-        memoryId?: string | null;
-        userRef?: string | null;
-        userId?: string | null;
+        memoryRef: string;
+        userRef: string;
       },
       ctx: Context,
     ) => {
@@ -3305,12 +3306,12 @@ export const memoryMutations = {
       // their target resolution maps any miss to the same FORBIDDEN and the
       // resolved id must equal the caller — an unknown handle/email is then
       // indistinguishable from a real user they can't act on.
-      const resolvedMemoryId = await resolveMemoryRefForMemberGate(ctx, { ref: memoryRef, id: memoryId });
+      const resolvedMemoryId = await resolveMemoryRefForMemberGate(ctx, memoryRef);
       let resolvedUserId: string;
       if (await isMemoryMemberOwner(ctx, resolvedMemoryId)) {
-        resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+        resolvedUserId = await resolveRequiredUserRef(ctx.db, userRef);
       } else {
-        resolvedUserId = await resolveSelfUserRefForMemberGate(ctx, { ref: userRef, id: userId });
+        resolvedUserId = await resolveSelfUserRefForMemberGate(ctx, userRef);
         if (resolvedUserId !== ctx.userId) throw memoryMemberForbidden();
       }
       await requireMemoryMemberOwnerOrSelf(ctx, resolvedMemoryId, resolvedUserId);

@@ -124,7 +124,7 @@ describe('createMemoryShare rule (#778)', () => {
   it('allows sharing an ORG-OWNED personal memory with a co-member', async () => {
     const mem = await orgOwnedPersonal(org.id, owner.id, 'org-comember');
     const { memoryShare } = await M.createMemoryShare(
-      null, { memoryId: mem.id, granteeId: grantee.id, role: 'reader' }, asOwner(),
+      null, { memoryRef: mem.id, granteeRef: grantee.id, role: 'reader' }, asOwner(),
     );
     expect(memoryShare.granteeId).toBe(grantee.id);
   });
@@ -132,26 +132,26 @@ describe('createMemoryShare rule (#778)', () => {
   it('REJECTS sharing an ORG-OWNED personal memory with a non-member', async () => {
     const mem = await orgOwnedPersonal(org.id, owner.id, 'org-nonmember');
     await expect(
-      M.createMemoryShare(null, { memoryId: mem.id, granteeId: stranger.id, role: 'reader' }, asOwner()),
+      M.createMemoryShare(null, { memoryRef: mem.id, granteeRef: stranger.id, role: 'reader' }, asOwner()),
     ).rejects.toThrow(/only be shared with a member of its organization/);
   });
 
   it('allows sharing a FREE-STANDING personal memory with anyone (non-member)', async () => {
     const mem = await freeStandingPersonal(owner.id, 'free-anyone');
     const { memoryShare } = await M.createMemoryShare(
-      null, { memoryId: mem.id, granteeId: stranger.id, role: 'writer' }, asOwner(),
+      null, { memoryRef: mem.id, granteeRef: stranger.id, role: 'writer' }, asOwner(),
     );
     expect(memoryShare.granteeId).toBe(stranger.id);
   });
 
   it('drops an org-owned share once the grantee leaves the org (re-share blocked)', async () => {
     const mem = await orgOwnedPersonal(org.id, owner.id, 'org-revoke');
-    await M.createMemoryShare(null, { memoryId: mem.id, granteeId: grantee.id, role: 'reader' }, asOwner());
+    await M.createMemoryShare(null, { memoryRef: mem.id, granteeRef: grantee.id, role: 'reader' }, asOwner());
     await db.orgMember.updateMany({
       where: { organizationId: org.id, userId: grantee.id }, data: { deletedAt: new Date() },
     });
     await expect(
-      M.createMemoryShare(null, { memoryId: mem.id, granteeId: grantee.id, role: 'writer' }, asOwner()),
+      M.createMemoryShare(null, { memoryRef: mem.id, granteeRef: grantee.id, role: 'writer' }, asOwner()),
     ).rejects.toThrow(/only be shared with a member of its organization/);
   });
 });
@@ -244,7 +244,7 @@ describe('writer-share write gate (#778)', () => {
     );
     try {
       await waitForLockWaitersOfType(db, 'advisory', 1);
-      await M.deleteMemoryShare(null, { memoryRef: writerShared.id, granteeId: grantee.id }, ctx(owner.id));
+      await M.deleteMemoryShare(null, { memoryRef: writerShared.id, granteeRef: grantee.id }, ctx(owner.id));
       release();
       await holder;
       expect((await write).ok).toBe(false);
@@ -326,7 +326,7 @@ describe('deleteMemoryShare — grantee self-removal (#785)', () => {
     expect(await rowExists(freeShared.id, grantee.id)).toBeNull();
 
     await M.deleteMemoryShare(
-      null, { memoryRef: writerShared.id, granteeId: grantee.id }, ctx(grantee.id),
+      null, { memoryRef: writerShared.id, granteeRef: grantee.id }, ctx(grantee.id),
     );
     expect(await rowExists(writerShared.id, grantee.id)).toBeNull();
   });
@@ -356,9 +356,9 @@ describe('deleteMemoryShare — grantee self-removal (#785)', () => {
 
   it('stays idempotent for the PRINCIPAL — deleting an already-gone row succeeds', async () => {
     const asOwner = ctx(owner.id);
-    await M.deleteMemoryShare(null, { memoryRef: freeShared.id, granteeId: grantee.id }, asOwner);
+    await M.deleteMemoryShare(null, { memoryRef: freeShared.id, granteeRef: grantee.id }, asOwner);
     await expect(
-      M.deleteMemoryShare(null, { memoryRef: freeShared.id, granteeId: grantee.id }, asOwner),
+      M.deleteMemoryShare(null, { memoryRef: freeShared.id, granteeRef: grantee.id }, asOwner),
     ).resolves.toEqual({ memoryId: freeShared.id, granteeId: grantee.id });
   });
 
@@ -394,7 +394,7 @@ describe('deleteMemoryShare — grantee self-removal (#785)', () => {
     });
     await share(freeShared.id, grantee2.id, owner.id, 'reader');
     await expect(
-      M.deleteMemoryShare(null, { memoryRef: freeShared.id, granteeId: grantee2.id }, ctx(grantee.id)),
+      M.deleteMemoryShare(null, { memoryRef: freeShared.id, granteeRef: grantee2.id }, ctx(grantee.id)),
     ).rejects.toThrow(/not authorized to manage shares/);
     expect(await rowExists(freeShared.id, grantee2.id)).not.toBeNull();
     // ...and the caller's own row is untouched by the failed call.
@@ -403,7 +403,7 @@ describe('deleteMemoryShare — grantee self-removal (#785)', () => {
 
   it('a stranger may NOT delete someone else\'s row', async () => {
     await expect(
-      M.deleteMemoryShare(null, { memoryRef: freeShared.id, granteeId: grantee.id }, ctx(stranger.id)),
+      M.deleteMemoryShare(null, { memoryRef: freeShared.id, granteeRef: grantee.id }, ctx(stranger.id)),
     ).rejects.toThrow(/not authorized to manage shares/);
     expect(await rowExists(freeShared.id, grantee.id)).not.toBeNull();
   });
@@ -419,7 +419,7 @@ describe('deleteMemoryShare — grantee self-removal (#785)', () => {
   it('the principal path still refuses a SOFT-DELETED memory', async () => {
     await db.memory.update({ where: { id: freeShared.id }, data: { deletedAt: new Date() } });
     await expect(
-      M.deleteMemoryShare(null, { memoryRef: freeShared.id, granteeId: grantee.id }, ctx(owner.id)),
+      M.deleteMemoryShare(null, { memoryRef: freeShared.id, granteeRef: grantee.id }, ctx(owner.id)),
     ).rejects.toThrow(/not authorized to manage shares/);
   });
 
