@@ -570,10 +570,11 @@ describe('the hazard #835 exists to remove', () => {
 
 /**
  * Source of the `hadron_update_edge` parameter shape. Since #2260 shapes live at module scope in server.ts
- * (`SHAPE_HADRON_UPDATE_EDGE`), built once per process, not inline in the `server.tool` call.
+ * (`SHAPE_HADRON_UPDATE_EDGE`), built once per process, not inline in the `server.tool` call. Since #236 they live in
+ * toolShapes.ts.
  */
 function updateEdgeShapeSource(): string {
-  const src = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+  const src = readFileSync(new URL('./toolShapes.ts', import.meta.url), 'utf8');
   const start = src.indexOf('const SHAPE_HADRON_UPDATE_EDGE = ');
   expect(start).toBeGreaterThan(-1);
   return src.slice(start, src.indexOf('\n};', start));
@@ -734,7 +735,8 @@ describe('the destructive semantics are legible at the callsite (#835 item 2)', 
   // the source text — the same audit-by-regex shape used elsewhere in the repo
   // for schema-text guarantees.
   const serverSource = () =>
-    readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+    readFileSync(new URL('./server.ts', import.meta.url), 'utf8')
+    + readFileSync(new URL('./toolShapes.ts', import.meta.url), 'utf8');
 
   it('hadron_update_node advertises that `edges` REPLACES, not merges', () => {
     // Pre-#835 the warning lived only on the SAFE tool (hadron_create_edge
