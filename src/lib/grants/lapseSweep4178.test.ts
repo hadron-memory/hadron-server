@@ -55,6 +55,7 @@ const grant = (holder: Record<string, unknown>, over: Record<string, unknown> = 
   activated_at: raw(DB_NOW), verification_kind: 'passkey', verified_by: admin.id, issuer_user_id: admin.id, ...holder, ...over,
 } as never);
 const departedAt = async (id: string) => (await db.grant.findUniqueOrThrow({ where: { id } })).holderDepartedAt;
+const cause = async (id: string) => (await db.grant.findUniqueOrThrow({ where: { id } })).holderDepartureReason;
 const licence = (over: { expiresAt?: Date | null; revokedAt?: Date | null } = {}) => db.agentOrgGrant.update({
   where: { orgId_agentId: { orgId, agentId } }, data: over,
 });
@@ -68,6 +69,7 @@ describe('#4178 the sweeper ends the grants of an agent whose derived install la
     const out = await sweepLapsedAgentGrants(db);
     expect(out).toMatchObject({ pairsJudged: 1, pairsDeparted: 1, grantsEnded: 1 });
     expect(await departedAt(g)).not.toBeNull();
+    expect(await cause(g)).toBe('AGENT_LICENSE_EXPIRED'); // #4180: the cause is the evidence the sweep judged
   });
 
   it('a licence REVOKED behind a derived install: stamped', async () => {
@@ -75,6 +77,14 @@ describe('#4178 the sweeper ends the grants of an agent whose derived install la
     const g = await grant({ agent_id: agentId });
     await sweepLapsedAgentGrants(db);
     expect(await departedAt(g)).not.toBeNull();
+    expect(await cause(g)).toBe('AGENT_LICENSE_REVOKED');
+  });
+
+  it('#4180: a licence both revoked and expired reads REVOKED (the act outranks the clock)', async () => {
+    await licence({ revokedAt: past(), expiresAt: past() });
+    const g = await grant({ agent_id: agentId });
+    await sweepLapsedAgentGrants(db);
+    expect(await cause(g)).toBe('AGENT_LICENSE_REVOKED');
   });
 
   it('a soft-deleted ORGANIZATION: stamped', async () => {
@@ -83,6 +93,25 @@ describe('#4178 the sweeper ends the grants of an agent whose derived install la
     const out = await sweepLapsedAgentGrants(db);
     expect(out.pairsDeparted).toBe(1);
     expect(await departedAt(g)).not.toBeNull();
+    expect(await cause(g)).toBe('ORG_DELETED');
+  });
+
+  it('#4180: a deleted organization outranks a lapsed licence in the same pair (the organization went first or with it)', async () => {
+    await licence({ expiresAt: past(), revokedAt: past() });
+    const g = await grant({ agent_id: agentId });
+    await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
+    await sweepLapsedAgentGrants(db);
+    expect(await cause(g)).toBe('ORG_DELETED');
+  });
+
+  it('#4180: the AGENT\'s own organization deleted (the App\'s is live) reads ORG_DELETED', async () => {
+    const otherOrg = (await db.organization.create({ data: { id: generateId(), name: 'Agent Org', urn: 's4178b.example' } })).id;
+    await db.agent.update({ where: { id: agentId }, data: { organizationId: otherOrg } });
+    const g = await grant({ agent_id: agentId });
+    await db.organization.update({ where: { id: otherOrg }, data: { deletedAt: new Date() } });
+    const out = await sweepLapsedAgentGrants(db);
+    expect(out.pairsDeparted).toBe(1);
+    expect(await cause(g)).toBe('ORG_DELETED');
   });
 
   it('the stamp reads HOLDER_GONE through the one #4173 derivation', async () => {
