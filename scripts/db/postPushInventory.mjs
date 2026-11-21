@@ -593,6 +593,9 @@ function balancedClose(text, openAt) {
  * template (no E-string, no concatenation, no USING) from this closed list:
  *   DROP SEQUENCE|INDEX [IF EXISTS] %s                    one arg, `<name or call>::regclass`
  *   ALTER TABLE %s DROP CONSTRAINT [IF EXISTS] %I         arg 1 `<name or call>::regclass`, arg 2 any (%I quotes it)
+ * The function must be spelled `pg_catalog.format`: a bare `format` resolves by search_path and overload, so a function
+ * the closure created as `public.format(text, regclass)` would win and could run anything (blind seat F2, #4800). Nothing
+ * in the corpus creates one, but the spelling makes that a property of the text instead of an assumption.
  * `%s` pastes its argument unquoted, so it is only allowed an argument that IS a regclass value: a bare (qualified)
  * name or one function call, cast to regclass, whose text is its schema-qualified, quoted name and cannot carry a
  * second statement. A `%s` fed anything else (a literal, a concatenation, a text variable) stays unrecognized, as does
@@ -780,7 +783,17 @@ export function classify(stmt) {
     if (!(stmt.payloads ?? '').trim()) return [{ unrecognized: sql }];
     const body = stripPayloadComments(stmt.payloads ?? '');
     const out = [];
+    // #4704: a catalog-resolved DROP creates no object, so it classifies as [] and must not stand in the remainder. It is
+    // matched on the comment-stripped body, so a commented-out one cannot count, and it is blanked BY POSITION (same
+    // length, so every later index still lines up), never by searching for its text: two identical calls each lose
+    // their own span, and a lookalike elsewhere in the body is never cut by mistake. Only a call that
+    // matchCatalogDrop accepted WHOLE is blanked: anything else (a CREATE template, a `%s` with a literal, USING, a
+    // trailing concatenation, an unqualified `format`) stays standing and the EXECUTE check below refuses the block.
     let remainder = body;
+    for (const m of body.matchAll(/\bEXECUTE\s+pg_catalog\s*\.\s*format\s*\(/gi)) {
+      const span = matchCatalogDrop(body, m);
+      if (span > 0) remainder = remainder.slice(0, m.index) + ' '.repeat(span) + remainder.slice(m.index + span);
+    }
     for (const m of body.matchAll(/\bEXECUTE\s+\$([A-Za-z_]*)\$([\s\S]*?)\$\1\$/gi)) {
       // A dollar-quoted payload is copied VERBATIM by the stripper, so its
       // own comments would reach classify raw and break its ^-anchored heads
@@ -807,14 +820,6 @@ export function classify(stmt) {
       if (glued || /(^|;)\s*DO\b/i.test(inner)) out.push({ unrecognized: sql });
       else out.push(...classify({ sql: inner }));
       remainder = remainder.replace(m[0], ' ');
-    }
-    // #4704: a catalog-resolved DROP creates no object, so it classifies as [] and leaves the remainder. It is matched
-    // on the comment-stripped body so a commented-out one cannot count, and it is cut out of the remainder only when
-    // matchCatalogDrop accepted the WHOLE call: anything else (a CREATE template, a `%s` with a literal, USING, a
-    // trailing concatenation) stays standing and the check below refuses the block.
-    for (const m of body.matchAll(/\bEXECUTE\s+format\s*\(/gi)) {
-      const span = matchCatalogDrop(body, m);
-      if (span > 0) remainder = remainder.replace(body.slice(m.index, m.index + span), ' ');
     }
     // Any EXECUTE still standing in the remainder after both extraction
     // loops is a shape the extractor cannot capture — format(…), a variable,

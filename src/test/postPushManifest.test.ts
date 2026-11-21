@@ -815,13 +815,13 @@ describe('#4704: a catalog-resolved DROP creates no object; every CREATE-shaped 
 
   it('classifies the accepted DROP shapes as non-objects', () => {
     for (const stmt of [
-      "EXECUTE format('DROP SEQUENCE %s', owned_seq::regclass);",
-      "EXECUTE format('DROP SEQUENCE IF EXISTS %s', owned_seq::regclass);",
-      "EXECUTE format('DROP INDEX %s', idx::regclass);",
-      "EXECUTE format('DROP INDEX IF EXISTS %s', pg_get_serial_sequence('t', 'id')::regclass);",
-      "EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', rel::regclass, cname);",
-      "EXECUTE format('ALTER TABLE %s DROP CONSTRAINT IF EXISTS %I', rel::regclass, cname);",
-      "EXECUTE\n  format('DROP SEQUENCE %s',\n    owned_seq::regclass)\n;",
+      "EXECUTE pg_catalog.format('DROP SEQUENCE %s', owned_seq::regclass);",
+      "EXECUTE pg_catalog.format('DROP SEQUENCE IF EXISTS %s', owned_seq::regclass);",
+      "EXECUTE pg_catalog.format('DROP INDEX %s', idx::regclass);",
+      "EXECUTE pg_catalog.format('DROP INDEX IF EXISTS %s', pg_get_serial_sequence('t', 'id')::regclass);",
+      "EXECUTE pg_catalog.format('ALTER TABLE %s DROP CONSTRAINT %I', rel::regclass, cname);",
+      "EXECUTE pg_catalog.format('ALTER TABLE %s DROP CONSTRAINT IF EXISTS %I', rel::regclass, cname);",
+      "EXECUTE\n  pg_catalog.format('DROP SEQUENCE %s',\n    owned_seq::regclass)\n;",
     ]) {
       expect(run(wrap(stmt)), stmt).toEqual([]);
     }
@@ -829,11 +829,11 @@ describe('#4704: a catalog-resolved DROP creates no object; every CREATE-shaped 
 
   it('still refuses every CREATE-shaped dynamic string', () => {
     for (const stmt of [
-      "EXECUTE format('CREATE INDEX %I ON t (c)', n);",
-      "EXECUTE format('CREATE SEQUENCE %s', s::regclass);",
-      "EXECUTE format('ALTER TABLE %s ADD CONSTRAINT %I CHECK (c > 0)', rel::regclass, n);",
-      "EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I; CREATE INDEX i ON t (c)', rel::regclass, n);",
-      "EXECUTE format('DROP SEQUENCE %s; CREATE INDEX i ON t (c)', s::regclass);",
+      "EXECUTE pg_catalog.format('CREATE INDEX %I ON t (c)', n);",
+      "EXECUTE pg_catalog.format('CREATE SEQUENCE %s', s::regclass);",
+      "EXECUTE pg_catalog.format('ALTER TABLE %s ADD CONSTRAINT %I CHECK (c > 0)', rel::regclass, n);",
+      "EXECUTE pg_catalog.format('ALTER TABLE %s DROP CONSTRAINT %I; CREATE INDEX i ON t (c)', rel::regclass, n);",
+      "EXECUTE pg_catalog.format('DROP SEQUENCE %s; CREATE INDEX i ON t (c)', s::regclass);",
     ]) {
       expect(refuses(wrap(stmt)).length, stmt).toBeGreaterThan(0);
     }
@@ -841,14 +841,14 @@ describe('#4704: a catalog-resolved DROP creates no object; every CREATE-shaped 
 
   it('refuses a %s that is not a regclass value, since %s pastes its argument unquoted', () => {
     for (const stmt of [
-      "EXECUTE format('DROP SEQUENCE %s', 'x; CREATE INDEX i ON t (c)');",
-      "EXECUTE format('DROP SEQUENCE %s', seq_name);",
-      "EXECUTE format('DROP SEQUENCE %s', a || b::regclass);",
-      "EXECUTE format('DROP SEQUENCE %s', f(a) || g(b)::regclass);",
-      "EXECUTE format('DROP SEQUENCE %s', (SELECT n FROM t)::regclass);",
-      "EXECUTE format('DROP SEQUENCE %s', 'public.s'::regclass);", // a literal cast is safe but stays outside the narrow shape: teach it if needed
-      "EXECUTE format('DROP SEQUENCE %s', s::regclass::text || ';');",
-      "EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', rel_text, cname);",
+      "EXECUTE pg_catalog.format('DROP SEQUENCE %s', 'x; CREATE INDEX i ON t (c)');",
+      "EXECUTE pg_catalog.format('DROP SEQUENCE %s', seq_name);",
+      "EXECUTE pg_catalog.format('DROP SEQUENCE %s', a || b::regclass);",
+      "EXECUTE pg_catalog.format('DROP SEQUENCE %s', f(a) || g(b)::regclass);",
+      "EXECUTE pg_catalog.format('DROP SEQUENCE %s', (SELECT n FROM t)::regclass);",
+      "EXECUTE pg_catalog.format('DROP SEQUENCE %s', 'public.s'::regclass);", // a literal cast is safe but stays outside the narrow shape: teach it if needed
+      "EXECUTE pg_catalog.format('DROP SEQUENCE %s', s::regclass::text || ';');",
+      "EXECUTE pg_catalog.format('ALTER TABLE %s DROP CONSTRAINT %I', rel_text, cname);",
     ]) {
       expect(refuses(wrap(stmt)).length, stmt).toBeGreaterThan(0);
     }
@@ -856,27 +856,44 @@ describe('#4704: a catalog-resolved DROP creates no object; every CREATE-shaped 
 
   it('refuses a shape outside the closed list, or one with anything around the call', () => {
     for (const stmt of [
-      "EXECUTE format('DROP TABLE %s', t::regclass);",
-      "EXECUTE format('DROP FUNCTION %s', f::regclass);",
-      "EXECUTE format('DROP SEQUENCE %s CASCADE', s::regclass);",
-      "EXECUTE format('DROP SEQUENCE %s', s::regclass, extra);",
-      "EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', rel::regclass);",
-      "EXECUTE format('DROP SEQUENCE %s', s::regclass) USING 1;",
-      "EXECUTE format('DROP SEQUENCE %s', s::regclass) || ' ; CREATE INDEX i ON t (c)';",
+      "EXECUTE pg_catalog.format('DROP TABLE %s', t::regclass);",
+      "EXECUTE pg_catalog.format('DROP FUNCTION %s', f::regclass);",
+      "EXECUTE pg_catalog.format('DROP SEQUENCE %s CASCADE', s::regclass);",
+      "EXECUTE pg_catalog.format('DROP SEQUENCE %s', s::regclass, extra);",
+      "EXECUTE pg_catalog.format('ALTER TABLE %s DROP CONSTRAINT %I', rel::regclass);",
+      "EXECUTE pg_catalog.format('DROP SEQUENCE %s', s::regclass) USING 1;",
+      "EXECUTE pg_catalog.format('DROP SEQUENCE %s', s::regclass) || ' ; CREATE INDEX i ON t (c)';",
       "EXECUTE 'x ' || format('DROP SEQUENCE %s', s::regclass);",
-      "EXECUTE format(E'DROP SEQUENCE %s', s::regclass);",
-      "EXECUTE format('DROP SEQUENCE ' || '%s', s::regclass);",
+      "EXECUTE pg_catalog.format(E'DROP SEQUENCE %s', s::regclass);",
+      "EXECUTE format('DROP SEQUENCE %s', s::regclass);", // a bare format resolves by search_path: a lookalike could win
+      "EXECUTE public.format('DROP SEQUENCE %s', s::regclass);",
+      "EXECUTE pg_catalog.format('DROP SEQUENCE ' || '%s', s::regclass);",
     ]) {
       expect(refuses(wrap(stmt)).length, stmt).toBeGreaterThan(0);
     }
   });
 
   it('one refused call refuses the block even beside an accepted one', () => {
-    expect(refuses(wrap("EXECUTE format('DROP SEQUENCE %s', s::regclass); EXECUTE format('CREATE INDEX %I ON t (c)', n);"))).toHaveLength(1);
+    expect(refuses(wrap("EXECUTE pg_catalog.format('DROP SEQUENCE %s', s::regclass); EXECUTE pg_catalog.format('CREATE INDEX %I ON t (c)', n);"))).toHaveLength(1);
   });
 
   it('does not count a commented-out DROP or let one mask a live CREATE', () => {
-    expect(run(wrap("-- EXECUTE format('DROP SEQUENCE %s', s::regclass);\n PERFORM 1;"))).toEqual([]);
-    expect(refuses(wrap("/* EXECUTE format('DROP SEQUENCE %s', s::regclass); */ EXECUTE format('CREATE INDEX %I ON t (c)', n);"))).toHaveLength(1);
+    expect(run(wrap("-- EXECUTE pg_catalog.format('DROP SEQUENCE %s', s::regclass);\n PERFORM 1;"))).toEqual([]);
+    expect(refuses(wrap("/* EXECUTE pg_catalog.format('DROP SEQUENCE %s', s::regclass); */ EXECUTE pg_catalog.format('CREATE INDEX %I ON t (c)', n);"))).toHaveLength(1);
+  });
+
+  it('blanks each accepted call at its own position: two identical calls both pass, a neighbour is never swallowed', () => {
+    const call = "EXECUTE pg_catalog.format('DROP SEQUENCE %s', s::regclass);";
+    expect(run(wrap(`${call} ${call}`))).toEqual([]);
+    expect(run(wrap(`${call} EXECUTE $ddl$CREATE INDEX nb_idx ON t (c)$ddl$; ${call}`))).toEqual([{ kind: 'index', name: 'nb_idx' }]);
+    // the span's text inside a string literal elsewhere is not cut: the literal stays a plain string and the block refuses on its own CREATE
+    expect(refuses(wrap(`${call} v := '${call.replace(/'/g, "''")}'; EXECUTE format('CREATE INDEX %I ON t (c)', n);`)).length).toBeGreaterThan(0);
+  });
+
+  it('the real stamp migration classifies clean, with its catalog-derived DROP beside the static DDL', () => {
+    const inv = postPushInventory(ENTRY);
+    expect(inv.unrecognized).toEqual([]);
+    expect(inv.objects.some((o: { kind: string; name: string }) => o.kind === 'identity-column' && o.name === 'stamp_signing_keys.id')).toBe(true);
   });
 });
+
