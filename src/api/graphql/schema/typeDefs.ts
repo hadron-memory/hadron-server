@@ -7752,6 +7752,10 @@ export const typeDefs = `#graphql
     AGENT_IMPORT_REMOVED
     "The organization's licence to the agent was revoked, which ended its installation in the grant's App."
     AGENT_LICENSE_REVOKED
+    "The organization's licence to the agent expired, which ended its installation in the grant's App (recorded by the lapse sweep, #4178)."
+    AGENT_LICENSE_EXPIRED
+    "An organization the agent's installation in the grant's App depended on (the App's or the agent's own) was deleted (recorded by the lapse sweep, #4178)."
+    ORG_DELETED
     "The grantee App was deleted."
     APP_DELETED
     "The holder went before causes were kept, so none was recorded. Not a guess at one."
