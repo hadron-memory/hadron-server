@@ -8676,9 +8676,9 @@ export const typeDefs = `#graphql
     "Suggested download filename, e.g. <loc-leaf>.md."
     filename: String!
     encoding: NodeExportEncoding!
-    "The rendered file contents (TEXT)."
+    "The rendered file contents, encoded per \`encoding\`: UTF-8 text for TEXT, base64 for BASE64 (a PDF)."
     data: String!
-    "Byte length of the rendered payload (UTF-8)."
+    "Byte length of the payload: for TEXT, the UTF-8 byte length of \`data\`; for BASE64, the PDF size in bytes as the renderer reports it (the decoded length of the base64 payload when the renderer omits it), not the length of the base64 string."
     bytes: Int!
   }
 
