@@ -1,34 +1,38 @@
 // #4646 (Refs #4278; gate CHECKED T1 by Xanthos, issuecomment-7054667627): the in-VM watchdog on the test-shard vitest
 // step. The real script, with a test time unit (WATCHDOG_SECONDS_PER_MINUTE=1, so a "minute" is one second) and
-// stand-in commands; no Actions run, no stack, no test database. Where a pin needs a scheduling window or a stalled
-// tool, a shim on PATH chooses it; the processes, PIDs and signals are real.
+// stand-in commands; no Actions run, no stack, no test database. Where a pin needs a stalled tool, a survivor or a lost
+// clock, a shim on PATH (or a test clock file) provides it; the processes, groups and signals are real.
 //
-// Pins, one per gate condition and review finding:
+// Design (Peter's ruling on #4647, team chat #129455): the command runs as its own process group and ONLY that group
+// is ever signalled; a descendant that leaves the group is the accepted residual (#128652), never reported as killed.
+//
+// Pins:
 //   1. a hang: the dump (the [watchdog] process list and a final [sampler] block) is printed while the command still
-//      runs, then the fixed "exceeded N min; killed" line, then the distinguishable exit 124; every process of the
-//      command's tree is gone, killed by PID or by its process group;
-//   2. no descendant escapes (#4647 LOCAL F1, BLIND P1): a child forked between a scan and its STOP, the grandchild it
-//      forks after the next scan, a grandchild reparented away when its parent exited, and a child that left the
-//      group for its own session;
-//   3. the kill is scoped: a process outside the command's tree and group survives, and nothing is matched by name;
-//   4. a stalled diagnostic cannot hold the kill (BLIND P2); a survivor is reported as "kill NOT verified";
-//      a TERM to the watchdog (the step cancelled) still ends the command;
-//   5. inside the budget the command's own exit code comes back unchanged (0, 1 and another code);
-//   6. the settings refuse non-integer, empty, zero, negative, oversized (no bash wrap-around: LOCAL F2, BLIND P3) and
-//      not-below-the-step-timeout values before the command runs, each with a fixed message naming its setting; the
-//      budget counts from WATCHDOG_STEP_STARTED_AT when set (BLIND P2);
-//   7. the 45 is declared twice in test.yml (timeout-minutes and WATCHDOG_STEP_TIMEOUT_MINUTES) and this pins them
-//      equal, the budget below them, and the step's first line exporting its start time, so none can drift unnoticed.
+//      runs, then the group is signalled, the fixed final line, and the distinguishable exit 124; every member of the
+//      group is gone, including a grandchild reparented away when its parent exited;
+//   2. only the group: an outside process survives; a child that left the group is not signalled and the final line
+//      says such descendants are not covered; the script signals nothing but the group and matches nothing by name;
+//   3. a group that ignores TERM still gets the KILL after the grace;
+//   4. a stalled diagnostic cannot hold the kill; a survivor, or an unreadable process table, is reported as "kill NOT
+//      verified"; a TERM to the watchdog (the step cancelled) still ends the command;
+//   5. the clock: unreadable at start refuses; lost after launch ends the command and says so; with no clock, each
+//      wait makes one bounded attempt;
+//   6. inside the budget the command's own exit code comes back unchanged (0, 1 and another code);
+//   7. the settings refuse non-integer, empty, zero, negative, oversized and not-below-the-step-timeout values before
+//      the command runs, each with a fixed message naming its setting; the budget counts from WATCHDOG_STEP_STARTED_AT;
+//   8. the 45 is declared twice in test.yml (timeout-minutes and WATCHDOG_STEP_TIMEOUT_MINUTES) and this pins them
+//      equal, the budget below them, the step's first lines recording its start time, the probe's hard deadline, and
+//      that no test-only setting reaches the step.
 import { test as vitestTest, expect } from 'vitest';
-
-// Each pin waits on real processes and a budget of a few seconds; vitest's 5 s default is too short.
-const test = (name, fn) => vitestTest(name, fn, 60_000);
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
+
+// Each pin waits on real processes and a budget of a few seconds; vitest's 5 s default is too short.
+const test = (name, fn) => vitestTest(name, fn, 60_000);
 
 const here = dirname(fileURLToPath(import.meta.url));
 const script = join(here, 'vitest-watchdog.sh');
@@ -47,7 +51,7 @@ function watch(command, { minutes = '3', stepTimeout = '45', extraEnv = {}, time
 const state = (pid) => { try { return readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /, '')[0]; } catch { return null; } };
 /** Not yet ended: running, sleeping or stopped, but not a zombie (a zombie has ended; only its parent has not reaped it). */
 const isLive = (pid) => { const s = state(pid); return s !== null && s !== 'Z'; };
-/** Gone, allowing a bounded moment for an orphan to be reaped (#4647 BLIND P2: `kill -0` succeeds on a zombie). */
+/** Gone, allowing a bounded moment for an orphan to be reaped (`kill -0` succeeds on a zombie). */
 const gone = (pid) => { for (let i = 0; i < 50 && isLive(pid); i++) spawnSync('sleep', ['0.1']); return !isLive(pid); };
 const pidsIn = (file) => readFileSync(file, 'utf8').trim().split('\n').map(Number);
 const withDir = (fn) => { const dir = mkdtempSync(join(tmpdir(), 'watchdog-4646-')); try { return fn(dir); } finally { rmSync(dir, { recursive: true, force: true }); } };
@@ -60,8 +64,10 @@ const shim = (dir, name, body) => {
 /** Whole seconds since boot: the watchdog's monotonic clock. */
 const uptime = () => Math.floor(Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]));
 const cleanup = (pids) => { for (const pid of pids) spawnSync('kill', ['-KILL', String(pid)]); };
+/** The final line when the group emptied. */
+const emptied = (why, pid) => `[watchdog] ${why}; process group ${pid} signalled and now empty; descendants that left the group are not covered`;
 
-test('a hang: dump while the command still runs, then the kill, the fixed line and exit 124; the whole tree is gone', () => withDir((dir) => {
+test('a hang: dump while the command still runs, then the group is signalled, the fixed line and exit 124; the group is gone', () => withDir((dir) => {
   const pids = join(dir, 'pids');
   // At the dump's process list, record each fixture process's state: it must still be running (not stopped, not gone).
   const PATH = shim(dir, 'ps', `if [ "$*" = "-eo pid,ppid,pgid,rss,etime,comm" ]; then
@@ -76,11 +82,11 @@ exec ${realPs} "$@"`);
     const out = r.stdout;
     const dump = out.indexOf('[watchdog] budget of 2 min reached; process tree before the kill:');
     const sampler = out.indexOf('[sampler]', dump);
-    const killed = out.indexOf('[watchdog] vitest exceeded 2 min; killed');
+    const done = out.indexOf(emptied('vitest exceeded 2 min', recorded[0]));
     expect(dump).toBeGreaterThanOrEqual(0);
     expect(sampler).toBeGreaterThan(dump);
-    expect(killed).toBeGreaterThan(sampler);
-    expect(out.slice(sampler, killed)).toMatch(/Mem:/);   // free -m ran in the final block
+    expect(done).toBeGreaterThan(sampler);
+    expect(out.slice(sampler, done)).toMatch(/Mem:/);   // free -m ran in the final block
     expect(recorded.length).toBe(4);
     const atDump = readFileSync(join(dir, 'at-dump'), 'utf8').trim().split('\n');
     expect(atDump.length).toBe(4);
@@ -89,70 +95,62 @@ exec ${realPs} "$@"`);
   } finally { cleanup(recorded); }
 }));
 
-test('a child forked while the tree is collected, and the grandchild it forks after the next scan, are both killed', () => withDir((dir) => {
-  // #4647 LOCAL F1 (Jane): the ps snapshot and the STOP are not atomic. This shim lets the real table be captured, THEN
-  // lets a process fork, on the first two tree scans: a child the first scan misses, and a grandchild that child forks
-  // after the second scan.
-  const PATH = shim(dir, 'ps', `out=$(${realPs} "$@")
-if [ "$*" = "-eo pid=,ppid=" ]; then
-  n=$(( $(cat ${dir}/calls 2>/dev/null || echo 0) + 1 )); echo "$n" > ${dir}/calls
-  if [ "$n" -le 2 ]; then
-    t=${dir}/child; [ "$n" = 2 ] && t=${dir}/grandchild
-    touch ${dir}/spawn$n
-    for _ in $(seq 500); do [ -s "$t" ] && break; sleep 0.01; done
-  fi
-fi
-printf '%s\\n' "$out"`);
-  // The forking processes run in their own session, outside the command's group, so the group STOP cannot freeze them
-  // and only the rescan loop can (inside the group, the group STOP already closes this window).
-  const waitFor = (f) => `until [ -e ${f} ]; do sleep 0.01; done`;
-  writeFileSync(join(dir, 'child.sh'), `${waitFor(join(dir, 'spawn2'))}; sleep 300 & echo $! > ${join(dir, 'grandchild')}; wait\n`);
-  writeFileSync(join(dir, 'root.sh'), `echo $$ > ${join(dir, 'own')}; ${waitFor(join(dir, 'spawn1'))}; bash ${join(dir, 'child.sh')} & echo $! > ${join(dir, 'child')}; sleep 300\n`);
-  const r = watch(`setsid bash ${join(dir, 'root.sh')} & sleep 300`, { minutes: '1', extraEnv: { PATH } });
-  const late = ['own', 'child', 'grandchild'].filter((f) => existsSync(join(dir, f))).map((f) => pidsIn(join(dir, f))[0]);
-  try {
-    expect(r.status, r.stderr).toBe(124);
-    expect(late.length, 'the child and grandchild were forked').toBe(3);
-    for (const pid of late) expect(gone(pid), `late pid ${pid} survived`).toBe(true);
-  } finally { cleanup(late); }
-}));
-
-test('a grandchild reparented away when its parent exited is killed through the process group (BLIND P1)', () => withDir((dir) => {
+test('a grandchild reparented away when its parent exited is still a group member, and is killed', () => withDir((dir) => {
   const gc = join(dir, 'gc');
   // The subshell starts the grandchild and exits at once, so the grandchild is no longer in the command's ppid tree.
   const r = watch(`(sleep 300 & echo $! > ${gc}); sleep 300`, { minutes: '1' });
   const pid = pidsIn(gc)[0];
   try {
     expect(r.status, r.stderr).toBe(124);
-    expect(r.stdout).toContain('[watchdog] vitest exceeded 1 min; killed');
+    expect(r.stdout).toMatch(/process group \d+ signalled and now empty/);
     expect(gone(pid), `reparented pid ${pid} survived`).toBe(true);
   } finally { cleanup([pid]); }
 }));
 
-test('a child that left the group for its own session is killed through the PID tree', () => withDir((dir) => {
+test('only the group: a child that left it is not signalled, and the final line says such descendants are not covered', () => withDir((dir) => {
+  // The accepted residual (#128652): it fails toward "no kill", and nothing claims it was killed.
   const own = join(dir, 'own');
-  const r = watch(`setsid sleep 300 & echo $! > ${own}; sleep 300`, { minutes: '1' });
+  const r = watch(`setsid sleep 300 >/dev/null 2>&1 & echo $! > ${own}; sleep 300`, { minutes: '1' });
   const pid = pidsIn(own)[0];
   try {
     expect(r.status, r.stderr).toBe(124);
-    expect(gone(pid), `own-session pid ${pid} survived`).toBe(true);
+    expect(state(pid), 'a process outside the group was signalled').toMatch(/^[RS]$/);
+    expect(r.stdout).toContain('; descendants that left the group are not covered');
   } finally { cleanup([pid]); }
 }));
 
-test('the kill is scoped to the command\'s own tree and group: an outside process with the same name survives', () => {
+test('only the group: an outside process survives, and the script signals nothing but the group, matching nothing by name', () => {
   const outside = spawnSync('bash', ['-c', 'sleep 300 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' });
   const pid = Number(outside.stdout.trim());
   try {
     expect(isLive(pid)).toBe(true);
     const r = watch('sleep 300', { minutes: '1' });
     expect(r.status).toBe(124);
-    expect(isLive(pid), 'a sleep outside the tree was killed').toBe(true);
+    expect(state(pid), 'a sleep outside the group was signalled').toMatch(/^[RS]$/);
   } finally { cleanup([pid]); }
-  // No name-based kill anywhere in the script (Hugo's house rule).
-  expect(readFileSync(script, 'utf8')).not.toMatch(/\bpkill\b|\bkillall\b|pgrep/);
+  const source = readFileSync(script, 'utf8').split('\n').filter((l) => !l.trimStart().startsWith('#'));
+  // Hugo's house rule: no name-based kill.
+  expect(source.join('\n')).not.toMatch(/\bpkill\b|\bkillall\b|pgrep/);
+  // Every signal the script sends is to the group ("-$cmd"); the only other use of kill is the liveness probe (-0).
+  // (A kill invocation always takes an option here; the words "kill NOT verified" in a message are not one.)
+  const kills = source.flatMap((l) => l.match(/\bkill -[^;|&)]*/g) ?? []);
+  expect(kills.length).toBeGreaterThan(0);
+  for (const k of kills) expect(k, `a signal not aimed at the group: ${k}`).toMatch(/^kill (-0 "\$cmd"|-s (TERM|KILL) -- "-\$cmd")/);
 });
 
-test('a stalled diagnostic cannot hold the kill (BLIND P2)', () => withDir((dir) => {
+test('a group that ignores TERM still gets the KILL after the grace', () => withDir((dir) => {
+  const root = join(dir, 'root');
+  // An ignored signal stays ignored across fork and exec, so the whole group ignores TERM.
+  const r = watch(`trap '' TERM; echo $$ > ${root}; sleep 300 & wait`, { minutes: '1' });
+  const pid = pidsIn(root)[0];
+  try {
+    expect(r.status, r.stderr).toBe(124);
+    expect(r.stdout).toContain(emptied('vitest exceeded 1 min', pid));
+    expect(gone(pid)).toBe(true);
+  } finally { cleanup([pid]); }
+}));
+
+test('a stalled diagnostic cannot hold the kill', () => withDir((dir) => {
   const root = join(dir, 'root');
   const PATH = shim(dir, 'df', 'exec sleep 300');   // df never returns
   const t0 = Date.now();
@@ -160,27 +158,27 @@ test('a stalled diagnostic cannot hold the kill (BLIND P2)', () => withDir((dir)
   const pid = pidsIn(root)[0];
   try {
     expect(r.status, r.stderr).toBe(124);
-    expect(r.stdout).toContain('[watchdog] vitest exceeded 1 min; killed');
+    expect(r.stdout).toContain(emptied('vitest exceeded 1 min', pid));
     expect(Date.now() - t0).toBeLessThan(30_000);
     expect(gone(pid)).toBe(true);
   } finally { cleanup([pid]); }
 }));
 
-test('a process still running after the kill is reported as not verified, still exit 124', () => withDir((dir) => {
+test('a group member still running after the kill is reported as not verified, still exit 124', () => withDir((dir) => {
   const root = join(dir, 'root');
-  // The survivor check sees one extra, never-ending member of the command's group.
+  // The membership check always sees one extra, never-ending member of the command's group.
   const PATH = shim(dir, 'ps', `if [ "$*" = "-eo pid=,pgid=,stat=" ]; then ${realPs} "$@"; echo "4194999 $(cat ${root}) S"; exit 0; fi
 exec ${realPs} "$@"`);
   const r = watch(`echo $$ > ${root}; sleep 300`, { minutes: '1', extraEnv: { PATH } });
   const pid = pidsIn(root)[0];
   try {
     expect(r.status, r.stderr).toBe(124);
-    expect(r.stdout).toContain('[watchdog] vitest exceeded 1 min; kill NOT verified, still running: 4194999');
-    expect(r.stdout).not.toContain('; killed');
+    expect(r.stdout).toContain(`[watchdog] vitest exceeded 1 min; process group ${pid} signalled, kill NOT verified, still running: 4194999`);
+    expect(r.stdout).not.toContain('now empty');
   } finally { cleanup([pid]); }
 }));
 
-test('a verification scan that fails is never reported as a verified kill (BLIND delta P1)', () => withDir((dir) => {
+test('a membership check that cannot read the process table is never reported as an empty group', () => withDir((dir) => {
   const root = join(dir, 'root');
   const PATH = shim(dir, 'ps', `[ "$*" = "-eo pid=,pgid=,stat=" ] && exit 1
 exec ${realPs} "$@"`);
@@ -188,42 +186,9 @@ exec ${realPs} "$@"`);
   const pid = pidsIn(root)[0];
   try {
     expect(r.status, r.stderr).toBe(124);
-    expect(r.stdout).toContain('[watchdog] vitest exceeded 1 min; kill NOT verified, the process table could not be read');
-    expect(r.stdout).not.toContain('; killed');
-    expect(gone(pid)).toBe(true);   // the group KILL still went out
-  } finally { cleanup([pid]); }
-}));
-
-test('a tree scan that fails still kills the group, and the kill is reported unverified (BLIND delta P1)', () => withDir((dir) => {
-  const root = join(dir, 'root');
-  const PATH = shim(dir, 'ps', `[ "$*" = "-eo pid=,ppid=" ] && exit 1
-exec ${realPs} "$@"`);
-  const r = watch(`echo $$ > ${root}; sleep 300 & wait`, { minutes: '1', extraEnv: { PATH } });
-  const pid = pidsIn(root)[0];
-  try {
-    expect(r.status, r.stderr).toBe(124);
-    expect(r.stdout).toContain('[watchdog] vitest exceeded 1 min; kill NOT verified, a process scan failed');
-    expect(gone(pid)).toBe(true);
-  } finally { cleanup([pid]); }
-}));
-
-test('a slow scan that never settles cannot hold the KILL past the cleanup bound (BLIND delta P2)', () => withDir((dir) => {
-  const root = join(dir, 'root');
-  // Each tree scan takes 0.6 s and shows one more child the watchdog has not stopped yet (an unused PID above the
-  // kernel's limit, so no real process is signalled). Without the elapsed bound the loop runs its 50 rounds (30 s+).
-  const PATH = shim(dir, 'ps', `if [ "$*" = "-eo pid=,ppid=" ]; then
-  n=$(( $(cat ${dir}/calls 2>/dev/null || echo 0) + 1 )); echo "$n" > ${dir}/calls
-  sleep 0.6; ${realPs} "$@"; echo "$(( 4194400 + n )) $(cat ${root})"; exit 0
-fi
-exec ${realPs} "$@"`);
-  const t0 = Date.now();
-  const r = watch(`echo $$ > ${root}; sleep 300`, { minutes: '1', extraEnv: { PATH } });
-  const pid = pidsIn(root)[0];
-  try {
-    expect(r.status, r.stderr).toBe(124);
-    expect(Date.now() - t0).toBeLessThan(20_000);   // the bound is 5 s with the test unit
-    expect(Number(readFileSync(join(dir, 'calls'), 'utf8'))).toBeLessThan(15);
-    expect(gone(pid)).toBe(true);
+    expect(r.stdout).toContain(`process group ${pid} signalled, kill NOT verified, the process table could not be read`);
+    expect(r.stdout).not.toContain('now empty');
+    expect(gone(pid)).toBe(true);   // the KILL still went out
   } finally { cleanup([pid]); }
 }));
 
@@ -235,7 +200,7 @@ test('a clock that cannot be read at start refuses before the command runs', () 
   expect(existsSync(ran)).toBe(false);
 }));
 
-test('a clock lost after launch ends the command, says so, and never stops watching silently (BLIND delta 3)', () => withDir((dir) => {
+test('a clock lost after launch ends the command, says so, and never stops watching silently', () => withDir((dir) => {
   const root = join(dir, 'root');
   const clock = join(dir, 'uptime');
   writeFileSync(clock, `${uptime()}.00 0.00\n`);   // a frozen clock: the 20 s budget is never reached by it
@@ -249,94 +214,29 @@ test('a clock lost after launch ends the command, says so, and never stops watch
     const dump = out.indexOf(`[watchdog] cannot read the clock (${clock}); process tree before the kill:`);
     expect(dump).toBeGreaterThanOrEqual(0);
     expect(out.indexOf('[sampler]', dump)).toBeGreaterThan(dump);
-    expect(out).toContain('[watchdog] watchdog lost its clock; killed');
+    expect(out).toContain(emptied('watchdog lost its clock', pid));
     expect(Date.now() - t0).toBeLessThan(30_000);
     expect(gone(pid)).toBe(true);
   } finally { cleanup([pid]); }
 }));
 
-test('with the clock lost, verification makes one bounded attempt and reports a survivor as not verified', () => withDir((dir) => {
+test('with the clock lost, each wait on the group makes one bounded attempt, and a survivor is reported', () => withDir((dir) => {
   const root = join(dir, 'root');
   const clock = join(dir, 'uptime');
   writeFileSync(clock, `${uptime()}.00 0.00\n`);
-  // The survivor check always sees one never-ending member of the group, and no clock is left to bound it.
-  // Each survivor scan also takes 2 s, so polling on (a count, not a clock) would take a minute or more.
-  const PATH = shim(dir, 'ps', `if [ "$*" = "-eo pid=,pgid=,stat=" ]; then sleep 2; ${realPs} "$@"; echo "4194999 $(cat ${root}) S"; exit 0; fi
+  // The membership check always sees one never-ending member and takes 2 s, so polling on would take a minute or more.
+  const PATH = shim(dir, 'ps', `if [ "$*" = "-eo pid=,pgid=,stat=" ]; then echo x >> ${dir}/checks; sleep 2; ${realPs} "$@"; echo "4194999 $(cat ${root}) S"; exit 0; fi
 exec ${realPs} "$@"`);
   const t0 = Date.now();
   const r = watch(`echo $$ > ${root}; sleep 1.5; rm ${clock}; sleep 300`, { minutes: '20', extraEnv: { WATCHDOG_UPTIME_FILE: clock, PATH } });
   const pid = pidsIn(root)[0];
   try {
     expect(r.status, r.stderr).toBe(124);
-    expect(r.stdout).toContain('[watchdog] watchdog lost its clock; kill NOT verified, still running: 4194999');
-    expect(Date.now() - t0).toBeLessThan(25_000);   // one 2 s attempt, not a poll count
+    expect(r.stdout).toContain(`[watchdog] watchdog lost its clock; process group ${pid} signalled, kill NOT verified, still running: 4194999`);
+    // Exactly two checks: one in the grace after TERM, one in the verification.
+    expect(readFileSync(join(dir, 'checks'), 'utf8').trim().split('\n')).toHaveLength(2);
+    expect(Date.now() - t0).toBeLessThan(25_000);
   } finally { cleanup([pid]); }
-}));
-
-/**
- * A fake /proc for the watchdog's identity reads (WATCHDOG_PROC_ROOT): on every tree scan the ps shim copies each listed
- * PID's real stat line into it, then, from scan `from` on, rewrites the target's line once: `born` makes its start time
- * (field 22) later, as a reused PID's would be; `ppid` makes it name another parent than the walk saw. The processes and
- * signals stay real; only what the watchdog reads as the target's identity changes.
- */
-const identityShim = (dir, target, mode, from) => shim(dir, 'ps', `out=$(${realPs} "$@")
-if [ "$*" = "-eo pid=,ppid=" ]; then
-  n=$(( $(cat ${dir}/calls 2>/dev/null || echo 0) + 1 )); echo "$n" > ${dir}/calls
-  t=$(cat ${target} 2>/dev/null)
-  for p in $(awk '{ print $1 }' <<< "$out"); do
-    [ "$p" = "$t" ] && [ -e ${dir}/changed ] && continue
-    mkdir -p ${dir}/proc/$p; cat /proc/$p/stat > ${dir}/proc/$p/stat 2>/dev/null
-  done
-  if [ -n "$t" ] && [ "$n" -ge ${from} ] && [ ! -e ${dir}/changed ] && [ -e ${dir}/proc/$t/stat ]; then
-    line=$(< ${dir}/proc/$t/stat); head=\${line%) *}; read -ra f <<< "\${line##*) }"
-    if [ ${mode} = born ]; then f[19]=$(( f[19] + 1 )); else f[1]=1; fi
-    echo "$head) \${f[*]}" > ${dir}/proc/$t/stat; touch ${dir}/changed
-  fi
-fi
-printf '%s\\n' "$out"`);
-
-test('a walked PID whose start time changed before the KILL (a reused PID) is never signalled, and is logged (gate, #129032)', () => withDir((dir) => {
-  // The child left the group, so only the walk reaches it. After the first scan recorded and stopped it, its identity
-  // changes as a reused PID's would: the KILL must skip it, log it, and verification must report it still running.
-  const own = join(dir, 'own');
-  const PATH = identityShim(dir, own, 'born', 2);
-  const r = watch(`setsid sleep 300 >/dev/null 2>&1 & echo $! > ${own}; sleep 300`, { minutes: '1', extraEnv: { PATH, WATCHDOG_PROC_ROOT: join(dir, 'proc') } });
-  const pid = pidsIn(own)[0];
-  try {
-    expect(r.status, r.stderr).toBe(124);
-    expect(r.stdout).toMatch(new RegExp(`\\[watchdog\\] PID ${pid} is not the process the walk found \\(start time \\d+, now \\d+\\); not signalled`));
-    expect(r.stdout).toMatch(new RegExp(`kill NOT verified, still running: .*\\b${pid}\\b`));
-    expect(state(pid), 'the mismatched PID was KILLed').not.toBeNull();   // stopped by the first scan, never killed
-  } finally { cleanup([pid]); }
-}));
-
-test('a walked PID whose stat line names another parent than the walk saw is never recorded, so never signalled', () => withDir((dir) => {
-  const own = join(dir, 'own');
-  const PATH = identityShim(dir, own, 'ppid', 1);
-  const r = watch(`setsid sleep 300 >/dev/null 2>&1 & echo $! > ${own}; sleep 300`, { minutes: '1', extraEnv: { PATH, WATCHDOG_PROC_ROOT: join(dir, 'proc') } });
-  const pid = pidsIn(own)[0];
-  try {
-    expect(r.status, r.stderr).toBe(124);
-    expect(state(pid), 'the unrecorded PID was signalled').toMatch(/^[RS]$/);   // not even stopped
-  } finally { cleanup([pid]); }
-}));
-
-test('a stale table that lists an outside process as a descendant never gets it signalled (LOCAL delta D1, Jane)', () => withDir((dir) => {
-  // The tree scan reports an unrelated process (started here, outside the command) as a child of the command, as a
-  // stale table after PID reuse would. Its own stat line names its real parent, so the walk never records it.
-  const root = join(dir, 'root');
-  const outside = spawn('sleep', ['300'], { stdio: 'ignore' });
-  try {
-    const PATH = shim(dir, 'ps', `if [ "$*" = "-eo pid=,ppid=" ]; then ${realPs} "$@"; [ -s ${root} ] && echo "${outside.pid} $(cat ${root})"; exit 0; fi
-exec ${realPs} "$@"`);
-    const r = watch(`echo $$ > ${root}; sleep 300`, { minutes: '1', extraEnv: { PATH } });
-    const pid = pidsIn(root)[0];
-    try {
-      expect(r.status, r.stderr).toBe(124);
-      expect(state(outside.pid), 'the outside process was signalled').toMatch(/^[RS]$/);   // not killed, not even stopped
-      expect(gone(pid)).toBe(true);
-    } finally { cleanup([pid]); }
-  } finally { outside.kill('SIGKILL'); }
 }));
 
 test('a TERM to the watchdog (the step cancelled) still ends the command', () => withDir((dir) => {
@@ -368,7 +268,7 @@ test('a bad setting refuses before the command runs, with a fixed message naming
     ...[['', '45'], ['abc', '45'], ['0', '45'], ['-5', '45'], ['1.5', '45'], ['045x', '45'], ['45', '45'], ['50', '45'], ['40', ''], ['40', 'x'],
       ['18446744073709551617', '45'], ['40', '18446744073709551657']].map(([minutes, stepTimeout]) => [{ minutes, stepTimeout }, budget]),
     ...['0', 'x', '18446744073709551617'].map((u) => [{ minutes: '40', extraEnv: { WATCHDOG_SECONDS_PER_MINUTE: u } }, unit]),
-    // '' is a failed read at step entry: refused, never taken as "start now" (BLIND delta P2).
+    // '' is a failed read at step entry: refused, never taken as "start now".
     ...['x', '', ' ', '-1', '1.5', String(now + 3600), '18446744073709551617'].map((t) => [{ minutes: '40', extraEnv: { WATCHDOG_STEP_STARTED_AT: t } }, start]),
   ];
   for (const [opts, message] of cases) {
@@ -397,14 +297,14 @@ test('the step runs the watchdog from its own start, and its step-timeout settin
   expect(step, 'the Run vitest suite step').toBeTruthy();
   expect(step.run).toMatch(/scripts\/ci\/vitest-watchdog\.sh -- pnpm test --shard=/);
   // Two lines, so a failed read fails the step (bash -e) instead of exporting an empty start; the watchdog refuses an
-  // empty one anyway. The probe before the watchdog is bounded.
+  // empty one anyway.
   expect(step.run.split('\n').slice(0, 2)).toEqual(['read -r up _ < /proc/uptime', 'export WATCHDOG_STEP_STARTED_AT=${up%.*}']);
   expect(step.run).toMatch(/^timeout -k 10 120 psql /m);   // a hard deadline: KILL 10 s after the TERM
   expect(String(step.env.WATCHDOG_STEP_TIMEOUT_MINUTES)).toBe(String(step['timeout-minutes']));
   const minutes = Number(step.env.WATCHDOG_MINUTES);
   expect(Number.isInteger(minutes) && minutes > 0 && minutes < step['timeout-minutes']).toBe(true);
-  expect(step.env.WATCHDOG_SECONDS_PER_MINUTE).toBeUndefined();   // the test unit never reaches CI
-  expect(step.env.WATCHDOG_UPTIME_FILE).toBeUndefined();          // nor the test clock
-  expect(step.env.WATCHDOG_PROC_ROOT).toBeUndefined();            // nor the test /proc
+  // No test-only setting reaches the step.
+  expect(step.env.WATCHDOG_SECONDS_PER_MINUTE).toBeUndefined();
+  expect(step.env.WATCHDOG_UPTIME_FILE).toBeUndefined();
   expect(step.run).not.toMatch(/WATCHDOG_(SECONDS_PER_MINUTE|UPTIME_FILE|PROC_ROOT)/);
 });
