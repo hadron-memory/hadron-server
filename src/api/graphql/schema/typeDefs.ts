@@ -1363,6 +1363,15 @@ export const typeDefs = `#graphql
 
   enum NodeMoveLinkStatus { MISSING RETARGETED AMBIGUOUS }
 
+  "#2947 - one edge whose URN a move changed (a rebased derived loc, or an authored edge carried into another memory or renumbered on a collision). Its old URN keeps resolving to the live edge through an alias."
+  type NodeMoveEdgeUrnChange {
+    edgeId: ID!
+    "The edge's URN before the move."
+    previousUrn: String!
+    "The edge's URN after the move."
+    urn: String!
+  }
+
   type NodeMoveLinkWarning {
     nodeId: ID!
     nodeLoc: String!
@@ -1487,6 +1496,8 @@ export const typeDefs = `#graphql
     id: ID!
     "#1392 — warnings from a cross-memory move. Null on other Node reads; [] when a move changes no local content links. Raw content is preserved."
     moveLinkWarnings: [NodeMoveLinkWarning!]
+    "#2947 - the edges whose URN this move changed (each old URN still resolves). Null on other Node reads; [] when the move changed no edge URN."
+    moveEdgeUrnChanges: [NodeMoveEdgeUrnChange!]
     "#1323 — current live revision. Creation is revision 1; each committed authoring change advances it. NodeRevision.revNo N is the retained snapshot of this node when revision N was current, before the edit that advanced it."
     revision: Int!
     "#1326 — attribution of this content state. Null means legacy or unknown. Task identity is redacted unless its memory is independently readable."
@@ -13201,6 +13212,10 @@ export const typeDefs = `#graphql
     destination. Requires write access to both the source and destination
     memories. On a cross-memory move, select Node.moveLinkWarnings to see
     raw relative content links that now miss or resolve to another node.
+    A move also keeps the edges that touch the moved subtree in step: a DERIVED
+    edge loc follows its endpoints, an authored loc is left as written, and
+    every edge URN the move changes keeps its old URN resolving; select
+    Node.moveEdgeUrnChanges to see them.
     """
     moveNode(sourceRef: ID!, targetUrn: String, targetMemoryRef: ID): Node!
     "Plan with the real move's gates and raised refusals, without locks, reconciliation, writes or mirror effects. Nodes in loc order; limit clamps to 1–1000 (default 100), with total and truncation disclosed. No edges. A point-in-time answer, not a reservation. This plan-only call is on the mutation root by rulings 0210/0211, so impersonation sessions are refused even though planning writes nothing. hrn:node:hadronmemory.com:specs:cor:api:190:03."
