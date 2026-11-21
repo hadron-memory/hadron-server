@@ -4,11 +4,12 @@
  * (a dropped field would return decoys; a post-filter would return a short page). Plus: a literal `$1` inside a bound
  * `where` value must not corrupt the placeholder re-parse in vectorFilterSql.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { getRetrievalProvider } from '../../lib/retrieval/postgres.js';
+import { setVectorSmallScopeRowsForTests, setVectorWindowRowsMaxForTests } from './vectors.js';
 
 const DIM = 768;
 const vec = (x: number) => { const v = new Array(DIM).fill(0); v[1] = 1; v[2] = x; return `'[${v.join(',')}]'::vector`; };
@@ -40,8 +41,8 @@ beforeAll(async () => {
     FROM nodes n JOIN (VALUES ${rows.join(',')}) AS v(id, e) ON v.id = n.id`);
 }, 120_000);
 
-const search = (filter: Record<string, unknown>) =>
-  getRetrievalProvider().vectorSearch({ db, memoryIds: [mem], queryEmbedding: query(), limit: 3, onWindow: () => {}, filter, ...{} } as any);
+const search = (filter: Record<string, unknown>, limit = 3, onWindow: (w: any) => void = () => {}) =>
+  getRetrievalProvider().vectorSearch({ db, memoryIds: [mem], queryEmbedding: query(), limit, onWindow, filter, ...{} } as any);
 
 const CASES: Array<[string, Record<string, unknown>]> = [
   ['nodeType', { nodeType: 'task' }],
@@ -58,13 +59,17 @@ const CASES: Array<[string, Record<string, unknown>]> = [
   ['where', { where: { path: ['k'], eq: 'a$1b $2' } }],
 ];
 
-describe('#2772 each filter field is applied inside the vector ranking', () => {
+// BLIND P3 (#4665): the fixture is under the small-scope bound, so the default run only exercises the EXACT statement;
+// the second pass forces the iterative ANN statement (scope bound 0) so the filter is proven inside that one too.
+for (const [label, bound] of [['exact path', null], ['ANN path (small-scope bound 0)', 0]] as const) describe(`#2772 each filter field is applied inside the vector ranking: ${label}`, () => {
+  beforeAll(() => setVectorSmallScopeRowsForTests(bound));
+  afterAll(() => setVectorSmallScopeRowsForTests(null));
   for (const [name, raw] of CASES) {
     const { _inverse, ...filter } = raw as Record<string, unknown>;
     it(`${name}: the page is full and holds only matching nodes though the nearest vectors fail the filter`, async () => {
       const hits = await search(filter);
       const want = _inverse ? decoys : targets;
-      expect(hits).toHaveLength(_inverse ? 3 : 3);
+      expect(hits).toHaveLength(3);
       for (const h of hits) expect(want).toContain(h.nodeId);
     });
   }
@@ -72,5 +77,28 @@ describe('#2772 each filter field is applied inside the vector ranking', () => {
   it('a literal $1 / $2 inside a bound where value neither shifts the bind list nor matches the wrong rows', async () => {
     const hits = await search({ where: { path: ['k'], eq: 'a$1b $2' } });
     expect(hits.map((h) => h.nodeId).sort()).toEqual([...targets].sort());
+  });
+});
+
+describe('BLIND P1 (#4665): the offset+limit window is cut at the cap and says stopped_early', () => {
+  afterAll(() => setVectorWindowRowsMaxForTests(null));
+  for (const bound of [null, 0]) {
+    it(`a window past the cap returns at most the cap rows, stoppedEarly, never exhausted (small-scope bound ${bound})`, async () => {
+      setVectorSmallScopeRowsForTests(bound);
+      setVectorWindowRowsMaxForTests(2);
+      let w: any;
+      const hits = await search({}, 5, (x) => { w = x; });
+      setVectorWindowRowsMaxForTests(null); setVectorSmallScopeRowsForTests(null);
+      expect(hits).toHaveLength(2);
+      expect(w.stoppedEarly).toBe(true);
+      expect(w.exhausted).toBe(false);
+    });
+  }
+  it('a window at the cap is not cut', async () => {
+    setVectorWindowRowsMaxForTests(5);
+    let w: any;
+    await search({}, 5, (x) => { w = x; });
+    setVectorWindowRowsMaxForTests(null);
+    expect(w.stoppedEarly).toBeFalsy();
   });
 });
