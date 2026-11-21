@@ -12,7 +12,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
-import type { Context } from './resolvers.helpers.js';
+import { canOpenMemoryRecordById, type Context } from './resolvers.helpers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -110,10 +110,13 @@ describe('#4140 updateMemory(ref, orgRef) and updateOrganization(ref)', () => {
   });
   it('#4218: a readable non-manager gets the ordinary authorization denial, never the org lookup or the concealed answer, as the SDL says', async () => {
     const m = await knowledge(orgA, 'readable');
-    const denied = await refusal(M.updateMemory({}, { ref: m.id, orgRef: 'no-such-org.example' }, ctxOf(member.id)));
-    expect(codeOf(denied)).not.toBe('ORGANIZATION_NOT_FOUND');
-    expect(codeOf(denied)).not.toBe('MEMORY_NOT_FOUND');
-    expect(String(denied.message)).toMatch(/forbidden|admin|permission|manage|access/i);
+    // The precondition that makes this the readable-non-manager case, not the concealed one.
+    expect(await canOpenMemoryRecordById(ctxOf(member.id), m.id)).toBe(true);
+    const denied = await refusal(M.updateMemory({}, { ref: m.id, orgRef: 'no-such-org.example', description: 'must-not-land' }, ctxOf(member.id)));
+    // Brooks (blind, #4692): pin the exact denial, not a set of not-X codes.
+    expect(codeOf(denied)).toBe('FORBIDDEN');
+    // ...and the refused call wrote nothing.
+    expect((await db.memory.findUniqueOrThrow({ where: { id: m.id } })).description).not.toBe('must-not-land');
   });
   it('updateOrganization ref accepts a PK and a URN, and the ADMIN gate is on the resolved org', async () => {
     for (const ref of [orgA.id, orgA.urn]) {
