@@ -1,3 +1,4 @@
+import { buildAuthRateAdmission } from '../auth/authRate.js';
 /**
  * Mailbox-connect OAuth flow — the ONE implementation of the
  * start-nonce → authorize-redirect → callback trio, mounted once per email
@@ -257,6 +258,8 @@ function sendConnectConfirmPage(
 /** Mount the three mailbox-connect routes for one provider. */
 export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfig): void {
   connectProviders.set(cfg.provider, cfg);
+  const authRate = buildAuthRateAdmission(db);
+  const startAuthRate = buildAuthRateAdmission(db, 'rest', 'bearer');
   const pendingStates = new Map<
     string,
     { orgId: string; userId: string; redirect: string; origin: ExchangeStartOrigin; flowId: string | null; expiresAt: number }
@@ -267,7 +270,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
   // single-use, short-TTL nonce. The 30-day JWT authenticates the initiating
   // user HERE, over a header on a server-to-server POST — it never rides in
   // the browser redirect URL (where it would land in access logs + history).
-  app.post(`/auth/${cfg.routeName}/start`, async (req, res) => {
+  app.post(`/auth/${cfg.routeName}/start`, startAuthRate, async (req, res) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) {
       res.status(401).json({ error: 'No token provided' });
@@ -374,7 +377,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
   // #2908: opening the link is a read. The browser arrives with a single-use nonce (minted by POST
   // /auth/<provider>/start or GraphQL `startConnection`); this page names the organization and who asked, and the
   // person confirms with a button. A link preview or a prefetch that only GETs consumes nothing and starts nothing.
-  app.get(`/auth/${cfg.routeName}`, async (req, res) => {
+  app.get(`/auth/${cfg.routeName}`, authRate, async (req, res) => {
     const nonce = typeof req.query.nonce === 'string' ? req.query.nonce : undefined;
     if (!nonce) {
       res.status(400).json({ error: 'Missing nonce' });
@@ -407,7 +410,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
     }
   });
 
-  app.post(`/auth/${cfg.routeName}`, express.urlencoded({ extended: false }), async (req, res) => {
+  app.post(`/auth/${cfg.routeName}`, authRate, express.urlencoded({ extended: false }), async (req, res) => {
     const body = (req.body ?? {}) as { nonce?: unknown; token?: unknown };
     const nonce = typeof body.nonce === 'string' ? body.nonce : undefined;
     if (!nonce) {
@@ -469,7 +472,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
     res.redirect(cfg.buildAuthUrl(state));
   });
 
-  app.get(`/auth/${cfg.routeName}/callback`, async (req, res) => {
+  app.get(`/auth/${cfg.routeName}/callback`, authRate, async (req, res) => {
     const { code, state, error: oauthError } = req.query as {
       code?: string;
       state?: string;

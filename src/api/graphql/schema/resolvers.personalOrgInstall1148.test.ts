@@ -124,10 +124,10 @@ it('session App-key system-memory provenance still requires the individual curre
  const id=present((await db.agent.findUniqueOrThrow({where:{id:agentId},select:{systemMemoryId:true}})).systemMemoryId,'the Agent system memory');
  const own=await db.session.create({data:{id:generateId(),appId,agentId,userId:ownerId}});
  const other=await db.session.create({data:{id:generateId(),appId,agentId,userId:outsiderId}});
- expect(await sessionScopedMemoryIds(db,appId,own.id)).toContain(id);
- expect(await sessionScopedMemoryIds(db,appId,other.id)).not.toContain(id);
+ expect(await sessionScopedMemoryIds(db, appId, own.id, {})).toContain(id);
+ expect(await sessionScopedMemoryIds(db, appId, other.id, {})).not.toContain(id);
  await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{deletedAt:new Date()}});
- expect(await sessionScopedMemoryIds(db,appId,own.id)).not.toContain(id);
+ expect(await sessionScopedMemoryIds(db, appId, own.id, {})).not.toContain(id);
 });
 it('the real chat entry refuses an owner whose retained personal install lost membership with the common licence code',async()=>{
  await serveAgentBootPrompt(db,agentId,'Synthetic served content.');

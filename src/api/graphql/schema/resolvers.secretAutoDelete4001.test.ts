@@ -238,7 +238,7 @@ it('rechecks a historical unbounded pending mark at signing without consuming or
   expect(await db.secretReadClient.count({ where: { grantId } })).toBe(0);
 });
 
-it('lets a historical unbounded pending mark be revoked without allowing it to be reactivated', async () => {
+it('lets a historical unbounded pending mark be revoked, and the revocation cannot be undone', async () => {
   const grantId = generateId();
   await db.$transaction(async tx => {
     await tx.$executeRawUnsafe('DROP TRIGGER secret_auto_delete_limit ON grants');
@@ -248,7 +248,7 @@ it('lets a historical unbounded pending mark be revoked without allowing it to b
   });
   await expect(resolvers.Mutation.revokeGrant({}, { ref: grantId }, ctx())).resolves.toMatchObject({ id: grantId });
   expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).revokedAt).not.toBeNull();
-  await expect(db.grant.update({ where: { id: grantId }, data: { revokedAt: null, revokedBy: null } })).rejects.toThrow(/append-only|constraint/i);
+  await expect(db.grant.update({ where: { id: grantId }, data: { revokedAt: null, revokedBy: null } })).rejects.toThrow(/grants are append-only/);
 });
 
 it('keeps historical unbounded marks maintainable on withdrawal and holder departure', async () => {
@@ -265,7 +265,7 @@ it('keeps historical unbounded marks maintainable on withdrawal and holder depar
   expect((await db.grant.findUniqueOrThrow({ where: { id: ids[0] } })).withdrawnAt).not.toBeNull();
   await db.$transaction(async tx => {
     await tx.worker.update({ where: { id: workerId }, data: { retiredAt: new Date() } });
-    await endHeldGrants(tx, 'worker', workerId);
+    await endHeldGrants(tx, 'worker', workerId, 'WORKER_RETIRED');
   });
   expect((await db.grant.findUniqueOrThrow({ where: { id: ids[1] } })).holderDepartedAt).not.toBeNull();
 });
