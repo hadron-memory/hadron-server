@@ -2485,7 +2485,7 @@ export async function getAccessibleMemoryIds(
   // read) at worst. Same shape as `requireSessionWriteAccess`'s App branch
   // (#932) and the #967 narrow-never-grant rule.
   if (ctx.appId && ctx.sessionId && !ctx.userId) {
-    const ids = await sessionScopedMemoryIds(ctx.db, ctx.appId, ctx.sessionId);
+    const ids = await sessionScopedMemoryIds(ctx.db, ctx.appId, ctx.sessionId, ctx);
     const scoped = onlyMemoryId ? ids.filter((id) => id === onlyMemoryId) : ids;
     // 0114 B: admit only explicitly named PUBLIC targets, never enumerate PUBLIC memories.
     if (!readsPublicKnowledgeWithoutUser(ctx)) return scoped;
