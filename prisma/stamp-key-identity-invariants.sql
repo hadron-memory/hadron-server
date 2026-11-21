@@ -5,10 +5,11 @@
 -- that CREATE TABLE IF NOT EXISTS is skipped. This is a separate file because signing-invariants.sql must stay
 -- byte-identical to the migration's tail (src/lib/signing/schema1632.test.ts).
 --
--- An identity BY DEFAULT is left alone (a re-run changes nothing). Push's exact sequence default is replaced by the
--- identity, which then continues above the highest existing id. Anything else (an ALWAYS identity, another default)
--- refuses with what was found. Prisma reads the identity as autoincrement(), so a later db push leaves it (probed). The
--- migration is the authority (ops:alpha:prisma-deploy-flow). One DO block: atomic.
+-- An identity BY DEFAULT is left alone (a re-run changes nothing). Push's exact sequence default, backed by the
+-- sequence this column owns, is replaced by the identity, which then continues above the highest existing id. Anything
+-- else (an ALWAYS identity, another default, a same-name sequence the column does not own) refuses with what was found.
+-- Prisma reads the identity as autoincrement(), so a later db push leaves it (probed). The migration is the authority
+-- (ops:alpha:prisma-deploy-flow). One DO block: atomic.
 -- Pinned by src/test/migrations/stampKeyIdentity4337.test.ts and the migration replay check.
 DO $$
 DECLARE
@@ -26,6 +27,10 @@ BEGIN
     RAISE EXCEPTION 'stamp_signing_keys.id is GENERATED ALWAYS, not BY DEFAULT AS IDENTITY; refusing to change it (hadron-server#4337)';
   ELSIF col_default IS DISTINCT FROM 'nextval(''stamp_signing_keys_id_seq''::regclass)' THEN
     RAISE EXCEPTION 'stamp_signing_keys.id has default %, not push''s sequence; refusing to change it (hadron-server#4337)', coalesce(col_default, '(none)');
+  ELSIF pg_get_serial_sequence(quote_ident(current_schema()) || '.stamp_signing_keys', 'id') IS DISTINCT FROM
+        quote_ident(current_schema()) || '.stamp_signing_keys_id_seq' THEN
+    -- The default names the right sequence, but only a sequence OWNED BY this column is push's to drop (#4691 BLIND F1).
+    RAISE EXCEPTION 'stamp_signing_keys_id_seq is not owned by stamp_signing_keys.id; refusing to drop it (hadron-server#4337)';
   END IF;
   EXECUTE $ddl$ALTER TABLE stamp_signing_keys ALTER COLUMN id DROP DEFAULT$ddl$;
   EXECUTE $ddl$DROP SEQUENCE stamp_signing_keys_id_seq$ddl$;
