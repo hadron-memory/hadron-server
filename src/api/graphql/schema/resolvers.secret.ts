@@ -237,6 +237,9 @@ export const secretMutations = {
       if (!(await lockSecretRow(tx, found.id))) throw notFound();
       const secret = await tx.secret.findUniqueOrThrow({ where: { id: found.id } });
       if (protect && secret.protected) throw badInput('Secret is already protected.');
+      // #4717 item 8 (cor:sec:070:01): clearing protection that is not on changes nothing, so it stages no request and
+      // spends no slot. Only whoever manages the App reaches this line (judged above), so no one else learns the state.
+      if (!protect && !secret.protected) return secret;
       const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
       return stageSecretChange(tx, ctx, { appId: secret.ownerId, secretId: secret.id, name: secret.name, kind: secret.kind,
         metadata: secret.metadata, operation: protect ? 'SET_PROTECTED' : 'CLEAR_PROTECTED', snapshot: changeSnapshot(secret, latest?.versionNo ?? 0) });
@@ -359,8 +362,15 @@ async function createAppSecret(ctx: Context, appId: string, name: string, args: 
           throw badInput('name must be lowercase [a-z0-9-], start alphanumeric, max 64 chars.');
         }
         const { metadata, valueJson, sizeBytes } = validateSecretPayload(args.kind, args.metadata, args.value);
-        if (args.protected) return stageSecretChange(tx, ctx, { appId, secretId: null, name, kind: args.kind,
-          metadata: metadata as never, operation: 'STORE', snapshot: 'absent', valueJson, sizeBytes });
+        if (args.protected) {
+          // #4717 item 3 (cor:sec:070:02): a taken name refuses at staging with the duplicate-name refusal, and nothing is
+          // staged. Completion still rejudges the name, so one taken after staging ends the request stale.
+          if (await tx.secret.findUnique({ where: { ownerType_ownerId_name: { ownerType: 'app', ownerId: appId, name } }, select: { id: true } })) {
+            throw badInput(`A secret named "${name}" already exists at this scope.`);
+          }
+          return stageSecretChange(tx, ctx, { appId, secretId: null, name, kind: args.kind,
+            metadata: metadata as never, operation: 'STORE', snapshot: 'absent', valueJson, sizeBytes });
+        }
         await assertAppSecretRoom(tx, appId);
         const secret = await tx.secret.create({
           data: {
