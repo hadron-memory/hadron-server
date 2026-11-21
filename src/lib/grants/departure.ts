@@ -22,6 +22,26 @@ import { GRANT_DB_NOW } from './live.js';
 
 export type GrantHolderKind = 'user' | 'agent' | 'worker' | 'app';
 
+/**
+ * #4180 (Holger R5, cor:acl:140:03; Victor's FIT): WHY a holder went, as a cause with no wording (the words are Holger's, open in
+ * :03, so a later ruling on them changes display copy, not these codes). Recorded at least as finely as any wording might need:
+ * leaving the organization apart from being removed from it, a worker retired apart from deleted, an agent deleted apart from each
+ * way it can lose its installation. Separate from the secret read clients' end reasons (SECRET_DELETED, PROTECTED), which are not
+ * holder departures. The database admits each code only for its holder kind and only when it agrees with what happened to the
+ * holder (prisma/grant-invariants.sql), and the hard-delete triggers record USER_ERASED / WORKER_DELETED / AGENT_DELETED /
+ * APP_DELETED themselves. A grant stamped before causes were kept has none, and reads {@link REASON_NOT_RECORDED}.
+ */
+export const DEPARTURE_REASONS = {
+  user: ['USER_ERASED', 'ORG_LEFT', 'ORG_REMOVED'],
+  worker: ['WORKER_RETIRED', 'WORKER_DELETED'],
+  agent: ['AGENT_DELETED', 'AGENT_UNINSTALLED', 'AGENT_IMPORTER_UNINSTALLED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED'],
+  app: ['APP_DELETED'],
+} as const;
+export type DepartureReason<K extends GrantHolderKind = GrantHolderKind> = (typeof DEPARTURE_REASONS)[K][number];
+export type AgentDepartureReason = DepartureReason<'agent'>;
+/** The read-side value for a departed grant with no recorded cause (stamped before #4180): a fact, never a guessed cause. */
+export const REASON_NOT_RECORDED = 'REASON_NOT_RECORDED';
+
 /** The sealed holder column each kind lives in (an identifier from this closed map, never from input). */
 const HOLDER_COLUMN: Record<GrantHolderKind, string> = { user: 'user_id', agent: 'agent_id', worker: 'worker_id', app: 'grantee_app_id' };
 
@@ -37,14 +57,15 @@ const ALREADY_ENDED = Prisma.sql`(activated_at IS NOT NULL AND ((expires_at IS N
             OR (x.lifetime_seconds IS NOT NULL AND grants.activated_at + make_interval(secs => x.lifetime_seconds) <= ${GRANT_DB_NOW})))))`;
 
 /**
- * End every grant `holderId` holds that has not already ended, in the caller's transaction. Returns how many it ended.
+ * End every grant `holderId` holds that has not already ended, in the caller's transaction, recording `reason` (#4180). Returns how many it ended.
  * A grant already revoked, departed, EXPIRED or SPENT (an activated grant past its expiry or at its count) keeps its first end; a grant whose own App is gone is skipped (its row is
  * deleted with the App). Never throws for "no grants".
  */
-export async function endHeldGrants(
+export async function endHeldGrants<K extends GrantHolderKind>(
   tx: Prisma.TransactionClient,
-  kind: GrantHolderKind,
+  kind: K,
   holderId: string,
+  reason: DepartureReason<K>,
   scope?: { organizationId: string },
 ): Promise<number> {
   const column = Prisma.raw(`grants."${HOLDER_COLUMN[kind]}"`);
@@ -61,7 +82,7 @@ export async function endHeldGrants(
       AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id) ${inScope}
     ORDER BY id FOR UPDATE`);
   return tx.$executeRaw(Prisma.sql`
-    UPDATE grants SET holder_departed_at = ${GRANT_DB_NOW}, updated_at = ${GRANT_DB_NOW}
+    UPDATE grants SET holder_departed_at = ${GRANT_DB_NOW}, updated_at = ${GRANT_DB_NOW}, holder_departure_reason = ${reason}
     WHERE ${column} = ${holderId} AND holder_departed_at IS NULL AND revoked_at IS NULL
       AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id) ${inScope}
       AND NOT ${ALREADY_ENDED}`);
@@ -76,18 +97,24 @@ export async function endHeldGrants(
  */
 export async function endAgentGrantsAtApps(
   tx: Prisma.TransactionClient,
-  pairs: ReadonlyArray<{ appId: string; agentId: string }>,
+  pairs: ReadonlyArray<{ appId: string; agentId: string; reason: AgentDepartureReason }>,
 ): Promise<number> {
   if (pairs.length === 0) return 0;
   const appIds = pairs.map((p) => p.appId);
   const agentIds = pairs.map((p) => p.agentId);
+  // #4180: each pair's own cause (one door can end two agents for different reasons: the agent it uninstalled, and the agent that
+  // agent imported, which lost its derived installation). A pair named twice keeps its first cause.
+  const reasons = pairs.map((p) => p.reason);
   const inPairs = Prisma.sql`(grants.app_id, grants.agent_id) IN (SELECT * FROM unnest(${appIds}::text[], ${agentIds}::text[]))`;
   await tx.$queryRaw(Prisma.sql`
     SELECT id FROM grants WHERE ${inPairs} AND holder_departed_at IS NULL AND revoked_at IS NULL
       AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
     ORDER BY id FOR UPDATE`);
   return tx.$executeRaw(Prisma.sql`
-    UPDATE grants SET holder_departed_at = ${GRANT_DB_NOW}, updated_at = ${GRANT_DB_NOW}
+    UPDATE grants SET holder_departed_at = ${GRANT_DB_NOW}, updated_at = ${GRANT_DB_NOW},
+      holder_departure_reason = (SELECT p.reason FROM unnest(${appIds}::text[], ${agentIds}::text[], ${reasons}::text[]) WITH ORDINALITY
+                                   AS p(app_id, agent_id, reason, n)
+                                 WHERE p.app_id = grants.app_id AND p.agent_id = grants.agent_id ORDER BY p.n LIMIT 1)
     WHERE ${inPairs} AND holder_departed_at IS NULL AND revoked_at IS NULL
       AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
       AND NOT ${ALREADY_ENDED}`);

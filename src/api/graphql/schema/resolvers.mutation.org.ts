@@ -892,7 +892,8 @@ export const orgMutations = {
         // #4171 (Holger ruling A, epic #1975): leaving the organization ends the person's grants in this organization's Apps, in
         // this transaction, AFTER the membership soft delete (the SQL guard admits the stamp only on proof the person is no longer
         // a live member). Not in the already-removed early return above; a rejoin revives nothing.
-        await endHeldGrants(tx, 'user', resolvedUserId, { organizationId: resolvedOrgId });
+        // #4180: the cause tells leaving (the person removed themselves) from being removed by an administrator.
+        await endHeldGrants(tx, 'user', resolvedUserId, ctx.userId === resolvedUserId ? 'ORG_LEFT' : 'ORG_REMOVED', { organizationId: resolvedOrgId });
         },
         {
           lockMode: 'exclusive',

@@ -199,6 +199,39 @@ describe('acceptance 1/2: the manager lists every state; everyone else gets an e
   });
 });
 
+describe('#4180 (R5, cor:acl:140:03): every audience that reads a grant reads why its holder went', () => {
+  // Fixture honesty: the departed rows are seeded through the test-only guard bypass; the doors that stamp each cause are pinned
+  // in the departure suites (#3690, #4171, #4172).
+  const READ = 'id state holderDepartureReason';
+  it('the worker (grants), the person (myGrants) and the manager (appGrants) read the cause; a row stamped before causes were kept reads REASON_NOT_RECORDED; a grant not ended by its holder reads null', async () => {
+    const retired = await active({ worker_id: w.workerId, holder_departed_at: raw(DB_NOW), holder_departure_reason: 'WORKER_RETIRED' });
+    const unrecorded = await active({ worker_id: w.workerId, holder_departed_at: raw(DB_NOW) });
+    const live = await active({ worker_id: w.workerId });
+    const revoked = await active({ worker_id: w.workerId, revoked_at: raw(DB_NOW), revoked_by: managerId });
+    const left = await active({ worker_id: null, user_id: managerId, holder_departed_at: raw(DB_NOW), holder_departure_reason: 'ORG_LEFT' });
+    const byId = (items: any[]) => new Map<string, any>(items.map((g) => [g.id, g.holderDepartureReason]));
+
+    const asWorker = await post(memberKey, workerSession, `{grants{items{${READ}}}}`);
+    expect(asWorker.errors).toBeUndefined();
+    const wk = byId(asWorker.data.grants.items);
+    expect([wk.get(retired), wk.get(unrecorded), wk.get(live), wk.get(revoked)]).toEqual(['WORKER_RETIRED', 'REASON_NOT_RECORDED', null, null]);
+    expect(asWorker.data.grants.items.find((g: any) => g.id === retired).state).toBe('HOLDER_GONE');
+
+    const one = await post(memberKey, workerSession, `query($r:ID!){grant(ref:$r){${READ}}}`, { r: retired });
+    expect(one.data.grant.holderDepartureReason).toBe('WORKER_RETIRED');
+
+    const mine = await post(managerKey, null, `{myGrants{items{${READ}}}}`);
+    expect(mine.errors).toBeUndefined();
+    expect(byId(mine.data.myGrants.items).get(left)).toBe('ORG_LEFT');
+
+    const mgr = await post(managerKey, null, `query($a:String!){appGrants(appRef:$a){items{${READ}}}}`, { a: w.appId });
+    expect(mgr.errors).toBeUndefined();
+    const m = byId(mgr.data.appGrants.items);
+    expect([m.get(retired), m.get(unrecorded), m.get(live), m.get(revoked), m.get(left)])
+      .toEqual(['WORKER_RETIRED', 'REASON_NOT_RECORDED', null, null, 'ORG_LEFT']);
+  });
+});
+
 describe('role-agent reach (ruling 0255 item 7, cor:acl:140:05 List)', () => {
   it('a worker lists the grants its role agent holds in its own App, every state', async () => {
     const live = await active({ worker_id: null, agent_id: w.agentId });
@@ -439,7 +472,7 @@ describe('acceptance 6-9 (V57): requester withdrawal of a PENDING grant', () => 
 
     const departed = await pending({ requested_by_user_id: managerId });
     await db.worker.update({ where: { id: otherWorkerId }, data: { retiredAt: new Date() } }); // a departure needs the holder to have gone
-    await db.$transaction((tx) => endHeldGrants(tx, 'worker', otherWorkerId));
+    await db.$transaction((tx) => endHeldGrants(tx, 'worker', otherWorkerId, 'WORKER_RETIRED'));
     const r = await post(managerKey, null, WITHDRAW, { r: departed });
     expect(r.errors).toBeUndefined();
     expect((await grantRows()).find((g) => g.id === departed).revoked_at).toBeNull();

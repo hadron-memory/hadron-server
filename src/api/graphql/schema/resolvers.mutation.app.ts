@@ -1173,7 +1173,7 @@ export const appMutations = {
           });
           // #3690: an App that HOLDS a grant (another App's grantee) is a holder that went: those grants end here, after the apps FOR
           // UPDATE lock. Its OWN grants allow nothing already (the live check reads `apps.deleted_at`) and cascade at the reclaim.
-          if (deleted.count > 0) await endHeldGrants(tx, 'app', resolvedId);
+          if (deleted.count > 0) await endHeldGrants(tx, 'app', resolvedId, 'APP_DELETED');
           if (deleted.count > 0) {
             const actor = secretActorOf(ctx);
             const secrets = await tx.secret.findMany({ where: { ownerType: 'app', ownerId: resolvedId }, select: { id: true, name: true } });

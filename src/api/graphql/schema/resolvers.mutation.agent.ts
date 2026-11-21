@@ -1267,7 +1267,7 @@ export const agentMutations = {
         await tx.agent.update({ where: { id }, data: { deletedAt } });
         // #3690 / ruling 0259: any agent delete, soft delete included, is a departure. No FK action fires on a soft delete, so the grants
         // the agent HOLDS end here, after the `agents FOR UPDATE` lock (afterLock below): the grant row lock is the last one.
-        await endHeldGrants(tx, 'agent', id);
+        await endHeldGrants(tx, 'agent', id, 'AGENT_DELETED');
         if (agent.systemMemoryId) {
           await tx.memory.updateMany({ where: { id: agent.systemMemoryId }, data: { deletedAt } });
         }
@@ -1545,7 +1545,7 @@ export const agentMutations = {
             for (const appId of await liveAppsWhereInstalled(tx, parentAgentId, resolvedOrgId)) candidateApps.add(appId);
           }
           await endGrantsOfAgentsNoLongerInstalled(
-            tx, [...candidateApps].map((appId) => ({ appId, agentId: resolvedAgentId })), ctx.userId ?? null);
+            tx, [...candidateApps].map((appId) => ({ appId, agentId: resolvedAgentId })), ctx.userId ?? null, 'AGENT_LICENSE_REVOKED');
           return tx.agentOrgGrant.findUnique({
             where: { orgId_agentId: { orgId: resolvedOrgId, agentId: resolvedAgentId } },
           });

@@ -21,6 +21,7 @@ import { grantLiveSql } from './live.js';
 import { grantStateSql, type GrantState } from './state.js';
 import { roleAgentReachedBy } from './reach.js';
 import { isAgentInstalledAndLicensed } from '../appAgent.js';
+import { REASON_NOT_RECORDED, type DepartureReason } from './departure.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -64,6 +65,12 @@ export interface GrantView {
   allows: boolean;
   /** #4173 (cor:acl:140:03): the lifecycle state, derived from the record by the one derivation ({@link grantStateSql}), never stored. Every audience reads it. */
   state: GrantState;
+  /**
+   * #4180 (Holger R5, cor:acl:140:03): why the holder went, for a grant its holder ended; null for every other grant. A departure
+   * stamped before causes were kept reads {@link REASON_NOT_RECORDED}, never a guess. Every audience that reads the row reads it
+   * (Victor's FIT: the spec puts no extra limit on it), unlike the stamp's time, which stays the manager's (V56).
+   */
+  holderDepartureReason: DepartureReason | typeof REASON_NOT_RECORDED | null;
 }
 
 interface Row {
@@ -72,6 +79,7 @@ interface Row {
   action: string; action_values: unknown; starts_at: Date | null; expires_at: Date | null; max_uses: number | null; use_count: number;
   reason: string; created_at: Date; activated_at: Date | null; verification_kind: string | null; verified_by: string | null;
   signature_id: string | null; revoked_at: Date | null; revoked_by: string | null; holder_departed_at: Date | null; allows: boolean; state: GrantState;
+  holder_departure_reason: DepartureReason | null;
 }
 
 function holderOf(r: Row): { kind: GrantHolderKind; id: string } {
@@ -91,6 +99,7 @@ function view(r: Row, manager = false): GrantView {
     requestedBySessionId: r.requested_by_session_id, startsAt: r.starts_at, expiresAt: r.expires_at, maxUses: r.max_uses,
     useCount: r.use_count, reason: r.reason, createdAt: r.created_at, activatedAt: r.activated_at, verificationKind: r.verification_kind,
     verifiedBy: r.verified_by, signatureId: r.signature_id, revokedAt: r.revoked_at, allows: r.allows, state: r.state,
+    holderDepartureReason: r.holder_departed_at === null ? null : r.holder_departure_reason ?? REASON_NOT_RECORDED,
   };
 }
 
@@ -116,7 +125,7 @@ const COLUMNS = Prisma.sql`g.id, g.app_id, a.urn AS app_urn, g.user_id, g.agent_
   g.signature_id, g.revoked_at,
   -- #3711: the revoker is a person; an erased account reads null, as issuer_user_id does (read-side mapping, never written).
   (SELECT u.id FROM users u WHERE u.id = g.revoked_by AND u.deleted_at IS NULL) AS revoked_by,
-  g.holder_departed_at, ${grantLiveSql('g')} AS allows, ${grantStateSql('g')} AS state`;
+  g.holder_departed_at, g.holder_departure_reason, ${grantLiveSql('g')} AS allows, ${grantStateSql('g')} AS state`;
 
 /** The reader's grants, newest first. `take` 0 is count-only. The caller clamps `take` and `skip`. */
 export async function listGrantsForWorker(db: Db, reader: GrantReader, page: { take?: number; skip?: number }): Promise<{ items: GrantView[]; total: number }> {
