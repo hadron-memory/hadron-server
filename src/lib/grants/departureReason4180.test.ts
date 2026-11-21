@@ -13,6 +13,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { DB_NOW, dropTestActions, insertGrant, insertGrantUnguarded, raw, seedWorld, type World } from './grantFixtures3668.js';
 import { endHeldGrants } from './departure.js';
+import { endGrantsOfAgentsNoLongerInstalled } from './agentInstallDeparture.js';
 import { listGrantsForManager } from './read.js';
 
 let w: World;
@@ -20,7 +21,11 @@ beforeEach(async () => { await cleanDb(db); w = await seedWorld(); });
 afterAll(async () => { await cleanDb(db); await dropTestActions(); });
 
 const exec = (sql: string, ...params: unknown[]) => db.$executeRawUnsafe(sql, ...params);
-const refused = (p: Promise<unknown>) => expect(p).rejects.toThrow(/grants are append-only|grants must arrive pending|chk_grants_shape|violates check constraint/);
+// Which layer refuses (Antonio P3): the guard trigger runs BEFORE the row CHECK, so a pin that names one asserts that one.
+const GUARD = /grants are append-only/;
+const CHECK = /chk_grants_shape/;
+const EITHER = /grants are append-only|chk_grants_shape/;
+const refused = (p: Promise<unknown>, by: RegExp = GUARD) => expect(p).rejects.toThrow(by);
 const active = (over: Record<string, unknown> = {}) => insertGrantUnguarded(w, { activated_at: raw(`${DB_NOW} - interval '1 hour'`), ...over } as never);
 const cause = async (id: string) => (await db.$queryRaw<Array<{ c: string | null }>>(Prisma.sql`
   SELECT holder_departure_reason AS c FROM grants WHERE id = ${id}`))[0]!.c;
@@ -29,7 +34,7 @@ const STAMP = `UPDATE grants SET holder_departed_at = ${DB_NOW}`;
 
 describe('#4180: the cause is a fact of the departure, set with the stamp and never otherwise', () => {
   it('a grant cannot arrive with a cause', async () => {
-    await refused(insertGrant(w, { user_id: null, worker_id: w.workerId, holder_departure_reason: 'WORKER_RETIRED' }));
+    await refused(insertGrant(w, { user_id: null, worker_id: w.workerId, holder_departure_reason: 'WORKER_RETIRED' }), CHECK);
   });
 
   it('a cause cannot be written on a grant whose holder has not gone (no stamp in the same statement)', async () => {
@@ -57,8 +62,11 @@ describe('#4180: the cause is a fact of the departure, set with the stamp and ne
     const id = await active({ user_id: null, worker_id: w.workerId });
     await retire();
     for (const wrong of ['USER_ERASED', 'ORG_LEFT', 'AGENT_DELETED', 'APP_DELETED', 'GUESSED', 'SECRET_DELETED', 'REASON_NOT_RECORDED', '']) {
-      await refused(exec(`${STAMP}, holder_departure_reason = $2 WHERE id = $1`, id, wrong));
+      // A code of another kind that the evidence clauses also contradict is refused by the guard first; one they do not is the CHECK's.
+      await refused(exec(`${STAMP}, holder_departure_reason = $2 WHERE id = $1`, id, wrong), EITHER);
     }
+    await refused(exec(`${STAMP}, holder_departure_reason = 'GUESSED' WHERE id = $1`, id), CHECK);
+    await refused(exec(`${STAMP}, holder_departure_reason = 'APP_DELETED' WHERE id = $1`, id), CHECK);
     expect(await cause(id)).toBeNull();
   });
 
@@ -113,6 +121,38 @@ describe('#4180: the cause is a fact of the departure, set with the stamp and ne
     await retire();
     await db.$transaction((tx) => endHeldGrants(tx, 'worker', w.workerId, 'WORKER_RETIRED'));
     expect([await cause(open), await cause(revoked)]).toEqual(['WORKER_RETIRED', null]);
+  });
+});
+
+describe('#4180 (BLIND P2, Antonio): a door\'s cause yields to what already happened to the holder; it never aborts the door', () => {
+  it('an install-loss door ending an agent that is ALREADY deleted (unstamped rows) records AGENT_DELETED and commits', async () => {
+    const id = await active({ user_id: null, agent_id: w.agentId });
+    await db.agent.update({ where: { id: w.agentId }, data: { deletedAt: new Date() } }); // deleted, its grant never stamped
+    for (const reason of ['AGENT_UNINSTALLED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED'] as const) {
+      const other = await active({ user_id: null, agent_id: w.agentId });
+      const { ended } = await db.$transaction((tx) => endGrantsOfAgentsNoLongerInstalled(tx, [{ appId: w.appId, agentId: w.agentId }], null, reason));
+      expect(ended).toBeGreaterThanOrEqual(1);
+      expect(await cause(other)).toBe('AGENT_DELETED');
+    }
+    expect(await cause(id)).toBe('AGENT_DELETED');
+  });
+
+  it('an org removal ending a person who is ALREADY erased (unstamped rows) records USER_ERASED and commits', async () => {
+    const id = await active({ user_id: w.user2Id });
+    await db.user.update({ where: { id: w.user2Id }, data: { deletedAt: new Date() } });
+    for (const reason of ['ORG_LEFT', 'ORG_REMOVED'] as const) {
+      const other = await active({ user_id: w.user2Id });
+      expect(await db.$transaction((tx) => endHeldGrants(tx, 'user', w.user2Id, reason, { organizationId: w.orgId }))).toBeGreaterThanOrEqual(1);
+      expect(await cause(other)).toBe('USER_ERASED');
+    }
+    expect(await cause(id)).toBe('USER_ERASED');
+  });
+
+  it('a live holder keeps the door\'s own cause (the yield applies only to a holder that already went that other way)', async () => {
+    const id = await active({ user_id: w.user2Id });
+    await db.orgMember.deleteMany({ where: { userId: w.user2Id, organizationId: w.orgId } });
+    await db.$transaction((tx) => endHeldGrants(tx, 'user', w.user2Id, 'ORG_LEFT', { organizationId: w.orgId }));
+    expect(await cause(id)).toBe('ORG_LEFT');
   });
 });
 

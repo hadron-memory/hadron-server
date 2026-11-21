@@ -19,9 +19,9 @@
 --   * it ends ONCE, by revoked_at stamped together with revoked_by, or by its HOLDER going: holder_departed_at is stamped
 --     (NULL to a time, never back) by the AFTER DELETE triggers below on every hard delete of a holder row, and by the
 --     deleting code on the soft deletes (an erased person, a retired worker, a deleted agent or App). The first end stands:
---     a departure records its CAUSE (holder_departure_reason, #4180) in the same statement, never afterwards; the cause must
---     fit the holder's kind and what happened to the holder. A stamp with no cause is admitted (the previous image's) and stays so.
---     a row already revoked, departed, expired or spent (an ACTIVATED row past its expiry or at its count) is not stamped (ruling 0259);
+--     a row already revoked, departed, expired or spent (an ACTIVATED row past its expiry or at its count) is not stamped (ruling 0259).
+--     A departure records its CAUSE (holder_departure_reason, #4180) in the same statement, never afterwards; the cause must
+--     fit the holder's kind and what happened to the holder. A stamp with no cause is admitted (the previous image's) and stays so;
 --   * an erased issuer's or requester's link goes: issuer_user_id or requested_by_user_id becomes NULL and the reason stays (cor:acl:140:08), and only when that
 --     person is ERASED (the users row is soft-deleted, or gone), never for a live person;
 --   * along a user merge ALREADY recorded in user_merges (mergeUsers writes that row before it rewrites links; the

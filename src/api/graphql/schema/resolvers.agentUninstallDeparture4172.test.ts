@@ -130,9 +130,12 @@ describe('D1-D4: the imported agent loses its derived install', () => {
     await install(w.app2Id, child.id);
     const here = await held(child.id, w.appId);
     const direct = await held(child.id, w.app2Id);
+    const parents = await held(parent.id, w.appId);
     await uninstall(w.appId, parent.id);
     expect((await row(here)).departed).toBe(true);
-    expect((await row(here)).cause).toBe('AGENT_IMPORTER_UNINSTALLED'); // #4180: its importer went, not the agent itself
+    // #4180: ONE call ends two agents for two different causes (Antonio P3): the agent uninstalled, and the agent it imported.
+    expect((await row(here)).cause).toBe('AGENT_IMPORTER_UNINSTALLED');
+    expect((await row(parents)).cause).toBe('AGENT_UNINSTALLED');
     expect((await row(direct)).departed).toBe(false);
   });
 
