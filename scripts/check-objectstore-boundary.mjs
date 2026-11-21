@@ -15,7 +15,9 @@
 // review, Baloo + Beckett). Canonical spellings are also flagged on the raw
 // line, so a provider path named in a comment is still caught. SDK package
 // names are compared EXACTLY after normalization, so the unrelated
-// @aws-sdk/client-s3-control package is not flagged.
+// @aws-sdk/client-s3-control package is not flagged. The retired integrations/r2
+// path is checked BOTH ways: raw substring (comments) and resolved segments
+// (a noncanonical integrations/./r2 spelling is still the retired path).
 //
 // Text scanning, not TypeScript, because the boundary has to hold for the
 // string paths inside `vi.mock(...)` calls too — those are invisible to
@@ -39,7 +41,14 @@ const BANNED_SDK_PACKAGES = new Set(['@aws-sdk/client-s3', '@aws-sdk/s3-request-
 
 // Canonical spellings, checked against the raw line (comments included).
 const CANONICAL_PROVIDER_RE = /objectstore(\/\.?)+s3/;
-const CANONICAL_SDK_RE = /@aws-sdk\/(s3-request-presigner|client-s3)(?![\w-])/;
+// The SDK lookahead must reject every character that can CONTINUE a package
+// name: word characters, hyphens, and dots (dots are legal in npm names, so
+// client-s3.foo is a different package — #4668 BLIND delta P3). But a dot
+// followed by whitespace or end-of-line is a sentence END, not a name
+// continuation, and still counts: `...from '@aws-sdk/client-s3.` in prose is
+// the banned package named in a comment. A `/` after the name is a subpath
+// import of the SAME package and stays flagged.
+const CANONICAL_SDK_RE = /@aws-sdk\/(s3-request-presigner|client-s3)(?![\w-])(?!\.\S)/;
 
 /** Collect files under dir recursively (deterministic order; symlinks skipped). */
 function collectFiles(dir, out) {
@@ -81,6 +90,36 @@ function referencesProviderDir(segments) {
     if (segments[i] === 'objectstore' && segments[i + 1] === 's3') return true;
   }
   return false;
+}
+
+function referencesRetiredDir(segments) {
+  for (let i = 0; i + 1 < segments.length; i += 1) {
+    if (segments[i] === 'integrations' && segments[i + 1] === 'r2') return true;
+  }
+  return false;
+}
+
+/** Candidate string bodies on a line: each quote paired with the NEXT quote
+ *  of the same type. A left-to-right regex pairing is shifted by a stray
+ *  apostrophe earlier on the line — a block comment containing one, right
+ *  before a traversal import, makes the comment apostrophe pair with the
+ *  import's opening quote, so the real body is never extracted (#4668 LOCAL
+ *  delta P2, Beckett: guard said OK while Node imported the module).
+ *  Immediate-next pairing cannot miss a real body: an unescaped string's
+ *  opening quote is always followed by its closing quote before any other
+ *  same-type quote. Stray apostrophes only add phantom candidates, which
+ *  resolve nowhere. */
+function candidateBodies(line) {
+  const bodies = [];
+  for (const q of ["'", '"', '`']) {
+    for (let i = line.indexOf(q); i !== -1; ) {
+      const j = line.indexOf(q, i + 1);
+      if (j === -1) break;
+      bodies.push(line.slice(i + 1, j));
+      i = j;
+    }
+  }
+  return bodies;
 }
 
 /** The package name of a bare specifier: '@scope/name' before any subpath,
@@ -142,21 +181,24 @@ function main() {
 
       if (providerExempt && sdkExempt) continue; // inside s3/: everything internal
 
-      // Resolving checks on every string literal on the line (catches
-      // noncanonical and traversal spellings the canonical regexes miss).
-      for (const literal of line.match(/'[^'\n]*'|"[^"\n]*"|`[^`\n]*`/g) ?? []) {
-        const body = literal.slice(1, -1);
-        if (!providerExempt && body.includes('objectstore')) {
-          if (referencesProviderDir(normalizeSegments(body))) {
-            violations.push({ kind: 'provider', where, line: line.trim() });
-            break;
-          }
+      // Resolving checks on every candidate string body on the line (catches
+      // noncanonical and traversal spellings the canonical regexes miss, and
+      // survives quote pairing shifted by comment apostrophes).
+      for (const body of candidateBodies(line)) {
+        const segments = normalizeSegments(body);
+        if (!providerExempt && body.includes('objectstore') && referencesProviderDir(segments)) {
+          violations.push({ kind: 'provider', where, line: line.trim() });
+          break;
         }
         if (!sdkExempt && body.startsWith('@aws-sdk/')) {
-          if (BANNED_SDK_PACKAGES.has(packageName(normalizeSegments(body)))) {
+          if (BANNED_SDK_PACKAGES.has(packageName(segments))) {
             violations.push({ kind: 'sdk', where, line: line.trim() });
             break;
           }
+        }
+        if (referencesRetiredDir(segments)) {
+          violations.push({ kind: 'r2', where, line: line.trim() });
+          break;
         }
       }
     }

@@ -28,6 +28,17 @@ const SDK_UNRELATED_IMPORT = `import { SageMakerRuntimeClient } from '${['@aws-s
 // The S3 Control SDK — a DIFFERENT package whose name starts like client-s3;
 // an exact-match package comparison must not flag it (#4668 delta P3).
 const SDK_S3_CONTROL_IMPORT = `import { S3ControlClient } from '${['@aws-sdk', 'client-s3-control'].join('/')}';`;
+// A DOTTED near-name — also a different package (dots are legal in npm
+// names), so neither the raw-line pattern nor the package comparison may
+// flag it (#4668 BLIND delta P3, Baloo).
+const SDK_S3_DOTTED_IMPORT = `import { Whatever } from '${['@aws-sdk', 'client-s3.foo'].join('/')}';`;
+// A subpath import of the BANNED package — same package, must stay flagged.
+const SDK_S3_SUBPATH_IMPORT = `import { S3Client } from '${['@aws-sdk', 'client-s3', 'dist-cjs', 'index.js'].join('/')}';`;
+// The banned SDK named at sentence end in a comment — the raw-line check
+// exists to catch comments, and must keep catching this one after the dotted
+// near-name is allowed (dot followed by whitespace ends the token; a dot
+// followed by a non-space character continues the package name).
+const SDK_S3_SENTENCE_END_COMMENT = `// do not import ${['@aws-sdk', 'client-s3'].join('/')}. it bypasses the scaffold.`;
 // The retired r2 integration path — assembled, never spelled as one literal.
 const RETIRED_PATH = ['integrations', 'r2'].join('/');
 // The legal scaffold import.
@@ -45,6 +56,16 @@ const PROVIDER_TRAVERSAL_REF = `import { S3Client } from 'src/integrations/objec
 // A deeper traversal (two named hops and two .. hops): still resolves to
 // the provider; proves the resolver balances segments, not just one pair.
 const PROVIDER_DEEP_TRAVERSAL_REF = `import { S3Client } from 'src/integrations/objectstore/${['a', 'b', '..', '..', 's3', 'client.js'].join('/')}';`;
+// A traversal import preceded on the SAME line by a block comment containing
+// an apostrophe: the stray quote shifts naive left-to-right string pairing
+// so the real specifier is never extracted (#4668 LOCAL delta P2, Beckett —
+// the guard said OK while Node imported the module). Relative spec form.
+const PROVIDER_TRAVERSAL_REL_SPEC = ['./integrations', 'objectstore', 'extra', '..', 's3', 'client.js'].join('/');
+const PROVIDER_APOSTROPHE_SHIFT_REF = `/* ' */ import { value } from '${PROVIDER_TRAVERSAL_REL_SPEC}';`;
+// The retired r2 path in a NONCANONICAL spelling: integrations/./r2 resolves
+// to the same two segments, so the tripwire must fire on it too (#4668 LOCAL
+// delta P3).
+const RETIRED_NONCANONICAL_SPEC = ['src', 'integrations', '.', 'r2'].join('/');
 
 const REPO_ROOT = resolve(dirname(new URL(import.meta.url).pathname), '../../..');
 const SCRIPT = join(REPO_ROOT, 'scripts', 'check-objectstore-boundary.mjs');
@@ -71,6 +92,9 @@ describe('object-store import boundary guard (#905)', () => {
       write(tree, 'lib/embedding/client-sagemaker.ts', SDK_UNRELATED_IMPORT);
       // A package whose name merely STARTS like the banned one is legal.
       write(tree, 'lib/control/s3Control.ts', SDK_S3_CONTROL_IMPORT);
+      // A package whose name merely starts like the banned one and adds a
+      // DOTTED continuation is legal too.
+      write(tree, 'lib/asset/dotted.ts', SDK_S3_DOTTED_IMPORT);
       // Provider-internal files may reference the provider and its SDK.
       write(
         tree,
@@ -132,6 +156,77 @@ describe('object-store import boundary guard (#905)', () => {
       const res = runGuard(tree);
       expect(res.status).toBe(1);
       expect(res.stdout).toContain('lib/asset/deepTraversal.ts');
+    } finally {
+      rmSync(tree, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a traversal import shifted by an apostrophe in an adjacent block comment (LOCAL delta P2)', () => {
+    const tree = makeTree();
+    try {
+      // The intermediate directory and provider module exist, as they would
+      // beside a real import: Beckett's probe ran this line under Node and
+      // the import resolved (the guard returned OK before the fix).
+      write(tree, 'integrations/objectstore/extra/placeholder.ts', 'export {};');
+      write(tree, 'integrations/objectstore/s3/client.js', 'export const value = 42;');
+      write(tree, 'lib/asset/apostropheShift.ts', PROVIDER_APOSTROPHE_SHIFT_REF);
+      const res = runGuard(tree);
+      expect(res.status).toBe(1);
+      expect(res.stdout).toContain('lib/asset/apostropheShift.ts');
+    } finally {
+      rmSync(tree, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects the retired r2 path in a noncanonical spelling (integrations/./r2) (LOCAL delta P3)', () => {
+    const tree = makeTree();
+    try {
+      write(tree, 'lib/asset/legacyNoncanonical.ts', `import x from '${RETIRED_NONCANONICAL_SPEC}';`);
+      const res = runGuard(tree);
+      expect(res.status).toBe(1);
+      expect(res.stdout).toContain('lib/asset/legacyNoncanonical.ts');
+    } finally {
+      rmSync(tree, { recursive: true, force: true });
+    }
+  });
+
+  it('does not flag a differently-named dotted package (client-s3.foo) (BLIND delta P3)', () => {
+    const tree = makeTree();
+    try {
+      // Dots are legal in npm package names: client-s3.foo is NOT the
+      // banned S3 client package, and a tree importing only it is clean.
+      write(tree, 'lib/asset/dotted.ts', SDK_S3_DOTTED_IMPORT);
+      const res = runGuard(tree);
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain('OK');
+    } finally {
+      rmSync(tree, { recursive: true, force: true });
+    }
+  });
+
+  it('still flags the banned SDK named at sentence end in a comment', () => {
+    const tree = makeTree();
+    try {
+      write(tree, 'lib/asset/prose.ts', SDK_S3_SENTENCE_END_COMMENT);
+      const res = runGuard(tree);
+      expect(res.status).toBe(1);
+      expect(res.stdout).toContain('lib/asset/prose.ts');
+      expect(res.stdout).toContain('S3-family AWS SDK');
+    } finally {
+      rmSync(tree, { recursive: true, force: true });
+    }
+  });
+
+  it('still flags a subpath import of the banned package (a /-continued path is the same package)', () => {
+    const tree = makeTree();
+    try {
+      // A subpath import is still the banned package: the boundary character
+      // after the package name is '/', which is not part of any name.
+      write(tree, 'lib/asset/subpath.ts', SDK_S3_SUBPATH_IMPORT);
+      const res = runGuard(tree);
+      expect(res.status).toBe(1);
+      expect(res.stdout).toContain('lib/asset/subpath.ts');
+      expect(res.stdout).toContain('S3-family AWS SDK');
     } finally {
       rmSync(tree, { recursive: true, force: true });
     }
