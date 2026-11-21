@@ -45,8 +45,8 @@ describe('#4312 retire, then worker rm, with ticker templates', () => {
     // The exemption is exercised: retirement really soft-deleted the ticker and ended the worker's own subscription.
     const after = await db.ticker.findUniqueOrThrow({ where: { id: ticker.id } });
     expect(after.deletedAt).not.toBeNull();
-    expect(await db.tickerSubscription.count({ where: { tickerId: ticker.id, workerId: worker.id, endedReason: 'WORKER_RETIRED' } })
-      + await db.tickerSubscription.count({ where: { tickerId: ticker.id, workerId: worker.id, endedReason: 'TICKER_DELETED' } })).toBe(1);
+    const subs = await db.tickerSubscription.findMany({ where: { tickerId: ticker.id, workerId: worker.id } });
+    expect(subs.map((x) => x.endedReason)).toEqual(['WORKER_RETIRED']);
     expect(await rm(worker.id)).toBe(true);
     expect(await db.worker.findUnique({ where: { id: worker.id } })).toBeNull();
     expect(await db.ticker.count({ where: { id: ticker.id } })).toBe(0);
@@ -113,5 +113,27 @@ describe('#4312 retire, then worker rm, with ticker templates', () => {
     await retire(a.worker.id);
     expect(await rm(a.worker.id)).toBe(true);
     expect(await db.ticker.count({ where: { id: b.ticker.id, deletedAt: null } })).toBe(1);
+  });
+
+  it('hard delete removes the worker\'s own subscription rows with the ticker', async () => {
+    const { worker, ticker } = await cast('Subs');
+    await retire(worker.id);
+    expect(await db.tickerSubscription.count({ where: { tickerId: ticker.id } })).toBe(1);
+    expect(await rm(worker.id)).toBe(true);
+    expect(await db.tickerSubscription.count({ where: { tickerId: ticker.id } })).toBe(0);
+  });
+
+  it('a never-retired worker with a live pristine generated ticker is still removable (the live branch)', async () => {
+    const { worker, ticker } = await cast('Live pristine');
+    expect(await rm(worker.id)).toBe(true);
+    expect(await db.ticker.count({ where: { id: ticker.id } })).toBe(0);
+  });
+
+  it('INVARIANT of the window: after retirement deleteTicker cannot re-stamp the generated ticker (no other writer lands in the window)', async () => {
+    const { worker, ticker } = await cast('Restamp');
+    await retire(worker.id);
+    const before = (await db.ticker.findUniqueOrThrow({ where: { id: ticker.id } })).deletedAt!;
+    expect(await refusal(M.deleteTicker({}, { ref: ticker.id }, ctx))).not.toBeNull();
+    expect((await db.ticker.findUniqueOrThrow({ where: { id: ticker.id } })).deletedAt!.getTime()).toBe(before.getTime());
   });
 });
