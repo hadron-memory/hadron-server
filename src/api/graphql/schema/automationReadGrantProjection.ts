@@ -8,6 +8,11 @@ import type { AppAutomationReadGrant } from '../../../generated/prisma/index.js'
 import { safeCanonicalUrn } from './resolvers.helpers.js';
 
 export function projectAutomationReadGrant(row: AppAutomationReadGrant, memory: { urn: string } | null) {
+  // The four callers: the approval (resolvers.automationPin.ts, liveReadGrants) passes null only when the caller cannot read
+  // the target or the memory row is soft-deleted; give, revoke and list (resolvers.automationReadGrant.ts) always resolve the
+  // memory (list includes soft-deleted rows), and a hard delete cascades the grant row away, so a manager door never passes null.
+  // `safeCanonicalUrn` always returns a string (strict-then-raw fallback), never null or undefined, so `memoryUrn === null`
+  // below is true only for the null memory: nothing else can make the prefix disappear.
   const memoryUrn = memory ? safeCanonicalUrn('memory', memory.urn) : null;
   return {
     id: row.id, appId: row.appId, triggerKind: row.triggerKind, triggerId: row.triggerId,
