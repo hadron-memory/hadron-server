@@ -185,6 +185,8 @@ describe('#2772 timeout classification (BLIND P2-2, P3-10)', () => {
   it('Postgres statement timeout and Prisma transaction expiry are the early stop; a user cancel is not', () => {
     expect(isStatementTimeout({ meta: { code: '57014' }, message: 'canceling statement due to statement timeout' })).toBe(true);
     expect(isStatementTimeout({ code: 'P2028', message: 'Transaction already closed' })).toBe(true);
+    // Pool pressure (maxWait expired before a connection was acquired) is an error, never an early stop.
+    expect(isStatementTimeout({ code: 'P2028', message: 'Transaction API error: Unable to start a transaction in the given time.' })).toBe(false);
     expect(isStatementTimeout({ meta: { code: '57014' }, message: 'canceling statement due to user request' })).toBe(false);
     expect(isStatementTimeout(new Error('boom'))).toBe(false);
   });

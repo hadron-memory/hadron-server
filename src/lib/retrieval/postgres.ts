@@ -160,7 +160,9 @@ const REGEX_DEFAULT_FIELDS = ['name', 'alias', 'loc', 'tags', 'description', 'ab
  * callers that pass none keep their own predicates).
  */
 function vectorFilterSql(opts: VectorSearchOpts): Prisma.Sql | undefined {
-  if (!opts.filter && !opts.excludeNodeIds?.length) return undefined;
+  // BLIND P2 (#4665): `includeDeleted` alone must still reach the statement, or the default deleted rule (applied only when
+  // no fragment exists) would hide tombstones from a caller who asked for them, while ANY other filter would show them.
+  if (!opts.filter && !opts.excludeNodeIds?.length && !opts.includeDeleted) return undefined;
   const { params, bind } = paramBuilder();
   const mem = opts.memoryIds.map((m) => bind(m)).join(', ');
   const deleted = opts.includeDeleted ? '' : 'AND deleted_at IS NULL';

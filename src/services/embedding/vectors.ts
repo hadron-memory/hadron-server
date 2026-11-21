@@ -403,7 +403,10 @@ export function isStatementTimeout(e: unknown): boolean {
   if (/user request/i.test(text)) return false;
   // P2028: Prisma's own interactive-transaction clock expired. It is margined past the budget below, but if it
   // still wins the race the search ran out of time all the same.
-  return err?.code === 'P2028' || err?.meta?.code === '57014' || /statement timeout/i.test(text);
+  // BLIND P2 (#4665, Abigail): P2028 is ALSO what Prisma raises when `maxWait` runs out acquiring a connection ("Unable to
+  // start a transaction in the given time"), which is pool pressure, not the work budget: it must reach error alerting.
+  if (err?.code === 'P2028') return !/unable to start a transaction/i.test(text);
+  return err?.meta?.code === '57014' || /statement timeout/i.test(text);
 }
 
 /**

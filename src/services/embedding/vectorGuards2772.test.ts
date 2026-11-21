@@ -54,6 +54,12 @@ describe('#2772 guards inside the ranking', () => {
     expect(hits).toHaveLength(6);
   });
 
+  it('includeDeleted ALONE (no filter, no exclusions) keeps the tombstone, the same as with any other filter present (BLIND P2-4)', async () => {
+    const hits = await search({ includeDeleted: true, limit: 10 });
+    expect(hits.map((h) => h.nodeId)).toContain(deadId);
+    expect(hits).toHaveLength(7);
+  });
+
   it('includeDeleted keeps the tombstone when the caller asks for it', async () => {
     const hits = await search({ excludeNodeIds: [ids[0]!], includeDeleted: true, limit: 10 });
     expect(hits.map((h) => h.nodeId)).toContain(deadId);
