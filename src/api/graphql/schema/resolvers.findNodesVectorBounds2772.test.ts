@@ -143,7 +143,7 @@ describe('#2772 request-level bounds (BLIND P1)', () => {
     process.env.VECTOR_SEARCH_TIMEOUT_MS = '6000';
     const windows: any[] = [];
     try {
-      const hits = await vectorSearchNodes(handle, { memoryIds: [mem], queryEmbedding: qvec(), limit: 5, onWindow: (w) => windows.push(w) } as any);
+      const hits = await vectorSearchNodes(handle, { memoryIds: [mem], queryEmbedding: qvec(), limit: 5, onWindow: (w: unknown) => windows.push(w) } as any);
       expect(hits).toEqual([]);
     } finally { delete process.env.VECTOR_SEARCH_TIMEOUT_MS; }
     expect(windows.at(-1)?.stoppedEarly).toBe(true);
