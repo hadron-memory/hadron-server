@@ -375,6 +375,18 @@ describe('#3819 slice 1 — episodes and the alarm (cor:agt:060:14, :15)', () =>
     expect(await evaluate()).toEqual([]);
   });
 
+  it('another App\'s no-worker outcome never opens an episode or raises an alarm in this App (Rodolfo SEC10 P3-1)', async () => {
+    await worker(); // this App is evaluated (it has a live worker) and its one combination has a free, eligible worker
+    const other = await db.app.create({ data: { name: 'Other', urn: `sat-${generateId()}.test:other`, ownerUserId: memberId } });
+    await recordMatchOutcome(db, other.id, SERVER_MID, 'NO_WORKER', 'NOBODY_FREE');
+    const raised = await evaluate();
+    // The pass covers every App: the other App's own episode opens, so the pass did see that outcome.
+    expect(await db.saturationEpisode.count({ where: { appId: other.id } })).toBe(1);
+    expect(raised).toHaveLength(1);
+    expect(await episodes()).toEqual([]);
+    expect(await alarms()).toEqual([]);
+  });
+
   it('the stall evaluator tick runs the pass and reports it; the alarm wakes nobody in slice 1', async () => {
     await outcome(SERVER_MID, 'NO_WORKER', 1);
     const r = await taskStallTick(db, new Date());
