@@ -182,6 +182,12 @@ export interface IssueExchangeStartArgs {
   origin?: ExchangeStartOrigin;
   /** #2913: the ConnectionFlow this nonce starts (GraphQL origin only); carried to the callback so it can settle that flow. */
   flowId?: string;
+  /**
+   * #2948: the account hint (a Google login_hint), already verified at the start to equal the
+   * `mailboxEmail` of a Google connection the caller holds in that org. Carried DB-backed so the
+   * authorize redirect can emit it without the address ever riding a core URL.
+   */
+  loginHint?: string;
 }
 
 /** Who started a mailbox-connect flow (#2897). */
@@ -207,6 +213,7 @@ export async function issueExchangeStartNonce(args: IssueExchangeStartArgs): Pro
       orgId: args.orgId,
       redirect: args.redirect,
       flowId: args.flowId ?? null,
+      loginHint: args.loginHint ?? null,
       expiresAt: new Date(Date.now() + HANDOFF_TTL_MS),
     },
   });
@@ -220,6 +227,8 @@ export interface RedeemedExchangeStart {
   origin: ExchangeStartOrigin;
   /** #2913: the flow this start belongs to; null for a portal start. */
   flowId: string | null;
+  /** #2948: the verified account hint this start carries; null when the start was made without one. */
+  loginHint: string | null;
 }
 
 /** Redeem an `exchange_start` nonce (atomic single-use + expiry, bound to
@@ -246,6 +255,7 @@ export async function redeemExchangeStartNonce(
     redirect: row.redirect ?? '/',
     origin: row.kind === kinds[1] ? 'graphql' : 'portal',
     flowId: row.flowId,
+    loginHint: row.loginHint,
   };
 }
 
@@ -269,6 +279,7 @@ export async function peekExchangeStartNonce(
     redirect: row.redirect ?? '/',
     origin: row.kind === kinds[1] ? 'graphql' : 'portal',
     flowId: row.flowId,
+    loginHint: row.loginHint,
   };
 }
 

@@ -5767,6 +5767,11 @@ model AuthHandoffCode {
   signInId        String?   @map("sign_in_id")
   /// #2913: exchange_start (GraphQL origin) only — the ConnectionFlow this nonce belongs to. No FK: the flow outlives the nonce.
   flowId          String?   @map("flow_id")
+  /// #2948: exchange_start (Google providers) only — the account hint the caller verified as their
+  /// own connected address at the start, carried DB-backed to the authorize redirect where it
+  /// becomes Google's login_hint. The hint NEVER rides a URL (only the final Google redirect),
+  /// and the callback ignores it: the connection records the account Google authenticated.
+  loginHint       String?   @map("login_hint")
 
   user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   signIn SignIn? @relation(fields: [signInId, userId], references: [id, userId], onDelete: NoAction, onUpdate: NoAction)
