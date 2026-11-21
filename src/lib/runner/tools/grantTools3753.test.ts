@@ -13,6 +13,7 @@ import { runContext } from '../../../jobs/appRunDeps.js';
 import { lockAuthorityAnchors } from '../../auth/authorityAnchors.js';
 import { upsertPlatformActions } from '../../grants/actions.js';
 import { isGrantLive } from '../../grants/live.js';
+import { createPendingGrant, GrantCreateRefusal } from '../../grants/create.js';
 import { admitAndExecuteTool, ToolDeniedError } from '../toolAdmission.js';
 import { grantCreateMutations } from '../../../api/graphql/schema/resolvers.grantCreate.js';
 import { dropTestActions, seedReadableNodes, seedWorld, type World } from '../../grants/grantFixtures3668.js';
@@ -241,6 +242,29 @@ describe('hadron_create_grant (#3753)', () => {
     await ask(run, { expiresAt: at, maxUses: 2 });
     expect((await rows())[0]).toMatchObject({ max_uses: 2 });
     expect(new Date(`${(await rows())[0].expires_at.toISOString().replace(/Z$/, '')}Z`).toISOString()).toBe(at);
+  });
+
+  it('the principal must name THIS run AND this run\'s App: a principal with the right client id but another App is refused', async () => {
+    const run = await mintRun(w.appId, w.agentId);
+    const wrongApp = { ...runContext(db, run), appId: w.app2Id };
+    expect(await refused(hadronCreateGrant.execute({ ...ctxOf(run), principal: wrongApp as never }, { action: 'schedule.create', values: entry(), reason: 'x' }))).toBe('APP_NOT_FOUND');
+    expect(await rows()).toHaveLength(0);
+  });
+
+  it('the core refuses a run requester whose holder is not the run\'s own agent, on its own (not only behind createGrantForRun)', async () => {
+    const run = await mintRun(w.appId, w.agentId);
+    const other = await newAgent('other-holder');
+    await db.appAgent.create({ data: { appId: w.appId, agentId: other.id } }); // installed: only the run guard (not install checks) can refuse it
+    const args = (holder: { kind: 'agent' | 'user'; id: string }) => ({
+      canReadMemory: async () => true, appId: w.appId, requester: { runId: run.id, agentId: w.agentId },
+      holder, heldAgentAnchor: holder.id, action: 'schedule.create', values: entry(), reason: 'x',
+    });
+    for (const holder of [{ kind: 'agent' as const, id: other.id }, { kind: 'user' as const, id: w.user2Id }]) {
+      const err = await db.$transaction((tx) => createPendingGrant(tx, args(holder) as never)).then(() => null, (e) => e);
+      expect(err).toBeInstanceOf(GrantCreateRefusal);
+      expect((err as GrantCreateRefusal).code).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    }
+    expect(await rows()).toHaveLength(0);
   });
 
   it('B14 (structural only): no non-run caller reaches the run arm: the tool refuses any principal that is not THIS run (isRunPrincipal and clientId run:<runId>), and its schema has no holder, App or activation key', async () => {
