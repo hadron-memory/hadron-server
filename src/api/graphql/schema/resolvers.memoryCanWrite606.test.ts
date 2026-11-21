@@ -5,15 +5,16 @@
  * so a drift between the flag and a write that would actually be refused fails here. A handful of cells also pin the
  * answer outright, so a gate that changed under both sides at once cannot pass silently.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { GraphQLError } from 'graphql';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { PrismaClient } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { requireMemoryWriteAccess, canWriteMemoryRecord } from './resolvers.helpers.js';
+import { requireMemoryWriteAccess, canWriteMemoryRecord, isMemoryWriteRefusal, memoryWriteForbidden } from './resolvers.helpers.js';
 
-const M = resolvers.Memory as unknown as { canWrite: (m: { id: string }, a: unknown, c: Context) => Promise<boolean> };
+const M = resolvers.Memory as unknown as { canWrite: (m: { id: string }, a: unknown, c: Context) => Promise<boolean | null> };
 const ctxOf = (o: Partial<Context>): Context => ({ db, ...o }) as Context;
 
 let org: { id: string };
@@ -51,7 +52,7 @@ beforeEach(async () => {
 
 async function gateAllows(ctx: Context, id: string): Promise<boolean> {
   try { await requireMemoryWriteAccess(ctx, id); return true; } catch (e: any) {
-    if (e?.extensions?.code === 'FORBIDDEN' || e?.extensions?.code === 'UNAUTHENTICATED') return false;
+    if (isMemoryWriteRefusal(e)) return false; // the same predicate the field uses
     throw e;
   }
 }
@@ -93,20 +94,41 @@ describe('#606 Memory.canWrite equals the write gate (matrix)', () => {
   });
 
   it('an App key with no user answers as the gate does (canWriteToMemory)', async () => {
-    const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'cw-app', slug: 'cw-app' } as any }).catch(() => null);
-    const c = ctxOf({ appId: app?.id ?? 'no-such-app' } as any);
-    expect(await M.canWrite({ id: shared.id }, {}, c)).toBe(await gateAllows(c, shared.id));
+    const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'cw-app', urn: 'cw-org::cw-app' } });
+    const c = ctxOf({ appId: app.id } as any);
+    const expected = await gateAllows(c, shared.id);
+    expect(await M.canWrite({ id: shared.id }, {}, c)).toBe(expected);
+    expect(expected).toBe(false); // pinned: a bare App key with no membership cannot write an org memory
   });
 
-  it('a gate failure that is not a refusal propagates instead of reading false', async () => {
-    await expect(M.canWrite({ id: 'no-such-memory' }, {}, ctxOf({ userId: u.contributor.id, roles: ['READER'] }))).rejects.toThrow();
+  it('a gate failure that is not a refusal answers null (unknown), never false, and does not throw', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const c = ctxOf({ userId: u.contributor.id, roles: ['READER'] });
+      await expect(canWriteMemoryRecord(c, 'no-such-memory')).rejects.toThrow(); // the helper still propagates
+      expect(await M.canWrite({ id: 'no-such-memory' }, {}, c)).toBeNull();
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('classifies a refusal by identity, not by its message text', async () => {
+    expect(isMemoryWriteRefusal(memoryWriteForbidden())).toBe(true);
+    // same words and code, but not made by memoryWriteForbidden(): a different failure
+    const lookalike = new GraphQLError(memoryWriteForbidden().message, { extensions: { code: 'FORBIDDEN' } });
+    expect(isMemoryWriteRefusal(lookalike)).toBe(false);
+    // a reworded refusal made by the gate's own constructor still counts
+    expect(isMemoryWriteRefusal(Object.assign(memoryWriteForbidden(), { message: 'reworded' }))).toBe(true);
   });
 
   it('is memoised per request context only', async () => {
     const c = ctxOf({ userId: u.contributor.id, roles: ['READER'] });
     const first = canWriteMemoryRecord(c, shared.id);
     expect(canWriteMemoryRecord(c, shared.id)).toBe(first);
-    expect(canWriteMemoryRecord(ctxOf({ userId: u.contributor.id, roles: ['READER'] }), shared.id)).not.toBe(first);
+    const other = canWriteMemoryRecord(ctxOf({ userId: u.contributor.id, roles: ['READER'] }), shared.id);
+    expect(other).not.toBe(first);
+    await Promise.all([first, other]);
   });
 });
 
@@ -131,7 +153,10 @@ describe('#606 query cost of memories(limit: 50)', () => {
       n = 0;
       await M.canWrite({ id: ids[0] }, {}, c2);
       const perMemory = n;
+      expect(perMemory).toBeGreaterThan(0); // the logging client really saw the gate's queries (not a vacuous 0 <= 0)
+      expect(total).toBeGreaterThan(0);
       expect(total).toBeLessThanOrEqual(perMemory * 50);
+      expect(perMemory).toBeLessThanOrEqual(12); // absolute ceiling per distinct memory
     } finally {
       await logged.$disconnect();
     }

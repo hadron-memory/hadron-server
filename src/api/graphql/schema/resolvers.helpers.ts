@@ -3051,7 +3051,8 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
 /**
  * #606 — the non-throwing twin of `requireMemoryWriteAccess`: "would a write to this memory be refused for this caller?"
  * It RUNS the gate and maps only its own refusal to false, so it cannot drift from it (no branch is copied here). Any
- * other failure (a DB error, a missing row) propagates instead of reading as "cannot write". A caller with no
+ * other failure (a DB error, a missing row) propagates from here instead of reading as "cannot write"; the
+ * `Memory.canWrite` field turns it into null (unknown) so one memory cannot null a list. A caller with no
  * identity at all (no user, no App) cannot write, which is the gate's own unauthenticated answer.
  *
  * Memoised per request context: a list of N memories asks the gate once per distinct memory, and a memory that
@@ -3074,17 +3075,25 @@ export function canWriteMemoryRecord(ctx: Context, memoryId: string): Promise<bo
         throw err;
       },
     );
-    perRequest.set(memoryId, answer);
+    const memo = perRequest;
+    memo.set(memoryId, answer);
     // A thrown (non-refusal) answer must not be remembered as the memory's answer.
-    answer.catch(() => perRequest!.delete(memoryId));
+    answer.catch(() => memo.delete(memoryId));
   }
   return answer;
 }
 
-function isMemoryWriteRefusal(err: unknown): boolean {
+/**
+ * #606 — the errors `memoryWriteForbidden()` made. Classification is by IDENTITY (this set), never by the denial's
+ * prose, so rewording the message cannot turn a refusal into a failure; every refusal the gate throws comes from
+ * `memoryWriteForbidden()`.
+ */
+const memoryWriteRefusals = new WeakSet<object>();
+
+/** True for the gate's own write refusal (made by `memoryWriteForbidden`) and for its no-identity answer. */
+export function isMemoryWriteRefusal(err: unknown): boolean {
   if (!(err instanceof GraphQLError)) return false;
-  const code = err.extensions?.code;
-  return (code === 'FORBIDDEN' && err.message === memoryWriteForbidden().message) || code === 'UNAUTHENTICATED';
+  return memoryWriteRefusals.has(err) || err.extensions?.code === 'UNAUTHENTICATED';
 }
 
 /**
@@ -3093,9 +3102,11 @@ function isMemoryWriteRefusal(err: unknown): boolean {
  * explicit so Apollo does not report an ordinary denial as a server fault.
  */
 export function memoryWriteForbidden(): GraphQLError {
-  return new GraphQLError('Forbidden: no write access to this memory', {
+  const err = new GraphQLError('Forbidden: no write access to this memory', {
     extensions: { code: 'FORBIDDEN' },
   });
+  memoryWriteRefusals.add(err);
+  return err;
 }
 
 export const MEMORY_INCLUDE = {

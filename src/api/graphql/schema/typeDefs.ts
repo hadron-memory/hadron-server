@@ -4388,19 +4388,21 @@ export const typeDefs = `#graphql
     """
     maxRevCount: Int!
     """
+    #606 — whether the CALLER may write to this memory: true exactly when a write to it would not be refused by the
+    memory write gate, for the request's own principal (user, impersonation, App key or run). It says nothing about
+    other users, and a Memory is only reachable here when the caller may already read it. Lets a write-target
+    picker filter without one effectiveAccess call per memory (the server still runs the gate once per distinct
+    memory per request). Null means the answer could not be determined (an unexpected failure, logged
+    server-side), never "cannot write"; it is nullable so one failing memory cannot null a whole list.
+    """
+    canWrite: Boolean
+    """
     #1447/#1448, derived per node since #1591 — DRAFT while none of this
     memory's live nodes is minted, MINTED once any is. Draft rights are per
     node: an unminted node can be renumbered, moved without a URN alias, and
     bulk-replaced, in any memory (see Node.mintStatus).
     """
     corpusState: CorpusState!
-    """
-    #606 — whether the CALLER may write to this memory: true exactly when a write to it would not be refused by the
-    memory write gate, for the request's own principal (user, impersonation, App key or run). It says nothing about
-    other users, and a Memory is only reachable here when the caller may already read it. Lets a write-target
-    picker filter without one effectiveAccess call per memory.
-    """
-    canWrite: Boolean!
     "#1448/#1591 — the latest mint time among this memory's live nodes; null while none is minted."
     corpusMintedAt: DateTime
     """

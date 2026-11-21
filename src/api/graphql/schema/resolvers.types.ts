@@ -1728,7 +1728,15 @@ export const typeResolvers = {
     corpusState: async (m: { id: string }, _: unknown, ctx: Context) =>
       (await corpusMintStateOf(ctx.db, m.id)).state,
     // #606: the memory write gate's own answer for THIS caller (resolvers.helpers canWriteMemoryRecord).
-    canWrite: (m: { id: string }, _: unknown, ctx: Context) => canWriteMemoryRecord(ctx, m.id),
+    // A failure that is not the gate's refusal answers null (unknown), logged, so one memory cannot null a list.
+    canWrite: async (m: { id: string }, _: unknown, ctx: Context) => {
+      try {
+        return await canWriteMemoryRecord(ctx, m.id);
+      } catch (err) {
+        console.warn(`[Memory.canWrite] write gate failed for memory ${m.id}; answering null:`, err);
+        return null;
+      }
+    },
     // A Memory reader may be external to its owning org. The nested object
     // exposes org policy and relations, so apply organization(ref:)'s gate.
     organization: (g: { organizationId: string | null }, _: unknown, ctx: Context) =>
