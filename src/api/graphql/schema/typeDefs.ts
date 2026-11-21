@@ -13742,8 +13742,10 @@ export const typeDefs = `#graphql
     organization (by ID or URN) is a no-op. Naming any other organization answers
     USE_TRANSFER_MEMORY_OWNERSHIP: use \`transferMemoryOwnership\` to change a
     memory's owner. For a caller who may manage the memory, an organization that
-    does not exist answers ORGANIZATION_NOT_FOUND; any other caller gets the
-    memory's own concealed answer first. An empty string \`orgRef: ""\` also
+    does not exist answers ORGANIZATION_NOT_FOUND. A caller who cannot read the
+    memory gets its concealed MEMORY_NOT_FOUND first, and a caller who can read
+    it but may not manage it gets the ordinary authorization denial; neither
+    reaches the organization lookup. An empty string \`orgRef: ""\` also
     answers USE_TRANSFER_MEMORY_OWNERSHIP.
 
     Spec 033 FR-026: enabling \`vectorIndexEnabled\` on an \`isEncrypted\` memory

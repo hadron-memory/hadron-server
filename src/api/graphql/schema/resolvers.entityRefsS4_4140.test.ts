@@ -76,6 +76,8 @@ describe('#4140 updateMemory(ref, orgRef) and updateOrganization(ref)', () => {
     expect(doc).toContain('USE_TRANSFER_MEMORY_OWNERSHIP');
     expect(doc).toContain('transferMemoryOwnership');
     expect(doc).toMatch(/may manage the memory, an organization that\s+does not exist answers ORGANIZATION_NOT_FOUND/);
+    expect(doc).toMatch(/cannot read the\s+memory gets its concealed MEMORY_NOT_FOUND/);
+    expect(doc).toMatch(/can read\s+it but may not manage it gets the ordinary authorization denial/);
     expect(doc).not.toMatch(/must equal/i);
   });
   it('ref accepts a PK and a URN; the memory\'s OWN org by URN or PK is a no-op', async () => {
@@ -105,6 +107,13 @@ describe('#4140 updateMemory(ref, orgRef) and updateOrganization(ref)', () => {
     const missing = await refusal(M.updateMemory({}, { ref: generateId(), orgRef: 'no-such-org.example' }, ctxOf(stranger.id)));
     expect(codeOf(outsider)).toBe('MEMORY_NOT_FOUND');
     expect(codeOf(missing)).toBe('MEMORY_NOT_FOUND');
+  });
+  it('#4218: a readable non-manager gets the ordinary authorization denial, never the org lookup or the concealed answer, as the SDL says', async () => {
+    const m = await knowledge(orgA, 'readable');
+    const denied = await refusal(M.updateMemory({}, { ref: m.id, orgRef: 'no-such-org.example' }, ctxOf(member.id)));
+    expect(codeOf(denied)).not.toBe('ORGANIZATION_NOT_FOUND');
+    expect(codeOf(denied)).not.toBe('MEMORY_NOT_FOUND');
+    expect(String(denied.message)).toMatch(/forbidden|admin|permission|manage|access/i);
   });
   it('updateOrganization ref accepts a PK and a URN, and the ADMIN gate is on the resolved org', async () => {
     for (const ref of [orgA.id, orgA.urn]) {
