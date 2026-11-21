@@ -1,14 +1,12 @@
 name: Object-Store Import Boundary
 
 # #905: call sites may import ONLY the provider-neutral scaffold
-# `src/integrations/objectstore/index.js`. The provider implementation
-# under `src/integrations/objectstore/s3/` (and the AWS SDK it wraps)
-# is an internal detail of the scaffold, and the retired
-# `src/integrations/r2/` path must not come back.
-#
-# Plain grep, not TypeScript, because the boundary has to hold for the
-# string paths inside `vi.mock(...)` calls too — those are invisible to
-# `tsc --noEmit`, so a stale one fails only at test runtime.
+# `src/integrations/objectstore/index.js`. The checks live in
+# scripts/check-objectstore-boundary.sh (retired r2/ path, provider-dir
+# references — including noncanonical equivalents — and direct S3-family
+# AWS SDK imports, all confined to the scaffold), which
+# src/integrations/objectstore/boundaryGuard.test.ts proves against fixture
+# trees.
 
 on:
   pull_request:
@@ -25,31 +23,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: git grep — retired r2/ path in src/
-        run: |
-          set +e
-          MATCHES=$(git grep -n 'integrations/r2' -- 'src/')
-          set -e
-          if [ -n "$MATCHES" ]; then
-            echo "::error::References to the retired integrations/r2 path found in src/ (#905 moved it to integrations/objectstore):"
-            echo "$MATCHES"
-            echo ""
-            echo "Import the provider-neutral scaffold 'integrations/objectstore/index.js' instead."
-            exit 1
-          fi
-          echo "OK — no retired r2/ path in src/."
-
-      - name: git grep — provider directory referenced outside objectstore/
-        run: |
-          set +e
-          MATCHES=$(git grep -n 'objectstore/s3' -- 'src/' ':(exclude)src/integrations/objectstore/**')
-          set -e
-          if [ -n "$MATCHES" ]; then
-            echo "::error::References to the s3 provider directory found outside src/integrations/objectstore/ (#905):"
-            echo "$MATCHES"
-            echo ""
-            echo "Call sites must import only 'integrations/objectstore/index.js' (the scaffold)."
-            echo "If a neutral operation is missing, extend the barrel rather than reaching into s3/."
-            exit 1
-          fi
-          echo "OK — objectstore/s3 referenced only from inside the scaffold."
+      - name: Object-store import boundary (r2 path, provider refs, S3 SDK)
+        run: bash scripts/check-objectstore-boundary.sh src
