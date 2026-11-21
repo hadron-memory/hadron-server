@@ -1973,17 +1973,26 @@ export const typeResolvers = {
      * surface (findings:broadening-read-gate-leaks-nested-objects): null, silently, for anyone who fails it, for a refused
      * principal (App key, impersonation, run) and for a request with no user. A member reads MEMBER with no role.
      */
-    selfJoin: async (
-      a: { id: string; organizationId: string | null; ownerUserId: string | null; deletedAt?: Date | null; uninstalledAt?: Date | null },
-      _: unknown, ctx: Context,
-    ) => {
-      if (!ctx.userId || isRefusedPrincipal(ctx) || a.deletedAt) return null;
-      if (!(await canReadApp(ctx, a))) return null;
-      const member = await ctx.db.appMember.findUnique({ where: { appId_userId: { appId: a.id, userId: ctx.userId } }, select: { userId: true } });
+    selfJoin: async (a: { id: string }, _: unknown, ctx: Context) => {
+      if (!ctx.userId || isRefusedPrincipal(ctx)) return null;
+      // Re-read the App by id: a route that reaches App with a narrower select leaves the lifecycle columns undefined, and
+      // reading `undefined` as "installed" would answer OPEN where joinApp refuses (BLIND P2-2). The ownership columns the read
+      // gate needs come from the same fresh row, never from what the parent happens to carry.
+      const app = await ctx.db.app.findUnique({
+        where: { id: a.id },
+        select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
+      });
+      if (!app || app.deletedAt) return null;
+      if (!(await canReadApp(ctx, app))) return null;
+      // The shared gate decision (resolveSelfJoinRole) is joinApp's own; the rows around it are pinned one by one against the real
+      // joinApp. ONE deliberate difference: joinApp checks the lifecycle first, then the idempotent re-join, but a member is
+      // answered MEMBER before the lifecycle check (condition 4: a member learns nothing new, and MEMBER is only what they know),
+      // so a member of an uninstalled App reads MEMBER where joinApp would refuse it as uninstalled (pinned).
+      const member = await ctx.db.appMember.findUnique({ where: { appId_userId: { appId: app.id, userId: ctx.userId } }, select: { userId: true } });
       if (member) return { state: 'MEMBER', role: null };
-      if (a.uninstalledAt) return { state: 'CLOSED', role: null };
-      try { return { state: 'OPEN', role: await resolveSelfJoinRole(ctx.db, a.id) }; }
-      catch (e) { if (e instanceof SelfJoinNotAllowedError) return { state: 'CLOSED', role: null }; throw e; }
+      if (app.uninstalledAt) return { state: 'CLOSED', role: null };
+      try { return { state: 'OPEN', role: await resolveSelfJoinRole(ctx.db, app.id) }; }
+      catch (e) { if (e instanceof SelfJoinNotAllowedError) return { state: 'CLOSED', role: null }; throw e; } // any other failure is a real failure, never CLOSED
     },
     /** #2109 — whether the caller manages this App; the shared managesApp predicate as a read-time fact. */
     viewerManages: (a: { id: string }, _: unknown, ctx: Context) => loadViewerManages(ctx, a.id),

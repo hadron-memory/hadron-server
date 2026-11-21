@@ -154,6 +154,13 @@ describe('#4490 condition 4: a member learns nothing new', () => {
     expect(open).toEqual({ state: 'MEMBER', role: null });
     expect(closed).toEqual(open);
   });
+  it('the one deliberate difference from joinApp: a member of an UNINSTALLED App reads MEMBER (joinApp would refuse it as uninstalled)', async () => {
+    await db.orgMember.create({ data: { organizationId: org.id, userId: participant.id, role: 'READER' } });
+    await setPolicy(OPEN);
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    expect(await read(participant.id)).toEqual({ state: 'MEMBER', role: null }); // reveals only what the member already knows
+    await expect(M.joinApp(null, { appRef: app.id }, as(participant.id))).rejects.toMatchObject({ extensions: { code: 'AppUninstalledError' } });
+  });
   it('a member who cannot read the App by app(ref:) reaches it only through their membership and learns nothing: null', async () => {
     await setPolicy(OPEN);
     const row = await db.app.findUniqueOrThrow({ where: { id: app.id } });
