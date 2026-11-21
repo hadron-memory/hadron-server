@@ -30,11 +30,16 @@ let f: any;
 const live = { kind: 'LIVE_CHAT', ref: 'client-chat:turn-3347' };
 const ctx = (extra: Partial<Context> = {}): Context => ({ db, userId: f.holder.id, roles: ['READER'], ...extra });
 const bound = (extra: Partial<Context> = {}) => ctx({ sessionId: f.session.id, ...extra });
-/** What a door answered: `RESOLVED` with its value, or the refusal's code and text. (#4740 F5: `value` is typed, so no cast at the use.) */
+/** What a door answered: `RESOLVED` with its value (typed `unknown`; the use narrows by asserting its shape), or the refusal's code and text. */
 type Answer = { code: string | undefined; message?: string; value?: unknown };
 const answer = async (p: Promise<unknown>): Promise<Answer> => {
   try { const value = await p; return { code: 'RESOLVED', value }; } catch (e: any) { return { code: e.extensions?.code, message: e.message }; }
 };
+/** The names and the target the doors use, defined ONCE: `calls` below and the `actsOn` precondition both read these, so the table cannot drift from the calls (#4740 F5). */
+const CAST_NAME = 'NewWorker';
+const PREVIEW_NAME = 'Preview';
+const DRIFT_NAME = 'Casted'; // the cast-drift test's own cast, which is not a matrix door but must not be the bystander either
+const targetId = (): string => f.target.id;
 /** Every door either matrix runs, and the six the substitution matrix runs (cast and preview pin theirs in resolvers.staffMember3308.test.ts).
  *  The per-door tables below are keyed by these unions, so a door added without its entry, or a typo, is a compile error (#4740 F3). */
 const DOORS = ['cast', 'retire', 'delete', 'deletePreview', 'add', 'remove', 'preview', 'leave'] as const;
@@ -42,14 +47,14 @@ type Door = (typeof DOORS)[number];
 const SUBSTITUTION_DOORS = ['retire', 'delete', 'deletePreview', 'add', 'remove', 'leave'] as const;
 type SubstitutionDoor = (typeof SUBSTITUTION_DOORS)[number];
 const calls: Record<Door, (instruction?: unknown, c?: Context) => Promise<any>> = {
-  cast: (instruction, c = bound()) => M.castWorker({}, { appRef: f.app.id, agentRef: f.agent.id, name: 'NewWorker', noTeam: true, instruction }, c),
-  retire: (instruction, c = bound()) => M.retireWorker({}, { workerRef: f.target.id, instruction }, c),
-  delete: (instruction, c = bound()) => M.deleteWorker({}, { workerRef: f.target.id, confirmNoExternalAttribution: true, instruction }, c),
+  cast: (instruction, c = bound()) => M.castWorker({}, { appRef: f.app.id, agentRef: f.agent.id, name: CAST_NAME, noTeam: true, instruction }, c),
+  retire: (instruction, c = bound()) => M.retireWorker({}, { workerRef: targetId(), instruction }, c),
+  delete: (instruction, c = bound()) => M.deleteWorker({}, { workerRef: targetId(), confirmNoExternalAttribution: true, instruction }, c),
   add: (instruction, c = bound()) => M.ensureAppMember({}, { appRef: f.app.id, userRef: f.other.id, role: 'member', instruction }, c),
   remove: (instruction, c = bound()) => M.removeAppMember({}, { appRef: f.app.id, userRef: f.other.id, instruction }, c),
-  preview: (instruction, c = bound()) => Q.castWorkerPreview({}, { appRef: f.app.id, agentRef: f.agent.id, name: 'Preview', noTeam: true, instruction }, c),
+  preview: (instruction, c = bound()) => Q.castWorkerPreview({}, { appRef: f.app.id, agentRef: f.agent.id, name: PREVIEW_NAME, noTeam: true, instruction }, c),
   leave: (instruction, c = bound()) => M.leaveApp({}, { appRef: f.app.id, instruction }, c),
-  deletePreview: (instruction, c = bound()) => Q.deleteWorkerPreview({}, { workerRef: f.target.id, instruction }, c),
+  deletePreview: (instruction, c = bound()) => Q.deleteWorkerPreview({}, { workerRef: targetId(), instruction }, c),
 };
 const snapshot = async () => ({
   workers: await db.worker.findMany({ where: { appId: f.app.id }, orderBy: { id: 'asc' } }),
@@ -57,6 +62,11 @@ const snapshot = async () => ({
   events: await db.agentTeamEvent.findMany({ where: { appId: f.app.id }, orderBy: { id: 'asc' } }),
   grants: await db.appGrant.findMany({ where: { appId: f.app.id }, orderBy: { id: 'asc' } }),
 });
+/** The events `after` has that `before` did not, by id (never by position: ids are UUIDv7, time-ordered only to the millisecond). */
+const createdSince = <T extends { id: string }>(before: T[], after: T[]): T[] => {
+  const known = new Set(before.map((e) => e.id));
+  return after.filter((e) => !known.has(e.id));
+};
 const grantName = (door: Door) => (door === 'add' || door === 'remove' || door === 'leave' ? 'APP_MEMBERS' : 'WORKERS_STAFF');
 const storedName = (door: Door) => (grantName(door) === 'APP_MEMBERS' ? 'app.members' : 'workers.staff');
 const give = (door: Door, workerId = f.worker.id) => M.grantApp({}, { appRef: f.app.id, workerRef: workerId, name: grantName(door) }, ctx());
@@ -70,8 +80,8 @@ type Acts = { workerIds: string[]; workerNames: string[]; userIds: string[] };
 const actsOn = (door: Door): Acts => {
   const none: Acts = { workerIds: [], workerNames: [], userIds: [] };
   const table: Record<Door, Acts> = {
-    cast: { ...none, workerNames: ['NewWorker', 'Casted'] }, preview: { ...none, workerNames: ['Preview'] },
-    retire: { ...none, workerIds: [f.target.id] }, delete: { ...none, workerIds: [f.target.id] }, deletePreview: { ...none, workerIds: [f.target.id] },
+    cast: { ...none, workerNames: [CAST_NAME, DRIFT_NAME] }, preview: { ...none, workerNames: [PREVIEW_NAME] },
+    retire: { ...none, workerIds: [targetId()] }, delete: { ...none, workerIds: [targetId()] }, deletePreview: { ...none, workerIds: [targetId()] },
     add: { ...none, userIds: [f.other.id] }, remove: { ...none, userIds: [f.other.id] }, leave: { ...none, userIds: [f.holder.id] },
   };
   return table[door];
@@ -198,13 +208,13 @@ describe('#3347 the cast reporting head drifting after the plan is refused', () 
       await tx.worker.update({ where: { id: stranger.id }, data: { name: 'Head', slug: 'head' } });
     });
     const before = await snapshot();
-    const a = await M.castWorker({}, { appRef: f.app.id, agentRef: f.agent.id, name: 'Casted', reportsTo: 'Head' }, ctx({ db: client })).then(() => null, (e: any) => e);
+    const a = await M.castWorker({}, { appRef: f.app.id, agentRef: f.agent.id, name: DRIFT_NAME, reportsTo: 'Head' }, ctx({ db: client })).then(() => null, (e: any) => e);
     expect(fired()).toBe(true);
     expect(a?.extensions).toMatchObject({ code: 'CAST_TARGET_CHANGED', retryable: true });
     // nothing written: the refused cast rolled the whole transaction back, the hook's own renames included, so the
     // workers (and so the reporting graph), the events and the grants are exactly as they were
     expect(await snapshot()).toEqual(before);
-    expect(await db.worker.count({ where: { name: 'Casted' } })).toBe(0);
+    expect(await db.worker.count({ where: { name: DRIFT_NAME } })).toBe(0);
   });
 });
 
@@ -247,14 +257,16 @@ describe('#3347 preflight-to-locked Session-principal substitution (the doors ca
   };
   // #4740 N2: what each control's act did, as a before/after diff of the App's rows (not only RESOLVED). `deletePreview` writes
   // nothing and returns its attestation payload; the others change exactly the rows named here.
-  const tookEffect = (door: SubstitutionDoor, before: Awaited<ReturnType<typeof snapshot>>, after: Awaited<ReturnType<typeof snapshot>>, value: any) => {
+  const tookEffect = (door: SubstitutionDoor, before: Awaited<ReturnType<typeof snapshot>>, after: Awaited<ReturnType<typeof snapshot>>, value: unknown) => {
+    // a missing row fails with its name, not a bare TypeError on a `!` (#4740 F6)
+    const must = <T,>(row: T | undefined, what: string): T => { expect(row, what).toBeDefined(); return row as T; };
     const worker = (rows: typeof before.workers, id: string) => rows.find((w: any) => w.id === id);
     const member = (rows: typeof before.members, id: string) => rows.find((m: any) => m.userId === id);
     const others = <T,>(rows: T[], idOf: (row: T) => string, skip: string) => rows.filter((row) => idOf(row) !== skip);
     expect(after.events.length, `${door}: one staffing event recorded`).toBe(door === 'deletePreview' ? before.events.length : before.events.length + 1);
     if (door === 'retire') {
-      expect(worker(before.workers, f.target.id)!.retiredAt).toBeNull();
-      expect(worker(after.workers, f.target.id)!.retiredAt).not.toBeNull();
+      expect(must(worker(before.workers, f.target.id), 'the target before').retiredAt).toBeNull();
+      expect(must(worker(after.workers, f.target.id), 'the target after').retiredAt).not.toBeNull();
       expect(others(after.workers, (w) => w.id, f.target.id)).toEqual(others(before.workers, (w) => w.id, f.target.id));
     } else if (door === 'delete') {
       expect(after.workers).toEqual(others(before.workers, (w) => w.id, f.target.id)); // only the target is gone, nothing else moved
@@ -263,8 +275,8 @@ describe('#3347 preflight-to-locked Session-principal substitution (the doors ca
       expect(after.workers).toEqual(before.workers);
       expect(after.members).toEqual(before.members);
     } else if (door === 'add') {
-      expect(member(before.members, f.other.id)!.role).toBe('reader');
-      expect(member(after.members, f.other.id)!.role).toBe('member');
+      expect(must(member(before.members, f.other.id), 'the member before').role).toBe('reader');
+      expect(must(member(after.members, f.other.id), 'the member after').role).toBe('member');
       expect(others(after.members, (m) => m.userId, f.other.id)).toEqual(others(before.members, (m) => m.userId, f.other.id)); // no other member row moved
       expect(after.workers).toEqual(before.workers); // and no worker row
     } else if (door === 'remove') {
@@ -273,6 +285,14 @@ describe('#3347 preflight-to-locked Session-principal substitution (the doors ca
     } else {
       expect(member(after.members, f.holder.id)).toBeUndefined();
       expect(after.members).toEqual(others(before.members, (m) => m.userId, f.holder.id));
+    }
+    // #4740 F3: every collection the door does not own is exactly as it was, so a cross-collection side effect cannot pass.
+    const owns: Record<SubstitutionDoor, Array<keyof typeof before>> = {
+      retire: ['workers', 'events'], delete: ['workers', 'events'], deletePreview: [],
+      add: ['members', 'events'], remove: ['members', 'events'], leave: ['members', 'events'],
+    };
+    for (const key of ['workers', 'members', 'events', 'grants'] as const) {
+      if (!owns[door].includes(key)) expect(after[key], `${door} left ${key} untouched`).toEqual(before[key]);
     }
   };
   for (const door of SUBSTITUTION_DOORS) {
@@ -291,8 +311,11 @@ describe('#3347 preflight-to-locked Session-principal substitution (the doors ca
       tookEffect(door, before, after, result.value);
       // N7, observed: whatever the door did, it did nothing to the bystander (its row) and wrote no event that names it.
       expect(await bystanderRow()).toEqual(bystander);
-      // (new events are ordered after the old by id; ULIDs are fixed-length, so one id is never a substring of another)
-      expect(JSON.stringify(after.events.slice(before.events.length))).not.toContain(f.bystander.id);
+      // New events by SET DIFFERENCE on ids: generateId is a UUIDv7 (time-ordered only to the millisecond, a random tail within one), so
+      // `slice(before.length)` could swap an old event in for a new one. The ids are 32 hex characters, so none is a substring of another.
+      const created = createdSince(before.events, after.events);
+      expect(created, `${door} recorded ${door === 'deletePreview' ? 'no' : 'exactly one'} staffing event`).toHaveLength(door === 'deletePreview' ? 0 : 1);
+      expect(JSON.stringify(created)).not.toContain(f.bystander.id);
     });
     it(`${door}: a transaction-local Session substitution cannot replace the preflight worker`, async () => {
       const { client, opened, swappedAt } = await setup(door, true);
@@ -333,6 +356,20 @@ describe('#4740 hookQuery matches one statement, never a batch', () => {
     const single = hookQuery(grants, async () => undefined, 'before');
     await single.client.$transaction(async (tx: any) => { await tx.$queryRaw(Prisma.sql`SELECT id FROM app_grants FOR SHARE`); });
     expect(single.fired()).toBe(true);
+  });
+});
+
+// #4740 F1: the new-events computation is by id, so an OLD event that sorts after a NEW one (ids tie to the millisecond) cannot stand in for it.
+describe('#4740 createdSince finds new events by id, not by position', () => {
+  it('picks the new event even when it sorts BEFORE an old one, where a slice by count picks the old one', () => {
+    const before = [{ id: 'b-old' }];
+    const after = [{ id: 'a-new' }, { id: 'b-old' }]; // ordered by id: the new event sorts first
+    expect(after.slice(before.length)).toEqual([{ id: 'b-old' }]); // the position-based reading would inspect the wrong event
+    expect(createdSince(before, after)).toEqual([{ id: 'a-new' }]);
+  });
+  it('is empty when nothing was created, and returns every new event when several were', () => {
+    expect(createdSince([{ id: 'x' }], [{ id: 'x' }])).toEqual([]);
+    expect(createdSince([{ id: 'x' }], [{ id: 'm' }, { id: 'x' }, { id: 'z' }])).toEqual([{ id: 'm' }, { id: 'z' }]);
   });
 });
 
