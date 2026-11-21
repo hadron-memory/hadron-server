@@ -158,6 +158,32 @@ describe('renumberSpec (#1449)', () => {
     expect(mirrorNodeMoveToGit).toHaveBeenCalledTimes(1);
   });
 
+  it('#4461: toLoc is held to the loc contract (bad charset and over-cap refuse BAD_USER_INPUT, field toLoc, no echo)', async () => {
+    for (const [toLoc, reason] of [['pas:04 0', 'invalid-charset'], [Array.from({ length: 10 }, (_, i) => `seg${i}${'x'.repeat(48)}`).join(':').padEnd(513, 'z'), 'too-long']] as const) {
+      const err = await renumber(true, 'pas:010', toLoc).then(() => null, (e: GraphQLError) => e);
+      expect(err?.extensions).toMatchObject({ code: 'BAD_USER_INPUT', field: 'toLoc', reason });
+      expect(JSON.stringify([err?.message, err?.extensions])).not.toContain(toLoc);
+    }
+    expect(await db.node.count({ where: { memoryId: draft.id, loc: 'pas:010', deletedAt: null } })).toBe(1);
+  });
+
+  it('#4461: an existing over-cap source still renumbers (fromLoc is not capped)', async () => {
+    const longLoc = Array.from({ length: 9 }, (_, i) => `seg${i}${'x'.repeat(60)}`).join(':');
+    expect(longLoc.length).toBeGreaterThan(512);
+    await spec(longLoc, 'Overcap spec', 'x');
+    const result = await renumber(false, longLoc, 'pas:050');
+    expect(result.moved).toEqual([{ fromLoc: longLoc, toLoc: 'pas:050' }]);
+    expect(await db.node.count({ where: { memoryId: draft.id, loc: 'pas:050', deletedAt: null } })).toBe(1);
+  });
+
+  it('#4461: a bad-charset fromLoc refuses the same way at any length, without echo (field fromLoc)', async () => {
+    for (const fromLoc of ['pas:01 0', `${Array.from({ length: 15 }, () => 'a'.repeat(40)).join(':')}:b c`]) {
+      const err = await renumber(true, fromLoc, 'pas:050').then(() => null, (e: GraphQLError) => e);
+      expect(err?.extensions).toMatchObject({ code: 'BAD_USER_INPUT', field: 'fromLoc', reason: 'invalid-charset' });
+      expect(JSON.stringify([err?.message, err?.extensions])).not.toContain(fromLoc);
+    }
+  });
+
   it('dry run: returns the plan and writes nothing', async () => {
     const before = await content('pas:020');
     const plan = await renumber(true);

@@ -51,13 +51,13 @@ async function list(ctx: Context, args: Args, audience: Prisma.Sql, fullId: Pris
     SELECT count(*)::int AS total FROM secret_read_clients c, grants g, apps a WHERE ${where}`);
   if (!take) return pageEnvelope([], total, skip);
   const rows = await ctx.db.$queryRaw<Array<{
-    id: string; fullId: boolean; grantId: string; secretId: string; secretName: string; selfIssued: boolean;
+    id: string; fullId: boolean; grantId: string; secretId: string; secretName: string; selfIssued: boolean; issuedToOwnWorker: boolean | null;
     endReason: string | null; createdAt: Date; startsAt: Date | null; expiresAt: Date | null; maxUses: number | null;
     useCount: number; activatedAt: Date | null; revokedAt: Date | null; holderDepartedAt: Date | null;
     issuerUserId: string | null; destroyOnEnd: boolean; live: boolean; now: Date;
     holderUserId: string | null; holderWorkerId: string | null; holderAgentId: string | null;
   }>>(Prisma.sql`SELECT c.id, ${fullId} AS "fullId", c.grant_id AS "grantId", c.secret_id AS "secretId",
-    c.secret_name AS "secretName", c.self_issued AS "selfIssued", c.end_reason AS "endReason", c.created_at AS "createdAt",
+    c.secret_name AS "secretName", c.self_issued AS "selfIssued", c.issued_to_own_worker AS "issuedToOwnWorker", c.end_reason AS "endReason", c.created_at AS "createdAt",
     g.starts_at AS "startsAt", g.expires_at AS "expiresAt", g.max_uses AS "maxUses", g.use_count AS "useCount",
     g.activated_at AS "activatedAt", g.revoked_at AS "revokedAt", g.holder_departed_at AS "holderDepartedAt",
     (CASE WHEN g.activated_at IS NULL THEN g.requested_by_user_id ELSE g.issuer_user_id END) AS "issuerUserId", (g.action_values->>'auto-delete' = 'delete') AS "destroyOnEnd",
@@ -67,7 +67,7 @@ async function list(ctx: Context, args: Args, audience: Prisma.Sql, fullId: Pris
     ORDER BY c.created_at DESC, c.id DESC LIMIT ${take} OFFSET ${skip}`);
   return pageEnvelope(rows.map(r => ({
     clientId: r.fullId ? r.id : null, clientPrefix: r.id.slice(0, 8), grantId: r.grantId, secretId: r.secretId,
-    secretName: r.secretName, selfIssued: r.selfIssued, createdAt: r.createdAt,
+    secretName: r.secretName, selfIssued: r.selfIssued, issuedToOwnWorker:r.issuedToOwnWorker, createdAt: r.createdAt,
     startsAt: r.startsAt, expiresAt: r.expiresAt, maxReads: r.maxUses, readCount: r.useCount, destroyOnEnd: !!r.destroyOnEnd,
     endReason: r.endReason ?? endStateOf(r),
     revealUrl: r.fullId ? revealUrlFor(r, viewerPersonUserId) : null,

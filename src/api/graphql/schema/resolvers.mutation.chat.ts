@@ -447,7 +447,7 @@ export const chatMutations = {
         // (an item-linked org memory in Session.memoryId is not; Diego P1). The same set the read paths use,
         // so a user's personal/private session memory (read-only in the access map) stays a chat target.
         targetMemoryId = session?.memoryId &&
-          (await sessionScopedMemoryIds(ctx.db, ctx.appId, ctx.sessionId)).includes(session.memoryId)
+          (await sessionScopedMemoryIds(ctx.db, ctx.appId, ctx.sessionId, ctx)).includes(session.memoryId)
           ? session.memoryId : null;
         // #2895 (Vera, option a): an Agent's system memory is the Agent's own definition, not a chat space. The read
         // scope above keeps it (reads are unchanged), but no API path writes it into Session.memoryId, so a chat
@@ -554,13 +554,19 @@ export const chatMutations = {
           organizationId: agent.organizationId, ownerUserId: agent.ownerUserId,
           appId: ctx.appId ?? null, userId: ctx.userId ?? null,
         };
-        const writable = await ctx.db.agentMemoryItem.findMany({
-          where: { agentId: resolvedAgentId, deletedAt: null, role: 'read-write', memory: { deletedAt: null } },
-          orderBy: { createdAt: 'asc' },
-          select: { memoryId: true, role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
-        });
-        // #3292: an item never grants a userless principal, including an AppRun, a chat target (cor:dmo:050:09).
-        targetMemoryId = !ctx.userId ? null : writable.find((m) => linkWriteTargetAdmits(tenant, m.memory, m.role))?.memoryId ?? null;
+        // #3354: a userless principal's answer is always "no target" (below), so its
+        // writable-item lookup is skipped. Behavior-preserving: same refusal, no write.
+        if (!ctx.userId) {
+          targetMemoryId = null;
+        } else {
+          const writable = await ctx.db.agentMemoryItem.findMany({
+            where: { agentId: resolvedAgentId, deletedAt: null, role: 'read-write', memory: { deletedAt: null } },
+            orderBy: { createdAt: 'asc' },
+            select: { memoryId: true, role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
+          });
+          // #3292: an item never grants a userless principal, including an AppRun, a chat target (cor:dmo:050:09).
+          targetMemoryId = writable.find((m) => linkWriteTargetAdmits(tenant, m.memory, m.role))?.memoryId ?? null;
+        }
       }
       const homeAppId = targetMemoryId
         ? (await ctx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } }))?.appId ?? null

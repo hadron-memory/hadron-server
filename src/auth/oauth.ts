@@ -1,3 +1,4 @@
+import { buildAuthRateAdmission } from './authRate.js';
 /**
  * Spec 025-oauth-for-mcp Phase 2 — MCP-compliant OAuth 2.1
  * Authorization Server.
@@ -1862,6 +1863,8 @@ export interface OAuthRouteOptions {
 
 export function buildOAuthRouter(opts: OAuthRouteOptions = {}): Router {
   const router = Router();
+  const authRate = buildAuthRateAdmission(db, 'oauth', 'cookie');
+  const tokenRate = buildAuthRateAdmission(db, 'oauth');
 
   router.get('/.well-known/oauth-protected-resource', handleProtectedResourceMetadata);
   router.get('/.well-known/oauth-authorization-server', handleAuthorizationServerMetadata);
@@ -1881,9 +1884,10 @@ export function buildOAuthRouter(opts: OAuthRouteOptions = {}): Router {
   // a CSRF token cookie); POST processes the decision. Both depend
   // on the `cookie-parser` middleware mounted in server.ts.
   const csrf = buildAuthorizeCsrfProtection();
-  router.get('/oauth/authorize', buildHandleAuthorizeGet(csrf));
+  router.get('/oauth/authorize', authRate, buildHandleAuthorizeGet(csrf));
   router.post(
     '/oauth/authorize',
+    authRate,
     // The consent form is application/x-www-form-urlencoded.
     // express.json (mounted globally in server.ts) does NOT parse
     // form bodies; mount urlencoded here so both the CSRF
@@ -1926,6 +1930,7 @@ export function buildOAuthRouter(opts: OAuthRouteOptions = {}): Router {
   // machine-to-machine endpoint, not a browser-form endpoint.
   router.post(
     '/oauth/token',
+    tokenRate,
     express.urlencoded({ extended: false }),
     handleOAuthToken,
   );

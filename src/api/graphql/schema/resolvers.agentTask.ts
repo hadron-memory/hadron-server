@@ -1348,9 +1348,15 @@ async function partyWorkerForLock(ctx: Context, appId: string, input: PartyInput
   return ref ? resolveTaskWorkerId(ctx, appId, ref) : null;
 }
 
-export function refuseEnded(task: TaskRow): void {
+/**
+ * #4494: the remedy a refused review-seat or verdict call names. Text only: the codes and every accept/refuse outcome are unchanged.
+ * A seat binds only while its task is live (schedule, freeze, seat, verdict, finish); when it cannot bind, the signed PR receipt at the exact head is the record.
+ */
+export const SEAT_RECEIPT_REMEDY = 'Post the verdict as a signed PR receipt at the exact head, which is the record when a seat cannot bind.';
+
+export function refuseEnded(task: TaskRow, remedy?: string): void {
   if (ENDED.includes(task.status)) {
-    throw taskError('TASK_ENDED', `This task is ${task.status}; an ended task never moves again.`, {
+    throw taskError('TASK_ENDED', `This task is ${task.status}; an ended task never moves again.${remedy ? ` ${remedy}` : ''}`, {
       taskId: task.id, status: task.status,
     });
   }
@@ -1574,170 +1580,6 @@ export async function createRootTaskForRun(
   }, { lockWorkerIds: [lockedAssignee] });
   if (made.queued) await matchAfterChange(principal.db, app.id);
   return principal.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
-}
-
-/**
- * #3125 S3 (cor:agt:120:03, V42): claim one outside item for the caller, in its OWN write transaction. A root task
- * through the root create gate (the participant re-judged under the anchors by `inTaskWriteTx`), owned by and assigned
- * to the caller, with the item's URL as external id, source and an issue reference, created STARTED with its start
- * time set: the one create that enters as started (cor:agt:050:02), so no not-started alarm can fire (050:14). Events,
- * in order: task.created, task.assigned (as any create onto an assignee), task.started (V-2, V45).
- * Returns null when another caller already holds the item (TASK_EXTERNAL_ID_TAKEN from the index): the walk skips it.
- * Any other refusal is thrown, for the walk to stop on.
- */
-export async function createStartedClaim(
-  ctx: Context,
-  app: TaskApp,
-  actor: TaskActor,
-  item: { title: string; url: string },
-): Promise<TaskRow | null> {
-  const externalId = externalIdInput(item.url);
-  const references = taskReferencesInput([{ kind: 'issue', target: item.url }]);
-  const owner = actorParty(actor);
-  const lockedWorker = actor.kind === 'worker' ? actor.workerId : null;
-  const now = new Date();
-  try {
-    // The row the answer carries is read inside the claim's transaction: nothing can fail between the commit and the
-    // answer, so a committed claim is never left out of it (Jane, #3150 delta P2).
-    return await inTaskWriteTx(ctx, app, actor, () => appNotFound(app.id), async (tx, txCtx, fresh) => {
-      await refuseResettingAssignee(tx, fresh.id, owner.workerId);
-      const made = await insertTask(tx, {
-        app: fresh, parentId: null, title: item.title, description: null, source: externalId, externalId, tags: [], references,
-        startBy: null, closeSessionWhenDone: false, requirements: null, owner, assignee: owner, status: 'pending',
-        created: createdStamp(txCtx), assigned: assignedStamp(txCtx, now), evActor: eventActor(txCtx.userId),
-      });
-      await tx.agentTask.update({ where: { id: made.id }, data: { status: 'started', startedAt: new Date(), ...updatedStamp(txCtx) } });
-      await appendTaskEvent(tx, { appId: fresh.id, taskId: made.id, actor: eventActor(txCtx.userId), event: { type: 'task.started' } });
-      return startedWithAppliedSettings(tx, made.id);
-    }, { lockWorkerIds: [lockedWorker] });
-  } catch (e) {
-    if (e instanceof GraphQLError && e.extensions?.code === 'TASK_EXTERNAL_ID_TAKEN') return null;
-    throw e;
-  }
-}
-
-/** #3132: a key's or run's claim names its parties; each is resolved to a party of the App (`resolveClaimParties`). */
-export type ClaimPartiesInput = { owner?: PartyInput; assignee?: PartyInput };
-export type ClaimParties = { owner: TaskParty; assignee: TaskParty };
-
-/**
- * #3132 (cor:agt:120:03, V45 point 12; cor:agt:050:01): the owner and assignee of a claim by an App key or a run, judged
- * on `c` (the caller's gate transaction, and again inside each claim's write). The assignee must be named
- * (TASK_ASSIGNEE_REQUIRED); the owner is the one named, else the person a run acts for (`actsForUserId`; a key acts for
- * nobody, so it must name one), else TASK_OWNER_REQUIRED. Each must be a worker or participant of the App, refused
- * exactly as `createAgentTask` refuses one (TASK_OWNER_INVALID / TASK_ASSIGNEE_INVALID).
- */
-export async function resolveClaimParties(
-  c: Context,
-  app: TaskApp,
-  input: ClaimPartiesInput,
-  actsForUserId: string | null,
-): Promise<ClaimParties> {
-  if (!input.assignee) {
-    throw taskError('TASK_ASSIGNEE_REQUIRED', 'A claim by an App key or a run names its assignee: a worker of the App or a person who participates in it. The claimed task is started on their behalf.');
-  }
-  let owner: TaskParty;
-  if (input.owner) owner = await resolveParty(c, app, input.owner, 'TASK_OWNER_INVALID');
-  else if (actsForUserId) owner = await resolveParty(c, app, { user: actsForUserId }, 'TASK_OWNER_INVALID');
-  else throw taskError('TASK_OWNER_REQUIRED', 'A claim by an App key, or by a run that acts for no person, names the task\'s owner: a worker of the App or a person who participates in it.');
-  const assignee = await resolveParty(c, app, input.assignee, 'TASK_ASSIGNEE_INVALID');
-  return { owner, assignee };
-}
-
-const partyRef = (p: TaskParty): NonNullable<PartyInput> => (p.workerId ? { worker: p.workerId } : { user: p.userId as string });
-
-/**
- * #3132 (cor:agt:120:03, :050:08 claims exception, :050:11, :050:23): claim one outside item for an App key or a run, in
- * its OWN write transaction, owned by and assigned to the parties the caller's gate resolved (re-resolved here under
- * the locks, so one who left meanwhile is refused). Created STARTED on the assignee's behalf, as `createStartedClaim`
- * does for a person or worker. The key or run is the creator and every event's actor (`actorAppKeyId` /
- * `actorRunId`; no person, worker or agent is credited), and the assignee is each event's subject when the actor does
- * not resolve it (`forParty`: always for a key; for a run unless the assignee is the person it acts for).
- * Returns null when another caller already holds the item.
- */
-export async function createStartedClaimFor(
-  ctx: Context,
-  app: TaskApp,
-  creator: KeyCreator | RunCreator,
-  item: { title: string; url: string },
-  parties: ClaimParties,
-): Promise<TaskRow | null> {
-  const externalId = externalIdInput(item.url);
-  const references = taskReferencesInput([{ kind: 'issue', target: item.url }]);
-  const evActor: EventActor = creator.kind === 'appKey'
-    ? { userId: null, workerId: null, agentId: null, appKeyId: creator.appKeyId }
-    : { userId: null, workerId: null, agentId: null, runId: creator.runId };
-  const actsFor = creator.kind === 'run' ? ctx.userId ?? null : null;
-  const evFor = parties.assignee.userId && parties.assignee.userId === actsFor ? null : parties.assignee;
-  const lockedAssignee = parties.assignee.workerId ?? null;
-  const now = new Date();
-  try {
-    return await inTaskWriteTx(ctx, app, creator, () => appNotFound(app.id), async (tx, txCtx, fresh) => {
-      const again = await resolveClaimParties(txCtx, fresh, { owner: partyRef(parties.owner), assignee: partyRef(parties.assignee) }, null);
-      if ((again.assignee.workerId ?? null) !== lockedAssignee) {
-        throw taskError('TASK_CONFLICT', 'The assignee named changed while this write waited; try again.');
-      }
-      await refuseResettingAssignee(tx, fresh.id, again.assignee.workerId);
-      const made = await insertTask(tx, {
-        app: fresh, parentId: null, title: item.title, description: null, source: externalId, externalId, tags: [], references,
-        startBy: null, closeSessionWhenDone: false, requirements: null, owner: again.owner, assignee: again.assignee, status: 'pending',
-        created: {
-          createdBy: null, createdByWorkerId: null, createdByAgentId: null, createdByRunId: creator.kind === 'run' ? creator.runId : null,
-          updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null,
-        },
-        assigned: { assignedAt: now, assignedBy: null, assignedByWorkerId: null, assignedByAgentId: null },
-        evActor, evFor,
-      });
-      // The start the assignee would make, made here on their behalf (V41, the claims exception to cor:agt:050:08).
-      await tx.agentTask.update({
-        where: { id: made.id },
-        data: { status: 'started', startedAt: new Date(), updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null },
-      });
-      await appendTaskEvent(tx, { appId: fresh.id, taskId: made.id, actor: evActor, forParty: evFor, event: { type: 'task.started' } });
-      return startedWithAppliedSettings(tx, made.id);
-    }, { lockWorkerIds: [lockedAssignee] });
-  } catch (e) {
-    if (e instanceof GraphQLError && e.extensions?.code === 'TASK_EXTERNAL_ID_TAKEN') return null;
-    throw e;
-  }
-}
-
-/**
- * #3132: a headless run's read of its OWN App's tasks (the untracked list's claimed-id read), in one transaction under
- * the App's shared anchors: the App and its org live and the run still RUNNING, re-judged after the lock. Anything
- * else answers as a missing App.
- */
-export async function withRunTaskApp<T>(
-  principal: Context,
-  run: { id: string; appId: string },
-  body: (c: Context, app: TaskApp) => Promise<T>,
-): Promise<T> {
-  const gone = (): never => { throw appNotFound(run.appId); };
-  return inAnchoredAppTx(principal, run.appId, gone, async (txCtx, app) => {
-    if (app.organizationId) {
-      const org = await txCtx.db.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } });
-      if (!org) return gone();
-    }
-    try {
-      await requireRunLive(txCtx, app, run.id);
-    } catch (e) {
-      if (e instanceof TaskGateRefused) return gone();
-      throw e;
-    }
-    return body(txCtx, app);
-  });
-}
-
-/** #3132: a run names no App but its own; any other ref, or one that resolves to nothing, is the missing-App answer. */
-export async function requireRunOwnApp(principal: Context, run: { appId: string }, appRef: string | null | undefined): Promise<void> {
-  if (appRef == null || appRef === '') return;
-  let namedAppId: string | null = null;
-  try {
-    namedAppId = (await resolveAppRef(principal.db, appRef)).id;
-  } catch (e) {
-    if (!(e instanceof AppNotFoundError)) throw e;
-  }
-  if (namedAppId !== run.appId) throw appNotFound(appRef);
 }
 
 /** #2644: priority/blockers use exactly the existing assigner set, never the assignee alone. */
@@ -1995,7 +1837,9 @@ async function applyTaskCreate(
     if (!isAssignee(actor, parent)) {
       throw notAssignee(actor, "Only the parent task's assignee creates its child tasks.", { taskId: parentRef });
     }
-    refuseEnded(parent);
+    // #4494: only a PR build task (one carrying a pull_request reference) gets the review-seat remedy; any other ended parent keeps the generic refusal.
+    const isPrBuild = storedTaskReferences(parent.references).some(r => r.kind === 'pull_request');
+    refuseEnded(parent, isPrBuild ? `A child task cannot be created under an ended build task. If it was meant as a review seat, ${SEAT_RECEIPT_REMEDY.charAt(0).toLowerCase()}${SEAT_RECEIPT_REMEDY.slice(1)}` : undefined);
   }
   if (p.clone) {
     // The source is revalidated under the write: one that is gone refuses like an unknown task, never a foreign-key error.

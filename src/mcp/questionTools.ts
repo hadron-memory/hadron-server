@@ -167,7 +167,7 @@ function pick(args: Input, keys: readonly string[]): Input {
   return out;
 }
 const ASK_FIELDS = ['title', 'background', 'whyNow', 'priority', 'tier', 'authorizes', 'deciders', 'assignee', 'neededBy', 'defaultAction',
-  'blocks', 'sources', 'specsTouched', 'specsMustChange', 'options', 'yesno', 'recommendation', 'noRecommendation'] as const;
+  'blocks', 'sources', 'specsTouched', 'specsMustChange', 'options', 'yesno', 'recommendation', 'noRecommendation', 'taskRef'] as const;
 const AMEND_FIELDS = ['title', 'background', 'whyNow', 'priority', 'tier', 'assignee', 'neededBy', 'defaultAction',
   'blocks', 'sources', 'specsTouched', 'specsMustChange', 'options', 'yesno', 'recommendation', 'noRecommendation'] as const;
 const LIST_FIELDS = ['appRef', 'logRef', 'awaitingMe', 'askedByMe', 'answered', 'state', 'priority', 'assigneeId', 'unassigned',
@@ -352,6 +352,8 @@ const SHAPE_HADRON_ASK_QUESTION = {
   ...QUESTION_FIELDS,
   authorizes: z.boolean().optional().describe('True when the answer authorizes an act; such a question must be at the SIGNED tier.'),
   deciders: z.array(z.string()).optional().describe('User ids who may answer, among the log\'s eligible deciders. Default: the log\'s default deciders.'),
+  // #4431 (Questions S7): the asking worker\'s own open task this question blocks; an answer then wakes that task\'s assignee.
+  taskRef: z.string().optional().describe('The agent task this question blocks: its id or handle (e.g. AT3.405). Only a worker session, naming its own open task in the App of the log\'s memory; anything else is QUESTION_INVALID at /taskRef. An answer then wakes the task\'s current assignee (the nudge names the task and the question code, never the answer); taking an answer back wakes nobody.'),
 };
 
 const SHAPE_HADRON_GET_QUESTION = {

@@ -52,8 +52,10 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, EntityNotFoundError } from '../../../lib/entityRef/errors.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
+import { appendTaskEvent, eventActor } from '../../../lib/agentTasks/events.js';
+import { resolveTaskRef } from './resolvers.agentTask.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
-import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
+import { validateLocOrThrow } from '../../../lib/validateLocOrThrow.js';
 import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
 import { deletePendingEdgesTargetingNodes } from '../../../lib/pendingEdgePromotion.js';
@@ -657,6 +659,39 @@ function toPriority(v: string | null | undefined): QuestionData['priority'] | nu
 
 type AskArgs = { logRef: string; input: Record<string, unknown> };
 
+/** #4431: the one answer to every unusable `taskRef`, so the refusal never says whether, or where, a task exists. */
+const TASK_REF_MESSAGE = 'taskRef must be an open task assigned to the asking worker, in the App this memory belongs to';
+const OPEN_TASK_STATUSES: ReadonlySet<string> = new Set(['pending', 'started']);
+
+/**
+ * #4431 (Questions S7, Vera's draft cor:agt:050:34) — the task a question blocks, by id or handle, as the stored
+ * `taskId`. Accepted only when the request acts as a worker, the task is open (pending or started) and assigned to that
+ * worker, and the task's App is the App of the log's memory; anything else (including a task that does not exist, or a
+ * caller with no worker) is the same QUESTION_INVALID at /taskRef. Judged inside the ask's transaction, before any write.
+ */
+/** #4431: the task row under `FOR SHARE`, read after the lock is granted (READ COMMITTED: a fresh snapshot). Null when absent. */
+async function lockTaskShared(tx: Tx, taskId: string): Promise<{ id: string; appId: string; status: string; assigneeWorkerId: string | null } | null> {
+  const [row] = await tx.$queryRaw<Array<{ id: string; appId: string; status: string; assigneeWorkerId: string | null }>>`
+    SELECT id, app_id AS "appId", status, assignee_worker_id AS "assigneeWorkerId" FROM agent_tasks WHERE id = ${taskId} FOR SHARE`;
+  return row ?? null;
+}
+
+async function linkedTaskId(txCtx: Context, tx: Tx, memoryId: string, taskRef: unknown): Promise<string> {
+  const refuse = (): never => invalidQuestion([{ pointer: '/taskRef', message: TASK_REF_MESSAGE }]);
+  const workerId = currentActor().workerId;
+  if (!workerId || typeof taskRef !== 'string' || taskRef.trim() === '') return refuse();
+  const memory = await tx.memory.findUnique({ where: { id: memoryId }, select: { appId: true } });
+  if (!memory?.appId) return refuse();
+  const taskId = await resolveTaskRef({ ...txCtx, db: tx } as Context, taskRef, memory.appId);
+  if (!taskId) return refuse();
+  // Beckett P2 on #4644: judged under a share lock on the task row, held to commit, so a concurrent finish, cancel or
+  // reassignment (which update the row) either commits first and is seen here, or waits for this ask. The last lock
+  // the ask takes before its writes; no task writer locks a question node, so the order cannot invert.
+  const task = await lockTaskShared(tx, taskId);
+  if (!task || task.appId !== memory.appId || task.assigneeWorkerId !== workerId || !OPEN_TASK_STATUSES.has(task.status)) return refuse();
+  return taskId;
+}
+
 export const questionMutations = {
   /**
    * §3.3, §7 — create a question log: memory MANAGE or an App owner (`requireLogManage`); refused in an encrypted
@@ -670,12 +705,7 @@ export const questionMutations = {
   ): Promise<QuestionLogView> => {
     refuseImpersonation(ctx);
     const { id: memoryId } = await resolveMemoryRef(ctx.db, args.memoryRef);
-    try {
-      validateLoc(args.loc);
-    } catch (error) {
-      if (error instanceof InvalidLocError) throw new GraphQLError(error.message, { extensions: { code: error.name, loc: error.loc, segment: error.segment } });
-      throw error;
-    }
+    validateLocOrThrow(args.loc, 'loc');
     const prefix = args.prefix ?? DEFAULT_QUESTION_PREFIX;
     if (!QUESTION_PREFIX_RE.test(prefix)) invalidQuestion([{ pointer: '/prefix', message: 'a prefix is one to three upper-case letters' }]);
     const name = (args.name ?? '').trim() || 'Questions';
@@ -799,7 +829,9 @@ export const questionMutations = {
    */
   askQuestion: async (_: unknown, args: AskArgs, ctx: Context): Promise<QuestionView> => {
     refuseImpersonation(ctx);
-    const input = parseOrRefuse(askInputSchema, lowerEnums(args.input));
+    // #4431: `taskRef` is an input of the door, not of the stored payload (which holds the resolved `taskId`).
+    const { taskRef, ...rawInput } = (args.input ?? {}) as Record<string, unknown>;
+    const input = parseOrRefuse(askInputSchema, lowerEnums(rawInput));
     const log = await resolveGovernedNode(ctx, args.logRef, QUESTION_LOG_ROLE, logMissing);
     await requireQuestionWrite(ctx, log.memoryId);
     const authorizes = input.authorizes ?? false;
@@ -814,6 +846,7 @@ export const questionMutations = {
     const effects: Array<() => void> = [];
     const id = await withAuthorizedMemoryTx(ctx, log.memoryId, [], (txCtx) => requireQuestionWrite(txCtx, log.memoryId), async (tx, txCtx) => {
       const { row: logRow, data: logData } = await lockLog(tx, log.id, log.memoryId, args.logRef);
+      const taskId = taskRef == null ? null : await linkedTaskId(txCtx, tx, log.memoryId, taskRef);
       // #1715: the log's sets may name merged-away accounts; compare, and
       // store, who each one is now. The log's own record is not rewritten.
       const eligibleSet = new Set(await survivors(tx, [...logData.defaultDeciders, ...logData.eligibleDeciders]));
@@ -841,7 +874,7 @@ export const questionMutations = {
         priority: input.priority ?? 'normal', tier, authorizes,
         grant: (input.grant ?? null) as QuestionData['grant'],
         deciders, assignee, askedBy: actor, askedAt: new Date().toISOString(),
-        neededBy: input.neededBy ?? null, defaultAction: input.defaultAction ?? null, taskId: null,
+        neededBy: input.neededBy ?? null, defaultAction: input.defaultAction ?? null, taskId,
         blocks: input.blocks ?? [], sources: input.sources ?? [],
         specsTouched: input.specsTouched ?? [], specsMustChange: input.specsMustChange ?? [],
         options,
@@ -1537,9 +1570,30 @@ async function answerAct(
         transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
       },
     );
+    await recordOnLinkedTask(tx, txCtx, final, row.id, act.entry.kind);
   }, { timeout: 60_000 });
   for (const effect of effects) effect();
   return loadQuestionView(ctx, target.id);
+}
+
+/**
+ * #4431 (Questions S7, cor:agt:050:11 Proposed) — after an answer or a take-back is written, one `question.answered`
+ * or `question.answer-retracted` event on the task the question blocks, in the same transaction, so a failed write
+ * records nothing. The payload is ids, the code, the revision after the write and the state after it: never the
+ * answer's option, text or reason. A task that is gone or no longer open gets no event, and the answer stands.
+ */
+async function recordOnLinkedTask(tx: Tx, txCtx: Context, final: QuestionData, questionId: string, kind: AnswerEntry['kind']): Promise<void> {
+  if (final.taskId == null) return;
+  // Under the same share lock as the ask (Beckett P2 on #4644): a task that ends concurrently either ends first (no
+  // event) or waits until this answer's event has committed. The last lock this transaction takes.
+  const task = await lockTaskShared(tx, final.taskId);
+  if (!task || !OPEN_TASK_STATUSES.has(task.status)) return;
+  const written = await tx.node.findUniqueOrThrow({ where: { id: questionId }, select: QUESTION_ROW_SELECT });
+  const [view] = await evaluateRows(tx, [written]);
+  await appendTaskEvent(tx, {
+    appId: task.appId, taskId: task.id, actor: eventActor(txCtx.userId),
+    event: { type: kind === 'answer' ? 'question.answered' : 'question.answer-retracted', questionId, code: final.code, revision: written.revSeq, state: view.evaluation.state },
+  });
 }
 
 // ─── Field resolvers ─────────────────────────────────────────────────────────

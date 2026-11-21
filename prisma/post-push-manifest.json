@@ -2,18 +2,6 @@
   "note": "Known-acceptable drift and raw-SQL object inventory for the migration smoke lane (#434). diff-whitelist: the exact `prisma migrate diff` lines the CI drift check may drop — each row names the object, its kind, and WHY the drift is acceptable; the filter (scripts/db/migrateDiffFilter.mjs) matches lines exactly, so any definition change re-surfaces as drift. This half is hand-maintained: a row whose line prisma no longer emits at all is pruned by hand on regen, and the smoke lane's own exact matching is what surfaces a changed line. post-push-owned: every durable object the prisma/post-push.sql closure creates — regenerate with scripts/db/gen-post-push-manifest.mjs; the completeness test (src/test/postPushManifest.test.ts) pins THIS half against the closure in both directions (a missing or stale row is red), and gen --check compares full rows (name, kind, file, why).",
   "diff-whitelist": [
     {
-      "name": "memories_user_id_idx",
-      "kind": "partial-index",
-      "why": "Partial index (WHERE clause) in the baseline migration; Prisma schema language cannot express a WHERE on an index, so the diff wants to 'fix' it into non-partial form on every run.",
-      "line": "CREATE INDEX \"memories_user_id_idx\" ON \"memories\"(\"user_id\");"
-    },
-    {
-      "name": "users_external_app_id_external_id_key",
-      "kind": "partial-index",
-      "why": "Partial unique index in the baseline migration; same Prisma limitation as memories_user_id_idx — the diff wants to drop the partiality it cannot model.",
-      "line": "CREATE UNIQUE INDEX \"users_external_app_id_external_id_key\" ON \"users\"(\"external_app_id\", \"external_id\");"
-    },
-    {
       "name": "node_embeddings_embedding_hnsw",
       "kind": "hnsw-index",
       "why": "pgvector HNSW index, created by raw SQL (post-push.sql on dev/test, the migration in prod — prod never runs post-push.sql). Prisma cannot express it, so the diff wants to DROP it; it must survive.",
@@ -784,6 +772,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_secret_change_shape",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_secret_owner_type",
       "kind": "check-constraint",
       "file": "secret-versions-invariants.sql",
@@ -1192,6 +1186,12 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_clear_deleted_app_changes",
+      "kind": "function",
+      "file": "post-push.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_comment_meta_immutable",
       "kind": "function",
       "file": "comment-invariants.sql",
@@ -1207,6 +1207,12 @@
       "name": "hadron_compiled_prompt_revision_immutable",
       "kind": "function",
       "file": "compiled-prompt-revision-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_departure_cause_fits",
+      "kind": "function",
+      "file": "grant-invariants.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
@@ -1246,6 +1252,12 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_end_deleted_secret_changes",
+      "kind": "function",
+      "file": "post-push.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_end_open_grant_signing_requests",
       "kind": "function",
       "file": "grant-signing-invariants.sql",
@@ -1258,7 +1270,19 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_fit_departure_cause",
+      "kind": "function",
+      "file": "grant-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_grant_holder_gone",
+      "kind": "function",
+      "file": "grant-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_grant_import_parent_gone",
       "kind": "function",
       "file": "grant-invariants.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
@@ -1357,6 +1381,12 @@
       "name": "hadron_guard_secret_auto_delete_limit",
       "kind": "function",
       "file": "secret-auto-delete-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_secret_change_request",
+      "kind": "function",
+      "file": "post-push.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
@@ -1465,6 +1495,18 @@
       "name": "hadron_safe_timestamptz",
       "kind": "function",
       "file": "post-push.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_secret_change_revision",
+      "kind": "function",
+      "file": "post-push.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_secret_client_own_worker_immutable",
+      "kind": "function",
+      "file": "secret-read-client-own-worker.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
@@ -1690,232 +1732,256 @@
       "why": "STORED generated column maintained by Postgres; Prisma schema language does not model generated columns."
     },
     {
+      "name": "stamp_signing_keys.id",
+      "kind": "identity-column",
+      "file": "stamp-key-identity-invariants.sql",
+      "why": "Identity column the raw-SQL corpus attaches so dev and test match the migration (Prisma models it as autoincrement(), which db push builds as a sequence default)."
+    },
+    {
       "name": "agent_team_alarm_schedule_open_due_idx",
       "kind": "index",
       "file": "agent-task-stall-invariants.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "agent_team_events_person_activity_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "agent_team_events_pr_frozen_head_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "agent_team_events_unacked_alarms_idx",
       "kind": "index",
       "file": "alarm-escalation-end-invariants.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "agents_organization_id_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "agents_urn_migration_pending_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "apps_urn_migration_pending_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "assets_staged_uploaded_at_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "assets_uploaded_by_staged_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "coordinator_cadence_episodes_app_id_ended_at_idx",
       "kind": "index",
       "file": "coordinator-cadence-invariants.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "dark_worker_episodes_app_id_ended_at_idx",
       "kind": "index",
       "file": "dark-alarm-invariants.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "edges_source_id_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "host_operations_failed_platform_start_idx",
       "kind": "index",
       "file": "desired-start-invariants.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "host_sweep_episodes_app_id_ended_at_idx",
       "kind": "index",
       "file": "host-sweep-invariants.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "host_sweep_runs_host_recent_idx",
       "kind": "index",
       "file": "host-sweep-invariants.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "host_sweep_runs_unposted_idx",
       "kind": "index",
       "file": "host-sweep-invariants.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "memories_urn_migration_pending_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
+      "name": "memories_user_id_idx",
+      "kind": "index",
+      "file": "partial-index-invariants.sql",
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "node_embeddings_embedding_hnsw",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "nodes_chat_worker_created_idx",
       "kind": "index",
       "file": "post-limit-invariants.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "nodes_data_gin",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "nodes_embedding_failed_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "nodes_embedding_pending_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "nodes_memory_id_loc_c_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "nodes_memory_parent_loc_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "nodes_memory_segment_key_eligible_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "nodes_memory_segment_key_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "nodes_msg_channel_seq_loc_c_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "nodes_properties_gin",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "nodes_tsv_gin",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "post_limit_episodes_app_id_ended_at_idx",
       "kind": "index",
       "file": "post-limit-invariants.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
+      "name": "secret_change_requests_expiry",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
+      "name": "secret_change_requests_secret_open",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "sessions_agent_id_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "sessions_memory_id_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "sessions_worker_ended_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "sessions_worker_started_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "start_failing_episodes_app_id_ended_at_idx",
       "kind": "index",
       "file": "desired-start-invariants.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "team_stop_signals_live_idx",
       "kind": "index",
       "file": "stop-signal-invariants.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "usage_events_node_id_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "usage_events_session_activity_idx",
       "kind": "index",
       "file": "post-push.sql",
-      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "git_mirror_attempt_seq",
@@ -1927,60 +1993,72 @@
       "name": "coordinator_cadence_clocks",
       "kind": "table",
       "file": "coordinator-cadence-invariants.sql",
-      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+      "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
     },
     {
       "name": "coordinator_cadence_episodes",
       "kind": "table",
       "file": "coordinator-cadence-invariants.sql",
-      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+      "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
     },
     {
       "name": "dark_worker_episodes",
       "kind": "table",
       "file": "dark-alarm-invariants.sql",
-      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+      "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
     },
     {
       "name": "host_sweep_episodes",
       "kind": "table",
       "file": "host-sweep-invariants.sql",
-      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+      "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
     },
     {
       "name": "host_sweep_runs",
       "kind": "table",
       "file": "host-sweep-invariants.sql",
-      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+      "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
     },
     {
       "name": "post_limit_episodes",
       "kind": "table",
       "file": "post-limit-invariants.sql",
-      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+      "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
+    },
+    {
+      "name": "secret_change_requests",
+      "kind": "table",
+      "file": "post-push.sql",
+      "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
     },
     {
       "name": "stamp_signing_keys",
       "kind": "table",
       "file": "signing-invariants.sql",
-      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+      "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
     },
     {
       "name": "start_failing_episodes",
       "kind": "table",
       "file": "desired-start-invariants.sql",
-      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+      "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
     },
     {
       "name": "worker_reference_fences",
       "kind": "table",
       "file": "worker-reference-invariants.sql",
-      "why": "Helper table created and owned by the raw-SQL corpus (no Prisma model exists for it)."
+      "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
     },
     {
       "name": "agent_clone_audits.agent_clone_audits_immutable",
       "kind": "trigger",
       "file": "post-push.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_imports.agent_imports_grant_parent_gone",
+      "kind": "trigger",
+      "file": "grant-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
@@ -2149,6 +2227,12 @@
       "name": "apps.apps_secrets_gone",
       "kind": "trigger",
       "file": "secret-versions-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "apps.secret_changes_app_deleted",
+      "kind": "trigger",
+      "file": "post-push.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
@@ -2542,6 +2626,12 @@
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
+      "name": "secret_change_requests.secret_change_requests_guard",
+      "kind": "trigger",
+      "file": "post-push.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "secret_events.secret_event_append_only",
       "kind": "trigger",
       "file": "secret-versions-invariants.sql",
@@ -2557,6 +2647,12 @@
       "name": "secret_owner_tombstones.secret_owner_tombstone_guard",
       "kind": "trigger",
       "file": "secret-versions-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secret_read_clients.secret_client_own_worker_immutable",
+      "kind": "trigger",
+      "file": "secret-read-client-own-worker.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
@@ -2581,6 +2677,18 @@
       "name": "secret_versions.worker_reference_fence_1162",
       "kind": "trigger",
       "file": "secret-versions-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secrets.secret_change_revision",
+      "kind": "trigger",
+      "file": "post-push.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "secrets.secret_changes_secret_deleted",
+      "kind": "trigger",
+      "file": "post-push.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
@@ -2851,325 +2959,331 @@
       "name": "agent_task_counters_project_uniq",
       "kind": "unique-index",
       "file": "agent-task-number-backfill.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "agent_task_stop_holds_open_uniq",
       "kind": "unique-index",
       "file": "stop-signal-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "agent_tasks_app_external_id_uniq",
       "kind": "unique-index",
       "file": "agent-task-external-id-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "agent_tasks_app_id_handle_key",
       "kind": "unique-index",
       "file": "agent-task-number-backfill.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "agent_ticker_templates_name_live_uniq",
       "kind": "unique-index",
       "file": "agent-ticker-template-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "ai_service_configs_agent_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "ai_service_configs_app_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "ai_service_configs_org_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "ai_service_configs_server_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "app_automation_read_grants_live_uq",
       "kind": "unique-index",
       "file": "app-automation-read-grant-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "app_automation_team_snapshot_grants_live_uq",
       "kind": "unique-index",
       "file": "app-automation-team-snapshot-grant-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "app_grants_live_uniq",
       "kind": "unique-index",
       "file": "ticker-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "app_key_scopes_live_uniq",
       "kind": "unique-index",
       "file": "app-key-scope-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "app_memory_write_grants_live_uq",
       "kind": "unique-index",
       "file": "app-memory-write-grant-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "app_runs_served_prompt_owner_uniq",
       "kind": "unique-index",
       "file": "served-prompt-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "apps_urn_active_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "channel_read_states_agent_app_channel_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "channel_read_states_worker_channel_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "comment_meta_one_open_thread",
       "kind": "unique-index",
       "file": "comment-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "coordinator_cadence_episodes_one_open_uniq",
       "kind": "unique-index",
       "file": "coordinator-cadence-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "dark_worker_episodes_one_open_uniq",
       "kind": "unique-index",
       "file": "dark-alarm-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "host_sweep_episodes_one_open_uniq",
       "kind": "unique-index",
       "file": "host-sweep-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "host_sweep_runs_run_uniq",
       "kind": "unique-index",
       "file": "host-sweep-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "launch_grants_live_per_operation",
       "kind": "unique-index",
       "file": "host-launch-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "memories_install_memory_live_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "memory_config_templates_app_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "memory_config_templates_org_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "memory_config_templates_server_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "memory_config_templates_user_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "node_embeddings_abstract_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "nodes_chat_message_seq_unique_idx",
       "kind": "unique-index",
       "file": "chat-seq-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "post_limit_episodes_one_open_uniq",
       "kind": "unique-index",
       "file": "post-limit-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "register_entries_app_channel_agent_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "register_entries_app_channel_all_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "register_entries_app_channel_worker_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "register_entries_org_channel_agent_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "register_entries_org_channel_all_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "register_entries_org_channel_worker_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "scopes_agent_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "scopes_app_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "scopes_org_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "secret_app_keys_one_active_idx",
       "kind": "unique-index",
       "file": "secret-app-keys-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "served_prompts_chat_ordinal_uniq",
       "kind": "unique-index",
       "file": "served-prompt-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "served_prompts_run_uniq",
       "kind": "unique-index",
       "file": "served-prompt-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "served_prompts_session_uniq",
       "kind": "unique-index",
       "file": "served-prompt-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "sessions_served_prompt_owner_uniq",
       "kind": "unique-index",
       "file": "served-prompt-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "slack_connections_org_team_active_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "start_failing_episodes_one_open_uniq",
       "kind": "unique-index",
       "file": "desired-start-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "team_stop_coverage_open_uniq",
       "kind": "unique-index",
       "file": "stop-signal-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "ticker_subscriptions_live_uniq",
       "kind": "unique-index",
       "file": "ticker-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "tickers_app_name_live_uniq",
       "kind": "unique-index",
       "file": "ticker-invariants.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "tickers_generated_live_uniq",
       "kind": "unique-index",
       "file": "ticker-generated-live-unique.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
+      "name": "users_external_app_id_external_id_key",
+      "kind": "unique-index",
+      "file": "partial-index-invariants.sql",
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "users_handle_lower_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "workers_app_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
-      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     }
   ]
 }

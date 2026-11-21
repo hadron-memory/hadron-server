@@ -42,5 +42,5 @@ export async function removeAgentImport(
   // installed in a new App between the reads is not missed (#4210 §10 P3-2). Extra candidates are harmless, each is judged.
   const after = await liveAppsWhereInstalled(tx, parentAgentId);
   const pairs = [...new Set([...apps, ...after])].map((appId) => ({ appId, agentId: importedAgentId }));
-  await endGrantsOfAgentsNoLongerInstalled(tx, pairs, removedBy);
+  await endGrantsOfAgentsNoLongerInstalled(tx, pairs, removedBy, 'AGENT_IMPORT_REMOVED');
 }

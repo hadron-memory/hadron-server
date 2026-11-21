@@ -16,15 +16,18 @@
 import type { Prisma } from '../../generated/prisma/index.js';
 import { lockAppInstallations, resolveAppInstallation } from '../appInstallations.js';
 import { removeRegisterRowsForUninstall } from '../registerInstall.js';
-import { endAgentGrantsAtApps } from './departure.js';
+import { endAgentGrantsAtApps, type AgentDepartureReason } from './departure.js';
 
 export interface AppAgentPair { appId: string; agentId: string }
+/** #4180: the cause a door records for a pair that departed (the door knows why; this function only judges whether). */
+export type PairDepartureReason = AgentDepartureReason | ((pair: AppAgentPair) => AgentDepartureReason);
 
 /** Judge each candidate pair, end the grants of agents with no installation left, return the pairs that departed. */
 export async function endGrantsOfAgentsNoLongerInstalled(
   tx: Prisma.TransactionClient,
   candidates: readonly AppAgentPair[],
   removedBy: string | null,
+  reason: PairDepartureReason,
 ): Promise<{ departed: AppAgentPair[]; ended: number }> {
   const unique = [...new Map(candidates.map((p) => [`${p.appId}\u0000${p.agentId}`, p])).values()]
     .sort((a, b) => a.appId.localeCompare(b.appId) || a.agentId.localeCompare(b.agentId));
@@ -38,7 +41,8 @@ export async function endGrantsOfAgentsNoLongerInstalled(
     }
   }
   for (const p of departed) await removeRegisterRowsForUninstall(tx, p.appId, p.agentId, removedBy);
-  const ended = await endAgentGrantsAtApps(tx, departed);
+  const causeOf = typeof reason === 'function' ? reason : () => reason;
+  const ended = await endAgentGrantsAtApps(tx, departed.map((p) => ({ ...p, reason: causeOf(p) })));
   return { departed, ended };
 }
 

@@ -23,9 +23,9 @@ let w: World;
 const ctx = (userId = f.holder.id): Context => ({ db, userId, roles: ['READER'] });
 const adminCtx = () => ctx(f.admin.id);
 const active = (over: Record<string, unknown> = {}) => insertGrantUnguarded(w, { activated_at: raw(`${DB_NOW} - interval '1 hour'`), ...over } as never);
-type Row = { live: boolean; holder_departed_at: string | null; worker_id: string | null; agent_id: string | null; grantee_app_id: string | null };
+type Row = { live: boolean; holder_departed_at: string | null; cause: string | null; worker_id: string | null; agent_id: string | null; grantee_app_id: string | null };
 const read = async (id: string): Promise<Row> => (await db.$queryRaw<Row[]>(Prisma.sql`
-  SELECT ${grantLiveSql('g')} AS live, (to_jsonb(g)->>'holder_departed_at') AS holder_departed_at, g.worker_id, g.agent_id, g.grantee_app_id FROM grants g WHERE g.id = ${id}`))[0];
+  SELECT ${grantLiveSql('g')} AS live, (to_jsonb(g)->>'holder_departed_at') AS holder_departed_at, (to_jsonb(g)->>'holder_departure_reason') AS cause, g.worker_id, g.agent_id, g.grantee_app_id FROM grants g WHERE g.id = ${id}`))[0];
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -58,7 +58,15 @@ describe('retireWorker ends the grants the worker holds (ruling 0259), in the re
     await retire();
     expect(await read(mine)).toMatchObject({ live: false, worker_id: f.target.id });
     expect((await read(mine)).holder_departed_at).not.toBeNull();
-    expect(await read(theirs)).toMatchObject({ live: true, holder_departed_at: null });
+    expect((await read(mine)).cause).toBe('WORKER_RETIRED'); // #4180: the door records its own cause
+    expect(await read(theirs)).toMatchObject({ live: true, holder_departed_at: null, cause: null });
+  });
+  it('#4180: a worker retired and THEN deleted keeps the first end\'s cause (WORKER_RETIRED), not the delete trigger\'s', async () => {
+    const id = await active({ user_id: null, worker_id: f.target.id });
+    await retire();
+    const first = (await read(id)).holder_departed_at;
+    expect(await remove()).toBe(true);
+    expect(await read(id)).toMatchObject({ holder_departed_at: first, cause: 'WORKER_RETIRED' });
   });
   it('retiring twice does not re-stamp: the first end stands (the arm runs only when the claim retired the worker)', async () => {
     const id = await active({ user_id: null, worker_id: f.target.id });
@@ -148,7 +156,7 @@ describe('deleteWorker: holding a grant is not "in use"; the delete ends the gra
     const id = await active({ user_id: null, worker_id: f.target.id });
     expect(await remove()).toBe(true);
     expect(await db.worker.findUnique({ where: { id: f.target.id } })).toBeNull();
-    expect(await read(id)).toMatchObject({ live: false, worker_id: f.target.id });
+    expect(await read(id)).toMatchObject({ live: false, worker_id: f.target.id, cause: 'WORKER_DELETED' });
     expect((await read(id)).holder_departed_at).not.toBeNull();
   });
   it('a worker that REQUESTED a grant (or is named in its events) is still in use: the fence stands and nothing is written', async () => {
@@ -169,7 +177,7 @@ describe('deleteAgent (a SOFT delete: no FK action fires) ends the grants the ag
     const mine = await active({ user_id: null, agent_id: spare.id });
     const theirs = await active({ user_id: null, agent_id: other.id });
     expect(await M.deleteAgent(null, { ref: spare.id }, adminCtx())).toBe(true);
-    expect(await read(mine)).toMatchObject({ live: false, agent_id: spare.id });
+    expect(await read(mine)).toMatchObject({ live: false, agent_id: spare.id, cause: 'AGENT_DELETED' });
     expect((await read(mine)).holder_departed_at).not.toBeNull();
     expect(await read(theirs)).toMatchObject({ live: true, holder_departed_at: null });
   });
@@ -190,7 +198,7 @@ describe('deleteApp (a SOFT delete)', () => {
   it('a grantee App deleted on its own while the grant\'s App stays: that holder ends the grant', async () => {
     const id = await active({ user_id: null, grantee_app_id: f.app2.id });
     await M.deleteApp(null, { ref: f.app2.id }, adminCtx());
-    expect(await read(id)).toMatchObject({ live: false, grantee_app_id: f.app2.id });
+    expect(await read(id)).toMatchObject({ live: false, grantee_app_id: f.app2.id, cause: 'APP_DELETED' });
     expect((await read(id)).holder_departed_at).not.toBeNull();
   });
 });

@@ -13,7 +13,8 @@
  * Regenerate the golden (only when a tool's wire surface is meant to change) with UPDATE_TOOL_GOLDEN=1.
  * Pinned from 92ff99df; #2249 amended exactly three entries (hadron_task_create / _assign / _reassign), whose text states the
  * closeSessionWhenDone default. #863 amended exactly two (hadron_run_action / hadron_run_task), whose text states what
- * the render returns since it is the prompt runTask executes.
+ * the render returns since it is the prompt runTask executes. #909 (a) amended exactly two (hadron_create_node / hadron_update_node), whose
+ * nodeType text now prints the canonical list from src/lib/nodeTypes.ts and the four platform kinds.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';

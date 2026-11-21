@@ -36,6 +36,7 @@ export async function requirePersonAsThemselves(ctx: PersonGateContext, refuse: 
  *    on the list either (S3b).
  *  - `secret.delete`: deleting an App-owned secret (#3997, Holger's ruling R1 on open question 6, 2026-11-12): its creator
  *    or whoever manages the App, each as a person; a worker session and a run are refused.
+ *  - `secret.change`: opening or completing a protected change, or changing protection (#3999; cor:sec:070:02).
  *  - `secret.issue-read-client`: issuing a client that may reveal an App secret's value (#3998, plan R4; the writer of the
  *    secret's current version or a manager of the App, each as a person; a worker session and a run are refused).
  *  - `agent-webhook.rotate`: rotating a webhook's credentials returns the new secret path and a platform token, which
@@ -43,7 +44,7 @@ export async function requirePersonAsThemselves(ctx: PersonGateContext, refuse: 
  * The rule's older person-only acts (adoption, passkeys, impersonation, account merge) have their own doors on
  * {@link requirePersonAsThemselves} and are not repeated here. CLOSED: a new door joins by naming one of these acts.
  */
-export const PERSON_ONLY_ACTS = ['app-key.mint', 'app-key.rotate', 'grant.give', 'agent-webhook.rotate', 'secret.delete', 'secret.issue-read-client'] as const;
+export const PERSON_ONLY_ACTS = ['app-key.mint', 'app-key.rotate', 'grant.give', 'agent-webhook.rotate', 'secret.delete', 'secret.change', 'secret.issue-read-client'] as const;
 export type PersonOnlyAct = (typeof PERSON_ONLY_ACTS)[number];
 
 /**
