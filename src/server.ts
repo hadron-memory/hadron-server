@@ -1812,6 +1812,10 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     // Fails safe until the mailbox GCP project's client is provisioned —
     // same posture as Google login (#583).
     isConfigured: isGmailConnectConfigured,
+    // #2948: a Google account shared across services — the start accepts an
+    // account hint (Google's login_hint) scoped to the caller's own Google
+    // connections in the org.
+    acceptsLoginHint: true,
   });
   // Google Calendar = hadrontool-google-cal — a CALENDAR connection on the
   // same rails (ExchangeConnection row, provider 'google-cal'). Separate
@@ -1827,6 +1831,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     // The calendar tool has no folder-subscription surface (no event plane
     // in v1) — don't POST a doomed inbox subscription on every connect.
     subscribeInbox: false,
+    // #2948: same Google-account hint scope as the gmail start.
+    acceptsLoginHint: true,
   });
   // Google Drive = hadrontool-google-drive — a DRIVE connection on the same
   // rails (ExchangeConnection row, provider 'google-drive'). Its own OAuth
@@ -1842,6 +1848,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     isConfigured: isGoogleDriveConnectConfigured,
     // No folder-subscription surface (no event plane in v1).
     subscribeInbox: false,
+    // #2948: same Google-account hint scope as the gmail start.
+    acceptsLoginHint: true,
   });
 
   // ---------------------------------------------------------------------------

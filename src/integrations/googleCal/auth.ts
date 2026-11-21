@@ -51,8 +51,12 @@ export function getGoogleCalRedirectUri(): string {
   return `${base}/auth/google-cal/callback`;
 }
 
-/** Build the URL to redirect the user to Google consent. */
-export function buildGoogleCalAuthUrl(state: string): string {
+/**
+ * Build the URL to redirect the user to Google consent. The optional account hint (#2948, ruling
+ * 0155) becomes Google's `login_hint` — appended LAST so a hint-less URL is byte-identical to the
+ * pre-#2948 one. A hint only: the callback still records the account Google authenticated.
+ */
+export function buildGoogleCalAuthUrl(state: string, loginHint?: string): string {
   const params = new URLSearchParams({
     client_id: getClientId(),
     response_type: 'code',
@@ -65,5 +69,6 @@ export function buildGoogleCalAuthUrl(state: string): string {
     access_type: 'offline',
     prompt: 'consent',
   });
+  if (loginHint !== undefined) params.set('login_hint', loginHint);
   return `${AUTH_ENDPOINT}?${params.toString()}`;
 }
