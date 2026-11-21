@@ -63,11 +63,12 @@ import {
  * values that are true NOW, not the ones its transaction read before the gate
  * ran. Absent from the map = no live row at that loc.
  *
- * It does NOT close the window entirely. The kind doors lock per loc, not on
- * the memory key this gate holds, so a promotion committing between this read
- * and the caller's write is still possible — the same residual window the
- * refuse path already documents, and #1213's bounded serialization point is
- * what closes it for both.
+ * Stable against supported signal changes only while the caller retains the
+ * complete memory-key set through its write. assertBatchMutable acquires that
+ * set itself; callers that read signals earlier must also acquire it at entry.
+ * #1213 S2 makes the audited signal writers and owning copy/move paths join
+ * the same key before loc/node locks. Direct SQL and unaudited future writers
+ * are not covered; S3's search/replace skip-before-OCC behavior is separate.
  */
 export type GovernedSnapshot = ReadonlyMap<string, { role: string | null; isRunnable: boolean | null }>;
 
@@ -250,11 +251,13 @@ export async function assertBatchMutable(
   }
   await assertNoCommentRows(tx, { memoryId: { in: [...new Set(memoryIds)] }, loc: { in: locs } }, op);
 
-  // #1213: every supported signal writer and owning copy/move takes this same bounded memory key
-  // before its loc/node locks. The authoritative read is therefore stable against promotion and demotion
-  // through this transaction's write. Still re-read: the planner or caller's rows may precede the key.
-  // An owning operation carries these freshly read signals rather than refusing or copying stale ones.
-  // No per-node governance key is allocated; paging/partial-merge semantics remain unchanged.
+  // #1213: the acquisition above is held by THIS transaction through its write. The authoritative
+  // re-read is stable against the audited participating signal writers/owning copy/move paths,
+  // which take the same complete memory set before loc/node locks. Earlier caller/planner reads
+  // may still precede the key; an owning operation must carry these freshly read signals instead.
+  // This is not a guarantee for direct SQL, unaudited writers, or writes outside the holding tx.
+  // No per-node governance key: a bulk page could otherwise exhaust the lock table. The bounded
+  // memory set does not change partial-merge semantics or implement S3's skip-before-OCC behavior.
   const governed = opts.governed ?? 'refuse';
 
   if (governed === 'carry') {

@@ -4307,7 +4307,7 @@ export const nodeMutations = {
         // Decrypt the source with the SOURCE memory key so writeNodeCore can
         // re-encrypt the plaintext for the DESTINATION memory. Only content/
         // abstract are encrypted at rest.
-        const srcEnc = await getMemoryEncryptionInfo(ctx.db, source.memoryId);
+        const srcEnc = await getMemoryEncryptionInfo(tx, source.memoryId);
         const srcPlain = { ...source };
         if (srcEnc.isEncrypted) {
           if (!sessionKeyCache.getByMemoryId(srcEnc.id)) {
@@ -4320,13 +4320,13 @@ export const nodeMutations = {
         }
 
         // Outgoing edges that naturally resolve in the destination memory.
-        const outgoing = await ctx.db.edge.findMany({
+        const outgoing = await tx.edge.findMany({
           where: { sourceId: source.id, deletedAt: null, target: { deletedAt: null } },
           include: { target: { select: { loc: true } } },
         });
         const edges: NodeEdgeInput[] = [];
         for (const e of outgoing) {
-          const destTarget = await ctx.db.node.findFirst({
+          const destTarget = await tx.node.findFirst({
             where: { loc: e.target.loc, memoryId: destMemoryId, deletedAt: null },
             select: { id: true },
           });
