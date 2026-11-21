@@ -32,12 +32,11 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
-import { SPEC_CITATION } from './check-sdl-spec-citations.mjs';
+import { SPECS_MEMORY, WHOLE_CITATION } from './check-sdl-spec-citations.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const SNAPSHOT_FILE = join(HERE, 'sdl-spec-citations-snapshot.txt');
-export const SPECS_MEMORY = 'hadronmemory.com:specs';
-const WHOLE = new RegExp(`^${SPEC_CITATION}$`);
+export { SPECS_MEMORY };
 
 /**
  * Build the snapshot text from `hadron spec list --json` (an array) and
@@ -51,7 +50,7 @@ export function buildSnapshot(list, describe, today) {
   }
   const placeholders = new Set(describe.placeholders.map((p) => (typeof p === 'string' ? p : p?.citation)));
   if (placeholders.has(undefined)) throw new Error('spec describe lists a placeholder with no citation');
-  const citations = [...new Set(list.map((n) => n?.citation).filter((c) => typeof c === 'string' && WHOLE.test(c)))]
+  const citations = [...new Set(list.map((n) => n?.citation).filter((c) => typeof c === 'string' && WHOLE_CITATION.test(c)))]
     .filter((c) => !placeholders.has(c))
     .sort();
   if (citations.length === 0) throw new Error('no written citation found in the spec list');
@@ -66,17 +65,38 @@ export function buildSnapshot(list, describe, today) {
 }
 
 function hadronJson(...args) {
-  return JSON.parse(execFileSync('hadron', ['spec', ...args, '-m', SPECS_MEMORY, '--json'], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 }));
+  try {
+    return JSON.parse(execFileSync('hadron', ['spec', ...args, '-m', SPECS_MEMORY, '--json'], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 }));
+  } catch (e) {
+    if (e?.code === 'ENOENT') {
+      throw new Error('the `hadron` CLI is not on PATH. Install it and log in with a token that can read ' + SPECS_MEMORY + ', then run this again.');
+    }
+    throw e;
+  }
 }
 
 function main() {
   const check = process.argv.includes('--check');
-  const text = buildSnapshot(hadronJson('list'), hadronJson('describe'), new Date().toISOString().slice(0, 10));
+  let text;
+  try {
+    text = buildSnapshot(hadronJson('list'), hadronJson('describe'), new Date().toISOString().slice(0, 10));
+  } catch (e) {
+    console.error(`✗ ${String(e?.message ?? e).split('\n')[0]}`);
+    process.exit(1);
+  }
   // The header's date and newest-updatedAt move on their own; compare the citations only.
   const body = (t) => t.split('\n').filter((l) => l && !l.startsWith('#')).join('\n');
   let current = '';
-  try { current = readFileSync(SNAPSHOT_FILE, 'utf8'); } catch { /* first run */ }
+  let exists = true;
+  try { current = readFileSync(SNAPSHOT_FILE, 'utf8'); } catch (e) {
+    if (e?.code !== 'ENOENT') throw e;
+    exists = false; // first run
+  }
   if (check) {
+    if (!exists) {
+      console.error(`✗ snapshot file is missing (${SNAPSHOT_FILE}); run node scripts/refresh-sdl-spec-citation-snapshot.mjs to create it`);
+      process.exit(1);
+    }
     if (body(current) === body(text)) { console.log('✓ snapshot matches the corpus'); return; }
     console.error('✗ snapshot differs from the corpus; run node scripts/refresh-sdl-spec-citation-snapshot.mjs');
     process.exit(1);

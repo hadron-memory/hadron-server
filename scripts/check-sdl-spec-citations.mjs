@@ -74,19 +74,33 @@ const TYPEDEFS = join(REPO, TYPEDEFS_PATH);
 const BASELINE = join(HERE, 'sdl-spec-citations-baseline.txt');
 const SNAPSHOT_PATH = 'scripts/sdl-spec-citations-snapshot.txt';
 const SNAPSHOT = join(REPO, SNAPSHOT_PATH);
-/** Qualified citations are judged only against the corpus the snapshot describes. */
-const SPECS_MEMORY_PREFIX = /(?:hrn|urn):node:hadronmemory\.com:specs:$/;
+/**
+ * The corpus the snapshot describes (the refresh script imports this, so the id is spelled once).
+ * Qualified citations are judged only against it.
+ */
+export const SPECS_MEMORY = 'hadronmemory.com:specs';
+/**
+ * The whole token before a citation must be exactly `<scheme>:node:<SPECS_MEMORY>:`, from the token's
+ * own start, so a URN nested inside another token never counts. Case-sensitive, like the portal gate's
+ * `isQualified` (`startsWith('hrn:node:')`): an upper-case scheme is not qualified at all.
+ */
+const SPECS_TOKEN_PREFIX = new RegExp(String.raw`^(?:hrn|urn):node:${SPECS_MEMORY.replace(/\./g, '\\.')}:$`);
 
 /** hadron-portal scripts/check-bare-loc-citations.mjs `SPEC_CITATION`, verbatim. */
 export const SPEC_CITATION = String.raw`cor:[a-z]{3}:\d{3}(?::\d{2})*`;
 const CITATION = new RegExp(String.raw`\b${SPEC_CITATION}`, 'g');
 const TOKEN_CHARS = /[A-Za-z0-9_.:-]/;
 
-/** Is the citation at `index` inside a fully qualified token? (The portal gate's `isQualified`.) */
-function isQualified(line, index) {
+/** Where the URN-ish token that contains `index` starts. */
+function tokenStart(line, index) {
   let start = index;
   while (start > 0 && TOKEN_CHARS.test(line[start - 1])) start--;
-  const token = line.slice(start);
+  return start;
+}
+
+/** Is the citation at `index` inside a fully qualified token? (The portal gate's `isQualified`.) */
+function isQualified(line, index) {
+  const token = line.slice(tokenStart(line, index));
   return token.startsWith('hrn:node:') || token.startsWith('urn:node:');
 }
 
@@ -113,25 +127,65 @@ export function findBareCitations(source) {
 }
 
 /**
- * Every fully qualified citation into the specs corpus in `source`:
- * `{ line, citation }`, 1-based lines, the citation WITHOUT its URN prefix.
- * A range (`…:14–:17`) returns its head AND its tail (`…:17`), so a range that
- * ends on a rule that is not written fails; the rules between the two are not
- * checked (a gap there is not an error). Qualified citations into another
- * memory are not returned.
+ * Annotation DATA escaping (GitHub's workflow-command rules): `%`, CR and LF, so a multi-line message
+ * cannot end the annotation at its first newline or smuggle a second command.
  */
-export function findQualifiedCitations(source) {
-  const out = [];
+export function escapeAnnotationData(message) {
+  return String(message).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+}
+
+/** A range tail: a dash (hyphen, en or em), optional spaces, then `:` and a rule number. */
+const TAIL_START = /^\s*[–—-]\s*:/;
+const TAIL = /^\s*[–—-]\s*:(\d{2})(?!\d)/;
+
+/**
+ * One scan for both exports. `citations` is every fully qualified citation into the specs corpus
+ * (without its URN prefix); `problems` is every range tail that could not be read.
+ * A range (`…:14–:17`, spaced or em-dashed, chained `…:14–:17–:19`) returns its head AND each tail, so a
+ * range that ends on a rule that is not written fails; the rules between are not checked (a gap there is
+ * not an error). A tail that is not `:` plus exactly two digits, or that hangs off a head with no rule
+ * number, is a PROBLEM and is never skipped silently. A citation repeated on one line is returned once.
+ */
+function scanQualified(source) {
+  const citations = [];
+  const problems = [];
   for (const [i, line] of source.split('\n').entries()) {
+    const seen = new Set();
+    const add = (citation) => {
+      if (seen.has(citation)) return;
+      seen.add(citation);
+      citations.push({ line: i + 1, citation });
+    };
     for (const m of line.matchAll(CITATION)) {
-      if (!isQualified(line, m.index) || !isWholeSpecCitation(line, m.index + m[0].length)) continue;
-      if (!SPECS_MEMORY_PREFIX.test(line.slice(0, m.index))) continue;
-      out.push({ line: i + 1, citation: m[0] });
-      const tail = /^[–-]:(\d{2})(?!\d)/.exec(line.slice(m.index + m[0].length));
-      if (tail) out.push({ line: i + 1, citation: m[0].replace(/:\d{2}$/, `:${tail[1]}`) });
+      const afterHead = line.slice(m.index + m[0].length);
+      // The portal's whole-run test rejects a hyphen straight after the head; a hyphen that opens a range
+      // tail (`:14-:17`) is a range, not an identifier, so it is not skipped here (it would go unchecked).
+      if (!isQualified(line, m.index) || !(isWholeSpecCitation(line, m.index + m[0].length) || TAIL_START.test(afterHead))) continue;
+      if (!SPECS_TOKEN_PREFIX.test(line.slice(tokenStart(line, m.index), m.index))) continue;
+      add(m[0]);
+      let rest = afterHead;
+      const hasRule = /:\d{2}$/.test(m[0]);
+      while (TAIL_START.test(rest)) {
+        const t = TAIL.exec(rest);
+        if (!t || !hasRule) {
+          problems.push({ line: i + 1, text: `${m[0]}${rest.slice(0, 24).trimEnd()}` });
+          break;
+        }
+        add(m[0].replace(/:\d{2}$/, `:${t[1]}`));
+        rest = rest.slice(t[0].length);
+      }
     }
   }
-  return out;
+  return { citations, problems };
+}
+
+export function findQualifiedCitations(source) {
+  return scanQualified(source).citations;
+}
+
+/** Range tails the gate could not read: `{ line, text }`. The gate fails on any. */
+export function findRangeTailProblems(source) {
+  return scanQualified(source).problems;
 }
 
 /**
@@ -160,7 +214,7 @@ export function missingFromSnapshot(qualified, snapshot) {
   return qualified.filter((q) => !snapshot.has(q.citation));
 }
 
-const WHOLE_CITATION = new RegExp(String.raw`^${SPEC_CITATION}$`);
+export const WHOLE_CITATION = new RegExp(String.raw`^${SPEC_CITATION}$`);
 
 /**
  * Baseline entries: `<citation> <count>`, one per citation; `#` comments and
@@ -235,14 +289,14 @@ function main() {
     // Against the working tree, so an uncommitted edit is checked locally too.
     diff = git('diff', '--unified=0', '--no-color', '--no-ext-diff', mergeBase, '--', TYPEDEFS_PATH);
   } catch (e) {
-    console.error(`::error::check-sdl-spec-citations: cannot diff against base "${base}" (${e.message.split('\n')[0]}). Fetch it, or pass a base ref.`);
+    console.error(`::error::${escapeAnnotationData(`check-sdl-spec-citations: cannot diff against base "${base}" (${e.message.split('\n')[0]}). Fetch it, or pass a base ref.`)}`);
     process.exit(2);
   }
   let baseline;
   try {
     baseline = parseBaseline(readFileSync(BASELINE, 'utf8'));
   } catch (e) {
-    console.error(`::error file=scripts/sdl-spec-citations-baseline.txt::${e.message}`);
+    console.error(`::error file=scripts/sdl-spec-citations-baseline.txt::${escapeAnnotationData(e.message)}`);
     process.exit(1);
   }
 
@@ -250,12 +304,13 @@ function main() {
   try {
     snapshot = parseSnapshot(readFileSync(SNAPSHOT, 'utf8'));
   } catch (e) {
-    console.error(`::error file=${SNAPSHOT_PATH}::${e.message}`);
+    console.error(`::error file=${SNAPSHOT_PATH}::${escapeAnnotationData(e.message)}`);
     process.exit(1);
   }
 
   const source = readFileSync(TYPEDEFS, 'utf8');
   const missing = missingFromSnapshot(findQualifiedCitations(source), snapshot);
+  const badTails = findRangeTailProblems(source);
   const found = findBareCitations(source);
   const added = onAddedLines(found, addedLines(diff));
   const { over, lowerable } = compareWithBaseline(found, baseline);
@@ -278,6 +333,14 @@ function main() {
         lowerable.map((l) => `${l.citation} ${l.allowed}→${l.count}`).join(', '),
     );
   }
+  for (const b of badTails) {
+    console.error(
+      `::error file=${TYPEDEFS_PATH},line=${b.line}::${escapeAnnotationData(
+        `range tail not readable after "${b.text}": a range tail is a dash then ':' and exactly two digits (…:14–:17), ` +
+          'and it must hang off a citation that ends in a rule number. Write the tail that way, or cite each rule on its own.',
+      )}`,
+    );
+  }
   for (const m of missing) {
     console.error(
       `::error file=${TYPEDEFS_PATH},line=${m.line}::spec citation ${m.citation} names no written spec in ${SNAPSHOT_PATH}. ` +
@@ -285,10 +348,10 @@ function main() {
         'snapshot, refresh it: node scripts/refresh-sdl-spec-citation-snapshot.mjs. A placeholder does not count as written.',
     );
   }
-  if (added.length || over.length || missing.length) {
+  if (added.length || over.length || missing.length || badTails.length) {
     console.error(
       `\n✗ ${added.length} bare citation(s) on added lines, ${over.length} citation(s) above the baseline, ` +
-        `${missing.length} qualified citation(s) naming no written spec. SDL citations must be fully qualified and must exist.`,
+        `${missing.length} qualified citation(s) naming no written spec, ${badTails.length} unreadable range tail(s). SDL citations must be fully qualified and must exist.`,
     );
     process.exit(1);
   }

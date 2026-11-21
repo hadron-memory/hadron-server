@@ -200,7 +200,7 @@ describe('#4586 F7/N1 — the refresh script\'s messages', () => {
       const r = run(s.dir, { ...process.env, PATH: '/nonexistent' }, '--check');
       expect(r.status).toBe(1);
       expect(r.stderr).toContain('`hadron` CLI');
-      expect(r.stderr).not.toContain('at ');
+      expect(r.stderr).not.toMatch(/\n\s+at /);
     } finally { s.done(); }
   });
 });
