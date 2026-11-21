@@ -1772,6 +1772,10 @@ export const nodeQueries = {
         f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where || f.approvalState || f.minted != null
       );
       const page = off + finalLimit;
+      // The keyword leg of a hybrid over-fetches (its filters apply after the ranking window); the VECTOR leg does
+      // not: its filters ride in the ranking statement, so it asks for exactly the page (`runVector` below).
+      // Offset has no ceiling by design (#437: lowering it would silently return an earlier page); the work is
+      // bounded instead by ONE request-wide budget (VECTOR_SEARCH_TIMEOUT_MS, `rankUnderBudget`) and limit <= 200.
       const fetchN = hasStructuredFilters ? page * 5 : page;
 
       /**
@@ -1782,11 +1786,11 @@ export const nodeQueries = {
       let vectorStoppedEarly = false;
       const runVector = async <T extends { nodeId: string; score: number }>(
         search: (limit: number, onWindow: (w: { exhausted: boolean; stoppedEarly?: boolean }) => void) => Promise<T[]>,
-      ): Promise<T[]> => search(fetchN, (w) => { if (w.stoppedEarly) vectorStoppedEarly = true; });
+      ): Promise<T[]> => search(page, (w) => { if (w.stoppedEarly) vectorStoppedEarly = true; });
       /** The envelope's (reason, degraded) for a vector-ranked result that may have stopped early. */
-      const stoppedEnvelope = (hitCount: number, degraded: string | null): { reason: string | null; degraded: string | null } => {
-        if (!vectorStoppedEarly) return { reason: null, degraded };
-        return { reason: hitCount === 0 ? 'stopped_early' : null, degraded: [degraded, 'stopped_early'].filter(Boolean).join(',') };
+      const stoppedEnvelope = (hitCount: number, degraded: string | null, builtReason: string | null = null): { reason: string | null; degraded: string | null } => {
+        if (!vectorStoppedEarly) return { reason: builtReason, degraded };
+        return { reason: hitCount === 0 ? 'stopped_early' : builtReason, degraded: [degraded, 'stopped_early'].filter(Boolean).join(',') };
       };
 
       // Hydrate a ranked (nodeId, score) list into hits: enforce the structured
@@ -2171,7 +2175,7 @@ export const nodeQueries = {
       if (effectiveMode === 'vector') {
         const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
         const built = await buildResult(vecHits.map((h) => ({ nodeId: h.nodeId, score: h.score })), simById, null, null);
-        const env = stoppedEnvelope(built.hits.length, built.degraded);
+        const env = stoppedEnvelope(built.hits.length, built.degraded, built.reason);
         return { ...built, reason: env.reason, degraded: env.degraded };
       }
 
@@ -2190,7 +2194,7 @@ export const nodeQueries = {
         null,
         mergeDegraded(null),
       );
-      const hybridEnv = stoppedEnvelope(builtHybrid.hits.length, builtHybrid.degraded);
+      const hybridEnv = stoppedEnvelope(builtHybrid.hits.length, builtHybrid.degraded, builtHybrid.reason);
       return { ...builtHybrid, reason: hybridEnv.reason, degraded: hybridEnv.degraded };
       };
 

@@ -1,4 +1,3 @@
-import { Prisma } from '../../generated/prisma/index.js';
 import { openThreadsSql } from '../comments/openThreads.js';
 /**
  * Postgres implementation of the node retrieval seam (cor:rag:010:02).
@@ -9,6 +8,7 @@ import { openThreadsSql } from '../comments/openThreads.js';
  * tsquery expression (tsquery.ts). Vector search delegates to the existing
  * pgvector helpers.
  */
+import { Prisma } from '../../generated/prisma/index.js';
 import { contentScopeSql, effectiveContentScope } from '../comments/scope.js';
 import { approvalStateSql, mintedSql } from '../nodeApproval.js';
 import type {

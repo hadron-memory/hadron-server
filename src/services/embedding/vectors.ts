@@ -360,12 +360,16 @@ export function iterativeScanSupported(db: PrismaClient): Promise<boolean> {
     return Promise.resolve(iterativeScanOverride);
   }
   iterativeScanProbe ??= (async () => {
-    let version: string | null = null;
+    let version: string | null;
     try {
       const rows = await db.$queryRaw<{ extversion: string }[]>`SELECT extversion FROM pg_extension WHERE extname = 'vector'`;
       version = rows[0]?.extversion ?? null;
     } catch {
-      version = null;
+      // A failed read says nothing about the version (the database may not be reachable yet at boot): do NOT
+      // remember it, so the next search probes again instead of running every query exact until restart.
+      iterativeScanProbe = null;
+      console.error('vector.iterative_scan_probe_failed — using the exact scan for this call; the probe is retried on the next');
+      return false;
     }
     const ok = pgvectorSupportsIterativeScan(version);
     if (!ok) logIterativeUnsupported(version ?? 'unknown');
@@ -394,7 +398,12 @@ export async function checkPgvectorAtBoot(db: PrismaClient): Promise<void> {
 /** A cancelled statement (SQLSTATE 57014) is the early stop of cor:api:090:04, never an error to the caller. */
 export function isStatementTimeout(e: unknown): boolean {
   const err = e as { code?: string; meta?: { code?: string; message?: string }; message?: string } | null;
-  return err?.meta?.code === '57014' || /statement timeout/i.test(String(err?.message ?? '')) || /statement timeout/i.test(String(err?.meta?.message ?? ''));
+  const text = `${err?.message ?? ''} ${err?.meta?.message ?? ''}`;
+  // A cancel by the user or an administrator (shutdown, pg_cancel_backend) is not the work budget running out.
+  if (/user request/i.test(text)) return false;
+  // P2028: Prisma's own interactive-transaction clock expired. It is margined past the budget below, but if it
+  // still wins the race the search ran out of time all the same.
+  return err?.code === 'P2028' || err?.meta?.code === '57014' || /statement timeout/i.test(text);
 }
 
 /**
@@ -404,9 +413,10 @@ export function isStatementTimeout(e: unknown): boolean {
  */
 async function withVectorBudget<T>(
   db: PrismaClient, candidateK: number, iterative: boolean, query: (tx: Prisma.TransactionClient) => Promise<T>,
+  budgetMs: number = vectorSearchTimeoutMs(),
 ): Promise<T> {
   return db.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${vectorSearchTimeoutMs()}`);
+    await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${budgetMs}`);
     await tx.$executeRawUnsafe(`SET LOCAL hnsw.ef_search = ${hnswEfSearchFor(candidateK)}`);
     if (iterative) {
       await tx.$executeRawUnsafe(`SET LOCAL hnsw.iterative_scan = strict_order`);
@@ -414,8 +424,15 @@ async function withVectorBudget<T>(
       await tx.$executeRawUnsafe(`SET LOCAL hnsw.max_scan_tuples = 2147483647`);
     }
     return query(tx);
-  });
+  // Prisma's interactive-transaction clock defaults to 5 s, the same as the default budget, and the SET LOCAL
+  // round-trips already spend part of it: give it room past the statement budget so Postgres ends the statement.
+  }, { timeout: budgetMs + VECTOR_TX_MARGIN_MS, maxWait: VECTOR_TX_MARGIN_MS });
 }
+
+/** Extra time Prisma's transaction clock gets beyond the statement budget (setup round-trips, commit). */
+export const VECTOR_TX_MARGIN_MS = 5000;
+/** The widest ANN `LIMIT` the iterative loop asks for; past it the exact statement ranks the page. */
+export const VECTOR_ANN_MAX_K = 20000;
 
 /**
  * #2772 — rank under the ruling-0150 contract: NO candidate cap. The iterative index scan walks the HNSW index
@@ -438,27 +455,40 @@ async function rankUnderBudget<R>(
 ): Promise<{ rows: R[]; exhausted: boolean; stopped: boolean }> {
   let best: R[] = [];
   const iterative = await iterativeScanSupported(db);
+  // ONE budget for the whole request: every statement below gets what is LEFT of it, so the env variable bounds the
+  // search, not each statement of a loop.
+  const deadline = Date.now() + vectorSearchTimeoutMs();
+  const left = (): number => {
+    const ms = deadline - Date.now();
+    if (ms < 1) throw Object.assign(new Error('canceling statement due to statement timeout'), { meta: { code: '57014' } });
+    return Math.trunc(ms);
+  };
   try {
     if (iterative) {
       let k = Math.max(o.k0, 1);
+      let ceiling = false;
       for (;;) {
-        const rows = await withVectorBudget(db, k, true, (tx) => o.ann(tx, k));
+        // A hard ceiling on the widening: past it the exact statement decides, with no count to ask first.
+        if (k > VECTOR_ANN_MAX_K) { ceiling = true; break; }
+        const rows = await withVectorBudget(db, k, true, (tx) => o.ann(tx, k), left());
         best = rows;
         if (o.distinctCount(rows) >= o.need) {
           if (o.need <= VECTOR_INDEX_ORDER_WINDOW) return { rows, exhausted: false, stopped: false };
           // Past the index's widest horizon the order of a FULL page is the index's approximate order, which
           // nothing in the statement can check (the count only catches a scan that ends short). Ruling 0150
           // asks for the true page, so rank it exactly; the cost grows with the offset (see the PR's EXPLAIN).
-          best = await withVectorBudget(db, 40, false, (tx) => o.exact(tx));
+          best = await withVectorBudget(db, 40, false, (tx) => o.exact(tx), left());
           return { rows: best, exhausted: o.distinctCount(best) < o.need, stopped: false };
         }
         if (rows.length < k) break; // short: the whole set, or an index walk that ended early (checked below)
         k *= 4;
       }
-      const eligible = await withVectorBudget(db, 40, true, (tx) => o.count(tx));
-      if (best.length >= eligible) return { rows: best, exhausted: true, stopped: false };
+      if (!ceiling) {
+        const eligible = await withVectorBudget(db, 40, true, (tx) => o.count(tx), left());
+        if (best.length >= eligible) return { rows: best, exhausted: true, stopped: false };
+      }
     }
-    best = await withVectorBudget(db, 40, false, (tx) => o.exact(tx));
+    best = await withVectorBudget(db, 40, false, (tx) => o.exact(tx), left());
     return { rows: best, exhausted: o.distinctCount(best) < o.need, stopped: false };
   } catch (e) {
     if (!isStatementTimeout(e)) throw e;
@@ -663,7 +693,7 @@ export async function vectorSearchChunks(
                ne.embedding <=> ${qvec}::vector AS distance
         ${eligibleFrom}
       )
-      SELECT * FROM cand ORDER BY distance ASC LIMIT ${k}`,
+      SELECT * FROM cand ORDER BY distance ASC, node_id ASC, chunk_index ASC LIMIT ${k}`,
     count: async (tx) => Number((await tx.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n ${eligibleFrom}`)[0]?.n ?? 0),
   });
   opts.onWindow?.({ exhausted: ranked.exhausted, stoppedEarly: ranked.stopped });
