@@ -10,6 +10,7 @@ import { GraphQLError } from 'graphql';
 // Spec 049 Phase 3b — a trigger's scopeRef, gated and resolved in the App's context.
 import { resolveScopeForTrigger } from '../../../lib/scopes.js';
 import { generateId } from '../../../lib/id.js';
+import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
 import {
   mintAppRun,
   handleSpawnCompletion,
@@ -404,6 +405,21 @@ async function resolveManualRunAgent(
 }
 
 /**
+ * #3911 (V70, cor:agt:040:10): the Agent a schedule or webhook is created with, chosen exactly as a manual run chooses
+ * it, but with no fall-through: an App with no installed Agent is refused here (`BOOT_PROMPT_NOT_SET`, the refusal a
+ * run of it gets at mint) instead of storing a trigger that names none. Every refusal lands before any write.
+ */
+async function resolveTriggerAgent(
+  ctx: Context,
+  appId: string,
+  agentRef: string | null | undefined,
+): Promise<string> {
+  const agentId = await resolveManualRunAgent(ctx, appId, agentRef);
+  if (!agentId) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
+  return agentId;
+}
+
+/**
  * Mint a MANUAL AppRun for an entry (task) node under an App — the shared
  * execute path behind the `triggerAppRun` mutation, `runTask(appRef:)` (#529),
  * and `importNode(taskRef:)` (#528). Authorized by the interactive gate (#530).
@@ -516,7 +532,7 @@ export const appRunMutations = {
     const app = await requireScheduleAdmin(ctx, input.appRef);
     const budgets = triggerBudgetPatch(input);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
-    const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
+    const agentId = await resolveTriggerAgent(ctx, app.id, input.agentRef);
     const timezone = input.timezone?.trim() || 'UTC';
     // Exactly one of cron (recurring) / runAt (one-shot) — mirrors
     // chk_agent_schedule_cron_xor_run_at so the constraint never surfaces
@@ -577,13 +593,15 @@ export const appRunMutations = {
       return withAuthorizedTx(
         ctx,
         [{ kind: 'org', id: app.organizationId }, { kind: 'app', id: app.id },
-          ...(agentId ? [{ kind: 'agent' as const, id: agentId }] : [])],
+          { kind: 'agent' as const, id: agentId }],
         async (txCtx) => {
           const currentApp = await requireScheduleAdmin(txCtx, input.appRef);
           if (currentApp.id !== app.id || currentApp.organizationId !== app.organizationId) {
             throw new Error('App scope changed; retry schedule creation');
           }
-          if (agentId) await resolveInstalledAgent(txCtx, app.id, input.agentRef);
+          if (await resolveTriggerAgent(txCtx, app.id, input.agentRef) !== agentId) {
+            throw new Error('Agent changed; retry schedule creation');
+          }
           if (input.scopeRef?.trim()) await resolveScopeForTrigger(txCtx, app.id, input.scopeRef);
         },
         async (tx, txCtx) => {
@@ -792,7 +810,7 @@ export const appRunMutations = {
     const app = await requireScheduleAdmin(ctx, input.appRef);
     const budgets = triggerBudgetPatch(input);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
-    const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
+    const agentId = await resolveTriggerAgent(ctx, app.id, input.agentRef);
     const scopeId = input.scopeRef?.trim() ? await resolveScopeForTrigger(ctx, app.id, input.scopeRef) : null;
     if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(input.name)) {
       throw new GraphQLError('Webhook name must be lowercase alphanumeric/dash, 1-64 chars.', {
@@ -807,13 +825,15 @@ export const appRunMutations = {
     const webhook = await withAuthorizedTx(
       ctx,
       [{ kind: 'org', id: app.organizationId }, { kind: 'app', id: app.id },
-        ...(agentId ? [{ kind: 'agent' as const, id: agentId }] : [])],
+        { kind: 'agent' as const, id: agentId }],
       async (txCtx) => {
         const currentApp = await requireScheduleAdmin(txCtx, input.appRef);
         if (currentApp.id !== app.id || currentApp.organizationId !== app.organizationId) {
           throw new Error('App scope changed; retry webhook creation');
         }
-        if (agentId) await resolveInstalledAgent(txCtx, app.id, input.agentRef);
+        if (await resolveTriggerAgent(txCtx, app.id, input.agentRef) !== agentId) {
+          throw new Error('Agent changed; retry webhook creation');
+        }
         if (input.scopeRef?.trim()) await resolveScopeForTrigger(txCtx, app.id, input.scopeRef);
       },
       async (tx) => {

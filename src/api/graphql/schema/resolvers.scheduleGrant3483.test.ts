@@ -32,9 +32,9 @@ afterAll(async () => { await cleanDb(db); await dropTestActions(); });
 const asWorker = <T>(fn: (ctx: any) => Promise<T>, workerId = w.workerId, sessionId = w.sessionId) =>
   runAsActor({ workerId, agentId: w.agentId }, () => fn({ ...w.workerCtx, sessionId }));
 const scheduleInput = (over: Record<string, unknown> = {}) => ({ appRef: w.appId, name: 'Daily', cron: '0 6 * * *', entryNodeUrn: w.entryNodeUrn, runAsSelf: true, ...over });
-const createSchedule = (ctx: any, over: Record<string, unknown> = {}) => M.createAgentSchedule({}, { input: scheduleInput(over) }, ctx);
+const createSchedule = (ctx: any, over: Record<string, unknown> = {}) => M.createAgentSchedule({}, { input: scheduleInput({ agentRef: w.agentId, ...over }) }, ctx);
 const createWebhook = (ctx: any, over: Record<string, unknown> = {}) =>
-  M.createAgentWebhook({}, { input: { appRef: w.appId, name: 'inbound', entryNodeUrn: w.entryNodeUrn, runAsSelf: true, ...over } }, ctx);
+  M.createAgentWebhook({}, { input: { appRef: w.appId, name: 'inbound', entryNodeUrn: w.entryNodeUrn, runAsSelf: true, agentRef: w.agentId, ...over } }, ctx);
 const schedules = () => db.agentSchedule.count({ where: { appId: w.appId } });
 const refusalOf = async (p: Promise<unknown>) => {
   const e = await p.then(() => null, (err: { message: string; extensions?: unknown }) => err);
