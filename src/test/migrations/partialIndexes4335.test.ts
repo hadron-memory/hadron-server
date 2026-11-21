@@ -28,6 +28,31 @@ describe('#4335 the two partial indexes carry the migration definition on push +
   });
 });
 
+/**
+ * #4672 QA F1: the two indexes must stay undeclared in schema.prisma. Prisma cannot see a partial index, so a declaration
+ * makes every later `db push` try to create it again ("already exists"), which neither a single push nor the replay
+ * catches. Comments are stripped first, so the explanatory comments that name the indexes do not count.
+ */
+describe('#4335 schema.prisma does not declare the two partial indexes', () => {
+  const schema = readFileSync(new URL('../../../prisma/schema.prisma', import.meta.url), 'utf8')
+    .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+  const model = (name: string) => {
+    const m = schema.match(new RegExp(`^model ${name} \\{[\\s\\S]*?^\\}`, 'm'));
+    expect(m, `model ${name}`).not.toBeNull();
+    return m![0];
+  };
+
+  it('Memory declares no plain index on userId alone', () => {
+    expect(model('Memory')).not.toMatch(/@@index\(\[\s*userId\s*\]/);
+    expect(model('Memory')).toMatch(/^\s*userId\s/m);
+  });
+
+  it('User declares no unique on (externalAppId, externalId)', () => {
+    expect(model('User')).not.toMatch(/@@unique\(\[\s*externalAppId\s*,\s*externalId\s*\]/);
+    expect(model('User')).toMatch(/^\s*externalAppId\s/m);
+  });
+});
+
 const FILE = readFileSync(new URL('../../../prisma/partial-index-invariants.sql', import.meta.url), 'utf8');
 
 /**
