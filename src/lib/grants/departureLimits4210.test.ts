@@ -68,14 +68,14 @@ describe('#4210: the new departure doors keep the first end of a grant its actio
   it('#4171 org leave: a person\'s used and timed-out edit grants keep their first end; the live one is stamped', async () => {
     const g = await threeGrants({ user_id: member.id });
     await db.orgMember.updateMany({ where: { organizationId: orgId, userId: member.id }, data: { deletedAt: new Date() } });
-    const ended = await db.$transaction((tx) => endHeldGrants(tx, 'user', member.id, { organizationId: orgId }));
+    const ended = await db.$transaction((tx) => endHeldGrants(tx, 'user', member.id, 'ORG_REMOVED', { organizationId: orgId }));
     await expectOnlyLiveEnded(g, ended);
   });
 
   it('#4172 uninstall: an agent\'s used and timed-out edit grants keep their first end; the live one is stamped', async () => {
     const g = await threeGrants({ agent_id: agentId });
     await db.appAgent.deleteMany({ where: { appId, agentId } });
-    const ended = await db.$transaction((tx) => endAgentGrantsAtApps(tx, [{ appId, agentId }]));
+    const ended = await db.$transaction((tx) => endAgentGrantsAtApps(tx, [{ appId, agentId, reason: 'AGENT_UNINSTALLED' }]));
     await expectOnlyLiveEnded(g, ended);
   });
 });
