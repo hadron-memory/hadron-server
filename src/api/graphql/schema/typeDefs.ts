@@ -13561,7 +13561,7 @@ export const typeDefs = `#graphql
     # #4142 (S6 chunk F): the deprecated orgId/userId aliases dropped; both
     # survivors resolve id / slug / URN (user: id / email / handle / URN).
     """
-    Accepts the entity's ID or URN (orgRef). A user who is already a live member is refused with CONFLICT.
+    orgRef and userRef accept what their argument descriptions list: an id, a slug or URN, and for a user also an email or handle. A user who is already a live member is refused with CONFLICT.
     """
     addOrgMember(
       "#764 — the organization as an id / slug / hrn:org:<slug> URN."
@@ -13571,7 +13571,7 @@ export const typeDefs = `#graphql
       role: Role!
     ): OrgMember!
     """
-    Accepts the entity's ID or URN (orgRef). Refused with NOT_FOUND when the user is not a live member, and with CONFLICT when it would demote the organization's last live owner.
+    orgRef and userRef accept what their argument descriptions list: an id, a slug or URN, and for a user also an email or handle. Refused with NOT_FOUND when the user is not a live member, and with CONFLICT when it would demote the organization's last live owner.
     """
     updateOrgMember(
       "#764 — the organization as an id / slug / hrn:org:<slug> URN."
@@ -13581,7 +13581,7 @@ export const typeDefs = `#graphql
       role: Role!
     ): OrgMember!
     """
-    Accepts the entity's ID or URN (orgRef). Refused with NOT_FOUND when the user never held a membership, and with CONFLICT when it would remove the last live owner; removing an already-revoked member succeeds again.
+    orgRef and userRef accept what their argument descriptions list: an id, a slug or URN, and for a user also an email or handle. Refused with NOT_FOUND when the user never held a membership, and with CONFLICT when it would remove the last live owner; removing an already-revoked member succeeds again.
     """
     removeOrgMember(
       "#764 — the organization as an id / slug / hrn:org:<slug> URN."
@@ -15923,7 +15923,7 @@ export const typeDefs = `#graphql
     org. Side effect: empty personal Memory of (user, agent) is hard-
     deleted; non-empty is retained with userMemoryOfAgentId preserved.
 
-    Accepts the entity's ID or URN (agentId).
+    userRef and agentRef accept what their argument descriptions list (the user as an id, email, handle or URN; the Agent as an id or URN).
     """
     revokeAgentSubscription(
       "#764 — the user as an id / email / handle / hrn:user:<handle> URN."
