@@ -3205,6 +3205,15 @@ export const typeDefs = `#graphql
     id: ID!
     name: String!
     urn: String!
+    """
+    #2309 — the portal link that opens this App: <FRONTEND_URL>/app/u/<the urn field above>, built from the SAME
+    rendered urn the field returns, so the two cannot diverge. It reads nothing of its own: it derives from a value the
+    caller already sees, so a caller who cannot read the App never reaches it. NULL when the deployment has no portal
+    origin (FRONTEND_URL unset or malformed), when the urn cannot be rendered (emission threw and the raw bare value
+    was served, which is not a canonical link), or when the urn holds a character a link cannot carry. Never a
+    guessed host.
+    """
+    portalUrl: String
     "#2171 (R211): the member roles this App offers: the union over its installed Agents, primary first."
     availableMemberRoles: [String!]!
     "#2138: when the whole team was paused (setTeamPause), or null. Separate from every worker's own pause."
@@ -4305,6 +4314,15 @@ export const typeDefs = `#graphql
     served raw and logged, so a bare, unprefixed value is a possible read.
     """
     urn: String!
+    """
+    #2309 — the portal link that opens this Memory: <FRONTEND_URL>/app/u/<the urn field above>, built from the SAME
+    rendered urn the field returns, so the two cannot diverge. It reads nothing of its own: it derives from a value the
+    caller already sees, so a caller who cannot read the Memory never reaches it. NULL when the deployment has no portal
+    origin (FRONTEND_URL unset or malformed), when the urn cannot be rendered (emission threw and the raw bare value
+    was served, which is not a canonical link), or when the urn holds a character a link cannot carry. Never a
+    guessed host.
+    """
+    portalUrl: String
     name: String!
     shortDescription: String
     description: String
@@ -4877,6 +4895,15 @@ export const typeDefs = `#graphql
     id: ID!
     organizationId: String
     urn: String!
+    """
+    #2309 — the portal link that opens this Agent: <FRONTEND_URL>/app/u/<the urn field above>, built from the SAME
+    rendered urn the field returns, so the two cannot diverge. It reads nothing of its own: it derives from a value the
+    caller already sees, so a caller who cannot read the Agent never reaches it. NULL when the deployment has no portal
+    origin (FRONTEND_URL unset or malformed), when the urn cannot be rendered (emission threw and the raw bare value
+    was served, which is not a canonical link), or when the urn holds a character a link cannot carry. Never a
+    guessed host.
+    """
+    portalUrl: String
     name: String!
     description: String
     """

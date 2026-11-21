@@ -1146,6 +1146,17 @@ function aiConfigWarnOnce(ctx: Context): (msg: string) => void {
   };
 }
 
+/**
+ * #2309: the portal link of a Memory, Agent or App, built from the SAME rendered urn the `urn` field returns (never the stored column,
+ * which is the bare, possibly legacy single-colon or v1 double-colon form). A rendered value that is not a canonical `hrn:` URN (emission
+ * threw and the raw bare value was served) is not a link, so it answers null, as does an unset or malformed portal origin.
+ */
+function portalUrlOfEntity(kind: 'memory' | 'agent' | 'app', stored: string | null | undefined): string | null {
+  if (!stored) return null;
+  const rendered = safeCanonicalUrn(kind, stored);
+  return rendered.startsWith('hrn:') ? portalUrlForUrn(rendered) : null;
+}
+
 export const typeResolvers = {
   ...servedPromptTypeResolvers,
   AiServiceConfig: {
@@ -1917,6 +1928,7 @@ export const typeResolvers = {
       if (!urn) throw new Error('Memory URN is required but not found (partial query?)');
       return safeCanonicalUrn('memory', urn);
     },
+    portalUrl: (g: { urn?: string | null }) => portalUrlOfEntity('memory', g.urn),
   },
   App: {
     /**
@@ -2163,6 +2175,7 @@ export const typeResolvers = {
       if (!a.urn) throw new Error('App URN is required but not found (partial query?)');
       return safeCanonicalUrn('app', a.urn);
     },
+    portalUrl: (a: { urn?: string | null }) => portalUrlOfEntity('app', a.urn),
   },
   // 023-app-shape US1: the App↔Agent N:M join.
   AppAgent: {
@@ -2873,6 +2886,7 @@ export const typeResolvers = {
       if (!a.urn) throw new Error('Agent URN is required but not found (partial query?)');
       return safeCanonicalUrn('agent', a.urn);
     },
+    portalUrl: (a: { urn?: string | null }) => portalUrlOfEntity('agent', a.urn),
   },
   UsageEvent: {
     actionArgs: (event: { actionArgs: unknown }) => deserializeJson(event.actionArgs),
