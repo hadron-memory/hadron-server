@@ -149,9 +149,11 @@ describe('never due: retired, paused, dormant', () => {
     await say(channel, 'attention', mention('liam'));
     const read = () => computeDueWakes({ ctx: ctx(holderA.id), app: { id: app.id, organizationId: org.id, ownerUserId: null }, reader: { manager: false, userId: holderA.id }, requester: { userId: holderA.id }, preview: true });
     expect((await read()).wakes.map((wake) => wake.workerId)).toEqual([liam.id]);
-    const old = new Date(Date.now() - 100 * DAY);
+    const old = new Date(Date.now() - 91 * DAY);
     await db.session.update({ where: { id: session.id }, data: { startedAt: old, updatedAt: old } });
     expect((await read()).wakes.map((wake) => wake.workerId)).toEqual([]);
+    await db.session.update({ where: { id: session.id }, data: { startedAt: recent, updatedAt: recent } });
+    expect((await read()).wakes.map((wake) => wake.workerId)).toEqual([liam.id]);
   });
 
   it('a dormant worker is never due; its mentions are counted where a router sees them', async () => {

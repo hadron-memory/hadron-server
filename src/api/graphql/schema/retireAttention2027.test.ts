@@ -73,7 +73,7 @@ describe('#2027 S11: the attention API is retired', () => {
 
   it('no MCP tool registration names hadron_team_attention* (deleted, not just #3082-disabled)', () => {
     const src = sourceWithoutComments('../../../mcp/server.ts');
-    expect(src).not.toMatch(/\bhadron_team_attention(?:_[a-z0-9]+)*\b/);
+    expect(src).not.toMatch(/\bhadron_team_attention\w*/);
   });
 
   it('the paged-attention scan codec and the poll entry points are deleted', () => {

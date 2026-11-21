@@ -520,11 +520,14 @@ describe('worker session reads and mark-read (resolver level; was the MCP parity
 
   it('refuses markOwnTeamChatRead while impersonating even within the App organization (#4507)', async () => {
     await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: user.id, heldAt: new Date() } });
-    const args = { appRef: app.id, sessionRef: sessionId, channelRef: channel.id, seq: 0 };
-    await expect(M.markOwnTeamChatRead({}, args, userCtx())).resolves.toBeDefined();
+    await post('unread');
+    const args = { appRef: app.id, sessionRef: sessionId, channelRef: channel.id, seq: 1 };
     const impersonation = { orgId: org.id, actorUserId: otherUser.id, sessionId: generateId(), expiresAt: new Date(Date.now() + 60_000) };
     await expect(M.markOwnTeamChatRead({}, args, userCtx({ impersonation })))
       .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    await expect(M.markOwnTeamChatRead({}, args, userCtx())).resolves.toBeDefined();
+    expect(await seenSeq(worker.id, channel.id)).toBe(1);
   });
 
   it('conceals an existing App from a non-participant exactly like an absent App (the pilot door)', async () => {
