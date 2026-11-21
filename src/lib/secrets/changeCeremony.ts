@@ -200,7 +200,9 @@ export async function declineSecretChange(db: PrismaClient, a: SecretAssertion):
    await tx.$executeRaw`UPDATE secret_change_requests SET state='expired',ended_at=(${now.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE id=${r.id} AND state='open'`;
    return new GraphQLError('This secret change is no longer available.',{extensions:{code:'SECRET_CHANGE_REQUEST_EXPIRED'}});
   }
-  if(!cred||(cred.window_outcome===null&&cred.window_ends_at!==null&&cred.window_ends_at>now))throw new GraphQLError('This passkey is still in its cooling-off period.',{extensions:{code:'PASSKEY_COOLING_OFF'}});
+  // A credential that vanished between verification and this lock is a refusal, not a cooling-off (#4798 BLIND F3).
+  if(!cred)throw refuse();
+  if(cred.window_outcome===null&&cred.window_ends_at!==null&&cred.window_ends_at>now)throw new GraphQLError('This passkey is still in its cooling-off period.',{extensions:{code:'PASSKEY_COOLING_OFF'}});
   const decided=await decideCeremonyAssertion(tx,{ceremonyId:a.ceremonyId,browserNonceHash:a.browserNonceHash,purpose:'SECRET_CHANGE',verified:verified.snapshot});
   if(!decided||decided.ownerId!==r.requester_id)throw refuse();
   // The one transition: guarded on `open`, so nothing else that ended the request is ever overwritten. The staged value is

@@ -29,7 +29,7 @@ async function proof(id: string, k = key, nonce = 'browser-nonce-for-secret-chan
     assertion: k.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(open.challenge, 'base64url'), origin: ORIGIN, rpId: RP }) });
 }
 type Proved = Awaited<ReturnType<typeof proof>> & { outcome: 'change'; nonce: string; ceremonyId: string; challenge: string; decline: { ceremonyId: string; challenge: string } };
-async function proved(id: string, k = key) { return await proof(id, k) as unknown as Proved; }
+async function proved(id: string, k = key, nonce?: string) { return await proof(id, k, nonce) as unknown as Proved; }
 const assertion = (k: typeof key, challenge: string) => k.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(challenge, 'base64url'), origin: ORIGIN, rpId: RP });
 async function decline(id: string, p: Proved, k = key) {
   return declineSecretChange(db, { requestId: id, ceremonyId: p.decline.ceremonyId, browserNonceHash: hash(p.nonce), credentialId: k.credentialId,
@@ -163,6 +163,16 @@ describe('#4703 exactly once under concurrency', () => {
     const both = await Promise.allSettled([decline(id, p), decline(id, p)]);
     expect(both.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     expect((await row(id)).state).toBe('declined');
+  });
+
+  it('two tabs: two distinct proofs of one request race to decline, and exactly one wins (BLIND F5)', async () => {
+    const id = await stage();
+    const tabA = await proved(id, key, 'browser-nonce-tab-a'), tabB = await proved(id, key, 'browser-nonce-tab-b');
+    expect(tabA.decline.ceremonyId).not.toBe(tabB.decline.ceremonyId);
+    const both = await Promise.allSettled([decline(id, tabA), decline(id, tabB)]);
+    expect(both.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(both.filter((r) => r.status === 'rejected')).toHaveLength(1);
+    expect(await row(id)).toMatchObject({ state: 'declined', staged_value_encrypted: null });
   });
 
   it('a decline racing an approve: exactly one terminal state, and a version only if the approve won', async () => {

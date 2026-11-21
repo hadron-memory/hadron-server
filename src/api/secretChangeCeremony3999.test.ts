@@ -6,7 +6,7 @@ import { type Server } from 'node:http';
 import { mountSecretChangeCeremonyRoutes } from './secretChangeCeremonyRoutes.js';
 let server:Server|undefined;
 afterEach(async()=>{vi.restoreAllMocks();vi.unstubAllEnvs();if(server)await new Promise<void>(r=>server!.close(()=>r()));server=undefined;});
-async function host(on:boolean){const app=express();process.env.PASSKEY_SIGNING_ENABLED=String(on);mountSecretChangeCeremonyRoutes(app);
+async function host(on:boolean){if(server){await new Promise<void>(r=>server!.close(()=>r()));server=undefined;}const app=express();process.env.PASSKEY_SIGNING_ENABLED=String(on);mountSecretChangeCeremonyRoutes(app);
  server=app.listen(0,'127.0.0.1');await new Promise<void>(r=>server!.once('listening',r));return `http://127.0.0.1:${(server.address() as any).port}`;}
 describe('#3999 server ceremony shell',()=>{
  it('is byte identical for every id, no-store and protected from framing',async()=>{
@@ -96,7 +96,6 @@ describe('#4703 the decline route',()=>{
  it('is mounted with the others, refuses a missing Origin, and is gone when signing is off',async()=>{
   const on=await host(true);const r=await fetch(on+'/secret-changes/missing/decline',{method:'POST'});
   expect(r.status).toBe(403);expect(await r.json()).toEqual({code:'FORBIDDEN'});
-  await new Promise<void>(res=>server!.close(()=>res()));server=undefined;
   const off=await host(false);expect((await fetch(off+'/secret-changes/missing/decline',{method:'POST'})).status).toBe(404);
  });
 });
