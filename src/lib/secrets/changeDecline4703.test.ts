@@ -12,7 +12,8 @@ import { generateId } from '../id.js';
 import { insertSoftPasskey, softPasskey } from '../../test/softPasskey.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { upsertPlatformActions } from '../grants/actions.js';
-import { openSecretProof, proveSecretChange, completeSecretChange, declineSecretChange } from './changeCeremony.js';
+import { createCeremony } from '../passkeys/ceremony.js';
+import { openSecretProof, proveSecretChange, completeSecretChange, declineSecretChange, secretDeclineChallenge } from './changeCeremony.js';
 import type { ChangeRequest } from './changeRequests.js';
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -88,11 +89,17 @@ describe('#4703 the requester declines their own open change', () => {
   });
 
   it('an open request past its expiry ends expired, never declined', async () => {
-    const id = await stage(), p = await proved(id);
-    await db.$executeRaw`UPDATE secret_change_requests SET expires_at = (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 second' WHERE id=${id}`;
-    await expect(decline(id, p)).rejects.toMatchObject({ extensions: { code: 'SECRET_CHANGE_REQUEST_EXPIRED' } });
-    expect((await row(id)).state).toBe('expired');
-    expect((await row(id)).staged_value_encrypted).toBeNull();
+    // The proof refuses an expired request, so the ceremony is minted directly (a request that expired between proof and decline).
+    const src = await row(await stage()), expiredId = generateId();
+    await db.secretChangeRequest.create({ data: { id: expiredId, appId, secretId, secretName: src.secret_name, secretKind: src.secret_kind,
+      metadata: src.metadata as never, operation: src.operation, requesterId: userId, state: 'open', snapshot: src.snapshot,
+      stagedValueEncrypted: src.staged_value_encrypted, keyVersion: src.key_version, sizeBytes: src.size_bytes, expiresAt: new Date(Date.now() - 10_000) } });
+    const challenge = secretDeclineChallenge(await row(expiredId));
+    const nonce = 'browser-nonce-expired';
+    const ceremony = await db.$transaction((tx) => createCeremony(tx, { purpose: 'SECRET_CHANGE', browserNonceHash: hash(nonce), ttlSeconds: 600, challengeHash: createHash('sha256').update(challenge).digest('hex') }));
+    await expect(declineSecretChange(db, { requestId: expiredId, ceremonyId: ceremony.id, browserNonceHash: hash(nonce), credentialId: key.credentialId,
+      assertion: assertion(key, challenge.toString('base64url')) })).rejects.toMatchObject({ extensions: { code: 'SECRET_CHANGE_REQUEST_EXPIRED' } });
+    expect(await row(expiredId)).toMatchObject({ state: 'expired', staged_value_encrypted: null });
   });
 });
 
