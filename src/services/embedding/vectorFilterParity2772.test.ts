@@ -9,7 +9,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { getRetrievalProvider } from '../../lib/retrieval/postgres.js';
-import { setVectorSmallScopeRowsForTests, setVectorWindowRowsMaxForTests, VECTOR_TX_MAX_WAIT_MS } from './vectors.js';
+import { setVectorSmallScopeRowsForTests, setVectorWindowRowsMaxForTests, vectorSearchNodes, VECTOR_TX_MAX_WAIT_MS } from './vectors.js';
 
 const DIM = 768;
 const vec = (x: number) => { const v = new Array(DIM).fill(0); v[1] = 1; v[2] = x; return `'[${v.join(',')}]'::vector`; };
@@ -127,6 +127,23 @@ describe('BLIND P2 (#4665): the cut is a loss only when the window was filled; t
   it('includeDeleted ranks the tombstone only in a recoverable memory', async () => {
     expect((await withDeleted([])).map((h: any) => h.nodeId)).not.toContain(deletedId);
     expect((await withDeleted([mem])).map((h: any) => h.nodeId)).toContain(deletedId);
+  });
+});
+
+describe('Celline survivor (#4665): the memory scope rides the node ranking statement', () => {
+  it('a vector in ANOTHER memory, closer than every in-scope vector, is never ranked into the page', async () => {
+    const other = (await createDbOrgAndGraph(db, { orgName: 'r2772p-org2', graphName: 'r2772p/other' })).graph.id;
+    await db.memory.update({ where: { id: other }, data: { vectorIndexEnabled: true, embeddingSource: 'contentChunks' } });
+    const foreign = generateId();
+    await db.node.create({ data: { id: foreign, memoryId: other, loc: 'foreign', name: 'foreign', content: 'body', role: 'review', createdBy: 'u-x' } });
+    await db.$executeRawUnsafe(`
+      INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, chunk_index, char_start, char_end, chunk_text, embedding, created_at)
+      VALUES (md5('${foreign}'), '${foreign}', '${other}', 'chunk', 'test', 'stub-model', ${DIM}, 0, 0, 4, 'body', ${vec(0)}, now())`);
+    // Called directly with NO filterSql: through the provider the filter fragment scopes by memory too, which would hide a
+    // dropped `ne.memory_id IN (...)` in the ranking statement itself.
+    const hits = await vectorSearchNodes(db, { memoryIds: [mem], queryEmbedding: query(), limit: 50 });
+    expect(hits.map((h) => h.nodeId)).not.toContain(foreign);
+    expect(hits.length).toBeGreaterThan(0);
   });
 });
 
