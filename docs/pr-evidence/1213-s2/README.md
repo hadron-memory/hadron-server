@@ -35,3 +35,9 @@ The first full hosted run at `df4155629` exposed six existing test harness assum
 - `resolvers.legacyChatSeq2987.test.ts` injects the stale absent-target answer through clone's real owning transaction client. The tombstone seq/revision and `SEQ_PROTECTED` assertions remain.
 
 After restoration, 596 tests pass across 29 focused/neighbor files (561 plus 35); the first-head production sources are byte-identical. The next hosted run, not these local results, decides whether the fix head may freeze.
+
+## Main carry before the first freeze
+
+Main `cb7a3f3c381862dc91d2f79b90f2c95eeef565f6` was merged cleanly after the test repair. Shared files: `governedRole.ts` adds Question MCP metadata/refusal guidance in separate hunks from S2's participation helper; `server.ts` imports/registers Question tools separately from the owning-move key set. The merge imports 22 main files, including Question approval/tools/SDL and principal/diagnostic changes; the S2 PR's own diff remains 18 files with no schema/SDL/migration delta.
+
+Post-carry focused validation passes **678 tests in 32 files**, including all six repaired harnesses, the new Question MCP tool suite, Question answers and approvals. Main's Question tools delegate to the existing Question resolver owners; they introduce no additional caller-owned signal transaction outside that audited path. The approval metadata gate does not change role/runnable participation.

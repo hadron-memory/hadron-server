@@ -27,7 +27,7 @@ Null, false and whitespace clearing participate. No unlocked existing-row read i
 | --- | --- | --- |
 | GraphQL and MCP ordinary/kind doors through `writeNodeCore` | Input-triggered own memory unioned with existing inline-edge endpoint memories, before loc locks | Existing before/after governed gate, authoring, access, revision, encryption and OCC |
 | Task-export property merge | Resolve complete own/inline set before transaction; authority, memory set, per-node advisory, fresh property merge, core reentry | Atomic bag merge and kind ownership |
-| Question/log create and update (`resolvers.questions.ts`) | Existing `lockLog`, `lockLogShared`, `lockQuestion` and create-log own-memory acquisition before log/question rows; core reentry | Existing question/log lifecycle and refusals |
+| Question/log create and update (`resolvers.questions.ts`), including MCP Question tool delegates | Existing `lockLog`, `lockLogShared`, `lockQuestion` and create-log own-memory acquisition before log/question rows; core reentry | Existing question/log lifecycle and refusals |
 | Spec reserve/allocate | Existing own-memory endpoint key before loc/row work; core reentry | Placeholder and spec authoring rules |
 | Spec renumber | Shared GraphQL node-move entry declares source/destination set | Existing reservation/relocation rules |
 | Git sync / mirror-derived signals | Existing complete endpoint memory set at sync transaction entry, before loc/node reconciliation | Existing mirror validation and role/runnable derivation |
