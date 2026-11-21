@@ -10,6 +10,7 @@ import { generateId } from '../../../lib/id.js';
 import { PLATFORM_ACTIONS, upsertPlatformActions } from '../../../lib/grants/actions.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { runAsActor } from '../../../lib/requestActor.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { grantTermsBytes } from '../../../lib/grants/terms.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -121,6 +122,20 @@ describe('#4434 agent-held secret.reveal', () => {
     expect(Buffer.from(bytes as never).toString('utf8')).toContain(roleAgentId);
     expect(g.agentId).toBe(roleAgentId);
     expect(g.workerId).toBeNull();
+  });
+
+  it('issuing an AGENT-held client takes the agent authority anchor: a revoker holding it exclusively makes the issue wait, and a worker-held issue does not wait', async () => {
+    const settled = async (p: Promise<unknown>, ms: number) => Promise.race([p.then(() => true, () => true), new Promise<boolean>((r) => setTimeout(() => r(false), ms))]);
+    let agentIssue: Promise<any> | undefined; let waited: boolean | undefined; let workerIssueDone: boolean | undefined;
+    await db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'agent', id: roleAgentId }], 'exclusive');
+      agentIssue = issue('AGENT', roleAgentId);
+      workerIssueDone = await settled(issue('WORKER', w1), 5000);
+      waited = await settled(agentIssue, 1000);
+    }, { timeout: 30000 });
+    expect(workerIssueDone).toBe(true);
+    expect(waited).toBe(false);
+    expect((await agentIssue)?.clientId).toBeTruthy();
   });
 
   it('an agent-held client is refused to a person (no worker bound) with the same uniform answer', async () => {
