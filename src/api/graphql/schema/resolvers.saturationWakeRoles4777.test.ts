@@ -61,7 +61,7 @@ const stored = async () => (await db.agentTaskStallSchedule.findUnique({ where: 
 beforeEach(async () => {
   await cleanDb(db);
   const n = generateId().slice(-8).toLowerCase();
-  const user = (h: string, roles = ['READER']) => db.user.create({ data: { handle: `${h}-${n}`, roles } }).then((u) => u.id);
+  const user = (h: string, roles = ['READER']) => db.user.create({ data: { handle: `${h}-${n}`, roles: roles as never } }).then((u) => u.id);
   ownerId = await user('owner');
   orgAdminId = await user('oadmin');
   orgOwnerId = await user('oowner');
@@ -108,7 +108,7 @@ describe('#4777 the list: empty by default, set by whoever manages the App (cor:
     ['an org OWNER', () => orgOwnerId],
     ['a platform admin', () => platformAdminId],
   ])('%s sets, replaces and clears it, and the read returns what is stored', async (_label, who) => {
-    const c = ctx(who());
+    const c = ctx(who(), who() === platformAdminId ? { roles: ['READER', 'ADMIN'] } : {});
     expect(await setRoles(['triager'], c)).toEqual({ appId, roles: ['triager'] });
     expect(await readRoles(ctx(memberId))).toEqual({ appId, roles: ['triager'] });
     expect(await setRoles(['qa-engineer', 'coordinator'], c)).toEqual({ appId, roles: ['coordinator', 'qa-engineer'] });
@@ -301,7 +301,7 @@ describe('#4777 the wake (cor:agt:060:16; the wake record is agent_team_alarm_sc
       ctx: ctx(ownerId), app: { id: appId, organizationId: orgId, ownerUserId: null },
       reader: { manager: true, userId: ownerId }, requester: { userId: ownerId }, preview: true,
     });
-    const woken = (w: string) => due.wakes.some((d: any) => d.workerId === w && d.reasons.some((r: any) => r.kind === 'TASK' && r.eventId === alarm.id));
+    const woken = (w: string) => due.wakes.some((d: any) => d.workerId === w && d.wake.reasons.some((r: any) => r.kind === 'TASK' && r.eventId === alarm.id));
     expect(woken(live)).toBe(true);
     expect(woken(paused)).toBe(false);
   });
@@ -329,20 +329,23 @@ describe('#4777 the wake (cor:agt:060:16; the wake record is agent_team_alarm_sc
     expect(row?.state).not.toBe('YOUR_MOVE');
   });
 
-  it('another App\'s list never wakes this App\'s workers', async () => {
+  it('another App\'s list never wakes this App\'s workers, and this App\'s alarm never wakes another App\'s', async () => {
     const t = await worker('triager');
+    // A triager of the OTHER App, whose own list names triager: it must never enter this App's alarm.
+    const foreign = await worker('triager', otherAppId);
     await setRoles(['triager'], ctx(orgAdminId), otherAppId);
+    await setRoles(['qa'], ctx(orgAdminId));
     await saturate();
     await evaluate();
     const [alarm] = await alarms();
     expect(alarm.chain).toEqual([]);
-    expect((await pendingTaskWakes(db, [t], new Date())).size).toBe(0);
+    expect((await pendingTaskWakes(db, [t, foreign], new Date())).size).toBe(0);
   });
 });
 
 describe('#4777 the MCP door: registered disabled, as the team cut requires (#3082 R1)', () => {
   it('the set and read tools are registered through the team cut, never listed', () => {
-    registerAgentTaskTools({} as never, { db } as never);
+    registerAgentTaskTools({} as never, { db, auth: {} } as never);
     expect(DISABLED_TEAM_TOOLS).toEqual(expect.arrayContaining(['hadron_saturation_wake_roles_set', 'hadron_saturation_wake_roles']));
   });
 });

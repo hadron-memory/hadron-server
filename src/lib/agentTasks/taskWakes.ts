@@ -40,6 +40,7 @@ import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.j
 import { isWorkerDormant, toNaiveUtc } from '../sessionActivity.js';
 import { ASSIGNED_EVENT_TYPES, PASSIVE_EVENT_TYPES } from './events.js';
 import { alarmEpisodeKey, currentAlarmEpisodes } from './stall.js';
+import { SATURATION_EVENT_TYPE } from './saturation.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -118,7 +119,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
   const assignedTypes = Prisma.join([...ASSIGNED_EVENT_TYPES]);
 
   type Row = { workerId: string; taskId: string; eventId: string; type: string; title: string; handle: string; at: Date };
-  const [assigned, finished, alarms, endSession, darkAlarms, answered] = await Promise.all([
+  const [assigned, finished, alarms, endSession, darkAlarms, answered, saturationAlarms] = await Promise.all([
     // The task's LATEST assignment event, to its current worker assignee, who has not acted on the task since
     // (an assignment the worker made itself counts as acting: `>=` includes the event).
     db.$queryRaw<Row[]>(Prisma.sql`
@@ -222,6 +223,22 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
         AND NOT EXISTS (SELECT 1 FROM agent_team_events x
                         WHERE x.task_id = t.id AND x.app_id = t.app_id AND x.actor_worker_id = t.assignee_worker_id AND x.created_at >= e.created_at AND x.type NOT LIKE 'app.%' AND x.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])}))
         AND ${undelivered('t.assignee_worker_id', 'e.id', '0')}`),
+    // #4777 (cor:agt:060:16): a saturation alarm wakes EVERY worker its chain names, each through its own row, all woken
+    // when the alarm was raised: never the highest position only, and never a climb. Acknowledging it changes nothing
+    // else (:16), so an acknowledged alarm's wake stays due until delivered; the App must still be live. Words only: the
+    // nudge names the combination from the payload, never evidence. Who is never due (cor:agt:080:11) is the caller's.
+    db.$queryRaw<(Row & { chainIndex: number })[]>(Prisma.sql`
+      SELECT (e.chain -> s.chain_index ->> 'workerId') AS "workerId", e.id AS "taskId", e.id AS "eventId", e.type,
+             'Saturation: no work could be given to ' || COALESCE(e.payload ->> 'family', 'any family') || ' / '
+               || COALESCE(e.payload ->> 'tier', 'any tier') || ' / ' || COALESCE(e.payload ->> 'role', 'any role') AS title,
+             'SATURATION' AS handle, e.created_at AS at, s.chain_index AS "chainIndex"
+      FROM agent_team_events e
+      JOIN agent_team_alarm_schedule s ON s.event_id = e.id AND s.woken_at IS NOT NULL
+      JOIN workers w ON w.id = (e.chain -> s.chain_index ->> 'workerId') AND w.app_id = e.app_id
+      WHERE e.type = ${SATURATION_EVENT_TYPE} AND e.severity = 'alarm'
+        AND (e.chain -> s.chain_index ->> 'workerId') IN (${ids})
+        AND ${liveApp('e')}
+        AND ${undelivered("(e.chain -> s.chain_index ->> 'workerId')", 'e.id', 's.chain_index')}`),
   ]);
 
   const current = await currentAlarmEpisodes(db, alarms, now);
@@ -235,6 +252,9 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
   for (const r of answered) push({ ...r, chainIndex: 0, event: 'ANSWERED' });
   for (const r of alarms) {
     if (!r.episodeStart || !current.has(alarmEpisodeKey(r.taskId, r.type, r.episodeStart))) continue;
+    push({ workerId: r.workerId, taskId: r.taskId, eventId: r.eventId, title: r.title, handle: r.handle, at: r.at, chainIndex: r.chainIndex, event: 'ALARM' });
+  }
+  for (const r of saturationAlarms) {
     push({ workerId: r.workerId, taskId: r.taskId, eventId: r.eventId, title: r.title, handle: r.handle, at: r.at, chainIndex: r.chainIndex, event: 'ALARM' });
   }
   for (const r of darkAlarms) {

@@ -74,6 +74,8 @@ import { recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { cancelLiveReset, holdForStopLease } from '../../../lib/contextReset/contextReset.js';
 import { effectiveWindows, STALL_WINDOW_DEFAULTS, type StallWindows } from '../../../lib/agentTasks/stall.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
+import { normalizeWakeRoles, SATURATION_EVENT_TYPE, SATURATION_WAKE_ROLE_MAX_LENGTH, SATURATION_WAKE_ROLES_MAX } from '../../../lib/agentTasks/saturation.js';
+import { withRosterAppRead } from './resolvers.agentTaskMatching.js';
 import {
   HOST_LAPSE_CHECK_INS_DEFAULT,
   HOST_LAPSE_CHECK_INS_MAX,
@@ -233,7 +235,9 @@ export const agentTaskAlarmMutations = {
       }
       // Membership is checked against the chain ON THE LOCKED ROW (Rook P3-2).
       // cor:agt:050:24 (#1762): an owner in the chain, or whoever manages the App, for any alarm in it.
-      const ownerInChain = inChain(actor, row.chain);
+      // #4777 (cor:agt:060:16): a saturation alarm's chain lists the workers it WOKE, not owners: only whoever manages
+      // the App acknowledges it, so its chain grants no standing here.
+      const ownerInChain = row.type !== SATURATION_EVENT_TYPE && inChain(actor, row.chain);
       if (!ownerInChain && !(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
         throw taskError(
           'ALARM_NOT_IN_CHAIN',
@@ -485,7 +489,57 @@ export const agentTaskAlarmMutations = {
     });
     return stallWindowsView(ctx, app.id);
   },
+
+  /**
+   * #4777 (#3819 slice 2; hrn:node:hadronmemory.com:specs:cor:agt:060:16): set the App's saturation-alarm wake-roles list,
+   * the whole list at once. Whoever manages the App (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), through the
+   * stall schedule's door exactly: `resolveParticipatedApp` (a non-participant gets APP_NOT_FOUND, the missing App's
+   * answer), then `actorManagesApp` inside `inTaskWriteTx` (a participant who does not manage it gets
+   * APP_MANAGER_REQUIRED; an instructed worker is admitted only as #3323 admits it). Malformed input is refused before
+   * any of that. The stored row is locked before it is compared, so two writers are ordered; writing the stored list
+   * again writes nothing and records nothing (#3323's no-op rule). The record is the precedent's ids-only
+   * `app.manager-act` row, written only when the instructed-manager arm admitted the caller. The list is read when an
+   * alarm is raised, so a change here never adds or removes a wake for an alarm already raised.
+   */
+  setSaturationAlarmWakeRoles: async (
+    _: unknown,
+    { appRef, roles, instruction }: { appRef: string; roles: unknown; instruction?: ActInstruction | null },
+    ctx: Context,
+  ) => {
+    const next = normalizeWakeRoles(roles);
+    if (!next) {
+      throw badInput(
+        `roles is a list of at most ${SATURATION_WAKE_ROLES_MAX} role names, each 1 to ${SATURATION_WAKE_ROLE_MAX_LENGTH} characters ` +
+          'with no ":" or whitespace; the empty list clears it.',
+      );
+    }
+    const participated = await resolveParticipatedApp(ctx, appRef);
+    const { app } = participated;
+    const actor = withInstruction(participated.actor, instruction);
+    requireWritable(ctx, app);
+    await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
+      if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
+        throw taskError('APP_MANAGER_REQUIRED', 'Only whoever manages the App sets the roles its saturation alarms wake.');
+      }
+      const [row] = await tx.$queryRaw<{ roles: string[] }[]>`
+        SELECT saturation_wake_roles AS roles FROM agent_task_stall_schedule WHERE app_id = ${freshApp.id} FOR UPDATE`;
+      const current = row?.roles ?? [];
+      if (current.length === next.length && current.every((r, i) => r === next[i])) return; // #3323: a no-op writes nothing
+      await tx.agentTaskStallSchedule.upsert({
+        where: { appId: freshApp.id },
+        create: { appId: freshApp.id, saturationWakeRoles: next, updatedBy: ctx.userId ?? null },
+        update: { saturationWakeRoles: next, updatedBy: ctx.userId ?? null },
+      });
+      await recordInstructedManagerAct(tx, freshApp.id, actor, 'app.saturation-wake-roles');
+    });
+    return saturationWakeRolesView(ctx.db, app.id);
+  },
 };
+
+async function saturationWakeRolesView(db: Context['db'], appId: string) {
+  const row = await db.agentTaskStallSchedule.findUnique({ where: { appId }, select: { saturationWakeRoles: true } });
+  return { appId, roles: row?.saturationWakeRoles ?? [] };
+}
 
 async function stallWindowsView(ctx: Context, appId: string) {
   const row = await ctx.db.agentTaskStallSchedule.findUnique({ where: { appId } });
@@ -503,6 +557,13 @@ async function stallWindowsView(ctx: Context, appId: string) {
 
 export const agentTaskAlarmQueries = {
   /** An App's effective stall windows, for its task audience (cor:agt:050:21). */
+  /**
+   * #4777 (hrn:node:hadronmemory.com:specs:cor:agt:060:16): the App's saturation-alarm wake-roles list, for whoever may
+   * read its roster, through the roster's gate and its refusal byte for byte (cor:agt:050:21, :23).
+   */
+  saturationAlarmWakeRoles: (_: unknown, { appRef }: { appRef: string }, ctx: Context) =>
+    withRosterAppRead(ctx, appRef, (readCtx, app) => saturationWakeRolesView(readCtx.db, app.id)),
+
   agentTaskStallSchedule: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
     const { app } = await resolveParticipatedApp(ctx, appRef);
     return stallWindowsView(ctx, app.id);

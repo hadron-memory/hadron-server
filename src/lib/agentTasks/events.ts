@@ -765,6 +765,8 @@ export type ManagerAct =
   | 'task.assign' | 'task.reassign' | 'task.cancel' | 'task.park' | 'task.ready' | 'task.update'
   | 'task.finding-dispose' | 'task.priority' | 'task.release-external-id' | 'task.blocker-add' | 'task.blocker-remove' | 'task.create'
   | 'alarm.acknowledge' | 'worker.availability' | 'model-family.availability' | 'app.stall-schedule'
+  // #4777: the saturation-alarm wake-roles list (cor:agt:060:16).
+  | 'app.saturation-wake-roles'
   | 'app.model-group.set' | 'app.model-group.delete' | 'app.properties'
   // #3321 (S4b): the host-operation, stop-signal, ticker, settings, isolation and wake doors.
   | `host-operation.${'worker.start' | 'worker.end' | 'worktree.create' | 'worktree.remove'}`

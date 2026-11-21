@@ -9754,6 +9754,12 @@ export const typeDefs = `#graphql
     agentTaskStallSchedule(appRef: ID!): AgentTaskStallSchedule!
 
     """
+    #4777 — the roles an App's saturation alarms wake (hrn:node:hadronmemory.com:specs:cor:agt:060:16): empty by default.
+    Readers: whoever may read the App's roster, with the roster's refusal byte for byte (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
+    """
+    saturationAlarmWakeRoles(appRef: ID!): SaturationAlarmWakeRoles!
+
+    """
     #1706 — every worker and model-family availability record in an App
     (hrn:node:hadronmemory.com:specs:cor:agt:060:02 / :03), each with whether it is in effect now. Readers: the
     App's task audience (interim until hrn:node:hadronmemory.com:specs:cor:agt:060:02's read question is ruled).
@@ -12637,6 +12643,17 @@ export const typeDefs = `#graphql
     #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
     setAgentTaskStallSchedule(appRef: ID!, input: AgentTaskStallScheduleInput!, instruction: ActInstructionInput): AgentTaskStallSchedule!
+
+    """
+    #4777 — set the roles an App's saturation alarms wake, the whole list at once (hrn:node:hadronmemory.com:specs:cor:agt:060:16): whoever
+    manages the App (hrn:node:hadronmemory.com:specs:cor:dmo:050:12). Names are trimmed and lower-cased, duplicates collapse, and the
+    result is sorted; at most 32 names of 1 to 64 characters with no ":" or whitespace. The empty list clears it. A role no
+    worker holds is accepted. Setting the stored list again changes nothing. The list is read when an alarm is raised: a
+    change never wakes anyone for an alarm already raised. Refusals: BAD_USER_INPUT (before any other check),
+    APP_NOT_FOUND, APP_MANAGER_REQUIRED, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    #3323: the App-manager arm also admits the manager's held worker on an instruction, recorded as one app.manager-act event, ids only.
+    """
+    setSaturationAlarmWakeRoles(appRef: ID!, roles: [String!]!, instruction: ActInstructionInput): SaturationAlarmWakeRoles!
 
     """
     #2831 S1 (hrn:node:hadronmemory.com:specs:cor:agt:060:12) - set an Agent's model group: the name is created or its whole pattern list replaced (no
@@ -18850,6 +18867,16 @@ export const typeDefs = `#graphql
   type TeamAvailability {
     workers: [WorkerAvailability!]!
     families: [ModelFamilyAvailability!]!
+  }
+
+  """
+  #4777 — the roles an App's saturation alarms wake (hrn:node:hadronmemory.com:specs:cor:agt:060:16). Each worker of the App whose role
+  is listed, matched regardless of case and not retired, is offered one wake when an alarm is raised.
+  """
+  type SaturationAlarmWakeRoles {
+    appId: ID!
+    "Stored trimmed, lower-cased, de-duplicated and sorted; empty by default."
+    roles: [String!]!
   }
 
   """

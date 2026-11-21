@@ -17,12 +17,14 @@
  * combination that has none. Opening writes the alarm in the same transaction, so two passes or two instances record
  * exactly one (:14 S5): the loser's insert fails on the index and its transaction rolls back.
  *
- * THE ALARM (:14). One App-owned `alarm.saturation` event per episode: no task, no subject worker, an EMPTY chain. There is
- * no wake in slice 1 (the App's wake-roles list and its wake are #4777); with an empty chain nobody is woken (:16 S1) and the
- * alarm stays readable by the roster audience (cor:agt:050:21, :23). Its acknowledgement is the shared `acknowledgeAlarm`:
- * with no chain only whoever manages the App may (cor:agt:050:24), and it records who and when and nothing else (:16). It
- * is deliberately absent from `alarmEpisodeEnds` and `recordEndedEscalations` (stall.ts), so no AlarmEscalationEnd is ever
- * recorded for it: an escalation end is the end of a chain's climb, and this alarm has no chain.
+ * THE ALARM (:14). One App-owned `alarm.saturation` event per episode: no task, no subject worker; its chain names the workers
+ * the App's wake-roles list woke when it was raised (#4777, :16), empty when the list is (then nobody is woken, :16 S1).
+ * Each is offered its wake through the shared due-wake path (`pendingTaskWakes`). The alarm stays readable by the roster
+ * audience (cor:agt:050:21, :23). Its acknowledgement is the shared `acknowledgeAlarm`: only whoever manages the App may
+ * (cor:agt:050:24; a woken worker is not an owner, so its place in the chain grants nothing), and it records who and when
+ * and nothing else (:16): a pending wake stays pending. It is deliberately absent from `alarmEpisodeEnds` and
+ * `recordEndedEscalations` (stall.ts), so no AlarmEscalationEnd is ever recorded for it: every row is woken at the raise,
+ * and there is no climb to end.
  *
  * The evaluator is the only writer of episodes in slice 1: the match path does not open or close them (a match is seen
  * within one pass). Episode times are the pass's `now`; outcome age is the database clock.
@@ -37,6 +39,29 @@ import { combinationKey, groupWorkerCombinations } from './utilization.js';
 import { isSerializationFailure } from './serializationFailure.js';
 
 export const SATURATION_EVENT_TYPE = 'alarm.saturation';
+
+/** #4777 (cor:agt:060:16): the most role names one App's saturation-alarm list holds, and the longest name. */
+export const SATURATION_WAKE_ROLES_MAX = 32;
+export const SATURATION_WAKE_ROLE_MAX_LENGTH = 64;
+
+/**
+ * #4777: the stored form of a saturation-alarm wake-roles list: each name trimmed and lower-cased (a worker's role
+ * matches regardless of case, as the combination's role does), duplicates collapsed, sorted. Null for malformed input
+ * (not a list; a name empty after trimming, over 64 characters, or holding a ':' or whitespace; more than 32 names
+ * after collapsing), which the door refuses as BAD_USER_INPUT before any write. The empty list is valid: it clears.
+ */
+export function normalizeWakeRoles(input: unknown): string[] | null {
+  if (!Array.isArray(input)) return null;
+  const out = new Set<string>();
+  for (const raw of input) {
+    if (typeof raw !== 'string') return null;
+    const role = raw.trim().toLowerCase();
+    if (role.length === 0 || role.length > SATURATION_WAKE_ROLE_MAX_LENGTH || /[:\s]/.test(role)) return null;
+    out.add(role);
+  }
+  if (out.size > SATURATION_WAKE_ROLES_MAX) return null;
+  return [...out].sort();
+}
 /** Which condition opened the episode: (a) a current no-worker outcome, or (b) workers and none eligible. */
 export type SaturationReason = 'no-worker' | 'none-eligible';
 /** A combination; `null` is a dimension left open (stored as '' on the episode, like `agent_match_outcomes`). */
@@ -88,10 +113,24 @@ export async function raiseSaturation(db: PrismaClient, appId: string, combo: Sa
       if (reason === 'no-worker' && (await currentNoWorkerOutcomes(tx, appId, combo)).length === 0) return null;
       const eventId = generateId();
       const payload: Prisma.InputJsonObject = { reason, family: family || null, tier: tier || null, role: role || null };
+      // #4777 (cor:agt:060:16): who this alarm wakes is decided HERE, once, from the App's list as it stands in this
+      // transaction: every worker of this App, not retired, whose role (any case) is listed. The chain names them, and
+      // each gets one schedule row woken at the raise. A later list change never touches this alarm; who is never due
+      // right now (paused, dormant, a stopped short-lived worker; cor:agt:080:11) is the delivery path's to judge, as for
+      // every alarm. The rows are never climbed: there is no unwoken row for the escalation to reach.
+      const woken = await tx.$queryRaw<{ id: string }[]>`
+        SELECT w.id FROM workers w
+        JOIN agent_task_stall_schedule s ON s.app_id = w.app_id
+        WHERE w.app_id = ${appId} AND w.retired_at IS NULL AND lower(w.role) = ANY (s.saturation_wake_roles)
+        ORDER BY w.id`;
+      const chain = woken.map((w) => ({ workerId: w.id }));
       await tx.$executeRaw`
         INSERT INTO agent_team_events (id, app_id, type, task_id, subject_worker_id, severity, chain, payload, created_at, episode_start)
-        VALUES (${eventId}, ${appId}, ${SATURATION_EVENT_TYPE}, NULL, NULL, 'alarm', '[]'::jsonb,
+        VALUES (${eventId}, ${appId}, ${SATURATION_EVENT_TYPE}, NULL, NULL, 'alarm', ${JSON.stringify(chain)}::jsonb,
                 ${JSON.stringify(payload)}::jsonb, ${toNaiveUtc(now)}::timestamp, NULL)`;
+      if (chain.length) {
+        await tx.agentTeamAlarmSchedule.createMany({ data: chain.map((_, i) => ({ eventId, chainIndex: i, dueAt: now, wokenAt: now })) });
+      }
       // The one-open-episode-per-combination index decides a race: the loser's insert fails and this transaction rolls back.
       await tx.saturationEpisode.create({ data: { appId, family, tier, role, eventId, openedAt: now } });
       return eventId;
