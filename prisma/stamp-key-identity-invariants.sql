@@ -18,7 +18,6 @@ DECLARE
   col_default text;
   default_seq oid;
   owned_seq oid;
-  named_seq oid;
   top integer;
 BEGIN
   SELECT a.attidentity::text, pg_get_expr(d.adbin, d.adrelid) INTO ident, col_default
@@ -35,9 +34,11 @@ BEGIN
     -- The default names the right sequence, but only a sequence OWNED BY this column is push's to drop (#4691 BLIND F1).
     RAISE EXCEPTION 'stamp_signing_keys_id_seq is not owned by stamp_signing_keys.id; refusing to drop it (hadron-server#4337)';
   END IF;
-  -- By OID, not by name (#4691 BLIND delta F1): the sequence the default depends on, the sequence the column owns, and
-  -- the one the unqualified name below resolves to must be the same sequence, so a same-name sequence that shadows the
-  -- schema's (a temporary one) can neither pass the checks above nor be the one dropped.
+  -- By OID, not by name (#4691 BLIND delta F1): the sequence the default depends on must be the one the column owns.
+  -- With that and the text check above, the unqualified DROP below can only reach the owned sequence: a same-name
+  -- sequence that shadows the schema's (a temporary one) either holds the default (this check refuses) or makes the
+  -- owned one render schema-qualified (the text check refuses); with no shadow, the name resolves in current_schema(),
+  -- where the owned sequence is. (The DROP stays a literal: post-push's inventory refuses DDL built at run time.)
   -- The default also depends on its own column (the table's row in pg_depend), so only a SEQUENCE it depends on counts.
   SELECT dep.refobjid INTO default_seq
     FROM pg_attrdef ad JOIN pg_depend dep ON dep.classid = 'pg_attrdef'::regclass AND dep.objid = ad.oid
@@ -45,9 +46,8 @@ BEGIN
                        JOIN pg_class seq ON seq.oid = dep.refobjid AND seq.relkind = 'S'
     WHERE ad.adrelid = rel AND ad.adnum = (SELECT attnum FROM pg_attribute WHERE attrelid = rel AND attname = 'id');
   owned_seq := pg_get_serial_sequence(quote_ident(current_schema()) || '.stamp_signing_keys', 'id')::regclass;
-  named_seq := to_regclass('stamp_signing_keys_id_seq');
-  IF default_seq IS DISTINCT FROM owned_seq OR named_seq IS DISTINCT FROM owned_seq THEN
-    RAISE EXCEPTION 'the sequence stamp_signing_keys.id''s default uses, or the one its name resolves to, is not the one the column owns; refusing to drop it (hadron-server#4337)';
+  IF default_seq IS DISTINCT FROM owned_seq THEN
+    RAISE EXCEPTION 'stamp_signing_keys.id''s default uses a sequence other than the one the column owns; refusing to drop it (hadron-server#4337)';
   END IF;
   EXECUTE $ddl$ALTER TABLE stamp_signing_keys ALTER COLUMN id DROP DEFAULT$ddl$;
   EXECUTE $ddl$DROP SEQUENCE stamp_signing_keys_id_seq$ddl$;
