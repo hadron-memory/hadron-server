@@ -463,10 +463,13 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
     const atBulkWrite = new Promise<void>((resolve) => { reached = resolve; });
     const mayCommit = new Promise<void>((resolve) => { release = resolve; });
     let hooked = false;
+    let bulkPid = -1;
+    const contenderPids: number[] = [];
     const spy = vi.spyOn(db, '$transaction').mockImplementation((async (arg: unknown, opts?: unknown) => {
       if (!hooked && typeof arg === 'function') {
         hooked = true;
         return (original as any)(async (tx: any) => {
+          bulkPid = (await tx.$queryRaw`SELECT pg_backend_pid() AS pid`)[0].pid;
           const update = tx.node.update.bind(tx.node);
           vi.spyOn(tx.node, 'update').mockImplementation(async (args: any) => {
             const written = await update(args);
@@ -479,9 +482,13 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
           return arg(tx);
         }, opts);
       }
+      if (typeof arg === 'function') return (original as any)(async (tx: any) => {
+        contenderPids.push((await tx.$queryRaw`SELECT pg_backend_pid() AS pid`)[0].pid);
+        return arg(tx);
+      }, opts);
       return (original as any)(arg, opts);
     }) as never);
-    return { atBulkWrite, release, restore: () => spy.mockRestore() };
+    return { atBulkWrite, release, restore: () => spy.mockRestore(), get bulkPid() { return bulkPid; }, contenderPids };
   }
 
   it('move-first refuses a selected node after it crosses into an unauthorized memory', async () => {
@@ -565,7 +572,7 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: ordinary.id } })).content).toBe('dog');
   });
 
-  it('bulk-first holds the row lock until its write commits, then the move sees that content', async () => {
+  it('bulk-first holds the memory handshake until its write commits, then the move sees that content', async () => {
     const node = await makeNode('bulk-first', { content: 'cat' });
     const destination = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: 'sr-org:dest', name: 'dest', class: 'knowledge' },
@@ -577,17 +584,21 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
     try {
       await paused.atBulkWrite;
       move = resolvers.Mutation.moveNode({}, { sourceRef: node.id, targetMemoryRef: destination.id }, ctx());
+      const [{ key }] = await db.$queryRaw<Array<{ key: number }>>`SELECT hashtext(${'channel-host:' + memory.id}) AS key`;
       await vi.waitFor(async () => {
         const waits = await db.$queryRaw<Array<{ pid: number }>>`
-          SELECT pid FROM pg_stat_activity
-          WHERE datname = current_database() AND wait_event_type = 'Lock'
-            AND query LIKE '%nodes%' AND pid <> pg_backend_pid()
+          SELECT pid FROM pg_locks WHERE locktype='advisory' AND NOT granted
+            AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+            AND pid=ANY(${paused.contenderPids}::int[]) AND classid=${key < 0 ? 4294967295 : 0}::bigint::oid
+            AND objid=${key >>> 0}::bigint::oid AND objsubid=1
+            AND ${paused.bulkPid}=ANY(pg_blocking_pids(pid))
         `;
         expect(waits.length).toBeGreaterThan(0);
-      }, { timeout: 2_000, interval: 25 });
+      }, { timeout: 8_000, interval: 10 });
     } finally {
       paused.release();
       paused.restore();
+      await Promise.allSettled([bulk, ...(move ? [move] : [])]);
     }
     await bulk;
     await move;

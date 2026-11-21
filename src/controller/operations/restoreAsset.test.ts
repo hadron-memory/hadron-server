@@ -13,7 +13,7 @@ const captureMessage = vi.hoisted(() => vi.fn());
 
 vi.mock('@sentry/node', () => ({ captureMessage }));
 
-vi.mock('../../integrations/r2/client.js', () => ({
+vi.mock('../../integrations/objectstore/index.js', () => ({
   headObject: headObjectMock,
 }));
 

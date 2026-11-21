@@ -11,7 +11,7 @@
  */
 
 import type { Asset, PrismaClient } from '../../generated/prisma/index.js';
-import { headObject } from '../../integrations/r2/client.js';
+import { headObject } from '../../integrations/objectstore/index.js';
 import { reportAssetBytesMissing } from '../../lib/asset/bytesMissingAlarm.js';
 import { logAssetEvent } from '../../lib/asset/audit.js';
 import { decryptStorageKey } from '../../lib/asset/encryption.js';

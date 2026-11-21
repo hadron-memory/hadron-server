@@ -1,7 +1,7 @@
 /**
  * hadron_store_file (#631 P2 first slice) — DB-backed handler tests over a
  * MOCKED object-store client (same posture as janitorAssets.test.ts: the
- * S3 seam is integrations/r2/client, everything else is real).
+ * S3 seam is integrations/objectstore (the scaffold), everything else is real).
  *
  * Pins: the asset row + reference node are created together (the 2026-07-11
  * decision: every stored file gets a reference node), authorization runs
@@ -11,7 +11,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-vi.mock('../../../integrations/r2/client.js', () => ({
+vi.mock('../../../integrations/objectstore/index.js', () => ({
   putObject: vi.fn().mockResolvedValue(undefined),
   deleteObject: vi.fn().mockResolvedValue(undefined),
 }));
@@ -26,7 +26,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../id.js';
 import { PLATFORM_DEFAULT_MAX_BYTES } from '../../asset/limits.js';
-import { putObject, deleteObject } from '../../../integrations/r2/client.js';
+import { putObject, deleteObject } from '../../../integrations/objectstore/index.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { hadronStoreFile, resolveRunTools } from './index.js';
 import type { AppRun } from '../../../generated/prisma/index.js';

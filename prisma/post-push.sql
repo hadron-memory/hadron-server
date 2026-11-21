@@ -443,7 +443,7 @@ BEGIN
                   THEN ', shares its root with another row' ELSE '' END), ', ' ORDER BY p.name)
       INTO offending_rows_summary
       FROM (SELECT id, name, kind, status FROM principals WHERE name <> lower(name) ORDER BY name LIMIT 20) p;
-    RAISE EXCEPTION 'principals.name: % principal row(s) are not lower case, so chk_principals_name_lower cannot be added (hadron-server#4400; this guard: #4411). For a row that shares its root with no other row, lower-case it and the owning users.handle / organizations.urn; for rows that share a root, decide which owner keeps it and rename or delete the others. Then re-run pnpm db:dev-setup. Rows (first 20): %', offending_count, offending_rows_summary
+    RAISE EXCEPTION 'principals.name: % principal row(s) are not lower case, so chk_principals_name_lower cannot be added (hadron-server#4400; this guard: #4411). For a row that shares its root with no other row, lower-case it and the owning users.handle / organizations.urn; for rows that share a root, decide which owner keeps it and rename or delete the others, then lower-case the kept row (if it is still mixed case) together with its owning users.handle / organizations.urn, or the next run refuses again. Then re-run pnpm db:dev-setup. Rows (first 20): %', offending_count, offending_rows_summary
       USING ERRCODE = 'HDPRF';
   END IF;
 END $$;
@@ -856,6 +856,14 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #4332 (#434 Slice C): the rate-limit CHECKs migration 20261031220000_shared_rate_limiter declares inline (pinned by
 -- src/lib/rateLimit/rateLimitChecks4332.test.ts and scripts/db/migration-replay.ts).
 \ir rate-limit-invariants.sql
+
+-- #4333 (#434 Slice C): the six UNIQUE constraints the migrations create, promoted from the same-name unique indexes
+-- db push leaves (pinned by src/test/migrations/uniqueConstraints4333.test.ts and scripts/db/migration-replay.ts).
+\ir unique-constraint-invariants.sql
+
+-- #4335 (#434 Slice C): the two indexes migration 20260519180903_baseline_init builds partial, which db push builds full
+-- (pinned by src/test/migrations/partialIndexes4335.test.ts and scripts/db/migration-replay.ts).
+\ir partial-index-invariants.sql
 
 -- #1885: an Agent extends at most one base Agent; no cycles, at most 4 in a
 -- chain. One source, shared verbatim with migration 20261014120000_agent_base

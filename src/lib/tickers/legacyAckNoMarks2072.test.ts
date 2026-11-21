@@ -21,7 +21,6 @@ import { computeDueWakes } from './dueWakes.js';
 import { isSessionDormant, isWorkerDormant } from '../sessionActivity.js';
 import { wakeStampsFor } from './postStamp.js';
 import { signWakeProof, verifyWakeProof } from './wakeProof.js';
-import { teamAttentionPage } from '../teamAttention.js';
 
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));

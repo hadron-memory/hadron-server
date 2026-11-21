@@ -84,7 +84,14 @@ function renderMarkdownV1(d: QuestionData): string {
     if (hasBackground) lines.push(d.background as string, '');
     if (d.whyNow != null) lines.push(`**Why now:** ${d.whyNow}`, '');
   }
-  lines.push(...refSection('What this question is blocking', d.blocks));
+  // #4431: the agent task the question blocks, by its id (the renderer is a pure function of the payload, which holds
+  // the id only). A question with no task renders exactly as before, so question-md/1 history is unchanged.
+  if (d.taskId != null) {
+    lines.push('## What this question is blocking', '', `**Blocks task:** ${d.taskId}`, '');
+    if (d.blocks.length > 0) lines.push(...d.blocks.map((r) => `- ${refText(r)}`), '');
+  } else {
+    lines.push(...refSection('What this question is blocking', d.blocks));
+  }
   if (d.specsTouched.length > 0 || d.specsMustChange.length > 0) {
     lines.push('## Specs', '');
     for (const r of d.specsTouched) lines.push(`- Touches: ${refText(r)}`);

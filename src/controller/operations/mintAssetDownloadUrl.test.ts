@@ -20,7 +20,7 @@ import { mintAssetDownloadUrl } from './mintAssetDownloadUrl.js';
 
 const mintGetUrlMock = vi.hoisted(() => vi.fn());
 
-vi.mock('../../integrations/r2/client.js', () => ({
+vi.mock('../../integrations/objectstore/index.js', () => ({
   mintGetUrl: mintGetUrlMock,
 }));
 

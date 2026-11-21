@@ -9,7 +9,7 @@ import { readTeamRecordKeys } from './lib/teamSpec/record.js';
 import * as Sentry from '@sentry/node';
 import { ApolloServer, type ApolloServerPlugin, type BaseContext } from '@apollo/server';
 import { memoryPressurePlugin } from './api/graphql/memoryPressurePlugin.js';
-import { expressMiddleware } from '@apollo/server/express4';
+import { expressMiddleware } from '@as-integrations/express4';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
@@ -176,10 +176,12 @@ const GITHUB_WEBHOOK_PATH = '/github/webhook';
 // BEING MAPPED IS NOT BEING SKIPPED (@copilot, PR #924). `isExpectedClientError`
 // consults one shared list with `formatError` — so no second hand-kept
 // `instanceof` chain lives here — but each entry declares `silenceInSentry`
-// separately. The asset refusals are mapped for the wire and deliberately still
-// REPORTED, because ASSET_BYTES_GONE is real server-state inconsistency and
-// this is currently its only alarm (#1140). Do not read the list as "everything
-// formatError touches is silent here"; read the flag.
+// separately. For example, the asset refusals were for a while mapped for the
+// wire but still REPORTED, because ASSET_BYTES_GONE (a missing object) had no
+// other alarm; since #1140 the bytes-missing sweep and the restore path raise
+// `asset.bytes_missing` where it is discovered, so they are silenced here now.
+// Do not read the list as "everything formatError touches is silent here";
+// read the flag.
 const sentryApolloPlugin: ApolloServerPlugin<BaseContext> = {
   async requestDidStart() {
     return {
@@ -1224,6 +1226,9 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     stopOnTerminationSignals: false,
     // #2087: concealed errors must not depend on the deployment's NODE_ENV.
     includeStacktraceInErrorResponses: false,
+    // #4593: Apollo 5 answers a variable-coercion error with HTTP 400 by default; 4 answered 200 with `errors`.
+    // Keep the 4 answer: flipping it is a client-visible contract change (S2 of #4521), not part of the bump.
+    status400ForVariableCoercionErrors: false,
     typeDefs,
     resolvers: deploymentResolvers,
     plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin, deliveryPendingPlugin, complexityAdmissionPlugin(admission), memoryPressurePlugin()],

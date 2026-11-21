@@ -81,7 +81,7 @@ import { compileBootPromptMutations } from './resolvers.mutation.compileBootProm
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamSpecQueries } from './resolvers.teamSpec.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
-import { teamAttentionMutations, teamAttentionQueries } from './resolvers.teamAttention.js';
+import { teamAttentionMutations } from './resolvers.teamAttention.js';
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { agentTaskMutations, agentTaskQueries, agentTaskFieldResolvers } from './resolvers.agentTask.js';
 import { tickerMutations, tickerQueries, tickerFieldResolvers } from './resolvers.ticker.js';
@@ -119,6 +119,7 @@ import { signingFieldResolvers, signingMutations, signingQueries } from './resol
 import { commentFieldResolvers, commentMutations, commentQueries } from './resolvers.comments.js';
 import { questionFieldResolvers, questionMutations, questionQueries } from './resolvers.questions.js';
 import { specDocumentQueries } from './resolvers.specDocument.js';
+import { retireSpecMutations } from './resolvers.mutation.retireSpec.js';
 import {
   specCorpusMintMutations,
   specCorpusMutations,
@@ -225,7 +226,6 @@ export const resolvers = {
     ...appKeyScopeQueries,
     ...chatQueries,
     ...teamChatQueries,
-    ...teamAttentionQueries,
     ...teamWorkQueries,
     ...agentTaskQueries,
     ...prProtocolQueries,
@@ -334,6 +334,7 @@ export const resolvers = {
     ...memoryConfigTemplateMutations,
     ...memoryConfigApplyMutations,
     ...specCorpusMutations,
+    ...retireSpecMutations,
     ...specCorpusRenumberMutations,
     ...specCorpusMintMutations,
     ...nodeApprovalMutations,

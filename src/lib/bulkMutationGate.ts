@@ -63,11 +63,12 @@ import {
  * values that are true NOW, not the ones its transaction read before the gate
  * ran. Absent from the map = no live row at that loc.
  *
- * It does NOT close the window entirely. The kind doors lock per loc, not on
- * the memory key this gate holds, so a promotion committing between this read
- * and the caller's write is still possible — the same residual window the
- * refuse path already documents, and #1213's bounded serialization point is
- * what closes it for both.
+ * Stable against supported signal changes only while the caller retains the
+ * complete memory-key set through its write. assertBatchMutable acquires that
+ * set itself; callers that read signals earlier must also acquire it at entry.
+ * #1213 S2 makes the audited signal writers and owning copy/move paths join
+ * the same key before loc/node locks. Direct SQL and unaudited future writers
+ * are not covered; S3's search/replace skip-before-OCC behavior is separate.
  */
 export type GovernedSnapshot = ReadonlyMap<string, { role: string | null; isRunnable: boolean | null }>;
 
@@ -250,40 +251,13 @@ export async function assertBatchMutable(
   }
   await assertNoCommentRows(tx, { memoryId: { in: [...new Set(memoryIds)] }, loc: { in: locs } }, op);
 
-  // The GOVERNED half re-reads under the MEMORY lock, and deliberately does
-  // NOT take a key per row (@copilot rounds 2 and 3, which pull in opposite
-  // directions and are both right).
-  //
-  // Round 2 was correct that the kind doors coordinate on
-  // `lockLocForWrite(memoryId, loc)`, so the memory key alone does not
-  // serialize against them. Round 3 was correct that the per-row answer is
-  // unaffordable here: `extractParentNodeGraph` passes its ENTIRE live subtree
-  // with no cap and no paging, so one advisory key per node — held until that
-  // single transaction ends — is an unbounded claim on a finite shared-memory
-  // lock table. A gate that can exhaust the lock table on a large but perfectly
-  // valid extract is not a safer gate.
-  //
-  // So this re-reads rather than trusting the caller's snapshot, which closes
-  // the window that matters in practice — a promotion committed before this
-  // transaction's read — and leaves ONE narrow window open: a promotion that
-  // commits between this read and the batch's write. That is filed rather than
-  // papered over, and closing it properly means giving the governed writers a
-  // BOUNDED shared serialization point instead of a key per row.
-  //
-  // An owning operation does not REFUSE — but it must not skip the read
-  // either (@codex P1 on PR #1230, and the finding is right). The caller's
-  // `rows` were read earlier in its transaction; the kind doors coordinate on
-  // `lockLocForWrite(memoryId, loc)`, which does not conflict with the memory
-  // key held above, and READ COMMITTED does not refresh that earlier snapshot.
-  // So a door that commits in between leaves the caller holding STALE signals
-  // — and a carry built from them copies `role: null` off a node that is now
-  // governed. With `move: true` the now-governed source is then soft-deleted,
-  // leaving only an ungoverned copy the generic surface may edit: governance
-  // laundering, introduced by the carry that exists to prevent it.
-  //
-  // So the read happens either way. What differs is the verdict: REFUSE turns
-  // a governed row into an error, CARRY hands the fresh values back for the
-  // caller to copy.
+  // #1213: the acquisition above is held by THIS transaction through its write. The authoritative
+  // re-read is stable against the audited participating signal writers/owning copy/move paths,
+  // which take the same complete memory set before loc/node locks. Earlier caller/planner reads
+  // may still precede the key; an owning operation must carry these freshly read signals instead.
+  // This is not a guarantee for direct SQL, unaudited writers, or writes outside the holding tx.
+  // No per-node governance key: a bulk page could otherwise exhaust the lock table. The bounded
+  // memory set does not change partial-merge semantics or implement S3's skip-before-OCC behavior.
   const governed = opts.governed ?? 'refuse';
 
   if (governed === 'carry') {

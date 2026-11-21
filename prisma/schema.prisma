@@ -508,7 +508,10 @@ model User {
   /// #1715 — accounts merged into this one.
   mergedFrom                    UserMerge[]                 @relation("UserMergeTarget")
 
-  @@unique([externalAppId, externalId])
+  // #4335: users_external_app_id_external_id_key is a PARTIAL unique (WHERE external_id IS NOT NULL), as migration
+  // 20260519180903 builds it (cor:dmo:040:01's App-provisioned identity key). Prisma cannot model an index predicate and
+  // cannot see a partial index, so declaring it here made every later db push try to re-add it. It is not declared:
+  // prisma/partial-index-invariants.sql (post-push) owns it. Nothing reads the generated externalAppId_externalId key.
   @@map("users")
 }
 
@@ -1171,7 +1174,9 @@ model Memory {
   @@index([organizationId])
   @@index([userMemoryOfAgentId])
   @@index([anonymousExpiresAt])
-  @@index([userId])
+  // #4335: memories_user_id_idx is PARTIAL (WHERE user_id IS NOT NULL), as migration 20260519180903 builds it. Prisma
+  // cannot model an index predicate and cannot see a partial index, so declaring it here made every later db push try to
+  // create it again ("already exists"). It is not declared: prisma/partial-index-invariants.sql (post-push) owns it.
   @@index([appId])
   @@index([installOfAgentId])
   @@index([ownerUserId])
@@ -1352,8 +1357,9 @@ enum NodeContentValidationReporterKind {
 ///   - `reference`: pointers to external sources or to other memories, such as papers, URLs and asset references.
 ///   - `system`: an agent's internal configuration, such as conversation designs, stages and topics; usually in
 ///     an Agent's system memory and hidden from end-user search.
-///   `comment` is reserved by the platform for governed feedback (see CommentMeta). The platform also uses
-///   further values of its own, for example `task` and `compiled-boot-prompt`.
+///   `comment` is reserved by the platform for governed feedback (see CommentMeta). The platform also writes
+///   `task`, `chat-message` and `compiled-boot-prompt`. The one list of every value the platform names is
+///   `NODE_TYPES` in `src/lib/nodeTypes.ts` (#909); this comment and the MCP tool descriptions cite it.
 /// - `objectType` names the collection the node is an instance of, in a memory that declares a schema.
 /// - `role` says what the node is for. It is an open string; a small closed subset of its values routes writes
 ///   to that kind's own path. No platform behaviour depends on any other value, apart from the role rules a
@@ -6787,9 +6793,8 @@ model MemoryConfig {
 /// - `validationTask`: the task that content-validation reports on matching nodes name
 ///   (src/lib/contentValidationReport.ts). Reports are advisory and never block a write.
 /// - `writers`: who may write matching nodes, on top of memory write access: `ALL` (no narrowing), `ADMIN`
-///   (the owning organization's admins and owners, and the owning user) or `OWNER`. `OWNER` is not built:
-///   every write that touches such a role is refused with ROLE_WRITERS_UNSUPPORTED
-///   (src/lib/nodeRoleWriters.ts). The level is checked against the node's state before and after the write
+///   (the owning organization's admins and owners, and the owning user) or `OWNER` (#1333: the owning party,
+///   plus an App published by the owner; see src/lib/nodeRoleWriters.ts). The level is checked against the node's state before and after the write
 ///   (hrn:node:hadronmemory.com:specs:cor:acl:010:03).
 /// - `descriptionNode` (a node that describes the role) and `validateBy` (who is meant to run the validation
 ///   task) are stored and returned by the config API. No other code reads them today.

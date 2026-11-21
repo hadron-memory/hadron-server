@@ -4,7 +4,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { ORPHAN_MIN_AGE_MS } from '../lib/asset/retention.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
-import type { ObjectPage } from '../integrations/r2/client.js';
+import type { ObjectPage } from '../integrations/objectstore/index.js';
 import {
   OrphanSweepAbortedError,
   reapOrphanAssetObjects,
@@ -13,7 +13,7 @@ import {
 const deleteObjectMock = vi.hoisted(() => vi.fn());
 const listObjectsPageMock = vi.hoisted(() => vi.fn());
 
-vi.mock('../integrations/r2/client.js', () => ({
+vi.mock('../integrations/objectstore/index.js', () => ({
   deleteObject: deleteObjectMock,
   listObjectsPage: listObjectsPageMock,
   isObjectStoreConfigured: () => true,
