@@ -2143,7 +2143,18 @@ async function nodeWriteCoordinationMemories(ctx: Context, memoryId: string, inp
   if (!mayChangeGovernance('update', input, ownsKind) && input.edges === undefined) return [];
   const ids = new Set([memoryId]);
   for (const edge of input.edges ?? []) {
-    const { id } = await resolveNodeRefForCaller(ctx, edge.targetId, memoryId);
+    let id: string;
+    try {
+      ({ id } = await resolveNodeRefForCaller(ctx, edge.targetId, memoryId));
+    } catch (err) {
+      // The transaction-entry scope pass must preserve the shared inline-edge refusal shape.
+      if (err instanceof NodeNotFoundError) {
+        throw new GraphQLError(`Edge target not found: "${err.ref}"`, {
+          extensions: { code: err.name, ref: err.ref },
+        });
+      }
+      throw err;
+    }
     const target = await ctx.db.node.findUnique({ where: { id }, select: { memoryId: true } });
     if (!target || !(await isMemoryReadableCached(ctx, target.memoryId))) {
       throw new GraphQLError(`Edge target not found: "${edge.targetId}"`, {
