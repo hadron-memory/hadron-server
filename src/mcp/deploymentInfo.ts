@@ -136,7 +136,16 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // field exists only so legacy callers reach REPLACE_SUBTREE_RETIRED instead
 // of an unknown-argument error (#4219 blind P2-A).
 // (Chunk A, the memory reads, follows #4136.)
-export const HADRON_SERVER_VERSION = '0.23.0';
+//
+// 0.24.0 — BREAKING (#2027 S11): the attention API is RETIRED. The GraphQL fields
+// `teamAttention` / `teamAttentionPage` / `teamAttentionPreviewPage` /
+// `teamAttentionSwitchoverPreview` and the `confirmTeamAttentionSwitchover`
+// mutation are gone, and with them the `hadron_team_attention*` MCP tools
+// (already wire-disabled by #3082). A router still polling must move to the
+// wake path (`dueWakes` / the CLI's `hadron team wakes`); the explicit
+// `markOwnTeamChatRead` mark and every wake/mark/resume rule it shared a module
+// with are unchanged.
+export const HADRON_SERVER_VERSION = '0.24.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

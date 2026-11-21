@@ -238,9 +238,20 @@ async function actingDecider(
  * pure App key may bind any session of its App, so its worker id alone proves nothing.
  */
 async function isAsker(ctx: Context, d: Pick<QuestionData, 'askedBy'>): Promise<boolean> {
+  return isAskerWith(ctx, askerNeedsIdentities(ctx, d) ? await callerIdentities(ctx) : new Set(), d);
+}
+
+/** Whether judging {@link isAskerWith} on this row needs the caller's identities: a user-named asker the worker arm does not already settle. */
+function askerNeedsIdentities(ctx: Context, d: Pick<QuestionData, 'askedBy'>): boolean {
+  if (ctx.userId && d.askedBy.workerId && d.askedBy.workerId === actorOf(ctx).workerId) return false;
+  return !!d.askedBy.userId && !!ctx.userId;
+}
+
+/** {@link isAsker} with the caller's identities already resolved (a list judges many rows against one set). */
+function isAskerWith(ctx: Context, identities: ReadonlySet<string>, d: Pick<QuestionData, 'askedBy'>): boolean {
   const actor = actorOf(ctx);
   if (ctx.userId && d.askedBy.workerId && d.askedBy.workerId === actor.workerId) return true;
-  if (d.askedBy.userId && ctx.userId && (await callerIdentities(ctx)).has(d.askedBy.userId)) return true;
+  if (d.askedBy.userId && ctx.userId && identities.has(d.askedBy.userId)) return true;
   return !d.askedBy.userId && !ctx.userId && !!d.askedBy.appId && d.askedBy.appId === ctx.appId;
 }
 
@@ -525,6 +536,31 @@ function requireWritable(view: QuestionView): QuestionData {
     );
   }
   return question;
+}
+
+/**
+ * #4429 (S5) — the gate `approveNode` runs inside the approval transaction on a question, on the already locked row.
+ * A question is approved by one of its deciders only: the same {@link actingDecider} the answer doors use, on a question
+ * that has an answer to approve. Refusals are typed (`QUESTION_WITHDRAWN`, `QUESTION_INVALID` for a state no door writes to,
+ * `QUESTION_NOT_DECIDER`, `QUESTION_IMPERSONATION_REFUSED`, `QUESTION_NOT_ANSWERED`) and nothing is stamped. Any tier may be
+ * approved (spec cor:dmo:140:05); the evaluation decides what the approval counts for (cor:dmo:140:08).
+ *
+ * Lock order: the question row is already held by the approval, so this reads the log with a plain read and never locks it
+ * ("a log lock is never taken while a question row is held").
+ */
+export function questionApprovalGate(txCtx: Context): (tx: Tx, node: { id: string; memoryId: string }) => Promise<void> {
+  return async (tx, node) => {
+    const row = await tx.node.findUniqueOrThrow({ where: { id: node.id }, select: QUESTION_ROW_SELECT });
+    const [view] = await evaluateRows(tx, [row]);
+    const current = requireWritable(view);
+    const log = await logOfQuestion(tx, row);
+    if (!log) throw logMissing(node.id);
+    const check = await actingDecider(txCtx, tx, current, parseLogData(log), node.memoryId);
+    if (!check.ok) throw questionError(check.code, check.message, { questionCode: current.code });
+    if (view.evaluation.state === 'OPEN') {
+      throw questionError('QUESTION_NOT_ANSWERED', `${current.code} has no standing answer to approve.`, { questionCode: current.code });
+    }
+  };
 }
 
 /** The derived, never-authoritative property projection for filters (§5.3). */
@@ -1190,13 +1226,17 @@ type QuestionSortName = 'PORTAL_DEFAULT' | 'CODE' | 'ASKED_AT_DESC' | 'ASKED_AT_
 
 const answeredAtOf = (v: QuestionView): string | null => (v.shown ? currentAnswer(v.shown)?.at ?? null : null);
 
-function sortViews(views: QuestionView[], sort: QuestionSortName): QuestionView[] {
+export function sortViews(views: QuestionView[], sort: QuestionSortName): QuestionView[] {
   const n = (v: QuestionView) => v.shown?.n ?? v.row.seq ?? 0;
   const rank = (v: QuestionView) => PRIORITY_RANK[v.shown?.priority ?? 'normal'];
   const askedAt = (v: QuestionView) => v.shown?.askedAt ?? '';
-  // Every sort ends in the same stable tiebreak: n descending, then loc.
-  const tie = (a: QuestionView, b: QuestionView) => n(b) - n(a) || a.row.loc.localeCompare(b.row.loc);
-  if (sort === 'CODE') return [...views].sort((a, b) => n(a) - n(b) || a.row.loc.localeCompare(b.row.loc));
+  // #4604 F3: a loc is unique only inside one memory, and an App-scope list spans memories, so two rows can share n AND loc. The last key
+  // is the row id (unique), on EVERY comparator, so the order is total: for a fixed set of rows, two requests give one order (inserts, deletes
+  // and changed sort keys between requests can still shift offsets).
+  const byId = (a: QuestionView, b: QuestionView) => (a.row.id < b.row.id ? -1 : a.row.id > b.row.id ? 1 : 0);
+  // Every sort ends in the same stable tiebreak: n descending, then loc, then id.
+  const tie = (a: QuestionView, b: QuestionView) => n(b) - n(a) || a.row.loc.localeCompare(b.row.loc) || byId(a, b);
+  if (sort === 'CODE') return [...views].sort((a, b) => n(a) - n(b) || a.row.loc.localeCompare(b.row.loc) || byId(a, b));
   if (sort === 'ASKED_AT_DESC') return [...views].sort((a, b) => askedAt(b).localeCompare(askedAt(a)) || tie(a, b));
   if (sort === 'ASKED_AT_ASC') return [...views].sort((a, b) => askedAt(a).localeCompare(askedAt(b)) || tie(a, b));
   if (sort === 'PRIORITY_DESC') return [...views].sort((a, b) => rank(a) - rank(b) || askedAt(b).localeCompare(askedAt(a)) || tie(a, b));
@@ -1212,7 +1252,7 @@ function sortViews(views: QuestionView[], sort: QuestionSortName): QuestionView[
     rank(a) - rank(b) ||
     STATE_ORDER[a.evaluation.state] - STATE_ORDER[b.evaluation.state] ||
     askedAt(b).localeCompare(askedAt(a)) ||
-    n(b) - n(a));
+    tie(a, b));
 }
 
 /** #4428 §2 — the memories of an App the caller can read, or null when the App does not resolve. */
@@ -1332,13 +1372,16 @@ export const questionQueries = {
       if (!log) return { items: [], total: 0 };
       where = { role: QUESTION_ROLE, deletedAt: null, memoryId: log.row.memoryId, loc: { startsWith: `${log.row.loc}:` } };
     }
-    const count = await ctx.db.node.count({ where });
     const cap = questionListBounds.cap();
-    if (count > cap) {
+    // #4604 F2: ONE statement bounds the evaluation: fetch at most cap + 1 and refuse, before evaluating anything, when the extra row is there.
+    // A separate count-then-fetch let an insert between the two statements push the fetch past the cap. The count below only words the refusal.
+    // Only askQuestion writes the question role, always directly under a log.
+    const rows = await ctx.db.node.findMany({ where, select: QUESTION_ROW_SELECT, take: cap + 1 });
+    if (rows.length > cap) {
+      // The fetch saw cap + 1 rows, so the list is over the cap; `count` is the larger of a later count and cap + 1, a lower bound at the fetch.
+      const count = Math.max(await ctx.db.node.count({ where }), cap + 1);
       throw questionError('QUESTION_LOG_TOO_LARGE_FOR_FILTER', `${count} questions exceed the ${cap} this list evaluates at once.`, { count, cap });
     }
-    // Only askQuestion writes the question role, always directly under a log.
-    const rows = await ctx.db.node.findMany({ where, select: QUESTION_ROW_SELECT });
     let views = await attachEffectiveAssignees(ctx.db as unknown as Tx, await evaluateRows(ctx.db as unknown as Tx, rows));
     if (args.awaitingMe) {
       const me = await callerIdentities(ctx);
@@ -1349,8 +1392,6 @@ export const questionQueries = {
     // #4428 §3 — every filter reads the EVALUATED view, never `properties`.
     const assigneeIds = args.assigneeId ? await identitiesOf(ctx.db, args.assigneeId) : null;
     const byMe = args.askedByMe ? true : null;
-    const askers = new Map<QuestionView, boolean>();
-    if (byMe) for (const v of views) askers.set(v, !!v.shown && (await isAsker(ctx, v.shown)));
     views = views.filter((v) => {
       if (args.state && !args.state.includes(v.evaluation.state)) return false;
       if (tier && v.shown?.tier !== tier) return false;
@@ -1366,7 +1407,6 @@ export const questionQueries = {
       if (args.assigneeId && args.unassigned) { if (!mine && eff !== null) return false; }
       else if (args.assigneeId) { if (!mine) return false; }
       else if (args.unassigned != null) { if (args.unassigned ? eff !== null : eff === null) return false; }
-      if (byMe && !askers.get(v)) return false;
       if (args.askedByWorkerId && v.shown?.askedBy.workerId !== args.askedByWorkerId) return false;
       if (args.askedByAppId && v.shown?.askedBy.appId !== args.askedByAppId) return false;
       if (answeredSince !== null) {
@@ -1375,6 +1415,13 @@ export const questionQueries = {
       }
       return true;
     });
+    // #4604 F5: the asker pull is judged LAST, on the rows every other filter kept. The caller's identities are resolved LAZILY, once for the
+    // request, and only when a surviving row needs them (a user-named asker the worker arm did not already settle): a matching worker, an
+    // App-only caller or an unevaluable row never costs a lookup, as under the per-row rule.
+    if (byMe) {
+      const mine = views.some((v) => !!v.shown && askerNeedsIdentities(ctx, v.shown)) ? await callerIdentities(ctx) : new Set<string>();
+      views = views.filter((v) => !!v.shown && isAskerWith(ctx, mine, v.shown));
+    }
     const sorted = sortViews(views, args.sort ?? 'PORTAL_DEFAULT');
     return { items: sorted.slice(offset, offset + limit), total: sorted.length };
   },

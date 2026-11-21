@@ -152,7 +152,8 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   ),
   // #3136: encrypt/decrypt on an encrypted memory with no active session key
   // used to be a bare Error('SESSION_EXPIRED: …') that only the surfaces which
-  // hand-wrapped it (comments/teamChat/teamRole/teamAttention/channels) typed;
+  // hand-wrapped it (comments/teamChat/teamRole/channels, and teamAttention
+  // before #2027 S11 retired its scan) typed;
   // every other read/write path surfaced INTERNAL_SERVER_ERROR. Throwing the
   // typed class at the source (nodeCrypto) and mapping it once gives every path
   // the code those wrapped sites already deliver — message prefix unchanged, so

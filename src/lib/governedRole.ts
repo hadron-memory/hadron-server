@@ -186,8 +186,9 @@ export const GOVERNED_KINDS: readonly GovernedKindEntry[] = [
     signal: { field: 'role', value: 'question' },
     strength: 'authority',
     doors: { create: 'askQuestion', update: 'amendQuestion' },
-    mcpDoors: null,
-    cliNote: 'questions are written only through the question operations (askQuestion, amendQuestion, withdrawQuestion, …)',
+    // #4430: the MCP question tools (cor:dmo:140:09); MCP offers no approval.
+    mcpDoors: { create: 'hadron_ask_question', update: 'hadron_amend_question' },
+    cliNote: 'questions are written only through the question operations (askQuestion, amendQuestion, withdrawQuestion, answerQuestion; MCP: hadron_ask_question and the other question tools)',
     operationsOnly: true,
   },
 ] as const;
@@ -560,10 +561,15 @@ export class RoleGovernedError extends GraphQLError {
             (onMcp ? (mcpDoor ? ` Over MCP, pass the whole ${merge} object to ${mcpDoor}.` : ` No MCP tool writes a ${kindWord} node.`) : '')
           : routable
             ? `${base} ${cli}${onMcp ? ` ${mcp}` : ''}`
-            : // No route for THIS operation: name no door as if it were one
-              // (@copilot, PR #1305 round 7). `extensions.door` still says
-              // which door governs the kind, for tooling that wants it.
-              `${act}. ${tail} There is no route to suggest for this operation.`;
+            : onMcp && entry.operationsOnly && entry.mcpDoors
+              ? // #4430: an operations-only kind (a question) has MCP tools of its own. They take the kind's fields, not this
+                // node write, so they are named as its operations and NOT as a replay route (`extensions.mcpDoor` stays null).
+                `${act}. ${tail} A ${entry.kind} is written only through its own operations, never by a generic node write: ` +
+                `over MCP, create one with ${entry.mcpDoors.create} and change one with ${entry.mcpDoors.update}.`
+              : // No route for THIS operation: name no door as if it were one
+                // (@copilot, PR #1305 round 7). `extensions.door` still says
+                // which door governs the kind, for tooling that wants it.
+                `${act}. ${tail} There is no route to suggest for this operation.`;
     super(message, {
       extensions: {
         code: 'ROLE_GOVERNED',
