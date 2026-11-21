@@ -210,3 +210,32 @@ describe('gates stay on the resolved revision, pinned with a URN', () => {
     expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(2);
   });
 });
+
+describe('an ambiguous legacy alias in the URN is a missing revision (Byron P3, no existence-dependent answer)', () => {
+  it('all four surfaces answer exactly as for an unknown ref, for an outsider and an admin', async () => {
+    const other = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'other', name: 'Other', content: 'o' } });
+    await db.urnAlias.createMany({ data: [node.id, other.id].map((entityId) => ({
+      urn: `${memory.urn}:shared-old`, entityType: 'NODE' as const, entityId,
+      reason: 'RENAME' as const, replacedByUrn: `${memory.urn}:guide`,
+    })) });
+    const ambiguous = composeNodeRevUrn(memory.urn, 'shared-old', 1);
+    const unknown = composeNodeRevUrn(memory.urn, 'no-such-loc', 1);
+    const ops = (ref: string) => [
+      `{ nodeRevision(nodeRevRef: "${ref}") { id } }`,
+      `mutation { restoreNodeRevision(nodeRevRef: "${ref}") { id } }`,
+      `mutation { deleteNodeRevision(nodeRevRef: "${ref}") }`,
+      `mutation { updateNodeRevision(nodeRevRef: "${ref}", revLabel: "x") { id } }`,
+    ];
+    for (const ctx of [outsiderCtx(), adminCtx()]) {
+      const a = ops(ambiguous);
+      const u = ops(unknown);
+      for (let i = 0; i < a.length; i++) {
+        const ra = await run(a[i]!, ctx);
+        const ru = await run(u[i]!, ctx);
+        expect(JSON.stringify(ra.errors?.map((e) => [e.message, e.extensions?.code]))).toBe(
+          JSON.stringify(ru.errors?.map((e) => [e.message, e.extensions?.code])));
+        expect(ra.errors?.[0]?.extensions?.code).not.toBe('AMBIGUOUS_LEGACY_URN');
+      }
+    }
+  });
+});
