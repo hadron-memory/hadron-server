@@ -8,6 +8,8 @@ import { generateId } from '../lib/id.js';
 import { createNodeRevision, buildNodeRevisionSnapshot } from '../lib/nodeRevisionSnapshot.js';
 import { lockMemoryConfigExclusive } from '../lib/governedRole.js';
 import { waitForLockWaitersOfType } from '../test/lockWait.js';
+import { holdInTransaction } from '../test/lockHold.js';
+import { deadline, waitBlocked } from '../test/lockObserver.js';
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 // #3558: a spy on the REAL task reader every MCP writer's recovery context carries (server.ts recoveryCtx).
 const reader = vi.hoisted(() => ({ calls: 0, override: null as boolean | null }));
@@ -131,15 +133,12 @@ describe('#3558 MCP governed node: edge-only needs no attestation', () => {
  });
 
  describe('#3558 B2: the token is checked on the locked row and never consumed', () => {
-  const hold = (lock: (tx: any) => Promise<unknown>) => {
-   let release!: () => void, held!: () => void;
-   const holding = new Promise<void>((r) => (held = r));
-   const gate = new Promise<void>((r) => (release = r));
-   const done = db.$transaction(async (tx) => { await lock(tx); held(); await gate; }, { timeout: 15_000 });
-   return holding.then(() => ({ release, done }));
-  };
-  const holdRow = () => hold((tx) => tx.$queryRaw`SELECT id FROM nodes WHERE id = ${gov.id} FOR UPDATE`);
-  const holdConfig = () => hold((tx) => lockMemoryConfigExclusive(tx, govMemoryId));
+  // #4751: the one shared latch (src/test/lockHold.ts): fails fast if the initial lock fails, reports the holder's pid.
+  const holdRow = () => holdInTransaction(db, (tx) => tx.$queryRaw`SELECT id FROM nodes WHERE id = ${gov.id} FOR UPDATE`);
+  const holdConfig = () => holdInTransaction(db, (tx) => lockMemoryConfigExclusive(tx, govMemoryId));
+  /** #4751 (the #4721 LOCAL seat's note): the edge-only writer, identified by its statement and by the pid that blocks it. */
+  const writerBlockedBy = (holderPid: number) =>
+    waitBlocked(db, deadline(3000), { query: /FROM "?nodes"? WHERE .*FOR UPDATE/s, blockedBy: [holderPid] });
 
   it('control: waits on the source row, applies, and the same token stays reusable', async () => {
    const before = await gstate();
@@ -147,22 +146,22 @@ describe('#3558 MCP governed node: edge-only needs no attestation', () => {
    let outcome = 'pending';
    const w = call({ expectedRevision: before.revSeq, edges: gedges(tgt) }).then((t) => (outcome = t));
    try {
-    await waitForLockWaitersOfType(db, 'transactionid', 1, 3000);
+    await writerBlockedBy(lock.pid);
     expect(outcome).toBe('pending');
    } finally { lock.release(); await lock.done; await w; }
    expect(outcome).toContain('Node updated:');
    expect(await gstate()).toEqual({ ...before, edges: [{ targetId: tgt.id, name: 'uses' }] });
    expect(await call({ expectedRevision: before.revSeq, edges: gedges(other) })).toContain('Node updated:');
    expect(await gstate()).toEqual({ ...before, edges: [{ targetId: other.id, name: 'uses' }] });
-  });
+  }, 30_000);
 
   // #3558: on this door the source row is locked TWICE before the token compare: server.ts's own FOR UPDATE and the one in
-  // ensureCurrentNodeRevisionInTransaction (src/lib/nodeRevisionSnapshot.ts:241). Either lock alone orders the writer, so
+  // ensureCurrentNodeRevisionInTransaction (the revision snapshot helper). Either lock alone orders the writer, so
   // removing one stays green by design; this pin (and the control and race pins) go red only when BOTH are removed.
   it('a writer that holds only the source row (no address lock) and commits a tracked revision makes the token stale', async () => {
    const before = await gstate();
    // The row-lock-only holder: the real revision allocator under FOR UPDATE, so the address lock cannot be what orders it.
-   const lock = await hold(async (tx: any) => {
+   const lock = await holdInTransaction(db, async (tx) => {
     await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${gov.id} FOR UPDATE`;
     const row = await tx.node.findUniqueOrThrow({ where: { id: gov.id } });
     await createNodeRevision(tx, { id: generateId(), ...buildNodeRevisionSnapshot(row, { userId }, { changes: ['content'] }) });
@@ -170,7 +169,7 @@ describe('#3558 MCP governed node: edge-only needs no attestation', () => {
    let outcome = 'pending';
    const w = call({ expectedRevision: before.revSeq, edges: gedges(tgt) }).then((t) => (outcome = t));
    try {
-    await waitForLockWaitersOfType(db, 'transactionid', 1, 3000);
+    await writerBlockedBy(lock.pid);
     expect(outcome).toBe('pending');
    } finally { lock.release(); await lock.done; await w; }
    expect(outcome).toMatch(/^\[node_write_conflict\]/);
