@@ -46,9 +46,9 @@ function watch(command, { minutes = '3', stepTimeout = '45', extraEnv = {}, time
 /** The process's state letter from /proc, or null when it no longer exists. */
 const state = (pid) => { try { return readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /, '')[0]; } catch { return null; } };
 /** Not yet ended: running, sleeping or stopped, but not a zombie (a zombie has ended; only its parent has not reaped it). */
-const running = (pid) => { const s = state(pid); return s !== null && s !== 'Z'; };
+const isLive = (pid) => { const s = state(pid); return s !== null && s !== 'Z'; };
 /** Gone, allowing a bounded moment for an orphan to be reaped (#4647 BLIND P2: `kill -0` succeeds on a zombie). */
-const gone = (pid) => { for (let i = 0; i < 50 && running(pid); i++) spawnSync('sleep', ['0.1']); return !running(pid); };
+const gone = (pid) => { for (let i = 0; i < 50 && isLive(pid); i++) spawnSync('sleep', ['0.1']); return !isLive(pid); };
 const pidsIn = (file) => readFileSync(file, 'utf8').trim().split('\n').map(Number);
 const withDir = (fn) => { const dir = mkdtempSync(join(tmpdir(), 'watchdog-4646-')); try { return fn(dir); } finally { rmSync(dir, { recursive: true, force: true }); } };
 /** A `name` shim on PATH in `dir`/bin with the given bash body; returns the PATH to pass. */
@@ -143,10 +143,10 @@ test('the kill is scoped to the command\'s own tree and group: an outside proces
   const outside = spawnSync('bash', ['-c', 'sleep 300 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' });
   const pid = Number(outside.stdout.trim());
   try {
-    expect(running(pid)).toBe(true);
+    expect(isLive(pid)).toBe(true);
     const r = watch('sleep 300', { minutes: '1' });
     expect(r.status).toBe(124);
-    expect(running(pid), 'a sleep outside the tree was killed').toBe(true);
+    expect(isLive(pid), 'a sleep outside the tree was killed').toBe(true);
   } finally { cleanup([pid]); }
   // No name-based kill anywhere in the script (Hugo's house rule).
   expect(readFileSync(script, 'utf8')).not.toMatch(/\bpkill\b|\bkillall\b|pgrep/);
@@ -255,12 +255,13 @@ test('a clock lost after launch ends the command, says so, and never stops watch
   } finally { cleanup([pid]); }
 }));
 
-test('with the clock lost, verification of a survivor still ends, after a bounded number of polls', () => withDir((dir) => {
+test('with the clock lost, verification makes one bounded attempt and reports a survivor as not verified', () => withDir((dir) => {
   const root = join(dir, 'root');
   const clock = join(dir, 'uptime');
   writeFileSync(clock, `${uptime()}.00 0.00\n`);
   // The survivor check always sees one never-ending member of the group, and no clock is left to bound it.
-  const PATH = shim(dir, 'ps', `if [ "$*" = "-eo pid=,pgid=,stat=" ]; then ${realPs} "$@"; echo "4194999 $(cat ${root}) S"; exit 0; fi
+  // Each survivor scan also takes 2 s, so polling on (a count, not a clock) would take a minute or more.
+  const PATH = shim(dir, 'ps', `if [ "$*" = "-eo pid=,pgid=,stat=" ]; then sleep 2; ${realPs} "$@"; echo "4194999 $(cat ${root}) S"; exit 0; fi
 exec ${realPs} "$@"`);
   const t0 = Date.now();
   const r = watch(`echo $$ > ${root}; sleep 1.5; rm ${clock}; sleep 300`, { minutes: '20', extraEnv: { WATCHDOG_UPTIME_FILE: clock, PATH } });
@@ -268,24 +269,74 @@ exec ${realPs} "$@"`);
   try {
     expect(r.status, r.stderr).toBe(124);
     expect(r.stdout).toContain('[watchdog] watchdog lost its clock; kill NOT verified, still running: 4194999');
-    expect(Date.now() - t0).toBeLessThan(45_000);
+    expect(Date.now() - t0).toBeLessThan(25_000);   // one 2 s attempt, not a poll count
   } finally { cleanup([pid]); }
 }));
 
-test('a walked PID that is no longer stopped at the KILL is left alone and reported, never killed blind (gate, #128652)', () => withDir((dir) => {
-  // The kill must never widen: a walked PID gets the KILL only if it is still stopped, because one that is running was
-  // resumed by someone else or is a reused PID. Here an outside helper keeps resuming a child that left the group (so
-  // only the walk reaches it); the watchdog must leave it running and say the kill was not verified.
+/**
+ * A fake /proc for the watchdog's identity reads (WATCHDOG_PROC_ROOT): on every tree scan the ps shim copies each listed
+ * PID's real stat line into it, then, from scan `from` on, rewrites the target's line once: `born` makes its start time
+ * (field 22) later, as a reused PID's would be; `ppid` makes it name another parent than the walk saw. The processes and
+ * signals stay real; only what the watchdog reads as the target's identity changes.
+ */
+const identityShim = (dir, target, mode, from) => shim(dir, 'ps', `out=$(${realPs} "$@")
+if [ "$*" = "-eo pid=,ppid=" ]; then
+  n=$(( $(cat ${dir}/calls 2>/dev/null || echo 0) + 1 )); echo "$n" > ${dir}/calls
+  t=$(cat ${target} 2>/dev/null)
+  for p in $(awk '{ print $1 }' <<< "$out"); do
+    [ "$p" = "$t" ] && [ -e ${dir}/changed ] && continue
+    mkdir -p ${dir}/proc/$p; cat /proc/$p/stat > ${dir}/proc/$p/stat 2>/dev/null
+  done
+  if [ -n "$t" ] && [ "$n" -ge ${from} ] && [ ! -e ${dir}/changed ] && [ -e ${dir}/proc/$t/stat ]; then
+    line=$(< ${dir}/proc/$t/stat); head=\${line%) *}; read -ra f <<< "\${line##*) }"
+    if [ ${mode} = born ]; then f[19]=$(( f[19] + 1 )); else f[1]=1; fi
+    echo "$head) \${f[*]}" > ${dir}/proc/$t/stat; touch ${dir}/changed
+  fi
+fi
+printf '%s\\n' "$out"`);
+
+test('a walked PID whose start time changed before the KILL (a reused PID) is never signalled, and is logged (gate, #129032)', () => withDir((dir) => {
+  // The child left the group, so only the walk reaches it. After the first scan recorded and stopped it, its identity
+  // changes as a reused PID's would: the KILL must skip it, log it, and verification must report it still running.
   const own = join(dir, 'own');
-  const helper = spawn('bash', ['-c', `until [ -s ${own} ]; do sleep 0.01; done; c=$(cat ${own}); while kill -CONT "$c" 2>/dev/null; do :; done`], { stdio: 'ignore' });
-  // The child's output goes nowhere, so the survivor holds no pipe to this test open.
-  const r = watch(`setsid sleep 300 >/dev/null 2>&1 & echo $! > ${own}; sleep 300`, { minutes: '1' });
+  const PATH = identityShim(dir, own, 'born', 2);
+  const r = watch(`setsid sleep 300 >/dev/null 2>&1 & echo $! > ${own}; sleep 300`, { minutes: '1', extraEnv: { PATH, WATCHDOG_PROC_ROOT: join(dir, 'proc') } });
   const pid = pidsIn(own)[0];
   try {
     expect(r.status, r.stderr).toBe(124);
+    expect(r.stdout).toMatch(new RegExp(`\\[watchdog\\] PID ${pid} is not the process the walk found \\(start time \\d+, now \\d+\\); not signalled`));
     expect(r.stdout).toMatch(new RegExp(`kill NOT verified, still running: .*\\b${pid}\\b`));
-    expect(running(pid), 'a PID that was not stopped at the KILL was killed').toBe(true);
-  } finally { cleanup([pid]); helper.kill('SIGKILL'); }
+    expect(state(pid), 'the mismatched PID was KILLed').not.toBeNull();   // stopped by the first scan, never killed
+  } finally { cleanup([pid]); }
+}));
+
+test('a walked PID whose stat line names another parent than the walk saw is never recorded, so never signalled', () => withDir((dir) => {
+  const own = join(dir, 'own');
+  const PATH = identityShim(dir, own, 'ppid', 1);
+  const r = watch(`setsid sleep 300 >/dev/null 2>&1 & echo $! > ${own}; sleep 300`, { minutes: '1', extraEnv: { PATH, WATCHDOG_PROC_ROOT: join(dir, 'proc') } });
+  const pid = pidsIn(own)[0];
+  try {
+    expect(r.status, r.stderr).toBe(124);
+    expect(state(pid), 'the unrecorded PID was signalled').toMatch(/^[RS]$/);   // not even stopped
+  } finally { cleanup([pid]); }
+}));
+
+test('a stale table that lists an outside process as a descendant never gets it signalled (LOCAL delta D1, Jane)', () => withDir((dir) => {
+  // The tree scan reports an unrelated process (started here, outside the command) as a child of the command, as a
+  // stale table after PID reuse would. Its own stat line names its real parent, so the walk never records it.
+  const root = join(dir, 'root');
+  const outside = spawn('sleep', ['300'], { stdio: 'ignore' });
+  try {
+    const PATH = shim(dir, 'ps', `if [ "$*" = "-eo pid=,ppid=" ]; then ${realPs} "$@"; [ -s ${root} ] && echo "${outside.pid} $(cat ${root})"; exit 0; fi
+exec ${realPs} "$@"`);
+    const r = watch(`echo $$ > ${root}; sleep 300`, { minutes: '1', extraEnv: { PATH } });
+    const pid = pidsIn(root)[0];
+    try {
+      expect(r.status, r.stderr).toBe(124);
+      expect(state(outside.pid), 'the outside process was signalled').toMatch(/^[RS]$/);   // not killed, not even stopped
+      expect(gone(pid)).toBe(true);
+    } finally { cleanup([pid]); }
+  } finally { outside.kill('SIGKILL'); }
 }));
 
 test('a TERM to the watchdog (the step cancelled) still ends the command', () => withDir((dir) => {
@@ -354,5 +405,6 @@ test('the step runs the watchdog from its own start, and its step-timeout settin
   expect(Number.isInteger(minutes) && minutes > 0 && minutes < step['timeout-minutes']).toBe(true);
   expect(step.env.WATCHDOG_SECONDS_PER_MINUTE).toBeUndefined();   // the test unit never reaches CI
   expect(step.env.WATCHDOG_UPTIME_FILE).toBeUndefined();          // nor the test clock
-  expect(step.run).not.toMatch(/WATCHDOG_(SECONDS_PER_MINUTE|UPTIME_FILE)/);
+  expect(step.env.WATCHDOG_PROC_ROOT).toBeUndefined();            // nor the test /proc
+  expect(step.run).not.toMatch(/WATCHDOG_(SECONDS_PER_MINUTE|UPTIME_FILE|PROC_ROOT)/);
 });
