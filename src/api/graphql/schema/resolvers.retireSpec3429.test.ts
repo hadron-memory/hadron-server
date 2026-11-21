@@ -386,6 +386,9 @@ describe('#3429 the door waits for a writer that holds its locks (acceptance 3, 
     const promo = await holding(async (t) => { await acquireLockSet(t, [{ memoryId: mem.id, loc: 'h:loc:x' }]); });
     const door = rescind(x.id);
     expect(await stillPending(door), 'the door must wait on the spec loc key').toBe(true);
+    // The loc key comes BEFORE the row lock (writeNodeCore's order): while the door waits on it, it holds no row lock yet.
+    // (writeNodeCore re-takes the key later, so only this probe tells the early key from the late one.)
+    await expect(db.$transaction(async (t) => { await t.$queryRaw`SELECT id FROM nodes WHERE id = ${x.id} FOR UPDATE NOWAIT`; })).resolves.toBeUndefined();
     promo.release(); await promo.done;
     expect((await door).node.tags).toContain('superseded');
   });
