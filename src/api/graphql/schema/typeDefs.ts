@@ -16175,7 +16175,7 @@ export const typeDefs = `#graphql
     displayMessage: String!
     stageTransitioned: Boolean!
     newStageName: String
-    "The stage name the turn asked for that is not one of the conversation's stages (hrn:node:hadronmemory.com:specs:cor:cht:030:02). The chat did not move; the turn is recorded. Null when the name was accepted or none was given."
+    "The stage name the turn asked for that is not one of the conversation's stages (hrn:node:hadronmemory.com:specs:cor:cht:030:02). The chat did not move; the turn is recorded. Null when the name was accepted or none was given, and null when routingSkipped: the rejection was judged against a stage list the chat has since left."
     rejectedNextStage: String
     conversationHandoff: String
     chatEnded: Boolean!
@@ -16183,7 +16183,7 @@ export const typeDefs = `#graphql
     conversationCompleted: String
     "Whether this turn returned the chat from a detour to the conversation and stage the most recent active detour left. False when a completion rule fired instead, or routing was skipped. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
     detourReturned: Boolean!
-    "Routing edits were skipped because a concurrent turn moved the chat from the decision's origin. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
+    "Routing edits were skipped because a concurrent turn moved the chat from the decision's origin (its conversation or its stage). The turn's routing claims are cleared with them: completion, handoff, stage transition, detour return and rejectedNextStage all read as unset. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
     routingSkipped: Boolean!
     onTrack: Boolean!
     offTrackReason: String
