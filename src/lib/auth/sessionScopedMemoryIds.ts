@@ -53,9 +53,11 @@ import { loadSessionBinding } from '../sessionBinding.js';
 import { isRunPrincipal } from './runPrincipal.js';
 
 /**
- * Who is asking, beyond the App and the session (#3401, ruling 0203). Required at every call site so no caller
- * can leave out a term: an impersonation reaches nothing through a session, and a run principal never reaches a
- * private memory (#1719 R5a), even when it carries an App and a session.
+ * Who is asking, beyond the App and the session (#3401, ruling 0203): an impersonation reaches nothing through a
+ * session, and a run principal never reaches a private memory (#1719 R5a), even when it carries an App and a session.
+ * The ARGUMENT is required, so a call site has to decide what to pass; the fields are optional because the principal
+ * types (`AuthContext`, the GraphQL `Context`) declare them optional. Production callers pass the principal itself,
+ * never a hand-built object; `{}` is a plain App key with neither term (tests).
  */
 export interface SessionScopeCaller {
   clientId?: string | null;

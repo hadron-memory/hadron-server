@@ -19,6 +19,7 @@ import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
 import { canReadMemory, canWriteToMemory, explainWriteRefusal, filterReadableMemoryIds } from './access-control.js';
 import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
+import { drainNodeUsage } from '../lib/usageRecorder.js';
 import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { AuthContext } from '../middleware/auth.js';
@@ -116,13 +117,6 @@ describe('#3401 owner-positive: the session key reads its person\'s session memo
       expect(await reach(keyAuth(sid), mem)).toEqual(all(true));
     });
   }
-
-  it('hadron_get_node returns the node itself, not just a hit', async () => {
-    const mem = await sessionMemory({ cls: 'personal' });
-    const sid = await session(mem.id);
-    const text = await createTestableMcpServer(keyAuth(sid)).callToolText('hadron_get_node', { urn: mem.nodeUrn });
-    expect(text).toContain(mem.marker);
-  });
 });
 
 /** The answer hadron_get_node gives for a node in a memory that does not exist, with the URN normalised out. */
@@ -132,11 +126,28 @@ async function unknownAnswer(auth: AuthContext, mem: Mem) {
   return text.split(ghost).join(mem.urn);
 }
 
-/** Refused on every surface, and hadron_get_node's answer is byte-identical to an unknown memory (D4). */
+/**
+ * GraphQL `node(ref:)`'s whole answer (value, or error message and code), with `fromUrn` swapped for `toUrn`. `reach`
+ * reads a throw as "not reached", which alone would pass a refusal that names the memory or the session (#4726 blind
+ * P3), so D4 compares this answer for the refused memory with the answer for a memory that does not exist.
+ */
+async function gqlNodeAnswer(auth: AuthContext, nodeUrn: string, fromUrn: string, toUrn: string) {
+  const ctx = { db, ...auth } as unknown as Context;
+  const out = await (resolvers.Query as any).node(null, { ref: nodeUrn }, ctx).then(
+    (v: unknown) => ({ value: v ?? null }),
+    (e: { message?: string; extensions?: { code?: unknown } }) => ({ error: e.message, code: e.extensions?.code ?? null }),
+  );
+  return JSON.stringify(out).split(fromUrn).join(toUrn);
+}
+
+/** Refused on every surface, and both hadron_get_node and GraphQL node answer as an unknown memory (D4). */
 async function expectRefused(auth: AuthContext, mem: Mem) {
   expect(await reach(auth, mem)).toEqual(all(false));
   const refused = await createTestableMcpServer(auth).callToolText('hadron_get_node', { urn: mem.nodeUrn });
   expect(refused).toBe(await unknownAnswer(auth, mem));
+  const ghost = `${org.urn}:ghost${generateId().toLowerCase().slice(-6)}`;
+  expect(await gqlNodeAnswer(auth, mem.nodeUrn, mem.urn, '<memory>'))
+    .toBe(await gqlNodeAnswer(auth, `hrn:node:${ghost}:diary`, ghost, '<memory>'));
 }
 
 describe('#3401 refusals answer as an unknown memory on both surfaces', () => {
@@ -234,6 +245,13 @@ describe('#3401 D1: the session is re-validated on every call', () => {
       const sid = (await db.session.create({
         data: { id: generateId(), appId: appX, userId: mia, agentId: agentA, memoryId: mem.id, startedAt: old, updatedAt: old },
       })).id;
+      await expectRefused(keyAuth(sid), mem);
+      // #4726 blind P2-1: a refused read must not count as a drive, or the next call of the same retained
+      // principal would find the session live again. Probe repeatedly, flush every usage write, then probe again.
+      for (let i = 0; i < 3; i += 1) await reach(keyAuth(sid), mem);
+      await drainNodeUsage(db);
+      expect(await db.usageEvent.count({ where: { sessionId: sid, countsAsActivity: true } })).toBe(0);
+      expect((await db.session.findUniqueOrThrow({ where: { id: sid } })).updatedAt).toEqual(old);
       await expectRefused(keyAuth(sid), mem);
     });
   }

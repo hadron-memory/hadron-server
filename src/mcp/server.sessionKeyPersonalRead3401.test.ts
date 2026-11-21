@@ -19,6 +19,7 @@ import { APP_KEY_PREFIX, hashAppKey, validateSessionBinding } from '../middlewar
 import { parseDataKey } from '../lib/crypto.js';
 import { encryptNodeFieldsWithKey } from '../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../lib/sessionKeyCache.js';
+import { drainNodeUsage } from '../lib/usageRecorder.js';
 import { closeServerIfStarted, createServerOnCleanDb } from '../test/startServerFixture.js';
 
 vi.mock('../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -186,16 +187,24 @@ describe('#3401 D1: a retained transport loses the read the moment its session i
     expect(await getNode(t, n.nodeUrn)).toContain(n.marker);
     const old = new Date(Date.now() - 3 * 86_400_000);
     await db.app.update({ where: { id: appId }, data: { sessionDormancyDays: 1 } });
-    // The read above records its usage heartbeat after answering; wait until the session is dormant in the ONE
-    // binding check before probing, so the probe tests the gate and not a race with that write.
-    await vi.waitFor(async () => {
-      await db.usageEvent.deleteMany({ where: { sessionId: s.id } });
-      await db.session.update({ where: { id: s.id }, data: { startedAt: old, updatedAt: old, expiresAt: null } });
-      expect(await validateSessionBinding(db, { appId }, s.id)).toBeNull();
-    }, { timeout: 5_000, interval: 100 });
+    // The read above records its usage heartbeat after answering, off the request path. Flush it (#4726 blind P2-2:
+    // polling for dormancy raced a late write), then age the session; it is dormant in the ONE binding check.
+    await drainNodeUsage(db);
+    await db.usageEvent.deleteMany({ where: { sessionId: s.id } });
+    await db.session.update({ where: { id: s.id }, data: { startedAt: old, updatedAt: old, expiresAt: null } });
+    expect(await validateSessionBinding(db, { appId }, s.id)).toBeNull();
     const after = await getNode(t, n.nodeUrn);
     expect(after).not.toContain(n.marker);
     expect(after).toBe(await unknownAnswer(t, n.urn));
+    // #4726 blind P2-1: the retained transport keeps asking. A refused read must not count as a drive, or the
+    // next call would find the session live and read again. Repeat, flush every usage write, and the session is
+    // still dormant, with no counted event and its heartbeat column untouched.
+    for (let i = 0; i < 3; i += 1) expect(await getNode(t, n.nodeUrn)).not.toContain(n.marker);
+    await drainNodeUsage(db);
+    expect(await db.usageEvent.count({ where: { sessionId: s.id, countsAsActivity: true } })).toBe(0);
+    expect((await db.session.findUniqueOrThrow({ where: { id: s.id } })).updatedAt).toEqual(old);
+    expect(await validateSessionBinding(db, { appId }, s.id)).toBeNull();
+    expect(await getNode(t, n.nodeUrn)).toBe(await unknownAnswer(t, n.urn));
   });
 
   it('private, ended while ANOTHER live session of the same memory still caches its key', async () => {
@@ -225,5 +234,41 @@ describe('#3401 over the wire: another person\'s session never reaches the memor
     const t = await open(leo.id);
     expect(await getNode(t, n.nodeUrn)).toBe(await unknownAnswer(t, n.urn));
     expect((await gqlNode(n.nodeUrn, leo.id)).data?.node ?? null).toBeNull();
+  });
+});
+
+describe('#3401 D2 through startAgentSession: two Apps, one Agent, the same external user id', () => {
+  it('each App gets its own user and session memory, so the narrowed D2 orphans nothing; neither reaches the other', async () => {
+    // #4726 blind P2-3: startAgentSession reuses a session memory by (Agent, user), and D2 now refuses a
+    // personal row whose App is not the session's. The user is found by (externalAppId = the calling App,
+    // externalId), so the same external id in a second App is a second user with a second memory, App-tied.
+    const keyX = key;
+    const a = await startSession('mia');
+    const nA = await seedNode(a.memoryId);
+    const org = await db.app.findUniqueOrThrow({ where: { id: appId }, select: { organizationId: true } });
+    const appY = (await db.app.create({
+      data: { id: generateId(), organizationId: org.organizationId, name: 'Y', urn: `${orgUrn}:y`, identifyUserMethod: 'USER_ID', createUserPermission: 'IMPLICIT' },
+    })).id;
+    await db.appAgent.create({ data: { appId: appY, agentId } });
+    const keyY = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
+    await db.appKey.create({ data: { id: generateId(), appId: appY, keyHash: hashAppKey(keyY), keyPreview: keyY.slice(-4), label: 'y' } });
+    try {
+      key = keyY;
+      const b = await startSession('mia');
+      expect(b.memoryId).not.toBe(a.memoryId);
+      const [memA, memB] = await Promise.all([a.memoryId, b.memoryId].map((id) => db.memory.findUniqueOrThrow({ where: { id } })));
+      expect([memA.appId, memB.appId]).toEqual([appId, appY]);
+      expect(memA.userId).not.toBe(memB.userId);
+      const nB = await seedNode(b.memoryId);
+      const tB = await open(b.id);
+      expect(await getNode(tB, nB.nodeUrn)).toContain(nB.marker);
+      expect(await getNode(tB, nA.nodeUrn)).toBe(await unknownAnswer(tB, nA.urn));
+      key = keyX;
+      const tA = await open(a.id);
+      expect(await getNode(tA, nA.nodeUrn)).toContain(nA.marker);
+      expect(await getNode(tA, nB.nodeUrn)).toBe(await unknownAnswer(tA, nB.urn));
+    } finally {
+      key = keyX;
+    }
   });
 });
