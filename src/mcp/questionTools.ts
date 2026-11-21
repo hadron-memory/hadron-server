@@ -49,6 +49,9 @@ export const MCP_ANSWER_VIA = 'MCP';
 /** How many earlier answer entries a read prints before summarising the rest. */
 const EARLIER_ENTRIES_SHOWN = 5;
 const NO_LOG = 'This App has no question log yet. A manager of the memory or an owner of the App creates one (portal: the App\'s Questions tab; CLI: hadron question log create).';
+/** One answer for a question that is missing and one the caller cannot read: the resolver returns null for both. */
+const NOT_FOUND_TEXT = '[question_not_found] No readable question.';
+class QuestionNotFound extends Error {}
 const DELIVER = 'Give this link to the person who should answer; nothing is sent to them.';
 const NO_AGENT_ANSWERS = 'Only a person who is one of the question\'s deciders can answer, acting as themselves. A worker or agent session is refused [question_not_decider]: an agent does not answer its own question.';
 
@@ -101,11 +104,12 @@ function answerLine(a: AnswerOut): string {
 /** One question as text, every field through the GraphQL field resolvers (the same projection the portal reads). */
 export async function renderQuestion(v: QuestionView, ctx: Context): Promise<string> {
   const f = (name: string) => F[name](v, {}, ctx);
-  const [urn, portalUrl, askedBy, assignee, recommendation, answer, answers, withdrawn] = await Promise.all([
+  const [urn, portalUrl, askedBy, assignee, recommendation, answer, answers, withdrawn, deciders] = await Promise.all([
     f('urn') as Promise<string>, f('portalUrl') as Promise<string | null>, f('askedBy') as Promise<QActor>,
     f('effectiveAssignee') as Promise<ActorRef>, f('recommendation') as Promise<{ key: string; reason: string } | null>,
     f('answer') as Promise<AnswerOut | null>, f('answers') as Promise<AnswerOut[]>,
     f('withdrawn') as Promise<{ at: string; reason: string; by: QActor } | null>,
+    f('deciders') as Promise<ActorRef[]>,
   ]);
   const options = f('options') as Array<{ key: string; label: string; whyChoose: string | null; whyNot: string | null; risks: string | null }>;
   const lines = [
@@ -114,8 +118,16 @@ export async function renderQuestion(v: QuestionView, ctx: Context): Promise<str
     `Asked by ${actorLabel(askedBy)}${f('askedAt') ? ` at ${f('askedAt')}` : ''}`,
     `Assignee: ${assignee ? refLabel(assignee, 'user', f('effectiveAssigneeId') as string) : 'none'}`,
   ];
+  if (f('authorizes')) lines.push('Authorizes: yes (the answer authorizes an act)');
+  if (f('neededBy')) lines.push(`Needed by: ${f('neededBy')}`);
+  if (f('defaultAction')) lines.push(`If no answer in time: ${f('defaultAction')}`);
+  if (deciders.length) lines.push(`Deciders: ${deciders.map((d) => refLabel(d, 'user', d?.id ?? null)).join(', ')}`);
   if (f('background')) lines.push(`Background: ${f('background')}`);
   if (f('whyNow')) lines.push(`Why now: ${f('whyNow')}`);
+  for (const [label, field] of [['Blocks', 'blocks'], ['Sources', 'sources'], ['Specs touched', 'specsTouched'], ['Specs that must change', 'specsMustChange']] as const) {
+    const list = f(field) as Array<{ ref: string | null; node: string | null; spec: string | null }>;
+    if (list.length) lines.push(`${label}: ${list.map((r) => r.spec ?? r.node ?? r.ref).join(', ')}`);
+  }
   if (options.length) {
     lines.push('Options:');
     for (const o of options) {
@@ -185,6 +197,8 @@ export function registerQuestionTools(server: McpServer, deps: { db: PrismaClien
     try {
       return textResult(await fn(ctxOf()));
     } catch (e) {
+      // A missing and an unreadable question read alike (no existence oracle), and both are a failed call (#1789).
+      if (e instanceof QuestionNotFound) return refused(NOT_FOUND_TEXT);
       return questionErrorText(e);
     }
   };
@@ -222,7 +236,7 @@ export function registerQuestionTools(server: McpServer, deps: { db: PrismaClien
     SHAPE_HADRON_GET_QUESTION,
     async ({ ref, code, logRef }) => run(async (ctx) => {
       const v = await Q.question({}, { ref: ref ?? null, code: code ?? null, logRef: logRef ?? null }, ctx);
-      if (!v) return '[question_not_found] No readable question.';
+      if (!v) throw new QuestionNotFound();
       return renderQuestion(v, ctx);
     }),
   );
@@ -362,13 +376,19 @@ const SHAPE_HADRON_LIST_QUESTIONS = {
   offset: z.number().int().nonnegative().optional().describe('Page offset.'),
 };
 
+/** The amend fields the resolver CLEARS on null (amendQuestion); every other field ignores null, so only these accept it. */
+const clearable = (description: string) => z.string().nullable().optional().describe(`${description} null clears it; omit to keep it.`);
 const SHAPE_HADRON_AMEND_QUESTION = {
   ref: questionRef,
   expectedRevision,
   reason: z.string().describe('Why you change it (kept in the revision history).'),
-  ...Object.fromEntries(Object.entries(QUESTION_FIELDS).map(([k, v]) => [k, k === 'title' ? (v as z.ZodString).optional() : v])) as {
-    [K in keyof typeof QUESTION_FIELDS]: K extends 'title' ? z.ZodOptional<z.ZodString> : (typeof QUESTION_FIELDS)[K]
-  },
+  ...QUESTION_FIELDS,
+  title: QUESTION_FIELDS.title.optional(),
+  background: clearable('What the person needs to know to answer.'),
+  whyNow: clearable('Why this needs an answer now.'),
+  neededBy: clearable('When an answer is needed, as an ISO date-time.'),
+  defaultAction: clearable('What happens if no one answers in time.'),
+  assignee: clearable('A user id among the question\'s deciders.'),
 };
 
 const SHAPE_HADRON_WITHDRAW_QUESTION = {

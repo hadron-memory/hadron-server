@@ -104,6 +104,12 @@ describe('#4430 ask and read', () => {
     const hidden = await mcp(outsider.id).callToolText('hadron_get_question', { ref: urn });
     expect(hidden).toMatch(/^\[question_not_found\] /);
     expect(hidden).not.toContain('Ship');
+    // A failed lookup is a failed call (isError), and a missing question reads exactly like an unreadable one (Baloo, Beckett P2).
+    const unreadable = await mcp(outsider.id).callTool('hadron_get_question', { ref: urn }) as { isError?: boolean; content: Array<{ text: string }> };
+    const missing = await mcp(holder.id).callTool('hadron_get_question', { ref: generateId() }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(unreadable.isError).toBe(true);
+    expect(missing.isError).toBe(true);
+    expect(missing.content[0].text).toBe(unreadable.content[0].text);
   });
 
   it('list_question_logs names the log, and says how to get one when there is none', async () => {
@@ -112,6 +118,39 @@ describe('#4430 ask and read', () => {
     const other = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'empty' }, gqlCtx(admin.id));
     const none = await mcp(holder.id).callToolText('hadron_list_question_logs', { memoryRef: other.id });
     expect(none).toContain('no question log yet');
+  });
+});
+
+describe('#4430 the read carries every decision field (Baloo P2)', () => {
+  it('authorizes, neededBy, defaultAction, deciders and the reference lists round-trip into hadron_get_question', async () => {
+    const neededBy = '2026-12-01T12:00:00.000Z';
+    const { urn } = await workerAsks({
+      ...ASK, tier: 'SIGNED', authorizes: true, neededBy, defaultAction: 'We wait a week',
+      blocks: [{ node: 'hrn:node:qmcp.example:team-shared:plan' }], sources: [{ ref: 'https://example.test/thread' }],
+      specsTouched: [{ spec: 'cor:dmo:140:09' }], specsMustChange: [{ spec: 'cor:dmo:140:05' }],
+    });
+    const got = await mcp(holder.id).callToolText('hadron_get_question', { ref: urn });
+    expect(got).toContain('Authorizes: yes');
+    expect(got).toContain(`Needed by: ${neededBy}`);
+    expect(got).toContain('If no answer in time: We wait a week');
+    expect(got).toContain('Deciders: user hrn:user:q-holder');
+    expect(got).toContain('Blocks: hrn:node:qmcp.example:team-shared:plan');
+    expect(got).toContain('Sources: https://example.test/thread');
+    expect(got).toContain('Specs touched: cor:dmo:140:09');
+    expect(got).toContain('Specs that must change: cor:dmo:140:05');
+  });
+});
+
+describe('#4430 amend: null clears the fields the resolver clears (Baloo note)', () => {
+  it('background null clears it; the shape accepts null for exactly the five clearable fields', async () => {
+    const { text, urn } = await workerAsks({ ...ASK, background: 'Some context', neededBy: '2026-12-01T12:00:00.000Z', defaultAction: 'Wait' });
+    const amended = await asWorker(() => mcp(holder.id).callToolText('hadron_amend_question', { ref: urn, expectedRevision: revOf(text), reason: 'clear', background: null }));
+    expect(code(amended), amended).toBe('NO_ERROR');
+    expect((await dataOf(urn)).data.background).toBeNull();
+    expect((await dataOf(urn)).data.defaultAction).toBe('Wait');
+    const s = mcp(holder.id);
+    for (const k of ['background', 'whyNow', 'neededBy', 'defaultAction', 'assignee']) expect(() => s.toolParamSchema('hadron_amend_question', k).parse(null)).not.toThrow();
+    for (const k of ['title', 'priority', 'options']) expect(() => s.toolParamSchema('hadron_amend_question', k).parse(null)).toThrow();
   });
 });
 
