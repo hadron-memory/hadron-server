@@ -8517,7 +8517,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             // #1466: an edge writer holds this memory key across endpoint
             // validation and insertion. Take it before any loc lock so an edge
             // cannot land after archiveTombstone enumerates the target's edges.
-            await lockEdgeEndpointMemories(tx, [toMemory.id]);
+            // #1213: an owning move holds the full source/destination set before its loc and row locks.
+            await lockEdgeEndpointMemories(tx, [fromMemory.id, toMemory.id]);
             const archivePlan = await discoverArchivePlan(tx, toMemory.id, toLoc);
             await acquireLockSet(tx, [
               ...archivePlan.descendantLocs.map(loc => ({ memoryId: toMemory.id, loc })),
