@@ -633,6 +633,13 @@ const OPEN_TASK_STATUSES: ReadonlySet<string> = new Set(['pending', 'started']);
  * worker, and the task's App is the App of the log's memory; anything else (including a task that does not exist, or a
  * caller with no worker) is the same QUESTION_INVALID at /taskRef. Judged inside the ask's transaction, before any write.
  */
+/** #4431: the task row under `FOR SHARE`, read after the lock is granted (READ COMMITTED: a fresh snapshot). Null when absent. */
+async function lockTaskShared(tx: Tx, taskId: string): Promise<{ id: string; appId: string; status: string; assigneeWorkerId: string | null } | null> {
+  const [row] = await tx.$queryRaw<Array<{ id: string; appId: string; status: string; assigneeWorkerId: string | null }>>`
+    SELECT id, app_id AS "appId", status, assignee_worker_id AS "assigneeWorkerId" FROM agent_tasks WHERE id = ${taskId} FOR SHARE`;
+  return row ?? null;
+}
+
 async function linkedTaskId(txCtx: Context, tx: Tx, memoryId: string, taskRef: unknown): Promise<string> {
   const refuse = (): never => invalidQuestion([{ pointer: '/taskRef', message: TASK_REF_MESSAGE }]);
   const workerId = currentActor().workerId;
@@ -641,7 +648,10 @@ async function linkedTaskId(txCtx: Context, tx: Tx, memoryId: string, taskRef: u
   if (!memory?.appId) return refuse();
   const taskId = await resolveTaskRef({ ...txCtx, db: tx } as Context, taskRef, memory.appId);
   if (!taskId) return refuse();
-  const task = await tx.agentTask.findUnique({ where: { id: taskId }, select: { appId: true, status: true, assigneeWorkerId: true } });
+  // Beckett P2 on #4644: judged under a share lock on the task row, held to commit, so a concurrent finish, cancel or
+  // reassignment (which update the row) either commits first and is seen here, or waits for this ask. The last lock
+  // the ask takes before its writes; no task writer locks a question node, so the order cannot invert.
+  const task = await lockTaskShared(tx, taskId);
   if (!task || task.appId !== memory.appId || task.assigneeWorkerId !== workerId || !OPEN_TASK_STATUSES.has(task.status)) return refuse();
   return taskId;
 }
@@ -1532,7 +1542,9 @@ async function answerAct(
  */
 async function recordOnLinkedTask(tx: Tx, txCtx: Context, final: QuestionData, questionId: string, kind: AnswerEntry['kind']): Promise<void> {
   if (final.taskId == null) return;
-  const task = await tx.agentTask.findUnique({ where: { id: final.taskId }, select: { id: true, appId: true, status: true } });
+  // Under the same share lock as the ask (Beckett P2 on #4644): a task that ends concurrently either ends first (no
+  // event) or waits until this answer's event has committed. The last lock this transaction takes.
+  const task = await lockTaskShared(tx, final.taskId);
   if (!task || !OPEN_TASK_STATUSES.has(task.status)) return;
   const written = await tx.node.findUniqueOrThrow({ where: { id: questionId }, select: QUESTION_ROW_SELECT });
   const [view] = await evaluateRows(tx, [written]);

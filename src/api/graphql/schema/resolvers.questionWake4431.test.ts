@@ -116,6 +116,8 @@ describe('#4431 §1: a worker links a question to its own open task', () => {
       ['a finished task', () => ask({ taskRef: finished.id })],
       ['a task of another App (asked by its own assignee)', () => ask({ taskRef: foreignTask.id }, foreign.id)],
       ['a task id that does not exist', () => ask({ taskRef: generateId() })],
+      ['a malformed reference', () => ask({ taskRef: 'not a task ref!' })],
+      ['a handle that names no task', () => ask({ taskRef: 'AT9999' })],
       ['a caller with no worker', () => ask({ taskRef: own.id }, null)],
     ];
     // Thunks: each ask starts only when awaited, so no refusal is ever an unhandled rejection.
@@ -175,11 +177,87 @@ describe('#4431 §2: one event on the task per answer and per take-back, in the 
     expect(await questionEvents(t.id)).toHaveLength(0);
   });
 
+  it('the answer and its event commit together: an event append that fails after the node write rolls the answer back', async () => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    // Beckett P3 on #4644: fail the append itself, which runs after the question's node write in the same transaction.
+    await db.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION test_4431_refuse_answer_event() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.type = 'question.answered' THEN RAISE EXCEPTION 'test 4431: event append refused'; END IF; RETURN NEW; END $$`);
+    await db.$executeRawUnsafe(`CREATE TRIGGER test_4431_refuse_answer_event BEFORE INSERT ON agent_team_events FOR EACH ROW EXECUTE FUNCTION test_4431_refuse_answer_event()`);
+    try {
+      expect(await errorOf(answer(q.row.id, q.row.revSeq))).not.toBeNull();
+    } finally {
+      await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_4431_refuse_answer_event ON agent_team_events`);
+      await db.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_4431_refuse_answer_event()`);
+    }
+    const row = await db.node.findUniqueOrThrow({ where: { id: q.row.id } });
+    expect(row.revSeq).toBe(q.row.revSeq);
+    expect(questionDataSchema.parse(row.data).answers).toHaveLength(0);
+    expect(await questionEvents(t.id)).toHaveLength(0);
+  });
+
   it('a task that is no longer open gets no event, and the answer still succeeds', async () => {
     const t = await mkTask();
     const q = await ask({ taskRef: t.id });
     await db.agentTask.update({ where: { id: t.id }, data: { status: 'finished', finishedAt: new Date(), resultOutcome: 'done' } });
     const after = await answer(q.row.id, q.row.revSeq);
+    expect(D.state(after, {}, as(holder.id))).toBe('DECIDED');
+    expect(await questionEvents(t.id)).toHaveLength(0);
+  });
+});
+
+/**
+ * Beckett P2 on #4644: both eligibility checks hold a share lock on the task row. A second transaction holds the
+ * task's row lock, ends the task and commits while the ask (or the answer) waits; the waiting side must judge the
+ * ended task, never the one it would have read before the lock.
+ */
+async function whileTaskLocked<T>(taskId: string, end: Record<string, unknown>, act: () => Promise<T>): Promise<T> {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  let locked!: () => void;
+  const isLocked = new Promise<void>((r) => { locked = r; });
+  const holder = db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id = ${taskId} FOR UPDATE`;
+    locked();
+    await gate;
+    await tx.agentTask.update({ where: { id: taskId }, data: end });
+  }, { timeout: 30_000 });
+  await isLocked;
+  let settled = false;
+  const acting = act().finally(() => { settled = true; });
+  acting.catch(() => undefined); // judged below; never an unhandled rejection
+  // Wait until the act is blocked on a lock, or has finished without blocking (the unguarded case).
+  for (let i = 0; i < 100 && !settled; i++) {
+    const [{ n }] = await db.$queryRaw<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`;
+    if (n > 0) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  release();
+  await holder;
+  return acting;
+}
+const FINISH = () => ({ status: 'finished', finishedAt: new Date(), resultOutcome: 'done' });
+const CANCEL = () => ({ status: 'cancelled', cancelledAt: new Date() });
+
+describe('#4431: eligibility is judged under the task\'s row lock (Beckett P2)', () => {
+  it('an ask that waits on a task being finished is refused, never linked to the finished task', async () => {
+    const t = await mkTask();
+    const e = await errorOf(whileTaskLocked(t.id, FINISH(), () => ask({ taskRef: t.id })));
+    expect(e?.extensions.code).toBe('QUESTION_INVALID');
+    expect(e?.extensions.pointers).toEqual([{ pointer: '/taskRef', message: LINK_MESSAGE }]);
+  });
+
+  it('an ask that waits on a reassignment away from the asker is refused', async () => {
+    const t = await mkTask();
+    const e = await errorOf(whileTaskLocked(t.id, { assigneeWorkerId: bea.id }, () => ask({ taskRef: t.id })));
+    expect(e?.extensions.code).toBe('QUESTION_INVALID');
+  });
+
+  it('an answer that waits on the task being cancelled records no event, and the answer stands', async () => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    const after = await whileTaskLocked(t.id, CANCEL(), () => answer(q.row.id, q.row.revSeq));
     expect(D.state(after, {}, as(holder.id))).toBe('DECIDED');
     expect(await questionEvents(t.id)).toHaveLength(0);
   });
@@ -212,6 +290,34 @@ describe('#4431 §3: the answer wakes the task\'s current assignee', () => {
     expect(await wakesOf(asker.id)).toHaveLength(1);
     await db.agentTask.update({ where: { id: t.id }, data: { status: 'cancelled', cancelledAt: new Date() } });
     expect(await wakesOf(asker.id)).toEqual([]);
+  });
+
+  it('a take-back wakes nobody and does not withdraw an answer wake still undelivered (it stands until delivered or acted on)', async () => {
+    // Beckett P3 on #4644. Vera's draft cor:agt:050:34: a take-back is recorded and wakes nobody; a wake stands until it
+    // is delivered or the assignee acts on the task. The nudge carries no answer, so the woken worker reads the
+    // question and finds it OPEN again.
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    const a = await answer(q.row.id, q.row.revSeq);
+    await retract(a.row.id, a.row.revSeq);
+    const [answered, retracted] = await questionEvents(t.id);
+    expect(retracted!.type).toBe('question.answer-retracted');
+    expect(await wakesOf(asker.id)).toEqual([{ taskId: t.id, eventId: answered!.id, event: 'ANSWERED' }]);
+  });
+
+  it('through GraphQL: dueWakes offers the ANSWERED reason for the task, and acknowledging its proof clears it', async () => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    await answer(q.row.id, q.row.revSeq);
+    const Q = resolvers.Query as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
+    const read = () => Q.dueWakes(null, { appRef: app.id, workerRefs: [asker.id] }, as(admin.id));
+    const page = await read();
+    const wake = page.wakes.find((w: any) => w.worker.id === asker.id);
+    const reason = wake?.reasons.find((r: any) => r.kind === 'TASK');
+    expect(reason?.task).toMatchObject({ event: 'ANSWERED', id: t.id, handle: t.handle, ref: `TASK:${t.id}:answered` });
+    await M.acknowledgeWakes(null, { proofs: [wake.proof] }, as(admin.id));
+    const again = await read();
+    expect((again.wakes.find((w: any) => w.worker.id === asker.id)?.reasons ?? []).filter((r: any) => r.kind === 'TASK')).toEqual([]);
   });
 
   it('a re-answer is a new event and wakes again', async () => {
@@ -292,5 +398,14 @@ describe('#4431 §7: earlier questions', () => {
     expect(D.state(after, {}, as(holder.id))).toBe('DECIDED');
     expect(await db.agentTeamEvent.count({ where: { type: { startsWith: 'question.' } } })).toBe(0);
     void t;
+  });
+
+  it('a question with blocks and taskId null renders its blocking section exactly as before #4431', async () => {
+    // Beckett P3 on #4644. taskId is required-nullable in the codec since #4426 (z.string().nullable()), so every
+    // stored question carries taskId: null; this drives the renderer's unchanged branch with a non-empty section.
+    const q = await ask({ blocks: [{ ref: 'hadron-server#4431' }] });
+    expect(q.row.content).toContain('## What this question is blocking\n\n- hadron-server#4431\n');
+    expect(q.row.content).not.toContain('Blocks task');
+    expect(D.state(q, {}, as(holder.id))).toBe('OPEN');
   });
 });

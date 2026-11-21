@@ -78,9 +78,6 @@ export const ASSIGNEE_CLEARED_EVENT_TYPES = ['task.handed-back'] as const satisf
 // question), never its assignee acting on the task, so neither clears a wake or counts as progress (Vera's draft of
 // cor:agt:050:11).
 export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed', 'task.external-id-released', 'review.defect-linked', 'question.answered', 'question.answer-retracted'] as const;
-
-/** #4431: the question events a linked task records (cor:agt:050:11, Proposed). Only the first wakes (taskWakes.ts). */
-export const QUESTION_EVENT_TYPES = ['question.answered', 'question.answer-retracted'] as const satisfies readonly TaskEventPayload['type'][];
 /** #2609: only facts already readable by every team-event reader. Assignee state and future codes are excluded. */
 export const RECORDED_TASK_WARNING_CODES = ['task.create.no-source', 'task.finish.open-children'] as const;
 export type RecordedTaskWarningCode = (typeof RECORDED_TASK_WARNING_CODES)[number];
