@@ -42,13 +42,18 @@ describe('#4335 schema.prisma does not declare the two partial indexes', () => {
     return m![0];
   };
 
+  it('the declaration patterns match across whitespace and newlines (#4672 BLIND delta F2)', () => {
+    expect('@@index(\n    [userId])').toMatch(/@@index\s*\(\s*\[\s*userId\s*\]/);
+    expect('@@unique( [\n externalAppId ,\n externalId ] )').toMatch(/@@unique\s*\(\s*\[\s*externalAppId\s*,\s*externalId\s*\]/);
+  });
+
   it('Memory declares no plain index on userId alone', () => {
-    expect(model('Memory')).not.toMatch(/@@index\(\[\s*userId\s*\]/);
+    expect(model('Memory')).not.toMatch(/@@index\s*\(\s*\[\s*userId\s*\]/);
     expect(model('Memory')).toMatch(/^\s*userId\s/m);
   });
 
   it('User declares no unique on (externalAppId, externalId)', () => {
-    expect(model('User')).not.toMatch(/@@unique\(\[\s*externalAppId\s*,\s*externalId\s*\]/);
+    expect(model('User')).not.toMatch(/@@unique\s*\(\s*\[\s*externalAppId\s*,\s*externalId\s*\]/);
     expect(model('User')).toMatch(/^\s*externalAppId\s/m);
   });
 });
@@ -131,9 +136,23 @@ describe('#4335 prisma/partial-index-invariants.sql', () => {
     });
   }, 60_000);
 
+  it('repairs an unusable memories index that has the migration definition (#4672 QA delta F1)', async () => {
+    await withLegacyFullIndexes(async (pg) => {
+      await pg.query(FILE);
+      const before = await state(pg, 'memories_user_id_idx');
+      // A failed concurrent build cannot be forced on a plain btree over text, so mark it unusable as one would leave it.
+      await pg.query(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'memories_user_id_idx'::regclass`);
+      await pg.query(FILE);
+      const repaired = await state(pg, 'memories_user_id_idx');
+      expect(repaired).toMatchObject({ d: PARTIAL('memories_user_id_idx'), valid: true });
+      expect(repaired.oid).not.toBe(before.oid);
+    });
+  }, 60_000);
+
   it.each([
     ['an index of the same name on another table', 'DROP INDEX memories_user_id_idx; CREATE INDEX memories_user_id_idx ON users (external_id)', /is on users, not memories/],
     ['an unrecognised definition (a standalone unique)', 'DROP INDEX memories_user_id_idx; CREATE UNIQUE INDEX memories_user_id_idx ON memories (user_id)', /neither the migration's partial form nor push's full form/],
+    ['a non-unique index with the users definition', 'DROP INDEX users_external_app_id_external_id_key; CREATE INDEX users_external_app_id_external_id_key ON users (external_app_id, external_id) WHERE (external_id IS NOT NULL)', /neither the migration's partial form nor push's full form/],
     ['a foreign key on push\'s full unique', 'CREATE TABLE pin4335_ref (a text, e text, FOREIGN KEY (a, e) REFERENCES users (external_app_id, external_id))', /depend/],
   ])('refuses, changing nothing, for %s (#4672 BLIND F2)', async (_label, setup, refusal) => {
     await withLegacyFullIndexes(async (pg) => {
