@@ -31,12 +31,15 @@ function fakes(t, { recordOn }) {
   return { dir, log };
 }
 
+/** The launching shell's environment with SECRET_ROOT_KEY ABSENT, as on a real stack (a variable already exported would stay exported on reassignment and hide a missing `export`). */
+const withoutRootKey = (extra) => { const env = { ...process.env, ...extra }; delete env.SECRET_ROOT_KEY; return env; };
+
 const recorded = (log) => Object.fromEntries(readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map(l => l.split(/=(.*)/s).slice(0, 2)));
 
 function runEntrypoint(t) {
   const f = fakes(t, { recordOn: 'node-supervise' });
   const run = spawnSync('sh', [entrypoint], { encoding: 'utf8',
-    env: { ...process.env, PATH: `${f.dir}:${process.env.PATH}`, DATABASE_URL: 'postgresql://fixture@db/e2e', RATE_LIMIT_KEYRING: '', SECRET_ROOT_KEY: '' } });
+    env: withoutRootKey({ PATH: `${f.dir}:${process.env.PATH}`, DATABASE_URL: 'postgresql://fixture@db/e2e', RATE_LIMIT_KEYRING: '' }) });
   assert.equal(run.status, 0, run.stderr);
   return { run, env: recorded(f.log) };
 }
@@ -44,8 +47,8 @@ function runEntrypoint(t) {
 function runSeedLane(t) {
   const f = fakes(t, { recordOn: 'pnpm-seed' });
   const run = spawnSync('bash', [seedLane], { encoding: 'utf8',
-    env: { ...process.env, PATH: `${f.dir}:${process.env.PATH}`, DATABASE_URL: 'postgresql://fixture@db/e2e',
-      ROW_SIGNING: 'false', ROW_REGISTRATION: 'false', ROW_EXPECT: 'pass', SECRET_ROOT_KEY: '' } });
+    env: withoutRootKey({ PATH: `${f.dir}:${process.env.PATH}`, DATABASE_URL: 'postgresql://fixture@db/e2e',
+      ROW_SIGNING: 'false', ROW_REGISTRATION: 'false', ROW_EXPECT: 'pass' }) });
   assert.equal(run.status, 0, run.stderr + run.stdout);
   return { run, env: recorded(f.log) };
 }
