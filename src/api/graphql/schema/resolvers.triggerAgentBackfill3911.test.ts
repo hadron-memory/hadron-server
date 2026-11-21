@@ -58,7 +58,7 @@ const read = async (t: { schedule: string; webhook: string; poll: string }) => (
   poll: await db.webFetchPollBinding.findUniqueOrThrow({ where: { jobId: t.poll } }),
 });
 async function migrate(): Promise<string> {
-  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  const client = new Client({ connectionString: process.env.DATABASE_URL! });
   const notices: string[] = [];
   client.on('notice', n => notices.push(n.message));
   await client.connect();
