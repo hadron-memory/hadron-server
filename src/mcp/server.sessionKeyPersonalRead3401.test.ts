@@ -184,6 +184,9 @@ describe('#3401 D1: a retained transport loses the read the moment its session i
     const s = await startSession('mia');
     const n = await seedNode(s.memoryId);
     const t = await open(s.id);
+    // Zero baseline for the control below (#4726 blind delta follow-up): nothing counted before the live read.
+    await drainNodeUsage(db);
+    expect(await db.usageEvent.count({ where: { sessionId: s.id, countsAsActivity: true } })).toBe(0);
     expect(await getNode(t, n.nodeUrn)).toContain(n.marker);
     const old = new Date(Date.now() - 3 * 86_400_000);
     await db.app.update({ where: { id: appId }, data: { sessionDormancyDays: 1 } });

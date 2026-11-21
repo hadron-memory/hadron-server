@@ -268,18 +268,22 @@ describe('#3401 D1: the session is re-validated on every call', () => {
   }
 
   it('control for the dormant pins: the same probes on a LIVE session do record counted activity', async () => {
-    // #4726 blind delta P2: "zero counted events" above means something only if these probes reach the
-    // recorder at all. On a live session, hadron_get_node through the same testable server, and then the same reach(), each
-    // leave counted events after the same flush.
+    // #4726 blind delta P2 (and its follow-up): "zero counted events" above means something only if these probes
+    // reach the recorder at all. From a zero baseline on a live session, hadron_get_node through the same testable
+    // server records counted activity, and the same reach() then strictly adds to it, each after the same flush.
     const mem = await sessionMemory({ cls: 'personal' });
     const sid = await session(mem.id);
+    const counted = () => db.usageEvent.count({ where: { sessionId: sid, countsAsActivity: true } });
+    await drainNodeUsage(db);
+    expect(await counted()).toBe(0);
     const mcp = createTestableMcpServer(keyAuth(sid));
     expect(await mcp.callToolText('hadron_get_node', { urn: mem.nodeUrn })).toContain(mem.marker);
     await drainNodeUsage(db);
-    expect(await db.usageEvent.count({ where: { sessionId: sid, countsAsActivity: true } })).toBeGreaterThan(0);
+    const afterGetNode = await counted();
+    expect(afterGetNode).toBeGreaterThan(0);
     expect(await reach(keyAuth(sid), mem)).toEqual(all(true));
     await drainNodeUsage(db);
-    expect(await db.usageEvent.count({ where: { sessionId: sid, countsAsActivity: true } })).toBeGreaterThan(0);
+    expect(await counted()).toBeGreaterThan(afterGetNode);
   });
 
   it('the shared predicate itself answers empty for an ended session (both surfaces call it)', async () => {
