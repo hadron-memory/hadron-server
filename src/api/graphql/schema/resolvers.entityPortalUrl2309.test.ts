@@ -121,6 +121,7 @@ describe('#2309 read gate, through the GraphQL executor', () => {
         expect(row.portalUrl, kind).toBe(`${ORIGIN}/app/u/${row.urn}`);
         const denied = await run(query, ref, outsider.id);
         expect(denied.data, kind).toEqual({ [q]: null });
+        expect(JSON.stringify(denied), kind).not.toContain('/app/u/'); // no link anywhere in a denied response
         if (denial === 'null') expect(denied.errors, kind).toBeUndefined();
         else {
           expect(denied.errors, kind).toHaveLength(1);
