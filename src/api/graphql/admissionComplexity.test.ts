@@ -129,8 +129,6 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.slackConnections",
   "Query.specBacklinksPage", // #3222 (#2213 S3): pageArgs, default 20, cap 200; in PAGE_ARGS_FIELDS.
   "Query.specUnresolvedReferencesPage", // #3222: as specBacklinksPage.
-  "Query.teamAttentionPage",
-  "Query.teamAttentionPreviewPage",
   "Query.teamChatMessages",
   "Query.teamChatSearch", // #2299: as channelMessageSearch.
   "Query.teamRoles",
