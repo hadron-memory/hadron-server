@@ -35,16 +35,18 @@ test('fresh public schema proceeds through setup, seed and supervised server', t
     env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, DATABASE_URL: 'postgresql://fixture@db/e2e', RATE_LIMIT_KEYRING: '' } });
   assert.equal(run.status, 0, run.stderr);
   const calls = readFileSync(log, 'utf8').trim().split('\n');
-  assert.equal(calls.length, 10);
+  assert.equal(calls.length, 11);
   assert(calls[0].includes('SELECT EXISTS'));
-  assert(calls[3].includes("current:'e2e'"));
-  assert(calls[4].endsWith('-f prisma/pre-push.sql'));
-  assert.equal(calls[5], 'pnpm prisma db push --skip-generate');
-  assert(calls[6].endsWith('-f prisma/post-push.sql'));
+  // #4747: calls 1-3 are the three per-launch random keys (JWT, encryption, App-secret root), then the rate keyring.
+  for (const i of [1, 2, 3]) assert(calls[i].startsWith('node -e') && calls[i].includes("randomBytes(32).toString('hex')"), calls[i]);
+  assert(calls[4].includes("current:'e2e'"));
+  assert(calls[5].endsWith('-f prisma/pre-push.sql'));
+  assert.equal(calls[6], 'pnpm prisma db push --skip-generate');
+  assert(calls[7].endsWith('-f prisma/post-push.sql'));
   // #4577: the platform actions come from the same upsert the normal boot runs, after the schema exists and before the server starts.
-  assert.equal(calls[7], 'pnpm tsx scripts/db/upsert-actions.ts');
-  assert.equal(calls[8], 'pnpm tsx scripts/e2e/seed.ts');
-  assert.equal(calls[9], 'node scripts/e2e/supervise.mjs');
+  assert.equal(calls[8], 'pnpm tsx scripts/db/upsert-actions.ts');
+  assert.equal(calls[9], 'pnpm tsx scripts/e2e/seed.ts');
+  assert.equal(calls[10], 'node scripts/e2e/supervise.mjs');
 });
 // #4577: the entrypoint can only run the upsert if the image carries it; the build context, the Dockerfile and the source archive stack.sh ships must all name it.
 test('the upsert script is shipped to the E2E image by every layer', () => {

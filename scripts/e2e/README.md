@@ -179,8 +179,9 @@ Credentials are freshly random on every new stack.
 checks. Only hashes are stored in DB, with raw values in a stack-scoped
 credential volume for check scripts. Seed and application logs do not print
 the raw credentials. Capture the final output privately if needed; `down`
-removes the credential volume. Signing and encryption keys are also randomly generated inside each fresh
-app launch, so a JWT from one stack does not authenticate to another. These
+removes the credential volume. Signing, encryption and App-secret root keys (`JWT_SECRET`, `HADRON_ENCRYPTION_KEY`, `SECRET_ROOT_KEY`, #4747) are also randomly generated inside each fresh
+app launch, so a JWT from one stack does not authenticate to another, and App secrets can be stored on a fresh stack with no manual change. The root key is
+never logged and never a development, test or production value; it is safe per launch because a stack's database is empty when it starts. These
 fixtures belong only in this local environment.
 
 ## Sign-in simulation limits
