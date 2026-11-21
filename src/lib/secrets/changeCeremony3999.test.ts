@@ -1,3 +1,4 @@
+import * as deletion from './autoDelete.js';
 import * as secretRows from './appSecrets.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { revealForPersonHolder } from './readClientReveal.js';
@@ -345,6 +346,37 @@ describe('#3999 proof rotation',()=>{
  });
 });
 
+describe('#3999 staged deletion uses the common deletion contract',()=>{
+ it('rolls back request completion, audit and deletion when the shared helper fails after deleting',async()=>{
+  const pending=await stage();const before=(await row(pending)).staged_value_encrypted;
+  const id=(await error(resolvers.Mutation.deleteSecret({}, {ref:secretId},ctx()))).extensions.requestId,p=await proof(id);
+  const original=deletion.deleteLockedAppSecret;
+  const fail=vi.spyOn(deletion,'deleteLockedAppSecret').mockImplementation(async(...args)=>{await original(...args);throw new Error('injected post-delete failure');});
+  try{await expect(complete(id,p)).rejects.toThrow('injected post-delete failure');}finally{fail.mockRestore();}
+  expect(await db.secret.count({where:{id:secretId}})).toBe(1);expect(await db.secretVersion.count({where:{secretId}})).toBe(1);
+  expect(await db.secretEvent.count({where:{secretId,kind:'DELETE'}})).toBe(0);
+  expect((await row(id)).state).toBe('open');expect((await row(pending)).state).toBe('open');expect((await row(pending)).staged_value_encrypted).toBe(before);
+ });
+ it('a manager deletes another person secret with newest-version audit, client ends and request cleanup',async()=>{
+  const writer=(await db.user.create({data:{email:`${generateId()}@s4.test`}})).id;
+  await db.appMember.create({data:{appId,userId:writer,role:'reader'}});
+  const writerCtx={...ctx(),userId:writer};
+  const target=await resolvers.Mutation.createSecret({}, {ownerType:'app',ownerRef:appId,name:'manager-target',kind:'generic',value:'v1'},writerCtx);
+  await resolvers.Mutation.updateSecret({}, {ref:target.id,value:'v2'},writerCtx);
+  const protectId=(await error(resolvers.Mutation.setSecretProtected({}, {ref:target.id,protected:true},ctx()))).extensions.requestId;
+  await complete(protectId,await proof(protectId));
+  const client=await resolvers.Mutation.issueSecretReadClient({}, {input:{secretRef:target.id,holderKind:'USER',holderRef:writer,reason:'sibling ends with secret'}},ctx());
+  const staged=(await error(resolvers.Mutation.updateSecret({}, {ref:target.id,value:'never-committed'},writerCtx))).extensions.requestId;
+  const id=(await error(resolvers.Mutation.deleteSecret({}, {ref:target.id},ctx()))).extensions.requestId;
+  await complete(id,await proof(id));
+  expect(await db.secret.findUnique({where:{id:target.id}})).toBeNull();expect(await db.secretVersion.count({where:{secretId:target.id}})).toBe(0);
+  expect(await db.secretEvent.findMany({where:{secretId:target.id,kind:'DELETE'}})).toMatchObject([{versionNo:2,actorUserId:userId}]);
+  expect(await db.secretReadClient.findUniqueOrThrow({where:{id:client.clientId}})).toMatchObject({endReason:'SECRET_DELETED',endedAt:expect.any(Date)});
+  expect((await row(id)).state).toBe('completed');expect((await row(id)).staged_value_encrypted).toBeNull();
+  expect((await row(staged)).state).toBe('stale');expect((await row(staged)).staged_value_encrypted).toBeNull();
+ });
+});
+
 describe('#3999 explicit validation and event boundaries',()=>{
  it('documents both protection event kinds on the public schema',()=>{
   const event=buildSchema(typeDefs).getType('SecretEvent') as GraphQLObjectType;
@@ -374,6 +406,7 @@ describe('#3999 explicit validation and event boundaries',()=>{
   }finally{await api.stop();}
  });
  it.each([true,false])('activates and reveals a protected worker grant with person holder NULL (own=%s)',async own=>{
+  await db.secret.update({where:{id:secretId},data:{protected:true}});expect((await db.secret.findUniqueOrThrow({where:{id:secretId}})).protected).toBe(true);
   const agent=await db.agent.create({data:{name:'protected-agent',urn:`${generateId()}:protected`,ownerUserId:userId}});
   const worker=await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,name:'protected-worker',slug:'protected-worker',appId,agentId:agent.id,...(own?{heldByUserId:userId,heldAt:new Date()}:{})}});
   const c=await resolvers.Mutation.issueSecretReadClient({}, {input:{secretRef:secretId,holderKind:'WORKER',holderRef:worker.id,reason:'protected worker boundary'}},ctx());
