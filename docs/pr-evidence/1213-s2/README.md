@@ -22,3 +22,16 @@ The new suites are `src/lib/governanceParticipation1213.test.ts` and `src/api/gr
 | Omit source from MCP move set | Real MCP move closure's PID waits on source key before destination overwrite |
 
 The runtime's bounded failed-wait exception is intentional mutant evidence, not a timeout-as-success test. Holders and contenders are released and drained even when the expected key wait is missing. S1's existing `channelMemoryLock1213.test.ts` separately covers real physical hash collision, signed key acquisition order and complete-set deduplication; S2 reuses that unchanged helper.
+
+## First hosted run and harness repair
+
+The first full hosted run at `df4155629` exposed six existing test harness assumptions; no production change was needed to address them. The repair changes only tests and evidence:
+
+- `lockAcquisitionOrder.test.ts` now observes only the two-argument loc namespace instead of fabricating a pair from a one-argument memory key. Its new exact-key regression pin is assertion-red with the old observer and green after restoration (one failure, seven controls skipped in that targeted red run).
+- `nodeLockCompatibility2054.test.ts` retains the original create-vs-move P-key probe. Owning move/reservation pairs now attribute the earlier C wait to the exact backend/holder/key and assert no old path key is retained while waiting; all committed-state/deadlock assertions remain.
+- `resolvers.searchReplace.test.ts` observes the actual moving backend waiting on bulk's exact C key, rather than searching for a query mentioning nodes. Content, move and revision lineage assertions remain; this does not implement S3's governed-skip behavior.
+- `server.edgeTools.test.ts` queues the move first and promotion second behind a synthetic C holder, then proves the move waits on the held edge row while promotion waits on the move's C. Releasing both lets promotion retry against the relocated source; existing edge/carry assertions remain.
+- `resolvers.attestationSeams3437.test.ts` preserves the ordinary-update no-wait control. An admitted create now proves the task-kind contender waits on C before allowing create to commit, then checks the admitted task revision and later stale-claim refusal. It never awaits the blocked contender from inside the holding transaction.
+- `resolvers.legacyChatSeq2987.test.ts` injects the stale absent-target answer through clone's real owning transaction client. The tombstone seq/revision and `SEQ_PROTECTED` assertions remain.
+
+After restoration, 596 tests pass across 29 focused/neighbor files (561 plus 35); the first-head production sources are byte-identical. The next hosted run, not these local results, decides whether the fix head may freeze.
