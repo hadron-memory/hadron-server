@@ -29,7 +29,7 @@ describe('#909 slice (a): one canonical node-type list', () => {
   });
 
   it('is what the MCP create and update descriptions print, not a second copy', () => {
-    const server = read('../mcp/server.ts');
+    const server = read('../mcp/toolShapes.ts');
     expect(server).not.toContain('canonical values: abstract, chat, data, info (default)');
     expect(server.match(/canonical values: \$\{ORDINARY_NODE_TYPES_TEXT\}/g)).toHaveLength(2);
   });
