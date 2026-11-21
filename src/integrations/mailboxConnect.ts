@@ -35,8 +35,13 @@ export interface MailboxConnectConfig {
   provider: string;
   /** Route segment: /auth/<routeName>/start, /auth/<routeName>, /auth/<routeName>/callback. */
   routeName: string;
-  /** Build the provider's authorize URL for a state value. */
-  buildAuthUrl: (state: string) => string;
+  /**
+   * Build the provider's authorize URL for a state value. The second argument is the #2948 account
+   * hint (present only on the Google providers, only when the start verified it): appended as the
+   * provider's account-hint parameter (`login_hint`). A provider that cannot use a hint simply
+   * never receives one — the start refuses it first.
+   */
+  buildAuthUrl: (state: string, loginHint?: string) => string;
   /** The registered redirect URI — the tool's token exchange repeats it verbatim. */
   getRedirectUri: () => string;
   /** Log prefix, e.g. `microsoft-oauth`. */
@@ -57,6 +62,14 @@ export interface MailboxConnectConfig {
    * best-effort failure.
    */
   subscribeInbox?: boolean;
+  /**
+   * #2948 (rulings 0155/0156): this provider's start accepts an optional account hint and passes
+   * it to the provider as `login_hint` — the Google providers (gmail, google-cal, google-drive),
+   * whose accounts are shared across their services. A hint on any other provider is refused with
+   * the same typed 400 as an out-of-scope hint: silently ignoring it would hand the caller a full
+   * account picker they asked to skip.
+   */
+  acceptsLoginHint?: boolean;
 }
 
 /** The provider's connect flow is not configured on this server (REST 503, GraphQL CONNECTION_PROVIDER_NOT_CONFIGURED). */
@@ -65,6 +78,57 @@ export class ConnectProviderNotConfiguredError extends Error {
     super(`${provider} connections are not configured on this server`);
     this.name = 'ConnectProviderNotConfiguredError';
   }
+}
+
+/**
+ * #2948 (ruling 0156): the account hint was refused at the start — malformed, on a provider that
+ * takes no hint, or not the `mailboxEmail` of a live Google connection the CALLER holds in THAT
+ * org. One refusal for every cause (REST 400 `{ error: 'invalid_account_hint' }`), raised BEFORE
+ * any nonce or flow row exists, so it answers nothing about which check failed or whether the
+ * address is connected for anyone else.
+ */
+export class ConnectAccountHintRefusedError extends Error {
+  constructor() {
+    super('invalid_account_hint');
+    this.name = 'ConnectAccountHintRefusedError';
+  }
+}
+
+/** The providers whose accounts are shared across Google services — the hint's scope (ruling 0156). */
+const GOOGLE_LOGIN_HINT_PROVIDERS = ['gmail', 'google-cal', 'google-drive'];
+
+/** RFC-adjacent shape + length bound: the real gate is equality with a connected mailboxEmail; this keeps garbage out of the check. */
+const HINT_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * #2948: judge an account hint against the caller's own connections. Accepted only when it equals
+ * the `mailboxEmail` of a LIVE connection (soft-deleted counts as missing, cor:dmo:080:04) with a
+ * Google provider that the caller holds in this org. Anything else is the one
+ * {@link ConnectAccountHintRefusedError} — same answer for a malformed value, a stranger's
+ * address, another member's connected address and the caller's own address in another org.
+ * Returns the validated hint (a string, by construction).
+ */
+async function judgeAccountHint(
+  cfg: MailboxConnectConfig,
+  args: { userId: string; orgId: string },
+  hint: unknown,
+): Promise<string> {
+  if (typeof hint !== 'string' || hint === '' || hint.length > 254 || !HINT_EMAIL_PATTERN.test(hint)) {
+    throw new ConnectAccountHintRefusedError();
+  }
+  if (!cfg.acceptsLoginHint) throw new ConnectAccountHintRefusedError();
+  const own = await db.exchangeConnection.findFirst({
+    where: {
+      userId: args.userId,
+      organizationId: args.orgId,
+      mailboxEmail: hint,
+      provider: { in: GOOGLE_LOGIN_HINT_PROVIDERS },
+      deletedAt: null,
+    },
+    select: { id: true },
+  });
+  if (!own) throw new ConnectAccountHintRefusedError();
+  return hint;
 }
 
 const connectProviders = new Map<string, MailboxConnectConfig>();
@@ -136,10 +200,21 @@ export async function issueConnectStart(
     orgId: string;
     redirect: string;
     origin: ExchangeStartOrigin;
+    /**
+     * #2948: the optional account hint, exactly as the caller sent it (undefined/null/'' mean no
+     * hint). Judged BEFORE the flow row or the nonce exists: a refused hint writes nothing.
+     */
+    accountHint?: unknown;
   },
 ): Promise<ConnectStart> {
   await requireOrgRole({ db, userId: args.userId, roles: args.roles }, args.orgId, 'ADMIN');
   if (!cfg.isConfigured()) throw new ConnectProviderNotConfiguredError(cfg.routeName);
+  // #2948: role first, configuration second, the hint third — a caller who may not connect in
+  // this org learns nothing about the hint rules, and a refused hint writes no row of any kind.
+  const loginHint =
+    args.accountHint === undefined || args.accountHint === null || args.accountHint === ''
+      ? undefined
+      : await judgeAccountHint(cfg, args, args.accountHint);
   const issuedAt = Date.now();
   // #2913: a GraphQL start also opens the flow row its caller will read. Created before the nonce, so a nonce that
   // exists always names a flow that does. Expired rows are swept here, never on a read (a read writes nothing).
@@ -158,6 +233,7 @@ export async function issueConnectStart(
     provider: cfg.provider,
     origin: args.origin,
     flowId: flowId ?? undefined,
+    loginHint,
   });
   return { nonce, expiresAt: new Date(issuedAt + EXCHANGE_START_TTL_MS), flowId };
 }
@@ -262,7 +338,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
   const startAuthRate = buildAuthRateAdmission(db, 'rest', 'bearer');
   const pendingStates = new Map<
     string,
-    { orgId: string; userId: string; redirect: string; origin: ExchangeStartOrigin; flowId: string | null; expiresAt: number }
+    { orgId: string; userId: string; redirect: string; origin: ExchangeStartOrigin; flowId: string | null; loginHint?: string; expiresAt: number }
   >();
 
   // #477 Sink 2 — mailbox-connect OAuth start. The portal calls this
@@ -298,7 +374,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       return;
     }
 
-    const body = (req.body ?? {}) as { orgId?: unknown; redirect?: unknown };
+    const body = (req.body ?? {}) as { orgId?: unknown; redirect?: unknown; accountHint?: unknown };
     const orgId = typeof body.orgId === 'string' ? body.orgId : '';
     if (!orgId) {
       res.status(400).json({ error: 'orgId is required' });
@@ -322,11 +398,17 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
     // revoked (soft-deleted) members. The gate and the provider-bound nonce
     // are the shared start (#2897), the same one GraphQL `startConnection` uses.
     try {
-      const { nonce } = await issueConnectStart(cfg, { userId, roles, orgId, redirect, origin: 'portal' });
+      const { nonce } = await issueConnectStart(cfg, { userId, roles, orgId, redirect, origin: 'portal', accountHint: body.accountHint });
       res.json({ nonce });
     } catch (err) {
       if (err instanceof ConnectProviderNotConfiguredError) {
         res.status(503).json({ error: `${cfg.routeName} connections are not configured on this server` });
+        return;
+      }
+      // #2948 (ruling 0156): one typed 400 for every out-of-scope hint, raised before any nonce
+      // existed — the answer says nothing about which check failed.
+      if (err instanceof ConnectAccountHintRefusedError) {
+        res.status(400).json({ error: 'invalid_account_hint' });
         return;
       }
       // Only the explicit authorization failure is a 403 — an unexpected
@@ -466,10 +548,13 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       redirect: started.redirect,
       origin: started.origin,
       flowId: started.flowId,
+      loginHint: started.loginHint ?? undefined,
       expiresAt: Date.now() + 10 * 60 * 1000,
     });
 
-    res.redirect(cfg.buildAuthUrl(state));
+    // #2948: the hint's ONLY URL appearance is this provider redirect (Google's login_hint); it
+    // rode the DB-backed nonce here and rides nothing else.
+    res.redirect(cfg.buildAuthUrl(state, started.loginHint ?? undefined));
   });
 
   app.get(`/auth/${cfg.routeName}/callback`, authRate, async (req, res) => {

@@ -9,6 +9,11 @@
  * records that person as requester and no worker or session. The other callers rulings 0253 and 0255 allow (an installed
  * agent's headless run or session) are a later slice; their absence here is an omission, not the rule.
  *
+ * A RUN (#3753, S2c; cor:acl:140:05 S5): a headless AppRun naming the agent asks for a grant held by ITS OWN agent in ITS OWN App, and
+ * for nothing else. The holder is the run row's agent, passed by the caller from the row and checked here against the run row read
+ * under lock; no input names a holder. The row records the RUN (`requested_by_run_id`) and no user, worker or session: the person a run
+ * acts for is not the requester (ruling 0255 item 21). A run that is not RUNNING in this App with this agent is {@link GrantRunGone}.
+ *
  * HOLDER. A grant for an agent is held by that agent IN THIS APP, so the agent must be installed and licensed here (item 20:
  * "it makes no sense to issue a grant to an agent that isn't installed"). A worker holder must belong to the grant's own App and
  * not be retired: the insert guard checks only that the holder row exists and has not gone, so this module checks the App
@@ -71,12 +76,20 @@ export class GrantCreateRefusal extends Error {
   }
 }
 
+/** The asker is a headless run (#3753): its own id and the agent the run row names (the only holder it may have). */
+export interface RunRequester { runId: string; agentId: string }
+
+/** A run that is not a live run of this App for this agent, judged on the locked row. Concealing: the tool answers it as APP_NOT_FOUND. */
+export class GrantRunGone extends Error {
+  constructor() { super('App not found.'); this.name = 'GrantRunGone'; }
+}
+
 /** The asker. `workerId` null is a PERSON who manages the App (#3711, the caller's gate has judged `managesApp` under the same locks); a worker id is a bound worker session. */
 export interface GrantRequester { userId: string; workerId: string | null; sessionId: string | null }
 
 export interface CreateGrantArgs {
   appId: string;
-  requester: GrantRequester;
+  requester: GrantRequester | RunRequester;
   holder: { kind: GrantHolderKind; id: string };
   action: string;
   values: unknown;
@@ -133,13 +146,27 @@ function declaredParameters(parameters: unknown): Array<{ name: string; type: st
 export async function createPendingGrant(tx: Prisma.TransactionClient, args: CreateGrantArgs): Promise<string> {
   const { appId, requester, holder } = args;
 
+  // A run asks (#3753): the run row, locked FOR SHARE after the caller's anchors, must be RUNNING in this App and name this agent, so a run
+  // that finished first is seen here and one that finishes next waits for this transaction. No person or worker is read or credited.
+  const run = 'runId' in requester ? requester : null;
+  const person = 'runId' in requester ? null : requester;
+  if (run) {
+    const rows = await tx.$queryRaw<Array<{ app_id: string; agent_id: string | null; status: string }>>`
+      SELECT app_id, agent_id, status::text AS status FROM app_runs WHERE id = ${run.runId} FOR SHARE`;
+    if (rows.length !== 1 || rows[0]!.app_id !== appId || rows[0]!.agent_id !== run.agentId || rows[0]!.status !== 'RUNNING') throw new GrantRunGone();
+    // The holder is exactly the run's own agent, anchored by the caller: any other kind or id is the one holder refusal.
+    if (holder.kind !== 'agent' || holder.id !== run.agentId) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
+  }
+
   // The requester: a live person (and, for a worker session, a live worker of THIS App), locked so a retirement either committed (seen here) or waits.
-  const users = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM users WHERE id = ${requester.userId} AND deleted_at IS NULL FOR SHARE`;
-  if (users.length === 0) throw new GrantCreateRefusal('GRANT_REQUESTER_NOT_WORKER');
+  if (person) {
+    const users = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM users WHERE id = ${person.userId} AND deleted_at IS NULL FOR SHARE`;
+    if (users.length === 0) throw new GrantCreateRefusal('GRANT_REQUESTER_NOT_WORKER');
+  }
   let me: WorkerRow | null = null;
-  if (requester.workerId !== null) {
+  if (person && person.workerId !== null) {
     const workers = await tx.$queryRaw<WorkerRow[]>`
-      SELECT id, app_id, agent_id, retired_at FROM workers WHERE id = ${requester.workerId} FOR SHARE`;
+      SELECT id, app_id, agent_id, retired_at FROM workers WHERE id = ${person.workerId} FOR SHARE`;
     me = workers[0] ?? null;
     if (!me || me.retired_at !== null || me.app_id !== appId) throw new GrantCreateRefusal('GRANT_REQUESTER_NOT_WORKER');
   }
@@ -244,10 +271,11 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   const userId = holder.kind === 'user' ? holder.id : null;
   const agentId = holder.kind === 'agent' ? holder.id : null;
   const workerId = holder.kind === 'worker' ? holder.id : null;
+  const asker = person ? { ...person, runId: null } : { userId: null, workerId: null, sessionId: null, runId: run!.runId };
   await tx.$executeRaw`
-    INSERT INTO grants (id, app_id, user_id, agent_id, worker_id, requested_by_user_id, requested_by_worker_id, requested_by_session_id,
+    INSERT INTO grants (id, app_id, user_id, agent_id, worker_id, requested_by_user_id, requested_by_worker_id, requested_by_session_id, requested_by_run_id,
                         action, action_values, starts_at, expires_at, max_uses, reason, created_at, updated_at)
-    VALUES (${id}, ${appId}, ${userId}, ${agentId}, ${workerId}, ${requester.userId}, ${requester.workerId}, ${requester.sessionId},
+    VALUES (${id}, ${appId}, ${userId}, ${agentId}, ${workerId}, ${asker.userId}, ${asker.workerId}, ${asker.sessionId}, ${asker.runId},
             ${action.name}, ${JSON.stringify(values)}::jsonb, ${startsAt?.toISOString() ?? null}::timestamptz AT TIME ZONE 'UTC', ${expiresAt?.toISOString() ?? null}::timestamptz AT TIME ZONE 'UTC', ${maxUses}, ${args.reason},
             (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`;
   return id;
