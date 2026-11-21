@@ -15,7 +15,7 @@ let other: { id: string };
 const gql = (): Context => ({ db, userId, roles: [] });
 const mcp = () => createTestableMcpServer({ userId, roles: [], clientId: `user:${userId}` });
 const spec = async (loc: string, memoryId = mem.id) => (await resolvers.Mutation.createSpecNode(null, { input: {
-  memoryId, loc, name: `Spec ${loc}`, content: `# T ${loc}\n\nBody.`, abstract: `About ${loc}.`, tags: ['spec'],
+  memoryId, loc, name: `Spec ${loc}`, role: 'spec', content: `# T ${loc}\n\nBody.`, abstract: `About ${loc}.`, tags: ['spec'],
 } } as never, gql())) as { id: string };
 const revision = async (id: string) => (await db.node.findUniqueOrThrow({ where: { id } })).revSeq;
 const state = async (id: string) => JSON.stringify({

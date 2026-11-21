@@ -8,6 +8,7 @@ import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { observeTransactionBackend, waitForAdvisoryWaiter } from '../../../test/advisoryWaiter.js';
+import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { generateId } from '../../../lib/id.js';
 import { acquireLockSet } from '../../../lib/nodeSubtreeLock.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -23,7 +24,7 @@ const as = (userId: string): Context => ({ db, userId, roles: [] });
 
 const spec = async (loc: string, patch: Record<string, unknown> = {}, memoryId = mem.id) =>
   (await resolvers.Mutation.createSpecNode(null, { input: {
-    memoryId, loc, name: `Spec ${loc}`, content: `# Title ${loc}\n\nBody of ${loc}.`, abstract: `About ${loc}.`, tags: ['spec'], ...patch,
+    memoryId, loc, name: `Spec ${loc}`, role: 'spec', content: `# Title ${loc}\n\nBody of ${loc}.`, abstract: `About ${loc}.`, tags: ['spec'], ...patch,
   } } as never, as(admin.id))) as { id: string };
 const rev = async (id: string) => (await db.node.findUniqueOrThrow({ where: { id } })).revSeq;
 const snap = async (id: string) => {
@@ -256,20 +257,19 @@ describe('#3429 one winner under real concurrency (acceptance 2)', () => {
   };
 
   it('rescind vs rescind, rescind vs supersede, supersede vs supersede: exactly one winner, the other NODE_WRITE_CONFLICT', async () => {
-    const pairs: Array<[string, (x: { id: string }, y: { id: string }, z: { id: string }) => [() => Promise<unknown>, () => Promise<unknown>]]> = [
-      ['rescind/rescind', (x) => [() => rescind(x.id), () => rescind(x.id)]],
-      ['rescind/supersede', (x, y) => [() => rescind(x.id), () => supersede(x.id, y.id)]],
-      ['supersede/supersede', (x, y, z) => [() => supersede(x.id, y.id), () => supersede(x.id, z.id)]],
+    const pairs: Array<[string, (x: { id: string }, y: { id: string }, z: { id: string }, rv: number) => [() => Promise<unknown>, () => Promise<unknown>]]> = [
+      ['rescind/rescind', (x, _y, _z, rv) => [() => rescind(x.id, { expectedRevision: rv }), () => rescind(x.id, { expectedRevision: rv })]],
+      ['rescind/supersede', (x, y, _z, rv) => [() => rescind(x.id, { expectedRevision: rv }), () => supersede(x.id, y.id, { expectedRevision: rv })]],
+      ['supersede/supersede', (x, y, z, rv) => [() => supersede(x.id, y.id, { expectedRevision: rv }), () => supersede(x.id, z.id, { expectedRevision: rv })]],
     ];
     for (const [i, [label, make]] of pairs.entries()) {
       for (const flip of [false, true]) {
         const x = await spec(`r:${i}:${flip ? 1 : 0}:x`); const y = await spec(`r:${i}:${flip ? 1 : 0}:y`); const z = await spec(`r:${i}:${flip ? 1 : 0}:z`);
-        // Both read the same revision, so the loser is a stale-read conflict or an already-retired conflict.
-        const rx = await rev(x.id);
-        const [a, b] = make(x, y, z);
+        // ONE revision read, passed to both calls: the loser is a stale-read or already-retired conflict, never a fresh read.
+        const rv = await rev(x.id);
+        const [a, b] = make(x, y, z, rv);
         const run = flip ? [b, a] : [a, b];
         const outcome = await settle(run[0]!, run[1]!);
-        void rx;
         expect(outcome.filter((o) => o === 'ok'), label).toHaveLength(1);
         expect(outcome.filter((o) => o === 'NODE_WRITE_CONFLICT'), label).toHaveLength(1);
       }
@@ -325,15 +325,22 @@ describe('#3429 writers outside the door (acceptance 3, writer first)', () => {
 });
 
 describe('#3429 authoring (acceptance 4)', () => {
-  it('a governed spec memory with no authoredWith is refused exactly as updateSpecNode refuses it, nothing written', async () => {
-    const x = await spec('g:x');
-    await db.agentTask.count().catch(() => 0);
-    const tokenCtx: Context = { ...as(admin.id), clientId: 'agent:test', authenticatedAs: 'token' } as unknown as Context;
-    const viaUpdate = await codeOf(resolvers.Mutation.updateSpecNode(null, { input: { id: x.id, abstract: 'zzz', expectedRevision: await rev(x.id) } } as never, tokenCtx));
+  it('a governed spec memory with no authoredWith is REFUSED, as updateSpecNode refuses it, and nothing is written', async () => {
+    const x = await spec('g:x'); const y = await spec('g:y');
+    // The rule: a node of role spec needs an author-task claim. Human portal sign-in is exempt, a plain caller is not.
+    const task = await db.node.create({ data: { id: generateId(), memoryId: mem.id, loc: 'author-task', name: 'Author task', isRunnable: true, content: 'how' } });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: mem.id } });
+    await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'spec', authorTaskId: task.id, authorTaskRequired: true } });
+    const viaUpdate = await codeOf(resolvers.Mutation.updateSpecNode(null, { input: { id: x.id, abstract: 'zzz', expectedRevision: await rev(x.id) } } as never, as(admin.id)));
+    expect(viaUpdate, 'the fixture must actually govern: updateSpecNode has to refuse').toMatch(/^AUTHORING_ATTESTATION_/);
     const before = await snap(x.id);
-    const viaDoor = await codeOf(retire({ ref: x.id, form: 'RESCIND', expectedRevision: await rev(x.id), reason: 'r', summary: 's' }, tokenCtx));
+    const beforeY = await snap(y.id);
+    const viaDoor = await codeOf(retire({ ref: x.id, form: 'RESCIND', expectedRevision: await rev(x.id), reason: 'r', summary: 's' }));
+    const viaSupersede = await codeOf(retire({ ref: x.id, form: 'SUPERSEDE', successorRef: y.id, expectedRevision: await rev(x.id) }));
     expect(viaDoor).toBe(viaUpdate);
-    if (viaUpdate !== 'NO_ERROR') expect(await snap(x.id)).toBe(before);
+    expect(viaSupersede).toBe(viaUpdate);
+    expect(await snap(x.id)).toBe(before);
+    expect(await snap(y.id)).toBe(beforeY);
   });
 });
 
@@ -363,8 +370,8 @@ describe('#3429 the door waits for a writer that holds its locks (acceptance 3, 
     });
     const door = rescind(x.id);
     const outcome = codeOf(door);
-    expect(await stillPending(door), 'the door must wait on the spec row lock').toBe(true);
-    writer.release(); await writer.done;
+    try { await waitForLockWaiters(db, 1); } finally { writer.release(); }
+    await writer.done;
     expect(await outcome).toBe('NODE_WRITE_CONFLICT');
   });
 
@@ -377,8 +384,8 @@ describe('#3429 the door waits for a writer that holds its locks (acceptance 3, 
     });
     const door = rescind(x.id);
     const outcome = codeOf(door);
-    expect(await stillPending(door)).toBe(true);
-    restore.release(); await restore.done;
+    try { await waitForLockWaiters(db, 1); } finally { restore.release(); }
+    await restore.done;
     expect(await outcome).toBe('NODE_WRITE_CONFLICT');
   });
 
@@ -386,7 +393,7 @@ describe('#3429 the door waits for a writer that holds its locks (acceptance 3, 
     const x = await spec('h:loc:x');
     const promo = await holding(async (t) => { await acquireLockSet(t, [{ memoryId: mem.id, loc: 'h:loc:x' }]); });
     const door = rescind(x.id);
-    expect(await stillPending(door), 'the door must wait on the spec loc key').toBe(true);
+    await waitForLockWaiters(db, 1);
     // The loc key comes BEFORE the row lock (writeNodeCore's order): while the door waits on it, it holds no row lock yet.
     // (writeNodeCore re-takes the key later, so only this probe tells the early key from the late one.)
     await expect(db.$transaction(async (t) => { await t.$queryRaw`SELECT id FROM nodes WHERE id = ${x.id} FOR UPDATE NOWAIT`; })).resolves.toBeUndefined();
@@ -399,8 +406,8 @@ describe('#3429 the door waits for a writer that holds its locks (acceptance 3, 
     // FOR NO KEY UPDATE does not conflict with the insert's own FK key-share, only with assertEdgeSourceWritersById's FOR SHARE.
     const holder = await holding(async (t) => { await t.$queryRaw`SELECT id FROM nodes WHERE id = ${x.id} FOR NO KEY UPDATE`; });
     const writer = resolvers.Mutation.createEdge(null, { sourceRef: x.id, targetRef: y.id, name: 'superseded-by-after' } as never, as(admin.id));
-    expect(await stillPending(writer), 'createEdge must wait on the source row').toBe(true);
-    holder.release(); await holder.done;
+    try { await waitForLockWaiters(db, 1); } finally { holder.release(); }
+    await holder.done;
     expect(await codeOf(writer)).toBe('NO_ERROR');
   });
 });
@@ -480,5 +487,67 @@ describe('#3429 the over-cap refusal is typed on the wire, with the helpful text
     expect(typeof err.extensions.length).toBe('number');
     expect(err.message).toContain('Abstract exceeds 2000-character cap');
     expect(await snap(x.id)).toBe(before);
+  });
+});
+
+describe('#3429 rollback after the node write (blind P3)', () => {
+  it('an edge insert that fails AFTER the spec write leaves the node, its revisions and its edges exactly as before', async () => {
+    const x = await spec('rb:x'); const y = await spec('rb:y');
+    const before = await snap(x.id);
+    await db.$executeRawUnsafe(`CREATE FUNCTION pg_temp.x() RETURNS void LANGUAGE sql AS 'select 1'`).catch(() => undefined);
+    await db.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION fail_retire_edge_3429() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RAISE EXCEPTION 'forced failure after the node write'; END $f$`);
+    await db.$executeRawUnsafe(`CREATE TRIGGER fail_retire_edge_3429 BEFORE INSERT ON edges FOR EACH ROW WHEN (NEW.name = 'superseded-by') EXECUTE FUNCTION fail_retire_edge_3429()`);
+    try {
+      const failed = await codeOf(supersede(x.id, y.id));
+      expect(failed).not.toBe('NO_ERROR');
+      expect(await snap(x.id)).toBe(before);
+    } finally {
+      await db.$executeRawUnsafe('DROP TRIGGER IF EXISTS fail_retire_edge_3429 ON edges');
+      await db.$executeRawUnsafe('DROP FUNCTION IF EXISTS fail_retire_edge_3429()');
+    }
+    expect((await supersede(x.id, y.id)).successorEdge).not.toBeNull();
+  });
+});
+
+describe('#3429 the banner cannot be changed by the text put in it (blind P2)', () => {
+  it('Markdown and raw HTML in the reason and the successor name are neutralised; the fixed warning stays', async () => {
+    const x = await spec('md:x');
+    const y = await spec('md:y', { name: 'Hostile <b>name</b> *x*' });
+    const out = await supersede(x.id, y.id, { reason: 'because <!-- hide *this* [x](http://e) & more' });
+    const banner = (out.node.content ?? '').split('\n').find((l) => l.startsWith('> '))!;
+    expect(banner).not.toContain('<!--');
+    expect(banner).not.toContain('<b>');
+    expect(banner).toContain('&lt;!--');
+    expect(banner).toContain('\\*this\\*');
+    expect(banner).toContain('\\[x\\]');
+    expect(banner).toContain('&amp; more');
+    expect(banner).toContain('**Do not apply.** Retained as a tombstone; the citation is never renumbered.');
+  });
+
+  it('ordinary text is written as is', async () => {
+    const x = await spec('md:z');
+    const out = await rescind(x.id, { reason: 'Replaced by policy 7, see the memo.' });
+    expect(out.node.content).toContain('Replaced by policy 7, see the memo.), no successor.');
+  });
+});
+
+describe('#3429 no second connection is requested while the transaction holds its locks (blind P2)', () => {
+  it('the door reads the encryption metadata and everything else through the transaction client', async () => {
+    const x = await spec('pool:x');
+    let inTx = false;
+    const outer: string[] = [];
+    const probed = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === '$transaction') {
+          return (fn: unknown, opts?: unknown) => typeof fn === 'function'
+            ? target.$transaction(async (tx) => { inTx = true; try { return await (fn as (t: unknown) => Promise<unknown>)(tx); } finally { inTx = false; } }, opts as never)
+            : (target.$transaction as (...a: unknown[]) => unknown)(fn, opts);
+        }
+        if (inTx && typeof prop === 'string' && !prop.startsWith('$')) outer.push(prop);
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    await retire({ ref: x.id, form: 'RESCIND', expectedRevision: await rev(x.id), reason: 'r', summary: 's' }, { ...as(admin.id), db: probed } as Context);
+    expect(outer, 'a model read on the pooled client while the transaction held its connection').toEqual([]);
   });
 });
