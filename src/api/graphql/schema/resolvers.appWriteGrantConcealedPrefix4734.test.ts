@@ -10,9 +10,15 @@ import { cleanDb } from '../../../test/helpers.js';
 import { GRANT_MEMORY_SELECT } from '../../../lib/appWriteGrant.js';
 import { buildSchema, defaultFieldResolver, graphql } from 'graphql';
 import { typeDefs } from './typeDefs.js';
+import { safeCanonicalUrn } from './resolvers.helpers.js';
 import { resolvers } from './resolvers.js';
 import { project } from './resolvers.appWriteGrant.js';
 
+// The URN helper is wrapped so one test can make it return null for a VISIBLE memory (it never does in production: strict-then-raw).
+vi.mock('./resolvers.helpers.js', async (orig) => {
+  const actual = await orig<typeof import('./resolvers.helpers.js')>();
+  return { ...actual, safeCanonicalUrn: vi.fn(actual.safeCanonicalUrn) };
+});
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 beforeEach(async () => { await cleanDb(db); });
@@ -81,7 +87,7 @@ describe('#4734 every concealed shape and door, not only revoke', () => {
     await rowOn(f, f.personal.id, { prefix: 'old:plans', revokedAt: new Date(), revokedBy: f.owner.id });
     expect(await listAs(f, f.peer, false)).toEqual([]);
     expect(await listAs(f, f.peer, true)).toEqual([]);
-    expect((await listAs(f, f.owner, true)).map((g) => [g.prefix, g.registerNodeUrn !== null])).toEqual(expect.arrayContaining([[PREFIX, true], ['old:plans', true]]));
+    expect((await listAs(f, f.owner, true)).map((g) => [g.prefix, g.registerNodeUrn !== null]).sort()).toEqual([['old:plans', true], [PREFIX, true]].sort());
   });
 
   it('a null memory (no row to show) gives null/null/null, and a revoked concealed row too', async () => {
@@ -101,6 +107,16 @@ describe('#4734 every concealed shape and door, not only revoke', () => {
     const { memory, app } = await projectionInputs(f, priv.id);
     expect(project(row, memory, app, f.peer.id)).toMatchObject({ memoryUrn: null, prefix: null, registerNodeUrn: null });
     expect(project(row, memory, app, f.owner.id)).toMatchObject({ prefix: PREFIX, registerNodeUrn: REGISTER });
+  });
+
+  it('the null rule follows the COMPUTED URN, not the visibility: a visible memory whose URN cannot be computed shows no prefix, no register URN, no mark', async () => {
+    const f = await fixture();
+    const row = await rowOn(f, f.shared.id);
+    await db.memory.update({ where: { id: f.shared.id }, data: { isEncrypted: true } }); // a memory with a real refusal reason
+    const { memory, app } = await projectionInputs(f, f.shared.id);
+    expect(project(row, memory, app, f.peer.id)).toMatchObject({ prefix: PREFIX, registerNodeUrn: REGISTER, notEffective: true, notEffectiveReason: 'encrypted' });
+    vi.mocked(safeCanonicalUrn).mockReturnValueOnce(null as never);
+    expect(project(row, memory, app, f.peer.id)).toMatchObject({ memoryUrn: null, prefix: null, registerNodeUrn: null, notEffective: null, notEffectiveReason: null });
   });
 
   it('the prefix and register URN follow the computed URN: neither is ever present while the URN is null, for every viewer and class', async () => {

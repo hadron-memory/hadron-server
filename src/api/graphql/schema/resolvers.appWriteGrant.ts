@@ -81,7 +81,8 @@ type ProjectionMemory = Prisma.MemoryGetPayload<{ select: typeof PROJECTION_MEMO
  *
  * #4734 (ruling 0222 extended to write grants, cor:agt:010:01:18): `prefix` and `registerNodeUrn` name content inside the
  * memory (a node path, a node URN), so a row never shows either without its `memoryUrn`: both follow the COMPUTED URN
- * (the #3526 shape), so the two can never diverge. A viewer who may see the memory keeps all three. The row's id,
+ * (the #3526 shape), so the two can never diverge. A viewer who may see the memory keeps all three, unless the URN cannot
+ * be computed (then the mark and its reason go too, as for a concealed row). The row's id,
  * grantor and timestamps stay: that a grant row exists is accepted, as for read grants.
  *
  * Every path that returns this row goes through here: the give door, the revoke door and the list below are the only
@@ -90,14 +91,14 @@ type ProjectionMemory = Prisma.MemoryGetPayload<{ select: typeof PROJECTION_MEMO
  */
 export function project(row: GrantRow, memory: ProjectionMemory | null, app: AppRow, viewerId: string | undefined) {
   const visible = memory !== null && (!isStrictOwnerClass(memory.class) || isStrictOwner({ userId: viewerId }, memory.userId));
-  const refusal = visible && row.revokedAt === null ? grantTargetRefusal(app, memory!) : null;
   const memoryUrn = visible ? safeCanonicalUrn('memory', memory!.urn) : null;
   const shown = memoryUrn !== null;
+  const refusal = shown && row.revokedAt === null ? grantTargetRefusal(app, memory!) : null;
   return {
     id: row.id, appId: row.appId, memoryUrn,
     prefix: shown ? row.prefix : null, registerNodeUrn: shown ? row.registerNodeUrn : null, grantedBy: row.grantedBy,
     createdAt: row.createdAt, revokedAt: row.revokedAt, revokedBy: row.revokedBy,
-    notEffective: visible ? refusal !== null : null, notEffectiveReason: refusal,
+    notEffective: shown ? refusal !== null : null, notEffectiveReason: refusal,
   };
 }
 
