@@ -282,7 +282,7 @@ describe('#3587 concurrency (two real connections)', () => {
     }, { timeout: 20_000 });
     await waitFor(async () => hPid > 0, 'holder');
     const startedAt = Date.now();
-    const waiting = M.createRevision({}, { agentRef: agentId }, ctx).then((r) => r, (e: any) => e);
+    const waiting = M.createRevision({}, { agentRef: agentId }, ctx).then((r: unknown) => r, (e: unknown) => e);
     await waitFor(async () => (await db.$queryRaw<Array<{ n: bigint }>>`
       SELECT count(*) AS n FROM pg_locks WHERE NOT granted AND locktype = 'advisory' AND ${hPid}::int = ANY(pg_blocking_pids(pid))`)[0].n > 0n, 'the save to wait on the revisions key');
     await new Promise((r) => setTimeout(r, Math.max(0, 5_800 - (Date.now() - startedAt))));
