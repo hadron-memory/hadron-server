@@ -1,5 +1,5 @@
 import { GraphQLError } from 'graphql';
-import { RootNameInvalidError, RootNameTakenError } from './mintPrincipal.js';
+import { echoRootName, ROOT_NAME_RULE_TEXT, RootNameInvalidError, RootNameTakenError } from './mintPrincipal.js';
 
 /**
  * Map the #692 principal pool's typed errors to user-facing refusals;
@@ -23,8 +23,7 @@ import { RootNameInvalidError, RootNameTakenError } from './mintPrincipal.js';
 export function rethrowRootNameErrors(err: unknown): never {
   if (err instanceof RootNameInvalidError) {
     throw new GraphQLError(
-      `The name "${err.rootName}" is not a legal root name: a root name is 1–64 ` +
-        `lower-case ASCII letters, digits, ".", "_" or "-", beginning and ending with a letter or digit.`,
+      `The name ${echoRootName(err.rootName)} is not a legal root name: ${ROOT_NAME_RULE_TEXT}`,
       { extensions: { code: 'ROOT_NAME_INVALID' } },
     );
   }
