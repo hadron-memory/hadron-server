@@ -394,7 +394,7 @@ describe('hadron_update_node — abstractStillAccurate (#1126)', () => {
 
     // The operation the spec's edge case is about.
     const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
-    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: rev!.id }, ctx);
+    await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: rev!.id }, ctx);
 
     // Restored verbatim (plan D4) — the null comes back...
     expect((await readRow('restore2'))?.abstractOriginHash).toBeNull();

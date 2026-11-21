@@ -241,7 +241,7 @@ describe('SECURITY §10 P2s on 7b2276e1 (Rico)', () => {
     await createNodeRevision(db, buildNodeRevisionSnapshot(await db.node.findUniqueOrThrow({ where: { id: row.id } }), editorFromAuth({ userId: member.id }), { revLabel: 'edit', changes: ['content'] }));
     await db.node.update({ where: { id: row.id }, data: { seq: 40 } });
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: row.id } });
-    expect((await errorOf(M.restoreNodeRevision(null, { revisionId: rev.id }, as()))).extensions.code).toBe('SEQ_PROTECTED');
+    expect((await errorOf(M.restoreNodeRevision(null, { nodeRevRef: rev.id }, as()))).extensions.code).toBe('SEQ_PROTECTED');
     expect((await db.node.findUniqueOrThrow({ where: { id: row.id } })).seq).toBe(40);
   });
 

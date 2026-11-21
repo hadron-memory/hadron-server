@@ -213,7 +213,7 @@ describe('every writer path honors the level (the inventory)', () => {
     const n = await node('p1', { role: 'policy' });
     await update(admin, 'p1', { content: 'v2' });
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id } });
-    expect(await code(resolvers.Mutation.restoreNodeRevision(null, { revisionId: rev.id }, as(contrib)))).not.toBe('OK');
+    expect(await code(resolvers.Mutation.restoreNodeRevision(null, { nodeRevRef: rev.id }, as(contrib)))).not.toBe('OK');
     expect((await state('p1'))!.content).toBe('v2');
   });
 

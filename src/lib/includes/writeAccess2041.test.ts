@@ -266,7 +266,7 @@ describe('every principal writer runs the check', () => {
     const revs = await db.nodeRevision.findMany({ where: { nodeId: v.id }, orderBy: { revNo: 'asc' } });
     const withTag = revs.find(r => (r.content ?? '').includes(foreignUrn));
     expect(withTag).toBeTruthy();
-    expect(await code(M.restoreNodeRevision(null, { revisionId: withTag!.id }, as()))).toBe('INCLUDE_TARGET_UNAVAILABLE');
+    expect(await code(M.restoreNodeRevision(null, { nodeRevRef: withTag!.id }, as()))).toBe('INCLUDE_TARGET_UNAVAILABLE');
     expect(await contentOf('v')).toBe('v2');
   });
 

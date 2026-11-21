@@ -77,7 +77,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { recoveryMemoryIds } from './resolvers.recovery.js';
-import { AmbiguousLegacyUrnError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AmbiguousLegacyUrnError, NodeNotFoundError, NodeRevisionNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { refHasUnstorableChars, refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
@@ -2703,8 +2703,16 @@ export const nodeQueries = {
     // current memory AND on the snapshot's own memory (per-snapshot gating —
     // a moved node keeps its id, so a snapshot may live in a memory the caller
     // can't read). Any miss collapses to null (no existence disclosure).
-    nodeRevision: async (_: unknown, { revisionId }: { revisionId: string }, ctx: Context) => {
+    nodeRevision: async (_: unknown, { nodeRevRef }: { nodeRevRef: string }, ctx: Context) => {
       requireRole(ctx, 'READER');
+      // #4138 (cor:api:140:00): a revision URN or PK, resolved once; an unknown or malformed ref is null, as an unknown PK was.
+      let revisionId: string;
+      try {
+        ({ id: revisionId } = await resolveNodeRevRef(ctx.db, nodeRevRef));
+      } catch (err) {
+        if (err instanceof NodeRevisionNotFoundError) return null;
+        throw err;
+      }
       const revision = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
       if (!revision) return null;
       const node = await ctx.db.node.findUnique({

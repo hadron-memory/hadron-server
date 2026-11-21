@@ -300,7 +300,7 @@ describe('restoreNodeRevision — abstract round-trips through history', () => {
     // Restore that revision. Node abstract should revert to "A".
     const restored = await resolvers.Mutation.restoreNodeRevision(
       {},
-      { revisionId: vA.id },
+      { nodeRevRef: vA.id },
       fx.ctx,
     );
     expect(restored.abstract).toBe('A');
@@ -323,7 +323,7 @@ describe('restoreNodeRevision — abstract round-trips through history', () => {
 
     const restored = await resolvers.Mutation.restoreNodeRevision(
       {},
-      { revisionId: vNullAbs.id },
+      { nodeRevRef: vNullAbs.id },
       fx.ctx,
     );
     expect(restored.abstract).toBeNull();
@@ -347,7 +347,7 @@ describe('restoreNodeRevision — abstract round-trips through history', () => {
     // must record the CURRENT abstract ("Y") so we can round-trip back.
     await resolvers.Mutation.restoreNodeRevision(
       {},
-      { revisionId: vX.id },
+      { nodeRevRef: vX.id },
       fx.ctx,
     );
 
@@ -542,7 +542,7 @@ describe('spec 032 — restoreNodeRevision round-trips abstractOriginHash', () =
 
     const restored = await resolvers.Mutation.restoreNodeRevision(
       {},
-      { revisionId: v0.id },
+      { nodeRevRef: v0.id },
       fx.ctx,
     );
     // After restore, the live row should have the revision's stored hash.
@@ -563,7 +563,7 @@ describe('spec 032 — restoreNodeRevision round-trips abstractOriginHash', () =
 
     // Restore the original. This creates a NEW NodeRevision snapshot
     // capturing the pre-restore live state (which has hash(B')).
-    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: v0.id }, fx.ctx);
+    await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: v0.id }, fx.ctx);
 
     const allVersions = await db.nodeRevision.findMany({
       where: { nodeId: created.id },

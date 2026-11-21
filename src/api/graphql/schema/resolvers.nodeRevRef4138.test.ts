@@ -45,7 +45,7 @@ beforeEach(async () => {
   memory = await db.memory.create({
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:mem`, name: 'mem', class: 'knowledge' },
   });
-  node = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'guide', name: 'Current', content: 'now' } });
+  node = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'guide', name: 'Current', content: 'now', revSeq: 3 } });
   rev1 = await db.nodeRevision.create({
     data: { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', revNo: 1, name: 'v1', content: 'body-1', createdAt: new Date('2026-01-01T00:00:00Z') },
   });
@@ -136,7 +136,10 @@ describe('unknown ≡ unreadable ≡ soft-deleted node ≡ soft-deleted memory (
     expect(r.errors?.[0]?.message).toBe('Node revision not found');
   });
 
-  it.each(misses)('deleteNodeRevision refuses %s with the typed NOT_FOUND', async (_n, setup, ctx, ref) => {
+  // deleteNodeRevision keeps its own gate (#4138 "gates unchanged"): a tombstoned NODE is still cleanable history (as
+  // clearNodeHistory), and an unreadable ordinary memory answers the established Forbidden from nodeDoorWritePreflight (#2734).
+  const deleteMisses = misses.filter(([n]) => !/unreadable|soft-deleted node/.test(n));
+  it.each(deleteMisses)('deleteNodeRevision refuses %s with the typed NOT_FOUND', async (_n, setup, ctx, ref) => {
     await setup();
     const r = await run(`mutation { deleteNodeRevision(nodeRevRef: "${ref()}") }`, ctx());
     expect(code(r)).toBe(NOT_FOUND);
@@ -144,11 +147,32 @@ describe('unknown ≡ unreadable ≡ soft-deleted node ≡ soft-deleted memory (
     expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(2); // nothing was deleted
   });
 
-  it('the refusal is byte-identical for unknown and unreadable (no echo that tells them apart)', async () => {
+  it('restore and update refuse unknown and unreadable with a byte-identical error (no echo that tells them apart)', async () => {
     const strip = (r: Awaited<ReturnType<typeof run>>) => ({ message: r.errors?.[0]?.message, code: code(r) });
-    const unknown = strip(await run(`mutation { deleteNodeRevision(nodeRevRef: "cnope00000000000000000000") }`, adminCtx()));
-    const unreadable = strip(await run(`mutation { deleteNodeRevision(nodeRevRef: "${rev1.id}") }`, outsiderCtx()));
-    expect(unreadable).toEqual(unknown);
+    const mk = (ref: string) => [
+      `mutation { restoreNodeRevision(nodeRevRef: "${ref}") { id } }`,
+      `mutation { updateNodeRevision(nodeRevRef: "${ref}", revLabel: "x") { id } }`,
+    ];
+    const unknownQs = mk('cnope00000000000000000000');
+    const unreadableQs = mk(rev1.id);
+    for (let i = 0; i < 2; i++) {
+      expect(strip(await run(unreadableQs[i]!, outsiderCtx()))).toEqual(strip(await run(unknownQs[i]!, adminCtx())));
+    }
+  });
+
+  it('deleteNodeRevision keeps its gate: a tombstoned node still takes the cleanup, an unreadable memory answers Forbidden', async () => {
+    const forbidden = await run(`mutation { deleteNodeRevision(nodeRevRef: "${urn1}") }`, outsiderCtx());
+    expect(forbidden.errors?.[0]?.message).toMatch(/Forbidden/);
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(2);
+    await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date() } });
+    // A URN into a tombstoned node is a missing ref (cor:api:140:00: the resolver excludes soft-deleted rows); the PK keeps
+    // today's cleanup path, so an owner can still purge a deleted node's residual history by id.
+    const viaUrn = await run(`mutation { deleteNodeRevision(nodeRevRef: "${urn1}") }`, adminCtx());
+    expect(code(viaUrn)).toBe(NOT_FOUND);
+    const viaPk = await run(`mutation { deleteNodeRevision(nodeRevRef: "${rev1.id}") }`, adminCtx());
+    expect(viaPk.errors).toBeUndefined();
+    expect(viaPk.data?.deleteNodeRevision).toBe(true);
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(1);
   });
 });
 
