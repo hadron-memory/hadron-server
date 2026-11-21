@@ -21,6 +21,17 @@ describe('#3571 scripts/db/reconcile-syncing-status.ts', () => {
     expect(await run([], {})).toEqual({ code: 2, lines: ['db.syncing_status_reconcile.database_url_missing'] });
   });
 
+  it('a failure exits 1 and names its class, never its message or the URL (#4719 BLIND P2-1)', async () => {
+    // Nothing listens on port 1: the connect fails before any query, and nothing is written.
+    const url = 'postgresql://nobody:secret-password@127.0.0.1:1/nowhere';
+    const out = await run([], { DATABASE_URL: url });
+    expect(out.code).toBe(1);
+    expect(out.lines).toHaveLength(1);
+    expect(out.lines[0]).toMatch(/^db\.syncing_status_reconcile\.failed error=\w+( code=\w+)?$/);
+    expect(out.lines[0]).not.toContain('secret-password');
+    expect(out.lines[0]).not.toContain('127.0.0.1');
+  }, 30_000);
+
   it('dry run and apply print counts only, never an id', async () => {
     const org = await db.organization.create({ data: { name: 'rs-tool', urn: 'rs-tool.test' } });
     const m = await db.memory.create({ data: { organizationId: org.id, class: 'knowledge', name: 'tool', urn: 'rs-tool.test:tool',
