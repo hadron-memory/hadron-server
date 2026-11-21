@@ -2,11 +2,11 @@ name: Object-Store Import Boundary
 
 # #905: call sites may import ONLY the provider-neutral scaffold
 # `src/integrations/objectstore/index.js`. The checks live in
-# scripts/check-objectstore-boundary.sh (retired r2/ path, provider-dir
-# references — including noncanonical equivalents — and direct S3-family
-# AWS SDK imports, all confined to the scaffold), which
-# src/integrations/objectstore/boundaryGuard.test.ts proves against fixture
-# trees.
+# scripts/check-objectstore-boundary.mjs (retired r2/ path, provider-dir
+# references — import strings are RESOLVED, so noncanonical and traversal
+# spellings count too — and direct S3-family AWS SDK imports, all confined
+# to the scaffold), which src/integrations/objectstore/boundaryGuard.test.ts
+# proves against fixture trees.
 
 on:
   pull_request:
@@ -24,4 +24,4 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Object-store import boundary (r2 path, provider refs, S3 SDK)
-        run: bash scripts/check-objectstore-boundary.sh src
+        run: node scripts/check-objectstore-boundary.mjs src

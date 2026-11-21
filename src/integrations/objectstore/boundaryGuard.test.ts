@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 /**
  * #905 fixture test for the object-store import boundary guard
- * (`scripts/check-objectstore-boundary.sh`, run by the
+ * (`scripts/check-objectstore-boundary.mjs`, run by the
  * `object-store-import-boundary` CI lane).
  *
  * The guard CI runs and the guard this test proves are the same code: the
@@ -25,6 +25,9 @@ const SDK_S3_IMPORT = `import { S3Client } from '${['@aws-sdk', 'client-s3'].joi
 const SDK_PRESIGN_IMPORT = `import { getSignedUrl } from '${['@aws-sdk', 's3-request-presigner'].join('/')}';`;
 // The SageMaker SDK — an unrelated AWS SDK package the guard must NOT flag.
 const SDK_UNRELATED_IMPORT = `import { SageMakerRuntimeClient } from '${['@aws-sdk', 'client-sagemaker'].join('/')}';`;
+// The S3 Control SDK — a DIFFERENT package whose name starts like client-s3;
+// an exact-match package comparison must not flag it (#4668 delta P3).
+const SDK_S3_CONTROL_IMPORT = `import { S3ControlClient } from '${['@aws-sdk', 'client-s3-control'].join('/')}';`;
 // The retired r2 integration path — assembled, never spelled as one literal.
 const RETIRED_PATH = ['integrations', 'r2'].join('/');
 // The legal scaffold import.
@@ -35,9 +38,16 @@ const PROVIDER_REF = `import { S3Client } from 'src/integrations/objectstore/${[
 // inserted): it resolves to the provider without containing the literal
 // provider path the naive guard would grep for.
 const PROVIDER_NONCANONICAL_REF = `import { S3Client } from 'src/integrations/objectstore/${['.', 's3', 'client.js'].join('/')}';`;
+// A TRAVERSAL-equivalent provider reference (a named directory plus a ..
+// hop): it resolves to the provider when extra/ exists and evades every
+// literal-spelling pattern (#4668 delta P2, Beckett's probe).
+const PROVIDER_TRAVERSAL_REF = `import { S3Client } from 'src/integrations/objectstore/${['extra', '..', 's3', 'client.js'].join('/')}';`;
+// A deeper traversal (two named hops and two .. hops): still resolves to
+// the provider; proves the resolver balances segments, not just one pair.
+const PROVIDER_DEEP_TRAVERSAL_REF = `import { S3Client } from 'src/integrations/objectstore/${['a', 'b', '..', '..', 's3', 'client.js'].join('/')}';`;
 
 const REPO_ROOT = resolve(dirname(new URL(import.meta.url).pathname), '../../..');
-const SCRIPT = join(REPO_ROOT, 'scripts', 'check-objectstore-boundary.sh');
+const SCRIPT = join(REPO_ROOT, 'scripts', 'check-objectstore-boundary.mjs');
 
 function makeTree(): string {
   return mkdtempSync(join(tmpdir(), 'objectstore-boundary-'));
@@ -50,7 +60,7 @@ function write(tree: string, relPath: string, content: string): void {
 }
 
 function runGuard(tree: string) {
-  return spawnSync('bash', [SCRIPT, tree], { encoding: 'utf8', timeout: 30_000 });
+  return spawnSync(process.execPath, [SCRIPT, tree], { encoding: 'utf8', timeout: 30_000 });
 }
 
 describe('object-store import boundary guard (#905)', () => {
@@ -59,6 +69,8 @@ describe('object-store import boundary guard (#905)', () => {
     try {
       write(tree, 'lib/asset/store.ts', SCAFFOLD_IMPORT);
       write(tree, 'lib/embedding/client-sagemaker.ts', SDK_UNRELATED_IMPORT);
+      // A package whose name merely STARTS like the banned one is legal.
+      write(tree, 'lib/control/s3Control.ts', SDK_S3_CONTROL_IMPORT);
       // Provider-internal files may reference the provider and its SDK.
       write(
         tree,
@@ -93,6 +105,33 @@ describe('object-store import boundary guard (#905)', () => {
       const res = runGuard(tree);
       expect(res.status).toBe(1);
       expect(res.stdout).toContain('lib/asset/noncanonical.ts');
+    } finally {
+      rmSync(tree, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a traversal-equivalent provider reference (objectstore/extra/../s3) outside the scaffold (delta P2)', () => {
+    const tree = makeTree();
+    try {
+      // The intermediate directory exists in the fixture, as it would beside
+      // a real import: the hop is valid filesystem resolution, not a typo.
+      write(tree, 'integrations/objectstore/extra/placeholder.ts', 'export {};');
+      write(tree, 'lib/asset/traversal.ts', PROVIDER_TRAVERSAL_REF);
+      const res = runGuard(tree);
+      expect(res.status).toBe(1);
+      expect(res.stdout).toContain('lib/asset/traversal.ts');
+    } finally {
+      rmSync(tree, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a balanced deep traversal (objectstore/a/b/../../s3) outside the scaffold', () => {
+    const tree = makeTree();
+    try {
+      write(tree, 'lib/asset/deepTraversal.ts', PROVIDER_DEEP_TRAVERSAL_REF);
+      const res = runGuard(tree);
+      expect(res.status).toBe(1);
+      expect(res.stdout).toContain('lib/asset/deepTraversal.ts');
     } finally {
       rmSync(tree, { recursive: true, force: true });
     }
@@ -143,7 +182,7 @@ describe('object-store import boundary guard (#905)', () => {
   });
 
   it('fails with exit 2 on a search error, never OK (F3)', () => {
-    const res = spawnSync('bash', [SCRIPT, join(tmpdir(), 'no-such-tree-905')], {
+    const res = spawnSync(process.execPath, [SCRIPT, join(tmpdir(), 'no-such-tree-905')], {
       encoding: 'utf8',
       timeout: 30_000,
     });
