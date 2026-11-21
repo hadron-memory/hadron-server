@@ -17,6 +17,10 @@
  *    the reinstall, so those rows are not stamped (the FIT's "an agent reinstalled since still had its old grants ended" needs a
  *    record this schema does not keep). They are named in the report as `skippedInstalled` only as a count of agent-held live
  *    grants whose agent is installed, never as a finding about any one of them.
+ *  - A never-installed agent's grant is not told apart from a departed one, and need not be: the only creator of an agent-held
+ *    grant (src/lib/grants/create.ts, item 20) refuses unless the agent is installed and licensed in the App at that moment, so an
+ *    agent-held row with no installation now means the installation left after the grant was made. A row inserted around that
+ *    door (a hand SQL insert, a test fixture) would be ended too; the dry run's `candidates` is the count to review.
  *  - A grant that ended on its own (expired, spent, past its action's limits) or was revoked between the real departure and the run is
  *    left alone: its first end stands, so it is not re-stamped and it carries no departure.
  *  - `skippedInstalled` is part of the dry run the production register grant reviews: if it is non-zero it goes to the §10 seat and to

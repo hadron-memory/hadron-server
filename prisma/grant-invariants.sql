@@ -282,8 +282,13 @@ FOR EACH ROW EXECUTE FUNCTION hadron_grant_holder_gone('grantee_app_id');
 --     departed, expired, spent or past the action's limits: the first end stands), only ones whose own App still exists.
 --   * Lock first, judge second (two statements, as hadron_grant_holder_gone): a grant that expired, or an install that
 --     committed, while this delete waited for the row lock is judged on the state AFTER the lock. The grant row lock is the LAST
---     lock this transaction takes (src/lib/grants/departure.ts, LOCK ORDER). No installation lock is taken here: a concurrent
---     reinstall linearizes after the departure, and a reinstall revives nothing (the stamp never clears), as for every door.
+--     lock THIS TRIGGER takes (src/lib/grants/departure.ts, LOCK ORDER). Inside a multi-table cascade, later cascades of the same
+--     delete can still lock other rows after it, so a code door that holds an installation lock and then wants a grant row can
+--     deadlock with this delete. Postgres detects that and aborts one transaction whole (no partial stamp, no wrong data): the
+--     delete or the door retries. No installation lock is taken here: a concurrent reinstall linearizes after the departure, and
+--     a reinstall revives nothing (the stamp never clears), as for every door.
+--   * Why only parent_agent_id: it is the ONE cascading foreign key on agent_imports (imported_agent_id and the agent_org_grants
+--     key are ON DELETE RESTRICT, so those deletes refuse instead of removing an edge). A new cascading key would need a case here.
 CREATE OR REPLACE FUNCTION hadron_grant_import_parent_gone() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
