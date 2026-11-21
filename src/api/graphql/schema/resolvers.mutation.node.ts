@@ -3384,10 +3384,24 @@ export const nodeMutations = {
         for (const id of [...planMemory.keys()].sort()) {
           await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
         }
-        // #1331 — the writer level of each planned row's role, on the LOCKED row
-        // and the committed rulebook; a row the caller may no longer write (the
-        // rule tightened, or its role changed, since selection) is dropped.
         for (const memoryId of [...plannedEncryption.keys()].sort()) await lockMemoryConfigShared(tx, memoryId);
+        // #1213 S3 / cor:acl:130:02: the current governed kind is an unconditional
+        // skip, even for a manager allowed through that kind's own door. Drop the
+        // plan BEFORE reconciliation, revision or OCC; one unique planned id
+        // contributes one skip, however many signals it has.
+        // Why this re-read stays current through the write: it runs after the
+        // `FOR UPDATE` above on every planned row, and governedKindsOf reads only
+        // that row's own role/isRunnable. Any writer that changes either column
+        // (door, revert, import, merge, admin) must UPDATE the same row, so it
+        // waits for this transaction's commit, whatever key it holds. S2 (#4649;
+        // pins in resolvers.governanceMemory1213.test.ts, inventory in
+        // governedRole.ts mayChangeGovernance) adds the memory key so a door's
+        // own refusal is race-free too; this read does not depend on it.
+        // Selection (above, the same governedKindsOf test) already skips rows
+        // governed when the replace was planned, which is all a dry run sees: it
+        // returns before this transaction, so it never previews a row governed at
+        // planning time, and only a flip after planning makes a previewed row
+        // skip here.
         const lockedRoles = new Map((await tx.node.findMany({
           where: { id: { in: [...planMemory.keys()] } }, select: { id: true, role: true, isRunnable: true },
         })).map((r) => [r.id, r] as const));
@@ -3396,9 +3410,16 @@ export const nodeMutations = {
           const locked = lockedRoles.get(plan.raw.id);
           const role = locked?.role ?? null;
           const runnable = locked?.isRunnable ?? null;
-          if ((role || runnable === true) && await roleWritersRefusal(tx, txCtx, plan.raw.memoryId, {
-            priorRole: role, nextRole: role, priorRunnable: runnable, nextRunnable: runnable,
-          })) {
+          // governedKindsOf (imported from lib/governedRole) takes GovernedState, whose
+          // role/isRunnable are nullable like the columns: null means "no role" /
+          // "not runnable", never "unknown". A row missing from lockedRoles (deleted
+          // since planning) reads as ungoverned here and the batch is refused with
+          // NODE_WRITE_CONFLICT by the locked deletedAt check further down. The skip counter is shared with #1331's
+          // writer-level refusal on purpose: both are "governed" in skipCounts.
+          if (governedKindsOf({ role, isRunnable: runnable }).length > 0 ||
+            ((role || runnable === true) && await roleWritersRefusal(tx, txCtx, plan.raw.memoryId, {
+              priorRole: role, nextRole: role, priorRunnable: runnable, nextRunnable: runnable,
+            }))) {
             skipCounts.governed += 1;
             planMemory.delete(plan.raw.id);
             plans.splice(i, 1);
