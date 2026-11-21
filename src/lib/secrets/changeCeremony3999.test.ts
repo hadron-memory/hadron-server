@@ -74,8 +74,13 @@ describe('#3999 own passkey ceremony',()=>{
   expect((await row(id)).state).toBe('withdrawn');expect((await row(id)).staged_value_encrypted).toBeNull();
  });
  it('bounds open requests per secret',async()=>{
-  for(let i=0;i<5;i++)expect(await stage()).toBeTruthy();
-  expect((await error(resolvers.Mutation.updateSecret({}, {ref:secretId,value:'six'},ctx()))).extensions.code).toBe('SECRET_CHANGE_REQUEST_LIMIT');
+  const users=await Promise.all([0,1].map(()=>db.user.create({data:{email:`${generateId()}@s4.test`}})));
+  await db.appMember.createMany({data:users.map(user=>({appId,userId:user.id,role:'reader'}))});
+  const others=users.map(user=>({...ctx(),userId:user.id}));
+  for(const caller of [ctx(),ctx(),others[0],others[0],others[1]]){
+   expect((await error(resolvers.Mutation.updateSecret({}, {ref:secretId,value:'staged'},caller))).extensions.requestId).toEqual(expect.any(String));
+  }
+  expect((await error(resolvers.Mutation.updateSecret({}, {ref:secretId,value:'six'},others[1]))).extensions.code).toBe('SECRET_CHANGE_REQUEST_LIMIT');
  });
 });
 
