@@ -7,6 +7,8 @@ import { generateId } from '../../../lib/id.js';
 import { createNodeRevision, buildNodeRevisionSnapshot } from '../../../lib/nodeRevisionSnapshot.js';
 import { lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
 import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
+import { holdInTransaction } from '../../../test/lockHold.js';
+import { deadline, waitBlocked } from '../../../test/lockObserver.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;
 let userId: string, memoryId: string, source: any, a: any, b: any;
@@ -79,8 +81,8 @@ describe('#3497 GraphQL inline edges', () => {
  */
 describe('#3558 governed node: edge-only needs no attestation', () => {
  let govMemoryId: string, taskId: string, gov: any, tgt: any, other: any;
- const reads = vi.fn(async (..._a: unknown[]) => true);
- const gctx = (): Context => ({ db, userId, roles: ['ADMIN'], readsAuthorTask: reads as never });
+ const reader = vi.fn(async (..._a: unknown[]) => true);
+ const gctx = (): Context => ({ db, userId, roles: ['ADMIN'], readsAuthorTask: reader as never });
  const claim = () => ({ task: taskId, revision: 1 });
  const gupdate = (input: Record<string, unknown>) => M.updateNode(null, { input: { id: gov.id, ...input } }, gctx());
  const stamp = (r: any) => ({ k: r.authorshipKind, t: r.authoredByTask, v: r.authoredByRevision, h: r.authoredByHuman, at: r.authoredAt });
@@ -90,7 +92,7 @@ describe('#3558 governed node: edge-only needs no attestation', () => {
    edges: await db.edge.findMany({ where: { sourceId: gov.id, deletedAt: null }, select: { targetId: true, name: true }, orderBy: { targetId: 'asc' } }) };
  }
  beforeEach(async () => {
-  reads.mockClear(); reads.mockImplementation(async () => true);
+  reader.mockClear(); reader.mockImplementation(async () => true);
   const org = await db.organization.findFirstOrThrow({ where: { urn: 'edges3497.example' } });
   govMemoryId = (await db.memory.create({ data: { name: 'Gov', urn: 'edges3497.example:gov', class: 'knowledge', organizationId: org.id } })).id;
   taskId = (await db.node.create({ data: { id: generateId(), memoryId: govMemoryId, loc: 'task', name: 'Task', isRunnable: true, content: 'instructions' } })).id;
@@ -99,7 +101,7 @@ describe('#3558 governed node: edge-only needs no attestation', () => {
   const mk = (loc: string, extra: Record<string, unknown> = {}) => M.createNode(null, { input: { memoryId: govMemoryId, loc, name: loc, content: 'body', ...extra } }, gctx());
   gov = await mk('gov', { role: 'guide', authoredWith: claim() });
   [tgt, other] = await Promise.all([mk('tgt'), mk('other')]);
-  reads.mockClear();
+  reader.mockClear();
  });
  const gedges = (t: any) => [{ targetId: t.id, name: 'uses' }];
 
@@ -111,7 +113,7 @@ describe('#3558 governed node: edge-only needs no attestation', () => {
   expect(await gstate()).toEqual({ ...before, edges: [{ targetId: tgt.id, name: 'uses' }] });
   await gupdate({ expectedRevision: before.revSeq, edges: gedges(other) });
   expect(await gstate()).toEqual({ ...before, edges: [{ targetId: other.id, name: 'uses' }] });
-  expect(reads).not.toHaveBeenCalled();
+  expect(reader).not.toHaveBeenCalled();
  });
 
  it('mixed content + edges: a missing claim refuses with the existing refusal and changes nothing', async () => {
@@ -121,10 +123,10 @@ describe('#3558 governed node: edge-only needs no attestation', () => {
  });
 
  it('mixed content + edges: an unreadable author task refuses with the existing refusal and changes nothing', async () => {
-  reads.mockImplementation(async () => false);
+  reader.mockImplementation(async () => false);
   const before = await gstate();
   await expect(gupdate({ content: 'changed', edges: gedges(tgt), authoredWith: claim() })).rejects.toMatchObject({ extensions: { code: 'AUTHOR_TASK_BROKEN', role: 'guide' } });
-  expect(reads).toHaveBeenCalled();
+  expect(reader).toHaveBeenCalled();
   expect(await gstate()).toEqual(before);
  });
 
@@ -132,62 +134,47 @@ describe('#3558 governed node: edge-only needs no attestation', () => {
   const before = await gstate();
   await gupdate({ content: 'changed', edges: gedges(tgt), authoredWith: claim() });
   const after = await gstate();
-  expect(reads).toHaveBeenCalled();
+  expect(reader).toHaveBeenCalled();
   expect(after).toMatchObject({ content: 'changed', revSeq: before.revSeq + 1, count: before.count + 1, edges: [{ targetId: tgt.id, name: 'uses' }] });
   expect(after.stamp).toMatchObject({ k: 'TASK', t: taskId, v: 1 });
  });
 
  describe('#3558 B2: the token is checked on the locked row and never consumed', () => {
-  /** Holds the row lock of the governed source until released. */
-  const hold = (lock: (tx: any) => Promise<unknown>) => {
-   let release!: () => void, held!: () => void;
-   const holding = new Promise<void>((r) => (held = r));
-   const gate = new Promise<void>((r) => (release = r));
-   const done = db.$transaction(async (tx) => { await lock(tx); held(); await gate; }, { timeout: 15_000 });
-   return holding.then(() => ({ release, done }));
-  };
-  const holdRow = () => {
-   let release!: () => void, held!: () => void;
-   const holding = new Promise<void>((r) => (held = r));
-   const gate = new Promise<void>((r) => (release = r));
-   const done = db.$transaction(async (tx) => { await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${gov.id} FOR UPDATE`; held(); await gate; }, { timeout: 15_000 });
-   return holding.then(() => ({ release, done }));
-  };
-  const holdConfig = () => {
-   let release!: () => void, held!: () => void;
-   const holding = new Promise<void>((r) => (held = r));
-   const gate = new Promise<void>((r) => (release = r));
-   const done = db.$transaction(async (tx) => { await lockMemoryConfigExclusive(tx, govMemoryId); held(); await gate; }, { timeout: 15_000 });
-   return holding.then(() => ({ release, done }));
-  };
+  // #4751: one shared latch (src/test/lockHold.ts). It fails fast if the initial lock fails, and it reports the holder's pid.
+  const holdRow = () => holdInTransaction(db, (tx) => tx.$queryRaw`SELECT id FROM nodes WHERE id = ${gov.id} FOR UPDATE`);
+  const holdConfig = () => holdInTransaction(db, (tx) => lockMemoryConfigExclusive(tx, govMemoryId));
+  /** #4751 (the #4721 LOCAL seat's note): the edge-only writer, identified by its statement and by the pid that blocks it. */
+  const writerBlockedBy = (holderPid: number) =>
+    waitBlocked(db, deadline(3000), { query: /FROM "?nodes"? WHERE .*FOR UPDATE/s, blockedBy: [holderPid] });
+  type Outcome = 'pending' | 'ok' | unknown;
 
   it('control: waits on the source row, applies, and the same token stays reusable', async () => {
    const before = await gstate();
    const lock = await holdRow();
-   let outcome: unknown = 'pending';
+   let outcome: Outcome = 'pending';
    const w = gupdate({ expectedRevision: before.revSeq, edges: gedges(tgt) }).then(() => (outcome = 'ok'), (e: unknown) => (outcome = e));
    try {
-    await waitForLockWaitersOfType(db, 'transactionid', 1);
+    await writerBlockedBy(lock.pid);
     expect(outcome).toBe('pending');
    } finally { lock.release(); await lock.done; await w; }
    expect(outcome).toBe('ok');
    expect(await gstate()).toEqual({ ...before, edges: [{ targetId: tgt.id, name: 'uses' }] });
    await gupdate({ expectedRevision: before.revSeq, edges: gedges(other) });
    expect(await gstate()).toEqual({ ...before, edges: [{ targetId: other.id, name: 'uses' }] });
-  });
+  }, 30_000);
 
   it('a writer that holds only the source row (no address lock) and commits a tracked revision makes the token stale', async () => {
    const before = await gstate();
    // The row-lock-only holder: the real revision allocator under FOR UPDATE, so the address lock cannot be what orders it.
-   const lock = await hold(async (tx: any) => {
+   const lock = await holdInTransaction(db, async (tx) => {
     await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${gov.id} FOR UPDATE`;
     const row = await tx.node.findUniqueOrThrow({ where: { id: gov.id } });
     await createNodeRevision(tx, { id: generateId(), ...buildNodeRevisionSnapshot(row, { userId }, { changes: ['content'] }) });
    });
-   let outcome: any = 'pending';
+   let outcome: Outcome = 'pending';
    const w = gupdate({ expectedRevision: before.revSeq, edges: gedges(tgt) }).then(() => (outcome = 'ok'), (e: unknown) => (outcome = e));
    try {
-    await waitForLockWaitersOfType(db, 'transactionid', 1, 3000);
+    await writerBlockedBy(lock.pid);
     expect(outcome).toBe('pending');
    } finally { lock.release(); await lock.done; await w; }
    expect(outcome).toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
@@ -200,7 +187,7 @@ describe('#3558 governed node: edge-only needs no attestation', () => {
    const before = await gstate();
    const config = await holdConfig();
    let advance: Promise<unknown> | undefined, edgeOnly: Promise<unknown> | undefined;
-   let outcome: any = 'pending';
+   let outcome: Outcome = 'pending';
    try {
     advance = gupdate({ content: 'advanced', authoredWith: claim() });   // takes the row lock, then waits on the rulebook lock
     await waitForLockWaitersOfType(db, 'advisory', 1, 3000);
