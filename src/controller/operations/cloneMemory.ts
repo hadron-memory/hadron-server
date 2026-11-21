@@ -520,6 +520,7 @@ export async function cloneMemoryGraphInTx(
       sourceId: idMap.get(e.sourceId)!,
       targetId: newTarget ?? e.targetId,
       loc: e.loc,
+      locAuthored: e.locAuthored, // #2947: the copy keeps the source edge's provenance
       name: e.name,
       description: e.description,
       isRunnable: e.isRunnable,

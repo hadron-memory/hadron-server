@@ -1759,6 +1759,12 @@ model Edge {
   /// derived from the endpoints + name when not authored (see
   /// `src/lib/edgeLoc.ts`). Mirrors `Node.loc`.
   loc                String
+  /// #2947 (rulings 0153, 0154, cor:api:190:01): whether `loc` was AUTHORED (supplied by a caller) or DERIVED from the
+  /// endpoints and name. RECORDED, never inferred at move time: a move rebases a derived loc and leaves an authored one
+  /// as written, even when an authored loc happens to equal the derivation. `true` is the safe default: a writer that
+  /// does not say is treated as authored, which a move never rewrites. The migration classified existing rows once, by
+  /// derivation shape (see `edgeLocDecodesAsDerived`, `src/lib/edgeLoc.ts`).
+  locAuthored        Boolean           @default(true) @map("loc_authored")
   /// Free-form relationship name (e.g. imports, depends_on, abstract-of).
   /// Optional since spec-037 — `loc` is now the identity. (Was `label`.)
   name               String?
@@ -6382,6 +6388,9 @@ enum UrnAliasEntityType {
   AGENT
   APP
   NODE
+  /// An Edge URN a move changed (#2947, rulings 0153 and 0162): a rebased derived loc, or an authored edge carried into
+  /// another memory (its memory atom changes), or one renumbered on a destination collision.
+  EDGE
 }
 
 /// Why a {@link UrnAlias} row exists.

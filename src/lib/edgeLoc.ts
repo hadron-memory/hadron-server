@@ -146,3 +146,20 @@ export function rekeyDerivedEdgeLoc(
   const suffix = migratedLocSuffix(loc, oldAlternate);
   return suffix === null ? null : `${newAlternate}:${suffix}`;
 }
+
+/**
+ * #2947 (Xabat's backfill rule): whether an edge's `loc` decodes as the derivation grammar
+ * `<source loc>:<name atom>:<target loc>` with the edge's OWN name, from any endpoint generation. The sanitized name is
+ * one INTERIOR atom of the loc, in either spelling (the runtime one and the historical code-point one, #4583). It is
+ * the SHAPE, never a comparison against the current endpoints, so a derived loc a pre-build move left stale still
+ * decodes. The migration `20261121060000_edge_loc_provenance` classifies existing rows with the SQL twin of this
+ * function (a parity test runs both on the same rows). It is used for that one backfill and its test, never at move time:
+ * a move reads the recorded `Edge.locAuthored` flag.
+ */
+export function edgeLocDecodesAsDerived(loc: string, name: string | null | undefined): boolean {
+  const atoms = loc.split(':');
+  if (atoms.length < 3) return false;
+  const plain = sanitizeLocAtom(name);
+  const twin = sanitizeLocAtomCodePoint(name);
+  return atoms.slice(1, -1).some((atom) => atom === plain || atom === twin);
+}

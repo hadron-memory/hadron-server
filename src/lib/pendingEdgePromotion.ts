@@ -318,6 +318,7 @@ export async function promotePendingEdgeForTarget(
               sourceId: currentSource.id,
               targetId: currentTarget.id,
               loc: pEdgeLoc,
+              locAuthored: currentPending.loc != null, // #2947: a loc the pending edge carried was supplied
               name: currentPending.name,
               description: currentPending.description,
               ...(currentPending.data != null

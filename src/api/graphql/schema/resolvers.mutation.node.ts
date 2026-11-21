@@ -1135,6 +1135,8 @@ async function writeNodeCoreRaw(
               sourceId: writtenNode.id,
               targetId: edge.targetNodeId,
               loc: edge.loc ?? deriveEdgeLoc(writtenNode.loc, edge.name, edge.targetLoc),
+              // #2947: a loc the caller supplied is AUTHORED, even when it equals the derivation.
+              locAuthored: edge.loc != null && edge.loc !== '',
               name: edge.name,
               description: edge.description,
               isRunnable: edge.isRunnable,
@@ -3933,6 +3935,8 @@ export const nodeMutations = {
               sourceId: locked.source.id,
               targetId: locked.target.id,
               loc: edgeLoc,
+              // #2947: authored iff the caller supplied the loc (even one equal to the derivation).
+              locAuthored: loc != null && loc !== '',
               name: name ?? null,
               description: description ?? null,
               isRunnable: isRunnable ?? null,
@@ -4088,7 +4092,8 @@ export const nodeMutations = {
           where: { id: resolvedEdgeId },
           data: {
             ...(name !== undefined ? { name: name ?? null } : {}),
-            ...(loc != null && loc !== '' ? { loc } : {}),
+            // #2947: a caller-supplied loc is authored from now on.
+            ...(loc != null && loc !== '' ? { loc, locAuthored: true } : {}),
             ...(description !== undefined ? { description: description ?? null } : {}),
             ...(isRunnable !== undefined ? { isRunnable: isRunnable ?? null } : {}),
             ...(condition !== undefined ? { condition: (condition ?? null) as InputJsonValue } : {}),
@@ -4837,7 +4842,7 @@ export const nodeMutations = {
           for (const r of relocations) {
             await tx.edge.update({
               where: { id: r.id },
-              data: { sourceId: r.sourceId, targetId: r.targetId, memoryId: r.memoryId, loc: r.loc },
+              data: { sourceId: r.sourceId, targetId: r.targetId, memoryId: r.memoryId, loc: r.loc, locAuthored: false }, // #2947: recomputed from the new endpoints, so derived
               select: { id: true },
             });
           }

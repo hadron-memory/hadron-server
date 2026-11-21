@@ -1039,6 +1039,8 @@ export async function addEdge(args: {
         sourceId: locked.source.id,
         targetId: locked.target.id,
         loc: edgeLoc,
+        // #2947: authored iff the caller supplied the loc (even one equal to the derivation).
+        locAuthored: authoredLoc != null && authoredLoc !== '',
         name,
         description,
         isRunnable,
@@ -1218,6 +1220,7 @@ async function replaceOutgoingEdgesInTransaction(
         sourceId: args.sourceNodeId,
         targetId: e.targetNodeId,
         loc: e.loc ?? deriveEdgeLoc(args.sourceLoc, e.name, e.targetLoc),
+        locAuthored: e.loc != null && e.loc !== '', // #2947
         name: e.name,
         description: e.description,
         isRunnable: e.isRunnable,
