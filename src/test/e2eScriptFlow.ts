@@ -23,6 +23,10 @@ export const E2E_SCRIPT_GRANT_PREFIX = 'runs';
  * value to DISABLE_RUN_WORKER=false inside the container and leaves every other value `true`, so the seed and the verifier,
  * which both run in the container, read the one variable the run worker itself reads, and only the exact value `false`
  * counts (an unset or mistyped value leaves the fixtures off, as for the worker).
+ *
+ * The two readers are not the same predicate off that path: the server runs the worker unless DISABLE_RUN_WORKER is exactly
+ * `true` (src/server.ts), while this enables the fixtures only on exactly `false`. Under stack.sh they always agree, since it
+ * sets one or the other; a variable set by hand to anything else (e.g. `0`) would run the worker without its flows seeded.
  */
 export const e2eFlowFixturesEnabled = (env: Record<string, string | undefined> = process.env): boolean =>
   env.DISABLE_RUN_WORKER === 'false';
