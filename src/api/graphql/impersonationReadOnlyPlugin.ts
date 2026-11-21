@@ -29,7 +29,7 @@ import type { ImpersonationContext } from '../../lib/auth/impersonation.js';
 
 /**
  * The ONE predicate for "this request is a read-only impersonation session". The mutation plugin below refuses on it,
- * and `Memory.canWrite` (#606) answers false on it: sharing it keeps the field's promise ("a write would succeed") in
+ * and `Memory.canWrite` (#606) answers false on it: sharing it keeps the field's promise ("a write would be allowed") in
  * step with what this plugin actually refuses.
  */
 export function isReadOnlyImpersonation(ctx: { impersonation?: unknown } | null | undefined): boolean {

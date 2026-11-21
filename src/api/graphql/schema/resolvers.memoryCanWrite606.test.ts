@@ -5,9 +5,8 @@
  * so a drift between the flag and a write that would actually be refused fails here. A handful of cells also pin the
  * answer outright, so a gate that changed under both sides at once cannot pass silently.
  */
-import { GraphQLError } from 'graphql';
+import { GraphQLError, parse } from 'graphql';
 import { isReadOnlyImpersonation, impersonationReadOnlyPlugin } from '../impersonationReadOnlyPlugin.js';
-import { parse } from 'graphql';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { PrismaClient } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
@@ -106,24 +105,30 @@ describe('#606 Memory.canWrite equals the write gate (matrix)', () => {
   it('the mutation plugin and the field agree on what a read-only impersonation session is (they cannot diverge)', async () => {
     const mutation = parse('mutation { createNode(urn: "x") { id } }');
     const op = mutation.definitions[0] as any;
-    const shapes: Array<[string, Record<string, unknown>]> = [
-      ['no impersonation', {}],
-      ['impersonation object', { impersonation: { actorUserId: u.platform.id } }],
-      ['impersonation without actor field', { impersonation: { orgId: 'some-org' } }],
-      ['impersonation undefined', { impersonation: undefined }],
-      ['impersonation null', { impersonation: null }],
+    // [label, ctx extras, whether a read-only impersonation session is expected]: hardcoded, NOT derived from the
+    // predicate under test, so a ctxOf that dropped the impersonation key would fail here instead of passing vacuously.
+    const shapes: Array<[string, Record<string, unknown>, boolean]> = [
+      ['no impersonation', {}, false],
+      ['impersonation object', { impersonation: { actorUserId: u.platform.id } }, true],
+      ['impersonation without actor field', { impersonation: { orgId: 'some-org' } }, true],
+      ['impersonation undefined', { impersonation: undefined }, false],
+      ['impersonation null', { impersonation: null }, false],
     ];
-    for (const [label, extra] of shapes) {
+    let refusedCount = 0;
+    for (const [label, extra, expectRefused] of shapes) {
       const c = ctxOf({ userId: u.contributor.id, roles: ['READER'], ...extra } as any);
+      expect([label, Boolean((c as any).impersonation)]).toEqual([label, expectRefused]); // the ctx really carries it
       const hooks: any = await (impersonationReadOnlyPlugin as any).requestDidStart();
       let refused = false;
       try { await hooks.didResolveOperation({ operation: op, document: mutation, contextValue: c }); } catch (e: any) {
         refused = e?.extensions?.code === 'IMPERSONATION_READ_ONLY';
       }
-      // plugin refuses  <=>  the field says false for a target the gate alone allows
-      expect([label, refused]).toEqual([label, isReadOnlyImpersonation(c)]);
-      expect([label, await M.canWrite({ id: shared.id }, {}, c)]).toEqual([label, !refused]);
+      if (refused) refusedCount += 1;
+      // the plugin refuses exactly where expected, and the field says false exactly there (the gate alone allows)
+      expect([label, refused]).toEqual([label, expectRefused]);
+      expect([label, await M.canWrite({ id: shared.id }, {}, c)]).toEqual([label, !expectRefused]);
     }
+    expect(refusedCount).toBe(2); // the plugin refused at least the impersonation shapes: not a vacuous pass
   });
 
   it('an App key with no user answers as the gate does (canWriteToMemory)', async () => {
@@ -189,6 +194,14 @@ describe('#606 query cost of memories(limit: 50)', () => {
       }
       watched = ids;
       const fresh = () => ({ db: logged, userId: u.contributor.id, roles: ['READER'] }) as unknown as Context;
+      // Baseline: one warm memory on a fresh context, so the window totals below are judged against what the gate
+      // really costs for ONE memory (a lookup keyed by user or org, one extra query per memory, would otherwise hide).
+      perId = new Map();
+      total = 0;
+      await M.canWrite({ id: ids[0] }, {}, fresh());
+      await flushQueryEvents();
+      const baseline = total;
+      expect(baseline).toBeGreaterThan(0);
       // A: each distinct memory once. B: every memory twice, on one fresh request context.
       perId = new Map();
       total = 0;
@@ -204,8 +217,10 @@ describe('#606 query cost of memories(limit: 50)', () => {
       const countsB = perId;
       const totalB = total;
       // Window totals catch what the per-memory count cannot see: a lookup keyed by user or org, repeated per memory.
-      expect(totalA).toBeLessThanOrEqual(50 * 12);
-      expect(totalB).toBeLessThanOrEqual(50 * 12);
+      // The gate costs 3 queries per distinct memory here (151 for 50, identical on every run once the query events are
+      // flushed); one more lookup per memory, keyed by user or org and so invisible to the per-memory count, reaches 201.
+      expect(totalA).toBeLessThanOrEqual(ids.length * 3 + 12);
+      expect(totalB).toBeLessThanOrEqual(Math.ceil(totalA * 1.1) + 5); // duplicates add (almost) nothing
       expect(once.every(Boolean)).toBe(true);
       expect(twice.every(Boolean)).toBe(true);
       for (const id of ids) {

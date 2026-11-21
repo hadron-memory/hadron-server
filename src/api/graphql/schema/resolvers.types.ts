@@ -1727,7 +1727,7 @@ export const typeResolvers = {
       (await corpusMintStateOf(ctx.db, m.id)).mintedAt,
     corpusState: async (m: { id: string }, _: unknown, ctx: Context) =>
       (await corpusMintStateOf(ctx.db, m.id)).state,
-    // #606: whether a write would succeed for THIS caller: the memory write gate's answer, and false under read-only
+    // #606: whether a write would be allowed for THIS caller: the memory write gate's answer, and false under read-only
     // impersonation (resolvers.helpers canWriteMemoryRecord).
     // A failure that is not the gate's refusal answers null (unknown), logged, so one memory cannot null a list.
     canWrite: async (m: { id: string }, _: unknown, ctx: Context) => {
