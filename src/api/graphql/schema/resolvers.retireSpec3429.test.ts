@@ -445,3 +445,22 @@ describe('#3429 survivors of the first mutant sweep', () => {
     expect(await codeOf(retire({ ref: x.id, form: 'SUPERSEDE', successorRef: y.id, expectedRevision: (await rev(x.id)) + 3 }))).toBe('NODE_WRITE_CONFLICT');
   });
 });
+
+describe('#3429 an impersonated session is read-only (#876, the #4669 CI failure)', () => {
+  const impersonated = (): Context => ({
+    ...as(admin.id),
+    impersonation: { sessionId: 's', actorUserId: admin.id, orgId: 'o', expiresAt: new Date('2099-01-01') },
+  } as Context);
+
+  it('the door refuses with the plugin\'s IMPERSONATION_READ_ONLY and writes nothing, even when called past the plugin', async () => {
+    const x = await spec('i:x'); const y = await spec('i:y');
+    const before = await snap(x.id);
+    expect(await codeOf(retire({ ref: x.id, form: 'RESCIND', expectedRevision: await rev(x.id), reason: 'r', summary: 's' }, impersonated()))).toBe('IMPERSONATION_READ_ONLY');
+    expect(await codeOf(retire({ ref: x.id, form: 'SUPERSEDE', successorRef: y.id, expectedRevision: await rev(x.id) }, impersonated()))).toBe('IMPERSONATION_READ_ONLY');
+    expect(await snap(x.id)).toBe(before);
+  });
+
+  it('the refusal comes before input-shape and read refusals, so it reveals nothing about any node', async () => {
+    expect(await codeOf(retire({ ref: generateId(), form: 'RESCIND', expectedRevision: 1 }, impersonated()))).toBe('IMPERSONATION_READ_ONLY');
+  });
+});
