@@ -65,4 +65,11 @@ describe('hadron_retire_spec (#3429)', () => {
     // A spec that already has a successor link is refused through MCP exactly as through GraphQL.
     expect(await mcp().callToolText('hadron_retire_spec', { ref: live.id, form: 'rescind', expectedRevision: await revision(live.id), reason: 'r', summary: 's' })).toContain('[node_write_conflict]');
   });
+
+  it('an over-cap composed abstract is the typed refusal text, not an opaque internal error (#4669 QA P2)', async () => {
+    const x = await spec('m:040:01');
+    const text = await mcp().callToolText('hadron_retire_spec', { ref: x.id, form: 'rescind', expectedRevision: await revision(x.id), reason: 'r', summary: 's'.repeat(1990) });
+    expect(text).toContain('Abstract exceeds 2000-character cap');
+    expect(text.toLowerCase()).not.toContain('internal');
+  });
 });

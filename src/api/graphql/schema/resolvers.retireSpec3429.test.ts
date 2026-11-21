@@ -41,7 +41,8 @@ const supersede = async (id: string, successor: string, extra: Retire = {}) =>
   retire({ ref: id, form: 'SUPERSEDE', successorRef: successor, expectedRevision: await rev(id), ...extra });
 const codeOf = async (p: Promise<unknown>) => {
   try { await p; return 'NO_ERROR'; } catch (e) {
-    return e instanceof GraphQLError ? String(e.extensions.code) : (e as Error).name;
+    // A raw class is NOT a typed refusal: the server masks it as INTERNAL_SERVER_ERROR on the wire (#4669 QA P2).
+    return e instanceof GraphQLError ? String(e.extensions.code) : `RAW:${(e as Error).name}`;
   }
 };
 const dbDate = async () => (await db.$queryRaw<Array<{ d: string }>>`SELECT to_char((now() AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS d`)[0]!.d;
@@ -462,5 +463,22 @@ describe('#3429 an impersonated session is read-only (#876, the #4669 CI failure
 
   it('the refusal comes before input-shape and read refusals, so it reveals nothing about any node', async () => {
     expect(await codeOf(retire({ ref: generateId(), form: 'RESCIND', expectedRevision: 1 }, impersonated()))).toBe('IMPERSONATION_READ_ONLY');
+  });
+});
+
+describe('#3429 the over-cap refusal is typed on the wire, with the helpful text (#4669 QA P2)', () => {
+  it('a composed abstract over the cap is a GraphQLError with the typed envelope, as updateNode answers it', async () => {
+    const x = await spec('cap:x');
+    const before = await snap(x.id);
+    let caught: unknown;
+    try {
+      await retire({ ref: x.id, form: 'RESCIND', expectedRevision: await rev(x.id), reason: 'r', summary: 's'.repeat(1990) });
+    } catch (e) { caught = e; }
+    expect(caught).toBeInstanceOf(GraphQLError);
+    const err = caught as GraphQLError;
+    expect(err.extensions).toMatchObject({ code: 'NodeAbstractTooLongError', max: 2000 });
+    expect(typeof err.extensions.length).toBe('number');
+    expect(err.message).toContain('Abstract exceeds 2000-character cap');
+    expect(await snap(x.id)).toBe(before);
   });
 });
