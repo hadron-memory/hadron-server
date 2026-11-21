@@ -18,7 +18,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { DEPARTURE_REASONS, REASON_NOT_RECORDED } from './departure.js';
-import { dropTestActions, seedWorld, type World } from './grantFixtures3668.js';
+import { DB_NOW, dropTestActions, insertGrantUnguarded, raw, seedWorld, type World } from './grantFixtures3668.js';
 
 const KINDS = ['user', 'worker', 'agent', 'app'] as const;
 const HOLDER_COLUMN = { user: 'user_id', worker: 'worker_id', agent: 'agent_id', app: 'grantee_app_id' } as const;
@@ -39,18 +39,25 @@ function sdlReasons(): string[] {
 }
 
 /** The codes the live chk_grants_shape admits, per holder column, parsed from Postgres's own rendering of the constraint. */
-async function checkReasonsByColumn(): Promise<Record<string, string[]>> {
+async function checkReasonsByColumn(): Promise<{ byColumn: Record<string, string[]>; raw: Record<string, string[]>; arms: number; mentions: number }> {
   const [{ def }] = await db.$queryRaw<Array<{ def: string }>>(Prisma.sql`
     SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'chk_grants_shape' AND conrelid = 'grants'::regclass`);
   const out: Record<string, string[]> = {};
+  const rawCodes: Record<string, string[]> = {};
+  let arms = 0;
   // Postgres renders each arm as `(<col> IS NOT NULL) AND (holder_departure_reason = ANY (ARRAY['A'::text, ...]))`, or with a single
   // code as `(holder_departure_reason = 'A'::text)`.
   const arm = /\((\w+) IS NOT NULL\) AND \(holder_departure_reason = (ANY \(ARRAY\[([^\]]*)\]\)|'(\w+)'::text)\)/g;
   for (const m of def.matchAll(arm)) {
     const codes = m[3] !== undefined ? [...m[3].matchAll(/'(\w+)'::text/g)].map((c) => c[1]!) : [m[4]!];
     out[m[1]!] = sorted([...(out[m[1]!] ?? []), ...codes]);
+    rawCodes[m[1]!] = [...(rawCodes[m[1]!] ?? []), ...codes];
+    arms++;
   }
-  return out;
+  // Rook BLIND P2 / Byron P3 (#4770): every mention of the column must be one the parse above understood, plus the one
+  // `holder_departure_reason IS NULL` head, so an arm written another way cannot hide outside the parse.
+  const mentions = [...def.matchAll(/holder_departure_reason/g)].length;
+  return { byColumn: out, raw: rawCodes, arms, mentions };
 }
 
 /** Every quoted code the live hadron_departure_cause_fits names. */
@@ -70,11 +77,36 @@ describe('#4737 one set of departure causes, wherever it is written', () => {
   });
 
   it('chk_grants_shape admits, for each holder kind, exactly that kind\'s DEPARTURE_REASONS', async () => {
-    const byColumn = await checkReasonsByColumn();
+    const { byColumn, raw: rawCodes, arms, mentions } = await checkReasonsByColumn();
     for (const kind of KINDS) {
       expect({ kind, codes: byColumn[HOLDER_COLUMN[kind]] ?? [] }).toEqual({ kind, codes: sorted(DEPARTURE_REASONS[kind]) });
+      // Raw lengths, so a code listed twice in one place is not hidden by the dedupe (Rook P3).
+      expect({ kind, n: rawCodes[HOLDER_COLUMN[kind]]?.length }).toEqual({ kind, n: DEPARTURE_REASONS[kind].length });
+      expect({ kind, n: new Set(DEPARTURE_REASONS[kind]).size }).toEqual({ kind, n: DEPARTURE_REASONS[kind].length });
     }
     expect(sorted(Object.keys(byColumn))).toEqual(sorted(Object.values(HOLDER_COLUMN))); // no arm for an unknown column
+    expect({ arms, mentions }).toEqual({ arms: KINDS.length, mentions: KINDS.length + 1 }); // nothing outside the parsed arms
+  });
+
+  it('behaviourally: the CHECK admits each code for its own holder kind and refuses it for every other kind (Byron P3, Rook P2)', async () => {
+    const holder = {
+      user: { user_id: w.userId }, worker: { user_id: null, worker_id: w.workerId },
+      agent: { user_id: null, agent_id: w.agentId }, app: { user_id: null, grantee_app_id: w.app2Id },
+    } as const;
+    const verdicts: string[] = [];
+    for (const kind of KINDS) {
+      for (const code of ALL) {
+        // The insert guard is off (insertGrantUnguarded), so only the table's CHECKs judge the row.
+        const ok = await insertGrantUnguarded(w, { ...holder[kind], holder_departed_at: raw(DB_NOW), holder_departure_reason: code })
+          .then(() => true, (e: unknown) => {
+            if (!String(e).includes('chk_grants_shape')) throw e;
+            return false;
+          });
+        verdicts.push(`${kind}:${code}:${ok}`);
+      }
+    }
+    const expected = KINDS.flatMap((kind) => ALL.map((code) => `${kind}:${code}:${(DEPARTURE_REASONS[kind] as readonly string[]).includes(code)}`));
+    expect(verdicts).toEqual(expected);
   });
 
   it('hadron_departure_cause_fits names every code except APP_DELETED (the one its ELSE TRUE arm is for), and no other', async () => {
@@ -115,6 +147,7 @@ describe('#4737 hadron_fit_departure_cause yields to what already happened to th
 
   it('agent: every install-loss code stands for a live agent, and yields AGENT_DELETED for a deleted one', async () => {
     const installLoss = DEPARTURE_REASONS.agent.filter((c) => c !== 'AGENT_DELETED');
+    expect(installLoss.length).toBeGreaterThan(0); // the loops below must run (Rook P3)
     for (const r of installLoss) expect(await fit(r, null, null, w.agentId)).toBe(r);
     await db.agent.update({ where: { id: w.agentId }, data: { deletedAt: new Date() } });
     for (const r of installLoss) expect(await fit(r, null, null, w.agentId)).toBe('AGENT_DELETED');
