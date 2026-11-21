@@ -8,7 +8,7 @@ import { canReadMemoryRecord, requireMemoryWriteAccess } from './resolvers.helpe
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
-import * as rootFs from '../../../integrations/localFs/saveNodeToFs.js';
+import * as rootLocks from '../../../lib/nodeSubtreeLock.js';
 
 const M = resolvers.Mutation as any;
 let owner: any, stranger: any, participant: any, app: any, agent: any;
@@ -77,9 +77,14 @@ describe('#2843 owner creation and boundaries', () => {
     if (state === 'uninstalled-app') await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
     await denied(ctx(), {}, state.endsWith('agent') ? 'AGENT_NOT_INSTALLED' : 'FORBIDDEN');
   });
-  it('rolls back Memory and root on injected root projection failure', async () => {
-    vi.spyOn(rootFs, 'saveNodeToFs').mockResolvedValue({ error: '2843 root failure' });
+  it('rolls back Memory and root on injected root database failure', async () => {
+    const rootLock = vi.spyOn(rootLocks, 'lockLocForWrite').mockImplementationOnce(async (tx, memoryId, loc) => {
+      expect(loc).toBe('Owner Notes');
+      expect(await tx.memory.findUnique({ where: { id: memoryId } })).toMatchObject({ name: 'Owner Notes' });
+      throw new Error('2843 root failure');
+    });
     await expect(create()).rejects.toThrow('2843 root failure');
+    expect(rootLock).toHaveBeenCalledTimes(1);
     expect(await db.memory.count()).toBe(0); expect(await db.node.count()).toBe(0);
   });
   it('retains root validation after owner authorization', async () => { await denied(ctx(), {name:'../invalid'}, 'BAD_USER_INPUT'); });

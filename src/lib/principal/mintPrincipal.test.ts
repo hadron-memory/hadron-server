@@ -34,18 +34,18 @@ describe('mintPrincipal — cross-kind uniqueness', () => {
   });
 
   it('stores the name lowercased and reports availability', async () => {
-    expect(await checkRootAvailable(db, 'Acme.com')).toBe(true);
+    expect(await checkRootAvailable(db, 'Acme.com')).toBe('free');
     await mintPrincipal(db, { kind: 'org', name: 'Acme.com' });
     const row = await db.principal.findFirstOrThrow({ where: { kind: 'org' } });
     expect(row.name).toBe('acme.com');
-    expect(await checkRootAvailable(db, 'acme.com')).toBe(false);
+    expect(await checkRootAvailable(db, 'acme.com')).toBe('taken');
   });
 });
 
 describe('reserved platform words', () => {
   it('rejects every reserved root word', async () => {
     for (const w of RESERVED_ROOT_NAMES) {
-      expect(await checkRootAvailable(db, w)).toBe(false);
+      expect(await checkRootAvailable(db, w)).toBe('taken');
       await expect(mintPrincipal(db, { kind: 'org', name: w })).rejects.toBeInstanceOf(RootNameTakenError);
     }
   });

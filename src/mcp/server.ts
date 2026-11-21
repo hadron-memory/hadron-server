@@ -60,7 +60,7 @@ import {
   editorFromAuth,
   diffNodeChanges,
 } from '../lib/nodeRevisionSnapshot.js';
-import { assertAuthoring, assertRenameAuthoring, attestedAuthoring } from '../lib/authoringAttestation.js';
+import { assertAuthoring, assertRenameAuthoring, attestedAuthoring, type AuthoredWith } from '../lib/authoringAttestation.js';
 import { mcpReadsTask } from './taskReadGate.js';
 import { authoredContentChanged, clearNodeAuthorship, type NodeAuthorshipStamp } from '../lib/nodeAuthorship.js';
 import {
@@ -111,6 +111,7 @@ import { NodeSchemaViolation } from '../lib/validateNodeAgainstSchema.js';
 import { normalizeObjectType, normalizeRole, validateNodeSchemaOnWrite } from '../lib/enforceNodeSchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
+import { retireSpecDoor } from '../api/graphql/schema/resolvers.mutation.retireSpec.js';
 import { archiveTombstone, discoverArchivePlan, validateArchivePlan, withArchivePlanRetries, ArchivePlanExhaustedError } from '../lib/tombstoneArchive.js';
 import { deletePendingEdgesTargetingNodes, promotePendingEdgeForTarget, reconcilePendingEdgeCounts } from '../lib/pendingEdgePromotion.js';
 import {
@@ -7734,6 +7735,42 @@ export function createMcpServerInstance(
     async (args) => callGovernedDoor('review', 'update', reviewUpdateArgs, args),
   );
 
+  // ── hadron_retire_spec (#3429) ────────────────────────────────────────
+  //
+  // The MCP twin of GraphQL `retireSpec`: it DELEGATES to the one door (cor:api:240:01), so the successor test, the
+  // refusal ladder, the locks and the composed text are never a second copy. The generic node tools refuse a spec
+  // node, and this is the single route an agent has to retire one.
+  server.tool(
+    'hadron_retire_spec',
+    'Retire a spec in ONE transaction: form "rescind" (no successor; pass reason and summary, and withdrawn for a draft that never took effect) or "supersede" (pass successorRef, an EXISTING node in the same memory; reason is optional and summary defaults to the stored abstract). The server composes the superseded tag, the banner under the title and the retirement abstract, and for a supersede inserts the one superseded-by edge. expectedRevision (the spec\'s Revision from hadron_get_node) is REQUIRED: a stale read refuses with [node_write_conflict]. It also refuses, writing nothing, a spec that is already retired or already has a superseded-by* link, and an unusable successor. Adds no authority beyond writing the spec.',
+    retireSpecArgs,
+    async ({ ref, form, expectedRevision, successorRef, withdrawn, reason, summary, authoredWith }) => {
+      try {
+        const out = await retireSpecDoor(
+          {
+            ref, form: form === 'rescind' ? 'RESCIND' : 'SUPERSEDE', expectedRevision,
+            successorRef: successorRef ?? null, withdrawn: withdrawn ?? null, reason: reason ?? null, summary: summary ?? null,
+            authoredWith: authoredWith as AuthoredWith | undefined,
+          },
+          doorCtx(),
+        );
+        const node = out.node as { id: string; revSeq?: number };
+        const edge = out.successorEdge;
+        return textResult(
+          `spec retired (${form}): ${ref} (id: ${node.id}${node.revSeq != null ? `, revision: ${node.revSeq}` : ''})` +
+            (edge ? `\nsuperseded-by edge: ${edge.loc} (id: ${edge.id})` : ''),
+        );
+      } catch (e) {
+        // The typed over-cap refusal reads as the same prose hadron_update_node gives (no code prefix, no server fault).
+        if ((e as { extensions?: { code?: string } }).extensions?.code === 'NodeAbstractTooLongError') return refusalResult((e as Error).message);
+        return toolErrorResult(e, () => {
+          const code = (e as { extensions?: { code?: string } }).extensions?.code;
+          return code ? `[${String(code).toLowerCase()}] ${(e as Error).message}` : `Error: ${(e as Error).message}`;
+        }, 'hadron_retire_spec:resolver');
+      }
+    },
+  );
+
   // ── hadron_update_node_data ───────────────────────────────────────────
   //
   // Shallow-MERGE a JSON patch into a node's `data` bag (issue #366).
@@ -8528,7 +8565,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             // #1466: an edge writer holds this memory key across endpoint
             // validation and insertion. Take it before any loc lock so an edge
             // cannot land after archiveTombstone enumerates the target's edges.
-            await lockEdgeEndpointMemories(tx, [toMemory.id]);
+            // #1213: an owning move holds the full source/destination set before its loc and row locks.
+            await lockEdgeEndpointMemories(tx, [fromMemory.id, toMemory.id]);
             const archivePlan = await discoverArchivePlan(tx, toMemory.id, toLoc);
             await acquireLockSet(tx, [
               ...archivePlan.descendantLocs.map(loc => ({ memoryId: toMemory.id, loc })),
@@ -13082,6 +13120,18 @@ const taskUpdateArgs = {
     .boolean()
     .optional()
     .describe('Set false to RETIRE this task — it stops being runnable. Omit to preserve. This door is the only way to change it: the generic surface is refused, because clearing the signal is how a governed node is un-governed.'),
+};
+
+// #3429: module scope, so the one parameter shape is shared across server instances (#2260).
+const retireSpecArgs = {
+  ref: z.string().describe('The spec: a node id or fully-qualified node URN.'),
+  form: z.enum(['rescind', 'supersede']).describe('"rescind" retires with no successor; "supersede" retires in favour of an existing successor.'),
+  expectedRevision: z.number().int().positive().max(2_147_483_647).describe('REQUIRED. The spec\'s Revision as you read it. A mismatch refuses atomically with [node_write_conflict].'),
+  successorRef: z.string().optional().describe('supersede only, required: the existing successor\'s node id or URN, in the same memory.'),
+  withdrawn: z.boolean().optional().describe('rescind only: word it as a draft that never took effect.'),
+  reason: z.string().optional().describe('Required (not blank) with rescind; optional with supersede.'),
+  summary: z.string().optional().describe('Required (not blank) with rescind; with supersede it defaults to the stored abstract.'),
+  authoredWith: AUTHORED_WITH_ARG,
 };
 
 const reviewUpdateArgs = {

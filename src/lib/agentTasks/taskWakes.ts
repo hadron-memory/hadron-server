@@ -12,6 +12,7 @@
  * | task.assigned / .reassigned / assignment.matched | the new assignee (the task's LATEST assignment only) | ASSIGNED / REASSIGNED / MATCHED |
  * | a child's task.finished / .cancelled    | the child's owner (050:16 r2) AND the parent's assignee (#4234, G7) | CHILD_FINISHED / CHILD_CANCELLED |
  * | an unacknowledged alarm                 | its currently-woken chain position, a worker (050:19) | ALARM |
+ * | question.answered (#4431), on a task the question blocks | the task's CURRENT assignee (Vera's draft cor:agt:050:34) | ANSWERED |
  * | task.session-end-requested (#1709), when someone else ended the task, or (#4223) the task was reassigned away from the asked worker, or (#4265) that worker handed it back | the asked worker, while that session is open and the request unresolved (050:10) | END_SESSION |
  *
  * A wake for an event stays due until a wake proof naming it is acknowledged
@@ -42,7 +43,7 @@ import { alarmEpisodeKey, currentAlarmEpisodes } from './stall.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
-export type TaskWakeEvent = 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINISHED' | 'CHILD_CANCELLED' | 'ALARM' | 'END_SESSION';
+export type TaskWakeEvent = 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINISHED' | 'CHILD_CANCELLED' | 'ALARM' | 'END_SESSION' | 'ANSWERED';
 
 /** One event a worker is due a wake for. `chainIndex` is 0 except for an alarm's woken position. */
 export type PendingTaskWake = {
@@ -56,6 +57,8 @@ export type PendingTaskWake = {
   /** #2553: the task's handle (`AT3.405`), printed first in the nudge. */
   handle: string;
   at: Date;
+  /** #4431: for ANSWERED, the code of the question answered (from the event; never the answer). Absent otherwise. */
+  questionCode?: string | null;
   /** S7 (R90): the held count the assignment raise stored on the event (assigned events only). */
 };
 
@@ -115,7 +118,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
   const assignedTypes = Prisma.join([...ASSIGNED_EVENT_TYPES]);
 
   type Row = { workerId: string; taskId: string; eventId: string; type: string; title: string; handle: string; at: Date };
-  const [assigned, finished, alarms, endSession, darkAlarms] = await Promise.all([
+  const [assigned, finished, alarms, endSession, darkAlarms, answered] = await Promise.all([
     // The task's LATEST assignment event, to its current worker assignee, who has not acted on the task since
     // (an assignment the worker made itself counts as acting: `>=` includes the event).
     db.$queryRaw<Row[]>(Prisma.sql`
@@ -204,6 +207,21 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
         AND (e.chain -> s.idx ->> 'workerId') IN (${ids})
         AND ${liveApp('e')}
         AND ${undelivered("(e.chain -> s.idx ->> 'workerId')", 'e.id', 's.idx')}`),
+    // #4431 (Questions S7, Vera's draft cor:agt:050:34): an answer to a question that blocks an open task wakes the
+    // task's CURRENT assignee (so a task reassigned before the answer wakes its new one), until delivered or that worker
+    // acts on the task since. Only an answer: a take-back (question.answer-retracted) is history and wakes nobody. Each
+    // answer is its own event, so a re-answer wakes again. The nudge names the task; the event carries no answer.
+    db.$queryRaw<(Row & { questionCode: string | null })[]>(Prisma.sql`
+      SELECT t.assignee_worker_id AS "workerId", t.id AS "taskId", e.id AS "eventId", e.type, t.title, t.handle, e.created_at AS at,
+             e.payload ->> 'code' AS "questionCode"
+      FROM agent_team_events e
+      JOIN agent_tasks t ON t.id = e.task_id AND t.app_id = e.app_id
+      JOIN workers w ON w.id = t.assignee_worker_id AND w.app_id = t.app_id
+      WHERE e.type = 'question.answered' AND t.assignee_worker_id IN (${ids}) AND t.status IN ${OPEN}
+        AND ${liveApp('t')}
+        AND NOT EXISTS (SELECT 1 FROM agent_team_events x
+                        WHERE x.task_id = t.id AND x.app_id = t.app_id AND x.actor_worker_id = t.assignee_worker_id AND x.created_at >= e.created_at AND x.type NOT LIKE 'app.%' AND x.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])}))
+        AND ${undelivered('t.assignee_worker_id', 'e.id', '0')}`),
   ]);
 
   const current = await currentAlarmEpisodes(db, alarms, now);
@@ -214,6 +232,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
   }
   for (const r of finished) push({ ...r, chainIndex: 0, event: CHILD_END_KIND[r.type as keyof typeof CHILD_END_KIND] });
   for (const r of endSession) push({ ...r, chainIndex: 0, event: 'END_SESSION' });
+  for (const r of answered) push({ ...r, chainIndex: 0, event: 'ANSWERED' });
   for (const r of alarms) {
     if (!r.episodeStart || !current.has(alarmEpisodeKey(r.taskId, r.type, r.episodeStart))) continue;
     push({ workerId: r.workerId, taskId: r.taskId, eventId: r.eventId, title: r.title, handle: r.handle, at: r.at, chainIndex: r.chainIndex, event: 'ALARM' });
