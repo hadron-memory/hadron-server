@@ -103,6 +103,7 @@ import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
 import { secretSweepDisabledReason, startSecretSweepLoop } from './jobs/secretSweep.js';
 import { startGitMirrorObligationSweepLoop } from './jobs/sweepGitMirrorObligations.js';
 import { startOauthClientGcLoop } from './jobs/gcOauthClients.js';
+import { startGrantLapseSweepLoop } from './jobs/sweepGrantLapse.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
@@ -1951,6 +1952,11 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // the count it would collect, until OAUTH_CLIENT_GC_ENABLED=true (R220).
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_OAUTH_CLIENT_GC !== 'true') {
     startOauthClientGcLoop(db);
+  }
+
+  // #4178 — end the grants of agents whose installation lapsed with no write door (licence expiry/revoke, deleted organization).
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_GRANT_LAPSE_SWEEP !== 'true') {
+    startGrantLapseSweepLoop(db);
   }
 
   // #1647 — resume pending notices of admin-initiated account erasures (restart-safe outbox).

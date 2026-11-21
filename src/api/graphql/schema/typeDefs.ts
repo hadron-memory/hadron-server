@@ -2221,7 +2221,7 @@ export const typeDefs = `#graphql
     NOT_APPLICABLE
     "Never approved."
     NOT_APPROVED
-    "The approval covers the current text: it was recorded at the revision in NodeApproval.revision, which can be older than Node.revision when only metadata (tags, properties, role, description, alias, loc, edges) changed since."
+    "The approval covers the current text: it was recorded at the revision in NodeApproval.revision, which can be older than Node.revision when only metadata (tags, properties, role, description, alias, loc) changed since."
     APPROVED
     "Approved once, then the title, abstract or content changed (or the text no longer hashes to the approval, see verifyNode's TAMPERED)."
     SUPERSEDED
@@ -6021,6 +6021,31 @@ export const typeDefs = `#graphql
     assume the outer query authorized them (#552 / #983).
     """
     previousSession: WorkerContinuitySession
+    """
+    #1054 — the author RECORDED in the handoff: who held the worker when the session named by the
+    handoff's envelope ran. It is what the envelope claims, not proof of who wrote the node: any
+    writer of the handoff node can set the envelope's session id (to one of this worker's own
+    sessions), so it is a hint for a reader, never an authentication. Null when \`handoff\` is
+    null. For a handoff with no session envelope (hand-written) it is an author with nothing known.
+    """
+    handoffAuthor: WorkerContinuityAuthor
+  }
+
+  """
+  #1054 — the person behind a handoff, as identity only. The handle is identity
+  (hrn:node:hadronmemory.com:specs:cor:acl:070:01), visible to any signed-in caller who can read
+  the worker. A display name, if ever added, would follow the same rule's gate (self, admin or
+  co-member; null, never an error).
+  """
+  type WorkerContinuityAuthor {
+    "The handle of the user who held the worker when the session the envelope names ran: as recorded, not authenticated (see handoffAuthor). Null only when the author is unknown or erased."
+    userHandle: String
+    """
+    The session the handoff's envelope names as its writer: the id alone, never the Session, and
+    null unless that session is one of this worker's own non-deleted sessions (same sanitization as
+    previousSession). Recorded, not authenticated: see handoffAuthor.
+    """
+    sessionId: ID
   }
 
   """
@@ -7128,9 +7153,11 @@ export const typeDefs = `#graphql
     """
     Optional optimistic-concurrency precondition (#937). When supplied, the
     update is applied only while the node's current live revision still equals
-    this positive 32-bit integer. A mismatch refuses atomically with
-    NODE_WRITE_CONFLICT; omitting it or passing null preserves last-write-wins
-    compatibility.
+    this positive 32-bit integer. A stale token is refused atomically with
+    NODE_WRITE_CONFLICT and no edges are applied. An inline-edge-only write
+    checks a current token without consuming it: the node's revision does not
+    advance and the same token remains valid. Omitting it or passing null
+    preserves last-write-wins compatibility.
     Read the baseline from Node.revision.
     """
     expectedRevision: Int
@@ -7170,8 +7197,9 @@ export const typeDefs = `#graphql
     """
     Why this change was made — recorded on the revision-history snapshot
     (NodeRevision.revLabel, #620; historically it squatted in editedBy),
-    mirroring hadron_update_node's reason arg so CLI and MCP edits leave
-    equally-traceable history.
+    mirroring hadron_update_node's reason arg. An inline-edge-only write
+    appends no revision, so it creates no history row on which to record this
+    reason.
     """
     reason: String
   }
@@ -7699,6 +7727,42 @@ export const typeDefs = `#graphql
   }
 
   """
+  #4180 (hrn:node:hadronmemory.com:specs:cor:acl:140:03, Holger R5): why a grant's holder went. Cause codes, not words: how each is shown is still open in the spec, so the copy may change without these values changing. The set is open to additions; a client must treat an unknown value as a departure it cannot name. Not the end reasons of a secret read client (SECRET_DELETED, PROTECTED), which are not holder departures.
+  """
+  enum GrantHolderDepartureReason {
+    "The person's account was erased."
+    USER_ERASED
+    "The person removed themselves from the organization that owns the grant's App."
+    ORG_LEFT
+    "The person was removed from the organization that owns the grant's App by someone else."
+    ORG_REMOVED
+    "The worker was retired."
+    WORKER_RETIRED
+    "The worker was deleted."
+    WORKER_DELETED
+    "The agent was deleted."
+    AGENT_DELETED
+    "The agent was uninstalled from the grant's App."
+    AGENT_UNINSTALLED
+    "The agent was installed only through an importing agent, and that agent was uninstalled from the grant's App."
+    AGENT_IMPORTER_UNINSTALLED
+    "The agent was installed only through an importing agent, and that agent was deleted (hard delete; #4179)."
+    AGENT_IMPORTER_DELETED
+    "The import that installed the agent in the grant's App was removed."
+    AGENT_IMPORT_REMOVED
+    "The organization's licence to the agent was revoked, which ended its installation in the grant's App."
+    AGENT_LICENSE_REVOKED
+    "The organization's licence to the agent expired, which ended its installation in the grant's App (recorded by the lapse sweep, #4178)."
+    AGENT_LICENSE_EXPIRED
+    "An organization the agent's installation in the grant's App depended on (the App's or the agent's own) was deleted (recorded by the lapse sweep, #4178)."
+    ORG_DELETED
+    "The grantee App was deleted."
+    APP_DELETED
+    "The holder went before causes were kept, so none was recorded. Not a guess at one."
+    REASON_NOT_RECORDED
+  }
+
+  """
   A grant (#3789, hrn:node:hadronmemory.com:specs:cor:acl:140:05): ids and scalars only, so no other entity's field resolvers are reachable
   through it. Its stored facts as stored, and allows and state, which are computed (#4173).
   """
@@ -7736,6 +7800,8 @@ export const typeDefs = `#graphql
     revokedByUserId: ID
     "#3711 (V56): when the holder went (a person erased, a worker retired, an agent or App deleted); a fact, not a state. Only the App's manager reads it (appGrants); every other read answers null."
     holderDepartedAt: DateTime
+    "#4180 (hrn:node:hadronmemory.com:specs:cor:acl:140:03, Holger R5): why the holder went, as a cause with no wording; null unless the holder ended the grant (state HOLDER_GONE). REASON_NOT_RECORDED for a departure stamped before causes were kept, never a guess. Every read of the grant carries it."
+    holderDepartureReason: GrantHolderDepartureReason
     "Whether the grant allows its action right now, judged on the database clock by the one live function (activated, not revoked, holder not gone, App not deleted, started, not expired, not spent). A fact about this instant, never a lifecycle name."
     allows: Boolean!
     "#4173: the lifecycle state (hrn:node:hadronmemory.com:specs:cor:acl:140:03), the same on every surface that returns the grant."
