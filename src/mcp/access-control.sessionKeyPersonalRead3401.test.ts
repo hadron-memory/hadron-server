@@ -117,6 +117,13 @@ describe('#3401 owner-positive: the session key reads its person\'s session memo
       expect(await reach(keyAuth(sid), mem)).toEqual(all(true));
     });
   }
+
+  it('hadron_get_node returns the node itself, not just a hit (keeps the D4 comparisons non-vacuous)', async () => {
+    const mem = await sessionMemory({ cls: 'personal' });
+    const sid = await session(mem.id);
+    const text = await createTestableMcpServer(keyAuth(sid)).callToolText('hadron_get_node', { urn: mem.nodeUrn });
+    expect(text).toContain(mem.marker);
+  });
 });
 
 /** The answer hadron_get_node gives for a node in a memory that does not exist, with the URN normalised out. */
@@ -248,7 +255,11 @@ describe('#3401 D1: the session is re-validated on every call', () => {
       await expectRefused(keyAuth(sid), mem);
       // #4726 blind P2-1: a refused read must not count as a drive, or the next call of the same retained
       // principal would find the session live again. Probe repeatedly, flush every usage write, then probe again.
-      for (let i = 0; i < 3; i += 1) await reach(keyAuth(sid), mem);
+      const mcp = createTestableMcpServer(keyAuth(sid));
+      for (let i = 0; i < 3; i += 1) {
+        expect(await mcp.callToolText('hadron_get_node', { urn: mem.nodeUrn })).not.toContain(mem.marker);
+        await reach(keyAuth(sid), mem);
+      }
       await drainNodeUsage(db);
       expect(await db.usageEvent.count({ where: { sessionId: sid, countsAsActivity: true } })).toBe(0);
       expect((await db.session.findUniqueOrThrow({ where: { id: sid } })).updatedAt).toEqual(old);
@@ -258,9 +269,14 @@ describe('#3401 D1: the session is re-validated on every call', () => {
 
   it('control for the dormant pins: the same probes on a LIVE session do record counted activity', async () => {
     // #4726 blind delta P2: "zero counted events" above means something only if these probes reach the
-    // recorder at all. Here the same reach() and the same flush, on a live session, leave counted events.
+    // recorder at all. On a live session, hadron_get_node through the same testable server, and then the same reach(), each
+    // leave counted events after the same flush.
     const mem = await sessionMemory({ cls: 'personal' });
     const sid = await session(mem.id);
+    const mcp = createTestableMcpServer(keyAuth(sid));
+    expect(await mcp.callToolText('hadron_get_node', { urn: mem.nodeUrn })).toContain(mem.marker);
+    await drainNodeUsage(db);
+    expect(await db.usageEvent.count({ where: { sessionId: sid, countsAsActivity: true } })).toBeGreaterThan(0);
     expect(await reach(keyAuth(sid), mem)).toEqual(all(true));
     await drainNodeUsage(db);
     expect(await db.usageEvent.count({ where: { sessionId: sid, countsAsActivity: true } })).toBeGreaterThan(0);
