@@ -111,15 +111,16 @@ describe('#4431 §1: a worker links a question to its own open task', () => {
     const finished = await mkTask({ status: 'finished', finishedAt: new Date(), resultOutcome: 'done' });
     const foreignTask = await db.agentTask.create({ data: { appId: otherApp.id, title: 'Theirs', ownerUserId: admin.id, status: 'started', assigneeWorkerId: foreign.id, assignedAt: new Date(), startedAt: new Date() }, select: { id: true } });
     const own = await mkTask();
-    const cases: Array<[string, Promise<unknown>]> = [
-      ['another worker\'s task', ask({ taskRef: others.id })],
-      ['a finished task', ask({ taskRef: finished.id })],
-      ['a task of another App (asked by its own assignee)', ask({ taskRef: foreignTask.id }, foreign.id)],
-      ['a task id that does not exist', ask({ taskRef: generateId() })],
-      ['a caller with no worker', ask({ taskRef: own.id }, null)],
+    const cases: Array<[string, () => Promise<unknown>]> = [
+      ['another worker\'s task', () => ask({ taskRef: others.id })],
+      ['a finished task', () => ask({ taskRef: finished.id })],
+      ['a task of another App (asked by its own assignee)', () => ask({ taskRef: foreignTask.id }, foreign.id)],
+      ['a task id that does not exist', () => ask({ taskRef: generateId() })],
+      ['a caller with no worker', () => ask({ taskRef: own.id }, null)],
     ];
-    for (const [label, p] of cases) {
-      const e = await errorOf(p);
+    // Thunks: each ask starts only when awaited, so no refusal is ever an unhandled rejection.
+    for (const [label, run] of cases) {
+      const e = await errorOf(run());
       expect(e, label).not.toBeNull();
       expect(e!.extensions.code, label).toBe('QUESTION_INVALID');
       expect(e!.extensions.pointers ?? e!.extensions.errors, label).toEqual([{ pointer: '/taskRef', message: LINK_MESSAGE }]);
