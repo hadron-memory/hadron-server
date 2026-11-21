@@ -136,8 +136,9 @@ export async function deleteUserAccount(
   //
   // #4690 (#3851's finding): two concurrent erasures of people whose grants are crossed deadlock in the grant writes
   // (the issuer and requester UPDATEs and endHeldGrants all lock grant rows), and Postgres aborts one with 40P01. A
-  // deadlock aborts the WHOLE transaction and nothing here has an effect outside the database before commit, so the
-  // attempt is re-run: retryOnDeadlock wraps the scope read and the transaction, so every attempt re-reads the
+  // deadlock aborts the WHOLE transaction and nothing here has an effect outside the database before commit (every
+  // helper runDeletionTxn calls takes `tx`; the asset purge, tool-connection teardown and deletion notice run below,
+  // after commit), so the attempt is re-run: retryOnDeadlock wraps the scope read and the transaction, so every attempt re-reads the
   // membership scope, takes its locks again and re-judges under them (a target the winner already erased refuses
   // "User not found", never erases twice). It is nested inside the serialization retry, so isSerializationFailure is
   // not widened for any other caller (#4318).

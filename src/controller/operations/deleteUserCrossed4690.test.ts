@@ -16,8 +16,10 @@ import { grantTermsFromRow, grantTermsHash } from '../../lib/grants/terms.js';
 import { grantSignaturePayloadBytes, GRANT_SIGNATURE_PAYLOAD_V1 } from '../../lib/signing/grantPayload.js';
 import { newSigningRequestId } from '../../lib/signing/requests.js';
 import { deleteUserAccount } from './deleteUser.js';
-import { isSerializationFailure } from '../../lib/serializableRetry.js';
+import { DEADLOCK_RETRIES, SERIALIZATION_RETRIES, isSerializationFailure } from '../../lib/serializableRetry.js';
 import { insertSoftPasskey, softPasskey } from '../../test/softPasskey.js';
+import { writeNodeToGit } from '../../integrations/github/writeNodeToGit.js';
+import { getBusClient } from '../../lib/bus/index.js';
 import { waitForLockWaiters } from '../../test/lockWait.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -28,11 +30,11 @@ const ORIGIN = 'http://localhost';
 const exec = (sql: string, ...params: unknown[]) => db.$executeRawUnsafe(sql, ...params);
 let w: World;
 
-beforeEach(async () => { await cleanDb(db); w = await seedWorld(); });
+beforeEach(async () => { await cleanDb(db); w = await seedWorld(); vi.mocked(writeNodeToGit).mockClear(); vi.mocked(getBusClient).mockClear(); });
 
-async function person(tag: string, roles: string[] = []) {
+async function person(tag: string, roles: Array<'ADMIN'> = []) {
   const suffix = generateId().slice(0, 6);
-  return db.user.create({ data: { handle: `${tag}-${suffix}`, email: `${tag}-${suffix}@example.test`, ...(roles.length ? { roles: roles as never } : {}) } });
+  return db.user.create({ data: { handle: `${tag}-${suffix}`, email: `${tag}-${suffix}@example.test`, ...(roles.length ? { roles } : {}) } });
 }
 async function rowTermsHash(grantId: string): Promise<string> {
   const g = await db.grant.findUniqueOrThrow({ where: { id: grantId } });
@@ -107,10 +109,17 @@ async function crossedErasures(eraseA: () => Promise<void>, eraseB: () => Promis
   const h2 = await holder('SELECT id FROM grants WHERE id = $1 FOR UPDATE', G2);
   const a = settle(eraseA());
   const b = settle(eraseB());
-  await waitForWaiterMatching(/issuer_user_id/, 2);
-  h2.release(); await h2.done;
-  await waitForWaiterMatching(/requested_by_user_id/, 1);
-  h1.release(); await h1.done;
+  try {
+    // These match deleteUser.ts's two grant writes by their SQL text (the issuer UPDATE sets issuer_user_id, the requester
+    // UPDATE sets requested_by_user_id); a refactor that renames or merges them fails here loudly, by design.
+    await waitForWaiterMatching(/issuer_user_id/, 2);
+    h2.release(); await h2.done;
+    await waitForWaiterMatching(/requested_by_user_id/, 1);
+  } finally {
+    // Never leave a holder open past the test: a timeout above would otherwise reject later, inside another test.
+    h2.release(); h1.release();
+    await Promise.allSettled([h1.done, h2.done]);
+  }
   return Promise.all([a, b]);
 }
 
@@ -124,8 +133,6 @@ describe('#4690 crossed erasures deadlock: the aborted erasure is re-run, not su
     const [ra, rb] = await crossedErasures(
       () => deleteUserAccount(ca.db, { targetUserId: A.id, actorUserId: A.id }),
       () => deleteUserAccount(cb.db, { targetUserId: B.id, actorUserId: B.id }), G1, G2);
-    const raw = [ra, rb].find((r) => !r.ok) as { e: Prisma.PrismaClientKnownRequestError } | undefined;
-    expect(raw ? { code: raw.e.code, sqlstate: (raw.e.meta as { code?: string } | undefined)?.code } : null).toBeNull();
     expect(ra).toEqual({ ok: true });
     expect(rb).toEqual({ ok: true });
     // One of the two ran once; the deadlock victim re-ran its transaction (a serialization retry may follow it, since it
@@ -133,6 +140,10 @@ describe('#4690 crossed erasures deadlock: the aborted erasure is re-run, not su
     const attempts = [ca.counter.transactions, cb.counter.transactions].sort((x, y) => x - y);
     expect(attempts[0]).toBe(1);
     expect(attempts[1]).toBeGreaterThanOrEqual(2);
+    expect(attempts[1]).toBeLessThanOrEqual((SERIALIZATION_RETRIES + 1) * (DEADLOCK_RETRIES + 1));
+    // The retried closure is database-only: it never reaches the outside effects this file mocks, on any attempt.
+    expect(vi.mocked(writeNodeToGit)).not.toHaveBeenCalled();
+    expect(vi.mocked(getBusClient)).not.toHaveBeenCalled();
     const users = await db.user.findMany({ where: { id: { in: [A.id, B.id] } }, select: { deletedAt: true } });
     expect(users.every((u) => u.deletedAt !== null)).toBe(true);
     const after = await grantState([G1, G2]);
