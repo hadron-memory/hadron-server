@@ -157,6 +157,7 @@ import {
   isMemoryMemberOwner,
   memoryMemberForbidden,
   resolveMemoryRefForMemberGate,
+  resolveMemoryRefConcealed,
   resolveSelfUserRefForMemberGate,
   resolveRequiredUserRef,
   resolveRequiredOrgRef,
@@ -265,22 +266,15 @@ async function resolveGranteeId(
 }
 
 /**
- * #4137 — resolve the `memoryRef` of createMemoryShare / updateMemoryShareRole.
- * A resolution miss (unknown or soft-deleted memory) is answered as the share
- * surface's uniform FORBIDDEN, the same bytes a non-principal gets for a real
- * memory, so the ref cannot probe which memories exist (cor:api:140:02).
- * A blank ref or a relative URN depends only on the input's shape, never on
- * existence, so it propagates before the gate (`BAD_USER_INPUT` /
- * `URN_NOT_QUALIFIED`, cor:api:140:01).
+ * #4137 — resolve the `memoryRef` of createMemoryShare / updateMemoryShareRole
+ * through the shared concealing resolution: an unknown, soft-deleted or ambiguous
+ * (legacy-URN) memory is answered as the share surface's uniform FORBIDDEN, the
+ * same bytes a non-principal gets for a real memory, so the ref cannot probe which
+ * memories exist (cor:api:140:02). A blank ref or relative URN is shape-only and
+ * propagates before the gate (cor:api:140:01).
  */
-async function resolveShareMemoryRef(ctx: Context, memoryRef: string): Promise<string> {
-  try {
-    return await resolveRequiredMemoryRef(ctx.db, memoryRef);
-  } catch (e) {
-    if (e instanceof GraphQLError && e.extensions?.code === 'NOT_FOUND') throw memoryShareForbidden();
-    throw e;
-  }
-}
+const resolveShareMemoryRef = (ctx: Context, memoryRef: string): Promise<string> =>
+  resolveMemoryRefConcealed(ctx, memoryRef, memoryShareForbidden);
 
 /**
  * Lock the (memory, agent) pair an attachment depends on, then re-read both

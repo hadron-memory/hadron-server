@@ -3321,12 +3321,33 @@ export async function resolveMemoryRefForMemberGate(
   ctx: Context,
   ref: string,
 ): Promise<string> {
+  return resolveMemoryRefConcealed(ctx, ref, memoryMemberForbidden);
+}
+
+/**
+ * The shared memory-ref resolution for the existence-hiding mutations
+ * (cor:api:140:02): the memory resolves BEFORE its gate, so every expected
+ * resolution refusal that depends on what exists folds into the gate's uniform
+ * FORBIDDEN, classified by TYPE (#3275, never by words in a message): an unknown or
+ * soft-deleted memory, and an ambiguous legacy URN (`Memory.legacyUrn` is
+ * non-unique by design, so one legacy ref can name two rows; #4761 section 10
+ * P2-1). A blank ref or a relative URN depends only on the input's shape, never on
+ * existence, so it propagates as `BAD_USER_INPUT` / `URN_NOT_QUALIFIED`
+ * (cor:api:140:01).
+ */
+export async function resolveMemoryRefConcealed(
+  ctx: Context,
+  ref: string,
+  forbidden: () => GraphQLError,
+): Promise<string> {
+  const chosen = ref?.trim();
+  if (!chosen) {
+    throw new GraphQLError('memoryRef is required.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
   try {
-    return await resolveRequiredMemoryRef(ctx.db, ref);
+    return (await resolveMemoryRef(ctx.db, chosen)).id;
   } catch (e) {
-    if (e instanceof GraphQLError && e.extensions?.code === 'NOT_FOUND') {
-      throw memoryMemberForbidden();
-    }
+    if (e instanceof MemoryNotFoundError || e instanceof AmbiguousLegacyUrnError) throw forbidden();
     throw e;
   }
 }
@@ -3342,12 +3363,17 @@ export async function resolveSelfUserRefForMemberGate(
   ctx: Context,
   ref: string,
 ): Promise<string> {
+  const chosen = ref?.trim();
+  if (!chosen) {
+    throw new GraphQLError('userRef is required.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
   try {
-    return await resolveRequiredUserRef(ctx.db, ref);
+    return (await resolveUserRefOrEmail(ctx.db, chosen)).id;
   } catch (e) {
-    if (e instanceof GraphQLError && e.extensions?.code === 'NOT_FOUND') {
-      throw memoryMemberForbidden();
-    }
+    // By type (#3275): an unknown user and two accounts differing only by email
+    // case both fold, or the ambiguity would tell a non-owner the user exists
+    // (#4761 section 10 P3-1). A relative URN is shape-only and propagates.
+    if (e instanceof UserNotFoundError || e instanceof AmbiguousUserRefError) throw memoryMemberForbidden();
     throw e;
   }
 }
