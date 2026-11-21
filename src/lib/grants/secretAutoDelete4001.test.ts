@@ -90,7 +90,7 @@ describe.each(ACTIONS)('#4001 finite-end database invariant for %s', (action) =>
 // The trigger has three branches (insert/changed terms, activation, unchanged-terms lifecycle update). The
 // tests above reach the insert branch and the action_values change; these pin the other two against the raw
 // database, so removing either branch (a mutant) fails here and not only in the resolver suites.
-// Historical rows predate the guard, so the fixture drops it for one transaction, exactly as the S6 migration found them.
+// Historical rows predate the guard, so the fixture disables it for one transaction, exactly as the S6 migration found them.
 async function historicalUnboundedMark(action: string): Promise<string> {
   const id = generateId();
   const { text, params } = rawGrantInsert(id, action);
@@ -135,6 +135,13 @@ describe.each(ACTIONS)('#4001 trigger update branches, isolated from grants_guar
     await expect(onlyAutoDeleteTrigger((tx) =>
       tx.$executeRaw`UPDATE grants SET action_values = action_values || '{"note": "x"}'::jsonb WHERE id = ${id}`))
       .rejects.toMatchObject(AUTO_DELETE_REFUSAL);
+    expect((await db.grant.findUniqueOrThrow({ where: { id }, select: { values: true } })).values).not.toHaveProperty('note');
+  });
+
+  it('allows activating a bounded mark (negative control for the activation branch)', async () => {
+    const id = await insertGrant(w, { action, action_values: values(action, 'delete'), max_uses: 1 });
+    await expect(onlyAutoDeleteTrigger((tx) =>
+      tx.$executeRaw`UPDATE grants SET activated_at = (clock_timestamp() AT TIME ZONE 'UTC') WHERE id = ${id}`)).resolves.toBe(1);
   });
 
   it('refuses clearing the finite end of a bounded mark (the changed-terms branch)', async () => {

@@ -66,25 +66,24 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  vi.restoreAllMocks();
   if (server) await new Promise<void>((resolve, reject) => server!.close((e) => (e ? reject(e) : resolve())));
   server = undefined;
   vi.unstubAllEnvs();
 });
 
-/** A pending mark written the way the old generic door wrote it: the limit trigger is dropped for the insert and put back. */
-async function historicalMark(terms: { maxUses: number | null; expiresInSeconds: number | null }): Promise<string> {
+/** A pending mark written the way the old generic door wrote it: the limit trigger is disabled for the insert and enabled again (the migration's own definition stays in place). */
+async function historicalMark(terms: { expiresInSeconds: number | null }): Promise<string> {
   const id = generateId();
   await db.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe('DROP TRIGGER secret_auto_delete_limit ON grants');
+    await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER secret_auto_delete_limit');
     await tx.$executeRawUnsafe(
       `INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, max_uses, expires_at, created_at, updated_at)
-       VALUES ($1, $2, $3, 'secret.reveal', $4::jsonb, 'historical mark', $5,
-         CASE WHEN $6::int IS NULL THEN NULL ELSE (clock_timestamp() AT TIME ZONE 'UTC') + make_interval(secs => $6::int) END,
+       VALUES ($1, $2, $3, 'secret.reveal', $4::jsonb, 'historical mark', NULL,
+         CASE WHEN $5::int IS NULL THEN NULL ELSE (clock_timestamp() AT TIME ZONE 'UTC') + make_interval(secs => $5::int) END,
          (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
-      id, appId, workerId, JSON.stringify({ secret: secretId, 'auto-delete': 'delete' }), terms.maxUses, terms.expiresInSeconds,
+      id, appId, workerId, JSON.stringify({ secret: secretId, 'auto-delete': 'delete' }), terms.expiresInSeconds,
     );
-    await tx.$executeRawUnsafe('CREATE TRIGGER secret_auto_delete_limit BEFORE INSERT OR UPDATE ON grants FOR EACH ROW EXECUTE FUNCTION hadron_guard_secret_auto_delete_limit()');
+    await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER secret_auto_delete_limit');
   });
   return id;
 }
@@ -121,7 +120,7 @@ const grantRow = (id: string) => db.grant.findUniqueOrThrow({ where: { id } });
 
 describe('#4635 SECRET_AUTO_DELETE_NEEDS_LIMIT over the signing HTTP transport', () => {
   it('a historical unbounded delete mark: completion answers the uniform bare 403, and nothing is written', async () => {
-    const g = await historicalMark({ maxUses: null, expiresInSeconds: null });
+    const g = await historicalMark({ expiresInSeconds: null });
     const req = await openRequest(g);
     const { cookie, body } = await readyToComplete(req.id);
     const r = await post(req.id, 'complete', body, cookie);
@@ -138,7 +137,7 @@ describe('#4635 SECRET_AUTO_DELETE_NEEDS_LIMIT over the signing HTTP transport',
   });
 
   it('negative control: the same mark with a finite end completes and activates', async () => {
-    const g = await historicalMark({ maxUses: null, expiresInSeconds: 3600 });
+    const g = await historicalMark({ expiresInSeconds: 3600 });
     const req = await openRequest(g);
     const { cookie, body } = await readyToComplete(req.id);
     const r = await post(req.id, 'complete', body, cookie);
