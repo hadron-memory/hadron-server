@@ -69,11 +69,25 @@ describe('#4140 SDL: the old names are gone', () => {
 });
 
 describe('#4140 updateMemory(ref, orgRef) and updateOrganization(ref)', () => {
+  it('#4218: the SDL documents orgRef as PK or URN on the resolved id, the transfer refusal, and the manage-scoped org miss', () => {
+    const doc = (buildSchema(typeDefs).getType('Mutation') as GraphQLObjectType).getFields().updateMemory!.description ?? '';
+    expect(doc).toMatch(/fully-qualified URN/);
+    expect(doc).toMatch(/RESOLVED organization id/);
+    expect(doc).toContain('USE_TRANSFER_MEMORY_OWNERSHIP');
+    expect(doc).toContain('transferMemoryOwnership');
+    expect(doc).toMatch(/may manage the memory, an organization that\s+does not exist answers ORGANIZATION_NOT_FOUND/);
+    expect(doc).not.toMatch(/must equal/i);
+  });
   it('ref accepts a PK and a URN; the memory\'s OWN org by URN or PK is a no-op', async () => {
     const m = await knowledge(orgA, 'mem');
     for (const ref of [m.id, m.urn]) {
       for (const orgRef of [orgA.id, orgA.urn]) {
-        expect((await M.updateMemory({}, { ref, orgRef, description: `d-${orgRef.length}` }, ctxOf(admin.id))).id).toBe(m.id);
+        // #4218: a no-op orgRef must not swallow the rest of the call: the description really round-trips.
+        const description = `d-${ref.length}-${orgRef.length}`;
+        const updated = await M.updateMemory({}, { ref, orgRef, description }, ctxOf(admin.id));
+        expect(updated.id).toBe(m.id);
+        expect(updated.description).toBe(description);
+        expect((await db.memory.findUniqueOrThrow({ where: { id: m.id } })).description).toBe(description);
       }
     }
   });

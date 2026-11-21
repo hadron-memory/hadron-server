@@ -13737,6 +13737,15 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
 
+    \`orgRef\` takes an organization's ID or fully-qualified URN and is compared on
+    the RESOLVED organization id, not on the text passed. Naming the memory's own
+    organization (by ID or URN) is a no-op. Naming any other organization answers
+    USE_TRANSFER_MEMORY_OWNERSHIP: use \`transferMemoryOwnership\` to change a
+    memory's owner. For a caller who may manage the memory, an organization that
+    does not exist answers ORGANIZATION_NOT_FOUND; any other caller gets the
+    memory's own concealed answer first. An empty string \`orgRef: ""\` also
+    answers USE_TRANSFER_MEMORY_OWNERSHIP.
+
     Spec 033 FR-026: enabling \`vectorIndexEnabled\` on an \`isEncrypted\` memory
     requires \`acknowledgeVectorInversionRisk: true\` in the same call. Without
     the flag, an \`EncryptedVectorIndexNotAcknowledgedError\` is thrown carrying
