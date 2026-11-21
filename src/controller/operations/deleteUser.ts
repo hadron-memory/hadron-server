@@ -171,10 +171,11 @@ export async function deleteUserAccount(
 }
 
 /**
- * The single SERIALIZABLE deletion transaction {@link deleteUserAccount}
- * retries. Locks the target's User row up front (`FOR UPDATE`) so two
- * concurrent deletions of the same account serialize instead of double-firing
- * the cascades, and re-checks liveness under the lock.
+ * The single SERIALIZABLE deletion transaction {@link deleteUserAccount} retries,
+ * on a serialization failure (P2034 / raw 40001) and on a deadlock (raw 40P01,
+ * #4690); each attempt re-runs this whole body. Locks the target's User row up
+ * front (`FOR UPDATE`) so two concurrent deletions of the same account serialize
+ * instead of double-firing the cascades, and re-checks liveness under the lock.
  */
 async function runDeletionTxn(
   db: PrismaClient,
