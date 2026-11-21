@@ -41,6 +41,8 @@ async function fixture() {
   const hub = await db.node.create({
     data: { memoryId: pub.id, loc: 'docs:hub', name: 'hub', nodeType: 'record', content: 'hub body' },
   });
+  // No nodeType on purpose: INCLUDE_LITERAL_NODE_TYPES (e.g. 'record') serve content as stored, so the include tag would never
+  // resolve and the include pins below would pass vacuously (blind P2-A). The positive control below proves it resolves.
   const inc = await db.node.create({
     data: { memoryId: pub.id, loc: 'docs:inc', name: 'inc', content: 'before {{> ' + `hrn:node:${orgVisible.urn}:${LOC}` + '}} after' },
   });
@@ -151,15 +153,30 @@ describe('#4139 nodeExport(ref:)', () => {
       }
     });
     it('a list-gated user (not only a userless principal) loses an edge into a memory they cannot read; a reader of both keeps it (blind P3-A)', async () => {
-      const out = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:hub'), format: 'JSON' }, f.strangerCtx);
-      expect(out.data).toContain('docs:sibling');
-      expect(out.data).not.toContain(f.orgVisible.nodeId);
+      for (const [format, full] of [['JSON', true], ['MD', true], ['MD', false]] as const) {
+        const out = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:hub'), format, full }, f.strangerCtx);
+        expect(out.data).toContain('docs:sibling');
+        expect(out.data).not.toContain(f.orgVisible.nodeId);
+        expect(out.data).not.toContain(f.orgVisible.urn);
+        expect(out.data).not.toContain('secret orgvis');
+      }
     });
-    it('an org member reads and exports BOTH memories through the shared gate, so the fail-closed helper does not deny a normal in-list reader (blind P2-C)', async () => {
+    it('an org member reads and exports BOTH memories through the shared gate (an ordinary in-list reader)', async () => {
       for (const [m, text] of [[f.pub, 'secret pub'], [f.orgVisible, 'secret orgvis']] as const) {
         expect(await Q.node({}, { ref: urn(m) }, f.ownerCtx)).not.toBeNull();
         expect((await Q.nodeExport({}, { ref: urn(m) }, f.ownerCtx)).data).toContain(text);
       }
+    });
+    // The invariant the fail-closed helper (nodeReadMemoryAllowed, resolvers.query.node.ts) rests on, stated here so a diff-only
+    // reader sees it (blind P2-C / N-1): memoryAccessFilter returns { memoryId: { in: ids } } for EVERY caller, ADMIN included,
+    // and never an unrestricted shape. So a shape that is not an in-list is not a case that exists, and failing closed on it denies nobody.
+    it('ADMIN is not denied by the fail-closed gate: an ADMIN caller exports both the PUBLIC and the org-visible memory (P2-C / N-1)', async () => {
+      for (const [m, text] of [[f.pub, 'secret pub'], [f.orgVisible, 'secret orgvis']] as const) {
+        expect((await Q.nodeExport({}, { ref: urn(m) }, f.adminCtx)).data).toContain(text);
+        expect((await Q.nodeExport({}, { ref: m.nodeId }, f.adminCtx)).data).toContain(text);
+      }
+      const withEdge = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:hub'), format: 'JSON' }, f.adminCtx);
+      expect(withEdge.data).toContain(f.orgVisible.nodeId);
     });
     it('a reader who CAN read the target memory still sees the edge', async () => {
       const out = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:hub'), format: 'JSON' }, f.ownerCtx);
@@ -174,10 +191,13 @@ describe('#4139 nodeExport(ref:)', () => {
       expect(rawControl.data).toContain('{{> ');
       const resolved = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:inc'), format: 'MD', full: false }, f[who]);
       expect(resolved.data).not.toContain('secret orgvis');
-      // full:true is the restore export: the author's own text, tag included, and still no target text.
+      // Policy (blind P3-D): full:true is the restore export, so it keeps the PUBLIC author's OWN tag, which names the target's
+      // URN and loc; node(ref:) shows the same stored text to the same caller. What must not leave is the TARGET's text.
       const raw = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:inc'), format: 'MD', full: true }, f[who]);
       expect(raw.data).not.toContain('secret orgvis');
     });
+    // UsageEvent is attributed by memoryId only (no organization column), so attribution is asserted by memory (blind P2-B).
+    // A PUBLIC memory that is not knowledge cannot exist (chk_memory_group_visibility), so the other-App PUBLIC case stands in (P3-3).
     it.each(['keyPrincipal', 'runPrincipal'] as const)('%s: the export records the same read usage event node(ref:) does (none lost, none to another memory)', async who => {
       const count = (memoryId: string) => db.usageEvent.count({ where: { memoryId } });
       const scope = { memoryId: { in: [f.pub.id, f.orgVisible.id] } };
