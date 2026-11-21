@@ -9312,8 +9312,23 @@ export const typeDefs = `#graphql
     that holds or ever held host:operate reads its own live host only (hrn:node:hadronmemory.com:specs:cor:agt:070:04); any other hostId
     answers HOST_NOT_FOUND, exactly as a host the App does not have. A host key's read is a recorded use
     (hrn:node:hadronmemory.com:specs:cor:agt:070:07). Reads only: nothing is started, stopped or changed.
+    #4260: the optional worker selector (a worker id or an exact name) narrows the rows this answer returns to the
+    workers of this host it names, for a host's per-worker re-reads — AT MOST ONE ROW: the id form is exactly one
+    (ids are unique), and the name form is at most one because a worker's name is unique per App,
+    case-insensitively (workers_app_name_uniq, a functional unique on (app_id, lower(name)) that Prisma's schema
+    cannot express — prisma/post-push.sql and migration 20260814130000); the name match itself is exact-case, so
+    a differently-cased selector selects nothing. Worker names are stored trimmed (the cast path trims a name
+    before storing it; there is no rename) and a non-empty selector is trimmed the same way, so an exact name
+    comparison always reaches a stored name. A null, empty or whitespace-only worker is treated as omitted — the
+    full host list returns. An exact id match takes precedence over a name match, so a worker whose name equals
+    another listed worker's id selects the id's row alone. A worker this host does not run — another host's, a
+    retired worker not on this host, an unknown id or name — answers the same empty workers list as an unknown
+    worker (hrn:node:hadronmemory.com:specs:cor:agt:020:08: denial and absence indistinguishable), so the
+    selector never probes the App's roster; a retired worker this host still lists keeps its row. The gates,
+    refusals, key-use recording, row semantics and sweepMode are exactly the host-wide read's; omit it and the
+    full list returns.
     """
-    hostDesiredState(appRef: String!, hostId: String!): HostDesiredState!
+    hostDesiredState(appRef: String!, hostId: String!, worker: String): HostDesiredState!
     """
     #4233 (S10 of #4229) — the recorded runs of one host's sweep, newest first: when each ran, its mode, the counts
     planned, applied, skipped and failed, and up to 50 per-worker lines with reason codes. Read by whoever reads the
