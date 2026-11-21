@@ -554,13 +554,19 @@ export const chatMutations = {
           organizationId: agent.organizationId, ownerUserId: agent.ownerUserId,
           appId: ctx.appId ?? null, userId: ctx.userId ?? null,
         };
-        const writable = await ctx.db.agentMemoryItem.findMany({
-          where: { agentId: resolvedAgentId, deletedAt: null, role: 'read-write', memory: { deletedAt: null } },
-          orderBy: { createdAt: 'asc' },
-          select: { memoryId: true, role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
-        });
-        // #3292: an item never grants a userless principal, including an AppRun, a chat target (cor:dmo:050:09).
-        targetMemoryId = !ctx.userId ? null : writable.find((m) => linkWriteTargetAdmits(tenant, m.memory, m.role))?.memoryId ?? null;
+        // #3354: a userless principal's answer is always "no target" (below), so its
+        // writable-item lookup is skipped. Behavior-preserving: same refusal, no write.
+        if (!ctx.userId) {
+          targetMemoryId = null;
+        } else {
+          const writable = await ctx.db.agentMemoryItem.findMany({
+            where: { agentId: resolvedAgentId, deletedAt: null, role: 'read-write', memory: { deletedAt: null } },
+            orderBy: { createdAt: 'asc' },
+            select: { memoryId: true, role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
+          });
+          // #3292: an item never grants a userless principal, including an AppRun, a chat target (cor:dmo:050:09).
+          targetMemoryId = writable.find((m) => linkWriteTargetAdmits(tenant, m.memory, m.role))?.memoryId ?? null;
+        }
       }
       const homeAppId = targetMemoryId
         ? (await ctx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } }))?.appId ?? null
