@@ -51,6 +51,17 @@ describe('#4335 schema.prisma does not declare the two partial indexes', () => {
     expect('@@unique( [\n externalAppId ,\n externalId ] )').toMatch(USERS_EXTERNAL_UNIQUE);
   });
 
+  // #4714 F8: the same declarations in Prisma's other spellings (named `fields:` argument, a field argument).
+  it('the patterns also match the `fields:` and field-argument spellings, and not a composite (#4714 F8)', () => {
+    expect('@@index(fields: [userId])').toMatch(MEMORIES_USER_ID_INDEX);
+    expect('@@index([userId(sort: Asc)])').toMatch(MEMORIES_USER_ID_INDEX);
+    expect('@@index(fields: [userId(sort: Desc)], map: "x")').toMatch(MEMORIES_USER_ID_INDEX);
+    expect('@@index([userId, createdAt])').not.toMatch(MEMORIES_USER_ID_INDEX);
+    expect('@@unique(fields: [externalAppId, externalId])').toMatch(USERS_EXTERNAL_UNIQUE);
+    expect('@@unique([externalAppId(sort: Asc), externalId])').toMatch(USERS_EXTERNAL_UNIQUE);
+    expect('@@unique(fields: [externalAppId, externalId, extra])').not.toMatch(USERS_EXTERNAL_UNIQUE);
+  });
+
   it('Memory declares no plain index on userId alone', () => {
     expect(model('Memory')).not.toMatch(MEMORIES_USER_ID_INDEX);
     expect(model('Memory')).toMatch(/^\s*userId\s/m);

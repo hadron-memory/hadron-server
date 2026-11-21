@@ -132,4 +132,27 @@ describe('#4337 the conversion block in prisma/stamp-key-identity-invariants.sql
       expect(await column(pg)).toEqual(before);
     });
   }, 60_000);
+
+  // #4714 F1 (Victor's FIT: a refusal in a stamp script carries HDPRF, #3770).
+  it('refuses with HDPRF and its own message when stamp_signing_keys does not exist (#4714 F1)', async () => {
+    await withPushBuiltTable('DROP TABLE stamp_signing_keys', async (pg) => {
+      await expect(pg.query(IDENTITY_SQL)).rejects.toMatchObject({
+        code: 'HDPRF',
+        message: expect.stringMatching(/stamp_signing_keys does not exist/),
+      });
+    });
+  }, 60_000);
+
+  // #4714 F2: another object on the old sequence is refused by the script, tagged, before anything is dropped.
+  it('refuses with HDPRF, changing nothing, when another object depends on the old sequence (#4714 F2)', async () => {
+    await withPushBuiltTable(`CREATE TABLE other4714 (x integer DEFAULT nextval('stamp_signing_keys_id_seq'))`, async (pg) => {
+      const before = await column(pg);
+      await expect(pg.query(IDENTITY_SQL)).rejects.toMatchObject({
+        code: 'HDPRF',
+        message: expect.stringMatching(/dependents other than stamp_signing_keys\.id/),
+      });
+      expect(await column(pg)).toEqual(before);
+      expect((await pg.query(`SELECT to_regclass('stamp_signing_keys_id_seq') IS NOT NULL AS seq`)).rows[0].seq).toBe(true);
+    });
+  }, 60_000);
 });
