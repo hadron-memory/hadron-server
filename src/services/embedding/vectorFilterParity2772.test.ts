@@ -197,6 +197,11 @@ describe('Charles survivors (#4665): the budget is measured inside the transacti
     const deep = await traced(0, () => vectorSearchNodes(db, { memoryIds: [mem], queryEmbedding: query(), limit: VECTOR_INDEX_ORDER_WINDOW + 1 }));
     expect(annSeen(deep.sql)).toBe(false);
     expect(deep.sql.some((q) => q.includes('MATERIALIZED'))).toBe(true);
+    // ...and the page it returns IS the exact ranking (Charles M9): every eligible node, nearest first (4 decoys at distance 0, then the 3 targets).
+    const ids = (await vectorSearchNodes(db, { memoryIds: [mem], queryEmbedding: query(), limit: VECTOR_INDEX_ORDER_WINDOW + 1 })).map((h) => h.nodeId);
+    expect(ids).toHaveLength(7);
+    expect(new Set(ids.slice(0, 4))).toEqual(new Set(decoys));
+    expect(new Set(ids.slice(4))).toEqual(new Set(targets));
     const shallow = await traced(0, () => vectorSearchNodes(db, { memoryIds: [mem], queryEmbedding: query(), limit: 3 }));
     expect(annSeen(shallow.sql)).toBe(true); // control: the walk still serves a page inside the horizon
   });
@@ -209,5 +214,13 @@ describe('Charles survivors (#4665): the budget is measured inside the transacti
     expect(hits.length).toBeLessThan(50);
     expect(w.stoppedEarly).toBeFalsy();
     expect(w.exhausted).toBe(true);
+  });
+  it('Charles N2/N3: the comment-thread (COMMENTS) rankings report a complete result past the cap too, nodes and chunks', async () => {
+    setVectorWindowRowsMaxForTests(50);
+    const wn: any[] = []; const wc: any[] = [];
+    await vectorSearchNodes(db, { memoryIds: [mem], queryEmbedding: query(), limit: 60, scope: 'COMMENTS', onWindow: (x) => wn.push(x) });
+    await vectorSearchChunks(db, { memoryIds: [mem], queryEmbedding: query(), limit: 60, scope: 'COMMENTS', onWindow: (x) => wc.push(x) });
+    setVectorWindowRowsMaxForTests(null);
+    for (const w of [wn[0], wc[0]]) { expect(w.stoppedEarly).toBeFalsy(); expect(w.exhausted).toBe(true); }
   });
 });
