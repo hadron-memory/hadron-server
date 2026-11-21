@@ -6789,9 +6789,8 @@ model MemoryConfig {
 /// - `validationTask`: the task that content-validation reports on matching nodes name
 ///   (src/lib/contentValidationReport.ts). Reports are advisory and never block a write.
 /// - `writers`: who may write matching nodes, on top of memory write access: `ALL` (no narrowing), `ADMIN`
-///   (the owning organization's admins and owners, and the owning user) or `OWNER`. `OWNER` is not built:
-///   every write that touches such a role is refused with ROLE_WRITERS_UNSUPPORTED
-///   (src/lib/nodeRoleWriters.ts). The level is checked against the node's state before and after the write
+///   (the owning organization's admins and owners, and the owning user) or `OWNER` (#1333: the owning party,
+///   plus an App published by the owner; see src/lib/nodeRoleWriters.ts). The level is checked against the node's state before and after the write
 ///   (hrn:node:hadronmemory.com:specs:cor:acl:010:03).
 /// - `descriptionNode` (a node that describes the role) and `validateBy` (who is meant to run the validation
 ///   task) are stored and returned by the config API. No other code reads them today.
