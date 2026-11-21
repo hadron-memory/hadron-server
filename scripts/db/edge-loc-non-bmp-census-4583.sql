@@ -68,7 +68,9 @@ SELECT count(*)                                                   AS divergent_e
          SELECT 1 FROM divergent r
           WHERE r.id <> d.id AND r.memory_id = d.memory_id AND r.source_id = d.source_id
             AND r.target_id = d.target_id AND r.name = d.name AND r.loc = r.runtime_loc)) AS twin_pairs,
-       count(*) FILTER (WHERE d.loc = d.migrated_loc AND EXISTS (
+       count(*) FILTER (WHERE (d.loc = d.migrated_loc
+                               OR (left(d.loc, length(d.migrated_loc) + 1) = d.migrated_loc || ':'
+                                   AND substr(d.loc, length(d.migrated_loc) + 2) ~ '^([2-9]|[1-9][0-9]+)$')) AND EXISTS (
          SELECT 1 FROM edges o
           WHERE o.memory_id = d.memory_id AND o.loc = d.runtime_loc
             AND (o.name IS DISTINCT FROM d.name OR o.source_id <> d.source_id OR o.target_id <> d.target_id))) AS runtime_loc_taken_by_another,
