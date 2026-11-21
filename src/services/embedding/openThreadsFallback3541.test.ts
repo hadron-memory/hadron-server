@@ -15,6 +15,12 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { postgresRetrievalProvider as provider } from '../../lib/retrieval/postgres.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { setVectorSmallScopeRowsForTests as __smallScope } from '../../services/embedding/vectors.js';
+import { beforeEach as __be, afterEach as __ae } from 'vitest';
+// #2772: these pins are about the ITERATIVE index scan; their small fixtures would otherwise be ranked exactly
+// (a scope under the small-scope bound never walks the global HNSW index, BLIND/SEC findings at b07e0311).
+__be(() => __smallScope(0));
+__ae(() => __smallScope(null));
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;

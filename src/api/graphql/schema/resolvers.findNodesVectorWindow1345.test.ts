@@ -22,6 +22,12 @@ import { embedNode } from '../../../jobs/embedNodes.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
 import { hnswEfSearchFor, setIterativeScanSupportForTests, vectorSearchChunks, vectorSearchNodes } from '../../../services/embedding/vectors.js';
 import { resolvers, type Context } from './resolvers.js';
+import { setVectorSmallScopeRowsForTests as __smallScope } from '../../../services/embedding/vectors.js';
+import { beforeEach as __be, afterEach as __ae } from 'vitest';
+// #2772: these pins are about the ITERATIVE index scan; their small fixtures would otherwise be ranked exactly
+// (a scope under the small-scope bound never walks the global HNSW index, BLIND/SEC findings at b07e0311).
+__be(() => __smallScope(0));
+__ae(() => __smallScope(null));
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),

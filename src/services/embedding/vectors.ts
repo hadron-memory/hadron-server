@@ -434,6 +434,18 @@ export const VECTOR_TX_MARGIN_MS = 5000;
 /** The widest ANN `LIMIT` the iterative loop asks for; past it the exact statement ranks the page. */
 export const VECTOR_ANN_MAX_K = 20000;
 
+let smallScopeRows = 20000;
+/**
+ * A scope whose OWN eligible vectors number at most this many is ranked EXACTLY, never through the global HNSW walk.
+ * The walk visits every tenant's vectors (the index is global; `memory_id` is filtered on visited tuples), so for a small
+ * scope its cost, and whether it finishes inside the budget, would depend on how much OTHER tenants' content sits near the
+ * query vector: an oracle the caller must not have, and a way for a small tenant's search to come back empty. The exact
+ * statement's cost is a function of the caller's own eligible rows only. Bounded by the capped count below.
+ */
+export function vectorSmallScopeRows(): number { return smallScopeRows; }
+/** Test seam: move the small-scope threshold (null restores the default). */
+export function setVectorSmallScopeRowsForTests(n: number | null): void { smallScopeRows = n ?? 20000; }
+
 /**
  * #2772 — rank under the ruling-0150 contract: NO candidate cap. The iterative index scan walks the HNSW index
  * until the filtered, access-scoped statement has `need` rows; when it ends short, an independent count of the
@@ -449,7 +461,8 @@ async function rankUnderBudget<R>(
     distinctCount: (rows: R[]) => number;
     ann: (tx: Prisma.TransactionClient, k: number) => Promise<R[]>;
     exact: (tx: Prisma.TransactionClient) => Promise<R[]>;
-    count: (tx: Prisma.TransactionClient) => Promise<number>;
+    /** The caller's own eligible vectors, counted up to `cap` (never more than `cap` rows are visited). */
+    count: (tx: Prisma.TransactionClient, cap: number) => Promise<number>;
     rawLength?: (rows: R[]) => number;
   },
 ): Promise<{ rows: R[]; exhausted: boolean; stopped: boolean }> {
@@ -465,27 +478,27 @@ async function rankUnderBudget<R>(
   };
   try {
     if (iterative) {
-      let k = Math.max(o.k0, 1);
-      let ceiling = false;
-      for (;;) {
-        // A hard ceiling on the widening: past it the exact statement decides, with no count to ask first.
-        if (k > VECTOR_ANN_MAX_K) { ceiling = true; break; }
-        const rows = await withVectorBudget(db, k, true, (tx) => o.ann(tx, k), left());
-        best = rows;
-        if (o.distinctCount(rows) >= o.need) {
-          if (o.need <= VECTOR_INDEX_ORDER_WINDOW) return { rows, exhausted: false, stopped: false };
-          // Past the index's widest horizon the order of a FULL page is the index's approximate order, which
-          // nothing in the statement can check (the count only catches a scan that ends short). Ruling 0150
-          // asks for the true page, so rank it exactly; the cost grows with the offset (see the PR's EXPLAIN).
-          best = await withVectorBudget(db, 40, false, (tx) => o.exact(tx), left());
-          return { rows: best, exhausted: o.distinctCount(best) < o.need, stopped: false };
+      // The caller's OWN eligible set, counted up to the small-scope bound (cost bounded by that bound, not by the
+      // index). A small scope never walks the global HNSW index (see vectorSmallScopeRows); a large one does.
+      const cap = vectorSmallScopeRows();
+      const eligible = await withVectorBudget(db, 40, true, (tx) => o.count(tx, cap + 1), left());
+      if (eligible > cap) {
+        let k = Math.max(o.k0, 1);
+        for (;;) {
+          // A hard ceiling on the widening: past it the exact statement decides.
+          if (k > VECTOR_ANN_MAX_K) break;
+          const rows = await withVectorBudget(db, k, true, (tx) => o.ann(tx, k), left());
+          best = rows;
+          if (o.distinctCount(rows) >= o.need) {
+            if (o.need <= VECTOR_INDEX_ORDER_WINDOW) return { rows, exhausted: false, stopped: false };
+            // Past the index's widest horizon the order of a FULL page is the index's approximate order, which
+            // nothing in the statement can check (the count only catches a scan that ends SHORT). Ruling 0150
+            // asks for the true page, so rank it exactly; the cost grows with the offset (see the PR's EXPLAIN).
+            break;
+          }
+          if (rows.length < k) break; // the walk ended short of the set: the exact statement decides
+          k *= 4;
         }
-        if (rows.length < k) break; // short: the whole set, or an index walk that ended early (checked below)
-        k *= 4;
-      }
-      if (!ceiling) {
-        const eligible = await withVectorBudget(db, 40, true, (tx) => o.count(tx), left());
-        if (best.length >= eligible) return { rows: best, exhausted: true, stopped: false };
       }
     }
     best = await withVectorBudget(db, 40, false, (tx) => o.exact(tx), left());
@@ -599,7 +612,7 @@ export async function vectorSearchNodes(
         ${eligibleFrom}
       )
       SELECT node_id, MIN(distance) AS distance FROM cand GROUP BY node_id ORDER BY distance ASC, node_id ASC LIMIT ${k}`,
-    count: async (tx) => Number((await tx.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n ${eligibleFrom}`)[0]?.n ?? 0),
+    count: async (tx, cap) => Number((await tx.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM (SELECT 1 ${eligibleFrom} LIMIT ${cap}) capped`)[0]?.n ?? 0),
   });
   const best = new Map<string, number>();
   for (const r of ranked.rows) if (!best.has(r.node_id)) best.set(r.node_id, Number(r.distance));
@@ -694,7 +707,7 @@ export async function vectorSearchChunks(
         ${eligibleFrom}
       )
       SELECT * FROM cand ORDER BY distance ASC, node_id ASC, chunk_index ASC LIMIT ${k}`,
-    count: async (tx) => Number((await tx.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n ${eligibleFrom}`)[0]?.n ?? 0),
+    count: async (tx, cap) => Number((await tx.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM (SELECT 1 ${eligibleFrom} LIMIT ${cap}) capped`)[0]?.n ?? 0),
   });
   opts.onWindow?.({ exhausted: ranked.exhausted, stoppedEarly: ranked.stopped });
   return ranked.rows.slice(0, k).map((r) => ({
