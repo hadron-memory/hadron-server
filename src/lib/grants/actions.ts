@@ -110,10 +110,10 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
       { name: 'auto-delete', type: 'secret-mark', refusesWildcard: true },
     ],
     summaryTemplate: 'Read the value of the secret {secret} of {app}, and {auto-delete}',
-    // #4162: the read is the holder's own session presenting its own client (readClientReveal.ts judges grant.workerId === the bound worker);
-    // an agent holder is refused when the client is requested (S3 does not build it; hadron-server#4434 will, as WORKER_OR_ROLE_AGENT), so the
-    // narrowest reach is the true one. A person holder reads on the passkey page, not as a worker.
-    reach: 'WORKER',
+    // #4434 (cor:sec:060:02 R5, cor:acl:140:06): a worker holder reads through its bound worker session, and an agent holder through its
+    // role agent's live workers in the client's App (readClientReveal.ts judges the reach with the shared helpers). A person holder
+    // reads on the passkey page and reaches no worker; an App holder has no reveal path (S5, #4000).
+    reach: 'WORKER_OR_ROLE_AGENT',
   },
 ];
 
