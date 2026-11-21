@@ -74,7 +74,7 @@ import type { WriteDestination } from '../../../lib/appWriteGrant.js';
 import { splitWholeNodeUrn } from '../../../lib/splitNodeUrnTolerant.js';
 import { validateLocOrThrow } from '../../../lib/validateLocOrThrow.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
-import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
+import { deriveEdgeLoc, isAuthoredLoc } from '../../../lib/edgeLoc.js';
 import {
   liveEdgeEndpointSet,
   lockEdgeEndpointMemories,
@@ -1125,6 +1125,8 @@ async function writeNodeCoreRaw(
               sourceId: writtenNode.id,
               targetId: edge.targetNodeId,
               loc: edge.loc ?? deriveEdgeLoc(writtenNode.loc, edge.name, edge.targetLoc),
+              // #2947: a loc the caller supplied is AUTHORED, even when it equals the derivation.
+              locAuthored: isAuthoredLoc(edge.loc),
               name: edge.name,
               description: edge.description,
               isRunnable: edge.isRunnable,
@@ -2513,6 +2515,7 @@ export const nodeMoveOps = {
       try {
         let relocated: MoveNodeSubtreeResult['moved'] = [];
         let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
+        let edgeUrnChanges: MoveNodeSubtreeResult['edgeUrnChanges'] = [];
         let warningsWithheld = false;
         // #3868: the plan's memory URNs, read inside the plan's RepeatableRead snapshot (cor:api:190:03, "true when answered").
         let planMemoryUrns = new Map<string, string>();
@@ -2588,6 +2591,7 @@ export const nodeMoveOps = {
             });
             relocated = result.moved;
             linkWarnings = result.linkWarnings;
+            edgeUrnChanges = result.edgeUrnChanges;
             return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: planOnly ? undefined : withEdges });
           },
           // A large subtree touches many rows; the default 5s interactive-txn
@@ -2599,7 +2603,7 @@ export const nodeMoveOps = {
           const ordered = relocated.sort((a, b) => a.previousLoc < b.previousLoc ? -1 : a.previousLoc > b.previousLoc ? 1 : 0);
           // #3579: omitted and explicit null both mean the SDL default of 100; the response is clamped to 1..1000.
           const bound = Math.max(1, Math.min(1000, Math.trunc(limit ?? 100)));
-          return { node: { ...moved, moveLinkWarnings: linkWarnings }, relocated,
+          return { node: { ...moved, moveLinkWarnings: linkWarnings, moveEdgeUrnChanges: edgeUrnChanges }, relocated,
             plan: {
               nodes: ordered.slice(0, bound).map(n => ({ id: n.id,
                 currentUrn: safeNodeUrnV2(urns.get(source.memoryId)!, n.previousLoc),
@@ -2628,7 +2632,7 @@ export const nodeMoveOps = {
             clientId: ctx.clientId ?? null,
           });
         }
-        return { node: { ...moved, moveLinkWarnings: linkWarnings }, relocated };
+        return { node: { ...moved, moveLinkWarnings: linkWarnings, moveEdgeUrnChanges: edgeUrnChanges }, relocated };
       } catch (e) {
         // Map the shared helper's typed errors (thrown from either branch) to the
         // GraphQL surface.
@@ -3995,6 +3999,8 @@ export const nodeMutations = {
               sourceId: locked.source.id,
               targetId: locked.target.id,
               loc: edgeLoc,
+              // #2947: authored iff the caller supplied the loc (even one equal to the derivation).
+              locAuthored: isAuthoredLoc(loc),
               name: name ?? null,
               description: description ?? null,
               isRunnable: isRunnable ?? null,
@@ -4143,7 +4149,8 @@ export const nodeMutations = {
           where: { id: resolvedEdgeId },
           data: {
             ...(name !== undefined ? { name: name ?? null } : {}),
-            ...(loc != null && loc !== '' ? { loc } : {}),
+            // #2947: a caller-supplied loc is authored from now on.
+            ...(isAuthoredLoc(loc) ? { loc, locAuthored: true } : {}),
             ...(description !== undefined ? { description: description ?? null } : {}),
             ...(isRunnable !== undefined ? { isRunnable: isRunnable ?? null } : {}),
             ...(condition !== undefined ? { condition: (condition ?? null) as InputJsonValue } : {}),
@@ -4906,7 +4913,7 @@ export const nodeMutations = {
           for (const r of relocations) {
             await tx.edge.update({
               where: { id: r.id },
-              data: { sourceId: r.sourceId, targetId: r.targetId, memoryId: r.memoryId, loc: r.loc },
+              data: { sourceId: r.sourceId, targetId: r.targetId, memoryId: r.memoryId, loc: r.loc, locAuthored: false }, // #2947: recomputed from the new endpoints, so derived
               select: { id: true },
             });
           }

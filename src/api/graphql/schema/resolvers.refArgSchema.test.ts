@@ -109,6 +109,21 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
 };
 
 /**
+ * #4136 (S0): the Query fields that already take refs, so the extension is exercised before any rename lands. Keyed by the
+ * bare field name and checked against `schema.getQueryType()`; the Mutation table above is checked against the Mutation
+ * type. A Query field a later slice renames (#4141's `appRuns(parentRunRef)`, S2/S3's reads) adds or changes its entry here.
+ */
+const EXPECTED_QUERY_REF_ARGS: Record<string, string[]> = {
+  node: ['ref', 'memoryRef'],
+  memory: ['ref'],
+  app: ['ref'],
+  agent: ['ref'],
+  appRun: ['ref'],
+  nodeRevisions: ['nodeRef'],
+  appRuns: ['appRef', 'orgRef'],
+};
+
+/**
  * Args that legitimately stay `<entity>Id` because they are genuine PKs or external-system labels, per
  * the convention ("output fields, DB columns, resolved locals" → `<entity>Id`). Each entry names ONE field
  * (`field.arg`), so `appId` is allowed on `updateOrgGithubApp` and still flagged anywhere else (#4357 P3-8:
@@ -130,20 +145,52 @@ const ALLOWED_ID_ARGS = new Set([
   // linkMemoryToUser.externalUserId: the external identity's label at the
   // App's IdP; the Hadron memory is named by memoryRef.
   'linkMemoryToUser.externalUserId',
+  // #4136 (S0): Query fields are keyed `Query.<field>.<arg>` so a Query field can never share a Mutation field's allowance.
+  // appRuns.parentRunId: a genuine PK-only filter (the run whose children are listed), not a ref that accepts a URN
+  // (cor:api:140:01 keeps `<entity>Id` for genuine PKs). #4141 renames it `parentRunRef` and removes this line with it.
+  'Query.appRuns.parentRunId',
 ]);
 
 /** The legacy-`Id` check, one (field, arg) at a time, against a per-field allow-list. */
 const isStrayLegacyIdArg = (field: string, arg: string, allowed: ReadonlySet<string> = ALLOWED_ID_ARGS): boolean =>
   /^(id|.*Id)$/.test(arg) && !allowed.has(`${field}.${arg}`);
 
-const mutationFields = () => {
-  const schema = buildSchema(typeDefs);
-  const mutation = schema.getType('Mutation') as GraphQLObjectType;
-  return mutation.getFields();
+type Root = 'Query' | 'Mutation';
+
+/** The fields of one root type of `schema` (the real SDL unless a fixture is passed). */
+const fieldsOf = (root: Root, sdl: string = typeDefs) => {
+  const schema = buildSchema(sdl);
+  const type = (root === 'Query' ? schema.getQueryType() : schema.getMutationType()) as GraphQLObjectType;
+  return type.getFields();
+};
+
+/** Every way `table` disagrees with the fields: a missing field, or a missing declared ref argument. Empty = agrees. */
+const refArgProblems = (root: Root, table: Record<string, string[]>, sdl: string = typeDefs): string[] => {
+  const fields = fieldsOf(root, sdl);
+  const problems: string[] = [];
+  for (const [name, expected] of Object.entries(table)) {
+    const field = fields[name];
+    if (!field) { problems.push(`${root}.${name} is missing from the SDL`); continue; }
+    const argNames = field.args.map((a) => a.name);
+    for (const want of expected) if (!argNames.includes(want)) problems.push(`${root}.${name} should declare "${want}"`);
+  }
+  return problems;
+};
+
+/** Every listed field that still declares a legacy `<entity>Id` argument not on the per-field allow-list. */
+const strayIdProblems = (root: Root, table: Record<string, string[]>, sdl: string = typeDefs, allowed: ReadonlySet<string> = ALLOWED_ID_ARGS): string[] => {
+  const fields = fieldsOf(root, sdl);
+  const offenders: string[] = [];
+  for (const name of Object.keys(table)) {
+    // A Query field's allowance key is `Query.<field>`, a Mutation's the bare field name (the table's existing keys).
+    const key = root === 'Query' ? `Query.${name}` : name;
+    for (const arg of fields[name]?.args ?? []) if (isStrayLegacyIdArg(key, arg.name, allowed)) offenders.push(`${name}.${arg.name}`);
+  }
+  return offenders;
 };
 
 describe('#789 — SDL ref-argument names match the resolvers', () => {
-  const fields = mutationFields();
+  const fields = fieldsOf('Mutation');
 
   it.each(Object.entries(EXPECTED_REF_ARGS))(
     '%s declares %s',
@@ -158,15 +205,70 @@ describe('#789 — SDL ref-argument names match the resolvers', () => {
   );
 
   it('none of them still declares a legacy <entity>Id reference arg', () => {
-    const offenders: string[] = [];
-    for (const name of Object.keys(EXPECTED_REF_ARGS)) {
-      for (const arg of fields[name]?.args ?? []) {
-        if (isStrayLegacyIdArg(name, arg.name)) offenders.push(`${name}.${arg.name}`);
-      }
-    }
     // `createApp.agentId` was exactly this — SDL saying Id while the resolver
     // read agentRef, so the mutation was unusable through the real API.
-    expect(offenders).toEqual([]);
+    expect(strayIdProblems('Mutation', EXPECTED_REF_ARGS)).toEqual([]);
+  });
+});
+
+describe('#4136 (S0) — the same guard over Query fields', () => {
+  const fields = fieldsOf('Query');
+
+  it.each(Object.entries(EXPECTED_QUERY_REF_ARGS))(
+    'Query.%s declares %s',
+    (name, expected) => {
+      const field = fields[name];
+      expect(field, `Query.${name} is missing from the SDL`).toBeDefined();
+      const argNames = field.args.map((a) => a.name);
+      for (const want of expected) {
+        expect(argNames, `Query.${name} should declare "${want}"`).toContain(want);
+      }
+    },
+  );
+
+  it('none of the listed Query fields still declares a legacy <entity>Id reference arg', () => {
+    expect(strayIdProblems('Query', EXPECTED_QUERY_REF_ARGS)).toEqual([]);
+  });
+});
+
+/** A fixture schema (never the real SDL), so the negative cases pin the CHECKER and not today's drift. */
+const FIXTURE_SDL = `
+  type Query { thing(ref: ID!, thingId: ID): String  other(otherRef: ID, filterId: ID): String  plain(limit: Int): String }
+  type Mutation { change(ref: ID!, thingId: ID): String }
+`;
+
+describe('#4136 (S0) — the checker fails where it must (fixture schema)', () => {
+  it('a Query entry naming an arg the SDL does not declare fails', () => {
+    expect(refArgProblems('Query', { thing: ['ref'] }, FIXTURE_SDL)).toEqual([]);
+    expect(refArgProblems('Query', { thing: ['ref', 'memoryRef'] }, FIXTURE_SDL)).toEqual(['Query.thing should declare "memoryRef"']);
+  });
+  it('a Query entry naming a field the SDL does not have fails', () => {
+    expect(refArgProblems('Query', { gone: ['ref'] }, FIXTURE_SDL)).toEqual(['Query.gone is missing from the SDL']);
+  });
+  it('a Query field is judged against the Query type and a Mutation field against the Mutation type, never crossed', () => {
+    expect(refArgProblems('Query', { change: ['ref'] }, FIXTURE_SDL)).toEqual(['Query.change is missing from the SDL']);
+    expect(refArgProblems('Mutation', { thing: ['ref'] }, FIXTURE_SDL)).toEqual(['Mutation.thing is missing from the SDL']);
+    expect(refArgProblems('Mutation', { change: ['ref'] }, FIXTURE_SDL)).toEqual([]);
+  });
+  it('a stray <entity>Id arg on a listed Query field is flagged, an unlisted field is not looked at', () => {
+    expect(strayIdProblems('Query', { thing: ['ref'], other: ['otherRef'] }, FIXTURE_SDL, new Set())).toEqual(['thing.thingId', 'other.filterId']);
+    expect(strayIdProblems('Query', { plain: [] }, FIXTURE_SDL, new Set())).toEqual([]);
+  });
+  it('a Query allowance is per field and keyed Query.<field>.<arg>: it neither covers another field nor a Mutation of the same name', () => {
+    expect(strayIdProblems('Query', { thing: ['ref'], other: ['otherRef'] }, FIXTURE_SDL, new Set(['Query.thing.thingId']))).toEqual(['other.filterId']);
+    // the bare Mutation-style key does not wave a Query arg through, and a Query key does not wave a Mutation arg through
+    expect(strayIdProblems('Query', { thing: ['ref'] }, FIXTURE_SDL, new Set(['thing.thingId']))).toEqual(['thing.thingId']);
+    expect(strayIdProblems('Mutation', { change: ['ref'] }, FIXTURE_SDL, new Set(['Query.change.thingId']))).toEqual(['change.thingId']);
+  });
+  it('the Mutation behavior is unchanged: a Mutation entry still fails on a missing arg and a stray Id', () => {
+    expect(refArgProblems('Mutation', { change: ['ref', 'orgRef'] }, FIXTURE_SDL)).toEqual(['Mutation.change should declare "orgRef"']);
+    expect(strayIdProblems('Mutation', { change: ['ref'] }, FIXTURE_SDL, new Set())).toEqual(['change.thingId']);
+    expect(strayIdProblems('Mutation', { change: ['ref'] }, FIXTURE_SDL, new Set(['change.thingId']))).toEqual([]);
+  });
+  it('the real appRuns.parentRunId allowance is exactly one entry and covers no other appRuns Id arg', () => {
+    expect(isStrayLegacyIdArg('Query.appRuns', 'parentRunId')).toBe(false);
+    expect(isStrayLegacyIdArg('Query.appRuns', 'orgId')).toBe(true);
+    expect(isStrayLegacyIdArg('Query.agentTasks', 'parentRunId')).toBe(true);
   });
 });
 

@@ -65,7 +65,7 @@ import type { Prisma } from '../generated/prisma/index.js';
 import { normalizeObjectType } from './enforceNodeSchema.js';
 import { recordUrnRename } from './urnAlias.js';
 import { assertNoMintedSpecRemoval } from './mintedSpecPermanence.js';
-import { safeNodeUrnV2 } from './urnEmit.js';
+import { safeEdgeUrnV2, safeNodeUrnV2 } from './urnEmit.js';
 import { UrnNotQualifiedError, UrnParseError, normalizeUrnForLookup } from './urn.js';
 import { resolveNodeRef, isConcealedNodeRefAmbiguity, type NodeRefProjection } from './entityRef/nodeRef.js';
 import { AmbiguousLegacyUrnError, NodeNotFoundError } from './entityRef/errors.js';
@@ -172,6 +172,8 @@ export interface MoveNodeSubtreeResult {
   moved: Array<{ id: string; previousLoc: string; loc: string }>;
   /** Raw relative wikilinks whose target changes identity or disappears after a cross-memory move. */
   linkWarnings: MoveLinkWarning[];
+  /** #2947: every edge whose URN this move changed (each keeps its old URN as an EDGE alias). */
+  edgeUrnChanges: EdgeUrnChange[];
 }
 
 export interface MoveLinkWarning {
@@ -666,6 +668,7 @@ export async function moveNodeSubtree(
       movedCount: subtree.length,
       moved: subtree.map(n => ({ id: n.id, previousLoc: n.loc, loc: newLocById.get(n.id)! })),
       linkWarnings: await linkWarningsAfterMove(true),
+      edgeUrnChanges: [],
     };
   }
 
@@ -718,6 +721,7 @@ export async function moveNodeSubtree(
     movedCount: subtree.length,
     moved: subtree.map((n) => ({ id: n.id, previousLoc: n.loc, loc: newLocById.get(n.id)! })),
     linkWarnings: [],
+    edgeUrnChanges: [],
   };
   const leaf = destLoc.split(':').pop()!;
   // #1328 — a rename is an authored name change. The rows are locked by now,
@@ -750,15 +754,36 @@ export async function moveNodeSubtree(
     });
   }
 
+  const carriedThreadEdgeChanges: EdgeUrnChange[] = [];
   if (carriedComments.length > 0) {
     // The threads follow (their locs are id-derived, so they cannot collide).
     const ids = carriedComments.map((c) => c.nodeId);
     await tx.node.updateMany({ where: { id: { in: ids } }, data: { memoryId: destMemoryId } });
+    // #2947 (ruling 0162, Vera's read of 2026-11-21): the thread's governed edges (a COMMENT_ANCHOR) keep their id-derived
+    // loc, but their URN names the memory, so the old URN keeps resolving through an EDGE alias like any other edge.
+    const threadEdges = await tx.edge.findMany({
+      where: { sourceId: { in: ids }, governedKind: { not: null }, memoryId: { not: destMemoryId } },
+      select: { id: true, loc: true, memoryId: true },
+    });
     await tx.edge.updateMany({ where: { sourceId: { in: ids }, governedKind: { not: null } }, data: { memoryId: destMemoryId } });
+    for (const e of threadEdges) {
+      const previousUrn = safeEdgeUrnV2(memoryUrns.get(e.memoryId) ?? memoryUrns.get(srcMemoryId)!, e.loc);
+      const urn = safeEdgeUrnV2(memoryUrns.get(destMemoryId)!, e.loc);
+      if (previousUrn === urn) continue;
+      await recordUrnRename(tx, {
+        entityType: 'EDGE', entityId: e.id,
+        oldUrn: previousUrn.slice('hrn:edge:'.length), newUrn: urn.slice('hrn:edge:'.length),
+        createdBy: editor.userId ?? editor.info ?? null,
+      });
+      carriedThreadEdgeChanges.push({ edgeId: e.id, previousUrn, urn });
+    }
   }
 
   if (!crossMemory) {
-    // Same-memory: no memoryId changes anywhere, edges left untouched (#768).
+    // Same-memory: no memoryId changes, but a DERIVED edge's loc follows its endpoints (#2947).
+    result.edgeUrnChanges = await rebaseMovedEdges(tx, {
+      movedIds, newLocById, srcMemoryId, destMemoryId, crossMemory, memoryUrns, createdBy: editor.userId ?? editor.info ?? null,
+    });
     return result;
   }
 
@@ -813,67 +838,131 @@ export async function moveNodeSubtree(
     });
   }
 
-  // Edges whose SOURCE moved follow it (Edge.memoryId denormalizes the source's
-  // memory). Re-derive the loc from the rebased source + the target's loc
-  // (rebased if the target also moved, else its current loc), and relocate the
-  // edge to the destination memory. Edges whose source did NOT move keep their
-  // memoryId (their source stayed) — they simply become cross-memory edges,
-  // gated at read time by #783.
-  const outgoing = await tx.edge.findMany({
-    // INCLUDE edges (#2040) were re-derived above and keep their id-derived loc.
-    where: { deletedAt: null, sourceId: { in: [...movedIds] }, OR: [{ governedKind: null }, { governedKind: { not: 'INCLUDE' } }] },
-  });
-  if (outgoing.length === 0) return result;
-
-  // Target locs for boundary targets (targets outside the moved set).
-  const outsideTargetIds = [
-    ...new Set(outgoing.map((e) => e.targetId).filter((id) => !movedIds.has(id))),
+  // #2947: the edge pass, shared with the same-memory path above.
+  result.edgeUrnChanges = [
+    ...carriedThreadEdgeChanges,
+    ...(await rebaseMovedEdges(tx, {
+      movedIds, newLocById, srcMemoryId, destMemoryId, crossMemory, memoryUrns, createdBy: editor.userId ?? editor.info ?? null,
+    })),
   ];
-  const outsideTargetLoc = new Map<string, string>();
-  if (outsideTargetIds.length > 0) {
-    const rows = await tx.node.findMany({
-      where: { id: { in: outsideTargetIds } },
-      select: { id: true, loc: true },
-    });
-    for (const r of rows) outsideTargetLoc.set(r.id, r.loc);
+  return result;
+}
+
+/** One edge whose URN a move changed: its old URN keeps resolving through an EDGE alias (ruling 0162). */
+export interface EdgeUrnChange {
+  edgeId: string;
+  /** `hrn:edge:<memory urn>:<loc>` before the move. */
+  previousUrn: string;
+  /** The same, after. */
+  urn: string;
+}
+
+/**
+ * #2947 (rulings 0153, 0154, 0161, 0162; cor:api:190:01, :02) — what a move does to the EDGES that touch the moved subtree,
+ * for a same-memory AND a cross-memory move.
+ *
+ *  - A DERIVED edge (`locAuthored = false`) whose source OR target moved gets its loc re-derived from the new endpoints.
+ *    A loc already held in its memory, by a live OR a soft-deleted edge, gets a numbered suffix (the unique index covers
+ *    every row); the edges park at an id-unique temp loc first, so a rebase onto the moved subtree's own old slots never
+ *    trips the unique mid-transaction.
+ *  - An AUTHORED edge keeps its loc on every move (0154). The one exception is a cross-memory move of its SOURCE, which
+ *    carries it into the destination memory (its memory atom changes): it keeps the loc, and a loc the destination already
+ *    holds gets a numbered suffix (0161). Authored edges claim their locs before derived ones do.
+ *  - A governed edge (INCLUDE, COMMENT_*) is never touched here: its loc is id-derived. (A carried thread's COMMENT_ANCHOR
+ *    gets its EDGE alias in the carried-comments step of the move, 0162.)
+ *  - A boundary edge whose only moved endpoint is its TARGET, landing in a memory other than the edge's own, is not
+ *    rebased, whether the move is cross-memory or a same-memory move inside the target's memory.
+ *  - Every edge whose URN changes keeps its old URN as an EDGE alias (0162), derived or authored.
+ *
+ * The recorded flag is the only thing that tells derived from authored; nothing is inferred from the loc at move time.
+ */
+async function rebaseMovedEdges(
+  tx: Prisma.TransactionClient,
+  a: {
+    movedIds: Set<string>;
+    newLocById: Map<string, string>;
+    srcMemoryId: string;
+    destMemoryId: string;
+    crossMemory: boolean;
+    memoryUrns: Map<string, string>;
+    createdBy: string | null;
+  },
+): Promise<EdgeUrnChange[]> {
+  const moved = [...a.movedIds];
+  const edges = await tx.edge.findMany({
+    where: { deletedAt: null, governedKind: null, OR: [{ sourceId: { in: moved } }, { targetId: { in: moved } }] },
+  });
+  if (edges.length === 0) return [];
+
+  // Current locs of the endpoints that did NOT move (the moved ones are in newLocById).
+  const outsideIds = [...new Set(edges.flatMap((e) => [e.sourceId, e.targetId]).filter((id) => !a.newLocById.has(id)))];
+  const outsideLoc = new Map<string, string>();
+  if (outsideIds.length > 0) {
+    for (const r of await tx.node.findMany({ where: { id: { in: outsideIds } }, select: { id: true, loc: true } })) outsideLoc.set(r.id, r.loc);
+  }
+  const locOf = (id: string) => a.newLocById.get(id) ?? outsideLoc.get(id);
+
+  // Memory URNs for the memories the edges live in before and after.
+  const memoryIds = new Set<string>([a.srcMemoryId, a.destMemoryId, ...edges.map((e) => e.memoryId)]);
+  const missing = [...memoryIds].filter((id) => !a.memoryUrns.has(id));
+  if (missing.length > 0) {
+    for (const m of await tx.memory.findMany({ where: { id: { in: missing } }, select: { id: true, urn: true } })) a.memoryUrns.set(m.id, m.urn);
   }
 
-  // Desired base loc per moved edge (null target loc ⇒ skip defensively).
-  const desired = outgoing.map((e) => {
-    const tgtLoc = newLocById.get(e.targetId) ?? outsideTargetLoc.get(e.targetId);
-    return {
-      id: e.id,
-      base: tgtLoc == null ? null : deriveEdgeLoc(newLocById.get(e.sourceId)!, e.name, tgtLoc),
-    };
-  });
+  type Plan = { id: string; name: string | null; oldMemoryId: string; oldLoc: string; memoryId: string; base: string; authored: boolean };
+  const plans: Plan[] = [];
+  for (const e of edges) {
+    const carried = a.crossMemory && a.movedIds.has(e.sourceId); // the edge's memory follows its source
+    const memoryId = carried ? a.destMemoryId : e.memoryId;
+    if (e.locAuthored) {
+      if (carried) plans.push({ id: e.id, name: e.name, oldMemoryId: e.memoryId, oldLoc: e.loc, memoryId, base: e.loc, authored: true });
+      continue;
+    }
+    // Ruling of 2026-11-21 (Holger, "don't rebase"): a boundary edge whose only moved endpoint is its TARGET, landing in a
+    // memory other than the edge's own, keeps its stored loc: a rebased loc would hand source-memory readers the
+    // target's new loc past the endpoint gate. Whatever the move's kind: an edge that is already cross-memory (source in
+    // A, target in B) whose target moves WITHIN B is a same-memory move and is covered too (Rook, SEC10).
+    if (!a.movedIds.has(e.sourceId) && e.memoryId !== a.destMemoryId) continue;
+    const src = locOf(e.sourceId); const tgt = locOf(e.targetId);
+    if (src == null || tgt == null) continue; // an endpoint vanished: leave the edge as it is
+    const base = deriveEdgeLoc(src, e.name, tgt);
+    if (base === e.loc && memoryId === e.memoryId) continue; // nothing about its address changed
+    plans.push({ id: e.id, name: e.name, oldMemoryId: e.memoryId, oldLoc: e.loc, memoryId, base, authored: false });
+  }
+  if (plans.length === 0) return [];
 
-  // Pre-existing destination edges that already hold a candidate loc — the exact
-  // base OR a numeric-suffixed variant (`<base>:2`, …), since the disambiguation
-  // loop below emits those. Missing the suffixed variants would let the loop pick
-  // a `<base>:2` that already exists → (loc, memoryId) unique violation (live OR
-  // tombstoned — the index is full). `startsWith <base>:` over-matches unrelated
-  // deeper locs, which is harmless (we only ever avoid taken locs). The moved
-  // edges are still in the source memory here, so they aren't matched.
-  const bases = [...new Set(desired.map((d) => d.base).filter((b): b is string => b != null))];
-  const taken = new Set<string>();
-  if (bases.length > 0) {
+  // Park, so no rebase can collide with a slot another moving edge is about to leave.
+  for (const p of plans) await tx.edge.update({ where: { id: p.id }, data: { loc: `__moving-edge-${p.id}` }, select: { id: true } });
+
+  // Slots already held in each landing memory (live OR soft-deleted): the exact base or a numbered variant of it.
+  const taken = new Map<string, Set<string>>();
+  for (const memoryId of new Set(plans.map((p) => p.memoryId))) {
+    const bases = [...new Set(plans.filter((p) => p.memoryId === memoryId).map((p) => p.base))];
     const rows = await tx.edge.findMany({
-      where: {
-        memoryId: destMemoryId,
-        OR: [{ loc: { in: bases } }, ...bases.map((b) => ({ loc: { startsWith: `${b}:` } }))],
-      },
+      where: { memoryId, OR: [{ loc: { in: bases } }, ...bases.map((b) => ({ loc: { startsWith: `${b}:` } }))] },
       select: { loc: true },
     });
-    for (const r of rows) taken.add(r.loc);
+    taken.set(memoryId, new Set(rows.map((r) => r.loc)));
   }
 
-  for (const d of desired) {
-    if (d.base == null) continue; // target vanished — leave the edge as-is
-    let loc = d.base;
-    for (let k = 2; taken.has(loc); k++) loc = `${d.base}:${k}`;
-    taken.add(loc);
-    await tx.edge.update({ where: { id: d.id }, data: { loc, memoryId: destMemoryId } });
+  const changes: EdgeUrnChange[] = [];
+  const emit = (memoryId: string, loc: string) => safeEdgeUrnV2(a.memoryUrns.get(memoryId)!, loc);
+  // Authored edges claim their locs first.
+  for (const p of [...plans].sort((x, y) => Number(y.authored) - Number(x.authored))) {
+    const held = taken.get(p.memoryId)!;
+    let loc = p.base;
+    for (let k = 2; held.has(loc); k++) loc = `${p.base}:${k}`;
+    held.add(loc);
+    await tx.edge.update({ where: { id: p.id }, data: { loc, memoryId: p.memoryId }, select: { id: true } });
+    const previousUrn = emit(p.oldMemoryId, p.oldLoc);
+    const urn = emit(p.memoryId, loc);
+    if (previousUrn === urn) continue;
+    await recordUrnRename(tx, {
+      entityType: 'EDGE', entityId: p.id,
+      oldUrn: previousUrn.slice('hrn:edge:'.length), newUrn: urn.slice('hrn:edge:'.length),
+      createdBy: a.createdBy,
+    });
+    changes.push({ edgeId: p.id, previousUrn, urn });
   }
-
-  return result;
+  return changes;
 }
