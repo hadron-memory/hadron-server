@@ -9,7 +9,7 @@ import { readTeamRecordKeys } from './lib/teamSpec/record.js';
 import * as Sentry from '@sentry/node';
 import { ApolloServer, type ApolloServerPlugin, type BaseContext } from '@apollo/server';
 import { memoryPressurePlugin } from './api/graphql/memoryPressurePlugin.js';
-import { expressMiddleware } from '@apollo/server/express4';
+import { expressMiddleware } from '@as-integrations/express4';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
@@ -1221,6 +1221,9 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     stopOnTerminationSignals: false,
     // #2087: concealed errors must not depend on the deployment's NODE_ENV.
     includeStacktraceInErrorResponses: false,
+    // #4593: Apollo 5 answers a variable-coercion error with HTTP 400 by default; 4 answered 200 with `errors`.
+    // Keep the 4 answer: flipping it is a client-visible contract change (S2 of #4521), not part of the bump.
+    status400ForVariableCoercionErrors: false,
     typeDefs,
     resolvers: deploymentResolvers,
     plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin, deliveryPendingPlugin, complexityAdmissionPlugin(admission), memoryPressurePlugin()],
