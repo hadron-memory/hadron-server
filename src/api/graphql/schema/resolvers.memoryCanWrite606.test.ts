@@ -143,20 +143,22 @@ describe('#606 query cost of memories(limit: 50)', () => {
         const m = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `cw-org:bulk-${i}`, name: `bulk-${i}`, class: 'knowledge' } });
         ids.push(m.id);
       }
-      const c = { db: logged, userId: u.contributor.id, roles: ['READER'] } as unknown as Context;
+      const fresh = () => ({ db: logged, userId: u.contributor.id, roles: ['READER'] }) as unknown as Context;
+      // A: each distinct memory once. B: every memory twice, on one fresh request context.
       n = 0;
-      const answers = await Promise.all([...ids, ...ids].map((id) => M.canWrite({ id }, {}, c)));
-      const total = n;
-      expect(answers.every(Boolean)).toBe(true);
-      // One gate run per DISTINCT memory (the 50 repeats add nothing); never 100 x the gate's queries.
-      const c2 = { db: logged, userId: u.contributor.id, roles: ['READER'] } as unknown as Context;
+      const once = await Promise.all(ids.map((id) => M.canWrite({ id }, {}, fresh())));
+      const distinctQueries = n;
       n = 0;
-      await M.canWrite({ id: ids[0] }, {}, c2);
-      const perMemory = n;
-      expect(perMemory).toBeGreaterThan(0); // the logging client really saw the gate's queries (not a vacuous 0 <= 0)
-      expect(total).toBeGreaterThan(0);
-      expect(total).toBeLessThanOrEqual(perMemory * 50);
-      expect(perMemory).toBeLessThanOrEqual(12); // absolute ceiling per distinct memory
+      const cB = fresh();
+      const twice = await Promise.all([...ids, ...ids].map((id) => M.canWrite({ id }, {}, cB)));
+      const duplicatedQueries = n;
+      expect(once.every(Boolean)).toBe(true);
+      expect(twice.every(Boolean)).toBe(true);
+      expect(distinctQueries).toBeGreaterThan(0); // the logging client really saw the gate's queries (not a vacuous 0 <= 0)
+      // Duplicates in one response add nothing: the same memory is answered once per request.
+      expect(duplicatedQueries).toBeLessThanOrEqual(distinctQueries);
+      // Absolute ceiling: a small constant number of queries per distinct memory, not growth beyond linear.
+      expect(distinctQueries).toBeLessThanOrEqual(50 * 12);
     } finally {
       await logged.$disconnect();
     }
