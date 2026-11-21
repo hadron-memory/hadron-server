@@ -64,24 +64,34 @@ export interface LockHolderRow {
   query: string | null;
 }
 
+/** What {@link describeLockHolders} read: at most {@link HOLDER_ROW_CAP} rows, and whether more existed. */
+export interface LockHolders { rows: LockHolderRow[]; truncated: boolean }
+export const HOLDER_ROW_CAP = 40;
+
 /**
  * #3272: who else holds or awaits a lock in THIS database right now, for a NOWAIT probe that just failed. Reads `pg_locks` joined
- * to `pg_stat_activity` (pid, state, wait event, lock type, relation, mode, granted, the backend's last query), for every
- * backend in this database (the capture itself holds none) that has a lock on `relation` or a transaction/advisory/tuple lock (a row lock shows as a tuple or a
- * transactionid lock, which carry no relation of their own). It reports; it decides nothing. At most 40 rows, ordered by pid.
+ * to `pg_stat_activity` (pid, state, wait event, lock type, relation, mode, granted, the backend's last query).
+ *
+ * Which rows: every backend's locks ON `relation` (the rows that name the holder of the probed table), then, after them, the
+ * transactionid, advisory and tuple locks of every backend (a row lock shows as a tuple or transactionid lock, which carries no
+ * relation of its own). The relation rows sort FIRST, so a busy database's unrelated lockers cannot push the holder out of the
+ * cap; the cap is {@link HOLDER_ROW_CAP}, and `truncated` says when more rows existed. The capture is meant to run on a SEPARATE
+ * connection, so its own backend holds none of these (the probing connection's own locks are reported like any other's).
+ * It reports; it decides nothing.
  */
 export async function describeLockHolders(
   db: Pick<PrismaClient, '$queryRaw'>,
   relation: string,
-): Promise<LockHolderRow[]> {
-  return db.$queryRaw<LockHolderRow[]>`
+): Promise<LockHolders> {
+  const rows = await db.$queryRaw<LockHolderRow[]>`
     SELECT l.pid, a.state, a.wait_event_type, a.wait_event, l.locktype, l.relation::regclass::text AS relation,
            l.mode, l.granted, left(a.query, 300) AS query
     FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
     WHERE a.datname = current_database()
       AND (l.relation = ${relation}::regclass OR l.locktype IN ('transactionid', 'advisory', 'tuple'))
-    ORDER BY l.pid, l.locktype
-    LIMIT 40`;
+    ORDER BY (l.relation = ${relation}::regclass) DESC NULLS LAST, l.pid, l.locktype
+    LIMIT ${HOLDER_ROW_CAP + 1}`;
+  return { rows: rows.slice(0, HOLDER_ROW_CAP), truncated: rows.length > HOLDER_ROW_CAP };
 }
 
 const isLockNotAvailable = (e: unknown): boolean => {
@@ -106,7 +116,8 @@ export async function withLockHolders<T>(
     if (!isLockNotAvailable(err)) throw err;
     let holders: string;
     try {
-      holders = JSON.stringify(await describeLockHolders(db, relation), null, 1);
+      const found = await describeLockHolders(db, relation);
+      holders = JSON.stringify(found.rows, null, 1) + (found.truncated ? `\n(truncated: more than ${HOLDER_ROW_CAP} rows; relation rows first)` : '');
     } catch (captureErr) {
       holders = `(capture failed: ${String((captureErr as Error)?.message ?? captureErr)})`;
     }
