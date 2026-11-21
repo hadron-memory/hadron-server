@@ -80,6 +80,7 @@ const createCode = (c: string, message: string) => new GraphQLError(message, { e
  * before any read with the holder refusal, so a holder that exists answers exactly like one that does not. The shared create core (src/lib/grants/create.ts)
  * does the writing; the GraphQL `createGrant` and MCP never reach this arm (a person's call stays the person's, S9). The row records the run
  * (`requested_by_run_id`), not the person it acts for. Cost 1, gated as `tool.hadron_create_grant`. Registered only where signing is on (resolveRunTools).
+ * FLOW AUTHORS: where signing is off the tool does not exist, so a hop whose node declares `hadron_create_grant` fails as an unknown tool when it runs (validation is per hop, not at publish).
  * Duplicate-pending is Holger's open call (cor:acl:140:01): a run that asks twice makes two pending rows.
  */
 export const hadronCreateGrant: RunToolDef = {
