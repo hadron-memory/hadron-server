@@ -7,9 +7,9 @@
 
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import {
   SPECS_MEMORY,
   escapeAnnotationData,
@@ -33,6 +33,10 @@ describe('#4586 F4 — one spelling of the memory id and the whole-citation test
   it('the refresh script uses the check script\'s constants', () => {
     expect(refresh.SPECS_MEMORY).toBe(SPECS_MEMORY);
     expect(SPECS_MEMORY).toBe('hadronmemory.com:specs');
+    // The refresh script spells neither the memory id nor the whole-citation regex itself.
+    const src = readFileSync(join(root, 'scripts/refresh-sdl-spec-citation-snapshot.mjs'), 'utf8');
+    expect(src).not.toContain("'hadronmemory.com:specs'");
+    expect(src).not.toMatch(/new RegExp\(.*SPEC_CITATION/);
   });
 });
 
@@ -66,10 +70,19 @@ describe('#4586 — range tails', () => {
     ['one digit', `${P}cor:agt:050:14–:7`],
     ['not a number', `${P}cor:agt:050:14–:ab`],
     ['a head with no rule number', `${P}cor:agt:050–:17`],
+    ['extra segments after the tail', `${P}cor:agt:050:14–:17:02`],
+    ['letters glued to the tail', `${P}cor:agt:050:14–:17abc`],
+    ['a tail with no colon (en dash)', `${P}cor:agt:050:14–17`],
+    ['a tail with no colon (hyphen)', `${P}cor:agt:050:14-17`],
+    ['a minus sign range', `${P}cor:agt:050:14−:17`],
   ])('reports an unparseable tail instead of skipping it: %s', (_n, s) => {
     const problems = findRangeTailProblems(`x\n${s}`);
     expect(problems).toHaveLength(1);
     expect(problems[0].line).toBe(2);
+  });
+  it('a tail that ends a sentence or a bracket is still read', () => {
+    expect(cites(`(${P}cor:agt:050:14–:17).`)).toEqual(['cor:agt:050:14', 'cor:agt:050:17']);
+    expect(findRangeTailProblems(`see ${P}cor:agt:050:14–:17, and`)).toEqual([]);
   });
   it('a dash that is prose, not a tail, is left alone', () => {
     expect(findRangeTailProblems(`${P}cor:agt:050:14 - see below`)).toEqual([]);
@@ -98,7 +111,7 @@ function sandbox(files: { snapshot?: string | null; baseline?: string | null } =
   put('sdl-spec-citations-baseline.txt', files.baseline, '');
   writeFileSync(join(dir, 'src/api/graphql/schema/typeDefs.ts'), '// clean\n');
   const git = (...a: string[]) => {
-    const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: dir, encoding: 'utf8' });
+    const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', ...a], { cwd: dir, encoding: 'utf8' });
     expect(r.status, `git ${a.join(' ')}: ${r.stderr}`).toBe(0);
   };
   git('init', '-q');
@@ -108,7 +121,7 @@ function sandbox(files: { snapshot?: string | null; baseline?: string | null } =
 }
 
 describe('#4586 F6 — main() failure branches', () => {
-  const check = (dir: string) => spawnSync('node', ['scripts/check-sdl-spec-citations.mjs', 'HEAD'], { cwd: dir, encoding: 'utf8' });
+  const check = (dir: string) => spawnSync(process.execPath, ['scripts/check-sdl-spec-citations.mjs', 'HEAD'], { cwd: dir, encoding: 'utf8' });
 
   it('a missing snapshot fails with an annotation naming the file', () => {
     const s = sandbox({ snapshot: null });
@@ -139,7 +152,7 @@ describe('#4586 F6 — main() failure branches', () => {
   it('an unresolvable base exits 2', () => {
     const s = sandbox();
     try {
-      const r = spawnSync('node', ['scripts/check-sdl-spec-citations.mjs', 'no-such-ref'], { cwd: s.dir, encoding: 'utf8' });
+      const r = spawnSync(process.execPath, ['scripts/check-sdl-spec-citations.mjs', 'no-such-ref'], { cwd: s.dir, encoding: 'utf8' });
       expect(r.status).toBe(2);
       expect(r.stderr).toContain('cannot diff against base "no-such-ref"');
     } finally { s.done(); }
@@ -172,7 +185,7 @@ describe('#4586 F7/N1 — the refresh script\'s messages', () => {
   it('--check passes when the snapshot matches the corpus', () => {
     const s = sandbox();
     try {
-      const r = run(s.dir, { ...process.env, PATH: `${stub(s.dir)}:${process.env.PATH}` }, '--check');
+      const r = run(s.dir, { ...process.env, PATH: `${stub(s.dir)}${delimiter}${process.env.PATH}` }, '--check');
       expect(r.status, r.stderr).toBe(0);
       expect(r.stdout).toContain('matches');
     } finally { s.done(); }
@@ -180,7 +193,7 @@ describe('#4586 F7/N1 — the refresh script\'s messages', () => {
   it('--check on a differing snapshot says it differs', () => {
     const s = sandbox({ snapshot: 'cor:agt:130:03\n' });
     try {
-      const r = run(s.dir, { ...process.env, PATH: `${stub(s.dir)}:${process.env.PATH}` }, '--check');
+      const r = run(s.dir, { ...process.env, PATH: `${stub(s.dir)}${delimiter}${process.env.PATH}` }, '--check');
       expect(r.status).toBe(1);
       expect(r.stderr).toContain('differs');
     } finally { s.done(); }
@@ -188,10 +201,19 @@ describe('#4586 F7/N1 — the refresh script\'s messages', () => {
   it('--check on a MISSING snapshot says it is missing, not that it differs', () => {
     const s = sandbox({ snapshot: null });
     try {
-      const r = run(s.dir, { ...process.env, PATH: `${stub(s.dir)}:${process.env.PATH}` }, '--check');
+      const r = run(s.dir, { ...process.env, PATH: `${stub(s.dir)}${delimiter}${process.env.PATH}` }, '--check');
       expect(r.status).toBe(1);
       expect(r.stderr).toContain('missing');
       expect(r.stderr).not.toContain('differs');
+    } finally { s.done(); }
+  });
+  it('--check on a missing snapshot says so even where the hadron CLI is absent', () => {
+    const s = sandbox({ snapshot: null });
+    try {
+      const r = run(s.dir, { ...process.env, PATH: '/nonexistent' }, '--check');
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('missing');
+      expect(r.stderr).not.toContain('`hadron` CLI');
     } finally { s.done(); }
   });
   it('a missing hadron binary gets its own message, not a stack trace', () => {
