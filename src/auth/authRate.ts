@@ -45,6 +45,10 @@ export function buildAuthRateAdmission(
 ): RequestHandler {
   return async (req, res, next) => {
     try {
+      // Holger's #419 contract includes token refresh and /auth/me in this SAME CREDENTIALS/IP budget
+      // (approved seed: 60/IP per 900s). A NAT-heavy client can exhaust interactive-login capacity;
+      // Ada #128137 accepts that rollout risk, not activation. LOG_ONLY first; policy tuning is separate.
+      // Contract and risk evidence: https://hadronmemory.com/app/u/hrn:node:hadronmemory.com:hadron-server:ops:auth-rate-admission-419
       await admitRate(db, 'CREDENTIALS', await authRateIdentity(req, db, source));
       next();
     } catch (error) {
@@ -53,6 +57,10 @@ export function buildAuthRateAdmission(
         else next(error);
         return;
       }
+      // Intentional #1793 contract (Holger comment6549880032, CHECKED6549891443): unreadable policy
+      // refuses closed classes in BOTH modes, even LOG_ONLY, without a cached mode. CREDENTIALS
+      // therefore returns RATE_LIMITED/Retry-After 900 during that outage; LOG_ONLY is no availability promise.
+      // Accepted outage semantics: https://hadronmemory.com/app/u/hrn:node:hadronmemory.com:hadron-server:ops:auth-rate-admission-419
       const retryAfterSeconds = error.extensions.retryAfterSeconds as number;
       res.set({ 'Retry-After': String(retryAfterSeconds), 'Cache-Control': 'no-store' });
       res.status(429).json({
