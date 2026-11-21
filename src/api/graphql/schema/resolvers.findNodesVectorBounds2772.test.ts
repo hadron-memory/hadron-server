@@ -128,6 +128,53 @@ describe('#2772 request-level bounds (BLIND P1)', () => {
     }
   }, 60_000);
 
+  it('a statement slower than a budget ABOVE the 5000 ms Prisma default is the early stop, never an internal error', async () => {
+    const handle = new Proxy(db, { get(t, p) {
+      const v = Reflect.get(t, p);
+      if (p !== '$transaction') return typeof v === 'function' ? v.bind(t) : v;
+      return (arg: unknown, o?: unknown) => typeof arg !== 'function' ? (t.$transaction as any)(arg, o)
+        : (t.$transaction as any)(async (tx: any) => (arg as (x: unknown) => unknown)(new Proxy(tx, { get(tt, pp) {
+            const vv = Reflect.get(tt, pp);
+            // After the real query, a 30 s statement: Postgres cancels it at statement_timeout (57014) inside the budgeted transaction.
+            if (pp === '$queryRaw') return async (s: TemplateStringsArray, ...a: unknown[]) => { const r = await (vv as any).call(tt, s, ...a); await (tt as any).$executeRawUnsafe('SELECT pg_sleep(30)'); return r; };
+            return typeof vv === 'function' ? vv.bind(tt) : vv;
+          } })), o);
+    } }) as typeof db;
+    process.env.VECTOR_SEARCH_TIMEOUT_MS = '6000';
+    const windows: any[] = [];
+    try {
+      const hits = await vectorSearchNodes(handle, { memoryIds: [mem], queryEmbedding: qvec(), limit: 5, onWindow: (w) => windows.push(w) } as any);
+      expect(hits).toEqual([]);
+    } finally { delete process.env.VECTOR_SEARCH_TIMEOUT_MS; }
+    expect(windows.at(-1)?.stoppedEarly).toBe(true);
+  }, 60_000);
+
+  it('the budget is ONE per request: each later statement is given only what the earlier ones left', async () => {
+    const timeouts: number[] = [];
+    const handle = new Proxy(db, { get(t, p) {
+      const v = Reflect.get(t, p);
+      if (p !== '$transaction') return typeof v === 'function' ? v.bind(t) : v;
+      return (arg: unknown, o?: unknown) => typeof arg !== 'function' ? (t.$transaction as any)(arg, o)
+        : (t.$transaction as any)(async (tx: any) => (arg as (x: unknown) => unknown)(new Proxy(tx, { get(tt, pp) {
+            const vv = Reflect.get(tt, pp);
+            if (pp === '$executeRawUnsafe') return (sql: string, ...a: unknown[]) => {
+              const m = /SET LOCAL statement_timeout = (\d+)/.exec(sql);
+              if (m) timeouts.push(Number(m[1]));
+              return (vv as any).call(tt, sql, ...a);
+            };
+            if (pp === '$queryRaw') return async (s: TemplateStringsArray, ...a: unknown[]) => { const r = await (vv as any).call(tt, s, ...a); await new Promise((res) => setTimeout(res, 400)); return r; };
+            return typeof vv === 'function' ? vv.bind(tt) : vv;
+          } })), o);
+    } }) as typeof db;
+    process.env.VECTOR_SEARCH_TIMEOUT_MS = '6000';
+    try {
+      await vectorSearchNodes(handle, { memoryIds: [mem], queryEmbedding: qvec(), limit: 5 });
+    } finally { delete process.env.VECTOR_SEARCH_TIMEOUT_MS; }
+    expect(timeouts.length).toBeGreaterThanOrEqual(2);
+    expect(timeouts[0]).toBeLessThanOrEqual(6000);
+    for (let i = 1; i < timeouts.length; i++) expect(timeouts[i]!).toBeLessThanOrEqual(timeouts[i - 1]! - 350);
+  }, 60_000);
+
   it('the widening has a hard ceiling', () => {
     expect(VECTOR_ANN_MAX_K).toBeGreaterThan(1000);
     expect(VECTOR_ANN_MAX_K).toBeLessThan(1_000_000);
