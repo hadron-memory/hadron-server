@@ -197,7 +197,8 @@ describe('#4178 batching', () => {
     });
     const lapsed = await grant({ agent_id: late });
     // The premise of this pin: the lapsed pair sorts after every still-installed one (ids are time-ordered).
-    expect([...stillInstalledAgents, late].sort().at(-1)).toBe(late);
+    const dbOrder = await db.$queryRaw<Array<{ agent_id: string }>>`SELECT DISTINCT agent_id FROM grants WHERE agent_id = ANY(${[...stillInstalledAgents, late]}::text[]) ORDER BY agent_id`;
+    expect(dbOrder.at(-1)?.agent_id).toBe(late); // in the database's own ordering, the one the keyset cursor uses
     const out = await sweepLapsedAgentGrants(db, { batchSize: 1, maxPages: 20 });
     expect(out.pairsJudged).toBe(4); // the cursor walked past all three installed pairs to reach the fourth
     expect(out.grantsEnded).toBe(1);
@@ -245,6 +246,33 @@ describe('#4178 resume across runs', () => {
   });
 });
 
+describe('#4178 a run that throws keeps its progress', () => {
+  it('onPage reports every committed page, so a throw on page 2 leaves the cursor of page 1 for the next run', async () => {
+    for (let i = 0; i < 2; i++) {
+      const a = await mkAgent(`fine${i}`);
+      await db.appAgent.create({ data: { appId, agentId: a } });
+      await grant({ agent_id: a });
+    }
+    let calls = 0;
+    const flaky = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === '$transaction') {
+          return (...args: unknown[]) => {
+            if (++calls === 2) return Promise.reject(new Error('page 2 failed'));
+            return (target.$transaction as (...a: unknown[]) => unknown)(...args);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as typeof db;
+    let saved = null as Awaited<ReturnType<typeof sweepLapsedAgentGrants>>['cursor'];
+    await expect(sweepLapsedAgentGrants(flaky, { batchSize: 1, maxPages: 5, onPage: (c) => { saved = c; } })).rejects.toThrow('page 2 failed');
+    expect(saved).not.toBeNull(); // page 1 committed and its resume point survived the throw
+    const next = await sweepLapsedAgentGrants(db, { batchSize: 1, maxPages: 5, after: saved });
+    expect(next.pairsJudged).toBe(1); // only the pair after page 1: it did not start over
+  });
+});
+
 describe('#4178 the loop wrapper', () => {
   it('startGrantLapseSweepLoop runs a pass after its initial delay and stamps the lapsed grant', async () => {
     await licence({ expiresAt: past() });
@@ -253,7 +281,7 @@ describe('#4178 the loop wrapper', () => {
     try {
       for (let i = 0; i < 100 && !(await departedAt(g)); i++) await new Promise((r) => setTimeout(r, 50));
       expect(await departedAt(g)).not.toBeNull();
-    } finally { clearTimeout(timer); }
+    } finally { clearTimeout(timer); } // the interval is unref'd and 1 h long: it never fires again in this process
   });
 });
 

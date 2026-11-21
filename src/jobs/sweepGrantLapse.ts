@@ -30,8 +30,9 @@ export function startGrantLapseSweepLoop(
     if (running) return;
     running = true;
     try {
-      const out = await sweepLapsedAgentGrants(db, { after: cursor });
-      cursor = out.cursor;
+      // The cursor is saved after each committed page (onPage), not when the run returns: a run that throws on a late page keeps its
+      // progress, so the next run resumes past the pages already judged instead of re-failing on the same prefix.
+      const out = await sweepLapsedAgentGrants(db, { after: cursor, onPage: (c) => { cursor = c; } });
       if (out.grantsEnded > 0) {
         console.log(`[grant-lapse-sweep] ended ${out.grantsEnded} grants across ${out.pairsDeparted} (App, agent) pairs with no installation left`);
       }

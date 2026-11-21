@@ -21,8 +21,7 @@
  * NOT covered, disclosed: (c) an App's own soft delete (its grants go with the App) and `uninstalledAt` (#4167) are out of scope and
  * excluded from the candidates; a lapse CURED between two sweeps (a licence renewed, an org restored) is not caught here, because
  * main has no write door that moves a licence's expiry forward or restores an organization (`ensureAgentOrgGrant` leaves an existing
- * row untouched, a revoke is final; no resolver or operation sets an organization's `deletedAt` back to null; checked by grep at
- * `origin/main` 5dbfa8282). An out-of-band restore (raw SQL, a support tool) that lands between a lapse and the next sweep would have its
+ * row untouched, a revoke is final; no resolver or operation sets an organization's `deletedAt` back to null; checked by grep when this was written). An out-of-band restore (raw SQL, a support tool) that lands between a lapse and the next sweep would have its
  * grants ended anyway, and the stamp is permanent: that is the cost of the gap and the reason a future door must call the sweep first. A future door that does must call {@link sweepLapsedAgentGrants} (or judge its pairs with
  * `endGrantsOfAgentsNoLongerInstalled`) BEFORE its own write. This sweeper also does not remove register rows (#4172's uninstall door
  * does): the grants are the whole of this issue. The cause code of a lapse waits on #4180 (recorded reasons).
@@ -53,7 +52,13 @@ const DEFAULT_MAX_PAGES = 80;
  */
 export async function sweepLapsedAgentGrants(
   db: PrismaClient,
-  opts: { batchSize?: number; maxPages?: number; after?: LapseSweepCursor | null } = {},
+  opts: {
+    batchSize?: number;
+    maxPages?: number;
+    after?: LapseSweepCursor | null;
+    /** Called after EVERY committed page with the resume point (null at the end), so a caller keeps its cursor even when a later page throws. */
+    onPage?: (cursor: LapseSweepCursor | null) => void;
+  } = {},
 ): Promise<LapseSweepOutcome> {
   const batchSize = opts.batchSize ?? DEFAULT_BATCH;
   const maxPages = opts.maxPages ?? DEFAULT_MAX_PAGES;
@@ -70,7 +75,7 @@ export async function sweepLapsedAgentGrants(
         AND EXISTS (SELECT 1 FROM apps ap WHERE ap.id = grants.app_id AND ap.deleted_at IS NULL AND ap.uninstalled_at IS NULL)
         ${after}
       ORDER BY grants.app_id, grants.agent_id LIMIT ${batchSize}`);
-    if (pairs.length === 0) { out.cursor = null; break; }
+    if (pairs.length === 0) { out.cursor = null; opts.onPage?.(null); break; }
     const byApp = new Map<string, string[]>();
     for (const p of pairs) byApp.set(p.app_id, [...(byApp.get(p.app_id) ?? []), p.agent_id]);
     const departed = await db.$transaction(async (tx) => {
@@ -91,6 +96,7 @@ export async function sweepLapsedAgentGrants(
     // Resume point for the NEXT run: a run that stops at its page cap leaves the cursor where it stopped, so a healthy prefix longer
     // than one run's reach cannot starve the pairs behind it; a run that reaches the end leaves null and the next one starts over.
     out.cursor = pairs.length < batchSize ? null : cursor;
+    opts.onPage?.(out.cursor);
     if (pairs.length < batchSize) break;
   }
   return out;

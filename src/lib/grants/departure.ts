@@ -29,8 +29,7 @@ const HOLDER_COLUMN: Record<GrantHolderKind, string> = { user: 'user_id', agent:
  * The first end stands (ruling 0259): an ACTIVATED grant past its own expiry or at its own count, or past its action's limits
  * (#4163, cor:acl:140:03: a used or timed-out boot-prompt grant), has already ended and is never stamped departed. Read with the
  * database clock, after the row locks. ONE fragment for every departure door, so the doors cannot drift.
- */
-/**
+ *
  * Embedded as BARE `grants` columns (`activated_at`, `expires_at`, `max_uses`, `use_count`) and `grants.action`: it is valid only in a
  * statement whose FROM is the unaliased `grants` table and where no other relation in scope has those column names (an `EXISTS`
  * subquery over another table is fine). Adding a join to such a statement needs the fragment qualified first (#4178 BLIND).
