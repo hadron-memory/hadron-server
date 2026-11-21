@@ -599,7 +599,7 @@ describe('#1003 — App members can read the App team space', () => {
     const misbound = await db.session.create({ data: {
       id: generateId(), appId: app.id, agentId: agent.id, memoryId: shared.id,
     } });
-    expect(await sessionScopedMemoryIds(db, app.id, misbound.id)).not.toContain(shared.id);
+    expect(await sessionScopedMemoryIds(db, app.id, misbound.id, {})).not.toContain(shared.id);
     expect(await getAccessibleMemoryIds({ db, appId: app.id, sessionId: misbound.id } as Context, shared.id))
       .not.toContain(shared.id);
     expect(await canReadMemory(db, { appId: app.id, sessionId: misbound.id }, shared.id)).toBe(false);
@@ -617,7 +617,7 @@ describe('#1003 — App members can read the App team space', () => {
     const workerMisbound = await db.session.create({ data: {
       id: generateId(), appId: app.id, agentId: agent.id, memoryId: workerMemory.id,
     } });
-    expect(await sessionScopedMemoryIds(db, app.id, workerMisbound.id)).not.toContain(workerMemory.id);
+    expect(await sessionScopedMemoryIds(db, app.id, workerMisbound.id, {})).not.toContain(workerMemory.id);
     expect(await canReadMemory(db, { appId: app.id, sessionId: workerMisbound.id }, workerMemory.id)).toBe(false);
   });
 

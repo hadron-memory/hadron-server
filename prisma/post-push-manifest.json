@@ -1210,6 +1210,12 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_departure_cause_fits",
+      "kind": "function",
+      "file": "grant-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_edges_governed_immutable",
       "kind": "function",
       "file": "comment-invariants.sql",
@@ -1261,6 +1267,12 @@
       "name": "hadron_end_open_signing_requests",
       "kind": "function",
       "file": "signing-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_fit_departure_cause",
+      "kind": "function",
+      "file": "grant-invariants.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
