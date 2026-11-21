@@ -42,7 +42,7 @@ describe('#3308 staged grant-name provisioning', () => {
    expect((await db.appGrant.findUniqueOrThrow({ where: { id: row.id } })).revokedAt).not.toBeNull();
   });
   it(`${wire}: the database accepts the new closed-list value`, async () => {
-   await expect(db.appGrant.create({ data: { appId: f.app.id, granteeWorkerId: f.worker.id, name: stored, grantedBy: f.holder.id } })).resolves.toMatchObject({ name: stored });
+   await expect(db.appGrant.create({ data: { appId: f.app.id, granteeWorkerId: f.worker.id, name: stored, grantedBy: f.holder.id } })).resolves.toMatchObject({ name: stored, grantedBy: f.holder.id });
   });
   for (const claim of [undefined, { kind: 'LIVE_CHAT', ref: 'client-chat:turn-1' }]) {
    it(`${wire}: worker cannot give itself a grant (${claim ? 'claimed instruction' : 'no instruction'})`, async () => {
@@ -76,24 +76,36 @@ describe('#3308 staged grant-name provisioning', () => {
  });
  it('schema-only migration upgrades the old CHECK, replays, preserves grants and creates no grants itself', async () => {
   const existing = await grant('TICKER_SUBSCRIBE_WORKERS');
+  // #3341: a REVOKED grant is preserved as it is; a migration that revived it would fail here.
+  const revokedSibling = await db.appGrant.create({ data: { appId: f.app.id, granteeWorkerId: f.worker.id, name: 'ticker.subscribe-workers', grantedBy: f.holder.id, revokedAt: new Date('2026-01-01T00:00:00Z'), revokedBy: f.holder.id } });
+  const live = await db.appGrant.findUniqueOrThrow({ where: { id: existing.id } });
+  const before = [live, revokedSibling].sort((x, y) => x.id.localeCompare(y.id));
   const sql = readFileSync(new URL('../../../../prisma/migrations/20261103160000_staff_member_grant_names/migration.sql', import.meta.url), 'utf8');
-  await db.$transaction(async tx => {
+  const sentinel = new Error('rollback sentinel');
+  const constraintDef = async () => (await db.$queryRaw<Array<{ def: string }>>`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'chk_app_grants_shape'`)[0].def;
+  const original = await constraintDef();
+  // #3341: the replay runs in one transaction that always ends in the sentinel, so its DDL is rolled back and
+  // the shared test database keeps the constraint it started with.
+  await expect(db.$transaction(async tx => {
    await tx.$executeRawUnsafe('ALTER TABLE app_grants DROP CONSTRAINT chk_app_grants_shape');
    await tx.$executeRawUnsafe("ALTER TABLE app_grants ADD CONSTRAINT chk_app_grants_shape CHECK(name IN ('ticker.subscribe-workers'))");
    for (let replay = 0; replay < 2; replay++) {
     for (const statement of sql.split(';').filter(part => part.trim())) await tx.$executeRawUnsafe(statement);
-    expect(await tx.appGrant.findMany({ where: { appId: f.app.id } })).toEqual([existing]);
+    expect((await tx.appGrant.findMany({ where: { appId: f.app.id } })).sort((x, y) => x.id.localeCompare(y.id))).toEqual(before);
    }
-   for (const [, name] of names) await tx.appGrant.create({ data: { appId: f.app.id, granteeWorkerId: f.worker.id, name } });
+   for (const [, name] of names) await tx.appGrant.create({ data: { appId: f.app.id, granteeWorkerId: f.worker.id, name, grantedBy: f.holder.id } });
    await tx.$executeRawUnsafe('SAVEPOINT invalid_name');
-   await expect(tx.appGrant.create({ data: { appId: f.app.id, granteeWorkerId: f.worker.id, name: 'unknown.grant' } })).rejects.toThrow(/chk_app_grants_shape/);
+   await expect(tx.appGrant.create({ data: { appId: f.app.id, granteeWorkerId: f.worker.id, name: 'unknown.grant', grantedBy: f.holder.id } })).rejects.toThrow(/chk_app_grants_shape/);
    await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT invalid_name');
-   expect(await tx.appGrant.count({ where: { appId: f.app.id } })).toBe(3);
-  });
+   expect(await tx.appGrant.count({ where: { appId: f.app.id } })).toBe(4);
+   throw sentinel;
+  })).rejects.toBe(sentinel);
+  expect(await constraintDef()).toBe(original);
+  expect(await db.appGrant.count({ where: { appId: f.app.id } })).toBe(2);
  });
  it('unknown names remain rejected at both the mutation and the database', async () => {
   await expect(grant('UNKNOWN_GRANT')).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
-  await expect(db.appGrant.create({ data: { appId: f.app.id, granteeWorkerId: f.worker.id, name: 'unknown.grant' } })).rejects.toThrow(/chk_app_grants_shape/);
+  await expect(db.appGrant.create({ data: { appId: f.app.id, granteeWorkerId: f.worker.id, name: 'unknown.grant', grantedBy: f.holder.id } })).rejects.toThrow(/chk_app_grants_shape/);
   expect(await db.appGrant.count({ where: { appId: f.app.id } })).toBe(0);
  });
  it('the existing ticker grant remains supported', async () => {
