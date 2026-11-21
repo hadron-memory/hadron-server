@@ -50,6 +50,7 @@ done
 # `1`, `TRUE`) keeps the default stack byte-identical. Only the worker is switched: DISABLE_SCHEDULER stays `true` in compose.yaml.
 E2E_DISABLE_RUN_WORKER=true
 [[ "${E2E_RUN_WORKER:-}" != true ]] || E2E_DISABLE_RUN_WORKER=false
+[[ -z "${E2E_RUN_WORKER:-}" || "$E2E_RUN_WORKER" == true ]] || echo "warning: E2E_RUN_WORKER is not exactly 'true'; the run worker stays off" >&2
 export E2E_DISABLE_RUN_WORKER
 compose() {
   local env_args=()

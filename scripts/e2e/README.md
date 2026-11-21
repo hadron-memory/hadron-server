@@ -100,7 +100,7 @@ and the write is authorized by the App's write grant on the `runs` prefix, not b
 | `hrn:node:<org>:flows:flows:script-write` | run `COMPLETED`, node `runs:script-write-result` present in `<org>:flows` |
 | `hrn:node:<org>:flows:flows:script-refused` | run `FAILED` with `TOOL_FAILED` (`no write access to this memory`), nothing written under `denied:` |
 
-With no bus the sweep executes pending runs every 60 seconds, so allow up to a minute after `triggerAppRun`.
+With no bus the sweep executes pending runs every 60 seconds, so allow about a minute plus the run itself after `triggerAppRun`.
 With the flag unset the same trigger leaves the run `PENDING` and nothing is written. `src/test/e2eScriptFlow.test.ts`
 runs these two flows through the real executor.
 

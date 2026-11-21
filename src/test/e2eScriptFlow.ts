@@ -28,9 +28,10 @@ export async function seedE2eScriptFlow(db: PrismaClient, o: {
 }): Promise<{ memoryId: string }> {
   const memoryId = o.id(`${o.org}:flows`);
   await db.memory.create({ data: { id: memoryId, organizationId: o.organizationId, urn: e2eFlowsMemoryUrn(o.org),
+    // The agent holds only the lesser 'read' role here: the write below rides the App write grant ALONE (the tests prove it).
     // PUBLIC gives the userless run its reads (#3278); writes still need the App grant below. Synthetic content only.
     name: `${o.org} flows`, class: 'knowledge', visibility: 'PUBLIC', tags: ['e2e'] } });
-  await db.agentMemoryItem.create({ data: { id: o.id(`${o.org}:flows:item`), agentId: o.agentId, memoryId, role: 'read-write' } });
+  await db.agentMemoryItem.create({ data: { id: o.id(`${o.org}:flows:item`), agentId: o.agentId, memoryId, role: 'read' } });
   const node = (loc: string, extra: Record<string, unknown> = {}) => db.node.create({ data: { id: o.id(`${o.org}:flows:${loc}`),
     memoryId, loc, name: loc.split(':').pop()!, tags: ['e2e'], ...extra } as never });
   // The register node a write grant cites as its authority (cor:acl, the grant's own record).

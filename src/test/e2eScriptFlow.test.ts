@@ -1,7 +1,7 @@
 /**
  * #4624: the E2E script-node fixture (src/test/e2eScriptFlow.ts, which scripts/e2e/seed.ts calls) run through the real run
- * path: triggerAppRun as the org admin, then the production executor with the production deps. No model seam is stubbed;
- * the stack has no AI config, so a model call would fail the run (the control below).
+ * path: triggerAppRun as the org admin, then the production executor with the production deps. The bus and git mirror seams are
+ * mocked, but the model path is not: the stack has no AI config, so a model call would fail the run, and `tokensSpent` is 0.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -49,6 +49,14 @@ describe('#4624 script-node fixture on the production run path', () => {
     const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
     expect(after.status).toBe('COMPLETED');
     expect(after.tokensSpent).toBe(0);
+    expect((await written(E2E_SCRIPT_WRITE_RESULT))?.content).toContain('script-node fixture');
+  });
+
+  it('sufficiency: the agent holds only the lesser role \'read\' on the memory and the write still completes', async () => {
+    // The App write grant authorizes the write; the agent's memory role only grants visibility (#4624 review F1).
+    expect(await db.agentMemoryItem.findMany({ where: { agentId: coordinatorId, memoryId: flowsMemoryId } })).toMatchObject([{ role: 'read' }]);
+    const run = await trigger(E2E_SCRIPT_WRITE_ENTRY);
+    expect(await executeAppRun(db, run.id, makeProdRunDeps(db))).toBe('completed');
     expect((await written(E2E_SCRIPT_WRITE_RESULT))?.content).toContain('script-node fixture');
   });
 

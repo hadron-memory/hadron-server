@@ -187,7 +187,7 @@ async function check() {
       assert(e2eFlowNodeUrn(org, entry).endsWith(`:${entry}`));
     }
     const grants = await db.appMemoryWriteGrant.findMany({ where: { appId: id(`${org}:team`), revokedAt: null } });
-    assert.deepEqual(grants.map(g => g.prefix), [E2E_SCRIPT_GRANT_PREFIX]);
+    assert.deepEqual(grants.map(g => g.prefix).sort(), [E2E_SCRIPT_GRANT_PREFIX]);
   }
   for (const cls of ['personal', 'private']) {
     const memory = await db.memory.findUniqueOrThrow({ where: { id: id(`personal-owner:${cls}`) } });
