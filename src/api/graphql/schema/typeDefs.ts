@@ -16559,6 +16559,8 @@ export const typeDefs = `#graphql
     title: String!
     "The task's handle, e.g. AT3.405: an alias for the id, printed first in the nudge (hrn:node:hadronmemory.com:specs:cor:agt:050:01)."
     handle: String!
+    "#4431 — for ANSWERED, the code of the question that was answered (e.g. QA3), for the nudge: a question this task asked was answered: <code>. Never the answer. Null for every other event (hrn:node:hadronmemory.com:specs:cor:agt:050:11)."
+    questionCode: String
     "A stable label for the reason, e.g. TASK:<id>:assigned."
     ref: String!
   }

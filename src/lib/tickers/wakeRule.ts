@@ -57,6 +57,8 @@ export type TaskWakeReason = {
   title: string;
   /** #2553: the task's handle, printed first in the nudge. */
   handle: string;
+  /** #4431: for ANSWERED, the code of the question answered, named by the nudge (cor:agt:050:34 draft). Never the answer. */
+  questionCode?: string;
 };
 
 /**
@@ -195,7 +197,7 @@ export function workerWake(args: {
   }
 
   for (const t of args.tasks ?? []) {
-    reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title, handle: t.handle });
+    reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title, handle: t.handle, ...(t.questionCode !== undefined ? { questionCode: t.questionCode } : {}) });
     if (t.atMs !== undefined) anchors.push(t.atMs);
   }
 

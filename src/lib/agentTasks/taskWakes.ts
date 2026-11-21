@@ -57,6 +57,8 @@ export type PendingTaskWake = {
   /** #2553: the task's handle (`AT3.405`), printed first in the nudge. */
   handle: string;
   at: Date;
+  /** #4431: for ANSWERED, the code of the question answered (from the event; never the answer). Absent otherwise. */
+  questionCode?: string | null;
   /** S7 (R90): the held count the assignment raise stored on the event (assigned events only). */
 };
 
@@ -209,8 +211,9 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
     // task's CURRENT assignee (so a task reassigned before the answer wakes its new one), until delivered or that worker
     // acts on the task since. Only an answer: a take-back (question.answer-retracted) is history and wakes nobody. Each
     // answer is its own event, so a re-answer wakes again. The nudge names the task; the event carries no answer.
-    db.$queryRaw<Row[]>(Prisma.sql`
-      SELECT t.assignee_worker_id AS "workerId", t.id AS "taskId", e.id AS "eventId", e.type, t.title, t.handle, e.created_at AS at
+    db.$queryRaw<(Row & { questionCode: string | null })[]>(Prisma.sql`
+      SELECT t.assignee_worker_id AS "workerId", t.id AS "taskId", e.id AS "eventId", e.type, t.title, t.handle, e.created_at AS at,
+             e.payload ->> 'code' AS "questionCode"
       FROM agent_team_events e
       JOIN agent_tasks t ON t.id = e.task_id AND t.app_id = e.app_id
       JOIN workers w ON w.id = t.assignee_worker_id AND w.app_id = t.app_id

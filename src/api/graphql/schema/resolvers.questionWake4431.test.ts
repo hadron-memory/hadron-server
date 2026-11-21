@@ -270,6 +270,7 @@ describe('#4431 §3: the answer wakes the task\'s current assignee', () => {
     await answer(q.row.id, q.row.revSeq);
     const [e] = await questionEvents(t.id);
     expect(await wakesOf(asker.id)).toEqual([{ taskId: t.id, eventId: e!.id, event: 'ANSWERED' }]);
+    expect((await pendingTaskWakes(db, [asker.id], new Date(Date.now() + MIN))).get(asker.id)?.[0]?.questionCode).toBe(D.code(q, {}, as(holder.id)));
     await db.workerDeliveryTaskEvent.create({ data: { workerId: asker.id, eventId: e!.id, chainIndex: 0, deliveredAt: new Date() } });
     expect(await wakesOf(asker.id)).toEqual([]);
   });
@@ -314,7 +315,9 @@ describe('#4431 §3: the answer wakes the task\'s current assignee', () => {
     const page = await read();
     const wake = page.wakes.find((w: any) => w.worker.id === asker.id);
     const reason = wake?.reasons.find((r: any) => r.kind === 'TASK');
-    expect(reason?.task).toMatchObject({ event: 'ANSWERED', id: t.id, handle: t.handle, ref: `TASK:${t.id}:answered` });
+    // Dara's P2 on #4644: the nudge names the question's code (draft cor:agt:050:34: "the task and the question's code").
+    expect(reason?.task).toMatchObject({ event: 'ANSWERED', id: t.id, handle: t.handle, questionCode: D.code(q, {}, as(holder.id)), ref: `TASK:${t.id}:answered` });
+    expect(JSON.stringify(reason)).not.toContain('pg');
     await M.acknowledgeWakes(null, { proofs: [wake.proof] }, as(admin.id));
     const again = await read();
     expect((again.wakes.find((w: any) => w.worker.id === asker.id)?.reasons ?? []).filter((r: any) => r.kind === 'TASK')).toEqual([]);
