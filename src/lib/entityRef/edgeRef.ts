@@ -25,8 +25,8 @@
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
-import { parseUrnInput, assertFullyQualifiedUrn } from '../urn.js';
-import { findMemoryByAliasedUrn } from '../urnAlias.js';
+import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
+import { findLiveUrnAliasTargets, findMemoryByAliasedUrn } from '../urnAlias.js';
 import { EdgeNotFoundError } from './errors.js';
 
 export async function resolveEdgeRef(
@@ -121,15 +121,25 @@ export async function resolveEdgeRef(
       },
       { includeDeleted: options?.includeDeleted },
     ));
-  if (!memory || (!options?.includeDeleted && memory.deletedAt)) {
-    throw new EdgeNotFoundError(ref);
-  }
+  // #2947 (ruling 0162): an edge whose URN a move changed keeps its old URN as an EDGE alias. A LIVE edge at the URN
+  // always wins; the alias is consulted only on a miss, and the live edge it names is re-queried under the same liveness
+  // filter, so an alias neither resurrects a dead edge nor adds a path around the caller's own access gate (the edge read
+  // gates on the edge's memory exactly as for the new loc). More than one live claimant is no answer.
+  const viaAlias = async (): Promise<{ id: string }> => {
+    const rows = await findLiveUrnAliasTargets(db, 'EDGE', normalizeUrnForLookup(normalized), (ids) =>
+      db.edge.findMany({
+        where: { id: { in: ids }, ...(options?.includeDeleted ? {} : { deletedAt: null, memory: { deletedAt: null } }) },
+        select: { id: true },
+      }),
+    );
+    if (rows.length !== 1) throw new EdgeNotFoundError(ref);
+    return { id: rows[0]!.id };
+  };
+  if (!memory || (!options?.includeDeleted && memory.deletedAt)) return viaAlias();
   const edge = await db.edge.findUnique({
     where: { loc_memoryId: { loc, memoryId: memory.id } },
     select: { id: true, deletedAt: true },
   });
-  if (!edge || (!options?.includeDeleted && edge.deletedAt)) {
-    throw new EdgeNotFoundError(ref);
-  }
+  if (!edge || (!options?.includeDeleted && edge.deletedAt)) return viaAlias();
   return { id: edge.id };
 }

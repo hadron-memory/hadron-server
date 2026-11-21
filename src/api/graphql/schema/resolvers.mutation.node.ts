@@ -2533,6 +2533,7 @@ export const nodeMoveOps = {
       try {
         let relocated: MoveNodeSubtreeResult['moved'] = [];
         let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
+        let edgeUrnChanges: MoveNodeSubtreeResult['edgeUrnChanges'] = [];
         let warningsWithheld = false;
         // #3868: the plan's memory URNs, read inside the plan's RepeatableRead snapshot (cor:api:190:03, "true when answered").
         let planMemoryUrns = new Map<string, string>();
@@ -2608,6 +2609,7 @@ export const nodeMoveOps = {
             });
             relocated = result.moved;
             linkWarnings = result.linkWarnings;
+            edgeUrnChanges = result.edgeUrnChanges;
             return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: planOnly ? undefined : withEdges });
           },
           // A large subtree touches many rows; the default 5s interactive-txn
@@ -2619,7 +2621,7 @@ export const nodeMoveOps = {
           const ordered = relocated.sort((a, b) => a.previousLoc < b.previousLoc ? -1 : a.previousLoc > b.previousLoc ? 1 : 0);
           // #3579: omitted and explicit null both mean the SDL default of 100; the response is clamped to 1..1000.
           const bound = Math.max(1, Math.min(1000, Math.trunc(limit ?? 100)));
-          return { node: { ...moved, moveLinkWarnings: linkWarnings }, relocated,
+          return { node: { ...moved, moveLinkWarnings: linkWarnings, moveEdgeUrnChanges: edgeUrnChanges }, relocated,
             plan: {
               nodes: ordered.slice(0, bound).map(n => ({ id: n.id,
                 currentUrn: safeNodeUrnV2(urns.get(source.memoryId)!, n.previousLoc),
@@ -2648,7 +2650,7 @@ export const nodeMoveOps = {
             clientId: ctx.clientId ?? null,
           });
         }
-        return { node: { ...moved, moveLinkWarnings: linkWarnings }, relocated };
+        return { node: { ...moved, moveLinkWarnings: linkWarnings, moveEdgeUrnChanges: edgeUrnChanges }, relocated };
       } catch (e) {
         // Map the shared helper's typed errors (thrown from either branch) to the
         // GraphQL surface.

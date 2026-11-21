@@ -90,12 +90,15 @@ describe('#2947 derived locs rebase on a move (ask 1)', () => {
   });
 
   it('a rebase onto a slot already held by a live or soft-deleted edge succeeds with a numbered suffix', async () => {
-    const a = await node(mem.id, 'a'); const c = await node(mem.id, 'c'); const z = await node(mem.id, 'z');
+    const a = await node(mem.id, 'a'); const c = await node(mem.id, 'c'); const q = await node(mem.id, 'q');
     const e = await link(a, c, 'uses');
-    const old = await link(z, c, 'uses');                 // z:uses:c, soft-deleted below
-    await db.edge.update({ where: { id: old.id }, data: { deletedAt: new Date() } });
+    // An unrelated edge row holds the slot the rebase wants (`z:uses:c`), live in one run and soft-deleted in the other.
+    for (const [i, deletedAt] of [new Date(), null].entries()) {
+      const holder = await db.edge.create({ data: { id: generateId(), memoryId: mem.id, sourceId: q.id, targetId: c.id, loc: i === 0 ? 'z:uses:c' : 'z:uses:c:2', name: 'held', deletedAt } });
+      void holder;
+    }
     await move(a, 'z');
-    expect((await edgeNow(e.id)).loc).toBe('z:uses:c:2');
+    expect((await edgeNow(e.id)).loc).toBe('z:uses:c:3');
   });
 
   it('a rebase onto the moved subtree\'s own old slots works (no mid-transaction unique trip)', async () => {
@@ -134,6 +137,15 @@ describe('#2947 the old edge URN keeps resolving (ask 2, ruling 0162)', () => {
     expect(now.loc).toBe('a2:uses:c');
     expect(await resolveEdgeRef(db, edgeUrn(mem, 'a:uses:c'))).toEqual({ id: e.id });
     expect(await resolveEdgeRef(db, edgeUrn(other, 'a2:uses:c'))).toEqual({ id: e.id });
+  });
+
+  it('the old URN of an edge carried out of a memory still resolves after that memory is gone', async () => {
+    const a = await node(mem.id, 'a'); const c = await node(mem.id, 'c');
+    const e = await link(a, c, 'uses');
+    await move(a, 'a2', mem, other);
+    await db.memory.update({ where: { id: mem.id }, data: { deletedAt: new Date() } });
+    // The old memory no longer resolves, so only the EDGE alias can answer; the edge it names is live in the new memory.
+    expect(await resolveEdgeRef(db, edgeUrn(mem, 'a:uses:c'))).toEqual({ id: e.id });
   });
 
   it('a soft-deleted edge is not resurrected by its alias', async () => {
