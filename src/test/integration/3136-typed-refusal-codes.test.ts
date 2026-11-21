@@ -123,12 +123,13 @@ describe('#3136 — swept refusals are typed on the wire', () => {
     expect(err.extensions?.memoryId).toBe(memoryId);
   });
 
-  it('createChannel with an invalid loc refuses with the InvalidLocError code its nine siblings deliver', async () => {
+  it('createChannel with an invalid loc refuses with the one BAD_USER_INPUT answer its nine siblings deliver (#4461)', async () => {
     const err = await graphqlError(
       `mutation($input: CreateChannelInput!) { createChannel(input: $input) { id } }`,
       { input: { memoryRef: memoryId, loc: 'bad!loc', name: 'x' } },
     );
-    expect(err.extensions?.code).toBe('InvalidLocError');
-    expect(err.extensions?.loc).toBe('bad!loc');
+    expect(err.extensions?.code).toBe('BAD_USER_INPUT');
+    expect(err.extensions?.field).toBe('loc');
+    expect(JSON.stringify(err)).not.toContain('bad!loc'); // #4461: never echoed
   });
 });

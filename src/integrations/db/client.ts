@@ -30,7 +30,7 @@ const datasourceUrl = poolDatasourceUrl(process.env.DATABASE_URL, process.env);
  */
 const basePrisma = new PrismaClient({
   ...(datasourceUrl === undefined ? {} : { datasourceUrl }),
-  omit: { secretVersion: { valueEncrypted: true } },
+  omit: { secretVersion: { valueEncrypted: true }, secretChangeRequest: { stagedValueEncrypted: true } },
 });
 
 type NodeData = Record<string, unknown>;

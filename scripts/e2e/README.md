@@ -73,8 +73,36 @@ answering` unless a later probe succeeds. Only the disposable instance is touche
 
 The first slice includes server and DB. Run a local portal as described below;
 MinIO, NATS, external-provider mocks, git-source fixtures and automated browser
-suites are not part of this slice. Mail, LLM spend and headless workers are off.
+suites are not part of this slice. Mail and LLM spend are off, and so are the headless workers unless you opt in (see
+"Run worker and the script-node fixture" below).
 No CI wiring or production snapshots are used.
+
+## Run worker and the script-node fixture
+
+By default no AppRun executes on a stack (`DISABLE_RUN_WORKER` and `DISABLE_SCHEDULER` are `true`): a triggered run stays
+`PENDING`. To exercise the run path, start a FRESH stack with the worker on:
+
+```bash
+E2E_RUN_WORKER=true ./scripts/e2e/stack.sh up <worker> <api-port> <portal-port>
+```
+
+Only the exact value `true` counts; every other value leaves the default. It switches the run worker only: the scheduler
+stays off, so no schedule fires and cadence is out of scope. The stack still holds no LLM key, mail or tool URL, so an LLM
+node fails for want of an AI config instead of spending. The flag applies from first boot, like the passkey switches.
+
+Each org seeds a synthetic `<org>:flows` memory with two entry flows. A script node makes one run-tool call with no model hop
+(`hadron_create_node`, an in-process write), so these run without any AI config. Both run through the product's own path:
+`triggerAppRun` as an org admin (name the agent, e.g. the coordinator: the App has two) resolves the principal and consent,
+and the write is authorized by the App's write grant on the `runs` prefix, not by the fixture.
+
+| Entry node | Expected after the run |
+| --- | --- |
+| `hrn:node:<org>:flows:flows:script-write` | run `COMPLETED`, node `runs:script-write-result` present in `<org>:flows` |
+| `hrn:node:<org>:flows:flows:script-refused` | run `FAILED` with `TOOL_FAILED` (`no write access to this memory`), nothing written under `denied:` |
+
+With no bus the sweep executes pending runs every 60 seconds, so allow about a minute plus the run itself after `triggerAppRun`.
+With the flag unset the same trigger leaves the run `PENDING` and nothing is written. `src/test/e2eScriptFlow.test.ts`
+runs these two flows through the real executor.
 
 ## Fixture inventory
 

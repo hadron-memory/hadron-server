@@ -25,14 +25,17 @@
  */
 
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
-import { appManagerUserIds } from '../auth/appManagement.js';
 import { generateId } from '../id.js';
 import { loadLastEventBySession, recentlyTouchedFilter, sessionActivityAt, toNaiveUtc } from '../sessionActivity.js';
 import { loadWorkerCheckStatuses, type WorkerCheckStatus } from '../workerCheckStatus.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { computeDueWakes } from '../tickers/dueWakes.js';
 import type { AlarmChain } from './events.js';
-import { isSerializationFailure } from './stall.js';
+import { darkAlarmChain } from './alarmChain.js';
+import { isSerializationFailure } from './serializationFailure.js';
+
+// #3539: `darkAlarmChain` moved to a leaf so postLimit does not reach this module; the old name stays exported from here.
+export { darkAlarmChain };
 
 export const DARK_WORKER_EVENT_TYPE = 'alarm.dark-worker';
 export type DarkReason = 'overdue' | 'wake-unacked';
@@ -137,29 +140,6 @@ async function unackedWakeAges(db: PrismaClient, app: { id: string; organization
     if (!page.nextAfter) return out;
     after = page.nextAfter;
   }
-}
-
-/** The live same-App reporting line, nearest first; only an empty line falls back to App managers (cor:agt:050:18/:26, #3358). */
-export async function darkAlarmChain(db: Prisma.TransactionClient | PrismaClient, app: { id: string; organizationId: string | null; ownerUserId: string | null }, workerId: string): Promise<AlarmChain> {
-  const rows = await db.$queryRaw<{ id: string }[]>`
-    WITH RECURSIVE up AS (
-      SELECT w.reports_to_worker_id AS id, 1 AS depth FROM workers w WHERE w.id = ${workerId} AND w.reports_to_worker_id IS NOT NULL
-      UNION ALL
-      SELECT w.reports_to_worker_id, up.depth + 1 FROM workers w JOIN up ON w.id = up.id
-      WHERE w.reports_to_worker_id IS NOT NULL AND up.depth < 64
-    )
-    SELECT up.id FROM up JOIN workers h ON h.id = up.id AND h.app_id = ${app.id} AND h.retired_at IS NULL ORDER BY up.depth`;
-  const chain: AlarmChain = [];
-  const seen = new Set<string>([workerId]);
-  for (const r of rows) {
-    if (seen.has(r.id)) continue;
-    seen.add(r.id);
-    chain.push({ workerId: r.id });
-  }
-  if (chain.length === 0) {
-    for (const userId of await appManagerUserIds(db, app)) chain.push({ userId, via: 'manager' });
-  }
-  return chain;
 }
 
 const partyJson = (p: AlarmChain[number]): Prisma.InputJsonObject =>

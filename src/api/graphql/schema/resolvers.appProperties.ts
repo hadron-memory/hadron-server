@@ -20,19 +20,13 @@ import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { requireOwnerOrOrgRole, type Context } from './resolvers.helpers.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
-import { actorManagesApp, recordInstructedManagerAct, resolveParticipatedApp, resolveTaskWorkerId, taskError, withInstruction } from './resolvers.agentTask.js';
+import { actorManagesApp, recordInstructedManagerAct, resolveParticipatedApp, taskError, withInstruction } from './resolvers.agentTask.js';
 import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { writeInApp } from './resolvers.ticker.js';
 import { appendAppPropertiesChangedEvent, eventActor } from '../../../lib/agentTasks/events.js';
-import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
-import { canonicalJson } from '../../../lib/agentTasks/properties.js';
 import {
-  APP_PROPERTIES_MAX_BYTES,
-  TASK_INTEGRATIONS_KEY,
   changedTopLevelKeys,
   checkAppPropertiesShape,
-  normalizeTaskIntegrations,
-  projectAppProperties,
 } from '../../../lib/appProperties.js';
 
 type AppPropertiesRow = {
@@ -74,18 +68,11 @@ async function storedProperties(ctx: Context, a: AppPropertiesRow): Promise<{ pr
   return { properties: row?.properties ?? null, propertiesRevision: row?.propertiesRevision ?? 0 };
 }
 
-async function leadUrns(ctx: Context, workerIds: string[]): Promise<Map<string, string>> {
-  const rows = await ctx.db.worker.findMany({
-    where: { id: { in: workerIds } },
-    select: { id: true, slug: true, app: { select: { urn: true } } },
-  });
-  return new Map(rows.map((w) => [w.id, composeWorkerUrn(w.app.urn, w.slug)]));
-}
-
 export const appPropertiesTypeResolvers = {
   properties: async (a: AppPropertiesRow, _: unknown, ctx: Context) => {
     if (!(await mayReadProperties(ctx, a))) return null;
-    return projectAppProperties((await storedProperties(ctx, a)).properties, (ids) => leadUrns(ctx, ids));
+    const { properties } = await storedProperties(ctx, a);
+    return properties !== null && typeof properties === 'object' && !Array.isArray(properties) ? properties : null;
   },
   propertiesRevision: async (a: AppPropertiesRow, _: unknown, ctx: Context) => {
     if (!(await mayReadProperties(ctx, a))) return null;
@@ -106,27 +93,7 @@ export async function writeAppProperties(
     }
     let next: Prisma.InputJsonObject | null = null;
     if (rawProperties !== null && rawProperties !== undefined) {
-      const shaped = checkAppPropertiesShape(rawProperties);
-      if (Object.hasOwn(shaped, TASK_INTEGRATIONS_KEY)) {
-        const integrations = await normalizeTaskIntegrations(shaped[TASK_INTEGRATIONS_KEY], async (ref) => {
-          const id = await resolveTaskWorkerId(txCtx, fresh.id, ref);
-          if (!id) return null;
-          const w = await tx.worker.findUnique({ where: { id }, select: { appId: true, retiredAt: true } });
-          return w && w.appId === fresh.id && !w.retiredAt ? id : null;
-        });
-        next = { ...shaped, [TASK_INTEGRATIONS_KEY]: integrations as unknown as Prisma.InputJsonArray };
-      } else {
-        next = shaped;
-      }
-    }
-    // PR #3131 local P2: normalising a lead (name or URN -> worker id) can grow the object past the cap the input
-    // check passed, so the stored form is measured too, before the revision check and any write.
-    if (next !== null && Buffer.byteLength(canonicalJson(next), 'utf8') > APP_PROPERTIES_MAX_BYTES) {
-      throw taskError(
-        'PROPERTIES_TOO_LARGE',
-        `properties may hold at most ${APP_PROPERTIES_MAX_BYTES} bytes of JSON as stored (each team lead is stored as its worker id). Nothing was changed.`,
-        { path: '' },
-      );
+      next = checkAppPropertiesShape(rawProperties);
     }
     const cur = await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: { properties: true, propertiesRevision: true } });
     if (expectedRevision != null && expectedRevision !== cur.propertiesRevision) {

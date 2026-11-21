@@ -23,7 +23,7 @@ import { formatGraphQLError, isExpectedClientError } from './formatError.js';
 
 const headObjectMock = vi.hoisted(() => vi.fn());
 const captureMock = vi.hoisted(() => vi.fn());
-vi.mock('../../integrations/r2/client.js', () => ({ headObject: headObjectMock, isObjectStoreConfigured: () => true }));
+vi.mock('../../integrations/objectstore/index.js', async (orig) => ({ ...(await orig<object>()), headObject: headObjectMock, isObjectStoreConfigured: () => true }));
 vi.mock('@sentry/node', () => ({ captureMessage: captureMock }));
 
 describe('#1140: the formatter goes quiet on ASSET_BYTES_GONE', () => {

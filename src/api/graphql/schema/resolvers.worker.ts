@@ -1236,9 +1236,10 @@ export const workerMutations = {
       async (tx, txCtx) => {
         await lockStaffingAct(tx, app, admission, ctx.sessionId, [worker.id]);
         admission = await admitWorkerStaffAct(txCtx, app, instruction, admission, true);
+        const retiredAt = new Date();
         const retired = await tx.worker.updateMany({
           where: { id: worker.id, retiredAt: null },
-          data: { retiredAt: new Date(), retiredBy: ctx.userId ?? null },
+          data: { retiredAt, retiredBy: ctx.userId ?? null },
         });
         // #1726: a retired worker reports to nobody. Workers that report TO it
         // keep their value; the roster flags them (`reportsToRetired`) rather
@@ -1261,7 +1262,7 @@ export const workerMutations = {
           });
           // #2024 (S8): the tickers generated for this worker end with it (and the subscriptions others hold to
           // them). Nothing else is touched.
-          await endGeneratedTickersForWorker(tx, { workerId: worker.id, deletedBy: ctx.userId ?? null });
+          await endGeneratedTickersForWorker(tx, { workerId: worker.id, deletedBy: ctx.userId ?? null, at: retiredAt });
           await reconcileStopCoverage(tx, worker.appId, new Date());
         } else {
           await appendStaffingInstructionClaim(tx, { appId: app.id, admission, operation: 'worker.retire', workerId: worker.id });
@@ -1795,7 +1796,7 @@ export const workerMutations = {
       // concurrent revoked row would leave it stale; provisionCastGrants judges the licence again (as the cast does).
       await provisionCastGrants(tx, freshApp, agent.id, provisionGrantsFor, ctx.userId ?? null);
       try {
-        await endGeneratedTickersForWorker(tx, { workerId: worker.id, deletedBy: ctx.userId ?? null });
+        await endGeneratedTickersForWorker(tx, { workerId: worker.id, deletedBy: ctx.userId ?? null, at: new Date() });
         await tx.worker.update({
           where: { id: worker.id },
           data: { agentId: agent.id, role: toRole, bootPromptNodeId: null, bootPromptUrn: null },

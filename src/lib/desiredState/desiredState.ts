@@ -32,6 +32,7 @@ import { AgentLifecycle as AgentLifecycleEnum, Prisma, SweepMode as SweepModeEnu
 import { recordInEffect } from '../agentTasks/availability.js';
 import { loadHostAssignments, loadHostSetupSource } from '../hostOperations/assignments.js';
 import { coveringSignals, strongestLevel, type StopLevel } from '../stopSignals/state.js';
+import { selectRows } from './selectRows.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -136,8 +137,33 @@ export type HostDesiredState = { hostId: string; sweepMode: SweepMode; workers: 
 /**
  * The desired state of every worker `hostId` runs in `appId` at `now`, by name; null when the App has no such
  * host. A fixed number of queries whatever the number of workers.
+ *
+ * `selector` (#4260), when a non-empty string, narrows the rows RETURNED to the workers of this host it names —
+ * a worker id or an exact name — matched ONLY against the rows this host itself runs, never a worker lookup. The
+ * ID FORM is the exactly-one path (ids are unique); the name form answers at most one row too, because a worker's
+ * name is unique per App, case-insensitively (`workers_app_name_uniq` — a functional unique on
+ * (app_id, lower(name)) that Prisma's schema cannot express; prisma/post-push.sql and migration 20260814130000),
+ * and the name match itself is exact-case, so a differently-cased selector selects nothing. An exact id match
+ * wins over a name match, so a worker whose name equals another listed worker's id yields the id's row alone.
+ * Names are stored trimmed (the cast path trims a name before storing it, and there is no rename), and a
+ * non-empty selector is trimmed the same way, so an exact name comparison always reaches a stored name. A worker
+ * the host does not run (another host's, a retired worker not on this host, an unknown id or name) answers the
+ * same empty `workers` list as an unknown worker (hrn:node:hadronmemory.com:specs:cor:agt:020:08: denial and
+ * absence indistinguishable, so a host key cannot probe the App's roster one name at a time); a retired worker
+ * the host still lists keeps its row exactly as the host-wide read shows it. The host, its sweepMode and every
+ * row's semantics are unchanged: this is the host-wide read's own composition with fewer rows returned, for C5's
+ * per-worker re-reads (hadron-server#4260) — the selector narrows only the rows RETURNED (the issue's bound is
+ * transferred bytes, not server compute); the host-wide composition and its fixed queries still run, which is
+ * what keeps selected-row parity with the discovery read. The application itself is `selectRows`, unit-tested
+ * there.
  */
-export async function loadHostDesiredState(db: Db, appId: string, hostId: string, now: Date): Promise<HostDesiredState | null> {
+export async function loadHostDesiredState(
+  db: Db,
+  appId: string,
+  hostId: string,
+  now: Date,
+  selector?: string,
+): Promise<HostDesiredState | null> {
   const listed = await hostWorkers(db, appId, hostId);
   if (listed === null) return null;
   const app = await db.app.findUnique({ where: { id: appId }, select: { sweepMode: true, teamPausedAt: true } });
@@ -202,7 +228,9 @@ export async function loadHostDesiredState(db: Db, appId: string, hostId: string
     };
   });
   rows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.workerId < b.workerId ? -1 : 1));
-  return { hostId, sweepMode: app.sweepMode, workers: rows };
+  // #4260: selectRows applies the selector — one row by id, at most one by name — with the full
+  // contract (precedence, concealment) stated in the function doc above and in the SDL.
+  return { hostId, sweepMode: app.sweepMode, workers: selectRows(rows, selector) };
 }
 
 /** Each worker's last activity (the roster's own aggregate), for the few workers whose reset mark waits on it. */

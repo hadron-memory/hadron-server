@@ -54,7 +54,7 @@ import { NOT_QUESTION_FAMILY_WHERE } from '../../../lib/questions/index.js';
 import { unresolvedFeedbackOf, type UnresolvedFeedbackRow } from '../../../lib/comments/summary.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { SubtreeMoveMintedError } from '../../../lib/nodeSubtreeMove.js';
-import { InvalidLocError, validateLoc } from '../../../lib/validateLoc.js';
+import { validateLocOrThrow } from '../../../lib/validateLocOrThrow.js';
 import {
   SCANNED_FIELDS,
   corpusReferencePattern,
@@ -1138,7 +1138,13 @@ export const specCorpusRenumberMutations = {
     ctx: Context,
   ): Promise<SpecRenumberResultOut> => {
     const corpus = await loadScannableCorpus(ctx, memoryRef);
-    for (const loc of [fromLoc, toLoc]) validateLocOrThrow(loc);
+    // #4461: `fromLoc` names an EXISTING node (looked up below, a miss is NODE_NOT_FOUND), so it is not capped: an
+    // existing over-cap spec must still be renumberable. Only `toLoc`, what the caller writes, is held to the
+    // contract; descendants are not re-capped (the gate is the contract unification, not a new subtree cap).
+    validateLocOrThrow(toLoc, 'toLoc');
+    // Not capped (an existing over-cap spec still renumbers), but charset and atoms are checked at any length, so a
+    // malformed `fromLoc` is refused without echo rather than reaching the NODE_NOT_FOUND message below.
+    validateLocOrThrow(fromLoc, 'fromLoc', { uncapped: true });
     if (fromLoc === toLoc || toLoc.startsWith(`${fromLoc}:`)) {
       throw new GraphQLError(`Cannot renumber "${fromLoc}" to "${toLoc}": the target is the spec itself or inside its subtree.`, {
         extensions: { code: 'BAD_USER_INPUT' },
@@ -1339,17 +1345,6 @@ async function rewriteWithRetry(
       const conflict = e instanceof GraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT';
       if (!conflict || attempt >= REWRITE_ATTEMPTS) throw e;
     }
-  }
-}
-
-function validateLocOrThrow(loc: string): void {
-  try {
-    validateLoc(loc);
-  } catch (err) {
-    if (err instanceof InvalidLocError) {
-      throw new GraphQLError(err.message, { extensions: { code: err.name, loc: err.loc, segment: err.segment } });
-    }
-    throw err;
   }
 }
 

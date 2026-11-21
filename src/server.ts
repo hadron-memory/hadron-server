@@ -10,7 +10,7 @@ import { readTeamRecordKeys } from './lib/teamSpec/record.js';
 import * as Sentry from '@sentry/node';
 import { ApolloServer, type ApolloServerPlugin, type BaseContext } from '@apollo/server';
 import { memoryPressurePlugin } from './api/graphql/memoryPressurePlugin.js';
-import { expressMiddleware } from '@apollo/server/express4';
+import { expressMiddleware } from '@as-integrations/express4';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
@@ -57,6 +57,7 @@ import { failLoginCallback, type LoginFailureReason } from './auth/login-error.t
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
 import { mountSigningCeremonyRoutes } from './api/signingCeremonyRoutes.js';
+import { mountSecretChangeCeremonyRoutes } from './api/secretChangeCeremonyRoutes.js';
 import { mountGrantSigningCeremonyRoutes } from './api/grantSigningCeremonyRoutes.js';
 import { mountSecretRevealRoutes } from './api/secretRevealRoutes.js';
 import { mountPasskeySignInRoutes } from './api/passkeySignInRoutes.js';
@@ -96,6 +97,7 @@ import { assignRequestId, bindRequestId, REQUEST_ID_HEADER } from './lib/request
 import { internalFaultErrorHandler, respondInternalFault } from './lib/internalFault.js';
 import { handleMcpRequest, handleMcpDelete, startMcpTransportSweepLoop } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
+import { startSecretChangeSweepLoop } from './jobs/sweepSecretChanges.js';
 import { startPasskeyCeremonySweepLoop } from './jobs/sweepPasskeyCeremonies.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
 import { secretSweepDisabledReason, startSecretSweepLoop } from './jobs/secretSweep.js';
@@ -1117,6 +1119,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   mountSigningCeremonyRoutes(app);
   // #3649 slice C: the grant signing ceremony, on the same switch.
   mountGrantSigningCeremonyRoutes(app);
+  mountSecretChangeCeremonyRoutes(app);
   mountSecretRevealRoutes(app);
   mountPasskeySignInRoutes(app);
   mountFreshSignInRoutes(app, { emailSendPerIpRateLimit, emailRecipientRateLimit });
@@ -1226,6 +1229,9 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     stopOnTerminationSignals: false,
     // #2087: concealed errors must not depend on the deployment's NODE_ENV.
     includeStacktraceInErrorResponses: false,
+    // #4593: Apollo 5 answers a variable-coercion error with HTTP 400 by default; 4 answered 200 with `errors`.
+    // Keep the 4 answer: flipping it is a client-visible contract change (S2 of #4521), not part of the bump.
+    status400ForVariableCoercionErrors: false,
     typeDefs,
     resolvers: deploymentResolvers,
     plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin, deliveryPendingPlugin, complexityAdmissionPlugin(admission), memoryPressurePlugin()],
@@ -1939,6 +1945,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
 
   // #3122: transient passkey/signing ceremonies; independent of feature flags so old rows still retire.
   startPasskeyCeremonySweepLoop(db);
+  startSecretChangeSweepLoop(db);
 
   // #155 — collect unused DCR OAuth clients 7 days past their expiry (soft delete). Dry run, logging
   // the count it would collect, until OAUTH_CLIENT_GC_ENABLED=true (R220).

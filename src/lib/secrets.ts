@@ -165,6 +165,23 @@ export interface SecretPayloadOptions {
   enforceValueSize?: boolean;
 }
 
+/** Validate inspectable App metadata without decrypting an unchanged value. The stored type was derived at value write. */
+export function validateUnchangedSecretMetadata(kind: string, metadata: unknown, storedMetadata: unknown): Record<string, unknown> {
+  if (!(SECRET_KINDS as readonly string[]).includes(kind)) throw badInput(`Unknown secret kind "${kind}".`);
+  if (metadata != null && (typeof metadata !== 'object' || Array.isArray(metadata))) throw badInput('metadata must be a JSON object.');
+  let normalized = (metadata ?? {}) as Record<string, unknown>;
+  if (kind === 'webfetch-auth') {
+    const type = (storedMetadata as Record<string, unknown> | null)?.type;
+    if (!['bearer', 'basic', 'header'].includes(String(type))) throw badInput('Stored webfetch-auth type is unavailable.');
+    if (typeof normalized.urlPrefix !== 'string') throw badInput('A webfetch-auth secret requires metadata.urlPrefix (its origin binding).');
+    assertValidUrlPrefix(normalized.urlPrefix);
+    if (normalized.type !== undefined && normalized.type !== type) throw badInput('metadata.type must match the value type (or be omitted — it is derived).');
+    normalized = { ...normalized, type };
+  }
+  if (JSON.stringify(normalized).length > MAX_METADATA_JSON_LENGTH) throw badInput(`metadata is too large (max ${MAX_METADATA_JSON_LENGTH} JSON chars).`);
+  return normalized;
+}
+
 /** Per-kind validation, shared by every owner type; encryption is the caller's (platform key, or the App key). */
 export function validateSecretPayload(
   kind: string,
