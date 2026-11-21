@@ -89,7 +89,6 @@ import { agentTickerTemplateFieldResolvers, agentTickerTemplateMutations, agentT
 import { deliverySettingsQueries, deliverySettingsMutations } from './resolvers.deliverySettings.js';
 import { appPropertiesMutations, appPropertiesTypeResolvers } from './resolvers.appProperties.js';
 import { chatbotAiConfigMutations, chatbotAiConfigQueries, chatbotAiConfigTypeResolvers } from './resolvers.chatbotAiConfig.js';
-import { untrackedTaskItemMutations, untrackedTaskItemQueries } from './resolvers.untrackedTaskItems.js';
 import { wakeMutations, wakeQueries } from './resolvers.wake.js';
 import { stopSignalMutations, stopSignalQueries } from './resolvers.stopSignal.js';
 import { deliveryBatchMutations, deliveryBatchQueries } from './resolvers.deliveryBatch.js';
@@ -227,7 +226,6 @@ export const resolvers = {
     ...teamWorkQueries,
     ...agentTaskQueries,
     ...prProtocolQueries,
-    ...untrackedTaskItemQueries,
     ...tickerQueries,
     ...agentTickerTemplateQueries,
     ...modelGroupQueries,
@@ -317,7 +315,6 @@ export const resolvers = {
     ...appPropertiesMutations,
     ...chatbotAiConfigMutations,
     ...runTeamSnapshotMutations,
-    ...untrackedTaskItemMutations,
     ...stopSignalMutations,
     ...wakeMutations,
     ...deliveryBatchMutations,

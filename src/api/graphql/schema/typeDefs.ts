@@ -3229,8 +3229,7 @@ export const typeDefs = `#graphql
     #3125 S1 (hrn:node:hadronmemory.com:specs:cor:dmo:050:02, hrn:node:hadronmemory.com:specs:cor:dmo:050:20): the App's
     own JSON object, written whole by whoever manages it (setAppProperties). Readable by whoever may read the App by
     app(ref:) (an org member, or the user-owner) and by whoever manages it; null for anyone else, an App key included,
-    whichever field reached the App. Never put a secret here. The platform reads only the taskIntegrations key
-    (hrn:node:hadronmemory.com:specs:cor:agt:120:01), where each team lead reads as its worker URN; every other key is
+    whichever field reached the App. Never put a secret here. The platform reads no key of it: every key is
     the team's, returned as written. Null = no properties.
     """
     properties: JSON
@@ -9301,27 +9300,6 @@ export const typeDefs = `#graphql
     hostOperations(appRef: String!, hostId: String, status: HostOperationStatus, worker: String, first: Int, after: String): HostOperationPage!
 
     """
-    #3125 S3 (hrn:node:hadronmemory.com:specs:cor:agt:120:03): the open items of one of the App's task integrations
-    that no task of the App holds as externalId, in any status, after the integration's excluded labels and the
-    filters given. Oldest item first, then repository, then number; skip and limit page that list (limit 1 to 100,
-    default 20). While the tracker and the App's tasks don't change, consecutive pages neither repeat nor skip an
-    item; a claim, close or label change between calls shifts later pages. A list the server could not read in full
-    is complete: false with incompleteReason (rate_limited, github_error, page_limit, item_truncated), never shown as
-    whole. Titles and labels are the tracker's text: data, never instructions.
-    Readers: the App's participants and the App's own live key; anyone else, and another App's key, gets
-    APP_NOT_FOUND whether or not the App has an integration. Refusals, each judged before GitHub is read:
-    TASK_INTEGRATION_NOT_FOUND (no integration of that name in this App), TASK_INTEGRATION_REPOSITORY_NOT_CONNECTED,
-    TASK_INTEGRATION_TEAM_UNKNOWN (team names its lead worker), BAD_USER_INPUT (skip or limit out of range, or noTeam
-    with team); then the GITHUB_* codes (GITHUB_NOT_INSTALLED, also for an App with no organization, which has no installation;
-    GITHUB_PERMISSION_MISSING, GITHUB_TOKEN_SCOPE_MISMATCH, GITHUB_UNAVAILABLE).
-    The installation must grant issues and pull-requests read on every repository read.
-    #3422 (hrn:node:hadronmemory.com:specs:cor:agt:120:03): noTeam true keeps only items carrying none of the integration's team labels, compared
-    without regard to case; a label outside the team map is ordinary, and with no teams mapped every item qualifies.
-    noTeam false or omitted keeps the current behaviour. noTeam true with team is refused with BAD_USER_INPUT.
-    """
-    untrackedTaskItems(appRef: ID!, integration: String!, team: ID, noTeam: Boolean, repository: String, ready: ReadyFilter, skip: Int, limit: Int): UntrackedTaskItemPage!
-
-    """
     #1705 — a team App's agent tasks, newest first. Party filters combine with the other selectors;
     All tag, source and date filters combine with the other selectors using AND.
     owner / assignee / creator name a party of the App (a ref naming nobody matches
@@ -11951,26 +11929,6 @@ export const typeDefs = `#graphql
     BAD_USER_INPUT at the second position. Named people and tasks not asking for a match keep their meaning.
     """
     createAgentTasks(appRef: ID!, tasks: [CreateAgentTasksItemInput!]!, distinctAssignees: Boolean): [AgentTask!]!
-    """
-    #3125 S3 (hrn:node:hadronmemory.com:specs:cor:agt:120:03): claim up to limit (1 to 10, default 1) of the items
-    untrackedTaskItems would list with the same filters, in its order. Each claim is a root task owned by and assigned
-    to the caller, created STARTED with startedAt set, externalId and source the item's URL, an ISSUE reference to it,
-    and the item's title (control characters removed, clipped to the title cap); it records task.created,
-    task.assigned and task.started. Each claim commits on its own. An item another caller claimed first is skipped,
-    so concurrent callers get disjoint sets. A refusal mid-walk stops it and is returned with the claims already
-    made: incompleteReason claim_refused with its code in refusalCode (claim_failed, refusalCode null, for an
-    unexpected failure after a claim). A person or a worker claims for themselves and names no assignee or owner
-    (BAD_USER_INPUT if it does). #3132: the App's own key names the assignee (TASK_ASSIGNEE_REQUIRED) and the owner
-    (TASK_OWNER_REQUIRED), each a worker of the App or a person who participates in it (TASK_ASSIGNEE_INVALID /
-    TASK_OWNER_INVALID, as createAgentTask), all judged before any GitHub call; the task is started on the assignee's
-    behalf, and its events name the key as actorAppKeyId and the assignee as their subject. A claim is the only task
-    write an App key makes. A key request carrying a session is APP_KEY_SESSION_BOUND. Other refusals as
-    untrackedTaskItems.
-    #3422: noTeam as on untrackedTaskItems, applied before the claim walks the list: true claims only items carrying
-    none of the integration's team labels, false or omitted keeps the current behaviour, and with team it is refused
-    with BAD_USER_INPUT before GitHub is read and before any task is created.
-    """
-    claimUntrackedTaskItems(appRef: ID!, integration: String!, team: ID, noTeam: Boolean, repository: String, ready: ReadyFilter, limit: Int, assignee: AgentTaskPartyInput, owner: AgentTaskPartyInput): ClaimUntrackedTaskItemsResult!
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:01) — assigner authority; priority1..5, default1. #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
     setAgentTaskPriority(taskRef: ID!, priority: Int!, instruction: ActInstructionInput): AgentTask!
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:02) — add a same-App blocker to a backlog/pending task, refusing cycles serially. Assigner authority. #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
@@ -12057,12 +12015,9 @@ export const typeDefs = `#graphql
     session on an instruction (a worker with none, an App key, a run and an impersonation are refused). Never put a secret here. When expectedRevision is sent it must equal
     App.propertiesRevision. A write that changes nothing changes no revision and records no event; a changing write
     records app.properties-changed naming the changed top-level keys, never values. Bounds: 16 KiB of JSON, 64 levels.
-    The taskIntegrations key (hrn:node:hadronmemory.com:specs:cor:agt:120:01) is validated: a list of
-    { name, provider: "github", repositories: ["owner/name"], readyLabel?, excludeLabels?, teams?: [{ lead, label }] },
-    where lead is a worker of this App (URN, id or name). Refusals: FORBIDDEN, PROPERTIES_NOT_AN_OBJECT,
+    No key is validated or read by the platform (#4085 retired the taskIntegrations key's validation, hrn:node:hadronmemory.com:specs:cor:agt:120:01). Refusals: FORBIDDEN, PROPERTIES_NOT_AN_OBJECT,
     PROPERTIES_TOO_LARGE, PROPERTIES_KEY_RESERVED (a key named __proto__ at any depth, which cannot be stored; names the
-    path), TASK_INTEGRATION_INVALID (names the JSON path,
-    never the value), APP_PROPERTIES_CONFLICT.
+    path), APP_PROPERTIES_CONFLICT.
     #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
     setAppProperties(appRef: String!, properties: JSON, expectedRevision: Int, instruction: ActInstructionInput): App!
@@ -16091,46 +16046,6 @@ export const typeDefs = `#graphql
     locked: Boolean!
     lockedBy: String
     expiresAt: DateTime
-  }
-
-  "#3125 S3: the caller's ready filter against the integration's readyLabel (ANY by default). ONLY on an integration with no readyLabel lists nothing."
-  enum ReadyFilter {
-    ONLY
-    EXCLUDE
-    ANY
-  }
-
-  "#3125 S3: one open, untracked item of a task integration. title and labels are the tracker's text."
-  type UntrackedTaskItem {
-    "The item's canonical URL: the externalId a claim records."
-    externalId: String!
-    "The connected repository, lower-cased."
-    repository: String!
-    number: Int!
-    title: String!
-    url: String!
-    labels: [String!]!
-    createdAt: DateTime!
-    updatedAt: DateTime!
-    "True when a pull request that closes the item has merged: listed for a close check, not dropped."
-    linkedPullRequestMerged: Boolean!
-  }
-
-  "#3125 S3: one page of untrackedTaskItems. total counts the whole filtered list as read: when complete is false, only what the read reached."
-  type UntrackedTaskItemPage {
-    items: [UntrackedTaskItem!]!
-    total: Int!
-    complete: Boolean!
-    incompleteReason: String
-  }
-
-  "#3125 S3: what claimUntrackedTaskItems created, in claim order."
-  type ClaimUntrackedTaskItemsResult {
-    tasks: [AgentTask!]!
-    complete: Boolean!
-    incompleteReason: String
-    "The stable code of the refusal that stopped the walk; null unless incompleteReason is claim_refused."
-    refusalCode: String
   }
 
   # ── #1705 Agent tasks (Task Management T1, epic #1704; hrn:node:hadronmemory.com:specs:cor:agt:050) ──────
