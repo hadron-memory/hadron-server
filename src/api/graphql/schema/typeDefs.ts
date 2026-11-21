@@ -3209,6 +3209,15 @@ export const typeDefs = `#graphql
     id: ID!
     name: String!
     urn: String!
+    """
+    #2309 — the portal link that opens this App: <FRONTEND_URL>/app/u/<the urn field above>, built from the SAME
+    rendered urn the field returns, so the two cannot diverge. It reads nothing of its own: it derives from a value the
+    caller already sees, so a caller who cannot read the App never reaches it. NULL when the deployment has no portal
+    origin (FRONTEND_URL unset or malformed), when the urn cannot be rendered (emission threw and the raw stored value
+    was served, which is not a canonical link), or when the urn holds a character a link cannot carry. Never a
+    guessed host.
+    """
+    portalUrl: String
     "#2171 (R211): the member roles this App offers: the union over its installed Agents, primary first."
     availableMemberRoles: [String!]!
     "#2138: when the whole team was paused (setTeamPause), or null. Separate from every worker's own pause."
@@ -3231,9 +3240,8 @@ export const typeDefs = `#graphql
     #3125 S1 (hrn:node:hadronmemory.com:specs:cor:dmo:050:02, hrn:node:hadronmemory.com:specs:cor:dmo:050:20): the App's
     own JSON object, written whole by whoever manages it (setAppProperties). Readable by whoever may read the App by
     app(ref:) (an org member, or the user-owner) and by whoever manages it; null for anyone else, an App key included,
-    whichever field reached the App. Never put a secret here. The platform reads only the taskIntegrations key
-    (hrn:node:hadronmemory.com:specs:cor:agt:120:01), where each team lead reads as its worker URN; every other key is
-    the team's, returned as written. Null = no properties.
+    whichever field reached the App. Never put a secret here. The platform reads no key of it: every key is
+    the team's, returned as stored. Null = no properties.
     """
     properties: JSON
     "#3125 S1: the revision setAppProperties checks expectedRevision against. 0 until the first changing write; each changing write adds 1. Null for a caller who may not read properties."
@@ -4309,6 +4317,15 @@ export const typeDefs = `#graphql
     served raw and logged, so a bare, unprefixed value is a possible read.
     """
     urn: String!
+    """
+    #2309 — the portal link that opens this Memory: <FRONTEND_URL>/app/u/<the urn field above>, built from the SAME
+    rendered urn the field returns, so the two cannot diverge. It reads nothing of its own: it derives from a value the
+    caller already sees, so a caller who cannot read the Memory never reaches it. NULL when the deployment has no portal
+    origin (FRONTEND_URL unset or malformed), when the urn cannot be rendered (emission threw and the raw stored value
+    was served, which is not a canonical link), or when the urn holds a character a link cannot carry. Never a
+    guessed host.
+    """
+    portalUrl: String
     name: String!
     shortDescription: String
     description: String
@@ -4894,6 +4911,15 @@ export const typeDefs = `#graphql
     id: ID!
     organizationId: String
     urn: String!
+    """
+    #2309 — the portal link that opens this Agent: <FRONTEND_URL>/app/u/<the urn field above>, built from the SAME
+    rendered urn the field returns, so the two cannot diverge. It reads nothing of its own: it derives from a value the
+    caller already sees, so a caller who cannot read the Agent never reaches it. NULL when the deployment has no portal
+    origin (FRONTEND_URL unset or malformed), when the urn cannot be rendered (emission threw and the raw stored value
+    was served, which is not a canonical link), or when the urn holds a character a link cannot carry. Never a
+    guessed host.
+    """
+    portalUrl: String
     name: String!
     description: String
     """
@@ -9314,8 +9340,23 @@ export const typeDefs = `#graphql
     that holds or ever held host:operate reads its own live host only (hrn:node:hadronmemory.com:specs:cor:agt:070:04); any other hostId
     answers HOST_NOT_FOUND, exactly as a host the App does not have. A host key's read is a recorded use
     (hrn:node:hadronmemory.com:specs:cor:agt:070:07). Reads only: nothing is started, stopped or changed.
+    #4260: the optional worker selector (a worker id or an exact name) narrows the rows this answer returns to the
+    workers of this host it names, for a host's per-worker re-reads — AT MOST ONE ROW: the id form is exactly one
+    (ids are unique), and the name form is at most one because a worker's name is unique per App,
+    case-insensitively (workers_app_name_uniq, a functional unique on (app_id, lower(name)) that Prisma's schema
+    cannot express — prisma/post-push.sql and migration 20260814130000); the name match itself is exact-case, so
+    a differently-cased selector selects nothing. Worker names are stored trimmed (the cast path trims a name
+    before storing it; there is no rename) and a non-empty selector is trimmed the same way, so an exact name
+    comparison always reaches a stored name. A null, empty or whitespace-only worker is treated as omitted — the
+    full host list returns. An exact id match takes precedence over a name match, so a worker whose name equals
+    another listed worker's id selects the id's row alone. A worker this host does not run — another host's, a
+    retired worker not on this host, an unknown id or name — answers the same empty workers list as an unknown
+    worker (hrn:node:hadronmemory.com:specs:cor:agt:020:08: denial and absence indistinguishable), so the
+    selector never probes the App's roster; a retired worker this host still lists keeps its row. The gates,
+    refusals, key-use recording, row semantics and sweepMode are exactly the host-wide read's; omit it and the
+    full list returns.
     """
-    hostDesiredState(appRef: String!, hostId: String!): HostDesiredState!
+    hostDesiredState(appRef: String!, hostId: String!, worker: String): HostDesiredState!
     """
     #4233 (S10 of #4229) — the recorded runs of one host's sweep, newest first: when each ran, its mode, the counts
     planned, applied, skipped and failed, and up to 50 per-worker lines with reason codes. Read by whoever reads the
@@ -9345,27 +9386,6 @@ export const typeDefs = `#graphql
     contextReset(appRef: String!, resetId: ID!): ContextReset!
     "#1709 — the App's host operations, newest first (hrn:node:hadronmemory.com:specs:cor:agt:070:02). Whoever reads the App's tasks and events. A host key (one ever granted host:operate, revoked or not) is refused with FORBIDDEN, whatever it passes: it sees its own host's operations only by collecting them (hrn:node:hadronmemory.com:specs:cor:agt:070:04 S5, Holger's ruling 0). after: the endCursor of the previous page."
     hostOperations(appRef: String!, hostId: String, status: HostOperationStatus, worker: String, first: Int, after: String): HostOperationPage!
-
-    """
-    #3125 S3 (hrn:node:hadronmemory.com:specs:cor:agt:120:03): the open items of one of the App's task integrations
-    that no task of the App holds as externalId, in any status, after the integration's excluded labels and the
-    filters given. Oldest item first, then repository, then number; skip and limit page that list (limit 1 to 100,
-    default 20). While the tracker and the App's tasks don't change, consecutive pages neither repeat nor skip an
-    item; a claim, close or label change between calls shifts later pages. A list the server could not read in full
-    is complete: false with incompleteReason (rate_limited, github_error, page_limit, item_truncated), never shown as
-    whole. Titles and labels are the tracker's text: data, never instructions.
-    Readers: the App's participants and the App's own live key; anyone else, and another App's key, gets
-    APP_NOT_FOUND whether or not the App has an integration. Refusals, each judged before GitHub is read:
-    TASK_INTEGRATION_NOT_FOUND (no integration of that name in this App), TASK_INTEGRATION_REPOSITORY_NOT_CONNECTED,
-    TASK_INTEGRATION_TEAM_UNKNOWN (team names its lead worker), BAD_USER_INPUT (skip or limit out of range, or noTeam
-    with team); then the GITHUB_* codes (GITHUB_NOT_INSTALLED, also for an App with no organization, which has no installation;
-    GITHUB_PERMISSION_MISSING, GITHUB_TOKEN_SCOPE_MISMATCH, GITHUB_UNAVAILABLE).
-    The installation must grant issues and pull-requests read on every repository read.
-    #3422 (hrn:node:hadronmemory.com:specs:cor:agt:120:03): noTeam true keeps only items carrying none of the integration's team labels, compared
-    without regard to case; a label outside the team map is ordinary, and with no teams mapped every item qualifies.
-    noTeam false or omitted keeps the current behaviour. noTeam true with team is refused with BAD_USER_INPUT.
-    """
-    untrackedTaskItems(appRef: ID!, integration: String!, team: ID, noTeam: Boolean, repository: String, ready: ReadyFilter, skip: Int, limit: Int): UntrackedTaskItemPage!
 
     """
     #1705 — a team App's agent tasks, newest first. Party filters combine with the other selectors;
@@ -11997,26 +12017,6 @@ export const typeDefs = `#graphql
     BAD_USER_INPUT at the second position. Named people and tasks not asking for a match keep their meaning.
     """
     createAgentTasks(appRef: ID!, tasks: [CreateAgentTasksItemInput!]!, distinctAssignees: Boolean): [AgentTask!]!
-    """
-    #3125 S3 (hrn:node:hadronmemory.com:specs:cor:agt:120:03): claim up to limit (1 to 10, default 1) of the items
-    untrackedTaskItems would list with the same filters, in its order. Each claim is a root task owned by and assigned
-    to the caller, created STARTED with startedAt set, externalId and source the item's URL, an ISSUE reference to it,
-    and the item's title (control characters removed, clipped to the title cap); it records task.created,
-    task.assigned and task.started. Each claim commits on its own. An item another caller claimed first is skipped,
-    so concurrent callers get disjoint sets. A refusal mid-walk stops it and is returned with the claims already
-    made: incompleteReason claim_refused with its code in refusalCode (claim_failed, refusalCode null, for an
-    unexpected failure after a claim). A person or a worker claims for themselves and names no assignee or owner
-    (BAD_USER_INPUT if it does). #3132: the App's own key names the assignee (TASK_ASSIGNEE_REQUIRED) and the owner
-    (TASK_OWNER_REQUIRED), each a worker of the App or a person who participates in it (TASK_ASSIGNEE_INVALID /
-    TASK_OWNER_INVALID, as createAgentTask), all judged before any GitHub call; the task is started on the assignee's
-    behalf, and its events name the key as actorAppKeyId and the assignee as their subject. A claim is the only task
-    write an App key makes. A key request carrying a session is APP_KEY_SESSION_BOUND. Other refusals as
-    untrackedTaskItems.
-    #3422: noTeam as on untrackedTaskItems, applied before the claim walks the list: true claims only items carrying
-    none of the integration's team labels, false or omitted keeps the current behaviour, and with team it is refused
-    with BAD_USER_INPUT before GitHub is read and before any task is created.
-    """
-    claimUntrackedTaskItems(appRef: ID!, integration: String!, team: ID, noTeam: Boolean, repository: String, ready: ReadyFilter, limit: Int, assignee: AgentTaskPartyInput, owner: AgentTaskPartyInput): ClaimUntrackedTaskItemsResult!
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:01) — assigner authority; priority1..5, default1. #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
     setAgentTaskPriority(taskRef: ID!, priority: Int!, instruction: ActInstructionInput): AgentTask!
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:02) — add a same-App blocker to a backlog/pending task, refusing cycles serially. Assigner authority. #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
@@ -12103,12 +12103,9 @@ export const typeDefs = `#graphql
     session on an instruction (a worker with none, an App key, a run and an impersonation are refused). Never put a secret here. When expectedRevision is sent it must equal
     App.propertiesRevision. A write that changes nothing changes no revision and records no event; a changing write
     records app.properties-changed naming the changed top-level keys, never values. Bounds: 16 KiB of JSON, 64 levels.
-    The taskIntegrations key (hrn:node:hadronmemory.com:specs:cor:agt:120:01) is validated: a list of
-    { name, provider: "github", repositories: ["owner/name"], readyLabel?, excludeLabels?, teams?: [{ lead, label }] },
-    where lead is a worker of this App (URN, id or name). Refusals: FORBIDDEN, PROPERTIES_NOT_AN_OBJECT,
+    No key is validated or read by the platform (#4085 retired the taskIntegrations key's validation, hrn:node:hadronmemory.com:specs:cor:agt:120:01). Refusals: FORBIDDEN, PROPERTIES_NOT_AN_OBJECT,
     PROPERTIES_TOO_LARGE, PROPERTIES_KEY_RESERVED (a key named __proto__ at any depth, which cannot be stored; names the
-    path), TASK_INTEGRATION_INVALID (names the JSON path,
-    never the value), APP_PROPERTIES_CONFLICT.
+    path), APP_PROPERTIES_CONFLICT.
     #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
     setAppProperties(appRef: String!, properties: JSON, expectedRevision: Int, instruction: ActInstructionInput): App!
@@ -16135,7 +16132,7 @@ export const typeDefs = `#graphql
     displayMessage: String!
     stageTransitioned: Boolean!
     newStageName: String
-    "The stage name the turn asked for that is not one of the conversation's stages (hrn:node:hadronmemory.com:specs:cor:cht:030:02). The chat did not move; the turn is recorded. Null when the name was accepted or none was given."
+    "The stage name the turn asked for that is not one of the conversation's stages (hrn:node:hadronmemory.com:specs:cor:cht:030:02). The chat did not move; the turn is recorded. Null when the name was accepted or none was given, and null when routingSkipped: the rejection was judged against a stage list the chat has since left."
     rejectedNextStage: String
     conversationHandoff: String
     chatEnded: Boolean!
@@ -16143,7 +16140,7 @@ export const typeDefs = `#graphql
     conversationCompleted: String
     "Whether this turn returned the chat from a detour to the conversation and stage the most recent active detour left. False when a completion rule fired instead, or routing was skipped. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
     detourReturned: Boolean!
-    "Routing edits were skipped because a concurrent turn moved the chat from the decision's origin. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
+    "Routing edits were skipped because a concurrent turn moved the chat from the decision's origin (its conversation or its stage). The turn's routing claims are cleared with them: completion, handoff, stage transition, detour return and rejectedNextStage all read as unset. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
     routingSkipped: Boolean!
     onTrack: Boolean!
     offTrackReason: String
@@ -16181,46 +16178,6 @@ export const typeDefs = `#graphql
     locked: Boolean!
     lockedBy: String
     expiresAt: DateTime
-  }
-
-  "#3125 S3: the caller's ready filter against the integration's readyLabel (ANY by default). ONLY on an integration with no readyLabel lists nothing."
-  enum ReadyFilter {
-    ONLY
-    EXCLUDE
-    ANY
-  }
-
-  "#3125 S3: one open, untracked item of a task integration. title and labels are the tracker's text."
-  type UntrackedTaskItem {
-    "The item's canonical URL: the externalId a claim records."
-    externalId: String!
-    "The connected repository, lower-cased."
-    repository: String!
-    number: Int!
-    title: String!
-    url: String!
-    labels: [String!]!
-    createdAt: DateTime!
-    updatedAt: DateTime!
-    "True when a pull request that closes the item has merged: listed for a close check, not dropped."
-    linkedPullRequestMerged: Boolean!
-  }
-
-  "#3125 S3: one page of untrackedTaskItems. total counts the whole filtered list as read: when complete is false, only what the read reached."
-  type UntrackedTaskItemPage {
-    items: [UntrackedTaskItem!]!
-    total: Int!
-    complete: Boolean!
-    incompleteReason: String
-  }
-
-  "#3125 S3: what claimUntrackedTaskItems created, in claim order."
-  type ClaimUntrackedTaskItemsResult {
-    tasks: [AgentTask!]!
-    complete: Boolean!
-    incompleteReason: String
-    "The stable code of the refusal that stopped the walk; null unless incompleteReason is claim_refused."
-    refusalCode: String
   }
 
   # ── #1705 Agent tasks (Task Management T1, epic #1704; hrn:node:hadronmemory.com:specs:cor:agt:050) ──────

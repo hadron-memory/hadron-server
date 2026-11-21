@@ -36,7 +36,7 @@ export { hadronSendSms } from './smsTools.js';
 export { hadronSendEmail } from './emailTools.js';
 export { hadronReadSecret } from './secretTools.js';
 export { driveSearch, driveGetFile, driveExportFile } from './driveTools.js';
-export { hadronTaskCreate, hadronTaskUntrackedList, hadronTaskUntrackedClaim } from './taskTools.js';
+export { hadronTaskCreate } from './taskTools.js';
 export { teamChatRead } from './teamChatTools.js';
 export { hadronTeamSnapshot } from './teamSnapshotTools.js';
 export { githubIssueSnapshot } from './githubTools.js';

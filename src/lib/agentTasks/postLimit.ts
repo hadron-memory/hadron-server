@@ -12,9 +12,9 @@ import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import { lockWorkerPostAdmission } from '../teamChatAdmission.js';
-import { darkAlarmChain } from './darkWorker.js';
+import { darkAlarmChain } from './alarmChain.js';
 import type { AlarmChain } from './events.js';
-import { isSerializationFailure } from './stall.js';
+import { isSerializationFailure } from './serializationFailure.js';
 
 export const POST_LIMIT_EVENT_TYPE = 'alarm.post-limit';
 const MAX_ATTEMPTS = 5;
