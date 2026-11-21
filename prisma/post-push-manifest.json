@@ -2,18 +2,6 @@
   "note": "Known-acceptable drift and raw-SQL object inventory for the migration smoke lane (#434). diff-whitelist: the exact `prisma migrate diff` lines the CI drift check may drop — each row names the object, its kind, and WHY the drift is acceptable; the filter (scripts/db/migrateDiffFilter.mjs) matches lines exactly, so any definition change re-surfaces as drift. This half is hand-maintained: a row whose line prisma no longer emits at all is pruned by hand on regen, and the smoke lane's own exact matching is what surfaces a changed line. post-push-owned: every durable object the prisma/post-push.sql closure creates — regenerate with scripts/db/gen-post-push-manifest.mjs; the completeness test (src/test/postPushManifest.test.ts) pins THIS half against the closure in both directions (a missing or stale row is red), and gen --check compares full rows (name, kind, file, why).",
   "diff-whitelist": [
     {
-      "name": "memories_user_id_idx",
-      "kind": "partial-index",
-      "why": "Partial index (WHERE clause) in the baseline migration; Prisma schema language cannot express a WHERE on an index, so the diff wants to 'fix' it into non-partial form on every run.",
-      "line": "CREATE INDEX \"memories_user_id_idx\" ON \"memories\"(\"user_id\");"
-    },
-    {
-      "name": "users_external_app_id_external_id_key",
-      "kind": "partial-index",
-      "why": "Partial unique index in the baseline migration; same Prisma limitation as memories_user_id_idx — the diff wants to drop the partiality it cannot model.",
-      "line": "CREATE UNIQUE INDEX \"users_external_app_id_external_id_key\" ON \"users\"(\"external_app_id\", \"external_id\");"
-    },
-    {
       "name": "node_embeddings_embedding_hnsw",
       "kind": "hnsw-index",
       "why": "pgvector HNSW index, created by raw SQL (post-push.sql on dev/test, the migration in prod — prod never runs post-push.sql). Prisma cannot express it, so the diff wants to DROP it; it must survive.",
@@ -1792,6 +1780,12 @@
       "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {
+      "name": "memories_user_id_idx",
+      "kind": "index",
+      "file": "partial-index-invariants.sql",
+      "why": "Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
       "name": "node_embeddings_embedding_hnsw",
       "kind": "index",
       "file": "post-push.sql",
@@ -3157,6 +3151,12 @@
       "name": "tickers_generated_live_uniq",
       "kind": "unique-index",
       "file": "ticker-generated-live-unique.sql",
+      "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
+    },
+    {
+      "name": "users_external_app_id_external_id_key",
+      "kind": "unique-index",
+      "file": "partial-index-invariants.sql",
       "why": "Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma."
     },
     {

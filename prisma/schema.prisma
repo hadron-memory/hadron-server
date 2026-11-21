@@ -507,7 +507,10 @@ model User {
   /// #1715 — accounts merged into this one.
   mergedFrom                    UserMerge[]                 @relation("UserMergeTarget")
 
-  @@unique([externalAppId, externalId])
+  // #4335: users_external_app_id_external_id_key is a PARTIAL unique (WHERE external_id IS NOT NULL), as migration
+  // 20260519180903 builds it (cor:dmo:040:01's App-provisioned identity key). Prisma cannot model an index predicate and
+  // cannot see a partial index, so declaring it here made every later db push try to re-add it. It is not declared:
+  // prisma/partial-index-invariants.sql (post-push) owns it. Nothing reads the generated externalAppId_externalId key.
   @@map("users")
 }
 
@@ -1170,7 +1173,9 @@ model Memory {
   @@index([organizationId])
   @@index([userMemoryOfAgentId])
   @@index([anonymousExpiresAt])
-  @@index([userId])
+  // #4335: memories_user_id_idx is PARTIAL (WHERE user_id IS NOT NULL), as migration 20260519180903 builds it. Prisma
+  // cannot model an index predicate and cannot see a partial index, so declaring it here made every later db push try to
+  // create it again ("already exists"). It is not declared: prisma/partial-index-invariants.sql (post-push) owns it.
   @@index([appId])
   @@index([installOfAgentId])
   @@index([ownerUserId])
