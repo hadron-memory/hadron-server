@@ -116,6 +116,8 @@ const EXPECTED_QUERY_REF_ARGS: Record<string, string[]> = {
   appRun: ['ref'],
   nodeRevisions: ['nodeRef'],
   appRuns: ['appRef', 'orgRef'],
+  // #4139 (S3): nodeExport takes the node's ref (PK or URN).
+  nodeExport: ['ref'],
 };
 
 /**
