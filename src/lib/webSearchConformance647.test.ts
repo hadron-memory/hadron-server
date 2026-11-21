@@ -10,7 +10,7 @@
  *   4. a tool configured as declaring another contract version is refused by
  *      `webSearch` BEFORE any request is sent;
  *   5. the same refusal holds for the fixture runner (zero requests);
- *   6. the envelope rules the fixtures rest on (integer rank in ascending order,
+ *   6. the envelope rules the fixtures rest on (integer rank in nondecreasing order,
  *      string title/url/snippet, a response-side version that differs).
  */
 
@@ -153,7 +153,20 @@ describe('#647 S1 web-search@1 conformance fixtures', () => {
     expect(report.passed).toBe(false);
     const text = report.failures.join('\n');
     expect(text).toMatch(/status: HTTP 500 \(upstream_unreachable\)/);
-    expect(text).not.toMatch(/refused an unknown option/);
+    expect(text).not.toMatch(/refused the unknown option/);
+  });
+
+  it('an unrelated 400 is reported as its status; a 400 naming the key is attributed to it', async () => {
+    const mk = (error: string) => vi.fn(async (_u: string | URL | Request, init?: RequestInit) => {
+      const req = JSON.parse(init!.body as string) as Req;
+      if (req.providerOptions) return { ok: false, status: 400, json: async () => ({ error }) } as unknown as Response;
+      return { ok: true, status: 200, json: async () => ({ results: [result(1)], contractVersion: WEB_SEARCH_CONTRACT_VERSION, source: 'external' }) } as unknown as Response;
+    }) as unknown as ReturnType<typeof conformingFetch>;
+    const unrelated = (await run(mk('bad_request'))).failures.join('\n');
+    expect(unrelated).toMatch(/status: HTTP 400 \(bad_request\)/);
+    expect(unrelated).not.toMatch(/refused the unknown option/);
+    const named = (await run(mk('providerOptions: unknown key'))).failures.join('\n');
+    expect(named).toMatch(/refused the unknown option with HTTP 400/);
   });
 
   it('records a rejected request and a non-JSON answer as failures of that fixture, not throws', async () => {
@@ -189,7 +202,7 @@ describe('#647 S1 web-search@1 conformance fixtures', () => {
 
   it('still searches when the configured declared version matches, or is unset', async () => {
     vi.stubEnv('WEBSEARCH_TOOL_URL', 'http://tool.test:8080');
-    vi.stubEnv('WEBSEARCH_TOOL_CONTRACT_VERSION', '');
+    vi.stubEnv('WEBSEARCH_TOOL_CONTRACT_VERSION', undefined);
     const fetchMock = conformingFetch();
     vi.stubGlobal('fetch', fetchMock);
     await webSearch({ query: 'hadron' });
@@ -212,7 +225,7 @@ describe('#647 S1 checkSearchEnvelope rules', () => {
     expect(checkSearchEnvelope({ source: 'external' }).join('\n')).toMatch(/results/);
   });
 
-  it('rejects a non-integer rank and a list not in ascending rank order', () => {
+  it('rejects a non-integer rank and a list not in nondecreasing rank order', () => {
     for (const ranks of [[1.5, 2], [2, 1], [1, 3, 2]]) {
       const out = checkSearchEnvelope({ ...good, results: ranks.map((r) => ({ ...result(1), rank: r })) });
       expect(out.join('\n'), JSON.stringify(ranks)).toMatch(/rank/);

@@ -19,7 +19,7 @@ import { WEB_SEARCH_CONTRACT_VERSION, contractVersionMismatch } from './webSearc
  * still answers a valid envelope; it cannot prove the key changed nothing.
  *
  * What a fixture checks is only what the spec makes durable: the result shape
- * (title, url, snippet, an integer rank, results in ascending rank order; the scale itself is not ruled, so none is imposed), the `source: 'external'` tag,
+ * (title, url, snippet, an integer rank, results in nondecreasing rank order; the scale itself is not ruled, so none is imposed), the `source: 'external'` tag,
  * `count` honored as an upper bound, and unknown `providerOptions` safely
  * ignored. It deliberately does NOT pin result content, provider identity,
  * ordering quality or latency (all tunable, not contract).
@@ -64,7 +64,7 @@ export const WEB_SEARCH_CONFORMANCE_FIXTURES: readonly WebSearchConformanceFixtu
     request: { query: 'hadron conformance', freshness: 'week', locale: 'en-US' },
   },
   {
-    name: 'unknown-providerOptions-are-ignored',
+    name: 'unknown-providerOptions-are-accepted',
     rule: 'cor:web:020:01 opaque options bag: an unknown key is accepted (not refused) and the answer stays a valid envelope',
     request: { query: 'hadron conformance', providerOptions: { 'conformance.unknown-option': true } },
   },
@@ -101,7 +101,7 @@ export function checkSearchEnvelope(payload: unknown): string[] {
         // cor:web:020:01 rules an ORDERED list carrying a rank; it does not rule
         // the scale, so a rank scale starting elsewhere or with gaps is accepted.
         if (prevRank !== undefined && row.rank < prevRank) {
-          out.push(`results[${i}].rank: ${row.rank} follows ${prevRank}; the list must be in ascending rank order`);
+          out.push(`results[${i}].rank: ${row.rank} follows ${prevRank}; the list must be in nondecreasing rank order`);
         }
         prevRank = row.rank;
       }
@@ -175,12 +175,16 @@ export async function runWebSearchConformance(opts: RunWebSearchConformanceOptio
           payload && typeof payload === 'object' && typeof (payload as { error?: unknown }).error === 'string'
             ? ` (${(payload as { error: string }).error})`
             : '';
-        // Only a 400/422 on the unknown-option fixture is read as "refused the
-        // option"; any other status (401, 429, 500...) is reported as itself.
-        const optionRefused = fixture.request.providerOptions !== undefined && (res.status === 400 || res.status === 422);
+        // The status and the tool's own error text are always reported. The
+        // unknown key is blamed only when a 400/422 body itself names it; a
+        // bare 400/422 may be unrelated request validation.
+        const named =
+          fixture.request.providerOptions !== undefined &&
+          (res.status === 400 || res.status === 422) &&
+          JSON.stringify(payload ?? '').match(/providerOptions|conformance\.unknown-option/) !== null;
         failures.push(
-          optionRefused
-            ? `providerOptions: the tool refused an unknown option with HTTP ${res.status}${code}; it must safely ignore it`
+          named
+            ? `providerOptions: the tool refused the unknown option with HTTP ${res.status}${code}, naming it; it must safely accept and ignore it`
             : `status: HTTP ${res.status}${code}, expected 200`,
         );
       } else if (failures.length === 0) {
