@@ -1,3 +1,4 @@
+import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
 import { edgeRunOrder } from '../../../lib/edgeOrder.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
@@ -2581,6 +2582,9 @@ export const sessionMutations = {
       const locToId = new Map<string, string>();
       await ctx.db.$transaction(
         async (tx) => {
+          // #1213: this owning restore can recreate snapshot roles and tombstone live signals.
+          // Join the bounded system-memory handshake before any loc or node-row lock/read.
+          await lockMemoryForChannelChange(tx, sysMemId);
           await lockAncestorsForCreateMany(
             tx,
             sysMemId,

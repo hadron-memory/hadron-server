@@ -33,6 +33,7 @@ Null, false and whitespace clearing participate. No unlocked existing-row read i
 | Git sync / mirror-derived signals | Existing complete endpoint memory set at sync transaction entry, before loc/node reconciliation | Existing mirror validation and role/runnable derivation |
 | Boot-prompt compile | Existing output/source complete memory set before path/row locks | Existing compile ownership and immutable output policy |
 | Revision restore | Authority prefix, node/source memory set, loc/reconcile/restore | Existing restore governed and authoring refusals |
+| Agent revision snapshot restore (`resolvers.mutation.session.ts`) | Owning restore transaction takes its system-memory key before ancestor keys, live-row reads, tombstones and snapshot role upserts; the prior auto-save commits separately | Existing Agent ADMIN/read gates, atomic restore, minted-spec checks and compiled-prompt exclusions |
 | GraphQL mergeNodes | Authority prefix, all authorized source/target memories, loc set and rows | Generic governed-result refusal; no laundering stored signals |
 | GraphQL node move | Authority prefix, source/destination memory set, complete loc set and subtree rows | Owning move carries signals and keeps existing refusals |
 | MCP node move, including overwrite | Agent authority prefix, source/destination memory set, archive/loc set and subtree rows | Existing overwrite/archive and move policy |
