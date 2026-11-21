@@ -1,3 +1,4 @@
+import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
 import { edgeRunOrder } from '../../../lib/edgeOrder.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
@@ -19,7 +20,8 @@ import {
 } from '../../../lib/nodeRevisionSnapshot.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
 import { nextRevisionNumber, RevisionSlotsExhaustedError } from '../../../lib/revisionSlot.js';
-import { lockAncestorsForCreate, lockAncestorsForCreateMany, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
+import { isLiveSlotLoc } from '../../../lib/agentRevisions.js';
+import { lockAncestorsForCreate, lockAncestorsForCreateMany, lockNodeForDelete, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
@@ -120,7 +122,7 @@ import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js
 import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../../../lib/bootPrompt.js';
 import { effortFromToken, fillEmptyAppliedRunSettings, isEffortLevel, recordRunSettings, type EffortLevel } from '../../../lib/agentTasks/runSettings.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
-import { forbiddenError } from '../../../lib/refusals.js';
+import { forbiddenError, notFoundError } from '../../../lib/refusals.js';
 import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { oauthSurfaceRefusal, oauthSurfaceRefusalMessage } from '../../../middleware/auth.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -2313,8 +2315,16 @@ export const sessionMutations = {
     endAgentSession: async (_: unknown, { sessionId }: { sessionId: string }, ctx: Context) => {
       if (!ctx.appId) throw forbiddenError('Forbidden: App Key required');
       const session = await ctx.db.session.findUnique({ where: { id: sessionId } });
+      // #4537: one typed answer for unknown, deleted and another App's session alike, so it is no existence oracle
+      // (never SESSION_APP_MISMATCH here). The plain Error it replaces reached the wire as INTERNAL_SERVER_ERROR.
       if (!session || session.appId !== ctx.appId) {
-        throw new Error('Session not found');
+        throw notFoundError('SESSION_NOT_FOUND', 'Session not found');
+      }
+      if (session.deletedAt) {
+        // A deleted session of this App still has its data key released, as an end used to do,
+        // so the refusal never strands a key. Only this App's: a foreign call must not touch another tenant's cache.
+        sessionKeyCache.evict(sessionId);
+        throw notFoundError('SESSION_NOT_FOUND', 'Session not found');
       }
       if (session.endedAt) {
         sessionKeyCache.evict(sessionId); // defensive — idempotent
@@ -2431,6 +2441,63 @@ export const sessionMutations = {
       return { revisionLoc: revLoc, label, published: false, createdAt: new Date().toISOString() };
     },
 
+    /**
+     * #4488 — delete one Agent revision by loc. The gate is restoreRevision's (the read gate, then ADMIN). Refuses
+     * the published (pinned) revision (REVISION_PUBLISHED) and the Agent's only revision (REVISION_ONLY), both
+     * judged on locked rows before any write. The row is soft-deleted: it leaves the list and restore, and its
+     * slot number stays used (#2507), so this does not free a slot.
+     */
+    deleteAgentRevision: async (
+      _: unknown,
+      { agentRef, revisionLoc }: { agentRef: string; revisionLoc: string },
+      ctx: Context,
+    ) => {
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
+      await requireAgentAccess(ctx, agent, 'ADMIN');
+      const sysMemId = (agent as any).systemMemoryId as string;
+      if (!sysMemId) throw new Error('Agent has no system memory');
+      // Only a direct live slot is a revision: anything else (a descendant, a tombstone, another node) is not one.
+      if (!isLiveSlotLoc(revisionLoc)) throw revisionNotFound(revisionLoc);
+
+      return ctx.db.$transaction(async (tx) => {
+        // Lock order: the revisions path (the key every save and restore takes), then this revision's loc, then the
+        // Agent row, which carries the pin. publishRevision takes the Agent row last too.
+        await lockPathForCreateUnder(tx, sysMemId, 'revisions');
+        await lockNodeForDelete(tx, sysMemId, revisionLoc);
+        const [pinRow] = await tx.$queryRaw<Array<{ published_revision_loc: string | null }>>`
+          SELECT published_revision_loc FROM agents WHERE id = ${agent.id} FOR UPDATE`;
+        const publishedLoc = pinRow?.published_revision_loc ?? null;
+
+        const revNode = await tx.node.findFirst({
+          where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
+        });
+        if (!revNode) throw revisionNotFound(revisionLoc);
+        if (publishedLoc === revisionLoc) {
+          throw new GraphQLError('The published revision cannot be deleted. Publish another revision first.', {
+            extensions: { code: 'REVISION_PUBLISHED' },
+          });
+        }
+        const liveSlots = (await tx.node.findMany({
+          where: { memoryId: sysMemId, deletedAt: null, loc: { startsWith: 'revisions:rev-' } },
+          select: { loc: true },
+        })).filter((r) => isLiveSlotLoc(r.loc));
+        if (liveSlots.length <= 1) {
+          throw new GraphQLError('The only revision cannot be deleted.', { extensions: { code: 'REVISION_ONLY' } });
+        }
+        await tx.node.update({
+          where: { id: revNode.id },
+          data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null },
+        });
+        const data = (revNode.data as Record<string, unknown>) ?? {};
+        return {
+          revisionLoc,
+          label: (data.label as string) ?? revNode.name,
+          published: false,
+          createdAt: revNode.createdAt.toISOString(),
+        };
+      });
+    },
+
     publishRevision: async (
       _: unknown,
       { agentRef, revisionLoc, versionLabel }: { agentRef: string; revisionLoc: string; versionLabel?: string },
@@ -2444,24 +2511,33 @@ export const sessionMutations = {
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
-      const revNode = await ctx.db.node.findFirst({
-        where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
-      });
-      if (!revNode) throw revisionNotFound(revisionLoc);
+      // #4488: the revision is judged live and pinned in ONE transaction under the delete's locks (the revision's loc,
+      // then the Agent row), so a concurrent deleteAgentRevision cannot leave the pin on a deleted revision.
+      // Same order as the delete (revision loc, then Agent row; the delete's extra revisions-path lock comes before both and
+      // publish never holds one while waiting for it), so the two cannot deadlock. Table `agents` is Agent's @@map name.
+      const label = await ctx.db.$transaction(async (tx) => {
+        await lockNodeForDelete(tx, sysMemId, revisionLoc);
+        await tx.$queryRaw`SELECT id FROM agents WHERE id = ${resolvedAgentId} FOR UPDATE`;
+        const revNode = await tx.node.findFirst({
+          where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
+        });
+        if (!revNode) throw revisionNotFound(revisionLoc);
 
-      const revData = (revNode.data as Record<string, unknown>) ?? {};
-      const label = versionLabel ?? (revData.label as string) ?? revisionLoc;
+        const revData = (revNode.data as Record<string, unknown>) ?? {};
+        const label = versionLabel ?? (revData.label as string) ?? revisionLoc;
 
-      // Mark as published
-      await ctx.db.node.update({
-        where: { id: revNode.id },
-        data: { data: { ...revData, published: true, publishedAt: new Date().toISOString(), versionLabel: label } as InputJsonValue },
-      });
+        // Mark as published
+        await tx.node.update({
+          where: { id: revNode.id },
+          data: { data: { ...revData, published: true, publishedAt: new Date().toISOString(), versionLabel: label } as InputJsonValue },
+        });
 
-      // Update agent to point to this revision
-      await ctx.db.agent.update({
-        where: { id: resolvedAgentId },
-        data: { publishedRevisionLoc: revisionLoc },
+        // Update agent to point to this revision
+        await tx.agent.update({
+          where: { id: resolvedAgentId },
+          data: { publishedRevisionLoc: revisionLoc },
+        });
+        return label;
       });
 
       return { revisionLoc, label, published: true, createdAt: new Date().toISOString() };
@@ -2506,6 +2582,9 @@ export const sessionMutations = {
       const locToId = new Map<string, string>();
       await ctx.db.$transaction(
         async (tx) => {
+          // #1213: this owning restore can recreate snapshot roles and tombstone live signals.
+          // Join the bounded system-memory handshake before any loc or node-row lock/read.
+          await lockMemoryForChannelChange(tx, sysMemId);
           await lockAncestorsForCreateMany(
             tx,
             sysMemId,
@@ -2524,9 +2603,9 @@ export const sessionMutations = {
           // cor:agt:040:10), not written below, and a snapshot's copy of one is ignored.
           //
           // #4313: every statement of this step leaves compiled rows out BY TYPE, in its own WHERE. It used to leave
-          // them out by the ids of an earlier read, so a compile that committed between that read and this one (the
-          // transaction is READ COMMITTED and shares no lock with a compile) was tombstoned, or had its edges
-          // retired. No statement here depends on what an earlier one saw of compiled rows.
+          // them out by ids from an earlier read. Before S2 coordinated restore and compile, a compile between
+          // those reads could be tombstoned or lose its edges. Direct writes outside the memory-key protocol can
+          // still interleave, so no statement here depends on an earlier snapshot of compiled rows.
           const notCompiled = { nodeType: { not: COMPILED_BOOT_PROMPT_NODE_TYPE } };
           const live = await tx.node.findMany({
             where: { memoryId: sysMemId, deletedAt: null, ...notCompiled, NOT: { loc: { startsWith: 'revisions' } } },

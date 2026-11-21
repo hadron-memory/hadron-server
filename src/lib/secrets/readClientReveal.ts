@@ -7,6 +7,7 @@
  * event commit before the value leaves this function. A client id that is unknown, belongs to another holder or another App is
  * the one uniform SECRET_READ_CLIENT_NOT_FOUND, so a client id is no existence oracle. Past that, the refusal names the state.
  */
+import { deleteLockedAppSecret } from './autoDelete.js';
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.js';
@@ -17,6 +18,7 @@ import { isModelReadableKind } from '../secrets.js';
 import { currentAppSecretValue, lockSecretRow, recordSecretEvent, secretActorOf } from './appSecrets.js';
 import { judgeSecretReadClientIssuer, SECRET_READ_CLIENT_SUPERSEDED } from './readClientIssuer.js';
 import { isAppParticipant } from '../auth/appParticipantRead.js';
+import { isRunPrincipal } from '../auth/runPrincipal.js';
 import { authorizationDenied } from '../auth/authorizationDenied.js';
 
 export const SECRET_READ_CLIENT_NOT_FOUND = 'SECRET_READ_CLIENT_NOT_FOUND';
@@ -46,7 +48,7 @@ export interface RevealResult { value: string; secretName: string; readsLeft: nu
 /** The GraphQL door: a bound worker only. A person, an App key, a run and an impersonation get the uniform answer. */
 export async function revealWithReadClient(ctx: Context, clientId: string): Promise<RevealResult> {
   const workerId = boundWorkerId();
-  if (!workerId || !ctx.userId || ctx.impersonation) throw notFound();
+  if (!workerId || !ctx.userId || ctx.appKeyId || ctx.impersonation || isRunPrincipal(ctx)) throw notFound();
   return revealAs(ctx, clientId, { kind: 'worker', workerId });
 }
 
@@ -125,6 +127,11 @@ async function revealAs(ctx: Context, clientId: string, holder: Holder): Promise
     await recordSecretEvent(tx, { ownerId: secret.ownerId, secretId: secret.id, secretName: secret.name, kind: 'REVEAL', versionNo: newest?.versionNo ?? null, actor });
     const value = await currentAppSecretValue(tx, { id: secret.id, ownerId: secret.ownerId });
     const after = await tx.grant.findUniqueOrThrow({ where: { id: client.grantId }, select: { maxUses: true, useCount: true } });
+    const terms = await tx.grant.findUniqueOrThrow({ where: { id: client.grantId }, select: { values: true, signatureId: true } });
+    if (terms.signatureId && (terms.values as Record<string, unknown>)['auto-delete'] === 'delete'
+        && after.maxUses !== null && after.useCount >= after.maxUses) {
+      await deleteLockedAppSecret(tx, secret);
+    }
     return { value: JSON.stringify(value), secretName: secret.name, readsLeft: after.maxUses === null ? null : after.maxUses - after.useCount };
   });
   } catch (e) {

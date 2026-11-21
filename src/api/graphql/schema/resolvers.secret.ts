@@ -18,6 +18,8 @@
  * An App secret keeps NO value on its row: every store adds a version (src/lib/secrets/appSecrets.ts). The
  * memory-owned scope stays superseded (#696, D-2026-07-15-006).
  */
+import { autoDeleteLimitRefusal, deleteLockedAppSecret } from '../../../lib/secrets/autoDelete.js';
+export { autoDeleteLimitRefusal } from '../../../lib/secrets/autoDelete.js';
 import { GraphQLError } from 'graphql';
 import { assertOneRevealPerOperation, type RevealOperationInfo } from '../../../lib/secrets/revealOperationGuard.js';
 import { pageArgs, pageEnvelope, type Context } from './resolvers.helpers.js';
@@ -45,7 +47,6 @@ import { forbiddenError } from '../../../lib/refusals.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
-import { boundWorkerId } from '../../../lib/bootPrompt.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -64,6 +65,7 @@ import { createPendingGrant, GrantCreateRefusal } from '../../../lib/grants/crea
 import { requireSecretReadClientIssuer } from '../../../lib/secrets/readClientIssuer.js';
 import { generateId } from '../../../lib/id.js';
 import { revealWithReadClient } from '../../../lib/secrets/readClientReveal.js';
+import { readClientPage, myReadClients } from '../../../lib/secrets/readClientList.js';
 import { tickBatch } from './tickBatch.js';
 
 function badInput(message: string): GraphQLError {
@@ -150,6 +152,7 @@ async function loadLiveApp(ctx: Context, appId: string): Promise<AppSecretRow | 
     select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
   });
   if (!app || app.deletedAt || app.uninstalledAt) return null;
+  if (app.organizationId && !(await ctx.db.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } }))) return null;
   return app;
 }
 
@@ -159,7 +162,7 @@ async function loadLiveApp(ctx: Context, appId: string): Promise<AppSecretRow | 
  * or null. A bound worker session is its driving person's session, so it passes when that person is a member.
  */
 async function appMember(ctx: Context, appId: string): Promise<AppSecretRow | null> {
-  if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return null;
+  if (!ctx.userId || ctx.appKeyId || ctx.impersonation || isRunPrincipal(ctx)) return null;
   const app = await loadLiveApp(ctx, appId);
   if (!app) return null;
   return (await isAppParticipant(ctx, app)) ? app : null;
@@ -173,7 +176,7 @@ async function requireAppMember(ctx: Context, appId: string): Promise<AppSecretR
 
 /** Whoever manages the live App, as a person acting as themselves (cor:dmo:050:12). */
 async function appManager(ctx: Context, appId: string): Promise<AppSecretRow | null> {
-  if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return null;
+  if (!ctx.userId || ctx.appKeyId || ctx.impersonation || isRunPrincipal(ctx)) return null;
   const app = await loadLiveApp(ctx, appId);
   if (!app) return null;
   return (await managesApp(ctx, app)) ? app : null;
@@ -474,11 +477,7 @@ async function deleteAppSecret(ctx: Context, found: SecretRow) {
       const secret = await tx.secret.findUnique({ where: { id: found.id } });
       if (!secret) throw notFound();
       if (secret.protected) throw protectedRefusal();
-      const newest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
-      await recordSecretEvent(tx, { ownerId: secret.ownerId, secretId: secret.id, secretName: secret.name, kind: 'DELETE', versionNo: newest?.versionNo ?? null, actor });
-      await tx.$executeRaw`UPDATE secret_read_clients SET end_reason = 'SECRET_DELETED', ended_at = (clock_timestamp() AT TIME ZONE 'UTC')
-         WHERE secret_id = ${secret.id} AND ended_at IS NULL`;
-      await tx.secret.delete({ where: { id: secret.id } });
+      await deleteLockedAppSecret(tx, secret, actor);
       return true;
     },
   );
@@ -510,16 +509,6 @@ function asTime(v: Date | string | null | undefined): Date | null {
   return d;
 }
 
-/** The auto-delete limit rule, as a pure function so it is tested while the NOT_AVAILABLE guard shadows it (#4443, Bridget P2 1). */
-export function autoDeleteLimitRefusal(
-  autoDelete: boolean, expiresAt: Date | null, maxUses: number | null,
-): { code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT'; message: string } | null {
-  if (autoDelete && !expiresAt && maxUses === null) {
-    return { code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT', message: 'An auto-delete mark needs a window or a read budget.' };
-  }
-  return null;
-}
-
 /**
  * Issue a read client (cor:sec:060:01): the pending `secret.reveal` grant and its client row, in ONE transaction. Only a person
  * acting as themselves, who manages the App or wrote the current version (`requireSecretReadClientIssuer`, judged under the
@@ -537,29 +526,24 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
   const startsAt = asTime(input.startsAt);
   const expiresAt = asTime(input.expiresAt);
   const maxUses = input.maxReads ?? null;
-  // The "delete" mark is signed but nothing consumes it until S6 (#4001): a person must not sign a retention term the server does not
-  // keep. Judged FIRST, so a caller is not walked through adding a limit only to be refused after it (#4443 item 6). S6's first act is
-  // to remove this guard; the limit rule (`autoDeleteLimitRefusal`, pinned by its own test now) then applies unchanged.
-  if (input.autoDelete) {
-    throw readClientRefusal('SECRET_AUTO_DELETE_NOT_AVAILABLE', 'Auto-delete on a read client is not available yet.');
-  }
   const limitRefusal = autoDeleteLimitRefusal(input.autoDelete, expiresAt, maxUses);
   if (limitRefusal) throw readClientRefusal(limitRefusal.code, limitRefusal.message);
   const found = await findSecretByRef(ctx, input.secretRef);
-  if (!found || found.ownerType !== 'app') throw authorizationDenied();
+  const denied = () => input.autoDelete ? readClientRefusal('SECRET_AUTO_DELETE_NOT_ALLOWED', 'You may not set an auto-delete mark for this secret.') : authorizationDenied();
+  if (!found || found.ownerType !== 'app') throw denied();
   const app = await loadLiveApp(ctx, found.ownerId);
-  if (!app) throw authorizationDenied();
+  if (!app) throw denied();
   try {
     return await withAuthorizedTx(
       ctx,
       appAnchors(app),
       async (txCtx) => {
         if (!(await lockSecretRow(txCtx.db as never, found.id))) throw authorizationDenied();
-        await requireSecretReadClientIssuer(txCtx, found.id);
+        await requireSecretReadClientIssuer(txCtx, found.id, input.autoDelete);
       },
       async (tx, txCtx) => {
         const userId = txCtx.userId as string;
-        const issuance = await requireSecretReadClientIssuer({ ...txCtx, db: tx } as Context, found.id);
+        const issuance = await requireSecretReadClientIssuer({ ...txCtx, db: tx } as Context, found.id, input.autoDelete);
         const holder = input.holderKind === 'USER'
           ? { kind: 'user' as const, id: userId }
           : { kind: 'worker' as const, id: input.holderRef ?? '' };
@@ -593,16 +577,10 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
 
 export const secretQueries = {
   mySecretReadClients: async (_: unknown, args: { limit?: number | null; offset?: number | null }, ctx: Context) => {
-    const workerId = boundWorkerId();
-    if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return [];
+    // Callers that can never be a person get the empty answer before they reach the limiter, as before #3998 B.
+    if (!ctx.userId || ctx.appKeyId || ctx.impersonation || isRunPrincipal(ctx)) return [];
     await admitOperationRate(ctx, ctx.db, 'OTHER_READS', appRateIdentity(ctx));
-    const take = clampListTake(args.limit);
-    if (take === 0) return [];
-    const rows = await ctx.db.secretReadClient.findMany({
-      where: { OR: [{ issuerUserId: ctx.userId }, { grant: { userId: ctx.userId } }, ...(workerId ? [{ grant: { workerId } }] : [])] },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take, skip: Math.max(0, args.offset ?? 0),
-    });
-    return rows.map((r) => ({ clientId: r.id, grantId: r.grantId, secretId: r.secretId, secretName: r.secretName, selfIssued: r.selfIssued, endReason: r.endReason, createdAt: r.createdAt }));
+    return myReadClients(ctx, args);
   },
 
   /**
@@ -736,6 +714,13 @@ const versionsPageBatch = tickBatch<string, VersionsPageResult>(async (ctx, keys
 
 /** `Secret` field resolvers for the App half: versions are metadata only, newest first. Org and user secrets have none. */
 export const secretFields = {
+  /** Separate audience from Secret metadata: current issuer or manager; prefix-only for other managers. */
+  readClients: async (s: { id: string; ownerType: string; ownerId: string }, args: { activeOnly?: boolean; limit?: number | null; offset?: number | null }, ctx: Context) => {
+    // readClientPage's SQL joins apps and organizations, so liveness is judged there; appManager is false for a dead App.
+    if (s.ownerType !== 'app') return pageEnvelope([], 0, 0);
+    const manager = !!(await appManager(ctx, s.ownerId));
+    return readClientPage(ctx, s.id, args, manager);
+  },
   currentVersion: async (s: { id: string; ownerType: string }, _: unknown, ctx: Context) => {
     if (s.ownerType !== 'app') return null;
     return currentVersionBatch(ctx, s.id);

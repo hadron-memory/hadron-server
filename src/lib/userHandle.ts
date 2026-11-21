@@ -113,7 +113,8 @@ type HandleProbeDb = Pick<PrismaClient, 'principal'>;
  * distinguish a handle collision (retryable) from any other conflict.
  */
 export async function isHandleTaken(db: HandleProbeDb, handle: string): Promise<boolean> {
-  return !(await checkRootAvailable(db, handle));
+  // Boolean by contract: a name the rule refuses is as unusable as a claimed one, so it is not picked either.
+  return (await checkRootAvailable(db, handle)) !== 'free';
 }
 
 /**

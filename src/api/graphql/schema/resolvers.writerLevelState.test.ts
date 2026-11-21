@@ -132,10 +132,11 @@ describe('writer levels: node state judged before and after', () => {
     expect(await code(door('createTaskNode', contrib, { loc: 'c4', isRunnable: true }))).toBe('OK');
   });
 
-  it('OWNER is not read as ALL', async () => {
+  it('OWNER is built (#1333): the owning party writes, and it is not read as ALL', async () => {
     await db.nodeRoleRule.deleteMany({});
     await rule('task', { writers: 'OWNER' });
-    expect(await code(door('createTaskNode', admin, { loc: 'o1', isRunnable: true }))).toBe('ROLE_WRITERS_UNSUPPORTED');
+    expect(await code(door('createTaskNode', admin, { loc: 'o1', isRunnable: true }))).toBe('OK');
+    expect(await code(door('createTaskNode', reader, { loc: 'o2', isRunnable: true }))).not.toBe('OK');
   });
 
   it('bulk replacement skips rows the caller may not write', async () => {

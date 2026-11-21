@@ -425,6 +425,29 @@ ON CONFLICT (name) DO NOTHING;
 -- the plain unique index on `name` is uniqueness across case. Until #4400 only the writers' lower-casing kept
 -- `Example` out beside `example`. Placed after the backfills above, which write lower(...) names.
 -- Synced with the 20261117900000_principals_name_lower_check migration.
+-- #4411: the migration refuses on a mixed-case row (SQLSTATE HDPRF) rather than lower-casing it, which could merge
+-- two owners' roots. This copy gives a development database the same guard, naming the rows and what to do, instead
+-- of failing below on a raw check violation. The sentinel comments are what principalNameLower4411.test.ts runs.
+-- #4411 preflight chk_principals_name_lower: begin
+DO $$
+DECLARE
+  offending_count bigint;
+  offending_rows_summary text;
+BEGIN
+  SELECT count(*) INTO offending_count FROM principals WHERE name <> lower(name);
+  IF offending_count > 0 THEN
+    -- A row "shares its root" when any OTHER row has the same lower(name): a lower-case twin, or another mixed-case
+    -- spelling (`Legacy.Example` beside `LEGACY.EXAMPLE`), so lower-casing it alone would collide.
+    SELECT string_agg(format('%L (%s, %s%s)', p.name, p.kind, p.status,
+             CASE WHEN EXISTS (SELECT 1 FROM principals t WHERE lower(t.name) = lower(p.name) AND t.id <> p.id)
+                  THEN ', shares its root with another row' ELSE '' END), ', ' ORDER BY p.name)
+      INTO offending_rows_summary
+      FROM (SELECT id, name, kind, status FROM principals WHERE name <> lower(name) ORDER BY name LIMIT 20) p;
+    RAISE EXCEPTION 'principals.name: % principal row(s) are not lower case, so chk_principals_name_lower cannot be added (hadron-server#4400; this guard: #4411). For a row that shares its root with no other row, lower-case it and the owning users.handle / organizations.urn; for rows that share a root, decide which owner keeps it and rename or delete the others, then lower-case the kept row (if it is still mixed case) together with its owning users.handle / organizations.urn, or the next run refuses again. Then re-run pnpm db:dev-setup. Rows (first 20): %', offending_count, offending_rows_summary
+      USING ERRCODE = 'HDPRF';
+  END IF;
+END $$;
+-- #4411 preflight chk_principals_name_lower: end
 ALTER TABLE principals
   DROP CONSTRAINT IF EXISTS chk_principals_name_lower;
 ALTER TABLE principals
@@ -826,6 +849,22 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #3996 (S1 of #3991): per-App data keys. One source, shared verbatim with migration 20261112150000_secret_app_keys.
 \ir secret-app-keys-invariants.sql
 
+-- #4003 (S8 of #3991): the secrets root's key-check value. One source, shared verbatim with migration
+-- 20261120090000_secret_root_check.
+\ir secret-rotation-invariants.sql
+
+-- #4332 (#434 Slice C): the rate-limit CHECKs migration 20261031220000_shared_rate_limiter declares inline (pinned by
+-- src/lib/rateLimit/rateLimitChecks4332.test.ts and scripts/db/migration-replay.ts).
+\ir rate-limit-invariants.sql
+
+-- #4333 (#434 Slice C): the six UNIQUE constraints the migrations create, promoted from the same-name unique indexes
+-- db push leaves (pinned by src/test/migrations/uniqueConstraints4333.test.ts and scripts/db/migration-replay.ts).
+\ir unique-constraint-invariants.sql
+
+-- #4335 (#434 Slice C): the two indexes migration 20260519180903_baseline_init builds partial, which db push builds full
+-- (pinned by src/test/migrations/partialIndexes4335.test.ts and scripts/db/migration-replay.ts).
+\ir partial-index-invariants.sql
+
 -- #1885: an Agent extends at most one base Agent; no cycles, at most 4 in a
 -- chain. One source, shared verbatim with migration 20261014120000_agent_base
 -- (pinned by src/api/graphql/schema/resolvers.agentBase1885.test.ts).
@@ -1008,3 +1047,6 @@ ALTER TABLE mcp_servers ALTER COLUMN tool_allowlist SET NOT NULL;
 ALTER TABLE rate_limit_manifests ALTER COLUMN key_ids SET NOT NULL;
 ALTER TABLE tickers ALTER COLUMN reasons SET NOT NULL;
 ALTER TABLE user_api_keys ALTER COLUMN oauth_scopes SET NOT NULL;
+
+-- #4001: finite auto-delete terms, after the grants and read-client invariants.
+\ir secret-auto-delete-invariants.sql

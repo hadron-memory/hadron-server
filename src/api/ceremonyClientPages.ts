@@ -14,7 +14,7 @@ import type { Express, Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { peekFreshSignIn } from '../lib/passkeys/freshSignIn.js';
 import { createHash } from 'node:crypto';
-import { page } from './ceremonyPages.js';
+import { ceremonyShell } from './ceremonyShell.js';
 import { passkeyRpId } from '../lib/signing/config.js';
 
 export const CEREMONY_SCRIPT_PATH = '/passkeys/assets/ceremony.js';
@@ -38,9 +38,12 @@ ${providersOnly ? '<p class="hint">An email link can\'t be used to remove a pass
 <p class="hint">Open the link in this browser. It confirms who you are to this page only, and does not sign you in.</p>`}
 </div>`;
 
+// #3700 R4: the passkey list's rows and status badge.
+const LIST_CSS = '#passkey-list ul{list-style:none;margin:0 0 1rem;padding:0}#passkey-list li{padding:.5rem 0;border-bottom:1px solid rgba(127,127,127,.4)}.badge{display:inline-block;padding:0 .5rem;border:1px solid currentColor;border-radius:1rem;font-size:.875rem}details summary{cursor:pointer;min-height:2.75rem}';
+
 function send(res: Response, title: string, body: string): void {
   res.status(200).set(CLIENT_PAGE_HEADERS).type('html')
-    .send(page(title, `${body}\n<script src="${CEREMONY_SCRIPT_PATH}" defer></script>`));
+    .send(ceremonyShell({ title, extraCss: LIST_CSS, body: `${body}\n<script src="${CEREMONY_SCRIPT_PATH}" defer></script>` }));
 }
 
 const METHOD_NAMES: Record<string, string> = { github: 'GitHub', google: 'Google', apple: 'Apple', email: 'an email link' };
@@ -70,18 +73,18 @@ export function mountCeremonyClientPages(app: Express, opts: { windowHours: numb
 ${step1}
 <h3>2. Name and add it</h3>
 <p><label>Name for this passkey <input id="label" maxlength="64" placeholder="for example, Work laptop"></label></p>
-<p><button id="add-first"${live ? '' : ' disabled aria-describedby="add-first-why"'}>Add my first passkey</button></p>
+<div><button id="add-first"${live ? '' : ' disabled aria-describedby="add-first-why"'}>Add my first passkey</button>
+<div id="account-check" hidden>
+<p id="account" role="alert" tabindex="-1"></p>
+<p><button id="confirm-account">Continue</button> <button id="stop-account">Not my account: stop</button></p>
+</div></div>
 ${live ? '' : '<p id="add-first-why" class="hint">Available once step 1 is done.</p>'}
 <p id="status-first" role="status" aria-live="polite"></p>
 ${next === 'sign-in' ? '<p id="continue-signin" hidden><a href="/auth/passkey/sign-in">Continue signing in</a></p>' : ''}
 <h2>Already have a passkey?</h2>
 <p>Use it to vouch for the new one. A passkey still in its cooling-off window can't vouch.</p>
-<p><button id="add-later">Use my passkey, then add another</button></p>
+<div><button id="add-later">Use my passkey, then add another</button></div>
 <p id="status-later" role="status" aria-live="polite"></p>
-<div id="account-check" hidden>
-<p id="account" role="alert" tabindex="-1"></p>
-<p><button id="confirm-account">Continue</button> <button id="stop-account">Not my account: stop</button></p>
-</div>
 </main>`);
   });
 
@@ -117,7 +120,7 @@ ${viaProvider}
 <p class="hint">Lost every passkey and have no linked GitHub, Google or Apple account? Contact Hadron support.</p>
 <p id="status-revoke" role="status" aria-live="polite"></p>
 <h2>2. Choose the passkey to remove</h2>
-<ul id="passkey-list" tabindex="-1" aria-live="polite"></ul>
+<div id="passkey-list" tabindex="-1" aria-live="polite"></div>
 </main>`);
   });
 
@@ -166,9 +169,11 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
     return post('/passkeys/register/challenge').then(function (r) { if (!r.ok) throw new Error('refused'); return r.json(); });
   };
   // Uma P2-2: the account check takes focus, and offers a way out that clears the ceremony.
-  var confirmAccount = function (handle) {
+  var confirmAccount = function (handle, opener) {
     return new Promise(function (resolve, reject) {
       var box = $('account-check'); var a = $('account');
+      // #3700 R3: the check sits directly under the button that opened it.
+      if (opener && opener.parentNode && opener.nextSibling !== box) opener.parentNode.insertBefore(box, opener.nextSibling);
       a.textContent = 'You are adding a passkey to the Hadron account @' + handle + '. Continue only if that is your account.';
       box.hidden = false; a.focus();
       $('confirm-account').onclick = function () { box.hidden = true; resolve(); };
@@ -202,8 +207,13 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
       return post('/passkeys/register/finish', { ceremonyId: ceremonyId, response: response, label: label });
     });
   };
+  // #3700 (BLIND P2): one account check serves both openers, so a second attempt while one is pending is ignored.
+  var registering = false;
   var register = function (vouch) {
     var out = vouch ? 'status-later' : 'status-first';
+    // #4621 item 4: an ignored click says why, on the clicked opener's own line, and leaves the pending check alone.
+    if (registering) { say(out, 'Finish or stop the passkey you are adding first.'); return; }
+    registering = true;
     say('status-first', ''); say('status-later', '');
     var ceremonyId;
     challenge().then(function (c) {
@@ -219,46 +229,81 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
       if (!r.ok) throw new Error(vouch ? 'That passkey can\'t vouch: it may be removed or still in its cooling-off window.' : 'Confirm who you are first (step 1), in this browser, within the last 10 minutes.');
       return r.json();
     }).then(function (options) {
-      return confirmAccount(options.account.handle).then(function () { return create(ceremonyId, options); });
+      return confirmAccount(options.account.handle, $(vouch ? 'add-later' : 'add-first')).then(function () { return create(ceremonyId, options); });
     }).then(function (r) {
       if (!r.ok) throw new Error('The passkey was not added. Start again.');
       return r.json();
     }).then(function (done) {
-      say(out, done.kind === 'first'
+      var nextStep = main.dataset.next === 'sign-in' && done.kind === 'first' ? ' Next: continue signing in.' : ' Next: nothing more to do here; you can close this page.';
+      say(out, (done.kind === 'first'
         ? 'Passkey added. Anything it signs stays pending for its cooling-off window. We emailed you a link to remove it if this wasn\'t you.'
-        : 'Passkey added. We emailed you a notice.');
+        : 'Passkey added. We emailed you a notice.') + nextStep);
+      say(out === 'status-later' ? 'status-first' : 'status-later', ''); // an ignored click's message does not outlive the attempt
       if (done.kind === 'first' && main.dataset.next === 'sign-in' && $('continue-signin')) $('continue-signin').hidden = false;
-    }).catch(function (e) { say(out, e && e.message && e.message !== 'refused' ? e.message : 'That didn\'t work. Start again.'); });
+      registering = false;
+    }).catch(function (e) { registering = false; say(out === 'status-later' ? 'status-first' : 'status-later', ''); say(out, e && e.message && e.message !== 'refused' ? e.message : 'That didn\'t work. Start again.'); });
   };
   // #1631 PR3: the revocation page.
   var revokeCeremony = null;
+  var fmtDate = function (v) {
+    return new Date(v).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+  };
+  var el = function (tag, text, cls) { var e = document.createElement(tag); if (text) e.textContent = text; if (cls) e.className = cls; return e; };
+  // #4621 item 3: a date is a <time datetime> holding the ISO instant; the text stays the local, minute-precision form.
+  // BLIND P2 (George): a missing or malformed timestamp renders as plain text, never a RangeError that aborts the list.
+  var timeEl = function (v) {
+    // Only a string is a timestamp here (the API sends ISO strings): anything else never reaches Date, so a malformed
+    // JSON value can neither throw at coercion nor pass as an epoch date (BLIND P2, delta).
+    var d = typeof v === 'string' ? new Date(v) : null;
+    if (!d || isNaN(d.getTime())) return document.createTextNode('an unknown date');
+    var t = el('time', fmtDate(v)); t.setAttribute('datetime', d.toISOString()); return t;
+  };
+  // Append text and dates to an element: each part is a string or a date marked { date: v }.
+  var appendTextAndDates = function (e, parts) {
+    parts.forEach(function (x) { e.appendChild(typeof x === 'string' ? document.createTextNode(x) : timeEl(x.date)); });
+    return e;
+  };
+  var line = function (tag, parts, cls) { return appendTextAndDates(el(tag, '', cls), parts); };
+  var row = function (p) {
+    var li = el('li');
+    var removed = !!p.revokedAt;
+    var head = el('div');
+    head.appendChild(el('strong', p.label));
+    head.appendChild(document.createTextNode(' '));
+    head.appendChild(el('span', removed ? 'Removed' : p.prover ? 'In use' : 'Active', 'badge'));
+    li.appendChild(head);
+    li.appendChild(line('div', ['Added ', { date: p.registeredAt }, p.inWindow && !removed ? ' (in its cooling-off window)' : '']));
+    // #4621 item 1: every removed row says when, whether or not it came with an email-link record.
+    if (removed) li.appendChild(line('div', ['Removed ', { date: p.revokedAt }]));
+    if (p.cancel) {
+      var d = el('details'); d.appendChild(el('summary', 'Details'));
+      d.appendChild(line('p', ['Removed by its email link at ', { date: p.cancel.at }, ' from ' + (p.cancel.ip || 'an unknown address') + ' (' + (p.cancel.userAgent || 'unknown browser') + ')']));
+      li.appendChild(d);
+    }
+    if (p.prover && !removed) {
+      li.appendChild(el('div', 'Used to prove it is you. Use another passkey or a provider to remove it.', 'hint'));
+    } else if (!removed) {
+      var b = el('button', 'Remove');
+      b.setAttribute('aria-label', 'Remove the passkey ' + p.label);
+      b.onclick = function () {
+        if (!window.confirm('Remove the passkey "' + p.label + '"? This also signs out the sessions it signed in.')) return;
+        post('/passkeys/revoke/finish', { ceremonyId: revokeCeremony, credentialId: p.credentialId }).then(function (r) {
+          say('status-revoke', r.ok ? 'Removed "' + p.label + '". Next: start again from step 1 to remove another passkey, or close this page.' : 'Not removed. Start again.');
+          if (r.ok) { $('passkey-list').textContent = ''; revokeCeremony = null; }
+        }).catch(function (e) { say('status-revoke', e.message); });
+      };
+      li.appendChild(b);
+    }
+    return li;
+  };
   var renderList = function (passkeys) {
-    var ul = $('passkey-list'); ul.textContent = '';
-    passkeys.forEach(function (p) {
-      var li = document.createElement('li');
-      var text = p.label + ', added ' + new Date(p.registeredAt).toLocaleString();
-      if (p.revokedAt) text += ' (removed)';
-      else if (p.inWindow) text += ' (in its cooling-off window)';
-      if (p.cancel) text += '. Removed by its email link at ' + new Date(p.cancel.at).toLocaleString() + ' from ' + (p.cancel.ip || 'an unknown address') + ' (' + (p.cancel.userAgent || 'unknown browser') + ')';
-      li.textContent = text;
-      if (!p.revokedAt && !p.prover) {
-        var b = document.createElement('button');
-        b.textContent = 'Remove';
-        b.setAttribute('aria-label', 'Remove the passkey ' + p.label);
-        b.onclick = function () {
-          if (!window.confirm('Remove the passkey "' + p.label + '"? This also signs out the sessions it signed in.')) return;
-          post('/passkeys/revoke/finish', { ceremonyId: revokeCeremony, credentialId: p.credentialId }).then(function (r) {
-            say('status-revoke', r.ok ? 'Removed "' + p.label + '".' + ' Start again to remove another.' : 'Not removed. Start again.');
-            if (r.ok) { $('passkey-list').textContent = ''; revokeCeremony = null; }
-          }).catch(function (e) { say('status-revoke', e.message); });
-        };
-        li.appendChild(document.createTextNode(' '));
-        li.appendChild(b);
-      } else if (p.prover) {
-        li.appendChild(document.createTextNode(' (used to prove it is you; use another passkey or a provider to remove it)'));
-      }
-      ul.appendChild(li);
-    });
+    var box = $('passkey-list'); box.textContent = '';
+    var removable = passkeys.filter(function (p) { return !p.revokedAt && !p.prover; });
+    var removedOrProver = passkeys.filter(function (p) { return p.revokedAt || p.prover; });
+    var group = function (items) { var ul = el('ul'); items.forEach(function (p) { ul.appendChild(row(p)); }); return ul; };
+    // #4621 item 2: say so when nothing here can be removed.
+    if (removable.length) box.appendChild(group(removable)); else box.appendChild(el('p', passkeys.length ? 'No passkey here can be removed.' : 'You have no passkeys to remove.', 'hint'));
+    if (removedOrProver.length) { box.appendChild(el('h3', 'Removed, or used to prove it is you')); box.appendChild(group(removedOrProver)); }
   };
   // The identity-provider confirmation is spent (or was refused) at start: offer the providers again (Uma #2230 P2-1).
   var idpSpent = function () {
@@ -298,7 +343,9 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
       return r.json();
     }).then(function (p) {
       var w = $('window-passkey'); var b = $('confirm-window');
-      w.textContent = 'This ends the cooling-off window of the passkey "' + p.label + '", added ' + new Date(p.registeredAt).toLocaleString() + ' after confirming with ' + p.method + '. Anything it has signed stops being pending and counts as signed by you. Continue only if you added it.';
+      var how = { github: 'GitHub', google: 'Google', apple: 'Apple', email: 'an email link' }[p.method] || 'another method';
+      w.textContent = '';
+      appendTextAndDates(w, [ 'The passkey "' + p.label + '" was added on ', { date: p.registeredAt }, ' after confirming with ' + how + '. Ending its cooling-off window makes anything it signed count as signed by you, so continue only if you added it.' ]);
       var n = $('not-mine-window');
       w.hidden = false; b.hidden = false; n.hidden = false; w.focus();
       // Uma P2-4: the case this preview exists to catch.
@@ -309,7 +356,7 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
       b.onclick = function () {
         b.hidden = true; $('not-mine-window').hidden = true;
         post('/passkeys/window/end').then(function (r) {
-          say('status-window', r.ok ? 'The cooling-off window has ended. Anything the passkey signed is no longer pending.' : 'Not ended. Start again.');
+          say('status-window', r.ok ? 'The cooling-off window has ended. Anything the passkey signed is no longer pending. Next: nothing more to do here; you can close this page.' : 'Not ended. Start again.');
         }).catch(function (e) { say('status-window', e.message); });
       };
     }).catch(function (e) { say('status-window', e.message); });

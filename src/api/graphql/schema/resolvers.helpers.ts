@@ -292,7 +292,7 @@ export async function resolveRefArg(
   const chosen = chosenRefArg(args);
   if (!chosen) {
     throw new GraphQLError(
-      `A ${args.label} is required: pass ${args.label}Ref (or the deprecated ${args.label}Id).`,
+      `${args.label}Ref is required (or the deprecated ${args.label}Id).`,
       { extensions: { code: 'BAD_USER_INPUT' } },
     );
   }
@@ -313,7 +313,7 @@ export async function resolveRequiredRefArg(
 ): Promise<string> {
   const chosen = args.ref?.trim();
   if (!chosen) {
-    throw new GraphQLError(`A ${args.label} is required: pass ${args.label}Ref.`, {
+    throw new GraphQLError(`${args.label}Ref is required.`, {
       extensions: { code: 'BAD_USER_INPUT' },
     });
   }

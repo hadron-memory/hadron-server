@@ -15,26 +15,5 @@
 #
 # Recorded at origin/main 4954deaf (Bradley, 2026-11-17; spike https://github.com/hadron-memory/hadron-server/issues/434#issuecomment-6949698384).
 
-# Rate-limit CHECKs exist only on the migration path. Escalated (access constraints), needs ruling: #4332
-added con:rate_limit_buckets.rate_limit_buckets_used_check 73731f68eb5d9e0f
-added con:rate_limit_policies.rate_limit_policies_enforcement_mode_check abf413728555184a
-added con:rate_limit_policies.rate_limit_policies_ip_limit_check a596e25269467158
-added con:rate_limit_policies.rate_limit_policies_key_limit_check 697473538402ddea
-added con:rate_limit_policies.rate_limit_policies_principal_limit_check c9ee8b2604f158cf
-added con:rate_limit_policies.rate_limit_policies_retention_seconds_check 393c66377272a561
-added con:rate_limit_policies.rate_limit_policies_window_seconds_check eb584fc4a27f23cb
-
-# UNIQUE constraints on the migration path are plain unique indexes after db push: #4333
-added con:coordinator_cadence_episodes.coordinator_cadence_episodes_event_id_key 6582efad72dad492
-added con:dark_worker_episodes.dark_worker_episodes_event_id_key 6582efad72dad492
-added con:host_sweep_episodes.host_sweep_episodes_event_id_key 6582efad72dad492
-added con:post_limit_episodes.post_limit_episodes_event_id_key 6582efad72dad492
-added con:rate_limit_buckets.rate_limit_buckets_field_class_dimension_subject_window_sta_key b92480459f6f50b9
-added con:start_failing_episodes.start_failing_episodes_event_id_key 6582efad72dad492
-
-# Partial on the migration path, full after db push: #4335
-changed idx:memories_user_id_idx 5ede391a85cd1b48
-changed idx:users_external_app_id_external_id_key 11f2d98b55a8792c
-
 # IDENTITY on the migration path, a sequence default after db push: #4337
 changed col:stamp_signing_keys.id e941ccdc021b547f

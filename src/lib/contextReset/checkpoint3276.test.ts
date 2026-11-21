@@ -51,10 +51,22 @@ it('replays the stored node through each registered nonended phase, ignoring cha
 });
 it.each(['both','neither'])('refuses %s checkpoint inputs without a node or phase change',async mode=>{
  const s=await claimed(),n=await nodeCount();
+ // Straight after the claim, before any refusal or fixture row exists: only the claim's own audit write can make this 1.
+ expect(await db.hostKeyUse.count({where:{appKeyId:f.orca1.id,action:'reset',operationId:s.operationId,refusedCode:null}})).toBe(1);
  expect(await code(call(s,mode==='both'?{checkpointNode:(await f.checkpoint()).id}:{checkpoint:undefined}))).toBe('RECOVERY_REF_INVALID');
  expect(await nodeCount()).toBe(n+(mode==='both'?1:0));
  expect((await db.contextReset.findUniqueOrThrow({where:{id:s.resetId}})).phase).toBe('claimed');
- expect((await db.hostKeyUse.findMany({where:{appKeyId:f.orca1.id,action:mode==='both'?'checkpoint':'reset'}})).at(-1)?.refusedCode).toBe('RECOVERY_REF_INVALID');
+ // #4424: read the refusal by its code, never by position. The table is append-only, so put an accepted row AFTER the
+ // refusal (timestamp taken from the stored refusal), the order that made `.at(-1)` return null; the filtered read must still find it.
+ // Reads are by f.orca1.id, which is a fresh key per case (setUpResetFixture runs in beforeEach). They are not scoped to
+ // operationId because a refusal row can legally carry none.
+ const action=mode==='both'?'checkpoint':'reset';
+ const refusal=await db.hostKeyUse.findFirstOrThrow({where:{appKeyId:f.orca1.id,action,refusedCode:'RECOVERY_REF_INVALID'}});
+ const key=await db.appKey.findUniqueOrThrow({where:{id:f.orca1.id}});
+ await db.hostKeyUse.create({data:{id:generateId(),appKeyId:key.id,appId:key.appId,hostId:refusal.hostId,action,operationId:s.operationId,refusedCode:null,usedAt:new Date(refusal.usedAt.getTime()+1000)}});
+ const rows=await db.hostKeyUse.findMany({where:{appKeyId:f.orca1.id,action},orderBy:{usedAt:'asc'}});
+ expect(rows.at(-1)?.refusedCode).toBeNull(); // the position-based read would now see an accepted row
+ expect(rows.filter(r=>r.refusedCode==='RECOVERY_REF_INVALID')).toHaveLength(1);
 });
 it.each(['missing-memory','encrypted'])('refuses %s working memory and writes nothing',async kind=>{
  const s=await claimed(),n=await nodeCount();

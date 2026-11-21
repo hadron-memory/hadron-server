@@ -521,6 +521,8 @@ async function runMerge(
       for (let i = 0; i < relocateIds.length; i += batchSize) {
         const ids = relocateIds.slice(i, i + batchSize);
         const moved = await db.$transaction(async (tx) => {
+          // #1213: the initial signal/role-writer snapshot is also under the complete key set.
+          await lockMemoriesForChannelChange(tx, [sourceMemoryId, targetMemoryId]);
           let rows = await tx.node.findMany({
             where: { id: { in: ids }, memoryId: sourceMemoryId, deletedAt: null },
           });

@@ -312,6 +312,22 @@ export const dashboardQueries = {
   },
 
   /**
+   * #2213 S3 (cor:api:120:04): `dashboardWidgets` as a page. The same identity scope (#876: a non-user or impersonated
+   * caller gets the empty page, as the old field gives []) and the same `position, id` order, counted and read in one
+   * snapshot.
+   */
+  dashboardWidgetsPage: async (_: unknown, args: { limit?: number | null; offset?: number | null }, ctx: Context) => {
+    if (!ctx.userId || ctx.impersonation) return { items: [], total: 0, hasMore: false };
+    const where = { userId: ctx.userId };
+    const { take, skip } = pageArgs(args);
+    const [total, items] = await ctx.db.$transaction([
+      ctx.db.dashboardWidget.count({ where }),
+      ctx.db.dashboardWidget.findMany({ where, orderBy: [{ position: 'asc' }, { id: 'asc' }], take, skip }),
+    ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+    return pageEnvelope(items, total, skip);
+  },
+
+  /**
    * Combined data for the caller's PLACED widgets — one entry per placement
    * (#797), in position order, each built from that placement's own `config`.
    * A placement whose type has no registered provider is skipped, not an error.

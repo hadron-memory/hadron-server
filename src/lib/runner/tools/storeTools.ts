@@ -37,7 +37,7 @@ import { logAssetEvent } from '../../asset/audit.js';
 import { assertMemoryAcceptsUploads } from '../../asset/gate.js';
 import { getEffectiveLimits } from '../../asset/limits.js';
 import { buildStorageKey, extractExtension } from '../../asset/storageKey.js';
-import { putObject, deleteObject } from '../../../integrations/r2/client.js';
+import { putObject, deleteObject } from '../../../integrations/objectstore/index.js';
 import { generateId } from '../../id.js';
 import { splitNodeUrn } from '../../urn.js';
 import { emitAssetUrnV2 } from '../../urnEmit.js';

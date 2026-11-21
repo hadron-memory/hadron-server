@@ -14,6 +14,9 @@
 #   appended to DIAG_OUT with the per-session reduction.
 #   The load generator itself runs inside the app container, never on the shared host (the #4448 host
 #   rule, finding synthetic-load-never-on-shared-host); only its counts-only line comes back out.
+#   Sampling interval (#2624): the preload's DIAG_SAMPLE_MS inside the app container, an integer 100..10000 ms,
+#   default 1000; compose.patch does not forward a host value. The preload records the interval it uses in its
+#   config record, and freshness is judged against two periods of that recorded value (none recorded: refused).
 # Failed samples/logs are retained only with verified instance ownership; otherwise private state is left for inspection.
 # Raw failure logs go to $DIAG_OUT.private.log, mode 0600.
 set -euo pipefail
@@ -55,7 +58,7 @@ down() {
     rm -- "$state/diagnose-owner"
     (cd "$stage/src" && scripts/e2e/stack.sh down "$worker") || cleanup_rc=5
   else
-    echo "stack ownership unverified; refusing capture/teardown; inspect private state: $state (manual ownership check required)" >&2
+    explain_stack_ownership_failure "${state:-}" "${project:-}"   # #2628: which case, and the path only when there is one to inspect
     if [ "$rc" = 0 ]; then cleanup_rc=5; fi
   fi
   if [ -n "$stage" ]; then git -C "$root" worktree remove --force "$stage/src" || cleanup_rc=5; rm -rf -- "$stage"; fi
@@ -149,6 +152,22 @@ elif [ "$load_rc" -eq 0 ]; then
   echo 'load generator exited 0 but printed no load line; diagnosis is invalid' >&2
   exit 7   # not 5: that is the generator's acceptance code and cleanup_rc's
 fi
+# #2627: an exit 0 is accepted only on positive evidence, one valid load record for this workload. Output that is
+# not one (a no-op, another kind, another workload, an extra line) is an invalid run, refused before any capture.
+# #4608 BLIND F2: one host Node invocation imports the validator and judges. Exit 42, and only 42, is a rejected record
+# (#4608 BLIND delta: 1 is what a crashing node exits with, so it cannot mean "rejected"); any other failure (no usable
+# host node, an import error, a validator exception) is named as a failed check. argv[1] is the record, never a path.
+if [ "$load_rc" -eq 0 ]; then
+  check_rc=0
+  node --input-type=module -e 'import { pathToFileURL } from "node:url";
+    let m; try { m = await import(pathToFileURL(process.argv[3]).href); } catch { process.exit(3); }
+    process.exit(m.loadRecordOk(process.argv[1], process.argv[2]) ? 0 : 42)' "$load_line" "$workload" "$here/load.mjs" || check_rc=$?
+  if [ "$check_rc" -eq 42 ]; then
+    echo "load generator exited 0 but printed no valid load record for $workload; diagnosis is invalid" >&2; exit 7
+  elif [ "$check_rc" -ne 0 ]; then
+    echo "could not run the load record check on this host (node exit $check_rc); diagnosis is invalid" >&2; exit 7
+  fi
+fi
 # A failed generator still explains itself: the line is echoed and stashed above, the EXIT trap
 # re-appends it to DIAG_OUT after preserve_samples, and the rc propagates (samples and private
 # logs are kept on any non-zero exit).
@@ -164,12 +183,14 @@ conns=$(compose_exec db psql -U e2e -d e2e -Atc "select count(*) from pg_stat_ac
 [[ "$conns" =~ ^[0-9]+$ ]] || conns=null
 # Idle tail: the sampler keeps running after load stops, so retention vs release is visible.
 sleep "${DIAG_IDLE_S:-300}"
-# Samples are one second apart. Require coverage to within two sampling periods
-# of the expected end, plus a live server: an idle-tail abort cannot pass.
-expected_end=$(( $(date +%s%3N) - 2000 ))
+# Require coverage to within two sampling periods of this moment, plus a live server: an idle-tail abort cannot
+# pass. #2624: the period is the one the preload recorded in its config record, not an assumed 1 s, so a non-default
+# interval is judged by its own cadence; a run that records no supported interval is refused. The validator reads the
+# interval from the same copy it judges and publishes (#4609 BLIND F1).
+freshness_now_ms=$(date +%s%3N)
 app_exec node -e "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:5)).catch(()=>process.exit(5))"
 take_snapshot idle
-finish_samples "$DIAG_OUT" "$conns" "$expected_end"
+finish_samples "$DIAG_OUT" "$conns" --until "$freshness_now_ms"
 w2=null; heap=null
 # #4448: the load line and its per-session reduction join the record after finish_samples has placed
 # the container's series (both asserted secret-free at write).

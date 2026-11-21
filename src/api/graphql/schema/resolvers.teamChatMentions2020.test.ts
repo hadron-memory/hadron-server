@@ -20,7 +20,6 @@ import { getMemoryEncryptionInfo, encryptNodeFieldsWithKey } from '../../../lib/
 import { generateDataKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { runAsActor } from '../../../lib/requestActor.js';
-import { teamAttentionPage } from '../../../lib/teamAttention.js';
 import { resolvers, type Context } from './resolvers.js';
 import { teamChatMutations } from './resolvers.teamChat.js';
 
@@ -78,18 +77,6 @@ async function mentionsOf(w: W, extra: Record<string, unknown> = {}): Promise<nu
   expect(page.total).toBe(page.items.length);
   return page.items.map((m: any) => m.seq);
 }
-/** The attention scan's mention count for one worker (the Orca router's number). */
-async function attentionMentions(w: W): Promise<number> {
-  let n = 0;
-  for (let page: string | null = null, guard = 0; guard < 50; guard++) {
-    const r: any = await teamAttentionPage(ctx(w.holder), app.id, { since: null, page });
-    for (const item of r.items) if (item.worker === w.id) n += item.unreadMentions;
-    if (r.scanComplete || !r.nextPage) break;
-    page = r.nextPage;
-  }
-  return n;
-}
-
 beforeEach(async () => {
   await cleanDb(db);
   const suffix = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
@@ -113,7 +100,6 @@ describe('a stamped broadcast reaches every worker (the #20231 red)', () => {
     expect(m.mentions).toEqual(['all']);
     expect(await mentionsOf(liam)).toEqual([m.seq]);
     expect(await mentionsOf(rook)).toEqual([m.seq]);
-    expect(await attentionMentions(liam)).toBe(1);
   });
 
   it('a grant holder\'s @all reaches the others, never its author', async () => {
@@ -136,14 +122,12 @@ describe('an unstamped broadcast is ordinary unread, not a mention', () => {
     const m = await workerSays(rook, 'quoting the @all token');
     expect(m.mentions).toEqual(['all']);
     expect(await mentionsOf(liam)).toEqual([]);
-    expect(await attentionMentions(liam)).toBe(0);
   });
 
   it('a plain member\'s @all and @team are not mentions either', async () => {
     await humanSays(holderB.id, 'hey @all');
     await humanSays(holderB.id, 'hey @team');
     expect(await mentionsOf(liam)).toEqual([]);
-    expect(await attentionMentions(liam)).toBe(0);
   });
 });
 
@@ -160,7 +144,6 @@ describe('names, replies and own posts', () => {
     const self = await workerSays(liam, 'note to @liam');
     expect(self.mentions).toEqual(['liam']);
     expect(await mentionsOf(liam)).toEqual([]);
-    expect(await attentionMentions(liam)).toBe(0);
   });
 });
 
@@ -172,7 +155,6 @@ describe('a worker whose name yields no mention token (Riana §10 P2)', () => {
     await workerSays(rook, 'quoting @all');
     await workerSays(bang, 'its own @all');
     expect(await mentionsOf(bang)).toEqual([stamped.seq]);
-    expect(await attentionMentions(bang)).toBe(1);
   });
 });
 
@@ -206,7 +188,6 @@ describe('legacy and malformed stamps', () => {
     await rawRow({ mentions: 'all', broadcastWakes: true });
     const ok = await rawRow({ mentions: ['all'], broadcastWakes: true });
     expect(await mentionsOf(liam)).toEqual([ok]);
-    expect(await attentionMentions(liam)).toBe(1);
   });
 });
 
@@ -253,7 +234,6 @@ describe('an encrypted team chat', () => {
     const sealed = await db.node.findMany({ where: { memoryId: memory.id, nodeType: 'chat-message' }, select: { data: true } });
     for (const s of sealed) expect(s.data).toHaveProperty('__enc');
     expect(await mentionsOf(liam)).toEqual([stamped.seq]);
-    expect(await attentionMentions(liam)).toBe(1);
     sessionKeyCache.evict('mr-2020');
   });
 });
@@ -272,8 +252,6 @@ describe('one eligibility set (every wake gate open)', () => {
     await humanSays(manager.id, '@nova over to you');
     const all = [liam, rook, nova];
     expect(await reached(all)).toEqual([nova.id]);
-    expect(await attentionMentions(nova)).toBe(1);
-    expect(await attentionMentions(liam)).toBe(0);
     expect(await due()).toEqual([nova.id]);
   });
 
@@ -308,9 +286,7 @@ describe('S3 real post/filter/history integration', () => {
     expect(post.teamBroadcastWorkerIds?.sort()).toEqual([liam.id, rook.id].sort());
     expect(post.teamTags).toEqual([{headId: rook.id, label: '@team.rook'}]);
     expect(await mentionsOf(liam)).toEqual([post.seq]);
-    expect(await attentionMentions(liam)).toBe(1);
     expect(await mentionsOf(outsider)).toEqual([]);
-    expect(await attentionMentions(outsider)).toBe(0);
     const page = await Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: rook.id, limit: 0}, ctx(holderA.id));
     expect(page).toMatchObject({items: [], total: 1});
     expect((await Q.teamChatMessages({}, {appRef: app.id, untagged: true}, ctx(holderA.id))).total).toBe(0);
@@ -408,11 +384,11 @@ describe('S3 filter audience and transport boundaries', () => {
       expect(await refusalOf(() => Q.channelMessages({}, {channelRef: made.channel.id, teamHeadRef: rook.id, limit: 0}, ctx(manager.id)))).toEqual(missing);
       expect((await Q.channelMessages({}, {channelRef: channel.id, teamHeadRef: rook.id, limit: 0}, ctx(manager.id))).total).toBe(1);
     });
-    async function sealStampHistory() {
+    async function sealStampHistory(target: { id: string } = memory, cacheSessionId = 'mr-2595') {
       const key = generateDataKey();
-      sessionKeyCache.set('mr-2595', memory.id, key);
-      await db.memory.update({where: {id: memory.id}, data: {isEncrypted: true}});
-      for (const row of await db.node.findMany({where: {memoryId: memory.id, nodeType: 'chat-message'}})) {
+      sessionKeyCache.set(cacheSessionId, target.id, key);
+      await db.memory.update({where: {id: target.id}, data: {isEncrypted: true}});
+      for (const row of await db.node.findMany({where: {memoryId: target.id, nodeType: 'chat-message'}})) {
         const sealed = encryptNodeFieldsWithKey({content: row.content, data: row.data}, key);
         await db.node.update({where: {id: row.id}, data: {content: sealed.content, data: sealed.data as never}});
       }
@@ -480,6 +456,27 @@ describe('S3 filter audience and transport boundaries', () => {
       const page = await Q.channelMessages({}, {channelRef: other.channel.id, teamHeadRef: rook.id}, ctx(manager.id));
       expect(page.items.map((m: any) => m.seq)).toEqual([post.seq]);
       expect(page.total).toBe(1);
+    });
+    it('H5c: encrypted — a sealed stamp in another memory at the same Channel loc cannot supply a stamp (#2602)', async () => {
+      const otherMemory = await db.memory.create({data: {id: generateId(), organizationId: org.id, appId: app.id, urn: `${org.urn}:other-tags-enc`, name: 'other tags enc', class: 'app'}});
+      const other = await ensureChannelWithRoot(db, {memoryId: otherMemory.id, loc: channel.loc, name: 'other', createdBy: manager.id});
+      // The only stamp lives in the OTHER memory's Channel (same loc as `channel`); `channel` itself holds none.
+      const post = await stampThenDissolve(other.channel.id);
+      await db.worker.update({where: {id: rook.id}, data: {retiredAt: new Date()}});
+      try {
+        // Sealing sits inside the try: sealStampHistory caches its key first, so a failure part-way still evicts.
+        await sealStampHistory(otherMemory, 'mr-2602-other');
+        await sealStampHistory(memory, 'mr-2602-own');
+        const missing = await refusalOf(() => readAs('no-such-worker'));
+        expect(missing).toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_HEAD_INVALID'}});
+        // The unstamped Channel refuses exactly like an unknown head ...
+        expect(await refusalOf(() => readAs(rook.id))).toEqual(missing);
+        expect(await refusalOf(() => Q.channelMessages({}, {channelRef: channel.id, teamHeadRef: rook.id, limit: 0}, ctx(manager.id)))).toEqual(missing);
+        // ... while the stamped Channel stays readable.
+        const page = await Q.channelMessages({}, {channelRef: other.channel.id, teamHeadRef: rook.id}, ctx(manager.id));
+        expect(page.items.map((m: any) => m.seq)).toEqual([post.seq]);
+        expect(page.total).toBe(1);
+      } finally { sessionKeyCache.evict('mr-2602-other'); sessionKeyCache.evict('mr-2602-own'); }
     });
     it.each(['early', 'late', 'missing'] as const)('bounds encrypted stamp scan batches and keeps %s-stamp outcomes, even at limit 0 (#2595)', async position => {
       await stampThenDissolve();

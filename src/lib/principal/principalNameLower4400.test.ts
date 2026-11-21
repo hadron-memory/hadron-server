@@ -43,11 +43,22 @@ describe('#4400 principals.name is lower case in the database', () => {
   });
 
   it('refuses a name with an upper-case letter outside ASCII, where the database folds it', async () => {
-    // lower() folds beyond ASCII only under a UTF-8 character type (not under C/POSIX). The test database is
-    // en_US.UTF-8 (the collation prerequisite in CLAUDE.md); production's ctype is read by the #4400 preflight.
-    const [{ datctype }] = await db.$queryRaw<{ datctype: string }[]>`
-      SELECT datctype FROM pg_database WHERE datname = current_database()`;
-    expect(datctype.toLowerCase()).toMatch(/utf-?8/);
+    // lower() folds beyond ASCII only under a locale that knows Unicode case (libc UTF-8, ICU, builtin C.UTF-8;
+    // not libc C/POSIX or builtin C). The test database is en_US.UTF-8 (the collation prerequisite in CLAUDE.md);
+    // production's is read by the #4400 preflight. #4411: judge the folding itself, not `datctype` alone, which is
+    // not the governing setting under the ICU or builtin provider; the provider and its locale name the cause.
+    // The provider and locale are read through to_jsonb so the query runs on every supported version: the
+    // pg16 floor has `datlocprovider` and `daticulocale` but no `datlocale` (PG 17), and a missing key is null.
+    const [{ provider, locale, folds }] = await db.$queryRaw<{ provider: string | null; locale: string | null; folds: boolean }[]>`
+      SELECT j->>'datlocprovider' AS provider,
+             CASE COALESCE(j->>'datlocprovider', 'c') WHEN 'c' THEN j->>'datctype'
+                  ELSE COALESCE(j->>'datlocale', j->>'daticulocale') END AS locale,
+             lower('É') = 'é' AS folds
+      FROM (SELECT to_jsonb(d) AS j FROM pg_database d WHERE d.datname = current_database()) s`;
+    expect(
+      folds,
+      `lower() does not fold non-ASCII under provider ${provider}, locale ${locale}: the test database needs a UTF-8 locale (collation prerequisite, CLAUDE.md, #3872)`,
+    ).toBe(true);
     expect(await refusal(rawInsert('École.example'))).toContain('chk_principals_name_lower');
   });
 
@@ -57,26 +68,19 @@ describe('#4400 principals.name is lower case in the database', () => {
     expect(said).toContain('chk_principals_name_lower');
   });
 
-  it('GUARD: what the writer stores always passes the CHECK', async () => {
-    // JavaScript lower-cases in the writer; Postgres lower() judges in the CHECK. A name the writer produced must
-    // be a fixed point of the database's lower(), or a legitimate mint would be refused. Since #4481 the pool
-    // itself refuses — typed, BEFORE the insert — any name whose lower-cased form leaves lower-case ASCII, so the
-    // writer can no longer produce non-ASCII output at all and what it does store ([a-z0-9._-]) is a trivial
-    // fixed point. The non-ASCII names keep #4400's evidence in two legs: the pool refuses them (#4481's rule,
-    // which fires ahead of the constraint), and their JS-lowered forms are still fixed points of Postgres
-    // lower() — the CHECK would not have refused a writer that stored them, so no legitimate mint ever dies on
-    // the constraint, whichever layer sees the name first.
-    for (const name of ['Plain-Name', 'ACME.Example']) {
+  it('GUARD: what the writer stores always passes the CHECK, and a name that cannot be stored is refused typed', async () => {
+    // The writer lower-cases in JavaScript; the CHECK judges in Postgres lower(). Since #4481 the pool refuses, typed
+    // and BEFORE the insert, any name whose lower-cased form leaves lower-case ASCII, so what it does store
+    // ([a-z0-9._-]) is a fixed point of lower() and a legitimate mint never dies on the constraint.
+    // The Kelvin sign (U+212A) is the sharpest probe of WHERE the guard sits: it is not ASCII, but it lower-cases to
+    // the ASCII `k`. Lower-casing first stores `k`; a guard placed before the lower-casing would refuse it.
+    for (const name of ['Plain-Name', 'ACME.Example', '\u212A']) {
       const p = await mintPrincipal(db, { kind: 'org', name });
       const row = await db.principal.findUniqueOrThrow({ where: { id: p.id } });
       expect(row.name).toBe(name.toLowerCase());
     }
     for (const name of ['İstanbul', 'ΟΔΟΣ', 'Straße', 'ÉCOLE.example']) {
       await expect(mintPrincipal(db, { kind: 'org', name })).rejects.toBeInstanceOf(RootNameInvalidError);
-      const lowered = name.toLowerCase();
-      const [{ fixed }] = await db.$queryRaw<{ fixed: boolean }[]>`
-        SELECT ${lowered} = lower(${lowered}) AS fixed`;
-      expect(fixed).toBe(true);
     }
   });
 });
@@ -84,9 +88,30 @@ describe('#4400 principals.name is lower case in the database', () => {
 describe('#4400 the migration refuses on data instead of guessing', () => {
   const sql = readFileSync(
     new URL('../../../prisma/migrations/20261117900000_principals_name_lower_check/migration.sql', import.meta.url), 'utf8');
-  const preflight = sql.slice(sql.indexOf('DO $$'), sql.indexOf('END $$;') + 'END $$;'.length);
+  // #4411: find the preflight as the one dollar-quoted DO block that raises HDPRF, matched on its own quote tag,
+  // so a reformat (spacing, case, a named tag) still finds it and anything else fails here by name. #4405 has
+  // merged, so the migration may already be applied somewhere: its bytes are not edited for a test sentinel.
+  const doBlocks = [...sql.matchAll(/\bDO\s+(\$\w*\$)[\s\S]*?\1\s*;/gi)].map((m) => m[0]);
+  const preflights = doBlocks.filter((b) => b.includes("'HDPRF'"));
+  // #4617 item 4: no empty-string fallback; the dependent tests below stop at once unless there is exactly one.
+  const onePreflight = (): string => {
+    expect(preflights, 'the migration must hold exactly one DO block raising HDPRF').toHaveLength(1);
+    return preflights[0];
+  };
 
-  it('raises SQLSTATE HDPRF when a mixed-case row exists, and changes nothing', async () => {
+  it('carries exactly one HDPRF preflight block', () => {
+    expect(preflights, 'the migration must hold exactly one DO block raising HDPRF').toHaveLength(1);
+    expect(onePreflight()).toContain("name <> lower(name)");
+  });
+
+  it('extracts the preflight block it runs (a renamed marker must not make the tests below vacuous)', () => {
+    expect(doBlocks.length).toBeGreaterThanOrEqual(1);
+    expect(preflights).toHaveLength(1);
+    expect(onePreflight()).toContain('HDPRF');
+  });
+
+  it('raises SQLSTATE HDPRF when a mixed-case row exists', async () => {
+    const guard = onePreflight(); // outside the try below: a wrong block count fails here, by name (#4641 LOCAL P3)
     let state = 'NO ERROR';
     await db.$transaction(async (tx) => {
       // A database from before the constraint: drop it inside this transaction only, then roll everything back.
@@ -94,7 +119,7 @@ describe('#4400 the migration refuses on data instead of guessing', () => {
       await tx.$executeRaw`INSERT INTO principals (id, name, kind, status, created_at, updated_at)
         VALUES (${generateId()}, 'Legacy.Example', 'org', 'released', now(), now())`;
       await tx.$executeRawUnsafe('SAVEPOINT before_preflight');
-      try { await tx.$executeRawUnsafe(preflight); } catch (e) {
+      try { await tx.$executeRawUnsafe(guard); } catch (e) {
         state = JSON.stringify((e as { meta?: unknown }).meta ?? {}) + String((e as { message?: string }).message);
       }
       await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT before_preflight');
@@ -102,10 +127,11 @@ describe('#4400 the migration refuses on data instead of guessing', () => {
     }).catch((e) => { if ((e as Error).message !== 'rollback') throw e; });
     expect(state).toContain('HDPRF');
     expect(state).toContain('1 row(s) are not lower case');
-    expect(await db.principal.count({ where: { name: 'Legacy.Example' } })).toBe(0);
-    // The rollback also brought the constraint back: a later test file must not run without it.
+    // The test's own rollback (not the preflight) undid the constraint drop and the insert: a later test file must
+    // not run without the constraint.
     const [{ n }] = await db.$queryRaw<{ n: bigint }[]>`
-      SELECT count(*) AS n FROM pg_constraint WHERE conname = 'chk_principals_name_lower'`;
+      SELECT count(*) AS n FROM pg_constraint
+      WHERE conname = 'chk_principals_name_lower' AND conrelid = 'principals'::regclass AND contype = 'c'`;
     expect(Number(n)).toBe(1);
   });
 
@@ -113,13 +139,17 @@ describe('#4400 the migration refuses on data instead of guessing', () => {
     // The test database is built from prisma/post-push.sql, so the pins above judge that copy. A deployed database
     // gets the constraint from this migration: pin that the two say the same thing.
     const postPush = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
-    const expr = (text: string) => /ADD CONSTRAINT "?chk_principals_name_lower"?\s+CHECK \(([^;]+)\);/.exec(text)?.[1].replace(/\s+/g, ' ');
+    // #4411: anchored on the table too, so the constraint added to some other table would not count.
+    const expr = (text: string) =>
+      /ALTER TABLE\s+"?principals"?\s+ADD CONSTRAINT\s+"?chk_principals_name_lower"?\s+CHECK\s*\(([^;]+)\);/i
+        .exec(text)?.[1].replace(/\s+/g, ' ');
     expect(expr(sql)).toBe('name = lower(name)');
     expect(expr(postPush)).toBe(expr(sql));
   });
 
   it('passes on a pool that is already lower case', async () => {
     await mintPrincipal(db, { kind: 'org', name: 'Clean.Example' });
-    await expect(db.$executeRawUnsafe(preflight)).resolves.toBeDefined();
+    // The DO block raises HDPRF on a mixed-case row; completing without raising is the assertion.
+    await db.$executeRawUnsafe(onePreflight());
   });
 });

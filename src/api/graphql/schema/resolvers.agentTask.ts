@@ -1348,9 +1348,15 @@ async function partyWorkerForLock(ctx: Context, appId: string, input: PartyInput
   return ref ? resolveTaskWorkerId(ctx, appId, ref) : null;
 }
 
-export function refuseEnded(task: TaskRow): void {
+/**
+ * #4494: the remedy a refused review-seat or verdict call names. Text only: the codes and every accept/refuse outcome are unchanged.
+ * A seat binds only while its task is live (schedule, freeze, seat, verdict, finish); when it cannot bind, the signed PR receipt at the exact head is the record.
+ */
+export const SEAT_RECEIPT_REMEDY = 'Post the verdict as a signed PR receipt at the exact head, which is the record when a seat cannot bind.';
+
+export function refuseEnded(task: TaskRow, remedy?: string): void {
   if (ENDED.includes(task.status)) {
-    throw taskError('TASK_ENDED', `This task is ${task.status}; an ended task never moves again.`, {
+    throw taskError('TASK_ENDED', `This task is ${task.status}; an ended task never moves again.${remedy ? ` ${remedy}` : ''}`, {
       taskId: task.id, status: task.status,
     });
   }
@@ -1995,7 +2001,9 @@ async function applyTaskCreate(
     if (!isAssignee(actor, parent)) {
       throw notAssignee(actor, "Only the parent task's assignee creates its child tasks.", { taskId: parentRef });
     }
-    refuseEnded(parent);
+    // #4494: only a PR build task (one carrying a pull_request reference) gets the review-seat remedy; any other ended parent keeps the generic refusal.
+    const isPrBuild = storedTaskReferences(parent.references).some(r => r.kind === 'pull_request');
+    refuseEnded(parent, isPrBuild ? `A child task cannot be created under an ended build task. If it was meant as a review seat, ${SEAT_RECEIPT_REMEDY.charAt(0).toLowerCase()}${SEAT_RECEIPT_REMEDY.slice(1)}` : undefined);
   }
   if (p.clone) {
     // The source is revalidated under the write: one that is gone refuses like an unknown task, never a foreign-key error.
@@ -3149,6 +3157,134 @@ async function partyFilter(ctx: Context, app: TaskApp, input: PartyInput, prefix
   }
 }
 
+/**
+ * #2212 A3 (cor:api:120:04): the ONE filter for an App's task list, shared by agentTasks and agentTasksPage so the page and
+ * the list can never diverge (no per-resolver gate). Called only inside withReadableApp, so every filter narrows tasks the
+ * caller may already read (cor:agt:050:21); refusals keep their order. AT0 is never listed (#2553).
+ */
+async function agentTaskListWhere(c: Context, app: TaskApp, args: ListArgs): Promise<Prisma.AgentTaskWhereInput> {
+  // Narrow only after the existing App read gate. All filters run in SQL before paging.
+  const filters: Prisma.AgentTaskWhereInput[] = [];
+  if (args.matchFailed != null) filters.push({ matchFailedAt: args.matchFailed ? { not: null } : null });
+  for (const [name, tags] of [['tagsAny', args.tagsAny], ['tagsAll', args.tagsAll]] as const) {
+    // #2696: the bounds a task's own tags obey, so the read and write limits cannot drift.
+    if (tags && tags.length > TASK_TAGS_MAX) throw badInput(`${name} takes at most ${TASK_TAGS_MAX} tags.`);
+    if (tags?.some((t) => t.length > TASK_TAG_MAX)) throw badInput(`A ${name} tag is longer than ${TASK_TAG_MAX} characters.`);
+  }
+  if (args.tagsAny?.length) filters.push({ tags: { hasSome: args.tagsAny } });
+  if (args.tagsAll?.length) filters.push({ tags: { hasEvery: args.tagsAll } });
+  if (args.source != null) filters.push({ source: args.source });
+  if (args.externalId != null) {
+    // #3125 S2: after the App read gate above, so it only narrows tasks the caller may already read. Exact match.
+    // Fix head 1: the same character count and surrogate check as the create (checkExternalIdText).
+    if (typeof args.externalId !== 'string') throw badInput(`externalId must be 1 to ${TASK_EXTERNAL_ID_MAX} characters.`);
+    try {
+      checkExternalIdText(args.externalId);
+    } catch (e) {
+      if (e instanceof TaskReferenceError) throw badInput(e.message);
+      throw e;
+    }
+    filters.push({ externalId: args.externalId });
+  }
+  if (args.externalIds != null) {
+    // #4084 (cor:agt:120:02, cor:agt:050:21): the batch form, after the same App read gate, so it only narrows tasks
+    // the caller may already read. Each entry passes the single form's check; one bad entry refuses the whole list,
+    // naming its position and never its text. An empty list is refused rather than read as "no narrowing".
+    const ids = args.externalIds;
+    if (!Array.isArray(ids) || ids.length < 1 || ids.length > TASK_EXTERNAL_IDS_MAX) {
+      throw badInput(`externalIds takes 1 to ${TASK_EXTERNAL_IDS_MAX} ids.`);
+    }
+    ids.forEach((id, i) => {
+      try {
+        if (typeof id !== 'string') throw new TaskReferenceError(`externalId must be 1 to ${TASK_EXTERNAL_ID_MAX} characters.`);
+        checkExternalIdText(id);
+      } catch (e) {
+        if (e instanceof TaskReferenceError) throw badInput(`externalIds[${i}]: ${e.message}`);
+        throw e;
+      }
+    });
+    filters.push({ externalId: { in: ids } });
+  }
+  if (args.reference != null) {
+    // #2649 (cor:agt:050:01): after the App read gate above, so it only narrows tasks the caller may already read.
+    // jsonb containment: an element holding this target (and kind) matches whatever its label; never a prefix.
+    const { target } = args.reference;
+    if (typeof target !== 'string' || target.length < 1 || target.length > TASK_REFERENCE_TARGET_MAX) {
+      throw badInput(`reference.target must be 1 to ${TASK_REFERENCE_TARGET_MAX} characters.`);
+    }
+    const element: Record<string, string> = { target };
+    if (args.reference.kind != null) element.kind = refKind(args.reference.kind);
+    filters.push({ references: { array_contains: [element] } });
+  }
+  if (args.unresolvedFindings === true) filters.push({ status: 'finished', unresolvedFindingIds: { isEmpty: false } });
+  if (args.text != null) {
+    // #2664: a case-insensitive substring over title and description. Trimmed, 1..TASK_TEXT_FILTER_MAX; the refusal
+    // is fixed text (never the pattern) and comes after the App read gate, like the tag bounds above. Prisma's
+    // `contains` does NOT escape LIKE wildcards, so %, _ and \ are escaped here and match literally.
+    const text = args.text.trim();
+    if (text.length < 1 || text.length > TASK_TEXT_FILTER_MAX) throw badInput(`text must be 1 to ${TASK_TEXT_FILTER_MAX} characters after trimming.`);
+    const like = text.replace(/[\\%_]/g, '\\$&');
+    filters.push({ OR: [
+      { title: { contains: like, mode: 'insensitive' } },
+      { description: { contains: like, mode: 'insensitive' } },
+    ] });
+  }
+  for (const [prefix, field] of [['created', 'createdAt'], ['started', 'startedAt'], ['finished', 'finishedAt']] as const) {
+    const range: { gte?: Date; lte?: Date } = {};
+    for (const [suffix, op] of [['After', 'gte'], ['Before', 'lte']] as const) {
+      const value = args[`${prefix}${suffix}`];
+      if (value == null) continue;
+      if (!(value instanceof Date) && !taskListDateTime.safeParse(value).success) {
+        throw badInput(`${prefix}${suffix} must be an ISO date-time with a timezone offset.`);
+      }
+      const date = value instanceof Date ? value : new Date(value as string);
+      if (!Number.isFinite(date.getTime())) throw badInput(`${prefix}${suffix} is not a valid date-time.`);
+      range[op] = date;
+    }
+    if (range.gte && range.lte && range.gte > range.lte) throw badInput(`${prefix}After must not be later than ${prefix}Before.`);
+    if (range.gte || range.lte) filters.push({ [field]: range });
+  }
+  if (args.overdue != null) {
+    // One database-clock snapshot per request, shared with the `overdue` field, so a deadline crossing mid-request
+    // cannot make the filter and the field disagree.
+    const now = await dbNowFor(c);
+    const late = overdueWhere(now);
+    // SQL NOT over nullable startBy / finishBy alone would also discard tasks with no deadline: the negation is
+    // written out so a task with neither time is never overdue and always falls in `false`.
+    filters.push(args.overdue ? late : notOverdueWhere(now));
+  }
+  const statuses = args.status?.map((s) => STATUS_FROM_GQL[s] ?? s);
+  const where: Prisma.AgentTaskWhereInput = {
+    appId: app.id,
+    ...(statuses?.length ? { status: { in: statuses } } : {}),
+    ...(args.tag ? { tags: { has: args.tag } } : {}),
+    ...(args.parentTaskId ? { parentTaskId: (await resolveTaskRef(c, args.parentTaskId, app.id)) ?? args.parentTaskId } : {}),
+    ...(args.queued ? { status: 'pending', assigneeWorkerId: null, assigneeUserId: null } : {}),
+  };
+  // #2553: AT0 is the platform's bookkeeping row, not a task anyone works: a LIST never shows it (it still reads by
+  // id or handle, and `parentTaskId: AT0` lists the tasks that have no project). `rootsOnly` keeps meaning "the top
+  // of the tree a person sees": the projects and the tasks with no project (children of AT0), never AT0 itself.
+  const noZero: Prisma.AgentTaskWhereInput = { handle: { not: PROJECT_ZERO_HANDLE } };
+  const rootsWhere: Prisma.AgentTaskWhereInput = args.rootsOnly
+    ? rootTaskWhere()
+    : {};
+  const ownerWhere = await partyFilter(c, app, args.owner, 'owner');
+  const assigneeWhere = await partyFilter(c, app, args.assignee, 'assignee');
+  const creatorWhere = await partyFilter(c, app, args.creator, 'creator');
+  return { AND: [where, noZero, rootsWhere, ownerWhere, assigneeWhere, creatorWhere, ...filters] };
+}
+
+/**
+ * The list's page size: #4084, #4217: a batch read with no limit answers every task holding each id it names, up to the list
+ * cap, instead of cutting at the list default. An id may have a history (finished and cancelled tasks no longer hold it,
+ * cor:agt:120:02, 2026-11-14), so the page is NOT as long as the list: sizing it to the id count would drop tasks.
+ */
+function agentTaskListTake(args: ListArgs, take: number): number {
+  return args.limit == null && args.externalIds?.length ? LIST_PAGE_MAX : take;
+}
+
+const AGENT_TASK_LIST_ORDER: Prisma.AgentTaskOrderByWithRelationInput[] = [{ createdAt: 'desc' }, { id: 'desc' }];
+
 export const agentTaskQueries = {
   /** One task, or null when it does not exist or the caller may not read it (cor:agt:050:21). */
   agentTask: async (_: unknown, { id }: { id: string }, ctx: Context) => {
@@ -3158,125 +3294,35 @@ export const agentTaskQueries = {
   /** An App's tasks, newest first, for its participants and the App's own key (cor:agt:050:21, #1755). */
   agentTasks: async (_: unknown, args: ListArgs, ctx: Context) =>
     withReadableApp(ctx, args.appRef, async (c, app) => {
-    // Narrow only after the existing App read gate. All filters run in SQL before paging.
-    const filters: Prisma.AgentTaskWhereInput[] = [];
-    if (args.matchFailed != null) filters.push({ matchFailedAt: args.matchFailed ? { not: null } : null });
-    for (const [name, tags] of [['tagsAny', args.tagsAny], ['tagsAll', args.tagsAll]] as const) {
-      // #2696: the bounds a task's own tags obey, so the read and write limits cannot drift.
-      if (tags && tags.length > TASK_TAGS_MAX) throw badInput(`${name} takes at most ${TASK_TAGS_MAX} tags.`);
-      if (tags?.some((t) => t.length > TASK_TAG_MAX)) throw badInput(`A ${name} tag is longer than ${TASK_TAG_MAX} characters.`);
-    }
-    if (args.tagsAny?.length) filters.push({ tags: { hasSome: args.tagsAny } });
-    if (args.tagsAll?.length) filters.push({ tags: { hasEvery: args.tagsAll } });
-    if (args.source != null) filters.push({ source: args.source });
-    if (args.externalId != null) {
-      // #3125 S2: after the App read gate above, so it only narrows tasks the caller may already read. Exact match.
-      // Fix head 1: the same character count and surrogate check as the create (checkExternalIdText).
-      if (typeof args.externalId !== 'string') throw badInput(`externalId must be 1 to ${TASK_EXTERNAL_ID_MAX} characters.`);
-      try {
-        checkExternalIdText(args.externalId);
-      } catch (e) {
-        if (e instanceof TaskReferenceError) throw badInput(e.message);
-        throw e;
-      }
-      filters.push({ externalId: args.externalId });
-    }
-    if (args.externalIds != null) {
-      // #4084 (cor:agt:120:02, cor:agt:050:21): the batch form, after the same App read gate, so it only narrows tasks
-      // the caller may already read. Each entry passes the single form's check; one bad entry refuses the whole list,
-      // naming its position and never its text. An empty list is refused rather than read as "no narrowing".
-      const ids = args.externalIds;
-      if (!Array.isArray(ids) || ids.length < 1 || ids.length > TASK_EXTERNAL_IDS_MAX) {
-        throw badInput(`externalIds takes 1 to ${TASK_EXTERNAL_IDS_MAX} ids.`);
-      }
-      ids.forEach((id, i) => {
-        try {
-          if (typeof id !== 'string') throw new TaskReferenceError(`externalId must be 1 to ${TASK_EXTERNAL_ID_MAX} characters.`);
-          checkExternalIdText(id);
-        } catch (e) {
-          if (e instanceof TaskReferenceError) throw badInput(`externalIds[${i}]: ${e.message}`);
-          throw e;
-        }
-      });
-      filters.push({ externalId: { in: ids } });
-    }
-    if (args.reference != null) {
-      // #2649 (cor:agt:050:01): after the App read gate above, so it only narrows tasks the caller may already read.
-      // jsonb containment: an element holding this target (and kind) matches whatever its label; never a prefix.
-      const { target } = args.reference;
-      if (typeof target !== 'string' || target.length < 1 || target.length > TASK_REFERENCE_TARGET_MAX) {
-        throw badInput(`reference.target must be 1 to ${TASK_REFERENCE_TARGET_MAX} characters.`);
-      }
-      const element: Record<string, string> = { target };
-      if (args.reference.kind != null) element.kind = refKind(args.reference.kind);
-      filters.push({ references: { array_contains: [element] } });
-    }
-    if (args.unresolvedFindings === true) filters.push({ status: 'finished', unresolvedFindingIds: { isEmpty: false } });
-    if (args.text != null) {
-      // #2664: a case-insensitive substring over title and description. Trimmed, 1..TASK_TEXT_FILTER_MAX; the refusal
-      // is fixed text (never the pattern) and comes after the App read gate, like the tag bounds above. Prisma's
-      // `contains` does NOT escape LIKE wildcards, so %, _ and \ are escaped here and match literally.
-      const text = args.text.trim();
-      if (text.length < 1 || text.length > TASK_TEXT_FILTER_MAX) throw badInput(`text must be 1 to ${TASK_TEXT_FILTER_MAX} characters after trimming.`);
-      const like = text.replace(/[\\%_]/g, '\\$&');
-      filters.push({ OR: [
-        { title: { contains: like, mode: 'insensitive' } },
-        { description: { contains: like, mode: 'insensitive' } },
-      ] });
-    }
-    for (const [prefix, field] of [['created', 'createdAt'], ['started', 'startedAt'], ['finished', 'finishedAt']] as const) {
-      const range: { gte?: Date; lte?: Date } = {};
-      for (const [suffix, op] of [['After', 'gte'], ['Before', 'lte']] as const) {
-        const value = args[`${prefix}${suffix}`];
-        if (value == null) continue;
-        if (!(value instanceof Date) && !taskListDateTime.safeParse(value).success) {
-          throw badInput(`${prefix}${suffix} must be an ISO date-time with a timezone offset.`);
-        }
-        const date = value instanceof Date ? value : new Date(value as string);
-        if (!Number.isFinite(date.getTime())) throw badInput(`${prefix}${suffix} is not a valid date-time.`);
-        range[op] = date;
-      }
-      if (range.gte && range.lte && range.gte > range.lte) throw badInput(`${prefix}After must not be later than ${prefix}Before.`);
-      if (range.gte || range.lte) filters.push({ [field]: range });
-    }
-    if (args.overdue != null) {
-      // One database-clock snapshot per request, shared with the `overdue` field, so a deadline crossing mid-request
-      // cannot make the filter and the field disagree.
-      const now = await dbNowFor(c);
-      const late = overdueWhere(now);
-      // SQL NOT over nullable startBy / finishBy alone would also discard tasks with no deadline: the negation is
-      // written out so a task with neither time is never overdue and always falls in `false`.
-      filters.push(args.overdue ? late : notOverdueWhere(now));
-    }
-    const statuses = args.status?.map((s) => STATUS_FROM_GQL[s] ?? s);
-    const where: Prisma.AgentTaskWhereInput = {
-      appId: app.id,
-      ...(statuses?.length ? { status: { in: statuses } } : {}),
-      ...(args.tag ? { tags: { has: args.tag } } : {}),
-      ...(args.parentTaskId ? { parentTaskId: (await resolveTaskRef(c, args.parentTaskId, app.id)) ?? args.parentTaskId } : {}),
-      ...(args.queued ? { status: 'pending', assigneeWorkerId: null, assigneeUserId: null } : {}),
-    };
-    // #2553: AT0 is the platform's bookkeeping row, not a task anyone works: a LIST never shows it (it still reads by
-    // id or handle, and `parentTaskId: AT0` lists the tasks that have no project). `rootsOnly` keeps meaning "the top
-    // of the tree a person sees": the projects and the tasks with no project (children of AT0), never AT0 itself.
-    const noZero: Prisma.AgentTaskWhereInput = { handle: { not: PROJECT_ZERO_HANDLE } };
-    const rootsWhere: Prisma.AgentTaskWhereInput = args.rootsOnly
-      ? rootTaskWhere()
-      : {};
-    const ownerWhere = await partyFilter(c, app, args.owner, 'owner');
-    const assigneeWhere = await partyFilter(c, app, args.assignee, 'assignee');
-    const creatorWhere = await partyFilter(c, app, args.creator, 'creator');
+    const where = await agentTaskListWhere(c, app, args);
     return c.db.agentTask.findMany({
       omit: { resultFindings: true },
-      where: { AND: [where, noZero, rootsWhere, ownerWhere, assigneeWhere, creatorWhere, ...filters] },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      // #4084, #4217: a batch read with no limit answers every task holding each id it names, up to the list cap, instead of
-      // cutting at the list default. An id may have a history (finished and cancelled tasks no longer hold it, cor:agt:120:02,
-      // 2026-11-14), so the page is NOT as long as the list: sizing it to the id count would drop tasks.
-      take: args.limit == null && args.externalIds?.length ? LIST_PAGE_MAX : clampListTake(args.limit),
+      where,
+      orderBy: AGENT_TASK_LIST_ORDER,
+      take: agentTaskListTake(args, clampListTake(args.limit)),
       skip: Math.max(0, args.offset ?? 0),
     });
     }, true),
+
+  /**
+   * #2212 A3 (hrn:node:hadronmemory.com:specs:cor:api:120:04): agentTasks as a page, `{ items, total, hasMore }`. The same
+   * App read gate (cor:agt:050:21: an App the caller does not participate in answers APP_NOT_FOUND, like an absent one), the
+   * same filter (agentTaskListWhere) and the same total order; `total` is a count over that identical filter, so it never
+   * counts a task the list would not show. Sized like every pageArgs field: an omitted limit pages at 20, 0 is count-only,
+   * over 200 is served as 200. Unlike agentTasks, an externalIds batch with no limit gets no special size: hasMore says
+   * whether more of the batch remains (admission charges exactly this page, PAGE_ARGS_FIELDS).
+   *
+   * The rows and the total come from ONE repeatable-read snapshot (withReadableApp's `coherent`, #4224), so a task written or
+   * deleted between the two reads cannot make total and hasMore disagree with the rows served (Beckett BLIND P2 on #4622).
+   */
+  agentTasksPage: async (_: unknown, args: ListArgs, ctx: Context) =>
+    withReadableApp(ctx, args.appRef, async (c, app) => {
+    const where = await agentTaskListWhere(c, app, args);
+    const { take, skip } = pageArgs(args);
+    const items = take === 0 ? [] : await c.db.agentTask.findMany({ omit: { resultFindings: true }, where, orderBy: AGENT_TASK_LIST_ORDER, take, skip });
+    const total = await c.db.agentTask.count({ where });
+    return pageEnvelope(items, total, skip);
+    }, true, undefined, { coherent: true }),
 
   /**
    * A task and every task below it, root first then by creation. Null when the
