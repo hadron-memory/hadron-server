@@ -28,10 +28,10 @@ let orgApp2: string; // an App of the SECOND organization
 let personalApp: string; // a user-owned App of the member
 const ctx = (userId: string): Context => ({ db, userId, roles: ['READER'] }) as Context;
 
-type Row = { id: string; departed: boolean; stamp: string | null; revoked: boolean };
+type Row = { id: string; departed: boolean; stamp: string | null; revoked: boolean; cause: string | null };
 const row = async (id: string): Promise<Row> => (await db.$queryRaw<Row[]>(Prisma.sql`
-  SELECT id, holder_departed_at IS NOT NULL AS departed, (to_jsonb(g)->>'holder_departed_at') AS stamp, revoked_at IS NOT NULL AS revoked
-  FROM grants g WHERE id = ${id}`))[0]!;
+  SELECT id, holder_departed_at IS NOT NULL AS departed, (to_jsonb(g)->>'holder_departed_at') AS stamp, revoked_at IS NOT NULL AS revoked,
+  (to_jsonb(g)->>'holder_departure_reason') AS cause FROM grants g WHERE id = ${id}`))[0]!;
 const active = (over: Record<string, unknown>) => insertGrantUnguarded(w, { activated_at: HOUR_AGO, ...over } as never);
 const remove = (userId = w.user2Id) => M.removeOrgMember({}, { orgRef: w.orgId, userRef: userId }, ctx(admin.id));
 
@@ -52,6 +52,19 @@ beforeEach(async () => {
 afterAll(async () => { await cleanDb(db); await dropTestActions(); });
 
 describe('P: the removal ends the person\'s grants in that organization\'s Apps, and nothing else', () => {
+  it('#4180: a person who removes THEMSELVES records ORG_LEFT, not ORG_REMOVED', async () => {
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: w.orgId, userId: w.user2Id } }, data: { role: 'ADMIN' } });
+    const id = await active({ user_id: w.user2Id, app_id: w.appId });
+    await M.removeOrgMember({}, { orgRef: w.orgId, userRef: w.user2Id }, ctx(w.user2Id));
+    expect(await row(id)).toMatchObject({ departed: true, cause: 'ORG_LEFT' });
+  });
+  it('#4180: a later erasure of a person who left keeps the first end\'s cause (ORG_REMOVED), never USER_ERASED', async () => {
+    const id = await active({ user_id: w.user2Id, app_id: w.appId });
+    await remove();
+    const first = await row(id);
+    await db.user.delete({ where: { id: w.user2Id } });
+    expect(await row(id)).toMatchObject({ stamp: first.stamp, cause: 'ORG_REMOVED' });
+  });
   it('P1/P2/P3/P4: both Apps of the org end (live and pending); another org, a user-owned App, another person, a worker and an agent stay', async () => {
     const live = await active({ user_id: w.user2Id, app_id: w.appId });
     const pending = await insertGrant(w, { user_id: w.user2Id, app_id: w.app2Id });
@@ -63,6 +76,9 @@ describe('P: the removal ends the person\'s grants in that organization\'s Apps,
     await remove();
     expect((await row(live)).departed).toBe(true);
     expect((await row(pending)).departed).toBe(true);
+    // #4180: removed by an administrator, so ORG_REMOVED (kept apart from leaving on one's own and from an erasure).
+    expect((await row(live)).cause).toBe('ORG_REMOVED');
+    expect((await row(pending)).cause).toBe('ORG_REMOVED');
     for (const id of [otherOrg, personal, otherPerson, worker, agent]) expect((await row(id)).departed, id).toBe(false);
   });
 
@@ -122,7 +138,7 @@ describe('N: refusals and rollback end nothing', () => {
     const id = await active({ user_id: w.user2Id });
     await expect(db.$transaction(async (tx) => {
       await tx.orgMember.update({ where: { organizationId_userId: { organizationId: w.orgId, userId: w.user2Id } }, data: { deletedAt: new Date() } });
-      await endHeldGrants(tx, 'user', w.user2Id, { organizationId: w.orgId });
+      await endHeldGrants(tx, 'user', w.user2Id, 'ORG_REMOVED', { organizationId: w.orgId });
       throw new Error('boom');
     })).rejects.toThrow('boom');
     expect((await row(id)).departed).toBe(false);
@@ -133,14 +149,14 @@ describe('N: refusals and rollback end nothing', () => {
 describe('K: the helper and the SQL cause', () => {
   it('K1: the scoped call before the membership is removed is refused by the guard (the person is still a live member)', async () => {
     await active({ user_id: w.user2Id });
-    await expect(db.$transaction((tx) => endHeldGrants(tx, 'user', w.user2Id, { organizationId: w.orgId }))).rejects.toThrow(/append-only/);
+    await expect(db.$transaction((tx) => endHeldGrants(tx, 'user', w.user2Id, 'ORG_REMOVED', { organizationId: w.orgId }))).rejects.toThrow(/append-only/);
   });
 
   it('K2: the scope is the organization: a membership removed in org A ends only org A\'s grants even when called for org B\'s id', async () => {
     const a = await active({ user_id: w.user2Id, app_id: w.appId });
     const b = await active({ user_id: w.user2Id, app_id: orgApp2 });
     await db.orgMember.update({ where: { organizationId_userId: { organizationId: w.orgId, userId: w.user2Id } }, data: { deletedAt: new Date() } });
-    await db.$transaction((tx) => endHeldGrants(tx, 'user', w.user2Id, { organizationId: w.orgId }));
+    await db.$transaction((tx) => endHeldGrants(tx, 'user', w.user2Id, 'ORG_REMOVED', { organizationId: w.orgId }));
     expect((await row(a)).departed).toBe(true);
     expect((await row(b)).departed).toBe(false);
   });
