@@ -120,6 +120,31 @@ describe('#1054 — WorkerContinuity.handoffAuthor', () => {
     expect(r.data.worker.continuity.handoffAuthor).toEqual({ userHandle: null, sessionId: sid });
   });
 
+  it('a handoff envelope naming ANOTHER worker\'s session never reveals that session\'s driver', async () => {
+    const agentId = (await db.agent.findFirstOrThrow({ where: { organizationId: org.id } })).id;
+    const other = await db.worker.create({
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId, name: 'Other', slug: 'other' },
+    });
+    const foreign = `s-foreign-${n}`;
+    await db.session.create({
+      data: { id: foreign, appId, workerId: other.id, userId: user.holderA!, endedAt: new Date() } as any,
+    });
+    await handoff('handoffs:0001', { sessionId: foreign });
+    const r = await post(await keyFor('holderB'), Q, { w: workerId, a: appId });
+    expect(r.errors).toBeUndefined();
+    expect(JSON.stringify(r.data)).not.toContain(`ha1054-holderA-${n}`);
+    expect(r.data.worker.continuity.handoffAuthor.userHandle).toBeNull();
+  });
+
+  it('a soft-deleted writing session gives a null handle and no error', async () => {
+    const sid = `s-gone-${n}`;
+    await endedSession(sid, user.holderA!, { deletedAt: new Date() });
+    await handoff('handoffs:0001', { sessionId: sid });
+    const r = await post(await keyFor('holderB'), Q, { w: workerId, a: appId });
+    expect(r.errors).toBeUndefined();
+    expect(r.data.worker.continuity.handoffAuthor).toEqual({ userHandle: null, sessionId: sid });
+  });
+
   it('a hand-written handoff (no session envelope) gives an author with nothing known', async () => {
     await handoff('handoffs:0001', {});
     const r = await post(await keyFor('holderB'), Q, { w: workerId, a: appId });

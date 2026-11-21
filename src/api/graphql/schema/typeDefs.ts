@@ -6021,6 +6021,25 @@ export const typeDefs = `#graphql
     assume the outer query authorized them (#552 / #983).
     """
     previousSession: WorkerContinuitySession
+    """
+    #1054 — who held the worker when the session that wrote \`handoff\` ran, so a reader can tell
+    their own notes from a colleague's. Null when \`handoff\` is null. For a handoff with no
+    session envelope (hand-written) it is an author with nothing known.
+    """
+    handoffAuthor: WorkerContinuityAuthor
+  }
+
+  """
+  #1054 — the person behind a handoff, as identity only. The handle is identity
+  (hrn:node:hadronmemory.com:specs:cor:acl:070:01), visible to any signed-in caller who can read
+  the worker. A display name, if ever added, would follow the same rule's gate (self, admin or
+  co-member; null, never an error).
+  """
+  type WorkerContinuityAuthor {
+    "The handle of the user who held the worker when the writing session ran. Null only when the author is unknown or erased."
+    userHandle: String
+    "The session that wrote the handoff: the id alone, never the Session (same sanitization as previousSession)."
+    sessionId: ID
   }
 
   """

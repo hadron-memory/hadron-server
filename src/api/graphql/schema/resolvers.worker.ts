@@ -3727,7 +3727,44 @@ export const workerFieldResolvers = {
       const handoff = handoffRow
         ? await ctx.db.node.findUnique({ where: { id: handoffRow.id } })
         : null;
-      return { status, handoff, previousSession };
+      // #1054: the envelope's session id rides along (not in the SDL) for WorkerContinuity.handoffAuthor.
+      return {
+        status, handoff, previousSession,
+        handoffWorkerId: worker.id,
+        handoffEnvelopeSessionId: handoffRow ? handoffSessionId(handoffRow.data) : null,
+      };
+    },
+  },
+  WorkerContinuity: {
+    /**
+     * #1054 — who held the worker when the session that wrote the newest handoff ran.
+     *
+     * The handle is identity (hrn:node:hadronmemory.com:specs:cor:acl:070:01): visible to any
+     * signed-in caller who reaches this field, which is already behind the worker read gate
+     * (`continuity` masks to null on deny). Null `userHandle` only for an unknown or erased author:
+     * a session with no user, a deleted session, or a soft-deleted user. Never an error.
+     *
+     * The envelope's session id is data any writer of the handoff node can set, so the session is
+     * looked up ONLY among this worker's own sessions: a forged id can never name another worker's
+     * driver. Selected narrowly (the user id), never the Session row (#552 / #983), and the user is
+     * projected to its handle alone.
+     */
+    handoffAuthor: async (
+      c: { handoff: unknown; handoffWorkerId?: string; handoffEnvelopeSessionId?: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (!c.handoff) return null;
+      const sessionId = c.handoffEnvelopeSessionId ?? null;
+      if (!sessionId || !c.handoffWorkerId) return { userHandle: null, sessionId: null };
+      const session = await ctx.db.session.findFirst({
+        where: { id: sessionId, workerId: c.handoffWorkerId, deletedAt: null },
+        select: { userId: true },
+      });
+      const user = session?.userId
+        ? await ctx.db.user.findFirst({ where: { id: session.userId, deletedAt: null }, select: { handle: true } })
+        : null;
+      return { userHandle: user?.handle ?? null, sessionId };
     },
   },
 };
