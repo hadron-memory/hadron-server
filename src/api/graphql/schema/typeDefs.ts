@@ -6845,6 +6845,40 @@ export const typeDefs = `#graphql
     name: String!
   }
 
+  "#3429 - the two ways to retire a spec."
+  enum RetireSpecForm {
+    "Retire a spec that has no successor."
+    RESCIND
+    "Retire a spec in favour of a successor that already exists, in the same memory."
+    SUPERSEDE
+  }
+
+  "#3429 - the input of retireSpec."
+  input RetireSpecInput {
+    "The spec: its node id or URN."
+    ref: ID!
+    form: RetireSpecForm!
+    "RESCIND only (default false): word it as a draft that never took effect. A SUPERSEDE with true is BAD_USER_INPUT."
+    withdrawn: Boolean
+    "SUPERSEDE only, required: the existing successor's node id or URN. Given with RESCIND is BAD_USER_INPUT."
+    successorRef: ID
+    "Required: the spec's revision as the caller read it. A mismatch is NODE_WRITE_CONFLICT and nothing is written."
+    expectedRevision: Int!
+    "Required (not blank) with RESCIND, optional with SUPERSEDE."
+    reason: String
+    "Required (not blank) with RESCIND; with SUPERSEDE it defaults to the spec's stored abstract."
+    summary: String
+    authoredWith: AuthoredWithInput
+  }
+
+  "#3429 - what retireSpec did."
+  type RetireSpecResult {
+    "The retired spec, at its new revision."
+    node: Node!
+    "The superseded-by edge a SUPERSEDE inserted; null for a RESCIND."
+    successorEdge: Edge
+  }
+
   """
   #1328 — an authoring attestation. The writer states which task it worked from
   and that task's current revision (Node.revSeq). The server compares both with
@@ -12551,6 +12585,22 @@ export const typeDefs = `#graphql
     NodeLocConflictError at a live loc. memoryRef accepts the memory's ID or URN.
     """
     reserveSpecCitation(memoryRef: ID!, loc: String!, name: String): Node!
+    """
+    #3429 (hrn:node:hadronmemory.com:specs:cor:spc:010:02, rulings 0212-0214, 0218-0220) - retire a spec in ONE transaction: either RESCIND it (no
+    successor) or SUPERSEDE it by a successor that already exists in the SAME memory. Under the spec memory's channel
+    key, the spec's loc key and its row lock, it refuses a spec that is already retired or already has a
+    superseded-by* link (live edge or non-deleted pending edge), and for a supersede an unreadable, missing, deleted,
+    self, other-memory, retired or already-linked successor. Then it writes the superseded tag, the banner under the
+    title and the retirement abstract (composed by the server, so the text is the same on every surface), through the
+    same writer updateSpecNode uses (same authority, authoring check and one revision), and for a supersede inserts
+    the one superseded-by edge. Nothing is written on any refusal. expectedRevision is REQUIRED: a stale read is
+    NODE_WRITE_CONFLICT. A refused spec or successor you cannot read answers NODE_NOT_FOUND; an unusable readable
+    successor and every state conflict answer NODE_WRITE_CONFLICT with no edge identity. A composed abstract over the
+    2000-character cap is NodeAbstractTooLongError. The door adds no authority. A raw createEdge or updateEdge of a
+    superseded-by* edge outside the door is not a lifecycle verb, and a snapshot restore that commits after a
+    retirement can un-retire the spec (hadron-server#3587).
+    """
+    retireSpec(input: RetireSpecInput!): RetireSpecResult!
     """
     #1178 — allocate the next citation under parentLoc and reserve it as a
     placeholder, in one transaction: mint-or-refuse, so a client never reads

@@ -117,6 +117,7 @@ import { signingFieldResolvers, signingMutations, signingQueries } from './resol
 import { commentFieldResolvers, commentMutations, commentQueries } from './resolvers.comments.js';
 import { questionFieldResolvers, questionMutations, questionQueries } from './resolvers.questions.js';
 import { specDocumentQueries } from './resolvers.specDocument.js';
+import { retireSpecMutations } from './resolvers.mutation.retireSpec.js';
 import {
   specCorpusMintMutations,
   specCorpusMutations,
@@ -328,6 +329,7 @@ export const resolvers = {
     ...memoryConfigTemplateMutations,
     ...memoryConfigApplyMutations,
     ...specCorpusMutations,
+    ...retireSpecMutations,
     ...specCorpusRenumberMutations,
     ...specCorpusMintMutations,
     ...nodeApprovalMutations,

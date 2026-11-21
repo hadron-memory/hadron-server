@@ -277,6 +277,10 @@
    "8c35cddc3c87106fdaf8adcb134889f9080334bef76df6b9f87e5f433d9f0fd0"
   ],
   [
+   "hadron_retire_spec",
+   "45ef0627e4cec3ba4b0df6340252844968db6a4f97d9c7aa70a3b57029030359"
+  ],
+  [
    "hadron_update_node_data",
    "73b43958302f63f877189815776e280c6a86b8e32554cf3b719ad06f780e9166"
   ],
@@ -633,6 +637,10 @@
   [
    "hadron_update_review",
    "8c35cddc3c87106fdaf8adcb134889f9080334bef76df6b9f87e5f433d9f0fd0"
+  ],
+  [
+   "hadron_retire_spec",
+   "45ef0627e4cec3ba4b0df6340252844968db6a4f97d9c7aa70a3b57029030359"
   ],
   [
    "hadron_update_node_data",
@@ -993,6 +1001,10 @@
    "8c35cddc3c87106fdaf8adcb134889f9080334bef76df6b9f87e5f433d9f0fd0"
   ],
   [
+   "hadron_retire_spec",
+   "45ef0627e4cec3ba4b0df6340252844968db6a4f97d9c7aa70a3b57029030359"
+  ],
+  [
    "hadron_update_node_data",
    "73b43958302f63f877189815776e280c6a86b8e32554cf3b719ad06f780e9166"
   ],
@@ -1349,6 +1361,10 @@
   [
    "hadron_update_review",
    "8c35cddc3c87106fdaf8adcb134889f9080334bef76df6b9f87e5f433d9f0fd0"
+  ],
+  [
+   "hadron_retire_spec",
+   "45ef0627e4cec3ba4b0df6340252844968db6a4f97d9c7aa70a3b57029030359"
   ],
   [
    "hadron_update_node_data",
