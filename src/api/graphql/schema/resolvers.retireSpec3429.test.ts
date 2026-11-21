@@ -9,6 +9,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { observeTransactionBackend, waitForAdvisoryWaiter } from '../../../test/advisoryWaiter.js';
 import { generateId } from '../../../lib/id.js';
+import { acquireLockSet } from '../../../lib/nodeSubtreeLock.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -332,5 +333,91 @@ describe('#3429 authoring (acceptance 4)', () => {
     const viaDoor = await codeOf(retire({ ref: x.id, form: 'RESCIND', expectedRevision: await rev(x.id), reason: 'r', summary: 's' }, tokenCtx));
     expect(viaDoor).toBe(viaUpdate);
     if (viaUpdate !== 'NO_ERROR') expect(await snap(x.id)).toBe(before);
+  });
+});
+
+/** A transaction held open by test code, standing in for a writer that has taken its locks but not committed. */
+async function holding(work: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<void>) {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  let ready!: () => void;
+  const readyP = new Promise<void>((r) => { ready = r; });
+  const tx = db.$transaction(async (t) => { await work(t); ready(); await gate; }, { timeout: 30_000 });
+  await readyP;
+  return { release, done: tx };
+}
+const stillPending = async (p: Promise<unknown>, ms = 400) => {
+  let settled = false;
+  void p.then(() => { settled = true; }, () => { settled = true; });
+  await new Promise((r) => setTimeout(r, ms));
+  return !settled;
+};
+
+describe('#3429 the door waits for a writer that holds its locks (acceptance 3, two connections)', () => {
+  it('a writer holding the spec row (createEdge in flight): the door waits, then sees the committed edge and refuses', async () => {
+    const x = await spec('h:row:x'); const y = await spec('h:row:y');
+    const writer = await holding(async (t) => {
+      await t.$queryRaw`SELECT id FROM nodes WHERE id = ${x.id} FOR UPDATE`;
+      await t.edge.create({ data: { id: generateId(), memoryId: mem.id, sourceId: x.id, targetId: y.id, loc: 'h-row', name: 'superseded-by-late' } });
+    });
+    const door = rescind(x.id);
+    const outcome = codeOf(door);
+    expect(await stillPending(door), 'the door must wait on the spec row lock').toBe(true);
+    writer.release(); await writer.done;
+    expect(await outcome).toBe('NODE_WRITE_CONFLICT');
+  });
+
+  it('system-memory restore running: it holds the spec row and revives a superseded-by edge; the door waits then refuses', async () => {
+    const x = await spec('h:restore:x'); const y = await spec('h:restore:y');
+    const dead = await link(x.id, y.id, 'superseded-by', { deletedAt: new Date() });
+    const restore = await holding(async (t) => {
+      await t.$queryRaw`SELECT id FROM nodes WHERE id = ${x.id} FOR UPDATE`;
+      await t.edge.update({ where: { id: dead.id }, data: { deletedAt: null } });
+    });
+    const door = rescind(x.id);
+    const outcome = codeOf(door);
+    expect(await stillPending(door)).toBe(true);
+    restore.release(); await restore.done;
+    expect(await outcome).toBe('NODE_WRITE_CONFLICT');
+  });
+
+  it('a promotion holding the spec loc key (the exact key pendingEdgePromotion takes): the door waits for it', async () => {
+    const x = await spec('h:loc:x'); const y = await spec('h:loc:y');
+    const promo = await holding(async (t) => {
+      await acquireLockSet(t, [{ memoryId: mem.id, loc: 'h:loc:x' }]);
+      await t.edge.create({ data: { id: generateId(), memoryId: mem.id, sourceId: x.id, targetId: y.id, loc: 'h-loc', name: 'superseded-by' } });
+    });
+    const door = rescind(x.id);
+    const outcome = codeOf(door);
+    expect(await stillPending(door), 'the door must wait on the spec loc key').toBe(true);
+    promo.release(); await promo.done;
+    expect(await outcome).toBe('NODE_WRITE_CONFLICT');
+  });
+
+  it('the door in flight (spec row held): a standalone createEdge waits on the source FOR SHARE, then succeeds (the stated limit)', async () => {
+    const x = await spec('h:edge:x'); const y = await spec('h:edge:y');
+    const holder = await holding(async (t) => { await t.$queryRaw`SELECT id FROM nodes WHERE id = ${x.id} FOR UPDATE`; });
+    const writer = resolvers.Mutation.createEdge(null, { sourceRef: x.id, targetRef: y.id, name: 'superseded-by-after' } as never, as(admin.id));
+    expect(await stillPending(writer), 'createEdge must wait on the source row').toBe(true);
+    holder.release(); await holder.done;
+    expect(await codeOf(writer)).toBe('NO_ERROR');
+  });
+});
+
+describe('#3429 other writers, committed first, make the door refuse (acceptance 3)', () => {
+  it('an updateEdge rename to superseded-by*', async () => {
+    const x = await spec('w3:x'); const y = await spec('w3:y');
+    const e = await link(x.id, y.id, 'related');
+    await resolvers.Mutation.updateEdge(null, { edgeRef: e.id, name: 'superseded-by-renamed' } as never, as(admin.id));
+    expect(await codeOf(rescind(x.id))).toBe('NODE_WRITE_CONFLICT');
+  });
+
+  it('an inline edges: write through updateSpecNode', async () => {
+    const x = await spec('w4:x'); const y = await spec('w4:y');
+    await resolvers.Mutation.updateSpecNode(null, { input: { id: x.id, edges: [{ sourceLoc: 'w4:x', targetLoc: 'w4:y', targetId: y.id, name: 'superseded-by' }] } } as never, as(admin.id));
+    const linked = await db.edge.count({ where: { sourceId: x.id, name: 'superseded-by', deletedAt: null } });
+    if (linked > 0) expect(await codeOf(rescind(x.id))).toBe('NODE_WRITE_CONFLICT');
+    void y;
+    expect(linked, 'the inline write must land for this pin to mean anything').toBeGreaterThan(0);
   });
 });
