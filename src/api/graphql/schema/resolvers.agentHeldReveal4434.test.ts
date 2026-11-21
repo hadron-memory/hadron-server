@@ -61,7 +61,7 @@ describe('#4434 agent-held secret.reveal', () => {
     expect(await reveal(w1, r.clientId)).toMatchObject({ secretName: 'tok', value: JSON.stringify('hunter2'), readsLeft: 2 });
     expect((await db.grant.findUniqueOrThrow({ where: { id: r.grantId } })).useCount).toBe(1);
     expect(await db.grantEvent.count({ where: { grantId: r.grantId, action: 'USE' } })).toBe(1);
-    expect(await db.secretEvent.count({ where: { secretId, kind: 'REVEAL', outcome: null } })).toBe(1);
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'REVEAL', outcome: 'OK' } })).toBe(1);
     expect(await code(reveal(w2, r.clientId))).toBe('OK');
     expect((await db.grant.findUniqueOrThrow({ where: { id: r.grantId } })).useCount).toBe(2);
   });
@@ -111,6 +111,9 @@ describe('#4434 agent-held secret.reveal', () => {
 
   it('an App-held reveal client is still refused at request, and leaves nothing', async () => {
     expect(await code(issue('APP', appId))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    // Nor may an APP kind carry a live worker's or agent's id through to a worker- or agent-held grant.
+    expect(await code(issue('APP', w1))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    expect(await code(issue('APP', roleAgentId))).toBe('GRANT_HOLDER_NOT_ALLOWED');
     expect(await db.secretReadClient.count({ where: { secretId } })).toBe(0);
     expect(await db.grant.count({ where: { appId } })).toBe(0);
   });

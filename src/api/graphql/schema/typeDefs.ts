@@ -6404,10 +6404,10 @@ export const typeDefs = `#graphql
   input IssueSecretReadClientInput {
     "The App secret, by id or URN."
     secretRef: ID!
-    "WORKER: a live worker of the App (holderRef is its id). USER: the issuer themself (holderRef omitted). AGENT and APP are refused (GRANT_HOLDER_NOT_ALLOWED): a read client is held by a person or a worker."
+    "WORKER: a live worker of the App (holderRef is its id). AGENT: an agent installed and licensed in the App (holderRef is its id); its live workers in the App read through the client (hrn:node:hadronmemory.com:specs:cor:sec:060:02). USER: the issuer themself (holderRef omitted). APP is refused (GRANT_HOLDER_NOT_ALLOWED): an App holds no reveal path."
     holderKind: GrantHolderKind!
     holderRef: ID
-    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refused (SECRET_AUTO_DELETE_NOT_AVAILABLE) until the deletion is available."
+    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refused (SECRET_AUTO_DELETE_NEEDS_LIMIT) without a window or a read budget."
     autoDelete: Boolean! = false
     startsAt: DateTime
     expiresAt: DateTime
