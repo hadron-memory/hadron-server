@@ -321,9 +321,11 @@ it(`#3335 ${door} holds the live manager membership after ${earlierTransaction ?
  * #3336: pin the session row's FOR SHARE in `lockInstructedActRows` (resolvers.instruction.ts). Without it a session
  * end could commit between the act's final re-admission and the act's commit, recording an act under a session that
  * had just ended (cor:dmo:050:12, cor:acl:100:04). Three connections: (a) the act through the signature door, (b) a
- * side transaction holding the App row FOR UPDATE, which the act's event insert reaches only AFTER the session lock
- * (its foreign key to apps), so the act is parked while it holds that lock, and (c) the real session-end write on its
- * own connection. The observer asserts by backend identity, not by timeout: (c) is in a Lock wait and (a)'s PID is in
+ * side transaction holding a SHARE table lock on agent_team_events, which blocks the act's event insert, the one
+ * write the act reaches only AFTER the session lock, so the act is parked while it holds that lock, and (c) the real
+ * session-end write on its own connection. The side lock is deliberately NOT a row lock on apps: withAuthorizedTx
+ * takes the App anchor row FOR SHARE at transaction start, so an apps lock parks the act BEFORE the session lock
+ * and the session end then simply wins (the first draft of this pin failed for that reason, with no mutant). The observer asserts by backend identity, not by timeout: (c) is in a Lock wait and (a)'s PID is in
  * its pg_blocking_pids. Removing only the session FOR SHARE leaves (c) unblocked, and this test goes red there.
  */
 it('#3336 an instructed act holds its session row FOR SHARE: a concurrent session end waits on the act backend', async () => {
@@ -348,7 +350,7 @@ it('#3336 an instructed act holds its session row FOR SHARE: a concurrent sessio
   side = db.$transaction(async tx => {
    const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
    blockerPid = pid;
-   await tx.$queryRaw`SELECT id FROM apps WHERE id=${f.app.id} FOR UPDATE`;
+   await tx.$executeRawUnsafe('LOCK TABLE agent_team_events IN SHARE MODE');
    held(); await gate;
   }, { timeout: 30000 });
   void side.catch(() => {});
