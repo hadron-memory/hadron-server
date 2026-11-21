@@ -664,7 +664,7 @@ const TASK_REF_MESSAGE = 'taskRef must be an open task assigned to the asking wo
 const OPEN_TASK_STATUSES: ReadonlySet<string> = new Set(['pending', 'started']);
 
 /**
- * #4431 (Questions S7, Vera's draft cor:agt:050:34) — the task a question blocks, by id or handle, as the stored
+ * #4431 (Questions S7, cor:agt:050:35) — the task a question blocks, by id or handle, as the stored
  * `taskId`. Accepted only when the request acts as a worker, the task is open (pending or started) and assigned to that
  * worker, and the task's App is the App of the log's memory; anything else (including a task that does not exist, or a
  * caller with no worker) is the same QUESTION_INVALID at /taskRef. Judged inside the ask's transaction, before any write.
