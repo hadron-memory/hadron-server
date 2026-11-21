@@ -167,6 +167,20 @@ describe('transactional secret.use (#4000)', () => {
       .rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
     expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
   });
+  it('does not let a worker-held grant reach a run that has no person behind it', async () => {
+    await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId: runCtx.run.agentId!, name: 'S5 held', slug: `s5-held-${generateId()}` } });
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+      await tx.$executeRaw`UPDATE grants SET grantee_app_id = NULL, user_id = NULL, worker_id = ${worker.id} WHERE id = ${grantId}`;
+      await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+    });
+    expect(runCtx.run.userId).toBeNull();
+    await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_NOT_FOUND' } });
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
+    expect(await db.actionTicket.count({ where: { organizationId: orgId, consumedAt: { not: null } } })).toBe(0);
+    expect(await db.grantEvent.count({ where: { grantId, action: 'USE' } })).toBe(0);
+  });
   it('refuses a client whose secret was altered away from the signed grant', async () => {
     await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
     const original = await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } });
