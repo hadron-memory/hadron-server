@@ -57,6 +57,10 @@ beforeAll(async () => {
   for (const key of [...Object.keys(GOOGLE_ENV), 'MICROSOFT_CLIENT_ID', 'FRONTEND_URL']) {
     savedEnv[key] = process.env[key];
   }
+  // #3066: the worker clone keeps the previous file's rows and createServer() reads the
+  // rate-limit manifest at boot — clean before the start (the beforeEach clean is per
+  // test and runs after this), as the #2913 suite does.
+  await cleanDb(db);
   const app = await createServer();
   const listening = createHttpServer(app);
   server = listening;
