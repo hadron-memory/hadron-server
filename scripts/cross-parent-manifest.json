@@ -2297,6 +2297,8 @@
       "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
       "target": "AgentTaskExternalIdChange"
     },
+    "RetireSpecResult.node": {"class": "parent-implies-child", "audience": "the caller who may write the spec's memory: retireSpecDoor conceals an unreadable spec as NODE_NOT_FOUND and requires write access before any read, and writeNodeCore holds the response to the memory's read audience (concealWriteBeyondRead)", "resolver": "src/api/graphql/schema/resolvers.mutation.retireSpec.ts::retireSpecDoor", "target": "Node"},
+    "RetireSpecResult.successorEdge": {"class": "parent-implies-child", "audience": "the same writer: the edge is the one the door inserted from the spec to a successor the caller can read (item 3, isMemoryReadableCached), in the spec's own memory; Edge.source and Edge.target keep their own field gates", "resolver": "src/api/graphql/schema/resolvers.mutation.retireSpec.ts::retireSpecDoor", "target": "Edge"},
     "WebPollsPage.items": {
       "class": "parent-implies-child",
       "audience": "Same org ADMIN and tool.web_poll policy authorization as the existing webPolls list, with org-bound redacted rows.",
