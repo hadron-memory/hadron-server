@@ -860,106 +860,6 @@ export const typeDefs = `#graphql
     cursorIncarnation: Int
   }
 
-  "#1353 — compact unread metadata for one Worker/Channel pair. No message body is returned."
-  type TeamAttentionChannel {
-    channel: ID!
-    name: String!
-    unread: Int!
-    unreadMentions: Int!
-    firstUnreadSeq: Int
-    lastSeq: Int!
-  }
-
-  "#1353 — one live Worker that has relevant unread attention after the supplied token."
-  type TeamAttentionWorker {
-    worker: ID!
-    name: String!
-    urn: String
-    live: Boolean!
-    channels: [TeamAttentionChannel!]!
-  }
-
-  type TeamAttentionResult {
-    "Opaque signed snapshot. Adopt it only after every listed nudge is accepted."
-    token: String!
-    workers: [TeamAttentionWorker!]!
-  }
-
-  type TeamAttentionSwitchoverChannel {
-    channel: ID!
-    name: String!
-    fromSeq: Int!
-    throughSeq: Int!
-    unread: Int!
-    unreadMentions: Int!
-  }
-
-  type TeamAttentionSwitchoverWorker {
-    worker: ID!
-    name: String!
-    urn: String
-    channels: [TeamAttentionSwitchoverChannel!]!
-  }
-
-  type TeamAttentionSwitchoverPreview {
-    "Short-lived proof binding the exact operator, App, Workers, registers, cursors and heads shown here."
-    proof: String!
-    expiresAt: DateTime!
-    workers: [TeamAttentionSwitchoverWorker!]!
-  }
-
-  """
-  #1384 paged (v2): one bounded slice of an attention scan. Counts are exact
-  for the captured (seen, head] range of the issuing scan only, and items are
-  emitted solely from Channels that scan has exhausted.
-  """
-  type TeamAttentionPageItem {
-    worker: ID!
-    workerName: String!
-    workerUrn: String
-    channel: ID!
-    channelName: String!
-    unread: Int!
-    unreadMentions: Int!
-    firstUnreadSeq: Int
-    lastRelevantSeq: Int
-    "The frozen Channel head this item's counts are exact for."
-    lastSeq: Int!
-  }
-
-  type TeamAttentionPage {
-    items: [TeamAttentionPageItem!]!
-    "False while any Channel is unfinished or queued items remain undelivered."
-    scanComplete: Boolean!
-    "Continuation for the next pull; null on the final page."
-    nextPage: String
-    """
-    FINAL PAGE ONLY: a since-watermark token (same shape v1 issued) to adopt
-    after every listed nudge was accepted. Never present while scanComplete
-    is false.
-    """
-    adoptableSince: String
-  }
-
-  type TeamAttentionPreviewPage {
-    items: [TeamAttentionPageItem!]!
-    scanComplete: Boolean!
-    nextPage: String
-    """
-    FINAL PAGE ONLY: the short-lived switchover proof (frozen heads). An
-    incomplete preview never carries one, so a partial preview can never
-    silently discard an unscanned backlog.
-    """
-    proof: String
-    expiresAt: DateTime
-  }
-
-  type TeamAttentionSwitchoverResult {
-    applied: Boolean!
-    workersAdvanced: Int!
-    channelsAdvanced: Int!
-  }
-
   "#1353 — the exact Worker/Channel cursor advanced by markOwnTeamChatRead."
   type OwnTeamChatReadState {
     workerId: ID!
@@ -2682,6 +2582,18 @@ export const typeDefs = `#graphql
     API
   }
 
+  "#4427 — an answer: an option, free text, or both. Never pre-selected; the caller names one."
+  input AnswerQuestionInput {
+    "One of the question\'s option keys. Optional when text is given."
+    optionKey: String
+    "Free text: alone, or a note beside the chosen option."
+    text: String
+    "Why this answer replaces an earlier one. Always optional; blank counts as not given."
+    reason: String
+    "Where the answer was given, as the client states it (a claim). Default API."
+    via: QuestionAnswerVia
+  }
+
   "#1641 — a reference: exactly one of an external ref (hadron-server#1640, team:6783), a node id or URN, or a spec citation."
   type QuestionRef {
     ref: String
@@ -2821,6 +2733,15 @@ export const typeDefs = `#graphql
     deciders: [CommentActorRef!]!
     "True when the caller is a decider, including through an account merged into theirs (#1715)."
     viewerIsDecider: Boolean!
+    """
+    #4427 — true when the caller may answer or take back an answer right now: one of the question\'s deciders, acting as
+    themselves (a person in a session bound to no worker or agent, no App key or run, no impersonation), still among the
+    log\'s deciders and able to write its memory, on a question that is not withdrawn, tampered or unverifiable
+    (hrn:node:hadronmemory.com:specs:cor:dmo:140:05). It is the capability to submit a new answer: it is false once the
+    answer history is full (the last entry is kept for taking an answer back), and it does not say that an answer stands to
+    take back (retractQuestionAnswer refuses QUESTION_NOT_ANSWERED otherwise).
+    """
+    viewerMayAnswer: Boolean!
     "Account merges the stored user ids follow: the record keeps the merged-away id (#1715)."
     identityMerges: [QuestionIdentityMerge!]!
     askedBy: QuestionActor!
@@ -9465,6 +9386,67 @@ export const typeDefs = `#graphql
     ): [AgentTask!]!
 
     """
+    #2212 A3 (hrn:node:hadronmemory.com:specs:cor:api:120:04): agentTasks as a page. The filters are agentTasks' own (one
+    shared filter), and the order is the same (newest first, then id); only the paging differs, as below. total counts the tasks the same filter matches,
+    never a task the caller cannot read: the App read gate (hrn:node:hadronmemory.com:specs:cor:agt:050:21) runs first, and
+    an App you do not participate in answers APP_NOT_FOUND exactly like an absent one, never an empty page. hasMore is
+    whether tasks remain past this page; pass offset + items length to continue. limit defaults to 20, 0 returns only total,
+    and over 200 is served as 200. Unlike agentTasks, an externalIds batch with no limit is not widened to 200: it pages at
+    20 like any filter, and hasMore says whether more of the batch remains.
+    items and total are read in one snapshot, so total and hasMore always describe the rows served.
+    """
+    agentTasksPage(
+      appRef: ID!
+      status: [AgentTaskStatus!]
+      owner: AgentTaskPartyInput
+      assignee: AgentTaskPartyInput
+      creator: AgentTaskPartyInput
+      tag: String
+      "Match at least one tag. Empty arrays do not narrow the list."
+      tagsAny: [String!]
+      "Match every tag. Empty arrays do not narrow the list."
+      tagsAll: [String!]
+      "Exact opaque source value, without interpretation or prefix matching."
+      source: String
+      "#3125 S2, #4217: the tasks with exactly this externalId (compared as written, 1 to 512 characters, else BAD_USER_INPUT): at most one ACTIVE task (backlog, pending or started) holds it, and any number of finished or cancelled tasks that held it before it. Newest first, so a caller that wants the live one picks the active one. Runs inside the App read gate, so it only finds this App's tasks."
+      externalId: String
+      """
+      #4084 (hrn:node:hadronmemory.com:specs:cor:agt:120:02): the tasks holding any of these external ids, each compared
+      exactly as written, with agentTasks' checks (1 to 100 ids, each 1 to 512 characters; one bad entry refuses the whole
+      list with BAD_USER_INPUT naming its position, never its text; an empty list is BAD_USER_INPUT). Paged like every other
+      filter here: an omitted limit is 20, never widened to the batch; hasMore says whether more of the batch remains.
+      """
+      externalIds: [String!]
+      "#2649: tasks carrying a reference with exactly this target, and this kind when given; the label is ignored. Runs inside the App read gate."
+      reference: AgentTaskReferenceFilter
+      "#2663: true narrows to finished tasks with at least one undisposed finding; false/omitted do not narrow. Existing App read scope, before paging (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
+      unresolvedFindings: Boolean
+      "Case-insensitive substring of the title or description, 1 to 200 characters after trimming (else BAD_USER_INPUT). Percent, underscore and backslash match literally. ANDed with every other filter."
+      text: String
+      "True: overdue on the server clock (the database clock). Two arms: a pending task, not started, whose start-by has passed; or a pending or started task whose finish-by has passed and which has not ended. An ended (finished or cancelled) task and a backlog task are never overdue, and neither is a task with neither time. Blocking is ignored. False: all other tasks. Not an alarm: listing raises nothing."
+      overdue: Boolean
+      "Inclusive creation-time lower bound."
+      createdAfter: DateTime
+      "Inclusive creation-time upper bound."
+      createdBefore: DateTime
+      "Inclusive start-time lower bound; tasks with no start time never match."
+      startedAfter: DateTime
+      "Inclusive start-time upper bound; tasks with no start time never match."
+      startedBefore: DateTime
+      "Inclusive finish-time lower bound; tasks with no finish time never match."
+      finishedAfter: DateTime
+      "Inclusive finish-time upper bound; tasks with no finish time never match."
+      finishedBefore: DateTime
+      parentTaskId: ID
+      rootsOnly: Boolean
+      queued: Boolean
+      "True: only single-shot match failures; false: unmarked tasks. Does not change who may read."
+      matchFailed: Boolean
+      limit: Int
+      offset: Int
+    ): AgentTaskPage!
+
+    """
     #1705 — a task and every task below it, the root first, then by depth and
     creation. Null when the root is missing or unreadable. Bounded at 1000 rows.
     """
@@ -11024,53 +11006,6 @@ export const typeDefs = `#graphql
     channelRef: the Channel's id or its address (\`Channel.chatRootUrn\`, #1171).
     """
     channelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!): ChannelReadState
-
-    """
-    #1353 v1 attention query, retired by #1384. This field always returns
-    UPGRADE_REQUIRED; use teamAttentionPage for bounded polling. Pass an
-    existing v1 since token to teamAttentionPage to carry its watermark
-    forward. Neither operation changes read state.
-    """
-    teamAttention(appRef: ID!, since: String): TeamAttentionResult!
-
-    """
-    #1384 paged (v2) attention poll — the bounded successor to teamAttention
-    (v1 answers UPGRADE_REQUIRED). Each call decrypts at most scanLimit rows
-    (encrypted Channels), counts plaintext Channels with bounded SQL
-    aggregates (#1779: a window of 200 seqs per scanLimit unit per Channel
-    visit, 400 per call), and emits at most limit Worker/Channel pairs; continue with page while
-    nextPage is present. The final page alone carries adoptableSince — adopt
-    it only after EVERY listed nudge was accepted; on any partial failure
-    retain the prior watermark and restart the scan (duplicates, never loss).
-    An existing v1 since token starts a scan, carrying the watermark forward.
-    Never changes read state.
-    """
-    teamAttentionPage(
-      appRef: ID!
-      since: String
-      page: String
-      limit: Int
-      scanLimit: Int
-    ): TeamAttentionPage!
-
-    """
-    #1384 paged switchover preview — same bounded scan as teamAttentionPage,
-    full-backlog accounting. The apply proof exists ONLY on the final page of
-    a completed preview; confirmTeamAttentionSwitchover (apply) is unchanged.
-    """
-    teamAttentionPreviewPage(
-      appRef: ID!
-      page: String
-      limit: Int
-      scanLimit: Int
-    ): TeamAttentionPreviewPage!
-
-    """
-    Preview the explicit baseline switchover for the operator's current live
-    Workers. Read-only: inspect the exact cursors, heads and unread counts,
-    then pass proof to confirmTeamAttentionSwitchover within ten minutes.
-    """
-    teamAttentionSwitchoverPreview(appRef: ID!): TeamAttentionSwitchoverPreview!
 
     """
     036-ai-service-config: resolve a config name for an execution context
@@ -13076,6 +13011,21 @@ export const typeDefs = `#graphql
     amendQuestion(ref: ID!, input: AmendQuestionInput!, expectedRevision: Int!, reason: String!): Question!
     "#1641 — withdraw a question (terminal; the code stays consumed): the asker or a decider, a decider once answered, whatever its state."
     withdrawQuestion(ref: ID!, reason: String!, expectedRevision: Int!): Question!
+    """
+    #4427 — answer a question, or answer it again. One of its deciders, acting as themselves: never a worker or agent
+    session, an App key, a run or an impersonated session (hrn:node:hadronmemory.com:specs:cor:dmo:140:05). Appends an answer
+    entry; earlier entries stay, and an answered, approved or signed question can always be answered again on the same node.
+    expectedRevision is required: the answer covers exactly the revision the decider saw (Question.revSeq). The identical
+    answer again with no reason writes nothing. Refusals: QUESTION_NOT_DECIDER, QUESTION_IMPERSONATION_REFUSED,
+    QUESTION_UNKNOWN_OPTION, QUESTION_WITHDRAWN, QUESTION_INVALID, QUESTION_NOT_FOUND, QUESTION_FORBIDDEN, QUESTION_LOG_NOT_FOUND,
+    NODE_WRITE_CONFLICT.
+    """
+    answerQuestion(ref: ID!, input: AnswerQuestionInput!, expectedRevision: Int!): Question!
+    """
+    #4427 — take the standing answer back: the question is OPEN again and the answer stays in its history. Same callers
+    and refusals as answerQuestion, plus QUESTION_NOT_ANSWERED when no answer stands.
+    """
+    retractQuestionAnswer(ref: ID!, expectedRevision: Int!, reason: String, via: QuestionAnswerVia): Question!
     "#1641 — a platform admin hard-deletes a question that was never answered (or one stranded in the pre-#4426 format), recorded on its log (QUESTION_ANSWERED otherwise). The code stays consumed."
     purgeUnansweredQuestion(ref: ID!, reason: String!): Boolean!
 
@@ -14791,14 +14741,6 @@ export const typeDefs = `#graphql
       """
       expectedIncarnation: Int
     ): OwnTeamChatReadState!
-
-    """
-    Explicitly confirm a previously previewed #1353 switchover. The proof is
-    actor/App/scope-bound; any live-Worker, register or cursor drift rejects
-    the whole transaction. It advances only through the heads captured by the
-    preview, so messages arriving afterward remain unread.
-    """
-    confirmTeamAttentionSwitchover(appRef: ID!, proof: String!): TeamAttentionSwitchoverResult!
 
     # Chatbot revisions (org ADMIN)
     """
@@ -16714,6 +16656,13 @@ export const typeDefs = `#graphql
   "#2213 — one page of tickers; hasMore is whether rows remain past it."
   type TickerPage {
     items: [Ticker!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2212 A3 — one page of an App's agent tasks, counted over the same filter and read gate."
+  type AgentTaskPage {
+    items: [AgentTask!]!
     total: Int!
     hasMore: Boolean!
   }

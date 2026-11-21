@@ -443,7 +443,7 @@ BEGIN
                   THEN ', shares its root with another row' ELSE '' END), ', ' ORDER BY p.name)
       INTO offending_rows_summary
       FROM (SELECT id, name, kind, status FROM principals WHERE name <> lower(name) ORDER BY name LIMIT 20) p;
-    RAISE EXCEPTION 'principals.name: % principal row(s) are not lower case, so chk_principals_name_lower cannot be added (hadron-server#4400; this guard: #4411). For a row that shares its root with no other row, lower-case it and the owning users.handle / organizations.urn; for rows that share a root, decide which owner keeps it and rename or delete the others. Then re-run pnpm db:dev-setup. Rows (first 20): %', offending_count, offending_rows_summary
+    RAISE EXCEPTION 'principals.name: % principal row(s) are not lower case, so chk_principals_name_lower cannot be added (hadron-server#4400; this guard: #4411). For a row that shares its root with no other row, lower-case it and the owning users.handle / organizations.urn; for rows that share a root, decide which owner keeps it and rename or delete the others, then lower-case the kept row (if it is still mixed case) together with its owning users.handle / organizations.urn, or the next run refuses again. Then re-run pnpm db:dev-setup. Rows (first 20): %', offending_count, offending_rows_summary
       USING ERRCODE = 'HDPRF';
   END IF;
 END $$;

@@ -57,7 +57,7 @@ const trapRun = ({ owned, git, body = 'true' }) => {
     const log = join(dir, 'ran');
     const stubs = `note() { echo "$1" >> '${log}'; }; preserve_samples() { note preserve; }; keep_logs_private() { note logs; }; `
       + `stack_owned() { ${owned}; }; purge_snapshots() { note purge; }; release_stack_reservation() { note release; }; git() { ${git}; }; `
-      + `stage='${dir}/stage'; state='${dir}/state'; root='${dir}'; worker=w; DIAG_OUT='${dir}/o'; mkdir -p "$stage/src" "$state"; : > "$state/diagnose-owner"; `
+      + `stage='${dir}/stage'; state='${dir}/state'; root='${dir}'; worker=w; project=hadron-e2e-w; DIAG_OUT='${dir}/o'; mkdir -p "$stage/src" "$state"; : > "$state/diagnose-owner"; `
       + `${runShDown()}\ntrap down EXIT\n${body}`;
     mkdirSync(join(dir, 'stage/src/scripts/e2e'), { recursive: true });
     writeFileSync(join(dir, 'stage/src/scripts/e2e/stack.sh'), `#!/bin/sh\necho stackdown >> '${log}'\n`);

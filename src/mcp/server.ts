@@ -340,7 +340,6 @@ import {
   markOwnTeamChatRead,
   maybeAdvanceOwnChannelRead,
   resumableOwnWorkerIds,
-  teamAttentionAvailable,
 } from '../lib/teamAttention.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
 import { edgeDisplayOrder, edgeRunOrder } from '../lib/edgeOrder.js';
@@ -2426,8 +2425,8 @@ export function createMcpServerInstance(
     'hadron_search', 'hadron_list_memories', 'hadron_server_info', 'hadron_list_apps', 'hadron_list_scopes',
     'hadron_scope_explain', 'hadron_list_channels', 'hadron_register_list', 'hadron_find_nodes', 'hadron_get_node',
     'hadron_get_nodes', 'hadron_get_next_node', 'hadron_agent_boot_prompt', 'hadron_list_nodes', 'hadron_get_object', 'hadron_find_objects',
-    'hadron_get_run', 'hadron_whoami', 'hadron_channel_read', 'hadron_team_chat_read', 'hadron_team_chat_search', 'hadron_team_attention',
-    'hadron_team_attention_page', 'hadron_list_workers', 'hadron_get_worker', 'hadron_team_work_items',
+    'hadron_get_run', 'hadron_whoami', 'hadron_channel_read', 'hadron_team_chat_read', 'hadron_team_chat_search',
+    'hadron_list_workers', 'hadron_get_worker', 'hadron_team_work_items',
     'hadron_list_comments', 'hadron_get_comment', 'hadron_team_chat_mark_read',
     'hadron_list_recovery_nodes', 'hadron_list_recovery_edges', 'hadron_get_recovery_node',
     // #1705 — agent-task reads (each takes its own optional session).
@@ -11029,87 +11028,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── #1353 internal-pilot compact attention ───────────────────────────────────
+  // ── #1353 own-worker mark-read (the attention poll/page/switchover tools that
+  // shared this guard were retired by #2027 S11) ──────────────────────────────
 
   // #1353: discovery follows the user principal — the pilot operator
   // allowlist that hid these tools from non-allowlisted connections is
   // removed. What still bounds them is per-call: resolvePilotApp's live-App
   // + participation checks (APP_NOT_FOUND parity) and each tool's own
-  // session/consent guards; the capability probe in server_info reports
-  // team-attention only for a caller who could actually use it.
+  // session/consent guards.
   if (auth.userId && !auth.impersonation) {
-    off(
-      'hadron_team_attention',
-      'RETIRED (#1384): the v1 one-shot poll scanned an encrypted Channel\'s whole unread backlog inside one request and now answers UPGRADE_REQUIRED. Use hadron_team_attention_page — the bounded paged successor; your existing since token is accepted there and carries your watermark forward.',
-      SHAPE_HADRON_TEAM_ATTENTION,
-      async ({ app, since }) => {
-        let appRef = app;
-        if (!appRef) {
-          const scopeError = requireAppScope();
-          if (scopeError) return scopeError;
-          appRef = auth.appId;
-        }
-        if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
-        try {
-          const result = await resolvers.Query.teamAttention({}, { appRef, since: since ?? null }, chatCtx());
-          return textResult(JSON.stringify(result, null, 2));
-        } catch (error) {
-          return scopeErrorText(error);
-        }
-      },
-    );
-
-    off(
-      'hadron_team_attention_page',
-      'PAGED ATTENTION (#1384 v2): one bounded slice of the compact unread scan for this operator\'s LIVE Workers — at most scanLimit decrypted rows and limit emitted Worker/Channel pairs per call. Continue with the returned nextPage while scanComplete is false. Items carry no message bodies; counts are exact for the captured range of the issuing scan. The FINAL page alone returns adoptableSince — adopt it only after every listed nudge was accepted; on any partial failure retain your prior watermark and restart the scan (duplicates, never loss). An existing v1 since token starts a scan and carries the watermark forward. Never changes ChannelReadState.',
-      SHAPE_HADRON_TEAM_ATTENTION_PAGE,
-      async ({ app, since, page, limit, scanLimit }) => {
-        let appRef = app;
-        if (!appRef) {
-          const scopeError = requireAppScope();
-          if (scopeError) return scopeError;
-          appRef = auth.appId;
-        }
-        if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
-        try {
-          const result = await resolvers.Query.teamAttentionPage(
-            {},
-            { appRef, since: since ?? null, page: page ?? null, limit: limit ?? null, scanLimit: scanLimit ?? null },
-            chatCtx(),
-          );
-          return textResult(JSON.stringify(result, null, 2));
-        } catch (error) {
-          return scopeErrorText(error);
-        }
-      },
-    );
-
-    off(
-      'hadron_team_attention_switchover',
-      'PAGED (#1384 v2): explicitly baseline every current live Worker through captured Channel heads. preview is read-only, pages like the poll tool (continue with its returned nextPage), and yields the short-lived proof ONLY on its final completed page. apply requires that proof and atomically refuses if the operator, App, live-Worker scope, effective register or cursor changed. Messages arriving after the preview freeze remain unread. This is the only supported way to discard the pre-router backlog.',
-      SHAPE_HADRON_TEAM_ATTENTION_SWITCHOVER,
-      async ({ app, action, page, limit, proof }) => {
-        let appRef = app;
-        if (!appRef) {
-          const scopeError = requireAppScope();
-          if (scopeError) return scopeError;
-          appRef = auth.appId;
-        }
-        if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
-        if (action === 'apply' && !proof) return refusalResult('[bad_user_input] action:"apply" requires the proof returned by the final preview page.');
-        if (action === 'preview' && proof !== undefined) return refusalResult('[bad_user_input] preview does not accept a proof.');
-        if (action === 'apply' && page !== undefined) return refusalResult('[bad_user_input] apply does not accept a page continuation.');
-        try {
-          const result = action === 'preview'
-            ? await resolvers.Query.teamAttentionPreviewPage({}, { appRef, page: page ?? null, limit: limit ?? null, scanLimit: null }, chatCtx())
-            : await resolvers.Mutation.confirmTeamAttentionSwitchover({}, { appRef, proof: proof! }, chatCtx());
-          return textResult(JSON.stringify(result, null, 2));
-        } catch (error) {
-          return scopeErrorText(error);
-        }
-      },
-    );
-
     off(
       'hadron_team_chat_mark_read',
       'Explicitly advance the Worker bound to your live session on one registered Channel. Use after filtered reads, which intentionally never auto-advance. Monotonic; a lower seq is a no-op and a seq beyond the Channel head is refused.',
@@ -13692,27 +13619,6 @@ const SHAPE_HADRON_TEAM_CHAT_SEARCH = {
   cursor: z.string().optional().describe('The continuation from the previous page of THIS search (same query, chat and caller); any other use is [team_chat_search_cursor_invalid].'),
   app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the active App. Ignored when channel is given.'),
   channel: z.string().optional().describe('Search THIS Channel (its id or address, from hadron_list_channels) instead of the App\'s default team chat.'),
-};
-
-const SHAPE_HADRON_TEAM_ATTENTION = {
-  app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
-  since: z.string().optional().describe('Opaque token returned by the preceding successful poll. Do not pass "now".'),
-};
-
-const SHAPE_HADRON_TEAM_ATTENTION_PAGE = {
-  app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
-  since: z.string().optional().describe('v1-shaped watermark token to start a scan from. Do not pass with page. Do not pass "now".'),
-  page: z.string().optional().describe('Opaque continuation returned by the preceding page. Do not pass with since.'),
-  limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit this call (default 20, cap 100).'),
-  scanLimit: z.number().int().optional().describe('Max encrypted rows to decrypt or aggregate this call (default 50, cap 100).'),
-};
-
-const SHAPE_HADRON_TEAM_ATTENTION_SWITCHOVER = {
-  app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
-  action: z.enum(['preview', 'apply']).describe('preview makes no writes and pages; apply requires the exact final-page proof.'),
-  page: z.string().optional().describe('preview continuation from the preceding preview page.'),
-  limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit per preview call (default 20, cap 100).'),
-  proof: z.string().optional().describe('Required for action:"apply"; returned by the final preview page.'),
 };
 
 const SHAPE_HADRON_TEAM_CHAT_MARK_READ = {

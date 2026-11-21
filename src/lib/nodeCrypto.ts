@@ -41,7 +41,8 @@ export interface MemoryEncryptionInfo {
  * unlocked in this process, or released by the key-cache idle TTL, #1114). This
  * used to be a bare `new Error('SESSION_EXPIRED: …')`, so every surface that
  * did not hand-wrap it into a typed `GraphQLError` (as `resolvers.comments` /
- * `teamChat` / `teamRole` / `teamAttention` / `channels` do) surfaced
+ * `teamChat` / `teamRole` / `channels` do, and `teamAttention` did before
+ * #2027 S11 retired its scan) surfaced
  * `INTERNAL_SERVER_ERROR` — a caller-state refusal disguised as a server fault.
  *
  * The class is mapped once in `api/graphql/formatError.ts`, so the code

@@ -108,6 +108,9 @@ export const PAGE_ARGS_FIELDS: ReadonlySet<string> = new Set([
   'AgentTask.clones',
   // #3223 (#2212 A3): pinned in admissionMyChatsPage2212A3.test.ts.
   'Query.myChatsPage',
+  // #2212 A3 remainder: agentTasksPage sizes only through pageArgs (no externalIds widening). The rows it reads are pinned in
+  // resolvers.agentTasksPage2212.test.ts, and the charged cost by its admission drift guard.
+  'Query.agentTasksPage',
   // #3222 (#2213 S3): pinned in admissionSpecReferencePages2213S3.test.ts.
   'Query.specBacklinksPage',
   'Query.specUnresolvedReferencesPage',
