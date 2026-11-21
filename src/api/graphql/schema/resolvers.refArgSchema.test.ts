@@ -161,6 +161,9 @@ const ALLOWED_ID_ARGS = new Set([
   // appRuns.parentRunId: a genuine PK-only filter (the run whose children are listed), not a ref that accepts a URN
   // (cor:api:140:01 keeps `<entity>Id` for genuine PKs). #4141 renames it `parentRunRef` and removes this line with it.
   'Query.appRuns.parentRunId',
+  // #4148 (S7): agentTasks.externalId is an external-system label (an outside item's id, e.g. an issue URL; cor:agt:120:02),
+  // not a Hadron entity reference, so it keeps its name per the convention ("external-system labels" stay `<x>Id`).
+  'Query.agentTasks.externalId',
 ]);
 
 /** The legacy-`Id` check, one (field, arg) at a time, against a per-field allow-list. */

@@ -44,7 +44,7 @@ type Party = { kind: 'WORKER' | 'USER'; id: string; name: string | null; urn: st
 
 type Resolver<A, R> = (parent: unknown, args: A, ctx: Context) => Promise<R>;
 const Q = resolvers.Query as unknown as {
-  agentTask: Resolver<{ id: string }, TaskRow | null>;
+  agentTask: Resolver<{ ref: string }, TaskRow | null>;
   agentTasks: Resolver<Record<string, unknown>, TaskRow[]>;
   agentTaskTree: Resolver<{ root: string }, TaskRow[] | null>;
   agentTeamEvents: Resolver<Record<string, unknown>, EventRow[]>;
@@ -414,7 +414,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       'Source and lifecycle fields are fixed. Ended tasks refuse edits; edits are not progress and clear no wake.',
     SHAPE_HADRON_TASK_UPDATE,
     async ({ session, taskId, input }) =>
-      write('hadron_task_update', session, 'Updated', ctx => M.updateAgentTask({}, {taskId,input:input ?? {}}, ctx)),
+      write('hadron_task_update', session, 'Updated', ctx => M.updateAgentTask({}, {taskRef: taskId,input:input ?? {}}, ctx)),
   );
 
   off(
@@ -440,7 +440,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'Start a pending task: its assignee only (cor:agt:050:08).',
     SHAPE_HADRON_TASK_START,
     async ({ session, taskId: id }) =>
-      write('hadron_task_start', session, 'Started', (ctx) => M.startAgentTask({}, { taskId: id }, ctx)),
+      write('hadron_task_start', session, 'Started', (ctx) => M.startAgentTask({}, { taskRef: id }, ctx)),
   );
 
   off(
@@ -448,7 +448,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'Record progress on a started task: its assignee only (cor:agt:050:08). Carries no text.',
     SHAPE_HADRON_TASK_PROGRESS,
     async ({ session, taskId: id }) =>
-      write('hadron_task_progress', session, 'Progress recorded', (ctx) => M.recordAgentTaskProgress({}, { taskId: id }, ctx)),
+      write('hadron_task_progress', session, 'Progress recorded', (ctx) => M.recordAgentTaskProgress({}, { taskRef: id }, ctx)),
   );
 
   off(
@@ -457,7 +457,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     SHAPE_HADRON_TASK_FINISH,
     async ({ session, taskId: id, outcome, summary, evidence }) =>
       write('hadron_task_finish', session, 'Finished', (ctx) =>
-        M.finishAgentTask({}, { taskId: id, result: { outcome, summary, evidence } }, ctx)),
+        M.finishAgentTask({}, { taskRef: id, result: { outcome, summary, evidence } }, ctx)),
   );
 
   off(
@@ -465,7 +465,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'Cancel a pending, started or backlog task: its owner, a worker the owner reports to, or whoever manages the App (cor:agt:050:09).',
     SHAPE_HADRON_TASK_CANCEL,
     async ({ session, taskId: id }) =>
-      write('hadron_task_cancel', session, 'Cancelled', (ctx) => M.cancelAgentTask({}, { taskId: id }, ctx)),
+      write('hadron_task_cancel', session, 'Cancelled', (ctx) => M.cancelAgentTask({}, { taskRef: id }, ctx)),
   );
 
   // ── #1754: the backlog moves (cor:agt:050:02) ─────────────────────────
@@ -476,7 +476,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       'no alarms. Whoever may assign a task may park it: its owner, a worker the owner reports to, or whoever manages the App (cor:agt:050:09).',
     SHAPE_HADRON_TASK_PARK,
     async ({ session, taskId: id }) =>
-      write('hadron_task_park', session, 'Parked', (ctx) => M.parkAgentTask({}, { taskId: id }, ctx)),
+      write('hadron_task_park', session, 'Parked', (ctx) => M.parkAgentTask({}, { taskRef: id }, ctx)),
   );
 
   off(
@@ -485,7 +485,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       'a task may make it ready: its owner, a worker the owner reports to, or whoever manages the App (cor:agt:050:09).',
     SHAPE_HADRON_TASK_MAKE_READY,
     async ({ session, taskId: id }) =>
-      write('hadron_task_make_ready', session, 'Ready', (ctx) => M.makeAgentTaskReady({}, { taskId: id }, ctx)),
+      write('hadron_task_make_ready', session, 'Ready', (ctx) => M.makeAgentTaskReady({}, { taskRef: id }, ctx)),
   );
 
   off(
@@ -499,7 +499,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
           if (!rows) return textResult(`[task_not_found] Task not found.\ntaskId: ${id}`, true);
           return textResult((await Promise.all(rows.map((t) => renderTask(t, ctx, { limit: dependencyLimit, offset: dependencyOffset })))).join('\n'));
         }
-        const t = await Q.agentTask({}, { id }, ctx);
+        const t = await Q.agentTask({}, { ref: id }, ctx);
         if (!t) return textResult(`[task_not_found] Task not found.\ntaskId: ${id}`, true);
         return textResult(await renderTask(t, ctx, { limit: dependencyLimit, offset: dependencyOffset }));
       }),
@@ -509,9 +509,10 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'hadron_task_list',
     'List a team App\'s agent tasks, newest first. Filters combine with AND. Readers: the App\'s participants (cor:agt:050:21).',
     SHAPE_HADRON_TASK_LIST,
-    async ({ session, ...args }) =>
+    async ({ session, parentTaskId, ...args }) =>
       read(session, async (ctx) => {
-        const rows = await Q.agentTasks({}, args, ctx);
+        // #4148 (S7): the tool keeps its MCP parameter name (golden #2260); the GraphQL argument is parentTaskRef.
+        const rows = await Q.agentTasks({}, { ...args, ...(parentTaskId === undefined ? {} : { parentTaskRef: parentTaskId }) }, ctx);
         if (!rows.length) return textResult('No tasks match.');
         return textResult((await Promise.all(rows.map((t) => renderTask(t, ctx)))).join('\n'));
       }),
@@ -521,9 +522,10 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'hadron_team_events',
     'Read a team App\'s event stream (cor:agt:050:11), oldest first. To read the next page, pass after: the id of the last event you read (events sharing a timestamp are never skipped). Events carry ids, counts and outcome words, never message text. task.warning, task.edited and task.properties-changed are passive history (never wake, suppress a wake or count as activity); payload is {code}, changed field names only, or (task.properties-changed) the size and SHA-256 of the canonical JSON of the old and new properties, never their content.',
     SHAPE_HADRON_TEAM_EVENTS,
-    async ({ session, ...args }) =>
+    async ({ session, taskId, ...args }) =>
       read(session, async (ctx) => {
-        const rows = await Q.agentTeamEvents({}, args, ctx);
+        // #4148 (S7): the tool keeps its MCP parameter name (golden #2260); the GraphQL argument is taskRef.
+        const rows = await Q.agentTeamEvents({}, { ...args, ...(taskId === undefined ? {} : { taskRef: taskId }) }, ctx);
         if (!rows.length) return textResult('No events match.');
         const lines = await Promise.all(rows.map((e) => renderEvent(e, ctx)));
         const pageSize = args.limit ?? 20;

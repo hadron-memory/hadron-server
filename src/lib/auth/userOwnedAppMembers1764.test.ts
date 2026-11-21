@@ -232,8 +232,8 @@ describe('tasks and the team chat', () => {
     expect(await Q.agentTasks({}, { appRef: app.id }, ctx(member.id))).toEqual([]);
     const made = await M.createAgentTask({}, { input: { appRef: app.id, title: 'From a member' } }, ctx(member.id));
     expect(made.title).toBe('From a member');
-    expect((await Q.agentTask({}, { id: made.id }, ctx(member.id))).id).toBe(made.id);
-    expect((await Q.agentTask({}, { id: made.id }, ctx(owner.id))).id).toBe(made.id);
+    expect((await Q.agentTask({}, { ref: made.id }, ctx(member.id))).id).toBe(made.id);
+    expect((await Q.agentTask({}, { ref: made.id }, ctx(owner.id))).id).toBe(made.id);
     expect(await code(Q.agentTasks({}, { appRef: app.id }, ctx(outsider.id)))).toBe('APP_NOT_FOUND');
     expect(await code(Q.agentTasks({}, { appRef: app.id }, ctx(otherMember.id)))).toBe('APP_NOT_FOUND');
     expect(await code(M.createAgentTask({}, { input: { appRef: app.id, title: 'nope' } }, ctx(outsider.id)))).toBe('APP_NOT_FOUND');

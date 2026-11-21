@@ -52,32 +52,32 @@ type Door = {
 const doors: Record<string, Door> = {
   assignAgentTask: {
     act: 'task.assign',
-    call: (instruction, c) => M.assignAgentTask({}, { taskId: f.task.id, assignee: { user: f.boss.id }, instruction }, c),
+    call: (instruction, c) => M.assignAgentTask({}, { taskRef: f.task.id, assignee: { user: f.boss.id }, instruction }, c),
     took: async () => (await db.agentTask.findUniqueOrThrow({ where: { id: f.task.id } })).assigneeUserId === f.boss.id,
   },
   reassignAgentTask: {
     act: 'task.reassign',
-    call: (instruction, c) => M.reassignAgentTask({}, { taskId: f.assigned.id, assignee: { user: f.holder.id }, instruction }, c),
+    call: (instruction, c) => M.reassignAgentTask({}, { taskRef: f.assigned.id, assignee: { user: f.holder.id }, instruction }, c),
     took: async () => (await db.agentTask.findUniqueOrThrow({ where: { id: f.assigned.id } })).assigneeUserId === f.holder.id,
   },
   cancelAgentTask: {
     act: 'task.cancel',
-    call: (instruction, c) => M.cancelAgentTask({}, { taskId: f.task.id, instruction }, c),
+    call: (instruction, c) => M.cancelAgentTask({}, { taskRef: f.task.id, instruction }, c),
     took: async () => (await db.agentTask.findUniqueOrThrow({ where: { id: f.task.id } })).status === 'cancelled',
   },
   parkAgentTask: {
     act: 'task.park',
-    call: (instruction, c) => M.parkAgentTask({}, { taskId: f.task.id, instruction }, c),
+    call: (instruction, c) => M.parkAgentTask({}, { taskRef: f.task.id, instruction }, c),
     took: async () => (await db.agentTask.findUniqueOrThrow({ where: { id: f.task.id } })).status === 'backlog',
   },
   makeAgentTaskReady: {
     act: 'task.ready',
-    call: (instruction, c) => M.makeAgentTaskReady({}, { taskId: f.backlog.id, instruction }, c),
+    call: (instruction, c) => M.makeAgentTaskReady({}, { taskRef: f.backlog.id, instruction }, c),
     took: async () => (await db.agentTask.findUniqueOrThrow({ where: { id: f.backlog.id } })).status === 'pending',
   },
   updateAgentTask: {
     act: 'task.update',
-    call: (instruction, c) => M.updateAgentTask({}, { taskId: f.task.id, input: { title: 'Renamed', properties: { k: 1 } }, instruction }, c),
+    call: (instruction, c) => M.updateAgentTask({}, { taskRef: f.task.id, input: { title: 'Renamed', properties: { k: 1 } }, instruction }, c),
     took: async () => {
       const t = await db.agentTask.findUniqueOrThrow({ where: { id: f.task.id } });
       return t.title === 'Renamed' && (t.properties as any)?.k === 1;
@@ -86,7 +86,7 @@ const doors: Record<string, Door> = {
   // #4084 (Bianca §10 P3 on #4089): the release door records its instructed act like cancel, whose authority it mirrors.
   releaseAgentTaskExternalId: {
     act: 'task.release-external-id',
-    call: (instruction, c) => M.releaseAgentTaskExternalId({}, { taskId: f.held.id, instruction }, c),
+    call: (instruction, c) => M.releaseAgentTaskExternalId({}, { taskRef: f.held.id, instruction }, c),
     took: async () => (await db.agentTask.findUniqueOrThrow({ where: { id: f.held.id } })).externalId === null,
   },
   disposeAgentTaskFinding: {
@@ -189,8 +189,8 @@ beforeEach(async () => {
   const blocker = await mk({ title: 'Blocker' });
   const blocked = await mk({ title: 'Blocked', blockedBy: [blocker.id] });
   const finished = await mk({ title: 'Finished', assignee: { user: boss.id } });
-  await M.startAgentTask({}, { taskId: finished.id }, asBoss);
-  await M.finishAgentTask({}, { taskId: finished.id, result: { outcome: 'done', summary: 's', findings: [{ id: 'F1', severity: 'P2', text: 'one' }, { id: 'F2', severity: 'P3', text: 'two' }] } }, asBoss);
+  await M.startAgentTask({}, { taskRef: finished.id }, asBoss);
+  await M.finishAgentTask({}, { taskRef: finished.id, result: { outcome: 'done', summary: 's', findings: [{ id: 'F1', severity: 'P2', text: 'one' }, { id: 'F2', severity: 'P3', text: 'two' }] } }, asBoss);
   const foreignTask = await mk({ title: 'Foreign' }, otherApp.id);
   const held = await mk({ title: 'Held', externalId: `https://tracker.test/s4a-${n}/1` });
   // An alarm with no owner in its chain: only the manager arm acknowledges it.
@@ -273,8 +273,8 @@ describe('#3323 the S4a doors admit an instructed worker on its holder\'s App-ma
   // Acceptance 6: the record comes after every refusal. Each act is admitted by the gate, then refused on its own state.
   const refusedAfterGate: Record<string, () => Promise<unknown>> = {
     'acknowledgeAlarm on an acknowledged alarm': () => M.acknowledgeAlarm({}, { eventId: f.alarm.id, instruction: live }, bound()),
-    'makeAgentTaskReady on a pending task': () => M.makeAgentTaskReady({}, { taskId: f.task.id, instruction: live }, bound()),
-    'parkAgentTask on an assigned task': () => M.parkAgentTask({}, { taskId: f.assigned.id, instruction: live }, bound()),
+    'makeAgentTaskReady on a pending task': () => M.makeAgentTaskReady({}, { taskRef: f.task.id, instruction: live }, bound()),
+    'parkAgentTask on an assigned task': () => M.parkAgentTask({}, { taskRef: f.assigned.id, instruction: live }, bound()),
     'deleteAppModelGroup of a missing group': () => M.deleteAppModelGroup({}, { appRef: f.app.id, name: 'none', instruction: live }, bound()),
     'setAppProperties at a stale revision': () => M.setAppProperties({}, { appRef: f.app.id, properties: { team: 'y' }, expectedRevision: 9, instruction: live }, bound()),
   };
@@ -395,27 +395,27 @@ describe('#3323 the S4a doors admit an instructed worker on its holder\'s App-ma
 describe('#3323 other arms are unchanged and write no record (acceptance 5)', () => {
   it('the task owner\'s worker cancels its own task with no instruction', async () => {
     const own: any = await asWorker(() => M.createAgentTask({}, { input: { appRef: f.app.id, title: 'Mine' } }, bound()));
-    expect(await answer(() => asWorker(() => M.cancelAgentTask({}, { taskId: own.id }, bound())))).toEqual({ code: 'RESOLVED' });
+    expect(await answer(() => asWorker(() => M.cancelAgentTask({}, { taskRef: own.id }, bound())))).toEqual({ code: 'RESOLVED' });
     expect(await managerActs()).toHaveLength(0);
   });
 
   it('the owner arm decides before the instructed manager arm: an instructed owner writes no record', async () => {
     const own: any = await asWorker(() => M.createAgentTask({}, { input: { appRef: f.app.id, title: 'Mine' } }, bound()));
-    expect(await answer(() => asWorker(() => M.cancelAgentTask({}, { taskId: own.id, instruction: live }, bound())))).toEqual({ code: 'RESOLVED' });
+    expect(await answer(() => asWorker(() => M.cancelAgentTask({}, { taskRef: own.id, instruction: live }, bound())))).toEqual({ code: 'RESOLVED' });
     expect(await managerActs()).toHaveLength(0);
   });
 
   it('a worker the owner reports to directs the task with no instruction', async () => {
     await db.worker.update({ where: { id: f.target.id }, data: { reportsToWorkerId: f.worker.id } });
     const owned: any = await runAsActor({ workerId: f.target.id, agentId: f.agent.id }, () => M.createAgentTask({}, { input: { appRef: f.app.id, title: 'Theirs' } }, ctx({ userId: f.holder.id })));
-    expect(await answer(() => asWorker(() => M.parkAgentTask({}, { taskId: owned.id }, bound())))).toEqual({ code: 'RESOLVED' });
+    expect(await answer(() => asWorker(() => M.parkAgentTask({}, { taskRef: owned.id }, bound())))).toEqual({ code: 'RESOLVED' });
     expect(await managerActs()).toHaveLength(0);
   });
 
   it('the reportsTo arm decides before the instructed manager arm: an instructed coordinator writes no record', async () => {
     await db.worker.update({ where: { id: f.target.id }, data: { reportsToWorkerId: f.worker.id } });
     const owned: any = await runAsActor({ workerId: f.target.id, agentId: f.agent.id }, () => M.createAgentTask({}, { input: { appRef: f.app.id, title: 'Theirs' } }, ctx({ userId: f.holder.id })));
-    expect(await answer(() => asWorker(() => M.parkAgentTask({}, { taskId: owned.id, instruction: live }, bound())))).toEqual({ code: 'RESOLVED' });
+    expect(await answer(() => asWorker(() => M.parkAgentTask({}, { taskRef: owned.id, instruction: live }, bound())))).toEqual({ code: 'RESOLVED' });
     expect(await managerActs()).toHaveLength(0);
   });
 
@@ -447,8 +447,8 @@ describe('#3323 other arms are unchanged and write no record (acceptance 5)', ()
   });
 
   it('the task assignee writes properties with no instruction', async () => {
-    await M.assignAgentTask({}, { taskId: f.task.id, assignee: { worker: f.worker.id } }, { db, userId: f.boss.id, roles: ['READER'] } as Context);
-    expect(await answer(() => asWorker(() => M.updateAgentTask({}, { taskId: f.task.id, input: { properties: { k: 9 } } }, bound())))).toEqual({ code: 'RESOLVED' });
+    await M.assignAgentTask({}, { taskRef: f.task.id, assignee: { worker: f.worker.id } }, { db, userId: f.boss.id, roles: ['READER'] } as Context);
+    expect(await answer(() => asWorker(() => M.updateAgentTask({}, { taskRef: f.task.id, input: { properties: { k: 9 } } }, bound())))).toEqual({ code: 'RESOLVED' });
     expect(await managerActs()).toHaveLength(0);
   });
 });
@@ -550,8 +550,8 @@ describe('#3323 refusal before oracle (acceptance 8)', () => {
     return answer(() => asWorker(fn));
   };
   it('a task in another App and a missing task answer alike', async () => {
-    const foreign = await refusedWorker(() => M.cancelAgentTask({}, { taskId: f.foreignTask.id, instruction: live }, bound()));
-    const missing = await refusedWorker(() => M.cancelAgentTask({}, { taskId: f.foreignTask.id.replace(/.$/, (c: string) => (c === 'a' ? 'b' : 'a')), instruction: live }, bound()));
+    const foreign = await refusedWorker(() => M.cancelAgentTask({}, { taskRef: f.foreignTask.id, instruction: live }, bound()));
+    const missing = await refusedWorker(() => M.cancelAgentTask({}, { taskRef: f.foreignTask.id.replace(/.$/, (c: string) => (c === 'a' ? 'b' : 'a')), instruction: live }, bound()));
     expect(foreign.code).toBe('TASK_NOT_FOUND');
     expect(missing.code).toBe(foreign.code);
   });

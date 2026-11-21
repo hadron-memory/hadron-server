@@ -107,7 +107,7 @@ describe('assignee warnings (create-with-assignee, assign, reassign)', () => {
     // reassign Anne's task to Liam (who now has one): busy for Liam because of the OTHER task, not this one
     const t = await create(ctx(member.id), { assignee: { worker: rook.id } });
     const r = ctx(member.id);
-    await M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: liam.id } }, r);
+    await M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: liam.id } }, r);
     expect(codes(r)).toEqual(['task.assign.assignee-busy']);
   });
 
@@ -128,14 +128,14 @@ describe('assignee warnings (create-with-assignee, assign, reassign)', () => {
     const queued = await create(ctx(member.id), {});
     // No live session ⇒ the roster shows NO_SESSION, not PAUSED ⇒ no warning (the pause stays private).
     const quiet = ctx(member.id);
-    await M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: liam.id } }, quiet);
+    await M.assignAgentTask({}, { taskRef: queued.id, assignee: { worker: liam.id } }, quiet);
     expect(codes(quiet)).toEqual([]);
     // With a live session the roster shows PAUSED to a participant ⇒ the warning.
     await db.session.create({ data: { id: generateId(), userId: member.id, appId: app.id, workerId: rook.id, agentId: teamAgentId } });
     await db.session.create({ data: { id: generateId(), userId: member.id, appId: app.id, workerId: liam.id, agentId: teamAgentId } });
     const queued2 = await create(ctx(member.id), {});
     const c = ctx(member.id);
-    const t = await M.assignAgentTask({}, { taskId: queued2.id, assignee: { worker: liam.id } }, c);
+    const t = await M.assignAgentTask({}, { taskRef: queued2.id, assignee: { worker: liam.id } }, c);
     expect(t.assigneeWorkerId).toBe(liam.id);
     expect(codes(c)).toContain('task.assign.assignee-paused');
   });
@@ -176,17 +176,17 @@ describe('assignee warnings (create-with-assignee, assign, reassign)', () => {
 describe('task.finish.open-children', () => {
   it('fires on finish with an open child, the finish still succeeds; none once the child is done', async () => {
     const parent = await create(ctx(member.id), { assignee: { worker: anne.id } });
-    await asWorker(anne, teamAgentId, () => M.startAgentTask({}, { taskId: parent.id }, ctx(member.id)));
+    await asWorker(anne, teamAgentId, () => M.startAgentTask({}, { taskRef: parent.id }, ctx(member.id)));
     const child = await asWorker(anne, teamAgentId, () => M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'child', source: 's' } }, ctx(member.id)));
     const c = ctx(member.id);
-    const done = await asWorker(anne, teamAgentId, () => M.finishAgentTask({}, { taskId: parent.id, result: { outcome: 'succeeded' } }, c));
+    const done = await asWorker(anne, teamAgentId, () => M.finishAgentTask({}, { taskRef: parent.id, result: { outcome: 'succeeded' } }, c));
     expect(done.status).toBe('finished');
     expect(codes(c)).toEqual(['task.finish.open-children']);
     // control: a childless task finishes quietly
     const solo = await create(ctx(member.id), { assignee: { worker: liam.id } });
-    await asWorker(liam, teamAgentId, () => M.startAgentTask({}, { taskId: solo.id }, ctx(member.id)));
+    await asWorker(liam, teamAgentId, () => M.startAgentTask({}, { taskRef: solo.id }, ctx(member.id)));
     const c2 = ctx(member.id);
-    await asWorker(liam, teamAgentId, () => M.finishAgentTask({}, { taskId: solo.id, result: { outcome: 'succeeded' } }, c2));
+    await asWorker(liam, teamAgentId, () => M.finishAgentTask({}, { taskRef: solo.id, result: { outcome: 'succeeded' } }, c2));
     expect(codes(c2)).toEqual([]);
     expect(child.id).toBeTruthy();
   });
@@ -194,7 +194,7 @@ describe('task.finish.open-children', () => {
   it('a refused finish carries no warning', async () => {
     const t = await create(ctx(member.id), { assignee: { worker: anne.id } }); // not started
     const c = ctx(member.id);
-    await expect(asWorker(anne, teamAgentId, () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, c))).rejects.toThrow();
+    await expect(asWorker(anne, teamAgentId, () => M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'succeeded' } }, c))).rejects.toThrow();
     expect(codes(c)).toEqual([]);
   });
 });

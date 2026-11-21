@@ -247,7 +247,7 @@ describe('cor:agt:090:03 — every level stops assignment', () => {
     await taskMatcherTick(db, new Date());
     expect(await assigneeOf(t.id)).toBeNull();
     const assigned = await M.createAgentTask({}, { input: { appRef: app.id, title: 'X', assignee: { worker: 'Kit' } } }, ctx(max.id));
-    const e = await refusal(M.reassignAgentTask({}, { taskId: assigned.id, assignee: { worker: 'Liam' } }, ctx(max.id)));
+    const e = await refusal(M.reassignAgentTask({}, { taskRef: assigned.id, assignee: { worker: 'Liam' } }, ctx(max.id)));
     const handle = (await db.user.findUniqueOrThrow({ where: { id: max.id }, select: { handle: true } })).handle;
     const setter = handle ? `@${handle}` : `user ${max.id}`;
     expect(e.message).toBe(`Can't assign to Liam: a PAUSE_DISPATCH stop signal (TEAM, set by ${setter}, until ${until.toISOString()}) covers them. Assign someone else, or whoever manages the App lifts it (\`hadron team stop lift\`, signal id ${s.id}).`);
@@ -261,18 +261,18 @@ describe('cor:agt:090:03 — every level stops assignment', () => {
   it('S6: under a host halt, an assignment by hand (assign, and create with an assignee) to a covered worker is refused', async () => {
     await set(keyCtx(orca1), { level: 'HALT', scope: 'HOST' });
     const t = await queued();
-    expect(await code(M.assignAgentTask({}, { taskId: t.id, assignee: { worker: 'Ada' } }, ctx(max.id)))).toBe('TASK_STOPPED');
+    expect(await code(M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: 'Ada' } }, ctx(max.id)))).toBe('TASK_STOPPED');
     expect(await code(M.createAgentTask({}, { input: { appRef: app.id, title: 'Y', assignee: { worker: 'Dan' } } }, ctx(max.id)))).toBe('TASK_STOPPED');
     expect(await db.agentTask.count({ where: { title: 'Y' } })).toBe(0);
     // Liam isn't on orca1: assigning him is fine.
-    expect((await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: 'Liam' } }, ctx(max.id))).assigneeWorkerId).toBe(liam.id);
+    expect((await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: 'Liam' } }, ctx(max.id))).assigneeWorkerId).toBe(liam.id);
   });
 
   it('moving a task AWAY from a covered worker, and cancelling it, are not refused', async () => {
     const t = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Z', assignee: { worker: 'Dan' } } }, ctx(max.id));
     await set(ctx(max.id), { level: 'PAUSE', scope: 'WORKER', worker: 'Dan' });
-    expect((await M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: 'Kit' } }, ctx(max.id))).assigneeWorkerId).toBe(kit.id);
-    expect((await M.cancelAgentTask({}, { taskId: t.id }, ctx(max.id))).status).toBe('cancelled');
+    expect((await M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: 'Kit' } }, ctx(max.id))).assigneeWorkerId).toBe(kit.id);
+    expect((await M.cancelAgentTask({}, { taskRef: t.id }, ctx(max.id))).status).toBe('cancelled');
   });
 
   it('S4 (R71): a task Liam creates under his pause is not matched to Dan while the pause covers Liam', async () => {

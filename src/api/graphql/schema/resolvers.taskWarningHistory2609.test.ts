@@ -148,11 +148,11 @@ describe('successful-field history', () => {
   it('keeps canonical App read gates and task filtering for history', async () => {
     const r = await graphql(`mutation { ${field('ok')} }`);
     const taskId = (r.data as any).ok.id;
-    const rows = await Q.agentTeamEvents({}, { appRef: app.id, types: ['task.warning'], taskId }, ctx());
+    const rows = await Q.agentTeamEvents({}, { appRef: app.id, types: ['task.warning'], taskRef: taskId }, ctx());
     expect(rows).toHaveLength(1);
     await expect(Q.agentTeamEvents({}, { appRef: app.id, types: ['task.warning'] }, { ...ctx(), userId: outsider.id })).rejects.toThrow();
     const other = await db.app.create({ data: { ownerUserId: outsider.id, name: 'Other', urn: `history-other-${generateId()}` } });
-    await expect(Q.agentTeamEvents({}, { appRef: other.id, types: ['task.warning'], taskId }, ctx())).rejects.toThrow();
+    await expect(Q.agentTeamEvents({}, { appRef: other.id, types: ['task.warning'], taskRef: taskId }, ctx())).rejects.toThrow();
   });
 
   it('recording failure never changes the response and is not retried', async () => {

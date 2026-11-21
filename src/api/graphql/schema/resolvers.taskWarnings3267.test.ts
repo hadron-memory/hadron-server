@@ -76,8 +76,8 @@ function task(status: string, data: Record<string, unknown> = {}, appId = app.id
     select: { id: true },
   });
 }
-const start = (c: Context, w: { id: string }, id: string) => asWorker(w, () => M.startAgentTask({}, { taskId: id }, c));
-const progress = (c: Context, w: { id: string }, id: string) => asWorker(w, () => M.recordAgentTaskProgress({}, { taskId: id }, c));
+const start = (c: Context, w: { id: string }, id: string) => asWorker(w, () => M.startAgentTask({}, { taskRef: id }, c));
+const progress = (c: Context, w: { id: string }, id: string) => asWorker(w, () => M.recordAgentTaskProgress({}, { taskRef: id }, c));
 
 async function expectCode(p: Promise<unknown>, code: string) {
   const e = await p.then(() => null, (err) => err);
@@ -141,7 +141,7 @@ describe('task.start.other-started', () => {
     await task('started', { ownerUserId: member.id, assigneeUserId: member.id });
     const mine = await task('pending', { ownerUserId: member.id, assigneeUserId: member.id });
     const c = ctx(member.id);
-    expect((await M.startAgentTask({}, { taskId: mine.id }, c)).status).toBe('started');
+    expect((await M.startAgentTask({}, { taskRef: mine.id }, c)).status).toBe('started');
     expect(codes(c)).toEqual([]);
   });
 
@@ -301,7 +301,7 @@ describe('privacy and recording', () => {
     const t = await task('pending', { assigneeWorkerId: anne.id, parentTaskId: parent.id });
     const server = new ApolloServer<Context>({ typeDefs, resolvers, plugins: [taskWarningsPlugin] });
     const res = await runAsActor({ workerId: anne.id, agentId: teamAgentId }, () =>
-      server.executeOperation({ query: `mutation { s: startAgentTask(taskId: "${t.id}") { id status } }` }, { contextValue: ctx(member.id) }));
+      server.executeOperation({ query: `mutation { s: startAgentTask(taskRef: "${t.id}") { id status } }` }, { contextValue: ctx(member.id) }));
     expect(res.body.kind).toBe('single');
     const single = (res.body as any).singleResult;
     expect(single.errors).toBeUndefined();

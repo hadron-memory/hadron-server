@@ -1976,7 +1976,7 @@ export const agentTaskMutations = {
   },
 
   /** #2645: Proposed cor:agt:050:09 Editing. The assignment gate and transaction are the only write door. */
-  updateAgentTask: async (_: unknown, { taskId, input, instruction }: { taskId: string; input: Record<string, unknown>; instruction?: ActInstruction | null }, ctx: Context) =>
+  updateAgentTask: async (_: unknown, { taskRef: taskId, input, instruction }: { taskRef: string; input: Record<string, unknown>; instruction?: ActInstruction | null }, ctx: Context) =>
     mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       // #2420 (cor:agt:050:28) and #3441 (ruling 0233, cor:agt:050:01 / :09): the task's assignee may write its
       // `properties` and its `references` and nothing else; a patch that names any other field needs the
@@ -2262,7 +2262,7 @@ export const agentTaskMutations = {
    * whatever its status. Every create gate applies to the copied values (the parent, the root gate, properties,
    * priority); the source is never changed. An ended task never reopens: this makes a NEW task.
    */
-  cloneAgentTask: async (_: unknown, { taskId, input }: { taskId: string; input?: CloneInput | null }, ctx: Context, info?: GraphQLResolveInfo) => {
+  cloneAgentTask: async (_: unknown, { taskRef: taskId, input }: { taskRef: string; input?: CloneInput | null }, ctx: Context, info?: GraphQLResolveInfo) => {
     const readable = await loadReadableTask(ctx, taskId);
     // Unknown, unreadable and cross-App sources answer alike (#1577 posture): no existence oracle over task ids.
     if (!readable) throw notFound(taskId);
@@ -2329,7 +2329,7 @@ export const agentTaskMutations = {
    */
   assignAgentTask: async (
     _: unknown,
-    { taskId, assignee, closeSessionWhenDone, instruction }: { taskId: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null; instruction?: ActInstruction | null },
+    { taskRef: taskId, assignee, closeSessionWhenDone, instruction }: { taskRef: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null; instruction?: ActInstruction | null },
     ctx: Context,
     info?: GraphQLResolveInfo,
   ) => {
@@ -2398,7 +2398,7 @@ export const agentTaskMutations = {
    * assignee becomes BACKLOG — unassigned, never matched, never waited on, no
    * alarms. Whoever may assign a task may park it (cor:agt:050:09).
    */
-  parkAgentTask: async (_: unknown, { taskId, instruction }: { taskId: string; instruction?: ActInstruction | null }, ctx: Context) =>
+  parkAgentTask: async (_: unknown, { taskRef: taskId, instruction }: { taskRef: string; instruction?: ActInstruction | null }, ctx: Context) =>
     mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, parks it in the backlog.", { taskId });
@@ -2432,7 +2432,7 @@ export const agentTaskMutations = {
    * becomes pending and the task enters the queue. Whoever may assign a task
    * may make it ready (cor:agt:050:09).
    */
-  makeAgentTaskReady: async (_: unknown, { taskId, instruction }: { taskId: string; instruction?: ActInstruction | null }, ctx: Context) => {
+  makeAgentTaskReady: async (_: unknown, { taskRef: taskId, instruction }: { taskRef: string; instruction?: ActInstruction | null }, ctx: Context) => {
     const ready = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, makes a backlog task ready.", { taskId });
@@ -2472,7 +2472,7 @@ export const agentTaskMutations = {
    */
   reassignAgentTask: async (
     _: unknown,
-    { taskId, assignee, closeSessionWhenDone, instruction }: { taskId: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null; instruction?: ActInstruction | null },
+    { taskRef: taskId, assignee, closeSessionWhenDone, instruction }: { taskRef: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null; instruction?: ActInstruction | null },
     ctx: Context,
     info?: GraphQLResolveInfo,
   ) => {
@@ -2525,7 +2525,7 @@ export const agentTaskMutations = {
    * Start a task: the assignee only (cor:agt:050:08). Explicit start only —
    * 050:02's inferred start is an open question (#1705 interim).
    */
-  startAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context, info?: GraphQLResolveInfo) => {
+  startAgentTask: async (_: unknown, { taskRef: taskId }: { taskRef: string }, ctx: Context, info?: GraphQLResolveInfo) => {
     const warn: TaskWarningCode[] = [];
     const started = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
@@ -2560,7 +2560,7 @@ export const agentTaskMutations = {
   },
 
   /** Record progress on a started task: the assignee only (cor:agt:050:08). Carries no text (050:11). */
-  recordAgentTaskProgress: async (_: unknown, { taskId }: { taskId: string }, ctx: Context, info?: GraphQLResolveInfo) => {
+  recordAgentTaskProgress: async (_: unknown, { taskRef: taskId }: { taskRef: string }, ctx: Context, info?: GraphQLResolveInfo) => {
     const warn: TaskWarningCode[] = [];
     const recorded = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
@@ -2622,7 +2622,7 @@ export const agentTaskMutations = {
    */
   finishAgentTask: async (
     _: unknown,
-    { taskId, result }: { taskId: string; result: { outcome: string; summary?: string | null; evidence?: string | null; findings?: unknown; workedFromRoleTaskRefs?: unknown } },
+    { taskRef: taskId, result }: { taskRef: string; result: { outcome: string; summary?: string | null; evidence?: string | null; findings?: unknown; workedFromRoleTaskRefs?: unknown } },
     ctx: Context,
     info?: GraphQLResolveInfo,
   ) => {
@@ -2678,7 +2678,7 @@ export const agentTaskMutations = {
    * Cancel a pending, started or backlog task: its owner, or whoever manages
    * the App (cor:agt:050:09, Proposed; backlog directly, Holger team chat #8150).
    */
-  cancelAgentTask: async (_: unknown, { taskId, instruction }: { taskId: string; instruction?: ActInstruction | null }, ctx: Context, info?: GraphQLResolveInfo) => {
+  cancelAgentTask: async (_: unknown, { taskRef: taskId, instruction }: { taskRef: string; instruction?: ActInstruction | null }, ctx: Context, info?: GraphQLResolveInfo) => {
     const warn: TaskWarningCode[] = [];
     const cancelled = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
@@ -2722,7 +2722,7 @@ export const agentTaskMutations = {
    * pass (agentTaskExternalIdChanges); it is passive history, never stall activity. The id is never set again on this
    * task: `externalId` is not in the update input (V29).
    */
-  releaseAgentTaskExternalId: async (_: unknown, { taskId, instruction }: { taskId: string; instruction?: ActInstruction | null }, ctx: Context) =>
+  releaseAgentTaskExternalId: async (_: unknown, { taskRef: taskId, instruction }: { taskRef: string; instruction?: ActInstruction | null }, ctx: Context) =>
     mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, releases its external id.", { taskId });
@@ -2970,7 +2970,7 @@ type ListArgs = {
   startedBefore?: unknown;
   finishedAfter?: unknown;
   finishedBefore?: unknown;
-  parentTaskId?: string | null;
+  parentTaskRef?: string | null;
   rootsOnly?: boolean | null;
   queued?: boolean | null;
   limit?: number | null;
@@ -3094,7 +3094,7 @@ async function agentTaskListWhere(c: Context, app: TaskApp, args: ListArgs): Pro
     appId: app.id,
     ...(statuses?.length ? { status: { in: statuses } } : {}),
     ...(args.tag ? { tags: { has: args.tag } } : {}),
-    ...(args.parentTaskId ? { parentTaskId: (await resolveTaskRef(c, args.parentTaskId, app.id)) ?? args.parentTaskId } : {}),
+    ...(args.parentTaskRef ? { parentTaskId: (await resolveTaskRef(c, args.parentTaskRef, app.id)) ?? args.parentTaskRef } : {}),
     ...(args.queued ? { status: 'pending', assigneeWorkerId: null, assigneeUserId: null } : {}),
   };
   // #2553: AT0 is the platform's bookkeeping row, not a task anyone works: a LIST never shows it (it still reads by
@@ -3123,8 +3123,8 @@ const AGENT_TASK_LIST_ORDER: Prisma.AgentTaskOrderByWithRelationInput[] = [{ cre
 
 export const agentTaskQueries = {
   /** One task, or null when it does not exist or the caller may not read it (cor:agt:050:21). */
-  agentTask: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-    return withReadableTask(ctx, id, async (_c, { task }) => task, true);
+  agentTask: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+    return withReadableTask(ctx, ref, async (_c, { task }) => task, true);
   },
 
   /** An App's tasks, newest first, for its participants and the App's own key (cor:agt:050:21, #1755). */
@@ -3307,7 +3307,7 @@ export const agentTaskQueries = {
 };
 
 /** #4316 item 4: exported so the parity pin (resolvers.teamEventCursor4098.test.ts) can tie its filter cases to these keys. */
-export type TeamEventsArgs = { appRef: string; since?: unknown; after?: string | null; before?: string | null; newestFirst?: boolean | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; alarmsInEffect?: boolean | null; taskId?: string | null; limit?: number | null };
+export type TeamEventsArgs = { appRef: string; since?: unknown; after?: string | null; before?: string | null; newestFirst?: boolean | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; alarmsInEffect?: boolean | null; taskRef?: string | null; limit?: number | null };
 
 /** #4316: how long a held-back horizon stays quiet before `team_events.horizon_lag` says something. */
 const HORIZON_LAG_MIN_AGE_MS = 30_000;
@@ -3504,7 +3504,7 @@ export async function readTeamEvents(c: Context, app: { id: string }, args: Team
     if (!cursor) throw badInput('after is not an event of this App. Pass the id of the last event you read.');
     afterKey = cursor;
   }
-  const taskId = args.taskId ? (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId : null;
+  const taskId = args.taskRef ? (await resolveTaskRef(c, args.taskRef, app.id)) ?? args.taskRef : null;
   const where: Prisma.AgentTeamEventWhereInput = {
     appId: app.id,
     ...(since ? { createdAt: { gt: since } } : {}),
