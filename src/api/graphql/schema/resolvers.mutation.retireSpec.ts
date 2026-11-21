@@ -246,8 +246,16 @@ export async function retireSpecDoor(input: RetireSpecInput, ctx: Context) {
     }
     return { written, edge };
   });
-  for (const effect of effects) effect();
-  if (done.edge) await mirrorEdgeSourceAfterCommit(ctx.db, done.edge.source, ctx.clientId);
+  // After the commit the retirement is DONE: a failing effect (the node-written announcement, the embedding wake, usage
+  // recording) is reported, never raised, or the caller would be told a committed retirement failed. The announcements
+  // themselves already downgrade a broker failure to local dispatch and log a handler failure.
+  for (const effect of effects) {
+    try { effect(); } catch (error) { console.error('[retireSpec] post-commit effect failed after the retirement committed:', error); }
+  }
+  if (done.edge) {
+    await mirrorEdgeSourceAfterCommit(ctx.db, done.edge.source, ctx.clientId)
+      .catch((error: unknown) => console.error('[retireSpec] post-commit edge mirror failed after the retirement committed:', error));
+  }
   return { node: done.written, successorEdge: done.edge };
 }
 
