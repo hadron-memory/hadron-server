@@ -10,7 +10,7 @@
  *   4. a tool configured as declaring another contract version is refused by
  *      `webSearch` BEFORE any request is sent;
  *   5. the same refusal holds for the fixture runner (zero requests);
- *   6. the envelope rules the fixtures rest on (integer rank in nondecreasing order,
+ *   6. the envelope rules the fixtures rest on (numeric rank, no scale or direction imposed,
  *      string title/url/snippet, a response-side version that differs).
  */
 
@@ -89,7 +89,7 @@ describe('#647 S1 web-search@1 conformance fixtures', () => {
     expect(report.failures.length).toBeGreaterThan(0);
     expect(report.failures.join('\n')).toMatch(/rank/);
     // The dropped field is reported as missing, not as an ordering fault.
-    expect(report.failures.join('\n')).toMatch(/rank: missing or not an integer/);
+    expect(report.failures.join('\n')).toMatch(/rank: missing or not a number/);
   });
 
   it("FAILS a stub that drops the source: 'external' tag, and names it", async () => {
@@ -225,15 +225,15 @@ describe('#647 S1 checkSearchEnvelope rules', () => {
     expect(checkSearchEnvelope({ source: 'external' }).join('\n')).toMatch(/results/);
   });
 
-  it('rejects a non-integer rank and a list not in nondecreasing rank order', () => {
-    for (const ranks of [[1.5, 2], [2, 1], [1, 3, 2]]) {
-      const out = checkSearchEnvelope({ ...good, results: ranks.map((r) => ({ ...result(1), rank: r })) });
-      expect(out.join('\n'), JSON.stringify(ranks)).toMatch(/rank/);
+  it('rejects a rank that is not a finite number', () => {
+    for (const rank of ['1', null, NaN, Infinity]) {
+      const out = checkSearchEnvelope({ ...good, results: [{ ...result(1), rank }] });
+      expect(out.join('\n'), String(rank)).toMatch(/rank: missing or not a number/);
     }
   });
 
-  it('accepts any ruled-compatible rank scale: not 1-based, with gaps, or tied (the spec rules none)', () => {
-    for (const ranks of [[10], [0, 1], [2, 3], [1, 3, 9], [1, 1]]) {
+  it('accepts any ruled-compatible rank scale: not 1-based, with gaps, or tied (the spec rules none): fractional, descending, tied', () => {
+    for (const ranks of [[10], [0, 1], [2, 3], [1, 3, 9], [1, 1], [0.5], [3, 1], [1.5, 2]]) {
       const out = checkSearchEnvelope({ ...good, results: ranks.map((r) => ({ ...result(1), rank: r })) });
       expect(out, JSON.stringify(ranks)).toEqual([]);
     }
