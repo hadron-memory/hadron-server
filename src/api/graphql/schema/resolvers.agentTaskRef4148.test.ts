@@ -7,6 +7,13 @@
  *    (unknown ≡ unreadable, cor:agt:050:21);
  *  - the old name is rejected as an unknown argument.
  * Exercised through the real schema (ApolloServer.executeOperation), so validation and the resolvers both run.
+ *
+ * Callers outside this repo (Billie's BLIND F2), a grep of every sibling repo's main on 2026-11-21 for the old names on
+ * these 16 fields: hadron-cli 25 call sites (companion hadron-cli#2897); hadron-portal 24 (companion hadron-portal#2480);
+ * hadron-client, hadron-relay, hadron-cloud and hadron-task-adapter-github 0; hadron-docs 0 (only generated reference,
+ * regenerated from this SDL). Inside this repo none remain. Ship order (F3; precedent 0274): notices, then this server,
+ * then the companions, which may fall back to the old name only on the GraphQL validation error. ticker-wake's behaviour
+ * under the skew is documented beside its queries (scripts/ticker-wake/ticker-wake.ts).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
