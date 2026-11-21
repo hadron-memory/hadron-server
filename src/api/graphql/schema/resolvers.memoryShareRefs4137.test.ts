@@ -316,6 +316,14 @@ describe('an ambiguous legacy memory URN is concealed like an unknown ref (#4137
     expect(await db.memoryShare.count()).toBe(0);
   });
 
+  it('deleteMemoryShare: a non-principal gets the unknown-ref FORBIDDEN for an ambiguous memory ref (Celine QA)', async () => {
+    const del = (memoryRef: string, userId: string) =>
+      run(`mutation { deleteMemoryShare(memoryRef: ${JSON.stringify(memoryRef)}, granteeRef: ${JSON.stringify(grantee.handle)}) { memoryId } }`, userId);
+    const unknown = refusal(await del('cnonexistentnonexistent12', stranger.id));
+    expect(JSON.parse(unknown)[0].c).toBe('FORBIDDEN');
+    expect(refusal(await del(AMBIGUOUS, stranger.id))).toBe(unknown);
+  });
+
   it('the member mutations: a non-owner gets the unknown-ref FORBIDDEN', async () => {
     for (const op of ['add', 'upd', 'rm'] as const) {
       const unknown = refusal(await member('cnonexistentnonexistent12', stranger.id, op));
@@ -335,5 +343,28 @@ describe('an ambiguous legacy memory URN is concealed like an unknown ref (#4137
     const unknown = refusal(await rm('ghost-user-s1'));
     expect(JSON.parse(unknown)[0].c).toBe('FORBIDDEN');
     expect(refusal(await rm(mixed))).toBe(unknown);
+  });
+});
+
+// Celine (QA, #4761): deleteMemoryShare resolves the grantee only AFTER it knows the
+// caller is not the principal, and a non-principal must fail the same whether the
+// named grantee exists or not. The fold sat in a bare catch with no pin; without it
+// a stranger tells a real user from a ghost by the NOT_FOUND-vs-FORBIDDEN difference.
+describe('deleteMemoryShare: the grantee is not an oracle for a non-principal (#4137 QA)', () => {
+  const del = (granteeRef: string, userId: string) =>
+    run(`mutation { deleteMemoryShare(memoryRef: ${JSON.stringify(personal.id)}, granteeRef: ${JSON.stringify(granteeRef)}) { memoryId } }`, userId);
+
+  it('a stranger naming a ghost, a real user or a case-colliding email gets the same FORBIDDEN', async () => {
+    const lower = `dcollide-${generateId().slice(-6)}@example.com`;
+    await db.user.create({ data: { id: generateId(), handle: `d1-${generateId().slice(-6)}`, email: lower, roles: ['READER'] } });
+    await db.user.create({ data: { id: generateId(), handle: `d2-${generateId().slice(-6)}`, email: lower.toUpperCase(), roles: ['READER'] } });
+    const real = refusal(await del(grantee.handle, stranger.id));
+    expect(JSON.parse(real)[0].c).toBe('FORBIDDEN');
+    expect(refusal(await del('ghost-user-s1', stranger.id))).toBe(real);
+    expect(refusal(await del(lower.replace('dcollide', 'Dcollide'), stranger.id))).toBe(real);
+  });
+
+  it('the principal still gets NOT_FOUND for a ghost (they already know the memory exists)', async () => {
+    expect(JSON.parse(refusal(await del('ghost-user-s1', owner.id)))[0].c).toBe('NOT_FOUND');
   });
 });
