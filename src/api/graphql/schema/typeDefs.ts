@@ -6022,9 +6022,11 @@ export const typeDefs = `#graphql
     """
     previousSession: WorkerContinuitySession
     """
-    #1054 — who held the worker when the session that wrote \`handoff\` ran, so a reader can tell
-    their own notes from a colleague's. Null when \`handoff\` is null. For a handoff with no
-    session envelope (hand-written) it is an author with nothing known.
+    #1054 — the author RECORDED in the handoff: who held the worker when the session named by the
+    handoff's envelope ran. It is what the envelope claims, not proof of who wrote the node: any
+    writer of the handoff node can set the envelope's session id (to one of this worker's own
+    sessions), so it is a hint for a reader, never an authentication. Null when \`handoff\` is
+    null. For a handoff with no session envelope (hand-written) it is an author with nothing known.
     """
     handoffAuthor: WorkerContinuityAuthor
   }
@@ -6036,14 +6038,12 @@ export const typeDefs = `#graphql
   co-member; null, never an error).
   """
   type WorkerContinuityAuthor {
-    "The handle of the user who held the worker when the writing session ran. Null only when the author is unknown or erased."
+    "The handle of the user who held the worker when the session the envelope names ran: as recorded, not authenticated (see handoffAuthor). Null only when the author is unknown or erased."
     userHandle: String
     """
     The session the handoff's envelope names as its writer: the id alone, never the Session, and
-    null unless that session is one of this worker's own live sessions (same sanitization as
-    previousSession). The envelope is written by the session that holds the worker, so this is the
-    author as RECORDED in the handoff: a later holder of the same worker could name an earlier
-    holder's session. Not an authentication of who wrote the node.
+    null unless that session is one of this worker's own non-deleted sessions (same sanitization as
+    previousSession). Recorded, not authenticated: see handoffAuthor.
     """
     sessionId: ID
   }

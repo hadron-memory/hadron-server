@@ -90,6 +90,18 @@ describe('#1054 — WorkerContinuity.handoffAuthor', () => {
     expect(r.data.worker.continuity.previousSession.id).toBe(sid);
   });
 
+  it('a handoff written by holder B whose envelope names holder A\'s session reports A (recorded, not authenticated)', async () => {
+    const sid = `s-claimed-${n}`;
+    await endedSession(sid, user.holderA!);
+    const nodeId = (await db.node.create({
+      data: { memoryId: workMemoryId, loc: 'handoffs:0001', name: 'h', content: 'written under B', data: { sessionId: sid } as any, createdBy: user.holderB! } as any,
+    })).id;
+    expect(nodeId).toBeTruthy();
+    const r = await post(await keyFor('holderB'), Q, { w: workerId, a: appId });
+    expect(r.errors).toBeUndefined();
+    expect(r.data.worker.continuity.handoffAuthor).toEqual({ userHandle: `ha1054-holderA-${n}`, sessionId: sid });
+  });
+
   it('names the author of an OLDER handoff (status MISSING), not the previous session\'s driver', async () => {
     const old = `s-old-${n}`;
     await endedSession(old, user.holderA!);
@@ -136,15 +148,15 @@ describe('#1054 — WorkerContinuity.handoffAuthor', () => {
     expect(r.data.worker.continuity.handoffAuthor).toEqual({ userHandle: null, sessionId: null });
   });
 
-  it('a non-string envelope session id is an author with nothing known, never an error', async () => {
-    for (const bad of [{ $ne: 'x' }, 42, ['a'], null, true]) {
-      await db.node.deleteMany({ where: { memoryId: workMemoryId } });
+  it.each([[{ $ne: 'x' }], [42], [['a']], [null], [true]])(
+    'a non-string envelope session id (%j) is an author with nothing known, never an error',
+    async (bad) => {
       await handoff('handoffs:0001', { sessionId: bad });
       const r = await post(await keyFor('holderB'), Q, { w: workerId, a: appId });
       expect(r.errors).toBeUndefined();
       expect(r.data.worker.continuity.handoffAuthor).toEqual({ userHandle: null, sessionId: null });
-    }
-  });
+    },
+  );
 
   it('a soft-deleted writing session gives a null handle and no error', async () => {
     const sid = `s-gone-${n}`;

@@ -3759,14 +3759,14 @@ export const workerFieldResolvers = {
       if (!sessionId || !c.handoffWorkerId) return { userHandle: null, sessionId: null };
       const session = await ctx.db.session.findFirst({
         where: { id: sessionId, workerId: c.handoffWorkerId, deletedAt: null },
-        select: { userId: true },
+        select: { id: true, userId: true },
       });
       const user = session?.userId
         ? await ctx.db.user.findFirst({ where: { id: session.userId, deletedAt: null }, select: { handle: true } })
         : null;
-      // sessionId is returned only for a session found among this worker's own live sessions (same
+      // sessionId is returned only for a session found among this worker's own non-deleted sessions (same
       // sanitization as previousSession): an unverified envelope id is never echoed as fact.
-      return { userHandle: user?.handle ?? null, sessionId: session ? sessionId : null };
+      return { userHandle: user?.handle ?? null, sessionId: session?.id ?? null };
     },
   },
 };
