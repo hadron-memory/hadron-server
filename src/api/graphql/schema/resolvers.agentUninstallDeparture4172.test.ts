@@ -27,9 +27,10 @@ let parent: { id: string };   // an importing agent
 let child: { id: string };    // the imported agent
 const ctx = (): Context => ({ db, userId: admin.id, roles: ['READER'] }) as Context;
 
-type Row = { departed: boolean; stamp: string | null };
+type Row = { departed: boolean; stamp: string | null; cause: string | null };
 const row = async (id: string): Promise<Row> => (await db.$queryRaw<Row[]>(Prisma.sql`
-  SELECT holder_departed_at IS NOT NULL AS departed, (to_jsonb(g)->>'holder_departed_at') AS stamp FROM grants g WHERE id = ${id}`))[0]!;
+  SELECT holder_departed_at IS NOT NULL AS departed, (to_jsonb(g)->>'holder_departed_at') AS stamp,
+    (to_jsonb(g)->>'holder_departure_reason') AS cause FROM grants g WHERE id = ${id}`))[0]!;
 const held = (agentId: string, appId: string, over: Record<string, unknown> = {}) =>
   insertGrantUnguarded(w, { user_id: null, agent_id: agentId, app_id: appId, activated_at: HOUR_AGO, ...over } as never);
 const install = (appId: string, agentId: string) => db.appAgent.create({ data: { appId, agentId } });
@@ -66,6 +67,7 @@ describe('U1/U2: uninstall ends only that App\'s agent grants', () => {
       await uninstall(w.appId, w.agentId, op);
       expect((await row(live)).departed).toBe(true);
       expect((await row(pending)).departed).toBe(true);
+      expect([(await row(live)).cause, (await row(pending)).cause]).toEqual(['AGENT_UNINSTALLED', 'AGENT_UNINSTALLED']); // #4180
       for (const id of [otherApp, worker, person]) expect((await row(id)).departed, id).toBe(false);
     });
   }
@@ -113,7 +115,7 @@ describe('U1/U2: uninstall ends only that App\'s agent grants', () => {
     await expect(db.$transaction(async (tx) => {
       await tx.appAgent.deleteMany({ where: { appId: w.appId, agentId: w.agentId } });
       const { endGrantsOfAgentsNoLongerInstalled } = await import('../../../lib/grants/agentInstallDeparture.js');
-      await endGrantsOfAgentsNoLongerInstalled(tx, [{ appId: w.appId, agentId: w.agentId }], null);
+      await endGrantsOfAgentsNoLongerInstalled(tx, [{ appId: w.appId, agentId: w.agentId }], null, 'AGENT_UNINSTALLED');
       throw new Error('boom');
     })).rejects.toThrow('boom');
     expect((await row(id)).departed).toBe(false);
@@ -128,8 +130,12 @@ describe('D1-D4: the imported agent loses its derived install', () => {
     await install(w.app2Id, child.id);
     const here = await held(child.id, w.appId);
     const direct = await held(child.id, w.app2Id);
+    const parents = await held(parent.id, w.appId);
     await uninstall(w.appId, parent.id);
     expect((await row(here)).departed).toBe(true);
+    // #4180: ONE call ends two agents for two different causes (Antonio P3): the agent uninstalled, and the agent it imported.
+    expect((await row(here)).cause).toBe('AGENT_IMPORTER_UNINSTALLED');
+    expect((await row(parents)).cause).toBe('AGENT_UNINSTALLED');
     expect((await row(direct)).departed).toBe(false);
   });
 
@@ -148,6 +154,7 @@ describe('D1-D4: the imported agent loses its derived install', () => {
     expect((await row(id)).departed).toBe(false);
     await M.removeAgentImport({}, { parentAgentRef: other.id, importedAgentRef: child.id }, ctx());
     expect((await row(id)).departed).toBe(true);
+    expect((await row(id)).cause).toBe('AGENT_IMPORT_REMOVED'); // #4180
     await M.removeAgentImport({}, { parentAgentRef: other.id, importedAgentRef: child.id }, ctx()); // idempotent
   });
 
@@ -155,6 +162,7 @@ describe('D1-D4: the imported agent loses its derived install', () => {
     const id = await held(child.id, w.appId);
     await M.revokeAgentOrgGrant({}, { agentRef: child.id, orgRef: w.orgId }, ctx());
     expect((await row(id)).departed).toBe(true);
+    expect((await row(id)).cause).toBe('AGENT_LICENSE_REVOKED'); // #4180
   });
 
   it('D3: a row-installed agent keeps its grants through the revoke', async () => {

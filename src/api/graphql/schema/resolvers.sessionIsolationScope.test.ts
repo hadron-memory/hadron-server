@@ -145,11 +145,11 @@ describe('#945 — the agent leg rides on the INSTALL, not the binding', () => {
     const session = await db.session.create({
       data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: mem.id },
     });
-    expect(new Set(await sessionScopedMemoryIds(db, app.id, session.id))).toEqual(
+    expect(new Set(await sessionScopedMemoryIds(db, app.id, session.id, {}))).toEqual(
       new Set([mem.id, ownAgent.systemMemoryId]),
     );
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
-    expect(await sessionScopedMemoryIds(db, app.id, session.id)).toEqual([]);
+    expect(await sessionScopedMemoryIds(db, app.id, session.id, {})).toEqual([]);
   });
 
   it('drops the whole session scope when its organization is soft-deleted', async () => {
@@ -158,11 +158,11 @@ describe('#945 — the agent leg rides on the INSTALL, not the binding', () => {
     const session = await db.session.create({
       data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: mem.id },
     });
-    expect(new Set(await sessionScopedMemoryIds(db, app.id, session.id))).toEqual(
+    expect(new Set(await sessionScopedMemoryIds(db, app.id, session.id, {}))).toEqual(
       new Set([mem.id, ownAgent.systemMemoryId]),
     );
     await db.organization.update({ where: { id: org.id }, data: { deletedAt: new Date() } });
-    expect(await sessionScopedMemoryIds(db, app.id, session.id)).toEqual([]);
+    expect(await sessionScopedMemoryIds(db, app.id, session.id, {})).toEqual([]);
   });
 });
 
@@ -177,10 +177,14 @@ describe('#945 — the memory leg must be tied to this App or this session\'s ag
     expect(new Set(ids)).toEqual(new Set([mem.id, ownAgent.systemMemoryId]));
   });
 
-  it('admits the reuse case — another App provisioned the (agent, user) memory', async () => {
-    // startAgentSession reuses an existing per-user memory keyed on
-    // (agent, user), so its appId can name a DIFFERENT App that installed the
-    // same agent. That must keep working.
+  it('refuses a personal memory another App provisioned for the same (agent, user) (#3401 D2)', async () => {
+    // This used to ADMIT the row: startAgentSession reuses a per-user memory
+    // keyed on (agent, user), so the reuse was assumed to cross Apps. It cannot
+    // arise through startAgentSession (its users are App-scoped,
+    // externalAppId = appId), and ruling 0203 admits a personal/private
+    // session memory only when its App AND Agent are the session's; a foreign
+    // App's row is the (app_id, user_id) isolation of spec 008. The gate
+    // ruled this GraphQL narrowing in scope (#3401, Xavier's CHECKED comment).
     const otherApp = await db.app.create({
       data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` },
     });
@@ -189,6 +193,9 @@ describe('#945 — the memory leg must be tied to this App or this session\'s ag
     const session = await db.session.create({
       data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: mem.id },
     });
+    expect(await getAccessibleMemoryIds(appKeyCtx(app.id, session.id))).not.toContain(mem.id);
+    // The same row provisioned by THIS App is still admitted.
+    await db.memory.update({ where: { id: mem.id }, data: { appId: app.id } });
     expect(await getAccessibleMemoryIds(appKeyCtx(app.id, session.id))).toContain(mem.id);
   });
 
@@ -221,10 +228,10 @@ describe('#945 — the memory leg must be tied to this App or this session\'s ag
     const session = await db.session.create({
       data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: memory.id },
     });
-    expect(await sessionScopedMemoryIds(db, app.id, session.id)).toEqual([ownAgent.systemMemoryId]);
+    expect(await sessionScopedMemoryIds(db, app.id, session.id, {})).toEqual([ownAgent.systemMemoryId]);
     await db.agentMemoryItem.update({ where: { id: link.id }, data: { role: 'read' } });
     // #1376: a valid item does not admit it either; an item is never a grant to a userless key.
-    expect(await sessionScopedMemoryIds(db, app.id, session.id)).toEqual([ownAgent.systemMemoryId]);
+    expect(await sessionScopedMemoryIds(db, app.id, session.id, {})).toEqual([ownAgent.systemMemoryId]);
   });
 
   it('does not turn an Agent link into an App-key grant on user-owned knowledge', async () => {
@@ -280,7 +287,7 @@ describe('#945 — the memory leg must be tied to this App or this session\'s ag
       const session = await db.session.create({
         data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId },
       });
-      expect(await sessionScopedMemoryIds(db, app.id, session.id)).toEqual([ownAgent.systemMemoryId]);
+      expect(await sessionScopedMemoryIds(db, app.id, session.id, {})).toEqual([ownAgent.systemMemoryId]);
     }
   });
 
@@ -308,12 +315,12 @@ describe('#945 review — lifecycle, not just structure', () => {
     const session = await db.session.create({
       data: { id: generateId(), appId: personalApp.id, userId: user.id, agentId: foreignAgent.id },
     });
-    expect(await sessionScopedMemoryIds(db, personalApp.id, session.id)).toContain(foreignAgent.systemMemoryId);
+    expect(await sessionScopedMemoryIds(db, personalApp.id, session.id, {})).toContain(foreignAgent.systemMemoryId);
     await db.agentSubscription.update({
       where: { userId_agentId: { userId: user.id, agentId: foreignAgent.id } },
       data: { revokedAt: new Date() },
     });
-    expect(await sessionScopedMemoryIds(db, personalApp.id, session.id)).not.toContain(foreignAgent.systemMemoryId);
+    expect(await sessionScopedMemoryIds(db, personalApp.id, session.id, {})).not.toContain(foreignAgent.systemMemoryId);
   });
 
   it('requires the creator and active subscription for a legacy knowledge holding', async () => {
@@ -328,18 +335,18 @@ describe('#945 review — lifecycle, not just structure', () => {
     const outsiderSession = await db.session.create({
       data: { id: generateId(), appId: app.id, userId: outsider.id, agentId: ownAgent.id, memoryId: holding.id },
     });
-    expect(await sessionScopedMemoryIds(db, app.id, outsiderSession.id)).not.toContain(holding.id);
+    expect(await sessionScopedMemoryIds(db, app.id, outsiderSession.id, {})).not.toContain(holding.id);
 
     await subscribe(ownAgent.id);
     const ownerSession = await db.session.create({
       data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: holding.id },
     });
-    expect(await sessionScopedMemoryIds(db, app.id, ownerSession.id)).toContain(holding.id);
+    expect(await sessionScopedMemoryIds(db, app.id, ownerSession.id, {})).toContain(holding.id);
     await db.agentSubscription.update({
       where: { userId_agentId: { userId: user.id, agentId: ownAgent.id } },
       data: { revokedAt: new Date() },
     });
-    expect(await sessionScopedMemoryIds(db, app.id, ownerSession.id)).not.toContain(holding.id);
+    expect(await sessionScopedMemoryIds(db, app.id, ownerSession.id, {})).not.toContain(holding.id);
   });
 
   it('drops the system memory when a cross-org install\'s AgentOrgGrant is revoked (Codex P1)', async () => {
@@ -485,12 +492,12 @@ describe('#945 — the two surfaces share one predicate', () => {
       data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: mem.id },
     });
     const viaResolver = await getAccessibleMemoryIds(appKeyCtx(app.id, session.id));
-    const viaPredicate = await sessionScopedMemoryIds(db, app.id, session.id);
+    const viaPredicate = await sessionScopedMemoryIds(db, app.id, session.id, {});
     expect(new Set(viaResolver)).toEqual(new Set(viaPredicate));
   });
 
   it('returns an empty scope for a session that no longer exists', async () => {
-    expect(await sessionScopedMemoryIds(db, app.id, generateId())).toEqual([]);
+    expect(await sessionScopedMemoryIds(db, app.id, generateId(), {})).toEqual([]);
   });
 });
 
@@ -562,7 +569,7 @@ describe("#934 — a user principal's session binding never changes their scope"
       data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: scratch.id },
     });
     // Sanity: the App-key session branch WOULD include it…
-    expect(await sessionScopedMemoryIds(db, app.id, session.id)).toContain(scratch.id);
+    expect(await sessionScopedMemoryIds(db, app.id, session.id, {})).toContain(scratch.id);
     // …and the bound hybrid principal must not.
     const bound = await getAccessibleMemoryIds(hybridCtx(user.id, app.id, session.id));
     expect(bound).not.toContain(scratch.id);

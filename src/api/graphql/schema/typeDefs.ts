@@ -3218,6 +3218,14 @@ export const typeDefs = `#graphql
     portalUrl: String
     "#2171 (R211): the member roles this App offers: the union over its installed Agents, primary first."
     availableMemberRoles: [String!]!
+    """
+    #4490 (hrn:node:hadronmemory.com:specs:cor:api:140:02, no existence oracle): whether the caller could join this App
+    themselves, computed by the SAME check joinApp makes. Null for a caller who cannot read the App by app(ref:) (whichever
+    route reached it), for an App key, an impersonated session or a run, and for a request with no user: an App the caller
+    cannot see answers exactly as before. A caller who is already a member reads MEMBER with no role, so an open and a closed
+    App read identically to them.
+    """
+    selfJoin: AppSelfJoin
     "#2138: when the whole team was paused (setTeamPause), or null. Separate from every worker's own pause."
     teamPausedAt: DateTime
     "#4224 (S3 of #4229): the App's sweep switch (setAppSweepMode). OFF by default."
@@ -3736,6 +3744,27 @@ export const typeDefs = `#graphql
 
   type MemoryProvisioning {
     appMemory: AppMemoryKind!
+  }
+
+  """
+  #4490: where an App stands for the caller on joining it themselves (joinApp). OPEN: joinApp would accept the caller as the
+  role in AppSelfJoin.role. CLOSED: it would refuse (the App has not opted in, is uninstalled, or has nothing installed).
+  MEMBER: the caller is already a member, whatever the App's policy says.
+  """
+  enum AppSelfJoinState {
+    OPEN
+    CLOSED
+    MEMBER
+  }
+
+  """
+  #4490: the answer to "would joinApp accept me", and nothing else. Never the App's maxMembers or member count, and never any
+  other field of the Agent's installation policy.
+  """
+  type AppSelfJoin {
+    state: AppSelfJoinState!
+    "The role a joiner would get: set only when state is OPEN, null otherwise."
+    role: String
   }
 
   type InstallationPolicy {
@@ -7727,6 +7756,42 @@ export const typeDefs = `#graphql
   }
 
   """
+  #4180 (hrn:node:hadronmemory.com:specs:cor:acl:140:03, Holger R5): why a grant's holder went. Cause codes, not words: how each is shown is still open in the spec, so the copy may change without these values changing. The set is open to additions; a client must treat an unknown value as a departure it cannot name. Not the end reasons of a secret read client (SECRET_DELETED, PROTECTED), which are not holder departures.
+  """
+  enum GrantHolderDepartureReason {
+    "The person's account was erased."
+    USER_ERASED
+    "The person removed themselves from the organization that owns the grant's App."
+    ORG_LEFT
+    "The person was removed from the organization that owns the grant's App by someone else."
+    ORG_REMOVED
+    "The worker was retired."
+    WORKER_RETIRED
+    "The worker was deleted."
+    WORKER_DELETED
+    "The agent was deleted."
+    AGENT_DELETED
+    "The agent was uninstalled from the grant's App."
+    AGENT_UNINSTALLED
+    "The agent was installed only through an importing agent, and that agent was uninstalled from the grant's App."
+    AGENT_IMPORTER_UNINSTALLED
+    "The agent was installed only through an importing agent, and that agent was deleted (hard delete; #4179)."
+    AGENT_IMPORTER_DELETED
+    "The import that installed the agent in the grant's App was removed."
+    AGENT_IMPORT_REMOVED
+    "The organization's licence to the agent was revoked, which ended its installation in the grant's App."
+    AGENT_LICENSE_REVOKED
+    "The organization's licence to the agent expired, which ended its installation in the grant's App (recorded by the lapse sweep, #4178)."
+    AGENT_LICENSE_EXPIRED
+    "An organization the agent's installation in the grant's App depended on (the App's or the agent's own) was deleted (recorded by the lapse sweep, #4178)."
+    ORG_DELETED
+    "The grantee App was deleted."
+    APP_DELETED
+    "The holder went before causes were kept, so none was recorded. Not a guess at one."
+    REASON_NOT_RECORDED
+  }
+
+  """
   A grant (#3789, hrn:node:hadronmemory.com:specs:cor:acl:140:05): ids and scalars only, so no other entity's field resolvers are reachable
   through it. Its stored facts as stored, and allows and state, which are computed (#4173).
   """
@@ -7764,6 +7829,8 @@ export const typeDefs = `#graphql
     revokedByUserId: ID
     "#3711 (V56): when the holder went (a person erased, a worker retired, an agent or App deleted); a fact, not a state. Only the App's manager reads it (appGrants); every other read answers null."
     holderDepartedAt: DateTime
+    "#4180 (hrn:node:hadronmemory.com:specs:cor:acl:140:03, Holger R5): why the holder went, as a cause with no wording; null unless the holder ended the grant (state HOLDER_GONE). REASON_NOT_RECORDED for a departure stamped before causes were kept, never a guess. Every read of the grant carries it."
+    holderDepartureReason: GrantHolderDepartureReason
     "Whether the grant allows its action right now, judged on the database clock by the one live function (activated, not revoked, holder not gone, App not deleted, started, not expired, not spent). A fact about this instant, never a lifecycle name."
     allows: Boolean!
     "#4173: the lifecycle state (hrn:node:hadronmemory.com:specs:cor:acl:140:03), the same on every surface that returns the grant."

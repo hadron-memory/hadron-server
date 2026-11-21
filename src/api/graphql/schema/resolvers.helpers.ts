@@ -2485,7 +2485,7 @@ export async function getAccessibleMemoryIds(
   // read) at worst. Same shape as `requireSessionWriteAccess`'s App branch
   // (#932) and the #967 narrow-never-grant rule.
   if (ctx.appId && ctx.sessionId && !ctx.userId) {
-    const ids = await sessionScopedMemoryIds(ctx.db, ctx.appId, ctx.sessionId);
+    const ids = await sessionScopedMemoryIds(ctx.db, ctx.appId, ctx.sessionId, ctx);
     const scoped = onlyMemoryId ? ids.filter((id) => id === onlyMemoryId) : ids;
     // 0114 B: admit only explicitly named PUBLIC targets, never enumerate PUBLIC memories.
     if (!readsPublicKnowledgeWithoutUser(ctx)) return scoped;
@@ -3673,8 +3673,11 @@ export async function uninstallAgentFromAppCore(
       // here end (first end stands; other Apps untouched). Judged on every call, so a retry also ends a stranded row. The agent
       // this one imports may have lost its only (derived) witness too: one level, derivation never recurses (D1).
       const importedHere = removedRow.count > 0 ? await importedPairsOfParent(tx, resolvedAgentId, [resolvedAppId]) : [];
+      // #4180: the uninstalled agent records AGENT_UNINSTALLED; an agent it imported, which lost its derived install here, records
+      // AGENT_IMPORTER_UNINSTALLED (it was not uninstalled itself).
       await endGrantsOfAgentsNoLongerInstalled(
-        tx, [{ appId: resolvedAppId, agentId: resolvedAgentId }, ...importedHere], ctx.userId ?? null);
+        tx, [{ appId: resolvedAppId, agentId: resolvedAgentId }, ...importedHere], ctx.userId ?? null,
+        (p) => (p.agentId === resolvedAgentId ? 'AGENT_UNINSTALLED' : 'AGENT_IMPORTER_UNINSTALLED'));
     },
     { lockMode: 'exclusive', afterLock: async (tx) => {
       // NO KEY UPDATE, not SHARE (#4210 F1): two uninstalls of different agents in one App delete their own app_agents rows and then
