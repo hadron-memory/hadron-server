@@ -238,7 +238,9 @@ describe('#2948 hint scope — own live Google connection in that org, else ONE 
   it('refuses a hint on the Microsoft start with the same typed 400 (no hint outside the Google providers)', async () => {
     process.env.MICROSOFT_CLIENT_ID = 'microsoft-client-id';
     try {
-      await seedConnection({ userId: adminId, organizationId: orgId, mailboxEmail: OWN_GMAIL, provider: 'ms-exchange' });
+      // The hint would be IN scope for a Google start (own, live, Google provider, this org):
+      // the refusal can only come from the Microsoft start taking no hint at all.
+      await seedConnection({ userId: adminId, organizationId: orgId, mailboxEmail: OWN_GMAIL, provider: 'google-drive' });
       const res = await start('microsoft', { accountHint: OWN_GMAIL });
       expect(res.status).toBe(400);
       expect(await res.json()).toEqual({ error: 'invalid_account_hint' });
