@@ -10,7 +10,7 @@
  *   4. a tool configured as declaring another contract version is refused by
  *      `webSearch` BEFORE any request is sent;
  *   5. the same refusal holds for the fixture runner (zero requests);
- *   6. the envelope rules the fixtures rest on (contiguous 1-based rank,
+ *   6. the envelope rules the fixtures rest on (integer rank in ascending order,
  *      string title/url/snippet, a response-side version that differs).
  */
 
@@ -88,7 +88,7 @@ describe('#647 S1 web-search@1 conformance fixtures', () => {
     expect(report.passed).toBe(false);
     expect(report.failures.length).toBeGreaterThan(0);
     expect(report.failures.join('\n')).toMatch(/rank/);
-    // The dropped field is reported as missing, not as a wrong position.
+    // The dropped field is reported as missing, not as an ordering fault.
     expect(report.failures.join('\n')).toMatch(/rank: missing or not an integer/);
   });
 
@@ -212,10 +212,17 @@ describe('#647 S1 checkSearchEnvelope rules', () => {
     expect(checkSearchEnvelope({ source: 'external' }).join('\n')).toMatch(/results/);
   });
 
-  it('rejects non-contiguous, non-1-based, duplicate, or non-integer rank', () => {
-    for (const ranks of [[2, 3], [1, 3], [1, 1], [1.5, 2]]) {
+  it('rejects a non-integer rank and a list not in ascending rank order', () => {
+    for (const ranks of [[1.5, 2], [2, 1], [1, 3, 2]]) {
       const out = checkSearchEnvelope({ ...good, results: ranks.map((r) => ({ ...result(1), rank: r })) });
       expect(out.join('\n'), JSON.stringify(ranks)).toMatch(/rank/);
+    }
+  });
+
+  it('accepts any ruled-compatible rank scale: not 1-based, with gaps, or tied (the spec rules none)', () => {
+    for (const ranks of [[10], [0, 1], [2, 3], [1, 3, 9], [1, 1]]) {
+      const out = checkSearchEnvelope({ ...good, results: ranks.map((r) => ({ ...result(1), rank: r })) });
+      expect(out, JSON.stringify(ranks)).toEqual([]);
     }
   });
 

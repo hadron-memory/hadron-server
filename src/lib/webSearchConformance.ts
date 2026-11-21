@@ -19,7 +19,7 @@ import { WEB_SEARCH_CONTRACT_VERSION, contractVersionMismatch } from './webSearc
  * still answers a valid envelope; it cannot prove the key changed nothing.
  *
  * What a fixture checks is only what the spec makes durable: the result shape
- * (title, url, snippet, 1-based contiguous rank), the `source: 'external'` tag,
+ * (title, url, snippet, an integer rank, results in ascending rank order; the scale itself is not ruled, so none is imposed), the `source: 'external'` tag,
  * `count` honored as an upper bound, and unknown `providerOptions` safely
  * ignored. It deliberately does NOT pin result content, provider identity,
  * ordering quality or latency (all tunable, not contract).
@@ -86,6 +86,7 @@ export function checkSearchEnvelope(payload: unknown): string[] {
   if (!Array.isArray(p.results)) {
     out.push('results: missing or not an array');
   } else {
+    let prevRank: number | undefined;
     p.results.forEach((r, i) => {
       if (r === null || typeof r !== 'object') {
         out.push(`results[${i}]: not an object`);
@@ -96,7 +97,14 @@ export function checkSearchEnvelope(payload: unknown): string[] {
         if (typeof row[field] !== 'string') out.push(`results[${i}].${field}: missing or not a string`);
       }
       if (!isInt(row.rank)) out.push(`results[${i}].rank: missing or not an integer`);
-      else if (row.rank !== i + 1) out.push(`results[${i}].rank: ${row.rank}, expected ${i + 1} (1-based, contiguous, in order)`);
+      else {
+        // cor:web:020:01 rules an ORDERED list carrying a rank; it does not rule
+        // the scale, so a rank scale starting elsewhere or with gaps is accepted.
+        if (prevRank !== undefined && row.rank < prevRank) {
+          out.push(`results[${i}].rank: ${row.rank} follows ${prevRank}; the list must be in ascending rank order`);
+        }
+        prevRank = row.rank;
+      }
     });
   }
   if (p.source !== 'external') out.push(`source: ${JSON.stringify(p.source)}, expected "external"`);
