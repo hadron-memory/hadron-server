@@ -9268,8 +9268,14 @@ export const typeDefs = `#graphql
     that holds or ever held host:operate reads its own live host only (hrn:node:hadronmemory.com:specs:cor:agt:070:04); any other hostId
     answers HOST_NOT_FOUND, exactly as a host the App does not have. A host key's read is a recorded use
     (hrn:node:hadronmemory.com:specs:cor:agt:070:07). Reads only: nothing is started, stopped or changed.
+    #4260: the optional worker selector (a worker id or an exact name) narrows the answer to that one worker's row of
+    this host's own list, for a host's per-worker re-reads. A worker this host does not run — another host's, a retired
+    worker not on this host, an unknown id or name — answers the same empty workers list as an unknown worker
+    (hrn:node:hadronmemory.com:specs:cor:agt:020:08: denial and absence indistinguishable), so the selector never probes the App's roster; a
+    retired worker this host still lists keeps its row. The gates, refusals, key-use recording, row semantics and
+    sweepMode are exactly the host-wide read's; omit it and the full list returns.
     """
-    hostDesiredState(appRef: String!, hostId: String!): HostDesiredState!
+    hostDesiredState(appRef: String!, hostId: String!, worker: String): HostDesiredState!
     """
     #4233 (S10 of #4229) — the recorded runs of one host's sweep, newest first: when each ran, its mode, the counts
     planned, applied, skipped and failed, and up to 50 per-worker lines with reason codes. Read by whoever reads the

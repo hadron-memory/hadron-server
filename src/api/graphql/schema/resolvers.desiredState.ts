@@ -8,6 +8,11 @@
  * hosts the App has (the cor:agt:070:04 rule that a host sees only its own; the sentence that adds this read to
  * that rule is drafted in S5, #4226). A host key's read is a recorded use (cor:agt:070:07).
  *
+ * #4260: the query takes an optional `worker` selector (a worker id or exact name) that narrows the answer to that
+ * one row of the host's own list. A worker the host does not run — another host's, a retired worker not on this
+ * host, an unknown id or name — answers the same empty workers list as an unknown worker (cor:agt:020:08), so the
+ * selector is no App-roster probe; the gates, refusals and key-use recording are exactly the host-wide read's.
+ *
  * WHO WRITES the marker and the mode: whoever manages the App, as themselves or through their held worker's
  * instruction (cor:dmo:050:12), like the team pause. No App key writes either.
  */
@@ -38,10 +43,13 @@ const hostNotFound = (hostId: string): GraphQLError =>
   taskError('HOST_NOT_FOUND', 'No host with that id is registered in this App.', { hostId });
 
 export const desiredStateQueries = {
-  /** The desired state of every worker one host runs (see the file header for who reads it). */
-  hostDesiredState: (_: unknown, a: { appRef: string; hostId: string }, ctx: Context) =>
+  /** The desired state of every worker one host runs (see the file header for who reads it). The optional #4260
+   *  worker selector narrows the answer to that worker's row of the host's own list, answered empty for a worker
+   *  this host does not run exactly as for an unknown one (see loadHostDesiredState). */
+  hostDesiredState: (_: unknown, a: { appRef: string; hostId: string; worker?: string | null }, ctx: Context) =>
     recordingRefusal(ctx, 'read', null, async () => {
       const hostId = typeof a.hostId === 'string' ? a.hostId.trim() : '';
+      const selector = typeof a.worker === 'string' && a.worker.trim() !== '' ? a.worker.trim() : undefined;
       const out = await withReadableApp(ctx, a.appRef, async (c, app) => {
         const key = appKeyCaller(c);
         // A host key, live or revoked, reads its own live host and nothing else. Decided before the host is looked
@@ -49,7 +57,7 @@ export const desiredStateQueries = {
         if (key && (await keyEverHeldHostOperate(c.db, key.appKeyId)) && (await keyHostId(c.db, key)) !== hostId) {
           throw hostNotFound(hostId);
         }
-        const state = hostId ? await loadHostDesiredState(c.db, app.id, hostId, new Date()) : null;
+        const state = hostId ? await loadHostDesiredState(c.db, app.id, hostId, new Date(), selector) : null;
         if (!state) throw hostNotFound(hostId);
         return state;
         // Coherent: every fact a row is composed from comes from one repeatable-read snapshot (#4242 blind P2-2).
