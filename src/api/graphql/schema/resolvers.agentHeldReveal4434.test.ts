@@ -10,11 +10,12 @@ import { generateId } from '../../../lib/id.js';
 import { PLATFORM_ACTIONS, upsertPlatformActions } from '../../../lib/grants/actions.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { runAsActor } from '../../../lib/requestActor.js';
+import { grantTermsBytes } from '../../../lib/grants/terms.js';
 import { resolvers, type Context } from './resolvers.js';
 
 let ownerId: string; let appId: string; let app2Id: string; let secretId: string;
 let roleAgentId: string; let otherAgentId: string; let childAgentId: string;
-let w1: string; let w2: string; let otherApp: string; let otherAgentWorker: string; let childWorker: string;
+let w1: string; let w2: string; let otherAppWorkerId: string; let otherAgentWorker: string; let childWorker: string;
 const ctxOf = (userId: string): Context => ({ db, userId, roles: [] } as unknown as Context);
 const asWorker = (id: string | null, p: () => Promise<unknown>) => runAsActor({ workerId: id, agentId: null }, p);
 const reveal = (workerId: string | null, clientId: string): Promise<any> => asWorker(workerId, () => resolvers.Mutation.revealSecret({}, { clientId }, ctxOf(ownerId)));
@@ -44,7 +45,7 @@ beforeEach(async () => {
   await db.appAgent.create({ data: { appId: app2Id, agentId: roleAgentId } });
   const mkWorker = async (app: string, agent: string, slug: string) => (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app, agentId: agent, name: slug, slug } })).id;
   w1 = await mkWorker(appId, roleAgentId, 'w1'); w2 = await mkWorker(appId, roleAgentId, 'w2');
-  otherApp = await mkWorker(app2Id, roleAgentId, 'w-app2');
+  otherAppWorkerId = await mkWorker(app2Id, roleAgentId, 'w-app2');
   otherAgentWorker = await mkWorker(appId, otherAgentId, 'w-other');
   childWorker = await mkWorker(appId, childAgentId, 'w-child');
   secretId = (await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'tok', kind: 'generic', value: 'hunter2' }, ctxOf(ownerId))).id;
@@ -67,7 +68,7 @@ describe('#4434 agent-held secret.reveal', () => {
   });
 
   it.each([
-    ['a worker of the same role agent bound in a DIFFERENT App', () => otherApp],
+    ['a worker of the same role agent bound in a DIFFERENT App', () => otherAppWorkerId],
     ['a worker of a different agent', () => otherAgentWorker],
     ['a worker of an agent that EXTENDS the holder agent, in the same App (cor:acl:140:06 S6)', () => childWorker],
   ])('refuses %s with the uniform not-found, spends nothing, and records the refusal on the known client', async (_n, who) => {
@@ -94,6 +95,32 @@ describe('#4434 agent-held secret.reveal', () => {
     await db.appAgent.delete({ where: { appId_agentId: { appId, agentId: roleAgentId } } });
     expect(await code(reveal(w1, r.clientId))).toBe('SECRET_READ_CLIENT_NOT_FOUND');
     expect((await db.grant.findUniqueOrThrow({ where: { id: r.grantId } })).useCount).toBe(0);
+  });
+
+  it('stops reaching the workers once the agent is no longer LICENSED in the App, with the agent still installed and its worker live', async () => {
+    const lessor = (await db.user.create({ data: { email: `${generateId()}@s4.test` } })).id;
+    const licensed = (await db.agent.create({ data: { ownerUserId: lessor, name: 'lic', urn: `${generateId().toLowerCase()}:lic` } as never })).id;
+    await db.appAgent.create({ data: { appId, agentId: licensed } });
+    await db.agentSubscription.create({ data: { userId: ownerId, agentId: licensed, activatedAt: new Date() } });
+    const worker = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId: licensed, name: 'wl', slug: 'wl' } })).id;
+    const r = await issue('AGENT', licensed);
+    await activate(r.grantId);
+    expect(await code(reveal(worker, r.clientId))).toBe('OK');
+    await db.agentSubscription.update({ where: { userId_agentId: { userId: ownerId, agentId: licensed } }, data: { revokedAt: new Date() } });
+    expect(await db.appAgent.count({ where: { appId, agentId: licensed } })).toBe(1);
+    expect(await code(reveal(worker, r.clientId))).toBe('SECRET_READ_CLIENT_NOT_FOUND');
+    expect((await db.grant.findUniqueOrThrow({ where: { id: r.grantId } })).useCount).toBe(1);
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'REVEAL', outcome: 'SECRET_READ_CLIENT_NOT_FOUND' } })).toBe(1);
+  });
+
+  it('an agent-held secret.reveal grant is signable: its terms bytes name the agent holder (the activation ceremony is holder-neutral)', async () => {
+    const r = await issue('AGENT', roleAgentId);
+    const g = await db.grant.findUniqueOrThrow({ where: { id: r.grantId } });
+    const bytes = grantTermsBytes({ appId, holder: { kind: 'agent', id: roleAgentId }, action: 'secret.reveal',
+      values: g.values as Record<string, unknown>, startsAt: g.startsAt, expiresAt: g.expiresAt, maxUses: g.maxUses, reason: g.reason });
+    expect(Buffer.from(bytes as never).toString('utf8')).toContain(roleAgentId);
+    expect(g.agentId).toBe(roleAgentId);
+    expect(g.workerId).toBeNull();
   });
 
   it('an agent-held client is refused to a person (no worker bound) with the same uniform answer', async () => {
