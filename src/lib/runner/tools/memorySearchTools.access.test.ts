@@ -192,22 +192,24 @@ it('discards an already-ranked node moved inside the allowed set instead of rela
   finally { spy.mockRestore(); }
 });
 
-it.each([25, 225])('returns a matching child even when %i inherited base hits rank ahead of it', async baseCount => {
+it.each([[25, 1], [225, 1], [25, 15], [225, 15]])('returns requested child matches after %i inherited hits (child count=%i)', async (baseCount, childCount) => {
   const base = await db.memory.create({ data: { id: generateId(), urn: 'search632-b.example:crowd-base', name: 'base', class: 'system', organizationId: otherOrgId } });
   const child = await db.memory.create({ data: { id: generateId(), urn: 'search632-a.example:crowd-child', name: 'child', class: 'system', organizationId: orgId } });
   const parent = await db.agent.create({ data: { id: generateId(), urn: 'search632-b.example:crowd-agent', name: 'base agent', organizationId: otherOrgId, visibility: 'PUBLIC', systemMemoryId: base.id } });
   await db.agent.update({ where: { id: agentId }, data: { extendsAgentId: parent.id, systemMemoryId: child.id } });
-  const local = await node(child.id, 'weak-child', { name: 'weak child', content: 'crowd632', description: null, abstract: null });
+  const locals = [];
+  for (let i = 0; i < childCount; i++) locals.push(await node(child.id, `weak-child-${i}`, { name: 'weak child', content: 'crowd632', description: null, abstract: null }));
   for (let i = 0; i < baseCount; i++) await node(base.id, `strong-${i}`, { name: 'crowd632 '.repeat(20), content: 'crowd632 '.repeat(100), description: null, abstract: null });
   const c = await context(false);
   const first = await Q.findNodes({}, { query: 'crowd632', mode: 'keyword', filter: { memoryIds: [child.id] }, limit: 10 }, c.principal);
   expect(first.hits).toHaveLength(10);
-  expect(first.hits.some((h: any) => h.node.id === local.id), 'control: inherited hits crowd out the child on the first page').toBe(false);
+  expect(first.hits.some((h: any) => locals.some(local => local.id === h.node.id)), 'control: inherited hits crowd out every child on the first page').toBe(false);
   const spy = vi.spyOn(Q, 'findNodes');
   try {
     const out = await call(c, { query: 'crowd632', memoryUrn: child.urn, limit: 10 });
-    expect(out.hits.map(h => h.urn)).toEqual([emitNodeUrnV2(child.urn, local.loc)]);
+    expect(out.hits).toHaveLength(Math.min(10, childCount));
+    for (const hit of out.hits) expect(locals.map(local => emitNodeUrnV2(child.urn, local.loc))).toContain(hit.urn);
     expect(JSON.stringify(out)).not.toContain('strong-');
-    if (baseCount > 200) expect(spy.mock.calls.map(args => args[1].offset)).toEqual([0, 200]);
+    expect(spy.mock.calls.map(args => args[1].offset)).toEqual(baseCount > 200 ? [0, 10, 210] : [0, 10]);
   } finally { spy.mockRestore(); }
 });
