@@ -12,6 +12,9 @@ import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import type { EmbeddingClient } from '../../../lib/embedding/index.js';
 import { setEmbeddingClientForTests, resetEmbeddingClientForTests } from '../../../lib/embedding/index.js';
+import { setIterativeScanSupportForTests, resetIterativeScanLogForTests } from '../../../services/embedding/vectors.js';
+import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
+import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -24,11 +27,14 @@ const stub: EmbeddingClient = { provider: 'test', model: 'stub-model', dim: DIM,
 const QLIT = () => `[${qvec().join(',')}]`;
 
 let mem: string;
+let memberId: string;
+let foreignSpecIds: string[] = [];
 let savedUrl: string | undefined;
 let savedTimeout: string | undefined;
 
+// The admin sees every memory (including the other org's, see the access pin), so the pins run scoped to `mem`.
 const findNodes = (args: Record<string, unknown>) =>
-  (resolvers.Query as any).findNodes(null, args, { db, roles: ['ADMIN'], userId: 'admin-2772' } as Context);
+  (resolvers.Query as any).findNodes(null, { ...args, filter: { ...((args.filter as object) ?? {}), memoryIds: [mem] } }, { db, roles: ['ADMIN'], userId: 'admin-2772' } as Context);
 const ids = (res: any) => res.hits.map((h: any) => h.node.id);
 
 /** Brute-force reference: exact cosine order over the nodes passing `where` (SQL fragment on alias n). */
@@ -63,6 +69,20 @@ beforeAll(async () => {
   await db.node.createMany({ data: Array.from({ length: SPEC_N }, (_, i) => ({ id: generateId(), memoryId: mem, loc: `s${i}`, name: `s${i}`, content: 'body', role: 'spec' })) });
   await embed('review', 0.02);
   await embed('spec', 0.1);
+  // Access: a plain member of the first org, and a memory of ANOTHER org (unreadable to them) whose spec nodes
+  // rank AHEAD of every readable spec node.
+  memberId = (await db.user.create({ data: { id: generateId(), handle: 'm2772', roles: [] } })).id;
+  await db.orgMember.create({ data: { organizationId: made.org.id, userId: memberId, role: 'READER' } });
+  await db.memory.update({ where: { id: mem }, data: { visibility: 'ORGANIZATION' } });
+  const other = await db.organization.create({ data: { id: generateId(), name: 'r2772-other', urn: 'r2772-other' } });
+  const foreign = await db.memory.create({ data: { id: generateId(), organizationId: other.id, urn: 'r2772-other:f', name: 'f', class: 'knowledge', visibility: 'ORGANIZATION', vectorIndexEnabled: true, embeddingSource: 'contentChunks' } });
+  const fr = Array.from({ length: 4 }, (_, i) => ({ id: generateId(), memoryId: foreign.id, loc: `f${i}`, name: `f${i}`, content: 'body', role: 'spec' }));
+  await db.node.createMany({ data: fr });
+  foreignSpecIds = fr.map((r) => r.id);
+  await db.$executeRawUnsafe(`
+    INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, chunk_index, char_start, char_end, chunk_text, embedding, created_at)
+    SELECT md5(id), id, memory_id, 'chunk', 'test', 'stub-model', ${DIM}, 0, 0, 4, 'body', ('[' || array_to_string(array_fill(0::real, ARRAY[1]) || ARRAY[1::real] || array_fill(0::real, ARRAY[${DIM - 2}]), ',') || ']')::vector, now()
+    FROM nodes WHERE memory_id = '${foreign.id}'`);
 }, 180_000);
 
 afterAll(() => {
@@ -70,6 +90,31 @@ afterAll(() => {
   if (savedUrl === undefined) delete process.env.EMBEDDING_API_URL; else process.env.EMBEDDING_API_URL = savedUrl;
   if (savedTimeout === undefined) delete process.env.VECTOR_SEARCH_TIMEOUT_MS; else process.env.VECTOR_SEARCH_TIMEOUT_MS = savedTimeout;
 });
+
+/** A db whose transactions run on the HNSW plan and record every in-transaction vector statement and SET LOCAL. */
+function spyHandle() {
+  const seen: string[] = [];
+  const sets: string[] = [];
+  const handle = new Proxy(db, {
+      get(target, prop) {
+        const v = Reflect.get(target, prop);
+        if (prop !== '$transaction') return typeof v === 'function' ? v.bind(target) : v;
+        return (arg: unknown, opts?: unknown) => typeof arg !== 'function' ? (target.$transaction as any)(arg, opts)
+          : (target.$transaction as any)(async (tx: any) => {
+              await tx.$executeRawUnsafe('SET LOCAL plan_cache_mode = force_custom_plan');
+              await tx.$executeRawUnsafe('SET LOCAL enable_sort = off'); // the production-at-scale plan: HNSW serves the ranking
+              const t = new Proxy(tx, { get(tt, pp) {
+                const vv = Reflect.get(tt, pp);
+                if (pp === '$queryRaw') return (strings: TemplateStringsArray, ...vals: unknown[]) => { seen.push(strings.join('?')); return (vv as any).call(tt, strings, ...vals); };
+                if (pp === '$executeRawUnsafe') return (sql: string) => { sets.push(sql); return (vv as any).call(tt, sql); };
+                return typeof vv === 'function' ? vv.bind(tt) : vv;
+              } });
+              return (arg as (t: unknown) => unknown)(t);
+            }, opts);
+      },
+    }) as typeof db;
+  return { handle, seen, sets };
+}
 
 describe('#2772 fixture', () => {
   it('every spec vector ranks behind more than 2,000 and 1,000 review vectors', async () => {
@@ -146,5 +191,74 @@ describe('#2772 sort is page-local (option B)', () => {
     expect(new Set(ids(res))).toEqual(want);
     const locs = res.hits.map((h: any) => h.node.loc);
     expect(locs).toEqual([...locs].sort());
+  }, 60_000);
+});
+
+describe('#2772 access before page', () => {
+  it('a caller who cannot read a memory gets pages made only of readable nodes, offset counting only readable hits', async () => {
+    const ctx = { db, roles: [], userId: memberId } as unknown as Context;
+    const mine = await (resolvers.Query as any).findNodes(null, { query: 'q', mode: 'vector', limit: 3, offset: 3, filter: { role: 'spec' } }, ctx);
+    expect(ids(mine)).toEqual(await reference(`n.role = 'spec'`, 3, 3));
+    const first = await (resolvers.Query as any).findNodes(null, { query: 'q', mode: 'vector', limit: 8, filter: { role: 'spec' } }, ctx);
+    expect(ids(first).filter((id: string) => foreignSpecIds.includes(id))).toEqual([]);
+    expect(first.hits).toHaveLength(SPEC_N);
+  }, 60_000);
+});
+
+describe('#2772 the memory scope is a guard of the ranking statement itself', () => {
+  it('the provider, called with NO structured filter, never ranks a node of a memory outside memoryIds (node and chunk)', async () => {
+    const provider = getRetrievalProvider();
+    for (const kind of ['node', 'chunk'] as const) {
+      const o = { db, queryEmbedding: qvec(), memoryIds: [mem], limit: 12 };
+      const got = await (kind === 'node' ? provider.vectorSearch(o) : provider.vectorSearchChunks(o));
+      expect(got.length, kind).toBe(12);
+      expect(got.filter((h) => foreignSpecIds.includes(h.nodeId)), kind).toEqual([]);
+    }
+  }, 60_000);
+});
+
+describe('#2772 an older pgvector (the exact scan) still gives the true page and never refuses', () => {
+  it('with the version stubbed to 0.7.x: one log line, the deep filtered page is the true page, flagged only if it stops', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    resetIterativeScanLogForTests();
+    setIterativeScanSupportForTests(false);
+    try {
+      const { handle, seen, sets } = spyHandle();
+      const res = await (resolvers.Query as any).findNodes(null, { query: 'q', mode: 'vector', limit: 3, offset: 3, filter: { role: 'spec', memoryIds: [mem] } }, { db: handle, roles: ['ADMIN'], userId: 'admin-2772' } as Context);
+      await findNodes({ query: 'q', mode: 'vector', limit: 3, offset: 0, filter: { role: 'spec' } });
+      expect(ids(res)).toEqual(await reference(`n.role = 'spec'`, 3, 3));
+      // The exact scan served it: no iterative-scan setting was issued, and the exact statement ran.
+      expect(sets.filter((x) => x.includes('iterative_scan'))).toEqual([]);
+      expect(seen.some((q) => q.includes('MATERIALIZED'))).toBe(true);
+      expect(res.degraded ?? null).toBeNull();
+      const lines = log.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith('vector.iterative_scan_unsupported'));
+      expect(lines).toHaveLength(1);
+    } finally {
+      setIterativeScanSupportForTests(null);
+      resetIterativeScanLogForTests();
+      log.mockRestore();
+    }
+  }, 60_000);
+});
+
+describe('#2772 both surfaces give the same answer', () => {
+  it('GraphQL and MCP hadron_find_nodes return the same deep filtered page', async () => {
+    const mcp = createTestableMcpServer({ userId: 'admin-2772', roles: ['ADMIN'], clientId: 'user:admin-2772' });
+    const want = await reference(`n.role = 'spec'`, 3, 3);
+    const gql = await findNodes({ query: 'q', mode: 'vector', limit: 3, offset: 3, filter: { role: 'spec' } });
+    expect(ids(gql)).toEqual(want);
+    const out = await mcp.callToolText('hadron_find_nodes', { query: 'q', mode: 'vector', limit: 3, offset: 3, role: 'spec', memoryUrn: 'hrn:mem:r2772-org:r2772/mem' });
+    expect(out).not.toContain('[internal_server_error]');
+    expect((out.match(/^- \*\*/gm) ?? []).length).toBe(3);
+  }, 60_000);
+});
+
+describe('#2772 the iterative index scan, not the exact fallback, serves the deep filtered page', () => {
+  it('on pgvector >= 0.8 with the HNSW plan, the deep role page takes the strict-order iterative scan and no exact statement', async () => {
+    const { handle, seen, sets } = spyHandle();
+    const res = await (resolvers.Query as any).findNodes(null, { query: 'q', mode: 'vector', limit: 3, offset: 3, filter: { role: 'spec', memoryIds: [mem] } }, { db: handle, roles: ['ADMIN'], userId: 'admin-2772' } as Context);
+    expect(ids(res)).toEqual(await reference(`n.role = 'spec'`, 3, 3));
+    expect(sets).toContain('SET LOCAL hnsw.iterative_scan = strict_order');
+    expect(seen.filter((q) => q.includes('MATERIALIZED')), 'the iterative scan finished the page: no exact statement').toEqual([]);
   }, 60_000);
 });

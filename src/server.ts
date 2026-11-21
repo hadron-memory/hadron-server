@@ -102,6 +102,7 @@ import { startGitMirrorObligationSweepLoop } from './jobs/sweepGitMirrorObligati
 import { startOauthClientGcLoop } from './jobs/gcOauthClients.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
+import { checkPgvectorAtBoot } from './services/embedding/vectors.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
 import { startAssetBytesSweepLoop } from './jobs/sweepAssetBytes.js';
 import { startSessionKeySweepLoop } from './lib/sessionKeyCache.js';
@@ -1981,6 +1982,10 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   ) {
     startOrphanObjectReaperLoop(db);
   }
+
+  // #2772: read the pgvector version once so the `vector.iterative_scan_unsupported` line (older than 0.8.0)
+  // appears at startup. It never throws and never refuses to start: an older version just uses the exact scan.
+  if (process.env.NODE_ENV !== 'test') void checkPgvectorAtBoot(db);
 
   // Background job (#1140): hourly bounded sweep for Asset rows whose bytes are
   // missing from object storage — the mirror of the orphan sweep. Read-only

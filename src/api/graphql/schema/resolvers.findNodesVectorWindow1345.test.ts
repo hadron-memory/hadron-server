@@ -20,7 +20,7 @@ import type { EmbeddingClient } from '../../../lib/embedding/index.js';
 import { setEmbeddingClientForTests, resetEmbeddingClientForTests } from '../../../lib/embedding/index.js';
 import { embedNode } from '../../../jobs/embedNodes.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
-import { hnswEfSearchFor, vectorSearchChunks, vectorSearchNodes, vectorWindowExhausted } from '../../../services/embedding/vectors.js';
+import { hnswEfSearchFor, setIterativeScanSupportForTests, vectorSearchChunks, vectorSearchNodes } from '../../../services/embedding/vectors.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -156,7 +156,7 @@ describe.each([
     expect(res.hits.map((h: any) => h.node.id)).toEqual([match]);
   });
 
-  it('the provider reports exhaustion only when the window held everything AND nothing was truncated', async () => {
+  it('#2772: the provider reports exhaustion only when the ranking is provably the whole set (a short page); a full page never is', async () => {
     const provider = getRetrievalProvider();
     const q = new Array(768).fill(0); q[1] = 1;
     const exhausted = async (kind: 'node' | 'chunk', limit: number) => {
@@ -167,23 +167,15 @@ describe.each([
     };
     // 9 one-chunk nodes. limit 20: the window holds all 9, nothing is cut.
     expect([await exhausted('node', 20), await exhausted('chunk', 20)]).toEqual([true, true]);
-    // limit 1: the window (10) still holds all 9, but LIMIT 1 truncates: NOT exhausted.
+    // limit 1: the page is full, more exist: NOT exhausted.
     expect([await exhausted('node', 1), await exhausted('chunk', 1)]).toEqual([false, false]);
-    // One node whose chunks outnumber the window: node search dedupes to few hits, yet NOT exhausted.
+    // One node whose many chunks outnumber the first iteration: node search dedupes to ONE node, and with no
+    // window the scan keeps going until the whole set is ranked, so a 5-page over one node IS exhausted
+    // (#2772; before it, a capped window had to answer "not exhausted").
     await db.memory.update({ where: { id: memId }, data: { chunkTokens: 8, chunkOverlap: 0 } });
     await db.node.deleteMany({ where: { memoryId: memId } });
     await seed(memId, 'many', Array.from({ length: 400 }, (_, i) => `near${i}`).join(' '));
-    expect(await exhausted('node', 5)).toBe(false);
-  });
-
-  it('exhaustion is judged against an INDEPENDENT eligible count, never a short scan (@codex round 6)', () => {
-    // The HNSW case the tiny test DB cannot produce (it seq-scans): a filtered
-    // index scan visits ef_search candidates, returns 40 of a 50-row window,
-    // while 1000 eligible rows exist. Short is not exhausted.
-    expect(vectorWindowExhausted({ windowRows: 40, eligibleRows: 1000, truncated: false })).toBe(false);
-    expect(vectorWindowExhausted({ windowRows: 9, eligibleRows: 9, truncated: false })).toBe(true);
-    // Everything fetched but the final LIMIT cut some: not exhausted.
-    expect(vectorWindowExhausted({ windowRows: 9, eligibleRows: 9, truncated: true })).toBe(false);
+    expect(await exhausted('node', 5)).toBe(true);
   });
 
   it('CONTROL: with no filter the nearest node wins and nothing widens', async () => {
@@ -215,14 +207,23 @@ describe('@codex round 7 — a wider window is a deeper HNSW scan', () => {
     expect([hnswEfSearchFor(10), hnswEfSearchFor(50), hnswEfSearchFor(200), hnswEfSearchFor(20000)]).toEqual([40, 50, 200, 1000]);
   });
 
-  it('each vector query sets it for its own window, in its own transaction', async () => {
+  it('each vector query sets its horizon, budget and iterative scan for its own window, in its own transaction', async () => {
     const sets: string[] = [];
     const tx = { $executeRawUnsafe: async (sql: string) => { sets.push(sql); return 0; }, $queryRaw: async () => [] };
     const fake = { $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx), $queryRaw: async () => [{ n: 0 }] } as any;
     const q = new Array(768).fill(0); q[1] = 1;
-    await vectorSearchNodes(fake, { memoryIds: ['m'], queryEmbedding: q, limit: 5 }); // candidateK 50
-    await vectorSearchChunks(fake, { memoryIds: ['m'], queryEmbedding: q, limit: 20 }); // candidateK 200
-    expect(sets).toEqual(['SET LOCAL hnsw.ef_search = 50', 'SET LOCAL hnsw.ef_search = 200']);
+    setIterativeScanSupportForTests(true);
+    try {
+      await vectorSearchNodes(fake, { memoryIds: ['m'], queryEmbedding: q, limit: 5 }); // candidateK 50
+      await vectorSearchChunks(fake, { memoryIds: ['m'], queryEmbedding: q, limit: 20 }); // candidateK 20
+    } finally {
+      setIterativeScanSupportForTests(null);
+    }
+    expect(sets).toContain('SET LOCAL hnsw.ef_search = 50');
+    expect(sets).toContain('SET LOCAL hnsw.iterative_scan = strict_order');
+    expect(sets).toContain('SET LOCAL statement_timeout = 5000');
+    // Only SET LOCAL: nothing reaches a pooled connection's session.
+    expect(sets.every((x) => x.startsWith('SET LOCAL '))).toBe(true);
   });
 });
 

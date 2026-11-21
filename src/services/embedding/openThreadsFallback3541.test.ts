@@ -72,15 +72,19 @@ function probe(shortfall: boolean) {
       if (prop !== '$queryRaw') return typeof v === 'function' ? v.bind(t) : v;
       return async (strings: TemplateStringsArray, ...vals: unknown[]) => {
         const sql = Array.isArray(strings) ? strings.join('?') : '';
-        // #3675: only the two ANN statements run in this transaction (vectors.ts withEfSearch): the node ANN carries
-        // `ann_rows`, the chunk ANN `ne.chunk_index`. Anything else is a new in-transaction query this harness would
-        // otherwise answer `[]` and mislabel, so it fails loudly before it runs.
-        const annKind = sql.includes('ann_rows') ? 'node' : sql.includes('ne.chunk_index') ? 'chunk' : null;
-        if (!annKind) throw new Error(`unexpected in-transaction SQL: ${sql.trim().replace(/\s+/g, ' ').slice(0, 80)}`);
+        // #2772: every vector statement runs in the budgeted transaction (vectors.ts withVectorBudget): the iterative
+        // ANN scan (ORDER BY the distance), the independent eligible count and the MATERIALIZED exact scan. Only the
+        // ANN statement is intercepted; anything else unrecognised fails loudly before it runs.
+        const isExact = sql.includes('MATERIALIZED');
+        const isCount = sql.includes('count(*)::int AS n');
+        const isAnn = !isExact && !isCount && sql.includes('ORDER BY ne.embedding');
+        if (!isExact && !isCount && !isAnn) throw new Error(`unexpected in-transaction SQL: ${sql.trim().replace(/\s+/g, ' ').slice(0, 80)}`);
         const real = await (v as any).call(t, strings, ...vals);
-        if (!shortfall) return real;
+        if (isExact) seen.exactCalls++;
+        if (isCount) seen.counts.push(Number((real as any[])[0]?.n));
+        if (!isAnn || !shortfall) return real;
         seen.annIntercepted++;
-        seen.annKind = annKind;
+        seen.annKind = sql.includes('ne.chunk_index') ? 'chunk' : 'node';
         seen.annRealRows = (real as unknown[]).length;
         return [];
       };
@@ -93,15 +97,6 @@ function probe(shortfall: boolean) {
         return (arg: unknown, opts?: unknown) => typeof arg !== 'function'
           ? (target.$transaction as any)(arg, opts)
           : (target.$transaction as any)((tx: any) => (arg as any)(txProxy(tx)), opts);
-      }
-      if (prop === '$queryRaw') {
-        return async (strings: TemplateStringsArray, ...vals: unknown[]) => {
-          const sql = Array.isArray(strings) ? strings.join('?') : '';
-          const out = await (v as any).call(target, strings, ...vals);
-          if (sql.includes('MATERIALIZED')) seen.exactCalls++;
-          else if (sql.includes('count(*)::int AS n')) seen.counts.push(Number((out as any[])[0]?.n));
-          return out;
-        };
       }
       return typeof v === 'function' ? v.bind(target) : v;
     },
@@ -121,7 +116,6 @@ for (const [value, expectedNames, limit] of [[true, ['e1', 'e2'], 2], [false, ['
       const eligible = expectedNames.length;
 
       it('control: with no interception the normal full ANN page takes NO fallback (so the branch-entry oracle is real)', async () => {
-        vi.stubEnv('VECTOR_EXACT_FALLBACK_MAX_ROWS', String(eligible));
         const { handle, seen } = probe(false);
         const hits = await call(handle);
         expect(names(hits.map((h) => h.nodeId))).toEqual(expectedNames);
@@ -130,7 +124,6 @@ for (const [value, expectedNames, limit] of [[true, ['e1', 'e2'], 2], [false, ['
       });
 
       it('interception: real ANN returned a full page, the real count and MATERIALIZED statements ran once, and the final result is exact', async () => {
-        vi.stubEnv('VECTOR_EXACT_FALLBACK_MAX_ROWS', String(eligible)); // the per-call bound equals the known eligible count
         const { handle, seen } = probe(true);
         const hits = await call(handle);
         // Exactly the intended ANN arm, once; the real statement had returned a full requested page.
