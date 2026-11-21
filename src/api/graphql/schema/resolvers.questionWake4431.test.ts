@@ -15,6 +15,8 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { questionDataSchema } from '../../../lib/questions/codec.js';
 import { pendingTaskWakes } from '../../../lib/agentTasks/taskWakes.js';
 import { resolvers, type Context } from './resolvers.js';
+import { createTestableMcpServer } from '../../../mcp/server.js';
+import type { AuthContext } from '../../../middleware/auth.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -405,6 +407,24 @@ describe('#4431 §6: an answer is passive history', () => {
       await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type, actorWorkerId: asker.id, actorUserId: holder.id, payload: {} } });
     }
     expect((await wakesOf(asker.id)).map((w) => w.event)).toContain('ASSIGNED');
+  });
+});
+
+describe('#4431 §4: hadron_ask_question takes taskRef (S6 #4643 merged first)', () => {
+  const mcp = () => createTestableMcpServer(
+    { userId: holder.id, roles: ['READER'], clientId: `user:${holder.id}` } as AuthContext,
+    { sessionId: `q-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } },
+  );
+  it('a worker session links its own open task through MCP; another worker\'s task is [question_invalid]', async () => {
+    const t = await mkTask();
+    const text = await asWorker(asker.id, () => mcp().callToolText('hadron_ask_question', { logRef: logId, ...ASK, taskRef: t.handle }));
+    expect(text).toMatch(/^Asked /);
+    const stored = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, role: 'question' }, orderBy: { seq: 'desc' } });
+    expect(questionDataSchema.parse(stored.data).taskId).toBe(t.id);
+    const others = await mkTask({ assigneeWorkerId: bea.id });
+    const refused = await asWorker(asker.id, () => mcp().callToolText('hadron_ask_question', { logRef: logId, ...ASK, taskRef: others.id }));
+    expect(refused).toMatch(/^\[question_invalid\]/);
+    expect(refused).toContain(LINK_MESSAGE);
   });
 });
 
