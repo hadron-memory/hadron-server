@@ -87,6 +87,11 @@ describe('portalUrlForUrn', () => {
     expect(portalUrlForUrn(URN)).toBeNull();
   });
 
+  it.each(['a/b', 'a?b', 'a#b', 'a\\b', 'a b'])('is null for a urn a path cannot carry (%j): no re-pointed path, query, fragment or broken href', (atom) => {
+    setBase('https://hadronmemory.com');
+    expect(portalUrlForUrn(`hrn:mem:acme.com:${atom}`)).toBeNull();
+  });
+
   it('is null for an empty URN', () => {
     setBase('https://hadronmemory.com');
     expect(portalUrlForUrn('   ')).toBeNull();

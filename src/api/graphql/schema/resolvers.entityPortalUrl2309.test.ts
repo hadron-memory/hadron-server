@@ -6,7 +6,7 @@
  *      v1 double-colon row (never the stored spelling);
  *   3  an unset or malformed origin is null; no localhost guess;
  *   4  a stored value whose emission throws (the raw bare value is served as `urn`) is null, not a link;
- *   4b an unrenderable stored value that itself starts with `hrn:` (the raw fallback looks canonical) is null too (LOCAL P2 on #4654);
+ *   4b an unrenderable stored value that itself starts with `hrn:` (the raw fallback looks canonical) is null too;
  *   5  a urn holding a character a link cannot carry is null; an empty or missing urn is null, never an empty string;
  *   6  through the GraphQL executor, a member reads each kind's link and an outsider gets no row (the existing read gate answers first; the field reads nothing itself).
  */
@@ -67,7 +67,7 @@ describe.each(KINDS)('#2309 %s.portalUrl', (kind) => {
     } finally { warn.mockRestore(); }
   });
 
-  it('is null when the unrenderable stored value itself starts with hrn: (the raw fallback looks canonical, LOCAL P2 on #4654)', () => {
+  it('is null when the unrenderable stored value itself starts with hrn: (the raw fallback looks canonical)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
       for (const stored of ['hrn:app:acme.com:::', 'hrn:mem:acme.com:::', 'hrn:agent:acme.com:::']) {
@@ -119,7 +119,7 @@ describe('#2309 read gate, through the GraphQL executor', () => {
         const row = seen.data![q]!;
         expect(row.urn.startsWith('hrn:'), kind).toBe(true);
         expect(row.portalUrl, kind).toBe(`${ORIGIN}/app/u/${row.urn}`);
-        // BLIND P2 (Beatrix) on #4654: selecting portalUrl ALONE (no urn in the selection) still yields the link, because the
+        // Selecting portalUrl ALONE (no urn in the selection) still yields the link, because the
         // parent row carries urn whatever the selection is (the urn field itself is `String!` and throws on a parent without it).
         const alone = await run(`query($ref: ID!){ ${q}(ref: $ref){ portalUrl } }`, ref, member.id);
         expect(alone.errors, kind).toBeUndefined();

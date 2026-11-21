@@ -1152,6 +1152,14 @@ function aiConfigWarnOnce(ctx: Context): (msg: string) => void {
  * throws (`safeCanonicalUrn`), and a raw value can itself start with `hrn:` (a stored `hrn:app:acme.com:::`), so the prefix does not
  * tell emission from fallback. This calls the strict emitter the field's wrapper calls and answers null when it throws: only a
  * successfully emitted canonical urn is a link. An unset or malformed portal origin is null too.
+ *
+ * Why the two cannot drift: for memory, agent and app `safeCanonicalUrn` delegates to `safeEntityUrnV2`, which is
+ * `try { emitEntityUrnV2 } catch { raw stored value }`. This function calls the same `emitEntityUrnV2`, so the emitted string is
+ * identical; the ONLY difference is the catch arm (the field serves the raw value, the link serves null).
+ *
+ * `portalUrlForUrn`'s `[/?#\\s]` guard is therefore unreachable from here: `emitEntityUrnV2` already throws on a space, `?`, `#`, `/` and `\`
+ * in a stored value, so such a value takes the catch arm above before the guard sees it. The guard stays as defence in depth for
+ * callers that pass an unvalidated urn (`bestEffortFlatNodeUrn`); `portalUrl.test.ts` pins it directly.
  */
 function portalUrlOfEntity(kind: 'memory' | 'agent' | 'app', stored: string | null | undefined): string | null {
   if (!stored) return null;
