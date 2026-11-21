@@ -1,12 +1,9 @@
 /**
- * #4260 — the targeted desired-worker read: an optional worker selector on hostDesiredState that returns only the
- * selected worker's row from the host's own list, with the same gates, refusals, key-use recording and row semantics
- * as the host-wide read.
- *
- * THE CONCEALMENT RULE (Victor's FIT, cor:agt:070:04 with cor:agt:020:08): a worker this host does not run — another
- * host's, a retired worker not on this host, or an unknown id or name — answers EXACTLY like an unknown worker: the
- * same empty workers list, with no distinguishing code, message or metadata. A retired worker this host still lists
- * keeps its row (that is the row parity the host-wide read already gives).
+ * #4260 — the targeted desired-worker read: an optional worker selector on hostDesiredState that narrows the
+ * rows returned to the workers of the host's own list it names — at most one row, by id or by name — with the
+ * same gates, refusals, key-use recording and row semantics as the host-wide read. The contract's full
+ * statement (precedence, the one-row basis and the cor:agt:020:08 concealment of not-run and unknown workers)
+ * lives in the SDL and loadHostDesiredState's doc; the tests below pin it.
  *
  * Cast: mirrors resolvers.desiredState4224.test.ts. Ada (LONG_LIVED) and Kit (SHORT_LIVED) on orca1; Zoe
  * (SHORT_LIVED) on orca2 — Zoe is the off-host worker. Sweep mode OBSERVE unless a test says otherwise.
@@ -65,7 +62,7 @@ type State = { hostId: string; sweepMode: string; workers: Row[] };
 /** The host read, with the #4260 selector when given (undefined = the host-wide discovery read). */
 const state = (hostId = 'orca1', worker?: string, c: Context = ctx(admin.id)) =>
   Q.hostDesiredState({}, { appRef: app.id, hostId, ...(worker !== undefined ? { worker } : {}) }, c) as Promise<State>;
-const rowOf = async (wide: State, w: { id: string }): Promise<Row> => {
+const rowOf = (wide: State, w: { id: string }): Row => {
   const r = wide.workers.find((x) => x.workerId === w.id);
   if (!r) throw new Error('worker not in the host-wide answer');
   return r;
@@ -133,14 +130,14 @@ describe('#4260 targeted desired-worker read: the selected row', () => {
     expect(selAda.hostId).toBe('orca1');
     expect(selAda.sweepMode).toBe(wide.sweepMode);
     expect(selAda.workers).toHaveLength(1);
-    expect(selAda.workers[0]).toEqual(await rowOf(wide, ada));
+    expect(selAda.workers[0]).toEqual(rowOf(wide, ada));
     expect(selAda.workers[0].openSessionId).toBe(s.id);
     expect(selAda.workers[0].family).toBe('claude');
     expect(selAda.workers[0].worktrees).toEqual(['hadron-server/ada']);
     // The no-open-session row parity: Kit has none.
     const selKit = await state('orca1', kit.id);
     expect(selKit.workers).toHaveLength(1);
-    expect(selKit.workers[0]).toEqual(await rowOf(wide, kit));
+    expect(selKit.workers[0]).toEqual(rowOf(wide, kit));
     expect(selKit.workers[0].openSessionId).toBeNull();
     // The host-wide discovery read is unchanged when no selector is given.
     expect(wide.workers.map((r) => r.name)).toEqual(['Ada', 'Kit']);
@@ -154,9 +151,9 @@ describe('#4260 targeted desired-worker read: the selected row', () => {
   });
 
   it("an exact id match wins when another listed worker's name equals that id — one row, not two (BLIND P2)", async () => {
-    // Worker names are not unique and ids are free-form, so one listed worker's exact name can equal another's id.
-    // The selector promises one row: the id interpretation of the string wins, and a name-shaped reading of the
-    // same selector must not widen the answer to the name-matched row too.
+    // Ids are free-form, so one listed worker's exact NAME can equal another's ID — the one string
+    // with two interpretations. The id interpretation wins, and the name-shaped reading of the same
+    // selector must not widen the answer to the name-matched row too.
     const echo = await db.worker.create({
       data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: shortAgentId, name: ada.id, slug: `echo-${ada.id}`, heldByUserId: member.id, heldAt: new Date() },
       select: { id: true },
@@ -168,9 +165,28 @@ describe('#4260 targeted desired-worker read: the selected row', () => {
     const wide = await state();
     const sel = await state('orca1', ada.id);
     expect(sel.workers).toHaveLength(1);
-    expect(sel.workers[0]).toEqual(await rowOf(wide, ada));
+    expect(sel.workers[0]).toEqual(rowOf(wide, ada));
     // Selecting the name-carrying worker by ITS id is the normal one-row answer, unaffected.
     expect((await state('orca1', echo.id)).workers.map((r) => r.workerId)).toEqual([echo.id]);
+  });
+
+  it('the one-row name promise rests on the database: a second same-named worker in an App is refused (BLIND P2)', async () => {
+    // A name selector can promise AT MOST ONE row because `workers_app_name_uniq` — a functional
+    // unique on (app_id, lower(name)) that Prisma's schema cannot express (prisma/post-push.sql and
+    // migration 20260814130000; the cast path's allocation primitive, pinned in
+    // resolvers.worker.test.ts) — makes duplicate names in one App impossible, case-insensitively,
+    // retired workers included. selectRows' unit test pins the total read semantics (a database
+    // that ever held duplicates would get every same-named row) for a reader who cannot see the DDL.
+    const dup = (name: string, slug: string) =>
+      db.worker.create({
+        data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: shortAgentId, name, slug, heldByUserId: member.id, heldAt: new Date() },
+        select: { id: true },
+      });
+    await expect(dup('Kit', 'kit-dup')).rejects.toMatchObject({ code: 'P2002' });
+    await expect(dup('KIT', 'kit-dup-ci')).rejects.toMatchObject({ code: 'P2002' }); // case-insensitive.
+    // The selector's own name match stays exact-case: 'KIT' selects nothing — the same concealed
+    // empty answer as an unknown name, never a case-folded hit.
+    expect((await state('orca1', 'KIT')).workers).toEqual([]);
   });
 
   it('a whitespace-only selector is no selector: the full host-wide list returns', async () => {
@@ -185,7 +201,7 @@ describe('#4260 targeted desired-worker read: the selected row', () => {
     const wide = await state();
     const sel = await state('orca1', ada.id);
     expect(sel.workers).toHaveLength(1);
-    expect(sel.workers[0]).toEqual(await rowOf(wide, ada));
+    expect(sel.workers[0]).toEqual(rowOf(wide, ada));
     expect(sel.workers[0].reason).toBe('RETIRED');
     expect(sel.workers[0].desired).toBe('STOPPED');
     expect(sel.workers[0].name).toBe('Ada');
@@ -197,14 +213,14 @@ describe('#4260 targeted desired-worker read: the selected row', () => {
     const offWide = await state();
     const offSel = await state('orca1', kit.id);
     expect(offSel.workers).toHaveLength(1);
-    expect(offSel.workers[0]).toEqual(await rowOf(offWide, kit));
+    expect(offSel.workers[0]).toEqual(rowOf(offWide, kit));
     expect(offSel.workers[0]).toMatchObject({ desired: null, reason: 'SWEEP_OFF', wouldBe: 'RUNNING', wouldBeReason: 'HOLDS_TASK' });
     await sweep('OBSERVE');
     await leaveAlone(ada, true, ctx(admin.id), 'why');
     const laWide = await state();
     const laSel = await state('orca1', ada.id);
     expect(laSel.workers).toHaveLength(1);
-    expect(laSel.workers[0]).toEqual(await rowOf(laWide, ada));
+    expect(laSel.workers[0]).toEqual(rowOf(laWide, ada));
     expect(laSel.workers[0]).toMatchObject({ desired: null, reason: 'LEAVE_ALONE', wouldBe: 'RUNNING', wouldBeReason: 'LONG_LIVED' });
   });
 });
@@ -242,6 +258,16 @@ describe('#4260 the gates, refusals and recording are the host-wide read\'s', ()
 
   it('a key whose host:operate scope was revoked reads no host, its former one included', async () => {
     expect(await code(state('orca1', ada.id, keyCtx(revokedScopeKey)))).toBe('HOST_NOT_FOUND');
+  });
+
+  it('a key that never held host:operate reads through the selector exactly as without it — no host gate gained, none bypassed', async () => {
+    // The host gate keys on EVER-held host:operate; plainKey never held any scope, so it stays an
+    // ordinary App key reading any of the App's hosts (the host-wide read's own rule, pinned in
+    // resolvers.desiredState4224.test.ts) — the selector narrows only the rows it returns.
+    const onOwn = await state('orca1', ada.id, keyCtx(plainKey));
+    expect(onOwn.workers.map((r) => r.workerId)).toEqual([ada.id]);
+    const onOther = await state('orca2', zoe.id, keyCtx(plainKey));
+    expect(onOther.workers.map((r) => r.workerId)).toEqual([zoe.id]);
   });
 
   it('an outsider and another App\'s key get the App-not-found answer', async () => {
@@ -285,6 +311,21 @@ describe('#4260 the SDL declares the optional worker argument', () => {
       expect(r.body.singleResult.errors).toBeUndefined();
       expect((r.body.singleResult.data as any).hostDesiredState.workers).toHaveLength(1);
       expect((r.body.singleResult.data as any).hostDesiredState.workers[0]).toMatchObject({ name: 'Kit' });
+    } finally {
+      await api.stop();
+    }
+  });
+
+  it('an explicit null worker over the wire is the omitted form: the full host list returns (BLIND P3)', async () => {
+    const api = new ApolloServer<Context>({ typeDefs, resolvers });
+    await api.start();
+    try {
+      const q = `query($appRef: String!, $hostId: String!, $worker: String) {
+        hostDesiredState(appRef: $appRef, hostId: $hostId, worker: $worker) { hostId sweepMode workers { workerId name desired reason } } }`;
+      const r = await api.executeOperation({ query: q, variables: { appRef: app.id, hostId: 'orca1', worker: null } }, { contextValue: ctx(admin.id) });
+      if (r.body.kind !== 'single') throw new Error('unexpected incremental response');
+      expect(r.body.singleResult.errors).toBeUndefined();
+      expect((r.body.singleResult.data as any).hostDesiredState.workers.map((w: Row) => w.name)).toEqual(['Ada', 'Kit']);
     } finally {
       await api.stop();
     }
