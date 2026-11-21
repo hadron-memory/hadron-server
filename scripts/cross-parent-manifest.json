@@ -42,6 +42,7 @@
     "SkillPlanUnrecognized": "value",
     "NodeBatchResult": "envelope",
     "Passage": "value",
+    "NodeMoveEdgeUrnChange": "value",
     "NodeMoveLinkWarning": "value",
     "NodeMovePlan": "envelope",
     "NodeMovePlanEntry": "value",
