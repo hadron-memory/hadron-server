@@ -21,7 +21,7 @@ vi.mock('../../config.js', async importOriginal => ({
   get GRAPHS_PATH() { return paths.root; },
 }));
 vi.mock('./gitBranch.js', () => ({ prepareWriteBranch: vi.fn(async () => {}) }));
-vi.mock('./execGit.js', () => ({ execGit: vi.fn() }));
+vi.mock('./execGit.js', async importOriginal => ({ ...await importOriginal<typeof import('./execGit.js')>(), execGit: vi.fn() }));
 vi.mock('./githubApp.js', () => ({ getInstallationToken: vi.fn(async () => 'fixture-token'), toHttpsUrl: (source: string) => source }));
 
 let n = 0;
@@ -32,12 +32,14 @@ async function org(installed: boolean) {
 async function memory(over: { organizationId?: string | null; source?: string | null; syncStatus?: 'SYNCING' | 'PENDING' | 'OK' | 'ERROR';
   isEncrypted?: boolean; deleted?: boolean } = {}) {
   n += 1;
+  // A memory is owned by an organization or by a user (chk_memory_owner_xor).
+  const owner = over.organizationId ? null : (await db.user.create({ data: { handle: `rs-owner-${n}`, roles: ['READER'] } })).id;
   const m = await db.memory.create({ data: {
-    organizationId: over.organizationId ?? null, class: 'knowledge', name: `m${n}`, urn: `rs.test:m${n}`,
+    organizationId: over.organizationId ?? null, ownerUserId: owner, class: 'knowledge', name: `m${n}`, urn: `rs.test:m${n}`,
     source: over.source === undefined ? null : over.source, syncStatus: over.syncStatus ?? 'SYNCING',
     // History a reconciliation must keep exactly (ruling 0223).
     syncError: 'earlier error', lastSyncedAt: new Date('2026-01-02T03:04:05.678Z'),
-    lastSyncReport: { v: 1, outcome: 'partial', entries: [] },
+    lastSyncReport: JSON.stringify({ v: 1, outcome: 'partial', entries: [] }),
     ...(over.isEncrypted ? { isEncrypted: true } : {}),
     ...(over.deleted ? { deletedAt: new Date('2026-02-03T00:00:00Z'), deletedBy: 'test' } : {}),
   } });
