@@ -6,6 +6,7 @@
  * answer outright, so a gate that changed under both sides at once cannot pass silently.
  */
 import { GraphQLError } from 'graphql';
+import { isReadOnlyImpersonation } from '../impersonationReadOnlyPlugin.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { PrismaClient } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
@@ -76,7 +77,7 @@ describe('#606 Memory.canWrite equals the write gate (matrix)', () => {
         const id = { shared: shared.id, private: privOwnedByOwner.id, personal: personalOwnedByOwner.id }[which];
         const c0 = mkCtx();
         // The gate's answer, except that a read-only impersonation session can write nothing at all.
-        const expected = (c0 as any).impersonation ? false : await gateAllows(c0, id);
+        const expected = isReadOnlyImpersonation(c0) ? false : await gateAllows(c0, id);
         expect(await M.canWrite({ id }, {}, mkCtx())).toBe(expected);
       });
     }
@@ -150,8 +151,10 @@ describe('#606 query cost of memories(limit: 50)', () => {
     // Count the gate's queries PER MEMORY (a query counts for a memory when its bound parameters carry that id), not
     // the database total: the total jitters with pool/connection housekeeping, a per-memory count does not.
     let perId = new Map<string, number>();
+    let total = 0;
     let watched: string[] = [];
     (logged as any).$on('query', (e: { params: string }) => {
+      total += 1;
       for (const id of watched) if (e.params.includes(id)) perId.set(id, (perId.get(id) ?? 0) + 1);
     });
     try {
@@ -164,14 +167,21 @@ describe('#606 query cost of memories(limit: 50)', () => {
       const fresh = () => ({ db: logged, userId: u.contributor.id, roles: ['READER'] }) as unknown as Context;
       // A: each distinct memory once. B: every memory twice, on one fresh request context.
       perId = new Map();
+      total = 0;
       const once = await Promise.all(ids.map((id) => M.canWrite({ id }, {}, fresh())));
       await flushQueryEvents();
       const countsA = perId;
+      const totalA = total;
+      total = 0;
       perId = new Map();
       const cB = fresh();
       const twice = await Promise.all([...ids, ...ids].map((id) => M.canWrite({ id }, {}, cB)));
       await flushQueryEvents();
       const countsB = perId;
+      const totalB = total;
+      // Window totals catch what the per-memory count cannot see: a lookup keyed by user or org, repeated per memory.
+      expect(totalA).toBeLessThanOrEqual(50 * 12);
+      expect(totalB).toBeLessThanOrEqual(50 * 12);
       expect(once.every(Boolean)).toBe(true);
       expect(twice.every(Boolean)).toBe(true);
       for (const id of ids) {

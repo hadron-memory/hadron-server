@@ -86,6 +86,7 @@ import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import type { WriteDestination } from '../../../lib/appWriteGrant.js';
 import { assertLinkAllowedForPublicAgent, isExcludedFromCoveredSet } from '../../../lib/agentPublicCongruence.js';
 import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
+import { isReadOnlyImpersonation } from '../impersonationReadOnlyPlugin.js';
 import { GraphQLError } from 'graphql';
 import { isLifecycleActive, type LifecycleLike } from '@hadron-memory/access-control';
 import {
@@ -3055,6 +3056,10 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
  * `Memory.canWrite` field turns it into null (unknown) so one memory cannot null a list. A caller with no
  * identity at all (no user, no App) cannot write, which is the gate's own unauthenticated answer.
  *
+ * NOT the raw gate answer: it answers the `Memory.canWrite` FIELD, so it is false for any read-only impersonation
+ * session even where `requireMemoryWriteAccess` alone would allow the target. A caller that needs the gate's own
+ * answer calls the gate. Its only caller is the field resolver.
+ *
  * Memoised per request context: a list of N memories asks the gate once per distinct memory, and a memory that
  * appears twice in one response (list item and a nested copy) is answered once. The memo lives only on the request's
  * context object, so it is never shared across principals or requests.
@@ -3063,7 +3068,7 @@ const memoryCanWriteMemo = new WeakMap<object, Map<string, Promise<boolean>>>();
 export function canWriteMemoryRecord(ctx: Context, memoryId: string): Promise<boolean> {
   // A read-only impersonation session refuses every mutation but stopImpersonation (impersonationReadOnlyPlugin), so
   // no write to any memory would succeed: the gate alone would say true, which is not what the field promises.
-  if (ctx.impersonation) return Promise.resolve(false);
+  if (isReadOnlyImpersonation(ctx)) return Promise.resolve(false);
   let perRequest = memoryCanWriteMemo.get(ctx);
   if (!perRequest) {
     perRequest = new Map();

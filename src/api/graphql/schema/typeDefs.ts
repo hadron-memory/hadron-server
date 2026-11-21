@@ -4390,7 +4390,7 @@ export const typeDefs = `#graphql
     """
     maxRevCount: Int!
     """
-    #606 — whether the CALLER may write to this memory: true exactly when a write to it would succeed for the request's own principal
+    #606 — whether the CALLER may write to this memory: true exactly when a write to it would be allowed for the request's own principal
     (user, App key or run): not refused by the memory write gate, and never true in a read-only impersonation session,
     where every mutation is refused. It says nothing about
     other users, and a Memory is only reachable here when the caller may already read it. Lets a write-target
