@@ -153,6 +153,26 @@ describe('#4260 targeted desired-worker read: the selected row', () => {
     expect(byName.workers).toEqual(byId.workers);
   });
 
+  it("an exact id match wins when another listed worker's name equals that id — one row, not two (BLIND P2)", async () => {
+    // Worker names are not unique and ids are free-form, so one listed worker's exact name can equal another's id.
+    // The selector promises one row: the id interpretation of the string wins, and a name-shaped reading of the
+    // same selector must not widen the answer to the name-matched row too.
+    const echo = await db.worker.create({
+      data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: shortAgentId, name: ada.id, slug: `echo-${ada.id}`, heldByUserId: member.id, heldAt: new Date() },
+      select: { id: true },
+    });
+    await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 1', pollIntervalSeconds: 600, workers: [
+      { worker: ada.id, family: 'claude', worktrees: ['hadron-server/ada'] },
+      { worker: echo.id, family: 'codex', worktrees: ['hadron-server/echo'] },
+    ] } }, keyCtx(orca1));
+    const wide = await state();
+    const sel = await state('orca1', ada.id);
+    expect(sel.workers).toHaveLength(1);
+    expect(sel.workers[0]).toEqual(await rowOf(wide, ada));
+    // Selecting the name-carrying worker by ITS id is the normal one-row answer, unaffected.
+    expect((await state('orca1', echo.id)).workers.map((r) => r.workerId)).toEqual([echo.id]);
+  });
+
   it('a whitespace-only selector is no selector: the full host-wide list returns', async () => {
     const blank = await state('orca1', '   ');
     const wide = await state();
