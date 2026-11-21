@@ -372,6 +372,24 @@ describe('#4431 §5: who is not woken', () => {
   });
 });
 
+describe('#4431 §5: a dead App wakes nobody (Dara P3)', () => {
+  it.each([
+    ['uninstalled', () => db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } })],
+    ['deleted', () => db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } })],
+    ['in a deleted org', async () => {
+      const a = await db.app.findUniqueOrThrow({ where: { id: app.id }, select: { organizationId: true } });
+      await db.organization.update({ where: { id: a.organizationId! }, data: { deletedAt: new Date() } });
+    }],
+  ] as const)('an answer on a task whose App is %s is recorded but wakes nobody', async (_label, kill) => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    await answer(q.row.id, q.row.revSeq);
+    expect(await wakesOf(asker.id)).toHaveLength(1);
+    await kill();
+    expect(await wakesOf(asker.id)).toEqual([]);
+  });
+});
+
 describe('#4431 §6: an answer is passive history', () => {
   it('a question.answered event does not suppress the assignee\'s undelivered ASSIGNED wake', async () => {
     const t = await mkTask({ status: 'pending', startedAt: null });
