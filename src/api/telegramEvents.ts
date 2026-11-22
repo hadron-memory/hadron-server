@@ -107,6 +107,8 @@ export async function dispatchTelegramEvent(event: InboundTelegramEvent): Promis
     select: { id: true, organizationId: true, appId: true, provider: true, toolConnectionId: true, botUsername: true },
   });
   if (!connection) {
+    // KNOWN GAP (deferred to #4829): an event that arrives before core's row exists (the tool starts polling at registration) is
+    // acknowledged and dropped here; closing it needs a tool-side change.
     console.log(`[telegram-events] ${event.event} for unknown tool connection ${event.connectionId}, dropped`);
     return;
   }

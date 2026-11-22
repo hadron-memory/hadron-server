@@ -62,7 +62,13 @@ export const telegramMutations = {
         },
       });
     } catch (err) {
-      void deleteTelegramToolConnection('telegram', identity.id);
+      // Tear the tool row down only if no live core row already holds that tool id: if the tool ever handed back an
+      // id the winner owns, deleting it would kill the winner's bot. (The tool today refuses a duplicate bot with a
+      // 400 and never returns an existing id; this guard does not depend on that.) A failed lookup skips the teardown.
+      const heldByCore = await ctx.db.telegramConnection
+        .count({ where: { toolConnectionId: identity.id, deletedAt: null } })
+        .then((n) => n > 0, () => true);
+      if (!heldByCore) void deleteTelegramToolConnection('telegram', identity.id);
       // A concurrent duplicate meets the PARTIAL unique (telegram_connections_app_active_uniq): same answer as the pre-check.
       // Two partial uniques can refuse the write: one ACTIVE connection per App and one per bot. Do not read the driver's
       // target spelling; ask the database which one holds: the App has a live row, or the bot is taken elsewhere.

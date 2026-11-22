@@ -166,6 +166,26 @@ describe('createTelegramConnection', () => {
     await expect(create(undefined, app2.id)).resolves.toMatchObject({ appId: app2.id, botId: '99' });
   });
 
+  it('a tool id already held by a live core row is NOT torn down by a refused create (the winner keeps its bot)', async () => {
+    await create(); // App 1 holds tool-conn-1
+    const app2 = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'tg-app3', urn: 'tg-org::tg-app3' } });
+    vi.mocked(deleteTelegramToolConnection).mockClear();
+    vi.mocked(createTelegramToolConnection).mockResolvedValue(identity({ id: 'tool-conn-1', botId: '55' })); // the tool re-issues the winner's id
+    await expect(create(undefined, app2.id)).rejects.toThrow();
+    expect(deleteTelegramToolConnection).not.toHaveBeenCalled();
+    expect(await db.telegramConnection.count({ where: { deletedAt: null } })).toBe(1);
+  });
+
+  it('the App-already-connected check ignores a soft-deleted row: the bot sentence still wins when the bot is live elsewhere', async () => {
+    await create(); // App 1 holds bot 99
+    const app2 = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'tg-app4', urn: 'tg-org::tg-app4' } });
+    await db.telegramConnection.create({
+      data: { organizationId: org.id, appId: app2.id, toolConnectionId: 'old-tool', botId: '77', botUsername: 'Old', displayName: 'Old', deletedAt: new Date() },
+    });
+    vi.mocked(createTelegramToolConnection).mockResolvedValue(identity({ id: 'tool-conn-9' })); // bot 99 again
+    await expect(create(undefined, app2.id)).rejects.toThrow('This bot is already connected.');
+  });
+
   it('two creates that both pass the pre-check leave one row (the partial unique decides) and tear the loser\'s tool row down', async () => {
     // Hold the first create's tool call until the second has also reached the tool: both have then passed the
     // pre-check (no row yet), so only the partial unique index can refuse the second write.
