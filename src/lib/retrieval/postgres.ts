@@ -27,7 +27,7 @@ import type {
 } from './provider.js';
 import type { VectorHit, ChunkHit } from '../../services/embedding/vectors.js';
 import { vectorSearchNodes, vectorSearchChunks } from '../../services/embedding/vectors.js';
-import { compileBooleanQuery } from './tsquery.js';
+import { UnindexableQueryError, compileBooleanQuery } from './tsquery.js';
 import { compileNodeWhere, compileNodePropertySort } from './nodeWhere.js';
 import { regexSearchTimeoutMs } from './regexTimeout.js';
 import { UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from './defaultNodeTypes.js';
@@ -188,6 +188,12 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
     // params via the builder. Weights are server-controlled floats → inlined as
     // a literal ($queryRawUnsafe can't bind a float4[] param).
     const tsq = compileBooleanQuery(opts.query, 1);
+    // #435: the database judges whether the index can serve this query. querytree() reads no table, evaluates the same
+    // expression with the same binds, and answers 'T' when some satisfying branch needs no positive indexed lexeme
+    // (`-foo`, `a OR -b`, `the -foo`): refuse it before the scan. '' means only stop words, which match nothing.
+    const [{ qt }] = await opts.db.$queryRawUnsafe<{ qt: string }[]>(`SELECT querytree(${tsq.sql})::text AS qt`, ...tsq.params);
+    if (qt === 'T') throw new UnindexableQueryError();
+    if (qt === '') return [];
     const { params, bind } = paramBuilder([...tsq.params]);
     const weightsLit = `ARRAY[${weights.join(', ')}]::float4[]`;
     const memPh = opts.memoryIds.map((m) => bind(m)).join(', ');
