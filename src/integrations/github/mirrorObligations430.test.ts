@@ -373,6 +373,17 @@ describe('a failed mirror attempt leaves a redacted obligation (#430)', () => {
     await expect(insert({ kind: 'REMOVE', removeLoc: '' })).rejects.toThrow();
     await expect(insert({ kind: 'WRITE', removeLoc: 'old' })).rejects.toThrow();
     await expect(insert({ state: 'NOT_CLONED', errorClass: 'PUSH_FAILED' })).rejects.toThrow();
+    // #425 review: the state/error_class pairing is closed in BOTH directions. 'PENDING' is the
+    // trigger's word alone — a PENDING row wears it and no other state does, EXHAUSTED included (a debt that
+    // was never attempted cannot have run out of attempts) — and a captured debt is no failure class.
+    await expect(insert({ errorClass: 'PENDING' })).rejects.toThrow();
+    await expect(insert({ state: 'PENDING', errorClass: 'TREE_WRITE' })).rejects.toThrow();
+    await expect(insert({ state: 'EXHAUSTED', errorClass: 'PENDING', attempts: 10 })).rejects.toThrow();
+    // An un-cloned attempt that reaches the cap is the EXHAUSTED shape the settle writer does produce.
+    await expect(insert({ state: 'EXHAUSTED', errorClass: 'NOT_CLONED', attempts: 10 })).resolves.toBeDefined();
+    await db.gitMirrorObligation.deleteMany({});
+    await expect(insert({ state: 'PENDING', errorClass: 'PENDING', kind: 'REMOVE', removeLoc: 'docs:a' })).resolves.toBeDefined();
+    await db.gitMirrorObligation.deleteMany({});
   });
 
   it('(k) a migration carries a byte-identical copy of the current invariants file', () => {

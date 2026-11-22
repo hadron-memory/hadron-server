@@ -17,7 +17,7 @@ import { gitMirrorSweepRowBudget } from './gitMirrorSweepBudget.js';
 import { Prisma } from '../generated/prisma/index.js';
 import { mirrorRetryBranchEligibleSql } from '../integrations/github/mirrorBranchEligibility.js';
 import { mutateMirrorFiles, hasIncompleteMirrorMutation } from '../integrations/github/mirrorFileMutation.js';
-import type { MirrorObligationRef } from '../integrations/github/mirrorObligations.js';
+import { settleMirrorObligations, tryTakeAttemptSeq, type MirrorObligationRef, type MirrorSettlement } from '../integrations/github/mirrorObligations.js';
 import { toNaiveUtc } from '../lib/sessionActivity.js';
 
 export const MAX_ATTEMPTS = 10;
@@ -26,6 +26,35 @@ const MAX_MEMORIES = 20;
 let running = false;
 type DueMemory = { memoryId: string; source: string; memoryUrn: string; orgUrn: string; writeBranch: string | null; dueAt: Date };
 type DueRow = { nodeId: string; kind: 'WRITE' | 'REMOVE'; removeLoc: string; branch: string };
+
+/**
+ * #425 review: settle a skipped memory's CAPTURED debts instead of leaving them PENDING. A capture is due the
+ * moment it exists and has no backoff arm, and a skip runs no attempt, so a memory this pass must skip (no local clone, an
+ * invalid stored source) had its PENDING rows selected on EVERY later tick, `validate` reading "waiting for the next mirror
+ * sweep" forever. Through the one fenced settle writer they take the shape every other un-runnable obligation already has:
+ *  - no local clone: NOT_CLONED, what an ordinary writer's un-cloned attempt records (#430). The debt is KEPT — it backs off,
+ *    applies when the clone returns, and an un-cloned skip then leaves it byte-identical (#3060);
+ *  - an invalid stored source: cleared. The memory is not mirrored (configuration, not a failure), exactly what
+ *    withMirrorCheckout settles for an ordinary writer's obligations there.
+ * Settled rows (FAILED, NOT_CLONED) are not touched: a skip still leaves them byte-identical (#3060).
+ *
+ * Not lock-ordered (a skip never takes the checkout lock), so the fence is what keeps it safe, as for a lock-failed settle:
+ * a restore cancelling a row between the read and the settle gets at worst one spurious row back (the safe direction; the
+ * next attempt's live-owner check clears it). The number is taken only once a row is found: a skip with nothing captured
+ * consumes no attempt and no sequence.
+ */
+async function settleCapturedOnSkip(db: PrismaClient, memory: DueMemory, settlement: MirrorSettlement): Promise<void> {
+  // The rows the due-row query below admits for this memory (a PENDING row is always due), without its LIMIT.
+  const captured = await db.$queryRaw<DueRow[]>`
+    SELECT node_id AS "nodeId", kind, remove_loc AS "removeLoc", branch
+    FROM git_mirror_obligations
+    WHERE memory_id = ${memory.memoryId} AND state = 'PENDING' AND attempts < ${MAX_ATTEMPTS}
+      AND ${mirrorRetryBranchEligibleSql(Prisma.sql`branch`, Prisma.sql`${memory.writeBranch}`)}`;
+  if (!captured.length) return;
+  const seq = await tryTakeAttemptSeq(db);
+  if (seq === null) return;
+  await settleMirrorObligations(db, memory.memoryId, captured, settlement, seq, MAX_ATTEMPTS);
+}
 
 /** One bounded run. The selection is a hint; withMirrorCheckout re-reads each row inside its memory lock. */
 export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Promise<number> {
@@ -57,8 +86,16 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
         WHERE (${afterDueUtc}::timestamp IS NULL OR ("dueAt", "memoryId") > (${afterDueUtc}::timestamp, ${afterId}::text))
         ORDER BY "dueAt", "memoryId" LIMIT ${MAX_MEMORIES}`;
       for (const candidate of candidates) {
-        try { validateMemorySource(candidate.source); } catch { continue; }
-        if (!existsSync(join(memoryLocalPath(candidate.orgUrn, candidate.memoryUrn), '.git'))) continue;
+        // The sweep never clones (#430) and never touches the network for an invalid stored source. A skipped memory's
+        // captured debts are settled here rather than left due forever (see settleCapturedOnSkip).
+        try { validateMemorySource(candidate.source); } catch {
+          await settleCapturedOnSkip(db, candidate, { result: 'cleared' });
+          continue;
+        }
+        if (!existsSync(join(memoryLocalPath(candidate.orgUrn, candidate.memoryUrn), '.git'))) {
+          await settleCapturedOnSkip(db, candidate, { result: 'failed', errorClass: 'NOT_CLONED' });
+          continue;
+        }
         if (handled >= MAX_MEMORIES || remainingRows === 0) break;
         handled++;
         // Bound the DB result, not just its consumer. Only due rows reserve budget slots; the existing lock-time

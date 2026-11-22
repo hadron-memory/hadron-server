@@ -6,7 +6,9 @@
  * every protocol refused but `file`, and one `insteadOf` rule rewrites the memory's github URL to
  * the bare repo). `gitBranch.js` is NOT mocked. `child_process.execFile` is mocked ONLY for the
  * syncGraphFromGithub leg (canned git answers, exactly as syncGraphFromGithub.test.ts does), while
- * `execFileSync` stays real for this file's own git calls. Rows are read straight from
+ * `execFileSync` stays real for this file's own git calls. The checkout lock is wrapped, never replaced:
+ * the wrapper records each arrival and acquisition, and `execGit` can hold one call, so a pin can commit
+ * a restore in the middle of the sweep's removal. Rows are read straight from
  * `git_mirror_obligations`; deletes are driven straight at `nodes`, below every writer (resolver,
  * MCP delegate, merge, cascade) the same trigger serves.
  */
@@ -21,6 +23,10 @@ import { generateId } from '../../lib/id.js';
 
 const env = vi.hoisted(() => ({
   failure: null as unknown, root: '', bare: '', failOn: null as null | ((args: string[]) => boolean),
+  /** A one-shot hold: the FIRST matching `execGit` call signals `entered`, then waits for `released`. */
+  hold: null as null | { on: (args: string[]) => boolean; entered: () => void; released: Promise<void> },
+  /** Checkout-lock arrivals and acquisitions, in order (the wrapper mock below). */
+  lockEvents: [] as string[],
 }));
 const TOKEN = 'tok-425-secret';
 const SOURCE = 'https://github.com/acme/repo-425.git';
@@ -51,6 +57,8 @@ vi.mock('child_process', async (importOriginal) => {
 vi.mock('./execGit.js', () => ({
   execGit: vi.fn(async (args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) => {
     if (env.failOn?.(args)) throw env.failure ?? new Error('Git command failed. Check the repository and branch, then retry.');
+    const hold = env.hold;
+    if (hold?.on(args)) { env.hold = null; hold.entered(); await hold.released; }
     const stdout = execFileSync('git', [
       '-c', 'protocol.allow=never', '-c', 'protocol.file.allow=always',
       '-c', `url.${env.bare}.insteadOf=${SOURCE}`,
@@ -60,6 +68,19 @@ vi.mock('./execGit.js', () => ({
     return { stdout, stderr: '' };
   }),
 }));
+
+// Observe the checkout lock's queue WITHOUT replacing the real lock (the #430 sweep harness's pattern): every
+// arrival and every acquisition is recorded, so a pin can tell "queued behind" from "ran alongside".
+vi.mock('./mirrorCheckoutLock.js', async importOriginal => {
+  const real = await importOriginal<typeof import('./mirrorCheckoutLock.js')>();
+  return {
+    ...real,
+    withMirrorCheckoutLock: <T>(id: string, work: () => Promise<T>, opts?: { fenceEncryption?: boolean }) => {
+      env.lockEvents.push('requested');
+      return real.withMirrorCheckoutLock(id, async () => { env.lockEvents.push('acquired'); return work(); }, opts);
+    },
+  };
+});
 
 import { gitMirrorSweepTick } from '../../jobs/sweepGitMirrorObligations.js';
 import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
@@ -109,12 +130,21 @@ async function setup(opts: SetupOpts = {}) {
   });
   memoryId = graph.id;
   local = memoryLocalPath(org.urn, graph.urn);
-  if (withRepo) {
-    mkdirSync(dirname(local), { recursive: true });
-    execFileSync('git', ['-c', 'protocol.file.allow=always', '-c', `url.${env.bare}.insteadOf=${SOURCE}`, 'clone', SOURCE, local], { stdio: 'ignore' });
-  }
+  if (withRepo) cloneRemote();
   return { org, graph };
 }
+
+/** Clone the bare remote into the memory's local path, as a first mirror write or sync would. */
+const cloneRemote = () => {
+  mkdirSync(dirname(local), { recursive: true });
+  execFileSync('git', ['-c', 'protocol.file.allow=always', '-c', `url.${env.bare}.insteadOf=${SOURCE}`, 'clone', SOURCE, local], { stdio: 'ignore' });
+};
+const sequenceValue = () => db.$queryRaw<Array<{ value: string; is_called: boolean }>>`SELECT last_value::text AS value, is_called FROM git_mirror_attempt_seq`;
+/** Poll until `done` holds; fails the test after five seconds instead of hanging a held sweep forever. */
+const eventually = async (done: () => boolean) => {
+  for (let i = 0; i < 500 && !done(); i++) await new Promise(resolve => setTimeout(resolve, 10));
+  if (!done()) throw new Error('not reached within five seconds');
+};
 
 const makeNode = (loc: string, id = generateId()) => createDbNode(db, { id, loc, memoryId, name: loc || 'root' });
 const softDelete = (id: string) => db.node.update({ where: { id }, data: { deletedAt: new Date() } });
@@ -139,6 +169,8 @@ beforeEach(async () => {
   env.root = mkdtempSync(join(tmpdir(), 'hadron-425-'));
   env.failOn = null;
   env.failure = null;
+  env.hold = null;
+  env.lockEvents = [];
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -218,6 +250,19 @@ describe('#425 a node delete leaves a PENDING REMOVE obligation', () => {
     await setup({ repo: false, noSource: true });
     const node = await makeNode('docs:a');
     await softDelete(node.id);
+    expect(await rows()).toEqual([]);
+  });
+
+  it('a user-owned memory (a source, but no organization) owes nothing: no sweep could ever select it', async () => {
+    // The capture's organization predicate is no other pin's subject (review: a mutant dropping it survived).
+    // Such a row is due the moment it exists, and the sweep's candidate query joins organizations, so it
+    // would never be selected: "waiting for the next mirror sweep" for good.
+    await setup({ repo: false });
+    const owner = await db.user.create({ data: { githubId: 425999, githubUsername: 'owner-425' } });
+    await db.memory.update({ where: { id: memoryId }, data: { organizationId: null, ownerUserId: owner.id } });
+    const soft = await makeNode('docs:a');
+    await softDelete(soft.id);
+    await db.node.delete({ where: { id: (await makeNode('docs:b')).id } });
     expect(await rows()).toEqual([]);
   });
 
@@ -317,12 +362,52 @@ describe('#425 the sweep applies a PENDING REMOVE obligation', () => {
     })]);
   });
 
-  it('a delete with no local clone still succeeds and leaves the debt owed (PENDING, one attempt)', async () => {
-    await setup({ repo: false });
+  it('with no local clone the capture settles NOT_CLONED: the debt is kept, backs off, and applies when the clone returns (#425 review)', async () => {
+    await setup();
+    const node = await makeNode('docs:a');
+    writeFrontmatterNode(nodeFilePath(local, 'docs:a'), { id: node.id, name: 'a' }, 'body');
+    commitFixtures(['docs/a.md']);
+    // The clone is gone (another host, an evicted checkout). The delete still succeeds, and the sweep never clones (#430).
+    rmSync(local, { recursive: true, force: true });
+    await softDelete(node.id);
+    expect(await rows()).toEqual([owed(node.id, 'docs:a')]);
+    // A capture is due the moment it exists and a skip runs no attempt: left alone, this row was selected on EVERY
+    // tick, forever, reading "waiting for the next mirror sweep". The skip settles it instead, to the state an
+    // ordinary writer's un-cloned attempt records.
+    await gitMirrorSweepTick(db, new Date(Date.now() + 60_000));
+    const settled = [expect.objectContaining({
+      nodeId: node.id, kind: 'REMOVE' as const, removeLoc: 'docs:a', state: 'NOT_CLONED' as const, errorClass: 'NOT_CLONED' as const, attempts: 2,
+    })];
+    expect(await rows()).toEqual(settled);
+    // `validate` stops reading "waiting for the next mirror sweep": this is an ordinary recorded failure now.
+    const report = await validateMemoryNodes(db, memoryId);
+    expect(report.findings.filter(f => f.kind === 'GIT_MIRROR_FAILED').map(f => f.detail)).toEqual([
+      'Git mirror removal of this path did not land (NOT_CLONED, 2 attempts); the repository may be stale',
+    ]);
+    // Now it backs off like any other debt: not due yet...
+    await gitMirrorSweepTick(db, new Date(Date.now() + 60_000));
+    expect(await rows()).toEqual(settled);
+    // ...and due again but still un-cloned, the pass skips it byte-identically, with no attempt and no sequence (#3060).
+    const seq = await sequenceValue();
+    expect(await gitMirrorSweepTick(db, new Date(Date.now() + 16 * 60_000))).toBe(0);
+    expect(await rows()).toEqual(settled);
+    expect(await sequenceValue()).toEqual(seq);
+    // The clone returns: the kept debt applies on the pass after its backoff.
+    cloneRemote();
+    expect(await gitMirrorSweepTick(db, new Date(Date.now() + 21 * 60_000))).toBe(1);
+    expect(await rows()).toEqual([]);
+    expect(git(env.bare, 'ls-tree', '-r', '--name-only', 'hadron-updates')).not.toContain('docs/a.md');
+  });
+
+  it('an invalid stored source voids the capture instead of skipping it forever: not mirrored means nothing owed (#425 review)', async () => {
+    // With a clone present: the source check comes first, so no Git runs against a source this server refuses.
+    await setup();
+    await db.memory.update({ where: { id: memoryId }, data: { source: 'not-a-github-source' } });
     const node = await makeNode('docs:a');
     await softDelete(node.id);
-    await gitMirrorSweepTick(db, new Date(Date.now() + 60_000));
     expect(await rows()).toEqual([owed(node.id, 'docs:a')]);
+    await gitMirrorSweepTick(db, new Date(Date.now() + 60_000));
+    expect(await rows()).toEqual([]);
   });
 
   it('a delete with an unreachable remote keeps the debt: the attempt fails soft as BRANCH_SETUP', async () => {
@@ -352,6 +437,84 @@ describe('#425 the sweep applies a PENDING REMOVE obligation', () => {
     const restored = await restore(node.id);
     await writeNodeToGit({ ...restored, outgoingEdges: [] }, '', null, memoryId);
     expect(git(env.bare, 'ls-tree', '-r', '--name-only', 'hadron-updates')).toContain('docs/a.md');
+  });
+
+  it('a restore committing while the sweep is mid-removal still ends with the file back (#425 review)', async () => {
+    await setup();
+    const root = await makeNode('');
+    const node = await makeNode('docs:a');
+    const file = nodeFilePath(local, 'docs:a');
+    writeFrontmatterNode(join(local, 'README.md'), { id: root.id, name: 'root' }, 'root');
+    writeFrontmatterNode(file, { id: node.id, name: 'a' }, 'body');
+    commitFixtures(['README.md', 'docs/a.md']);
+    await softDelete(node.id);
+    // Hold the sweep INSIDE the checkout lock: it has re-read the row, found no live owner, removed the file
+    // and staged the removal, and is about to commit. A restore committing here is the interleaving the
+    // sequential pin above cannot reach: the owner check has already been made.
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    env.hold = { on: args => args[0] === 'commit', entered: enter, released: held };
+    const sweeping = gitMirrorSweepTick(db, new Date(Date.now() + 60_000));
+    await entered;
+    // The sweep holds the checkout lock.
+    expect(env.lockEvents).toEqual(['requested', 'acquired']);
+    let writing: Promise<unknown> = Promise.resolve();
+    try {
+      expect(existsSync(file)).toBe(false);
+      const restored = await restore(node.id);
+      // The cancel trigger takes the row the sweep is working on, so the sweep's own clear is then a no-op.
+      expect(await rows()).toEqual([]);
+      // Every restore publishes node.written, and that mirror write takes the same checkout lock: it queues.
+      writing = writeNodeToGit({ ...restored, outgoingEdges: [] }, '', null, memoryId);
+      await eventually(() => env.lockEvents.length === 3);
+      expect(env.lockEvents).toEqual(['requested', 'acquired', 'requested']);
+    } finally {
+      release();
+      await Promise.all([sweeping, writing]);
+    }
+    // The sweep's removal was pushed first; the restore's write, queued behind it, put the file back.
+    expect(env.lockEvents).toEqual(['requested', 'acquired', 'requested', 'acquired']);
+    expect(await rows()).toEqual([]);
+    expect(existsSync(file)).toBe(true);
+    expect(git(env.bare, 'ls-tree', '-r', '--name-only', 'hadron-updates')).toContain('docs/a.md');
+  });
+
+  it('under a row budget a pass takes the oldest-due row first, a capture and a failed debt alike, and leaves the rest untouched', async () => {
+    await setup();
+    const root = await makeNode('');
+    const failed = await makeNode('docs:failed');
+    const earlier = await makeNode('docs:earlier');
+    const later = await makeNode('docs:later');
+    writeFrontmatterNode(join(local, 'README.md'), { id: root.id, name: 'root' }, 'root');
+    for (const n of [failed, earlier, later]) writeFrontmatterNode(nodeFilePath(local, n.loc), { id: n.id, name: n.loc }, 'body');
+    commitFixtures(['README.md', 'docs/failed.md', 'docs/earlier.md', 'docs/later.md']);
+    await softDelete(failed.id);
+    await softDelete(earlier.id);
+    await softDelete(later.id);
+    // Due times are set, not the microseconds between two captures: the first debt's attempt failed once (two
+    // attempts, its 10-minute backoff elapsed), so it is the oldest, then the earlier capture, then the later
+    // one. A capture is due the moment it exists.
+    const now = Date.now();
+    await db.gitMirrorObligation.updateMany({ where: { nodeId: failed.id }, data: {
+      state: 'FAILED', errorClass: 'PUSH_FAILED', attempts: 2, lastAttemptAt: new Date(now - 30 * 60_000),
+    } });
+    await db.gitMirrorObligation.updateMany({ where: { nodeId: earlier.id }, data: { lastAttemptAt: new Date(now - 3 * 60_000) } });
+    await db.gitMirrorObligation.updateMany({ where: { nodeId: later.id }, data: { lastAttemptAt: new Date(now - 60_000) } });
+    vi.stubEnv('GIT_MIRROR_SWEEP_MAX_ROWS', '1');
+    try {
+      // One row per pass, oldest due first; every other row is byte-identical until its own pass.
+      for (const taken of [failed, earlier, later]) {
+        const before = JSON.stringify(await rows(), (_, v) => typeof v === 'bigint' ? v.toString() : v);
+        expect(await gitMirrorSweepTick(db, new Date(now + 60_000))).toBe(1);
+        const after = JSON.stringify((await rows()).filter(r => r.nodeId !== taken.id), (_, v) => typeof v === 'bigint' ? v.toString() : v);
+        expect(after).toBe(JSON.stringify(JSON.parse(before).filter((r: { nodeId: string }) => r.nodeId !== taken.id)));
+        expect(await db.gitMirrorObligation.findMany({ where: { memoryId, nodeId: taken.id } })).toEqual([]);
+      }
+      expect(await gitMirrorSweepTick(db, new Date(now + 60_000))).toBe(0);
+      expect(git(env.bare, 'ls-tree', '-r', '--name-only', 'hadron-updates')).not.toMatch(/docs\/failed.md|docs\/earlier.md|docs\/later.md/);
+    } finally { vi.unstubAllEnvs(); }
   });
 });
 

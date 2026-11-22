@@ -7,15 +7,17 @@
 -- `error_class` is a CLOSED set of fixed words, never exception text: a raw Git error can carry an installation-token URL
 -- (findings:git-execfile-error-carries-auth-url), so nothing free-form is storable here. A NOT_CLONED row says so in both
 -- columns; a PENDING row (a #425 captured delete debt, born from the trigger below before any attempt) says so in both
--- columns too, and a FAILED row can wear neither word. A REMOVE row names the old loc it must vacate; a WRITE row has
--- none. `attempts` and `attempt_seq` only grow.
+-- columns too, and NO other state wears that word (a debt that was never attempted cannot have failed, let alone
+-- exhausted its retries); a FAILED row can wear neither word. A REMOVE row names the old loc it must vacate; a WRITE row
+-- has none. `attempts` and `attempt_seq` only grow.
 CREATE SEQUENCE IF NOT EXISTS git_mirror_attempt_seq AS bigint;
 ALTER TABLE git_mirror_obligations DROP CONSTRAINT IF EXISTS chk_git_mirror_obligation_shape;
 ALTER TABLE git_mirror_obligations ADD CONSTRAINT chk_git_mirror_obligation_shape CHECK (
   error_class IN ('TOKEN_UNAVAILABLE', 'BRANCH_SETUP', 'TREE_WRITE', 'PUSH_FAILED', 'PUSH_REJECTED', 'LOCK_FAILED', 'NOT_CLONED', 'PENDING') AND
   ((state::text = 'NOT_CLONED' AND error_class = 'NOT_CLONED') OR
    (state::text = 'FAILED' AND error_class NOT IN ('NOT_CLONED', 'PENDING')) OR
-   (state::text = 'PENDING' AND error_class = 'PENDING') OR state::text = 'EXHAUSTED') AND
+   (state::text = 'PENDING' AND error_class = 'PENDING') OR
+   (state::text = 'EXHAUSTED' AND error_class <> 'PENDING')) AND
   ((kind = 'WRITE' AND remove_loc = '') OR (kind = 'REMOVE' AND remove_loc <> '')) AND
   attempts >= 1
 );
