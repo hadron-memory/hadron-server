@@ -62,12 +62,28 @@ describe('#4845 miscastHasReferences, driven with a recording db', () => {
     }
   });
 
+  it('a spent budget refuses before arming: no statement is ever armed with 0 (Postgres reads 0 as no timeout)', async () => {
+    const { db: fake, events } = fakeDb();
+    const armed: unknown[] = [];
+    const raw = fake.$queryRaw;
+    fake.$queryRaw = async (q: unknown, ...v: unknown[]) => { if (/set_config/.test(Array.isArray(q) ? (q as string[]).join('?') : '')) armed.push(v[0]); return raw(q, ...v); };
+    const real = Date.now();
+    const spy = vi.spyOn(Date, 'now').mockReturnValueOnce(real).mockReturnValue(real + 10_000_000); // the deadline has passed by the first arm
+    try {
+      await expect(miscastHasReferences(fake, worker)).rejects.toBeInstanceOf(WorkerCensusIncompleteError);
+    } finally { spy.mockRestore(); }
+    expect(events.filter((e) => e === 'stmt')).toHaveLength(0);
+    expect(armed.filter((v) => /^0?ms$|^-|^0ms$/.test(String(v)))).toEqual([]);
+  });
+
   it('only a real statement timeout is an unfinished census: SQLSTATE 57014 or its message, anchored', async () => {
     const cases: Array<[unknown, boolean]> = [
       [Object.assign(new Error('raw query failed'), { meta: { code: '57014' } }), true],
       [new Error('ERROR: canceling statement due to statement timeout'), true],
       [new Error('Raw query failed. Code: `57014`. Message: `canceling statement`'), true],
       [new Error('connection 157014 reset'), false], // the number inside a longer one is not the SQLSTATE
+      [new Error('connect ECONNREFUSED 127.0.0.1:57014'), false], // 57014 is also an ephemeral port number
+      [new Error('ERROR: SQLSTATE 57014'), true],
       [new Error('a statement timeout setting was read'), false], // not the cancellation text
       [new Error('boom'), false],
     ];
@@ -81,6 +97,7 @@ describe('#4845 miscastHasReferences, driven with a recording db', () => {
 });
 
 // ---- integration ----------------------------------------------------------------------------------------------------------
+const BOUND_MS = 1500;
 let f: any;
 const ctx = (): Context => ({ db, userId: f.holder.id, roles: ['READER'] });
 const remove = () => M.deleteWorker({}, { workerRef: f.target.id, confirmNoExternalAttribution: true }, ctx());
@@ -110,7 +127,7 @@ describe('#4845 a MODEL query is the cancelled statement', () => {
   it.each([['deleteWorker', remove], ['deleteWorkerPreview', preview]] as const)(
     '%s: Postgres cancels asset.count near the budget, WORKER_CENSUS_INCOMPLETE', async (_n, call) => {
       expect((await db.worker.findUnique({ where: { id: f.target.id } }))?.memoryId).toBeTruthy(); // the tail reaches asset.count
-      process.env.WORKER_CENSUS_TIMEOUT_MS = '1500';
+      process.env.WORKER_CENSUS_TIMEOUT_MS = String(BOUND_MS);
       const holder = new pg.Client({ connectionString: process.env.DATABASE_URL });
       await holder.connect();
       try {
@@ -120,7 +137,7 @@ describe('#4845 a MODEL query is the cancelled statement', () => {
         const e = await refusal(call());
         const elapsed = Date.now() - started;
         expect(e.extensions?.code).toBe('WORKER_CENSUS_INCOMPLETE');
-        expect(elapsed).toBeGreaterThanOrEqual(1000); // the bound ended it, not an immediate error
+        expect(elapsed).toBeGreaterThanOrEqual(BOUND_MS * 0.6); // the bound ended it, not an immediate error
         expect(elapsed).toBeLessThan(10_000);
         expect(await db.worker.findUnique({ where: { id: f.target.id } })).not.toBeNull();
       } finally { await holder.query('ROLLBACK').catch(() => {}); await holder.end(); }
