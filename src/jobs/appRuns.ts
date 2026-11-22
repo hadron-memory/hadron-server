@@ -615,7 +615,10 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // #3689: past this guard the run has its Agent; the column is NOT NULL with a foreign key, so there is no agentless row.
   const runAgentId = args.agentId;
   if (!runAgentId) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
-  const runAgent = await db.agent.findUniqueOrThrow({ where: { id: runAgentId }, select: { id: true, name: true, urn: true, personaRole: true } });
+  // #3911: a trigger's agent_id has no foreign key, so a hard-deleted Agent leaves a dangling id. It is the same typed refusal
+  // as no Agent (the headless run has no boot prompt to serve), not a P2025 that surfaces as a 500.
+  const runAgent = await db.agent.findUnique({ where: { id: runAgentId }, select: { id: true, name: true, urn: true, personaRole: true } });
+  if (!runAgent) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
   await resolveServedBootPrompt(db, { surface: 'run', appId: args.appId, agent: { id: runAgent.id, name: runAgent.name } });
   // cor:dmo:150:08: `session.llmModel` is the run's model. It is the one the run will resolve (same override, same registry
   // walk as `resolveConfig`), taken now so the record holds it; with none configured the run fails NO_AI_CONFIG anyway.
