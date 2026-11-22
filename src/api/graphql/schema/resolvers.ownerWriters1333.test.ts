@@ -335,9 +335,17 @@ describe('the real run principal: runContext, not a synthesized one (blind revie
 
 describe('the App, its AppAgent link and its Agent are held while the write decides (blind review F5, section-10 delta)', () => {
   const owner = () => ({ organizationId: org.id, ownerUserId: null });
-  const within = <T>(p: Promise<T>, ms: number) => Promise.race([
-    p, new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`not reached within ${ms}ms`)), ms)),
-  ]);
+  // The timer is cleared when the work settles (#4664), so none outlives the helper.
+  const within = async <T>(p: Promise<T>, ms: number): Promise<T> => {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        p, new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error(`not reached within ${ms}ms`)), ms); }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 
   /**
    * A write transaction that judges `appId` qualified and then sits on its locks. `start` begins the competing change;
@@ -384,6 +392,59 @@ describe('the App, its AppAgent link and its Agent are held while the write deci
     }
     if (failure !== undefined) throw failure;
   }
+
+  /**
+   * The reverse order (#4664): a change that already holds its locks BEFORE the judgement starts. `change` runs in its own
+   * transaction and stays open until released; the judgement is started then, must be observed WAITING on a lock (not merely
+   * slow), and once the change commits it must see the committed state and answer `expected`. Every path releases the
+   * change and drains both operations in `finally`.
+   */
+  async function judgeBehindHeldChange(
+    appId: string, change: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<unknown>, expected: boolean,
+  ): Promise<void> {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let changed!: () => void;
+    const changedFirst = new Promise<void>((res) => { changed = res; });
+    const changing = db.$transaction(async (tx) => {
+      await change(tx);
+      changed();
+      await gate;
+    }, { timeout: 8_000 });
+    let judging: Promise<boolean> | undefined;
+    let lockWait: Promise<unknown> | undefined;
+    let settled = false;
+    let failure: unknown;
+    try {
+      await within(Promise.race([changedFirst, changing.then(() => { throw new Error('change ended before holding'); })]), 5_000);
+      judging = db.$transaction((tx) => appCarriesOwnersAgent(tx as never, appId, owner()), { timeout: 8_000 })
+        .then((v) => { settled = true; return v; });
+      const early = judging.then(() => { throw new Error('the judgement finished without waiting behind the held change'); });
+      early.catch(() => undefined);
+      lockWait = waitForLockWaiters(db, 1, 3_000);
+      lockWait.catch(() => undefined);
+      await Promise.race([lockWait, early]);
+      expect(settled).toBe(false);
+    } catch (e) {
+      failure = e;
+    } finally {
+      release();
+      const done = await Promise.allSettled([changing, ...(judging ? [judging] : []), ...(lockWait ? [lockWait] : [])]);
+      if (failure === undefined) {
+        const bad = done.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
+        if (bad) failure = bad.reason;
+      }
+    }
+    if (failure !== undefined) throw failure;
+    expect(await judging).toBe(expected);
+  }
+
+  it('an AppAgent unlink that holds first makes the judgement wait, then see no link and refuse (unlink-first, #4664)', async () => {
+    const own = await agent(org.id, null);
+    const a = await app({ orgId: org.id, agents: [own] });
+    await judgeBehindHeldChange(a, (tx) => tx.appAgent.delete({ where: { appId_agentId: { appId: a, agentId: own } } }), false);
+    expect(await refusal(principalOf(a))).toBe(REFUSED);
+  }, 30_000);
 
   it('the race helper surfaces a fast failure of the competing change as itself, and rejects a change that never waited', async () => {
     const a = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
