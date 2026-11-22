@@ -57,9 +57,16 @@ async function privateMemory(counts: { healthy?: number; blocked?: number; tombs
     await db.chatRootEngineState.create({ data: { chatRootNodeId: node.id, state: state as never } });
     return node;
   };
-  const healthy = [], blocked = [], tombstoned = [];
+  const healthy = [], tombstoned = [];
+  const blocked: Array<{ id: string }> = [];
   for (let i = 0; i < (counts.healthy ?? 0); i++) healthy.push(await mk(`h${i}`, { conversationName: 'intake', stageName: 'first' }));
-  for (let i = 0; i < (counts.blocked ?? 0); i++) blocked.push(await mk(`b${i}`, TAMPERED));
+  const blockedCount = counts.blocked ?? 0;
+  if (blockedCount) { // one round trip per table, so a 105-row cap test needs no long timeout
+    const rows = Array.from({ length: blockedCount }, (_, i) => ({ id: generateId(), tag: `b${i}` }));
+    await db.node.createMany({ data: rows.map(r => ({ id: r.id, memoryId: memory.id, loc: `chats:${r.tag}`, name: r.tag, nodeType: 'record', createdBy: userId, content: `SYNTHETIC-CONTENT-${r.tag}`, data: { scope: 'private', title: r.tag } })) });
+    await db.chatRootEngineState.createMany({ data: rows.map(r => ({ chatRootNodeId: r.id, state: TAMPERED as never })) });
+    for (const r of rows) blocked.push({ id: r.id });
+  }
   for (let i = 0; i < (counts.tombstoned ?? 0); i++) tombstoned.push(await mk(`t${i}`, TAMPERED, { deletedAt: new Date() }));
   return { memory, healthy, blocked, tombstoned };
 }
@@ -132,7 +139,7 @@ describe('#3575 encryptMemory continues past an unauthenticated engine envelope,
     expect(ids).toHaveLength(100);
     expect(ids).toEqual([...blocked.map(n => n.id)].sort().slice(0, 100));
     expect(new Set(ids).size).toBe(100);
-  }, 120_000);
+  });
 
   it('a root moved out of the memory is not scanned and its state is untouched', async () => {
     const { blocked } = await privateMemory({ blocked: 1 });
@@ -240,16 +247,131 @@ describe('#3575 the helper classifies; it does not throw for an unauthenticated 
 
 describe('#3575 the error builder owns the id policy (ruling 0228)', () => {
   it('sorts ascending, de-duplicates and caps at 100; the count is the exact distinct total, or null when the scan did not finish', async () => {
-    const { engineStateIncomplete } = await import('../../../lib/chatRootEngineState.js');
+    const { buildEngineStateIncompleteError } = await import('../../../lib/chatRootEngineState.js');
     const pool = Array.from({ length: 130 }, (_, i) => `node-${String(i).padStart(4, '0')}`);
     const shuffled = [...pool].reverse().concat(pool.slice(0, 20)); // reversed, with 20 duplicates
-    const done = engineStateIncomplete({ memoryId: 'm', operation: 'ENCRYPT_MEMORY', blockedRootIds: shuffled, scanFinished: true, progressCommitted: false });
+    const done = buildEngineStateIncompleteError({ memoryId: 'm', operation: 'ENCRYPT_MEMORY', blockedRootIds: shuffled, scanFinished: true, progressCommitted: false });
     expect(done.extensions.blockedEngineStateRootIds).toEqual(pool.slice(0, 100));
     expect(done.extensions.blockedEngineStateCount).toBe(130);
-    const unfinished = engineStateIncomplete({ memoryId: 'm', operation: 'ENCRYPT_MEMORY', blockedRootIds: shuffled, scanFinished: false, progressCommitted: true });
+    const unfinished = buildEngineStateIncompleteError({ memoryId: 'm', operation: 'ENCRYPT_MEMORY', blockedRootIds: shuffled, scanFinished: false, progressCommitted: true });
     expect(unfinished.extensions.blockedEngineStateCount).toBeNull();
     expect(unfinished.extensions.progressCommitted).toBe(true);
     expect(done.message).toBe('Encryption conversion is incomplete.');
   });
 });
 
+/** A client whose `table.findMany` first runs `beforePass` whenever a pass starts (no cursor), so a pass always finds fresh work. */
+function withPassHook(table: 'node' | 'nodeRevision', beforePass: () => Promise<void>, isFirstPage: (args: Record<string, any>) => boolean): Context['db'] {
+  const bind = (target: any, prop: string | symbol) => { const v = Reflect.get(target, prop); return typeof v === 'function' ? v.bind(target) : v; };
+  return new Proxy(db, {
+    get(target, prop) {
+      if (prop !== table) return bind(target, prop);
+      return new Proxy((target as any)[table], {
+        get(t, p) {
+          if (p !== 'findMany') return bind(t, p);
+          return async (args: Record<string, any>) => { if (isFirstPage(args)) await beforePass(); return t.findMany(args); };
+        },
+      });
+    },
+  }) as Context['db'];
+}
+
+describe('#4724 pins for the conversion edge cases #4710 deferred', () => {
+  it('promotion skips a root moved out of the memory between the row scan and the node lock (membership recheck)', async () => {
+    const { app, memory, healthy } = await (async () => {
+      const app = await db.app.create({ data: { id: generateId(), name: 'promo4724', urn: `promo4724:${generateId()}`, organizationId: orgId, identifyUserMethod: 'SECRET', createUserPermission: 'IMPLICIT' } });
+      await db.appAgent.create({ data: { appId: app.id, agentId } });
+      const memory = await db.memory.create({ data: { id: generateId(), organizationId: orgId, appId: app.id, userMemoryOfAgentId: agentId, userId: null, createdBy: null, class: 'app', anonymousExpiresAt: new Date(Date.now() + 86_400_000), urn: `conv4724:anon-${generateId()}`, name: 'anon' } });
+      const healthy = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'chats:healthy', name: 'healthy', nodeType: 'record', data: {} } });
+      await db.chatRootEngineState.create({ data: { chatRootNodeId: healthy.id, state: { conversationName: 'intake' } } });
+      return { app, memory, healthy };
+    })();
+    // A tombstoned root is not locked by the node pass, so a second connection can hold it while promotion scans engine rows.
+    const mover = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'chats:mover', name: 'mover', nodeType: 'record', data: {}, deletedAt: new Date() } });
+    await db.chatRootEngineState.create({ data: { chatRootNodeId: mover.id, state: TAMPERED } });
+    const elsewhere = await db.memory.create({ data: { id: generateId(), organizationId: orgId, urn: `conv4724:${generateId()}`, name: 'elsewhere', class: 'private', userId, createdBy: userId, userMemoryOfAgentId: agentId } });
+
+    let signalLocked!: () => void;
+    const locked = new Promise<void>(resolve => { signalLocked = resolve; });
+    let release!: () => void;
+    const hold = new Promise<void>(resolve => { release = resolve; });
+    const holder = db.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${mover.id} FOR UPDATE`;
+      signalLocked();
+      await hold;
+      await tx.node.update({ where: { id: mover.id }, data: { memoryId: elsewhere.id } }); // commits when released
+    });
+    await locked;
+    const key = generateDataKey();
+    const promoting = withTestOperationKey(keyText(key), app.id, () => ask({ db, appId: app.id, roles: [] } as Context,
+      `mutation($m: ID!) { linkMemoryToUser(memoryRef: $m, externalUserId: "promo-4724") { id isEncrypted } }`, { m: memory.id }));
+    try {
+      await vi.waitFor(async () => {
+        const waiting = await db.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FROM nodes WHERE id=%FOR UPDATE%'`;
+        expect(waiting.length).toBeGreaterThan(0);
+      }, { timeout: 10_000, interval: 25 });
+    } finally { release(); }
+    await holder;
+    const a = await promoting;
+    expect(a.error).toBeNull(); // the moved-out blocked row is neither counted nor refused
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).isEncrypted).toBe(true);
+    expect(isAuthenticatedDataEnvelope((await stored(healthy.id)).state, key)).toBe(true);
+    expect((await stored(mover.id)).state).toEqual(TAMPERED); // not converted either
+    expect((await db.node.findUniqueOrThrow({ where: { id: mover.id } })).memoryId).toBe(elsewhere.id);
+  });
+
+  it('blockedEngineStateCount is null end to end when five passes never converge, with the ids from the last pass', async () => {
+    const { blocked } = await privateMemory({ blocked: 1 });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let fresh = 0;
+    const churning = withPassHook('node', async () => { // a new plaintext node before every pass: every pass converts something
+      await db.node.create({ data: { id: generateId(), memoryId, loc: `fresh:${fresh++}`, name: 'fresh', nodeType: 'record', content: 'PLAIN', data: {} } });
+    }, args => !args.cursor);
+    try {
+      const err = await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey: keyText(generateDataKey()) }, { ...ctx, db: churning } as Context).catch((e: any) => e);
+      expect(fresh).toBe(5);
+      expect(err.extensions).toMatchObject({ code: 'ENCRYPTION_INCOMPLETE', phase: 'CHAT_ENGINE_STATE', blockedEngineStateCount: null, blockedEngineStateRootIds: [blocked[0]!.id], progressCommitted: true });
+    } finally { error.mockRestore(); }
+  });
+
+  it('progressCommitted is true when only the history pass converted something', async () => {
+    const { blocked } = await privateMemory({ blocked: 1 });
+    const key = generateDataKey();
+    await ask(ctx, ENCRYPT, { m: memoryId, k: keyText(key) }); // converts the nodes; the blocked row stays
+    const settled = await ask(ctx, ENCRYPT, { m: memoryId, k: keyText(key) });
+    expect(settled.error?.extensions.progressCommitted).toBe(false); // nothing left to convert anywhere
+    await db.nodeRevision.create({ data: { nodeId: blocked[0]!.id, memoryId, loc: 'chats:b0', name: 'b0', content: 'PLAIN-HISTORY', revNo: 9999 } });
+    const a = await ask(ctx, ENCRYPT, { m: memoryId, k: keyText(key) });
+    expect(a.error?.extensions).toMatchObject({ code: 'ENCRYPTION_INCOMPLETE', blockedEngineStateCount: 1, progressCommitted: true });
+    expect((await db.nodeRevision.findFirstOrThrow({ where: { nodeId: blocked[0]!.id, revNo: 9999 } })).content).not.toBe('PLAIN-HISTORY');
+  });
+
+  it('history non-convergence wins over blocked engine rows: the bare error, with no ids', async () => {
+    await privateMemory({ blocked: 2 });
+    const key = generateDataKey();
+    await ask(ctx, ENCRYPT, { m: memoryId, k: keyText(key) });
+    let revNo = 20_000;
+    const [anyNode] = await db.node.findMany({ where: { memoryId }, take: 1 });
+    const churning = withPassHook('nodeRevision', async () => {
+      await db.nodeRevision.create({ data: { nodeId: anyNode!.id, memoryId, loc: anyNode!.loc, name: 'x', content: 'PLAIN-HISTORY', revNo: revNo++ } });
+    }, args => !args.where?.id);
+    const err = await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey: keyText(key) }, { ...ctx, db: churning } as Context).catch((e: any) => e);
+    expect(err.extensions).toEqual({ code: 'ENCRYPTION_INCOMPLETE', memoryId });
+    expect(revNo).toBe(20_005);
+  });
+
+  it('promotion reports at most 100 root ids, ascending, with the exact count beside them (the cap holds on both operations)', async () => {
+    const app = await db.app.create({ data: { id: generateId(), name: 'cap4724', urn: `cap4724:${generateId()}`, organizationId: orgId, identifyUserMethod: 'SECRET', createUserPermission: 'IMPLICIT' } });
+    await db.appAgent.create({ data: { appId: app.id, agentId } });
+    const memory = await db.memory.create({ data: { id: generateId(), organizationId: orgId, appId: app.id, userMemoryOfAgentId: agentId, userId: null, createdBy: null, class: 'app', anonymousExpiresAt: new Date(Date.now() + 86_400_000), urn: `conv4724:cap-${generateId()}`, name: 'anon' } });
+    const ids = Array.from({ length: 105 }, () => generateId());
+    await db.node.createMany({ data: ids.map((id, i) => ({ id, memoryId: memory.id, loc: `chats:c${i}`, name: 'c', nodeType: 'record', data: {} })) });
+    await db.chatRootEngineState.createMany({ data: ids.map(id => ({ chatRootNodeId: id, state: TAMPERED as never })) });
+    const a = await withTestOperationKey(keyText(generateDataKey()), app.id, () => ask({ db, appId: app.id, roles: [] } as Context,
+      `mutation($m: ID!) { linkMemoryToUser(memoryRef: $m, externalUserId: "cap-4724") { id } }`, { m: memory.id }));
+    expect(a.error?.extensions).toMatchObject({ code: 'ENCRYPTION_INCOMPLETE', operation: 'PROMOTE_ANONYMOUS_MEMORY', blockedEngineStateCount: 105, progressCommitted: false });
+    expect(a.error?.extensions.blockedEngineStateRootIds).toEqual([...ids].sort().slice(0, 100));
+  });
+});

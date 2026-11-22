@@ -8,13 +8,13 @@
  * affected, AFTER its own write and under its own anchors, and this function judges each pair under the installation locks and
  * ends the grants of those left with none. No door stamps on a row delete without asking.
  *
- * LOCK ORDER (departure.ts): the door's anchors, then the installation locks here (App FOR SHARE, app_agents, agent_imports,
- * agents FOR SHARE, per App in id order), then the register rows, then ONE sorted grant lock phase last. Nothing is ended
+ * LOCK ORDER (departure.ts): the door's anchors, then the installation locks here (each App's rows, then every agent in one pass:
+ * those judged FOR NO KEY UPDATE, which fences a concurrent agent-grant create, #4715), then the register rows, then ONE sorted grant lock phase last. Nothing is ended
  * inside the per-App loop. Only AGENT-held grants end; a worker's, a person's and an App's are never touched, and reinstalling
  * revives nothing (the SQL guard never lets the stamp clear).
  */
 import type { Prisma } from '../../generated/prisma/index.js';
-import { lockAppInstallations, resolveAppInstallation } from '../appInstallations.js';
+import { lockAppInstallationsFenced, resolveAppInstallation } from '../appInstallations.js';
 import { removeRegisterRowsForUninstall } from '../registerInstall.js';
 import { endAgentGrantsAtApps, type AgentDepartureReason } from './departure.js';
 
@@ -34,8 +34,8 @@ export async function endGrantsOfAgentsNoLongerInstalled(
   const byApp = new Map<string, string[]>();
   for (const p of unique) byApp.set(p.appId, [...(byApp.get(p.appId) ?? []), p.agentId]);
   const departed: AppAgentPair[] = [];
+  await lockAppInstallationsFenced(tx, byApp); // every App's structure, then every agent in ONE global pass (#4715)
   for (const [appId, agentIds] of byApp) {
-    await lockAppInstallations(tx, appId, agentIds);
     for (const agentId of agentIds) {
       if (!(await resolveAppInstallation(tx, appId, agentId))) departed.push({ appId, agentId });
     }
