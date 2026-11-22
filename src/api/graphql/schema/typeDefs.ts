@@ -15216,14 +15216,21 @@ export const typeDefs = `#graphql
 
     # Editor lock (org ADMIN)
     """
-    Acquire (or renew) the editor lock for an Agent's system memory.
+    Acquire (or renew) the editor lock for an Agent's system memory. The lock is
+    ADVISORY: a signal to other editors that someone is editing, lasting 5
+    minutes unless renewed by the holder. The server does not refuse an edit
+    made without it (no edit mutation checks it). When another editor holds an
+    unexpired lock, this does not take it: it answers locked: false with the
+    holder (lockedBy) and the expiry.
 
     Accepts the entity's ID or URN.
     """
     acquireEditorLock(agentRef: ID!): EditorLockResult!
 
     """
-    Release the editor lock for an Agent's system memory.
+    Release the editor lock for an Agent's system memory. The lock is ADVISORY
+    (see acquireEditorLock): releasing it clears the signal to other editors and
+    changes nothing about who may edit.
 
     Accepts the entity's ID or URN.
     """
