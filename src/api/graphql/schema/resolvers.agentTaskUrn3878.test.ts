@@ -6,7 +6,7 @@
  * the one null (cor:api:180:01): a caller outside the App, another App's task, a malformed body, a task-id leaf and a
  * nonexistent handle are indistinguishable. The MCP task read prints the same address.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -21,6 +21,20 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGrap
 // The run arm's team-read decision (cor:agt:050:23), made switchable so the pin compares the arm with Query.agentTask.
 const runGrant = vi.hoisted(() => ({ value: false }));
 vi.mock('../../../lib/auth/runTeamRead.js', () => ({ runMayReadTeam: vi.fn(async () => runGrant.value) }));
+// A fault inside the urn field's compose step (#2975: only a compose refusal may read as null), switchable per test.
+const composeFault = vi.hoisted(() => ({ error: null as Error | null }));
+vi.mock('../../../lib/agentTasks/handle.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../lib/agentTasks/handle.js')>();
+  return {
+    ...actual,
+    agentTaskUrn: (...args: Parameters<typeof actual.agentTaskUrn>) => {
+      if (composeFault.error) throw composeFault.error;
+      return actual.agentTaskUrn(...args);
+    },
+  };
+});
+
+afterEach(() => { vi.restoreAllMocks(); });
 
 const M = resolvers.Mutation as any;
 const Q = resolvers.Query as any;
@@ -201,7 +215,26 @@ describe('#3878 resolveUrn agenttask arm', () => {
     // App Y now carries the same old spelling, so the alias is ambiguous: alice reads both Apps, and still gets the
     // plain null, with no error that would say the spelling names more than one App.
     await db.app.update({ where: { id: appY.id }, data: { legacyUrn: old } });
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     await expect(resolve(viaAlias, as(alice))).resolves.toBeNull();
+    expect(logged, 'a concealed refusal is not logged as a fault').not.toHaveBeenCalled();
+  });
+
+  it('a database fault inside the arm propagates; it is never concealed as not-found', async () => {
+    const { loose } = await seed();
+    const urn = (await urnOf(loose))!;
+    expect(await resolve(urn, as(alice))).toMatchObject({ id: loose.id }); // positive control
+    const original = db.agentTask.findUnique.bind(db.agentTask);
+    let injected = false;
+    vi.spyOn(db.agentTask, 'findUnique').mockImplementation(((args: any) => {
+      if (!injected && args?.where?.appId_handle) {
+        injected = true;
+        return Promise.reject(new Error('3878 task lookup outage'));
+      }
+      return original(args);
+    }) as any);
+    await expect(resolve(urn, as(alice))).rejects.toThrow('3878 task lookup outage');
+    expect(injected, 'the fault reached the arm\'s task lookup').toBe(true);
   });
 });
 
@@ -225,5 +258,16 @@ describe('#3878 MCP task read carries the URN', () => {
     const { nested } = await seed();
     const text = await renderTask(nested, as(alice));
     expect(text).toContain(`  urn: hrn:agenttask:${org.urn}:x:at1.1`);
+  });
+});
+
+describe('#3878 AgentTask.urn: only a compose refusal is null', () => {
+  afterEach(() => { composeFault.error = null; });
+
+  it('a fault while composing propagates instead of reading as a null urn', async () => {
+    const { loose } = await seed();
+    expect(await urnOf(loose)).toMatch(/:at0\.1$/); // positive control: the real compose
+    composeFault.error = new Error('3878 compose fault');
+    await expect(urnOf(loose)).rejects.toThrow('3878 compose fault');
   });
 });
