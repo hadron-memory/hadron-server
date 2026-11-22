@@ -281,11 +281,11 @@ describe('#4855 who may: a signed grant held by that worker, naming the target, 
     evict.mockRestore();
   });
 
-  it('a target of another App: with no grant the one refusal; a grant that names it (no shipped path makes one) still ends nothing and spends nothing', async () => {
+  it('a target of another App reads as a missing worker, with or without a grant that names it (the id is scoped to the actor\'s App)', async () => {
     const foreign = await workerOf(w, w.agentId, w.app2Id);
     expect(await code(restart(foreign))).toBe(REFUSED);
     const g = await grant(foreign);
-    expect(await code(restart(foreign))).toBe('WORKER_NOT_FOUND');
+    expect(await code(restart(foreign))).toBe(REFUSED);
     expect(await useCount(g)).toBe(0);
     expect(await starts()).toHaveLength(0);
   });
@@ -415,7 +415,7 @@ describe('#4855 the not-started alarm interplay (QA F1): the restart neither hid
     await restart();
     // The restart carries the task in its start; it does not start, reassign, release or re-time the task, and ends no alarm.
     expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).toMatchObject({
-      status: taskBefore.status, assigneeWorkerId: kit, assignedAt: taskBefore.assignedAt, startedAt: null,
+      status: taskBefore.status, assigneeWorkerId: kit, assignedAt: taskBefore.assignedAt, startedAt: null, updatedAt: taskBefore.updatedAt,
     });
     expect((await starts())[0]!.args).toMatchObject({ taskId: t.id });
     expect((await alarms()).map((e) => e.id)).toEqual(before.map((e) => e.id));
@@ -446,7 +446,7 @@ describe('#4855 the not-started alarm interplay (QA F1): the restart neither hid
 });
 
 describe('#4855 two workers restarting each other at once (blind F1): the id-ordered assignment lock serializes them, no deadlock', () => {
-  it('both calls settle; at most one start is issued for each, and neither hangs', async () => {
+  it('both calls settle, exactly one wins, at most one start per target, and neither hangs', async () => {
     // Kit gets its own session (the actor's), a grant naming the first worker, and the first worker a dark session of its own.
     await db.appMember.create({ data: { appId: w.appId, userId: w.user2Id, role: 'member' } }).catch(() => undefined);
     const kitSessionOwn = await db.session.create({ data: { id: generateId(), appId: w.appId, workerId: kit, agentId: w.agentId, userId: w.userId } as never, select: { id: true } });
@@ -465,8 +465,13 @@ describe('#4855 two workers restarting each other at once (blind F1): the id-ord
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error('deadlock: the calls did not settle')), 20_000)),
     ]);
     // Each outcome is a success or one of the documented refusals; never a database deadlock (40P01) or a timeout.
-    for (const o of both) expect(['ok', 'WORKER_LIVE', 'WORKER_START_PENDING', 'NO_OPEN_SESSION']).toContain(o);
-    expect((await starts()).length).toBeLessThanOrEqual(2);
+    // Exactly one wins: kit's own session is live (a restart of kit is WORKER_LIVE), and if kit's call goes first it ends the first
+    // worker's session, so the serialized second call acts through a session that has ended (refused).
+    for (const o of both) expect(['ok', 'WORKER_LIVE', REFUSED]).toContain(o);
+    expect(both.filter((o) => o === 'ok')).toHaveLength(1);
+    const ops = await starts();
+    expect(ops.filter((o) => o.workerId === kit).length).toBeLessThanOrEqual(1);
+    expect(ops.filter((o) => o.workerId === w.workerId).length).toBeLessThanOrEqual(1);
   });
 });
 
@@ -492,6 +497,15 @@ describe('#4855 the library re-judges the actor under the transaction (a retirem
     await kitSession();
     expect(await code(direct(foreign))).toBe(REFUSED);
     expect(await useCount(g)).toBe(0);
+  });
+
+  it('an actor whose own session has ended is refused under the lock (the second call of two workers restarting each other)', async () => {
+    const g = await grant();
+    await kitSession();
+    const mine = await db.session.create({ data: { id: generateId(), appId: w.appId, workerId: w.workerId, agentId: w.agentId, userId: w.userId, endedAt: new Date() } as never, select: { id: true } });
+    expect(await code(direct(w.workerId, { sessionId: mine.id }))).toBe(REFUSED);
+    expect(await useCount(g)).toBe(0);
+    expect(await starts()).toHaveLength(0);
   });
 
   it('control: the same call by the live holder succeeds', async () => {

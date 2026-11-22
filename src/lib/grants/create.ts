@@ -251,7 +251,7 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
 
   // #4855: a worker-ref names a live worker of THIS App. A missing, other-App or retired worker is the same refusal as a malformed id
   // (no existence oracle, no cross-App naming). The worker rows are locked FOR SHARE, so a retirement that comes next waits for this
-  // insert; a worker retired later is not reached by the grant (workersReachedByGrant) and the door re-reads the actor under its own lock.
+  // insert. (A retired HOLDER is reached by nothing, workersReachedByGrant; a retired TARGET named by a live grant is refused by the door as WORKER_RETIRED.)
   // A worker holder may not name itself (a worker never restarts itself, so that term could never be used).
   for (const p of declared) {
     if (p.type !== 'worker-ref') continue;

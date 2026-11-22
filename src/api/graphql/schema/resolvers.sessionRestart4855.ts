@@ -12,9 +12,8 @@
 import type { Context } from './resolvers.helpers.js';
 import { inTaskWriteTx, requireWritable, resolveParticipatedApp, resolveTaskWorkerId, taskError } from './resolvers.agentTask.js';
 import { LaunchRefusal } from '../../../lib/hostOperations/launch.js';
-import { restartDarkSession, restartGrantRequired, type RestartActor, type RestartResult } from '../../../lib/hostOperations/darkRestart.js';
+import { restartDarkSession, restartGrantHeld, restartGrantRequired, type RestartActor, type RestartResult } from '../../../lib/hostOperations/darkRestart.js';
 import { workerBoundActor } from '../../../lib/grants/triggerGrant.js';
-import { restartGrantHeld } from '../../../lib/hostOperations/darkRestart.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { afterWaits, anchorNow, coveringSignals } from '../../../lib/stopSignals/state.js';
 import { GraphQLError } from 'graphql';
@@ -40,7 +39,9 @@ export const sessionRestartMutations = {
       workerId: actor.workerId, sessionId: bound.sessionId, hostLaunched: bound.hostLaunched, userId: actor.userId, agentId: actor.agentId,
     };
     // The target resolves inside the actor's own App only; a name that is none is the same refusal as a missing grant (no oracle).
-    const workerId = await resolveTaskWorkerId(ctx, app.id, input.worker);
+    // resolveTaskWorkerId reads an id or URN unscoped, so the App scope is checked here: a worker of another App reads as a missing one.
+    const resolved = await resolveTaskWorkerId(ctx, app.id, input.worker);
+    const workerId = resolved && (await ctx.db.worker.findFirst({ where: { id: resolved, appId: app.id }, select: { id: true } })) ? resolved : null;
     if (!workerId) throw restartGrantRequired();
     // Authority before any lock: a worker without a covering grant takes no assignment lock on the target (it could otherwise make
     // other writers wait on any worker of its App). Unlocked and read-only; the library judges again under the locks.
@@ -63,15 +64,14 @@ export const sessionRestartMutations = {
       if (e instanceof LaunchRefusal) throw taskError(e.code, e.message, { workerId });
       throw e;
     }
-    const done: RestartResult = result;
     // An ended session releases its memory keys once its end is durable, as every end does.
-    for (const id of done.endedSessionIds) sessionKeyCache.evict(id);
+    for (const id of result.endedSessionIds) sessionKeyCache.evict(id);
     // The audit of an end no human saw: ids and the caller's free-text reason, to the log only (no table here holds a reason, and the
     // task makes no migration). The durable record is the grant's USE event (who, which session) and the start's issuer.
     console.info('[session-restart] dark session ended and worker started', {
-      appId: app.id, workerId, operationId: done.operationId, endedSessionIds: done.endedSessionIds, taskId: done.taskId,
+      appId: app.id, workerId, operationId: result.operationId, endedSessionIds: result.endedSessionIds, taskId: result.taskId,
       by: { workerId: actor.workerId }, reason,
     });
-    return done;
+    return result;
   },
 };
