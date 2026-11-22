@@ -8,12 +8,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { isStoreFault } from '../../secrets/storeFault.js';
+import { meterRefusedSecretUse } from '../../secrets/readClientReveal.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../id.js';
 import { upsertPlatformActions } from '../../grants/actions.js';
 import { resolvers, type Context } from '../../../api/graphql/schema/resolvers.js';
 import type { RunToolContext } from './types.js';
+const fault = vi.hoisted(() => ({ on: false }));
+vi.mock('../../secrets/appSecrets.js', async (orig) => {
+  const actual = await orig<typeof import('../../secrets/appSecrets.js')>();
+  const { Prisma: P } = await import('../../../generated/prisma/index.js');
+  return { ...actual, currentAppSecretValue: (...a: Parameters<typeof actual.currentAppSecretValue>) => {
+    if (fault.on) return Promise.reject(new P.PrismaClientInitializationError('db down', 't'));
+    return actual.currentAppSecretValue(...a);
+  } };
+});
 vi.mock('../../webfetchClient.js', () => ({ httpRequest: vi.fn(), fetchUrl: vi.fn() }));
 import { httpRequest } from '../../webfetchClient.js';
 import { webRequest } from './webTools.js';
@@ -41,6 +51,7 @@ const budget = async () => (await db.appRun.findUniqueOrThrow({ where: { id: ctx
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  fault.on = false;
   process.env.SECRET_ROOT_KEY = '33'.repeat(32);
   await cleanDb(db); await upsertPlatformActions(db);
   const user = await db.user.create({ data: { handle: `s5w-${generateId()}` } });
@@ -75,7 +86,7 @@ describe('#4775 the use path is wired', () => {
 describe('#4775 echo redaction (acceptance 1)', () => {
   it('a remote that echoes the injected header back leaves no value in the result, the log or the hop record', async () => {
     await tickets(1);
-    vi.mocked(httpRequest).mockResolvedValue({ method: 'GET', finalUrl: `${URL_OK}?t=${CANARY}`, status: 200, headers: { 'x-echo': `Bearer ${CANARY}` }, contentType: 'application/json',
+    vi.mocked(httpRequest).mockResolvedValue({ method: 'GET', finalUrl: URL_OK, status: 200, headers: { 'x-echo': `Bearer ${CANARY}` }, contentType: 'application/json',
       body: { echoed: { authorization: `Bearer ${CANARY}` }, raw: `Bearer ${CANARY}` }, truncated: false } as never);
     const records: unknown[] = [];
     const out = await admitAndExecuteTool(webRequest, { method: 'GET', url: URL_OK, secretClientId: clientId }, { toolCtx: ctx, record: (e) => records.push(e) });
@@ -140,6 +151,27 @@ describe('#4775 refused attempts are metered and their audit capped (item 3)', (
   });
 });
 
+describe('#4775 cap counts refusals only, and delete-at-last-use works through web_request', () => {
+  it('successful uses never count toward the refusal cap', async () => {
+    const secretId = (await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } })).secretId;
+    await db.secretEvent.createMany({ data: Array.from({ length: 100 }, () => ({ ownerType: 'app', ownerId: appId, secretId, secretName: 'token', clientId, kind: 'USE', outcome: 'OK', runId: ctx.run.id })) });
+    await expect(call()).rejects.toMatchObject({ extensions: { code: 'ACTION_TICKET_REQUIRED' } });
+    expect(await db.secretEvent.count({ where: { clientId, kind: 'USE', outcome: 'ACTION_TICKET_REQUIRED' } })).toBe(1);
+  });
+  it('a signed delete-marked client spends its last use through web_request, the response is returned and the secret is gone', async () => {
+    const secretId = (await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } })).secretId;
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+      await tx.$executeRaw`UPDATE grants SET action_values = jsonb_set(action_values, '{auto-delete}', '"delete"'), signature_id = 'sig-1', max_uses = 1 WHERE id = ${grantId}`;
+    });
+    await tickets(1);
+    await expect(call()).resolves.toMatchObject({ status: 200, body: 'ok' });
+    expect(await db.secret.count({ where: { id: secretId } })).toBe(0);
+    await expect(call()).rejects.toBeDefined();
+    expect(httpRequest).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('#4775 a store fault is not a refusal (blind P2)', () => {
   it('classifies only connection-class Prisma errors as faults; a missing row or a constraint is a judgment', () => {
     const known = (code: string) => new Prisma.PrismaClientKnownRequestError('x', { code, clientVersion: 't' });
@@ -148,16 +180,24 @@ describe('#4775 a store fault is not a refusal (blind P2)', () => {
     expect(isStoreFault(new Prisma.PrismaClientInitializationError('x', 't'))).toBe(true);
     expect(isStoreFault(new Error('x'))).toBe(false);
   });
-  it('an outage during the use propagates as itself: not metered, not audited as REFUSED, nothing sent', async () => {
+  it('an outage reading the secret inside the use propagates as itself: not metered, not audited, nothing sent', async () => {
     await tickets(1);
     const before = await budget();
-    const fault = new Prisma.PrismaClientInitializationError('db down', 't');
-    const spy = vi.spyOn(db, '$transaction').mockRejectedValueOnce(fault);
-    await expect(call()).rejects.toBe(fault);
-    spy.mockRestore();
+    fault.on = true;
+    const err = await call().catch((e: unknown) => e);
+    fault.on = false;
+    expect(err).toBeInstanceOf(Prisma.PrismaClientInitializationError);
     expect(await budget()).toBe(before);
     expect(await db.secretEvent.count({ where: { clientId, kind: 'USE' } })).toBe(0);
     expect(httpRequest).not.toHaveBeenCalled();
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
+  });
+  it('the meter itself skips a store fault but charges any other refusal', async () => {
+    const before = await budget();
+    await meterRefusedSecretUse(ctx, new Prisma.PrismaClientInitializationError('db down', 't'));
+    expect(await budget()).toBe(before);
+    await meterRefusedSecretUse(ctx, new GraphQLError('refused'));
+    expect(await budget()).toBe(before! - 1);
   });
 });
 
@@ -168,5 +208,13 @@ describe('#4775 a followed redirect withholds the response (blind P1, defense in
     const err = (await call().catch((e: unknown) => e)) as GraphQLError;
     expect(err.extensions).toMatchObject({ code: 'WEBFETCH_REDIRECT_FOLLOWED' });
     expect(JSON.stringify({ m: err.message, x: err.extensions })).not.toContain(CANARY);
+  });
+  it('a result with no finalUrl is refused the same way (fail closed) and raises the operator line', async () => {
+    await tickets(1);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.mocked(httpRequest).mockResolvedValue({ method: 'GET', status: 200, headers: {}, contentType: null, body: 'ok', truncated: false } as never);
+    await expect(call()).rejects.toMatchObject({ extensions: { code: 'WEBFETCH_REDIRECT_FOLLOWED' } });
+    expect(warn).toHaveBeenCalledWith('[secretUse] redirect followed or finalUrl missing; response withheld', { runId: ctx.run.id });
+    warn.mockRestore();
   });
 });

@@ -166,7 +166,9 @@ export const webRequest: RunToolDef = {
       const result = await httpRequest({ ...input, url: prepared.url, auth: prepared.auth, redirects: 'none' });
       // Defense in depth for a tool that ignores redirects:'none': if the answer came from another origin the credential may have
       // reached it. It cannot be unsent, so the response is refused (never returned to the model) and the failure says why.
-      if (typeof result.finalUrl === 'string' && !sameOrigin(result.finalUrl, prepared.url)) {
+      if (typeof result.finalUrl !== 'string' || !sameResource(result.finalUrl, prepared.url)) {
+        // Fixed-shape operator line (no URL, no value): a followed redirect means a deployed tool predates hadrontool-webfetch#12.
+        console.warn('[secretUse] redirect followed or finalUrl missing; response withheld', { runId: ctx.run.id });
         throw new GraphQLError('web_request: the tool followed a redirect while a credential was in flight; the response is withheld.', { extensions: { code: 'WEBFETCH_REDIRECT_FOLLOWED' } });
       }
       const safe = redactSecretUse(result, prepared.auth) as HttpRequestResult;
@@ -178,8 +180,9 @@ export const webRequest: RunToolDef = {
   },
 };
 
-function sameOrigin(a: string, b: string): boolean {
-  try { return new URL(a).origin === new URL(b).origin; } catch { return false; }
+/** The bound URL as a URL object compares it: a redirect to another host, path or query (even on the same origin) differs. */
+function sameResource(a: string, b: string): boolean {
+  try { return new URL(a).href === new URL(b).href; } catch { return false; }
 }
 
 /**

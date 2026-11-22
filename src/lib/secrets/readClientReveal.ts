@@ -160,10 +160,10 @@ async function revealAs(ctx: Context, clientId: string, holder: Holder): Promise
 }
 
 /** Fewer than {@link SECRET_USE_REFUSAL_AUDIT_CAP} stored refusals for this client in the last 24 hours (database clock). */
-async function belowRefusalAuditCap(tool: import('../runner/tools/types.js').RunToolContext, clientId: string): Promise<boolean> {
+async function belowRefusalAuditCap(tool: import('../runner/tools/types.js').RunToolContext, secretId: string, clientId: string): Promise<boolean> {
   try {
     const [{ n }] = await tool.db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM secret_events
-      WHERE client_id = ${clientId} AND kind = 'USE' AND outcome <> 'OK' AND at > (clock_timestamp() AT TIME ZONE 'UTC') - interval '24 hours'`;
+      WHERE secret_id = ${secretId} AND client_id = ${clientId} AND kind = 'USE' AND outcome <> 'OK' AND at > (clock_timestamp() AT TIME ZONE 'UTC') - interval '24 hours'`;
     return Number(n) < SECRET_USE_REFUSAL_AUDIT_CAP;
   } catch { return true; } // the count is an optimisation of the bound; never lose the audit because it failed
 }
@@ -306,7 +306,9 @@ async function prepareSecretUseOnce(
     const audited = known as { ownerId: string; secretId: string; secretName: string } | null;
     const rawCode = error instanceof GraphQLError ? error.extensions?.code : undefined;
     const outcome = typeof rawCode === 'string' && /^[A-Z0-9_]{1,64}$/.test(rawCode) ? rawCode : 'REFUSED';
-    if (audited && !(await belowRefusalAuditCap(tool, clientId))) {
+    // An infrastructure fault is not an outcome of this use: it is neither stored nor counted as a refusal, and it propagates as itself.
+    if (isStoreFault(error)) throw error;
+    if (audited && !(await belowRefusalAuditCap(tool, audited.secretId, clientId))) {
       // Over the cap a refusal is not stored, but it is never silent: one fixed-shape line (no value, no message) an operator can alarm on.
       console.warn('[secretUse] refusal audit cap reached', { clientId, secretId: audited.secretId, ownerId: audited.ownerId, outcome, cap: SECRET_USE_REFUSAL_AUDIT_CAP });
     } else if (audited) {
