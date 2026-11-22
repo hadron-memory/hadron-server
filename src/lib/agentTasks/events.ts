@@ -77,7 +77,9 @@ export const ASSIGNEE_CLEARED_EVENT_TYPES = ['task.handed-back'] as const satisf
 // #4431: an answer to a question that blocks the task, or its take-back, is a fact about the task (a decider acted on the
 // question), never its assignee acting on the task, so neither clears a wake or counts as progress (Vera's draft of
 // cor:agt:050:11).
-export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed', 'task.external-id-released', 'review.defect-linked', 'question.answered', 'question.answer-retracted'] as const;
+// #4441: a verdict's withdrawal is a fact about a FINISHED seat, recorded by its holder or the coordinator, never its
+// assignee working the task, so it never counts as activity or clears a wake.
+export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed', 'task.external-id-released', 'review.defect-linked', 'question.answered', 'question.answer-retracted', 'review.verdict.withdrawn'] as const;
 /** #2609: only facts already readable by every team-event reader. Assignee state and future codes are excluded. */
 export const RECORDED_TASK_WARNING_CODES = ['task.create.no-source', 'task.finish.open-children'] as const;
 export type RecordedTaskWarningCode = (typeof RECORDED_TASK_WARNING_CODES)[number];
@@ -183,6 +185,7 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
       slot: e.slot, head: e.head, verdict: e.verdict, node: e.node, receipt: e.receipt,
       reviewerFamily: e.reviewerFamily, reviewerModel: e.reviewerModel, modelReportedAt: e.modelReportedAt,
     };
+    case 'review.verdict.withdrawn': return { slot: e.slot, head: e.head, verdictEventId: e.verdictEventId, verdict: e.verdict, receipt: e.receipt };
     case 'pr.ready': return { head: e.head };
     case 'task.edited':
       if (e.fields.some(f => !(TASK_EDIT_FIELDS as readonly string[]).includes(f))) throw new Error('Unsupported task edit field');
@@ -765,6 +768,8 @@ export type ManagerAct =
   | 'task.assign' | 'task.reassign' | 'task.cancel' | 'task.park' | 'task.ready' | 'task.update'
   | 'task.finding-dispose' | 'task.priority' | 'task.release-external-id' | 'task.blocker-add' | 'task.blocker-remove' | 'task.create'
   | 'alarm.acknowledge' | 'worker.availability' | 'model-family.availability' | 'app.stall-schedule'
+  // #4441: a coordinator's (or manager's) withdrawal of another reviewer's negative verdict.
+  | 'review.verdict-withdraw'
   // #4777: the saturation-alarm wake-roles list (cor:agt:060:16).
   | 'app.saturation-wake-roles'
   | 'app.model-group.set' | 'app.model-group.delete' | 'app.properties'

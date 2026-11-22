@@ -78,9 +78,15 @@ function scheduled(events: Event[], taskId: string): string[] {
 /** #4202: the task's latest verdict at `head`, among the events of the task's OWN App (`appId`); another App's row naming the task is not its verdict. */
 const verdictAtHead = (tx: Prisma.TransactionClient, appId: string, taskId: string, head: string) =>
   tx.agentTeamEvent.findFirst({ where: { appId, taskId, type: 'review.verdict', payload: { path: ['head'], equals: head } }, orderBy: [...newest] });
+const NEGATIVE_VERDICTS = ['CHANGES_REQUESTED', 'FAIL', 'REFUSED'] as const;
+const isNegative = (verdict: unknown) => (NEGATIVE_VERDICTS as readonly string[]).includes(String(verdict));
+/** #4441: whether this verdict event was withdrawn (review.verdict.withdrawn naming it, in the task's own App). */
+const withdrawalOf = (tx: Prisma.TransactionClient, appId: string, taskId: string, verdictEventId: string) =>
+  tx.agentTeamEvent.findFirst({ where: { appId, taskId, type: 'review.verdict.withdrawn', payload: { path: ['verdictEventId'], equals: verdictEventId } }, orderBy: [...newest], select: { id: true } });
+/** The task's latest verdict at `head` is negative and was not withdrawn (#4441): the one predicate every negative-seat guard reads. */
 async function negativeAtHead(tx: Prisma.TransactionClient, appId: string, taskId: string, head: string): Promise<boolean> {
   const prior = await verdictAtHead(tx, appId, taskId, head);
-  return ['CHANGES_REQUESTED', 'FAIL', 'REFUSED'].includes(String(data(prior ?? undefined).verdict));
+  return !!prior && isNegative(data(prior).verdict) && !await withdrawalOf(tx, appId, taskId, prior.id);
 }
 function sameEventActor(event: Pick<Event, 'actorWorkerId' | 'actorUserId'>, actor: { workerId: string | null; userId: string | null }): boolean {
   return event.actorWorkerId ? event.actorWorkerId === actor.workerId
@@ -99,11 +105,15 @@ export function freezersAtHeadSql(appId: string, head: string): Prisma.Sql {
 async function negativeHead(tx: Prisma.TransactionClient, build: Pick<TaskRow, 'id' | 'appId'>, head: string): Promise<boolean> {
   const [answer] = await tx.$queryRaw<{ blocked: boolean }[]>`SELECT EXISTS (
     SELECT 1 FROM (
-      SELECT DISTINCT ON (e.task_id) e.payload FROM agent_team_events e
+      SELECT DISTINCT ON (e.task_id) e.id, e.task_id, e.payload FROM agent_team_events e
       JOIN agent_tasks t ON t.id = e.task_id AND t.app_id = ${build.appId} AND t.parent_task_id = ${build.id}
       WHERE e.app_id = ${build.appId} AND e.type = 'review.verdict' AND e.payload->>'head' = ${head}
       ORDER BY e.task_id, e.created_at DESC, e.id DESC
-    ) latest WHERE latest.payload->>'verdict' IN ('CHANGES_REQUESTED', 'FAIL', 'REFUSED')
+    ) latest WHERE latest.payload->>'verdict' IN (${Prisma.join([...NEGATIVE_VERDICTS])})
+      -- #4441: a negative withdrawn by its holder or the coordinator no longer blocks the head.
+      AND NOT EXISTS (SELECT 1 FROM agent_team_events w
+        WHERE w.app_id = ${build.appId} AND w.task_id = latest.task_id AND w.type = 'review.verdict.withdrawn'
+          AND w.payload->>'verdictEventId' = latest.id)
   ) AS blocked`;
   return answer.blocked;
 }
@@ -370,7 +380,9 @@ export const prProtocolMutations = {
       const head = headValue(args.head);
       if (head !== assigned.head) throw taskError('REVIEW_HEAD_MISMATCH', `The verdict head differs from the assigned head. Record at the head the seat was bound to. If the seat truly cannot record, ${RECEIPT_IF_UNBINDABLE}`);
       const prior = await verdictAtHead(tx, row.appId, row.id, head);
-      if (prior && ['CHANGES_REQUESTED', 'FAIL', 'REFUSED'].includes(String(data(prior).verdict))
+      // #4441: no withdrawal check here, on purpose: a withdrawal needs a FINISHED seat and a verdict needs a live one,
+      // so a seat that can take a verdict can never hold a withdrawn negative. A path that reopens a seat must revisit this.
+      if (prior && isNegative(data(prior).verdict)
         && !sameEventActor(prior, { workerId: currentActor().workerId, userId: c.userId ?? null })) {
         throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'Only the actor who recorded a negative verdict may re-rate it at the same head.');
       }
@@ -380,6 +392,40 @@ export const prProtocolMutations = {
       await record(tx, c, row, { type: 'review.verdict', slot: assigned.slot, head, verdict: args.verdict, node, receipt, ...reviewer }, { 'review.verdict': args.verdict, 'review.node': node, 'review.receipt': receipt });
     }, { taskGraph: 'exclusive' });
     return { task, action: await action(ctx, task.appId, 'review.verdict') };
+  },
+  /**
+   * #4441 (Holger's ruling, team chat #138478, "WITHDRAW VERB"): withdraw a FINISHED seat's negative verdict at the head
+   * it was recorded at. Who: the actor who recorded that verdict (the seat holder), or the coordinator: a worker whose
+   * current role is coordinator in the App, or whoever manages the App (with an instruction for a worker whose holder
+   * does). A caller who may not read the App's tasks is answered as for a task that does not exist. One
+   * review.verdict.withdrawn event on the seat task, naming the verdict event; the verdict event and the finished task row
+   * are not changed. Afterwards every negative-seat guard reads the verdict as not negative, so the slot can be
+   * superseded at the same head, but it counts only through a positive verdict. TASK_ENDED still forbids re-recording on
+   * the finished seat.
+   */
+  withdrawReviewVerdict: async (_: unknown, args: { taskRef: string; head: string; receipt?: string | null; instruction?: ActInstruction | null }, ctx: Context) => {
+    const task = await mutateTask(ctx, args.taskRef, async (tx, row, actor, app, c) => {
+      const head = headValue(args.head);
+      const receipt = optionalMetadata(args.receipt, 'receipt');
+      const assigned = data(latest(await taskEvents(tx, [row.id]), 'review.seat.assigned', row.id));
+      if (typeof assigned.slot !== 'string') throw taskError('REVIEW_SEAT_UNASSIGNED', 'The task has no assigned review seat; only a bound seat\'s verdict can be withdrawn.');
+      if (row.status !== 'finished') throw taskError('TASK_INVALID_TRANSITION', 'A verdict is withdrawn only on a FINISHED seat; while the seat is STARTED its holder re-rates it.');
+      if (head !== assigned.head) throw taskError('REVIEW_HEAD_MISMATCH', 'Withdraw at the head the seat was bound to.');
+      const prior = await verdictAtHead(tx, app.id, row.id, head);
+      if (!prior || !isNegative(data(prior).verdict)) throw taskError('REVIEW_VERDICT_NOT_NEGATIVE', 'Only a CHANGES_REQUESTED, FAIL or REFUSED verdict can be withdrawn.');
+      if (await withdrawalOf(tx, app.id, row.id, prior.id)) throw taskError('REVIEW_VERDICT_ALREADY_WITHDRAWN', 'This verdict is already withdrawn.');
+      const holder = sameEventActor(prior, { workerId: currentActor().workerId, userId: c.userId ?? null });
+      const coordinator = !holder && actor.kind === 'worker' && await workerHasRole(tx, actor.workerId, app.id, ['coordinator']);
+      const manager = !holder && !coordinator && await actorManagesApp(c, app, actor, actor.instructed);
+      if (!holder && !coordinator && !manager) {
+        throw taskError('REVIEW_WITHDRAW_FORBIDDEN', 'Only the reviewer who recorded the negative verdict, a coordinator worker, or whoever manages the App (a worker whose holder does, with an instruction) withdraws it. Nothing was written.');
+      }
+      await appendTaskEvent(tx, { appId: app.id, taskId: row.id, actor: eventActor(c.userId), event: {
+        type: 'review.verdict.withdrawn', slot: assigned.slot, head, verdictEventId: prior.id, verdict: data(prior).verdict as ReviewVerdict, receipt,
+      } });
+      if (manager) await recordInstructedManagerAct(tx, app.id, actor, 'review.verdict-withdraw', { taskId: row.id });
+    }, { taskGraph: 'exclusive' }, args.instruction ?? null);
+    return { task, action: await action(ctx, task.appId, 'review.verdict.withdrawn') };
   },
   recordReadyCall: async (_: unknown, { taskRef, head: raw }: { taskRef: string; head: string }, ctx: Context) => {
     const task = await mutateTask(ctx, taskRef, async (tx, row, actor, _app, c) => {
