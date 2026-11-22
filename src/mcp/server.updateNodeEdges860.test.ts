@@ -111,6 +111,19 @@ describe('addEdges (#860)', () => {
     expect(await namesOf()).toEqual(['applies-when', 'documented-by', 'relates-to']);
   });
 
+  it('the same loc aimed at a DIFFERENT target is a conflict, not an idempotent re-add (Rook P3)', async () => {
+    // e1 sits at e1.loc with target t1; the same loc, name and fields but target t4 is another edge.
+    const row = await db.edge.findUniqueOrThrow({ where: { id: e1.id } });
+    const out = await call('hadron_update_node', {
+      urn: nodeUrnOf(source.loc),
+      addEdges: [{ targetUrn: t4.id, name: row.name ?? undefined, loc: e1.loc }],
+    });
+    expect(out).toContain('edge_loc_conflict');
+    const after = await db.edge.findUniqueOrThrow({ where: { id: e1.id } });
+    expect(after.targetId).toBe(t1.id);
+    expect(await namesOf()).toEqual(['applies-when', 'documented-by', 'relates-to']);
+  });
+
   it('an unresolvable target refuses the whole call and writes nothing', async () => {
     const out = await call('hadron_update_node', {
       urn: nodeUrnOf(source.loc),
