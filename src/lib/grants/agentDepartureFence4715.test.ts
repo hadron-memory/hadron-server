@@ -309,9 +309,72 @@ describe('#4715 the judge locks the agents in ONE id-ordered pass, each row at i
   });
 });
 
-/** Every agent-row lock a transaction takes, in order: [txIndex, 'SHARE' | 'NKU', agentId]. A wrapper around `db` whose transactions log their raw statements. */
+describe('#4895 a vanished App still fences its named agents (Bindi F2 on #4795, follow-up of #4808)', () => {
+  it('an App id with no row: its named agents still take FOR NO KEY UPDATE, and the judge completes', async () => {
+    const lone = await mkAgent('lone-4895');
+    const rec = lockRecorder();
+    await rec.spyDb.$transaction((tx) => lockAppInstallationsFenced(tx as never, new Map([[generateId(), [lone]]])));
+    expect(rec.log.map(([, mode, id]) => `${mode}:${id}`)).toEqual([`NKU:${lone}`]);
+  });
+
+  it('a vanished App\'s named agents join the SAME one id-ordered pass as a found App\'s fence, and it invents no witness', async () => {
+    const nA = await mkAgent('mix-a-4895'); const nB = await mkAgent('mix-b-4895'); const nV = await mkAgent('mix-v-4895');
+    // The database's id order of the three (queried, not assumed: the pass is ordered by the database, not a JS sort).
+    const dbOrder = (await db.$queryRaw<Array<{ id: string }>>`SELECT id FROM agents WHERE id = ANY(${[nA, nB, nV]}) ORDER BY id`).map((r) => r.id);
+    // The found App names the first and last in that order; the VANISHED App names the middle one, so a second per-App pass (or a
+    // dropped agent) cannot produce the expected sequence. The vanished App id has no apps row at all.
+    const byApp = new Map<string, readonly string[]>([[appId, [dbOrder[0]!, dbOrder[2]!]], [generateId(), [dbOrder[1]!]]]);
+    const rec = lockRecorder();
+    await rec.spyDb.$transaction((tx) => lockAppInstallationsFenced(tx as never, byApp));
+    expect(rec.log.map(([, mode, id]) => `${mode}:${id}`)).toEqual(dbOrder.map((id) => `NKU:${id}`));
+  });
+});
+
+describe('#4895 round 2 (Arden\'s BLIND P2s): the App list and the fence derive together; an id in both sets; empty lists; the found App\'s structure', () => {
+  it('an id that is BOTH a witness and fenced locks ONCE as NO KEY UPDATE, a pure witness takes SHARE, and the sequence is one apps statement, the rows, then the agents', async () => {
+    const named = await mkAgent('r2-named'); // named under the found App AND a vanished one; also the target of the found App's import edge
+    const witnessRow = await mkAgent('r2-row'); // a physical row of the found App, named NOWHERE: a witness, never fenced
+    const vanishedNamed = await mkAgent('r2-vanished'); // named only under the vanished App
+    await db.appAgent.create({ data: { appId, agentId: witnessRow } });
+    await db.agentOrgGrant.create({ data: { orgId, agentId: named, activatedAt: new Date(Date.now() - 86_400_000) } });
+    await db.agentImport.create({
+      data: { parentAgentId: witnessRow, importedAgentId: named, position: 0, agentOrgGrantOrgId: orgId, agentOrgGrantAgentId: named },
+    });
+    const dbOrder = (await db.$queryRaw<Array<{ id: string }>>`SELECT id FROM agents WHERE id = ANY(${[named, witnessRow, vanishedNamed]}) ORDER BY id`).map((r) => r.id);
+    const vanished = generateId();
+    const byApp = new Map<string, readonly string[]>([[appId, [named]], [vanished, [named, vanishedNamed]]]);
+    const rec = lockRecorder();
+    await rec.spyDb.$transaction((tx) => lockAppInstallationsFenced(tx as never, byApp));
+    // The agent pass: each id ONCE, at its own strength — the both-sets id (named) is fenced, the pure witness (witnessRow) is SHARE.
+    expect(rec.log.map(([, mode, id]) => `${mode}:${id}`)).toEqual(dbOrder.map((id) => `${id === witnessRow ? 'SHARE' : 'NKU'}:${id}`));
+    // The whole sequence: ONE apps statement covering every App that has a named agent (found AND vanished), the found App's row lock,
+    // then the one agent pass. The vanished App has no structure of its own to lock.
+    expect(rec.trace).toEqual([
+      `app SHARE ${appId}`, `app SHARE ${vanished}`, `rows SHARE ${appId}`,
+      ...dbOrder.map((id) => `agent ${id === witnessRow ? 'SHARE' : 'NKU'} ${id}`),
+    ]);
+  });
+
+  it('an App with an EMPTY named list locks nothing anywhere (not even its own row), and a vanished App naming an id with no agent row locks nothing and completes', async () => {
+    const ghost = generateId();
+    let rec = lockRecorder();
+    await rec.spyDb.$transaction((tx) => lockAppInstallationsFenced(tx as never, new Map<string, readonly string[]>([[appId, []], [ghost, ['no-such-agent-4895r2']]])));
+    // The empty-list App is absent from the one apps statement (only the vanished App's ghost id is named); no row has the ghost agent id.
+    expect(rec.trace).toEqual([`app SHARE ${ghost}`]);
+    expect(rec.log).toEqual([]);
+    rec = lockRecorder();
+    await rec.spyDb.$transaction((tx) => lockAppInstallationsFenced(tx as never, new Map<string, readonly string[]>([[appId, []]])));
+    expect(rec.trace).toEqual([]); // every list empty: not even the apps statement runs
+    expect(rec.log).toEqual([]);
+  });
+});
+
+/** Every agent-row lock a transaction takes, in order: [txIndex, 'SHARE' | 'NKU', agentId]. A wrapper around `db` whose transactions log their raw statements.
+ * `trace` (#4895 round 2) additionally records the structural statements in execution order — the one `apps` FOR SHARE statement (one
+ * line per App id it names), each App's `app_agents` row lock, and every agent-row lock — so a pin can assert the whole lock sequence. */
 function lockRecorder() {
   const log: Array<[number, 'SHARE' | 'NKU', string]> = [];
+  const trace: string[] = [];
   let txCount = 0;
   const wrapTx = (tx: any, index: number) => new Proxy(tx, {
     get(target, prop) {
@@ -319,7 +382,16 @@ function lockRecorder() {
         return (strings: TemplateStringsArray, ...values: unknown[]) => {
           const text = Array.isArray(strings) ? strings.join('?') : String(strings);
           const m = /FROM agents WHERE id (?:= \?|= ANY\(\?\)).*?FOR (SHARE|NO KEY UPDATE)/s.exec(text);
-          if (m) for (const v of values.flat()) if (typeof v === 'string') log.push([index, m[1] === 'SHARE' ? 'SHARE' : 'NKU', v]);
+          if (m) {
+            for (const v of values.flat()) if (typeof v === 'string') {
+              log.push([index, m[1] === 'SHARE' ? 'SHARE' : 'NKU', v]);
+              trace.push(`agent ${m[1] === 'SHARE' ? 'SHARE' : 'NKU'} ${v}`);
+            }
+          } else if (/FROM apps WHERE id = ANY\(\?\) ORDER BY id FOR SHARE/.test(text)) {
+            for (const v of values.flat()) if (typeof v === 'string') trace.push(`app SHARE ${v}`);
+          } else if (/FROM app_agents aa WHERE aa\.app_id\s*=\s*\?.*?FOR SHARE OF aa/s.test(text)) {
+            if (typeof values[0] === 'string') trace.push(`rows SHARE ${values[0]}`);
+          }
           return (target as any).$queryRaw(strings, ...values);
         };
       }
@@ -338,7 +410,7 @@ function lockRecorder() {
       return typeof v === 'function' ? v.bind(target) : v;
     },
   }) as typeof db;
-  return { log, spyDb };
+  return { log, trace, spyDb };
 }
 
 describe('#4715 the judge takes its agents in ONE pass across all Apps, in the database\'s id order (BLIND P2s, Bindi)', () => {
