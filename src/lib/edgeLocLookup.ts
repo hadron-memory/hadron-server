@@ -19,37 +19,32 @@ import { deriveEdgeLoc, deriveEdgeLocAlternates, compareMigratedSuffix, migrated
  *
  * Never writes, never rewrites a loc, and reads nothing for a name with a single spelling.
  *
- * The selection is made BEFORE the caller's upsert and this module does not serialize the two, so the guarantee is
- * stated exactly.
+ * Contract (#4718, closes the #4637 gap). When the selection returns a MIGRATED row's loc, that row is locked
+ * `FOR KEY SHARE` before the loc is returned, and the lock is held to the end of the CALLER's transaction. A hard
+ * delete or a loc update of that row (an endpoint re-key) takes a conflicting lock, so it waits for the caller's
+ * upsert and commit instead of landing between the selection and the upsert; the caller upserts at a row that is still
+ * there, so the migrated edge is never twinned. The lock is re-checked after it is taken: a row that was deleted or
+ * re-keyed between the read and the lock is not returned, and the selection runs again against the new state (bounded,
+ * then the newest selection is returned). Locks of this class are compatible with each other, so two seam writers
+ * never wait on one another. The primary (runtime) spelling and the no-row answer take no lock: a row missing there
+ * only makes every writer create the same runtime loc, which meets on the (loc, memory) unique.
  *
- * While the selected same-edge row stays at its loc, two writers that both go through this seam cannot twin each
- * other: a seam writer picks the runtime spelling only when no same-edge row holds the migrated one, so both address
- * the same loc and meet on the (loc, memory) unique. Each caller's `update: {}` upsert is followed, in the same
- * transaction, by the occupant check (live, same source, target, name), which refuses a different edge at that loc
- * rather than overwriting it.
+ * It is only a lock when `db` is the caller's open transaction client; outside a transaction it ends with the statement.
  *
- * It does NOT hold if the selected row leaves its loc between the selection and the upsert: a hard delete (deleteEdge,
- * the inline and MCP outgoing-edge replacement, a merge drop) or an endpoint move that re-keys it. The writer that had
- * selected it then upserts at the migrated loc and creates the edge there, while a writer that selected after the
- * change creates it at the runtime loc: ONE duplicate edge. A writer off this seam (the fresh-edge create paths:
- * createEdge in GraphQL and MCP, inline edges, merge, subtree move, extract), which only ever writes the runtime
- * spelling and is out of scope of #4583, can leave one the same way.
+ * LOCK ORDER (one fixed order, every path that touches an edge row follows it):
+ *   1. the memory channel key (`lockMemoriesForChannelChange`; the seam's callers hold it),
+ *   2. the subtree advisory locks (`moveNodeSubtree`: destination ancestors, `lockSourceForMove`),
+ *   3. the node rows and the memory fences,
+ *   4. the edge row (this lock; `moveNodeSubtree`'s edge pass writes edge rows last, in plan order, after 1-3).
+ * The seam takes at most ONE edge-row lock per call and never takes a node, memory or advisory lock after it; a caller
+ * that holds the key share and then reaches for a node row held by a move is the one cycle this order forbids, and
+ * `edgeLocLock4718.test.ts` pins the cross-memory `moveNodeSubtree` interleaving.
  *
- * What the selection itself does in these races: it is a read and writes nothing, so the outcome is the duplicate edge
- * described above, not a lost or merged one. (What the caller's own upsert does under contention is that caller's
- * concern and is not claimed here.) Serializing the selection through the upsert (an advisory lock per relationship)
- * was declined: the seam's callers handle several relationships per transaction in differing orders, so a late-taken
- * lock risks a lock-order deadlock, a worse failure than the duplicate.
- *
- * Re-assessed in #4637 (returning the selected row's identity and retrying the selection), measured at main: the window
- * is one upsert statement (p50 1.3 ms locally), the upsert at an existing row takes no row lock, and the writers not
- * serialized with the callers (which hold the memory channel key) are a hard deleteEdge and an endpoint re-key. Re-reading
- * the row before the write only moves the same gap by one statement; closing it takes a lock held to commit (FOR KEY
- * SHARE), which is a separately gated design with a writer-versus-multi-row-re-key deadlock surface, not a retry loop
- * here. The limitation stands. Evidence: hrn:node:hadronmemory.com:hadron-server:findings:edge-loc-lookup-stale-migrated-loc-race-disposition
+ * Writers that never go through the seam (the fresh-edge create paths: createEdge, inline edges, merge, extract) only
+ * write the runtime spelling and are out of scope of #4583.
  */
 export async function derivedEdgeLocForUpsert(
-  db: Pick<PrismaClient, 'edge'>,
+  db: Pick<PrismaClient, 'edge' | '$queryRaw'>,
   edge: {
     memoryId: string;
     sourceId: string;
@@ -64,18 +59,36 @@ export async function derivedEdgeLocForUpsert(
   if (alternates.length === 0) return primary;
   // The backfill also appended `:N` (N >= 2) to the migrated loc when two names between the same endpoints sanitized to
   // one atom (migration lines 70-89), so those locs are candidates too: `<alternate>:2`, `<alternate>:3`, ...
+  for (let attempt = 0; ; attempt++) {
+    const picked = await select(db, edge, primary, alternates);
+    if (picked.lock === null) return picked.loc;
+    // FOR KEY SHARE conflicts with a delete and with a key (loc) update, and waits for either to finish.
+    const held = await db.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM edges WHERE id = ${picked.lock} AND memory_id = ${edge.memoryId} AND loc = ${picked.loc} FOR KEY SHARE`;
+    if (held.length > 0 || attempt >= MAX_LOCK_ATTEMPTS) return picked.loc;
+  }
+}
+
+const MAX_LOCK_ATTEMPTS = 5;
+
+async function select(
+  db: Pick<PrismaClient, 'edge'>,
+  edge: { memoryId: string; sourceId: string; targetId: string; name: string | null | undefined },
+  primary: string,
+  alternates: string[],
+): Promise<{ loc: string; lock: string | null }> {
   const rows = await db.edge.findMany({
     where: {
       memoryId: edge.memoryId,
       OR: [{ loc: { in: [primary, ...alternates] } }, ...alternates.map((a) => ({ loc: { startsWith: `${a}:` } }))],
     },
-    select: { loc: true, name: true, sourceId: true, targetId: true },
+    select: { id: true, loc: true, name: true, sourceId: true, targetId: true },
   });
   const isThisEdge = (r: { name: string | null; sourceId: string; targetId: string }) =>
     r.name === (edge.name ?? null) && r.sourceId === edge.sourceId && r.targetId === edge.targetId;
   // The runtime loc wins when it IS this edge (what main already did for it). When a DIFFERENT edge owns it, that must
   // not hide a same-edge migrated row: the caller's occupant check would refuse although the right edge exists.
-  if (rows.some((r) => r.loc === primary && isThisEdge(r))) return primary;
+  if (rows.some((r) => r.loc === primary && isThisEdge(r))) return { loc: primary, lock: null };
   // Rank within one alternate: the plain loc first, then suffixes as DECIMALS (shorter digit string first, then
   // lexicographic: the canonical form has no leading zeros, so this is numeric order without floating point).
   const rank = (loc: string): string | null => {
@@ -89,8 +102,8 @@ export async function derivedEdgeLocForUpsert(
   // The same edge only: same name, source and target.
   const same = rows
     .filter(isThisEdge)
-    .map((r) => ({ loc: r.loc, rank: rank(r.loc) }))
-    .filter((r): r is { loc: string; rank: string } => r.rank !== null)
+    .map((r) => ({ id: r.id, loc: r.loc, rank: rank(r.loc) }))
+    .filter((r): r is { id: string; loc: string; rank: string } => r.rank !== null)
     .sort((x, y) => compareMigratedSuffix(x.rank, y.rank))[0];
-  return same ? same.loc : primary;
+  return same ? { loc: same.loc, lock: same.id } : { loc: primary, lock: null };
 }
