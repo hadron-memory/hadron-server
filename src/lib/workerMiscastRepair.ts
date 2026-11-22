@@ -47,8 +47,9 @@ async function jsonReferences(db: Reader, table: string, column: string, ids: st
  * transaction-local `statement_timeout` before each statement (so Postgres cancels a stuck scan, not just the
  * transaction wrapper). An unfinished census has NOT found none, so the delete is refused, never admitted
  * (`WorkerCensusIncompleteError`; its own code, never `WORKER_IN_USE`, which means a reference was found).
- * 20 s is the build's choice: the measured census on a quiet 1M-node App is 7.9 s before the one-pass change, so the bound
- * leaves a wide margin for a legitimate run while holding a pooled connection for a bounded time. `WORKER_CENSUS_TIMEOUT_MS`
+ * 20 s is the build's choice: the measured census on a quiet 1M-node App is 7.9 s before the one-pass change, and on a 250k-node App
+ * about 3 s with 10 ended sessions and about 16 s with 100 (it scales with the identity count too, #4820 QA), so the margin
+ * narrows for an App with very many ended bindings; an operator can raise the bound, and an overrun fails closed. `WORKER_CENSUS_TIMEOUT_MS`
  * overrides it, read per call; only a positive integer counts (0 means "no timeout" to Postgres, so 0, negatives and junk
  * fall back to the default instead of widening the bound).
  */
