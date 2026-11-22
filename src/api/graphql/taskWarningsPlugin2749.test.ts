@@ -262,5 +262,5 @@ describe('the final response cap', () => {
     ]);
     // Every write committed even where its advice was cut.
     expect(await db.node.count({ where: { memoryId, loc: { startsWith: 'pinned-' } } })).toBe(NODES);
-  });
+  }, 60_000); // #4793: the finishable parents are set up inside the test
 });

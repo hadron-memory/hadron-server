@@ -433,7 +433,7 @@ describe('decided in the write transaction, bounded after it', () => {
     expect(warnings).toHaveLength(MAX_WARNINGS_PER_RESPONSE);
     expect(warnings[0].register?.state).toBe('mapped');
     expect(bounded).toHaveLength(2); // one shared enrichment transaction plus one bounded history transaction
-  });
+  }, 60_000); // #4793: the 21 finishable parents (create, start, child) are set up inside the test, outside the measured step
 });
 
 describe('order and the aggregate lookup bound', () => {
