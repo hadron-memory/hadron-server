@@ -16,6 +16,7 @@ import { generateId } from '../../../lib/id.js';
 import type { EmbeddingClient } from '../../../lib/embedding/index.js';
 import { setEmbeddingClientForTests, resetEmbeddingClientForTests } from '../../../lib/embedding/index.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
+import type { VectorSearchOpts } from '../../../lib/retrieval/provider.js';
 import { reciprocalRankFusionScored } from '../../../lib/rrf.js';
 import { certifiedHybridRanking } from '../../../lib/retrieval/hybrid.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -140,7 +141,7 @@ describe('#4779 P3-4: hybrid pages are slices of one fused order (no repeat, no 
 
   it('a vector rank lookup that runs out of budget flags the page stopped_early', async () => {
     keywordLeg(KW);
-    vi.spyOn(provider as any, 'vectorRanks').mockResolvedValue({ ranks: new Map(), stoppedEarly: true });
+    vi.spyOn(provider, 'vectorRanks').mockResolvedValue({ ranks: new Map(), stoppedEarly: true });
     const res = await findNodes({ query: 'q', mode: 'hybrid', limit: 2 });
     expect(res.degraded ?? '').toContain('stopped_early');
   }, 60_000);
@@ -158,9 +159,9 @@ describe('#4779 P3-4: hybrid pages are slices of one fused order (no repeat, no 
 
 describe('#4779 SEC10 P2-1 (Rook): the vector rank lookup ranks only the eligible set', () => {
   // Unfiltered vector order: A, B, X, E, ... A closer node that is excluded or filtered out must not shift a rank.
-  const ranksOf = (extra: Record<string, unknown>, nodeIds: string[]) => (provider as any).vectorRanks({
-    db, queryEmbedding: q(), memoryIds: [mem], nodeIds: nodeIds.map((n) => id[n]), ...extra,
-  }).then((r: { ranks: Map<string, number> }) => Object.fromEntries(nodeIds.map((n) => [n, r.ranks.get(id[n]!) ?? null])));
+  const ranksOf = (extra: Partial<VectorSearchOpts>, nodeIds: string[]) => provider.vectorRanks({
+    db, queryEmbedding: q(), memoryIds: [mem], nodeIds: nodeIds.map((n) => id[n]!), ...extra,
+  }).then((r) => Object.fromEntries(nodeIds.map((n) => [n, r.ranks.get(id[n]!) ?? null])));
 
   it('unfiltered: the exact positions', async () => {
     expect(await ranksOf({}, ['A', 'X', 'E'])).toEqual({ A: 1, X: 3, E: 4 });
@@ -187,8 +188,8 @@ describe('#4779 BLIND P2-3 (Bianca): the rank lookup and the page ranking share 
   ] as const) {
     it(`${name}: every node's looked-up rank is its position in vectorSearch`, async () => {
       const opts = { db, queryEmbedding: q(), memoryIds: [mem], ...extra, ...(name === 'filter + exclusions' ? { excludeNodeIds: [id.B!] } : {}) };
-      const page = await provider.vectorSearch({ ...opts, limit: 100 } as any);
-      const { ranks } = await (provider as any).vectorRanks({ ...opts, nodeIds: Object.values(id) });
+      const page = await provider.vectorSearch({ ...opts, limit: 100 } as VectorSearchOpts);
+      const { ranks } = await provider.vectorRanks({ ...opts, nodeIds: Object.values(id) } as Parameters<typeof provider.vectorRanks>[0]);
       expect(page.length).toBeGreaterThan(5);
       expect(Object.fromEntries(page.map((h, i) => [h.nodeId, i + 1]))).toEqual(Object.fromEntries(ranks));
     }, 60_000);
@@ -214,7 +215,7 @@ describe('#4779 BLIND P2-2 (Bianca): one work budget per request, across every v
             return typeof vv === 'function' ? vv.bind(tt) : vv;
           } })), o);
     } }) as typeof db;
-    const lookups = vi.spyOn(provider as any, 'vectorRanks');
+    const lookups = vi.spyOn(provider, 'vectorRanks');
     process.env.VECTOR_SEARCH_TIMEOUT_MS = '6000';
     try {
       await (resolvers.Query as any).findNodes(null, { query: 'q', mode: 'hybrid', limit: 2, filter: { memoryIds: [mem] } }, { db: handle, roles: ['ADMIN'], userId: 'admin-4779' } as Context);
