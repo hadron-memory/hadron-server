@@ -147,12 +147,14 @@ describe('3. cor:api:140:03 parity — a refused PK equals a refused URN equals 
   });
 
   it('resolveNodeReadScopeIds (memoryLocSegments)', async () => {
-    const run = (m: string) => ask(stranger(), 'query($m: [ID!]!){ memoryLocSegments(memoryRefs: $m, parentLoc: ""){ items { segment } hasMore } }', { m: [m] });
-    const pk = await run(M.id);
+    const run = (c: Context, m: string) => ask(c, 'query($m: [ID!]!){ memoryLocSegments(memoryRefs: $m, parentLoc: ""){ items { segment } hasMore } }', { m: [m] });
+    // Positive control: a caller who CAN read M sees its top segment, so the empty page below is the access gate's doing, not an empty memory.
+    expect((await run(admin(), M.id)).data?.memoryLocSegments).toEqual({ items: [{ segment: 'ops' }], hasMore: false });
+    const pk = await run(reader(), M.id);
     expect(pk.error, 'resolved without a validation error').toBeNull();
     expect(pk.data?.memoryLocSegments, 'an unreadable memory answers the empty page').toEqual({ items: [], hasMore: false });
-    expect(await run(M.urn)).toEqual(pk);
-    expect(await run(generateId())).toEqual(pk);
-    expect(await run(missingUrn)).toEqual(pk);
+    expect(await run(reader(), M.urn)).toEqual(pk);
+    expect(await run(reader(), generateId())).toEqual(pk);
+    expect(await run(reader(), missingUrn)).toEqual(pk);
   });
 });

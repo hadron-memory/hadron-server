@@ -157,7 +157,8 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // A lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation. Nothing else
 // changes: every field already resolved an ID or URN and keeps its gate and its refusals byte-identical; the
 // usage "provide either nodeId or loc" refusal now names `nodeRef`. (0.25.0 and 0.26.0 are claimed by
-// #4789 and #4810.)
+// #4789 and #4810. Merge order, ruled by the coordinator: #4789 (0.25.0), #4810 (0.26.0), then this change (0.27.0); all three are held
+// paired renames, and whichever merges later than its number renumbers this constant by hand.)
 export const HADRON_SERVER_VERSION = '0.27.0';
 
 /**
