@@ -466,25 +466,23 @@ describe('#4850 truncation: a short list never reads as the whole one (cor:api:1
 });
 
 describe('#4850 one clock: an omitted until is the instant the snapshots were read', () => {
-  it('window.until equals asOf when until is omitted, even when the clock moves during admission (#4889: deterministic)', async () => {
-    // #4889 (LOCAL F1 on #4881): only Date is faked, so Prisma's own timers are untouched. The clock jumps a full minute
-    // inside the read (at the task-reader check, after the window is resolved), so a resolver that reads the clock a second
-    // time for asOf answers a different instant every time, not only when admission happens to take a millisecond.
-    const real = taskModule.mayReadAppTasks;
-    vi.useFakeTimers({ toFake: ['Date'] });
-    const spy = vi.spyOn(taskModule, 'mayReadAppTasks').mockImplementation(async (...a: Parameters<typeof real>) => {
-      vi.setSystemTime(Date.now() + 60_000);
-      return real(...a);
-    });
-    try {
-      const d = await ok();
-      expect(spy).toHaveBeenCalled();
-      expect(d.window.until).toBe(d.asOf);
-      expect(new Date(d.window.until).getTime() - new Date(d.window.since).getTime()).toBe(7 * DAY);
-    } finally {
-      spy.mockRestore();
-      vi.useRealTimers();
+  it('window.until equals asOf when until is omitted, however many times anything reads the clock (#4889: deterministic)', async () => {
+    // #4889 (LOCAL F1 on #4881, BLIND F1 on #4902): every argument-less `new Date()` steps the clock a full minute, so ANY two
+    // clock reads in the resolver answer different instants, wherever they sit relative to admission or each other. Only the
+    // no-argument constructor steps; Date.now(), parsing and Prisma's own timers are untouched. Red against the two-clock
+    // resolver main had before #4881 (8b88848a5), recorded in the PR.
+    const RealDate = Date;
+    let clock = RealDate.now();
+    class SteppingDate extends RealDate {
+      constructor(...args: unknown[]) {
+        if (args.length === 0) { clock += 60_000; super(clock); } else super(...(args as [string | number | Date]));
+      }
     }
+    vi.stubGlobal('Date', SteppingDate);
+    let d: any;
+    try { d = await ok(); } finally { vi.unstubAllGlobals(); }
+    expect(d.window.until).toBe(d.asOf);
+    expect(new Date(d.window.until).getTime() - new Date(d.window.since).getTime()).toBe(7 * DAY);
   });
 });
 
@@ -499,25 +497,32 @@ describe('#4889 same-App only: the redundant app_id predicates (cor:agt:150)', (
     const mine = await task({ owner: w.ada, assignee: w.dev1, parent: ours.id, status: 'pending' });
     const stranger = await worker('Stranger', { app: otherAppId });
     const foreign = await task({ owner: stranger, assignee: stranger, parent: ours.id, status: 'pending', app: otherAppId });
-    const pending = (await ok()).projects.items[0].children.find((c: any) => c.status === 'PENDING').tasks;
-    expect(idsOf(pending)).toEqual([mine.id]);
-    expect(pending.ids).not.toContain(foreign.id);
+    const row = (await ok()).projects.items.find((i: any) => i.project.taskId === ours.id);
+    expect(row, 'this App\'s project is listed').toBeDefined();
+    const pending = row.children.find((c: any) => c.status === 'PENDING');
+    expect(pending, 'a PENDING bucket is present').toBeDefined();
+    // idsOf is a sorted copy of ids: exactly this App's child, so the foreign row is not among them.
+    expect(idsOf(pending.tasks)).toEqual([mine.id]);
+    expect(foreign.id).not.toBe(mine.id);
   });
   it("an alarm in another App never makes this App's worker overdue, even on a task naming that worker", async () => {
+    // The treatment and the control differ only in the App: owner a worker of that App, assignee this App's w.dev1, the
+    // owner on the chain, a not-started alarm whose episode is the task's assignment. Checked in two steps so the first
+    // failure names which half broke.
+    const notStarted = async (app: string, owner: string) => {
+      const t = await task({ owner, assignee: w.dev1, status: 'pending', app });
+      expect(t.assignedAt, 'the fixture task is assigned').not.toBeNull();
+      const alarmId = await db.$transaction(async (tx) => appendAlarmEvent(tx as never, {
+        appId: app, taskId: t.id, type: 'stall.not-started', episodeStart: t.assignedAt!, subjectWorkerId: w.dev1,
+        chain: [{ workerId: owner } as never], payload: { windowMinutes: 15 }, createdAt: ago(HOUR),
+      }));
+      expect(alarmId, 'the alarm is recorded').not.toBeNull();
+    };
     const stranger = await worker('Stranger', { app: otherAppId });
-    const foreign = await task({ owner: stranger, assignee: w.dev1, status: 'pending', app: otherAppId });
-    const id = await db.$transaction(async (tx) => appendAlarmEvent(tx as never, {
-      appId: otherAppId, taskId: foreign.id, type: 'stall.not-started', episodeStart: foreign.assignedAt as Date, subjectWorkerId: w.dev1,
-      chain: [{ workerId: stranger } as never], payload: { windowMinutes: 15 }, createdAt: ago(HOUR),
-    }));
-    expect(id, 'the foreign alarm exists').not.toBeNull();
-    // The same alarm shape in THIS App does make the worker overdue, so the fixture is live and only the App scope excludes it.
-    const own = await task({ owner: w.ada, assignee: w.dev2, status: 'pending' });
-    await db.$transaction(async (tx) => appendAlarmEvent(tx as never, {
-      appId, taskId: own.id, type: 'stall.not-started', episodeStart: own.assignedAt as Date, subjectWorkerId: w.dev2,
-      chain: [{ workerId: w.ada } as never], payload: { windowMinutes: 15 }, createdAt: ago(HOUR),
-    }));
-    expect((await ok()).workers.overdue).toMatchObject({ total: 1, ids: [w.dev2] });
+    await notStarted(otherAppId, stranger);
+    expect((await ok()).workers.overdue.total, 'a foreign-App alarm does not count').toBe(0);
+    await notStarted(appId, w.ada);
+    expect((await ok()).workers.overdue, 'the same alarm in this App does count').toMatchObject({ total: 1, ids: [w.dev1] });
   });
 });
 
