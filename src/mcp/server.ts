@@ -833,7 +833,7 @@ export async function resolveEdgeRefs(
         targetLoc: tgt.loc,
         targetMemoryId: tgt.memoryId,
         name: edge.name ?? null,
-        loc: edge.loc ?? null,
+        loc: edge.loc || null, // #4738: '' is no authored loc, it derives
         description: edge.description ?? null,
         isRunnable: edge.isRunnable ?? null,
       });

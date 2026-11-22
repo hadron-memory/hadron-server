@@ -6501,7 +6501,7 @@ export const typeDefs = `#graphql
   type SecretChangeRequest {
     """The change request id."""
     id: ID!
-    """The effective state, with expiry judged on the server clock."""
+    """The effective state, with expiry judged on the server clock: open, completed, declined (the requester declined on the ceremony page), expired, withdrawn (the requester withdrew it) or stale (the secret changed first)."""
     state: String!
     """The requested operation."""
     operation: String!
@@ -9340,16 +9340,28 @@ export const typeDefs = `#graphql
     windowHours: Int!
     combinations: [WorkerUtilization!]!
   }
-  "One current family/tier/role combination. Unknown tier has its own null row; retired workers are excluded."
+  "#3819 — the latest no-worker match outcome of a combination inside the read's window (hrn:node:hadronmemory.com:specs:cor:agt:060:13)."
+  type MatchFailure {
+    "When the failed match was decided (the database clock)."
+    at: DateTime!
+    "The coarse reason: NO_ROLE, REQUIREMENTS_EXCLUDED, NOBODY_FREE, STOP_SIGNAL or TEAM_POOL_EMPTY. Null on a row recorded without one."
+    reason: String
+  }
+  "One family/tier/role combination: one with current workers, or one with none that a no-worker outcome inside the window names (hrn:node:hadronmemory.com:specs:cor:agt:060:13). Unknown or unnamed tier has its own null row; retired workers are excluded."
   type WorkerUtilization {
-    family: String!
+    "#3819: null when the failed task left the family open (a row with workers always has one). Nullable since #3819 slice 1: a contract change."
+    family: String
+    "Null: the worker's tier is unknown, or the failed task named no tier."
     tier: String
+    "Null: the failed task named no role."
     role: String
     eligibleWorkers: Int!
     busyWorkers: Int!
     utilization: Float!
-    "Slice 1: true only for zero eligible workers (then utilization=1). Failure-only saturation reads false until the deferred match-outcome integration; no alarm is emitted by this read."
+    "True when the combination's latest match outcome inside the window is no worker, or when it has workers and none eligible; utilization is then 1 (hrn:node:hadronmemory.com:specs:cor:agt:060:13). This read writes nothing: the saturation episode and its one alarm are the stall evaluator's (hrn:node:hadronmemory.com:specs:cor:agt:060:14, hrn:node:hadronmemory.com:specs:cor:agt:060:15)."
     saturated: Boolean!
+    "The latest outcome inside the window when it is no worker; null otherwise (the record keeps only the latest outcome, so an earlier failure followed by a match is not shown)."
+    lastMatchFailure: MatchFailure
   }
 
   type Query {
@@ -9755,7 +9767,7 @@ export const typeDefs = `#graphql
     the App's task audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21). Retired workers are left out.
     """
     teamRoster(appRef: ID!): TeamRoster!
-    "#3819 slice 1: advisory utilization in the roster audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21). Window defaults to 24h, range 1–168; tier is high/mid/low. Failed-match saturation and alarms await their historical provider."
+    "#3819: advisory utilization in the roster audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21, hrn:node:hadronmemory.com:specs:cor:agt:060:13). Window defaults to 24h, range 1–168; tier is high/mid/low. Ranked by utilization, then the most recent failed match, then fewest eligible workers, then family, tier and role. The match-outcome record is read only through this field. The alarm.saturation alarm is raised by the stall evaluator, not by this read."
     teamUtilization(appRef: ID!, family: String, tier: String, role: String, windowHours: Int = 24): TeamUtilization!
 
     """
@@ -14375,6 +14387,13 @@ export const typeDefs = `#graphql
     origin binding). A run resolves the name via the CSS cascade
     (user -> org) at entitled scopes only; an App secret is never resolved
     by a run (hrn:node:hadronmemory.com:specs:cor:sec:020:02).
+    With protected: true the create is only STAGED: it answers the error
+    SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl, no
+    secret exists yet, and the requester's own passkey ceremony at that URL makes
+    it (hrn:node:hadronmemory.com:specs:cor:sec:070:02). A staged request lasts
+    one hour; at most 5 are open per secret name and at most 2 per requester
+    (SECRET_CHANGE_REQUEST_LIMIT, SECRET_CHANGE_REQUESTER_LIMIT). Those numbers are
+    engineering bounds, not ruled values.
     """
     createSecret(
       ownerType: String!
@@ -14393,15 +14412,35 @@ export const typeDefs = `#graphql
     any member of the App may store. Name, kind, and owner are immutable —
     the cascade and flow config reference the name; create a new name
     instead. The effective (metadata, value) pair is re-validated per kind.
+    On a PROTECTED App secret a change is only staged: it answers the error
+    SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl instead
+    of a Secret, and nothing changes until the requester completes the passkey
+    ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02). The expiry and the two
+    caps are as for createSecret.
     """
     updateSecret(ref: ID!, metadata: JSON, value: JSON, protected: Boolean): Secret!
-    """Open a protection change for your own passkey ceremony. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+    """
+    Turn protection on or off for an App secret, through your own passkey ceremony
+    (hrn:node:hadronmemory.com:specs:cor:sec:070:02). The payload is a Secret only when
+    nothing needs to change (clearing protection that is not on). Otherwise the change
+    is staged and the answer is the error SECRET_PROTECTED_NEEDS_PASSKEY with
+    extensions requestId and ceremonyUrl, never a Secret: the protection changes only
+    when the requester completes the ceremony. Turning protection off needs whoever
+    manages the App. An App key, an impersonated session and a run are refused.
+    The expiry and the two caps are as for createSecret.
+    """
     setSecretProtected(ref: ID!, protected: Boolean!): Secret!
-    """Withdraw your own open change request and clear its staged value. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+    """
+    Withdraw your own open change request and clear its staged value; the request then
+    reads withdrawn. Only the requester can withdraw, complete or decline a request, and
+    anyone else is answered as for a request that does not exist. Declining is done on
+    the ceremony page, with a passkey proof, and reads declined.
+    hrn:node:hadronmemory.com:specs:cor:sec:070:02
+    """
     withdrawSecretChangeRequest(id: ID!): Boolean!
 
 
-    "Hard-delete a secret, every version with it; referencing runs fail their resolution loud (or fall through the cascade) afterwards. An unprotected App secret is deleted by its creator or whoever manages the App, each as a person."
+    "Hard-delete a secret, every version with it; referencing runs fail their resolution loud (or fall through the cascade) afterwards. An unprotected App secret is deleted by its creator or whoever manages the App, each as a person. A PROTECTED App secret is only staged: the answer is the error SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl, and it is deleted only when the requester completes the passkey ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02)."
     deleteSecret(ref: ID!): Boolean!
 
     """
@@ -17612,7 +17651,7 @@ export const typeDefs = `#graphql
   type AgentTeamEvent {
     id: ID!
     appId: ID!
-    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.coordinator-cadence (#2763: task-less, subjectWorker is the coordinator that stopped assigning); alarm.stale-sweep (#4233: task-less and workerless: a host of an App in sweep mode OBSERVE or APPLY whose last run the server recorded more than five minutes ago (the server's clock, not the host's; a switch-on of the mode restarts the clock); payload.hostId names the host, the alarm goes to the App's managers and ends when the host records its next run); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02); question.answered, question.answer-retracted (#4431: a question that blocks the task was answered, or its answer taken back; payload is questionId, code, revision and state only, never the answer; only question.answered wakes the task\'s assignee)."
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.coordinator-cadence (#2763: task-less, subjectWorker is the coordinator that stopped assigning); alarm.stale-sweep (#4233: task-less and workerless: a host of an App in sweep mode OBSERVE or APPLY whose last run the server recorded more than five minutes ago (the server's clock, not the host's; a switch-on of the mode restarts the clock); payload.hostId names the host, the alarm goes to the App's managers and ends when the host records its next run); alarm.saturation (#3819: task-less and workerless, with an empty chain, so it wakes nobody: a family/tier/role combination the platform could not give work to, hrn:node:hadronmemory.com:specs:cor:agt:060:14; payload is reason (no-worker or none-eligible), family, tier and role, null for a dimension the task left open; only whoever manages the App acknowledges it, and acknowledging does not end its episode); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02); question.answered, question.answer-retracted (#4431: a question that blocks the task was answered, or its answer taken back; payload is questionId, code, revision and state only, never the answer; only question.answered wakes the task\'s assignee)."
     type: String!
     taskId: ID
     "The task's stored handle (hrn:node:hadronmemory.com:specs:cor:agt:050:01, Proposed). Null when taskId is null or the task no longer exists; never invented."
