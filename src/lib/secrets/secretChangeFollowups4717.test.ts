@@ -40,7 +40,7 @@ async function staged(p: Promise<unknown>): Promise<string> {
 }
 const ceremony = async (id: string) => complete(id, await proof(id));
 const eventKinds = async (secretName: string) =>
-  (await db.secretEvent.findMany({ where: { ownerId: appId, secretName }, orderBy: { at: 'asc' }, select: { kind: true } })).map((e) => e.kind);
+  (await db.secretEvent.findMany({ where: { ownerId: appId, secretName }, orderBy: [{ at: 'asc' }, { id: 'asc' }], select: { kind: true } })).map((e) => e.kind);
 const row = async (id: string) => (await db.$queryRaw<ChangeRequest[]>`SELECT * FROM secret_change_requests WHERE id=${id}`)[0];
 const member = async () => {
   const id = (await db.user.create({ data: { email: `${generateId()}@s4.test` } })).id;
