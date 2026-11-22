@@ -81,6 +81,25 @@ describe('#4779 P3-4: certifiedHybridRanking (unit)', () => {
     expect(r.certified).toBe(false);
     expect(certify!({ ids: ['P'], exhausted: true }, { ids: ['P'], exhausted: true }, 2).certified).toBe(true);
   });
+  it('LOCAL P3-1 (Bridget): a page row tied with a later inexact row\'s upper bound does not certify (the tie key could put that row first)', () => {
+    // I: keyword rank 2 + vector rank 1 = 1/62 + 1/61 (exact). J: keyword rank 1, vector term unknown (vector leg 1 deep,
+    // not exhausted): 1/61, at most 1/61 + 1/62 — EXACTLY I's score. If J's vector rank is 2 the two tie, and the
+    // keyword-first tie key (J is keyword rank 1) puts J first: page 1 is not certain.
+    const r = certify!({ ids: ['J', 'I'], exhausted: true }, { ids: ['I'], exhausted: false }, 1);
+    expect(r.ranked.map((x) => x.nodeId)).toEqual(['I', 'J']);
+    expect(r.ranked[0]!.score).toBe(1 / 61 + 1 / 62); // the tie is exact in floating point, not approximate
+    expect(r.certified).toBe(false);
+    // Once J's vector rank is known, the order is exact and the page certifies.
+    expect(certify!({ ids: ['J', 'I'], exhausted: true }, { ids: ['I'], exhausted: false }, 1, new Map([['J', 5]]), new Set(['J'])).certified).toBe(true);
+  });
+  it('LOCAL P3-2 (Bridget): with every seen row exact, the UNSEEN-node bound alone refuses a page a not-exhausted leg could still change', () => {
+    // Vector leg empty but not exhausted (e.g. stopped by the budget); keyword hits A, B looked up with NO eligible vector
+    // (term exactly 0). Every seen row is exact, yet an unseen vector-only node at vector rank 1 scores 1/61 > B's 1/62.
+    const r = certify!({ ids: ['A', 'B'], exhausted: true }, { ids: [], exhausted: false }, 2, new Map(), new Set(['A', 'B']));
+    expect(r.certified).toBe(false);
+    // The vector leg exhausted (truly empty): nothing unseen, so the page is exact.
+    expect(certify!({ ids: ['A', 'B'], exhausted: true }, { ids: [], exhausted: true }, 2).certified).toBe(true);
+  });
   it('exhausted legs are exact: certified, in RRF order with keyword-first ties', () => {
     const r = certify!({ ids: KW, exhausted: true }, { ids: VEC, exhausted: true }, 5);
     expect(r.certified).toBe(true);
