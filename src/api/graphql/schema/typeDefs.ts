@@ -12639,7 +12639,7 @@ export const typeDefs = `#graphql
     issueHostOperation(input: IssueHostOperationInput!, instruction: ActInstructionInput): HostOperation!
 
     """
-    #4855 (hrn:node:hadronmemory.com:specs:cor:agt:070:08 S4a, Holger 2026-11-22; cor:acl:140:02) - end a DARK open session of a
+    #4855 (hrn:node:hadronmemory.com:specs:cor:agt:070:08 S4a, Holger 2026-11-22; hrn:node:hadronmemory.com:specs:cor:acl:140:02) - end a DARK open session of a
     worker and start the worker again, in one transaction, with no person in the loop. Dark is the caller's judgement (it
     cannot get the session going or get an answer from it), never the platform's: an assignment alone never ends a session
     (quiet is not dark, S4). The caller is a worker, through its own session, holding a live worker.session.restart grant

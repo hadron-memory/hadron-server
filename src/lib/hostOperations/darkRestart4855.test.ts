@@ -129,7 +129,7 @@ describe('#4855 the grant holder ends a dark session and starts the worker again
   it('with no open task the start carries none', async () => {
     await grant();
     await kitSession();
-    expect((await restart()).taskId).toBeNull();
+    expect(((await restart()) as { taskId: string | null }).taskId).toBeNull();
     expect((await starts())[0]!.args).not.toHaveProperty('taskId');
   });
 
