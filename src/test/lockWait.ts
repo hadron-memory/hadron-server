@@ -51,7 +51,7 @@ export async function waitForLockWaitersOfType(
   }
 }
 
-/** One backend's row from {@link describeLockHoldersRenamed}. */
+/** One backend's row from {@link describeLockHolders}. */
 export interface LockHolderRow {
   pid: number;
   state: string | null;
@@ -64,7 +64,7 @@ export interface LockHolderRow {
   query: string | null;
 }
 
-/** What {@link describeLockHoldersRenamed} read: at most {@link HOLDER_ROW_CAP} rows, and whether more existed. */
+/** What {@link describeLockHolders} read: at most {@link HOLDER_ROW_CAP} rows, and whether more existed. */
 export interface LockHolders { rows: LockHolderRow[]; truncated: boolean }
 export const HOLDER_ROW_CAP = 40;
 
@@ -79,7 +79,7 @@ export const HOLDER_ROW_CAP = 40;
  * connection, so its own backend holds none of these (the probing connection's own locks are reported like any other's).
  * It reports; it decides nothing.
  */
-export async function describeLockHoldersRenamed(
+export async function describeLockHolders(
   db: Pick<PrismaClient, '$queryRaw'>,
   relation: string,
 ): Promise<LockHolders> {
@@ -116,7 +116,7 @@ export async function withLockHolders<T>(
     if (!isLockNotAvailable(err)) throw err;
     let holders: string;
     try {
-      const found = await describeLockHoldersRenamed(db, relation);
+      const found = await describeLockHolders(db, relation);
       holders = JSON.stringify(found.rows, null, 1) + (found.truncated ? `\n(truncated: more than ${HOLDER_ROW_CAP} rows; relation rows first)` : '');
     } catch (captureErr) {
       holders = `(capture failed: ${String((captureErr as Error)?.message ?? captureErr)})`;
