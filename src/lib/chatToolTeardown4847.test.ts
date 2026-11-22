@@ -364,3 +364,22 @@ describe('#4847 organization deletion and a platform admin', () => {
     expect(calls()).toEqual({ telegram: ['tg-a', 'tg-b'], slack: ['sl-a', 'sl-b'] });
   });
 });
+
+describe('#4847 blind P2: a tool connection id is never reused, so the one-intent-per-id key cannot swallow a later registration', () => {
+  it('core cannot hold a second connection row with the id of a deleted one (both tables), so no intent can be shadowed', async () => {
+    await M.deleteApp({}, { ref: appA.id }, ctx(admin.id));
+    await settle();
+    await expect(telegram(org.id, appB.id, 'tg-a')).rejects.toMatchObject({ code: 'P2002' });
+    await expect(slack(org.id, appB.id, 'sl-a')).rejects.toMatchObject({ code: 'P2002' });
+  });
+
+  it('a PENDING intent that has used every attempt is never claimed again (the cap guard attempts < MAX)', async () => {
+    telegramDelete.mockResolvedValue(false);
+    await db.$transaction((tx) => softDeleteChatToolConnections(tx, { appId: appA.id }, null));
+    const id = (await intentOf('telegram', 'tg-a')).id;
+    await db.chatToolTeardownIntent.update({ where: { id }, data: { attempts: CHAT_TOOL_TEARDOWN_MAX_ATTEMPTS, lastAttemptAt: T0 } });
+    expect(await attemptChatToolTeardown(db, id, minutes(1_000_000))).toBe('skipped');
+    expect(telegramDelete).not.toHaveBeenCalled();
+    expect((await intentOf('telegram', 'tg-a')).attempts).toBe(CHAT_TOOL_TEARDOWN_MAX_ATTEMPTS);
+  });
+});

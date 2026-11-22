@@ -47,7 +47,11 @@ const NOW_UTC = Prisma.sql`(clock_timestamp() AT TIME ZONE 'UTC')`;
 /**
  * `WITH gone AS (<the soft-delete, RETURNING id, provider, tool_connection_id>) INSERT <one intent per row>`: the soft-delete and its
  * intents are ONE statement, so they commit together or not at all. A repeat meets the (kind, tool_connection_id) unique key and
- * records nothing, so one path serves the doors, the org and App paths and the reconciliation without ever doubling an intent.
+ * records nothing. The key is safe because a tool connection id is never reused: every registration mints a fresh one, and both
+ * connection tables hold a UNIQUE tool_connection_id over live AND soft-deleted rows, so core cannot even insert a second row with an
+ * id an intent already names (pinned in chatToolTeardown4847.test.ts); the intent is also never consulted for a live row, by that same key.
+ * (PR #4927 blind review P2: the re-issue it feared is refused by the database; a hard-deleted row, a URN reclaim, would need the tool itself to re-mint an id.)
+ * so one path serves the doors, the org and App paths and the reconciliation without ever doubling an intent.
  */
 function recordIntents(kind: ChatToolKind, softDelete: Prisma.Sql): Prisma.Sql {
   return Prisma.sql`
@@ -164,7 +168,7 @@ export function dispatchChatToolTeardown(teardowns: readonly ChatToolTeardown[])
  * for Slack, whose default App or organization is), through the same intent. Only those: a live owner's row is never reached.
  * Bounded per call; `FOR UPDATE SKIP LOCKED` so two instances do not fight over a row. Returns how many rows it queued.
  */
-export async function reconcileOrphanedChatToolConnections(db: PrismaClient, _now: Date = new Date(), limit = RECONCILE_BATCH): Promise<number> {
+export async function reconcileOrphanedChatToolConnections(db: PrismaClient, limit = RECONCILE_BATCH): Promise<number> {
   const telegram = await db.$queryRaw<IntentRow[]>(recordIntents('telegram', Prisma.sql`
     UPDATE telegram_connections SET deleted_at = ${NOW_UTC}, deleted_by = 'system:reconcile'
     WHERE deleted_at IS NULL AND id IN (
@@ -210,7 +214,7 @@ export async function chatToolTeardownSweepTick(
   db: PrismaClient,
   now: Date = new Date(),
 ): Promise<{ reconciled: number; capped: number; attempted: number; confirmed: number }> {
-  const reconciled = await reconcileOrphanedChatToolConnections(db, now);
+  const reconciled = await reconcileOrphanedChatToolConnections(db);
   let capped = await capExhausted(db, now);
   const nowUtc = toNaiveUtc(now);
   const due = await db.$queryRaw<Array<{ id: string }>>`
@@ -221,7 +225,8 @@ export async function chatToolTeardownSweepTick(
   let attempted = 0;
   let confirmed = 0;
   for (const { id } of due) {
-    const outcome = await attemptChatToolTeardown(db, id, now);
+    let outcome: TeardownAttempt;
+    try { outcome = await attemptChatToolTeardown(db, id, now); } catch (error) { console.error('[chatToolTeardown] sweep attempt failed:', error); continue; }
     if (outcome === 'skipped') continue;
     attempted++;
     if (outcome === 'confirmed') confirmed++;
@@ -249,4 +254,3 @@ export async function listCappedChatToolTeardowns(
     select: { id: true, kind: true, provider: true, toolConnectionId: true, attempts: true, cappedAt: true },
   });
 }
-
