@@ -9211,9 +9211,9 @@ export const typeDefs = `#graphql
     appId: ID!
     "The granted memory. Null when the grant is on someone's personal or private memory and the caller is not its owner."
     memoryUrn: String
-    "The loc prefix: the loc itself and its colon-boundary descendants (reports:team-progress does not cover reports:team-progressX)."
-    prefix: String!
-    "The register line this grant cites. A citation only, never evidence that the line exists."
+    "The loc prefix: the loc itself and its colon-boundary descendants (reports:team-progress does not cover reports:team-progressX). #4734: null whenever memoryUrn is null, because a prefix names content inside a memory the caller may not know exists; never shown without its memory URN."
+    prefix: String
+    "The register line this grant cites. A citation only, never evidence that the line exists. #4734: null whenever memoryUrn is null, as prefix is."
     registerNodeUrn: String
     "The person who set it."
     grantedBy: String!
