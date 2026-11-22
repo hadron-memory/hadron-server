@@ -307,6 +307,15 @@ export const SHAPE_HADRON_CREATE_NODE = {
   }).optional().describe('#2044 — write into an App\'s INSTALL MEMORY (where it keeps its customisation of an installed Agent, cor:agt:040:06) instead of a memory named by `urn`. When set, `urn` is just the node\'s LOC (e.g. "prompts:lane"), not a URN. The first create finds-or-creates the install memory in the same step as the write; later calls reuse it. Only whoever manages the App may write, while the App is live and the Agent installed. Not supported with `edges`, `isRunnable` or `abstractStillAccurate`.'),
 };
 
+/** #860: one outgoing-edge item, the shape `edges` and `addEdges` share on hadron_update_node. */
+const UPDATE_NODE_EDGE_ITEM = z.object({
+  targetUrn: z.string().describe('Target node fully-qualified URN'),
+  name: z.string().optional().describe('Relationship name (was "label"), e.g. depends-on, documents'),
+  loc: z.string().optional().describe('Explicit edge loc. Omit to derive <sourceLoc>:<name>:<targetLoc>.'),
+  description: z.string().optional().describe(EDGE_DESCRIPTION_DOC),
+  isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
+});
+
 export const SHAPE_HADRON_UPDATE_NODE = {
   authoredWith: AUTHORED_WITH_ARG,
   urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports"'),
@@ -333,6 +342,8 @@ export const SHAPE_HADRON_UPDATE_NODE = {
     description: z.string().optional().describe(EDGE_DESCRIPTION_DOC),
     isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
   })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
+  addEdges: z.array(UPDATE_NODE_EDGE_ITEM).optional().describe('#860 — outgoing edges to ADD, leaving every other edge on the source node alone (the safe counterpart of `edges`). Each item is what `edges` takes. Re-adding an edge that already exists (same loc, target and fields) is a no-op reported as unchanged. A target that does not resolve refuses the whole call. Cannot be combined with `edges`.'),
+  removeEdges: z.array(z.string()).optional().describe('#860 — outgoing edges of THIS node to REMOVE, each by edge ID or fully-qualified edge URN (as hadron_delete_edge takes), leaving every other edge alone. An unknown edge, another node\'s edge and an edge you cannot read all answer the same "Edge not found"; one refused item refuses the whole call and nothing is written. A derived include edge or a comment anchor is refused as hadron_delete_edge refuses it. A pending edge (its target does not exist yet) can only be dropped by an `edges` replace. Removals run first, then additions, in one transaction. Cannot be combined with `edges`.'),
   reason: z.string().optional().describe('Why this change was made (stored in revision history). An inline-edge-only write appends no revision, so it creates no history row on which to record this reason.'),
   install: z.object({
     app: z.string().describe('The App: its ID or fully-qualified URN.'),

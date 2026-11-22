@@ -235,6 +235,37 @@ async function assertEdgeWriteMemory(tx: Prisma.TransactionClient, edgeId: strin
   }
 }
 
+/**
+ * #860: the per-edge checks `deleteEdge` runs under its transaction, shared with
+ * `hadron_update_node(removeEdges:)` so the two doors cannot drift. Runs on the transaction client, AFTER
+ * the caller's own preflight (resolve the ref, read the edge's memory, readable and write gates) and, for
+ * `deleteEdge`, after its install-authority and memory-share locks. A caller already inside a node-write
+ * transaction has taken its own locks and passes its door context. An unreadable, missing or
+ * already-deleted edge is the one `EDGE_NOT_FOUND` answer.
+ */
+export async function deleteEdgeInDoorTx(
+  tx: Prisma.TransactionClient,
+  txCtx: Context,
+  args: { edgeId: string; edgeRef: string; memoryId: string },
+): Promise<void> {
+  const { edgeId, edgeRef, memoryId } = args;
+  if (!(await isMemoryReadableCached(txCtx, memoryId))) {
+    throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
+      extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+    });
+  }
+  await requireMemoryWriteAccess(txCtx, memoryId);
+  // Writer level of the edge's current source, locked before the edge.
+  const lockedEdge = await lockEdgeUnderSourceWriters(tx, txCtx, edgeId);
+  if (!lockedEdge || lockedEdge.deleted_at) {
+    throw new GraphQLError(`Edge not found: "${edgeRef}"`, { extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef } });
+  }
+  await assertEdgeWriteMemory(tx, edgeId, memoryId);
+  await assertNoBootPromptRows(tx, [lockedEdge.source_id], 'update');
+  await refuseGovernedEdge(tx, edgeId);
+  await tx.edge.delete({ where: { id: edgeId } });
+}
+
 // ── Shared node-write core (spec 039 Phase 0 D1) ────────────────────────────
 //
 // The single canonical single-node write path — formerly the upsertNode
@@ -2406,7 +2437,7 @@ function shallowMergeProperties(existing: unknown, patch: Record<string, unknown
  * and roles after its authority wait. Keep the existing ordinary-memory
  * context contract; this cut does not change those doors' principal model.
  */
-async function nodeDoorTxContext(ctx: Context, tx: Prisma.TransactionClient, memoryIds: readonly string[], preview = false): Promise<Context> {
+export async function nodeDoorTxContext(ctx: Context, tx: Prisma.TransactionClient, memoryIds: readonly string[], preview = false): Promise<Context> {
   // Writes refresh under authority/credential locks. A plan validates the same
   // live credential facts in its read-only repeatable-read snapshot (#3424).
   const install = await tx.memory.findFirst({ where: { isInstallMemory: true, class: 'system',
@@ -4210,21 +4241,7 @@ export const nodeMutations = {
         await lockInstallAuthoritiesFirst(tx, ctx, [edgeMem.memoryId]);
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${edgeMem.memoryId} FOR SHARE`;
         const txCtx = await nodeDoorTxContext(ctx, tx, [edgeMem.memoryId]);
-        if (!(await isMemoryReadableCached(txCtx, edgeMem.memoryId))) {
-          throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-            extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
-          });
-        }
-        await requireMemoryWriteAccess(txCtx, edgeMem.memoryId);
-        // Writer level of the edge's current source, locked before the edge.
-        const lockedEdge = await lockEdgeUnderSourceWriters(tx, txCtx, resolvedEdgeId);
-        if (!lockedEdge || lockedEdge.deleted_at) {
-          throw new GraphQLError(`Edge not found: "${edgeRef}"`, { extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef } });
-        }
-        await assertEdgeWriteMemory(tx, resolvedEdgeId, edgeMem.memoryId);
-        await assertNoBootPromptRows(tx, [lockedEdge.source_id], 'update');
-        await refuseGovernedEdge(tx, resolvedEdgeId);
-        await tx.edge.delete({ where: { id: resolvedEdgeId } });
+        await deleteEdgeInDoorTx(tx, txCtx, { edgeId: resolvedEdgeId, edgeRef, memoryId: edgeMem.memoryId });
       });
       // #1061 — attributed to the source node, as createEdge is.
       recordNodeWrite(ctx.db, toUsageNodeRef(edgeMem.source), ctx);
