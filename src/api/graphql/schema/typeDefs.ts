@@ -6757,6 +6757,18 @@ export const typeDefs = `#graphql
     from: String!
     "Whether an encrypted API key is stored; the key is never returned."
     hasApiKey: Boolean!
+    """
+    #4865 — report only. Whether the domain of the from address is verified at Resend, read
+    live through the hadrontool-resend capability tool each time this field is selected: never
+    cached, so it is current as of this read, and it costs one tool call per sender. Core never
+    calls Resend itself (hrn:node:hadronmemory.com:specs:cor:int:030:01).
+    true: Resend reports the domain verified.
+    false: Resend reports it not verified, including when Resend has no record of the domain.
+    null: the state could not be read. The caller is not a member of the sender's organization
+    (an App key may list senders, but reads null here); the tool is not configured; or the
+    lookup failed or ran past its bound of 12 seconds. A null says nothing about the domain.
+    """
+    domainVerified: Boolean
     enabled: Boolean!
     createdAt: DateTime!
     createdBy: String

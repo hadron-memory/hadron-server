@@ -3872,8 +3872,8 @@ model HomeAssistantInstance {
 /// Relationships: at most one per Organization, deleted with it.
 ///
 /// Behaviour: the server stores the API key encrypted and write-only. The stateless Resend capability tool
-/// receives the key only for a send that has already been authorized. One sender per organization means the
-/// credential used is never chosen by a model.
+/// receives the key only for a send, or for the read-only domain-status lookup (#4865), each after it has
+/// been authorized. One sender per organization means the credential used is never chosen by a model.
 model ResendSender {
   id              String   @id @default(cuid())
   organizationId  String   @unique(map: "resend_senders_organization_id_uniq") @map("organization_id")

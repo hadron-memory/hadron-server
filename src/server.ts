@@ -53,7 +53,7 @@ import {
   type LoginProvider,
   type NewPendingLogin,
 } from './auth/pendingLoginState.js';
-import { mintProviderNonce, nonceExpectation, recordNonceRefusal } from './auth/providerNonce.js';
+import { mintProviderNonce, nonceExpectation, refuseUnboundNonce } from './auth/providerNonce.js';
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
@@ -662,11 +662,11 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     const pending = await claimStateOrFail(res, state, 'google');
     if (!pending) return;
 
-    // #2204: what the ID token's nonce must match. Null = a ceremony row with no nonce hash, refused before any
-    // exchange (the legacy skip never reaches passkey step-up).
+    // #2204: what the ID token's nonce must match. Null = a row with no nonce hash (ceremony or ordinary), refused before any
+    // exchange (#2282: no row is exempt).
     const nonceExpected = nonceExpectation(pending);
     if (!nonceExpected) {
-      recordNonceRefusal('google', 'ceremony_unbound');
+      refuseUnboundNonce('google', pending);
       failLoginCallback(res, 'google', 'verify_failed');
       return;
     }
@@ -829,11 +829,11 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     const pending = await claimStateOrFail(res, state, 'apple');
     if (!pending) return;
 
-    // #2204: what the ID token's nonce must match. Null = a ceremony row with no nonce hash, refused before any
-    // exchange (the legacy skip never reaches passkey step-up).
+    // #2204: what the ID token's nonce must match. Null = a row with no nonce hash (ceremony or ordinary), refused before any
+    // exchange (#2282: no row is exempt).
     const nonceExpected = nonceExpectation(pending);
     if (!nonceExpected) {
-      recordNonceRefusal('apple', 'ceremony_unbound');
+      refuseUnboundNonce('apple', pending);
       failLoginCallback(res, 'apple', 'verify_failed');
       return;
     }
