@@ -220,7 +220,15 @@ describe('#709 aliases, install memories, durable refs and a failed alias', () =
     const stuck = await agentOf(source, 'Stuck'); await softDelete.agent(stuck.id);
     const fine = await agentOf(source, 'Fine'); await softDelete.agent(fine.id);
     failAliasFor.urn = `${S}:stuck`;
-    await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id });
+      // The one line that names a row a completed merge left un-rooted (Bianca SEC10 F1-d1, Betty LOCAL F1).
+      const refused = warn.mock.calls.map(([line]) => String(line)).filter((line) => line.includes('merge.dead_reroot_refused'));
+      expect(refused.map((line) => JSON.parse(line))).toEqual([{ event: 'merge.dead_reroot_refused', entityType: 'AGENT', entityId: stuck.id, code: 'P2002' }]);
+    } finally {
+      warn.mockRestore();
+    }
     expect(await db.agent.findUniqueOrThrow({ where: { id: stuck.id } })).toMatchObject({ urn: `${S}:stuck`, ownerUserId: target.id, legacyUrn: null });
     expect(await aliases(stuck.id)).toEqual([]);
     expect((await db.agent.findUniqueOrThrow({ where: { id: fine.id } })).urn).toBe(`${T}:fine`);
