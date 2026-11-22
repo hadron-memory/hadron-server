@@ -15,7 +15,11 @@ export async function testRunAgentId(db: Db, organizationId: string, appId: stri
   const installed = await db.appAgent.findFirst({ where: { appId, agent: { deletedAt: null } }, orderBy: { createdAt: 'asc' }, select: { agentId: true } });
   if (installed) return installed.agentId;
   const urn = `run-agent-of-${appId}`.toLowerCase();
-  const existing = await db.agent.findUnique({ where: { urn }, select: { id: true } });
-  if (existing) return existing.id;
+  const existing = await db.agent.findUnique({ where: { urn }, select: { id: true, deletedAt: true } });
+  if (existing) {
+    // A soft-deleted fixture Agent is not a live Agent to name (the urn is unique, so it cannot be re-created): revive it.
+    if (existing.deletedAt !== null) await db.agent.update({ where: { id: existing.id }, data: { deletedAt: null } });
+    return existing.id;
+  }
   return (await db.agent.create({ data: { id: generateId(), organizationId, urn, name: 'Run agent' }, select: { id: true } })).id;
 }
