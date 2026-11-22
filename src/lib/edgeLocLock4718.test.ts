@@ -2,7 +2,7 @@
  * #4718: the selection -> upsert gap of derivedEdgeLocForUpsert is closed by FOR KEY SHARE on the selected migrated
  * row, held to the caller's commit. Each pin runs a real caller transaction against a real second connection.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../test/helpers.js';
 import { generateId } from './id.js';
@@ -41,6 +41,19 @@ async function waitForRowLockWaiter() {
     await new Promise((res) => setTimeout(res, 5));
   }
   throw new Error('the competing writer never blocked on the selected row');
+}
+
+/** True once at least `n` OTHER backends are blocked on a row lock. */
+async function waitForLockWaiters(n: number) {
+  const until = Date.now() + 10_000;
+  while (Date.now() < until) {
+    const [r] = await db.$queryRaw<Array<{ n: number }>>`
+      SELECT count(DISTINCT pid)::int AS n FROM pg_locks WHERE NOT granted AND locktype IN ('transactionid', 'tuple')
+        AND pid <> pg_backend_pid()`;
+    if (r.n >= n) return;
+    await new Promise((res) => setTimeout(res, 5));
+  }
+  throw new Error('the expected lock wait was never observed');
 }
 
 describe('derivedEdgeLocForUpsert holds the selected migrated row to commit (#4718)', () => {
@@ -154,10 +167,13 @@ describe('KNOWN, ACCEPTED: a writer key-sharing two edges against a mover re-key
     await cleanDb(db);
   });
 
-  // The one cycle the lock order cannot prevent: the seam caller's relationship order and moveNodeSubtree's plan order
-  // are independent. The move (no channel key) aborts with 40P01 and is retryable; the writer completes; no corruption.
-  // Pinned so the behavior is a recorded contract, not a surprise (follow-up: retryOnDeadlock around the move).
-  it('the mover aborts 40P01, the writer commits, and a retried move completes with both edges carried', async () => {
+  // The one cycle the lock order cannot prevent, reached here only because the writer drives the seam WITHOUT the
+  // endpoint advisory keys every real caller holds first (#4888 audit: sync and the promoter take the channel key and
+  // an exclusive advisory lock over each endpoint path, which serializes them against the mover's source key, so no
+  // current caller can form it). Pinned as the recorded behavior of the synthetic cycle, not as a request to make it
+  // succeed. Exactly one side is the deadlock victim (40P01); which one is the database's choice (it depends on who
+  // waits longest), so the pin asserts that and never names a role. No sleep: both sides advance on OBSERVED lock waits.
+  it('one side aborts 40P01, the other commits, and a retry of the victim completes with both edges carried', async () => {
     const { org, graph } = await createDbOrgAndGraph(db, { orgName: 'edge-lock-multi', graphName: 'edge/multi4718' });
     const dest = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: 'edge-lock-multi:edge/dest', name: 'edge/dest', class: 'knowledge' },
@@ -186,21 +202,89 @@ describe('KNOWN, ACCEPTED: a writer key-sharing two edges against a mover re-key
       await writerHasFirst;
       await move(tx);
     }, { timeout: 20_000 });
+    mover.catch(() => undefined);
     await moverHoldsNodes;
     const writer = db.$transaction(async (tx) => {
       await lockMemoriesForChannelChange(tx, [graph.id]);
       await derivedEdgeLocForUpsert(tx, args(t2)); // the caller's order: E2 first,
       writerFirst();
-      await new Promise((r) => setTimeout(r, 500));
+      // Hold E1 back until the mover is OBSERVED blocked on a lock this writer holds (E2's key share, or the channel
+      // key), so the writer's next step is the one that closes the cycle, whatever the machine's speed.
+      await waitForLockWaiters(1);
       await derivedEdgeLocForUpsert(tx, args(t1)); // then E1; the mover re-keys E1 first
     }, { timeout: 20_000 });
+    writer.catch(() => undefined);
     const [m, w] = await Promise.allSettled([mover, writer]);
-    expect(w.status).toBe('fulfilled');
-    expect(m.status).toBe('rejected');
-    expect(String((m as PromiseRejectedResult).reason)).toContain('40P01');
-    // Nothing was half-moved, and the retry the caller is told to make succeeds.
-    expect((await db.edge.findMany({ where: { sourceId: source.id, memoryId: graph.id } })).length).toBe(2);
-    await db.$transaction((tx) => move(tx), { timeout: 20_000 });
-    expect(await db.edge.count({ where: { sourceId: source.id, memoryId: dest.id } })).toBe(2);
+    // Exactly one victim, and it is a deadlock; the other commits. Roles-agnostic.
+    const rejected = [m, w].filter((x): x is PromiseRejectedResult => x.status === 'rejected');
+    expect(rejected).toHaveLength(1);
+    expect(String(rejected[0].reason)).toContain('40P01');
+    const moverWon = m.status === 'fulfilled';
+    if (moverWon) {
+      expect(await db.edge.count({ where: { sourceId: source.id, memoryId: dest.id } })).toBe(2);
+    } else {
+      // Nothing was half-moved, and the retry the caller is told to make succeeds.
+      expect(await db.edge.count({ where: { sourceId: source.id, memoryId: graph.id } })).toBe(2);
+      await db.$transaction((tx) => move(tx), { timeout: 20_000 });
+      expect(await db.edge.count({ where: { sourceId: source.id, memoryId: dest.id } })).toBe(2);
+    }
+  });
+});
+
+describe('the post-lock re-check and the capped re-select loop (#4888)', () => {
+  beforeEach(async () => {
+    await cleanDb(db);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('a row left alone between selection and lock is returned with the lock HELD (live arm)', async () => {
+    const f = await fixture();
+    await db.$transaction(async (tx) => {
+      expect(await derivedEdgeLocForUpsert(tx, f.args)).toBe(MIGRATED);
+      // From another connection, a lock that conflicts with FOR KEY SHARE must now fail at once: the share is held.
+      // (NOWAIT: a refusal, never a wait.) The lock is taken BEFORE the loc is returned, so a mutant that returns first
+      // leaves the row free and this succeeds.
+      await expect(
+        db.$transaction((other) => other.$queryRaw`SELECT id FROM edges WHERE id = ${f.migrated.id} FOR UPDATE NOWAIT`),
+      ).rejects.toThrow(/55P03|could not obtain lock/);
+    });
+    // Released at the caller's commit.
+    await db.$transaction((other) => other.$queryRaw`SELECT id FROM edges WHERE id = ${f.migrated.id} FOR UPDATE NOWAIT`);
+  });
+
+  /** A db whose selection always finds the migrated row and whose lock never holds: every attempt loses the race. */
+  function racing() {
+    const row = { id: 'edge-1', loc: MIGRATED, name: NAME, sourceId: 's', targetId: 't' };
+    const findMany = vi.fn(async () => [row]);
+    const $queryRaw = vi.fn(async () => [] as Array<{ id: string }>);
+    const args = { memoryId: 'm', sourceId: 's', targetId: 't', sourceLoc: 'root', targetLoc: 'leaf', name: NAME };
+    return { db: { edge: { findMany }, $queryRaw } as never, findMany, $queryRaw, args };
+  }
+
+  it('the cap is hit with the lock never held: the newest selection is returned and ONE fixed warn says so', async () => {
+    const r = racing();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(await derivedEdgeLocForUpsert(r.db, r.args)).toBe(MIGRATED);
+    expect(r.findMany).toHaveBeenCalledTimes(6); // the first selection plus 5 re-selects
+    expect(r.$queryRaw).toHaveBeenCalledTimes(6);
+    expect(warn).toHaveBeenCalledTimes(1);
+    const text = String(warn.mock.calls[0][0]);
+    expect(text).toContain('edge_loc_lock_cap_reached');
+    // Fixed text: no loc, name or id of the edge is echoed.
+    expect(text).not.toContain(MIGRATED);
+    expect(text).not.toContain(NAME);
+    expect(text).not.toContain('edge-1');
+  });
+
+  it('no warn when the lock is held, nor on a plain answer', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const f = await fixture();
+    await db.$transaction(async (tx) => {
+      expect(await derivedEdgeLocForUpsert(tx, f.args)).toBe(MIGRATED);
+    });
+    expect(await derivedEdgeLocForUpsert(db, { ...f.args, name: 'plain' })).toBe('root:plain:leaf');
+    expect(warn).not.toHaveBeenCalled();
   });
 });
