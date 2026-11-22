@@ -63,9 +63,13 @@ async function reference(where: string, offset: number, limit: number): Promise<
  * dim3 = d) has cosine 1/sqrt(1 + d^2), a strictly decreasing function of d, and every other dimension is 0. Node k (by
  * id order) gets d = base + k * step. The old fill used unseeded random() noise in 766 dimensions, which made the 8 spec
  * scores near-ties redrawn each run; one near-tie swapped by the HNSW's approximate recall shifted a page by one.
- * With the spacing below the ranks are separated by far more than float4's resolution (about 6e-8 relative) and by
- * enough that a one-position recall miss cannot reorder them: adjacent nodes differ by at least ~1e-5 in cosine
- * (near) and ~0.03 (spec); every spec ranks strictly after every near node (cosine 0.447 at most vs 0.604 at least).
+ * This does NOT make HNSW recall exact, and the assertions below are still comparisons against an exact order. What it
+ * removes is the regime that made a miss likely: 768-dimensional random noise has near-uniform distances (the hard case
+ * for graph search), while these points all lie on ONE curve (one varying coordinate), where the HNSW graph is easy to
+ * navigate and the iterative scan has a clear order to follow. The ranks are also strictly separated: every spec ranks
+ * after every near node (cosine 0.447 at most vs 0.604 at least), adjacent specs differ by about 0.03 or more, and
+ * adjacent near nodes by about 1e-5 or more (about 170x float4's relative resolution of ~6e-8), so the true order is
+ * fixed and unique, never a tie. The evidence that the flake is gone is the loop-run harness (#4840), not a proof.
  */
 const NEAR_BASE = 0.02;
 const NEAR_STEP = 0.0005; // near d runs 0.02 .. 1.32 over NEAR_N = 2600
