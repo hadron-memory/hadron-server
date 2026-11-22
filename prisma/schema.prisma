@@ -5729,8 +5729,8 @@ model SecretEvent {
   sessionId   String?  @map("session_id")
   runId       String?  @map("run_id")
   at          DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)"))
-  /// #4875: the tiebreak when `at` ties (rows of one transaction can share a microsecond, and a UUIDv7 `id` is random inside one
-  /// millisecond, so it is no insertion order). A bigserial the DDL fills; reads order `(at, seq)`, `at` first. Rows that predate the
+  /// #4875: the tiebreak when `at` ties (`at` is timestamp(3), so rows of one transaction can share a millisecond, and a UUIDv7 `id` is random
+  /// inside one millisecond, so it is no insertion order). A bigserial the DDL fills; reads order `(at, seq)`, `at` first. Rows that predate the
   /// column got arbitrary values among their ties, so nothing reads `seq` as the order of history before #4875.
   seq         BigInt   @default(autoincrement())
 

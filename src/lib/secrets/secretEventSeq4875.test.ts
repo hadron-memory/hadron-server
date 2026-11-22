@@ -1,6 +1,6 @@
 /**
  * #4875 (F8 of #4814): `secret_events` rows written in one transaction have no recoverable order when their `at` ties.
- * `at` is `clock_timestamp()` (microseconds) and `id` is a UUIDv7 whose bits are random inside one millisecond, so
+ * `at` is `clock_timestamp()` stored as timestamp(3) (milliseconds) and `id` is a UUIDv7 whose bits are random inside one millisecond, so
  * `(at, id)` mis-orders a tie. A monotonic per-row `seq` (a bigserial the DDL fills) is the tiebreak: reads order
  * `(at, seq)`, `at` stays first for clients.
  *
@@ -21,7 +21,7 @@ let userId: string, appId: string, secretId: string;
 const ctx = (): Context => ({ db, userId, roles: [] } as unknown as Context);
 const KINDS = ['METADATA', 'PROTECT', 'UNPROTECT', 'REVEAL'] as const;
 
-/** Write the kinds in order, in ONE transaction, all with the SAME `at`, under ids whose order is the REVERSE of insertion. */
+/** `secret_events.id` is TEXT (any string, `generateId()` is a UUIDv7 in production), so the fabricated ids below are valid. Write the kinds in order, in ONE transaction, all with the SAME `at`, under ids whose order is the REVERSE of insertion. */
 async function writeTied(kinds: readonly string[]): Promise<void> {
   const at = new Date('2026-11-22T10:00:00.000Z');
   const ids = kinds.map((_, i) => `0000-${String(kinds.length - i).padStart(4, '0')}-${generateId()}`);
@@ -59,16 +59,16 @@ describe('#4875 secret_events: (at, seq) is the order of events written in one t
 
   it('the events list answers newest first by (at, seq): a tie lists the later write first', async () => {
     await writeTied(KINDS);
-    const page: any = await resolvers.Query.secretEvents({}, { ref: secretId, limit: 50 }, ctx());
-    const tied = page.items.filter((e: any) => (KINDS as readonly string[]).includes(e.kind)).map((e: any) => e.kind);
+    const page = (await resolvers.Query.secretEvents({}, { ref: secretId, limit: 50 }, ctx())) as { items: Array<{ kind: string }> };
+    const tied = page.items.filter((e) => (KINDS as readonly string[]).includes(e.kind)).map((e) => e.kind);
     expect(tied).toEqual([...KINDS].reverse());
   });
 
   it('`at` still leads the list: an earlier `at` with a HIGHER seq never outranks a later `at` (guard against seq-first; green on main by design)', async () => {
     await db.secretEvent.create({ data: { ownerType: 'app', ownerId: appId, secretId, secretName: 'canary', kind: 'REVEAL', outcome: 'OK', at: new Date('2026-11-22T09:00:00Z') } });
     await db.secretEvent.create({ data: { ownerType: 'app', ownerId: appId, secretId, secretName: 'canary', kind: 'PROTECT', outcome: 'OK', at: new Date('2026-11-22T08:00:00Z') } });
-    const page: any = await resolvers.Query.secretEvents({}, { ref: secretId, limit: 50 }, ctx());
-    const kinds = page.items.map((e: any) => e.kind);
+    const page = (await resolvers.Query.secretEvents({}, { ref: secretId, limit: 50 }, ctx())) as { items: Array<{ kind: string }> };
+    const kinds = page.items.map((e) => e.kind);
     // REVEAL (09:00) was written first, so its seq is LOWER than PROTECT's (08:00); `at` leads, so it still comes first.
     expect(kinds.indexOf('REVEAL')).toBeLessThan(kinds.indexOf('PROTECT'));
   });
@@ -78,7 +78,7 @@ describe('#4875 secret_events: (at, seq) is the order of events written in one t
     await expect(db.$executeRaw`UPDATE secret_events SET seq = seq + 1000 WHERE secret_id = ${secretId}`).rejects.toThrow(/append-only/);
   });
 
-  it('a real updateSecret that changes metadata and protection records METADATA then PROTECT, read by seq', async () => {
+  it('a real updateSecret metadata change is the LAST event by (at, seq) (the METADATA-then-PROTECT pair is pinned by secretChangeFollowups4717 through the same order)', async () => {
     const before = await db.secretEvent.count({ where: { secretId } });
     await resolvers.Mutation.updateSecret({}, { ref: secretId, metadata: { note: 'x' } }, ctx());
     const rows = await db.secretEvent.findMany({ where: { secretId }, orderBy: [{ at: 'asc' }, { seq: 'asc' }] });
