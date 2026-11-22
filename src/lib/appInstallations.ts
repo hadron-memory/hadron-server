@@ -267,12 +267,20 @@ async function lockAgentRows(tx: Prisma.TransactionClient, witnesses: ReadonlySe
  * first, then the agents of all the Apps in ONE pass, the agents it names FOR NO KEY UPDATE and the witnesses FOR SHARE. createGrant and
  * the insert guard hold the agent row FOR SHARE, so a create in flight is waited for and then seen, and a create after the judge waits
  * and reads the install gone. A named agent is locked even with no witness left (an uninstalled agent has no app_agents row).
+ *
+ * A named agent is fenced whether or not its App row was found (#4895): an App hard-deleted between the caller's read and this lock
+ * locks nothing and contributes no witness, but its named agents still join the ONE pass below — the same fence the single-App path
+ * (`lockAppInstallations` with `fenceAgents`) takes, so the two doors of one judge cannot differ and the #4715 create-vs-departure
+ * race stays closed for those agents too.
  */
 export async function lockAppInstallationsFenced(tx: Prisma.TransactionClient, byApp: ReadonlyMap<string, readonly string[]>): Promise<void> {
   const witnesses = new Set<string>();
   const fence = new Set<string>();
   const wanted = [...byApp.keys()].filter((id) => byApp.get(id)!.length > 0);
   if (!wanted.length) return;
+  // Every named agent of every App in byApp, found row or not (#4895); the Apps still lock in id order below, and an App with no row
+  // is skipped for its install structure only.
+  for (const agentIds of byApp.values()) for (const id of agentIds) fence.add(id);
   // The Apps in the database's id order, locked in one statement (an App that does not exist locks nothing and is skipped).
   const apps = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM apps WHERE id = ANY(${wanted}) ORDER BY id FOR SHARE`;
   for (const { id: appId } of apps) {
@@ -280,7 +288,6 @@ export async function lockAppInstallationsFenced(tx: Prisma.TransactionClient, b
     const { rowIds, edges } = await lockInstallStructure(tx, appId, agentIds, true);
     for (const id of rowIds) witnesses.add(id);
     for (const e of edges) witnesses.add(e.imported_agent_id);
-    for (const id of agentIds) fence.add(id);
   }
   await lockAgentRows(tx, witnesses, fence);
 }
