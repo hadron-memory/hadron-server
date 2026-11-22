@@ -496,8 +496,9 @@ export const agentTaskAlarmMutations = {
    * stall schedule's door exactly: `resolveParticipatedApp` (a non-participant gets APP_NOT_FOUND, the missing App's
    * answer), then `actorManagesApp` inside `inTaskWriteTx` (a participant who does not manage it gets
    * APP_MANAGER_REQUIRED; an instructed worker is admitted only as #3323 admits it). Malformed input is refused before
-   * any of that. The stored row is locked before it is compared, so two writers are ordered; writing the stored list
-   * again writes nothing and records nothing (#3323's no-op rule). The record is the precedent's ids-only
+   * any of that. An existing row is read FOR UPDATE before the compare, so a second writer compares against the first
+   * one's committed list (not pinned: last write wins either way). Writing the stored list again writes nothing and
+   * records nothing (#3323's no-op rule). The record is the precedent's ids-only
    * `app.manager-act` row, written only when the instructed-manager arm admitted the caller. The list is read when an
    * alarm is raised, so a change here never adds or removes a wake for an alarm already raised.
    */
