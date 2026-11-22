@@ -36,6 +36,7 @@ import * as issuers from '../grants/issuers.js';
 import { GrantSummaryError, renderGrantSummary } from '../grants/summary.js';
 import { GrantTermsError, grantTermsFromRow, grantTermsHash } from '../grants/terms.js';
 import { emitEntityUrnV2, safeNodeUrnV2 } from '../urnEmit.js';
+import { composeWorkerUrnV2 } from '../urn.js';
 import type { AssertionParts } from './verify.js';
 import { verifySigningAssertion } from './verify.js';
 import { grantSignaturePayloadBytes } from './grantPayload.js';
@@ -240,6 +241,21 @@ async function summaryFor(ctx: Context, tx: Prisma.TransactionClient, g: GrantRo
         const app = parseUrnV2(appUrn);
         refs[id] = { urn: composeAppSecretUrnV2(app.root, app.segments[0], secret.name) };
       } catch { return null; }
+      continue;
+    }
+    if (p.type === 'worker-ref') {
+      // #4855: each worker the grant names shows as its canonical worker URN (the App's root and slug, the worker's stored slug). A worker
+      // that is gone or of another App makes the sentence unsignable, never a guess. Retired workers still resolve (a name is never freed).
+      const value = values[p.name];
+      for (const id of Array.isArray(value) ? value : [value]) {
+        if (typeof id !== 'string' || Object.prototype.hasOwnProperty.call(refs, id)) continue;
+        const w = await tx.worker.findFirst({ where: { id, appId: g.app_id }, select: { slug: true } });
+        if (!w) return null;
+        try {
+          const app = parseUrnV2(appUrn);
+          refs[id] = { urn: composeWorkerUrnV2(app.root, app.segments[0]!, w.slug) };
+        } catch { return null; }
+      }
       continue;
     }
     if (p.type !== 'node-ref') continue;

@@ -483,6 +483,47 @@ describe('#4000: signing a secret.use grant', () => {
   });
 });
 
+describe('#4855: signing a worker.session.restart grant', () => {
+  const restartGrant = async (names: string | string[], holder = workerId): Promise<string> => {
+    const id = generateId();
+    await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, created_at, updated_at)
+      VALUES ($1, $2, $3, 'worker.session.restart', $4::jsonb, 'keep the team running', (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
+    id, appId, holder, JSON.stringify({ worker: names }));
+    return id;
+  };
+  const otherWorker = async (appOf = appId, slug = 'gs-kit') => (await db.worker.create({
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: appOf, agentId: (await db.agent.findFirstOrThrow({ where: { organizationId: orgId } })).id, name: slug, slug },
+  })).id;
+
+  it('the signer reads each named worker as its canonical worker URN, and an App manager signs it into an active grant', async () => {
+    const kit = await otherWorker();
+    const id = await restartGrant([kit, workerId]);
+    const req = await openRequest(id);
+    const p = await prove(req.id, admin);
+    expect(p.json.canSign).toBe(true);
+    const urn = (slug: string) => `hrn:worker:${appUrn.replace(/^hrn:app:/, '')}:${slug}`;
+    expect(p.json.view.summary).toBe(`End a dark open session of the workers ${urn('gs-kit')}, ${urn('gs-worker')} in ${appUrn} and start them again`);
+    const r = await post(req.id, 'complete', signingBody(p, admin), p.cookie);
+    expect(r.status).toBe(200);
+    expect((await grantRow(id))!.activated_at).not.toBeNull();
+  });
+
+  it('a person who does not manage the App gets the one refusal: no terms, no ceremony', async () => {
+    const id = await restartGrant(await otherWorker());
+    const p = await prove((await openRequest(id)).id, member);
+    expect(p.text).toBe(FORBIDDEN);
+    expect(await unconsumedGrantSign(member.id)).toBe(0);
+  });
+
+  it('a named worker of another App is unsignable: summary null, canSign false', async () => {
+    const otherApp = await db.app.create({ data: { organizationId: orgId, name: 'gs-app2', urn: `${appUrn.replace(/^hrn:app:/, '').split(':')[0]}:gs-app2` } });
+    const id = await restartGrant(await otherWorker(otherApp.id, 'gs-foreign'));
+    const p = await prove((await openRequest(id)).id, admin);
+    expect(p.json.view.summary).toBeNull();
+    expect(p.json.canSign).toBe(false);
+  });
+});
+
 describe('refusals at completion are judged before any write', () => {
   async function expectNothingWritten(g: string, reqId: string, userId: string, counterBefore: number) {
     expect((await grantRow(g)).activated_at).toBeNull();

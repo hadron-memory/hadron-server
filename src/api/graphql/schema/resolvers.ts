@@ -97,6 +97,7 @@ import { stopSignalMutations, stopSignalQueries } from './resolvers.stopSignal.j
 import { deliveryBatchMutations, deliveryBatchQueries } from './resolvers.deliveryBatch.js';
 import { appKeyScopeMutations, appKeyScopeFieldResolvers, appKeyScopeQueries } from './resolvers.appKeyScope.js';
 import { hostOperationMutations, hostOperationQueries, hostOperationFieldResolvers } from './resolvers.hostOperation.js';
+import { sessionRestartMutations } from './resolvers.sessionRestart4855.js';
 import { hostSweepRunMutations, hostSweepRunQueries } from './resolvers.hostSweepRuns.js';
 import { desiredStateMutations, desiredStateQueries, desiredStateWorkerFields } from './resolvers.desiredState.js';
 import { hostAssignmentMutations, hostAssignmentQueries, hostAssignmentFieldResolvers } from './resolvers.hostAssignment.js';
@@ -328,6 +329,7 @@ export const resolvers = {
     ...deliveryBatchMutations,
     ...appKeyScopeMutations,
     ...hostOperationMutations,
+    ...sessionRestartMutations,
     ...desiredStateMutations,
     ...hostSweepRunMutations,
     ...hostAssignmentMutations,

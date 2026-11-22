@@ -17,6 +17,7 @@ import { APP_KEY_PREFIX, hashAppKey } from '../../middleware/auth.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { cleanDb } from '../../test/helpers.js';
+import { dbNowPlus } from '../grants/grantFixtures3668.js';
 import { seedTriggerWorld, triggerGrant, useCount, useEvents, workerOf, type TriggerWorld } from '../grants/triggerGrantFixtures3483.js';
 import { createPendingGrant } from '../grants/create.js';
 import { valueCovers, coverableAction } from '../grants/cover.js';
@@ -76,7 +77,7 @@ const kitSession = async (quiet = true) => {
   return db.session.create({ data: { id: generateId(), appId: w.appId, workerId: kit, userId: w.user2Id, startedAt: at, updatedAt: at, family: 'claude' }, select: { id: true } });
 };
 const sessionOf = (id: string) => db.session.findUniqueOrThrow({ where: { id }, select: { endedAt: true, endReason: true } });
-const failInFlightStarts = () => db.hostOperation.updateMany({ where: { type: 'worker.start' }, data: { status: 'failed' } });
+const failInFlightStarts = () => db.hostOperation.updateMany({ where: { type: 'worker.start' }, data: { status: 'failed', finishedAt: new Date(), failureReason: 'host gone' } });
 
 describe('#4855 the quiet control (S4) and the unchanged start', () => {
   it('S4: assigning Kit over a QUIET open session starts nothing and ends nothing', async () => {
@@ -220,11 +221,13 @@ describe('#4855 who may: a signed grant held by that worker, naming the target, 
   it('a pending (unsigned), an expired and a revoked grant each allow nothing', async () => {
     const s = await kitSession();
     const pending = await grant(kit, {}, { activate: false });
-    const expired = await grant(kit, { expires_at: new Date(Date.now() - 1000) });
-    const revoked = await grant(kit, { revoked_at: new Date() });
+    const expiring = await grant(kit, { expires_at: dbNowPlus('1 second') });
+    const revoked = await grant();
+    await db.$executeRawUnsafe(`UPDATE grants SET revoked_at = (clock_timestamp() AT TIME ZONE 'UTC'), revoked_by = $2 WHERE id = $1`, revoked, w.userId);
+    await new Promise((r) => setTimeout(r, 1500));
     expect(await code(restart())).toBe(REFUSED);
     await untouched(s.id);
-    for (const g of [pending, expired, revoked]) expect(await useCount(g)).toBe(0);
+    for (const g of [pending, expiring, revoked]) expect(await useCount(g)).toBe(0);
   });
 
   it('a grant of another App covers nothing in this one', async () => {
