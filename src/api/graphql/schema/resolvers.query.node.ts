@@ -72,6 +72,8 @@ import { resolveGrantRef } from '../../../lib/entityRef/grantRef.js';
 import { getGrantForWorker } from '../../../lib/grants/read.js';
 import { resolveGrantReader } from './resolvers.grant.js';
 import { requireWorkerProfileAccess } from './resolvers.worker.js';
+import { withReadableTask } from './resolvers.agentTask.js';
+import { parseTaskHandle } from '../../../lib/agentTasks/handle.js';
 import { resolveNodeRevRef } from '../../../lib/entityRef/nodeRevRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
@@ -1072,6 +1074,36 @@ export const nodeQueries = {
           // slug (cor:agt:020:02), and history — PR trailers, chat archives —
           // must keep resolving.
           return { kind: 'worker', id, organizationId: app.organizationId };
+        }
+        case 'agenttask': {
+          // #3878 (hrn:node:hadronmemory.com:specs:cor:urn:010:01; ruling 0278): hrn:agenttask:<root>:<app-slug>:<handle>,
+          // the URN AgentTask.urn emits (handle in lower case), read in either case. The leaf is the HANDLE only: the
+          // task-id leaf was never built and no qualified task-id URN resolves (cor:urn:010:01), so the wider task
+          // reference form (targetHasKindForm) is not inherited. The App is resolved by reference, so a renamed App's
+          // old spelling still resolves; then Query.agentTask's own gate decides (withReadableTask: a participant, the
+          // App's own key, or a run in its App). Every refusal is the one null (cor:api:180:01).
+          let qualified: string;
+          try {
+            const parsed = parseUrnV2(baseUrn); // fixed 'agenttask' arity: [app-slug, leaf]
+            const leaf = parseTaskHandle(parsed.segments[1]);
+            if (!leaf || leaf.appUrn !== null) return null;
+            qualified = `hrn:agenttask:${parsed.root}:${parsed.segments[0]!}:${leaf.handle}`;
+          } catch (error) {
+            if (!refNamesNothing(error)) throw error;
+            return null;
+          }
+          try {
+            return await withReadableTask(
+              ctx,
+              qualified,
+              async (_c, { task, app }) => ({ kind: 'agenttask', id: task.id, organizationId: app.organizationId }),
+              true,
+            );
+          } catch (error) {
+            // A name-resolution outcome on the App reference is the uniform refusal; a fault propagates (#2975).
+            if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
+            return null;
+          }
         }
         case 'grant': {
           // #3709 (cor:urn:010:01's Grant row, rulings:0255 item 9):

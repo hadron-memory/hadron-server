@@ -17703,10 +17703,19 @@ export const typeDefs = `#graphql
     number within each parent down to it (hrn:node:hadronmemory.com:specs:cor:agt:050:01). "AT0" is the reserved
     project "No project": a task made with no project is AT0.<n>. An alias for the id, which stays canonical; every
     task operation that takes a task id also takes the handle. Immutable: parentage is fixed at creation. A person who
-    belongs to several Apps qualifies it as hrn:agenttask:<app-urn>:AT3.405, where the App URN is the App's urn.
-    The handle is not the number of any GitHub issue the task's source names.
+    belongs to several Apps qualifies it with the task's urn, hrn:agenttask:<app-urn>:at3.405, where the App URN is the
+    App's urn (either case is read). The handle is not the number of any GitHub issue the task's source names.
     """
     handle: String!
+    """
+    #3878: this task's URN, hrn:agenttask:<root>:<app-slug>:<handle>, for example
+    hrn:agenttask:hadronmemory.com:hadron-dev-team:at3.405 (hrn:node:hadronmemory.com:specs:cor:urn:010:01). Computed
+    when read from the App's current urn and the handle, never stored; emitted with the handle in lower case, while
+    the handle field and every display keep AT3.405. Query.resolveUrn reads it in either case, behind this task's
+    own read gate, and an old App spelling still resolves after the App is renamed. Null only when the App's urn
+    cannot form the address.
+    """
+    urn: String
     "This task's own number inside its handle (the last segment), counted per parent. Permanent: never changed, never given to another task."
     taskNumber: String!
     title: String!
