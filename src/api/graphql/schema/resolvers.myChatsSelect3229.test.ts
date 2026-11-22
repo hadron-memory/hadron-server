@@ -114,6 +114,7 @@ async function spyFindMany(run: () => Promise<unknown>, decoy = false): Promise<
   const spy = vi.spyOn(db.node, 'findMany');
   // Snapshot before mockRestore(): vitest's restore clears mock.calls.
   try {
+    // loc-scope-ok: a deliberate decoy query that matches no row; the pin must ignore it.
     if (decoy) await db.node.findMany({ where: { loc: 'decoy-not-a-chat-root' } });
     await run();
     return [...spy.mock.calls];
@@ -141,6 +142,7 @@ describe('#3229 myChats/myChatsPage select exactly the toChatRows columns', () =
     const where = { loc: { startsWith: 'chats:' } };
     const dropped = { id: true, loc: true, memoryId: true, data: true, createdAt: true };
     expect(() => expectChatRootSelects([[{ where, select: dropped }]], 1)).toThrow();
+    // loc-scope-ok: a fake call record handed to the pin helper, not a query.
     expect(() => expectChatRootSelects([[{ where: { loc: 'x' }, select: dropped }]], 1)).toThrow();
   });
 });
