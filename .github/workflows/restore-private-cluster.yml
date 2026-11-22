@@ -2,6 +2,7 @@ name: Restore private cluster
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 
