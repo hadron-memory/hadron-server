@@ -7175,6 +7175,27 @@ export const typeDefs = `#graphql
   }
 
   """
+  #4864 — createTaskNode's optional tasks-index edge: the Agent whose index lists
+  the new task, and the trigger the edge carries (hrn:node:hadronmemory.com:specs:cor:dmo:050:15).
+  """
+  input TaskIndexInput {
+    "The Agent (ID or URN) whose tasks index lists this task. The node must be created in that Agent's own system memory."
+    agent: String!
+    "The edge's name: the trigger for this task, as the Agent's task list shows it."
+    trigger: String!
+  }
+
+  """
+  #4864 — createTaskNode's opt-in skill export: written as an enabled
+  properties.exports.claudeSkill block, validated by the skill lint (a finding at
+  error severity refuses the whole call). Omit it and no block is written.
+  """
+  input TaskSkillExportInput {
+    name: String!
+    description: String!
+  }
+
+  """
   Input for createNode. 'loc' and 'name' are required, plus EITHER 'memoryId'
   or 'install' (an App's install memory, #2044) — both or neither is an
   error (BAD_USER_INPUT). Creating is create-only — a live node at (memoryId,
@@ -13118,8 +13139,23 @@ export const typeDefs = `#graphql
     This mutation is not itself an MCP tool; its MCP counterpart is the
     deliberate hadron_create_task tool, separate from hadron_create_node,
     which refuses (#1301 names it in the refusal).
+
+    #4864 — with index, the SAME door also writes the task's tasks-index
+    edge, in its one transaction: the new node and one edge from it to the node
+    the Agent's tasksIndexRef names, labelled index.trigger, stored by id
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:15). Either both exist or neither
+    does. The node must be created in the Agent's own system memory, which is
+    also where the index must lie: an Agent with no pointer, an index elsewhere,
+    an existing loc and an unknown or unreadable Agent each refuse and write
+    nothing. The memory's read and write checks and the task writer level
+    (hrn:node:hadronmemory.com:specs:cor:acl:010:03) judge the call first, so none
+    of those refusals tells a caller who may not write the memory anything about
+    it. With skill, it also writes an enabled properties.exports.claudeSkill
+    block with the given name and description, validated by the skill lint; by
+    default no block is written. Neither argument sets a role; without both the
+    door behaves exactly as before.
     """
-    createTaskNode(input: CreateNodeInput!): Node!
+    createTaskNode(input: CreateNodeInput!, index: TaskIndexInput, skill: TaskSkillExportInput): Node!
 
     """
     #1201 — the UPDATE door for the task kind, and the counterpart of

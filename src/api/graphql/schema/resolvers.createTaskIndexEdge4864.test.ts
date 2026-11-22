@@ -14,8 +14,12 @@ import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
+import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
+import { attestedAuthoring } from '../../../lib/authoringAttestation.js';
+import { writeNodeCore } from './resolvers.mutation.node.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -49,7 +53,8 @@ async function code(p: Promise<unknown>): Promise<{ code: string; message: strin
 }
 const create = (u: { id: string }, loc: string, index: unknown = INDEX(), extra: Record<string, unknown> = {}, mem = sysMem, skill?: unknown) =>
   M.createTaskNode({}, { input: { memoryId: mem.id, loc, name: loc, content: 'steps', isRunnable: true, ...extra }, ...(index ? { index } : {}), ...(skill ? { skill } : {}) }, as(u));
-const nodesAt = (loc: string) => db.node.findMany({ where: { loc, deletedAt: null } });
+// loc-scope-ok: this test's two fixture memories only
+const nodesAt = (loc: string) => db.node.findMany({ where: { loc, memoryId: { in: [sysMem.id, otherMem.id] }, deletedAt: null } });
 const edgesFrom = (nodeId: string) => db.edge.findMany({ where: { sourceId: nodeId, deletedAt: null } });
 const totals = async () => ({ nodes: await db.node.count(), edges: await db.edge.count() });
 
@@ -90,10 +95,10 @@ describe('a valid create with the index input (#4864)', () => {
   });
 
   it('survives a later move of the index: the edge is stored by id, never by URN', async () => {
-    await create(admin, 'tasks:deploy');
+    const made = await create(admin, 'tasks:deploy');
     await M.moveNode({}, { sourceRef: indexId, targetUrn: nodeUrn(sysMem, 'lists:tasks') }, as(admin));
-    const row = (await nodesAt('tasks:deploy'))[0];
-    expect((await edgesFrom(row.id))[0].targetId).toBe(indexId);
+    expect((await db.node.findUniqueOrThrow({ where: { id: indexId } })).loc).toBe('lists:tasks');
+    expect((await edgesFrom(made.id))[0].targetId).toBe(indexId);
   });
 
   it('writes no skill export block by default', async () => {
@@ -107,7 +112,7 @@ describe('atomicity: a refused step writes nothing (#4864)', () => {
   it('a failure at the edge write leaves no node behind', async () => {
     // The derived edge loc <sourceLoc>:<name>:<targetLoc> is taken by another node's edge, so the edge insert fails.
     const other = await db.node.create({ data: { id: generateId(), memoryId: sysMem.id, loc: 'tasks:other', name: 'other', content: '' } });
-    await db.edge.create({ data: { id: generateId(), memoryId: sysMem.id, sourceId: other.id, targetId: indexId, name: 'x', loc: 'tasks:deploy:when asked to deploy:tasks' } });
+    await db.edge.create({ data: { id: generateId(), memoryId: sysMem.id, sourceId: other.id, targetId: indexId, name: 'x', loc: deriveEdgeLoc('tasks:deploy', 'when asked to deploy', 'tasks') } });
     const before = await totals();
     const r = await code(create(admin, 'tasks:deploy'));
     expect(r.code).not.toBe('OK');
@@ -116,33 +121,51 @@ describe('atomicity: a refused step writes nothing (#4864)', () => {
   });
 
   it.each([
-    ['an Agent with no tasksIndexRef', async () => { await db.agent.update({ where: { id: agent.id }, data: { tasksIndexRef: null } }); }, 'tasks:deploy'],
-    ['an existing slug', async () => { await db.node.create({ data: { id: generateId(), memoryId: sysMem.id, loc: 'tasks:deploy', name: 'old', content: '' } }); }, 'tasks:deploy'],
+    ['an Agent with no tasksIndexRef', async () => { await db.agent.update({ where: { id: agent.id }, data: { tasksIndexRef: null } }); }, 'tasks:deploy', 'TASKS_INDEX_NOT_SET'],
+    ['an existing slug', async () => { await db.node.create({ data: { id: generateId(), memoryId: sysMem.id, loc: 'tasks:deploy', name: 'old', content: '' } }); }, 'tasks:deploy', 'NodeLocConflictError'],
     ['an index outside the Agent\'s own system memory', async () => {
       const far = await db.node.create({ data: { id: generateId(), memoryId: otherMem.id, loc: 'tasks', name: 'far', content: '' } });
       await db.agent.update({ where: { id: agent.id }, data: { tasksIndexRef: far.id } });
-    }, 'tasks:deploy'],
-    ['a malformed slug', async () => {}, 'Tasks Deploy!'],
-  ])('%s refuses and writes nothing', async (_label, setup, loc) => {
+    }, 'tasks:deploy', 'TASKS_INDEX_OUT_OF_SCOPE'],
+    ['a deleted index node', async () => { await db.node.update({ where: { id: indexId }, data: { deletedAt: new Date() } }); }, 'tasks:deploy', 'TASKS_INDEX_OUT_OF_SCOPE'],
+    ['a malformed slug', async () => {}, 'Tasks Deploy!', 'BAD_USER_INPUT'],
+  ])('%s refuses with its own code and writes nothing', async (_label, setup, loc, expected) => {
     await setup();
     const before = await totals();
     const r = await code(create(admin, loc));
-    expect(r.code).not.toBe('OK');
-    const after = await totals();
-    expect(after.edges).toBe(before.edges);
-    expect(after.nodes).toBe(before.nodes);
+    expect(r.code).toBe(expected);
+    expect(await totals()).toEqual(before);
+  });
+
+  it.each(['', '   '])('a blank trigger (%j) refuses with BAD_USER_INPUT and writes nothing', async (trigger) => {
+    const before = await totals();
+    expect((await code(create(admin, 'tasks:deploy', { agent: agent.id, trigger }))).code).toBe('BAD_USER_INPUT');
+    expect(await totals()).toEqual(before);
+  });
+
+  it('an existing slug names the task and says to extend it', async () => {
+    await db.node.create({ data: { id: generateId(), memoryId: sysMem.id, loc: 'tasks:deploy', name: 'old', content: '' } });
+    const r = await code(create(admin, 'tasks:deploy'));
+    expect(r.message).toContain('tasks:deploy');
+    expect(r.message).toContain('hadron_update_task');
+  });
+
+  it('an Agent the caller cannot read answers as absent, and writes nothing', async () => {
+    const hidden = await db.agent.create({
+      data: { name: 'hidden', urn: `ti-hidden-${stranger.id}`, visibility: 'PERSONAL', ownerUserId: stranger.id, systemMemoryId: sysMem.id, tasksIndexRef: indexId },
+    });
+    const before = await totals();
+    const unknown = await code(create(admin, 'tasks:a', { agent: 'no-such-agent', trigger: 'x' }));
+    const unreadable = await code(create(admin, 'tasks:b', { agent: hidden.id, trigger: 'x' }));
+    expect(unknown.code).toBe('NOT_FOUND');
+    expect(unreadable.code).toBe('NOT_FOUND');
+    expect(await totals()).toEqual(before);
   });
 
   it('a task created in another memory than the Agent\'s system memory writes no cross-memory edge', async () => {
     const before = await totals();
     const r = await code(create(admin, 'tasks:deploy', INDEX(), {}, otherMem));
     expect(r.code).not.toBe('OK');
-    expect(await totals()).toEqual(before);
-  });
-
-  it('an unknown Agent refuses and writes nothing', async () => {
-    const before = await totals();
-    expect((await code(create(admin, 'tasks:deploy', { agent: 'no-such-agent', trigger: 'x' }))).code).not.toBe('OK');
     expect(await totals()).toEqual(before);
   });
 });
@@ -235,5 +258,23 @@ describe('GraphQL and MCP agree (#4864)', () => {
     expect(gql.code).not.toBe('OK');
     expect(viaMcp).toContain(`[${gql.code.toLowerCase()}]`);
     expect(await nodesAt('tasks:three')).toHaveLength(0);
+  });
+});
+
+describe('an App write grant never reaches the index edge (#4864)', () => {
+  it('a userless run of the granted App cannot create a task WITH an index edge, though the same create without one is a grant write', async () => {
+    // cor:agt:010:01: a prefix grant permits node create and update, and "no edges outside the prefix" — the index edge
+    // is an edge the write carries, so the grant arm must not answer for it.
+    const app = await db.app.create({ data: { name: 'Grant App', urn: 'ti-org:grantapp', organizationId: org.id } });
+    await db.appMember.create({ data: { appId: app.id, userId: admin.id, role: 'owner' } });
+    await db.appMemoryWriteGrant.create({ data: { appId: app.id, memoryId: otherMem.id, prefix: 'tasks', grantedBy: admin.id } });
+    const run = () => ({ db, ...runAuthContext({ id: generateId(), appId: app.id, userId: null, organizationId: org.id }) }) as never;
+    const door = (loc: string, taskIndex?: { agent: string; trigger: string }) =>
+      writeNodeCore({ memoryId: otherMem.id, loc, name: loc, isRunnable: true, content: 'x' } as never, run(), 'create',
+        { authoring: attestedAuthoring(null), ownsKind: 'task', governedContext: 'node-write', ...(taskIndex ? { taskIndex } : {}) });
+    expect(await code(door('tasks:control'))).toEqual({ code: 'OK', message: '' });
+    const before = await totals();
+    expect((await code(door('tasks:deploy', INDEX()))).code).toBe('FORBIDDEN');
+    expect(await totals()).toEqual(before);
   });
 });

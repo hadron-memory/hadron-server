@@ -7646,6 +7646,19 @@ export function createMcpServerInstance(
     for (const key of Object.keys(shape)) {
       if (key !== 'urn' && key !== 'session' && key in rest) fields[key] = rest[key];
     }
+    // #4864: the tasks-index edge is the task CREATE door's own argument, not a field of the node input.
+    let taskIndex: { agent: string; trigger: string } | undefined;
+    if (kind === 'task' && mode === 'create') {
+      const { agent, trigger } = fields as { agent?: unknown; trigger?: unknown };
+      delete fields.agent;
+      delete fields.trigger;
+      if (agent !== undefined || trigger !== undefined) {
+        if (typeof agent !== 'string' || agent.trim() === '' || typeof trigger !== 'string' || trigger.trim() === '') {
+          return textResult('hadron_create_task: "agent" and "trigger" go together: name the Agent whose tasks index lists this task and the trigger label for it.');
+        }
+        taskIndex = { agent, trigger };
+      }
+    }
     // #1291: the merge option is the task door's own argument, not a field of the node input.
     const mergeExports = kind === 'task' && mode === 'update' && fields.mergeExports === true;
     delete fields.mergeExports;
@@ -7716,10 +7729,10 @@ export function createMcpServerInstance(
         resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<{ id: string }>>
       )[doorName](
         {},
-        { input: { memoryId: memory.id, loc, ...fields, ...signal }, ...(mergeExports ? { mergeExports: true } : {}) },
+        { input: { memoryId: memory.id, loc, ...fields, ...signal }, ...(mergeExports ? { mergeExports: true } : {}), ...(taskIndex ? { index: taskIndex } : {}) },
         ctx,
       );
-      return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
+      return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})${taskIndex ? ` · listed in the tasks index of ${taskIndex.agent} (trigger: ${taskIndex.trigger.trim()})` : ''}${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
     } catch (e) {
       return toolErrorResult(e, () => {
         const code = (e as { extensions?: { code?: string } }).extensions?.code;
@@ -7730,9 +7743,9 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_create_task',
-    'Create a RUNNABLE node — a task `hadron_run_task` can execute. This is the only way to author one: `hadron_create_node` refuses a write that would produce a runnable node, because authoring something the platform will EXECUTE is not the same act as writing prose. The runnable flag is set by this tool, so you do not pass it. Use it when you are deliberately writing a procedure for an agent to run; for ordinary notes, docs or findings use hadron_create_node.',
-    governedDoorArgs,
-    async (args) => callGovernedDoor('task', 'create', governedDoorArgs, args),
+    'Create a RUNNABLE node — a task `hadron_run_task` can execute. This is the only way to author one: `hadron_create_node` refuses a write that would produce a runnable node, because authoring something the platform will EXECUTE is not the same act as writing prose. The runnable flag is set by this tool, so you do not pass it. Use it when you are deliberately writing a procedure for an agent to run; for ordinary notes, docs or findings use hadron_create_node. To list the task on an Agent\'s task list in the same step, pass `agent` and `trigger` together: the node and one edge to the node the Agent\'s tasksIndexRef names are written in one transaction, so either both exist or neither does (the task must be created in that Agent\'s own system memory).',
+    taskCreateArgs,
+    async (args) => callGovernedDoor('task', 'create', taskCreateArgs, args),
   );
 
   server.tool(
@@ -13185,6 +13198,13 @@ const governedDoorArgs = {
 // because the review door owns the review kind and not the task kind. A
 // description that promises an argument the gate always refuses is worse than
 // no argument.
+/** #4864: the CREATE door's own arguments, beside the shared ones. Absent from the update door: an edit never lists a task. */
+const taskCreateArgs = {
+  ...governedDoorArgs,
+  agent: z.string().optional().describe('The Agent (ID or URN) whose tasks index lists this task. Give it with `trigger`; the task must be created in that Agent\'s own system memory.'),
+  trigger: z.string().optional().describe('The trigger label of the tasks-index edge: what the Agent\'s task list shows for this task. Give it with `agent`.'),
+};
+
 const taskUpdateArgs = {
   ...governedDoorArgs,
   mergeExports: z
